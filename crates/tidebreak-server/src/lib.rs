@@ -1924,6 +1924,32 @@ async fn bind_inner(
     };
     #[cfg(feature = "scripted-harness")]
     scripted_harness::install_from_env(&mut runtime.adapters)?;
+    // Remote sessions need both halves: the configured runtime endpoint and
+    // a gateway to mint owner-scoped tokens through. Half a configuration is
+    // a boot error, not a silently local deployment.
+    let runtime = match (
+        state.config.runtime_endpoint.clone(),
+        state.config.runtime_profile.clone(),
+    ) {
+        (Some(endpoint), Some(profile)) => {
+            let Some(gateway) = state.on_behalf_of_gateway.clone() else {
+                return Err(AgentError::config(
+                    "TIDEBREAK_RUNTIME_ENDPOINT requires gateway authentication (TIDEBREAK_AUTH_GATEWAY_URL): sandboxes are provisioned as their owner",
+                ));
+            };
+            let provisioner = code::remote::gateway::GatewayProvisioner::new(
+                gateway.gateway_base_url(),
+                &endpoint,
+                gateway.runtime_tokens(&endpoint),
+            )
+            .map_err(|error| AgentError::config(format!("sandbox runtime client: {error}")))?;
+            runtime.with_remote_sessions(code::remote::service::RemoteSessions::new(
+                Arc::new(provisioner),
+                code::remote::service::default_settings(profile),
+            ))
+        }
+        _ => runtime,
+    };
     let code = Arc::new(runtime);
     // Recovery runs after the bind, below: the workers it re-attaches need the
     // bound loopback address to reach their approval endpoint.

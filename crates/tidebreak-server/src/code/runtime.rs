@@ -197,6 +197,10 @@ pub(crate) struct CodeRuntime {
     /// machine (decision 71). `None` everywhere else: a machine whose engines
     /// carry their own provider credentials keeps using them.
     harness_llm: Option<Arc<super::harness_llm::HarnessLlmRelay>>,
+    /// The configured remote-session context, on a deployment with a sandbox
+    /// runtime endpoint (`docs/slack-sessions.md`). `None` everywhere else;
+    /// remote workspaces then refuse turns rather than half-running.
+    remote: Option<Arc<super::remote::service::RemoteSessions>>,
     loopback_base: Mutex<Option<String>>,
     /// Memoized harness probes, one per kind. See [`CodeRuntime::probe`].
     probes: Mutex<HashMap<HarnessKind, HarnessProbe>>,
@@ -245,6 +249,8 @@ pub(crate) struct CodeRuntime {
     reconcile_started: AtomicBool,
     pr_refresh_sweep: Mutex<Option<super::pr_refresh::PrRefreshGuard>>,
     pr_refresh_started: AtomicBool,
+    remote_sweep: Mutex<Option<super::remote::service::RemoteSweepGuard>>,
+    remote_started: AtomicBool,
     /// Workspaces with a background naming call in flight.
     ///
     /// One call per workspace at a time; a second trigger is dropped rather
@@ -445,6 +451,7 @@ impl CodeRuntime {
             host_tool_broker,
             git_credentials,
             harness_llm,
+            remote: None,
             loopback_base: Mutex::new(None),
             probes: Mutex::new(HashMap::new()),
             pin_install_errors: Mutex::new(HashMap::new()),
@@ -472,6 +479,8 @@ impl CodeRuntime {
             reconcile_started: AtomicBool::new(false),
             pr_refresh_sweep: Mutex::new(None),
             pr_refresh_started: AtomicBool::new(false),
+            remote_sweep: Mutex::new(None),
+            remote_started: AtomicBool::new(false),
             titling_in_flight: Mutex::new(std::collections::HashSet::new()),
             recap: Mutex::new(None),
             #[cfg(test)]
@@ -533,6 +542,7 @@ impl CodeRuntime {
             runtime.ensure_trigger_sweep();
             runtime.ensure_reconcile_sweep();
             runtime.ensure_pr_refresh_sweep();
+            runtime.ensure_remote_sweep();
             actions
         })
     }
@@ -578,6 +588,7 @@ impl CodeRuntime {
             host_tool_broker: None,
             git_credentials: None,
             harness_llm: None,
+            remote: None,
             loopback_base: Mutex::new(None),
             probes: Mutex::new(HashMap::new()),
             pin_install_errors: Mutex::new(HashMap::new()),
@@ -605,6 +616,8 @@ impl CodeRuntime {
             reconcile_started: AtomicBool::new(false),
             pr_refresh_sweep: Mutex::new(None),
             pr_refresh_started: AtomicBool::new(false),
+            remote_sweep: Mutex::new(None),
+            remote_started: AtomicBool::new(false),
             titling_in_flight: Mutex::new(std::collections::HashSet::new()),
             recap: Mutex::new(None),
             #[cfg(test)]
@@ -639,6 +652,20 @@ impl CodeRuntime {
     pub(crate) fn with_clone_parent_default(mut self, parent: PathBuf) -> Self {
         self.clone_parent_default = Some(parent);
         self
+    }
+
+    /// Enable remote sessions with a configured transport and settings.
+    pub(crate) fn with_remote_sessions(
+        mut self,
+        remote: Arc<super::remote::service::RemoteSessions>,
+    ) -> Self {
+        self.remote = Some(remote);
+        self
+    }
+
+    /// The remote-session context, when this deployment configured one.
+    pub(crate) fn remote_sessions(&self) -> Option<Arc<super::remote::service::RemoteSessions>> {
+        self.remote.clone()
     }
 
     #[cfg(test)]
@@ -1225,6 +1252,128 @@ impl CodeRuntime {
         Ok(())
     }
 
+    /// Create a workspace whose checkout lives in a sandbox, not on this
+    /// machine. The empty worktree path is the durable remote marker
+    /// ([`CodeWorkspace::is_remote`]); nothing here touches the filesystem.
+    ///
+    /// No route speaks this yet: the Slack adapter slice is its first caller,
+    /// and until then the runtime tests are.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) async fn create_remote_workspace(
+        &self,
+        owner: &OwnerId,
+        repo_id: RepoId,
+        title: Option<String>,
+    ) -> Result<CodeWorkspace, ServerError> {
+        if self.remote.is_none() {
+            return Err(ServerError::conflict_kind(
+                "remote_disabled",
+                "this deployment has no sandbox runtime configured",
+            ));
+        }
+        let repo = self.get_repo(owner, repo_id).await?;
+        Self::refuse_removed_repo(&repo)?;
+        if repo.origin_host.is_none() || repo.origin_owner.is_none() || repo.origin_name.is_none() {
+            return Err(ServerError::conflict_kind(
+                "repo_origin_unknown",
+                "the repository records no origin, so a sandbox cannot clone it",
+            ));
+        }
+        let title = title
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_default();
+        let id = WorkspaceId::new();
+        let branch = branch_name(&repo.branch_prefix, &title, id.0.as_u128());
+        let existing = list_workspaces(&self.db, owner, Some(repo_id)).await?;
+        if existing
+            .iter()
+            .any(|workspace| workspace.branch_name == branch)
+        {
+            return Err(ServerError::conflict_kind(
+                "branch_collision",
+                format!("branch {branch} already exists on this repository"),
+            ));
+        }
+        let workspace = CodeWorkspace {
+            id,
+            owner: owner.clone(),
+            repo_id,
+            title,
+            worktree_path: String::new(),
+            branch_name: branch,
+            base_ref: repo.default_base_ref.clone(),
+            status: CodeWorkspaceStatus::Active,
+            pr: None,
+            created_at: Utc::now(),
+            archived_at: None,
+            released_at: None,
+            released_tip: None,
+            bundle_bytes: None,
+        };
+        insert_workspace(&self.db, &workspace).await?;
+        Ok(workspace)
+    }
+
+    /// Create a session on a remote workspace: a row and nothing else. No
+    /// local harness is probed or spawned — the sandbox carries the engine,
+    /// and the first turn provisions it.
+    ///
+    /// No route speaks this yet: the Slack adapter slice is its first caller,
+    /// and until then the runtime tests are.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) async fn create_remote_session(
+        &self,
+        owner: &OwnerId,
+        workspace_id: WorkspaceId,
+        harness: HarnessKind,
+        settings: NewSessionSettings,
+    ) -> Result<CodeSession, ServerError> {
+        if self.remote.is_none() {
+            return Err(ServerError::conflict_kind(
+                "remote_disabled",
+                "this deployment has no sandbox runtime configured",
+            ));
+        }
+        let workspace = self.get_workspace(owner, workspace_id).await?;
+        if !workspace.is_remote() {
+            return Err(ServerError::conflict_kind(
+                "workspace_not_remote",
+                "this workspace has a local checkout; create a local session on it",
+            ));
+        }
+        if workspace.status != CodeWorkspaceStatus::Active {
+            return Err(ServerError::conflict_kind(
+                "workspace_not_ready",
+                format!("workspace is {}", workspace.status.as_str()),
+            ));
+        }
+        let session = CodeSession {
+            id: CodeSessionId::new(),
+            owner: owner.clone(),
+            workspace_id,
+            kind: CodeSessionKind::Interactive,
+            harness_kind: harness,
+            harness_version: None,
+            harness_resume_ref: None,
+            permission_mode: settings.permission_mode,
+            model: normalize_model(settings.model),
+            reasoning_effort: settings.reasoning_effort,
+            fast_mode: false,
+            lifecycle: CodeSessionLifecycle::Idle,
+            fence_reason: None,
+            child_pid: None,
+            child_process_identity: None,
+            spawn_epoch: 1,
+            attention: Attention::working(AttentionSource::Lifecycle),
+            unrecognized_event_count: 0,
+            subagents: Vec::new(),
+            created_at: Utc::now(),
+        };
+        insert_session(&self.db, &session).await?;
+        Ok(session)
+    }
+
     pub(crate) async fn create_workspace(
         &self,
         owner: &OwnerId,
@@ -1638,6 +1787,26 @@ impl CodeRuntime {
                 "workspace_shutdown_timeout",
                 "a workspace worker did not stop; the checkout was preserved",
             ));
+        }
+
+        if workspace.is_remote() {
+            let archived_at = Utc::now();
+            if !complete_workspace_archive(&self.db, owner, workspace.id, archived_at).await? {
+                let current = self.get_workspace(owner, workspace.id).await?;
+                if current.status == CodeWorkspaceStatus::Archived {
+                    return Ok(current);
+                }
+                return Err(ServerError::conflict_kind(
+                    "workspace_lifecycle_changed",
+                    "the workspace row changed before archive completed",
+                ));
+            }
+            let mut workspace = workspace;
+            workspace.status = CodeWorkspaceStatus::Archived;
+            workspace.archived_at = Some(archived_at);
+            super::attention::emit_workspace_digests(&self.db, &self.bus, owner, workspace.id)
+                .await;
+            return Ok(workspace);
         }
 
         let turn = self.worktree_turn_lock(workspace.id);
@@ -3275,6 +3444,12 @@ impl CodeRuntime {
                 format!("workspace is {}", workspace.status.as_str()),
             ));
         }
+        if workspace.is_remote() {
+            return Err(ServerError::conflict_kind(
+                "workspace_remote",
+                "this workspace's engine runs in a remote sandbox; create a remote session on it",
+            ));
+        }
         if kind == CodeSessionKind::Watch {
             let existing = list_sessions_for_workspace(&self.db, owner, workspace_id).await?;
             if existing.iter().any(|session| {
@@ -3570,6 +3745,24 @@ impl CodeRuntime {
                 "session has ended",
             ));
         }
+        if workspace.is_remote() {
+            // The sandbox path: no local worker, no worktree lock, no
+            // harness probe. Everything below this branch assumes a checkout
+            // on this machine.
+            return self
+                .submit_remote_turn(
+                    owner,
+                    session,
+                    &workspace,
+                    message,
+                    model,
+                    reasoning_effort,
+                    attachments,
+                    trigger_delivery,
+                    queue_if_busy,
+                )
+                .await;
+        }
         // No capability gate on attachments. An engine that states image input
         // is handed the bytes on its own protocol; every other one is handed a
         // private file and an absolute path in the prompt. The worker picks
@@ -3719,6 +3912,218 @@ impl CodeRuntime {
         .await
     }
 
+    /// Submit one turn to a remote session's sandbox (`docs/slack-sessions.md`).
+    #[allow(clippy::too_many_arguments)]
+    async fn submit_remote_turn(
+        &self,
+        owner: &OwnerId,
+        mut session: CodeSession,
+        workspace: &CodeWorkspace,
+        message: String,
+        model: Option<String>,
+        reasoning_effort: Option<Option<ReasoningEffort>>,
+        attachments: Vec<tidebreak_core::ImageRef>,
+        trigger_delivery: Option<TriggerDeliveryClaim>,
+        queue_if_busy: bool,
+    ) -> Result<SubmitTurnOutcome, ServerError> {
+        let Some(remote) = self.remote_sessions() else {
+            return Err(ServerError::conflict_kind(
+                "remote_disabled",
+                "this deployment has no sandbox runtime configured",
+            ));
+        };
+        if trigger_delivery.is_some() {
+            return Err(ServerError::conflict_kind(
+                "remote_triggers_unsupported",
+                "trigger turns do not reach remote sessions yet",
+            ));
+        }
+        if !attachments.is_empty() {
+            return Err(ServerError::conflict_kind(
+                "remote_attachments_unsupported",
+                "remote sessions do not take attachments yet",
+            ));
+        }
+        // Settings stick without local capability validation: the sandbox
+        // engine reads them off the spawn, and no local harness answers for
+        // a remote one.
+        let mut next = CodeSessionExecutionSettings::from(&session);
+        if let Some(model) = normalize_model(model) {
+            next.model = Some(model);
+        }
+        if let Some(effort) = reasoning_effort {
+            next.reasoning_effort = effort;
+        }
+        if next != CodeSessionExecutionSettings::from(&session) {
+            session = replace_session_execution_settings(&self.db, owner, &session, &next)
+                .await?
+                .ok_or_else(|| {
+                    ServerError::conflict_kind(
+                        "session_settings_changed",
+                        "the session settings changed before the turn could reserve them",
+                    )
+                })?;
+        }
+        // Queue-default, exactly as the local path: a busy session parks the
+        // send as a durable row the remote sweep promotes at the next idle.
+        let in_flight = session.lifecycle == CodeSessionLifecycle::Running
+            || get_open_turn(&self.db, owner, session.id).await?.is_some();
+        let backlog = !tidebreak_core::db::code::list_queued_turns(&self.db, owner, session.id)
+            .await?
+            .is_empty();
+        if in_flight || backlog {
+            if !queue_if_busy {
+                return Err(ServerError::conflict_kind(
+                    "trigger_turn_busy",
+                    "the turn was not accepted because the session is busy",
+                ));
+            }
+            return self.park_remote_follow_up(owner, &session, message).await;
+        }
+        let repo = self.get_repo(owner, workspace.repo_id).await?;
+        let driver = remote.driver(&self.db, self.bus.as_ref());
+        let outcome = driver
+            .submit_turn(&mut session, workspace, &repo, &message)
+            .await?;
+        self.relay_remote_outcome(owner, &session, outcome, message, queue_if_busy)
+            .await
+    }
+
+    /// Translate a driver outcome into the submit answer the routes speak.
+    async fn relay_remote_outcome(
+        &self,
+        owner: &OwnerId,
+        session: &CodeSession,
+        outcome: super::remote::driver::RemoteTurnOutcome,
+        message: String,
+        queue_if_busy: bool,
+    ) -> Result<SubmitTurnOutcome, ServerError> {
+        use super::remote::driver::RemoteTurnOutcome as Outcome;
+        match outcome {
+            Outcome::Delivered { turn } | Outcome::Reincarnated { turn, .. } => {
+                Ok(SubmitTurnOutcome::Ran(turn))
+            }
+            Outcome::TurnInFlight | Outcome::ReincarnationInFlight | Outcome::FlushPending => {
+                if !queue_if_busy {
+                    return Err(ServerError::conflict_kind(
+                        "trigger_turn_busy",
+                        "the turn was not accepted because the session is busy",
+                    ));
+                }
+                self.park_remote_follow_up(owner, session, message).await
+            }
+            Outcome::CapExhausted { running } => Err(ServerError::conflict_kind(
+                "sandbox_cap_exhausted",
+                format!(
+                    "the sandbox cap is full: {} session(s) hold the slots",
+                    running.len()
+                ),
+            )),
+            Outcome::SignInRequired => Err(ServerError::conflict_kind(
+                "sign_in_required",
+                "sign in to the sandbox environment, then retry",
+            )),
+        }
+    }
+
+    /// Park a message for a remote session. The remote sweep promotes the
+    /// head at the next idle; there is no worker to nudge.
+    async fn park_remote_follow_up(
+        &self,
+        owner: &OwnerId,
+        session: &CodeSession,
+        message: String,
+    ) -> Result<SubmitTurnOutcome, ServerError> {
+        let queued = tidebreak_core::db::code::list_queued_turns(&self.db, owner, session.id)
+            .await
+            .map_err(ServerError::from)?;
+        if queued.len() >= CodeQueuedTurn::MAX_PER_SESSION {
+            return Err(ServerError::conflict_kind(
+                "queue_full",
+                format!(
+                    "this session may queue at most {} messages",
+                    CodeQueuedTurn::MAX_PER_SESSION
+                ),
+            ));
+        }
+        let now = chrono::Utc::now();
+        let row = tidebreak_core::db::code::enqueue_queued_turn(
+            &self.db,
+            owner,
+            &CodeQueuedTurn {
+                id: CodeTurnId::new(),
+                session_id: session.id,
+                message,
+                attachments: Vec::new(),
+                position: 0,
+                created_at: now,
+                updated_at: now,
+            },
+        )
+        .await
+        .map_err(ServerError::from)?;
+        Ok(SubmitTurnOutcome::Queued(Box::new(row)))
+    }
+
+    /// Promote the queue head of every idle remote session. Called from the
+    /// remote sweep; local sessions drain their own queues through their
+    /// workers and are skipped here.
+    pub(crate) async fn promote_remote_queue_heads(&self) -> Result<(), ServerError> {
+        let Some(remote) = self.remote_sessions() else {
+            return Ok(());
+        };
+        let sessions = list_sessions_all_owners(&self.db).await?;
+        for mut session in sessions {
+            if session.lifecycle != CodeSessionLifecycle::Idle {
+                continue;
+            }
+            let Ok(workspace) = self
+                .get_workspace(&session.owner, session.workspace_id)
+                .await
+            else {
+                continue;
+            };
+            if !workspace.is_remote() {
+                continue;
+            }
+            if tidebreak_core::db::code::queue_paused(&self.db, &session.owner, session.id).await? {
+                continue;
+            }
+            let Some(head) = queued_turn_head(&self.db, &session.owner, session.id).await? else {
+                continue;
+            };
+            let Ok(repo) = self.get_repo(&session.owner, workspace.repo_id).await else {
+                continue;
+            };
+            let driver = remote.driver(&self.db, self.bus.as_ref());
+            let message = head.message.clone();
+            match driver
+                .submit_turn(&mut session, &workspace, &repo, &message)
+                .await
+            {
+                Ok(super::remote::driver::RemoteTurnOutcome::Delivered { .. })
+                | Ok(super::remote::driver::RemoteTurnOutcome::Reincarnated { .. }) => {
+                    let _ = tidebreak_core::db::code::delete_queued_turn(
+                        &self.db,
+                        &session.owner,
+                        session.id,
+                        head.id,
+                    )
+                    .await;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        session = %session.id,
+                        %error,
+                        "promoting a queued remote message failed; the row stays queued"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Park a message as a durable queue row (decision 69).
     ///
     /// The row id is minted here and becomes the promoted turn's id. The cap
@@ -3791,6 +4196,123 @@ impl CodeRuntime {
             &self.db, owner, id, queued_id, message, position,
         )
         .await?)
+    }
+
+    pub(crate) async fn interrupt(&self, id: CodeSessionId) -> Result<(), ServerError> {
+        // Interrupt stops only the active turn. The worker and logical code
+        // session continue, so its browser capfile and native capability must
+        // remain live for later turns.
+        if self.workers.lock().expect("code workers").contains_key(&id) {
+            let handle = self.require_worker(id)?;
+            let (reply, rx) = oneshot::channel();
+            handle
+                .commands
+                .send(WorkerCommand::Interrupt { reply })
+                .await
+                .map_err(|_| ServerError::internal("session worker is gone"))?;
+            return rx
+                .await
+                .map_err(|_| ServerError::internal("session worker dropped the interrupt"))?
+                .map_err(map_worker);
+        }
+        // No host worker: a remote session's engine lives in a sandbox.
+        let sessions = list_sessions_all_owners(&self.db).await?;
+        let Some(session) = sessions.into_iter().find(|session| session.id == id) else {
+            return Err(ServerError::conflict_kind(
+                "session_worker_missing",
+                "session worker is not running",
+            ));
+        };
+        let workspace = self
+            .get_workspace(&session.owner, session.workspace_id)
+            .await?;
+        if !workspace.is_remote() {
+            return Err(ServerError::conflict_kind(
+                "session_worker_missing",
+                "session worker is not running",
+            ));
+        }
+        self.interrupt_remote(&session).await
+    }
+
+    async fn interrupt_remote(&self, session: &CodeSession) -> Result<(), ServerError> {
+        let Some(remote) = self.remote_sessions() else {
+            return Err(ServerError::conflict_kind(
+                "remote_disabled",
+                "this deployment has no sandbox runtime configured",
+            ));
+        };
+        let Some(row) =
+            tidebreak_core::db::code::latest_incarnation(&self.db, &session.owner, session.id)
+                .await?
+        else {
+            return Err(ServerError::conflict_kind(
+                "no_active_turn",
+                "there is no active turn to interrupt",
+            ));
+        };
+        if row.state != tidebreak_core::IncarnationState::Active {
+            return Err(ServerError::conflict_kind(
+                "no_active_turn",
+                "there is no active turn to interrupt",
+            ));
+        }
+        let Some(sandbox_id) = row.sandbox_id.as_deref() else {
+            return Err(ServerError::conflict_kind(
+                "no_active_turn",
+                "there is no active turn to interrupt",
+            ));
+        };
+        let message = super::remote::wire::SandboxMessage {
+            body: "stop".to_owned(),
+            interrupt: true,
+        };
+        match remote
+            .provisioner
+            .send(&session.owner, sandbox_id, &message)
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(super::remote::RemoteSandboxError::SignInRequired(_)) => {
+                Err(ServerError::conflict_kind(
+                    "sign_in_required",
+                    "sign in to the sandbox environment, then retry",
+                ))
+            }
+            Err(error) => Err(ServerError::internal(error.to_string())),
+        }
+    }
+
+    /// Best-effort stop of a remote session's sandbox. Used when the session
+    /// row is ending, so the environment does not keep spending.
+    async fn cancel_remote_sandbox(&self, session: &CodeSession) {
+        let Some(remote) = self.remote_sessions() else {
+            return;
+        };
+        let Ok(Some(row)) =
+            tidebreak_core::db::code::latest_incarnation(&self.db, &session.owner, session.id)
+                .await
+        else {
+            return;
+        };
+        if let Some(sandbox_id) = row.sandbox_id.as_deref() {
+            if let Err(error) = remote.provisioner.cancel(&session.owner, sandbox_id).await {
+                tracing::warn!(
+                    session = %session.id,
+                    %error,
+                    "could not cancel a remote sandbox while ending the session"
+                );
+            }
+        }
+        if row.state != tidebreak_core::IncarnationState::Stopped {
+            let _ = tidebreak_core::db::code::stop_incarnation(
+                &self.db,
+                &session.owner,
+                row.id,
+                Some("session_ended"),
+            )
+            .await;
+        }
     }
 
     /// Retract one queued message. `false` when the row is gone.
@@ -3876,22 +4398,6 @@ impl CodeRuntime {
                     fenced.id
                 )
             }))
-    }
-
-    pub(crate) async fn interrupt(&self, id: CodeSessionId) -> Result<(), ServerError> {
-        // Interrupt stops only the active turn. The worker and logical code
-        // session continue, so its browser capfile and native capability must
-        // remain live for later turns.
-        let handle = self.require_worker(id)?;
-        let (reply, rx) = oneshot::channel();
-        handle
-            .commands
-            .send(WorkerCommand::Interrupt { reply })
-            .await
-            .map_err(|_| ServerError::internal("session worker is gone"))?;
-        rx.await
-            .map_err(|_| ServerError::internal("session worker dropped the interrupt"))?
-            .map_err(map_worker)
     }
 
     pub(crate) async fn steer(
@@ -4048,6 +4554,24 @@ impl CodeRuntime {
                 "only a fenced session can be reaped",
             ));
         }
+        let workspace = self.get_workspace(owner, session.workspace_id).await?;
+        if workspace.is_remote() {
+            // No worker to shut down and nothing to relaunch: the driver
+            // cancels whatever the environment still holds, closes the
+            // incarnation, and resolves the fence. The next turn
+            // reincarnates on demand.
+            let Some(remote) = self.remote_sessions() else {
+                return Err(ServerError::conflict_kind(
+                    "remote_disabled",
+                    "this deployment has no sandbox runtime configured",
+                ));
+            };
+            let driver = remote.driver(&self.db, self.bus.as_ref());
+            return driver.reap(session).await.map_err(|error| match error {
+                recovery::ReapSessionError::Store(error) => ServerError::from(error),
+                other => ServerError::conflict_kind("session_not_reaped", other.to_string()),
+            });
+        }
         let handle = self.workers.lock().expect("code workers").remove(&id);
         let decision_gate = handle
             .as_ref()
@@ -4110,6 +4634,16 @@ impl CodeRuntime {
                 ));
             }
             _ => {}
+        }
+
+        let workspace = self.get_workspace(owner, session.workspace_id).await?;
+        if workspace.is_remote() {
+            // The sandbox carries the engine. Persist the mode on the row and
+            // do not relaunch a host harness against the empty worktree.
+            let mut session = session;
+            session.permission_mode = mode;
+            super::attention::persist_session(&self.db, &self.bus, &session).await?;
+            return Ok(session);
         }
 
         // Refuse a mode this engine cannot honor here, not at the next turn,
@@ -4833,6 +5367,16 @@ impl CodeRuntime {
         *self.reconcile_sweep.lock().expect("reconcile sweep") = Some(guard);
     }
 
+    /// Start the remote-session sweep once, on deployments that configured
+    /// remote execution. A no-op everywhere else.
+    pub(super) fn ensure_remote_sweep(self: &Arc<Self>) {
+        if self.remote.is_none() || self.remote_started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let guard = super::remote::service::RemoteSweepGuard::spawn(Arc::downgrade(self));
+        *self.remote_sweep.lock().expect("remote sweep") = Some(guard);
+    }
+
     /// End one session: mark the row ended, stop its worker, and re-assert.
     ///
     /// The same steps [`Self::end_workspace_sessions`] takes per session,
@@ -4848,6 +5392,11 @@ impl CodeRuntime {
         };
         if session.lifecycle == CodeSessionLifecycle::Ended {
             return Ok(());
+        }
+        if let Ok(workspace) = self.get_workspace(owner, session.workspace_id).await {
+            if workspace.is_remote() {
+                self.cancel_remote_sandbox(&session).await;
+            }
         }
         let handle = self
             .workers
@@ -5115,6 +5664,12 @@ impl CodeRuntime {
         limit: Option<u32>,
     ) -> Result<(Vec<String>, bool), ServerError> {
         let workspace = self.get_workspace(owner, workspace_id).await?;
+        if workspace.is_remote() {
+            return Err(ServerError::conflict_kind(
+                "workspace_remote",
+                "this workspace's engine runs in a remote sandbox; there is no host worktree",
+            ));
+        }
         worktree::list_tree_paths(
             std::path::Path::new(&workspace.worktree_path),
             query,
@@ -5152,6 +5707,12 @@ impl CodeRuntime {
         turn_id: Option<CodeTurnId>,
     ) -> Result<(Vec<ChangedFile>, bool, Diffstat, Option<CodeTurnId>), ServerError> {
         let workspace = self.get_workspace(owner, workspace_id).await?;
+        if workspace.is_remote() {
+            return Err(ServerError::conflict_kind(
+                "workspace_remote",
+                "this workspace's engine runs in a remote sandbox; there is no host worktree",
+            ));
+        }
         let (worktree, from, to, turn) = resolve_diff_range(&self.db, &workspace, turn_id)
             .await
             .map_err(map_checkpoint)?;
@@ -5181,6 +5742,12 @@ impl CodeRuntime {
         file: Option<&str>,
     ) -> Result<(String, bool, Diffstat, Option<CodeTurnId>), ServerError> {
         let workspace = self.get_workspace(owner, workspace_id).await?;
+        if workspace.is_remote() {
+            return Err(ServerError::conflict_kind(
+                "workspace_remote",
+                "this workspace's engine runs in a remote sandbox; there is no host worktree",
+            ));
+        }
         let (worktree, from, to, turn) = resolve_diff_range(&self.db, &workspace, turn_id)
             .await
             .map_err(map_checkpoint)?;

@@ -127,6 +127,16 @@ pub struct Config {
     /// [`Config::bind_addr`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listen_addr: Option<SocketAddr>,
+    /// The confined-sandbox runtime endpoint slug remote sessions are
+    /// provisioned through (`docs/slack-sessions.md`). Meaningful only on a
+    /// gateway-authenticated hosted machine, where the sandbox calls ride the
+    /// same gateway as authentication; absent, remote sessions are off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_endpoint: Option<String>,
+    /// The administrator-defined sandbox profile named on every remote spawn.
+    /// Required together with [`Config::runtime_endpoint`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_profile: Option<String>,
     /// Where new code-mode worktrees land when no `code_worktree_root` setting
     /// is stored.
     ///
@@ -223,6 +233,8 @@ impl Config {
             auth_gateway_verifier_url: None,
             public_url: None,
             listen_addr: None,
+            runtime_endpoint: None,
+            runtime_profile: None,
             code_worktree_root_default: None,
         }
     }
@@ -237,8 +249,9 @@ impl Config {
     /// (self-host only; exactly one is required there), optional
     /// `TIDEBREAK_AUTH_GATEWAY_VERIFIER_URL` for cluster-internal validation,
     /// `TIDEBREAK_PUBLIC_URL` for machine-bound Gateway credentials,
-    /// and `TIDEBREAK_LISTEN_ADDR` (self-host only; default loopback on an
-    /// ephemeral port).
+    /// `TIDEBREAK_LISTEN_ADDR` (self-host only; default loopback on an
+    /// ephemeral port), and optional `TIDEBREAK_RUNTIME_ENDPOINT` plus
+    /// `TIDEBREAK_RUNTIME_PROFILE` together to enable remote sessions.
     pub fn from_env() -> Result<Self> {
         Self::from_vars(
             std::env::var("TIDEBREAK_PROFILE").ok(),
@@ -250,6 +263,8 @@ impl Config {
             std::env::var("TIDEBREAK_AUTH_GATEWAY_VERIFIER_URL").ok(),
             std::env::var("TIDEBREAK_PUBLIC_URL").ok(),
             std::env::var("TIDEBREAK_LISTEN_ADDR").ok(),
+            std::env::var("TIDEBREAK_RUNTIME_ENDPOINT").ok(),
+            std::env::var("TIDEBREAK_RUNTIME_PROFILE").ok(),
         )
     }
 
@@ -271,6 +286,8 @@ impl Config {
         auth_gateway_verifier_url: Option<String>,
         public_url: Option<String>,
         listen_addr: Option<String>,
+        runtime_endpoint: Option<String>,
+        runtime_profile: Option<String>,
     ) -> Result<Self> {
         let profile = match profile.filter(|value| !value.is_empty()).as_deref() {
             None | Some("desktop") => Profile::Desktop,
@@ -309,6 +326,13 @@ impl Config {
                 ))
             })?),
         };
+        let runtime_endpoint = runtime_endpoint.filter(|value| !value.trim().is_empty());
+        let runtime_profile = runtime_profile.filter(|value| !value.trim().is_empty());
+        if runtime_endpoint.is_some() != runtime_profile.is_some() {
+            return Err(AgentError::config(
+                "TIDEBREAK_RUNTIME_ENDPOINT and TIDEBREAK_RUNTIME_PROFILE are required together",
+            ));
+        }
         Ok(Self {
             profile,
             data_dir,
@@ -325,6 +349,8 @@ impl Config {
             auth_gateway_verifier_url,
             public_url,
             listen_addr,
+            runtime_endpoint,
+            runtime_profile,
             code_worktree_root_default: None,
         })
     }
@@ -422,6 +448,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         )
         .unwrap();
         let expected = std::env::current_dir().unwrap().join(".tidebreak");
@@ -441,9 +469,47 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         )
         .unwrap();
         assert_eq!(config.profile, Profile::Desktop);
+    }
+
+    #[test]
+    fn a_runtime_endpoint_requires_its_profile() {
+        // Half-configured remote execution refuses at boot rather than at the
+        // first spawn.
+        let refused = Config::from_vars(
+            None,
+            Some(OsString::from("/data")),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("primary".into()),
+            None,
+        );
+        assert!(refused.is_err());
+        let config = Config::from_vars(
+            None,
+            Some(OsString::from("/data")),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("primary".into()),
+            Some("tidebreak-remote".into()),
+        )
+        .unwrap();
+        assert_eq!(config.runtime_endpoint.as_deref(), Some("primary"));
+        assert_eq!(config.runtime_profile.as_deref(), Some("tidebreak-remote"));
     }
 
     #[test]
@@ -454,6 +520,8 @@ mod tests {
             None,
             None,
             Some(OsString::from("/etc/tidebreak/tokens")),
+            None,
+            None,
             None,
             None,
             None,
@@ -472,6 +540,8 @@ mod tests {
     fn unknown_profile_var_is_an_error() {
         assert!(Config::from_vars(
             Some("bogus".into()),
+            None,
+            None,
             None,
             None,
             None,
@@ -512,6 +582,8 @@ mod tests {
             None,
             None,
             Some("0.0.0.0:8080".into()),
+            None,
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -530,7 +602,9 @@ mod tests {
             None,
             None,
             None,
-            Some("0.0.0.0".into())
+            Some("0.0.0.0".into()),
+            None,
+            None
         )
         .is_err());
     }
@@ -576,6 +650,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            None,
         )
         .unwrap();
         assert!(config.container_execution_enabled);
@@ -587,6 +663,8 @@ mod tests {
             None,
             None,
             Some("yes".into()),
+            None,
+            None,
             None,
             None,
             None,
@@ -608,6 +686,8 @@ mod tests {
             Some("https://gateway.example.test".into()),
             Some("https://gateway.model-gateway.svc.cluster.local".into()),
             Some("https://tidebreak.example.test".into()),
+            None,
+            None,
             None,
         )
         .unwrap();
