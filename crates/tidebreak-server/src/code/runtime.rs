@@ -4019,6 +4019,15 @@ impl CodeRuntime {
                     running.len()
                 ),
             )),
+            Outcome::SpendExhausted {
+                spent_microusd,
+                ceiling_microusd,
+            } => Err(ServerError::conflict_kind(
+                "session_spend_exhausted",
+                format!(
+                    "this session has spent {spent_microusd} of its {ceiling_microusd} micro-USD ceiling and takes no more turns"
+                ),
+            )),
             Outcome::SignInRequired => Err(ServerError::conflict_kind(
                 "sign_in_required",
                 "sign in to the sandbox environment, then retry",
@@ -4089,6 +4098,9 @@ impl CodeRuntime {
             if tidebreak_core::db::code::queue_paused(&self.db, &session.owner, session.id).await? {
                 continue;
             }
+            if remote.promotion_held(session.id) {
+                continue;
+            }
             let Some(head) = queued_turn_head(&self.db, &session.owner, session.id).await? else {
                 continue;
             };
@@ -4097,20 +4109,36 @@ impl CodeRuntime {
             };
             let driver = remote.driver(&self.db, self.bus.as_ref());
             let message = head.message.clone();
+            use super::remote::driver::RemoteTurnOutcome as Outcome;
             match driver
-                .submit_turn(&mut session, &workspace, &repo, &message)
+                .submit_turn_from(&mut session, &workspace, &repo, &message, Some(&head))
                 .await
             {
-                Ok(super::remote::driver::RemoteTurnOutcome::Delivered { .. })
-                | Ok(super::remote::driver::RemoteTurnOutcome::Reincarnated { .. }) => {
-                    let _ = tidebreak_core::db::code::delete_queued_turn(
+                // The claim was the atomic promotion; nothing to delete.
+                Ok(Outcome::Delivered { .. }) | Ok(Outcome::Reincarnated { .. }) => {
+                    remote.clear_promotion_hold(session.id);
+                }
+                // Permanent for this session: nothing exposes a way to raise
+                // the ceiling, and every retry would re-journal the refusal
+                // and re-cancel the sandbox. Pause the queue so the tray
+                // shows why nothing moves; unpausing retries deliberately.
+                Ok(Outcome::SpendExhausted { .. }) => {
+                    let _ = tidebreak_core::db::code::set_queue_paused(
                         &self.db,
                         &session.owner,
                         session.id,
-                        head.id,
+                        true,
                     )
                     .await;
                 }
+                // Transient machine-side refusals: hold retries so the
+                // notice and attention do not repeat every sweep tick. The
+                // hold expiring retries on its own once the slot may be
+                // free or the owner has signed in.
+                Ok(Outcome::CapExhausted { .. }) | Ok(Outcome::SignInRequired) => {
+                    remote.hold_promotion(session.id);
+                }
+                // Busy shapes: the row stays queued for the next idle.
                 Ok(_) => {}
                 Err(error) => {
                     tracing::warn!(
@@ -4118,6 +4146,7 @@ impl CodeRuntime {
                         %error,
                         "promoting a queued remote message failed; the row stays queued"
                     );
+                    remote.hold_promotion(session.id);
                 }
             }
         }
