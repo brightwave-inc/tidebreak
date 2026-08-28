@@ -105,6 +105,8 @@ export type PendingComposerPrompt = {
   scope: string;
   text: string;
   submit: boolean;
+  /** Files to attach when the workspace composer takes this prompt. */
+  images?: readonly File[];
 };
 
 function readStoredCreateDefaults(): CodeCreateDefaults | null {
@@ -330,7 +332,11 @@ export type CodeUiStore = {
    */
   pendingComposerPrompt: PendingComposerPrompt | null;
   composerActionScope: string | null;
-  offerComposerPrompt: (scope: string, prompt: string) => void;
+  offerComposerPrompt: (
+    scope: string,
+    prompt: string,
+    images?: readonly File[],
+  ) => void;
   runComposerPrompt: (scope: string, prompt: string) => boolean;
   takeComposerPrompt: (scope: string) => PendingComposerPrompt | null;
   finishComposerAction: (scope: string) => void;
@@ -500,8 +506,15 @@ export const useCodeUiStore = create<CodeUiStore>()((set, get) => ({
     set({ openFilePending: null });
     return pending;
   },
-  offerComposerPrompt: (scope, prompt) =>
-    set({ pendingComposerPrompt: { scope, text: prompt, submit: false } }),
+  offerComposerPrompt: (scope, prompt, images) =>
+    set({
+      pendingComposerPrompt: {
+        scope,
+        text: prompt,
+        submit: false,
+        ...(images && images.length > 0 ? { images } : {}),
+      },
+    }),
   runComposerPrompt: (scope, prompt) => {
     if (get().composerActionScope !== null) return false;
     set({

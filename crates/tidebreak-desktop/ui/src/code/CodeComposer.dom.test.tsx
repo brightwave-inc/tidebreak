@@ -140,6 +140,31 @@ describe("CodeComposer", () => {
     expect(useCodeUiStore.getState().pendingComposerPrompt).toBeNull();
   });
 
+  it("attaches files offered with a pending prompt", async () => {
+    const image = new File([new Uint8Array([1, 2, 3, 4])], "shot.png", {
+      type: "image/png",
+    });
+    useCodeUiStore
+      .getState()
+      .offerComposerPrompt("sess-1", "Review this screenshot", [image]);
+    renderComposer(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        sessionId="sess-1"
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByRole("textbox", { name: "Message" })).toHaveValue(
+      "Review this screenshot",
+    );
+    expect(await screen.findByLabelText("Attached images")).toBeInTheDocument();
+    expect(screen.getByText("shot.png")).toBeInTheDocument();
+    expect(useCodeUiStore.getState().pendingComposerPrompt).toBeNull();
+  });
+
   it("submits a one-click workspace action without replacing the draft", async () => {
     const onSend = vi.fn();
     renderComposer(

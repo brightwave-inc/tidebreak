@@ -823,18 +823,23 @@ export function NewWorkspaceDialog({
             await client.submitCodeTurn(session.id, prompt);
           }
         } catch (error) {
-          // Never drop typed words: the workspace composer holds them.
-          useCodeUiStore.getState().offerComposerPrompt(workspace.id, prompt);
+          // Never drop typed words or pasted images: the workspace composer
+          // holds them.
+          useCodeUiStore
+            .getState()
+            .offerComposerPrompt(workspace.id, prompt, attempt.images);
           toast.error(
             `Session started, but the first message could not be sent. ${friendlyErrorMessage(error, "Send it from the workspace composer.")}`,
           );
         }
       }
     } catch (error) {
-      // No session to send to; the workspace composer holds the text and
-      // start-session on the workspace page picks it up.
+      // No session to send to; the workspace composer holds the text, images,
+      // and start-session on the workspace page picks them up.
       if (prompt) {
-        useCodeUiStore.getState().offerComposerPrompt(workspace.id, prompt);
+        useCodeUiStore
+          .getState()
+          .offerComposerPrompt(workspace.id, prompt, attempt.images);
       }
       toast.error(
         `Workspace created, but the session could not start. ${friendlyErrorMessage(error, "Try again from the workspace.")}`,

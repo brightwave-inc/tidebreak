@@ -906,6 +906,9 @@ export function CodeComposer({
       return;
     }
     setDraft((current) => appendComposerPrompt(current, request.text));
+    if (request.images && request.images.length > 0) {
+      images.attachFiles(request.images);
+    }
     window.requestAnimationFrame(() => {
       document
         .querySelector<HTMLTextAreaElement>("[data-composer-input]")

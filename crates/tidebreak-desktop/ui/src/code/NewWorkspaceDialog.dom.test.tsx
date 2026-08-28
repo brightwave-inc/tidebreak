@@ -1026,6 +1026,119 @@ describe("NewWorkspaceDialog", () => {
     expect(publishCodeImage).toHaveBeenCalledWith("sess-ws-image", image);
   });
 
+  it("hands pasted images to the workspace composer when the turn cannot be sent", async () => {
+    const repos = [repo("repo-new", "tidebreak")];
+    useCodeCatalogStore.setState({
+      repos,
+      doctor: {
+        harnesses: [harness("claude_code")],
+        notices: [],
+      } as never,
+    });
+    const image = new File([new Uint8Array([1, 2, 3, 4])], "shot.png", {
+      type: "image/png",
+    });
+    const submitCodeTurn = vi.fn(async () => {
+      throw new Error("engine crashed on spawn");
+    });
+    const { router } = await renderWithRouter(
+      <AppContextProvider
+        value={app({
+          createCodeWorkspace: vi.fn(async () =>
+            workspace("ws-held-image", "repo-new", "2026-08-20T00:00:00.000Z"),
+          ),
+          createCodeSession: vi.fn(async () =>
+            session("ws-held-image", "claude_code", "2026-08-20T00:00:00.000Z"),
+          ),
+          submitCodeTurn,
+          listCodeHarnessModels: claudeModels(),
+        })}
+      >
+        <NewWorkspaceDialog open onOpenChange={vi.fn()} repos={repos} />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+
+    const message = screen.getByRole("textbox", { name: "First message" });
+    fireEvent.change(message, { target: { value: "Review this screenshot" } });
+    fireEvent(
+      message,
+      createEvent.paste(message, {
+        clipboardData: { files: [image] },
+      }),
+    );
+    fireEvent.keyDown(screen.getByRole("dialog"), {
+      key: "Enter",
+      metaKey: true,
+    });
+
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/code/w/ws-held-image"),
+    );
+    expect(useCodeUiStore.getState().pendingComposerPrompt).toEqual({
+      scope: "ws-held-image",
+      text: "Review this screenshot",
+      submit: false,
+      images: [image],
+    });
+  });
+
+  it("hands pasted images to the workspace composer when the session cannot start", async () => {
+    const repos = [repo("repo-new", "tidebreak")];
+    useCodeCatalogStore.setState({
+      repos,
+      doctor: {
+        harnesses: [harness("claude_code")],
+        notices: [],
+      } as never,
+    });
+    const image = new File([new Uint8Array([1, 2, 3, 4])], "shot.png", {
+      type: "image/png",
+    });
+    const created = workspace(
+      "ws-recover-image",
+      "repo-new",
+      "2026-08-19T00:00:00.000Z",
+    );
+    const { router } = await renderWithRouter(
+      <AppContextProvider
+        value={app({
+          createCodeWorkspace: vi.fn(async () => created),
+          createCodeSession: vi.fn(async () => {
+            throw new Error("Codex sign-in expired");
+          }),
+          listCodeHarnessModels: claudeModels(),
+        })}
+      >
+        <NewWorkspaceDialog open onOpenChange={vi.fn()} repos={repos} />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+
+    const message = screen.getByRole("textbox", { name: "First message" });
+    fireEvent.change(message, { target: { value: "Review this screenshot" } });
+    fireEvent(
+      message,
+      createEvent.paste(message, {
+        clipboardData: { files: [image] },
+      }),
+    );
+    fireEvent.keyDown(screen.getByRole("dialog"), {
+      key: "Enter",
+      metaKey: true,
+    });
+
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/code/w/ws-recover-image"),
+    );
+    expect(useCodeUiStore.getState().pendingComposerPrompt).toEqual({
+      scope: "ws-recover-image",
+      text: "Review this screenshot",
+      submit: false,
+      images: [image],
+    });
+  });
+
   it("hands the message to the workspace composer when the turn cannot be sent", async () => {
     const repos = [repo("repo-new", "tidebreak")];
     useCodeCatalogStore.setState({
