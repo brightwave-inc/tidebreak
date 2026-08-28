@@ -59,6 +59,15 @@ impl From<&CodeSession> for CodeSessionExecutionSettings {
 /// Insert a session row. The row belongs to `session.owner`, denormalized
 /// from the workspace it runs in.
 pub async fn insert_session(store: &DbStore, session: &CodeSession) -> Result<()> {
+    insert_session_on(&store.conn, session).await
+}
+
+/// [`insert_session`] against any connection, so a caller can commit the
+/// session with the rows that depend on it.
+pub(in crate::db) async fn insert_session_on<C>(connection: &C, session: &CodeSession) -> Result<()>
+where
+    C: sea_orm::ConnectionTrait,
+{
     entities::code_session::ActiveModel {
         id: Set(session.id.0),
         owner: Set(session.owner.as_str().to_owned()),
@@ -96,7 +105,7 @@ pub async fn insert_session(store: &DbStore, session: &CodeSession) -> Result<()
         }),
         created_at: Set(session.created_at),
     }
-    .insert(&store.conn)
+    .insert(connection)
     .await
     .map_err(store_err)?;
     Ok(())

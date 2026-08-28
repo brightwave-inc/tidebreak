@@ -1938,6 +1938,28 @@ pub mod code_session_incarnation {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod code_external_binding {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "code_external_binding")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub owner: String,
+        pub channel_kind: String,
+        pub external_key: String,
+        pub grant_id: Uuid,
+        pub session_id: Uuid,
+        pub created_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod code_session_image {
     use sea_orm::entity::prelude::*;
 

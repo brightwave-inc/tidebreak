@@ -458,7 +458,12 @@ mod tests {
             .await
             .unwrap();
         assert!(workspace.is_remote());
-        assert!(workspace.worktree_path.is_empty());
+        // The marker is per-workspace: the column is unique, and a shared
+        // sentinel would cap the machine at one remote workspace.
+        assert_eq!(
+            workspace.worktree_path,
+            tidebreak_core::CodeWorkspace::remote_worktree_marker(workspace.id)
+        );
         let session = runtime
             .create_remote_session(
                 &owner,
@@ -983,6 +988,109 @@ mod tests {
         assert_eq!(
             fake.cancels.lock().unwrap().as_slice(),
             &["sb-1".to_owned()]
+        );
+    }
+
+    /// External get-or-create builds everything on first contact, is
+    /// idempotent on the conversation key, scopes by grant, and never
+    /// resurrects an ended session.
+    #[tokio::test]
+    async fn an_external_conversation_binds_once_and_scopes_by_grant() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, _fake, owner, repo) = runtime_with_remote(dir.path()).await;
+        let grant = tidebreak_core::CodeGrantId::new();
+        let resolved = runtime
+            .external_get_or_create(
+                &owner,
+                grant,
+                "slack",
+                "T1/C7/42.1",
+                repo.id,
+                Some("fix the flake".into()),
+                HarnessKind::ClaudeCode,
+                session_settings(),
+            )
+            .await
+            .unwrap();
+        let tidebreak_core::ExternalSessionResolution::Created(binding) = resolved else {
+            panic!("expected a create");
+        };
+        let session = runtime
+            .get_session(&owner, binding.session_id)
+            .await
+            .unwrap();
+        assert_eq!(session.lifecycle, CodeSessionLifecycle::Idle);
+        let workspace = runtime
+            .get_workspace(&owner, session.workspace_id)
+            .await
+            .unwrap();
+        assert!(workspace.is_remote());
+
+        // The channel's retry answers with the same session.
+        let again = runtime
+            .external_get_or_create(
+                &owner,
+                grant,
+                "slack",
+                "T1/C7/42.1",
+                repo.id,
+                None,
+                HarnessKind::ClaudeCode,
+                session_settings(),
+            )
+            .await
+            .unwrap();
+        let tidebreak_core::ExternalSessionResolution::Existing(hit) = again else {
+            panic!("expected the existing binding");
+        };
+        assert_eq!(hit.session_id, binding.session_id);
+
+        // Another grant's call on the same conversation refuses.
+        let refused = runtime
+            .external_get_or_create(
+                &owner,
+                tidebreak_core::CodeGrantId::new(),
+                "slack",
+                "T1/C7/42.1",
+                repo.id,
+                None,
+                HarnessKind::ClaudeCode,
+                session_settings(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            refused,
+            tidebreak_core::ExternalSessionResolution::GrantMismatch
+        ));
+
+        // An ended session answers `Ended` rather than resurrecting.
+        let mut stored = runtime
+            .get_session(&owner, binding.session_id)
+            .await
+            .unwrap();
+        stored.lifecycle = CodeSessionLifecycle::Ended;
+        assert!(tidebreak_core::db::code::save_session(&runtime.db, &stored)
+            .await
+            .unwrap());
+        let ended = runtime
+            .external_get_or_create(
+                &owner,
+                grant,
+                "slack",
+                "T1/C7/42.1",
+                repo.id,
+                None,
+                HarnessKind::ClaudeCode,
+                session_settings(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            ended,
+            tidebreak_core::ExternalSessionResolution::Ended {
+                session_id: binding.session_id
+            }
         );
     }
 

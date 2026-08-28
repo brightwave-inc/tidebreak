@@ -1138,3 +1138,15 @@ pub(crate) enum CodeWorkflowRunFetch {
     ListEtag,
     ObservedAt,
 }
+
+#[derive(DeriveIden)]
+pub(crate) enum CodeExternalBinding {
+    Table,
+    Id,
+    Owner,
+    ChannelKind,
+    ExternalKey,
+    GrantId,
+    SessionId,
+    CreatedAt,
+}

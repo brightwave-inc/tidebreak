@@ -9,6 +9,18 @@ use super::super::super::{entities, store_err, DbStore};
 /// Insert a workspace. The row belongs to `workspace.owner`, denormalized
 /// from the repository it was created against.
 pub async fn insert_workspace(store: &DbStore, workspace: &CodeWorkspace) -> Result<()> {
+    insert_workspace_on(&store.conn, workspace).await
+}
+
+/// [`insert_workspace`] against any connection, so a caller can commit the
+/// workspace with the rows that depend on it.
+pub(in crate::db) async fn insert_workspace_on<C>(
+    connection: &C,
+    workspace: &CodeWorkspace,
+) -> Result<()>
+where
+    C: sea_orm::ConnectionTrait,
+{
     entities::code_workspace::ActiveModel {
         id: Set(workspace.id.0),
         owner: Set(workspace.owner.as_str().to_owned()),
@@ -28,7 +40,7 @@ pub async fn insert_workspace(store: &DbStore, workspace: &CodeWorkspace) -> Res
         released_tip: Set(workspace.released_tip.clone()),
         bundle_bytes: Set(workspace.bundle_bytes),
     }
-    .insert(&store.conn)
+    .insert(connection)
     .await
     .map_err(store_err)?;
     Ok(())

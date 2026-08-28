@@ -4527,6 +4527,251 @@ async fn the_incarnation_cap_refuses_and_names_the_running_sessions() {
     admitted(admit(&store, &owner, session_b, 1, 1).await);
 }
 
+/// A remote workspace and session value pair for the binding tests,
+/// unsaved: `resolve_external_session` commits or discards them itself.
+fn external_pair(owner: &OwnerId, repo_id: RepoId, label: &str) -> (CodeWorkspace, CodeSession) {
+    let workspace_id = WorkspaceId::new();
+    let workspace = CodeWorkspace {
+        id: workspace_id,
+        owner: owner.clone(),
+        repo_id,
+        title: label.into(),
+        worktree_path: CodeWorkspace::remote_worktree_marker(workspace_id),
+        branch_name: format!("tidebreak/{label}"),
+        base_ref: "main".into(),
+        status: CodeWorkspaceStatus::Active,
+        pr: None,
+        created_at: now(),
+        archived_at: None,
+        released_at: None,
+        released_tip: None,
+        bundle_bytes: None,
+    };
+    let session = CodeSession {
+        id: CodeSessionId::new(),
+        owner: owner.clone(),
+        workspace_id,
+        kind: CodeSessionKind::Interactive,
+        harness_kind: HarnessKind::ClaudeCode,
+        harness_version: None,
+        harness_resume_ref: None,
+        permission_mode: PermissionMode::Allow,
+        model: None,
+        reasoning_effort: None,
+        fast_mode: false,
+        lifecycle: CodeSessionLifecycle::Idle,
+        fence_reason: None,
+        child_pid: None,
+        child_process_identity: None,
+        spawn_epoch: 1,
+        attention: Attention::working(AttentionSource::Lifecycle),
+        unrecognized_event_count: 0,
+        subagents: Vec::new(),
+        created_at: now(),
+    };
+    (workspace, session)
+}
+
+/// Two racing creates for one conversation yield one session: the loser's
+/// rows never commit and it answers with the winner's binding.
+#[tokio::test]
+async fn two_racing_external_creates_yield_one_session() {
+    let (_dir, store) = temp_store().await;
+    let store = std::sync::Arc::new(store);
+    let owner = OwnerId::local();
+    let (_, repo_id) = {
+        let (session, _) = seed_owner(&store, &owner, "race-binding").await;
+        let stored = crate::db::code::get_session(&store, &owner, session)
+            .await
+            .unwrap()
+            .unwrap();
+        let workspace = crate::db::code::get_workspace(&store, &owner, stored.workspace_id)
+            .await
+            .unwrap()
+            .unwrap();
+        (session, workspace.repo_id)
+    };
+    let grant = crate::code::CodeGrantId::new();
+    let mut handles = Vec::new();
+    for index in 0..2 {
+        let store = std::sync::Arc::clone(&store);
+        let owner = owner.clone();
+        handles.push(tokio::spawn(async move {
+            let (workspace, session) =
+                external_pair(&owner, repo_id, &format!("race-binding-{index}"));
+            crate::db::code::resolve_external_session(
+                &store,
+                &owner,
+                grant,
+                "slack",
+                "T1/C1/171.5",
+                &workspace,
+                &session,
+            )
+            .await
+            .unwrap()
+        }));
+    }
+    let mut created = Vec::new();
+    let mut existing = Vec::new();
+    for handle in handles {
+        match handle.await.unwrap() {
+            crate::code::ExternalSessionResolution::Created(binding) => created.push(binding),
+            crate::code::ExternalSessionResolution::Existing(binding) => existing.push(binding),
+            other => panic!("unexpected resolution: {other:?}"),
+        }
+    }
+    assert_eq!(created.len(), 1);
+    assert_eq!(existing.len(), 1);
+    assert_eq!(created[0].session_id, existing[0].session_id);
+    // The loser's transaction rolled back whole: exactly one of the two
+    // built sessions exists.
+    let all = crate::db::code::list_sessions(&store, &owner)
+        .await
+        .unwrap();
+    let bound: Vec<_> = all
+        .iter()
+        .filter(|session| session.id == created[0].session_id)
+        .collect();
+    assert_eq!(bound.len(), 1);
+    let losers = all
+        .iter()
+        .filter(|session| {
+            session.workspace_id != bound[0].workspace_id
+                && session.permission_mode == PermissionMode::Allow
+        })
+        .count();
+    assert_eq!(losers, 0, "the losing create must leave no session row");
+}
+
+/// A bound conversation resolves to its session; an ended one answers
+/// `Ended` rather than resurrecting; another grant's key refuses.
+#[tokio::test]
+async fn a_binding_resolves_ends_and_scopes_by_grant() {
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let (_, _) = seed_owner(&store, &owner, "binding").await;
+    let repo_id = {
+        let sessions = crate::db::code::list_sessions(&store, &owner)
+            .await
+            .unwrap();
+        let workspace = crate::db::code::get_workspace(&store, &owner, sessions[0].workspace_id)
+            .await
+            .unwrap()
+            .unwrap();
+        workspace.repo_id
+    };
+    let grant = crate::code::CodeGrantId::new();
+    let (workspace, session) = external_pair(&owner, repo_id, "binding-a");
+    let resolved = crate::db::code::resolve_external_session(
+        &store,
+        &owner,
+        grant,
+        "slack",
+        "T1/C9/9.1",
+        &workspace,
+        &session,
+    )
+    .await
+    .unwrap();
+    let crate::code::ExternalSessionResolution::Created(binding) = resolved else {
+        panic!("expected a create");
+    };
+    assert!(
+        crate::db::code::session_bound_to_grant(&store, &owner, session.id, grant)
+            .await
+            .unwrap()
+    );
+    assert!(!crate::db::code::session_bound_to_grant(
+        &store,
+        &owner,
+        session.id,
+        crate::code::CodeGrantId::new()
+    )
+    .await
+    .unwrap());
+
+    // Same key again: the existing binding, nothing new.
+    let (workspace_b, session_b) = external_pair(&owner, repo_id, "binding-b");
+    let again = crate::db::code::resolve_external_session(
+        &store,
+        &owner,
+        grant,
+        "slack",
+        "T1/C9/9.1",
+        &workspace_b,
+        &session_b,
+    )
+    .await
+    .unwrap();
+    let crate::code::ExternalSessionResolution::Existing(hit) = again else {
+        panic!("expected the existing binding");
+    };
+    assert_eq!(hit.id, binding.id);
+
+    // Another grant on the same key refuses.
+    let (workspace_c, session_c) = external_pair(&owner, repo_id, "binding-c");
+    let refused = crate::db::code::resolve_external_session(
+        &store,
+        &owner,
+        crate::code::CodeGrantId::new(),
+        "slack",
+        "T1/C9/9.1",
+        &workspace_c,
+        &session_c,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        refused,
+        crate::code::ExternalSessionResolution::GrantMismatch
+    );
+
+    // Ending the session flips the answer to `Ended`; nothing resurrects.
+    let mut stored = crate::db::code::get_session(&store, &owner, session.id)
+        .await
+        .unwrap()
+        .unwrap();
+    stored.lifecycle = CodeSessionLifecycle::Ended;
+    assert!(crate::db::code::save_session(&store, &stored)
+        .await
+        .unwrap());
+    let (workspace_d, session_d) = external_pair(&owner, repo_id, "binding-d");
+    let ended = crate::db::code::resolve_external_session(
+        &store,
+        &owner,
+        grant,
+        "T1",
+        "T1/C9/9.1",
+        &workspace_d,
+        &session_d,
+    )
+    .await
+    .unwrap();
+    // A different channel kind is a different conversation; use the real one.
+    assert!(matches!(
+        ended,
+        crate::code::ExternalSessionResolution::Created(_)
+    ));
+    let ended = crate::db::code::resolve_external_session(
+        &store,
+        &owner,
+        grant,
+        "slack",
+        "T1/C9/9.1",
+        &workspace_d,
+        &session_d,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        ended,
+        crate::code::ExternalSessionResolution::Ended {
+            session_id: session.id
+        }
+    );
+}
+
 /// The cap is a reservation taken with the intent, not a check-then-act
 /// count: six concurrent intents against a cap of two admit exactly two.
 /// The tasks interleave at every await inside the op, which is where a

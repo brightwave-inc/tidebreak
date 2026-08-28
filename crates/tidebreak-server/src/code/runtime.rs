@@ -1279,13 +1279,26 @@ impl CodeRuntime {
                 "the repository records no origin, so a sandbox cannot clone it",
             ));
         }
+        let workspace = self.build_remote_workspace(owner, &repo, title).await?;
+        insert_workspace(&self.db, &workspace).await?;
+        Ok(workspace)
+    }
+
+    /// Validate and shape a remote workspace value without inserting it, so
+    /// a caller can commit it atomically with the rows that depend on it.
+    async fn build_remote_workspace(
+        &self,
+        owner: &OwnerId,
+        repo: &CodeRepo,
+        title: Option<String>,
+    ) -> Result<CodeWorkspace, ServerError> {
         let title = title
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty())
             .unwrap_or_default();
         let id = WorkspaceId::new();
         let branch = branch_name(&repo.branch_prefix, &title, id.0.as_u128());
-        let existing = list_workspaces(&self.db, owner, Some(repo_id)).await?;
+        let existing = list_workspaces(&self.db, owner, Some(repo.id)).await?;
         if existing
             .iter()
             .any(|workspace| workspace.branch_name == branch)
@@ -1295,12 +1308,12 @@ impl CodeRuntime {
                 format!("branch {branch} already exists on this repository"),
             ));
         }
-        let workspace = CodeWorkspace {
+        Ok(CodeWorkspace {
             id,
             owner: owner.clone(),
-            repo_id,
+            repo_id: repo.id,
             title,
-            worktree_path: String::new(),
+            worktree_path: CodeWorkspace::remote_worktree_marker(id),
             branch_name: branch,
             base_ref: repo.default_base_ref.clone(),
             status: CodeWorkspaceStatus::Active,
@@ -1310,9 +1323,116 @@ impl CodeRuntime {
             released_at: None,
             released_tip: None,
             bundle_bytes: None,
-        };
-        insert_workspace(&self.db, &workspace).await?;
-        Ok(workspace)
+        })
+    }
+
+    /// Shape a remote session value bound to `workspace`, uninserted.
+    fn remote_session_value(
+        owner: &OwnerId,
+        workspace_id: WorkspaceId,
+        harness: HarnessKind,
+        settings: NewSessionSettings,
+    ) -> CodeSession {
+        CodeSession {
+            id: CodeSessionId::new(),
+            owner: owner.clone(),
+            workspace_id,
+            kind: CodeSessionKind::Interactive,
+            harness_kind: harness,
+            harness_version: None,
+            harness_resume_ref: None,
+            permission_mode: settings.permission_mode,
+            model: normalize_model(settings.model),
+            reasoning_effort: settings.reasoning_effort,
+            fast_mode: false,
+            lifecycle: CodeSessionLifecycle::Idle,
+            fence_reason: None,
+            child_pid: None,
+            child_process_identity: None,
+            spawn_epoch: 1,
+            attention: Attention::working(AttentionSource::Lifecycle),
+            unrecognized_event_count: 0,
+            subagents: Vec::new(),
+            created_at: Utc::now(),
+        }
+    }
+
+    /// Bind an external conversation to a session, creating the remote
+    /// workspace, session, and binding together on first contact
+    /// (docs/slack-sessions.md, stage 2).
+    ///
+    /// Idempotent across the channel's retries: a bound conversation
+    /// answers with its session, an ended one answers `Ended` rather than
+    /// resurrecting, and a binding under another grant refuses. Two racing
+    /// creates converge on one session through the binding's unique
+    /// conversation key.
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn external_get_or_create(
+        &self,
+        owner: &OwnerId,
+        grant_id: tidebreak_core::CodeGrantId,
+        channel_kind: &str,
+        external_key: &str,
+        repo_id: RepoId,
+        title: Option<String>,
+        harness: HarnessKind,
+        settings: NewSessionSettings,
+    ) -> Result<tidebreak_core::ExternalSessionResolution, ServerError> {
+        if self.remote.is_none() {
+            return Err(ServerError::conflict_kind(
+                "remote_disabled",
+                "this deployment has no sandbox runtime configured",
+            ));
+        }
+        if channel_kind.trim().is_empty() || external_key.trim().is_empty() {
+            return Err(ServerError::conflict_kind(
+                "binding_key_invalid",
+                "a binding needs a channel kind and a conversation key",
+            ));
+        }
+        // The fast path costs one read and builds nothing.
+        if let Some(binding) = tidebreak_core::db::code::get_external_binding(
+            &self.db,
+            owner,
+            channel_kind,
+            external_key,
+        )
+        .await?
+        {
+            if binding.grant_id != grant_id {
+                return Ok(tidebreak_core::ExternalSessionResolution::GrantMismatch);
+            }
+            let session = self.get_session(owner, binding.session_id).await?;
+            if session.lifecycle == CodeSessionLifecycle::Ended {
+                return Ok(tidebreak_core::ExternalSessionResolution::Ended {
+                    session_id: binding.session_id,
+                });
+            }
+            return Ok(tidebreak_core::ExternalSessionResolution::Existing(
+                Box::new(binding),
+            ));
+        }
+        let repo = self.get_repo(owner, repo_id).await?;
+        Self::refuse_removed_repo(&repo)?;
+        if repo.origin_host.is_none() || repo.origin_owner.is_none() || repo.origin_name.is_none() {
+            return Err(ServerError::conflict_kind(
+                "repo_origin_unknown",
+                "the repository records no origin, so a sandbox cannot clone it",
+            ));
+        }
+        let workspace = self.build_remote_workspace(owner, &repo, title).await?;
+        let session = Self::remote_session_value(owner, workspace.id, harness, settings);
+        Ok(tidebreak_core::db::code::resolve_external_session(
+            &self.db,
+            owner,
+            grant_id,
+            channel_kind,
+            external_key,
+            &workspace,
+            &session,
+        )
+        .await?)
     }
 
     /// Create a session on a remote workspace: a row and nothing else. No
@@ -1348,28 +1468,7 @@ impl CodeRuntime {
                 format!("workspace is {}", workspace.status.as_str()),
             ));
         }
-        let session = CodeSession {
-            id: CodeSessionId::new(),
-            owner: owner.clone(),
-            workspace_id,
-            kind: CodeSessionKind::Interactive,
-            harness_kind: harness,
-            harness_version: None,
-            harness_resume_ref: None,
-            permission_mode: settings.permission_mode,
-            model: normalize_model(settings.model),
-            reasoning_effort: settings.reasoning_effort,
-            fast_mode: false,
-            lifecycle: CodeSessionLifecycle::Idle,
-            fence_reason: None,
-            child_pid: None,
-            child_process_identity: None,
-            spawn_epoch: 1,
-            attention: Attention::working(AttentionSource::Lifecycle),
-            unrecognized_event_count: 0,
-            subagents: Vec::new(),
-            created_at: Utc::now(),
-        };
+        let session = Self::remote_session_value(owner, workspace_id, harness, settings);
         insert_session(&self.db, &session).await?;
         Ok(session)
     }
