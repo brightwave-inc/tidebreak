@@ -172,9 +172,9 @@ async fn settle_turn_rows(
     starting_turn: i32,
     running_turn: Option<CodeTurn>,
     events: &[super::wire::SandboxEvent],
-) -> Result<(), tidebreak_core::AgentError> {
+) -> Result<bool, tidebreak_core::AgentError> {
     let Some(mut turn) = running_turn else {
-        return Ok(());
+        return Ok(false);
     };
     for event in events {
         let status = match event.kind.as_str() {
@@ -204,9 +204,9 @@ async fn settle_turn_rows(
         turn.status = status;
         turn.ended_at = Some(chrono::Utc::now());
         save_turn(db, owner, &turn).await?;
-        break;
+        return Ok(true);
     }
-    Ok(())
+    Ok(false)
 }
 
 impl RemoteDriver<'_> {
@@ -511,7 +511,8 @@ impl RemoteDriver<'_> {
         let outcome: IngestOutcome = ingest_events(db, bus, &binding, &read).await?;
         report.ingested = outcome.ingested;
 
-        settle_turn_rows(db, &owner, row.starting_turn, running_turn, &read.events).await?;
+        let turn_settled =
+            settle_turn_rows(db, &owner, row.starting_turn, running_turn, &read.events).await?;
 
         if read.state.is_terminal() && row.state == IncarnationState::Active {
             stop_incarnation(
@@ -522,19 +523,25 @@ impl RemoteDriver<'_> {
             )
             .await?;
             report.incarnation_stopped = true;
-            if session.lifecycle == CodeSessionLifecycle::Running {
-                // The ingest just wrote this turn's verdict (DoneUnreviewed,
-                // needs-you) onto the stored row. Refresh this snapshot
-                // before persisting, or the stale Working it still carries
-                // from turn start would overwrite the verdict.
-                if let Some(stored) =
-                    tidebreak_core::db::code::get_session(db, &owner, session.id).await?
-                {
-                    *session = stored;
-                }
-                session.lifecycle = CodeSessionLifecycle::Idle;
-                let _ = persist_session(db, bus, session).await?;
+        }
+        // A settled turn ends the Running lifecycle whether or not the
+        // sandbox itself ended: an inbox-delivered turn completes while the
+        // sandbox stays live, and leaving the session Running would let the
+        // stall sweep overwrite the turn's done verdict with a stall.
+        if (turn_settled || read.state.is_terminal())
+            && session.lifecycle == CodeSessionLifecycle::Running
+        {
+            // The ingest just wrote this turn's verdict (DoneUnreviewed,
+            // needs-you) onto the stored row. Refresh this snapshot
+            // before persisting, or the stale Working it still carries
+            // from turn start would overwrite the verdict.
+            if let Some(stored) =
+                tidebreak_core::db::code::get_session(db, &owner, session.id).await?
+            {
+                *session = stored;
             }
+            session.lifecycle = CodeSessionLifecycle::Idle;
+            let _ = persist_session(db, bus, session).await?;
         }
         if let Some(reason) = outcome.fence {
             report.fenced = Some(reason.clone());
@@ -889,11 +896,41 @@ mod tests {
         };
         assert_eq!(turn.ordinal, 1);
         assert!(fake.spawns.lock().unwrap().is_empty());
-        let sends = fake.sends.lock().unwrap();
+        {
+            let sends = fake.sends.lock().unwrap();
+            assert_eq!(
+                sends.as_slice(),
+                &[("sb-1".to_owned(), "and then this".to_owned())]
+            );
+        }
+
+        // The turn settles while the sandbox stays live: the session goes
+        // Idle with the turn's verdict, so the stall sweep cannot mistake a
+        // finished turn for a stall.
+        fake.event_reads.lock().unwrap().push_back(read(
+            SandboxState::Running,
+            2,
+            vec![
+                event(1, "turn_started", json!({ "turn": 1 })),
+                event(2, "turn_completed", json!({ "turn": 1, "exit_code": 0 })),
+            ],
+        ));
+        driver.pump(&mut session, 0).await.unwrap();
+        let live = get_session(&db, &session.owner, session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(live.lifecycle, CodeSessionLifecycle::Idle);
         assert_eq!(
-            sends.as_slice(),
-            &[("sb-1".to_owned(), "and then this".to_owned())]
+            live.attention.state,
+            tidebreak_core::AttentionState::DoneUnreviewed
         );
+        // The sandbox itself is still live for the next turn.
+        let row = latest_incarnation(&db, &session.owner, session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.state, IncarnationState::Active);
     }
 
     /// The session survives a sandbox stop: the pump closes the incarnation
@@ -982,6 +1019,13 @@ mod tests {
             .unwrap();
         assert_eq!(settled.ordinal, 2);
         assert_eq!(settled.status, CodeTurnStatus::Completed);
+        // The settlement ends the Running lifecycle even though the
+        // successor sandbox stays live.
+        let after = get_session(&db, &session.owner, session.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.lifecycle, CodeSessionLifecycle::Idle);
     }
 
     /// A stopped predecessor whose terminal events are not journaled yet
