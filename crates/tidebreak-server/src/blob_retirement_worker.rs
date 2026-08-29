@@ -188,20 +188,18 @@ impl BlobRetirementWorker {
 
         let blobs = Arc::clone(&self.blobs);
         let blob_id = retirement.blob_id;
+        let deletion_task = tokio::spawn(async move {
+            let result = blobs.delete(blob_id).await;
+            (permit, result)
+        });
         let deletion = self
-            .supervise(&retirement, lease_token, async move {
-                tokio::task::spawn_blocking(move || {
-                    let result = blobs.delete(blob_id);
-                    (permit, result)
-                })
-                .await
-                .map_err(|error| AgentError::Store(format!("blob delete task failed: {error}")))
-            })
+            .supervise(&retirement, lease_token, deletion_task)
             .await;
         match deletion {
             Supervised::LeaseLost => {
-                // Dropping the join future detaches the blocking operation, but
-                // that operation owns the file-lock permit until it exits.
+                // Dropping the join future detaches the delete task. The task
+                // owns the lifecycle permit until the backend resolves the
+                // request, including after an ambiguous network cancellation.
                 Ok(BlobRetirementWorkerOutcome::LeaseLost(retirement.blob_id))
             }
             Supervised::Completed(Err(error)) => {
@@ -334,7 +332,6 @@ fn chrono_duration(duration: Duration) -> Result<chrono::Duration> {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Condvar, Mutex as StdMutex};
 
     use async_trait::async_trait;
     use tidebreak_core::{DbStore, DocumentBlob, DocumentId, DocumentSourceUpsert, FsBlobStore};
@@ -496,11 +493,11 @@ mod tests {
             self.inner.get(id).await
         }
 
-        fn delete(&self, id: Uuid) -> Result<()> {
+        async fn delete(&self, id: Uuid) -> Result<()> {
             if self.fail_delete.swap(false, Ordering::SeqCst) {
                 Err(AgentError::Store("injected blob delete failure".into()))
             } else {
-                self.inner.delete(id)
+                self.inner.delete(id).await
             }
         }
     }
@@ -536,8 +533,7 @@ mod tests {
 
     struct DeleteGate {
         entered: Notify,
-        released: StdMutex<bool>,
-        release: Condvar,
+        release: Notify,
     }
 
     struct BlockingDeleteBlobStore {
@@ -555,14 +551,10 @@ mod tests {
             self.inner.get(id).await
         }
 
-        fn delete(&self, id: Uuid) -> Result<()> {
+        async fn delete(&self, id: Uuid) -> Result<()> {
             self.gate.entered.notify_one();
-            let mut released = self.gate.released.lock().unwrap();
-            while !*released {
-                released = self.gate.release.wait(released).unwrap();
-            }
-            drop(released);
-            self.inner.delete(id)
+            self.gate.release.notified().await;
+            self.inner.delete(id).await
         }
     }
 
@@ -572,8 +564,7 @@ mod tests {
         let store = store(&dir).await;
         let gate = Arc::new(DeleteGate {
             entered: Notify::new(),
-            released: StdMutex::new(false),
-            release: Condvar::new(),
+            release: Notify::new(),
         });
         let blobs: Arc<dyn BlobStore> = Arc::new(BlockingDeleteBlobStore {
             inner: FsBlobStore::new(dir.path().join("blobs")),
@@ -628,11 +619,7 @@ mod tests {
         });
         tokio::time::sleep(Duration::from_millis(25)).await;
         assert!(!publisher.is_finished());
-        {
-            let mut released = gate.released.lock().unwrap();
-            *released = true;
-            gate.release.notify_all();
-        }
+        gate.release.notify_one();
         let _publisher = tokio::time::timeout(Duration::from_secs(1), publisher)
             .await
             .expect("publisher remained blocked after delete exited")

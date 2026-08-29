@@ -59,8 +59,8 @@ impl BlobStore for GatedPutBlobStore {
         self.inner.get(id).await
     }
 
-    fn delete(&self, id: uuid::Uuid) -> tidebreak_core::Result<()> {
-        self.inner.delete(id)
+    async fn delete(&self, id: uuid::Uuid) -> tidebreak_core::Result<()> {
+        self.inner.delete(id).await
     }
 }
 

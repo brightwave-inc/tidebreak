@@ -4,6 +4,7 @@ use futures::{
     StreamExt,
 };
 use std::ops::Range;
+use std::time::SystemTime;
 
 use crate::error::{AgentError, Result};
 use crate::model::DocumentBlob;
@@ -15,6 +16,13 @@ use super::types::BlobStream;
 pub struct BlobMetadata {
     /// Number of bytes in the immutable blob.
     pub byte_len: u64,
+}
+
+/// One canonical blob discovered by a backend inventory scan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlobInventoryItem {
+    pub id: uuid::Uuid,
+    pub modified_at: SystemTime,
 }
 
 /// Opaque byte storage for documents, images, and exports.
@@ -92,10 +100,23 @@ pub trait BlobStore: Send + Sync {
         Ok(Some(stream::once(async move { Ok(bytes) }).boxed()))
     }
 
-    /// Delete a blob synchronously; a no-op if it doesn't exist.
-    ///
-    /// Async callers must move this operation to a blocking executor. This
-    /// boundary lets a lifecycle guard remain owned by the blocking operation
-    /// even when its awaiting worker is cancelled.
-    fn delete(&self, id: uuid::Uuid) -> Result<()>;
+    /// List canonical blobs for conservative orphan discovery.
+    async fn inventory(&self) -> Result<Vec<BlobInventoryItem>> {
+        Err(AgentError::Store(
+            "blob inventory is unavailable for this backend".into(),
+        ))
+    }
+
+    /// Read the modification time used to recheck orphan eligibility.
+    async fn modified_at(&self, id: uuid::Uuid) -> Result<Option<SystemTime>> {
+        Ok(self
+            .inventory()
+            .await?
+            .into_iter()
+            .find(|item| item.id == id)
+            .map(|item| item.modified_at))
+    }
+
+    /// Delete a blob; a no-op if it doesn't exist.
+    async fn delete(&self, id: uuid::Uuid) -> Result<()>;
 }

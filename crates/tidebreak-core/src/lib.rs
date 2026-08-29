@@ -64,6 +64,8 @@ pub mod context;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub mod db;
 pub mod deliverable;
+#[cfg(feature = "blob-object")]
+mod object_blob;
 // Host-side acceptance writes bytes into private scratch, so it depends on the
 // capability filesystem and async runtime that only the `tools` feature pulls
 // in. The persisted contract and migration below stay available without it.
@@ -273,6 +275,8 @@ pub use model::{
     MAX_EXEC_SNAPSHOT_BYTES, MAX_EXEC_WORKSPACE_FILE_BYTES, MAX_MESSAGE_ATTACHMENTS,
     MAX_ROOT_ATTACHMENTS,
 };
+#[cfg(feature = "blob-object")]
+pub use object_blob::ObjectBlobStore;
 #[cfg(feature = "tools")]
 pub use output_scan::{
     sync_output_directory, OutputDirectorySync, OutputSyncEntry, OutputSyncStatus,
@@ -312,8 +316,8 @@ pub use storage::{
     AcceptAgentRunOutcome, AcceptClaimedToolCallOutcome, AcceptToolCallOutcome, AcceptTurnOutcome,
     AcceptTurnSteerOutcome, AdmitSandboxAgentRunOutcome, AnswerUserQuestionsOutcome,
     AppendClaimedMessageOutcome, ApplyTurnSteerOutcome, BeginRootAttachmentChangeOutcome,
-    BeginSandboxProvisionOutcome, BeginTurnAdmissionOutcome, BlobMetadata, BlobStore, BlobStream,
-    ChatCitationSnapshot, ChatTerminalTurnSnapshot, ChatTerminalTurnStatus,
+    BeginSandboxProvisionOutcome, BeginTurnAdmissionOutcome, BlobInventoryItem, BlobMetadata,
+    BlobStore, BlobStream, ChatCitationSnapshot, ChatTerminalTurnSnapshot, ChatTerminalTurnStatus,
     ChatToolActivitySnapshot, ChatToolActivityStatus, ChatTranscriptSnapshot,
     CheckpointSandboxSpawnOutcome, ClaimClientToolCallOutcome, ClaimDelegatedFileReadOutcome,
     ClaimSandboxToolCallOutcome, ClaimScanTerminalEvent, ClaimTurnRunOutcome, ClientToolCallClaim,

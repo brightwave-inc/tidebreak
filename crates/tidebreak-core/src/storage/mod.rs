@@ -20,7 +20,7 @@ mod secret;
 mod store;
 mod types;
 
-pub use blob::{BlobMetadata, BlobStore};
+pub use blob::{BlobInventoryItem, BlobMetadata, BlobStore};
 pub use secret::SecretProvider;
 pub use store::Store;
 pub use types::*;
