@@ -2535,8 +2535,8 @@ fn register_computer_use_tools(tools: &mut ToolRegistry) {
 /// The server checkpoints each call for the desktop foreground browser
 /// executor to claim, authorize, and dispatch through [`BrowserRegistry`].
 /// The server itself never drives a browser — it only validates arguments
-/// and parks the call. No semantic act tool is registered; that requires
-/// native input synthesis and is gated on a separate capability check.
+/// and parks the call. Semantic act and upload register only when a separate
+/// capability check confirms trusted native interaction.
 ///
 /// Registered only when an explicit foreground-browser availability flag is
 /// true (the desktop can bind a browser surface for foreground chat). When

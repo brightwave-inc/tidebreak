@@ -37,9 +37,9 @@ pub const BROWSER_UPLOAD_TOOL: &str = "browser_upload";
 /// The complete set of browser tools this contract supports.
 ///
 /// Wait and screenshot are available on any engine that can inspect a page.
-/// Semantic act requires native input synthesis and is registered only when
-/// the engine adapter reports [`BrowserEngineCapabilities::semantic_actions`]
-/// as true.
+/// Semantic act and upload require trusted native interaction and register
+/// only when the engine adapter reports
+/// [`BrowserEngineCapabilities::semantic_actions`] as true.
 pub const BROWSER_TOOLS: [&str; 7] = [
     BROWSER_LIST_TOOL,
     BROWSER_NAVIGATE_TOOL,
