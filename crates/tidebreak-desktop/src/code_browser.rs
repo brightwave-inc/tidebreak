@@ -933,7 +933,10 @@ async fn share_browser_with_agent(
         workspace_id,
         &origin,
         scope,
-        &[BrowserGrantCapability::BrowserControlOrigin],
+        &[
+            BrowserGrantCapability::BrowserControlOrigin,
+            BrowserGrantCapability::BrowserTransferFiles,
+        ],
     )?;
     let pending_navigation = registry.take_pending_navigation(browser_id, workspace_id)?;
     Ok((snapshot, pending_navigation))
@@ -948,7 +951,7 @@ async fn native_public_share_choice(
     let mut dialog = app
         .dialog()
         .message(format!(
-            "Allow agents in this workspace to inspect and navigate {origin}?\n\nPage content is untrusted. Password, file, and verification-code fields stay private and require human takeover. Screenshots pause when the host cannot prove that visible fields are safe."
+            "Allow agents in this workspace to inspect and navigate {origin}?\n\nPage content is untrusted. Password and verification-code fields stay private and require human takeover. Every file upload requires another confirmation. Screenshots pause when the host cannot prove that visible fields are safe."
         ))
         .title("Share this site with agents?")
         .kind(MessageDialogKind::Warning)
@@ -976,7 +979,7 @@ async fn native_loopback_share_choice(
     let mut dialog = app
         .dialog()
         .message(format!(
-            "Allow agents in this workspace to inspect and navigate {origin_label}?\n\nPassword, file, and verification-code fields stay private and require human takeover. Screenshots pause when the host cannot prove that visible fields are safe. Choose only this origin, or all loopback sites in this workspace so development ports can change without another prompt."
+            "Allow agents in this workspace to inspect and navigate {origin_label}?\n\nPassword and verification-code fields stay private and require human takeover. Every file upload requires another confirmation. Screenshots pause when the host cannot prove that visible fields are safe. Choose only this origin, or all loopback sites in this workspace so development ports can change without another share prompt."
         ))
         .title("Share a local site with agents?")
         .kind(MessageDialogKind::Warning)

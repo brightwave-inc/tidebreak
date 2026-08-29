@@ -9,6 +9,7 @@ use schemars::JsonSchema;
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use url::Url;
+use uuid::Uuid;
 
 use crate::ToolSpec;
 
@@ -29,6 +30,9 @@ pub const BROWSER_SCREENSHOT_TOOL: &str = "browser_screenshot";
 /// native input behind origin consent and a live Stop latch. Until then
 /// it returns [`BrowserActStatus::UnsupportedNative`] for every action.
 pub const BROWSER_ACT_TOOL: &str = "browser_act";
+/// Attach one exact conversation output or connected file to a re-resolved
+/// file-input target after fresh native confirmation.
+pub const BROWSER_UPLOAD_TOOL: &str = "browser_upload";
 
 /// The complete set of browser tools this contract supports.
 ///
@@ -36,13 +40,14 @@ pub const BROWSER_ACT_TOOL: &str = "browser_act";
 /// Semantic act requires native input synthesis and is registered only when
 /// the engine adapter reports [`BrowserEngineCapabilities::semantic_actions`]
 /// as true.
-pub const BROWSER_TOOLS: [&str; 6] = [
+pub const BROWSER_TOOLS: [&str; 7] = [
     BROWSER_LIST_TOOL,
     BROWSER_NAVIGATE_TOOL,
     BROWSER_SNAPSHOT_TOOL,
     BROWSER_WAIT_TOOL,
     BROWSER_SCREENSHOT_TOOL,
     BROWSER_ACT_TOOL,
+    BROWSER_UPLOAD_TOOL,
 ];
 
 /// Maximum wire length of an opaque browser id.
@@ -59,6 +64,8 @@ pub const DEFAULT_BROWSER_WAIT_TIMEOUT_MS: u64 = 5_000;
 pub const MAX_BROWSER_WAIT_TIMEOUT_MS: u64 = 30_000;
 /// Maximum allowed value for typed action values (fill, select, press).
 pub const MAX_BROWSER_ACTION_VALUE_CHARS: usize = 8_192;
+/// Hard ceiling on a connected-file path proposed for browser upload.
+pub const MAX_BROWSER_UPLOAD_PATH_BYTES: usize = 1_024;
 /// Maximum width or height for a screenshot in CSS pixels.
 pub const MAX_BROWSER_SCREENSHOT_DIMENSION: u64 = 4_096;
 /// Hard ceiling for encoded image bytes before base64 (8 MiB).
@@ -608,6 +615,94 @@ pub struct BrowserActArgs {
     pub action: BrowserAction,
 }
 
+/// One logical Tidebreak resource that the native browser executor may attach.
+///
+/// Neither variant can represent a host path. The trusted foreground executor
+/// resolves the opaque identity inside the persisted conversation and checks
+/// the exact bytes again after native confirmation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BrowserUploadResource {
+    /// One live output owned by the current conversation.
+    Output { output_id: Uuid },
+    /// One file below a root attached to the current conversation.
+    ConnectedFile { root_id: Uuid, path: String },
+}
+
+impl BrowserUploadResource {
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        match self {
+            Self::Output { output_id } => !output_id.is_nil(),
+            Self::ConnectedFile { root_id, path } => {
+                !root_id.is_nil() && valid_browser_upload_path(path)
+            }
+        }
+    }
+}
+
+/// Canonical arguments for [`BROWSER_UPLOAD_TOOL`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserUploadArgs {
+    /// Opaque id returned by `browser_list` for this exact capability.
+    #[schemars(
+        length(min = 1, max = MAX_BROWSER_ID_CHARS),
+        description = "Opaque browser id returned by browser_list."
+    )]
+    pub browser_id: String,
+    /// The snapshot id whose ref and epoch this upload targets.
+    pub snapshot_id: String,
+    /// The document epoch the snapshot was taken under.
+    pub document_epoch: u64,
+    /// Ephemeral file-input ref from the most recent snapshot.
+    #[schemars(description = "Ephemeral file-input ref from the most recent snapshot.")]
+    #[serde(rename = "ref")]
+    pub target_ref: String,
+    /// Logical conversation resource to attach. Host paths are never accepted.
+    pub resource: BrowserUploadResource,
+}
+
+impl BrowserUploadArgs {
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        valid_browser_id(&self.browser_id)
+            && !self.snapshot_id.is_empty()
+            && !self.target_ref.is_empty()
+            && self.resource.is_well_formed()
+    }
+}
+
+/// Model-facing outcome of [`BROWSER_UPLOAD_TOOL`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserUploadStatus {
+    Uploaded,
+    StaleTarget,
+    HiddenTab,
+    InvalidTarget,
+    Declined,
+    EngineFailure,
+}
+
+/// Model-facing result of [`BROWSER_UPLOAD_TOOL`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserUploadResult {
+    pub browser_id: String,
+    pub snapshot_id: String,
+    pub document_epoch: u64,
+    #[serde(rename = "ref")]
+    pub target_ref: String,
+    pub status: BrowserUploadStatus,
+    pub message: String,
+    pub requires_resnapshot: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+}
+
 impl BrowserActArgs {
     #[must_use]
     pub fn is_well_formed(&self) -> bool {
@@ -785,6 +880,24 @@ pub fn valid_browser_url(value: &str) -> bool {
         && url.password().is_none()
 }
 
+/// Whether a connected-file upload proposal has the broker's portable
+/// root-relative path shape. The native executor repeats this check with the
+/// broker's authoritative [`RelativePath`](tidebreak_host_broker::RelativePath)
+/// parser before reading anything.
+#[must_use]
+pub fn valid_browser_upload_path(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_BROWSER_UPLOAD_PATH_BYTES
+        && !value.starts_with('/')
+        && !value.contains(['\0', '\\'])
+        && value.split('/').all(|part| {
+            !part.is_empty()
+                && !matches!(part, "." | "..")
+                && !part.contains(':')
+                && !part.chars().any(char::is_control)
+        })
+}
+
 /// Whether `name` is part of the initial browser tool contract.
 #[must_use]
 pub fn is_browser_tool(name: &str) -> bool {
@@ -829,6 +942,13 @@ pub fn validate_browser_screenshot_arguments(arguments: &Value) -> bool {
 #[must_use]
 pub fn validate_browser_act_arguments(arguments: &Value) -> bool {
     serde_json::from_value::<BrowserActArgs>(arguments.clone())
+        .is_ok_and(|arguments| arguments.is_well_formed())
+}
+
+/// Validate a canonical `browser_upload` payload.
+#[must_use]
+pub fn validate_browser_upload_arguments(arguments: &Value) -> bool {
+    serde_json::from_value::<BrowserUploadArgs>(arguments.clone())
         .is_ok_and(|arguments| arguments.is_well_formed())
 }
 
@@ -883,6 +1003,15 @@ pub fn browser_act_tool_spec() -> ToolSpec {
     ToolSpec::for_args::<BrowserActArgs>(
         BROWSER_ACT_TOOL,
         "Perform one semantic action on a re-resolved interactive target. The target ref must come from the latest snapshot. Re-snapshot before the next action. This tool is available only when the browser engine can synthesise trusted native input.",
+    )
+}
+
+/// Tool contract for [`BROWSER_UPLOAD_TOOL`].
+#[must_use]
+pub fn browser_upload_tool_spec() -> ToolSpec {
+    ToolSpec::for_args::<BrowserUploadArgs>(
+        BROWSER_UPLOAD_TOOL,
+        "Attach one exact output or connected-folder file from this conversation to a file-input ref from the latest browser snapshot. Provide only an opaque output_id, or an opaque root_id with a bounded root-relative path. Tidebreak never accepts a host path, reauthorizes the exact resource immediately before attachment, and asks the user to confirm every upload.",
     )
 }
 
@@ -962,6 +1091,7 @@ mod tests {
             browser_wait_tool_spec(),
             browser_screenshot_tool_spec(),
             browser_act_tool_spec(),
+            browser_upload_tool_spec(),
         ] {
             assert_eq!(
                 spec.input_schema["additionalProperties"], false,
@@ -983,6 +1113,67 @@ mod tests {
         assert!(browser_act_tool_spec()
             .description
             .contains("semantic action"));
+        assert!(browser_upload_tool_spec()
+            .description
+            .contains("every upload"));
+    }
+
+    #[test]
+    fn browser_upload_accepts_only_logical_bounded_resources() {
+        let output_id = Uuid::new_v4();
+        let root_id = Uuid::new_v4();
+        assert!(validate_browser_upload_arguments(&json!({
+            "browser_id": "browser-1",
+            "snapshot_id": "snapshot-1",
+            "document_epoch": 2,
+            "ref": "@e4",
+            "resource": { "kind": "output", "output_id": output_id }
+        })));
+        assert!(validate_browser_upload_arguments(&json!({
+            "browser_id": "browser-1",
+            "snapshot_id": "snapshot-1",
+            "document_epoch": 2,
+            "ref": "@e4",
+            "resource": {
+                "kind": "connected_file",
+                "root_id": root_id,
+                "path": "reports/q3.pdf"
+            }
+        })));
+        for path in ["/tmp/secret", "../secret", "reports//q3.pdf", "a\\b"] {
+            assert!(
+                !validate_browser_upload_arguments(&json!({
+                    "browser_id": "browser-1",
+                    "snapshot_id": "snapshot-1",
+                    "document_epoch": 2,
+                    "ref": "@e4",
+                    "resource": {
+                        "kind": "connected_file",
+                        "root_id": root_id,
+                        "path": path
+                    }
+                })),
+                "{path}"
+            );
+        }
+        assert!(!validate_browser_upload_arguments(&json!({
+            "browser_id": "browser-1",
+            "snapshot_id": "snapshot-1",
+            "document_epoch": 2,
+            "ref": "@e4",
+            "resource": { "kind": "output", "output_id": Uuid::nil() }
+        })));
+        assert!(!validate_browser_upload_arguments(&json!({
+            "browser_id": "browser-1",
+            "snapshot_id": "snapshot-1",
+            "document_epoch": 2,
+            "ref": "@e4",
+            "resource": {
+                "kind": "connected_file",
+                "root_id": Uuid::nil(),
+                "path": "report.pdf"
+            }
+        })));
     }
 
     #[test]

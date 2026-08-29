@@ -2081,19 +2081,19 @@ async fn foreground_browser_tools_absent_by_default() {
 }
 
 #[tokio::test]
-async fn foreground_browser_tools_register_exactly_five() {
+async fn foreground_browser_tools_register_reads_and_navigate_without_semantic_actions() {
     let dir = tempfile::tempdir().unwrap();
     let (tools, _) = agent_deps_for_test(dir.path(), false, true, false).await;
 
-    // Exactly five observation tools register as client-executed.
-    let observation_tools = [
+    // The five non-semantic tools register as client-executed.
+    let base_tools = [
         tidebreak_core::BROWSER_LIST_TOOL,
         tidebreak_core::BROWSER_NAVIGATE_TOOL,
         tidebreak_core::BROWSER_SNAPSHOT_TOOL,
         tidebreak_core::BROWSER_WAIT_TOOL,
         tidebreak_core::BROWSER_SCREENSHOT_TOOL,
     ];
-    for &name in &observation_tools {
+    for &name in &base_tools {
         assert_eq!(
             tools.execution(name),
             Some(tidebreak_core::ToolCallExecution::Client),
@@ -2105,19 +2105,25 @@ async fn foreground_browser_tools_register_exactly_five() {
         );
     }
 
-    // The act tool must NOT be registered.
-    assert!(
-        tools.registered_class(tidebreak_core::BROWSER_ACT_TOOL).is_none(),
-        "browser_act must not register when foreground_browser is true — it requires separate semantic_actions capability"
-    );
-    assert!(
-        tools.execution(tidebreak_core::BROWSER_ACT_TOOL).is_none(),
-        "browser_act must not execute even if foreground_browser is true"
-    );
+    // Semantic actions and file attachment require the separate native engine
+    // capability. Foreground browser availability alone must expose neither.
+    for &name in &[
+        tidebreak_core::BROWSER_ACT_TOOL,
+        tidebreak_core::BROWSER_UPLOAD_TOOL,
+    ] {
+        assert!(
+            tools.registered_class(name).is_none(),
+            "{name} must not register without semantic_actions"
+        );
+        assert!(
+            tools.execution(name).is_none(),
+            "{name} must not execute without semantic_actions"
+        );
+    }
 }
 
 #[tokio::test]
-async fn foreground_browser_act_registers_only_with_semantic_actions() {
+async fn foreground_browser_semantic_tools_register_only_with_semantic_actions() {
     let dir = tempfile::tempdir().unwrap();
     let (tools, _) = agent_deps_for_test(dir.path(), false, true, true).await;
 
@@ -2143,6 +2149,34 @@ async fn foreground_browser_act_registers_only_with_semantic_actions() {
             "document_epoch": 1,
             "ref": "@e1",
             "action": { "type": "click" }
+        })
+    ));
+
+    assert_eq!(
+        tools.execution(tidebreak_core::BROWSER_UPLOAD_TOOL),
+        Some(tidebreak_core::ToolCallExecution::Client),
+        "browser_upload must be client-executed when semantic actions are available"
+    );
+    assert_eq!(
+        tools.registered_class(tidebreak_core::BROWSER_UPLOAD_TOOL),
+        Some(ApprovalClass::Sensitive),
+        "browser_upload attaches bytes to an untrusted site and must be Sensitive"
+    );
+    assert!(
+        tools.get(tidebreak_core::BROWSER_UPLOAD_TOOL).is_none(),
+        "browser_upload has no server-side executor"
+    );
+    assert!(tools.client_arguments_are_valid(
+        tidebreak_core::BROWSER_UPLOAD_TOOL,
+        &serde_json::json!({
+            "browser_id": "browser-1",
+            "snapshot_id": "snapshot-1",
+            "document_epoch": 1,
+            "ref": "@e2",
+            "resource": {
+                "kind": "output",
+                "output_id": uuid::Uuid::new_v4()
+            }
         })
     ));
 }
@@ -2176,6 +2210,11 @@ async fn foreground_browser_tools_have_correct_approval_classes() {
         tools.registered_class(tidebreak_core::BROWSER_ACT_TOOL),
         Some(ApprovalClass::Sensitive),
         "browser_act synthesizes native input and must be Sensitive"
+    );
+    assert_eq!(
+        tools.registered_class(tidebreak_core::BROWSER_UPLOAD_TOOL),
+        Some(ApprovalClass::Sensitive),
+        "browser_upload transfers confirmed bytes to a site and must be Sensitive"
     );
 }
 
@@ -2292,10 +2331,60 @@ async fn foreground_browser_tools_reject_malformed_arguments() {
             "action": { "type": "press", "key": "Ctrl+C" }
         })
     ));
+
+    // upload accepts only one logical conversation resource and never a host
+    // path or a malformed connected-root path.
+    assert!(tools.client_arguments_are_valid(
+        tidebreak_core::BROWSER_UPLOAD_TOOL,
+        &serde_json::json!({
+            "browser_id": "browser-1",
+            "snapshot_id": "snapshot-1",
+            "document_epoch": 0,
+            "ref": "@e2",
+            "resource": {
+                "kind": "output",
+                "output_id": uuid::Uuid::new_v4()
+            }
+        })
+    ));
+    assert!(tools.client_arguments_are_valid(
+        tidebreak_core::BROWSER_UPLOAD_TOOL,
+        &serde_json::json!({
+            "browser_id": "browser-1",
+            "snapshot_id": "snapshot-1",
+            "document_epoch": 0,
+            "ref": "@e2",
+            "resource": {
+                "kind": "connected_file",
+                "root_id": uuid::Uuid::new_v4(),
+                "path": "reports/q3.pdf"
+            }
+        })
+    ));
+    for resource in [
+        serde_json::json!({ "kind": "output", "output_id": uuid::Uuid::nil() }),
+        serde_json::json!({
+            "kind": "connected_file",
+            "root_id": uuid::Uuid::new_v4(),
+            "path": "../secret.txt"
+        }),
+        serde_json::json!({ "kind": "host_path", "path": "/tmp/secret.txt" }),
+    ] {
+        assert!(!tools.client_arguments_are_valid(
+            tidebreak_core::BROWSER_UPLOAD_TOOL,
+            &serde_json::json!({
+                "browser_id": "browser-1",
+                "snapshot_id": "snapshot-1",
+                "document_epoch": 0,
+                "ref": "@e2",
+                "resource": resource
+            })
+        ));
+    }
 }
 
 #[tokio::test]
-async fn foreground_browser_plan_mode_includes_reads_excludes_navigate() {
+async fn foreground_browser_plan_mode_includes_reads_excludes_effects() {
     let dir = tempfile::tempdir().unwrap();
     let (tools, _) = agent_deps_for_test(dir.path(), false, true, true).await;
 
@@ -2329,5 +2418,9 @@ async fn foreground_browser_plan_mode_includes_reads_excludes_navigate() {
     assert!(
         !plan_specs.contains(tidebreak_core::BROWSER_ACT_TOOL),
         "plan mode must not contain browser_act"
+    );
+    assert!(
+        !plan_specs.contains(tidebreak_core::BROWSER_UPLOAD_TOOL),
+        "plan mode must not contain browser_upload"
     );
 }
