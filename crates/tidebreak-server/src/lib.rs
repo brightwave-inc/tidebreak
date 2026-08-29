@@ -100,6 +100,7 @@ mod scripted_provider;
 pub mod secret_rehome;
 mod source_tools;
 mod state;
+mod store_ownership;
 mod task_plan_tool;
 mod turn_worker;
 mod view_frames;
@@ -1234,6 +1235,7 @@ pub struct Server {
     _approval_judge_worker: AbortTask,
     _mcp_supervisor: AbortTask,
     _gateway_model_sync: AbortTask,
+    _store_ownership: store_ownership::StoreOwnership,
     _instance_lock: InstanceLock,
     /// Removes `{data_dir}/listen.json` when this server drops.
     _listen_endpoint: listen_endpoint::ListenEndpointGuard,
@@ -1337,9 +1339,32 @@ impl Server {
 
     /// Run the accept loop until the process exits.
     pub async fn serve(self) -> Result<()> {
-        axum::serve(self.listener, self.router)
-            .await
-            .map_err(|e| AgentError::msg(format!("server error: {e}")))
+        let listener = self.listener;
+        let router = self.router;
+        match self._store_ownership {
+            store_ownership::StoreOwnership::Local => axum::serve(listener, router)
+                .await
+                .map_err(|error| AgentError::msg(format!("server error: {error}"))),
+            #[cfg(feature = "postgres")]
+            store_ownership::StoreOwnership::Postgres(mut ownership) => {
+                let server = async move { axum::serve(listener, router).await };
+                tokio::pin!(server);
+                let mut checks =
+                    tokio::time::interval(store_ownership::POSTGRES_OWNERSHIP_CHECK_INTERVAL);
+                checks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                checks.tick().await;
+                loop {
+                    tokio::select! {
+                        result = &mut server => {
+                            return result.map_err(|error| {
+                                AgentError::msg(format!("server error: {error}"))
+                            });
+                        }
+                        _ = checks.tick() => ownership.verify().await?,
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1699,6 +1724,7 @@ async fn bind_inner(
     // approvals are durable, while one process still owns the complete data
     // directory and its worker set.
     let instance_lock = InstanceLock::acquire(&config)?;
+    let mut store_ownership = store_ownership::StoreOwnership::acquire(&config).await?;
     let sandbox_container_admission = sandbox_admission::resolve(&config);
     let sandbox_spawn_execution_location = sandbox_container_admission.execution_location;
     let db = connect_db(&config).await?;
@@ -2170,6 +2196,11 @@ async fn bind_inner(
     let local_addr = listener
         .local_addr()
         .map_err(|e| AgentError::config(format!("no local address: {e}")))?;
+    // Binding builds the complete runtime before `serve` starts its periodic
+    // lease check. Recheck at the last safe point before recovery and workers
+    // start so a connection lost during boot cannot leave a duplicate runtime
+    // alive beside the process that acquires the released lease.
+    store_ownership.verify().await?;
     // Publish the loopback base and take the code-mode recovery pass, then run
     // it in the background. It has to come after the bind — a session
     // re-attached before the address is known comes back with no approval
@@ -2239,6 +2270,7 @@ async fn bind_inner(
         _approval_judge_worker: AbortTask(approval_judge_worker),
         _mcp_supervisor: AbortTask(mcp_supervisor),
         _gateway_model_sync: AbortTask(gateway_model_sync),
+        _store_ownership: store_ownership,
         _instance_lock: instance_lock,
         _listen_endpoint: listen_endpoint,
     })

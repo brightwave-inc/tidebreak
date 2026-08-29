@@ -375,9 +375,11 @@ data in a self-host deployment yet:
   environment instead (see the table above) — which also means they are
   visible to anyone who can inspect the container.
 - Object storage is not wired.
-- Multi-process ownership is not wired: run exactly one server process against
-  a database. The instance lock only guards one data directory, not the shared
-  store.
+- Tidebreak enforces one active server process per PostgreSQL database through
+  a dedicated advisory lease. A second process refuses boot even when it uses
+  another data directory. Horizontal multi-process serving remains unsupported
+  until every process-local worker and live-delivery path has a distributed
+  owner.
 
 One more, specific to this packaging:
 
