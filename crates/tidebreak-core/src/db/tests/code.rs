@@ -5223,3 +5223,212 @@ async fn out_of_order_external_messages_apply_in_channel_order() {
         "the earlier channel token must run before the later one"
     );
 }
+
+fn fake_hash(seed: &str) -> String {
+    // 64 hex digits, deterministic per seed; the ops layer never sees
+    // secrets, only hashes, so tests hash nothing real.
+    let mut out: String = seed.bytes().map(|byte| format!("{byte:02x}")).collect();
+    out.truncate(64);
+    format!("{out:0>64}")
+}
+
+/// Mint, authenticate, rotate, and detect reuse: a replayed rotated
+/// refresh hash revokes the grant in the same transaction, and a revoked
+/// grant authenticates nothing.
+#[tokio::test]
+async fn a_replayed_rotated_refresh_revokes_the_grant() {
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+
+    let grant = crate::db::code::mint_external_grant(
+        &store,
+        &owner,
+        "slack",
+        "U1",
+        "T1",
+        &fake_hash("token-1"),
+        &fake_hash("refresh-1"),
+    )
+    .await
+    .unwrap();
+    let found = crate::db::code::grant_by_token_hash_all_owners(&store, &fake_hash("token-1"))
+        .await
+        .unwrap()
+        .expect("the minted token must authenticate");
+    assert_eq!(found.id, grant.id);
+
+    // A second live grant for the same identity refuses.
+    assert!(crate::db::code::mint_external_grant(
+        &store,
+        &owner,
+        "slack",
+        "U1",
+        "T1",
+        &fake_hash("token-x"),
+        &fake_hash("refresh-x"),
+    )
+    .await
+    .is_err());
+
+    // Rotation trades the pair and retires the old access token.
+    let rotated = crate::db::code::rotate_external_grant_all_owners(
+        &store,
+        &fake_hash("refresh-1"),
+        &fake_hash("token-2"),
+        &fake_hash("refresh-2"),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(rotated, crate::code::GrantRotation::Rotated(_)));
+    assert!(
+        crate::db::code::grant_by_token_hash_all_owners(&store, &fake_hash("token-1"))
+            .await
+            .unwrap()
+            .is_none(),
+        "the rotated-away access token must stop authenticating"
+    );
+    assert!(
+        crate::db::code::grant_by_token_hash_all_owners(&store, &fake_hash("token-2"))
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    // The old refresh hash reappearing is theft: the grant revokes.
+    let reuse = crate::db::code::rotate_external_grant_all_owners(
+        &store,
+        &fake_hash("refresh-1"),
+        &fake_hash("token-3"),
+        &fake_hash("refresh-3"),
+    )
+    .await
+    .unwrap();
+    let crate::code::GrantRotation::ReuseDetected(revoked) = reuse else {
+        panic!("a replayed rotated refresh must be detected, got {reuse:?}");
+    };
+    assert_eq!(revoked.id, grant.id);
+    assert!(revoked.revoked_at.is_some());
+    assert!(
+        crate::db::code::grant_by_token_hash_all_owners(&store, &fake_hash("token-2"))
+            .await
+            .unwrap()
+            .is_none(),
+        "a revoked grant must authenticate nothing"
+    );
+
+    // Unknown hashes answer `Unknown`, and revocation is idempotent.
+    assert_eq!(
+        crate::db::code::rotate_external_grant_all_owners(
+            &store,
+            &fake_hash("never-issued"),
+            &fake_hash("token-4"),
+            &fake_hash("refresh-4"),
+        )
+        .await
+        .unwrap(),
+        crate::code::GrantRotation::Unknown
+    );
+    let again = crate::db::code::revoke_external_grant(&store, &owner, grant.id, "owner asked")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(again.revoked_reason, revoked.revoked_reason);
+
+    // With the old grant revoked, the identity can re-link.
+    assert!(crate::db::code::mint_external_grant(
+        &store,
+        &owner,
+        "slack",
+        "U1",
+        "T1",
+        &fake_hash("token-5"),
+        &fake_hash("refresh-5"),
+    )
+    .await
+    .is_ok());
+}
+
+/// The reuse net covers every retired generation, not just the last one,
+/// and the live-identity unique index holds against a mint that races
+/// past the pre-insert read.
+#[tokio::test]
+async fn an_old_generation_refresh_replay_still_revokes() {
+    use sea_orm::{ActiveModelTrait, Set};
+
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+
+    let grant = crate::db::code::mint_external_grant(
+        &store,
+        &owner,
+        "slack",
+        "U1",
+        "T1",
+        &fake_hash("token-1"),
+        &fake_hash("refresh-1"),
+    )
+    .await
+    .unwrap();
+    for generation in [
+        ("refresh-1", "token-2", "refresh-2"),
+        ("refresh-2", "token-3", "refresh-3"),
+    ] {
+        let rotated = crate::db::code::rotate_external_grant_all_owners(
+            &store,
+            &fake_hash(generation.0),
+            &fake_hash(generation.1),
+            &fake_hash(generation.2),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(rotated, crate::code::GrantRotation::Rotated(_)));
+    }
+
+    // The oldest generation, two rotations back, must still be theft.
+    let reuse = crate::db::code::rotate_external_grant_all_owners(
+        &store,
+        &fake_hash("refresh-1"),
+        &fake_hash("token-x"),
+        &fake_hash("refresh-x"),
+    )
+    .await
+    .unwrap();
+    let crate::code::GrantRotation::ReuseDetected(revoked) = reuse else {
+        panic!("an old-generation replay must be detected, got {reuse:?}");
+    };
+    assert_eq!(revoked.id, grant.id);
+
+    // The identity constraint is schema-level: an insert that skips the
+    // mint's pre-check (a raced concurrent mint) still refuses while a
+    // live grant covers the identity.
+    let fresh = crate::db::code::mint_external_grant(
+        &store,
+        &owner,
+        "slack",
+        "U2",
+        "T1",
+        &fake_hash("u2-token"),
+        &fake_hash("u2-refresh"),
+    )
+    .await
+    .unwrap();
+    let raced = crate::db::entities::code_external_grant::ActiveModel {
+        id: Set(crate::code::CodeGrantId::new().0),
+        owner: Set(owner.as_str().to_owned()),
+        channel_kind: Set("slack".to_owned()),
+        external_identity: Set("U2".to_owned()),
+        workspace_identity: Set("T1".to_owned()),
+        token_hash: Set(fake_hash("raced-token")),
+        refresh_hash: Set(fake_hash("raced-refresh")),
+        rotated_at: Set(None),
+        created_at: Set(fresh.created_at),
+        revoked_at: Set(None),
+        revoked_reason: Set(None),
+    }
+    .insert(&store.conn)
+    .await;
+    assert!(
+        raced.is_err(),
+        "the live-identity index must refuse a second live row"
+    );
+}

@@ -17,6 +17,7 @@ pub(crate) mod delivery;
 pub(crate) mod forge_rest;
 pub(crate) mod fork;
 pub(crate) mod gh;
+pub(crate) mod grants;
 pub(crate) mod harness_install;
 pub(crate) mod harness_llm;
 pub(crate) mod pr_facts;

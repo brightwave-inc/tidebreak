@@ -1983,6 +1983,50 @@ pub mod code_external_event {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod code_external_grant {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "code_external_grant")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub owner: String,
+        pub channel_kind: String,
+        pub external_identity: String,
+        pub workspace_identity: String,
+        pub token_hash: String,
+        pub refresh_hash: String,
+        pub rotated_at: Option<DateTimeUtc>,
+        pub created_at: DateTimeUtc,
+        pub revoked_at: Option<DateTimeUtc>,
+        pub revoked_reason: Option<String>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod code_external_grant_retired_refresh {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "code_external_grant_retired_refresh")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub hash: String,
+        pub grant_id: Uuid,
+        pub retired_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod code_session_image {
     use sea_orm::entity::prelude::*;
 

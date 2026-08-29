@@ -1163,3 +1163,27 @@ pub(crate) enum CodeExternalEvent {
     TurnId,
     CreatedAt,
 }
+
+#[derive(DeriveIden)]
+pub(crate) enum CodeExternalGrant {
+    Table,
+    Id,
+    Owner,
+    ChannelKind,
+    ExternalIdentity,
+    WorkspaceIdentity,
+    TokenHash,
+    RefreshHash,
+    RotatedAt,
+    CreatedAt,
+    RevokedAt,
+    RevokedReason,
+}
+
+#[derive(DeriveIden)]
+pub(crate) enum CodeExternalGrantRetiredRefresh {
+    Table,
+    Hash,
+    GrantId,
+    RetiredAt,
+}

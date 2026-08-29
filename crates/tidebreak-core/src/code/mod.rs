@@ -1356,6 +1356,49 @@ pub struct CodeExternalBinding {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// The credential a channel adapter holds per linked user
+/// (`docs/slack-sessions.md`, stage 2).
+///
+/// The row carries no secrets: the machine stores only hashes, and the
+/// adapter holds the token pair. `revoked_at`/`revoked_reason` make
+/// revocation durable and visible — the desktop grants list renders the
+/// reason, so a theft-triggered revoke reaches the owner.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CodeExternalGrant {
+    /// Stable id; bindings tag sessions with it.
+    pub id: CodeGrantId,
+    /// Owner.
+    pub owner: crate::OwnerId,
+    /// Which channel family linked (for example `slack`).
+    pub channel_kind: String,
+    /// The channel's identity for the linked user, opaque here.
+    pub external_identity: String,
+    /// The channel's workspace identity (for example a Slack team id).
+    pub workspace_identity: String,
+    /// When the token pair last rotated.
+    pub rotated_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Creation time.
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    /// When the grant was revoked; a live grant carries `None`.
+    pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Why, in owner-facing words.
+    pub revoked_reason: Option<String>,
+}
+
+/// What presenting a refresh token for rotation found.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GrantRotation {
+    /// The presented token was current: the pair rotated, and the old
+    /// refresh hash stays behind for reuse detection.
+    Rotated(Box<CodeExternalGrant>),
+    /// The presented token was already rotated away. Only two parties ever
+    /// held it, and the adapter discarded it — so a replay is theft. The
+    /// grant is revoked, durably, before this answer returns.
+    ReuseDetected(Box<CodeExternalGrant>),
+    /// The token matches nothing live.
+    Unknown,
+}
+
 /// What an external get-or-create resolved to.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExternalSessionResolution {
