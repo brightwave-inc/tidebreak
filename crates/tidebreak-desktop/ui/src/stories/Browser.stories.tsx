@@ -40,6 +40,7 @@ type BrowserScenario =
   | "inspect-remove-failure"
   | "inspect-off"
   | "inspect-on"
+  | "unsupported-frame"
   | "profile-reset-confirmation"
   | "profile-resetting"
   | "profile-reset-reconstructing"
@@ -188,7 +189,9 @@ function BrowserStory({
   );
   const [profileResetStarted, setProfileResetStarted] = useState(false);
   const inspectEnabled =
-    scenario === "inspect-on" || scenario === "inspect-remove-failure";
+    scenario === "inspect-on" ||
+    scenario === "inspect-remove-failure" ||
+    scenario === "unsupported-frame";
   const inspectFailure =
     scenario === "inspect-enable-failure"
       ? "Could not show inspect highlights"
@@ -364,7 +367,10 @@ function BrowserStory({
             ) : scenario === "loading" || scenario === "slow" ? (
               <LoadingPage />
             ) : (
-              <DeveloperPage compact={compact} />
+              <DeveloperPage
+                compact={compact}
+                unsupportedFrame={scenario === "unsupported-frame"}
+              />
             )}
           </div>
         </div>
@@ -443,14 +449,25 @@ function NarrowToolbarStory({
   );
 }
 
-function DeveloperPage({ compact }: { compact: boolean }) {
+function DeveloperPage({
+  compact,
+  unsupportedFrame = false,
+}: {
+  compact: boolean;
+  unsupportedFrame?: boolean;
+}) {
   return (
     <div className="h-full overflow-auto bg-[#f1eee7] text-[#20211f]">
       <header className="flex h-14 items-center justify-between border-b border-black/10 px-5 sm:px-8">
         <span className="text-sm font-semibold tracking-[-0.02em]">
           Tidebreak / browser lab
         </span>
-        <nav className="hidden items-center gap-5 text-xs text-black/55 sm:flex">
+        <nav
+          className={cn(
+            "hidden items-center gap-5 text-xs text-black/55 sm:flex",
+            compact && "sm:hidden",
+          )}
+        >
           <span>Fixture</span>
           <span>Contracts</span>
           <span>Runs</span>
@@ -481,8 +498,35 @@ function DeveloperPage({ compact }: { compact: boolean }) {
             Replace target
           </button>
         </div>
+        {unsupportedFrame && (
+          <section className="relative mt-8 min-h-44 overflow-hidden rounded-xl border border-black/10 bg-[#faf7f0]">
+            <div className="grid h-full min-h-44 grid-cols-[1fr_auto] gap-8 p-6 opacity-45 sm:p-8">
+              <div>
+                <p className="font-mono text-2xs text-black/45">
+                  third-party preview
+                </p>
+                <p className="mt-5 text-lg font-semibold">
+                  Hosted payment summary
+                </p>
+                <p className="mt-2 max-w-md text-sm leading-6 text-black/55">
+                  This content comes from another origin and stays outside the
+                  semantic snapshot.
+                </p>
+              </div>
+              <div className="hidden w-32 rounded-lg bg-black/8 sm:block" />
+            </div>
+            <div className="absolute inset-2 grid place-items-center rounded-lg border border-warning-border bg-warning-background/92 px-5 text-center text-sm font-medium text-warning-foreground backdrop-blur-[2px]">
+              Uninspectable frame · human takeover
+            </div>
+          </section>
+        )}
         {!compact && (
-          <div className="mt-16 grid gap-px overflow-hidden rounded-xl border border-black/10 bg-black/10 sm:grid-cols-[1.25fr_0.75fr]">
+          <div
+            className={cn(
+              "grid gap-px overflow-hidden rounded-xl border border-black/10 bg-black/10 sm:grid-cols-[1.25fr_0.75fr]",
+              unsupportedFrame ? "mt-6" : "mt-16",
+            )}
+          >
             <section className="bg-[#f8f5ee] p-6 sm:p-8">
               <p className="font-mono text-2xs text-black/45">
                 latest snapshot
@@ -505,6 +549,86 @@ function DeveloperPage({ compact }: { compact: boolean }) {
           </div>
         )}
       </main>
+    </div>
+  );
+}
+
+function SplitPaneBrowserStory() {
+  const session = browserSession("ready");
+  const [address, setAddress] = useState(session.address);
+  const [viewport, setViewport] = useState<BrowserViewport>({
+    preset: "fit",
+    customWidth: 1024,
+  });
+
+  return (
+    <div className="grid min-h-dvh place-items-center overflow-auto bg-page-background p-5">
+      <div className="grid h-[min(760px,calc(100dvh-2.5rem))] min-h-[560px] w-full min-w-[760px] max-w-[1400px] grid-cols-[minmax(320px,0.9fr)_minmax(420px,1.1fr)] overflow-hidden rounded-xl border border-border bg-background shadow-lg">
+        <section
+          aria-label="Source editor"
+          className="flex min-w-0 flex-col border-r border-border"
+        >
+          <div className="flex h-10 shrink-0 items-center border-b border-border-subtle px-3">
+            <span className="font-mono text-xs text-muted-foreground">
+              browser_semantics.rs
+            </span>
+          </div>
+          <div className="min-h-0 flex-1 overflow-hidden bg-muted/25 p-5 font-mono text-xs leading-6 text-muted-foreground">
+            <p className="text-foreground">pub enum BrowserFrameStatus {"{"}</p>
+            <p className="pl-5">SameOrigin,</p>
+            <p className="pl-5 text-warning-foreground">UnsupportedFrame,</p>
+            <p className="text-foreground">{"}"}</p>
+            <p className="mt-7 text-foreground">
+              // The browser stays useful beside the source.
+            </p>
+            <p className="mt-2">
+              // Its toolbar and control row keep their full actions.
+            </p>
+          </div>
+        </section>
+
+        <section
+          aria-label="Browser split pane"
+          className="flex min-w-0 flex-col bg-background"
+        >
+          <BrowserToolbar
+            session={session}
+            address={address}
+            addressError={null}
+            canGoBack
+            canGoForward={false}
+            controller={activeAgent}
+            agentAccess={localSharedAccess}
+            engine={inspectEngine}
+            onAddressChange={setAddress}
+            onNavigate={fn()}
+            onBack={fn()}
+            onForward={fn()}
+            onReload={fn()}
+            onStop={fn()}
+            onStopAgent={fn()}
+            onTakeOver={fn()}
+            onShareAgent={fn()}
+            onRevokeAgent={fn()}
+            onSelectHistory={fn()}
+            onOpenExternal={fn()}
+            onOverlayOpenChange={fn()}
+            onAgentAccessOpenChange={fn()}
+            onToggleInspect={fn()}
+            inspectEnabled={false}
+            viewportControl={
+              <BrowserViewportControl
+                viewport={viewport}
+                renderedWidth={null}
+                onViewportChange={setViewport}
+              />
+            }
+          />
+          <div className="min-h-0 flex-1 overflow-hidden">
+            <DeveloperPage compact />
+          </div>
+        </section>
+      </div>
     </div>
   );
 }
@@ -868,6 +992,31 @@ export const InspectOn: Story = {
     ).toBeVisible();
     const btn = canvas.getByRole("button", { name: "Hide inspect highlights" });
     await expect(btn).toHaveAttribute("aria-pressed", "true");
+  },
+};
+
+export const UnsupportedFrame: Story = {
+  args: { scenario: "unsupported-frame" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      canvas.getByRole("button", { name: "Hide inspect highlights" }),
+    ).toBeVisible();
+    await expect(
+      canvas.getByText("Uninspectable frame · human takeover"),
+    ).toBeVisible();
+  },
+};
+
+export const SplitPane: StoryObj<typeof SplitPaneBrowserStory> = {
+  render: () => <SplitPaneBrowserStory />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByLabelText("Source editor")).toBeVisible();
+    await expect(canvas.getByLabelText("Browser split pane")).toBeVisible();
+    await expect(
+      canvas.getByText("Code agent is using this tab"),
+    ).toBeVisible();
   },
 };
 
