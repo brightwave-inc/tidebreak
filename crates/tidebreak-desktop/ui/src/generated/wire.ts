@@ -3900,7 +3900,7 @@ export type RendererToolFailureReason = "lease_expired";
  * are all generated from this enum, so a variant added here cannot leave one of
  * them behind — see `docs/wire-types.md`.
  */
-export type RendererToolName = "search" | "list_documents" | "read_document" | "read_tool_result" | "web_search" | "web_extract" | "read_delegated_file" | "read_file" | "list_dir" | "write_file" | "request_folder_access" | "connect_folder" | "list_connected_folders" | "list_folder" | "read_connected_file" | "import_connected_file" | "write_output_to_connected_folder" | "spawn_sandbox_agent" | "wait_for_agents" | "ask_user_questions" | "exit_plan_mode" | "update_task_plan" | "exec" | "create_app" | "other";
+export type RendererToolName = "search" | "list_documents" | "read_document" | "read_tool_result" | "web_search" | "web_extract" | "read_delegated_file" | "read_file" | "list_dir" | "write_file" | "request_folder_access" | "connect_folder" | "list_connected_folders" | "list_folder" | "read_connected_file" | "import_connected_file" | "write_output_to_connected_folder" | "spawn_sandbox_agent" | "wait_for_agents" | "ask_user_questions" | "exit_plan_mode" | "update_task_plan" | "browser_list" | "browser_navigate" | "browser_snapshot" | "browser_wait" | "browser_screenshot" | "browser_act" | "exec" | "create_app" | "other";
 
 export type RendererToolStatus = "completed" | "failed";
 
@@ -4708,6 +4708,12 @@ export const RENDERER_TOOL_NAMES = [
   "ask_user_questions",
   "exit_plan_mode",
   "update_task_plan",
+  "browser_list",
+  "browser_navigate",
+  "browser_snapshot",
+  "browser_wait",
+  "browser_screenshot",
+  "browser_act",
   "exec",
   "create_app",
   "other",

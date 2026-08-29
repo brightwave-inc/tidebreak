@@ -1815,6 +1815,36 @@ mod tests {
         assert!(!activity.result_unreadable);
     }
 
+    #[test]
+    fn browser_tool_activity_keeps_its_fixed_renderer_name() {
+        for (name, expected) in [
+            (
+                crate::BROWSER_LIST_TOOL,
+                crate::RendererToolName::BrowserList,
+            ),
+            (
+                crate::BROWSER_NAVIGATE_TOOL,
+                crate::RendererToolName::BrowserNavigate,
+            ),
+            (
+                crate::BROWSER_SNAPSHOT_TOOL,
+                crate::RendererToolName::BrowserSnapshot,
+            ),
+            (
+                crate::BROWSER_WAIT_TOOL,
+                crate::RendererToolName::BrowserWait,
+            ),
+            (
+                crate::BROWSER_SCREENSHOT_TOOL,
+                crate::RendererToolName::BrowserScreenshot,
+            ),
+            (crate::BROWSER_ACT_TOOL, crate::RendererToolName::BrowserAct),
+        ] {
+            let activity = tool_activity_from_call(terminal_call(name, None), None);
+            assert_eq!(activity.tool, expected);
+        }
+    }
+
     /// The projection is a closed union that is allowed to move, so a row
     /// written by an older build may no longer parse. Rendering nothing would
     /// claim the call produced nothing, which is a different and untrue thing.

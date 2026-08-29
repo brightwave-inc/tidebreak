@@ -70,6 +70,27 @@ describe("toolCallPresentation", () => {
     );
   });
 
+  it("distinguishes each foreground browser phase", () => {
+    expect(toolCallPresentation("browser_list", "completed").title).toBe(
+      "Checked browser tabs",
+    );
+    expect(toolCallPresentation("browser_navigate", "running").title).toBe(
+      "Opening a web page",
+    );
+    expect(toolCallPresentation("browser_snapshot", "completed").title).toBe(
+      "Inspected a web page",
+    );
+    expect(toolCallPresentation("browser_wait", "running").title).toBe(
+      "Waiting for a web page",
+    );
+    expect(toolCallPresentation("browser_screenshot", "completed").title).toBe(
+      "Captured a screenshot",
+    );
+    expect(toolCallPresentation("browser_act", "completed").title).toBe(
+      "Used a web page",
+    );
+  });
+
   it("degrades an unknown runtime status without using it as copy", () => {
     const presentation = toolCallPresentation(
       "web_search",

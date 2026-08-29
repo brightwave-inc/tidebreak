@@ -1089,6 +1089,51 @@ mod tests {
     }
 
     #[test]
+    fn browser_tools_use_fixed_renderer_names() {
+        for (name, expected) in [
+            (
+                tidebreak_core::BROWSER_LIST_TOOL,
+                RendererToolName::BrowserList,
+            ),
+            (
+                tidebreak_core::BROWSER_NAVIGATE_TOOL,
+                RendererToolName::BrowserNavigate,
+            ),
+            (
+                tidebreak_core::BROWSER_SNAPSHOT_TOOL,
+                RendererToolName::BrowserSnapshot,
+            ),
+            (
+                tidebreak_core::BROWSER_WAIT_TOOL,
+                RendererToolName::BrowserWait,
+            ),
+            (
+                tidebreak_core::BROWSER_SCREENSHOT_TOOL,
+                RendererToolName::BrowserScreenshot,
+            ),
+            (
+                tidebreak_core::BROWSER_ACT_TOOL,
+                RendererToolName::BrowserAct,
+            ),
+        ] {
+            let projected = RendererSequencedEvent::from(&SequencedEvent {
+                seq: 1,
+                event: AgentEvent::ToolCallStarted {
+                    call_id: CallId::new(),
+                    name: name.into(),
+                },
+            });
+            assert!(matches!(
+                projected.event,
+                RendererAgentEvent::ToolCallStarted {
+                    name,
+                    ..
+                } if name == expected
+            ));
+        }
+    }
+
+    #[test]
     fn steered_messages_are_projected_inline_in_sequence_order() {
         let first_id = MessageId::new();
         let second_id = MessageId::new();
