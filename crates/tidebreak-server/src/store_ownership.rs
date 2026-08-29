@@ -22,8 +22,7 @@ const POSTGRES_OWNERSHIP_CONNECT_TIMEOUT: std::time::Duration = std::time::Durat
 #[cfg(feature = "postgres")]
 const POSTGRES_OWNERSHIP_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 #[cfg(feature = "postgres")]
-pub(crate) const POSTGRES_OWNERSHIP_CHECK_INTERVAL: std::time::Duration =
-    std::time::Duration::from_secs(5);
+const POSTGRES_OWNERSHIP_MONITOR_SLEEP_SECONDS: f64 = 2_147_483_647.0;
 
 /// Stable across Tidebreak and SQLx versions so a rolling deploy cannot make
 /// two server versions choose different ownership keys.
@@ -122,8 +121,24 @@ impl PostgresStoreOwnership {
         if matches!(result, Ok(Ok(_))) {
             return Ok(());
         }
-        Err(AgentError::msg(
-            "lost the PostgreSQL self-host ownership connection; stopping the server before another Tidebreak process can take over the database",
-        ))
+        Err(ownership_lost_error())
     }
+
+    /// Keep a query pending on the lock-holding connection. PostgreSQL ends
+    /// the query as soon as that backend disappears, so `serve` can stop in
+    /// the same `select!` instead of waiting for a periodic health check.
+    pub(crate) async fn wait_until_lost(&mut self) -> AgentError {
+        let _ = sea_orm::sqlx::query("SELECT pg_sleep($1)")
+            .bind(POSTGRES_OWNERSHIP_MONITOR_SLEEP_SECONDS)
+            .execute(self.guard.as_mut())
+            .await;
+        ownership_lost_error()
+    }
+}
+
+#[cfg(feature = "postgres")]
+fn ownership_lost_error() -> AgentError {
+    AgentError::msg(
+        "lost the PostgreSQL self-host ownership connection; stopping the server before another Tidebreak process can take over the database",
+    )
 }

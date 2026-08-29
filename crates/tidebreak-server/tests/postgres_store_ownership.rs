@@ -96,9 +96,12 @@ async fn postgres_store_ownership_refuses_a_second_boot_and_fails_closed_on_loss
         "PostgreSQL must terminate the ownership session"
     );
 
-    let stopped = tokio::time::timeout(Duration::from_secs(12), serving)
+    let replacement = tidebreak_server::bind(second_config)
         .await
-        .expect("the server must stop after losing ownership")
+        .expect("a replacement can take ownership after the backend closes");
+    let stopped = tokio::time::timeout(Duration::from_secs(1), serving)
+        .await
+        .expect("the old server must stop before its replacement can overlap")
         .expect("the server task must not panic")
         .expect_err("losing ownership must fail the serve loop");
     assert!(
@@ -108,9 +111,6 @@ async fn postgres_store_ownership_refuses_a_second_boot_and_fails_closed_on_loss
         "the serve failure must name the lost lease: {stopped}"
     );
 
-    let replacement = tidebreak_server::bind(second_config)
-        .await
-        .expect("dropping the failed owner releases the database");
     drop(replacement);
 
     let secret = "store-owner-url-secret";

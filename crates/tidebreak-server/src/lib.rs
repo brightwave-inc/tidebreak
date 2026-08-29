@@ -1221,8 +1221,13 @@ pub struct Server {
     /// The one gateway runtime, handed to pairing so a registered pending
     /// pairing lands in the same slot the sign-in surface reads.
     gateway: Arc<gateway_runtime::GatewayRuntime>,
-    listener: TcpListener,
-    router: Router,
+    listener: Option<TcpListener>,
+    router: Option<Router>,
+    // Keep every process-local worker before `_store_ownership`. Rust drops
+    // fields in declaration order, so dropping an unserved `Server` aborts
+    // these tasks before it releases the PostgreSQL advisory lock.
+    _queued_turn_promoter: AbortTask,
+    _code_recovery: AbortTask,
     _turn_worker: AbortTask,
     _sandbox_agent_run_worker: AbortTask,
     _sandbox_container_run_worker: Option<AbortTask>,
@@ -1296,6 +1301,16 @@ impl Drop for AbortTask {
     }
 }
 
+impl AbortTask {
+    fn abort(&self) {
+        self.0.abort();
+    }
+
+    async fn wait(&mut self) {
+        let _ = (&mut self.0).await;
+    }
+}
+
 impl Server {
     /// The loopback address the server is listening on.
     pub fn local_addr(&self) -> SocketAddr {
@@ -1338,33 +1353,71 @@ impl Server {
     }
 
     /// Run the accept loop until the process exits.
-    pub async fn serve(self) -> Result<()> {
-        let listener = self.listener;
-        let router = self.router;
-        match self._store_ownership {
+    pub async fn serve(mut self) -> Result<()> {
+        let listener = self
+            .listener
+            .take()
+            .expect("a bound server keeps its listener until serve");
+        let router = self
+            .router
+            .take()
+            .expect("a bound server keeps its router until serve");
+        let result = match &mut self._store_ownership {
             store_ownership::StoreOwnership::Local => axum::serve(listener, router)
                 .await
                 .map_err(|error| AgentError::msg(format!("server error: {error}"))),
             #[cfg(feature = "postgres")]
-            store_ownership::StoreOwnership::Postgres(mut ownership) => {
+            store_ownership::StoreOwnership::Postgres(ownership) => {
                 let server = async move { axum::serve(listener, router).await };
                 tokio::pin!(server);
-                let mut checks =
-                    tokio::time::interval(store_ownership::POSTGRES_OWNERSHIP_CHECK_INTERVAL);
-                checks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                checks.tick().await;
-                loop {
-                    tokio::select! {
-                        result = &mut server => {
-                            return result.map_err(|error| {
-                                AgentError::msg(format!("server error: {error}"))
-                            });
-                        }
-                        _ = checks.tick() => ownership.verify().await?,
+                tokio::select! {
+                    result = &mut server => {
+                        result.map_err(|error| {
+                            AgentError::msg(format!("server error: {error}"))
+                        })
                     }
+                    error = ownership.wait_until_lost() => Err(error),
                 }
             }
+        };
+        self.stop_workers().await;
+        result
+    }
+
+    async fn stop_workers(&mut self) {
+        self._queued_turn_promoter.abort();
+        self._code_recovery.abort();
+        self._turn_worker.abort();
+        self._sandbox_agent_run_worker.abort();
+        if let Some(worker) = &self._sandbox_container_run_worker {
+            worker.abort();
         }
+        self._sandbox_web_search_worker.abort();
+        self._sandbox_task_plan_worker.abort();
+        self._sandbox_exec_worker.abort();
+        self._agent_run_scratch_reaper.abort();
+        self._blob_retirement_worker.abort();
+        self._blob_orphan_auditor.abort();
+        self._approval_judge_worker.abort();
+        self._mcp_supervisor.abort();
+        self._gateway_model_sync.abort();
+
+        self._queued_turn_promoter.wait().await;
+        self._code_recovery.wait().await;
+        self._turn_worker.wait().await;
+        self._sandbox_agent_run_worker.wait().await;
+        if let Some(worker) = &mut self._sandbox_container_run_worker {
+            worker.wait().await;
+        }
+        self._sandbox_web_search_worker.wait().await;
+        self._sandbox_task_plan_worker.wait().await;
+        self._sandbox_exec_worker.wait().await;
+        self._agent_run_scratch_reaper.wait().await;
+        self._blob_retirement_worker.wait().await;
+        self._blob_orphan_auditor.wait().await;
+        self._approval_judge_worker.wait().await;
+        self._mcp_supervisor.wait().await;
+        self._gateway_model_sync.wait().await;
     }
 }
 
@@ -2183,7 +2236,6 @@ async fn bind_inner(
             }
         })
     };
-    drop(queued_turn_promoter);
     let server_store = state.store.clone();
     let data_dir = state.config.data_dir.clone();
     let mcp_runtime = state.mcp.clone();
@@ -2210,7 +2262,7 @@ async fn bind_inner(
     // turn submitted into it is refused with `session_worker_missing`; before,
     // the same wait was spent with the port closed and the app unusable.
     let code_recovery = code.start(format!("http://{local_addr}"));
-    tokio::spawn(async move {
+    let code_recovery = tokio::spawn(async move {
         if let Err(error) = code_recovery.await {
             tracing::warn!("code-mode recovery: {}", error.message());
         }
@@ -2256,8 +2308,10 @@ async fn bind_inner(
         code_execution,
         mcp: mcp_runtime,
         gateway: gateway_runtime,
-        listener,
-        router,
+        listener: Some(listener),
+        router: Some(router),
+        _queued_turn_promoter: AbortTask(queued_turn_promoter),
+        _code_recovery: AbortTask(code_recovery),
         _turn_worker: AbortTask(turn_worker),
         _sandbox_agent_run_worker: AbortTask(sandbox_agent_run_worker),
         _sandbox_container_run_worker: sandbox_container_run_worker.map(AbortTask),
