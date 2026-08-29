@@ -3057,7 +3057,6 @@ impl MigrationTrait for CodeTurnRewrite {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
