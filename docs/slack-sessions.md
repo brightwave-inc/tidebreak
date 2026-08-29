@@ -58,11 +58,11 @@ criteria" and "Stage: scratch workspaces").
   ([`0063`](decisions/0063-hosted-machines-borrow-forge-credentials.md),
   [`0065`](decisions/0065-hosted-git-acts-as-the-person.md)). Every trust
   statement in this design is made with that unscoped token in mind.
-- Remote session execution is parked in [`deferred.md`](deferred.md).
-  Decision [`0079`](decisions/0079-supervised-agent-declines-the-sandbox-protocol.md)
-  built the agent side only. Everything Tidebreak-side — provisioning,
-  incarnation tracking, event ingestion, resume — is unbuilt and is the
-  heaviest work in this design.
+- Remote session execution now provisions sandboxes, tracks incarnations,
+  ingests events, resumes from pushed WIP refs, and reaps fenced sessions.
+  Trigger turns and image attachments remain typed refusals because the
+  runtime contract cannot preserve their delivery rules; Execution records
+  those product boundaries.
 - The environment that provisions and confines the sandbox is external to
   this repository. Tidebreak calls its spawn, steer, and event APIs and
   requests ceilings at spawn; it does not own enforcement of them. Naming
@@ -442,6 +442,21 @@ micro-USD per session. `TIDEBREAK_RUNTIME_CONCURRENCY_CAP` changes the first.
 `none` leaves that Tidebreak ceiling unset. The runtime profile may still
 impose a lower ceiling. A refusal names the setting that the operator can
 raise before restarting Tidebreak.
+
+Two remote inputs stay refused until the runtime contract can preserve their
+existing safety properties:
+
+- Code trigger turns are at-most-once. Sandbox spawn and inbox calls accept no
+  idempotency key and expose no replay result. If Tidebreak retried an
+  ambiguous response, one pull-request event could run twice. Tidebreak keeps
+  returning `remote_triggers_unsupported` until the runtime accepts a stable
+  operation key and returns the prior outcome on replay.
+- Image attachments never enter transcript text. The sandbox message contract
+  carries text only, and spawn can clone repositories but cannot stage a
+  bounded owner-scoped blob. Tidebreak keeps returning
+  `remote_attachments_unsupported` until the runtime provides that file
+  transfer. Base64 in the prompt and temporary repository commits are not
+  acceptable substitutes.
 
 Remote sessions get their own fence causes — incarnation intent
 unresolved, sandbox lost mid-turn, terminal flush missing — because the
