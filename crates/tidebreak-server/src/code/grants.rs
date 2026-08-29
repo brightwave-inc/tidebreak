@@ -182,6 +182,146 @@ impl super::runtime::CodeRuntime {
                 .is_some_and(|grant| grant.revoked_at.is_none()),
         )
     }
+
+    /// Park a connect handshake and mint its one-time nonce. The adapter
+    /// puts the nonce in the connect card link; the machine keeps a hash.
+    pub(crate) async fn start_connect_handshake(
+        &self,
+        channel_kind: &str,
+        external_identity: &str,
+        workspace_identity: &str,
+        display_name: &str,
+        workspace_name: &str,
+        avatar_url: Option<&str>,
+    ) -> Result<(tidebreak_core::CodeConnectHandshake, String), ServerError> {
+        let nonce = mint_secret("tbn");
+        let csrf = uuid::Uuid::new_v4().simple().to_string();
+        let handshake = tidebreak_core::db::code::insert_connect_handshake(
+            &self.db,
+            &hash_adapter_token(&nonce),
+            &csrf,
+            channel_kind,
+            external_identity,
+            workspace_identity,
+            display_name,
+            workspace_name,
+            avatar_url,
+            chrono::Duration::minutes(15),
+        )
+        .await?;
+        Ok((handshake, nonce))
+    }
+
+    /// The handshake a nonce opens, with the CSRF token the approval page
+    /// posts back. `None` for a used or stale link.
+    pub(crate) async fn view_connect_handshake(
+        &self,
+        nonce: &str,
+    ) -> Result<Option<(tidebreak_core::CodeConnectHandshake, String)>, ServerError> {
+        Ok(tidebreak_core::db::code::view_connect_handshake_all_owners(
+            &self.db,
+            &hash_adapter_token(nonce),
+        )
+        .await?)
+    }
+
+    /// The owner's "is this you?". Approving mints nothing — the adapter's
+    /// closing confirm does, so a forwarded link binds nothing.
+    pub(crate) async fn approve_connect_handshake(
+        &self,
+        owner: &OwnerId,
+        nonce: &str,
+        csrf: &str,
+    ) -> Result<Option<tidebreak_core::CodeConnectHandshake>, ServerError> {
+        Ok(
+            tidebreak_core::db::code::approve_connect_handshake_all_owners(
+                &self.db,
+                &hash_adapter_token(nonce),
+                csrf,
+                owner,
+            )
+            .await?,
+        )
+    }
+
+    /// The adapter's closing confirm: consume the approved handshake and
+    /// mint the grant bound to the identity the approval page showed. A
+    /// live grant already covering that identity is revoked first — a
+    /// re-link is an explicit replacement — and the mint answers with the
+    /// only copy of the token pair.
+    pub(crate) async fn complete_connect_handshake(
+        &self,
+        nonce: &str,
+    ) -> Result<Option<(CodeExternalGrant, AdapterTokenPair)>, ServerError> {
+        let Some(handshake) = tidebreak_core::db::code::complete_connect_handshake_all_owners(
+            &self.db,
+            &hash_adapter_token(nonce),
+        )
+        .await?
+        else {
+            return Ok(None);
+        };
+        let Some(owner) = handshake.approved_owner.clone() else {
+            return Err(ServerError::internal(
+                "a completed handshake must carry its approver",
+            ));
+        };
+        let replaced = tidebreak_core::db::code::list_external_grants(&self.db, &owner)
+            .await?
+            .into_iter()
+            .find(|grant| {
+                grant.revoked_at.is_none()
+                    && grant.channel_kind == handshake.channel_kind
+                    && grant.external_identity == handshake.external_identity
+                    && grant.workspace_identity == handshake.workspace_identity
+            });
+        if let Some(previous) = replaced {
+            self.revoke_adapter_grant(&owner, previous.id, "replaced by a new connect approval")
+                .await?;
+        }
+        let minted = self
+            .mint_adapter_grant(
+                &owner,
+                &handshake.channel_kind,
+                &handshake.external_identity,
+                &handshake.workspace_identity,
+            )
+            .await?;
+        Ok(Some(minted))
+    }
+
+    /// Every grant the owner holds, for the desktop grants list.
+    pub(crate) async fn list_adapter_grants(
+        &self,
+        owner: &OwnerId,
+    ) -> Result<Vec<CodeExternalGrant>, ServerError> {
+        Ok(tidebreak_core::db::code::list_external_grants(&self.db, owner).await?)
+    }
+
+    /// Revoke every live grant a channel workspace holds. The grants list
+    /// shows the workspace so an owner can cut off a whole workspace at
+    /// once — the hostile-admin boundary the design names.
+    pub(crate) async fn revoke_workspace_grants(
+        &self,
+        owner: &OwnerId,
+        channel_kind: &str,
+        workspace_identity: &str,
+        reason: &str,
+    ) -> Result<Vec<CodeExternalGrant>, ServerError> {
+        let mut revoked = Vec::new();
+        for grant in tidebreak_core::db::code::list_external_grants(&self.db, owner).await? {
+            if grant.revoked_at.is_some()
+                || grant.channel_kind != channel_kind
+                || grant.workspace_identity != workspace_identity
+            {
+                continue;
+            }
+            if let Some(row) = self.revoke_adapter_grant(owner, grant.id, reason).await? {
+                revoked.push(row);
+            }
+        }
+        Ok(revoked)
+    }
 }
 
 #[cfg(test)]

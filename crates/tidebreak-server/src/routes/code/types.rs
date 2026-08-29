@@ -13,6 +13,69 @@ use tidebreak_core::{
     QuickAction, ReasoningEffort, RepoId, WorkspaceId,
 };
 
+/// One adapter grant, as the desktop grants list renders it. Carries no
+/// secrets: the token pair exists only in the mint response the adapter
+/// kept.
+#[derive(Debug, Clone, Serialize, TS)]
+pub struct CodeGrantSnapshot {
+    pub id: tidebreak_core::CodeGrantId,
+    /// Which channel family linked (for example `slack`).
+    pub channel_kind: String,
+    /// The channel's identity for the linked user.
+    pub external_identity: String,
+    /// The channel's workspace identity, shown so an owner can revoke a
+    /// whole workspace at once.
+    pub workspace_identity: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub rotated_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Why the grant was revoked, in owner-facing words. A theft-triggered
+    /// revoke reaches the owner here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub revoked_reason: Option<String>,
+}
+
+impl From<tidebreak_core::CodeExternalGrant> for CodeGrantSnapshot {
+    fn from(grant: tidebreak_core::CodeExternalGrant) -> Self {
+        Self {
+            id: grant.id,
+            channel_kind: grant.channel_kind,
+            external_identity: grant.external_identity,
+            workspace_identity: grant.workspace_identity,
+            rotated_at: grant.rotated_at,
+            created_at: grant.created_at,
+            revoked_at: grant.revoked_at,
+            revoked_reason: grant.revoked_reason,
+        }
+    }
+}
+
+/// What the connect approval page renders: the identity being linked and
+/// the CSRF token its "is this you?" POST must echo.
+#[derive(Debug, Clone, Serialize, TS)]
+pub struct CodeConnectPage {
+    /// Which channel family is linking (for example `slack`).
+    pub channel_kind: String,
+    /// The person's display name in the channel.
+    pub display_name: String,
+    /// The channel workspace's human name.
+    pub workspace_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub avatar_url: Option<String>,
+    /// `pending` or `approved`; a completed or expired link renders
+    /// nothing.
+    pub state: String,
+    /// Echo this in the approve POST.
+    pub csrf: String,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// A registered local git repository.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 pub struct CodeRepoSnapshot {

@@ -121,6 +121,20 @@ async fn external_app() -> (
     RepoId,
     tempfile::TempDir,
 ) {
+    let (router, fake, runtime, repo_id, _token, dir) = external_app_with_token().await;
+    (router, fake, runtime, repo_id, dir)
+}
+
+/// Like [`external_app`], also handing back the API bearer token for the
+/// authenticated (person- and adapter-principal) routes.
+async fn external_app_with_token() -> (
+    Router,
+    Arc<FakeProvisioner>,
+    Arc<CodeRuntime>,
+    RepoId,
+    Arc<str>,
+    tempfile::TempDir,
+) {
     let (dir, store) = temp_db_store("code.db").await;
     let db = Arc::new(store);
     let store_trait: Arc<dyn Store> = db.clone();
@@ -170,7 +184,8 @@ async fn external_app() -> (
         },
     );
     state.code = Some(runtime.clone());
-    (app(state), fake, runtime, repo_id, dir)
+    let token = state.token.clone();
+    (app(state), fake, runtime, repo_id, token, dir)
 }
 
 async fn bound_session_id(
@@ -563,4 +578,164 @@ async fn external_events_snapshot_then_replay_then_sever_on_revoke() {
         severed.is_ok(),
         "the revoked grant's stream must drop immediately"
     );
+}
+
+/// The human halves of the grant lifecycle: the connect handshake mints a
+/// grant bound to the shown identity, but only at the adapter's closing
+/// confirm — a forwarded link that is merely approved binds nothing — and
+/// the desktop lists and revokes grants, whole workspaces included.
+#[tokio::test]
+async fn a_connect_handshake_mints_only_at_the_closing_confirm() {
+    let (router, _fake, runtime, _repo_id, token, _dir) = external_app_with_token().await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let owner = OwnerId::local();
+
+    let started: serde_json::Value = client
+        .post(format!("http://{addr}/external/connect"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "channel_kind": "slack",
+            "external_identity": "U1",
+            "workspace_identity": "T1",
+            "display_name": "Casey",
+            "workspace_name": "Acme Corp",
+            "avatar_url": "https://example.com/a.png",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let nonce = started["nonce"].as_str().unwrap().to_owned();
+
+    // The approval page shows the identity being linked.
+    let page: serde_json::Value = client
+        .get(format!("http://{addr}/external/connect/{nonce}"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(page["display_name"], "Casey");
+    assert_eq!(page["workspace_name"], "Acme Corp");
+    assert_eq!(page["state"], "pending");
+    let csrf = page["csrf"].as_str().unwrap().to_owned();
+
+    // A forwarded link binds nothing: completion before approval refuses,
+    // and a wrong CSRF token cannot approve.
+    let early = client
+        .post(format!("http://{addr}/external/connect/{nonce}/complete"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(early.status(), reqwest::StatusCode::NOT_FOUND);
+    let forged = client
+        .post(format!("http://{addr}/external/connect/{nonce}/approve"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "csrf": "not-the-token" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forged.status(), reqwest::StatusCode::NOT_FOUND);
+
+    // The owner approves. Nothing is minted yet.
+    let approved = client
+        .post(format!("http://{addr}/external/connect/{nonce}/approve"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "csrf": csrf }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(approved.status(), reqwest::StatusCode::NO_CONTENT);
+    let grants: Vec<serde_json::Value> = client
+        .get(format!("http://{addr}/code/grants"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(grants.is_empty(), "approval alone must mint nothing");
+
+    // The closing confirm mints the grant bound to the shown identity,
+    // exactly once.
+    let completed: serde_json::Value = client
+        .post(format!("http://{addr}/external/connect/{nonce}/complete"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(completed["grant"]["external_identity"], "U1");
+    assert_eq!(completed["grant"]["workspace_identity"], "T1");
+    assert!(completed["token"].as_str().unwrap().starts_with("tbg_"));
+    let replayed = client
+        .post(format!("http://{addr}/external/connect/{nonce}/complete"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(replayed.status(), reqwest::StatusCode::NOT_FOUND);
+    let stale_view = client
+        .get(format!("http://{addr}/external/connect/{nonce}"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale_view.status(), reqwest::StatusCode::NOT_FOUND);
+
+    // The desktop lists the grant and revokes it.
+    let grants: Vec<serde_json::Value> = client
+        .get(format!("http://{addr}/code/grants"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(grants.len(), 1);
+    let grant_id = grants[0]["id"].as_str().unwrap().to_owned();
+    let revoked: serde_json::Value = client
+        .post(format!("http://{addr}/code/grants/{grant_id}/revoke"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "reason": "done with this workspace" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(revoked["revoked_at"].is_string());
+    assert_eq!(revoked["revoked_reason"], "done with this workspace");
+
+    // Revoking a whole workspace cuts every live grant it holds.
+    runtime
+        .mint_adapter_grant(&owner, "slack", "U5", "T9")
+        .await
+        .unwrap();
+    runtime
+        .mint_adapter_grant(&owner, "slack", "U6", "T9")
+        .await
+        .unwrap();
+    let swept: Vec<serde_json::Value> = client
+        .post(format!("http://{addr}/code/grants/revoke-workspace"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "channel_kind": "slack", "workspace_identity": "T9" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(swept.len(), 2);
+    assert!(swept.iter().all(|grant| grant["revoked_at"].is_string()));
 }

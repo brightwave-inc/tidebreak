@@ -115,6 +115,10 @@ code_id_type!(
     CodeGrantId
 );
 code_id_type!(
+    /// Identifies one connect handshake behind a grant.
+    CodeHandshakeId
+);
+code_id_type!(
     /// Identifies one durable trigger rule bound to a repository.
     CodeTriggerId
 );
@@ -1383,6 +1387,76 @@ pub struct CodeExternalGrant {
     pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Why, in owner-facing words.
     pub revoked_reason: Option<String>,
+}
+
+/// One connect handshake: the human half of minting a grant
+/// (`docs/slack-sessions.md`, stage 2).
+///
+/// The row walks `Pending` (card posted) to `Approved` (the owner said
+/// "this is me" on the hosted approval page) to `Completed` (the adapter's
+/// closing confirm, after its DM proved control of the channel account).
+/// Only completion mints: a forwarded link can reach `Approved` at most,
+/// which binds nothing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CodeConnectHandshake {
+    /// Stable id.
+    pub id: CodeHandshakeId,
+    /// Which channel family is linking (for example `slack`).
+    pub channel_kind: String,
+    /// The channel's identity for the linking user, opaque here.
+    pub external_identity: String,
+    /// The channel's workspace identity (for example a Slack team id).
+    pub workspace_identity: String,
+    /// The person's display name in the channel, for "is this you?".
+    pub display_name: String,
+    /// The channel workspace's human name, shown on the approval page.
+    pub workspace_name: String,
+    /// The person's avatar in the channel, when the channel offers one.
+    pub avatar_url: Option<String>,
+    /// Where the handshake stands.
+    pub state: CodeConnectState,
+    /// Who approved, once someone has.
+    pub approved_owner: Option<crate::OwnerId>,
+    /// Creation time.
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    /// When the nonce stops working.
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Where a connect handshake stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeConnectState {
+    /// The card is posted; nobody has approved.
+    Pending,
+    /// The owner approved on the hosted page; nothing is minted yet.
+    Approved,
+    /// The adapter's closing confirm landed; the grant is minted.
+    Completed,
+}
+
+impl CodeConnectState {
+    /// Stable database token.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Approved => "approved",
+            Self::Completed => "completed",
+        }
+    }
+
+    /// Parse a stored token.
+    #[must_use]
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "pending" => Some(Self::Pending),
+            "approved" => Some(Self::Approved),
+            "completed" => Some(Self::Completed),
+            _ => None,
+        }
+    }
 }
 
 /// What presenting a refresh token for rotation found.

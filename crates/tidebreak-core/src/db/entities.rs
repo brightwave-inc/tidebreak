@@ -2027,6 +2027,36 @@ pub mod code_external_grant_retired_refresh {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod code_connect_handshake {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "code_connect_handshake")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub nonce_hash: String,
+        pub csrf: String,
+        pub channel_kind: String,
+        pub external_identity: String,
+        pub workspace_identity: String,
+        pub display_name: String,
+        pub workspace_name: String,
+        pub avatar_url: Option<String>,
+        pub state: String,
+        pub approved_owner: Option<String>,
+        pub created_at: DateTimeUtc,
+        pub expires_at: DateTimeUtc,
+        pub approved_at: Option<DateTimeUtc>,
+        pub completed_at: Option<DateTimeUtc>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod code_session_image {
     use sea_orm::entity::prelude::*;
 

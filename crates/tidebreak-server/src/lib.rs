@@ -608,6 +608,14 @@ pub fn app(state: AppState) -> Router {
             "/external/grants/rotate",
             post(routes::code::external_rotate),
         )
+        // The connect bootstrap: the adapter holds no grant until complete
+        // mints one, so start and complete live here, gated by the one-time
+        // nonce. The owner's view and approve stay on the authenticated API.
+        .route("/external/connect", post(routes::code::connect_start))
+        .route(
+            "/external/connect/{nonce}/complete",
+            post(routes::code::connect_complete),
+        )
         .with_state(state.clone());
 
     let api = Router::new()
@@ -862,6 +870,17 @@ pub fn app(state: AppState) -> Router {
             axum::routing::delete(routes::delete_standing_grant),
         )
         .route("/chats/{id}/events", get(routes::chat_events))
+        .route("/code/grants", get(routes::code::list_grants))
+        .route("/code/grants/{id}/revoke", post(routes::code::revoke_grant))
+        .route(
+            "/code/grants/revoke-workspace",
+            post(routes::code::revoke_workspace_grants),
+        )
+        .route("/external/connect/{nonce}", get(routes::code::connect_view))
+        .route(
+            "/external/connect/{nonce}/approve",
+            post(routes::code::connect_approve),
+        )
         .route(
             "/code/repos",
             post(routes::code::create_repo).get(routes::code::list_repos),
