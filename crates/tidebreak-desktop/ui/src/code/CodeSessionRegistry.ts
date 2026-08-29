@@ -235,31 +235,28 @@ export function peekCodeSession(
   return registry.get(sessionId);
 }
 
-/** Stamp a live recap onto a retained or open session store. */
+/** Stamp a finished recap onto a retained or open session store. */
 export function applyLiveTurnRewrite(
   sessionId: string,
   turnId: string,
   state: "rewriting" | "rewritten" | "failed",
   rewrite?: string,
 ): void {
+  if (state !== "rewritten" || !rewrite) return;
   const entry = registry.get(sessionId);
   if (!entry) return;
   entry.store.getState().update((session) => {
-    let next = session;
-    if (state === "rewritten" && rewrite) {
-      next = {
-        ...next,
-        storedRewrites: { ...next.storedRewrites, [turnId]: rewrite },
-      };
-    }
-    next = {
+    const next = {
+      ...session,
+      storedRewrites: { ...session.storedRewrites, [turnId]: rewrite },
+    };
+    return applyStoredRewrites({
       ...next,
       items: applyTurnRewrite(next.items, turnId, {
         rewrite,
-        rewriteState: state,
+        rewriteState: "rewritten",
       }),
-    };
-    return state === "rewritten" ? applyStoredRewrites(next) : next;
+    });
   });
 }
 

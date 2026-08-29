@@ -1104,4 +1104,31 @@ describe("CodeSessionRegistry", () => {
     });
     expect(store.getState().storedRewrites.t1).toBe("The recap.");
   });
+
+  it("leaves rewriting notices off the session store", () => {
+    const sockets: FakeSocket[] = [];
+    const store = acquireCodeSession("s1", (after, onFrame) => {
+      const socket = new FakeSocket(after, onFrame);
+      sockets.push(socket);
+      return socket as unknown as WebSocket;
+    });
+    sockets[0]?.emit({
+      seq: 1,
+      event: { type: "turn_started", turn_id: "t1" },
+    });
+    sockets[0]?.emit({
+      seq: 1,
+      event: { type: "assistant_delta", text: "The original closing message." },
+      transient: true,
+    });
+    applyLiveTurnRewrite("s1", "t1", "rewriting");
+    const assistant = store
+      .getState()
+      .items.find((item) => item.kind === "assistant" && item.turnId === "t1");
+    expect(assistant).toMatchObject({
+      text: "The original closing message.",
+    });
+    expect(assistant).not.toMatchObject({ rewriteState: "rewriting" });
+    expect(store.getState().storedRewrites.t1).toBeUndefined();
+  });
 });
