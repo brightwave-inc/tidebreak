@@ -31,9 +31,18 @@ pub(crate) struct VaultSecretProvider {
     token_file: PathBuf,
 }
 
+pub(crate) struct ValidatedVaultConfig {
+    base_url: Url,
+    client: reqwest::Client,
+    mount: Vec<String>,
+    namespace: Option<HeaderValue>,
+    path: Vec<String>,
+    token_file: PathBuf,
+}
+
 impl VaultSecretProvider {
     /// Validate the operator configuration and build the no-redirect client.
-    pub(crate) fn new(config: &VaultSecretConfig) -> Result<Self> {
+    pub(crate) fn validate(config: &VaultSecretConfig) -> Result<ValidatedVaultConfig> {
         let base_url = validate_base_url(&config.address)?;
         let mount = validate_secret_path("TIDEBREAK_VAULT_MOUNT", &config.mount)?;
         let path = validate_secret_path("TIDEBREAK_VAULT_PATH", &config.path)?;
@@ -63,7 +72,7 @@ impl VaultSecretProvider {
             .user_agent(USER_AGENT)
             .build()
             .map_err(|_| AgentError::config("could not initialize the Vault HTTP client"))?;
-        Ok(Self {
+        Ok(ValidatedVaultConfig {
             base_url,
             client,
             mount,
@@ -71,6 +80,17 @@ impl VaultSecretProvider {
             path,
             token_file: config.token_file.clone(),
         })
+    }
+
+    pub(crate) fn new(config: ValidatedVaultConfig) -> Self {
+        Self {
+            base_url: config.base_url,
+            client: config.client,
+            mount: config.mount,
+            namespace: config.namespace,
+            path: config.path,
+            token_file: config.token_file,
+        }
     }
 
     fn secret_url(&self, key: &str) -> Result<Url> {
@@ -524,14 +544,14 @@ mod tests {
         token_file: PathBuf,
         namespace: Option<&str>,
     ) -> VaultSecretProvider {
-        VaultSecretProvider::new(&VaultSecretConfig {
+        let config = VaultSecretConfig {
             address: fixture.address.clone(),
             token_file,
             mount: "secret".into(),
             path: "tidebreak/production".into(),
             namespace: namespace.map(str::to_owned),
-        })
-        .unwrap()
+        };
+        VaultSecretProvider::new(VaultSecretProvider::validate(&config).unwrap())
     }
 
     #[tokio::test]
@@ -686,9 +706,9 @@ mod tests {
             namespace: None,
         };
 
-        assert!(VaultSecretProvider::new(&config("https://vault.example.test")).is_ok());
-        assert!(VaultSecretProvider::new(&config("http://127.0.0.1:8200")).is_ok());
-        assert!(VaultSecretProvider::new(&config("http://[::1]:8200")).is_ok());
+        assert!(VaultSecretProvider::validate(&config("https://vault.example.test")).is_ok());
+        assert!(VaultSecretProvider::validate(&config("http://127.0.0.1:8200")).is_ok());
+        assert!(VaultSecretProvider::validate(&config("http://[::1]:8200")).is_ok());
         for address in [
             "http://localhost:8200",
             "http://vault.example.test",
@@ -697,7 +717,7 @@ mod tests {
             "https://vault.example.test/#fragment",
         ] {
             assert!(
-                VaultSecretProvider::new(&config(address)).is_err(),
+                VaultSecretProvider::validate(&config(address)).is_err(),
                 "accepted {address}"
             );
         }

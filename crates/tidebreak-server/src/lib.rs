@@ -1757,25 +1757,45 @@ async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser_par
 /// cached `None` would then hide the session from the sync loop until
 /// restart. Its misses re-ask the store instead; an absent item answers
 /// `NoEntry` without an ACL prompt, so the slow-path rereads are cheap.
-fn secret_provider(config: &Config) -> Result<ProfileSecrets> {
+enum CredentialStoragePlan {
+    Desktop(Option<String>),
+    Vault(vault_secrets::ValidatedVaultConfig),
+    UnavailableSelfHost,
+}
+
+fn credential_storage_plan(config: &Config) -> Result<CredentialStoragePlan> {
     if config.profile != Profile::SelfHost && config.vault_secrets.is_some() {
         return Err(AgentError::config(
             "Vault secret custody is available only with TIDEBREAK_PROFILE=self_host",
         ));
     }
-    let storage: Arc<dyn SecretProvider> = match config.profile {
-        Profile::Desktop => Arc::new(match &config.keychain_service {
+    match config.profile {
+        Profile::Desktop => Ok(CredentialStoragePlan::Desktop(
+            config.keychain_service.clone(),
+        )),
+        Profile::SelfHost => match &config.vault_secrets {
+            Some(vault) => Ok(CredentialStoragePlan::Vault(
+                vault_secrets::VaultSecretProvider::validate(vault)?,
+            )),
+            None => Ok(CredentialStoragePlan::UnavailableSelfHost),
+        },
+        _ => Err(AgentError::config(
+            "the configured profile is not supported",
+        )),
+    }
+}
+
+fn secret_provider(plan: CredentialStoragePlan) -> ProfileSecrets {
+    let storage: Arc<dyn SecretProvider> = match plan {
+        CredentialStoragePlan::Desktop(keychain_service) => Arc::new(match keychain_service {
             Some(service) => KeychainSecretProvider::with_service(service),
             None => KeychainSecretProvider::new(),
         }),
-        Profile::SelfHost => match &config.vault_secrets {
-            Some(vault) => Arc::new(vault_secrets::VaultSecretProvider::new(vault)?),
-            None => Arc::new(vault_secrets::UnavailableSelfHostSecretProvider),
-        },
-        _ => {
-            return Err(AgentError::config(
-                "the configured profile is not supported",
-            ))
+        CredentialStoragePlan::Vault(config) => {
+            Arc::new(vault_secrets::VaultSecretProvider::new(config))
+        }
+        CredentialStoragePlan::UnavailableSelfHost => {
+            Arc::new(vault_secrets::UnavailableSelfHostSecretProvider)
         }
     };
     let bundle = Arc::new(BundledSecretProvider::new(storage));
@@ -1783,7 +1803,7 @@ fn secret_provider(config: &Config) -> Result<ProfileSecrets> {
         CachingSecretProvider::new(bundle.clone())
             .with_miss_passthrough([crate::connectors::GATEWAY_SECRET_KEY]),
     );
-    Ok(ProfileSecrets { bundle, provider })
+    ProfileSecrets { bundle, provider }
 }
 
 /// The profile's credential store, at the two layers callers need.
@@ -1809,8 +1829,9 @@ pub async fn rehome_configured_secrets(
             "rehome-secrets is available only for the desktop profile because self-host credentials never use the OS keychain",
         ));
     }
+    let plan = credential_storage_plan(config)?;
     let store = connect_store(config).await?;
-    secret_rehome::rehome_secrets(&*store, &secret_provider(config)?.bundle).await
+    secret_rehome::rehome_secrets(&*store, &secret_provider(plan).bundle).await
 }
 
 #[cfg(test)]
@@ -1822,7 +1843,7 @@ mod profile_secret_tests {
         let directory = tempfile::tempdir().unwrap();
         let mut config = Config::desktop(directory.path());
         config.profile = Profile::SelfHost;
-        let secrets = secret_provider(&config).unwrap().provider;
+        let secrets = secret_provider(credential_storage_plan(&config).unwrap()).provider;
 
         assert_eq!(secrets.get_secret("provider.test").await.unwrap(), None);
         let error = secrets
@@ -1866,7 +1887,7 @@ mod profile_secret_tests {
     }
 
     #[test]
-    fn desktop_provider_rejects_programmatic_vault_settings() {
+    fn desktop_storage_plan_rejects_programmatic_vault_settings() {
         let directory = tempfile::tempdir().unwrap();
         let mut config = Config::desktop(directory.path());
         config.vault_secrets = Some(tidebreak_core::VaultSecretConfig {
@@ -1877,7 +1898,7 @@ mod profile_secret_tests {
             namespace: None,
         });
 
-        let error = match secret_provider(&config) {
+        let error = match credential_storage_plan(&config) {
             Err(error) => error.to_string(),
             Ok(_) => panic!("desktop accepted Vault settings"),
         };
@@ -1906,13 +1927,14 @@ async fn bind_inner(
     // routable interface, and that refusal should cost nothing and leave
     // nothing behind. See [`Config::bind_addr`].
     let bind_addr = config.bind_addr()?;
-    // Provider construction validates boot-only custody settings without
+    // Storage planning validates boot-only custody settings without
     // reading a secret. Keep it before the lock and database so an invalid
     // Vault address leaves no local or shared resources open.
+    let credential_storage = credential_storage_plan(&config)?;
     let ProfileSecrets {
         bundle: secret_bundle,
         provider: secrets,
-    } = secret_provider(&config)?;
+    } = secret_provider(credential_storage);
     // Desktop live delivery remains process-local. Turns, steering, and tool
     // approvals are durable, while one process still owns the complete data
     // directory and its worker set.
