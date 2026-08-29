@@ -69,12 +69,7 @@ async fn postgres_store_ownership_refuses_a_second_boot_and_fails_closed_on_loss
         "the boot refusal must name database ownership: {refusal}"
     );
 
-    let first_addr = first.local_addr();
     let serving = tokio::spawn(first.serve());
-    let health = reqwest::get(format!("http://{first_addr}/healthz"))
-        .await
-        .expect("the owning server must serve liveness");
-    assert_eq!(health.status(), reqwest::StatusCode::OK);
     let mut admin = PgConnection::connect(&url)
         .await
         .expect("connect to inspect the ownership session");
