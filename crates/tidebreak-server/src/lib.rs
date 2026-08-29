@@ -580,6 +580,36 @@ pub fn app(state: AppState) -> Router {
         ))
         .with_state(state.clone());
 
+    // The channel-adapter surface (docs/slack-sessions.md, stage 2).
+    // Authenticated per request by adapter grant tokens, so it stays outside
+    // `require_token` like the inference relay above.
+    let external_adapter_api = Router::new()
+        .route(
+            "/external/code/sessions",
+            post(routes::code::external_get_or_create),
+        )
+        .route(
+            "/external/code/sessions/{id}/messages",
+            post(routes::code::external_messages),
+        )
+        .route(
+            "/external/code/sessions/{id}/events",
+            get(routes::code::external_events),
+        )
+        .route(
+            "/external/code/sessions/{id}/interrupt",
+            post(routes::code::external_interrupt),
+        )
+        .route(
+            "/external/code/sessions/{id}/reap",
+            post(routes::code::external_reap),
+        )
+        .route(
+            "/external/grants/rotate",
+            post(routes::code::external_rotate),
+        )
+        .with_state(state.clone());
+
     let api = Router::new()
         .route("/settings", get(routes::get_settings))
         .route(
@@ -1099,7 +1129,8 @@ pub fn app(state: AppState) -> Router {
         // The inference relay authenticates the same way with its own
         // per-session key.
         .merge(browser_api)
-        .merge(harness_llm_api);
+        .merge(harness_llm_api)
+        .merge(external_adapter_api);
     let frame_state = state.clone();
     let auth_discovery = Router::new()
         .route("/auth/discovery", get(auth::discovery))

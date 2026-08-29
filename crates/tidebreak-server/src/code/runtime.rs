@@ -152,7 +152,6 @@ pub(crate) enum SubmitTurnOutcome {
 /// Result of one external message delivery (`docs/slack-sessions.md`,
 /// stage 2). A replayed delivery answers with the same shape the first one
 /// earned, derived from the row's current state.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug)]
 pub(crate) enum ExternalMessageOutcome {
     /// The message became a running turn.
@@ -1400,7 +1399,6 @@ impl CodeRuntime {
     /// resurrecting, and a binding under another grant refuses. Two racing
     /// creates converge on one session through the binding's unique
     /// conversation key.
-    #[cfg_attr(not(test), allow(dead_code))]
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn external_get_or_create(
         &self,
@@ -4306,7 +4304,6 @@ impl CodeRuntime {
     /// row's current state — still queued, promoted into a turn, or
     /// retracted — without writing a second row. An idle session promotes
     /// the head immediately; a busy one queues durably.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn external_submit_message(
         &self,
         owner: &OwnerId,

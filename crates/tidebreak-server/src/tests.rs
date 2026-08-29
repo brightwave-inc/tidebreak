@@ -44,6 +44,7 @@ mod code;
 mod code_browser;
 #[cfg(unix)]
 mod code_clone;
+mod code_external;
 #[cfg(unix)]
 mod code_git;
 #[cfg(unix)]

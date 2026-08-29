@@ -560,7 +560,7 @@ fn json_id(value: &serde_json::Value) -> &str {
     value["id"].as_str().expect("id is a string")
 }
 
-async fn serve(router: Router) -> std::net::SocketAddr {
+pub(super) async fn serve(router: Router) -> std::net::SocketAddr {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -9828,10 +9828,11 @@ fn code_routes_go_through_the_owner_scoped_view() {
         // `types.rs` declare and shape, and serve nothing.
         let serves_data = text.contains("pub async fn") && name != "mod.rs";
         if serves_data && !text.contains("ScopedCode") {
-            // Browser and harness inference are capability-bearer routes.
-            // Each resolves a session-private token to the owning session
-            // instead of accepting the app-token `ScopedCode` extractor.
-            // Require each route's own authorization path here.
+            // Browser, harness inference, and external adapters are
+            // capability-bearer routes. Each derives the owner from a
+            // narrower credential instead of accepting the app-token
+            // `ScopedCode` extractor. Require each route's own authorization
+            // path here.
             if name == "browser.rs" {
                 if !text.contains("fn authorize(")
                     || !text.contains("BrowserSubject")
@@ -9851,7 +9852,18 @@ fn code_routes_go_through_the_owner_scoped_view() {
                     findings.push(format!(
                         "{name} is the capability-bearer harness inference \
                          route but is missing its `HarnessLlmRelay` / \
-                         `HeaderMap` / `relay.forward` authorization path"
+                        `HeaderMap` / `relay.forward` authorization path"
+                    ));
+                }
+            } else if name == "external.rs" {
+                if !text.contains("ExternalGrantAuth")
+                    || !text.contains("authenticate_adapter_token")
+                    || !text.contains("session_bound_to_grant")
+                {
+                    findings.push(format!(
+                        "{name} is the adapter grant route but is missing its \
+                         `ExternalGrantAuth` / `authenticate_adapter_token` / \
+                         `session_bound_to_grant` authorization path"
                     ));
                 }
             } else {
