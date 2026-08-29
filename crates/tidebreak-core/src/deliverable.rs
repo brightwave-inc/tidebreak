@@ -300,6 +300,18 @@ pub fn validate_portable_filename(name: &str) -> Result<(), &'static str> {
             "filename may contain only letters, numbers, spaces, dashes, underscores, and parentheses",
         );
     }
+    let stem = name
+        .split_once('.')
+        .map_or(name, |(stem, _)| stem)
+        .to_ascii_uppercase();
+    if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || stem
+            .strip_prefix("COM")
+            .or_else(|| stem.strip_prefix("LPT"))
+            .is_some_and(|port| matches!(port, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"))
+    {
+        return Err("filename is reserved by a desktop platform");
+    }
     Ok(())
 }
 
@@ -456,6 +468,9 @@ mod tests {
             "folder/report.md",
             "report.pdf",
             "bad\u{202e}.md",
+            "CON.txt",
+            "com1.md",
+            "LPT9.csv",
         ] {
             assert!(validate_deliverable_name(invalid).is_err(), "{invalid}");
         }

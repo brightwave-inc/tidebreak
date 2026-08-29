@@ -19,6 +19,7 @@ import {
 
 import { Button } from "@/components/ui/button";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
+import { useRefreshSignals } from "@/RefreshSignals";
 import { BrowserNoticeRow, BrowserToolbar } from "./BrowserToolbar";
 import { BrowserViewportControl } from "./BrowserViewportControl";
 import {
@@ -151,6 +152,7 @@ function CodeBrowserTabSession({
     useState(false);
   const [slow, setSlow] = useState(false);
   const [runtime, setRuntime] = useState<BrowserHostSnapshot | null>(null);
+  const signalRefresh = useRefreshSignals((state) => state.signal);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const mountedRef = useRef(true);
   const nativeReady = useRef(false);
@@ -826,7 +828,31 @@ function CodeBrowserTabSession({
           setBrowserNotice(current, {
             kind: "download",
             url: event.url,
-            message: "Downloads are not available in the in-app browser yet",
+            message:
+              event.message ||
+              "Downloads are not available in the in-app browser yet",
+          }),
+        );
+      } else if (event.type === "download_started") {
+        updateSession((current) =>
+          setBrowserNotice(current, {
+            kind: "download_saved",
+            message: event.message || "Saving this download to Outputs",
+          }),
+        );
+      } else if (event.type === "download_finished") {
+        signalRefresh("outputWritebacks");
+        updateSession((current) =>
+          setBrowserNotice(current, {
+            kind: "download_saved",
+            message: event.message || "Saved this download to Outputs",
+          }),
+        );
+      } else if (event.type === "download_failed") {
+        updateSession((current) =>
+          setBrowserNotice(current, {
+            kind: "download",
+            message: event.message || "Could not save this download",
           }),
         );
       } else if (event.type === "navigation_blocked") {
@@ -880,6 +906,7 @@ function CodeBrowserTabSession({
     recordRuntime,
     reconstructAfterProfileReset,
     reconcileAfterNativeReady,
+    signalRefresh,
     updateSession,
     workspaceId,
   ]);
@@ -1261,7 +1288,13 @@ function CodeBrowserTabSession({
       {notice && (
         <BrowserNoticeRow
           message={notice.message}
-          tone={notice.kind === "blocked" ? "critical" : "warning"}
+          tone={
+            notice.kind === "blocked"
+              ? "critical"
+              : notice.kind === "download_saved"
+                ? "info"
+                : "warning"
+          }
           actionLabel={noticeAction?.label}
           onAction={noticeAction?.run}
           onDismiss={() =>

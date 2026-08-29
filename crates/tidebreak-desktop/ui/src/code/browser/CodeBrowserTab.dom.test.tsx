@@ -25,6 +25,7 @@ import {
   seedBrowserSession,
   type LegacyBrowserState,
 } from "./browserPersistence";
+import { useRefreshSignals } from "@/RefreshSignals";
 import { CodeBrowserTab } from "./CodeBrowserTab";
 
 type CommandCall = {
@@ -1110,6 +1111,51 @@ describe("CodeBrowserTab", () => {
       await screen.findByText("This address cannot open in the in-app browser"),
     ).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Open here" })).toBeNull();
+  });
+
+  it("reports saved downloads and refreshes the Outputs catalog", async () => {
+    const runtime = browserHost();
+    const outputRevision = useRefreshSignals.getState().outputWritebacks;
+    render(
+      <CodeBrowserTab
+        workspaceId="workspace-1"
+        browserId="browser-1"
+        initialUrl="https://example.com"
+        host={runtime.host}
+      />,
+    );
+    await waitFor(() =>
+      expect(runtime.calls.some(({ action }) => action.type === "create")).toBe(
+        true,
+      ),
+    );
+
+    act(() =>
+      runtime.emit({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        type: "download_started",
+        message: "Saving report.pdf to Outputs",
+      }),
+    );
+    expect(
+      await screen.findByText("Saving report.pdf to Outputs"),
+    ).toBeVisible();
+
+    act(() =>
+      runtime.emit({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        type: "download_finished",
+        message: "Saved report.pdf to Outputs",
+      }),
+    );
+    expect(
+      await screen.findByText("Saved report.pdf to Outputs"),
+    ).toBeVisible();
+    expect(useRefreshSignals.getState().outputWritebacks).toBe(
+      outputRevision + 1,
+    );
   });
 
   it("offers native sharing for an unshared origin without claiming ambient access", async () => {

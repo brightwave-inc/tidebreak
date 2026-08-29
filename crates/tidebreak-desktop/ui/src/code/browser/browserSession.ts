@@ -11,7 +11,7 @@ export type BrowserHistoryEntry = {
 };
 
 export type BrowserNotice = {
-  kind: "popup" | "download" | "blocked";
+  kind: "popup" | "download" | "download_saved" | "blocked";
   url?: string;
   message: string;
 };
