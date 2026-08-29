@@ -13,7 +13,7 @@ branch; where something is not built yet, it says so.
 
 ## What the self-host profile is
 
-Selecting `TIDEBREAK_PROFILE=self_host` changes three things about the server:
+Selecting `TIDEBREAK_PROFILE=self_host` changes four things about the server:
 
 - **The store is PostgreSQL**, opened from `TIDEBREAK_DATABASE_URL`, and the
   binary must be built with tidebreak-server's `postgres` feature for the
@@ -28,6 +28,10 @@ Selecting `TIDEBREAK_PROFILE=self_host` changes three things about the server:
   exactly one of `TIDEBREAK_AUTH_GATEWAY_URL` or
   `TIDEBREAK_AUTH_TOKENS_FILE` is valid — a shared database never comes up
   behind an API that cannot tell its callers apart.
+- **Stored credentials use Vault KV v2.** The server never opens the desktop
+  OS keychain. When Vault is not configured, provider environment variables
+  remain available as read fallbacks, but deployment-plane credential writes
+  and deletes fail with setup guidance.
 
 The deployment posture is stated in
 [decision record 6](decisions/0006-self-host-deployment-plane-authorization.md):
@@ -49,6 +53,8 @@ and for what is still integration work.
 - A machine that can reach your model provider's API.
 - Somewhere private to keep the database password, plus either a Model Gateway
   installation or a standalone tokens file.
+- A Vault KV v2 mount if administrators need to save shared credentials through
+  Tidebreak. Provider environment variables remain available without Vault.
 
 ## Model Gateway identity (hosted default)
 
@@ -182,6 +188,62 @@ umask 077
 printf 'alice %s admin\n' "$(openssl rand -hex 32)" > deploy/self-host/tokens
 ```
 
+## Vault credential custody
+
+To save provider, web-search, code-execution, and connected-app credentials
+through Tidebreak, give the self-host server a HashiCorp Vault KV v2 mount.
+The server stores no Vault token in its database or boot configuration. It
+reads the token from a mounted file for every Vault request, so an injector or
+Vault Agent can rotate the file without restarting Tidebreak.
+
+Tidebreak appends each internal credential key to the configured path. With a
+mount of `secret` and a path of `tidebreak/production`, the normal credential
+bundle lives under `secret/data/tidebreak/production/tidebreak.secret_bundle_v1`.
+Grant the path wildcard because migration-safe fallback reads can address
+other stable credential keys under the same prefix.
+
+If the `secret` mount does not exist, enable KV v2:
+
+```sh
+vault secrets enable -path=secret kv-v2
+```
+
+Create a policy for one deployment path:
+
+```hcl
+path "secret/data/tidebreak/production/*" {
+  capabilities = ["create", "read", "update", "delete"]
+}
+```
+
+Attach that policy to the Vault identity used by the server. Configure your
+Vault Agent, Kubernetes injector, or service supervisor to write the resulting
+token to a file that only the Tidebreak process can read. Then set:
+
+```sh
+export TIDEBREAK_VAULT_ADDR=https://vault.internal.example
+export TIDEBREAK_VAULT_TOKEN_FILE=/run/secrets/tidebreak-vault-token
+export TIDEBREAK_VAULT_MOUNT=secret
+export TIDEBREAK_VAULT_PATH=tidebreak/production
+# Optional for Vault Enterprise or HCP Vault:
+export TIDEBREAK_VAULT_NAMESPACE=platform/team-a
+```
+
+`TIDEBREAK_VAULT_ADDR` must use HTTPS. For local development, Tidebreak accepts
+HTTP only when the host is a literal loopback address such as `127.0.0.1` or
+`::1`; `localhost` does not qualify. The address cannot contain credentials, a
+query, or a fragment, and Tidebreak refuses redirects. Keep the Vault token out
+of environment variables and logs.
+
+Vault KV v2 keeps version history according to the mount's retention settings.
+Deleting a credential through Tidebreak deletes the latest version. If your
+policy requires historical values to be destroyed, configure Vault retention
+or destroy those versions through an operator-controlled Vault workflow.
+
+If Vault is absent, stored-secret reads return unset so provider environment
+variables keep working. Attempts to save or remove a credential fail and name
+`TIDEBREAK_VAULT_ADDR` and `TIDEBREAK_VAULT_TOKEN_FILE` as the required setup.
+
 ## Environment variables
 
 Every variable below is read by the server or the CLI; nothing here is
@@ -195,6 +257,11 @@ aspirational.
 | `TIDEBREAK_AUTH_GATEWAY_VERIFIER_URL` | no | `TIDEBREAK_AUTH_GATEWAY_URL` | Optional server-to-server Gateway URL for principal validation when the public origin is not cluster-routable. Requires Gateway auth. |
 | `TIDEBREAK_AUTH_TOKENS_FILE` | one auth mode required | — | Standalone compatibility: path to the static token file above. Mutually exclusive with Gateway auth. |
 | `TIDEBREAK_ADAPTER_BOOTSTRAP_TOKENS` | no | unset | Comma-separated service bearers allowed to start an external channel connect handshake. Each value must be 32–512 header-safe characters. Leave unset to disable connect start. To rotate without downtime, add the new value, move the adapter, then remove the old value. |
+| `TIDEBREAK_VAULT_ADDR` | required with Vault custody | — | Vault base URL. HTTPS is required except for literal loopback development. Setting any Vault option enables Vault configuration and requires this variable plus `TIDEBREAK_VAULT_TOKEN_FILE`. |
+| `TIDEBREAK_VAULT_TOKEN_FILE` | required with Vault custody | — | Mounted file containing the Vault token. Tidebreak reads it for every request so rotation does not require a restart. |
+| `TIDEBREAK_VAULT_MOUNT` | no | `secret` | KV v2 mount path. |
+| `TIDEBREAK_VAULT_PATH` | no | `tidebreak` | Deployment-specific path below the mount. Tidebreak appends one encoded credential key. |
+| `TIDEBREAK_VAULT_NAMESPACE` | no | unset | Vault Enterprise or HCP namespace sent as `X-Vault-Namespace`. |
 | `TIDEBREAK_DATA_DIR` | no | `./.tidebreak` | Instance lock, logs, per-turn scratch. Durable state lives in PostgreSQL, not here. |
 | `TIDEBREAK_LOG` | no | built-in policy | `tracing` filter directives, e.g. `debug` or `warn,tidebreak_server=trace`. An invalid spec falls back to the default. |
 | `TIDEBREAK_DIAGNOSTICS_LOG` | no | `off,tidebreak_diagnostics=info` | `tracing` filter directives for the bounded structured JSONL log. See [Diagnostics](diagnostics.md). |
@@ -207,7 +274,7 @@ aspirational.
 | `TIDEBREAK_RUNTIME_CONCURRENCY_CAP` | no | `3` | Positive maximum number of live remote sandboxes each owner may hold. Restart Tidebreak after changing it. |
 | `TIDEBREAK_RUNTIME_SPAWN_SPEND_CEILING_MICROUSD` | no | `5000000` | Positive per-spawn spend ceiling in micro-USD. Set `none` to leave this ceiling to the runtime profile. Restart Tidebreak after changing it. |
 | `TIDEBREAK_RUNTIME_SESSION_SPEND_CEILING_MICROUSD` | no | `20000000` | Positive cumulative spend ceiling per remote session in micro-USD. Set `none` to remove Tidebreak's cumulative ceiling; the runtime profile still bounds each spawn. Restart Tidebreak after changing it. |
-| `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `GEMINI_API_KEY`, `FIREWORKS_API_KEY`, `TOGETHER_API_KEY` | no | unset | Fallback provider credentials, consulted when no credential is stored for that provider. A container has no OS keychain, so this is how a self-host deployment supplies model keys. |
+| `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `GEMINI_API_KEY`, `FIREWORKS_API_KEY`, `TOGETHER_API_KEY` | no | unset | Fallback provider credentials, consulted when Vault holds no credential for that provider or Vault custody is not configured. |
 | `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `OPENAI_COMPATIBLE_BASE_URL`, `OLLAMA_BASE_URL` | no | unset | Fallback provider endpoints, consulted when no base URL is stored for that provider. Point a provider at a compatible endpoint from your chart or compose file instead of setting it after first boot. Use HTTPS; Ollama also accepts HTTP on a loopback address. An unusable value is ignored, and the provider keeps its built-in endpoint. |
 | `TIDEBREAK_LISTEN_ADDR` | no | loopback, ephemeral port | Self-host only: the address and port the API binds, e.g. `0.0.0.0:8080`. The desktop profile refuses to boot with it set — that profile's loopback binding is what its per-launch token assumes. The image sets it to `0.0.0.0:8080` so the container is reachable at a known port. |
 
@@ -233,6 +300,11 @@ docker compose up -d --build
 # 4. Confirm it is up.
 curl -fsS http://127.0.0.1:8080/healthz     # -> ok
 ```
+
+This minimal Compose stack uses provider environment variables. To save
+credentials through Settings, mount a Vault token file into the server
+container and pass the `TIDEBREAK_VAULT_*` variables from the preceding
+section.
 
 `/healthz` is the one unauthenticated route. Everything else needs
 `Authorization: Bearer <token>` with a token from your file.
@@ -374,13 +446,6 @@ data in a self-host deployment yet:
 
 - Document and blob PostgreSQL parity is not comprehensively tested (the
   durable turn state machine is what CI exercises against PostgreSQL).
-- Remote secret custody is future work, and it shows up immediately in a
-  container: there is no OS keychain behind the credential store, so the
-  deployment-plane routes that write or read provider and web-search
-  credentials answer `500 web search credential storage is unavailable`
-  rather than storing anything. Supply model credentials through the
-  environment instead (see the table above) — which also means they are
-  visible to anyone who can inspect the container.
 - Object storage is not wired.
 - Tidebreak enforces one active server process per PostgreSQL database through
   a dedicated advisory lease. A second process refuses boot even when it uses

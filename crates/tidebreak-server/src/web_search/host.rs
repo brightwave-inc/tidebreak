@@ -450,7 +450,9 @@ pub async fn write_credential(
     secrets
         .set_secret(credential_key(provider)?, api_key)
         .await
-        .map_err(|_| ServerError::internal("web search credential storage is unavailable"))?;
+        .map_err(|error| {
+            ServerError::credential_storage(error, "web search credential storage is unavailable")
+        })?;
     Ok(WebSearchCredentialReadiness {
         provider,
         has_credential: true,
@@ -465,7 +467,9 @@ pub async fn delete_credential(
     secrets
         .delete_secret(credential_key(provider)?)
         .await
-        .map_err(|_| ServerError::internal("web search credential storage is unavailable"))?;
+        .map_err(|error| {
+            ServerError::credential_storage(error, "web search credential storage is unavailable")
+        })?;
     Ok(WebSearchCredentialReadiness {
         provider,
         has_credential: false,
