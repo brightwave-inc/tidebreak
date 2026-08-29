@@ -266,8 +266,15 @@ pub async fn external_events(
                 return;
             }
         }
-        let stream =
-            super::session_events::stream_events(socket, state, owner, id, query.after, None);
+        let stream = super::session_events::stream_events(
+            socket,
+            state,
+            owner,
+            id,
+            query.after,
+            None,
+            super::session_events::Viewer::Adapter,
+        );
         tokio::pin!(stream);
         loop {
             tokio::select! {

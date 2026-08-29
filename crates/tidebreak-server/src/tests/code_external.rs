@@ -486,6 +486,31 @@ async fn external_events_snapshot_then_replay_then_sever_on_revoke() {
         "the per-turn assistant record must reach the socket"
     );
 
+    // The adapter is a renderer, not a viewer: its reconnect — the resync
+    // path — must not clear `DoneUnreviewed`, which the desktop inbox and
+    // the channel's own success render both read.
+    let before = runtime.get_session(&owner, parsed).await.unwrap().attention;
+    let mut request = format!("ws://{addr}/external/code/sessions/{session_id}/events")
+        .into_client_request()
+        .unwrap();
+    request.headers_mut().insert(
+        "Authorization",
+        format!("Bearer {}", pair.token).parse().unwrap(),
+    );
+    let (mut resync, _) = connect_async(request).await.unwrap();
+    let frame = tokio::time::timeout(Duration::from_secs(5), resync.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(frame.to_text().unwrap().contains("snapshot"));
+    let after = runtime.get_session(&owner, parsed).await.unwrap().attention;
+    assert_eq!(
+        after.state, before.state,
+        "an adapter connect must not count as the owner viewing the session"
+    );
+    drop(resync);
+
     // Revocation severs the live stream promptly.
     runtime
         .revoke_adapter_grant(&owner, grant.id, "owner unlinked the workspace")

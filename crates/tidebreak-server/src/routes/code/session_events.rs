@@ -45,8 +45,25 @@ pub async fn session_events(
     } else {
         upgrade
     };
-    Ok(upgrade
-        .on_upgrade(move |socket| stream_events(socket, state, owner, id, query.after, auth_lease)))
+    Ok(upgrade.on_upgrade(move |socket| {
+        stream_events(
+            socket,
+            state,
+            owner,
+            id,
+            query.after,
+            auth_lease,
+            Viewer::Owner,
+        )
+    }))
+}
+
+/// Who is on the other end of an events socket. The owner's own reader
+/// counts as looking at the session; an adapter's follower does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Viewer {
+    Owner,
+    Adapter,
 }
 
 pub(super) async fn stream_events(
@@ -56,13 +73,19 @@ pub(super) async fn stream_events(
     session: CodeSessionId,
     after: i64,
     auth_lease: Option<GatewayAuthLease>,
+    viewer: Viewer,
 ) {
     let mut auth_revalidation = gateway_auth_revalidation_timer(auth_lease.as_ref());
     let Some(runtime) = state.code.clone() else {
         return;
     };
     let (mut live, tail) = runtime.bus.attach(session);
-    let _ = runtime.mark_session_viewed(&owner, session).await;
+    // Only the desktop's own socket means the owner is looking at the
+    // session. The adapter's follower is a renderer, not a viewer: its
+    // connects and resyncs must not clear `DoneUnreviewed` for the owner.
+    if viewer == Viewer::Owner {
+        let _ = runtime.mark_session_viewed(&owner, session).await;
+    }
     let mut last_seq = after;
     if replay_after(&mut socket, &runtime.db, &owner, session, &mut last_seq)
         .await
