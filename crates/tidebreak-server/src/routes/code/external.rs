@@ -238,7 +238,18 @@ pub async fn external_events(
     let session = runtime.get_session(&grant.owner, id).await?;
     let owner = grant.owner.clone();
     let grant_id = grant.id;
+    // Subscribe before deciding to serve, then re-read the durable row while
+    // holding the subscription. A revocation that committed before this point
+    // published into a channel nobody held; the recheck catches it, and one
+    // that commits after it reaches the subscription. Without this ordering,
+    // a revocation racing the handshake leaves the stream connected.
     let revocations = runtime.grant_revocations();
+    let mut severed = revocations.subscribe();
+    if !runtime.adapter_grant_is_live(&owner, grant_id).await? {
+        return Err(ServerError::unauthorized(
+            "the adapter token matches no live grant",
+        ));
+    }
     Ok(upgrade.on_upgrade(move |mut socket| async move {
         // The renderer needs the session's standing before the journal:
         // lifecycle and the attention snapshot arrive first, as their own
@@ -255,7 +266,6 @@ pub async fn external_events(
                 return;
             }
         }
-        let mut severed = revocations.subscribe();
         let stream =
             super::session_events::stream_events(socket, state, owner, id, query.after, None);
         tokio::pin!(stream);

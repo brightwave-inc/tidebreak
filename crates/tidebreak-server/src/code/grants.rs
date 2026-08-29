@@ -164,6 +164,24 @@ impl super::runtime::CodeRuntime {
     pub(crate) fn grant_revocations(&self) -> Arc<GrantRevocations> {
         self.grant_revocations.clone()
     }
+
+    /// Whether the grant's durable row is still live.
+    ///
+    /// The event stream's handshake recheck: a revocation that commits
+    /// between token authentication and the revocation subscription
+    /// published into a channel nobody held, so the stream re-reads the
+    /// row while holding its subscription before it starts.
+    pub(crate) async fn adapter_grant_is_live(
+        &self,
+        owner: &OwnerId,
+        grant_id: CodeGrantId,
+    ) -> Result<bool, ServerError> {
+        Ok(
+            tidebreak_core::db::code::get_external_grant(&self.db, owner, grant_id)
+                .await?
+                .is_some_and(|grant| grant.revoked_at.is_none()),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -288,5 +306,40 @@ mod tests {
         assert_ne!(a, hash_adapter_token("tbg_other"));
         assert_eq!(a.len(), 64);
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    /// The event stream's handshake recheck: a revocation that lands after
+    /// token authentication but before the revocation subscription must
+    /// still refuse the stream, because it published into a channel nobody
+    /// held yet.
+    #[tokio::test]
+    async fn a_revocation_racing_the_handshake_fails_the_recheck() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = runtime(dir.path()).await;
+        let owner = OwnerId::local();
+        let (grant, _pair) = runtime
+            .mint_adapter_grant(&owner, "slack", "U9", "T9")
+            .await
+            .unwrap();
+        assert!(runtime
+            .adapter_grant_is_live(&owner, grant.id)
+            .await
+            .unwrap());
+        // The revocation commits with no subscriber listening — exactly the
+        // window between the extractor's auth and the stream's subscribe.
+        runtime
+            .revoke_adapter_grant(&owner, grant.id, "owner unlinked the workspace")
+            .await
+            .unwrap()
+            .expect("the grant exists");
+        let severed = runtime.grant_revocations().subscribe();
+        assert!(
+            !runtime
+                .adapter_grant_is_live(&owner, grant.id)
+                .await
+                .unwrap(),
+            "the recheck under the subscription must see the revoked row"
+        );
+        drop(severed);
     }
 }
