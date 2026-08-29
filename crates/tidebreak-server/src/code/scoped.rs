@@ -637,6 +637,15 @@ impl ScopedCode {
             .await
     }
 
+    pub(crate) async fn external_bindings_for_sessions(
+        &self,
+        session_ids: &[CodeSessionId],
+    ) -> Result<Vec<tidebreak_core::CodeExternalBinding>, ServerError> {
+        self.runtime
+            .external_bindings_for_sessions(&self.owner, session_ids)
+            .await
+    }
+
     pub(crate) async fn list_session_turns(
         &self,
         id: CodeSessionId,

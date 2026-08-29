@@ -15,7 +15,8 @@ use axum::http::{header, request::Parts, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 
 use super::types::{
-    CodeForkTranscript, CodeSessionSnapshot, CodeTurnSnapshot, CreateRemoteSessionBody,
+    CodeForkTranscript, CodeSessionExternalOrigin, CodeSessionSnapshot, CodeTurnSnapshot,
+    CreateRemoteSessionBody,
     CreateSessionBody, QueuePausedBody, QueuedCodeTurn, QueuedCodeTurnUpdate,
     QueuedCodeTurnsSnapshot, SequencedCodeEventFrame, SetAttentionBody, SetFastModeBody,
     SetPermissionModeBody, SetReasoningEffortBody, SteerBody, SubmitTurnBody,
@@ -110,10 +111,30 @@ pub async fn list_workspace_sessions(
     Path(workspace_id): Path<WorkspaceId>,
 ) -> Result<Json<Vec<CodeSessionSnapshot>>, ServerError> {
     let sessions = code.list_workspace_sessions(workspace_id).await?;
+    let ids: Vec<CodeSessionId> = sessions.iter().map(|session| session.id).collect();
+    let origins: std::collections::HashMap<CodeSessionId, CodeSessionExternalOrigin> = code
+        .external_bindings_for_sessions(&ids)
+        .await?
+        .into_iter()
+        .map(|binding| {
+            (
+                binding.session_id,
+                CodeSessionExternalOrigin {
+                    channel_kind: binding.channel_kind,
+                    external_key: binding.external_key,
+                },
+            )
+        })
+        .collect();
     Ok(Json(
         sessions
             .into_iter()
-            .map(CodeSessionSnapshot::from)
+            .map(|session| {
+                let origin = origins.get(&session.id).cloned();
+                let mut snapshot = CodeSessionSnapshot::from(session);
+                snapshot.external_origin = origin;
+                snapshot
+            })
             .collect(),
     ))
 }

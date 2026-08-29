@@ -149,6 +149,7 @@ import {
 import { submitAcceptedTurn } from "./CodeSessionSend";
 import { CodeSidebar } from "./CodeSidebar";
 import { CodeTranscript } from "./CodeTranscript";
+import { SessionOriginBanner } from "./SessionOriginBanner";
 import {
   applyTurnRewrite,
   mainAgentTranscriptItems,
@@ -2542,6 +2543,9 @@ function CodeSessionPane({
           status={selectedSubagent?.status ?? "unavailable"}
           onBack={onBackFromSubagent}
         />
+      )}
+      {!subagentCallId && session.external_origin && (
+        <SessionOriginBanner origin={session.external_origin} />
       )}
       <div className={cn("message-view", follow.fadeClass)}>
         {connectionState === "reconnecting" && (

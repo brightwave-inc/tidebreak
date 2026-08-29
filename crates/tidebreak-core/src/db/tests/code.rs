@@ -4718,6 +4718,18 @@ async fn a_binding_resolves_ends_and_scopes_by_grant() {
             .await
             .unwrap()
     );
+    // The desktop's provenance join answers for exactly the bound session
+    // and stays silent for a desktop-created one.
+    let joined = crate::db::code::list_external_bindings_for_sessions(
+        &store,
+        &owner,
+        &[session.id, crate::code::CodeSessionId::new()],
+    )
+    .await
+    .unwrap();
+    assert_eq!(joined.len(), 1);
+    assert_eq!(joined[0].id, binding.id);
+    assert_eq!(joined[0].external_key, "T1/C9/9.1");
     assert!(!crate::db::code::session_bound_to_grant(
         &store,
         &owner,

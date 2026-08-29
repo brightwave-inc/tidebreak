@@ -49,6 +49,32 @@ pub async fn get_external_binding(
         .transpose()
 }
 
+/// Every binding whose session is in `session_ids`, for the owner.
+///
+/// The desktop snapshot join: one query answers provenance for a whole
+/// workspace's session list instead of one lookup per session.
+pub async fn list_external_bindings_for_sessions(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_ids: &[CodeSessionId],
+) -> Result<Vec<CodeExternalBinding>> {
+    if session_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    entities::code_external_binding::Entity::find()
+        .filter(entities::code_external_binding::Column::Owner.eq(owner.as_str()))
+        .filter(
+            entities::code_external_binding::Column::SessionId
+                .is_in(session_ids.iter().map(|id| id.0)),
+        )
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .map(binding_from_model)
+        .collect()
+}
+
 /// Whether `session_id` is bound under `grant_id`.
 ///
 /// The scope check every grant-authenticated session call runs: a grant may

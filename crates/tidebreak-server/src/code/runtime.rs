@@ -5733,6 +5733,23 @@ impl CodeRuntime {
         Ok(list_sessions_for_workspace(&self.db, owner, workspace_id).await?)
     }
 
+    /// The external bindings behind `session_ids`, for provenance display.
+    /// Sessions the desktop created have none and are simply absent.
+    pub(crate) async fn external_bindings_for_sessions(
+        &self,
+        owner: &OwnerId,
+        session_ids: &[CodeSessionId],
+    ) -> Result<Vec<tidebreak_core::CodeExternalBinding>, ServerError> {
+        Ok(
+            tidebreak_core::db::code::list_external_bindings_for_sessions(
+                &self.db,
+                owner,
+                session_ids,
+            )
+            .await?,
+        )
+    }
+
     pub(crate) async fn list_session_turns(
         &self,
         owner: &OwnerId,

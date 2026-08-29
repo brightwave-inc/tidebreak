@@ -1599,6 +1599,22 @@ subagents?: Array<CodeSubagentSummary>,
 recap?: string, };
 
 /**
+ * Where an externally created session came from. The desktop renders it
+ * as the provenance banner; a session the desktop created carries none.
+ */
+export type CodeSessionExternalOrigin = { 
+/**
+ * The channel family, for example `slack`.
+ */
+channel_kind: string, 
+/**
+ * The channel's durable conversation identity, opaque to the server.
+ * For Slack this is `workspace:channel:thread_ts`, which the desktop
+ * turns into a thread permalink.
+ */
+external_key: string, };
+
+/**
  * Identifies one durable conversation with an external agent engine.
  */
 export type CodeSessionId = string;
@@ -1624,7 +1640,11 @@ reasoning_effort?: ReasoningEffort,
 /**
  * Whether this session runs its turns in the engine's fast mode.
  */
-fast_mode: boolean, lifecycle: CodeSessionLifecycle, fence_reason?: FenceReason, attention: Attention, unrecognized_event_count: number, created_at: string, };
+fast_mode: boolean, lifecycle: CodeSessionLifecycle, fence_reason?: FenceReason, attention: Attention, unrecognized_event_count: number, created_at: string, 
+/**
+ * Present when an external channel created the session.
+ */
+external_origin?: CodeSessionExternalOrigin, };
 
 /**
  * The next reclaim tier a workspace can take.
