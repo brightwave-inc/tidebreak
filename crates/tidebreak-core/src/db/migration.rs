@@ -3035,6 +3035,7 @@ impl MigrationTrait for CodeExternalEvents {
     }
 }
 
+#[async_trait::async_trait]
 impl MigrationTrait for CodeTurnRewrite {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         if !manager.has_column("code_turn", "rewrite").await? {
