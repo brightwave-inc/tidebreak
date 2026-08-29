@@ -1758,6 +1758,11 @@ async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser_par
 /// restart. Its misses re-ask the store instead; an absent item answers
 /// `NoEntry` without an ACL prompt, so the slow-path rereads are cheap.
 fn secret_provider(config: &Config) -> Result<ProfileSecrets> {
+    if config.profile != Profile::SelfHost && config.vault_secrets.is_some() {
+        return Err(AgentError::config(
+            "Vault secret custody is available only with TIDEBREAK_PROFILE=self_host",
+        ));
+    }
     let storage: Arc<dyn SecretProvider> = match config.profile {
         Profile::Desktop => Arc::new(match &config.keychain_service {
             Some(service) => KeychainSecretProvider::with_service(service),
@@ -1858,6 +1863,25 @@ mod profile_secret_tests {
             .to_string();
         assert!(error.contains("desktop profile"));
         assert!(error.contains("OS keychain"));
+    }
+
+    #[test]
+    fn desktop_provider_rejects_programmatic_vault_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = Config::desktop(directory.path());
+        config.vault_secrets = Some(tidebreak_core::VaultSecretConfig {
+            address: "https://vault.example.test".into(),
+            token_file: directory.path().join("vault-token"),
+            mount: "secret".into(),
+            path: "tidebreak".into(),
+            namespace: None,
+        });
+
+        let error = match secret_provider(&config) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("desktop accepted Vault settings"),
+        };
+        assert!(error.contains("TIDEBREAK_PROFILE=self_host"));
     }
 }
 
