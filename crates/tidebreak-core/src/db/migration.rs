@@ -62,6 +62,7 @@ impl MigratorTrait for Migrator {
             Box::new(CodeSessionIncarnations),
             Box::new(IncarnationIngest),
             Box::new(CodeExternalBindings),
+            Box::new(CodeExternalEvents),
         ]
     }
 }
@@ -2923,6 +2924,104 @@ impl MigrationTrait for CodeExternalBindings {
     }
 }
 
+/// Make external message delivery idempotent (docs/slack-sessions.md,
+/// stage 2).
+///
+/// One row per channel event that caused a queue row or turn. The event id
+/// commits in the same transaction as that row, and `turn_id` names it —
+/// the queue row's id becomes the turn's id at promotion, so one column
+/// follows the message through its whole life. A replayed delivery derives
+/// its response from that row's current state; there is no separate outcome
+/// snapshot to go stale.
+struct CodeExternalEvents;
+
+impl MigrationName for CodeExternalEvents {
+    fn name(&self) -> &str {
+        "m20260828_000025_code_external_events"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for CodeExternalEvents {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(idens::CodeExternalEvent::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(idens::CodeExternalEvent::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeExternalEvent::Owner)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeExternalEvent::SessionId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeExternalEvent::EventId)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeExternalEvent::ChannelTs)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeExternalEvent::TurnId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeExternalEvent::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_code_external_event_session")
+                            .from(
+                                idens::CodeExternalEvent::Table,
+                                idens::CodeExternalEvent::SessionId,
+                            )
+                            .to(idens::CodeSession::Table, idens::CodeSession::Id)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        // The replay gate: one channel event causes at most one row.
+        manager
+            .create_index(
+                Index::create()
+                    .name("ix_code_external_event_key")
+                    .table(idens::CodeExternalEvent::Table)
+                    .col(idens::CodeExternalEvent::Owner)
+                    .col(idens::CodeExternalEvent::SessionId)
+                    .col(idens::CodeExternalEvent::EventId)
+                    .unique()
+                    .if_not_exists()
+                    .to_owned(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // Dropping the table would forget which deliveries already ran, and
+        // the channel's retries would double-submit turns.
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
@@ -2996,6 +3095,7 @@ mod tests {
                 "m20260827_000022_code_session_incarnations",
                 "m20260827_000023_incarnation_ingest",
                 "m20260828_000024_code_external_bindings",
+                "m20260828_000025_code_external_events",
             ]
         );
         assert!(db

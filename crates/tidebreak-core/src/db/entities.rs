@@ -1960,6 +1960,28 @@ pub mod code_external_binding {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+pub mod code_external_event {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "code_external_event")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub owner: String,
+        pub session_id: Uuid,
+        pub event_id: String,
+        pub channel_ts: String,
+        pub turn_id: Uuid,
+        pub created_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 pub mod code_session_image {
     use sea_orm::entity::prelude::*;
 

@@ -149,6 +149,21 @@ pub(crate) enum SubmitTurnOutcome {
     AlreadyDelivered,
 }
 
+/// Result of one external message delivery (`docs/slack-sessions.md`,
+/// stage 2). A replayed delivery answers with the same shape the first one
+/// earned, derived from the row's current state.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug)]
+pub(crate) enum ExternalMessageOutcome {
+    /// The message became a running turn.
+    NewTurn(Box<CodeTurn>),
+    /// The session was busy; the message sits as a durable queue row.
+    Queued(Box<CodeQueuedTurn>),
+    /// The row the first delivery caused was retracted before it could
+    /// run; the replay has nothing to point at.
+    Dropped,
+}
+
 enum LivePermissionModeOutcome {
     Unavailable,
     RelaunchRequired,
@@ -4177,79 +4192,172 @@ impl CodeRuntime {
     /// remote sweep; local sessions drain their own queues through their
     /// workers and are skipped here.
     pub(crate) async fn promote_remote_queue_heads(&self) -> Result<(), ServerError> {
+        if self.remote.is_none() {
+            return Ok(());
+        }
+        let sessions = list_sessions_all_owners(&self.db).await?;
+        for session in sessions {
+            self.try_promote_remote_head(session).await?;
+        }
+        Ok(())
+    }
+
+    /// Promote one idle remote session's queue head, when it has one and
+    /// nothing holds promotion. Shared by the sweep and the external
+    /// messages path, which tries the head immediately after enqueueing
+    /// rather than waiting out a sweep tick.
+    async fn try_promote_remote_head(&self, mut session: CodeSession) -> Result<(), ServerError> {
         let Some(remote) = self.remote_sessions() else {
             return Ok(());
         };
-        let sessions = list_sessions_all_owners(&self.db).await?;
-        for mut session in sessions {
-            if session.lifecycle != CodeSessionLifecycle::Idle {
-                continue;
+        if session.lifecycle != CodeSessionLifecycle::Idle {
+            return Ok(());
+        }
+        let Ok(workspace) = self
+            .get_workspace(&session.owner, session.workspace_id)
+            .await
+        else {
+            return Ok(());
+        };
+        if !workspace.is_remote() {
+            return Ok(());
+        }
+        if tidebreak_core::db::code::queue_paused(&self.db, &session.owner, session.id).await? {
+            return Ok(());
+        }
+        if remote.promotion_held(session.id) {
+            return Ok(());
+        }
+        let Some(head) = queued_turn_head(&self.db, &session.owner, session.id).await? else {
+            return Ok(());
+        };
+        let Ok(repo) = self.get_repo(&session.owner, workspace.repo_id).await else {
+            return Ok(());
+        };
+        let driver = remote.driver(&self.db, self.bus.as_ref());
+        let message = head.message.clone();
+        use super::remote::driver::RemoteTurnOutcome as Outcome;
+        match driver
+            .submit_turn_from(&mut session, &workspace, &repo, &message, Some(&head))
+            .await
+        {
+            // The claim was the atomic promotion; nothing to delete.
+            Ok(Outcome::Delivered { .. }) | Ok(Outcome::Reincarnated { .. }) => {
+                remote.clear_promotion_hold(session.id);
             }
-            let Ok(workspace) = self
-                .get_workspace(&session.owner, session.workspace_id)
-                .await
-            else {
-                continue;
-            };
-            if !workspace.is_remote() {
-                continue;
+            // Permanent for this session: nothing exposes a way to raise
+            // the ceiling, and every retry would re-journal the refusal
+            // and re-cancel the sandbox. Pause the queue so the tray
+            // shows why nothing moves; unpausing retries deliberately.
+            Ok(Outcome::SpendExhausted { .. }) => {
+                let _ = tidebreak_core::db::code::set_queue_paused(
+                    &self.db,
+                    &session.owner,
+                    session.id,
+                    true,
+                )
+                .await;
             }
-            if tidebreak_core::db::code::queue_paused(&self.db, &session.owner, session.id).await? {
-                continue;
+            // Transient machine-side refusals: hold retries so the
+            // notice and attention do not repeat every sweep tick. The
+            // hold expiring retries on its own once the slot may be
+            // free or the owner has signed in.
+            Ok(Outcome::CapExhausted { .. }) | Ok(Outcome::SignInRequired) => {
+                remote.hold_promotion(session.id);
             }
-            if remote.promotion_held(session.id) {
-                continue;
-            }
-            let Some(head) = queued_turn_head(&self.db, &session.owner, session.id).await? else {
-                continue;
-            };
-            let Ok(repo) = self.get_repo(&session.owner, workspace.repo_id).await else {
-                continue;
-            };
-            let driver = remote.driver(&self.db, self.bus.as_ref());
-            let message = head.message.clone();
-            use super::remote::driver::RemoteTurnOutcome as Outcome;
-            match driver
-                .submit_turn_from(&mut session, &workspace, &repo, &message, Some(&head))
-                .await
-            {
-                // The claim was the atomic promotion; nothing to delete.
-                Ok(Outcome::Delivered { .. }) | Ok(Outcome::Reincarnated { .. }) => {
-                    remote.clear_promotion_hold(session.id);
-                }
-                // Permanent for this session: nothing exposes a way to raise
-                // the ceiling, and every retry would re-journal the refusal
-                // and re-cancel the sandbox. Pause the queue so the tray
-                // shows why nothing moves; unpausing retries deliberately.
-                Ok(Outcome::SpendExhausted { .. }) => {
-                    let _ = tidebreak_core::db::code::set_queue_paused(
-                        &self.db,
-                        &session.owner,
-                        session.id,
-                        true,
-                    )
-                    .await;
-                }
-                // Transient machine-side refusals: hold retries so the
-                // notice and attention do not repeat every sweep tick. The
-                // hold expiring retries on its own once the slot may be
-                // free or the owner has signed in.
-                Ok(Outcome::CapExhausted { .. }) | Ok(Outcome::SignInRequired) => {
-                    remote.hold_promotion(session.id);
-                }
-                // Busy shapes: the row stays queued for the next idle.
-                Ok(_) => {}
-                Err(error) => {
-                    tracing::warn!(
-                        session = %session.id,
-                        %error,
-                        "promoting a queued remote message failed; the row stays queued"
-                    );
-                    remote.hold_promotion(session.id);
-                }
+            // Busy shapes: the row stays queued for the next idle.
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(
+                    session = %session.id,
+                    %error,
+                    "promoting a queued remote message failed; the row stays queued"
+                );
+                remote.hold_promotion(session.id);
             }
         }
         Ok(())
+    }
+
+    /// Take one external message for a bound session
+    /// (`docs/slack-sessions.md`, stage 2).
+    ///
+    /// Idempotent across the channel's retries: the event id commits with
+    /// the queue row it causes, and a replay derives its answer from that
+    /// row's current state — still queued, promoted into a turn, or
+    /// retracted — without writing a second row. An idle session promotes
+    /// the head immediately; a busy one queues durably.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) async fn external_submit_message(
+        &self,
+        owner: &OwnerId,
+        grant_id: tidebreak_core::CodeGrantId,
+        session_id: CodeSessionId,
+        message: String,
+        event_id: &str,
+        channel_ts: &str,
+    ) -> Result<ExternalMessageOutcome, ServerError> {
+        if self.remote.is_none() {
+            return Err(ServerError::conflict_kind(
+                "remote_disabled",
+                "this deployment has no sandbox runtime configured",
+            ));
+        }
+        if !tidebreak_core::db::code::session_bound_to_grant(&self.db, owner, session_id, grant_id)
+            .await?
+        {
+            return Err(ServerError::conflict_kind(
+                "grant_scope",
+                "this grant holds no binding to that session",
+            ));
+        }
+        let session = self.get_session(owner, session_id).await?;
+        match session.lifecycle {
+            CodeSessionLifecycle::Ended => {
+                return Err(ServerError::conflict_kind(
+                    "session_ended",
+                    "the bound session has ended; the conversation is closed",
+                ));
+            }
+            CodeSessionLifecycle::Fenced => {
+                return Err(ServerError::conflict_kind(
+                    "session_fenced",
+                    "the bound session is fenced pending a reap",
+                ));
+            }
+            _ => {}
+        }
+        let record = tidebreak_core::db::code::record_external_message(
+            &self.db, owner, session_id, event_id, channel_ts, &message,
+        )
+        .await?;
+        let (turn_id, fresh) = match &record {
+            tidebreak_core::ExternalMessageRecord::Recorded(row) => (row.id, true),
+            tidebreak_core::ExternalMessageRecord::Replay { turn_id } => (*turn_id, false),
+        };
+        if fresh {
+            // Best effort: a refusal leaves the row queued for the sweep.
+            let session = self.get_session(owner, session_id).await?;
+            if let Err(error) = self.try_promote_remote_head(session).await {
+                tracing::warn!(
+                    session = %session_id,
+                    ?error,
+                    "promoting an external message failed; the row stays queued"
+                );
+            }
+        }
+        if let Some(row) = tidebreak_core::db::code::list_queued_turns(&self.db, owner, session_id)
+            .await?
+            .into_iter()
+            .find(|row| row.id == turn_id)
+        {
+            return Ok(ExternalMessageOutcome::Queued(Box::new(row)));
+        }
+        if let Some(turn) = tidebreak_core::db::code::get_turn(&self.db, owner, turn_id).await? {
+            return Ok(ExternalMessageOutcome::NewTurn(Box::new(turn)));
+        }
+        // The row the first delivery caused was retracted before it ran.
+        Ok(ExternalMessageOutcome::Dropped)
     }
 
     /// Park a message as a durable queue row (decision 69).
