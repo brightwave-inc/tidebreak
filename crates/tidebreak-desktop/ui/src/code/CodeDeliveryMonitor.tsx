@@ -3,6 +3,7 @@ import type { ApiClient } from "../api/client";
 import type {
   CodeDeliveryPullRequestSummary,
   CodeDeliveryRunSummary,
+  CodeDeliverySourceError,
   CodeGitHubRepositoryRef,
   CodeGitHubRepositoryTarget,
 } from "../api/types";
@@ -101,15 +102,20 @@ export function CodeDeliveryMonitor({ client }: { client: ApiClient }) {
         );
         const legacyRules = current.legacyNotificationRules;
         if (legacyRules) {
-          await migrateLegacyNotificationRules(
+          const migrationComplete = await migrateLegacyNotificationRules(
             client,
             legacyRules,
-            repositories,
+            {
+              repositories,
+              errors: discovered.errors,
+            },
           );
           if (!isCurrent()) return;
-          useCodeDeliveryStore
-            .getState()
-            .completeNotificationRuleMigration(legacyRules);
+          if (migrationComplete) {
+            useCodeDeliveryStore
+              .getState()
+              .completeNotificationRuleMigration(legacyRules);
+          }
         }
 
         const targets = repositories.map(codeDeliveryRepositoryTarget);
@@ -201,19 +207,27 @@ export function CodeDeliveryMonitor({ client }: { client: ApiClient }) {
   return null;
 }
 
-/** Arm every server trigger represented by the old client-side rules. */
+/**
+ * Arm every server trigger represented by the old client-side rules.
+ *
+ * A partial repository catalog may still arm the rows it found, but it cannot
+ * commit the one-way migration because a later retry may discover more repos.
+ */
 export async function migrateLegacyNotificationRules(
   client: Pick<ApiClient, "listCodeTriggers" | "createCodeTrigger">,
   rules: readonly CodeDeliveryNotificationRule[],
-  repositories: readonly CodeGitHubRepositoryRef[],
-): Promise<void> {
+  catalog: {
+    repositories: readonly CodeGitHubRepositoryRef[];
+    errors: readonly CodeDeliverySourceError[];
+  },
+): Promise<boolean> {
   const byRepository = new Map<
     string,
     ReturnType<typeof triggersForNotificationRules>
   >();
   for (const trigger of triggersForNotificationRules(
     [...rules],
-    [...repositories],
+    [...catalog.repositories],
   )) {
     const triggers = byRepository.get(trigger.repoId) ?? [];
     triggers.push(trigger);
@@ -233,6 +247,7 @@ export async function migrateLegacyNotificationRules(
       existing.add(trigger.condition);
     }
   }
+  return catalog.errors.length === 0;
 }
 
 /** Delay until the next monitor pass. `null` means there is no clock. */

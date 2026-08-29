@@ -33,17 +33,37 @@ describe("migrateLegacyNotificationRules", () => {
     const listCodeTriggers = vi.fn(async () => []);
     const createCodeTrigger = vi.fn(async () => ({}) as never);
 
-    await migrateLegacyNotificationRules(
-      { listCodeTriggers, createCodeTrigger },
-      [attentionRule],
-      [repository],
-    );
+    await expect(
+      migrateLegacyNotificationRules(
+        { listCodeTriggers, createCodeTrigger },
+        [attentionRule],
+        { repositories: [repository], errors: [] },
+      ),
+    ).resolves.toBe(true);
 
     expect(listCodeTriggers).toHaveBeenCalledWith("repo-1");
     expect(createCodeTrigger.mock.calls).toEqual([
       ["repo-1", "changes_requested", "notify"],
       ["repo-1", "conflicts", "notify"],
     ]);
+  });
+
+  it("keeps the migration pending when repository discovery is partial", async () => {
+    const listCodeTriggers = vi.fn(async () => []);
+    const createCodeTrigger = vi.fn(async () => ({}) as never);
+
+    await expect(
+      migrateLegacyNotificationRules(
+        { listCodeTriggers, createCodeTrigger },
+        [attentionRule],
+        {
+          repositories: [repository],
+          errors: [{ kind: "github", message: "one repository failed" }],
+        },
+      ),
+    ).resolves.toBe(false);
+
+    expect(createCodeTrigger).toHaveBeenCalledTimes(2);
   });
 
   it("retries only missing rows after a partial migration", async () => {
@@ -71,13 +91,13 @@ describe("migrateLegacyNotificationRules", () => {
       migrateLegacyNotificationRules(
         { listCodeTriggers, createCodeTrigger },
         [attentionRule],
-        [repository],
+        { repositories: [repository], errors: [] },
       ),
     ).rejects.toThrow("offline");
     await migrateLegacyNotificationRules(
       { listCodeTriggers, createCodeTrigger },
       [attentionRule],
-      [repository],
+      { repositories: [repository], errors: [] },
     );
 
     expect(createCodeTrigger.mock.calls).toEqual([
