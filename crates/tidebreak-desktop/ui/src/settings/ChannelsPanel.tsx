@@ -26,16 +26,20 @@ import { SettingsError, SettingsPanel, SettingsSection } from "./primitives";
  */
 export function ChannelsPanel({ client }: { client: ApiClient }) {
   const [grants, setGrants] = useState<CodeGrantSnapshot[] | null>(null);
+  const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const { confirm, dialog } = useConfirm();
 
   const reload = useCallback(async () => {
+    setLoading(true);
     setError(null);
     try {
       setGrants(await client.listCodeGrants());
     } catch (err) {
       setError(String(err));
+    } finally {
+      setLoading(false);
     }
   }, [client]);
 
@@ -99,12 +103,19 @@ export function ChannelsPanel({ client }: { client: ApiClient }) {
     <SettingsPanel
       title="Channels"
       description="External channels that can reach coding sessions on this machine. Each grant is one linked person in one channel workspace; revoking it cuts their access immediately."
-      busy={grants === null}
+      busy={loading || working}
     >
-      {grants === null ? (
+      {loading && grants === null ? (
         <p className="text-sm text-muted-foreground" role="status">
           Loading grants…
         </p>
+      ) : grants === null ? (
+        <div className="flex flex-col items-start gap-3">
+          <SettingsError>{error}</SettingsError>
+          <Button type="button" variant="outline" size="sm" onClick={reload}>
+            Try again
+          </Button>
+        </div>
       ) : groups.length === 0 ? (
         <Empty className="min-h-64">
           <EmptyHeader>
@@ -182,7 +193,7 @@ export function ChannelsPanel({ client }: { client: ApiClient }) {
           </SettingsSection>
         ))
       )}
-      {error && <SettingsError>{error}</SettingsError>}
+      {grants !== null && error && <SettingsError>{error}</SettingsError>}
       {dialog}
     </SettingsPanel>
   );

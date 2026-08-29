@@ -26,6 +26,7 @@ const meta = {
     phase: "ready",
     error: null,
     onApprove: () => {},
+    onRetry: () => {},
   },
 } satisfies Meta<typeof ConnectApprovalView>;
 
@@ -53,6 +54,11 @@ export const ApprovedAwaitingChannelConfirm: Story = {
 /** A used, expired, or forwarded-and-consumed link renders its refusal. */
 export const LinkNoLongerValid: Story = {
   args: { page: null, phase: "invalid" },
+};
+
+/** A temporary read failure keeps the still-live link and offers a retry. */
+export const OpenFailed: Story = {
+  args: { page: null, phase: "unavailable" },
 };
 
 /** The approve POST failed; the question stays and the error is spoken. */

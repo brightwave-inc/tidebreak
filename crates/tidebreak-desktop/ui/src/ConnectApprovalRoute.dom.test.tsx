@@ -3,8 +3,11 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { CodeConnectPage } from "./api";
-import { ConnectApprovalView } from "./ConnectApprovalRoute";
+import { HttpError, type CodeConnectPage } from "./api";
+import {
+  connectPageFailurePhase,
+  ConnectApprovalView,
+} from "./ConnectApprovalRoute";
 
 const page: CodeConnectPage = {
   channel_kind: "slack",
@@ -27,6 +30,7 @@ describe("ConnectApprovalView", () => {
         phase="ready"
         error={null}
         onApprove={onApprove}
+        onRetry={() => {}}
       />,
     );
 
@@ -52,6 +56,7 @@ describe("ConnectApprovalView", () => {
         phase="loading"
         error={null}
         onApprove={() => {}}
+        onRetry={() => {}}
       />,
     );
     expect(screen.getByRole("status")).toHaveTextContent(
@@ -64,6 +69,7 @@ describe("ConnectApprovalView", () => {
         phase="approved"
         error={null}
         onApprove={() => {}}
+        onRetry={() => {}}
       />,
     );
     expect(screen.getByText(/return to Slack and confirm there/)).toBeTruthy();
@@ -77,6 +83,7 @@ describe("ConnectApprovalView", () => {
         phase="invalid"
         error={null}
         onApprove={() => {}}
+        onRetry={() => {}}
       />,
     );
     expect(
@@ -91,10 +98,47 @@ describe("ConnectApprovalView", () => {
         phase="ready"
         error="The connect request could not be approved. Try again."
         onApprove={() => {}}
+        onRetry={() => {}}
       />,
     );
     expect(screen.getByRole("alert")).toHaveTextContent(
       "The connect request could not be approved. Try again.",
+    );
+  });
+
+  it("keeps temporary load failures retryable", async () => {
+    const onRetry = vi.fn();
+    render(
+      <ConnectApprovalView
+        page={null}
+        phase="unavailable"
+        error={null}
+        onApprove={() => {}}
+        onRetry={onRetry}
+      />,
+    );
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "The link may still be valid",
+    );
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "Try again" }));
+    expect(onRetry).toHaveBeenCalledOnce();
+  });
+
+  it("calls only a used-or-stale 404 invalid", () => {
+    expect(connectPageFailurePhase(new HttpError(404, "not found"))).toBe(
+      "invalid",
+    );
+    expect(connectPageFailurePhase(new HttpError(401, "unauthorized"))).toBe(
+      "unavailable",
+    );
+    expect(connectPageFailurePhase(new HttpError(500, "server error"))).toBe(
+      "unavailable",
+    );
+    expect(connectPageFailurePhase(new TypeError("network error"))).toBe(
+      "unavailable",
     );
   });
 });

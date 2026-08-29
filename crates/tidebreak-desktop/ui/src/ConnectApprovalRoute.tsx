@@ -2,9 +2,17 @@ import { useEffect, useState } from "react";
 import { useParams } from "@tanstack/react-router";
 
 import { useApp } from "./AppContext";
-import type { CodeConnectPage } from "./api";
+import { HttpError, type CodeConnectPage } from "./api";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+
+type ConnectApprovalPhase =
+  | "loading"
+  | "ready"
+  | "approving"
+  | "approved"
+  | "invalid"
+  | "unavailable";
 
 /**
  * The connect approval a channel's connect card links to
@@ -20,27 +28,29 @@ export function ConnectApprovalRoute() {
   const { nonce } = useParams({ strict: false }) as { nonce: string };
   const { client } = useApp();
   const [page, setPage] = useState<CodeConnectPage | null>(null);
-  const [phase, setPhase] = useState<
-    "loading" | "ready" | "approving" | "approved" | "invalid"
-  >("loading");
+  const [phase, setPhase] = useState<ConnectApprovalPhase>("loading");
   const [error, setError] = useState<string | null>(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
+    setPage(null);
+    setError(null);
+    setPhase("loading");
     void (async () => {
       try {
         const next = await client.getCodeConnectPage(nonce);
         if (cancelled) return;
         setPage(next);
         setPhase(next.state === "approved" ? "approved" : "ready");
-      } catch {
-        if (!cancelled) setPhase("invalid");
+      } catch (loadError) {
+        if (!cancelled) setPhase(connectPageFailurePhase(loadError));
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [client, nonce]);
+  }, [client, loadAttempt, nonce]);
 
   async function approve() {
     if (!page) return;
@@ -61,8 +71,18 @@ export function ConnectApprovalRoute() {
       phase={phase}
       error={error}
       onApprove={() => void approve()}
+      onRetry={() => setLoadAttempt((attempt) => attempt + 1)}
     />
   );
+}
+
+/** Only the server's used-or-stale 404 proves that the link is dead. */
+export function connectPageFailurePhase(
+  error: unknown,
+): Extract<ConnectApprovalPhase, "invalid" | "unavailable"> {
+  return error instanceof HttpError && error.status === 404
+    ? "invalid"
+    : "unavailable";
 }
 
 /**
@@ -74,11 +94,13 @@ export function ConnectApprovalView({
   phase,
   error,
   onApprove,
+  onRetry,
 }: {
   page: CodeConnectPage | null;
-  phase: "loading" | "ready" | "approving" | "approved" | "invalid";
+  phase: ConnectApprovalPhase;
   error: string | null;
   onApprove: () => void;
+  onRetry: () => void;
 }) {
   return (
     <div className="flex min-h-full items-center justify-center p-6">
@@ -96,6 +118,21 @@ export function ConnectApprovalView({
               It may have expired or already been used. Start again from the
               channel: mention the agent and follow the fresh link it posts.
             </p>
+          </div>
+        ) : phase === "unavailable" ? (
+          <div className="flex flex-col items-start gap-3" role="alert">
+            <div className="flex flex-col gap-2">
+              <h1 className="text-lg font-semibold">
+                The connect request could not be opened
+              </h1>
+              <p className="text-sm text-muted-foreground">
+                The link may still be valid. Check that Tidebreak is running,
+                then try again before the request expires.
+              </p>
+            </div>
+            <Button type="button" variant="outline" onClick={onRetry}>
+              Try again
+            </Button>
           </div>
         ) : page ? (
           <div className="flex flex-col gap-4">

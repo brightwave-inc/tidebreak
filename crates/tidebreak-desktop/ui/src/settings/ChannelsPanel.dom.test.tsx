@@ -92,4 +92,30 @@ describe("ChannelsPanel", () => {
     render(<ChannelsPanel client={client} />);
     await screen.findByText("No channels connected");
   });
+
+  it("leaves loading and lets the owner retry a failed grants read", async () => {
+    const listCodeGrants = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("The machine could not be reached."))
+      .mockResolvedValueOnce([]);
+    const client = { listCodeGrants } as unknown as ApiClient;
+
+    const { container } = render(<ChannelsPanel client={client} />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "The machine could not be reached.",
+    );
+    expect(screen.queryByText("Loading grants…")).toBeNull();
+    expect(container.querySelector(".settings-panel")).toHaveAttribute(
+      "aria-busy",
+      "false",
+    );
+
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "Try again" }));
+
+    expect(await screen.findByText("No channels connected")).toBeTruthy();
+    expect(listCodeGrants).toHaveBeenCalledTimes(2);
+  });
 });
