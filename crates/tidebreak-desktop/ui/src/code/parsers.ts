@@ -34,6 +34,8 @@ import type {
   CodeRepoStorageSnapshot,
   CodeWorkspaceStorageSnapshot,
   CodeStorageAction,
+  CodeGrantSnapshot,
+  CodeConnectPage,
   CodeActionSnapshot,
   CodeCommitSnapshot,
   CodePushSnapshot,
@@ -4196,5 +4198,68 @@ export function parseCodeApproval(value: unknown): CodeApprovalSnapshot | null {
     requested_at: value.requested_at,
     ...(value.feedback !== undefined ? { feedback: value.feedback } : {}),
     ...(value.decided_at !== undefined ? { decided_at: value.decided_at } : {}),
+  };
+}
+
+export function parseCodeGrant(value: unknown): CodeGrantSnapshot | null {
+  if (
+    !isRecord(value) ||
+    !nonEmpty(value.id) ||
+    !nonEmpty(value.channel_kind) ||
+    !nonEmpty(value.external_identity) ||
+    !nonEmpty(value.workspace_identity) ||
+    !nonEmpty(value.created_at) ||
+    !optionalString(value.rotated_at) ||
+    !optionalString(value.revoked_at) ||
+    !optionalString(value.revoked_reason)
+  ) {
+    return null;
+  }
+  return {
+    id: value.id,
+    channel_kind: value.channel_kind,
+    external_identity: value.external_identity,
+    workspace_identity: value.workspace_identity,
+    created_at: value.created_at,
+    ...(value.rotated_at !== undefined ? { rotated_at: value.rotated_at } : {}),
+    ...(value.revoked_at !== undefined ? { revoked_at: value.revoked_at } : {}),
+    ...(value.revoked_reason !== undefined
+      ? { revoked_reason: value.revoked_reason }
+      : {}),
+  };
+}
+
+export function parseCodeGrantList(value: unknown): CodeGrantSnapshot[] | null {
+  if (!Array.isArray(value)) return null;
+  const grants: CodeGrantSnapshot[] = [];
+  for (const entry of value) {
+    const grant = parseCodeGrant(entry);
+    if (!grant) return null;
+    grants.push(grant);
+  }
+  return grants;
+}
+
+export function parseCodeConnectPage(value: unknown): CodeConnectPage | null {
+  if (
+    !isRecord(value) ||
+    !nonEmpty(value.channel_kind) ||
+    !nonEmpty(value.display_name) ||
+    !nonEmpty(value.workspace_name) ||
+    !optionalString(value.avatar_url) ||
+    !nonEmpty(value.state) ||
+    !nonEmpty(value.csrf) ||
+    !nonEmpty(value.expires_at)
+  ) {
+    return null;
+  }
+  return {
+    channel_kind: value.channel_kind,
+    display_name: value.display_name,
+    workspace_name: value.workspace_name,
+    ...(value.avatar_url !== undefined ? { avatar_url: value.avatar_url } : {}),
+    state: value.state,
+    csrf: value.csrf,
+    expires_at: value.expires_at,
   };
 }
