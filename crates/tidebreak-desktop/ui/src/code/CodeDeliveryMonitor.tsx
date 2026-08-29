@@ -3,6 +3,7 @@ import type { ApiClient } from "../api/client";
 import type {
   CodeDeliveryPullRequestSummary,
   CodeDeliveryRunSummary,
+  CodeGitHubRepositoryRef,
   CodeGitHubRepositoryTarget,
 } from "../api/types";
 import {
@@ -13,7 +14,9 @@ import {
   codeDeliveryRepositoryTarget,
   trackedCodeDeliveryRepositories,
   useCodeDeliveryStore,
+  type CodeDeliveryNotificationRule,
 } from "./CodeDeliveryStore";
+import { triggersForNotificationRules } from "./CodeTriggerMigration";
 import { useCodeUpdatesStore } from "./CodeUpdatesStore";
 
 // Freshness rides the `delivery` nudge on the updates socket (decision 66):
@@ -96,6 +99,19 @@ export function CodeDeliveryMonitor({ client }: { client: ApiClient }) {
           discovered.repositories,
           current,
         );
+        const legacyRules = current.legacyNotificationRules;
+        if (legacyRules) {
+          await migrateLegacyNotificationRules(
+            client,
+            legacyRules,
+            repositories,
+          );
+          if (!isCurrent()) return;
+          useCodeDeliveryStore
+            .getState()
+            .completeNotificationRuleMigration(legacyRules);
+        }
+
         const targets = repositories.map(codeDeliveryRepositoryTarget);
         if (targets.length === 0) {
           current.completeDeliveryPoll([], [], startedAt);
@@ -183,6 +199,40 @@ export function CodeDeliveryMonitor({ client }: { client: ApiClient }) {
   }, [client]);
 
   return null;
+}
+
+/** Arm every server trigger represented by the old client-side rules. */
+export async function migrateLegacyNotificationRules(
+  client: Pick<ApiClient, "listCodeTriggers" | "createCodeTrigger">,
+  rules: readonly CodeDeliveryNotificationRule[],
+  repositories: readonly CodeGitHubRepositoryRef[],
+): Promise<void> {
+  const byRepository = new Map<
+    string,
+    ReturnType<typeof triggersForNotificationRules>
+  >();
+  for (const trigger of triggersForNotificationRules(
+    [...rules],
+    [...repositories],
+  )) {
+    const triggers = byRepository.get(trigger.repoId) ?? [];
+    triggers.push(trigger);
+    byRepository.set(trigger.repoId, triggers);
+  }
+  for (const [repoId, triggers] of byRepository) {
+    const existing = new Set(
+      (await client.listCodeTriggers(repoId)).map(
+        (trigger) => trigger.condition,
+      ),
+    );
+    for (const trigger of triggers) {
+      // A retry leaves rows already written alone. Re-arming would enable a
+      // row that the user disabled after a partial migration.
+      if (existing.has(trigger.condition)) continue;
+      await client.createCodeTrigger(repoId, trigger.condition, trigger.action);
+      existing.add(trigger.condition);
+    }
+  }
 }
 
 /** Delay until the next monitor pass. `null` means there is no clock. */

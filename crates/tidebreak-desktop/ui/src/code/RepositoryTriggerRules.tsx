@@ -146,9 +146,6 @@ export function RepositoryTriggerRules({
           <p className="truncate text-xs font-medium text-muted-foreground">
             {repository.name_with_owner}
           </p>
-          <p className="mt-0.5 text-xs text-muted-foreground">
-            Legacy notification rules remain active separately.
-          </p>
         </div>
         {loading && <LoaderCircle className="size-4 animate-spin" />}
       </div>

@@ -223,27 +223,9 @@ describe("delivery notifications", () => {
     ).toBe(0);
   });
 
-  it("applies repository and Tidebreak-link scopes before creating feed rows", () => {
+  it("keeps the client-side feed after rule evaluation moves to the server", () => {
     const alpha = repository("brightwave-inc", "alpha", "repo-alpha");
     const beta = repository("brightwave-inc", "beta", "repo-beta");
-    useCodeDeliveryStore
-      .getState()
-      .updateNotificationRule("pull_request_attention", {
-        repositoryKeys: [codeDeliveryRepositoryKey(alpha)],
-        tidebreakLinkedOnly: true,
-      });
-
-    expect(
-      useCodeDeliveryStore
-        .getState()
-        .ingestDeliveryPoll([pullRequest(1, beta)], [], NOW),
-    ).toBe(0);
-    expect(
-      useCodeDeliveryStore
-        .getState()
-        .ingestDeliveryPoll([pullRequest(2, alpha)], [], NOW),
-    ).toBe(0);
-
     const linked = pullRequest(3, alpha, {
       workspace_links: [
         {
@@ -257,11 +239,18 @@ describe("delivery notifications", () => {
       ],
     });
     expect(
-      useCodeDeliveryStore.getState().ingestDeliveryPoll([linked], [], NOW),
-    ).toBe(1);
-    expect(useCodeDeliveryStore.getState().notifications[0]?.workspaceId).toBe(
-      "ws-3",
-    );
+      useCodeDeliveryStore
+        .getState()
+        .ingestDeliveryPoll([pullRequest(1, beta), linked], [], NOW),
+    ).toBe(2);
+    expect(useCodeDeliveryStore.getState().notifications).toHaveLength(2);
+    expect(
+      useCodeDeliveryStore
+        .getState()
+        .notifications.find(
+          (notification) => notification.workspaceId === "ws-3",
+        ),
+    ).toBeDefined();
   });
 
   it("keeps at most 500 notifications and drops events older than 30 days", () => {
