@@ -134,13 +134,18 @@ impl Client {
         local_import_token: Option<&str>,
         listen_data_dir: Option<PathBuf>,
     ) -> Result<Self> {
+        let base = validated_server_base_url(&base)?;
         let mut headers = reqwest::header::HeaderMap::new();
         let mut value = reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
             .map_err(|error| AgentError::msg(format!("invalid server token: {error}")))?;
         value.set_sensitive(true);
         headers.insert(reqwest::header::AUTHORIZATION, value);
-        let mut http = reqwest::Client::builder().default_headers(headers);
-        if loopback_http_base(&base) {
+        let mut http = reqwest::Client::builder()
+            .default_headers(headers)
+            // A same-host HTTPS-to-HTTP redirect would otherwise resend the
+            // bearer over cleartext. Tidebreak routes never redirect.
+            .redirect(reqwest::redirect::Policy::none());
+        if server_url_is_loopback(&base) {
             // Ambient HTTP_PROXY must not intercept loopback: a proxy that
             // claims 127.0.0.1 black-holes `serve` and `--attach`.
             http = http.no_proxy();
@@ -1217,14 +1222,49 @@ impl Client {
     }
 }
 
-/// True when `base` names a loopback HTTP origin.
-fn loopback_http_base(base: &str) -> bool {
-    let rest = base
-        .strip_prefix("http://")
-        .or_else(|| base.strip_prefix("https://"))
-        .unwrap_or(base);
-    let host = rest.split(['/', ':']).next().unwrap_or(rest);
-    matches!(host, "127.0.0.1" | "localhost" | "[::1]" | "::1")
+/// Validate and normalize a bearer-authenticated server URL.
+///
+/// Cleartext is a local-development exception. A remote attachment carries
+/// full profile authority, so its base URL must use TLS before the CLI loads
+/// the bearer or the client builds its transport.
+pub(crate) fn validated_server_base_url(value: &str) -> Result<String> {
+    let url = reqwest::Url::parse(value.trim())
+        .map_err(|_| AgentError::config("server URL must be a valid http or https URL"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(AgentError::config("server URL must use http or https"));
+    }
+    if url.host_str().is_none() {
+        return Err(AgentError::config("server URL must name a host"));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(AgentError::config("server URL must not embed credentials"));
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(AgentError::config(
+            "server URL must not include a query or fragment",
+        ));
+    }
+    if url.scheme() == "http" && !url_host_is_loopback(&url) {
+        return Err(AgentError::config(
+            "server URL must use https unless it names a loopback host",
+        ));
+    }
+    Ok(url.as_str().trim_end_matches('/').to_owned())
+}
+
+fn server_url_is_loopback(base: &str) -> bool {
+    reqwest::Url::parse(base).is_ok_and(|url| url_host_is_loopback(&url))
+}
+
+fn url_host_is_loopback(url: &reqwest::Url) -> bool {
+    url.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    })
 }
 
 /// reqwest's `Display` already strips nothing for loopback URLs, but keep the
@@ -1299,6 +1339,8 @@ fn durable_turn_from_transcript(
 
 #[cfg(test)]
 mod tests {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
     use super::*;
 
     #[test]
@@ -1332,6 +1374,51 @@ mod tests {
         assert_eq!(client.token, "second-token");
         assert_eq!(client.local_import_token.as_deref(), Some("second-import"));
         assert_eq!(client.listen_data_dir.as_deref(), Some(dir.path()));
+    }
+
+    #[test]
+    fn attach_clients_refuse_remote_cleartext_before_building_transport() {
+        let error = Client::attach("http://machine.example.com".into(), "secret-token")
+            .err()
+            .expect("remote cleartext must be refused");
+        assert!(error.to_string().contains("https"), "{error}");
+        assert!(Client::attach("http://127.0.0.1:8080".into(), "local-token").is_ok());
+    }
+
+    #[tokio::test]
+    async fn authenticated_clients_do_not_follow_cleartext_redirects() {
+        let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target.local_addr().unwrap();
+        let redirect = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let redirect_addr = redirect.local_addr().unwrap();
+        let redirect_task = tokio::spawn(async move {
+            let (mut stream, _) = redirect.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 302 Found\r\nLocation: http://{target_addr}/settings\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+
+        let client = Client::new(redirect_addr, "redirect-test-token").unwrap();
+        let error = client
+            .get_settings()
+            .await
+            .expect_err("the redirect must be returned, not followed");
+        assert!(error.to_string().contains("302"), "{error}");
+        redirect_task.await.unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(250), target.accept())
+                .await
+                .is_err(),
+            "the bearer must not reach the redirect target"
+        );
     }
 
     #[test]

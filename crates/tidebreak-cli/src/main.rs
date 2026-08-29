@@ -226,10 +226,11 @@ family also take --server <url> [--server-token-env <var>] or --attach, which
 talks to a server that is already running instead of embedding one. --attach
 reads {TIDEBREAK_DATA_DIR}/listen.json (written by serve and the desktop).
 With --server the token comes from TIDEBREAK_SERVER_TOKEN, or from the named
-variable; it is never an argument either. The folder commands do not take
+variable; it is never an argument either. Remote server URLs must use https;
+http is accepted only for a loopback host. The folder commands do not take
 --server/--attach: they provision local host consent in this machine's own
-broker and product store, and they can run while serve or the desktop
-already owns the data directory.";
+broker and product store, and they can run while serve or the desktop already
+owns the data directory.";
 
 #[tokio::main]
 async fn main() {

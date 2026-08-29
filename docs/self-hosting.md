@@ -160,7 +160,8 @@ cargo run -p tidebreak-cli -- --server "$TIDEBREAK_SERVER_URL" -p "summarize yes
 
 `--server` / `TIDEBREAK_SERVER_TOKEN` are the same attach path the headless
 docs describe. A member token receives `403` on deployment-plane routes, which
-is the intended degradation — not a desktop Settings panel.
+is the intended degradation — not a desktop Settings panel. Remote server URLs
+must use HTTPS; cleartext HTTP is available only for loopback development.
 
 The packaged desktop app still embeds its local Desktop-profile server, but it
 can attach its renderer to a remote self-host machine. For a Gateway-backed

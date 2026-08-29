@@ -26,7 +26,7 @@
 use std::path::PathBuf;
 use tidebreak_core::{AgentError, Result};
 
-use crate::api::client::Client;
+use crate::api::client::{validated_server_base_url, Client};
 
 /// Names the server to attach to instead of embedding one.
 pub const SERVER_URL_ENV: &str = "TIDEBREAK_SERVER_URL";
@@ -127,26 +127,7 @@ impl Server {
 /// string, and a bare `127.0.0.1:8080` would silently produce a URL nothing can
 /// connect to.
 fn base_url(value: &str) -> Result<String> {
-    let value = value.trim();
-    let rest = value
-        .strip_prefix("http://")
-        .or_else(|| value.strip_prefix("https://"))
-        .ok_or_else(|| {
-            AgentError::config(format!(
-                "--server expects an http:// or https:// URL, got {value:?}"
-            ))
-        })?;
-    if rest.is_empty() || rest.starts_with('/') {
-        return Err(AgentError::config(format!(
-            "--server URL {value:?} has no host"
-        )));
-    }
-    if rest.contains('?') || rest.contains('#') {
-        return Err(AgentError::config(format!(
-            "--server expects a base URL without a query or fragment, got {value:?}"
-        )));
-    }
-    Ok(value.trim_end_matches('/').to_owned())
+    validated_server_base_url(value)
 }
 
 /// A live client plus, when embedding, the engine keeping it answering.
@@ -238,6 +219,15 @@ mod tests {
             "http://127.0.0.1:8080"
         );
         assert_eq!(
+            base_url("http://127.0.0.2:8080/").unwrap(),
+            "http://127.0.0.2:8080"
+        );
+        assert_eq!(
+            base_url("http://localhost:8080/").unwrap(),
+            "http://localhost:8080"
+        );
+        assert_eq!(base_url("http://[::1]:8080/").unwrap(), "http://[::1]:8080");
+        assert_eq!(
             base_url(" https://box.local:9000 ").unwrap(),
             "https://box.local:9000"
         );
@@ -247,6 +237,14 @@ mod tests {
         );
         assert!(base_url("http://").is_err(), "a host is required");
         assert!(base_url("http://host/?a=1").is_err(), "no query string");
+        assert!(base_url("http://box.local:9000")
+            .expect_err("remote cleartext must be refused")
+            .to_string()
+            .contains("https"));
+        assert!(
+            base_url("https://user:password@box.local:9000").is_err(),
+            "credentials belong in the token environment variable"
+        );
 
         std::env::remove_var(SERVER_URL_ENV);
         let Err(error) = Server::resolve(None, Some("SOME_VAR".to_owned()), false) else {
