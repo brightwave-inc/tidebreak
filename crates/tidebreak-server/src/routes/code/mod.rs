@@ -1,14 +1,16 @@
 //! `/code/*` routes: repos, workspaces, sessions, doctor, event stream.
 //!
-//! Every route here is owner-scoped through `ScopedCode`, with two
-//! exceptions. The routes that change what the machine *is* — installing
-//! pinned harness binaries, and the clone-parent and worktree-root
-//! directories every principal shares — are registered on the
-//! deployment-plane router in `crate::lib` instead, behind `require_admin`.
-//! And the `/code/browser/*` routes in [`browser`] and the `/code/llm/*`
-//! routes in [`llm`] authenticate with a per-session capability bearer
-//! rather than the launch token, so they are registered outside
-//! `require_token` and derive their owner from the session-key registry.
+//! App-token routes here are owner-scoped through `ScopedCode`. Three route
+//! families use narrower bearer capabilities instead. The `/code/browser/*`
+//! routes in [`browser`] and `/code/llm/*` routes in [`llm`] derive the owner
+//! from a session-private capability. The `/external/code/*` routes in
+//! [`external`] derive the owner from an adapter grant and require that grant
+//! to bind every requested session.
+//!
+//! Routes that change what the machine *is* — installing pinned harness
+//! binaries, and the clone-parent and worktree-root directories every
+//! principal shares — are registered on the deployment-plane router in
+//! `crate::lib` instead, behind `require_admin`.
 
 pub(crate) use super::settings::double_option;
 
@@ -112,9 +114,10 @@ pub(crate) use workspaces::{
     set_worktree_root,
 };
 
-// Nothing here reaches `AppState.code` directly. Every handler in this module
-// extracts a `crate::code::ScopedCode`, which binds the process runtime to the
-// requesting principal and refuses when code mode is not configured — so a new
-// `/code/*` route is owner-scoped by construction rather than by remembering
-// to filter (decision 6's "enforcement is a router property, not a handler
-// habit", applied to data scoping).
+// App-token handlers do not reach `AppState.code` directly. They extract a
+// `crate::code::ScopedCode`, which binds the process runtime to the requesting
+// principal and refuses when code mode is not configured. Capability handlers
+// validate their narrower bearer and derive the owner before reading data. A
+// new route is therefore scoped by construction rather than by remembering to
+// filter (decision 6's "enforcement is a router property, not a handler habit",
+// applied to data scoping).

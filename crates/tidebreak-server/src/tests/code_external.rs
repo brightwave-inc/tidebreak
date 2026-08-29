@@ -173,6 +173,18 @@ async fn external_app() -> (
     (app(state), fake, runtime, repo_id, dir)
 }
 
+async fn bound_session_id(
+    runtime: &CodeRuntime,
+    owner: &OwnerId,
+    external_key: &str,
+) -> tidebreak_core::CodeSessionId {
+    tidebreak_core::db::code::get_external_binding(&runtime.db, owner, "slack", external_key)
+        .await
+        .unwrap()
+        .expect("the external session request committed its binding")
+        .session_id
+}
+
 /// The whole adapter surface over HTTP: bad tokens refuse, get-or-create
 /// is idempotent, messages are idempotent on the event id, a foreign grant
 /// sees "not found", interrupt reaches the sandbox, and rotation with a
@@ -216,7 +228,12 @@ async fn external_routes_scope_by_grant_and_replay_idempotently() {
     assert_eq!(created.status(), reqwest::StatusCode::CREATED);
     let created: serde_json::Value = created.json().await.unwrap();
     assert_eq!(created["status"], "created");
-    let session_id = created["session_id"].as_str().unwrap().to_owned();
+    let session_id = bound_session_id(&runtime, &owner, "T1/C1/1.1").await;
+    let session_id_text = session_id.to_string();
+    assert_eq!(
+        created["session_id"].as_str(),
+        Some(session_id_text.as_str())
+    );
     let again: serde_json::Value = client
         .post(format!("http://{addr}/external/code/sessions"))
         .bearer_auth(&pair.token)
@@ -228,7 +245,7 @@ async fn external_routes_scope_by_grant_and_replay_idempotently() {
         .await
         .unwrap();
     assert_eq!(again["status"], "existing");
-    assert_eq!(again["session_id"].as_str().unwrap(), session_id);
+    assert_eq!(again["session_id"].as_str(), Some(session_id_text.as_str()));
 
     // Messages: the idle session runs the message; the replay answers the
     // same turn without a second spawn.
@@ -379,7 +396,12 @@ async fn external_events_snapshot_then_replay_then_sever_on_revoke() {
         .json()
         .await
         .unwrap();
-    let session_id = created["session_id"].as_str().unwrap().to_owned();
+    let session_id = bound_session_id(&runtime, &owner, "T1/C2/9.9").await;
+    let session_id_text = session_id.to_string();
+    assert_eq!(
+        created["session_id"].as_str(),
+        Some(session_id_text.as_str())
+    );
     let first: serde_json::Value = client
         .post(format!(
             "http://{addr}/external/code/sessions/{session_id}/messages"
@@ -426,7 +448,10 @@ async fn external_events_snapshot_then_replay_then_sever_on_revoke() {
         .unwrap()
         .unwrap();
     let value: serde_json::Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
-    assert_eq!(value["snapshot"]["id"].as_str().unwrap(), session_id);
+    assert_eq!(
+        value["snapshot"]["id"].as_str(),
+        Some(session_id_text.as_str())
+    );
     assert!(value["snapshot"]["attention"].is_object());
     assert!(value["snapshot"]["lifecycle"].is_string());
 
@@ -457,8 +482,7 @@ async fn external_events_snapshot_then_replay_then_sever_on_revoke() {
             },
         ],
     });
-    let parsed: tidebreak_core::CodeSessionId = session_id.parse().unwrap();
-    let mut live = runtime.get_session(&owner, parsed).await.unwrap();
+    let mut live = runtime.get_session(&owner, session_id).await.unwrap();
     runtime
         .remote_sessions()
         .unwrap()
@@ -489,7 +513,11 @@ async fn external_events_snapshot_then_replay_then_sever_on_revoke() {
     // The adapter is a renderer, not a viewer: its reconnect — the resync
     // path — must not clear `DoneUnreviewed`, which the desktop inbox and
     // the channel's own success render both read.
-    let before = runtime.get_session(&owner, parsed).await.unwrap().attention;
+    let before = runtime
+        .get_session(&owner, session_id)
+        .await
+        .unwrap()
+        .attention;
     let mut request = format!("ws://{addr}/external/code/sessions/{session_id}/events")
         .into_client_request()
         .unwrap();
@@ -504,7 +532,11 @@ async fn external_events_snapshot_then_replay_then_sever_on_revoke() {
         .unwrap()
         .unwrap();
     assert!(frame.to_text().unwrap().contains("snapshot"));
-    let after = runtime.get_session(&owner, parsed).await.unwrap().attention;
+    let after = runtime
+        .get_session(&owner, session_id)
+        .await
+        .unwrap()
+        .attention;
     assert_eq!(
         after.state, before.state,
         "an adapter connect must not count as the owner viewing the session"
