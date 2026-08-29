@@ -343,32 +343,22 @@ impl Client {
 
     /// Which web-search provider slots hold a key.
     pub async fn get_web_search_credentials(&self) -> Result<serde_json::Value> {
-        let response = self
-            .get_response(format!("{}/web-search/credentials", self.base))
-            .await?;
-        if response.status().is_success() {
-            return response
-                .json::<serde_json::Value>()
-                .await
-                .map_err(request_error);
-        }
-
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        if status == reqwest::StatusCode::INTERNAL_SERVER_ERROR
-            && serde_json::from_str::<ErrorBody>(&body).is_ok_and(|error| {
-                error.kind.as_deref() == Some("internal")
-                    && error.message == WEB_SEARCH_CREDENTIAL_STORAGE_UNAVAILABLE
-            })
+        match self
+            .get_json(format!("{}/web-search/credentials", self.base))
+            .await
         {
-            return Ok(serde_json::json!({
+            Ok(credentials) => Ok(credentials),
+            Err(AgentError::Secret(message))
+                if message == WEB_SEARCH_CREDENTIAL_STORAGE_UNAVAILABLE =>
+            {
+                Ok(serde_json::json!({
                 "credentials": null,
                 "storage_available": false,
                 "unavailable_reason": WEB_SEARCH_CREDENTIAL_STORAGE_UNAVAILABLE,
-            }));
+                }))
+            }
+            Err(error) => Err(error),
         }
-
-        Err(response_error(status, &body))
     }
 
     /// Store one web-search provider's key. Selection is unchanged.
@@ -909,19 +899,12 @@ impl Client {
 
     /// GET a JSON body, lifting failures the way every other route does.
     pub(crate) async fn get_json<T: serde::de::DeserializeOwned>(&self, url: String) -> Result<T> {
-        let response = self.get_response(url).await?;
+        let response = self.http.get(url).send().await.map_err(request_error)?;
         Self::expect_success(response)
             .await?
             .json::<T>()
             .await
             .map_err(request_error)
-    }
-
-    /// Start one authenticated GET without deciding how its response should
-    /// be decoded. Most callers use [`Self::get_json`]; compatibility reads
-    /// that recognize one exact server failure inspect the response first.
-    async fn get_response(&self, url: String) -> Result<reqwest::Response> {
-        self.http.get(url).send().await.map_err(request_error)
     }
 
     /// PUT a JSON body and decode the route's answer.
@@ -1252,6 +1235,15 @@ fn request_error(error: reqwest::Error) -> AgentError {
 
 fn response_error(status: reqwest::StatusCode, body: &str) -> AgentError {
     match serde_json::from_str::<ErrorBody>(body) {
+        Ok(ErrorBody {
+            kind: Some(kind),
+            message,
+        }) if status == reqwest::StatusCode::INTERNAL_SERVER_ERROR
+            && kind == "internal"
+            && message == WEB_SEARCH_CREDENTIAL_STORAGE_UNAVAILABLE =>
+        {
+            AgentError::Secret(message)
+        }
         Ok(ErrorBody {
             kind: Some(kind),
             message,
