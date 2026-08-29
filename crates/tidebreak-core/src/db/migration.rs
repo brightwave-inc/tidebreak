@@ -3248,6 +3248,11 @@ impl MigrationTrait for CodeConnectHandshakes {
                             .not_null(),
                     )
                     .col(
+                        ColumnDef::new(idens::CodeConnectHandshake::ConfirmHash)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
                         ColumnDef::new(idens::CodeConnectHandshake::Csrf)
                             .text()
                             .not_null(),
@@ -3283,7 +3288,8 @@ impl MigrationTrait for CodeConnectHandshakes {
                             .text()
                             .not_null(),
                     )
-                    .col(ColumnDef::new(idens::CodeConnectHandshake::ApprovedOwner).text())
+                    .col(ColumnDef::new(idens::CodeConnectHandshake::ApprovalOwner).text())
+                    .col(ColumnDef::new(idens::CodeConnectHandshake::GrantId).uuid())
                     .col(
                         ColumnDef::new(idens::CodeConnectHandshake::CreatedAt)
                             .timestamp_with_time_zone()
@@ -3302,6 +3308,19 @@ impl MigrationTrait for CodeConnectHandshakes {
                         ColumnDef::new(idens::CodeConnectHandshake::CompletedAt)
                             .timestamp_with_time_zone(),
                     )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_code_connect_handshake_grant")
+                            .from(
+                                idens::CodeConnectHandshake::Table,
+                                idens::CodeConnectHandshake::GrantId,
+                            )
+                            .to(
+                                idens::CodeExternalGrant::Table,
+                                idens::CodeExternalGrant::Id,
+                            )
+                            .on_delete(ForeignKeyAction::SetNull),
+                    )
                     .to_owned(),
             )
             .await?;
@@ -3316,12 +3335,29 @@ impl MigrationTrait for CodeConnectHandshakes {
                     .to_owned(),
             )
             .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("ix_code_connect_handshake_grant")
+                    .table(idens::CodeConnectHandshake::Table)
+                    .col(idens::CodeConnectHandshake::GrantId)
+                    .unique()
+                    .if_not_exists()
+                    .to_owned(),
+            )
+            .await?;
         Ok(())
     }
 
-    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
-        // Handshakes are short-lived; nothing depends on dropping them.
-        Ok(())
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(
+                Table::drop()
+                    .table(idens::CodeConnectHandshake::Table)
+                    .if_exists()
+                    .to_owned(),
+            )
+            .await
     }
 }
 
@@ -3408,6 +3444,34 @@ mod tests {
             .query_one_raw(Statement::from_string(
                 DbBackend::Sqlite,
                 "SELECT owner FROM app LIMIT 1".to_owned(),
+            ))
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn connect_handshake_migration_rolls_back_its_ephemeral_table() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        Migrator::up(&db, None).await.unwrap();
+        assert!(db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' \
+                 AND name = 'code_connect_handshake'"
+                    .to_owned(),
+            ))
+            .await
+            .unwrap()
+            .is_some());
+
+        Migrator::down(&db, Some(1)).await.unwrap();
+        assert!(db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' \
+                 AND name = 'code_connect_handshake'"
+                    .to_owned(),
             ))
             .await
             .unwrap()

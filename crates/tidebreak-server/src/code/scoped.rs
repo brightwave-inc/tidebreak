@@ -779,6 +779,12 @@ impl ScopedCode {
         self.runtime.list_adapter_grants(&self.owner).await
     }
 
+    pub(crate) async fn list_adapter_grant_profiles(
+        &self,
+    ) -> Result<Vec<tidebreak_core::CodeGrantProfile>, ServerError> {
+        self.runtime.list_adapter_grant_profiles(&self.owner).await
+    }
+
     pub(crate) async fn revoke_adapter_grant(
         &self,
         id: tidebreak_core::CodeGrantId,
@@ -804,7 +810,9 @@ impl ScopedCode {
         &self,
         nonce: &str,
     ) -> Result<Option<(tidebreak_core::CodeConnectHandshake, String)>, ServerError> {
-        self.runtime.view_connect_handshake(nonce).await
+        self.runtime
+            .view_connect_handshake(&self.owner, nonce)
+            .await
     }
 
     pub(crate) async fn approve_connect_handshake(

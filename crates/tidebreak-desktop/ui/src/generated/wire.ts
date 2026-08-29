@@ -1439,10 +1439,23 @@ channel_kind: string,
  */
 external_identity: string, 
 /**
+ * The channel user's display name at connect time, when this grant came
+ * from the connect flow.
+ */
+display_name?: string, 
+/**
  * The channel's workspace identity, shown so an owner can revoke a
  * whole workspace at once.
  */
-workspace_identity: string, rotated_at?: string, created_at: string, revoked_at?: string, 
+workspace_identity: string, 
+/**
+ * The channel workspace's display name at connect time.
+ */
+workspace_name?: string, 
+/**
+ * The linked user's safe public avatar URL at connect time.
+ */
+avatar_url?: string, rotated_at?: string, created_at: string, revoked_at?: string, 
 /**
  * Why the grant was revoked, in owner-facing words. A theft-triggered
  * revoke reaches the owner here.

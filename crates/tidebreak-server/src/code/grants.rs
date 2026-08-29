@@ -49,6 +49,84 @@ fn mint_pair() -> AdapterTokenPair {
     }
 }
 
+fn bounded_connect_value(
+    field: &str,
+    value: &str,
+    max_bytes: usize,
+) -> Result<String, ServerError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(ServerError::bad_request(format!(
+            "{field} must not be empty"
+        )));
+    }
+    if value.len() > max_bytes {
+        return Err(ServerError::bad_request(format!(
+            "{field} must be at most {max_bytes} bytes"
+        )));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(ServerError::bad_request(format!(
+            "{field} must not contain control characters"
+        )));
+    }
+    Ok(value.to_owned())
+}
+
+fn validated_channel_kind(value: &str) -> Result<String, ServerError> {
+    let value = bounded_connect_value("channel_kind", value, 32)?;
+    if !value.bytes().all(|byte| {
+        byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+    }) {
+        return Err(ServerError::bad_request(
+            "channel_kind must use lowercase letters, digits, hyphens, or underscores",
+        ));
+    }
+    Ok(value)
+}
+
+fn safe_avatar_url(value: Option<&str>) -> Result<Option<String>, ServerError> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if value.len() > 2_048 {
+        return Err(ServerError::bad_request(
+            "avatar_url must be at most 2048 bytes",
+        ));
+    }
+    let mut parsed = url::Url::parse(value)
+        .map_err(|_| ServerError::bad_request("avatar_url must be a valid HTTPS URL"))?;
+    if parsed.scheme() != "https"
+        || parsed.host().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return Err(ServerError::bad_request(
+            "avatar_url must be a public HTTPS URL without credentials",
+        ));
+    }
+    match parsed.host() {
+        Some(url::Host::Domain(host))
+            if host.eq_ignore_ascii_case("localhost")
+                || host.ends_with(".localhost")
+                || host.ends_with(".local") =>
+        {
+            return Err(ServerError::bad_request(
+                "avatar_url must use a public HTTPS host",
+            ));
+        }
+        Some(url::Host::Ipv4(_)) | Some(url::Host::Ipv6(_)) => {
+            return Err(ServerError::bad_request(
+                "avatar_url must use a public HTTPS hostname",
+            ));
+        }
+        Some(url::Host::Domain(_)) => {}
+        None => unreachable!("the host check above already refused a missing host"),
+    }
+    parsed.set_fragment(None);
+    Ok(Some(parsed.to_string()))
+}
+
 /// Live fan-out for revocations. The events WebSocket route subscribes and
 /// closes its stream the moment its grant's id arrives; everything else
 /// learns from the durable row.
@@ -193,36 +271,64 @@ impl super::runtime::CodeRuntime {
         display_name: &str,
         workspace_name: &str,
         avatar_url: Option<&str>,
-    ) -> Result<(tidebreak_core::CodeConnectHandshake, String), ServerError> {
+    ) -> Result<(tidebreak_core::CodeConnectHandshake, String, String), ServerError> {
+        let channel_kind = validated_channel_kind(channel_kind)?;
+        let external_identity = bounded_connect_value("external_identity", external_identity, 256)?;
+        let workspace_identity =
+            bounded_connect_value("workspace_identity", workspace_identity, 256)?;
+        let display_name = bounded_connect_value("display_name", display_name, 256)?;
+        let workspace_name = bounded_connect_value("workspace_name", workspace_name, 256)?;
+        let avatar_url = safe_avatar_url(avatar_url)?;
         let nonce = mint_secret("tbn");
+        let confirmation_token = mint_secret("tbc");
         let csrf = uuid::Uuid::new_v4().simple().to_string();
         let handshake = tidebreak_core::db::code::insert_connect_handshake(
             &self.db,
             &hash_adapter_token(&nonce),
+            &hash_adapter_token(&confirmation_token),
             &csrf,
-            channel_kind,
-            external_identity,
-            workspace_identity,
-            display_name,
-            workspace_name,
-            avatar_url,
+            &channel_kind,
+            &external_identity,
+            &workspace_identity,
+            &display_name,
+            &workspace_name,
+            avatar_url.as_deref(),
             chrono::Duration::minutes(15),
         )
         .await?;
-        Ok((handshake, nonce))
+        Ok((handshake, nonce, confirmation_token))
     }
 
     /// The handshake a nonce opens, with the CSRF token the approval page
     /// posts back. `None` for a used or stale link.
     pub(crate) async fn view_connect_handshake(
         &self,
+        owner: &OwnerId,
         nonce: &str,
     ) -> Result<Option<(tidebreak_core::CodeConnectHandshake, String)>, ServerError> {
         Ok(tidebreak_core::db::code::view_connect_handshake_all_owners(
             &self.db,
             &hash_adapter_token(nonce),
+            owner,
         )
         .await?)
+    }
+
+    /// The state the adapter may poll with the confirmation capability that
+    /// never appears in the approval link.
+    pub(crate) async fn connect_handshake_status(
+        &self,
+        nonce: &str,
+        confirmation_token: &str,
+    ) -> Result<Option<tidebreak_core::CodeConnectHandshake>, ServerError> {
+        Ok(
+            tidebreak_core::db::code::connect_handshake_status_all_owners(
+                &self.db,
+                &hash_adapter_token(nonce),
+                &hash_adapter_token(confirmation_token),
+            )
+            .await?,
+        )
     }
 
     /// The owner's "is this you?". Approving mints nothing — the adapter's
@@ -252,42 +358,25 @@ impl super::runtime::CodeRuntime {
     pub(crate) async fn complete_connect_handshake(
         &self,
         nonce: &str,
+        confirmation_token: &str,
     ) -> Result<Option<(CodeExternalGrant, AdapterTokenPair)>, ServerError> {
-        let Some(handshake) = tidebreak_core::db::code::complete_connect_handshake_all_owners(
-            &self.db,
-            &hash_adapter_token(nonce),
-        )
-        .await?
+        let pair = mint_pair();
+        let Some((grant, replaced)) =
+            tidebreak_core::db::code::complete_connect_handshake_and_mint_grant_all_owners(
+                &self.db,
+                &hash_adapter_token(nonce),
+                &hash_adapter_token(confirmation_token),
+                &hash_adapter_token(&pair.token),
+                &hash_adapter_token(&pair.refresh),
+            )
+            .await?
         else {
             return Ok(None);
         };
-        let Some(owner) = handshake.approved_owner.clone() else {
-            return Err(ServerError::internal(
-                "a completed handshake must carry its approver",
-            ));
-        };
-        let replaced = tidebreak_core::db::code::list_external_grants(&self.db, &owner)
-            .await?
-            .into_iter()
-            .find(|grant| {
-                grant.revoked_at.is_none()
-                    && grant.channel_kind == handshake.channel_kind
-                    && grant.external_identity == handshake.external_identity
-                    && grant.workspace_identity == handshake.workspace_identity
-            });
-        if let Some(previous) = replaced {
-            self.revoke_adapter_grant(&owner, previous.id, "replaced by a new connect approval")
-                .await?;
+        for grant_id in replaced {
+            self.grant_revocations().publish(grant_id);
         }
-        let minted = self
-            .mint_adapter_grant(
-                &owner,
-                &handshake.channel_kind,
-                &handshake.external_identity,
-                &handshake.workspace_identity,
-            )
-            .await?;
-        Ok(Some(minted))
+        Ok(Some((grant, pair)))
     }
 
     /// Every grant the owner holds, for the desktop grants list.
@@ -296,6 +385,14 @@ impl super::runtime::CodeRuntime {
         owner: &OwnerId,
     ) -> Result<Vec<CodeExternalGrant>, ServerError> {
         Ok(tidebreak_core::db::code::list_external_grants(&self.db, owner).await?)
+    }
+
+    /// Human-facing names retained from completed approval handshakes.
+    pub(crate) async fn list_adapter_grant_profiles(
+        &self,
+        owner: &OwnerId,
+    ) -> Result<Vec<tidebreak_core::CodeGrantProfile>, ServerError> {
+        Ok(tidebreak_core::db::code::list_connect_grant_profiles(&self.db, owner).await?)
     }
 
     /// Revoke every live grant a channel workspace holds. The grants list
@@ -308,17 +405,16 @@ impl super::runtime::CodeRuntime {
         workspace_identity: &str,
         reason: &str,
     ) -> Result<Vec<CodeExternalGrant>, ServerError> {
-        let mut revoked = Vec::new();
-        for grant in tidebreak_core::db::code::list_external_grants(&self.db, owner).await? {
-            if grant.revoked_at.is_some()
-                || grant.channel_kind != channel_kind
-                || grant.workspace_identity != workspace_identity
-            {
-                continue;
-            }
-            if let Some(row) = self.revoke_adapter_grant(owner, grant.id, reason).await? {
-                revoked.push(row);
-            }
+        let revoked = tidebreak_core::db::code::revoke_external_workspace_grants(
+            &self.db,
+            owner,
+            channel_kind,
+            workspace_identity,
+            reason,
+        )
+        .await?;
+        for grant in &revoked {
+            self.grant_revocations().publish(grant.id);
         }
         Ok(revoked)
     }

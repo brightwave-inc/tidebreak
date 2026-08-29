@@ -31,7 +31,7 @@ fn grant_from_model(model: entities::code_external_grant::Model) -> Result<CodeE
     })
 }
 
-fn hash_like(value: &str) -> bool {
+pub(super) fn hash_like(value: &str) -> bool {
     value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit())
 }
 
@@ -286,6 +286,68 @@ pub async fn revoke_external_grant(
     let grant = grant_from_model(updated)?;
     transaction.commit().await.map_err(store_err)?;
     Ok(Some(grant))
+}
+
+/// Revoke every live grant one channel workspace holds for an owner.
+///
+/// The matching read, updates, and returned snapshots share one transaction,
+/// so a storage failure cannot leave a half-revoked workspace.
+pub async fn revoke_external_workspace_grants(
+    store: &DbStore,
+    owner: &OwnerId,
+    channel_kind: &str,
+    workspace_identity: &str,
+    reason: &str,
+) -> Result<Vec<CodeExternalGrant>> {
+    if channel_kind.trim().is_empty() || workspace_identity.trim().is_empty() {
+        return Err(AgentError::Store(
+            "a workspace revoke needs a channel kind and workspace identity".into(),
+        ));
+    }
+    if reason.trim().is_empty() {
+        return Err(AgentError::Store(
+            "a workspace revoke needs a reason".into(),
+        ));
+    }
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    let live = entities::code_external_grant::Entity::find()
+        .filter(entities::code_external_grant::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_external_grant::Column::ChannelKind.eq(channel_kind))
+        .filter(entities::code_external_grant::Column::WorkspaceIdentity.eq(workspace_identity))
+        .filter(entities::code_external_grant::Column::RevokedAt.is_null())
+        .all(&transaction)
+        .await
+        .map_err(store_err)?;
+    if live.is_empty() {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(Vec::new());
+    }
+    let ids: Vec<_> = live.iter().map(|grant| grant.id).collect();
+    let now = database_now(&transaction).await?;
+    entities::code_external_grant::Entity::update_many()
+        .col_expr(
+            entities::code_external_grant::Column::RevokedAt,
+            sea_orm::sea_query::Expr::value(Some(now)),
+        )
+        .col_expr(
+            entities::code_external_grant::Column::RevokedReason,
+            sea_orm::sea_query::Expr::value(Some(reason.to_owned())),
+        )
+        .filter(entities::code_external_grant::Column::Id.is_in(ids.clone()))
+        .filter(entities::code_external_grant::Column::RevokedAt.is_null())
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    let updated = entities::code_external_grant::Entity::find()
+        .filter(entities::code_external_grant::Column::Id.is_in(ids))
+        .all(&transaction)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .map(grant_from_model)
+        .collect::<Result<Vec<_>>>()?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(updated)
 }
 
 /// Every grant the owner holds, live and revoked, newest first. The

@@ -214,6 +214,7 @@ pub(crate) const MAX_RAW_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_WEB_SEARCH_CREDENTIAL_BODY_BYTES: usize = 16 * 1024;
 const MAX_CODE_EXECUTION_CONFIG_BODY_BYTES: usize = 1_024;
 const MAX_CODE_EXECUTION_CREDENTIAL_BODY_BYTES: usize = 16 * 1024;
+const MAX_EXTERNAL_CONNECT_BODY_BYTES: usize = 16 * 1024;
 
 /// Build the router: unauthenticated health check plus the token-guarded API.
 pub fn app(state: AppState) -> Router {
@@ -608,10 +609,15 @@ pub fn app(state: AppState) -> Router {
             "/external/grants/rotate",
             post(routes::code::external_rotate),
         )
-        // The connect bootstrap: the adapter holds no grant until complete
-        // mints one, so start and complete live here, gated by the one-time
-        // nonce. The owner's view and approve stay on the authenticated API.
-        .route("/external/connect", post(routes::code::connect_start))
+        // The connect bootstrap: start requires the deployment's narrow
+        // adapter service bearer. Status and completion require the separate
+        // per-handshake confirmation capability returned only to that caller.
+        // The owner's view and approve stay on the authenticated API.
+        .route(
+            "/external/connect",
+            post(routes::code::connect_start)
+                .layer(RequestBodyLimitLayer::new(MAX_EXTERNAL_CONNECT_BODY_BYTES)),
+        )
         .route(
             "/external/connect/{nonce}/status",
             get(routes::code::connect_status),
@@ -1927,6 +1933,7 @@ async fn bind_inner(
         os_policy,
     )?
     .with_on_behalf_of_gateway(on_behalf_of_gateway);
+    state.adapter_bootstrap_tokens = auth::AdapterBootstrapTokens::from_env()?.map(Arc::new);
     state.agent_run_wake = agent_run_wake;
     state.sandbox_attempts = sandbox_attempts;
     state.sandbox_steering = sandbox_steering;

@@ -1415,12 +1415,34 @@ pub struct CodeConnectHandshake {
     pub avatar_url: Option<String>,
     /// Where the handshake stands.
     pub state: CodeConnectState,
-    /// Who approved, once someone has.
-    pub approved_owner: Option<crate::OwnerId>,
+    /// The Tidebreak owner this approval surface is bound to. The first
+    /// authenticated view claims it, so a CSRF token copied from one owner
+    /// cannot approve for another.
+    pub approval_owner: Option<crate::OwnerId>,
+    /// The grant minted by the completed handshake, when one exists.
+    pub grant_id: Option<CodeGrantId>,
     /// Creation time.
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// When the nonce stops working.
     pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Human-facing identity retained with a grant-producing handshake.
+///
+/// Grant credentials keep channel identities opaque for authorization. This
+/// projection lets owner-facing settings show the names and avatar that the
+/// approval page showed without changing those authorization keys.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CodeGrantProfile {
+    /// The grant this identity describes.
+    pub grant_id: CodeGrantId,
+    /// The channel user's display name at connect time.
+    pub display_name: String,
+    /// The channel workspace's display name at connect time.
+    pub workspace_name: String,
+    /// The channel user's avatar at connect time, when the adapter supplied a
+    /// safe public HTTPS URL.
+    pub avatar_url: Option<String>,
 }
 
 /// Where a connect handshake stands.

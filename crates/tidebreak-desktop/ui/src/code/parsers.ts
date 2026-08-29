@@ -4207,7 +4207,10 @@ export function parseCodeGrant(value: unknown): CodeGrantSnapshot | null {
     !nonEmpty(value.id) ||
     !nonEmpty(value.channel_kind) ||
     !nonEmpty(value.external_identity) ||
+    !optionalString(value.display_name) ||
     !nonEmpty(value.workspace_identity) ||
+    !optionalString(value.workspace_name) ||
+    !optionalString(value.avatar_url) ||
     !nonEmpty(value.created_at) ||
     !optionalString(value.rotated_at) ||
     !optionalString(value.revoked_at) ||
@@ -4219,7 +4222,14 @@ export function parseCodeGrant(value: unknown): CodeGrantSnapshot | null {
     id: value.id,
     channel_kind: value.channel_kind,
     external_identity: value.external_identity,
+    ...(value.display_name !== undefined
+      ? { display_name: value.display_name }
+      : {}),
     workspace_identity: value.workspace_identity,
+    ...(value.workspace_name !== undefined
+      ? { workspace_name: value.workspace_name }
+      : {}),
+    ...(value.avatar_url !== undefined ? { avatar_url: value.avatar_url } : {}),
     created_at: value.created_at,
     ...(value.rotated_at !== undefined ? { rotated_at: value.rotated_at } : {}),
     ...(value.revoked_at !== undefined ? { revoked_at: value.revoked_at } : {}),

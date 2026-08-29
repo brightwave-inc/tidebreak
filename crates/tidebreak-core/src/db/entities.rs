@@ -2036,6 +2036,7 @@ pub mod code_connect_handshake {
         #[sea_orm(primary_key, auto_increment = false)]
         pub id: Uuid,
         pub nonce_hash: String,
+        pub confirm_hash: String,
         pub csrf: String,
         pub channel_kind: String,
         pub external_identity: String,
@@ -2044,7 +2045,8 @@ pub mod code_connect_handshake {
         pub workspace_name: String,
         pub avatar_url: Option<String>,
         pub state: String,
-        pub approved_owner: Option<String>,
+        pub approval_owner: Option<String>,
+        pub grant_id: Option<Uuid>,
         pub created_at: DateTimeUtc,
         pub expires_at: DateTimeUtc,
         pub approved_at: Option<DateTimeUtc>,

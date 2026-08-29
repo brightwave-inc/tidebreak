@@ -199,6 +199,9 @@ pub struct AppState {
     /// checks live account state; static-token mode remains for standalone
     /// deployments. Desktop never consults it.
     pub(crate) principal_authenticator: Arc<crate::auth::PrincipalAuthenticator>,
+    /// Narrow service bearers that may start an external connect handshake.
+    /// `None` keeps the pre-grant adapter surface disabled.
+    pub(crate) adapter_bootstrap_tokens: Option<Arc<crate::auth::AdapterBootstrapTokens>>,
     /// Per-caller gateway capabilities — inference credentials and
     /// entitlement snapshots — on a gateway-authenticated hosted machine
     /// (decisions 51 and 62). `None` everywhere else, which is what keeps
@@ -430,6 +433,7 @@ impl AppState {
             agent_config,
             token: Uuid::new_v4().to_string().into(),
             principal_authenticator,
+            adapter_bootstrap_tokens: None,
             on_behalf_of_gateway: None,
             client_executor_token: mint_client_executor_token(),
             local_import_token: mint_local_import_token(),

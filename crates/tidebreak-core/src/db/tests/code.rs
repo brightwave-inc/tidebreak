@@ -5232,6 +5232,208 @@ fn fake_hash(seed: &str) -> String {
     format!("{out:0>64}")
 }
 
+/// The connect flow binds its CSRF token to the first authenticated owner,
+/// keeps the adapter confirmation capability out of the approval link, and
+/// rolls the state back when grant insertion fails.
+#[tokio::test]
+async fn connect_completion_is_owner_bound_and_atomic() {
+    let (_dir, store) = temp_store().await;
+    let alice = OwnerId::new("alice").unwrap();
+    let bob = OwnerId::new("bob").unwrap();
+    let nonce_hash = fake_hash("connect-nonce");
+    let confirm_hash = fake_hash("connect-confirm");
+
+    crate::db::code::insert_connect_handshake(
+        &store,
+        &nonce_hash,
+        &confirm_hash,
+        "csrf-token",
+        "slack",
+        "U1",
+        "T1",
+        "Casey",
+        "Acme Corp",
+        Some("https://example.com/avatar.png"),
+        chrono::Duration::minutes(15),
+    )
+    .await
+    .unwrap();
+
+    let (page, csrf) =
+        crate::db::code::view_connect_handshake_all_owners(&store, &nonce_hash, &alice)
+            .await
+            .unwrap()
+            .expect("the first owner claims the approval surface");
+    assert_eq!(page.approval_owner.as_ref(), Some(&alice));
+    assert_eq!(csrf, "csrf-token");
+    assert!(
+        crate::db::code::view_connect_handshake_all_owners(&store, &nonce_hash, &bob,)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(crate::db::code::connect_handshake_status_all_owners(
+        &store,
+        &nonce_hash,
+        &fake_hash("wrong-confirm"),
+    )
+    .await
+    .unwrap()
+    .is_none());
+
+    let (first, second) = tokio::join!(
+        crate::db::code::approve_connect_handshake_all_owners(
+            &store,
+            &nonce_hash,
+            "csrf-token",
+            &alice,
+        ),
+        crate::db::code::approve_connect_handshake_all_owners(
+            &store,
+            &nonce_hash,
+            "csrf-token",
+            &alice,
+        ),
+    );
+    let approvals = [first.unwrap(), second.unwrap()]
+        .into_iter()
+        .filter(Option::is_some)
+        .count();
+    assert_eq!(
+        approvals, 1,
+        "only one concurrent approval may move the row"
+    );
+
+    // Force the grant insert to fail after the completion compare-and-set by
+    // colliding with an existing access-token hash. The transaction must put
+    // the handshake back in Approved so a safe retry can finish.
+    crate::db::code::mint_external_grant(
+        &store,
+        &alice,
+        "slack",
+        "U-existing",
+        "T-existing",
+        &fake_hash("conflicting-token"),
+        &fake_hash("existing-refresh"),
+    )
+    .await
+    .unwrap();
+    assert!(
+        crate::db::code::complete_connect_handshake_and_mint_grant_all_owners(
+            &store,
+            &nonce_hash,
+            &confirm_hash,
+            &fake_hash("conflicting-token"),
+            &fake_hash("connect-refresh-failed"),
+        )
+        .await
+        .is_err()
+    );
+    let still_approved =
+        crate::db::code::connect_handshake_status_all_owners(&store, &nonce_hash, &confirm_hash)
+            .await
+            .unwrap()
+            .expect("the failed mint must leave the handshake retryable");
+    assert_eq!(
+        still_approved.state,
+        crate::code::CodeConnectState::Approved
+    );
+
+    let token_a = fake_hash("connect-token-a");
+    let refresh_a = fake_hash("connect-refresh-a");
+    let token_b = fake_hash("connect-token-b");
+    let refresh_b = fake_hash("connect-refresh-b");
+    let (completed, replayed) = tokio::join!(
+        crate::db::code::complete_connect_handshake_and_mint_grant_all_owners(
+            &store,
+            &nonce_hash,
+            &confirm_hash,
+            &token_a,
+            &refresh_a,
+        ),
+        crate::db::code::complete_connect_handshake_and_mint_grant_all_owners(
+            &store,
+            &nonce_hash,
+            &confirm_hash,
+            &token_b,
+            &refresh_b,
+        ),
+    );
+    let completions = [completed.unwrap(), replayed.unwrap()];
+    let minted = completions
+        .iter()
+        .filter_map(Option::as_ref)
+        .collect::<Vec<_>>();
+    assert_eq!(minted.len(), 1, "only one concurrent completion may mint");
+    assert!(minted[0].1.is_empty());
+    assert!(crate::db::code::connect_handshake_status_all_owners(
+        &store,
+        &nonce_hash,
+        &confirm_hash,
+    )
+    .await
+    .unwrap()
+    .is_none());
+
+    let profiles = crate::db::code::list_connect_grant_profiles(&store, &alice)
+        .await
+        .unwrap();
+    assert_eq!(profiles.len(), 1);
+    assert_eq!(profiles[0].grant_id, minted[0].0.id);
+    assert_eq!(profiles[0].display_name, "Casey");
+    assert_eq!(profiles[0].workspace_name, "Acme Corp");
+}
+
+/// Whole-workspace revoke is one store operation: every live grant in the
+/// target workspace gets the same first reason, while another workspace stays
+/// live.
+#[tokio::test]
+async fn workspace_revoke_updates_the_whole_scope() {
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    for (user, workspace, token) in [
+        ("U1", "T1", "workspace-token-1"),
+        ("U2", "T1", "workspace-token-2"),
+        ("U3", "T2", "workspace-token-3"),
+    ] {
+        crate::db::code::mint_external_grant(
+            &store,
+            &owner,
+            "slack",
+            user,
+            workspace,
+            &fake_hash(token),
+            &fake_hash(&format!("{token}-refresh")),
+        )
+        .await
+        .unwrap();
+    }
+
+    let revoked = crate::db::code::revoke_external_workspace_grants(
+        &store,
+        &owner,
+        "slack",
+        "T1",
+        "the owner revoked the whole workspace",
+    )
+    .await
+    .unwrap();
+    assert_eq!(revoked.len(), 2);
+    assert!(revoked.iter().all(|grant| {
+        grant.revoked_at.is_some()
+            && grant.revoked_reason.as_deref() == Some("the owner revoked the whole workspace")
+    }));
+    let all = crate::db::code::list_external_grants(&store, &owner)
+        .await
+        .unwrap();
+    assert_eq!(
+        all.iter()
+            .filter(|grant| grant.workspace_identity == "T2" && grant.revoked_at.is_none())
+            .count(),
+        1
+    );
+}
+
 /// Mint, authenticate, rotate, and detect reuse: a replayed rotated
 /// refresh hash revokes the grant in the same transaction, and a revoked
 /// grant authenticates nothing.

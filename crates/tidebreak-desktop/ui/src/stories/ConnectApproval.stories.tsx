@@ -35,6 +35,16 @@ type Story = StoryObj<typeof meta>;
 /** "Is this you?" — the identity shown is exactly what a grant would bind. */
 export const IsThisYou: Story = {};
 
+/** The authenticated page is loading the one-time handshake. */
+export const Loading: Story = {
+  args: { page: null, phase: "loading" },
+};
+
+/** The approval POST is in flight and cannot be submitted twice. */
+export const Approving: Story = {
+  args: { phase: "approving" },
+};
+
 /** Approved: nothing is linked until the channel-side confirm lands. */
 export const ApprovedAwaitingChannelConfirm: Story = {
   args: { phase: "approved" },
@@ -48,4 +58,16 @@ export const LinkNoLongerValid: Story = {
 /** The approve POST failed; the question stays and the error is spoken. */
 export const ApproveFailed: Story = {
   args: { error: "The machine could not be reached. Try again." },
+};
+
+/** Long identity copy must wrap without pushing the action off the card. */
+export const LongIdentity: Story = {
+  args: {
+    page: {
+      ...casey,
+      display_name: "Casey Nakamura-Santiago, Platform Reliability",
+      workspace_name:
+        "Acme International Engineering and Infrastructure Operations",
+    },
+  },
 };

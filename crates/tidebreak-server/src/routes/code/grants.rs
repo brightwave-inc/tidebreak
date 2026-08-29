@@ -3,15 +3,16 @@
 //!
 //! Two audiences share this file, on two surfaces. The person, on the
 //! authenticated API: the connect approval page (`view`/`approve`) and the
-//! desktop grants list with revoke. The adapter, on the unauthenticated
-//! external surface — it holds no grant until connect completes: parking a
-//! handshake and completing it after its DM confirm, both gated by the
-//! unguessable one-time nonce. Approval alone mints nothing — a forwarded
-//! connect link therefore binds nothing.
+//! desktop grants list with revoke. The adapter holds no grant until connect
+//! completes, so the external surface uses a narrow deployment bootstrap
+//! bearer for start and a separate per-handshake confirmation capability for
+//! status and completion. Approval alone mints nothing — a forwarded connect
+//! link therefore binds nothing.
 
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{header, HeaderMap, StatusCode};
 
+use crate::auth::AdapterBootstrapAuth;
 use crate::code::ScopedCode;
 use crate::error::ServerError;
 use crate::extract::{Json, Path};
@@ -31,12 +32,34 @@ fn adapter_runtime(
         .ok_or_else(|| ServerError::not_found("this connect link is no longer valid"))
 }
 
+fn confirmation_token(headers: &HeaderMap) -> Result<&str, ServerError> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ServerError::not_found("this connect link is no longer valid"))
+}
+
 /// `GET /code/grants` — every grant the owner holds, revoked ones
 /// included so a theft-triggered revoke and its reason stay visible.
 pub async fn list_grants(code: ScopedCode) -> Result<Json<Vec<CodeGrantSnapshot>>, ServerError> {
     let grants = code.list_adapter_grants().await?;
+    let mut profiles: std::collections::HashMap<_, _> = code
+        .list_adapter_grant_profiles()
+        .await?
+        .into_iter()
+        .map(|profile| (profile.grant_id, profile))
+        .collect();
     Ok(Json(
-        grants.into_iter().map(CodeGrantSnapshot::from).collect(),
+        grants
+            .into_iter()
+            .map(|grant| {
+                let profile = profiles.remove(&grant.id);
+                CodeGrantSnapshot::from_grant_and_profile(grant, profile)
+            })
+            .collect(),
     ))
 }
 
@@ -101,6 +124,9 @@ pub struct ConnectStartBody {
 pub struct ConnectStartResponse {
     /// Goes into the connect card link, once; the machine keeps a hash.
     pub nonce: String,
+    /// Adapter-only capability for status polling and the closing confirm.
+    /// This value never appears in the approval link.
+    pub confirmation_token: String,
     pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -110,9 +136,10 @@ pub struct ConnectStartResponse {
 /// approves it on the authenticated page.
 pub async fn connect_start(
     State(state): State<AppState>,
+    _bootstrap: AdapterBootstrapAuth,
     Json(body): Json<ConnectStartBody>,
 ) -> Result<(StatusCode, Json<ConnectStartResponse>), ServerError> {
-    let (handshake, nonce) = adapter_runtime(&state)?
+    let (handshake, nonce, confirmation_token) = adapter_runtime(&state)?
         .start_connect_handshake(
             &body.channel_kind,
             &body.external_identity,
@@ -126,6 +153,7 @@ pub async fn connect_start(
         StatusCode::CREATED,
         Json(ConnectStartResponse {
             nonce,
+            confirmation_token,
             expires_at: handshake.expires_at,
         }),
     ))
@@ -185,9 +213,11 @@ pub struct ConnectStatusResponse {
 pub async fn connect_status(
     State(state): State<AppState>,
     Path(nonce): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Json<ConnectStatusResponse>, ServerError> {
-    let (handshake, _csrf) = adapter_runtime(&state)?
-        .view_connect_handshake(&nonce)
+    let confirmation_token = confirmation_token(&headers)?;
+    let handshake = adapter_runtime(&state)?
+        .connect_handshake_status(&nonce, confirmation_token)
         .await?
         .ok_or_else(|| ServerError::not_found("this connect link is no longer valid"))?;
     Ok(Json(ConnectStatusResponse {
@@ -211,9 +241,11 @@ pub struct ConnectCompleteResponse {
 pub async fn connect_complete(
     State(state): State<AppState>,
     Path(nonce): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Json<ConnectCompleteResponse>, ServerError> {
+    let confirmation_token = confirmation_token(&headers)?;
     let (grant, pair) = adapter_runtime(&state)?
-        .complete_connect_handshake(&nonce)
+        .complete_connect_handshake(&nonce, confirmation_token)
         .await?
         .ok_or_else(|| ServerError::not_found("this connect link is no longer valid"))?;
     Ok(Json(ConnectCompleteResponse {

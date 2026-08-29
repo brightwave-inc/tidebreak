@@ -25,6 +25,8 @@ use crate::code::CodeRuntime;
 use tidebreak_core::db::code::insert_repo;
 use tidebreak_core::{CodeRepo, OwnerId, RepoId};
 
+const ADAPTER_BOOTSTRAP_TOKEN: &str = "adapter-bootstrap-token-padded-to-forty-eight-characters";
+
 #[derive(Default)]
 struct FakeProvisioner {
     spawns: StdMutex<Vec<SpawnArguments>>,
@@ -184,6 +186,9 @@ async fn external_app_with_token() -> (
         },
     );
     state.code = Some(runtime.clone());
+    state.adapter_bootstrap_tokens = Some(Arc::new(crate::auth::AdapterBootstrapTokens::for_test(
+        ADAPTER_BOOTSTRAP_TOKEN,
+    )));
     let token = state.token.clone();
     (app(state), fake, runtime, repo_id, token, dir)
 }
@@ -591,9 +596,40 @@ async fn a_connect_handshake_mints_only_at_the_closing_confirm() {
     let client = reqwest::Client::new();
     let owner = OwnerId::local();
 
+    let missing_bootstrap = client
+        .post(format!("http://{addr}/external/connect"))
+        .json(&serde_json::json!({
+            "channel_kind": "slack",
+            "external_identity": "U1",
+            "workspace_identity": "T1",
+            "display_name": "Casey",
+            "workspace_name": "Acme Corp",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        missing_bootstrap.status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    let wrong_bootstrap = client
+        .post(format!("http://{addr}/external/connect"))
+        .bearer_auth("wrong-bootstrap-token-padded-to-thirty-two")
+        .json(&serde_json::json!({
+            "channel_kind": "slack",
+            "external_identity": "U1",
+            "workspace_identity": "T1",
+            "display_name": "Casey",
+            "workspace_name": "Acme Corp",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong_bootstrap.status(), reqwest::StatusCode::UNAUTHORIZED);
+
     let started: serde_json::Value = client
         .post(format!("http://{addr}/external/connect"))
-        .bearer_auth(&token)
+        .bearer_auth(ADAPTER_BOOTSTRAP_TOKEN)
         .json(&serde_json::json!({
             "channel_kind": "slack",
             "external_identity": "U1",
@@ -609,6 +645,25 @@ async fn a_connect_handshake_mints_only_at_the_closing_confirm() {
         .await
         .unwrap();
     let nonce = started["nonce"].as_str().unwrap().to_owned();
+    let confirmation_token = started["confirmation_token"].as_str().unwrap().to_owned();
+
+    // The approval link alone cannot observe or complete the adapter half.
+    let unconfirmed_status = client
+        .get(format!("http://{addr}/external/connect/{nonce}/status"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unconfirmed_status.status(), reqwest::StatusCode::NOT_FOUND);
+    let pending: serde_json::Value = client
+        .get(format!("http://{addr}/external/connect/{nonce}/status"))
+        .bearer_auth(&confirmation_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(pending["state"], "pending");
 
     // The approval page shows the identity being linked.
     let page: serde_json::Value = client
@@ -625,11 +680,18 @@ async fn a_connect_handshake_mints_only_at_the_closing_confirm() {
     assert_eq!(page["state"], "pending");
     let csrf = page["csrf"].as_str().unwrap().to_owned();
 
-    // A forwarded link binds nothing: completion before approval refuses,
-    // and a wrong CSRF token cannot approve.
+    // A forwarded link binds nothing: the link lacks the adapter's separate
+    // confirmation capability, completion before approval refuses even with
+    // that capability, and a wrong CSRF token cannot approve.
+    let link_only = client
+        .post(format!("http://{addr}/external/connect/{nonce}/complete"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(link_only.status(), reqwest::StatusCode::NOT_FOUND);
     let early = client
         .post(format!("http://{addr}/external/connect/{nonce}/complete"))
-        .bearer_auth(&token)
+        .bearer_auth(&confirmation_token)
         .send()
         .await
         .unwrap();
@@ -652,6 +714,16 @@ async fn a_connect_handshake_mints_only_at_the_closing_confirm() {
         .await
         .unwrap();
     assert_eq!(approved.status(), reqwest::StatusCode::NO_CONTENT);
+    let approved_status: serde_json::Value = client
+        .get(format!("http://{addr}/external/connect/{nonce}/status"))
+        .bearer_auth(&confirmation_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(approved_status["state"], "approved");
     let grants: Vec<serde_json::Value> = client
         .get(format!("http://{addr}/code/grants"))
         .bearer_auth(&token)
@@ -667,7 +739,7 @@ async fn a_connect_handshake_mints_only_at_the_closing_confirm() {
     // exactly once.
     let completed: serde_json::Value = client
         .post(format!("http://{addr}/external/connect/{nonce}/complete"))
-        .bearer_auth(&token)
+        .bearer_auth(&confirmation_token)
         .send()
         .await
         .unwrap()
@@ -679,7 +751,7 @@ async fn a_connect_handshake_mints_only_at_the_closing_confirm() {
     assert!(completed["token"].as_str().unwrap().starts_with("tbg_"));
     let replayed = client
         .post(format!("http://{addr}/external/connect/{nonce}/complete"))
-        .bearer_auth(&token)
+        .bearer_auth(&confirmation_token)
         .send()
         .await
         .unwrap();
@@ -703,6 +775,9 @@ async fn a_connect_handshake_mints_only_at_the_closing_confirm() {
         .await
         .unwrap();
     assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0]["display_name"], "Casey");
+    assert_eq!(grants[0]["workspace_name"], "Acme Corp");
+    assert_eq!(grants[0]["avatar_url"], "https://example.com/a.png");
     let grant_id = grants[0]["id"].as_str().unwrap().to_owned();
     let revoked: serde_json::Value = client
         .post(format!("http://{addr}/code/grants/{grant_id}/revoke"))
@@ -738,4 +813,58 @@ async fn a_connect_handshake_mints_only_at_the_closing_confirm() {
         .unwrap();
     assert_eq!(swept.len(), 2);
     assert!(swept.iter().all(|grant| grant["revoked_at"].is_string()));
+}
+
+/// The approval page never receives an avatar that can target a local host or
+/// carry credentials. Invalid avatar input is a request error, not a stored
+/// surprise that the browser later loads.
+#[tokio::test]
+async fn connect_rejects_unsafe_avatar_urls() {
+    let (router, _fake, _runtime, _repo_id, _token, _dir) = external_app_with_token().await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+
+    for avatar_url in [
+        "http://example.com/a.png",
+        "https://user:secret@example.com/a.png",
+        "https://127.0.0.1/a.png",
+        "https://avatars.local/a.png",
+    ] {
+        let response = client
+            .post(format!("http://{addr}/external/connect"))
+            .bearer_auth(ADAPTER_BOOTSTRAP_TOKEN)
+            .json(&serde_json::json!({
+                "channel_kind": "slack",
+                "external_identity": "U1",
+                "workspace_identity": "T1",
+                "display_name": "Casey",
+                "workspace_name": "Acme Corp",
+                "avatar_url": avatar_url,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    }
+}
+
+/// The public bootstrap route never buffers an unbounded identity document.
+#[tokio::test]
+async fn connect_start_rejects_an_oversized_body() {
+    let (router, _fake, _runtime, _repo_id, _token, _dir) = external_app_with_token().await;
+    let addr = serve(router).await;
+    let response = reqwest::Client::new()
+        .post(format!("http://{addr}/external/connect"))
+        .bearer_auth(ADAPTER_BOOTSTRAP_TOKEN)
+        .json(&serde_json::json!({
+            "channel_kind": "slack",
+            "external_identity": "U1",
+            "workspace_identity": "T1",
+            "display_name": "x".repeat(20 * 1024),
+            "workspace_name": "Acme Corp",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
 }

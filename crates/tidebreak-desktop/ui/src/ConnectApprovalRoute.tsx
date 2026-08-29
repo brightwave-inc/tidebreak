@@ -49,8 +49,8 @@ export function ConnectApprovalRoute() {
     try {
       await client.approveCodeConnect(nonce, page.csrf);
       setPhase("approved");
-    } catch (err) {
-      setError(String(err));
+    } catch {
+      setError("The connect request could not be approved. Try again.");
       setPhase("ready");
     }
   }
@@ -84,7 +84,7 @@ export function ConnectApprovalView({
     <div className="flex min-h-full items-center justify-center p-6">
       <Card className="w-full max-w-md p-6">
         {phase === "loading" ? (
-          <p className="text-sm text-muted-foreground">
+          <p className="text-sm text-muted-foreground" role="status">
             Opening the connect request…
           </p>
         ) : phase === "invalid" ? (
@@ -100,20 +100,7 @@ export function ConnectApprovalView({
         ) : page ? (
           <div className="flex flex-col gap-4">
             <div className="flex items-center gap-3">
-              {page.avatar_url ? (
-                <img
-                  src={page.avatar_url}
-                  alt={`${page.display_name}'s avatar`}
-                  className="size-12 rounded-full"
-                />
-              ) : (
-                <div
-                  aria-hidden
-                  className="flex size-12 items-center justify-center rounded-full bg-muted text-lg font-medium"
-                >
-                  {page.display_name.slice(0, 1).toUpperCase()}
-                </div>
-              )}
+              <ConnectAvatar page={page} />
               <div className="min-w-0">
                 <h1 className="text-lg font-semibold">{page.display_name}</h1>
                 <p className="text-sm text-muted-foreground">
@@ -147,11 +134,40 @@ export function ConnectApprovalView({
                 </div>
               </>
             )}
-            {error && <p className="text-sm text-destructive">{error}</p>}
+            {error && (
+              <p className="text-sm text-destructive" role="alert">
+                {error}
+              </p>
+            )}
           </div>
         ) : null}
       </Card>
     </div>
+  );
+}
+
+function ConnectAvatar({ page }: { page: CodeConnectPage }) {
+  const [failed, setFailed] = useState(false);
+  useEffect(() => setFailed(false), [page.avatar_url]);
+  if (!page.avatar_url || failed) {
+    return (
+      <div
+        aria-hidden
+        className="flex size-12 shrink-0 items-center justify-center rounded-full bg-muted text-lg font-medium"
+      >
+        {page.display_name.slice(0, 1).toUpperCase()}
+      </div>
+    );
+  }
+  return (
+    <img
+      src={page.avatar_url}
+      alt={`${page.display_name}'s avatar`}
+      className="size-12 shrink-0 rounded-full object-cover"
+      referrerPolicy="no-referrer"
+      decoding="async"
+      onError={() => setFailed(true)}
+    />
   );
 }
 

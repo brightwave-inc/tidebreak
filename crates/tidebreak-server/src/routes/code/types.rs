@@ -23,9 +23,22 @@ pub struct CodeGrantSnapshot {
     pub channel_kind: String,
     /// The channel's identity for the linked user.
     pub external_identity: String,
+    /// The channel user's display name at connect time, when this grant came
+    /// from the connect flow.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub display_name: Option<String>,
     /// The channel's workspace identity, shown so an owner can revoke a
     /// whole workspace at once.
     pub workspace_identity: String,
+    /// The channel workspace's display name at connect time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub workspace_name: Option<String>,
+    /// The linked user's safe public avatar URL at connect time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub avatar_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub rotated_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -46,11 +59,34 @@ impl From<tidebreak_core::CodeExternalGrant> for CodeGrantSnapshot {
             id: grant.id,
             channel_kind: grant.channel_kind,
             external_identity: grant.external_identity,
+            display_name: None,
             workspace_identity: grant.workspace_identity,
+            workspace_name: None,
+            avatar_url: None,
             rotated_at: grant.rotated_at,
             created_at: grant.created_at,
             revoked_at: grant.revoked_at,
             revoked_reason: grant.revoked_reason,
+        }
+    }
+}
+
+impl CodeGrantSnapshot {
+    fn with_profile(mut self, profile: tidebreak_core::CodeGrantProfile) -> Self {
+        self.display_name = Some(profile.display_name);
+        self.workspace_name = Some(profile.workspace_name);
+        self.avatar_url = profile.avatar_url;
+        self
+    }
+
+    pub(super) fn from_grant_and_profile(
+        grant: tidebreak_core::CodeExternalGrant,
+        profile: Option<tidebreak_core::CodeGrantProfile>,
+    ) -> Self {
+        let snapshot = Self::from(grant);
+        match profile {
+            Some(profile) => snapshot.with_profile(profile),
+            None => snapshot,
         }
     }
 }
