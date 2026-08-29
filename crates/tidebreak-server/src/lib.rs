@@ -613,6 +613,10 @@ pub fn app(state: AppState) -> Router {
         // nonce. The owner's view and approve stay on the authenticated API.
         .route("/external/connect", post(routes::code::connect_start))
         .route(
+            "/external/connect/{nonce}/status",
+            get(routes::code::connect_status),
+        )
+        .route(
             "/external/connect/{nonce}/complete",
             post(routes::code::connect_complete),
         )

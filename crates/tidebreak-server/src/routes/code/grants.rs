@@ -171,6 +171,32 @@ pub async fn connect_approve(
 }
 
 #[derive(serde::Serialize)]
+pub struct ConnectStatusResponse {
+    /// `pending`, `approved`, or nothing once completed or expired — those
+    /// answer not-found like an invalid nonce.
+    pub state: String,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// `GET /external/connect/{nonce}/status` — how the adapter learns the
+/// owner approved, so it can send its DM confirm. On the external surface,
+/// gated by the nonce; answers state and expiry only, never the CSRF token
+/// the authenticated approval page gets.
+pub async fn connect_status(
+    State(state): State<AppState>,
+    Path(nonce): Path<String>,
+) -> Result<Json<ConnectStatusResponse>, ServerError> {
+    let (handshake, _csrf) = adapter_runtime(&state)?
+        .view_connect_handshake(&nonce)
+        .await?
+        .ok_or_else(|| ServerError::not_found("this connect link is no longer valid"))?;
+    Ok(Json(ConnectStatusResponse {
+        state: handshake.state.as_str().to_owned(),
+        expires_at: handshake.expires_at,
+    }))
+}
+
+#[derive(serde::Serialize)]
 pub struct ConnectCompleteResponse {
     pub grant: CodeGrantSnapshot,
     /// The only copy of the pair; the machine keeps hashes.
