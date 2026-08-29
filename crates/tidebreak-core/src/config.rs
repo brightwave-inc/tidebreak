@@ -137,6 +137,27 @@ pub struct Config {
     /// Required together with [`Config::runtime_endpoint`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_profile: Option<String>,
+    /// Concurrent remote sandboxes one owner may hold. The reservation is
+    /// atomic, so competing starts cannot exceed this cap.
+    #[serde(
+        default = "default_runtime_concurrency_cap",
+        skip_serializing_if = "runtime_concurrency_cap_is_default"
+    )]
+    pub runtime_concurrency_cap: usize,
+    /// Tidebreak's per-spawn spend ceiling in micro-USD. The runtime profile
+    /// may impose a lower ceiling. `None` leaves this ceiling to the profile.
+    #[serde(
+        default = "default_runtime_spawn_spend_ceiling_microusd",
+        skip_serializing_if = "runtime_spawn_spend_ceiling_is_default"
+    )]
+    pub runtime_spawn_spend_ceiling_microusd: Option<i64>,
+    /// Cumulative per-session spend ceiling in micro-USD. `None` removes the
+    /// Tidebreak ledger ceiling; the runtime profile still bounds each spawn.
+    #[serde(
+        default = "default_runtime_session_spend_ceiling_microusd",
+        skip_serializing_if = "runtime_session_spend_ceiling_is_default"
+    )]
+    pub runtime_session_spend_ceiling_microusd: Option<i64>,
     /// Where new code-mode worktrees land when no `code_worktree_root` setting
     /// is stored.
     ///
@@ -155,6 +176,10 @@ pub struct Config {
 /// The bind every profile uses when no address is configured: loopback, and
 /// an ephemeral port the OS picks.
 const DEFAULT_BIND: SocketAddr = SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+
+const DEFAULT_RUNTIME_CONCURRENCY_CAP: usize = 3;
+const DEFAULT_RUNTIME_SPAWN_SPEND_CEILING_MICROUSD: i64 = 5_000_000;
+const DEFAULT_RUNTIME_SESSION_SPEND_CEILING_MICROUSD: i64 = 20_000_000;
 
 impl Config {
     /// The per-install directory user-authored skill packages are read from.
@@ -235,6 +260,10 @@ impl Config {
             listen_addr: None,
             runtime_endpoint: None,
             runtime_profile: None,
+            runtime_concurrency_cap: default_runtime_concurrency_cap(),
+            runtime_spawn_spend_ceiling_microusd: default_runtime_spawn_spend_ceiling_microusd(),
+            runtime_session_spend_ceiling_microusd: default_runtime_session_spend_ceiling_microusd(
+            ),
             code_worktree_root_default: None,
         }
     }
@@ -251,7 +280,10 @@ impl Config {
     /// `TIDEBREAK_PUBLIC_URL` for machine-bound Gateway credentials,
     /// `TIDEBREAK_LISTEN_ADDR` (self-host only; default loopback on an
     /// ephemeral port), and optional `TIDEBREAK_RUNTIME_ENDPOINT` plus
-    /// `TIDEBREAK_RUNTIME_PROFILE` together to enable remote sessions.
+    /// `TIDEBREAK_RUNTIME_PROFILE` together to enable remote sessions. Remote
+    /// deployments can also set `TIDEBREAK_RUNTIME_CONCURRENCY_CAP`,
+    /// `TIDEBREAK_RUNTIME_SPAWN_SPEND_CEILING_MICROUSD`, and
+    /// `TIDEBREAK_RUNTIME_SESSION_SPEND_CEILING_MICROUSD`.
     pub fn from_env() -> Result<Self> {
         Self::from_vars(
             std::env::var("TIDEBREAK_PROFILE").ok(),
@@ -265,6 +297,11 @@ impl Config {
             std::env::var("TIDEBREAK_LISTEN_ADDR").ok(),
             std::env::var("TIDEBREAK_RUNTIME_ENDPOINT").ok(),
             std::env::var("TIDEBREAK_RUNTIME_PROFILE").ok(),
+        )?
+        .with_runtime_limit_vars(
+            std::env::var("TIDEBREAK_RUNTIME_CONCURRENCY_CAP").ok(),
+            std::env::var("TIDEBREAK_RUNTIME_SPAWN_SPEND_CEILING_MICROUSD").ok(),
+            std::env::var("TIDEBREAK_RUNTIME_SESSION_SPEND_CEILING_MICROUSD").ok(),
         )
     }
 
@@ -351,8 +388,39 @@ impl Config {
             listen_addr,
             runtime_endpoint,
             runtime_profile,
+            runtime_concurrency_cap: default_runtime_concurrency_cap(),
+            runtime_spawn_spend_ceiling_microusd: default_runtime_spawn_spend_ceiling_microusd(),
+            runtime_session_spend_ceiling_microusd: default_runtime_session_spend_ceiling_microusd(
+            ),
             code_worktree_root_default: None,
         })
+    }
+
+    /// Apply the three operator-controlled remote runtime limits. Split from
+    /// [`Config::from_env`] so tests can cover invalid values without mutating
+    /// process-global environment variables.
+    fn with_runtime_limit_vars(
+        mut self,
+        concurrency_cap: Option<String>,
+        spawn_spend_ceiling_microusd: Option<String>,
+        session_spend_ceiling_microusd: Option<String>,
+    ) -> Result<Self> {
+        self.runtime_concurrency_cap = parse_positive_usize(
+            "TIDEBREAK_RUNTIME_CONCURRENCY_CAP",
+            concurrency_cap,
+            DEFAULT_RUNTIME_CONCURRENCY_CAP,
+        )?;
+        self.runtime_spawn_spend_ceiling_microusd = parse_spend_ceiling(
+            "TIDEBREAK_RUNTIME_SPAWN_SPEND_CEILING_MICROUSD",
+            spawn_spend_ceiling_microusd,
+            Some(DEFAULT_RUNTIME_SPAWN_SPEND_CEILING_MICROUSD),
+        )?;
+        self.runtime_session_spend_ceiling_microusd = parse_spend_ceiling(
+            "TIDEBREAK_RUNTIME_SESSION_SPEND_CEILING_MICROUSD",
+            session_spend_ceiling_microusd,
+            Some(DEFAULT_RUNTIME_SESSION_SPEND_CEILING_MICROUSD),
+        )?;
+        Ok(self)
     }
 
     /// The socket the API should bind for this config.
@@ -412,6 +480,76 @@ pub fn tidebreak_machine_resource(canonical_public_url: &str) -> String {
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+fn default_runtime_concurrency_cap() -> usize {
+    DEFAULT_RUNTIME_CONCURRENCY_CAP
+}
+
+fn runtime_concurrency_cap_is_default(value: &usize) -> bool {
+    *value == DEFAULT_RUNTIME_CONCURRENCY_CAP
+}
+
+fn default_runtime_spawn_spend_ceiling_microusd() -> Option<i64> {
+    Some(DEFAULT_RUNTIME_SPAWN_SPEND_CEILING_MICROUSD)
+}
+
+fn runtime_spawn_spend_ceiling_is_default(value: &Option<i64>) -> bool {
+    *value == Some(DEFAULT_RUNTIME_SPAWN_SPEND_CEILING_MICROUSD)
+}
+
+fn default_runtime_session_spend_ceiling_microusd() -> Option<i64> {
+    Some(DEFAULT_RUNTIME_SESSION_SPEND_CEILING_MICROUSD)
+}
+
+fn runtime_session_spend_ceiling_is_default(value: &Option<i64>) -> bool {
+    *value == Some(DEFAULT_RUNTIME_SESSION_SPEND_CEILING_MICROUSD)
+}
+
+fn parse_positive_usize(name: &str, value: Option<String>, default: usize) -> Result<usize> {
+    let Some(value) = value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(default);
+    };
+    value
+        .parse::<usize>()
+        .ok()
+        .filter(|parsed| *parsed > 0)
+        .ok_or_else(|| {
+            AgentError::config(format!(
+                "invalid {name}: expected a positive integer, got {value:?}"
+            ))
+        })
+}
+
+fn parse_spend_ceiling(
+    name: &str,
+    value: Option<String>,
+    default: Option<i64>,
+) -> Result<Option<i64>> {
+    let Some(value) = value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(default);
+    };
+    if value.eq_ignore_ascii_case("none") {
+        return Ok(None);
+    }
+    value
+        .parse::<i64>()
+        .ok()
+        .filter(|parsed| *parsed > 0)
+        .map(Some)
+        .ok_or_else(|| {
+            AgentError::config(format!(
+                "invalid {name}: expected a positive integer in micro-USD or `none`, got {value:?}"
+            ))
+        })
 }
 
 #[cfg(test)]
@@ -510,6 +648,37 @@ mod tests {
         .unwrap();
         assert_eq!(config.runtime_endpoint.as_deref(), Some("primary"));
         assert_eq!(config.runtime_profile.as_deref(), Some("tidebreak-remote"));
+    }
+
+    #[test]
+    fn remote_runtime_limit_vars_are_validated_and_honored() {
+        let config = Config::desktop("/data")
+            .with_runtime_limit_vars(
+                Some("8".into()),
+                Some("7500000".into()),
+                Some("none".into()),
+            )
+            .unwrap();
+        assert_eq!(config.runtime_concurrency_cap, 8);
+        assert_eq!(config.runtime_spawn_spend_ceiling_microusd, Some(7_500_000));
+        assert_eq!(config.runtime_session_spend_ceiling_microusd, None);
+
+        for invalid in ["0", "-1", "many"] {
+            assert!(
+                Config::desktop("/data")
+                    .with_runtime_limit_vars(Some(invalid.into()), None, None)
+                    .is_err(),
+                "concurrency cap {invalid:?} must fail"
+            );
+        }
+        for invalid in ["0", "-1", "5.00"] {
+            assert!(
+                Config::desktop("/data")
+                    .with_runtime_limit_vars(None, Some(invalid.into()), None)
+                    .is_err(),
+                "spawn ceiling {invalid:?} must fail"
+            );
+        }
     }
 
     #[test]
@@ -628,6 +797,12 @@ mod tests {
         assert_eq!(config.auth_gateway_url, None);
         assert_eq!(config.auth_gateway_verifier_url, None);
         assert_eq!(config.public_url, None);
+        assert_eq!(config.runtime_concurrency_cap, 3);
+        assert_eq!(config.runtime_spawn_spend_ceiling_microusd, Some(5_000_000));
+        assert_eq!(
+            config.runtime_session_spend_ceiling_microusd,
+            Some(20_000_000)
+        );
     }
 
     #[test]
@@ -636,6 +811,21 @@ mod tests {
         let json = serde_json::to_value(config).unwrap();
         assert_eq!(json.get("container_execution_enabled"), None);
         assert_eq!(json.get("container_image"), None);
+        assert_eq!(json.get("runtime_concurrency_cap"), None);
+        assert_eq!(json.get("runtime_spawn_spend_ceiling_microusd"), None);
+        assert_eq!(json.get("runtime_session_spend_ceiling_microusd"), None);
+    }
+
+    #[test]
+    fn an_explicit_missing_runtime_ceiling_roundtrips() {
+        let mut config = Config::desktop("/data");
+        config.runtime_spawn_spend_ceiling_microusd = None;
+        config.runtime_session_spend_ceiling_microusd = None;
+
+        let json = serde_json::to_string(&config).unwrap();
+        let restored = serde_json::from_str::<Config>(&json).unwrap();
+        assert_eq!(restored.runtime_spawn_spend_ceiling_microusd, None);
+        assert_eq!(restored.runtime_session_spend_ceiling_microusd, None);
     }
 
     #[test]

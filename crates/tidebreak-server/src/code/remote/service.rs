@@ -33,16 +33,18 @@ const PUMP_FAULT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5
 /// retrying every sweep tick would repeat both every two seconds.
 pub(crate) const PROMOTION_RETRY_HOLD: std::time::Duration = std::time::Duration::from_secs(150);
 
-/// Spawn settings a deployment starts with until they are operator-tunable:
-/// three concurrent sandboxes per owner, $5 per spawn, $20 per session. The
-/// per-spawn ceiling bounds one runaway incarnation; the per-session ledger
-/// bounds their sum, since reincarnation multiplies the former (#2874).
-pub(crate) fn default_settings(profile: String) -> RemoteSpawnSettings {
+/// Resolve one deployment's remote spawn settings from boot configuration.
+/// The per-spawn ceiling bounds one runaway incarnation. The per-session
+/// ledger bounds their sum because reincarnation multiplies the former.
+pub(crate) fn configured_settings(
+    profile: String,
+    config: &tidebreak_core::Config,
+) -> RemoteSpawnSettings {
     RemoteSpawnSettings {
         profile,
-        incarnation_cap: 3,
-        spend_ceiling_microusd: Some(5_000_000),
-        session_spend_ceiling_microusd: Some(20_000_000),
+        incarnation_cap: config.runtime_concurrency_cap,
+        spend_ceiling_microusd: config.runtime_spawn_spend_ceiling_microusd,
+        session_spend_ceiling_microusd: config.runtime_session_spend_ceiling_microusd,
     }
 }
 
@@ -379,6 +381,20 @@ mod tests {
             spend_ceiling_microusd: None,
             session_spend_ceiling_microusd: None,
         }
+    }
+
+    #[test]
+    fn configured_settings_use_operator_limits() {
+        let mut config = tidebreak_core::Config::desktop("/data");
+        config.runtime_concurrency_cap = 7;
+        config.runtime_spawn_spend_ceiling_microusd = Some(9_000_000);
+        config.runtime_session_spend_ceiling_microusd = None;
+
+        let settings = configured_settings("remote-large".to_owned(), &config);
+        assert_eq!(settings.profile, "remote-large");
+        assert_eq!(settings.incarnation_cap, 7);
+        assert_eq!(settings.spend_ceiling_microusd, Some(9_000_000));
+        assert_eq!(settings.session_spend_ceiling_microusd, None);
     }
 
     async fn runtime_with_remote(

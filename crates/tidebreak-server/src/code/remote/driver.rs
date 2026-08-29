@@ -366,7 +366,7 @@ impl RemoteDriver<'_> {
                     bus,
                     session,
                     format!(
-                        "The turn was refused: this session has spent {} of its {} ceiling and takes no more turns.{release}",
+                        "The turn was refused: this session has spent {} of its {} ceiling. Ask the deployment operator to raise TIDEBREAK_RUNTIME_SESSION_SPEND_CEILING_MICROUSD and restart Tidebreak before retrying.{release}",
                         dollars(spent),
                         dollars(ceiling)
                     ),
@@ -463,7 +463,7 @@ impl RemoteDriver<'_> {
                     bus,
                     session,
                     format!(
-                        "The turn was refused: all {} sandbox slots are in use by {}. Stop one of those sessions to continue.",
+                        "The turn was refused: all {} sandbox slots are in use by {}. Stop one of those sessions to continue, or ask the deployment operator to raise TIDEBREAK_RUNTIME_CONCURRENCY_CAP and restart Tidebreak.",
                         settings.incarnation_cap, names
                     ),
                     "the sandbox cap refused this turn",
@@ -1490,6 +1490,10 @@ mod tests {
         assert!(notice.contains("remote"), "{notice}");
         assert!(!notice.contains(&session_a.id.to_string()), "{notice}");
         assert!(notice.contains("Stop one of those sessions"), "{notice}");
+        assert!(
+            notice.contains("TIDEBREAK_RUNTIME_CONCURRENCY_CAP"),
+            "{notice}"
+        );
         let live = get_session(&db, &session_b.owner, session_b.id)
             .await
             .unwrap()
@@ -1545,11 +1549,13 @@ mod tests {
             .expect("expected a refusal notice");
         assert!(notice.contains("$2.50"), "{notice}");
         assert!(notice.contains("$2.00"), "{notice}");
-        // The refusal frees the cap slot instead of telling the owner to do
-        // something the product does not offer: the idle sandbox is asked to
-        // stop, and the copy says so.
-        assert!(!notice.contains("Raise the ceiling"), "{notice}");
+        // The refusal frees the cap slot and names the operator setting that
+        // can admit a later retry.
         assert!(notice.contains("stopped"), "{notice}");
+        assert!(
+            notice.contains("TIDEBREAK_RUNTIME_SESSION_SPEND_CEILING_MICROUSD"),
+            "{notice}"
+        );
         assert_eq!(
             fake.cancels.lock().unwrap().as_slice(),
             &["sb-1".to_owned()]

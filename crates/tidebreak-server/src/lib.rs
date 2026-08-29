@@ -1982,7 +1982,7 @@ async fn bind_inner(
             .map_err(|error| AgentError::config(format!("sandbox runtime client: {error}")))?;
             runtime.with_remote_sessions(code::remote::service::RemoteSessions::new(
                 Arc::new(provisioner),
-                code::remote::service::default_settings(profile),
+                code::remote::service::configured_settings(profile, &state.config),
             ))
         }
         _ => runtime,
