@@ -110,3 +110,50 @@ export const ProgressUpdates: Story = {
     );
   },
 };
+
+const rewrittenItems: CodeTranscriptItem[] = items.map((item) =>
+  item.kind === "assistant" && item.id === "assistant-final"
+    ? {
+        ...item,
+        rewrite:
+          "Workspace switching reuses recent transcript stores. It reconnects from the last event sequence.",
+        rewriteState: "rewritten",
+      }
+    : item,
+);
+
+/** Off: the original closing message, no recap. */
+export const RewriteOff: Story = {
+  args: { items },
+};
+
+/** Rewriting: the original stays visible while the recap is written. */
+export const RewriteRewriting: Story = {
+  args: {
+    items: items.map((item) =>
+      item.kind === "assistant" && item.id === "assistant-final"
+        ? { ...item, rewriteState: "rewriting" }
+        : item,
+    ),
+  },
+};
+
+/** Rewritten: original stays, recap sits under it. */
+export const RewriteRewritten: Story = {
+  args: { items: rewrittenItems },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText("Recap")).toBeInTheDocument();
+  },
+};
+
+/** Failed: the original stands, and the transcript says so. */
+export const RewriteFailed: Story = {
+  args: {
+    items: items.map((item) =>
+      item.kind === "assistant" && item.id === "assistant-final"
+        ? { ...item, rewriteState: "failed" }
+        : item,
+    ),
+  },
+};

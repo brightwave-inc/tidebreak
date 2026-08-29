@@ -87,6 +87,7 @@ export const storySettings: RuntimeSettings = {
   },
   model_visibility_overrides: {},
   computer_use_enabled: true,
+  rewrite_closing_messages: false,
 };
 
 function model(

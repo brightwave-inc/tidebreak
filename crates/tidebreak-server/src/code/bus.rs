@@ -29,7 +29,7 @@ use std::sync::Mutex;
 use chrono::{DateTime, Utc};
 use tidebreak_core::{
     Attention, CodeEvent, CodeSessionActivity, CodeSessionId, CodeSessionKind,
-    CodeSessionLifecycle, CodeSubagentSummary, CodeWatchState, HarnessKind, OwnerId,
+    CodeSessionLifecycle, CodeSubagentSummary, CodeTurnId, CodeWatchState, HarnessKind, OwnerId,
     PullRequestDigest, RepoId, SequencedCodeEvent, WorkspaceId, MAX_EVENT_TEXT_CHARS,
 };
 use tokio::sync::broadcast;
@@ -107,6 +107,26 @@ pub(crate) enum CodeLiveUpdate {
     /// The pull-request store changed (decision 66). No payload: delivery
     /// surfaces re-read their queries on receipt.
     Delivery,
+    /// Lucid rewrite of a completed turn's closing message. Not restated on
+    /// connect: the turn snapshot carries the stored rewrite.
+    TurnRewrite(TurnRewriteNotice),
+}
+
+/// Progress of one background rewrite of a completed turn's closing message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TurnRewriteNotice {
+    pub session: CodeSessionId,
+    pub turn_id: CodeTurnId,
+    pub state: TurnRewriteState,
+    pub rewrite: Option<String>,
+}
+
+/// Where one rewrite stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TurnRewriteState {
+    Rewriting,
+    Rewritten,
+    Failed,
 }
 
 /// Per-session broadcast channels for live journal events, plus one digest

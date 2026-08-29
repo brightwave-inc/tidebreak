@@ -115,6 +115,14 @@ async fn stream_updates(
                         break;
                     }
                 }
+                Ok(CodeLiveUpdate::TurnRewrite(notice)) => {
+                    if send_notice(&mut socket, &CodeUpdateNotice::turn_rewrite(notice))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
                 Err(RecvError::Lagged(_)) => {
                     match list_digests(&runtime.db, &owner).await {
                         Ok(sessions) => {

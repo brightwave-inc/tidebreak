@@ -1645,9 +1645,18 @@ export type CodeTriggerSnapshot = { id: CodeTriggerId, repo_id: RepoId, conditio
 export type CodeTurnId = string;
 
 /**
+ * Where one closing-message rewrite stands.
+ */
+export type CodeTurnRewriteState = "rewriting" | "rewritten" | "failed";
+
+/**
  * One user→engine turn.
  */
-export type CodeTurnSnapshot = { id: CodeTurnId, session_id: CodeSessionId, ordinal: number, status: CodeTurnStatus, model?: string, fast_mode: boolean, user_input: string, attachments: Array<ImageRef>, usage?: CodeUsage, checkpoint_ref?: string, diffstat?: Diffstat, started_at: string, ended_at?: string, };
+export type CodeTurnSnapshot = { id: CodeTurnId, session_id: CodeSessionId, ordinal: number, status: CodeTurnStatus, model?: string, fast_mode: boolean, user_input: string, attachments: Array<ImageRef>, usage?: CodeUsage, checkpoint_ref?: string, diffstat?: Diffstat, started_at: string, ended_at?: string, 
+/**
+ * Lucid rewrite of the closing message. The journal keeps the original.
+ */
+rewrite?: string, };
 
 /**
  * Status of one user→engine turn.
@@ -1695,7 +1704,7 @@ subagents?: Array<CodeSubagentSummary>,
  * Where this session stands, in a sentence, derived from the newest
  * turn that carries one.
  */
-recap?: string, } | { "type": "terminal_activity", workspace_id: WorkspaceId, terminal_id: CodeTerminalId, } | { "type": "clone_progress", job: string, phase: string, percent?: number, done: boolean, error?: string, repo_id?: RepoId, } | { "type": "harness_install", kind: HarnessKind, version?: string, phase: string, done: boolean, error?: string, } | { "type": "delivery" };
+recap?: string, } | { "type": "terminal_activity", workspace_id: WorkspaceId, terminal_id: CodeTerminalId, } | { "type": "clone_progress", job: string, phase: string, percent?: number, done: boolean, error?: string, repo_id?: RepoId, } | { "type": "harness_install", kind: HarnessKind, version?: string, phase: string, done: boolean, error?: string, } | { "type": "delivery" } | { "type": "turn_rewrite", session: CodeSessionId, turn_id: CodeTurnId, state: CodeTurnRewriteState, rewrite?: string, };
 
 /**
  * Token accounting for one turn.
@@ -4159,7 +4168,12 @@ model_visibility_overrides: { [key in string]: ModelVisibility },
  * enabled. Read at boot; turning it off unregisters the tools on the next
  * launch.
  */
-computer_use_enabled: boolean, };
+computer_use_enabled: boolean, 
+/**
+ * Whether completed code turns rewrite their closing message into lucid
+ * prose. Default off.
+ */
+rewrite_closing_messages: boolean, };
 
 /**
  * Renderer-safe progress of the current sign-in attempt.

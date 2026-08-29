@@ -3,6 +3,8 @@ import type { CodeEvent, SequencedCodeEventFrame } from "../api/types";
 import {
   applyAcceptedTurn,
   applyCodeTurnSnapshot,
+  applyStoredRewrites,
+  applyTurnRewrite,
   hydrateCodeTurns,
   initialCodeSessionState,
   mainAgentTranscriptItems,
@@ -2196,5 +2198,63 @@ describe("reasoning lifecycle", () => {
 
     const reasoning = state.items.find((item) => item.kind === "reasoning");
     expect(reasoning).toMatchObject({ kind: "reasoning", streaming: true });
+  });
+});
+
+describe("applyTurnRewrite", () => {
+  const closing = {
+    kind: "assistant" as const,
+    id: "a1",
+    turnId: "t1",
+    parentCallId: null,
+    text: "The harness restated three tool calls.",
+    streaming: false,
+    rewrite: "The turn added three tools.",
+    rewriteState: "rewritten" as const,
+  };
+
+  it("does not let a rewriting notice clear a stored rewrite", () => {
+    const next = applyTurnRewrite([closing], "t1", {
+      rewriteState: "rewriting",
+    });
+    expect(next[0]).toMatchObject({
+      rewrite: "The turn added three tools.",
+      rewriteState: "rewritten",
+    });
+  });
+
+  it("does not let a failed notice without text clear a stored rewrite", () => {
+    const next = applyTurnRewrite([closing], "t1", { rewriteState: "failed" });
+    expect(next[0]).toMatchObject({
+      rewrite: "The turn added three tools.",
+      rewriteState: "rewritten",
+    });
+  });
+});
+
+describe("stored recaps", () => {
+  it("stamps a stored recap after replay builds the closing message", () => {
+    const hydrated = hydrateCodeTurns(initialCodeSessionState(), [
+      { ...SNAPSHOT_TURN, rewrite: "The recap." },
+    ]);
+    expect(hydrated.storedRewrites.t1).toBe("The recap.");
+    const { state } = play(
+      [
+        { type: "turn_started", turn_id: "t1" },
+        { type: "assistant_delta", text: "The original closing message." },
+        { type: "turn_completed", usage: NO_USAGE },
+      ],
+      hydrated,
+    );
+    const stamped = applyStoredRewrites(state);
+    const assistant = stamped.items.find(
+      (item) => item.kind === "assistant" && item.turnId === "t1",
+    );
+    expect(assistant).toMatchObject({
+      kind: "assistant",
+      text: "The original closing message.",
+      rewrite: "The recap.",
+      rewriteState: "rewritten",
+    });
   });
 });

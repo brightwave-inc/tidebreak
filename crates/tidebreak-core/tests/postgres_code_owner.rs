@@ -124,6 +124,7 @@ async fn seed_owner(
             diffstat: None,
             usage: None,
             narrative: None,
+            rewrite: None,
             started_at: Utc::now(),
             ended_at: None,
         },

@@ -63,6 +63,7 @@ impl MigratorTrait for Migrator {
             Box::new(IncarnationIngest),
             Box::new(CodeExternalBindings),
             Box::new(CodeExternalEvents),
+            Box::new(CodeTurnRewrite),
         ]
     }
 }
@@ -2941,6 +2942,18 @@ impl MigrationName for CodeExternalEvents {
     }
 }
 
+/// Sibling column for a lucid rewrite of a completed turn's closing message.
+///
+/// The original journal text stays on the event. This column has one writer,
+/// the same rule as `narrative`: `save_turn` must not carry it.
+struct CodeTurnRewrite;
+
+impl MigrationName for CodeTurnRewrite {
+    fn name(&self) -> &str {
+        "m20260828_000026_code_turn_rewrite"
+    }
+}
+
 #[async_trait::async_trait]
 impl MigrationTrait for CodeExternalEvents {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
@@ -3022,6 +3035,28 @@ impl MigrationTrait for CodeExternalEvents {
     }
 }
 
+#[async_trait::async_trait]
+impl MigrationTrait for CodeTurnRewrite {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        if !manager.has_column("code_turn", "rewrite").await? {
+            manager
+                .alter_table(
+                    Table::alter()
+                        .table(idens::CodeTurn::Table)
+                        .add_column(ColumnDef::new(idens::CodeTurn::Rewrite).text())
+                        .to_owned(),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // The column holds derived prose the reader may still be looking at.
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
@@ -3096,6 +3131,7 @@ mod tests {
                 "m20260827_000023_incarnation_ingest",
                 "m20260828_000024_code_external_bindings",
                 "m20260828_000025_code_external_events",
+                "m20260828_000026_code_turn_rewrite",
             ]
         );
         assert!(db

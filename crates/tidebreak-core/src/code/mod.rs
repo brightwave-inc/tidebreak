@@ -1200,6 +1200,13 @@ pub struct CodeTurn {
     /// the column alone, because its callers hold a snapshot taken before this
     /// existed.
     pub narrative: Option<String>,
+    /// Lucid rewrite of the closing message. The journal keeps the original.
+    ///
+    /// Derived after the turn ends and written only by
+    /// [`crate::db::code::set_turn_rewrite`]. `save_turn` deliberately leaves
+    /// the column alone, the same single-writer rule as `narrative`.
+    #[serde(default)]
+    pub rewrite: Option<String>,
     /// Start time.
     pub started_at: chrono::DateTime<chrono::Utc>,
     /// End time, when terminal.

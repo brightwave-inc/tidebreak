@@ -1,7 +1,9 @@
 import { create } from "zustand";
+
 import type { SequencedCodeEventFrame } from "../api/types";
 import type { CodeConnectionState } from "./CodeSessionController";
 import {
+  applyStoredRewrites,
   initialCodeSessionState,
   markCodeSessionHydrated,
   reduceCodeSessionEvent,
@@ -67,6 +69,7 @@ export function createCodeSessionStore() {
         effects.push(...transition.effects);
       }
       if (settleInitialView) state = markCodeSessionHydrated(state);
+      state = applyStoredRewrites(state);
 
       // The reducer returns its input for duplicate/stale frames. Do not turn
       // that no-op into a fresh Zustand snapshot and wake every subscriber.

@@ -41,6 +41,7 @@ describe("AgentsPanel", () => {
       },
       model_visibility_overrides: {},
       computer_use_enabled: true,
+      rewrite_closing_messages: false,
     };
     const putSettings = vi.fn().mockResolvedValue({
       ...settings,

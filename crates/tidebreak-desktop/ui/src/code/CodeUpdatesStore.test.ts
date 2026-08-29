@@ -65,6 +65,7 @@ const EMPTY_STATE: CodeUpdatesState = {
   harnessInstalls: {},
   viewedWorkspaceId: null,
   deliveryRevision: 0,
+  turnRewrites: {},
 };
 
 afterEach(() => {
@@ -656,5 +657,41 @@ describe("shouldRequestOsAttention", () => {
         null,
       ),
     ).toBe(false);
+  });
+});
+
+describe("turn rewrite notices", () => {
+  it("keeps stored rewrite text when a later rewriting notice omits it", () => {
+    const rewritten = reduceCodeUpdates(EMPTY_STATE, {
+      type: "turn_rewrite",
+      session: "sess-1",
+      turnId: "t1",
+      state: "rewritten",
+      rewrite: "The turn added three tools.",
+    });
+    const lagged = reduceCodeUpdates(rewritten, {
+      type: "turn_rewrite",
+      session: "sess-1",
+      turnId: "t1",
+      state: "rewriting",
+    });
+    expect(lagged.turnRewrites["sess-1"]?.["t1"]).toEqual({
+      state: "rewriting",
+      rewrite: "The turn added three tools.",
+    });
+  });
+
+  it("drops live rewrite notices on snapshot reconnect", () => {
+    const withNotice = reduceCodeUpdates(EMPTY_STATE, {
+      type: "turn_rewrite",
+      session: "sess-1",
+      turnId: "t1",
+      state: "rewriting",
+    });
+    const snapped = reduceCodeUpdates(withNotice, {
+      type: "snapshot",
+      sessions: [digest()],
+    });
+    expect(snapped.turnRewrites).toEqual({});
   });
 });

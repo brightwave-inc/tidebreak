@@ -847,6 +847,7 @@ async fn start_turn_row(
         diffstat: None,
         usage: None,
         narrative: None,
+        rewrite: None,
         started_at: chrono::Utc::now(),
         ended_at: None,
     };
@@ -1723,6 +1724,7 @@ mod tests {
             diffstat: None,
             usage: None,
             narrative: None,
+            rewrite: None,
             started_at: chrono::Utc::now(),
             ended_at: None,
         };

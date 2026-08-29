@@ -25,6 +25,7 @@ import {
 import { requestUserAttention } from "../host";
 import { useRefreshSignals } from "../RefreshSignals";
 import { friendlyErrorMessage } from "../lib/utils";
+import { applyLiveTurnRewrite } from "./CodeSessionRegistry";
 import { useCodeUiStore } from "./CodeUiStore";
 
 /**
@@ -98,6 +99,17 @@ export type CodeUpdatesState = {
    * instead of running their own poll timers.
    */
   deliveryRevision: number;
+  /** Live rewrite notices, keyed session → turn. Not restated on connect. */
+  turnRewrites: Record<
+    string,
+    Record<
+      string,
+      {
+        state: "rewriting" | "rewritten" | "failed";
+        rewrite?: string;
+      }
+    >
+  >;
 };
 
 export type CodeUpdatesAction =
@@ -106,6 +118,13 @@ export type CodeUpdatesAction =
   | { type: "clone_progress"; job: CodeCloneJobSnapshot }
   | { type: "harness_install"; install: CodeHarnessInstallSnapshot }
   | { type: "delivery" }
+  | {
+      type: "turn_rewrite";
+      session: string;
+      turnId: string;
+      state: "rewriting" | "rewritten" | "failed";
+      rewrite?: string;
+    }
   | { type: "view"; workspaceId: string | null }
   | { type: "reset" };
 
@@ -120,6 +139,7 @@ const EMPTY: CodeUpdatesState = {
   harnessInstalls: {},
   viewedWorkspaceId: null,
   deliveryRevision: 0,
+  turnRewrites: {},
 };
 
 export function reduceCodeUpdates(
@@ -129,7 +149,9 @@ export function reduceCodeUpdates(
   switch (action.type) {
     case "snapshot": {
       // The snapshot restates every live session, so both maps rebuild from
-      // scratch — a reconnect self-heals a missed end notice.
+      // scratch — a reconnect self-heals a missed end notice. TurnRewrite is
+      // live-only; drop those notices so a lagged replay cannot overlay
+      // rewriting onto a turn snapshot that already stored the rewrite.
       const conversationsByWorkspace: DigestsByWorkspace = {};
       const childrenByWorkspace: DigestsByWorkspace = {};
       for (const digest of action.sessions) {
@@ -139,7 +161,12 @@ export function reduceCodeUpdates(
             : conversationsByWorkspace;
         (map[digest.workspace] ??= {})[digest.session] = digest;
       }
-      return { ...state, conversationsByWorkspace, childrenByWorkspace };
+      return {
+        ...state,
+        conversationsByWorkspace,
+        childrenByWorkspace,
+        turnRewrites: {},
+      };
     }
     case "digest": {
       if (action.digest.kind === "watch") {
@@ -187,6 +214,24 @@ export function reduceCodeUpdates(
       };
     case "delivery":
       return { ...state, deliveryRevision: state.deliveryRevision + 1 };
+    case "turn_rewrite": {
+      const previous = state.turnRewrites[action.session]?.[action.turnId];
+      const sessionRewrites = {
+        ...(state.turnRewrites[action.session] ?? {}),
+        [action.turnId]: {
+          ...previous,
+          state: action.state,
+          ...(action.rewrite !== undefined ? { rewrite: action.rewrite } : {}),
+        },
+      };
+      return {
+        ...state,
+        turnRewrites: {
+          ...state.turnRewrites,
+          [action.session]: sessionRewrites,
+        },
+      };
+    }
     case "view":
       return { ...state, viewedWorkspaceId: action.workspaceId };
     case "reset":
@@ -418,6 +463,15 @@ export function noticeToAction(
   }
   if (notice.type === "delivery") {
     return { type: "delivery" };
+  }
+  if (notice.type === "turn_rewrite") {
+    return {
+      type: "turn_rewrite",
+      session: notice.session,
+      turnId: notice.turn_id,
+      state: notice.state,
+      ...(notice.rewrite !== undefined ? { rewrite: notice.rewrite } : {}),
+    };
   }
   return null;
 }
@@ -866,6 +920,14 @@ function open(client: CloneUpdatesClient, born: number): void {
       return;
     }
     if (action) useCodeUpdatesStore.getState().apply(action);
+    if (action?.type === "turn_rewrite") {
+      applyLiveTurnRewrite(
+        action.session,
+        action.turnId,
+        action.state,
+        action.rewrite,
+      );
+    }
   });
   socket = next;
   next.onopen = () => {

@@ -602,18 +602,11 @@ const TranscriptItem = memo(function TranscriptItem({
       return <FileActivityRow files={item.files} onReveal={onReveal} />;
     case "assistant":
       return (
-        <article className="message message-assistant" aria-label="Assistant">
-          <AssistantMessageBody
-            text={item.text}
-            streaming={item.streaming && animateStreaming}
-          />
-          <MessageFooter
-            role="assistant"
-            text={item.text}
-            settled={!item.streaming}
-            sequenceEnd={ownsCopyAction}
-          />
-        </article>
+        <AssistantRewriteMessage
+          item={item}
+          animateStreaming={animateStreaming}
+          ownsCopyAction={ownsCopyAction}
+        />
       );
     case "reasoning":
       return (
@@ -687,6 +680,50 @@ const TranscriptItem = memo(function TranscriptItem({
       );
   }
 });
+
+function AssistantRewriteMessage({
+  item,
+  animateStreaming,
+  ownsCopyAction,
+}: {
+  item: Extract<CodeTranscriptItem, { kind: "assistant" }>;
+  animateStreaming: boolean;
+  ownsCopyAction?: boolean;
+}) {
+  const rewritten = item.rewriteState === "rewritten" && Boolean(item.rewrite);
+  return (
+    <article className="message message-assistant" aria-label="Assistant">
+      {item.rewriteState === "rewriting" && (
+        <p className="text-muted-foreground mb-2 text-xs" role="status">
+          Writing a recap…
+        </p>
+      )}
+      {item.rewriteState === "failed" && (
+        <p className="text-muted-foreground mb-2 text-xs" role="status">
+          Couldn't write a recap. The original stands.
+        </p>
+      )}
+      <AssistantMessageBody
+        text={item.text}
+        streaming={item.streaming && animateStreaming}
+      />
+      {rewritten && item.rewrite && (
+        <div className="mt-3 border-t border-border-subtle pt-3">
+          <p className="text-muted-foreground mb-1 text-2xs font-medium tracking-wide uppercase">
+            Recap
+          </p>
+          <AssistantMessageBody text={item.rewrite} streaming={false} />
+        </div>
+      )}
+      <MessageFooter
+        role="assistant"
+        text={item.text}
+        settled={!item.streaming}
+        sequenceEnd={ownsCopyAction}
+      />
+    </article>
+  );
+}
 
 /**
  * A run of tool calls behind one line.

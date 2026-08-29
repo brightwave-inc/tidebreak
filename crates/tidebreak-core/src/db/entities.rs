@@ -1848,6 +1848,7 @@ pub mod code_turn {
         #[sea_orm(column_type = "JsonBinary", nullable)]
         pub usage: Option<Json>,
         pub narrative: Option<String>,
+        pub rewrite: Option<String>,
         pub started_at: DateTimeUtc,
         pub ended_at: Option<DateTimeUtc>,
     }

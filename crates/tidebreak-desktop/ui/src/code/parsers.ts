@@ -142,6 +142,7 @@ import type {
   ToolDetail as WireToolDetail,
   CodeSessionDigest as WireCodeSessionDigest,
   CodeUpdateNotice as WireCodeUpdateNotice,
+  CodeTurnRewriteState,
   CodeCloneDefaults as WireCodeCloneDefaults,
   CodeRepoSource as WireCodeRepoSource,
   CodeRepoSources as WireCodeRepoSources,
@@ -277,6 +278,11 @@ const TURN_STATUSES = new Set<CodeTurnStatus>([
   "completed",
   "failed",
   "interrupted",
+]);
+const TURN_REWRITE_STATES = new Set<CodeTurnRewriteState>([
+  "rewriting",
+  "rewritten",
+  "failed",
 ]);
 const NOTICE_LEVELS = new Set<HarnessNoticeLevel>(["info", "warning", "error"]);
 const FILE_CHANGE_KINDS = new Set<FileChangeKind>([
@@ -2664,6 +2670,7 @@ export function parseCodeTurn(value: unknown): CodeTurnSnapshot | null {
       "diffstat",
       "started_at",
       "ended_at",
+      "rewrite",
     ]) ||
     !nonEmpty(value.id) ||
     !nonEmpty(value.session_id) ||
@@ -2677,7 +2684,8 @@ export function parseCodeTurn(value: unknown): CodeTurnSnapshot | null {
     !optionalString(value.checkpoint_ref) ||
     typeof value.user_input !== "string" ||
     !nonEmpty(value.started_at) ||
-    !optionalString(value.ended_at)
+    !optionalString(value.ended_at) ||
+    !optionalString(value.rewrite)
   ) {
     return null;
   }
@@ -2704,6 +2712,7 @@ export function parseCodeTurn(value: unknown): CodeTurnSnapshot | null {
       : {}),
     ...(diffstat ? { diffstat } : {}),
     ...(value.ended_at !== undefined ? { ended_at: value.ended_at } : {}),
+    ...(value.rewrite !== undefined ? { rewrite: value.rewrite } : {}),
   };
 }
 
@@ -4129,6 +4138,27 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
         type: "terminal_activity",
         workspace_id: value.workspace_id,
         terminal_id: value.terminal_id,
+      };
+    }
+    case "turn_rewrite": {
+      if (
+        !onlyKeys<Extract<WireCodeUpdateNotice, { type: "turn_rewrite" }>>(
+          value,
+          ["type", "session", "turn_id", "state", "rewrite"],
+        ) ||
+        !nonEmpty(value.session) ||
+        !nonEmpty(value.turn_id) ||
+        !isMember(value.state, TURN_REWRITE_STATES) ||
+        !optionalString(value.rewrite)
+      ) {
+        return null;
+      }
+      return {
+        type: "turn_rewrite",
+        session: value.session,
+        turn_id: value.turn_id,
+        state: value.state,
+        ...(value.rewrite !== undefined ? { rewrite: value.rewrite } : {}),
       };
     }
     default:

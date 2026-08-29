@@ -150,6 +150,7 @@ import { submitAcceptedTurn } from "./CodeSessionSend";
 import { CodeSidebar } from "./CodeSidebar";
 import { CodeTranscript } from "./CodeTranscript";
 import {
+  applyTurnRewrite,
   mainAgentTranscriptItems,
   subagentTranscriptItems,
   type CodeTranscriptItem,
@@ -2129,13 +2130,31 @@ function CodeSessionPane({
   const selectedSubagent = subagentCallId
     ? (subagentSummary ?? transcriptSubagent)
     : null;
-  const transcriptItems = useMemo(
-    () =>
-      subagentCallId
-        ? subagentTranscriptItems(items, subagentCallId)
-        : mainAgentTranscriptItems(items),
-    [items, subagentCallId],
+  const turnRewrites = useCodeUpdatesStore(
+    (state) => state.turnRewrites[session.id],
   );
+  const transcriptItems = useMemo(() => {
+    const base = subagentCallId
+      ? subagentTranscriptItems(items, subagentCallId)
+      : mainAgentTranscriptItems(items);
+    if (!turnRewrites) return base;
+    let next = base;
+    for (const [turnId, notice] of Object.entries(turnRewrites)) {
+      const stored = next.some(
+        (item) =>
+          item.kind === "assistant" &&
+          item.turnId === turnId &&
+          item.parentCallId === null &&
+          Boolean(item.rewrite),
+      );
+      if (stored && notice.state !== "rewritten") continue;
+      next = applyTurnRewrite(next, turnId, {
+        rewrite: notice.rewrite,
+        rewriteState: notice.state,
+      });
+    }
+    return next;
+  }, [items, subagentCallId, turnRewrites]);
   const transcriptBusy = subagentCallId
     ? selectedSubagent?.status === "running"
     : busy;

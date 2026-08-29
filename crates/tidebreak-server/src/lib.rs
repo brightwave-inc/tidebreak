@@ -2008,6 +2008,19 @@ async fn bind_inner(
         )
         .with_on_behalf_of_gateway(state.on_behalf_of_gateway.clone()),
     ));
+    code.install_rewrite(Arc::new(
+        code::rewrite::TurnRewriter::new(
+            code.db.clone(),
+            code.bus.clone(),
+            state.store.clone(),
+            state.resolver.clone(),
+            state.secrets.clone(),
+            state.provisioned_policy.clone(),
+            state.os_policy.clone(),
+        )
+        .with_on_behalf_of_gateway(state.on_behalf_of_gateway.clone()),
+    ));
+
     let blob_orphan_auditor = blob_orphan_auditor::BlobOrphanAuditor::new(
         state.store.clone(),
         state.config.data_dir.join("blobs"),

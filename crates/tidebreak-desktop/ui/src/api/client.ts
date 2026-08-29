@@ -532,6 +532,8 @@ export class ApiClient {
       min_threshold_tokens?: number;
       protect_recent_messages?: number;
     };
+    computer_use_enabled?: boolean;
+    rewrite_closing_messages?: boolean;
   }): Promise<RuntimeSettings> {
     return this.json("/settings", {
       method: "PUT",

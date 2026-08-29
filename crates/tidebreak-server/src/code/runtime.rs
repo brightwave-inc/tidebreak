@@ -278,6 +278,9 @@ pub(crate) struct CodeRuntime {
     /// reads the model handles the app state owns and this runtime is built
     /// first. `None` until then, and in deployments that install none.
     recap: Mutex<Option<Arc<dyn super::recap::TurnRecap>>>,
+    /// Derives a lucid rewrite of each completed turn's closing message
+    /// (`super::rewrite`). Installed the same way as recap.
+    rewrite: Mutex<Option<Arc<dyn super::rewrite::TurnRewrite>>>,
     #[cfg(test)]
     archive_shutdown_timeout: AtomicBool,
     #[cfg(test)]
@@ -498,6 +501,7 @@ impl CodeRuntime {
             remote_started: AtomicBool::new(false),
             titling_in_flight: Mutex::new(std::collections::HashSet::new()),
             recap: Mutex::new(None),
+            rewrite: Mutex::new(None),
             #[cfg(test)]
             archive_shutdown_timeout: AtomicBool::new(false),
             #[cfg(test)]
@@ -635,6 +639,7 @@ impl CodeRuntime {
             remote_started: AtomicBool::new(false),
             titling_in_flight: Mutex::new(std::collections::HashSet::new()),
             recap: Mutex::new(None),
+            rewrite: Mutex::new(None),
             #[cfg(test)]
             archive_shutdown_timeout: AtomicBool::new(false),
             #[cfg(test)]
@@ -733,6 +738,15 @@ impl CodeRuntime {
     /// install never has to reach sinks that are already running.
     fn recap_hook(&self) -> Option<Arc<dyn super::recap::TurnRecap>> {
         self.recap.lock().expect("code recap hook").clone()
+    }
+
+    /// Install the hook that rewrites each completed turn (`super::rewrite`).
+    pub(crate) fn install_rewrite(&self, rewrite: Arc<dyn super::rewrite::TurnRewrite>) {
+        *self.rewrite.lock().expect("code rewrite hook") = Some(rewrite);
+    }
+
+    fn rewrite_hook(&self) -> Option<Arc<dyn super::rewrite::TurnRewrite>> {
+        self.rewrite.lock().expect("code rewrite hook").clone()
     }
 
     /// Revoke the session browser token and permanently tombstone its native
@@ -6193,6 +6207,7 @@ impl CodeRuntime {
             attached.subagents.clone(),
             self.gh_search_path_owned(),
             self.recap_hook(),
+            self.rewrite_hook(),
             self.hot_pull_requests(),
         );
         let approval = self.approval_channel(

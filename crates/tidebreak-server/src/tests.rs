@@ -51,6 +51,7 @@ mod code_pr_facts;
 mod code_recap;
 #[cfg(unix)]
 mod code_reconcile;
+mod code_rewrite;
 mod code_terminals;
 mod code_titling;
 #[cfg(unix)]

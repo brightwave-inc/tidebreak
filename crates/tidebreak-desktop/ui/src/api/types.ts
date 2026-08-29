@@ -160,6 +160,7 @@ import {
   type CodeTurnSnapshot as WireCodeTurnSnapshot,
   type QueuedCodeTurn as WireQueuedCodeTurn,
   type CodeTurnStatus as WireCodeTurnStatus,
+  type CodeTurnRewriteState as WireCodeTurnRewriteState,
   type CodeUsage as WireCodeUsage,
   type CodeWorkspaceDiff as WireCodeWorkspaceDiff,
   type CodeWorkspaceFiles as WireCodeWorkspaceFiles,
@@ -1226,6 +1227,7 @@ export type CodeTurnSnapshot = WireCodeTurnSnapshot;
 export type QueuedCodeTurn = WireQueuedCodeTurn;
 export type CodeTurnId = WireCodeTurnId;
 export type CodeTurnStatus = WireCodeTurnStatus;
+export type CodeTurnRewriteState = WireCodeTurnRewriteState;
 export type CodeUsage = WireCodeUsage;
 export type Diffstat = WireDiffstat;
 export type FileChangeKind = WireFileChangeKind;
