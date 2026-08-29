@@ -32,7 +32,8 @@ use tidebreak_core::{
     accept_workspace_artifact, binary_media_type_for_extension, deliverable_media_type,
     validate_binary_deliverable, validate_portable_filename, AgentError, BrowserControllerKind,
     ChatId, OutputId, OutputRevisionId, RevisionProducer, WorkspaceArtifactProposal,
-    MAX_BINARY_DELIVERABLE_BYTES, MAX_DELIVERABLE_NAME_CHARS,
+    CHART_FILENAME_SUFFIX, MAX_BINARY_DELIVERABLE_BYTES, MAX_DELIVERABLE_BYTES,
+    MAX_DELIVERABLE_NAME_CHARS,
 };
 use url::Url;
 use uuid::Uuid;
@@ -165,10 +166,11 @@ impl BrowserDownloadReceipt {
             || self.launch_id.is_nil()
             || self.chat_id.0.is_nil()
             || !valid_browser_id
-            || validate_binary_deliverable(&self.requested_filename, &self.media_type).is_err()
-            || self.final_filename.as_deref().is_some_and(|filename| {
-                validate_binary_deliverable(filename, &self.media_type).is_err()
-            })
+            || !download_media_type_matches(&self.requested_filename, &self.media_type)
+            || self
+                .final_filename
+                .as_deref()
+                .is_some_and(|filename| !download_media_type_matches(filename, &self.media_type))
             || matches!(self.phase, BrowserDownloadPhase::Ready) != self.final_filename.is_some()
             || matches!(self.phase, BrowserDownloadPhase::Requested)
                 && self.final_filename.is_some()
@@ -420,16 +422,20 @@ pub(crate) async fn recover_browser_downloads(app: AppHandle) {
             }
         };
         for receipt in receipts {
-            publish_and_report(&app, &downloads, receipt).await;
+            publish_and_report(&app, &downloads, receipt, None).await;
         }
         tokio::time::sleep(RECOVERY_INTERVAL).await;
     }
 }
 
-pub(crate) fn publish_completed_download(app: AppHandle, receipt: BrowserDownloadReceipt) {
+pub(crate) fn publish_completed_download(
+    app: AppHandle,
+    receipt: BrowserDownloadReceipt,
+    request_url: String,
+) {
     let downloads = app.state::<BrowserDownloadStore>().inner().clone();
     tauri::async_runtime::spawn(async move {
-        publish_and_report(&app, &downloads, receipt).await;
+        publish_and_report(&app, &downloads, receipt, Some(request_url)).await;
     });
 }
 
@@ -437,6 +443,7 @@ async fn publish_and_report(
     app: &AppHandle,
     downloads: &BrowserDownloadStore,
     receipt: BrowserDownloadReceipt,
+    request_url: Option<String>,
 ) {
     let browser_id = receipt.browser_id.clone();
     let workspace_id = format!("{FOREGROUND_SCOPE_PREFIX}{}", receipt.chat_id);
@@ -454,7 +461,7 @@ async fn publish_and_report(
             &workspace_id,
             &browser_id,
             "download_failed",
-            None,
+            request_url,
             message,
         ),
         PublishOutcome::Deferred(error) => {
@@ -642,11 +649,22 @@ async fn available_download_filename(
 }
 
 fn filename_with_copy_suffix(filename: &str, copy: u16) -> Result<String, String> {
-    let (stem, extension) = filename
-        .rsplit_once('.')
-        .map_or((filename, None), |(stem, extension)| {
-            (stem, Some(extension))
-        });
+    let lowercased = filename.to_ascii_lowercase();
+    let (stem, extension) = if lowercased.ends_with(CHART_FILENAME_SUFFIX) {
+        let stem_end = filename.len() - CHART_FILENAME_SUFFIX.len();
+        (&filename[..stem_end], Some(&filename[stem_end + 1..]))
+    } else {
+        filename
+            .rsplit_once('.')
+            .map_or((filename, None), |(stem, extension)| {
+                (stem, Some(extension))
+            })
+    };
+    let (stem, extension) = if extension.is_none() && deliverable_media_type(filename).is_some() {
+        (stem, Some("txt"))
+    } else {
+        (stem, extension)
+    };
     let suffix = format!(" ({copy})");
     let extension_len = extension.map_or(0, |extension| extension.len() + 1);
     let max_stem = MAX_DELIVERABLE_NAME_CHARS
@@ -708,20 +726,26 @@ fn suggested_download_filename(destination: &Path) -> Result<String, String> {
 }
 
 fn download_media_type(filename: &str) -> Result<String, String> {
-    let media_type = if deliverable_media_type(filename).is_some() {
-        "application/octet-stream"
-    } else {
-        binary_media_type_for_extension(filename)
-    };
-    if media_type == "application/octet-stream" && deliverable_media_type(filename).is_none() {
+    if let Some(media_type) = deliverable_media_type(filename) {
+        return Ok(media_type.to_owned());
+    }
+    let media_type = binary_media_type_for_extension(filename);
+    if matches!(media_type, "application/octet-stream" | "image/svg+xml") {
         return Err("This file type is not supported as a browser output".to_owned());
     }
     validate_binary_deliverable(filename, media_type).map_err(str::to_owned)?;
     Ok(media_type.to_owned())
 }
 
+fn download_media_type_matches(filename: &str, media_type: &str) -> bool {
+    download_media_type(filename).is_ok_and(|expected| expected == media_type)
+}
+
 fn validate_download_content(filename: &str, media_type: &str, bytes: &[u8]) -> Result<(), String> {
     if deliverable_media_type(filename).is_some() {
+        if bytes.len() > MAX_DELIVERABLE_BYTES {
+            return Err("The downloaded text file is larger than 512 KiB".to_owned());
+        }
         let text = std::str::from_utf8(bytes)
             .map_err(|_| "The downloaded text file is not valid UTF-8".to_owned())?;
         if text.contains('\0') {
@@ -734,7 +758,6 @@ fn validate_download_content(filename: &str, media_type: &str, bytes: &[u8]) -> 
         "image/jpeg" => bytes.starts_with(b"\xff\xd8\xff"),
         "image/webp" => bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP"),
         "image/gif" => bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a"),
-        "image/svg+xml" => false,
         "application/pdf" => bytes.starts_with(b"%PDF-"),
         "application/zip" => valid_zip(bytes, None),
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => {
@@ -1008,6 +1031,14 @@ mod tests {
             filename_with_copy_suffix("report.pdf", 2).unwrap(),
             "report (2).pdf"
         );
+        assert_eq!(
+            filename_with_copy_suffix("sales.chart.json", 2).unwrap(),
+            "sales (2).chart.json"
+        );
+        assert_eq!(
+            filename_with_copy_suffix("Dockerfile", 2).unwrap(),
+            "Dockerfile (2).txt"
+        );
         let long = format!("{}.pdf", "a".repeat(116));
         assert!(filename_with_copy_suffix(&long, 999).unwrap().len() <= MAX_DELIVERABLE_NAME_CHARS);
     }
@@ -1019,15 +1050,20 @@ mod tests {
             download_media_type("report.pdf").unwrap(),
             "application/pdf"
         );
+        assert_eq!(download_media_type("notes.txt").unwrap(), "text/plain");
+        assert_eq!(download_media_type("data.csv").unwrap(), "text/csv");
+        assert_eq!(download_media_type("report.md").unwrap(), "text/markdown");
+        assert!(download_media_type("drawing.svg").is_err());
         assert!(validate_download_content("report.pdf", "application/pdf", b"MZpayload").is_err());
         assert!(validate_download_content("report.pdf", "application/pdf", b"%PDF-1.7").is_ok());
-        assert!(
-            validate_download_content("notes.txt", "application/octet-stream", b"hello").is_ok()
-        );
-        assert!(
-            validate_download_content("notes.txt", "application/octet-stream", b"bad\0text")
-                .is_err()
-        );
+        assert!(validate_download_content("notes.txt", "text/plain", b"hello").is_ok());
+        assert!(validate_download_content("notes.txt", "text/plain", b"bad\0text").is_err());
+        assert!(validate_download_content(
+            "notes.txt",
+            "text/plain",
+            &vec![b'a'; MAX_DELIVERABLE_BYTES + 1]
+        )
+        .is_err());
     }
 
     #[test]

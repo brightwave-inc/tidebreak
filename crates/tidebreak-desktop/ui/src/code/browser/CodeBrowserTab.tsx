@@ -852,6 +852,7 @@ function CodeBrowserTabSession({
         updateSession((current) =>
           setBrowserNotice(current, {
             kind: "download",
+            url: event.url,
             message: event.message || "Could not save this download",
           }),
         );

@@ -1067,7 +1067,7 @@ describe("CodeBrowserTab", () => {
     );
   });
 
-  it("routes blocked downloads externally and offers no retry for unsafe navigation", async () => {
+  it("routes blocked and failed downloads externally and offers no retry for unsafe navigation", async () => {
     const runtime = browserHost();
     render(
       <CodeBrowserTab
@@ -1099,6 +1099,25 @@ describe("CodeBrowserTab", () => {
     );
     expect(runtime.openExternal).toHaveBeenCalledWith(
       "https://example.com/archive.zip",
+    );
+
+    runtime.emit({
+      workspaceId: "workspace-1",
+      browserId: "browser-1",
+      type: "download_failed",
+      url: "https://example.com/report.md",
+      message: "report.md: The downloaded text file is not valid UTF-8",
+    });
+    const failedNotice = await screen.findByText(
+      "report.md: The downloaded text file is not valid UTF-8",
+    );
+    await userEvent.click(
+      within(failedNotice.parentElement!).getByRole("button", {
+        name: "Open externally",
+      }),
+    );
+    expect(runtime.openExternal).toHaveBeenLastCalledWith(
+      "https://example.com/report.md",
     );
 
     runtime.emit({

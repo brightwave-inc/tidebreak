@@ -812,7 +812,7 @@ fn create_browser(
             DownloadEvent::Finished { url, path, success } => {
                 match download_store.finish(&download_browser, &url, path.as_deref(), success) {
                     Ok(BrowserDownloadFinished::Publish(receipt)) => {
-                        publish_completed_download(download_app.clone(), receipt);
+                        publish_completed_download(download_app.clone(), receipt, url.to_string());
                     }
                     Ok(BrowserDownloadFinished::Rejected { filename, message }) => {
                         emit_download_event(
@@ -820,7 +820,7 @@ fn create_browser(
                             &download_workspace,
                             &download_browser,
                             "download_failed",
-                            None,
+                            Some(url.to_string()),
                             format!("{filename}: {message}"),
                         );
                     }
@@ -830,7 +830,7 @@ fn create_browser(
                         &download_workspace,
                         &download_browser,
                         "download_failed",
-                        None,
+                        Some(url.to_string()),
                         message,
                     ),
                 }

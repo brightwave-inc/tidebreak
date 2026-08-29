@@ -496,6 +496,54 @@ async fn a_binary_workspace_artifact_is_accepted_published_and_attributed_to_its
 
 #[cfg(feature = "tools")]
 #[tokio::test]
+async fn a_text_workspace_artifact_keeps_its_canonical_media_type() {
+    use crate::deliverable::{output_revision_relative_path, RevisionProducer};
+    use crate::deliverable_acceptance::{accept_workspace_artifact, WorkspaceArtifactProposal};
+
+    let (_dir, store, chat) = store_with_chat().await;
+    let scratch = tempfile::tempdir().unwrap();
+    let dir = open_scratch(scratch.path());
+    let output_id = OutputId::new();
+    let revision_id = OutputRevisionId::new();
+    let content = b"# Downloaded report\n".to_vec();
+    let proposal = WorkspaceArtifactProposal {
+        output_id,
+        chat_id: chat.id,
+        filename: "report.md".into(),
+        media_type: "text/markdown".into(),
+        revision_id,
+        producer: RevisionProducer::User,
+        revise: false,
+        content: content.clone(),
+        created_at: at(0),
+    };
+
+    let record = accept_workspace_artifact(&store, &dir, &proposal)
+        .await
+        .unwrap();
+
+    assert_eq!(record.media_type, "text/markdown");
+    assert_eq!(
+        std::fs::read(
+            scratch
+                .path()
+                .join(output_revision_relative_path(output_id, revision_id))
+        )
+        .unwrap(),
+        content
+    );
+
+    let mut mismatched = proposal;
+    mismatched.output_id = OutputId::new();
+    mismatched.revision_id = OutputRevisionId::new();
+    mismatched.media_type = "application/octet-stream".into();
+    assert!(accept_workspace_artifact(&store, &dir, &mismatched)
+        .await
+        .is_err());
+}
+
+#[cfg(feature = "tools")]
+#[tokio::test]
 async fn acceptance_enforces_the_binary_cap_and_rejects_empty_artifacts() {
     use crate::deliverable::{RevisionProducer, MAX_BINARY_DELIVERABLE_BYTES};
     use crate::deliverable_acceptance::{accept_workspace_artifact, WorkspaceArtifactProposal};
