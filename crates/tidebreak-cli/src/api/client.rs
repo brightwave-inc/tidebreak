@@ -344,11 +344,8 @@ impl Client {
     /// Which web-search provider slots hold a key.
     pub async fn get_web_search_credentials(&self) -> Result<serde_json::Value> {
         let response = self
-            .http
-            .get(format!("{}/web-search/credentials", self.base))
-            .send()
-            .await
-            .map_err(request_error)?;
+            .get_response(format!("{}/web-search/credentials", self.base))
+            .await?;
         if response.status().is_success() {
             return response
                 .json::<serde_json::Value>()
@@ -912,12 +909,19 @@ impl Client {
 
     /// GET a JSON body, lifting failures the way every other route does.
     pub(crate) async fn get_json<T: serde::de::DeserializeOwned>(&self, url: String) -> Result<T> {
-        let response = self.http.get(url).send().await.map_err(request_error)?;
+        let response = self.get_response(url).await?;
         Self::expect_success(response)
             .await?
             .json::<T>()
             .await
             .map_err(request_error)
+    }
+
+    /// Start one authenticated GET without deciding how its response should
+    /// be decoded. Most callers use [`Self::get_json`]; compatibility reads
+    /// that recognize one exact server failure inspect the response first.
+    async fn get_response(&self, url: String) -> Result<reqwest::Response> {
+        self.http.get(url).send().await.map_err(request_error)
     }
 
     /// PUT a JSON body and decode the route's answer.
