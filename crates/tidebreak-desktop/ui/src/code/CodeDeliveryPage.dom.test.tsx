@@ -28,6 +28,9 @@ import {
   deliveryRepositoriesSnapshot,
   deliveryRunDetails,
   deliveryRuns,
+  codeDigest,
+  codeWorkspace,
+  harnessDoctor,
 } from "../stories/fixtures";
 import {
   CodeDeliveryPage,
@@ -40,11 +43,13 @@ import {
   useCodeDeliveryStore,
 } from "./CodeDeliveryStore";
 import { useCodeUpdatesStore } from "./CodeUpdatesStore";
+import { useCodeCatalogStore } from "./CodeCatalogStore";
 
 afterEach(() => {
   cleanup();
   useCodeDeliveryStore.getState().reset();
   useCodeUpdatesStore.getState().reset();
+  useCodeCatalogStore.getState().reset();
 });
 
 vi.mock("@/openInBrowser", () => ({ openInBrowser: vi.fn() }));
@@ -208,6 +213,32 @@ describe("delivery pull request list", () => {
   it("opens repository-scoped trigger rules from the production dialog", async () => {
     const user = userEvent.setup();
     const listCodeTriggers = vi.fn(async () => []);
+    const repoId =
+      deliveryRepositoriesSnapshot.repositories[0]!.tidebreak_repo_id!;
+    useCodeCatalogStore.setState({
+      workspaces: [
+        {
+          ...codeWorkspace,
+          id: "ws-trigger-target",
+          repo_id: repoId,
+          title: "Fix trigger delivery",
+          pr: { number: 2921, state: "open" },
+        },
+      ],
+      doctor: harnessDoctor,
+    });
+    useCodeUpdatesStore.getState().apply({
+      type: "snapshot",
+      sessions: [
+        codeDigest({
+          workspace: "ws-trigger-target",
+          session: "sess-trigger-target",
+          harness_kind: "codex",
+          title: "Fix trigger delivery",
+          trigger_target_at: "2026-08-29T12:30:00Z",
+        }),
+      ],
+    });
     const client = {
       ...storyClient(),
       listCodeTriggers,
@@ -227,9 +258,10 @@ describe("delivery pull request list", () => {
     expect(
       await screen.findByRole("heading", { name: "Triggers" }),
     ).toBeInTheDocument();
-    expect(listCodeTriggers).toHaveBeenCalledWith(
-      deliveryRepositoriesSnapshot.repositories[0]!.tidebreak_repo_id,
-    );
+    expect(listCodeTriggers).toHaveBeenCalledWith(repoId);
+    expect(
+      screen.getByText("Interrupts Fix trigger delivery mid-turn (Codex CLI)."),
+    ).toBeInTheDocument();
   });
 
   it("does not warn when only local-only repositories were skipped", async () => {

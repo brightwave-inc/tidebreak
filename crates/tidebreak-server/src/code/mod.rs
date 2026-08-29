@@ -44,6 +44,17 @@ pub(crate) mod worktree_root;
 pub(crate) use runtime::CodeRuntime;
 pub(crate) use scoped::ScopedCode;
 
+/// Timestamp used to rank sessions for trigger delivery and its UI preview.
+///
+/// A session with turns ranks by its newest turn start. A session with no
+/// turns ranks by creation time.
+pub(crate) fn trigger_target_at(
+    session_created_at: chrono::DateTime<chrono::Utc>,
+    latest_turn_started_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> chrono::DateTime<chrono::Utc> {
+    latest_turn_started_at.unwrap_or(session_created_at)
+}
+
 /// The display name the product uses for an engine, wherever copy names one.
 pub(crate) fn harness_label(kind: tidebreak_core::HarnessKind) -> &'static str {
     match kind {
@@ -51,5 +62,21 @@ pub(crate) fn harness_label(kind: tidebreak_core::HarnessKind) -> &'static str {
         tidebreak_core::HarnessKind::Codex => "Codex CLI",
         tidebreak_core::HarnessKind::Opencode => "opencode",
         tidebreak_core::HarnessKind::Grok => "Grok CLI",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{TimeZone, Utc};
+
+    use super::trigger_target_at;
+
+    #[test]
+    fn trigger_target_time_prefers_the_latest_turn_and_falls_back_to_creation() {
+        let created = Utc.with_ymd_and_hms(2026, 8, 28, 9, 0, 0).unwrap();
+        let latest_turn = Utc.with_ymd_and_hms(2026, 8, 29, 11, 0, 0).unwrap();
+
+        assert_eq!(trigger_target_at(created, Some(latest_turn)), latest_turn);
+        assert_eq!(trigger_target_at(created, None), created);
     }
 }

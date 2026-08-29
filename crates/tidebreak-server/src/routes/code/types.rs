@@ -2014,6 +2014,12 @@ pub struct CodeSessionDigest {
     pub attention: Attention,
     pub title: String,
     pub turn_count: i64,
+    /// Timestamp trigger delivery uses to rank candidate sessions: the newest
+    /// turn start, or session creation before the first turn. Optional so a
+    /// desktop can still read a digest from an older server during an update.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub trigger_target_at: Option<chrono::DateTime<chrono::Utc>>,
     /// What the live turn is occupied with, while running.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -2060,6 +2066,7 @@ impl From<crate::code::bus::SessionDigest> for CodeSessionDigest {
             attention: digest.attention,
             title: digest.title,
             turn_count: digest.turn_count,
+            trigger_target_at: Some(digest.trigger_target_at),
             activity: digest.activity,
             pr_state: digest.pr_state,
             pr_count: digest.pr_count,
@@ -2096,6 +2103,10 @@ pub enum CodeUpdateNotice {
         attention: Attention,
         title: String,
         turn_count: i64,
+        /// Timestamp trigger delivery uses to rank candidate sessions.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        trigger_target_at: Option<chrono::DateTime<chrono::Utc>>,
         /// What the live turn is occupied with, while running.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
@@ -2221,6 +2232,7 @@ impl CodeUpdateNotice {
             attention: wire.attention,
             title: wire.title,
             turn_count: wire.turn_count,
+            trigger_target_at: wire.trigger_target_at,
             activity: wire.activity,
             pr_state: wire.pr_state.map(Box::new),
             pr_count: wire.pr_count,

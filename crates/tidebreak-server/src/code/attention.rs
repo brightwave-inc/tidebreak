@@ -22,6 +22,7 @@ use tidebreak_core::{
 };
 
 use super::bus::{CodeEventBus, CodeLiveUpdate, SessionDigest};
+use super::trigger_target_at;
 
 /// Running-but-silent threshold. A periodic sweep applies
 /// [`AttentionState::Stalled`] past this many seconds.
@@ -422,14 +423,15 @@ async fn build_digest(
     // predate the field and workspaces that never shipped read the same.
     let pr_count =
         count_attributed_prs_for_workspace(db, &session.owner, session.workspace_id).await?;
+    let turns = list_turns(db, &session.owner, session.id).await?;
+    // Keep this timestamp aligned with trigger delivery's ranking rule. The
+    // interface uses it to name the same session that a fire would reach.
+    let trigger_target_at =
+        trigger_target_at(session.created_at, turns.last().map(|turn| turn.started_at));
     // The newest recapped turn speaks for the session: a turn the model
     // declined to recap, or one whose call is still in flight, leaves the
     // previous line standing rather than blanking the row mid-work.
-    let recap = list_turns(db, &session.owner, session.id)
-        .await?
-        .into_iter()
-        .rev()
-        .find_map(|turn| turn.narrative);
+    let recap = turns.into_iter().rev().find_map(|turn| turn.narrative);
     Ok(SessionDigest {
         workspace: session.workspace_id,
         session: session.id,
@@ -439,6 +441,7 @@ async fn build_digest(
         attention: session.attention.clone(),
         title: workspace.title,
         turn_count,
+        trigger_target_at,
         activity,
         pr_state: workspace.pr,
         pr_count: (pr_count > 0).then_some(pr_count),

@@ -95,6 +95,7 @@ import {
 import { CodeSidebar } from "./CodeSidebar";
 import { useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
+import { codeTriggerTargetForRepository } from "./CodeTriggerTarget";
 import { RepositorySettings } from "./RepositorySettings";
 import { RepositoryTriggerRules } from "./RepositoryTriggerRules";
 import { GithubAvatar } from "./GithubAvatar";
@@ -3239,6 +3240,11 @@ function DeliveryRepositoriesDialog({
   onRefresh: () => void;
 }) {
   const { client } = useApp();
+  const workspaces = useCodeCatalogStore((state) => state.workspaces);
+  const doctor = useCodeCatalogStore((state) => state.doctor);
+  const conversationsByWorkspace = useCodeUpdatesStore(
+    (state) => state.conversationsByWorkspace,
+  );
   const manualRepositories = useCodeDeliveryStore(
     (state) => state.manualRepositories,
   );
@@ -3253,6 +3259,16 @@ function DeliveryRepositoriesDialog({
     useState<CodeGitHubRepositoryRef | null>(null);
   const [settingsRepository, setSettingsRepository] =
     useState<CodeGitHubRepositoryRef | null>(null);
+  const triggerTarget = useMemo(
+    () =>
+      codeTriggerTargetForRepository({
+        repoId: triggerRepository?.tidebreak_repo_id,
+        workspaces,
+        conversationsByWorkspace,
+        doctor,
+      }),
+    [conversationsByWorkspace, doctor, triggerRepository, workspaces],
+  );
 
   const add = async () => {
     const repositories = input
@@ -3368,6 +3384,7 @@ function DeliveryRepositoriesDialog({
                 <RepositoryTriggerRules
                   client={client}
                   repository={triggerRepository}
+                  target={triggerTarget}
                 />
               </div>
             )}
