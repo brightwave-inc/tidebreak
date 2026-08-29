@@ -42,6 +42,9 @@ struct ErrorBody {
     message: String,
 }
 
+const WEB_SEARCH_CREDENTIAL_STORAGE_UNAVAILABLE: &str =
+    "web search credential storage is unavailable";
+
 /// `POST /chats` returns the whole `Chat`; only the id is read.
 #[derive(Deserialize)]
 struct ChatCreated {
@@ -340,8 +343,22 @@ impl Client {
 
     /// Which web-search provider slots hold a key.
     pub async fn get_web_search_credentials(&self) -> Result<serde_json::Value> {
-        self.get_json(format!("{}/web-search/credentials", self.base))
+        match self
+            .get_json(format!("{}/web-search/credentials", self.base))
             .await
+        {
+            Ok(credentials) => Ok(credentials),
+            Err(AgentError::Secret(message))
+                if message == WEB_SEARCH_CREDENTIAL_STORAGE_UNAVAILABLE =>
+            {
+                Ok(serde_json::json!({
+                "credentials": null,
+                "storage_available": false,
+                "unavailable_reason": WEB_SEARCH_CREDENTIAL_STORAGE_UNAVAILABLE,
+                }))
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Store one web-search provider's key. Selection is unchanged.
@@ -691,20 +708,7 @@ impl Client {
         }
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        match serde_json::from_str::<ErrorBody>(&body) {
-            Ok(ErrorBody {
-                kind: Some(kind),
-                message,
-            }) if !kind.is_empty() => Err(AgentError::msg(format!(
-                "request failed ({status}): {kind}: {message}"
-            ))),
-            Ok(ErrorBody { message, .. }) => Err(AgentError::msg(format!(
-                "request failed ({status}): {message}"
-            ))),
-            Err(_) => Err(AgentError::msg(format!(
-                "request failed ({status}): {body}"
-            ))),
-        }
+        Err(response_error(status, &body))
     }
 
     /// Read the server's bounded process and request measurements.
@@ -1227,6 +1231,30 @@ fn loopback_http_base(base: &str) -> bool {
 /// mapping in one place.
 fn request_error(error: reqwest::Error) -> AgentError {
     AgentError::msg(format!("request failed: {error}"))
+}
+
+fn response_error(status: reqwest::StatusCode, body: &str) -> AgentError {
+    match serde_json::from_str::<ErrorBody>(body) {
+        Ok(ErrorBody {
+            kind: Some(kind),
+            message,
+        }) if status == reqwest::StatusCode::INTERNAL_SERVER_ERROR
+            && kind == "internal"
+            && message == WEB_SEARCH_CREDENTIAL_STORAGE_UNAVAILABLE =>
+        {
+            AgentError::Secret(message)
+        }
+        Ok(ErrorBody {
+            kind: Some(kind),
+            message,
+        }) if !kind.is_empty() => {
+            AgentError::msg(format!("request failed ({status}): {kind}: {message}"))
+        }
+        Ok(ErrorBody { message, .. }) => {
+            AgentError::msg(format!("request failed ({status}): {message}"))
+        }
+        Err(_) => AgentError::msg(format!("request failed ({status}): {body}")),
+    }
 }
 
 /// Percent-encode a query value. Titles are file names, so this only has to be

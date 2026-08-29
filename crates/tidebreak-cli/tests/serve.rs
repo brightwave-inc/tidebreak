@@ -1,7 +1,7 @@
 //! End-to-end tests of the `tidebreak` process surfaces.
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::str::FromStr;
@@ -438,6 +438,101 @@ fn spawn_serve_with_env(dir: &Path, extra_env: &[(&str, &str)]) -> (Reaper, Stri
     (reaper, url, token)
 }
 
+/// Serve the settings routes over the same HTTP attach path as a hosted
+/// deployment. The credential response is supplied by each regression case.
+fn run_attached_settings_show(
+    output_format: &str,
+    credential_status: &'static str,
+    credential_body: &'static str,
+) -> (Output, Vec<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind settings fixture");
+    listener
+        .set_nonblocking(true)
+        .expect("make settings fixture nonblocking");
+    let address = listener.local_addr().expect("settings fixture address");
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let mut paths = Vec::new();
+        loop {
+            if stop_rx.try_recv().is_ok() {
+                return paths;
+            }
+            let (mut stream, _) = match listener.accept() {
+                Ok(connection) => connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                    continue;
+                }
+                Err(error) => panic!("accept settings request: {error}"),
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set settings fixture read timeout");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut chunk).expect("read settings request");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let request = String::from_utf8(request).expect("settings request is HTTP text");
+            let path = request
+                .lines()
+                .next()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .expect("settings request path")
+                .to_owned();
+            paths.push(path.clone());
+            let (status, body) = match path.as_str() {
+                "/settings" => (
+                    "200 OK",
+                    r#"{"model":null,"has_api_key":false,"max_active_background_agents":2}"#,
+                ),
+                "/web-search" => (
+                    "200 OK",
+                    r#"{"provider":"exa","mode":"host","available":false}"#,
+                ),
+                "/web-search/credentials" => (credential_status, credential_body),
+                "/code-execution" => ("200 OK", r#"{"provider":null,"available":false}"#),
+                "/code-execution/credentials" => ("200 OK", r#"{"credentials":[]}"#),
+                _ => (
+                    "404 Not Found",
+                    r#"{"kind":"not_found","message":"unknown fixture route"}"#,
+                ),
+            };
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write settings response");
+        }
+    });
+
+    let dir = tempfile::tempdir().expect("settings client data dir");
+    let output = Command::new(env!("CARGO_BIN_EXE_tidebreak"))
+        .args([
+            "settings",
+            "show",
+            "--output-format",
+            output_format,
+            "--server",
+        ])
+        .arg(format!("http://{address}"))
+        .env("TIDEBREAK_SERVER_TOKEN", "settings-fixture-token")
+        .env("TIDEBREAK_DATA_DIR", dir.path())
+        .env_remove("TIDEBREAK_SERVER_URL")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run attached settings show");
+    stop_tx.send(()).expect("stop settings fixture");
+    let paths = server.join().expect("settings fixture thread");
+    (output, paths)
+}
+
 /// Attach mode's whole point: a second process reaches a data directory the
 /// first one owns by being its client, and the call is the real thing — a
 /// route answering over HTTP against the running server's state. The attaching
@@ -471,6 +566,83 @@ fn a_setup_command_attaches_to_a_running_server() {
                 .any(|provider| provider["kind"] == "anthropic")),
         "stdout: {}",
         String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+/// A hosted server can expose general settings without secret storage. The
+/// optional credential read must not hide the rest of the diagnostic output.
+#[test]
+fn settings_show_reports_unavailable_hosted_credential_storage() {
+    const UNAVAILABLE: &str = "web search credential storage is unavailable";
+    const BODY: &str =
+        r#"{"kind":"internal","message":"web search credential storage is unavailable"}"#;
+
+    let (json_output, json_paths) =
+        run_attached_settings_show("json", "500 Internal Server Error", BODY);
+    let json_stderr = String::from_utf8_lossy(&json_output.stderr);
+    assert!(json_output.status.success(), "stderr: {json_stderr}");
+    let json: serde_json::Value =
+        serde_json::from_slice(&json_output.stdout).expect("settings JSON output");
+    let credentials = &json["web_search"]["credentials"];
+    assert!(credentials["credentials"].is_null(), "stdout: {json}");
+    assert_eq!(credentials["storage_available"], false, "stdout: {json}");
+    assert_eq!(
+        credentials["unavailable_reason"], UNAVAILABLE,
+        "stdout: {json}"
+    );
+    assert_eq!(
+        json_paths,
+        [
+            "/settings",
+            "/web-search",
+            "/web-search/credentials",
+            "/code-execution",
+            "/code-execution/credentials",
+        ]
+    );
+
+    let (text_output, text_paths) =
+        run_attached_settings_show("text", "500 Internal Server Error", BODY);
+    let text_stderr = String::from_utf8_lossy(&text_output.stderr);
+    assert!(text_output.status.success(), "stderr: {text_stderr}");
+    let text = String::from_utf8(text_output.stdout).expect("settings text output");
+    assert!(
+        text.contains(&format!("keys stored        unavailable ({UNAVAILABLE})")),
+        "stdout: {text}"
+    );
+    let web_search_block = text
+        .split("code execution")
+        .next()
+        .expect("web-search settings block");
+    assert!(
+        !web_search_block.contains("keys stored        none"),
+        "stdout: {text}"
+    );
+    assert_eq!(text_paths, json_paths);
+}
+
+/// Compatibility applies only to the documented hosted storage failure.
+/// Other credential-route failures still make the command fail.
+#[test]
+fn settings_show_keeps_unrelated_credential_failures_fatal() {
+    let (output, paths) = run_attached_settings_show(
+        "json",
+        "500 Internal Server Error",
+        r#"{"kind":"internal","message":"credential database is unavailable"}"#,
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        stderr.contains("internal: credential database is unavailable"),
+        "stderr: {stderr}"
+    );
+    assert_eq!(
+        paths,
+        ["/settings", "/web-search", "/web-search/credentials"]
     );
 }
 

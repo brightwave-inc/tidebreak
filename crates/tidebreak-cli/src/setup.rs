@@ -666,6 +666,12 @@ fn show(value: &serde_json::Value) -> String {
 /// The provider names in a `{ credentials: [{provider, has_credential}] }`
 /// readiness body that actually hold a key.
 fn credentialed(readiness: &serde_json::Value) -> String {
+    if readiness["storage_available"] == serde_json::Value::Bool(false) {
+        return readiness["unavailable_reason"]
+            .as_str()
+            .map(|reason| format!("unavailable ({reason})"))
+            .unwrap_or_else(|| "unavailable".to_owned());
+    }
     let stored: Vec<&str> = readiness["credentials"]
         .as_array()
         .map(|rows| {
