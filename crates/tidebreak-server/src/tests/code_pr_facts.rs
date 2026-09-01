@@ -208,6 +208,8 @@ async fn seeded(
             rewrite: None,
             started_at: chrono::Utc::now(),
             ended_at: Some(chrono::Utc::now()),
+            park_ref: None,
+            park_wait: None,
         },
     )
     .await

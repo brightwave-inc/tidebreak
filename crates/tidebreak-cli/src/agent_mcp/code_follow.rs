@@ -137,7 +137,8 @@ fn from_turn_status(
         CodeTurnStatus::Completed => TurnStatus::Completed,
         CodeTurnStatus::Failed => TurnStatus::Failed,
         CodeTurnStatus::Interrupted => TurnStatus::Cancelled,
-        CodeTurnStatus::Running => TurnStatus::Running,
+        // A parked turn is still in flight from a follower's seat.
+        CodeTurnStatus::Running | CodeTurnStatus::Waiting => TurnStatus::Running,
     };
     CodeTurnResult {
         status,
@@ -225,7 +226,9 @@ async fn reconcile_lost_socket(
         return Err(stream_error);
     };
     if let Some(turn) = turn_by_id(client, session, turn_id).await? {
-        if turn.status != CodeTurnStatus::Running {
+        // A parked turn is open, not finished: fall through to the pending
+        // approval, which is the only thing that can release it.
+        if !turn.status.is_open() {
             return Ok(from_turn_status(
                 turn.status,
                 assistant_text,
@@ -466,7 +469,7 @@ async fn settled_or_parked(
     follow: &CodeFollowState,
 ) -> Result<Option<CodeTurnResult>> {
     if let Some(turn) = turn_by_id(client, session, follow.turn_id).await? {
-        if turn.status != CodeTurnStatus::Running {
+        if !turn.status.is_open() {
             return Ok(Some(from_turn_status(
                 turn.status,
                 follow.assistant_text.clone(),

@@ -850,6 +850,8 @@ async fn start_turn_row(
         rewrite: None,
         started_at: chrono::Utc::now(),
         ended_at: None,
+        park_ref: None,
+        park_wait: None,
     };
     match promoted {
         // Claim the queue row and insert its turn in one transaction, the
@@ -1733,6 +1735,8 @@ mod tests {
             rewrite: None,
             started_at: chrono::Utc::now(),
             ended_at: None,
+            park_ref: None,
+            park_wait: None,
         };
         insert_turn(&db, &session.owner, &running).await.unwrap();
 

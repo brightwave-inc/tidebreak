@@ -867,9 +867,26 @@ export type CodeAnalyticsSnapshot = { range: CodeAnalyticsRange, from?: string, 
 export type CodeAnalyticsTotals = { sessions: number, turns: number, completed_turns: number, failed_turns: number, interrupted_turns: number, running_turns: number, input_tokens: number, output_tokens: number, cache_read_tokens: number, cache_write_tokens: number, total_tokens: number, estimated_cost_microusd: number, pull_requests_opened: number, pull_requests_merged: number, };
 
 /**
- * `approve` or `deny`.
+ * The decision on one approval.
+ *
+ * The richer variants are capability-gated: the server refuses them for an
+ * engine whose capability vector does not declare the channel, and a grant
+ * is named by its index into the rungs the approval's own kind offered —
+ * a client can pick a rung the card showed, never invent a scope.
  */
-export type CodeApprovalDecision = "approve" | "deny";
+export type CodeApprovalDecision = "approve" | "deny" | { "approve_with_grant": {
+/**
+ * Index into the approval kind's `offered_grants`, narrowest first.
+ */
+grant_index: number, } } | { "answers": {
+/**
+ * Answers to a questions approval, validated server-side.
+ */
+answers: Array<UserQuestionAnswer>, } } | { "plan_decision": {
+/**
+ * Whether the proposed plan is accepted.
+ */
+approve: boolean, } };
 
 /**
  * Body of `POST /code/approvals/{id}/decision`.
@@ -1781,7 +1798,7 @@ rewrite?: string, };
 /**
  * Status of one user→engine turn.
  */
-export type CodeTurnStatus = "running" | "completed" | "failed" | "interrupted";
+export type CodeTurnStatus = "running" | "waiting" | "completed" | "failed" | "interrupted";
 
 /**
  * One unsequenced notice on `WS /code/updates`.

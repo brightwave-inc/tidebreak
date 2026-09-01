@@ -1549,6 +1549,20 @@ describe("hydrate then replay", () => {
     });
   });
 
+  it("keeps a parked turn busy: waiting is open, not terminal", () => {
+    const waiting = hydrateCodeTurns(initialCodeSessionState(), [
+      { ...SNAPSHOT_TURN, status: "waiting", ended_at: undefined },
+    ]);
+    expect(waiting).toMatchObject({
+      busy: true,
+      activeTurnId: SNAPSHOT_TURN.id,
+      lifecycle: "running",
+    });
+    expect(
+      waiting.items.find((item) => item.kind === "turn_boundary"),
+    ).toBeUndefined();
+  });
+
   it("lets live timing replace a replay-only unknown boundary", () => {
     const now = vi
       .fn<() => string>()

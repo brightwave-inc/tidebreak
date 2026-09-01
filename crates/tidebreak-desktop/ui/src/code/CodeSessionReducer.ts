@@ -219,7 +219,7 @@ export type PendingTerminalReconciliation = {
   candidateTurnId: string | null;
   /** The first retained start after an unassigned terminal, when one appears. */
   nextTurnId: string | null;
-  status: Exclude<CodeTurnStatus, "running">;
+  status: Exclude<CodeTurnStatus, "running" | "waiting">;
   usage: CodeUsage | null;
   error: string | null;
   diffstat: Diffstat | null;
@@ -302,13 +302,18 @@ export function markCodeSessionHydrated(
   return state.hydrated ? state : { ...state, hydrated: true };
 }
 
+/** Whether a turn is still open: live, or parked waiting on a decision. */
+function turnIsOpen(status: CodeTurnStatus): status is "running" | "waiting" {
+  return status === "running" || status === "waiting";
+}
+
 /** Record a turn that a live submit received before its journal start. */
 export function applyAcceptedTurn(
   state: CodeSessionState,
   turn: CodeTurnSnapshot,
 ): CodeSessionState {
   const next = upsertTurnPrompt(state, turn);
-  if (turn.status !== "running") return next;
+  if (!turnIsOpen(turn.status)) return next;
   const continuesObservedTurn =
     state.activeTurnId === turn.id && state.turnStartObservedLive;
   return {
@@ -335,7 +340,7 @@ export function applyCodeTurnSnapshot(
   turn: CodeTurnSnapshot,
 ): CodeSessionState {
   const next = upsertTurnPrompt(state, turn);
-  if (turn.status === "running") return next;
+  if (turnIsOpen(turn.status)) return next;
   const durableBoundaryTurnIds = new Set(next.durableBoundaryTurnIds);
   durableBoundaryTurnIds.add(turn.id);
   const withBoundary = {
@@ -391,7 +396,7 @@ function reconcileCodeTurnSnapshotWithPending(
   turn: CodeTurnSnapshot,
   pending: PendingTerminalReconciliation | undefined,
 ): CodeSessionState {
-  if (turn.status === "running") {
+  if (turnIsOpen(turn.status)) {
     return applyCodeTurnSnapshot(state, turn);
   }
 
@@ -635,7 +640,7 @@ function assignUnattributedTerminals(
       if (
         !item ||
         !turn ||
-        turn.status === "running" ||
+        turnIsOpen(turn.status) ||
         turn.status !== item.status ||
         claimed.has(turn.id)
       ) {
@@ -662,7 +667,7 @@ function applyAuthoritativeTurnActivity(
     : undefined;
   if (
     state.acceptedTurnFence &&
-    (!acceptedTurn || acceptedTurn.status === "running")
+    (!acceptedTurn || turnIsOpen(acceptedTurn.status))
   ) {
     return {
       ...state,
@@ -677,7 +682,7 @@ function applyAuthoritativeTurnActivity(
     .reverse()
     .find(
       (turn) =>
-        turn.status === "running" && !latestPendingForTurn(state, turn.id),
+        turnIsOpen(turn.status) && !latestPendingForTurn(state, turn.id),
     );
   const lastUsage = latestTurnUsage(state, turns);
   if (open) {
@@ -726,7 +731,7 @@ function latestTurnUsage(
   turns: readonly CodeTurnSnapshot[],
 ): CodeUsage | null {
   for (const turn of [...turns].reverse()) {
-    if (turn.status === "running") continue;
+    if (turnIsOpen(turn.status)) continue;
     if (turn.usage) return turn.usage;
     if (!state.durableBoundaryTurnIds.has(turn.id)) continue;
     const boundary = state.items.find(
@@ -1487,7 +1492,7 @@ function upsertTurnBoundary(
   items: CodeTranscriptItem[],
   boundary: {
     turnId: string;
-    status: Exclude<CodeTurnStatus, "running">;
+    status: Exclude<CodeTurnStatus, "running" | "waiting">;
     durationMs: number | null;
     usage: CodeUsage | null;
     error: string | null;
@@ -1534,7 +1539,7 @@ function replaceTurnBoundary(
   items: CodeTranscriptItem[],
   boundary: {
     turnId: string;
-    status: Exclude<CodeTurnStatus, "running">;
+    status: Exclude<CodeTurnStatus, "running" | "waiting">;
     durationMs: number | null;
     usage: CodeUsage | null;
     error: string | null;

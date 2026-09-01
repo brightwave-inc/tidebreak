@@ -16,13 +16,13 @@ use tidebreak_core::db::code::{
     append_event, get_approval, get_repo, get_repo_by_root_path, get_session, get_turn,
     get_workspace, insert_approval, insert_repo, insert_session, insert_turn, insert_workspace,
     list_approvals, list_events, list_repos, list_sessions, list_turns, mark_repo_removed,
-    set_workspace_title_if, MAX_REPLAY_EVENTS,
+    save_turn, set_workspace_title_if, MAX_REPLAY_EVENTS,
 };
 use tidebreak_core::{
     Attention, AttentionSource, CodeApproval, CodeApprovalId, CodeApprovalKind, CodeApprovalState,
     CodeEvent, CodeRepo, CodeSession, CodeSessionId, CodeSessionKind, CodeSessionLifecycle,
     CodeTurn, CodeTurnId, CodeTurnStatus, CodeWorkspace, CodeWorkspaceStatus, DbStore, HarnessKind,
-    OwnerId, PermissionMode, RepoId, WorkspaceId,
+    OwnerId, PermissionMode, RepoId, TurnParkWait, WorkspaceId,
 };
 
 static POSTGRES_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -125,6 +125,8 @@ async fn seed_owner(
             usage: None,
             narrative: None,
             rewrite: None,
+            park_ref: None,
+            park_wait: None,
             started_at: Utc::now(),
             ended_at: None,
         },
@@ -261,6 +263,46 @@ async fn postgres_code_queries_partition_by_owner() {
 /// Repository registration is unique per owner on PostgreSQL as well: the
 /// composite index is what allows a second user to register a path the first
 /// user already has.
+/// The park columns and the widened status check are the one piece of this
+/// slice whose PostgreSQL branch is a different statement from SQLite's: the
+/// constraint is swapped in place rather than rebuilt with the table. A turn
+/// that cannot park on this backend would strand the engine's checkpoint.
+#[tokio::test]
+async fn postgres_stores_a_parked_turn_and_reads_its_wait_back() {
+    let _guard = POSTGRES_TEST_LOCK.lock().await;
+    let url = match std::env::var("TIDEBREAK_POSTGRES_TEST_URL") {
+        Ok(url) => url,
+        Err(_) if std::env::var_os("TIDEBREAK_REQUIRE_POSTGRES_TEST").is_some() => {
+            panic!("TIDEBREAK_POSTGRES_TEST_URL must name an isolated test database")
+        }
+        Err(_) => return,
+    };
+    let store = DbStore::connect(&url).await.unwrap();
+    let run = uuid::Uuid::new_v4().simple().to_string();
+    let owner = OwnerId::new(&format!("parker-{run}")).unwrap();
+    let (_repo, _workspace, _session, turn_id) =
+        seed_owner(&store, &owner, &format!("parker-{run}")).await;
+
+    let mut turn = get_turn(&store, &owner, turn_id).await.unwrap().unwrap();
+    assert_eq!(turn.park_ref, None);
+    turn.status = CodeTurnStatus::Waiting;
+    turn.park_ref = Some("cp-1".to_owned());
+    turn.park_wait = Some(TurnParkWait::Approval {
+        call_id: "call-1".to_owned(),
+    });
+    assert!(save_turn(&store, &owner, &turn).await.unwrap());
+
+    let parked = get_turn(&store, &owner, turn_id).await.unwrap().unwrap();
+    assert_eq!(parked.status, CodeTurnStatus::Waiting);
+    assert_eq!(parked.park_ref.as_deref(), Some("cp-1"));
+    assert_eq!(
+        parked.park_wait,
+        Some(TurnParkWait::Approval {
+            call_id: "call-1".to_owned()
+        })
+    );
+}
+
 #[tokio::test]
 async fn postgres_repository_paths_are_unique_per_owner() {
     let _guard = POSTGRES_TEST_LOCK.lock().await;

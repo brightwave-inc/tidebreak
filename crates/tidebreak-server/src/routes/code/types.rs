@@ -2033,12 +2033,29 @@ pub struct CodeApprovalDecisionBody {
     pub feedback: Option<String>,
 }
 
-/// `approve` or `deny`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, TS)]
+/// The decision on one approval.
+///
+/// The richer variants are capability-gated: the server refuses them for an
+/// engine whose capability vector does not declare the channel, and a grant
+/// is named by its index into the rungs the approval's own kind offered —
+/// a client can pick a rung the card showed, never invent a scope.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum CodeApprovalDecision {
     Approve,
     Deny,
+    ApproveWithGrant {
+        /// Index into the approval kind's `offered_grants`, narrowest first.
+        grant_index: u32,
+    },
+    Answers {
+        /// Answers to a questions approval, validated server-side.
+        answers: Vec<tidebreak_core::UserQuestionAnswer>,
+    },
+    PlanDecision {
+        /// Whether the proposed plan is accepted.
+        approve: bool,
+    },
 }
 
 /// Query for `POST /code/harnesses/{kind}/install`.

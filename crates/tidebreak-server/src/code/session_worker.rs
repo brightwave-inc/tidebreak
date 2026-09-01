@@ -875,7 +875,7 @@ async fn run_worker(
                     }
                 }
                 Some(command) => {
-                    if apply_control(engine.as_ref(), command, None).await
+                    if apply_control(engine.as_ref(), command, None, None).await
                         == ControlFlow::Shutdown
                     {
                         break;
@@ -1063,7 +1063,7 @@ async fn await_worktree_turn<'a>(
                 // belongs to whichever loop owns the session row.
                 // `apply_control` answers all three that way already.
                 Some(command) => {
-                    if apply_control(engine, command, None).await == ControlFlow::Shutdown {
+                    if apply_control(engine, command, None, None).await == ControlFlow::Shutdown {
                         return WorktreeWait::Shutdown;
                     }
                 }
@@ -1097,10 +1097,192 @@ async fn reserve_execution_settings(
     }
 }
 
+/// Decisions this turn already handed the engine, keyed by the engine's own
+/// call id.
+///
+/// A `Decide` can arrive after `ApprovalRequested` is published and before
+/// the engine returns `Parked`. That command is admitted on the running
+/// leg, so no second `Decide` follows. The park wait has to resume from
+/// this record or the turn stays `waiting`.
+type DeliveredDecisions =
+    Arc<std::sync::Mutex<std::collections::HashMap<String, ApprovalDecision>>>;
+
+fn resume_if_already_delivered(
+    wait: &tidebreak_core::TurnParkWait,
+    delivered: &DeliveredDecisions,
+) -> Option<tidebreak_harness::ResumeInput> {
+    let tidebreak_core::TurnParkWait::Approval { call_id } = wait else {
+        return None;
+    };
+    let decision = delivered
+        .lock()
+        .expect("delivered decisions")
+        .get(call_id)
+        .cloned()?;
+    Some(tidebreak_harness::ResumeInput::ApprovalDecided {
+        call_id: call_id.clone(),
+        decision,
+    })
+}
+
+/// Deliver one approval decision over the engine's native channel, with the
+/// same timeout and ambiguity classification wherever the decision is taken
+/// from — the concurrent control path or a parked turn's wait.
+async fn deliver_decision(
+    engine: &dyn HarnessSession,
+    approval: HarnessApprovalRef,
+    decision: ApprovalDecision,
+    delivered: Option<DeliveredDecisions>,
+) -> Result<(), WorkerError> {
+    let call_id = approval.call_id.clone();
+    let recorded = decision.clone();
+    match tokio::time::timeout(APPROVAL_CONTROL_TIMEOUT, engine.decide(approval, decision)).await {
+        Ok(Ok(())) => {
+            if let Some(delivered) = delivered {
+                delivered
+                    .lock()
+                    .expect("delivered decisions")
+                    .insert(call_id, recorded);
+            }
+            Ok(())
+        }
+        Ok(Err(HarnessError::ApprovalAcknowledgementLost(message))) => {
+            Err(WorkerError::ApprovalDeliveryUnknown(message))
+        }
+        Ok(Err(err)) => Err(WorkerError::ApprovalDeliveryFailed(err.to_string())),
+        Err(_) => Err(WorkerError::ApprovalDeliveryUnknown(
+            "the native approval decision timed out; delivery could not be confirmed".into(),
+        )),
+    }
+}
+
+/// Persist a parked turn: status, the engine's checkpoint token, and the
+/// awaited dependency, mapped into the durable park-wait shape.
+async fn persist_turn_park(
+    db: &DbStore,
+    session: &CodeSession,
+    turn: &mut CodeTurn,
+    park_ref: &str,
+    waiting_on: &tidebreak_harness::ParkWait,
+) -> Result<tidebreak_core::TurnParkWait, String> {
+    let wait = match waiting_on {
+        tidebreak_harness::ParkWait::Approval { call_id } => {
+            tidebreak_core::TurnParkWait::Approval {
+                call_id: call_id.clone(),
+            }
+        }
+        tidebreak_harness::ParkWait::ClientToolCall { call_id } => {
+            tidebreak_core::TurnParkWait::ClientToolCall {
+                call_id: call_id.clone(),
+            }
+        }
+        tidebreak_harness::ParkWait::AgentRuns { run_ids } => {
+            tidebreak_core::TurnParkWait::AgentRuns {
+                run_ids: run_ids.clone(),
+            }
+        }
+    };
+    turn.status = CodeTurnStatus::Waiting;
+    turn.park_ref = Some(park_ref.to_owned());
+    turn.park_wait = Some(wait.clone());
+    save_turn(db, &session.owner, turn)
+        .await
+        .map_err(|err| format!("persisting the parked turn failed: {err}"))?;
+    Ok(wait)
+}
+
+/// Hold a parked turn until its wait resolves, the worker is interrupted, or
+/// the command channel closes.
+///
+/// A decision for the awaited approval is delivered to the engine first —
+/// the same native channel and classification as the concurrent control path
+/// — and only a confirmed delivery resumes the turn. Every other command
+/// takes the ordinary control path.
+#[allow(clippy::too_many_arguments)]
+async fn await_park_resolution<'a>(
+    engine: &'a dyn HarnessSession,
+    commands: &mut mpsc::Receiver<WorkerCommand>,
+    controls: &mut FuturesUnordered<BoxFuture<'a, ControlFlow>>,
+    interrupted: &mut bool,
+    commands_closed: &mut bool,
+    wait: &tidebreak_core::TurnParkWait,
+    turn_id: CodeTurnId,
+    delivered: &DeliveredDecisions,
+) -> Option<tidebreak_harness::ResumeInput> {
+    if let Some(input) = resume_if_already_delivered(wait, delivered) {
+        return Some(input);
+    }
+    loop {
+        tokio::select! {
+            biased;
+            Some(flow) = controls.next(), if !controls.is_empty() => {
+                if flow == ControlFlow::Shutdown {
+                    *interrupted = true;
+                    return None;
+                }
+                // The opening leg may still be delivering the awaited
+                // decision when the engine parks. That future lives in
+                // `controls`; once it finishes, resume from the record.
+                if let Some(input) = resume_if_already_delivered(wait, delivered) {
+                    return Some(input);
+                }
+            }
+            command = commands.recv(), if !*commands_closed => match command {
+                Some(WorkerCommand::Decide { approval, decision, reply }) => {
+                    let call_id = approval.call_id.clone();
+                    let decided = (*decision).clone();
+                    let result =
+                        deliver_decision(engine, approval, *decision, Some(delivered.clone())).await;
+                    let delivered = result.is_ok();
+                    let _ = reply.send(result);
+                    let awaited = matches!(
+                        wait,
+                        tidebreak_core::TurnParkWait::Approval { call_id: waited }
+                            if *waited == call_id
+                    );
+                    if delivered && awaited {
+                        return Some(tidebreak_harness::ResumeInput::ApprovalDecided {
+                            call_id,
+                            decision: decided,
+                        });
+                    }
+                }
+                Some(WorkerCommand::Interrupt { reply }) => {
+                    *interrupted = true;
+                    let result = engine
+                        .interrupt()
+                        .await
+                        .map_err(|err| WorkerError::Failed(err.to_string()));
+                    let _ = reply.send(result);
+                    return None;
+                }
+                Some(WorkerCommand::Shutdown) => {
+                    *interrupted = true;
+                    return None;
+                }
+                Some(other) => {
+                    controls.push(Box::pin(apply_control(
+                        engine,
+                        other,
+                        Some(turn_id),
+                        Some(delivered.clone()),
+                    )));
+                }
+                None => {
+                    *commands_closed = true;
+                    *interrupted = true;
+                    return None;
+                }
+            },
+        }
+    }
+}
+
 async fn apply_control(
     engine: &dyn HarnessSession,
     command: WorkerCommand,
     active_turn_id: Option<CodeTurnId>,
+    delivered: Option<DeliveredDecisions>,
 ) -> ControlFlow {
     match command {
         WorkerCommand::Decide {
@@ -1108,22 +1290,7 @@ async fn apply_control(
             decision,
             reply,
         } => {
-            let result = match tokio::time::timeout(
-                APPROVAL_CONTROL_TIMEOUT,
-                engine.decide(approval, *decision),
-            )
-            .await
-            {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(HarnessError::ApprovalAcknowledgementLost(message))) => {
-                    Err(WorkerError::ApprovalDeliveryUnknown(message))
-                }
-                Ok(Err(err)) => Err(WorkerError::ApprovalDeliveryFailed(err.to_string())),
-                Err(_) => Err(WorkerError::ApprovalDeliveryUnknown(
-                    "the native approval decision timed out; delivery could not be confirmed"
-                        .into(),
-                )),
-            };
+            let result = deliver_decision(engine, approval, *decision, delivered).await;
             let _ = reply.send(result);
             ControlFlow::Continue
         }
@@ -1568,6 +1735,8 @@ async fn drive_turn_inner(
         rewrite: None,
         started_at: Utc::now(),
         ended_at: None,
+        park_ref: None,
+        park_wait: None,
     };
 
     // Clear files a crashed worker left behind before this turn exposes any
@@ -1664,14 +1833,14 @@ async fn drive_turn_inner(
             Vec::new(),
         )
     };
-    let run = engine.run_turn(TurnInput {
+    let mut next_input = Some(TurnInput {
         text: engine_text,
         model: turn_settings.model.clone(),
         reasoning_effort: turn_settings.reasoning_effort,
         fast_mode: turn_settings.fast_mode,
         images,
     });
-    tokio::pin!(run);
+    let mut next_resume: Option<(String, tidebreak_harness::ResumeInput)> = None;
     // Adapters that spawn one child per turn have no pid to report until the
     // turn is under way. Record every transition as it happens: the session
     // row's pid is what boot recovery probes, and a NULL pid there is read as
@@ -1684,40 +1853,103 @@ async fn drive_turn_inner(
     let mut controls: FuturesUnordered<BoxFuture<'_, ControlFlow>> = FuturesUnordered::new();
     let mut interrupted = false;
     let mut commands_closed = false;
-    let run = loop {
-        tokio::select! {
-            // Once a control has been accepted from the command channel, poll
-            // it before allowing a simultaneously-terminal turn to win. Native
-            // steering registers its response waiter on that first poll; the
-            // turn reader can then drain and demultiplex the acknowledgement.
-            biased;
-            Some(flow) = controls.next(), if !controls.is_empty() => {
-                if flow == ControlFlow::Shutdown {
-                    interrupted = true;
-                    controls.push(Box::pin(interrupt_engine(engine)));
+    let delivered: DeliveredDecisions =
+        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    // One leg per engine future: the opening `run_turn`, then one
+    // `resume_turn` per resolved park. An engine that never parks runs one
+    // leg, exactly the old shape.
+    let run = 'legs: loop {
+        let leg: BoxFuture<'_, Result<TurnOutcome, HarnessError>> =
+            if let Some(input) = next_input.take() {
+                Box::pin(engine.run_turn(input))
+            } else if let Some((park_ref, input)) = next_resume.take() {
+                Box::pin(engine.resume_turn(park_ref, input))
+            } else {
+                unreachable!("every leg starts with an input or a resume");
+            };
+        tokio::pin!(leg);
+        let result = loop {
+            tokio::select! {
+                // Once a control has been accepted from the command channel, poll
+                // it before allowing a simultaneously-terminal turn to win. Native
+                // steering registers its response waiter on that first poll; the
+                // turn reader can then drain and demultiplex the acknowledgement.
+                biased;
+                Some(flow) = controls.next(), if !controls.is_empty() => {
+                    if flow == ControlFlow::Shutdown {
+                        interrupted = true;
+                        controls.push(Box::pin(interrupt_engine(engine)));
+                    }
+                }
+                // A terminal result wins over commands that have not yet been
+                // admitted. This prevents guidance for turn A from entering the
+                // control set after A has already completed and then reaching B.
+                result = &mut leg => break result,
+                command = commands.recv(), if !commands_closed => match command {
+                    Some(command) => {
+                        interrupted |= matches!(command, WorkerCommand::Interrupt { .. });
+                        controls.push(Box::pin(apply_control(
+                            engine,
+                            command,
+                            Some(turn.id),
+                            Some(delivered.clone()),
+                        )));
+                    }
+                    None => {
+                        commands_closed = true;
+                        interrupted = true;
+                        controls.push(Box::pin(interrupt_engine(engine)));
+                    }
+                },
+                pid = next_child_pid(pid_changes.as_mut()) => {
+                    if session.child_pid != pid {
+                        record_child_process(session, pid);
+                        let _ = save_session(db, session).await;
+                    }
                 }
             }
-            // A terminal result wins over commands that have not yet been
-            // admitted. This prevents guidance for turn A from entering the
-            // control set after A has already completed and then reaching B.
-            result = &mut run => break result,
-            command = commands.recv(), if !commands_closed => match command {
-                Some(command) => {
-                    interrupted |= matches!(command, WorkerCommand::Interrupt { .. });
-                    controls.push(Box::pin(apply_control(engine, command, Some(turn.id))));
-                }
-                None => {
-                    commands_closed = true;
-                    interrupted = true;
-                    controls.push(Box::pin(interrupt_engine(engine)));
-                }
-            },
-            pid = next_child_pid(pid_changes.as_mut()) => {
-                if session.child_pid != pid {
-                    record_child_process(session, pid);
-                    let _ = save_session(db, session).await;
-                }
+        };
+        let Ok(TurnOutcome::Parked {
+            park_ref,
+            waiting_on,
+        }) = result
+        else {
+            break 'legs result;
+        };
+        // The engine checkpointed durably and released the turn. Persist the
+        // park so the row says what the turn waits for, then hold here for
+        // the resolution. The session stays Running: a parked turn is open,
+        // and the decide route requires a live worker.
+        if interrupted {
+            // A stop raced the park; close the turn instead of waiting.
+            break 'legs Ok(TurnOutcome::Clean);
+        }
+        let wait = match persist_turn_park(db, session, &mut turn, &park_ref, &waiting_on).await {
+            Ok(wait) => wait,
+            Err(error) => break 'legs Err(HarnessError::Other(error)),
+        };
+        match await_park_resolution(
+            engine,
+            commands,
+            &mut controls,
+            &mut interrupted,
+            &mut commands_closed,
+            &wait,
+            turn.id,
+            &delivered,
+        )
+        .await
+        {
+            Some(input) => {
+                turn.status = CodeTurnStatus::Running;
+                turn.park_ref = None;
+                turn.park_wait = None;
+                let _ = save_turn(db, &session.owner, &turn).await;
+                next_resume = Some((park_ref, input));
             }
+            // Interrupted or shut down while parked: fall through to the
+            // shared closing code, which closes an open turn as interrupted.
+            None => break 'legs Ok(TurnOutcome::Clean),
         }
     };
     // A control command still in flight has a caller waiting on its reply.
@@ -1776,11 +2008,11 @@ async fn drive_turn_inner(
             let detail = match outcome {
                 TurnOutcome::Clean => None,
                 TurnOutcome::Incomplete { detail } => Some(detail),
-                // No registered engine declares durable_parks yet; a park
-                // reaching this worker is a contract violation, and failing
-                // the turn loudly beats stranding it open.
+                // Parks are intercepted by the leg loop above; one arriving
+                // here means the engine parked after the worker stopped
+                // waiting, and failing loudly beats stranding the turn open.
                 TurnOutcome::Parked { .. } => {
-                    Some("the engine parked the turn, which this worker does not support".into())
+                    Some("the engine parked a turn the worker was no longer waiting on".into())
                 }
             };
             // An engine that died on us says why on stderr. That belongs in
@@ -1800,7 +2032,7 @@ async fn drive_turn_inner(
                 )
                 .await;
             }
-            if turn.status == CodeTurnStatus::Running {
+            if turn.status.is_open() {
                 // The stream ended without closing the turn. Only the worker
                 // knows whether that was asked for.
                 let (status, event) = if interrupted {
@@ -1851,7 +2083,7 @@ async fn drive_turn_inner(
             }
         }
         Err(err) => {
-            if turn.status == CodeTurnStatus::Running {
+            if turn.status.is_open() {
                 turn.status = CodeTurnStatus::Failed;
                 turn.ended_at = Some(Utc::now());
                 let _ = save_turn(db, &session.owner, &turn).await;
@@ -2771,7 +3003,8 @@ mod tests {
     use chrono::Utc;
     use tidebreak_core::db::code::{
         enqueue_queued_turn, get_session, insert_repo, insert_session, insert_workspace,
-        list_events, list_turns, replace_session_execution_settings, MAX_REPLAY_EVENTS,
+        list_approvals, list_events, list_turns, replace_session_execution_settings,
+        MAX_REPLAY_EVENTS,
     };
     use tidebreak_core::{
         CodeRepo, CodeSessionKind, CodeUsage, CodeWorkspace, CodeWorkspaceStatus, HarnessKind,
@@ -2966,6 +3199,384 @@ mod tests {
             crate::code::pr_refresh::HotPullRequests::default(),
         );
         (directory, store, sink, session_id)
+    }
+
+    #[tokio::test]
+    async fn a_parked_turn_waits_durably_and_resumes_on_the_awaited_decision() {
+        let (directory, store, sink, session_id) = seeded_sink().await;
+        let owner = OwnerId::local();
+        let mut session = get_session(&store, &owner, session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        session.lifecycle = CodeSessionLifecycle::Idle;
+        assert!(save_session(&store, &session).await.unwrap());
+
+        let worktree = directory.path().join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let private = directory.path().join("private");
+        std::fs::create_dir(&private).unwrap();
+        let private_root =
+            super::super::scratch::ScratchRoot::open_for_test(&private).expect("scratch root");
+        let script = vec![
+            HarnessEvent::TurnStarted,
+            HarnessEvent::ApprovalRequested {
+                harness_ref: tidebreak_harness::HarnessApprovalRef::engine("call-1"),
+                raw: serde_json::json!({ "tool_name": "Write" }),
+                kind: None,
+            },
+            HarnessEvent::AssistantMessage {
+                text: "resumed after the decision".into(),
+                parent_call_id: None,
+            },
+            HarnessEvent::TurnCompleted {
+                usage: CodeUsage::default(),
+            },
+        ];
+        // The engine checkpoints after the request instead of blocking on it.
+        let adapter = ScriptedAdapter::new(script)
+            .with_unattended_approvals()
+            .with_parked_turn(
+                2,
+                "cp-1",
+                tidebreak_harness::ParkWait::Approval {
+                    call_id: "call-1".into(),
+                },
+            );
+        let engine = adapter
+            .launch(SessionSpec {
+                worktree,
+                allowed_read_roots: Vec::new(),
+                permission_mode: session.permission_mode,
+                model: session.model.clone(),
+                reasoning_effort: session.reasoning_effort,
+                fast_mode: session.fast_mode,
+                resume_ref: None,
+                extra_argv: Vec::new(),
+                extra_env: Vec::new(),
+                relay_key_env: None,
+                env: Vec::new(),
+                approval: None,
+                binary: Some(std::path::PathBuf::from("/scripted/engine")),
+                sink: sink.clone() as Arc<dyn tidebreak_harness::HarnessEventSink>,
+                browser: None,
+            })
+            .await
+            .unwrap();
+        let handle = spawn_session_worker(
+            session.clone(),
+            engine,
+            sink,
+            AttachmentStore {
+                blobs: None,
+                private_root,
+                engine_reads_images: false,
+            },
+            Arc::new(tokio::sync::Mutex::new(())),
+            tokio::sync::watch::channel(false).1,
+        );
+
+        let (turn_reply, turn_response) = oneshot::channel();
+        handle
+            .commands
+            .send(WorkerCommand::RunTurn {
+                message: "park then resume".into(),
+                attachments: Vec::new(),
+                trigger_delivery: None,
+                reply: turn_reply,
+            })
+            .await
+            .unwrap();
+
+        // The turn must reach the durable park before the decision arrives.
+        let parked = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let turns = list_turns(&store, &owner, session_id).await.unwrap();
+                if let Some(turn) = turns.iter().find(|t| t.status == CodeTurnStatus::Waiting) {
+                    break turn.clone();
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the turn parks");
+        assert_eq!(parked.park_ref.as_deref(), Some("cp-1"));
+        assert_eq!(
+            parked.park_wait,
+            Some(tidebreak_core::TurnParkWait::Approval {
+                call_id: "call-1".into()
+            })
+        );
+
+        let (decide_reply, decide_response) = oneshot::channel();
+        handle
+            .commands
+            .send(WorkerCommand::Decide {
+                approval: tidebreak_harness::HarnessApprovalRef::engine("call-1"),
+                decision: Box::new(tidebreak_harness::ApprovalDecision::Approve),
+                reply: decide_reply,
+            })
+            .await
+            .unwrap();
+        decide_response.await.unwrap().unwrap();
+
+        let turn = tokio::time::timeout(Duration::from_secs(5), turn_response)
+            .await
+            .expect("the turn completes after the resume")
+            .unwrap()
+            .unwrap();
+        assert_eq!(turn.status, CodeTurnStatus::Completed);
+        assert_eq!(turn.park_ref, None, "the resume clears the park");
+        assert_eq!(turn.park_wait, None);
+        assert_eq!(adapter.resumes().len(), 1, "one resume for one park");
+        let events = list_events(&store, &owner, session_id, 0, MAX_REPLAY_EVENTS)
+            .await
+            .unwrap();
+        assert!(
+            events
+                .events
+                .iter()
+                .any(|event| matches!(event.event, CodeEvent::TurnCompleted { .. })),
+            "the resumed leg reaches the journal"
+        );
+        let _ = handle.commands.send(WorkerCommand::Shutdown).await;
+    }
+
+    #[tokio::test]
+    async fn a_decision_on_the_running_leg_resumes_the_park() {
+        let (directory, store, sink, session_id) = seeded_sink().await;
+        let owner = OwnerId::local();
+        let mut session = get_session(&store, &owner, session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        session.lifecycle = CodeSessionLifecycle::Idle;
+        assert!(save_session(&store, &session).await.unwrap());
+
+        let worktree = directory.path().join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let private = directory.path().join("private");
+        std::fs::create_dir(&private).unwrap();
+        let private_root =
+            super::super::scratch::ScratchRoot::open_for_test(&private).expect("scratch root");
+        let script = vec![
+            HarnessEvent::TurnStarted,
+            HarnessEvent::ApprovalRequested {
+                harness_ref: tidebreak_harness::HarnessApprovalRef::engine("call-1"),
+                raw: serde_json::json!({ "tool_name": "Write" }),
+                kind: None,
+            },
+            // Holds the opening leg open after the request is journaled so
+            // Decide is admitted there, before `Parked` is persisted.
+            HarnessEvent::AssistantDelta {
+                text: "still running".into(),
+            },
+            HarnessEvent::AssistantMessage {
+                text: "resumed after the decision".into(),
+                parent_call_id: None,
+            },
+            HarnessEvent::TurnCompleted {
+                usage: CodeUsage::default(),
+            },
+        ];
+        let adapter = ScriptedAdapter::new(script)
+            .with_unattended_approvals()
+            .with_delay(Duration::from_millis(150))
+            .with_approval_ack_delay(Duration::from_millis(150))
+            .with_parked_turn(
+                3,
+                "cp-1",
+                tidebreak_harness::ParkWait::Approval {
+                    call_id: "call-1".into(),
+                },
+            );
+        let engine = adapter
+            .launch(SessionSpec {
+                worktree,
+                allowed_read_roots: Vec::new(),
+                permission_mode: session.permission_mode,
+                model: session.model.clone(),
+                reasoning_effort: session.reasoning_effort,
+                fast_mode: session.fast_mode,
+                resume_ref: None,
+                extra_argv: Vec::new(),
+                extra_env: Vec::new(),
+                relay_key_env: None,
+                env: Vec::new(),
+                approval: None,
+                binary: Some(std::path::PathBuf::from("/scripted/engine")),
+                sink: sink.clone() as Arc<dyn tidebreak_harness::HarnessEventSink>,
+                browser: None,
+            })
+            .await
+            .unwrap();
+        let handle = spawn_session_worker(
+            session.clone(),
+            engine,
+            sink,
+            AttachmentStore {
+                blobs: None,
+                private_root,
+                engine_reads_images: false,
+            },
+            Arc::new(tokio::sync::Mutex::new(())),
+            tokio::sync::watch::channel(false).1,
+        );
+
+        let (turn_reply, turn_response) = oneshot::channel();
+        handle
+            .commands
+            .send(WorkerCommand::RunTurn {
+                message: "decide before the park".into(),
+                attachments: Vec::new(),
+                trigger_delivery: None,
+                reply: turn_reply,
+            })
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let pending = list_approvals(
+                    &store,
+                    &owner,
+                    Some(CodeApprovalState::Pending),
+                    Some(session_id),
+                )
+                .await
+                .unwrap();
+                if !pending.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the approval is published");
+        let turns = list_turns(&store, &owner, session_id).await.unwrap();
+        assert!(
+            turns
+                .iter()
+                .any(|turn| turn.status == CodeTurnStatus::Running),
+            "Decide must reach the opening leg while the turn is still running"
+        );
+
+        let (decide_reply, decide_response) = oneshot::channel();
+        handle
+            .commands
+            .send(WorkerCommand::Decide {
+                approval: tidebreak_harness::HarnessApprovalRef::engine("call-1"),
+                decision: Box::new(tidebreak_harness::ApprovalDecision::Approve),
+                reply: decide_reply,
+            })
+            .await
+            .unwrap();
+        decide_response.await.unwrap().unwrap();
+
+        let turn = tokio::time::timeout(Duration::from_secs(5), turn_response)
+            .await
+            .expect("the turn completes from the already-delivered decision")
+            .unwrap()
+            .unwrap();
+        assert_eq!(turn.status, CodeTurnStatus::Completed);
+        assert_eq!(turn.park_ref, None, "the resume clears the park");
+        assert_eq!(turn.park_wait, None);
+        assert_eq!(adapter.resumes().len(), 1, "one resume for one park");
+        let _ = handle.commands.send(WorkerCommand::Shutdown).await;
+    }
+
+    #[tokio::test]
+    async fn an_interrupt_closes_a_parked_turn() {
+        let (directory, store, sink, session_id) = seeded_sink().await;
+        let owner = OwnerId::local();
+        let mut session = get_session(&store, &owner, session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        session.lifecycle = CodeSessionLifecycle::Idle;
+        assert!(save_session(&store, &session).await.unwrap());
+        let worktree = directory.path().join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let private = directory.path().join("private");
+        std::fs::create_dir(&private).unwrap();
+        let private_root =
+            super::super::scratch::ScratchRoot::open_for_test(&private).expect("scratch root");
+        let adapter = ScriptedAdapter::new(vec![HarnessEvent::TurnStarted]).with_parked_turn(
+            1,
+            "cp-1",
+            tidebreak_harness::ParkWait::Approval {
+                call_id: "call-1".into(),
+            },
+        );
+        let engine = adapter
+            .launch(SessionSpec {
+                worktree,
+                allowed_read_roots: Vec::new(),
+                permission_mode: session.permission_mode,
+                model: None,
+                reasoning_effort: None,
+                fast_mode: false,
+                resume_ref: None,
+                extra_argv: Vec::new(),
+                extra_env: Vec::new(),
+                relay_key_env: None,
+                env: Vec::new(),
+                approval: None,
+                binary: Some(std::path::PathBuf::from("/scripted/engine")),
+                sink: sink.clone() as Arc<dyn tidebreak_harness::HarnessEventSink>,
+                browser: None,
+            })
+            .await
+            .unwrap();
+        let handle = spawn_session_worker(
+            session.clone(),
+            engine,
+            sink,
+            AttachmentStore {
+                blobs: None,
+                private_root,
+                engine_reads_images: false,
+            },
+            Arc::new(tokio::sync::Mutex::new(())),
+            tokio::sync::watch::channel(false).1,
+        );
+        let (turn_reply, turn_response) = oneshot::channel();
+        handle
+            .commands
+            .send(WorkerCommand::RunTurn {
+                message: "park then interrupt".into(),
+                attachments: Vec::new(),
+                trigger_delivery: None,
+                reply: turn_reply,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(turn) = get_open_turn(&store, &owner, session_id).await.unwrap() {
+                    if turn.status == CodeTurnStatus::Waiting {
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the turn parks");
+        let (stop_reply, stop_response) = oneshot::channel();
+        handle
+            .commands
+            .send(WorkerCommand::Interrupt { reply: stop_reply })
+            .await
+            .unwrap();
+        stop_response.await.unwrap().unwrap();
+        let turn = tokio::time::timeout(Duration::from_secs(5), turn_response)
+            .await
+            .expect("the parked turn closes")
+            .unwrap()
+            .unwrap();
+        assert_eq!(turn.status, CodeTurnStatus::Interrupted);
+        let _ = handle.commands.send(WorkerCommand::Shutdown).await;
     }
 
     #[tokio::test]

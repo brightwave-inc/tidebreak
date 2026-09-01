@@ -568,6 +568,8 @@ mod tests {
                 rewrite: None,
                 started_at: now(),
                 ended_at: None,
+                park_ref: None,
+                park_wait: None,
             },
         )
         .await

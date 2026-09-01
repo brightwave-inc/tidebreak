@@ -325,6 +325,11 @@ impl CodeWorkspaceStatus {
 pub enum CodeTurnStatus {
     /// The engine is still working this turn.
     Running,
+    /// The engine durably checkpointed the turn and released it; it resumes
+    /// once the wait recorded on the turn resolves (decision 0048 step 5).
+    ///
+    /// Only engines declaring `durable_parks` produce this state.
+    Waiting,
     /// The turn finished successfully.
     Completed,
     /// The turn failed.
@@ -339,6 +344,7 @@ impl CodeTurnStatus {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Running => "running",
+            Self::Waiting => "waiting",
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Interrupted => "interrupted",
@@ -351,12 +357,45 @@ impl CodeTurnStatus {
     pub fn from_str(value: &str) -> Option<Self> {
         match value {
             "running" => Some(Self::Running),
+            "waiting" => Some(Self::Waiting),
             "completed" => Some(Self::Completed),
             "failed" => Some(Self::Failed),
             "interrupted" => Some(Self::Interrupted),
             _ => None,
         }
     }
+
+    /// Whether the turn is still open: the engine owes it a terminal event.
+    #[must_use]
+    pub const fn is_open(self) -> bool {
+        matches!(self, Self::Running | Self::Waiting)
+    }
+}
+
+/// The dependency a parked turn waits on, persisted beside its park ref.
+///
+/// The durable mirror of the adapter contract's park wait: the worker
+/// records it when an engine parks so a restarted server can see what the
+/// turn was waiting for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TurnParkWait {
+    /// A pending approval: a tool approval, questions, or a plan. Named by
+    /// the engine-native call id the approval row records.
+    Approval {
+        /// Engine-native call id.
+        call_id: String,
+    },
+    /// A tool call executed outside the engine by a leased client.
+    ClientToolCall {
+        /// Durable tool call id, engine-scoped.
+        call_id: String,
+    },
+    /// A set of background agent runs; the turn resumes when all settle.
+    AgentRuns {
+        /// Durable agent run ids, engine-scoped.
+        run_ids: Vec<String>,
+    },
 }
 
 /// State of a persisted approval.
@@ -1298,6 +1337,13 @@ pub struct CodeTurn {
     pub started_at: chrono::DateTime<chrono::Utc>,
     /// End time, when terminal.
     pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Engine-owned checkpoint token while the turn is
+    /// [`CodeTurnStatus::Waiting`]; handed back verbatim on resume.
+    #[serde(default)]
+    pub park_ref: Option<String>,
+    /// What a waiting turn is parked on.
+    #[serde(default)]
+    pub park_wait: Option<TurnParkWait>,
 }
 
 /// One durable queued follow-up: a message accepted while its session or its

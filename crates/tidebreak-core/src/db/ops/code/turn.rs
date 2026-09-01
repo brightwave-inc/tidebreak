@@ -68,6 +68,11 @@ where
         rewrite: Set(turn.rewrite.clone()),
         started_at: Set(turn.started_at),
         ended_at: Set(turn.ended_at),
+        park_ref: Set(turn.park_ref.clone()),
+        park_wait: Set(match &turn.park_wait {
+            Some(wait) => Some(serde_json::to_value(wait)?),
+            None => None,
+        }),
     }
     .insert(conn)
     .await
@@ -306,10 +311,7 @@ pub async fn get_open_turn(
     session_id: CodeSessionId,
 ) -> Result<Option<CodeTurn>> {
     let turns = list_turns(store, owner, session_id).await?;
-    Ok(turns
-        .into_iter()
-        .rev()
-        .find(|turn| turn.status == CodeTurnStatus::Running))
+    Ok(turns.into_iter().rev().find(|turn| turn.status.is_open()))
 }
 
 /// Next 1-based ordinal for a new turn on one of the owner's sessions.
@@ -375,6 +377,17 @@ pub async fn save_turn(store: &DbStore, owner: &OwnerId, turn: &CodeTurn) -> Res
         .col_expr(
             entities::code_turn::Column::EndedAt,
             sea_orm::sea_query::Expr::value(turn.ended_at),
+        )
+        .col_expr(
+            entities::code_turn::Column::ParkRef,
+            sea_orm::sea_query::Expr::value(turn.park_ref.clone()),
+        )
+        .col_expr(
+            entities::code_turn::Column::ParkWait,
+            sea_orm::sea_query::Expr::value(match &turn.park_wait {
+                Some(wait) => Some(serde_json::to_value(wait)?),
+                None => None,
+            }),
         )
         .filter(entities::code_turn::Column::Id.eq(turn.id.0))
         .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
@@ -469,6 +482,13 @@ pub(super) fn turn_from_row(row: entities::code_turn::Model) -> Result<CodeTurn>
         rewrite: row.rewrite,
         started_at: row.started_at,
         ended_at: row.ended_at,
+        park_ref: row.park_ref,
+        park_wait: match row.park_wait {
+            Some(value) => Some(serde_json::from_value(value).map_err(|err| {
+                AgentError::Store(format!("code_turn {} park_wait: {err}", row.id))
+            })?),
+            None => None,
+        },
     })
 }
 

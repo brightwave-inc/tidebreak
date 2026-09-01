@@ -453,11 +453,13 @@ pub enum TurnOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ParkWait {
-    /// A pending approval row: a tool approval, a questions card, or a plan
-    /// proposal.
+    /// A pending approval: a tool approval, a questions card, or a plan
+    /// proposal. Named by the engine-native call id, because the engine
+    /// never learns the server's durable row id; the worker resolves it to
+    /// the approval row it recorded for that call.
     Approval {
-        /// Durable approval id.
-        approval_id: String,
+        /// Engine-native call id, as on [`HarnessApprovalRef`].
+        call_id: String,
     },
     /// A tool call executed outside the engine, by a client the server
     /// leases.
@@ -484,8 +486,8 @@ pub enum ParkWait {
 pub enum ResumeInput {
     /// The awaited approval was decided, with this decision.
     ApprovalDecided {
-        /// The approval that settled.
-        approval_id: String,
+        /// Engine-native call id of the approval that settled.
+        call_id: String,
         /// The decision, already durably recorded.
         decision: ApprovalDecision,
     },

@@ -2,11 +2,11 @@ use axum::extract::Query;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 
+use crate::code::runtime::ApprovalDecisionRequest;
 use crate::code::ScopedCode;
 use crate::error::ServerError;
 use crate::extract::{Json, Path};
 use tidebreak_core::CodeApprovalId;
-use tidebreak_harness::ApprovalDecision;
 
 use super::types::{
     CodeApprovalDecision, CodeApprovalDecisionBody, CodeApprovalSnapshot, ListApprovalsQuery,
@@ -31,8 +31,16 @@ pub async fn decide_approval(
     Json(body): Json<CodeApprovalDecisionBody>,
 ) -> Result<impl IntoResponse, ServerError> {
     let decision = match body.decision {
-        CodeApprovalDecision::Approve => ApprovalDecision::Approve,
-        CodeApprovalDecision::Deny => ApprovalDecision::Deny {
+        CodeApprovalDecision::Approve => ApprovalDecisionRequest::Approve,
+        CodeApprovalDecision::Deny => ApprovalDecisionRequest::Deny {
+            feedback: body.feedback,
+        },
+        CodeApprovalDecision::ApproveWithGrant { grant_index } => {
+            ApprovalDecisionRequest::ApproveWithGrant { grant_index }
+        }
+        CodeApprovalDecision::Answers { answers } => ApprovalDecisionRequest::Answers { answers },
+        CodeApprovalDecision::PlanDecision { approve } => ApprovalDecisionRequest::PlanDecision {
+            approve,
             feedback: body.feedback,
         },
     };

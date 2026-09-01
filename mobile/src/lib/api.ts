@@ -400,7 +400,7 @@ export function parseCodeTurn(value: unknown): CodeTurnSnapshot | null {
     !nonEmpty(turn.id) ||
     !nonEmpty(turn.session_id) ||
     !finiteNumber(turn.ordinal) ||
-    !["running", "completed", "failed", "interrupted"].includes(
+    !["running", "waiting", "completed", "failed", "interrupted"].includes(
       String(turn.status),
     ) ||
     !optionalString(turn.model) ||

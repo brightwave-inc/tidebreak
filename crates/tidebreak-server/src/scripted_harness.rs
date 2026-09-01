@@ -858,6 +858,7 @@ fn apply_scripted_writes(worktree: &Path, writes: &[ScriptedWrite]) -> Result<()
 /// Object form of [`SCRIPT_VAR`]: events plus optional delay, writes, and
 /// approval-channel flags. A bare JSON array of [`HarnessEvent`]s is also
 /// accepted so a short successful turn stays one line.
+#[cfg_attr(test, allow(dead_code))]
 #[derive(Debug, Deserialize)]
 struct ScriptedHarnessScript {
     events: Vec<HarnessEvent>,
@@ -876,6 +877,7 @@ struct ScriptedHarnessScript {
 /// A malformed script is an error rather than a silent fall-through to the
 /// real engines: a CLI e2e whose script did not parse would otherwise try to
 /// install pinned harness binaries.
+#[cfg_attr(test, allow(dead_code))]
 pub(crate) fn adapter_from_env() -> Result<Option<ScriptedAdapter>> {
     let Ok(script) = std::env::var(SCRIPT_VAR) else {
         return Ok(None);
@@ -905,6 +907,7 @@ pub(crate) fn adapter_from_env() -> Result<Option<ScriptedAdapter>> {
 /// Install the env-driven scripted engine in place of the matching built-in,
 /// so a spawned `tidebreak serve` can drive code-mode turns without a real
 /// harness binary.
+#[cfg_attr(test, allow(dead_code))]
 pub(crate) fn install_from_env(registry: &mut AdapterRegistry) -> Result<()> {
     if let Some(adapter) = adapter_from_env()? {
         registry.register(Arc::new(adapter));
@@ -912,6 +915,7 @@ pub(crate) fn install_from_env(registry: &mut AdapterRegistry) -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(test, allow(dead_code))]
 fn parse_script(script: &str) -> std::result::Result<ScriptedHarnessScript, serde_json::Error> {
     if let Ok(events) = serde_json::from_str::<Vec<HarnessEvent>>(script) {
         return Ok(ScriptedHarnessScript {
@@ -1020,7 +1024,7 @@ mod tests {
             2,
             "checkpoint-1",
             ParkWait::Approval {
-                approval_id: "approval-9".into(),
+                call_id: "call-9".into(),
             },
         );
         let sink = Arc::new(CollectingSink::default());
@@ -1041,7 +1045,7 @@ mod tests {
         assert_eq!(
             waiting_on,
             ParkWait::Approval {
-                approval_id: "approval-9".into()
+                call_id: "call-9".into()
             }
         );
         assert_eq!(sink.events.lock().unwrap().len(), 2, "prefix only");
@@ -1050,7 +1054,7 @@ mod tests {
             .resume_turn(
                 park_ref,
                 ResumeInput::ApprovalDecided {
-                    approval_id: "approval-9".into(),
+                    call_id: "call-9".into(),
                     decision: ApprovalDecision::Approve,
                 },
             )

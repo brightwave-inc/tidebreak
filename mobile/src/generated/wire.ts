@@ -867,9 +867,26 @@ export type CodeAnalyticsSnapshot = { range: CodeAnalyticsRange, from?: string, 
 export type CodeAnalyticsTotals = { sessions: number, turns: number, completed_turns: number, failed_turns: number, interrupted_turns: number, running_turns: number, input_tokens: number, output_tokens: number, cache_read_tokens: number, cache_write_tokens: number, total_tokens: number, estimated_cost_microusd: number, pull_requests_opened: number, pull_requests_merged: number, };
 
 /**
- * `approve` or `deny`.
+ * The decision on one approval.
+ *
+ * The richer variants are capability-gated: the server refuses them for an
+ * engine whose capability vector does not declare the channel, and a grant
+ * is named by its index into the rungs the approval's own kind offered —
+ * a client can pick a rung the card showed, never invent a scope.
  */
-export type CodeApprovalDecision = "approve" | "deny";
+export type CodeApprovalDecision = "approve" | "deny" | { "approve_with_grant": {
+/**
+ * Index into the approval kind's `offered_grants`, narrowest first.
+ */
+grant_index: number, } } | { "answers": {
+/**
+ * Answers to a questions approval, validated server-side.
+ */
+answers: Array<UserQuestionAnswer>, } } | { "plan_decision": {
+/**
+ * Whether the proposed plan is accepted.
+ */
+approve: boolean, } };
 
 /**
  * Body of `POST /code/approvals/{id}/decision`.
@@ -1535,10 +1552,13 @@ export type CodePrMergeMethod = "squash" | "merge" | "rebase";
 /**
  * How strongly a workspace is tied to a pull request (decision 77).
  *
- * Only two acts mint attribution: `gh pr create` (authored) and a push whose
- * branch is or becomes a pull request's head (contributed). Reading,
- * checking out, commenting on, closing, or merging a pull request never
- * does, so review and triage agents stay out of the attributed set.
+ * `gh pr create` mints authored attribution. A push whose branch is or
+ * becomes a pull request's head mints contributed attribution. A changed,
+ * clean workspace checkout also mints contributed attribution when it remains
+ * on the workspace branch and its current commit exactly matches an open pull
+ * request head. Reading, checking out, commenting on, closing, or merging a
+ * pull request never does, so review and triage agents stay out of the
+ * attributed set.
  */
 export type CodePullRequestRelation = "authored" | "contributed";
 
@@ -1778,7 +1798,7 @@ rewrite?: string, };
 /**
  * Status of one user→engine turn.
  */
-export type CodeTurnStatus = "running" | "completed" | "failed" | "interrupted";
+export type CodeTurnStatus = "running" | "waiting" | "completed" | "failed" | "interrupted";
 
 /**
  * One unsequenced notice on `WS /code/updates`.

@@ -287,6 +287,7 @@ const PULL_REQUEST_RELATIONS = new Set<CodePullRequestRelation>([
 const PULL_REQUEST_FACT_STATES = new Set<string>(["open", "merged", "closed"]);
 const TURN_STATUSES = new Set<CodeTurnStatus>([
   "running",
+  "waiting",
   "completed",
   "failed",
   "interrupted",
