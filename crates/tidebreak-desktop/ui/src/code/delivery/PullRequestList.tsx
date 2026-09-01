@@ -9,13 +9,9 @@ import {
   VirtualRows,
 } from "./VirtualRows";
 import { PrLifecycleIcon, relativeTime } from "../PullRequestDetail";
+import { PrCheckSummary } from "../PrCheckSummary";
 import type { PullRequestGrouping } from "./views";
-import {
-  checkCounts,
-  checkSummary,
-  prStatus,
-  type PullRequestListGroup,
-} from "../prState";
+import { checkCounts, prStatus, type PullRequestListGroup } from "../prState";
 import {
   STATUS_DOT,
   STATUS_MARK,
@@ -342,7 +338,7 @@ function PullRequestRow({
 }) {
   const status = prStatus(item);
   const lifecycle = status.lifecycle;
-  const checks = checkSummary(checkCounts(item));
+  const checks = checkCounts(item);
   const comments = item.comment_count;
   const mergeAction = item.head_sha
     ? prDirectMergeAction(deliveryPullRequestDigest(item), {
@@ -445,9 +441,7 @@ function PullRequestRow({
         </span>
       </span>
       <span className="flex items-center">
-        <span className={cn("text-xs", STATUS_TEXT[checks.tone])}>
-          {checks.label}
-        </span>
+        <PrCheckSummary counts={checks} />
       </span>
       <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
         <MessageSquare className="size-3.5 shrink-0" />

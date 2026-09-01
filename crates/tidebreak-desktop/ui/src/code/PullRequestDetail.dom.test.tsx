@@ -200,9 +200,9 @@ describe("PullRequestDetailSheet", () => {
     const checksTab = screen.getByRole("tab", { name: /Checks/ });
     expect(checksTab).toHaveTextContent("2/2");
     await userEvent.click(checksTab);
-    expect(
-      await screen.findByText("1 of 2 passed, 1 failed"),
-    ).toBeInTheDocument();
+    // The same words the delivery row uses for these counts.
+    const panel = await screen.findByRole("tabpanel");
+    expect(within(panel).getByText("1 failed")).toBeInTheDocument();
     const rows = screen.getAllByRole("button", { name: /desktop \// });
     expect(rows[0]).toHaveTextContent("desktop / storybook");
   });
@@ -212,9 +212,8 @@ describe("PullRequestDetailSheet", () => {
     const checksTab = await screen.findByRole("tab", { name: /Checks/ });
     expect(checksTab).toHaveTextContent("3/3");
     await userEvent.click(checksTab);
-    expect(
-      await screen.findByText("2 of 3 passed, 1 skipped"),
-    ).toBeInTheDocument();
+    const panel = await screen.findByRole("tabpanel");
+    expect(within(panel).getByText("2 passed")).toBeInTheDocument();
   });
 
   it("keeps pending checks out of progress and uses the running mark", async () => {

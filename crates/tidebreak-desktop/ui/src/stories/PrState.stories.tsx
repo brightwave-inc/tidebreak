@@ -18,6 +18,7 @@ import {
   pullRequestLifecycle,
   type PrStateInput,
 } from "@/code/prState";
+import { PrCheckSummary } from "@/code/PrCheckSummary";
 import { PrLifecycleIcon, StackMap } from "@/code/PullRequestDetail";
 import { STATUS_MARK, STATUS_TEXT, type StatusTone } from "@/code/statusTone";
 
@@ -344,6 +345,90 @@ const stackMembers: CodeDeliveryStackMember[] = [
     head_sha: "3f0c1b2a",
   },
 ];
+
+const checkSummaryInputs: { name: string; input: PrStateInput }[] = [
+  { name: "No checks", input: digestWith({ checks: [] }) },
+  {
+    name: "All passed",
+    input: digestWith({
+      checks: [
+        { name: "ci / rust", bucket: "pass" },
+        { name: "desktop UI", bucket: "pass" },
+      ],
+    }),
+  },
+  {
+    name: "Still running",
+    input: digestWith({
+      checks: [
+        { name: "ci / rust", bucket: "pass" },
+        { name: "desktop UI", bucket: "pending" },
+      ],
+    }),
+  },
+  {
+    name: "Failures first",
+    input: digestWith({
+      checks: [
+        { name: "ci / rust", bucket: "fail" },
+        { name: "desktop UI", bucket: "pending" },
+        { name: "docs", bucket: "pass" },
+      ],
+    }),
+  },
+  {
+    name: "Only skipped",
+    input: digestWith({
+      checks: [
+        { name: "release draft", bucket: "skipped" },
+        { name: "publish", bucket: "skipped" },
+      ],
+    }),
+  },
+  {
+    name: "Counts without a check list",
+    input: digestWith({
+      check_counts: { passing: 8, pending: 1, failing: 0, skipped: 2 },
+    }),
+  },
+];
+
+export const CheckSummary: StoryObj = {
+  name: "Check summary",
+  render: () => (
+    <Section
+      title="Check summary"
+      description="One phrase per rollup, failures first, then work in flight, then the settled result. The delivery row and the detail Checks tab render this same component, so a change to the wording here changes both."
+    >
+      <table className="w-full max-w-xl text-left text-sm">
+        <thead>
+          <tr className="text-muted-foreground text-2xs uppercase tracking-wide">
+            <th className="py-1.5 pr-4 font-medium">Checks</th>
+            <th className="py-1.5 pr-4 font-medium">Counts</th>
+            <th className="py-1.5 font-medium">Summary</th>
+          </tr>
+        </thead>
+        <tbody>
+          {checkSummaryInputs.map(({ name, input }) => {
+            const counts = checkCounts(input);
+            return (
+              <tr key={name} className="border-border-subtle border-t">
+                <td className="py-2 pr-4">{name}</td>
+                <td className="text-muted-foreground py-2 pr-4 text-xs tabular-nums">
+                  {counts.passing} pass · {counts.pending} pending ·{" "}
+                  {counts.failing} fail · {counts.skipped} skipped
+                </td>
+                <td className="py-2">
+                  <PrCheckSummary counts={counts} />
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </Section>
+  ),
+};
 
 export const Stack: StoryObj = {
   name: "Stack map",

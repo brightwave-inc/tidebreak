@@ -581,7 +581,7 @@ export const PullRequestRunningCheckDetail: Story = {
     await expect(checksTab).toHaveTextContent("0/1");
     await userEvent.click(checksTab);
     await expect(
-      await body.findByText("0 of 1 passed, 1 pending"),
+      within(await body.findByRole("tabpanel")).getByText("1 pending"),
     ).toBeVisible();
     const pending = await body.findByRole("button", {
       name: /Preview \/ Build preview image/,
@@ -935,7 +935,9 @@ export const PullRequestDetailChecks: Story = {
     const body = within(canvasElement.ownerDocument.body);
     await openPullRequest(canvasElement, "Build the delivery center");
     await userEvent.click(await body.findByRole("tab", { name: /Checks/ }));
-    await expect(await body.findByText(/1 of 2 passed/)).toBeVisible();
+    await expect(
+      within(await body.findByRole("tabpanel")).getByText("1 failed"),
+    ).toBeVisible();
   },
 };
 
@@ -951,7 +953,7 @@ export const PullRequestTerminalChecks: Story = {
     await expect(checksTab).toHaveTextContent("3/3");
     await userEvent.click(checksTab);
     await expect(
-      await body.findByText("2 of 3 passed, 1 skipped"),
+      within(await body.findByRole("tabpanel")).getByText("2 passed"),
     ).toBeVisible();
   },
 };
