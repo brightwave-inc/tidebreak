@@ -865,7 +865,9 @@ pub async fn delete_chat(
             match cleanup {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
-                    tracing::error!("tidebreak: could not remove private scratch for chat {id}: {error}");
+                    tracing::error!(
+                        "tidebreak: could not remove private scratch for chat {id}: {error}"
+                    );
                 }
                 Err(error) => {
                     tracing::error!(
@@ -986,6 +988,8 @@ async fn erase_deleted_chat_agent_run_workspaces(
     })
     .await;
     if let Err(error) = cleanup {
-        tracing::error!("tidebreak: agent-run scratch cleanup task stopped for chat {chat_id}: {error}");
+        tracing::error!(
+            "tidebreak: agent-run scratch cleanup task stopped for chat {chat_id}: {error}"
+        );
     }
 }

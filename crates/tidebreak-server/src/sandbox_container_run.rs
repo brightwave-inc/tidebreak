@@ -2468,7 +2468,9 @@ impl SandboxContainerRunner {
         // destroyed, and idempotently for runs that never minted one.
         self.revoke_scoped_token(run_uuid).await;
         if let Err(error) = self.store.enqueue_sandbox_teardown(run_uuid).await {
-            tracing::error!("tidebreak: could not persist a container teardown obligation: {error}");
+            tracing::error!(
+                "tidebreak: could not persist a container teardown obligation: {error}"
+            );
         }
         for attempt in 0..3u32 {
             match self.backend.destroy(handle).await {
@@ -2619,7 +2621,9 @@ impl SandboxContainerRunner {
                 }
             }
             Err(error) => {
-                tracing::warn!("tidebreak: the sandbox orphan sweep proved nothing this pass: {error}");
+                tracing::warn!(
+                    "tidebreak: the sandbox orphan sweep proved nothing this pass: {error}"
+                );
             }
         }
         Ok(())

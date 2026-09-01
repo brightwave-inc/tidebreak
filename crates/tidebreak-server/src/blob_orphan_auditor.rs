@@ -107,7 +107,10 @@ impl BlobOrphanAuditor {
                                 failure.error
                             ),
                             None => {
-                                tracing::error!("tidebreak: blob orphan scan failed: {}", failure.error)
+                                tracing::error!(
+                                    "tidebreak: blob orphan scan failed: {}",
+                                    failure.error
+                                )
                             }
                         }
                     }

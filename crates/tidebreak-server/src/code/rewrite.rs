@@ -316,7 +316,9 @@ impl TurnRewrite for TurnRewriter {
                     }
                     Ok(Outcome::NotApplicable) => {}
                     Err(error) => {
-                        tracing::error!("tidebreak: could not rewrite code turn {turn_id}: {error}");
+                        tracing::error!(
+                            "tidebreak: could not rewrite code turn {turn_id}: {error}"
+                        );
                     }
                 }
                 let Some(next) = claim.take_pending_or_release() else {

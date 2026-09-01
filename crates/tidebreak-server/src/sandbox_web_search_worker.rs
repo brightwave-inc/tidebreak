@@ -221,7 +221,9 @@ impl SandboxWebSearchWorker {
                     idle_delay = self.config.idle_min;
                 }
                 Err(error) => {
-                    tracing::warn!("tidebreak: sandbox web-search worker iteration failed: {error}");
+                    tracing::warn!(
+                        "tidebreak: sandbox web-search worker iteration failed: {error}"
+                    );
                     let delay = failure_backoff.next_delay();
                     tokio::select! {
                         _ = tokio::time::sleep(delay) => {}

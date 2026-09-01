@@ -766,7 +766,8 @@ impl TurnWorker {
                     // again and returns the concrete error if `exec` is called.
                     tracing::warn!(
                         "tidebreak: local exec folders unavailable for chat {}: {}",
-                        chat.id, error
+                        chat.id,
+                        error
                     );
                     Vec::new()
                 }
@@ -1014,7 +1015,8 @@ impl TurnWorker {
                     Err(error) => {
                         tracing::warn!(
                             "tidebreak: private scratch unavailable for chat {}: {}",
-                            chat.id, error
+                            chat.id,
+                            error
                         );
                         None
                     }
@@ -2802,7 +2804,9 @@ impl TurnWorker {
     }
 
     async fn retry_after(&self, operation: &str, turn_id: TurnId, error: &AgentError) {
-        tracing::warn!("tidebreak: turn {turn_id} {operation} failed; retrying exact request: {error}");
+        tracing::warn!(
+            "tidebreak: turn {turn_id} {operation} failed; retrying exact request: {error}"
+        );
         tokio::time::sleep(self.config.failure_delay).await;
     }
 
