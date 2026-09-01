@@ -1,4 +1,10 @@
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import { Outlet, useNavigate, useRouter } from "@tanstack/react-router";
 import { getVersion } from "@tauri-apps/api/app";
 import { isTauri } from "@tauri-apps/api/core";
@@ -13,7 +19,7 @@ import {
   type ProviderInfo,
   type ServerInfo,
 } from "./api";
-import { AppContextProvider } from "./AppContext";
+import { AppContextProvider, type AppContextValue } from "./AppContext";
 
 import { resolveServerInfo } from "./boot";
 import {
@@ -150,6 +156,32 @@ function isMonacoFocused(): boolean {
 // calling actions only — never read state fields from them.
 const chatListActions = useChatListStore.getState();
 const projectListActions = useProjectListStore.getState();
+
+/**
+ * Every field of the app context that is invoked rather than read. The shell
+ * rebuilds these closures each render (they capture that render's state), but
+ * the context carries one stable set of forwarders so a callback changing
+ * identity never invalidates the context value — see {@link AppShell}.
+ */
+type AppContextActions = Pick<
+  AppContextValue,
+  | "refreshCatalog"
+  | "refreshChats"
+  | "newChat"
+  | "deleteChat"
+  | "startRename"
+  | "commitRename"
+  | "cancelRename"
+  | "newProject"
+  | "deleteProject"
+  | "startProjectRename"
+  | "commitProjectRename"
+  | "cancelProjectRename"
+  | "newChatInProject"
+  | "moveChatToProject"
+  | "checkForUpdate"
+  | "restartForUpdate"
+>;
 
 /**
  * The shell hooks that do work on their own — the parked-prompt poll and the
@@ -945,6 +977,92 @@ export function AppShell() {
     }
   }
 
+  // The context's mutations, rebound to this render's closures. Assigned into
+  // a ref every render — the same pattern as `useNativeHostEvent` — so the
+  // stable forwarders below always call the newest closure and never a stale
+  // one.
+  const contextActions: AppContextActions = {
+    refreshCatalog,
+    refreshChats,
+    newChat: () => void onNewChat(),
+    deleteChat: (target) => void onDeleteChat(target),
+    startRename: startChatRename,
+    commitRename: (target) => void commitChatRename(target),
+    cancelRename: cancelChatRename,
+    newProject: onNewProject,
+    deleteProject: (target) => void onDeleteProject(target),
+    startProjectRename,
+    commitProjectRename: (target) => void commitProjectRename(target),
+    cancelProjectRename,
+    newChatInProject: (projectId) => void onNewChatInProject(projectId),
+    moveChatToProject: (chat, projectId) =>
+      void onMoveChatToProject(chat, projectId),
+    checkForUpdate: desktopUpdates.check,
+    restartForUpdate: onRestartForUpdate,
+  };
+  const contextActionsRef = useRef(contextActions);
+  contextActionsRef.current = contextActions;
+  // One set of forwarders for the shell's lifetime. Each has a stable identity
+  // and delegates to whatever the ref holds now, which is what lets the
+  // context value below memoize on data alone.
+  const [stableActions] = useState<AppContextActions>(() => ({
+    refreshCatalog: () => contextActionsRef.current.refreshCatalog(),
+    refreshChats: () => contextActionsRef.current.refreshChats(),
+    newChat: () => contextActionsRef.current.newChat(),
+    deleteChat: (chat) => contextActionsRef.current.deleteChat(chat),
+    startRename: (chat) => contextActionsRef.current.startRename(chat),
+    commitRename: (chat) => contextActionsRef.current.commitRename(chat),
+    cancelRename: () => contextActionsRef.current.cancelRename(),
+    newProject: (title) => contextActionsRef.current.newProject(title),
+    deleteProject: (project) =>
+      contextActionsRef.current.deleteProject(project),
+    startProjectRename: (project) =>
+      contextActionsRef.current.startProjectRename(project),
+    commitProjectRename: (project) =>
+      contextActionsRef.current.commitProjectRename(project),
+    cancelProjectRename: () => contextActionsRef.current.cancelProjectRename(),
+    newChatInProject: (projectId) =>
+      contextActionsRef.current.newChatInProject(projectId),
+    moveChatToProject: (chat, projectId) =>
+      contextActionsRef.current.moveChatToProject(chat, projectId),
+    checkForUpdate: () => contextActionsRef.current.checkForUpdate(),
+    restartForUpdate: () => contextActionsRef.current.restartForUpdate(),
+  }));
+
+  // Memoized so the ~34 useApp() consumers re-render when the data they read
+  // changes, not whenever the shell does — before this, every shell render
+  // (a status line update, an update-state event) re-rendered every consumer,
+  // transcript included. `null` until boot lands a client; the shell early
+  // returns before the provider ever sees that.
+  const appContextValue = useMemo<AppContextValue | null>(
+    () =>
+      client && info
+        ? {
+            client,
+            attachment: info.attachment,
+            models,
+            defaultModelKey,
+            providers,
+            status,
+            setStatus,
+            updateState: desktopUpdates.state,
+            updateUpToDate: desktopUpdates.upToDate,
+            ...stableActions,
+          }
+        : null,
+    [
+      client,
+      info,
+      models,
+      defaultModelKey,
+      providers,
+      status,
+      desktopUpdates.state,
+      desktopUpdates.upToDate,
+      stableActions,
+    ],
+  );
+
   if (bootFailure) {
     return (
       <BootFailure
@@ -985,36 +1103,7 @@ export function AppShell() {
         shortcuts={shellShortcuts}
         shortcutMode={currentShortcutMode}
       />
-      <AppContextProvider
-        value={{
-          client,
-          attachment: info.attachment,
-          models,
-          defaultModelKey,
-          providers,
-          refreshCatalog,
-          refreshChats,
-          status,
-          setStatus,
-          newChat: () => void onNewChat(),
-          deleteChat: (target) => void onDeleteChat(target),
-          startRename: startChatRename,
-          commitRename: (target) => void commitChatRename(target),
-          cancelRename: cancelChatRename,
-          newProject: (title) => onNewProject(title),
-          deleteProject: (target) => void onDeleteProject(target),
-          startProjectRename,
-          commitProjectRename: (target) => void commitProjectRename(target),
-          cancelProjectRename,
-          newChatInProject: (projectId) => void onNewChatInProject(projectId),
-          moveChatToProject: (chat, projectId) =>
-            void onMoveChatToProject(chat, projectId),
-          updateState: desktopUpdates.state,
-          updateUpToDate: desktopUpdates.upToDate,
-          checkForUpdate: desktopUpdates.check,
-          restartForUpdate: onRestartForUpdate,
-        }}
-      >
+      <AppContextProvider value={appContextValue}>
         <div
           className={`app-shell${nativeTitlebar ? " with-titlebar" : ""}`}
           // Publish this as part of the shell's first render. An effect that

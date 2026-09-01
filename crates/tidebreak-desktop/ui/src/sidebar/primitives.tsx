@@ -11,6 +11,7 @@ import { Slot } from "@radix-ui/react-slot";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import {
+  clampSidebarWidth,
   SIDEBAR_DEFAULT_WIDTH,
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_MIN_WIDTH,
@@ -42,6 +43,11 @@ function SidebarResizeHandle({
     pointerId: number;
     startX: number;
     startWidth: number;
+    /** The clamped width of the latest pointer frame, for the end-drag commit. */
+    width: number;
+    /** The shell publishes the width as a CSS variable; the titlebar reads it. */
+    shell: HTMLElement | null;
+    rail: HTMLElement | null;
   } | null>(null);
   const [dragging, setDragging] = useState(false);
 
@@ -52,8 +58,9 @@ function SidebarResizeHandle({
       dragRef.current = null;
       setDragging(false);
       onDraggingChange(false);
-      // Commit the live width once; moves during the drag skipped persistence.
-      setSidebarWidth(useUiStore.getState().sidebarWidth);
+      // The one store write of the whole drag: the moves wrote straight to the
+      // DOM, so this is where React and localStorage catch up — once.
+      setSidebarWidth(drag.width);
       try {
         event.currentTarget.releasePointerCapture(event.pointerId);
       } catch {
@@ -72,6 +79,11 @@ function SidebarResizeHandle({
       pointerId: event.pointerId,
       startX: event.clientX,
       startWidth: sidebarWidth,
+      width: sidebarWidth,
+      shell: event.currentTarget.closest<HTMLElement>(".app-shell"),
+      rail: event.currentTarget.closest<HTMLElement>(
+        '[data-sidebar="expanded"]',
+      ),
     };
     setDragging(true);
     onDraggingChange(true);
@@ -83,9 +95,22 @@ function SidebarResizeHandle({
   const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
-    setSidebarWidth(drag.startWidth + (event.clientX - drag.startX), {
-      persist: false,
-    });
+    // Written to the DOM, not the store: a store write per pointer frame
+    // re-renders the shell — it subscribes to the width for its CSS variable —
+    // and with it every route, transcript included. The rail's own styles and
+    // the shell variable together move everything the width drives; endDrag
+    // commits the same number to React, so the repaint lands on what the drag
+    // already left in place.
+    drag.width = clampSidebarWidth(
+      drag.startWidth + (event.clientX - drag.startX),
+    );
+    const px = `${drag.width}px`;
+    drag.shell?.style.setProperty("--sidebar-expanded-width", px);
+    if (drag.rail) {
+      drag.rail.style.flex = `0 0 ${px}`;
+      drag.rail.style.minWidth = px;
+      drag.rail.style.width = px;
+    }
   };
 
   const onDoubleClick = () => {

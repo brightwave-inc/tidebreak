@@ -106,10 +106,11 @@ export type UiStore = {
   /** Expanded rail width in CSS pixels. Ignored while the rail is compact. */
   sidebarWidth: number;
   /**
-   * Set the expanded rail width. Pass `{ persist: false }` while dragging so
-   * localStorage is only written once the pointer is up.
+   * Set and persist the expanded rail width. Live drags bypass this — the
+   * resize handle writes the DOM directly per pointer frame and commits here
+   * once on release, so this always both re-renders and persists.
    */
-  setSidebarWidth: (width: number, options?: { persist?: boolean }) => void;
+  setSidebarWidth: (width: number) => void;
   /**
    * Whether the model picker's "Not connected" section is folded away. Open by
    * default — the section exists to be noticed once — and remembered after
@@ -140,9 +141,9 @@ export function createUiStore() {
         return { sidebarCollapsed };
       }),
     sidebarWidth: readStoredSidebarWidth(),
-    setSidebarWidth: (width, options) => {
+    setSidebarWidth: (width) => {
       const sidebarWidth = clampSidebarWidth(width);
-      if (options?.persist !== false) storeSidebarWidth(sidebarWidth);
+      storeSidebarWidth(sidebarWidth);
       set({ sidebarWidth });
     },
     modelMenuNotConnectedCollapsed: readStoredNotConnectedCollapsed(),
