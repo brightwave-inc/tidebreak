@@ -1857,6 +1857,10 @@ function DiffPatch({ patch }: { patch: string }) {
 
 function PrChecks({ checks }: { checks: readonly CodeDeliveryCheck[] }) {
   const counts = checkCounts({ checks });
+  // The delivery list row summarizes the same counts through
+  // `checkSummary` in prState.ts with different wording ("passed" here,
+  // "passing" there). Folding the two into one component changes visible
+  // text, so it stays a follow-up rather than part of the file split.
   if (checks.length === 0) {
     return <p className="text-xs text-muted-foreground">No checks reported.</p>;
   }
