@@ -228,8 +228,9 @@ import type {
 // - Raw: verbatim data the reader asked to see as it is, rendered by a pane
 //   that escapes nothing and expects terminal escapes and carriage returns:
 //   blob content, diffs and patches, terminal reads, command stdout/stderr,
-//   tool result previews, search hit lines, the harness's raw approval JSON,
-//   and the user's own prompt and steer text. Only the length is bounded,
+//   tool result previews, search hit lines and the history excerpts cut from
+//   prompts and tool output, the harness's raw approval JSON, and the user's
+//   own prompt and steer text. Only the length is bounded,
 //   with headroom over the server's own truncation points (512 KiB blobs,
 //   256 KiB diffs).
 //
@@ -2937,7 +2938,7 @@ export function parseCodeWorkspaceSearch(
       !["turn_user_input", "turn_narrative", "event"].includes(
         item.source as string,
       ) ||
-      !blockText(item.preview) ||
+      !rawText(item.preview) ||
       !timestamp(item.created_at)
     ) {
       return null;

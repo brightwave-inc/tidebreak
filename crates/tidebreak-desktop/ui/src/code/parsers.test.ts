@@ -1737,5 +1737,21 @@ describe("string bounds", () => {
     expect(parseCodeTurn(pasted)).toEqual(pasted);
     const steer = { type: "user_steered", text: "stop; it prints \u001b[31m" };
     expect(parseCodeEvent(steer)).toEqual(steer);
+    // A history excerpt is cut from that same text, so it is raw as well.
+    const search = {
+      matches: [],
+      history_matches: [
+        {
+          workspace_id: "workspace-1",
+          workspace_title: "Colored test run",
+          session_id: "session-1",
+          source: "event",
+          preview: "\u001b[32m\u2713\u001b[0m 12 passed",
+          created_at: "2026-08-25T12:00:00Z",
+        },
+      ],
+      truncated: false,
+    };
+    expect(parseCodeWorkspaceSearch(search)).toEqual(search);
   });
 });
