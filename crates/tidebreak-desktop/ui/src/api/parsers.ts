@@ -1,5 +1,17 @@
 import { parseAttention } from "../code/parsers";
-import { isRecord, onlyKeys } from "../lib/guards";
+import {
+  MAX_WIRE_CURSOR_CHARS,
+  MAX_WIRE_ID_CHARS,
+  MAX_WIRE_TIMESTAMP_CHARS,
+  bounded,
+  boundedBlock,
+  isMember,
+  isRecord,
+  isWebUrl,
+  nonEmptyBounded,
+  nullableNonEmptyString,
+  onlyKeys,
+} from "../lib/wireDecode";
 import {
   RENDERER_TOOL_NAMES,
   type AgentActivityDetail,
@@ -110,8 +122,8 @@ export function parseOutputWritebackRequest(
       "mode",
       "claimed",
     ]) ||
-    !nonEmptyBounded(value.call_id, 128) ||
-    !nonEmptyBounded(value.turn_id, 128) ||
+    !nonEmptyBounded(value.call_id, MAX_WIRE_ID_CHARS) ||
+    !nonEmptyBounded(value.turn_id, MAX_WIRE_ID_CHARS) ||
     (value.mode !== "create" && value.mode !== "replace") ||
     typeof value.claimed !== "boolean"
   ) {
@@ -148,11 +160,10 @@ export function parseInboxItem(value: unknown): InboxItem | null {
       action?: RendererToolName;
       requested_at: string;
     }>(value, ["turn_id", "call_id", "kind", "action", "requested_at"]) ||
-    !nonEmptyBounded(value.turn_id, 128) ||
-    !nonEmptyBounded(value.call_id, 128) ||
-    !nonEmptyBounded(value.requested_at, 64) ||
-    typeof value.kind !== "string" ||
-    !INBOX_ITEM_KINDS.has(value.kind as InboxItemKind)
+    !nonEmptyBounded(value.turn_id, MAX_WIRE_ID_CHARS) ||
+    !nonEmptyBounded(value.call_id, MAX_WIRE_ID_CHARS) ||
+    !nonEmptyBounded(value.requested_at, MAX_WIRE_TIMESTAMP_CHARS) ||
+    !isMember(value.kind, INBOX_ITEM_KINDS)
   ) {
     return null;
   }
@@ -184,7 +195,7 @@ function parseInboxConversation(value: unknown): InboxConversation | null {
     ) {
       return null;
     }
-    if (!nonEmptyBounded(value.chat_id, 128)) return null;
+    if (!nonEmptyBounded(value.chat_id, MAX_WIRE_ID_CHARS)) return null;
     return { surface: "chat", chatId: value.chat_id };
   }
   if (value.surface === "code") {
@@ -197,8 +208,8 @@ function parseInboxConversation(value: unknown): InboxConversation | null {
       return null;
     }
     if (
-      !nonEmptyBounded(value.session_id, 128) ||
-      !nonEmptyBounded(value.workspace_id, 128)
+      !nonEmptyBounded(value.session_id, MAX_WIRE_ID_CHARS) ||
+      !nonEmptyBounded(value.workspace_id, MAX_WIRE_ID_CHARS)
     ) {
       return null;
     }
@@ -224,16 +235,19 @@ export function parseAgentNotification(
       created_at: unknown;
       read_at?: unknown;
     }>(value, ["id", "kind", "title", "context", "created_at", "read_at"]) ||
-    !nonEmptyBounded(value.id, 128) ||
+    !nonEmptyBounded(value.id, MAX_WIRE_ID_CHARS) ||
     !isNotificationKind(value.kind) ||
     !nonEmptyBounded(value.title, 512) ||
-    !nonEmptyBounded(value.created_at, 64)
+    !nonEmptyBounded(value.created_at, MAX_WIRE_TIMESTAMP_CHARS)
   ) {
     return null;
   }
   const context = parseInboxConversation(value.context);
   if (!context) return null;
-  if (value.read_at !== undefined && !nonEmptyBounded(value.read_at, 64)) {
+  if (
+    value.read_at !== undefined &&
+    !nonEmptyBounded(value.read_at, MAX_WIRE_TIMESTAMP_CHARS)
+  ) {
     return null;
   }
   return {
@@ -261,7 +275,7 @@ export function parseAgentNotificationPage(
   }
   if (
     value.next_cursor !== undefined &&
-    !nonEmptyBounded(value.next_cursor, 256)
+    !nonEmptyBounded(value.next_cursor, MAX_WIRE_CURSOR_CHARS)
   ) {
     return null;
   }
@@ -298,7 +312,7 @@ export function parseInboxEntry(value: unknown): InboxEntry | null {
       "items",
       "waiting_since",
     ]) ||
-    !nonEmptyBounded(value.waiting_since, 64) ||
+    !nonEmptyBounded(value.waiting_since, MAX_WIRE_TIMESTAMP_CHARS) ||
     !Array.isArray(value.items)
   ) {
     return null;
@@ -344,7 +358,7 @@ export function parsePendingChatPrompt(
       "folder_access_call_ids",
       "output_writeback_call_ids",
     ]) ||
-    !nonEmptyBounded(value.chat_id, 128)
+    !nonEmptyBounded(value.chat_id, MAX_WIRE_ID_CHARS)
   ) {
     return null;
   }
@@ -391,7 +405,8 @@ function parseOpaqueCallIds(value: unknown): string[] | null {
   if (!Array.isArray(value) || value.length > 64) return null;
   const callIds = new Set<string>();
   for (const callId of value) {
-    if (!nonEmptyBounded(callId, 128) || callIds.has(callId)) return null;
+    if (!nonEmptyBounded(callId, MAX_WIRE_ID_CHARS) || callIds.has(callId))
+      return null;
     callIds.add(callId);
   }
   return [...callIds];
@@ -409,13 +424,13 @@ export function parsePendingPlanApproval(
       "plan",
       "proposed_at",
     ]) ||
-    !nonEmptyBounded(value.call_id, 128) ||
-    !nonEmptyBounded(value.turn_id, 128) ||
+    !nonEmptyBounded(value.call_id, MAX_WIRE_ID_CHARS) ||
+    !nonEmptyBounded(value.turn_id, MAX_WIRE_ID_CHARS) ||
     !nonEmptyBounded(value.title, 120) ||
     typeof value.plan !== "string" ||
     !value.plan.trim() ||
     Array.from(value.plan).length > 40_000 ||
-    !nonEmptyBounded(value.proposed_at, 64)
+    !nonEmptyBounded(value.proposed_at, MAX_WIRE_TIMESTAMP_CHARS)
   ) {
     return null;
   }
@@ -447,8 +462,8 @@ export function parseTaskPlan(value: unknown): TaskPlan | null {
   if (
     !isRecord(value) ||
     !onlyKeys<WireTaskPlan>(value, ["turn_id", "steps", "updated_at"]) ||
-    !nonEmptyBounded(value.turn_id, 128) ||
-    !nonEmptyBounded(value.updated_at, 64)
+    !nonEmptyBounded(value.turn_id, MAX_WIRE_ID_CHARS) ||
+    !nonEmptyBounded(value.updated_at, MAX_WIRE_TIMESTAMP_CHARS)
   ) {
     return null;
   }
@@ -473,8 +488,8 @@ export function parseAgentRunTaskPlan(value: unknown): AgentRunTaskPlan | null {
   if (
     !isRecord(value) ||
     !onlyKeys<WireAgentRunTaskPlan>(value, ["run_id", "steps", "updated_at"]) ||
-    !nonEmptyBounded(value.run_id, 128) ||
-    !nonEmptyBounded(value.updated_at, 64)
+    !nonEmptyBounded(value.run_id, MAX_WIRE_ID_CHARS) ||
+    !nonEmptyBounded(value.updated_at, MAX_WIRE_TIMESTAMP_CHARS)
   ) {
     return null;
   }
@@ -509,8 +524,7 @@ function parseTaskPlanSteps(value: unknown): TaskPlanStep[] | null {
       !isRecord(step) ||
       !onlyKeys<WireTaskPlanStep>(step, ["content", "status"]) ||
       !nonEmptyBounded(step.content, MAX_TASK_PLAN_STEP_CHARS) ||
-      typeof step.status !== "string" ||
-      !TASK_PLAN_STEP_STATUSES.has(step.status as TaskPlanStepStatus)
+      !isMember(step.status, TASK_PLAN_STEP_STATUSES)
     ) {
       return null;
     }
@@ -533,8 +547,8 @@ export function parsePendingUserQuestions(
       "questions",
       "asked_at",
     ]) ||
-    !nonEmptyBounded(value.call_id, 128) ||
-    !nonEmptyBounded(value.turn_id, 128) ||
+    !nonEmptyBounded(value.call_id, MAX_WIRE_ID_CHARS) ||
+    !nonEmptyBounded(value.turn_id, MAX_WIRE_ID_CHARS) ||
     typeof value.asked_at !== "string" ||
     value.asked_at.length > 64 ||
     !Array.isArray(value.questions) ||
@@ -609,64 +623,6 @@ export function parsePendingUserQuestions(
     questions,
     askedAt: value.asked_at,
   };
-}
-
-function nonEmptyBounded(value: unknown, maxChars: number): value is string {
-  return bounded(value, maxChars) && value.trim().length > 0;
-}
-
-/**
- * A string within `maxChars` characters and free of any character that could
- * break the one line it is rendered on or spoof its visual order: C0/C1
- * controls, the line and paragraph separators, and the bidirectional
- * overrides and isolates. This mirrors the projection's own clamp
- * (`preview_formatting_character` in `tidebreak-core`), because the renderer
- * validates what it is about to draw rather than trusting that the sender
- * already did.
- *
- * Unlike {@link nonEmptyBounded} an empty string passes. Nothing on this wire
- * is expected to be empty — the projection drops a field that clamps away —
- * so this only avoids rejecting a whole payload over a field whose emptiness
- * says nothing about its trustworthiness.
- */
-function bounded(value: unknown, maxChars: number): value is string {
-  return (
-    typeof value === "string" &&
-    Array.from(value).length <= maxChars &&
-    !Array.from(value).some(forbiddenPreviewCharacter)
-  );
-}
-
-/**
- * The same clamp for a field that is drawn as a block rather than a line, so
- * line breaks and tabs are structure rather than spoofing. Everything else
- * {@link bounded} rejects is still rejected: an escape sequence or a
- * bidirectional override in a pane of command output could still redraw or
- * reorder what the reader sees.
- */
-function boundedBlock(value: unknown, maxChars: number): value is string {
-  return (
-    typeof value === "string" &&
-    Array.from(value).length <= maxChars &&
-    !Array.from(value).some(
-      (character) =>
-        forbiddenPreviewCharacter(character) &&
-        character !== "\n" &&
-        character !== "\t",
-    )
-  );
-}
-
-function forbiddenPreviewCharacter(character: string): boolean {
-  const code = character.codePointAt(0) ?? 0;
-  return (
-    code < 32 ||
-    (code >= 127 && code <= 159) ||
-    code === 0x2028 ||
-    code === 0x2029 ||
-    (code >= 0x202a && code <= 0x202e) ||
-    (code >= 0x2066 && code <= 0x2069)
-  );
 }
 
 const AGENT_ACTIVITY_KINDS = new Set<AgentActivityKind>([
@@ -833,10 +789,8 @@ export function parseAgentActivityHistory(
   return value.flatMap((entry) => {
     if (
       !isRecord(entry) ||
-      typeof entry.kind !== "string" ||
-      !AGENT_ACTIVITY_KINDS.has(entry.kind as AgentActivityKind) ||
-      typeof entry.outcome !== "string" ||
-      !AGENT_ACTIVITY_OUTCOMES.has(entry.outcome as AgentActivityOutcome) ||
+      !isMember(entry.kind, AGENT_ACTIVITY_KINDS) ||
+      !isMember(entry.outcome, AGENT_ACTIVITY_OUTCOMES) ||
       typeof entry.at !== "string" ||
       entry.at.length === 0
     ) {
@@ -1025,8 +979,8 @@ export function parseToolActionPreview(
       !domains.every(
         (domain): domain is string => typeof domain === "string",
       ) ||
-      !isOptionalString(start_published_at) ||
-      !isOptionalString(end_published_at)
+      !nullableNonEmptyString(start_published_at) ||
+      !nullableNonEmptyString(end_published_at)
     ) {
       return null;
     }
@@ -1248,10 +1202,10 @@ function parseResultEntry(value: unknown): ResultEntry | null {
     typeof label !== "string" ||
     label.length === 0 ||
     !(RESULT_ENTRY_KINDS as readonly unknown[]).includes(kind) ||
-    !isOptionalString(detail) ||
-    !isOptionalString(meta) ||
-    !isOptionalString(mediaType) ||
-    !isOptionalString(targetId)
+    !nullableNonEmptyString(detail) ||
+    !nullableNonEmptyString(meta) ||
+    !nullableNonEmptyString(mediaType) ||
+    !nullableNonEmptyString(targetId)
   ) {
     return null;
   }
@@ -1269,23 +1223,6 @@ function parseResultEntry(value: unknown): ResultEntry | null {
 }
 
 /**
- * Whether a projected address may be handed to the host's external opener.
- *
- * The server admits only `http` and `https` into the projection, and this
- * repeats the check on the way out: the renderer is the last thing standing
- * between stored text and a browser window.
- */
-function isWebUrl(value: unknown): value is string {
-  if (typeof value !== "string") return false;
-  try {
-    const { protocol } = new URL(value);
-    return protocol === "http:" || protocol === "https:";
-  } catch {
-    return false;
-  }
-}
-
-/**
  * Validate one failure row.
  *
  * The reason is what the row exists to say, so a row without a readable one is
@@ -1299,7 +1236,7 @@ function parseResultFailure(value: unknown): ResultFailure | null {
   if (
     typeof error !== "string" ||
     error.length === 0 ||
-    !isOptionalString(label)
+    !nullableNonEmptyString(label)
   ) {
     return null;
   }
@@ -1327,7 +1264,7 @@ function parseAnsweredUserQuestion(
     question.length === 0 ||
     !Array.isArray(labels) ||
     !labels.every((label) => typeof label === "string") ||
-    !isOptionalString(custom)
+    !nullableNonEmptyString(custom)
   ) {
     return null;
   }
@@ -1391,7 +1328,7 @@ export function parseToolResultPreview(
     const { answers, additional_context }: UncheckedUserQuestionsResult = value;
     if (
       !Array.isArray(answers) ||
-      !isOptionalString(additional_context ?? null)
+      !nullableNonEmptyString(additional_context ?? null)
     ) {
       return null;
     }
@@ -1414,7 +1351,7 @@ export function parseToolResultPreview(
       typeof title !== "string" ||
       typeof plan !== "string" ||
       typeof accepted !== "boolean" ||
-      !isOptionalString(feedback ?? null)
+      !nullableNonEmptyString(feedback ?? null)
     ) {
       return null;
     }
@@ -1544,14 +1481,4 @@ function isRendererApprovalKind(value: unknown): value is RendererApprovalKind {
   return (
     typeof value === "string" && Object.hasOwn(RENDERER_APPROVAL_KINDS, value)
   );
-}
-
-/**
- * A field the server sends as `null` when the model did not set it.
- *
- * `undefined` is not accepted: a missing key on this surface means the payload
- * is not the shape it claims to be, which is what the validator is for.
- */
-function isOptionalString(value: unknown): value is string | null {
-  return value === null || (typeof value === "string" && value.length > 0);
 }
