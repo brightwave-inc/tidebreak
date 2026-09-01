@@ -164,6 +164,31 @@ impl CodeRuntime {
         Ok(list_workspaces(&self.db, owner, repo_id).await?)
     }
 
+    /// The workspace a session binds, when it binds one.
+    pub(crate) async fn session_workspace(
+        &self,
+        session: &CodeSession,
+    ) -> Result<Option<CodeWorkspace>, ServerError> {
+        match session.workspace_id {
+            Some(workspace_id) => self
+                .get_workspace(&session.owner, workspace_id)
+                .await
+                .map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// The workspace id a checkout-bound operation needs, or the conflict a
+    /// session without one answers.
+    pub(crate) fn require_workspace_id(session: &CodeSession) -> Result<WorkspaceId, ServerError> {
+        session.workspace_id.ok_or_else(|| {
+            ServerError::conflict_kind(
+                "session_has_no_workspace",
+                "this session runs without a workspace, so there is no checkout to act on",
+            )
+        })
+    }
+
     pub(crate) async fn get_workspace(
         &self,
         owner: &OwnerId,

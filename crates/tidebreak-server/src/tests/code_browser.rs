@@ -314,7 +314,7 @@ async fn seed_session(db: &DbStore, lc: CodeSessionLifecycle) -> (WorkspaceId, C
     let s = CodeSession {
         id: CodeSessionId::new(),
         owner: OwnerId::local(),
-        workspace_id: ws.id,
+        workspace_id: Some(ws.id),
         kind: CodeSessionKind::Interactive,
         harness_kind: HarnessKind::ClaudeCode,
         harness_version: None,

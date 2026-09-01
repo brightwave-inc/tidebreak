@@ -102,8 +102,14 @@ async fn append_event_inner(
                 session.id, session.kind
             ))
         })?;
-        if crate::code_session_mints_notification(session_kind) {
-            let workspace_id = WorkspaceId(session.workspace_id);
+        // A session with no workspace mints no notification yet: the record
+        // names the workspace the turn ran in, and one without a workspace
+        // has nothing to name until the entity merge reshapes it.
+        if let Some(workspace_id) = session
+            .workspace_id
+            .map(WorkspaceId)
+            .filter(|_| crate::code_session_mints_notification(session_kind))
+        {
             let workspace_title = entities::code_workspace::Entity::find_by_id(workspace_id.0)
                 .filter(entities::code_workspace::Column::Owner.eq(owner.as_str()))
                 .one(&transaction)

@@ -213,7 +213,9 @@ pub struct CodeSessionExternalOrigin {
 #[derive(Debug, Clone, PartialEq, Serialize, TS)]
 pub struct CodeSessionSnapshot {
     pub id: tidebreak_core::CodeSessionId,
-    pub workspace_id: WorkspaceId,
+    /// `None` for a session that binds no workspace: the in-process
+    /// engine's (decision 0048 step 5).
+    pub workspace_id: Option<WorkspaceId>,
     pub kind: CodeSessionKind,
     pub harness_kind: HarnessKind,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1717,6 +1719,22 @@ pub struct CreateSessionBody {
     pub fast_mode: bool,
 }
 
+/// Body of `POST /code/sessions`: a session with no workspace.
+///
+/// No engine field: a session without a workspace selects the in-process
+/// engine (decision 0048 step 5).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateSessionWithoutWorkspaceBody {
+    pub permission_mode: PermissionMode,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub reasoning_effort: Option<ReasoningEffort>,
+    #[serde(default)]
+    pub fast_mode: bool,
+}
+
 /// Body of `POST /code/remote/workspaces/{id}/sessions`.
 ///
 /// Remote sessions always run in `Allow` mode inside the configured sandbox
@@ -2122,7 +2140,8 @@ pub struct CodeTerminalActivityNotice {
 /// Cheap per-session digest on `/code/updates`.
 #[derive(Debug, Clone, PartialEq, Serialize, TS)]
 pub struct CodeSessionDigest {
-    pub workspace: WorkspaceId,
+    /// `None` for a session that binds no workspace.
+    pub workspace: Option<WorkspaceId>,
     pub session: tidebreak_core::CodeSessionId,
     pub kind: CodeSessionKind,
     /// Engine identity for list surfaces that collapse several sessions into
@@ -2213,7 +2232,7 @@ pub enum CodeUpdateNotice {
     },
     /// One session's current digest.
     Digest {
-        workspace: WorkspaceId,
+        workspace: Option<WorkspaceId>,
         session: tidebreak_core::CodeSessionId,
         kind: CodeSessionKind,
         /// Engine identity for the session represented by this digest.

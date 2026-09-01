@@ -16,9 +16,10 @@ use axum::response::{IntoResponse, Response};
 
 use super::types::{
     CodeForkTranscript, CodeSessionExternalOrigin, CodeSessionSnapshot, CodeTurnSnapshot,
-    CreateRemoteSessionBody, CreateSessionBody, QueuePausedBody, QueuedCodeTurn,
-    QueuedCodeTurnUpdate, QueuedCodeTurnsSnapshot, SequencedCodeEventFrame, SetAttentionBody,
-    SetFastModeBody, SetPermissionModeBody, SetReasoningEffortBody, SteerBody, SubmitTurnBody,
+    CreateRemoteSessionBody, CreateSessionBody, CreateSessionWithoutWorkspaceBody, QueuePausedBody,
+    QueuedCodeTurn, QueuedCodeTurnUpdate, QueuedCodeTurnsSnapshot, SequencedCodeEventFrame,
+    SetAttentionBody, SetFastModeBody, SetPermissionModeBody, SetReasoningEffortBody, SteerBody,
+    SubmitTurnBody,
 };
 use crate::code::runtime::{NewSessionSettings, SubmitTurnOutcome};
 use tidebreak_core::{CodeSessionId, PermissionMode, TurnSteer, WorkspaceId};
@@ -69,6 +70,31 @@ pub async fn create_session(
                 permission_mode_ceiling,
             },
         )
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(CodeSessionSnapshot::from(session)),
+    ))
+}
+
+/// `POST /code/sessions` — create a session with no workspace.
+///
+/// The in-process engine hosts it: no checkout, and the conversation it
+/// keeps is reachable only through this session (decision 0048 step 5).
+pub async fn create_session_without_workspace(
+    State(state): State<AppState>,
+    code: ScopedCode,
+    Json(body): Json<CreateSessionWithoutWorkspaceBody>,
+) -> Result<impl IntoResponse, ServerError> {
+    let permission_mode_ceiling = state.managed_policy()?.permission_mode_ceiling;
+    let session = code
+        .create_session_without_workspace(NewSessionSettings {
+            permission_mode: body.permission_mode,
+            model: body.model,
+            reasoning_effort: body.reasoning_effort,
+            fast_mode: body.fast_mode,
+            permission_mode_ceiling,
+        })
         .await?;
     Ok((
         StatusCode::CREATED,

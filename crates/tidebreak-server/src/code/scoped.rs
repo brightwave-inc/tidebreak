@@ -600,6 +600,15 @@ impl ScopedCode {
             .await
     }
 
+    pub(crate) async fn create_session_without_workspace(
+        &self,
+        settings: NewSessionSettings,
+    ) -> Result<CodeSession, ServerError> {
+        self.runtime
+            .create_session_without_workspace(&self.owner, settings)
+            .await
+    }
+
     pub(crate) async fn create_remote_session(
         &self,
         workspace_id: WorkspaceId,

@@ -212,6 +212,8 @@ impl HarnessEngine {
             .spec
             .adapter
             .launch(SessionSpec {
+                owner: tidebreak_core::OwnerId::local(),
+                session_id: tidebreak_core::CodeSessionId::new(),
                 worktree: self.spec.worktree.clone(),
                 allowed_read_roots: self.spec.allowed_read_roots.clone(),
                 permission_mode: PermissionMode::Allow,

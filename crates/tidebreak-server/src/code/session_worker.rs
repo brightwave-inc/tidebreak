@@ -27,7 +27,8 @@ use tidebreak_core::db::code::{
     delete_queued_turn, get_open_turn, get_session, get_session_all_owners, get_workspace,
     insert_approval_for_worker, insert_turn, next_turn_ordinal, promote_queued_turn, queue_paused,
     queued_turn_head, save_session, save_turn, set_queue_paused, set_session_harness_resume_ref,
-    set_session_subagents, CodeJournalError, CodeSessionExecutionSettings,
+    set_session_subagents, settle_engine_observed_approval, CodeJournalError,
+    CodeSessionExecutionSettings,
 };
 use tidebreak_core::{
     bound_subagents, Attention, AttentionSource, BlobStore, BoundedError, CodeApproval,
@@ -65,6 +66,11 @@ pub(crate) enum WorkerCommand {
         // Boxed: the grant-carrying decision variants dwarf every other
         // command (clippy::large_enum_variant).
         decision: Box<ApprovalDecision>,
+        /// The mode the session moves to once this decision is delivered:
+        /// an accepted plan's proposed mode. The worker applies it, because
+        /// the turn is still open and the settings route refuses a running
+        /// session.
+        mode_after: Option<PermissionMode>,
         reply: oneshot::Sender<Result<(), WorkerError>>,
     },
     Interrupt {
@@ -459,6 +465,60 @@ impl LiveSink {
             .await
     }
 
+    /// Settle the pending row behind an approval the engine decided itself.
+    async fn settle_engine_observed(
+        &self,
+        harness_ref: &tidebreak_harness::HarnessApprovalRef,
+        decision: ApprovalDecision,
+    ) {
+        let settlement = match settle_engine_observed_approval(
+            &self.db,
+            &self.owner,
+            self.session_id,
+            self.spawn_epoch,
+            &harness_ref.call_id,
+            tidebreak_core::ApprovalDecisionKind::from(decision),
+            Utc::now(),
+        )
+        .await
+        {
+            Ok(Some(settlement)) => settlement,
+            Ok(None) => return,
+            Err(error) => {
+                warn!(
+                    session = %self.session_id,
+                    call_id = %harness_ref.call_id,
+                    error = %error,
+                    "could not settle an engine-decided approval"
+                );
+                return;
+            }
+        };
+        self.bus.publish(self.session_id, settlement.event);
+        let Ok(Some(session)) = get_session(&self.db, &self.owner, self.session_id).await else {
+            return;
+        };
+        let Ok(next) = super::attention::compute_attention(
+            &self.db,
+            &self.bus,
+            &session,
+            super::attention::ComputeOpts::default(),
+        )
+        .await
+        else {
+            return;
+        };
+        let _ = super::attention::apply_attention(
+            &self.db,
+            &self.bus,
+            &self.owner,
+            self.session_id,
+            next,
+            false,
+        )
+        .await;
+    }
+
     async fn record_approval(
         &self,
         approval_id: CodeApprovalId,
@@ -600,9 +660,17 @@ impl HarnessEventSink for LiveSink {
             }
             return;
         }
-        if matches!(event, HarnessEvent::ApprovalResolved { .. }) {
-            // The decision route journals ApprovalResolved after the harness
-            // observes the decision. Ignore a duplicate emit from the engine.
+        if let HarnessEvent::ApprovalResolved {
+            harness_ref,
+            decision,
+        } = &event
+        {
+            // The decision route settles the row it claimed and journals the
+            // resolution itself. A decision the engine reached on its own
+            // channel — a standing grant, the auto-approval judge — settles
+            // the still-pending row here; anything else is a duplicate.
+            self.settle_engine_observed(harness_ref, decision.clone())
+                .await;
             return;
         }
         if matches!(event, HarnessEvent::TurnStarted) && self.turn_id.lock().unwrap().is_some() {
@@ -1104,8 +1172,15 @@ async fn reserve_execution_settings(
 /// the engine returns `Parked`. That command is admitted on the running
 /// leg, so no second `Decide` follows. The park wait has to resume from
 /// this record or the turn stays `waiting`.
-type DeliveredDecisions =
-    Arc<std::sync::Mutex<std::collections::HashMap<String, ApprovalDecision>>>;
+type DeliveredDecisions = Arc<std::sync::Mutex<Delivered>>;
+
+#[derive(Default)]
+struct Delivered {
+    decisions: std::collections::HashMap<String, ApprovalDecision>,
+    /// A mode change owed to the session once the leg that took the
+    /// decision ends: an accepted plan's proposed mode.
+    mode_after: Option<PermissionMode>,
+}
 
 fn resume_if_already_delivered(
     wait: &tidebreak_core::TurnParkWait,
@@ -1117,6 +1192,7 @@ fn resume_if_already_delivered(
     let decision = delivered
         .lock()
         .expect("delivered decisions")
+        .decisions
         .get(call_id)
         .cloned()?;
     Some(tidebreak_harness::ResumeInput::ApprovalDecided {
@@ -1132,6 +1208,7 @@ async fn deliver_decision(
     engine: &dyn HarnessSession,
     approval: HarnessApprovalRef,
     decision: ApprovalDecision,
+    mode_after: Option<PermissionMode>,
     delivered: Option<DeliveredDecisions>,
 ) -> Result<(), WorkerError> {
     let call_id = approval.call_id.clone();
@@ -1139,10 +1216,11 @@ async fn deliver_decision(
     match tokio::time::timeout(APPROVAL_CONTROL_TIMEOUT, engine.decide(approval, decision)).await {
         Ok(Ok(())) => {
             if let Some(delivered) = delivered {
-                delivered
-                    .lock()
-                    .expect("delivered decisions")
-                    .insert(call_id, recorded);
+                let mut delivered = delivered.lock().expect("delivered decisions");
+                delivered.decisions.insert(call_id, recorded);
+                if mode_after.is_some() {
+                    delivered.mode_after = mode_after;
+                }
             }
             Ok(())
         }
@@ -1154,6 +1232,48 @@ async fn deliver_decision(
             "the native approval decision timed out; delivery could not be confirmed".into(),
         )),
     }
+}
+
+/// Move the session to the mode an accepted plan proposed.
+///
+/// The engine left plan mode on its own state when it took the decision; the
+/// session row and the journal follow it here, inside the worker, because
+/// the turn is still open and the settings route refuses a running session.
+async fn apply_accepted_plan_mode(
+    engine: &dyn HarnessSession,
+    db: &DbStore,
+    bus: &CodeEventBus,
+    session: &mut CodeSession,
+    mode: PermissionMode,
+) {
+    if session.permission_mode == mode {
+        return;
+    }
+    if let Err(error) = engine.set_permission_mode(mode).await {
+        warn!(
+            session = %session.id,
+            error = %error,
+            "the engine did not take the accepted plan's permission mode"
+        );
+        return;
+    }
+    let previous = session.permission_mode;
+    session.permission_mode = mode;
+    let _ = save_session(db, session).await;
+    let _ = journal_event(
+        db,
+        bus,
+        &session.owner,
+        session.id,
+        session.spawn_epoch,
+        CodeEvent::HarnessNotice {
+            level: tidebreak_core::HarnessNoticeLevel::Info,
+            message: format!(
+                "permission mode changed from {previous} to {mode}: the plan was accepted"
+            ),
+        },
+    )
+    .await;
 }
 
 /// Persist a parked turn: status, the engine's checkpoint token, and the
@@ -1228,11 +1348,17 @@ async fn await_park_resolution<'a>(
                 }
             }
             command = commands.recv(), if !*commands_closed => match command {
-                Some(WorkerCommand::Decide { approval, decision, reply }) => {
+                Some(WorkerCommand::Decide { approval, decision, mode_after, reply }) => {
                     let call_id = approval.call_id.clone();
                     let decided = (*decision).clone();
-                    let result =
-                        deliver_decision(engine, approval, *decision, Some(delivered.clone())).await;
+                    let result = deliver_decision(
+                        engine,
+                        approval,
+                        *decision,
+                        mode_after,
+                        Some(delivered.clone()),
+                    )
+                    .await;
                     let delivered = result.is_ok();
                     let _ = reply.send(result);
                     let awaited = matches!(
@@ -1288,9 +1414,10 @@ async fn apply_control(
         WorkerCommand::Decide {
             approval,
             decision,
+            mode_after,
             reply,
         } => {
-            let result = deliver_decision(engine, approval, *decision, delivered).await;
+            let result = deliver_decision(engine, approval, *decision, mode_after, delivered).await;
             let _ = reply.send(result);
             ControlFlow::Continue
         }
@@ -1676,15 +1803,17 @@ async fn drive_turn_inner(
     if *worktree.quiesce.borrow() {
         return Err(WorkerError::UpdateQuiesced);
     }
-    let workspace = get_workspace(&sink.db, &session.owner, session.workspace_id)
-        .await
-        .map_err(|error| WorkerError::Failed(error.to_string()))?
-        .ok_or_else(|| WorkerError::Conflict("workspace no longer exists".into()))?;
-    if workspace.status != CodeWorkspaceStatus::Active {
-        return Err(WorkerError::Conflict(format!(
-            "workspace is {}",
-            workspace.status.as_str()
-        )));
+    if let Some(workspace_id) = session.workspace_id {
+        let workspace = get_workspace(&sink.db, &session.owner, workspace_id)
+            .await
+            .map_err(|error| WorkerError::Failed(error.to_string()))?
+            .ok_or_else(|| WorkerError::Conflict("workspace no longer exists".into()))?;
+        if workspace.status != CodeWorkspaceStatus::Active {
+            return Err(WorkerError::Conflict(format!(
+                "workspace is {}",
+                workspace.status.as_str()
+            )));
+        }
     }
 
     // An idle send resolves settings after it owns the worktree, so a
@@ -1853,8 +1982,7 @@ async fn drive_turn_inner(
     let mut controls: FuturesUnordered<BoxFuture<'_, ControlFlow>> = FuturesUnordered::new();
     let mut interrupted = false;
     let mut commands_closed = false;
-    let delivered: DeliveredDecisions =
-        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let delivered: DeliveredDecisions = Arc::new(std::sync::Mutex::new(Delivered::default()));
     // One leg per engine future: the opening `run_turn`, then one
     // `resume_turn` per resolved park. An engine that never parks runs one
     // leg, exactly the old shape.
@@ -1945,6 +2073,14 @@ async fn drive_turn_inner(
                 turn.park_ref = None;
                 turn.park_wait = None;
                 let _ = save_turn(db, &session.owner, &turn).await;
+                let mode_after = delivered
+                    .lock()
+                    .expect("delivered decisions")
+                    .mode_after
+                    .take();
+                if let Some(mode) = mode_after {
+                    apply_accepted_plan_mode(engine, db, bus, session, mode).await;
+                }
                 next_resume = Some((park_ref, input));
             }
             // Interrupted or shut down while parked: fall through to the
@@ -3145,7 +3281,7 @@ mod tests {
             &CodeSession {
                 id: session_id,
                 owner: owner.clone(),
-                workspace_id,
+                workspace_id: Some(workspace_id),
                 kind: CodeSessionKind::Interactive,
                 harness_kind,
                 harness_version: harness_version.map(str::to_owned),
@@ -3245,6 +3381,8 @@ mod tests {
             );
         let engine = adapter
             .launch(SessionSpec {
+                owner: tidebreak_core::OwnerId::local(),
+                session_id: tidebreak_core::CodeSessionId::new(),
                 worktree,
                 allowed_read_roots: Vec::new(),
                 permission_mode: session.permission_mode,
@@ -3314,6 +3452,7 @@ mod tests {
             .send(WorkerCommand::Decide {
                 approval: tidebreak_harness::HarnessApprovalRef::engine("call-1"),
                 decision: Box::new(tidebreak_harness::ApprovalDecision::Approve),
+                mode_after: None,
                 reply: decide_reply,
             })
             .await
@@ -3392,6 +3531,8 @@ mod tests {
             );
         let engine = adapter
             .launch(SessionSpec {
+                owner: tidebreak_core::OwnerId::local(),
+                session_id: tidebreak_core::CodeSessionId::new(),
                 worktree,
                 allowed_read_roots: Vec::new(),
                 permission_mode: session.permission_mode,
@@ -3467,6 +3608,7 @@ mod tests {
             .send(WorkerCommand::Decide {
                 approval: tidebreak_harness::HarnessApprovalRef::engine("call-1"),
                 decision: Box::new(tidebreak_harness::ApprovalDecision::Approve),
+                mode_after: None,
                 reply: decide_reply,
             })
             .await
@@ -3510,6 +3652,8 @@ mod tests {
         );
         let engine = adapter
             .launch(SessionSpec {
+                owner: tidebreak_core::OwnerId::local(),
+                session_id: tidebreak_core::CodeSessionId::new(),
                 worktree,
                 allowed_read_roots: Vec::new(),
                 permission_mode: session.permission_mode,
@@ -3608,6 +3752,8 @@ mod tests {
         let adapter = ScriptedAdapter::new(plain_text_script());
         let engine = adapter
             .launch(SessionSpec {
+                owner: tidebreak_core::OwnerId::local(),
+                session_id: tidebreak_core::CodeSessionId::new(),
                 worktree,
                 allowed_read_roots: Vec::new(),
                 permission_mode: session.permission_mode,
@@ -3720,6 +3866,8 @@ mod tests {
         let adapter = ScriptedAdapter::new(plain_text_script());
         let engine = adapter
             .launch(SessionSpec {
+                owner: tidebreak_core::OwnerId::local(),
+                session_id: tidebreak_core::CodeSessionId::new(),
                 worktree,
                 allowed_read_roots: Vec::new(),
                 permission_mode: session.permission_mode,
@@ -4346,6 +4494,8 @@ mod tests {
         let adapter = ScriptedAdapter::new(plain_text_script());
         let engine = adapter
             .launch(SessionSpec {
+                owner: tidebreak_core::OwnerId::local(),
+                session_id: tidebreak_core::CodeSessionId::new(),
                 worktree,
                 allowed_read_roots: Vec::new(),
                 permission_mode: session.permission_mode,

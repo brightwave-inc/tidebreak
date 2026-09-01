@@ -1228,7 +1228,7 @@ mod tests {
             .unwrap();
         assert_eq!(session.lifecycle, CodeSessionLifecycle::Idle);
         let workspace = runtime
-            .get_workspace(&owner, session.workspace_id)
+            .get_workspace(&owner, session.workspace_id.expect("workspace"))
             .await
             .unwrap();
         assert!(workspace.is_remote());
@@ -1525,7 +1525,7 @@ mod tests {
         // The promotion runs with the stale snapshot: B's text goes to the
         // sandbox, and the claim must consume B's row under its own id.
         let workspace = runtime
-            .get_workspace(&owner, live.workspace_id)
+            .get_workspace(&owner, live.workspace_id.expect("workspace"))
             .await
             .unwrap();
         let stored_repo = runtime.get_repo(&owner, workspace.repo_id).await.unwrap();

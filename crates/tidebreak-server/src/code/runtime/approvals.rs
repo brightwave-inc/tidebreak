@@ -352,6 +352,16 @@ impl CodeRuntime {
         let probe = self.probe(adapter.as_ref()).await;
         let decision = resolve_decision_request(&approval, &adapter.capabilities(&probe), request)?;
         let native_ref = Self::native_approval_ref(owner, &approval)?;
+        // An accepted plan moves the session to the mode the plan proposed.
+        // The worker applies it on delivery: the turn is still open, so the
+        // settings route would refuse the change.
+        let mode_after = match (&approval.kind, &decision) {
+            (
+                tidebreak_core::CodeApprovalKind::Plan { proposed_mode },
+                ApprovalDecision::PlanDecision { approve: true, .. },
+            ) => Some(*proposed_mode),
+            _ => None,
+        };
         let claim = uuid::Uuid::new_v4();
         let Some(_) = claim_approval(
             &self.db,
@@ -381,6 +391,7 @@ impl CodeRuntime {
             .send(crate::code::session_worker::WorkerCommand::Decide {
                 approval: native_ref,
                 decision: Box::new(decision.clone()),
+                mode_after,
                 reply,
             })
             .await

@@ -209,6 +209,7 @@ const HARNESS_KINDS = new Set<HarnessKind>([
   "codex",
   "opencode",
   "grok",
+  "internal",
 ]);
 const HARNESS_TIERS = new Set<HarnessTier>([
   "reference",

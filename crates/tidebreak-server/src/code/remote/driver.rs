@@ -181,10 +181,13 @@ async fn occupying_names(
     let mut names = Vec::new();
     for id in running {
         let name = match tidebreak_core::db::code::get_session(db, owner, *id).await {
-            Ok(Some(session)) => match get_workspace(db, owner, session.workspace_id).await {
-                Ok(Some(workspace)) if !workspace.title.is_empty() => workspace.title,
-                Ok(Some(workspace)) => workspace.branch_name,
-                _ => id.to_string(),
+            Ok(Some(session)) => match session.workspace_id {
+                Some(workspace_id) => match get_workspace(db, owner, workspace_id).await {
+                    Ok(Some(workspace)) if !workspace.title.is_empty() => workspace.title,
+                    Ok(Some(workspace)) => workspace.branch_name,
+                    _ => id.to_string(),
+                },
+                None => id.to_string(),
             },
             _ => id.to_string(),
         };
@@ -1452,7 +1455,7 @@ mod tests {
         let (db, bus, session_a, workspace, repo) = seed(dir.path()).await;
         super::super::fixtures::seeded_incarnation(&db, &session_a).await;
         let mut session_b = super::super::fixtures::session_value();
-        session_b.workspace_id = workspace.id;
+        session_b.workspace_id = Some(workspace.id);
         tidebreak_core::db::code::insert_session(&db, &session_b)
             .await
             .unwrap();

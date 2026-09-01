@@ -16,9 +16,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tidebreak_core::{
-    BoundedError, CodeApprovalKind, CodeUsage, Diffstat, FileChangeKind, GrantScope, HarnessCaps,
-    HarnessCommand, HarnessKind, HarnessNoticeLevel, PermissionMode, ReasoningEffort, ToolDetail,
-    ToolOutcome, UserQuestionAnswer,
+    BoundedError, CodeApprovalKind, CodeSessionId, CodeUsage, Diffstat, FileChangeKind, GrantScope,
+    HarnessCaps, HarnessCommand, HarnessKind, HarnessNoticeLevel, OwnerId, PermissionMode,
+    ReasoningEffort, ToolDetail, ToolOutcome, UserQuestionAnswer,
 };
 
 pub mod browser_channel;
@@ -67,6 +67,10 @@ pub fn auth_override_present(
         HarnessKind::ClaudeCode => claude::auth_override_present(env),
         HarnessKind::Codex => codex::auth_override_present(env),
         HarnessKind::Opencode | HarnessKind::Grok => true,
+        // The in-process engine takes inference from the server's own
+        // provider resolution; there is no engine-side credential to
+        // override.
+        HarnessKind::Internal => false,
     }
 }
 
@@ -127,7 +131,7 @@ pub fn observe_auth_mode(
     let signal = match kind {
         HarnessKind::ClaudeCode => claude::observe_auth_override(env),
         HarnessKind::Codex => codex::observe_auth_override(env),
-        HarnessKind::Opencode | HarnessKind::Grok => None,
+        HarnessKind::Opencode | HarnessKind::Grok | HarnessKind::Internal => None,
     };
     signal.map_or(
         HarnessAuthObservation::Unknown,
@@ -680,6 +684,14 @@ impl BrowserChannelSpec {
 
 /// What an adapter needs to spawn or connect one session.
 pub struct SessionSpec {
+    /// Principal the session acts for. An in-process engine resolves its
+    /// inference and scopes its durable state by this; external engines
+    /// carry their own credentials and ignore it.
+    pub owner: OwnerId,
+    /// The durable session this launch serves. An in-process engine keys
+    /// its own durable state on it, so a relaunch finds the same state
+    /// without a native resume token; external engines ignore it.
+    pub session_id: CodeSessionId,
     /// Worktree the engine should use as its working directory.
     pub worktree: PathBuf,
     /// Absolute directory roots that engine tools may read outside the worktree.

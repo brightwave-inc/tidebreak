@@ -40,7 +40,8 @@ const UPDATES_BUFFER: usize = 256;
 /// Cheap per-session digest published on `/code/updates`.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SessionDigest {
-    pub workspace: WorkspaceId,
+    /// `None` for a session that binds no workspace.
+    pub workspace: Option<WorkspaceId>,
     pub session: CodeSessionId,
     pub kind: CodeSessionKind,
     /// Engine identity for list surfaces that collapse several sessions into

@@ -41,6 +41,7 @@ pub(in crate::db) async fn list_pending_chat_prompts(
         Some(owner) => Some(
             entities::chat::Entity::find()
                 .filter(entities::chat::Column::Owner.eq(owner.as_str()))
+                .filter(entities::chat::Column::EnginePrivate.eq(false))
                 .all(&store.conn)
                 .await
                 .map_err(store_err)?

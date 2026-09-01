@@ -319,6 +319,10 @@ pub(crate) async fn after_turn_ended(
     if !terminal || turn.checkpoint_ref.is_some() {
         return;
     }
+    // No workspace, no checkout to snapshot.
+    if session.workspace_id.is_none() {
+        return;
+    }
     match record_for_turn(db, session, turn).await {
         Ok(recorded) => {
             turn.checkpoint_ref = Some(recorded.checkpoint_ref.clone());
@@ -369,7 +373,10 @@ async fn record_for_turn(
     session: &CodeSession,
     turn: &CodeTurn,
 ) -> Result<RecordedCheckpoint, CheckpointError> {
-    let workspace = get_workspace(db, &session.owner, session.workspace_id)
+    let workspace_id = session
+        .workspace_id
+        .ok_or_else(|| CheckpointError::user("session has no workspace"))?;
+    let workspace = get_workspace(db, &session.owner, workspace_id)
         .await
         .map_err(|err| CheckpointError::internal(err.to_string()))?
         .ok_or_else(|| CheckpointError::user("workspace not found"))?;
@@ -901,7 +908,7 @@ pub(crate) async fn resolve_diff_range(
                 .await
                 .map_err(|err| CheckpointError::internal(err.to_string()))?
                 .ok_or_else(|| CheckpointError::user("session not found"))?;
-            if session.workspace_id != workspace.id {
+            if session.workspace_id != Some(workspace.id) {
                 return Err(CheckpointError::user(
                     "turn does not belong to this workspace",
                 ));
@@ -2533,7 +2540,7 @@ mod tests {
         let session = CodeSession {
             id: CodeSessionId::new(),
             owner,
-            workspace_id,
+            workspace_id: Some(workspace_id),
             kind: CodeSessionKind::Interactive,
             harness_kind: HarnessKind::ClaudeCode,
             harness_version: None,
@@ -2803,7 +2810,7 @@ mod tests {
         run(&repo, &["git", "commit", "-m", "receipts"]);
         let tree = add_worktree(&repo, "shared");
         let (db, bus, earlier) = seed_session(&repo, &tree).await;
-        record_session_baseline(&tree, earlier.workspace_id, earlier.id)
+        record_session_baseline(&tree, earlier.workspace_id.expect("workspace"), earlier.id)
             .await
             .unwrap();
 
@@ -2818,7 +2825,7 @@ mod tests {
 
         // A second session starts on the worktree the first one has edited.
         let later = seed_sibling_session(&db, &earlier).await;
-        record_session_baseline(&tree, later.workspace_id, later.id)
+        record_session_baseline(&tree, later.workspace_id.expect("workspace"), later.id)
             .await
             .unwrap();
 
@@ -2840,7 +2847,7 @@ mod tests {
         );
 
         // The read path agrees: `code diff --turn` resolves the same range.
-        let workspace = get_workspace(&db, &later.owner, later.workspace_id)
+        let workspace = get_workspace(&db, &later.owner, later.workspace_id.expect("workspace"))
             .await
             .unwrap()
             .unwrap();
@@ -2870,7 +2877,7 @@ mod tests {
         let (_dir, repo) = init_repo();
         let tree = add_worktree(&repo, "lone");
         let (db, bus, session) = seed_session(&repo, &tree).await;
-        record_session_baseline(&tree, session.workspace_id, session.id)
+        record_session_baseline(&tree, session.workspace_id.expect("workspace"), session.id)
             .await
             .unwrap();
 
@@ -2905,7 +2912,7 @@ mod tests {
         after_turn_ended(&db, &bus, &session, &mut turn).await;
 
         let r#ref = turn.checkpoint_ref.clone().expect("turn 1 keeps its ref");
-        let baseline = session_baseline_ref(session.workspace_id, session.id);
+        let baseline = session_baseline_ref(session.workspace_id.expect("workspace"), session.id);
         assert!(
             git_text(&tree, &["rev-parse", "--verify", &baseline], GIT_TIMEOUT)
                 .await
@@ -2927,9 +2934,10 @@ mod tests {
         let (_dir, repo) = init_repo();
         let tree = add_worktree(&repo, "chain-from-baseline");
         let (db, bus, session) = seed_session(&repo, &tree).await;
-        let baseline = record_session_baseline(&tree, session.workspace_id, session.id)
-            .await
-            .unwrap();
+        let baseline =
+            record_session_baseline(&tree, session.workspace_id.expect("workspace"), session.id)
+                .await
+                .unwrap();
 
         std::fs::write(tree.join("one.txt"), "one\n").unwrap();
         let mut first = seed_turn(&db, &session, 1, CodeTurnStatus::Completed).await;
@@ -2968,9 +2976,10 @@ mod tests {
         let (_dir, repo) = init_repo();
         let tree = add_worktree(&repo, "missing-previous");
         let (db, bus, session) = seed_session(&repo, &tree).await;
-        let baseline = record_session_baseline(&tree, session.workspace_id, session.id)
-            .await
-            .unwrap();
+        let baseline =
+            record_session_baseline(&tree, session.workspace_id.expect("workspace"), session.id)
+                .await
+                .unwrap();
 
         std::fs::write(tree.join("one.txt"), "one\n").unwrap();
         let mut first = seed_turn(&db, &session, 1, CodeTurnStatus::Completed).await;

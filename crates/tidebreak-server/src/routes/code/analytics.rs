@@ -89,8 +89,9 @@ fn build_snapshot(
     let session_by_id: HashMap<CodeSessionId, &CodeSession> = sessions
         .iter()
         .filter(|session| {
-            workspace_repos
-                .get(&session.workspace_id)
+            session
+                .workspace_id
+                .and_then(|workspace_id| workspace_repos.get(&workspace_id))
                 .is_some_and(|repo_id| repo_filter.is_none_or(|filter| filter == *repo_id))
         })
         .map(|session| (session.id, session))
@@ -123,7 +124,10 @@ fn build_snapshot(
         if !in_range(turn.started_at, from, through) {
             continue;
         }
-        let Some(repo_id) = workspace_repos.get(&session.workspace_id).copied() else {
+        let Some(repo_id) = session
+            .workspace_id
+            .and_then(|workspace_id| workspace_repos.get(&workspace_id).copied())
+        else {
             continue;
         };
         active_sessions.insert(session.id);
@@ -201,7 +205,10 @@ fn build_snapshot(
         let Some(session) = session_by_id.get(&session_id).copied() else {
             continue;
         };
-        let Some(repo_id) = workspace_repos.get(&session.workspace_id).copied() else {
+        let Some(repo_id) = session
+            .workspace_id
+            .and_then(|workspace_id| workspace_repos.get(&workspace_id).copied())
+        else {
             continue;
         };
         repo_metrics

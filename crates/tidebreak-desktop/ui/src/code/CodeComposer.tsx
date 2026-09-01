@@ -45,6 +45,7 @@ import {
   ProviderIcon,
   XaiIcon,
 } from "../ProviderIcons";
+import { Logomark } from "../Logomark";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -171,6 +172,7 @@ const HARNESS_ICONS: Record<HarnessKind, typeof ClaudeIcon> = {
   codex: OpenAIIcon,
   opencode: OpenCodeIcon,
   grok: XaiIcon,
+  internal: Logomark,
 };
 
 /** The mark for one picker row: vendor, then open-model family, then the engine. */

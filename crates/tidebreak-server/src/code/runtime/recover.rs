@@ -15,10 +15,10 @@ impl CodeRuntime {
         if let Some(relay) = &self.harness_llm {
             relay.revoke(session.id);
         }
-        if let Some(runtime) = &self.browser_runtime {
+        if let (Some(runtime), Some(workspace)) = (&self.browser_runtime, session.workspace_id) {
             let scope = crate::code::browser_runtime::BrowserRuntimeScope {
                 owner: session.owner.clone(),
-                workspace: session.workspace_id,
+                workspace,
                 session: session.id,
             };
             runtime.revoke_session(&scope);
@@ -152,10 +152,7 @@ impl CodeRuntime {
             if !checked_workspaces.insert(session.workspace_id) {
                 continue;
             }
-            if let Ok(workspace) = self
-                .get_workspace(&session.owner, session.workspace_id)
-                .await
-            {
+            if let Ok(Some(workspace)) = self.session_workspace(session).await {
                 if workspace.is_remote() {
                     remote_workspaces.insert(session.workspace_id);
                 }

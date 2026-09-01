@@ -63,10 +63,14 @@ async fn repository_transcript_search_survives_workspace_release() {
         .await
         .unwrap()
         .unwrap();
-    let mut workspace = get_workspace(&store, &owner, session.workspace_id)
-        .await
-        .unwrap()
-        .unwrap();
+    let mut workspace = get_workspace(
+        &store,
+        &owner,
+        session.workspace_id.expect("session has a workspace"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     let repo_id = workspace.repo_id;
     workspace.status = CodeWorkspaceStatus::Released;
     workspace.archived_at = Some(now());
@@ -193,7 +197,7 @@ async fn seed_owner(
         &CodeSession {
             id: session_id,
             owner: owner.clone(),
-            workspace_id,
+            workspace_id: Some(workspace_id),
             kind: CodeSessionKind::Interactive,
             harness_kind: HarnessKind::ClaudeCode,
             harness_version: Some("2.1.233".into()),
@@ -262,10 +266,14 @@ async fn claimed_trigger_delivery(
         .await
         .unwrap()
         .unwrap();
-    let workspace = get_workspace(store, owner, session.workspace_id)
-        .await
-        .unwrap()
-        .unwrap();
+    let workspace = get_workspace(
+        store,
+        owner,
+        session.workspace_id.expect("session has a workspace"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     let at = now();
     arm_trigger(
         store,
@@ -294,7 +302,7 @@ async fn claimed_trigger_delivery(
         &CodeTriggerFireIdentity {
             trigger_id: trigger.id,
             owner: owner.clone(),
-            workspace_id: session.workspace_id,
+            workspace_id: session.workspace_id.expect("session has a workspace"),
             pr_number: 42,
             head_sha: uuid::Uuid::new_v4().to_string(),
         },
@@ -697,7 +705,8 @@ async fn workspace_title_swap_replaces_only_the_expected_title() {
         .await
         .unwrap()
         .unwrap()
-        .workspace_id;
+        .workspace_id
+        .expect("session has a workspace");
     assert!(set_workspace_title_if(
         &store,
         &OwnerId::local(),
@@ -746,7 +755,8 @@ async fn pull_request_write_preserves_a_concurrent_workspace_rename() {
         .await
         .unwrap()
         .unwrap()
-        .workspace_id;
+        .workspace_id
+        .expect("session has a workspace");
     let refresh_snapshot = get_workspace(&store, &owner, workspace_id)
         .await
         .unwrap()
@@ -808,10 +818,14 @@ async fn entity_graph_round_trips() {
         .unwrap()
         .unwrap();
     assert_eq!(turn.user_input, "hello");
-    let workspace = get_workspace(&store, &OwnerId::local(), session.workspace_id)
-        .await
-        .unwrap()
-        .unwrap();
+    let workspace = get_workspace(
+        &store,
+        &OwnerId::local(),
+        session.workspace_id.expect("session has a workspace"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(workspace.status, CodeWorkspaceStatus::Active);
     let repo = get_repo(&store, &OwnerId::local(), workspace.repo_id)
         .await
@@ -1470,7 +1484,8 @@ async fn a_terminal_code_event_mints_one_notification_in_its_transaction() {
                 .await
                 .unwrap()
                 .unwrap()
-                .workspace_id,
+                .workspace_id
+                .expect("session has a workspace"),
         }
     );
 }
@@ -2032,7 +2047,8 @@ async fn owner_scoped_code_queries_partition_every_table() {
         .await
         .unwrap()
         .unwrap()
-        .workspace_id;
+        .workspace_id
+        .expect("session has a workspace");
     assert!(get_workspace(&store, &bob, alice_workspace)
         .await
         .unwrap()
@@ -2317,14 +2333,15 @@ async fn latest_watch_for_session_matches_on_the_session_not_the_workspace() {
         .await
         .unwrap()
         .unwrap()
-        .workspace_id;
+        .workspace_id
+        .expect("session has a workspace");
     let watch_session_id = CodeSessionId::new();
     insert_session(
         &store,
         &CodeSession {
             id: watch_session_id,
             owner: owner.clone(),
-            workspace_id,
+            workspace_id: Some(workspace_id),
             kind: CodeSessionKind::Watch,
             harness_kind: HarnessKind::ClaudeCode,
             harness_version: None,
@@ -2414,7 +2431,8 @@ async fn watch_submission_failure_retries_without_consuming_the_head() {
         .await
         .unwrap()
         .unwrap()
-        .workspace_id;
+        .workspace_id
+        .expect("session has a workspace");
     let created_at = now() - chrono::Duration::minutes(1);
     let watch = CodeWatch {
         id: CodeWatchId::new(),
@@ -2527,7 +2545,8 @@ async fn a_removed_repo_keeps_its_workspaces_and_transcript() {
         .await
         .unwrap()
         .unwrap()
-        .workspace_id;
+        .workspace_id
+        .expect("session has a workspace");
 
     assert!(mark_repo_removed(&store, &owner, repo.id, now())
         .await
@@ -2671,7 +2690,8 @@ async fn a_cloned_repo_records_where_it_came_from() {
         .await
         .unwrap()
         .unwrap()
-        .workspace_id;
+        .workspace_id
+        .expect("session has a workspace");
     let registered = get_workspace(&store, &owner, workspace_id)
         .await
         .unwrap()
@@ -2751,7 +2771,8 @@ async fn trigger_persistence_rejects_another_owner() {
         .await
         .unwrap()
         .unwrap()
-        .workspace_id;
+        .workspace_id
+        .expect("session has a workspace");
     let at = now();
 
     let foreign_repo_trigger = CodeTrigger {
@@ -2900,7 +2921,8 @@ async fn trigger_fire_identity_includes_pull_request_number() {
         .await
         .unwrap()
         .unwrap()
-        .workspace_id;
+        .workspace_id
+        .expect("session has a workspace");
 
     let trigger = CodeTrigger {
         id: CodeTriggerId::new(),
@@ -2981,7 +3003,8 @@ async fn trigger_fire_delivery_retries_are_fenced_and_durable() {
         .await
         .unwrap()
         .unwrap()
-        .workspace_id;
+        .workspace_id
+        .expect("session has a workspace");
     let trigger = CodeTrigger {
         id: CodeTriggerId::new(),
         owner: owner.clone(),
@@ -3213,7 +3236,8 @@ async fn deleting_a_trigger_clears_its_fires() {
         .await
         .unwrap()
         .unwrap()
-        .workspace_id;
+        .workspace_id
+        .expect("session has a workspace");
 
     let trigger = CodeTrigger {
         id: CodeTriggerId::new(),
@@ -3273,7 +3297,8 @@ async fn trigger_mutations_have_field_specific_serialization() {
         .await
         .unwrap()
         .unwrap()
-        .workspace_id;
+        .workspace_id
+        .expect("session has a workspace");
     let created_at = now();
     let trigger = CodeTrigger {
         id: CodeTriggerId::new(),
@@ -3645,7 +3670,8 @@ async fn pull_request_facts_upsert_claim_and_promote() {
         .await
         .unwrap()
         .unwrap()
-        .workspace_id;
+        .workspace_id
+        .expect("session has a workspace");
 
     let first_seen = now();
     let fact = CodePullRequestFact {
@@ -4593,7 +4619,7 @@ fn external_pair(owner: &OwnerId, repo_id: RepoId, label: &str) -> (CodeWorkspac
     let session = CodeSession {
         id: CodeSessionId::new(),
         owner: owner.clone(),
-        workspace_id,
+        workspace_id: Some(workspace_id),
         kind: CodeSessionKind::Interactive,
         harness_kind: HarnessKind::ClaudeCode,
         harness_version: None,
@@ -4628,10 +4654,14 @@ async fn two_racing_external_creates_yield_one_session() {
             .await
             .unwrap()
             .unwrap();
-        let workspace = crate::db::code::get_workspace(&store, &owner, stored.workspace_id)
-            .await
-            .unwrap()
-            .unwrap();
+        let workspace = crate::db::code::get_workspace(
+            &store,
+            &owner,
+            stored.workspace_id.expect("session has a workspace"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         (session, workspace.repo_id)
     };
     let grant = crate::code::CodeGrantId::new();
@@ -4698,10 +4728,14 @@ async fn a_binding_resolves_ends_and_scopes_by_grant() {
         let sessions = crate::db::code::list_sessions(&store, &owner)
             .await
             .unwrap();
-        let workspace = crate::db::code::get_workspace(&store, &owner, sessions[0].workspace_id)
-            .await
-            .unwrap()
-            .unwrap();
+        let workspace = crate::db::code::get_workspace(
+            &store,
+            &owner,
+            sessions[0].workspace_id.expect("session has a workspace"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         workspace.repo_id
     };
     let grant = crate::code::CodeGrantId::new();
@@ -5226,10 +5260,14 @@ async fn seed_external_session(
         .await
         .unwrap()
         .unwrap();
-    let workspace = crate::db::code::get_workspace(store, owner, stored.workspace_id)
-        .await
-        .unwrap()
-        .unwrap();
+    let workspace = crate::db::code::get_workspace(
+        store,
+        owner,
+        stored.workspace_id.expect("session has a workspace"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     let (external_workspace, external_session) = external_pair(owner, workspace.repo_id, label);
     match crate::db::code::resolve_external_session(
         store,

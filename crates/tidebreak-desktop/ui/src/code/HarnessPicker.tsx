@@ -8,6 +8,7 @@ import {
   OpenCodeIcon,
   XaiIcon,
 } from "../ProviderIcons";
+import { Logomark } from "../Logomark";
 import {
   Select,
   SelectContent,
@@ -32,6 +33,7 @@ export const HARNESS_ICONS: Record<
   codex: OpenAIIcon,
   opencode: OpenCodeIcon,
   grok: XaiIcon,
+  internal: Logomark,
 };
 
 /**

@@ -140,7 +140,7 @@ async fn authorize(state: &AppState, headers: &HeaderMap) -> Result<BrowserSubje
     ) {
         return Err(ServerError::forbidden("the browser session has ended"));
     }
-    if session.workspace_id != subject.workspace {
+    if session.workspace_id != Some(subject.workspace) {
         return Err(ServerError::not_found("browser target not found"));
     }
 

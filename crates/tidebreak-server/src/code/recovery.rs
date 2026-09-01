@@ -56,10 +56,7 @@ pub(crate) async fn recover_running_sessions_with(
         // Running with no pid is its normal shape, and interrupting it here
         // would abandon a lease that is still spending. Its own lifecycle
         // (the pump, the stale-intent sweep, reap) settles it.
-        if let Some(workspace) =
-            tidebreak_core::db::code::get_workspace(store, &session.owner, session.workspace_id)
-                .await?
-        {
+        if let Some(workspace) = super::session_workspace(store, &session).await? {
             if workspace.is_remote() {
                 continue;
             }
@@ -639,7 +636,7 @@ mod tests {
             &CodeSession {
                 id: session_id,
                 owner: tidebreak_core::OwnerId::local(),
-                workspace_id,
+                workspace_id: Some(workspace_id),
                 kind: CodeSessionKind::Interactive,
                 harness_kind: HarnessKind::ClaudeCode,
                 harness_version: Some("2.1.233".into()),
@@ -675,11 +672,14 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let mut workspace =
-            tidebreak_core::db::code::get_workspace(&store, &owner, session.workspace_id)
-                .await
-                .unwrap()
-                .unwrap();
+        let mut workspace = tidebreak_core::db::code::get_workspace(
+            &store,
+            &owner,
+            session.workspace_id.expect("workspace"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         workspace.worktree_path = String::new();
         tidebreak_core::db::code::save_workspace(&store, &workspace)
             .await
@@ -1092,6 +1092,8 @@ mod tests {
         // recovery runs; the test never waits for it.
         .with_delay(std::time::Duration::from_secs(30))
         .launch(tidebreak_harness::SessionSpec {
+            owner: tidebreak_core::OwnerId::local(),
+            session_id: tidebreak_core::CodeSessionId::new(),
             worktree: _dir.path().join("wt"),
             allowed_read_roots: Vec::new(),
             permission_mode: PermissionMode::Plan,

@@ -17,6 +17,7 @@ use tokio::io::AsyncWriteExt as _;
 
 const CODE_DIR: &str = "code";
 const PRIVATE_DIR: &str = "private";
+const SESSIONS_DIR: &str = "sessions";
 
 /// A workspace's private storage root, pinned to the directory that passed
 /// validation.
@@ -141,6 +142,33 @@ pub(crate) fn workspace_root(
             .join(CODE_DIR)
             .join(PRIVATE_DIR)
             .join(workspace_name),
+    })
+}
+
+/// Create the private root for one session that binds no workspace, under
+/// the same tree as workspace roots: `{data_dir}/code/private/sessions/{id}`.
+///
+/// The in-process engine's working directory. Nothing in it is a checkout,
+/// and no other session shares it.
+pub(crate) fn session_root(
+    data_dir: &Path,
+    session_id: tidebreak_core::CodeSessionId,
+) -> io::Result<ScratchRoot> {
+    let data_dir = absolute_path(data_dir)?;
+    let root = open_root(&data_dir)?;
+    reject_git_indexable_root(&std::fs::canonicalize(&data_dir)?)?;
+    let code = ensure_child_dir(&root, OsStr::new(CODE_DIR))?;
+    let private = ensure_child_dir(&code, OsStr::new(PRIVATE_DIR))?;
+    let sessions = ensure_child_dir(&private, OsStr::new(SESSIONS_DIR))?;
+    let session_name = session_id.to_string();
+    let session = ensure_child_dir(&sessions, OsStr::new(&session_name))?;
+    Ok(ScratchRoot {
+        dir: Arc::new(session),
+        path: data_dir
+            .join(CODE_DIR)
+            .join(PRIVATE_DIR)
+            .join(SESSIONS_DIR)
+            .join(session_name),
     })
 }
 

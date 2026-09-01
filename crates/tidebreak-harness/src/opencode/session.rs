@@ -1030,6 +1030,8 @@ mod tests {
 
     fn unit_session() -> OpencodeSession {
         OpencodeSession::new(SessionSpec {
+            owner: tidebreak_core::OwnerId::local(),
+            session_id: tidebreak_core::CodeSessionId::new(),
             worktree: std::path::PathBuf::from("."),
             allowed_read_roots: Vec::new(),
             permission_mode: PermissionMode::Auto,

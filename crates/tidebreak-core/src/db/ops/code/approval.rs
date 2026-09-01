@@ -249,6 +249,54 @@ pub async fn abandon_pending_approval(
     .await
 }
 
+/// Settle a pending approval the engine decided on its own channel — a
+/// standing grant or an auto-approval judge — named by the engine's call id.
+///
+/// The decision route claims a row before it delivers, so a row it is
+/// deciding never matches here; only an unclaimed pending row does. `None`
+/// reports nothing to settle, which is what a duplicate report of a routed
+/// decision gets.
+pub async fn settle_engine_observed_approval(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+    worker_epoch: i64,
+    native_call_id: &str,
+    decision: ApprovalDecisionKind,
+    decided_at: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<ApprovalSettlement>> {
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !acquire_code_session_write_lock(&transaction, session_id).await? {
+        return Ok(None);
+    }
+    let Some(row) = entities::code_approval::Entity::find()
+        .filter(entities::code_approval::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_approval::Column::SessionId.eq(session_id.0))
+        .filter(entities::code_approval::Column::WorkerEpoch.eq(worker_epoch))
+        .filter(entities::code_approval::Column::NativeCallId.eq(native_call_id))
+        .filter(entities::code_approval::Column::State.eq(CodeApprovalState::Pending.as_str()))
+        .filter(entities::code_approval::Column::DecisionClaim.is_null())
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+    else {
+        return Ok(None);
+    };
+    let settlement = settle_approval_on_locked(
+        &transaction,
+        owner,
+        CodeApprovalId(row.id),
+        session_id,
+        worker_epoch,
+        ApprovalClaim::Unclaimed,
+        decision,
+        decided_at,
+    )
+    .await?;
+    transaction.commit().await.map_err(store_err)?;
+    Ok(settlement)
+}
+
 #[derive(Clone, Copy)]
 enum ApprovalClaim {
     Unclaimed,

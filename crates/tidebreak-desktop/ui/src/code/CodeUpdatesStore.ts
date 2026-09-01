@@ -155,6 +155,9 @@ export function reduceCodeUpdates(
       const conversationsByWorkspace: DigestsByWorkspace = {};
       const childrenByWorkspace: DigestsByWorkspace = {};
       for (const digest of action.sessions) {
+        // The rail is keyed by workspace. A session with none (the
+        // in-process engine's) has no row here until the surfaces merge.
+        if (digest.workspace === null) continue;
         const map =
           digest.kind === "watch"
             ? childrenByWorkspace
@@ -169,6 +172,7 @@ export function reduceCodeUpdates(
       };
     }
     case "digest": {
+      if (action.digest.workspace === null) return state;
       if (action.digest.kind === "watch") {
         return {
           ...state,
@@ -252,6 +256,7 @@ function upsertDigest(
   digest: CodeSessionDigest,
   dropEnded: boolean,
 ): DigestsByWorkspace {
+  if (digest.workspace === null) return map;
   const forWorkspace = { ...map[digest.workspace] };
   if (dropEnded && digest.lifecycle === "ended") {
     delete forWorkspace[digest.session];
@@ -834,7 +839,7 @@ function maybeBumpAgentNotifications(
   previous: CodeUpdatesState,
   digest: CodeSessionDigest,
 ): void {
-  if (digest.kind === "watch") return;
+  if (digest.kind === "watch" || digest.workspace === null) return;
   const prior =
     previous.conversationsByWorkspace[digest.workspace]?.[digest.session]
       ?.attention;
@@ -849,6 +854,7 @@ function maybeNotify(
   previous: CodeUpdatesState,
   digest: CodeSessionDigest,
 ): void {
+  if (digest.workspace === null) return;
   const prior =
     previous.conversationsByWorkspace[digest.workspace]?.[digest.session]
       ?.attention;

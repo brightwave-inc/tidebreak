@@ -32,14 +32,16 @@ impl CodeRuntime {
         workspace_id: WorkspaceId,
         kind: CodeSessionKind,
         harness: HarnessKind,
-        NewSessionSettings {
-            permission_mode,
-            model,
-            reasoning_effort,
-            fast_mode,
-            permission_mode_ceiling,
-        }: NewSessionSettings,
+        settings: NewSessionSettings,
     ) -> Result<CodeSession, ServerError> {
+        // A workspace selects an external engine; the in-process engine is
+        // what a session with no workspace gets (decision 0048 step 5).
+        if harness.is_in_process() {
+            return Err(ServerError::unprocessable_kind(
+                "harness_unavailable",
+                format!("{harness} does not run against a workspace"),
+            ));
+        }
         let lifecycle = self.workspace_lifecycle_lock(workspace_id);
         let _lifecycle_guard = lifecycle.lock().await;
         let workspace = self.get_workspace(owner, workspace_id).await?;
@@ -67,6 +69,67 @@ impl CodeRuntime {
                 ));
             }
         }
+        let session = self
+            .create_session_row(owner, Some(workspace_id), kind, harness, settings)
+            .await?;
+        // Pin where this session starts, before it can take a turn. Sessions
+        // share the worktree (record 55), so without a baseline the first
+        // turn's diff is the whole worktree against the base branch — a
+        // sibling's edits included.
+        if let Err(err) = record_session_baseline(
+            Path::new(&workspace.worktree_path),
+            workspace.id,
+            session.id,
+        )
+        .await
+        {
+            tracing::warn!(
+                session = %session.id,
+                workspace = %workspace.id,
+                error = %err,
+                "could not record the session baseline; its first turn diffs against the base ref"
+            );
+        }
+        self.attach_and_spawn_worker(session).await
+    }
+
+    /// Create a session that binds no workspace: a conversation the
+    /// in-process engine hosts (decision 0048 step 5). No checkout, no
+    /// baseline, and no shared worktree lock; the engine keeps its own
+    /// scratch under the session's private root.
+    pub(crate) async fn create_session_without_workspace(
+        &self,
+        owner: &OwnerId,
+        settings: NewSessionSettings,
+    ) -> Result<CodeSession, ServerError> {
+        let session = self
+            .create_session_row(
+                owner,
+                None,
+                CodeSessionKind::Interactive,
+                HarnessKind::Internal,
+                settings,
+            )
+            .await?;
+        self.attach_and_spawn_worker(session).await
+    }
+
+    /// Probe the engine, check the requested settings against what it
+    /// honors, and insert the row. Shared by every create path.
+    async fn create_session_row(
+        &self,
+        owner: &OwnerId,
+        workspace_id: Option<WorkspaceId>,
+        kind: CodeSessionKind,
+        harness: HarnessKind,
+        NewSessionSettings {
+            permission_mode,
+            model,
+            reasoning_effort,
+            fast_mode,
+            permission_mode_ceiling,
+        }: NewSessionSettings,
+    ) -> Result<CodeSession, ServerError> {
         let adapter = self.adapter(harness)?;
         #[cfg(not(test))]
         {
@@ -86,7 +149,7 @@ impl CodeRuntime {
                     false
                 }
             };
-            if !skip_pin {
+            if !skip_pin && !harness.is_in_process() {
                 match self.ensure_pinned_harness(harness, false).await {
                     Ok(binary) => {
                         self.record_pin_install(harness, Ok(()));
@@ -131,7 +194,7 @@ impl CodeRuntime {
             }
         }
         refuse_unhonored_mode(harness, permission_mode, &caps)?;
-        if probe.binary_path.is_none() {
+        if probe.binary_path.is_none() && !harness.is_in_process() {
             return Err(ServerError::unprocessable_kind(
                 "harness_not_found",
                 format!("{harness} has no path"),
@@ -177,25 +240,7 @@ impl CodeRuntime {
             created_at: Utc::now(),
         };
         insert_session(&self.db, &session).await?;
-        // Pin where this session starts, before it can take a turn. Sessions
-        // share the worktree (record 55), so without a baseline the first
-        // turn's diff is the whole worktree against the base branch — a
-        // sibling's edits included.
-        if let Err(err) = record_session_baseline(
-            Path::new(&workspace.worktree_path),
-            workspace.id,
-            session.id,
-        )
-        .await
-        {
-            tracing::warn!(
-                session = %session.id,
-                workspace = %workspace.id,
-                error = %err,
-                "could not record the session baseline; its first turn diffs against the base ref"
-            );
-        }
-        self.attach_and_spawn_worker(session).await
+        Ok(session)
     }
 
     pub(crate) async fn get_session(
@@ -326,7 +371,7 @@ impl CodeRuntime {
         if session.lifecycle == CodeSessionLifecycle::Ended {
             return Ok(());
         }
-        if let Ok(workspace) = self.get_workspace(owner, session.workspace_id).await {
+        if let Ok(Some(workspace)) = self.session_workspace(&session).await {
             if workspace.is_remote() {
                 self.cancel_remote_sandbox(&session).await;
             }
@@ -492,7 +537,7 @@ impl CodeRuntime {
     ) -> Result<fork::WrittenTranscript, ServerError> {
         let session = self.get_session(owner, session_id).await?;
         let workspace = self
-            .require_live_workspace(owner, session.workspace_id)
+            .require_live_workspace(owner, Self::require_workspace_id(&session)?)
             .await?;
         let private_root = crate::code::scratch::workspace_root(&self.data_dir, workspace.id)
             .map_err(|err| {

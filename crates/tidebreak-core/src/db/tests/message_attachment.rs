@@ -768,7 +768,7 @@ async fn pin_code_turn_attachment(store: &DbStore, blob: &DocumentBlob) {
         &CodeSession {
             id: session_id,
             owner: crate::OwnerId::local(),
-            workspace_id,
+            workspace_id: Some(workspace_id),
             kind: CodeSessionKind::Interactive,
             harness_kind: HarnessKind::ClaudeCode,
             harness_version: Some("scripted".into()),

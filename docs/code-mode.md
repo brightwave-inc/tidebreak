@@ -291,6 +291,21 @@ Process models the trait absorbs:
   [`0039`](decisions/0039-allow-is-a-first-class-code-permission-mode.md));
   capabilities honestly `Unsupported` or `Unknown` where its surface does not
   carry them.
+- **Internal** — Tidebreak's own agent loop, in-process, behind the same
+  contract ([`0048`](decisions/0048-one-interaction-model.md) step 5). A
+  session with no workspace selects it; a workspace never does. It spawns no
+  child, probes as found with no binary, and takes inference from the
+  server's own provider resolution. Its durable state is one engine-private
+  conversation per session, keyed by the session id, which owner-scoped chat
+  reads never list. Chat's continuations ride the contract as durable parks:
+  a user-questions card or a plan proposal ends the leg as `Parked`, and the
+  answer or plan decision resumes it through `resume_turn`. It declares
+  `durable_parks`, `user_questions`, and `standing_grants`; an approval it
+  decides on its own channel (a standing grant, the Auto judge) reaches the
+  journal as an engine-observed `ApprovalResolved`, and an accepted plan moves
+  the session to the plan's proposed mode inside the worker. Image input is
+  not wired yet, and the doctor does not list it: there is nothing to
+  install or sign in to.
 
 Session-long children spawn lazily on the first turn, and an idle session's
 child is parked — stopped, then respawned and resumed by the next turn
@@ -367,6 +382,9 @@ POST            /code/workspaces/{id}/restore        back from a reclaim tier (0
 POST            /code/workspaces/{id}/retry-setup    run setup again on the same worktree
 POST            /code/workspaces/{id}/sessions       {harness, permission_mode,
                                                      model?, reasoning_effort?, fast_mode?}
+POST            /code/sessions                       {permission_mode, model?,
+                                                     reasoning_effort?, fast_mode?}
+                                                     no workspace: the internal engine (0048)
 POST/GET        /code/sessions/{id}/turns            {message}  (queued while running —
                                                      the chat product's queue-default rule;
                                                      steering is the explicit alternative,

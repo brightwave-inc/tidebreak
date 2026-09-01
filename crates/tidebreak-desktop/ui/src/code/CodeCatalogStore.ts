@@ -294,6 +294,8 @@ export const useCodeCatalogStore = create<CodeCatalogStore>()((set, get) => ({
     });
   },
   rememberSession: (session) => {
+    // Remembered per workspace; a session with none has no slot here.
+    if (session.workspace_id === null) return;
     set({
       sessionsByWorkspace: {
         ...get().sessionsByWorkspace,

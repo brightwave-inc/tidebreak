@@ -171,6 +171,10 @@ async fn hosted_models(
             .into_iter()
             .map(|row| hosted_model(row, None))
             .collect()),
+        // The in-process engine takes its model from the chat model
+        // catalog, which the models routes already serve; it lists nothing
+        // of its own here.
+        HarnessKind::Internal => Ok(Vec::new()),
         HarnessKind::Opencode => {
             let anthropic = anthropic?;
             let openai = openai?;
@@ -214,7 +218,13 @@ async fn doctor(code: &ScopedCode) -> Result<HarnessDoctorReport, ServerError> {
     // Probe the kinds concurrently. A cold probe is a login shell plus a
     // version and an authentication subprocess, so a serial walk over the
     // harnesses is most of what this route costs on a cache miss.
+    // The doctor lists the engines a workspace can pick; the in-process
+    // engine is not one of them, and has no binary, pin, or sign-in to
+    // report on.
     let harnesses = futures::future::join_all(HarnessKind::ALL.iter().filter_map(|kind| {
+        if kind.is_in_process() {
+            return None;
+        }
         let adapter = code.adapters().get(*kind)?;
         Some(async move {
             let probe = code.probe(adapter.as_ref()).await;
