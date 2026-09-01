@@ -2329,6 +2329,7 @@ async fn bind_inner(
         state.active_turns.clone(),
         state.turn_job_wake.clone(),
         state.agent_run_wake.clone(),
+        state.queued_turn_wake.clone(),
         state.agent_config.clone(),
         Some(state.config.data_dir.join("scratch")),
         turn_worker::TurnWorkerConfig {
@@ -2401,20 +2402,16 @@ async fn bind_inner(
     };
 
     // Queued-message promotion: a light sweep, wake-driven with a slow floor.
+    // `state.queued_turn_wake` fires on enqueue, turn-terminal, unpause, and
+    // cancellation commits; the floor only covers a lost notification.
     // Try-based on the idempotent turn acceptance, so it needs no lease of its
     // own — see `routes::promote_queued_turns`.
     let queued_turn_promoter = {
         let state = state.clone();
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_millis(750));
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            loop {
-                tick.tick().await;
-                if let Err(error) = routes::promote_queued_turns(&state).await {
-                    tracing::error!("tidebreak: queued-turn promotion failed: {error:?}");
-                }
-            }
-        })
+        tokio::spawn(routes::run_queued_turn_promoter(
+            state,
+            std::time::Duration::from_secs(5),
+        ))
     };
     let server_store = state.store.clone();
     let data_dir = state.config.data_dir.clone();

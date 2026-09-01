@@ -183,6 +183,13 @@ pub struct AppState {
     /// This is only a latency hint; the worker always uses its durable claim
     /// scan as the correctness source after a missed or coalesced wake-up.
     pub(crate) agent_run_wake: Arc<Notify>,
+    /// Wakes the queued-turn promoter when a queued message may have become
+    /// promotable: a row was enqueued, a running turn reached a terminal
+    /// state, or a chat's queue pause was released.
+    ///
+    /// This is only a latency hint; the promoter's sweep stays the
+    /// correctness source behind a slow fallback tick.
+    pub(crate) queued_turn_wake: Arc<Notify>,
     /// Wakes the source-blob retirement worker after a reference drop commits.
     pub(crate) blob_retirement_wake: Arc<Notify>,
     /// Coordinates source publication and retirement across server processes.
@@ -427,6 +434,7 @@ impl AppState {
             provisioned_policy,
             turn_job_wake: Arc::new(Notify::new()),
             agent_run_wake: Arc::new(Notify::new()),
+            queued_turn_wake: Arc::new(Notify::new()),
             blob_retirement_wake: Arc::new(Notify::new()),
             blob_writes,
             file_preview_permits: Arc::new(Semaphore::new(2)),

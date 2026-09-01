@@ -1802,6 +1802,7 @@ async fn worker_renews_a_near_expiry_ambiguous_claim_before_execution() {
         state.active_turns.clone(),
         state.turn_job_wake.clone(),
         state.agent_run_wake.clone(),
+        state.queued_turn_wake.clone(),
         state.agent_config.clone(),
         None,
         turn_worker::TurnWorkerConfig {
@@ -1898,6 +1899,7 @@ async fn worker_heartbeats_while_event_journaling_is_blocked() {
         state.active_turns.clone(),
         state.turn_job_wake.clone(),
         state.agent_run_wake.clone(),
+        state.queued_turn_wake.clone(),
         state.agent_config.clone(),
         None,
         turn_worker::TurnWorkerConfig {
@@ -2216,6 +2218,7 @@ async fn cancellation_after_drive_result_persists_the_completed_model_step() {
         state.active_turns.clone(),
         state.turn_job_wake.clone(),
         state.agent_run_wake.clone(),
+        state.queued_turn_wake.clone(),
         state.agent_config.clone(),
         None,
         turn_worker::TurnWorkerConfig::default(),

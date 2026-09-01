@@ -3837,3 +3837,89 @@ async fn send_now_releases_a_paused_queue() {
     }
     panic!("send-now left rows in the queue");
 }
+
+/// The promoter is wake-driven: a message queued behind a running turn is
+/// promoted promptly once that turn completes, without waiting out the
+/// promoter's fallback tick.
+#[tokio::test]
+async fn queued_turn_promotes_on_completion_wake_without_the_fallback_tick() {
+    // The first turn parks in the provider, keeping the chat busy so the
+    // follow-up parks as a queued row instead of running immediately.
+    let gate = Arc::new(Notify::new());
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            dir.path().join("t.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let state = AppState::new(
+        Config::desktop(dir.path()),
+        store.clone(),
+        Arc::new(FixedResolver(Arc::new(GatedProvider {
+            gate: gate.clone(),
+        }))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        AgentConfig {
+            model: "gated".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let token = state.token.clone();
+    let router = app(state.clone());
+    spawn_turn_worker(&state);
+    // The real promoter loop, with a floor far beyond this test's timeout:
+    // only a wake can promote the row in time, so a promotion below proves
+    // the enqueue and turn-completion commits reach the promoter.
+    tokio::spawn(crate::routes::run_queued_turn_promoter(
+        state.clone(),
+        Duration::from_secs(300),
+    ));
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+
+    assert_eq!(
+        send_message_with_id(&router, &bearer, chat.id, TurnId::new(), "blocking turn").await,
+        StatusCode::ACCEPTED
+    );
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/chats/{}/messages", chat.id))
+                .header(header::AUTHORIZATION, bearer.as_str())
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "turn_id": TurnId::new(),
+                        "content": "queued follow-up",
+                        "queue": true,
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(
+        store.list_queued_turns(chat.id).await.unwrap().len(),
+        1,
+        "the follow-up did not park as a queued row"
+    );
+
+    // Let the blocking turn finish. Its terminal commit must wake the
+    // promoter, which drains the queued row long before the 300s floor.
+    gate.notify_one();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !store.list_queued_turns(chat.id).await.unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the queued message was not promoted off the completion wake");
+}
