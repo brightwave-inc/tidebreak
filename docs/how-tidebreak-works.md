@@ -779,10 +779,12 @@ new session and publish its tool surface only for subsequent turns.
 The `Profile::SelfHost` shape and PostgreSQL database implementation exist, and
 CI exercises the durable turn state machine against PostgreSQL. Document/blob
 PostgreSQL parity is not comprehensively tested, and production Postgres
-wiring, remote secret custody, object storage, and multi-process ownership
-remain future integration work. Building `tidebreak-server` with its `postgres`
-feature compiles the driver in; the store then opens from
-`TIDEBREAK_DATABASE_URL`.
+wiring, remote secret custody, and object storage remain future integration
+work. A self-host server holds a PostgreSQL advisory lease for its lifetime, so
+another process cannot start duplicate workers against the same database;
+horizontal multi-process serving remains unsupported. Building
+`tidebreak-server` with its `postgres` feature compiles the driver in; the store
+then opens from `TIDEBREAK_DATABASE_URL`.
 
 **Authorization — the gate this profile was blocked on (#853) — is built.**
 The pieces, each enforced where it cannot silently drift:
@@ -918,7 +920,7 @@ The main next steps are:
 - finish the self-host profile — the request path resolves a principal and
   queries are owner-scoped (#853), so what remains is production integration:
   Postgres document/blob parity, remote secret custody, object storage, and
-  multi-process ownership;
+  distributed ownership for horizontal multi-process serving;
 - add health-aware provider failover;
 - add output deletion, version history, richer formats, and durable export
   receipts without widening the native write boundary;

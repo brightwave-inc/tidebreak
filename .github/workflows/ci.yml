@@ -849,6 +849,10 @@ jobs:
         run: >-
           cargo test -p tidebreak-core --no-default-features --features postgres
           --test postgres_release_upgrade --locked
+      - name: Exercise self-host store ownership on PostgreSQL
+        run: >-
+          cargo test -p tidebreak-server --features postgres
+          --test postgres_store_ownership --locked
 
   self-host-build:
     name: self-host server build

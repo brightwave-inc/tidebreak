@@ -100,6 +100,7 @@ mod scripted_provider;
 pub mod secret_rehome;
 mod source_tools;
 mod state;
+mod store_ownership;
 mod task_plan_tool;
 mod turn_worker;
 mod view_frames;
@@ -1251,8 +1252,13 @@ pub struct Server {
     /// The one gateway runtime, handed to pairing so a registered pending
     /// pairing lands in the same slot the sign-in surface reads.
     gateway: Arc<gateway_runtime::GatewayRuntime>,
-    listener: TcpListener,
-    router: Router,
+    listener: Option<TcpListener>,
+    router: Option<Router>,
+    // Keep every process-local worker before `_store_ownership`. Rust drops
+    // fields in declaration order, so dropping an unserved `Server` aborts
+    // these tasks before it releases the PostgreSQL advisory lock.
+    _queued_turn_promoter: AbortTask,
+    _code_recovery: AbortTask,
     _turn_worker: AbortTask,
     _sandbox_agent_run_worker: AbortTask,
     _sandbox_container_run_worker: Option<AbortTask>,
@@ -1265,6 +1271,7 @@ pub struct Server {
     _approval_judge_worker: AbortTask,
     _mcp_supervisor: AbortTask,
     _gateway_model_sync: AbortTask,
+    _store_ownership: store_ownership::StoreOwnership,
     _instance_lock: InstanceLock,
     /// Removes `{data_dir}/listen.json` when this server drops.
     _listen_endpoint: listen_endpoint::ListenEndpointGuard,
@@ -1325,6 +1332,16 @@ impl Drop for AbortTask {
     }
 }
 
+impl AbortTask {
+    fn abort(&self) {
+        self.0.abort();
+    }
+
+    async fn wait(&mut self) {
+        let _ = (&mut self.0).await;
+    }
+}
+
 impl Server {
     /// The loopback address the server is listening on.
     pub fn local_addr(&self) -> SocketAddr {
@@ -1367,10 +1384,71 @@ impl Server {
     }
 
     /// Run the accept loop until the process exits.
-    pub async fn serve(self) -> Result<()> {
-        axum::serve(self.listener, self.router)
-            .await
-            .map_err(|e| AgentError::msg(format!("server error: {e}")))
+    pub async fn serve(mut self) -> Result<()> {
+        let listener = self
+            .listener
+            .take()
+            .expect("a bound server keeps its listener until serve");
+        let router = self
+            .router
+            .take()
+            .expect("a bound server keeps its router until serve");
+        let result = match &mut self._store_ownership {
+            store_ownership::StoreOwnership::Local => axum::serve(listener, router)
+                .await
+                .map_err(|error| AgentError::msg(format!("server error: {error}"))),
+            #[cfg(feature = "postgres")]
+            store_ownership::StoreOwnership::Postgres(ownership) => {
+                let server = async move { axum::serve(listener, router).await };
+                tokio::pin!(server);
+                tokio::select! {
+                    result = &mut server => {
+                        result.map_err(|error| {
+                            AgentError::msg(format!("server error: {error}"))
+                        })
+                    }
+                    error = ownership.wait_until_lost() => Err(error),
+                }
+            }
+        };
+        self.stop_workers().await;
+        result
+    }
+
+    async fn stop_workers(&mut self) {
+        self._queued_turn_promoter.abort();
+        self._code_recovery.abort();
+        self._turn_worker.abort();
+        self._sandbox_agent_run_worker.abort();
+        if let Some(worker) = &self._sandbox_container_run_worker {
+            worker.abort();
+        }
+        self._sandbox_web_search_worker.abort();
+        self._sandbox_task_plan_worker.abort();
+        self._sandbox_exec_worker.abort();
+        self._agent_run_scratch_reaper.abort();
+        self._blob_retirement_worker.abort();
+        self._blob_orphan_auditor.abort();
+        self._approval_judge_worker.abort();
+        self._mcp_supervisor.abort();
+        self._gateway_model_sync.abort();
+
+        self._queued_turn_promoter.wait().await;
+        self._code_recovery.wait().await;
+        self._turn_worker.wait().await;
+        self._sandbox_agent_run_worker.wait().await;
+        if let Some(worker) = &mut self._sandbox_container_run_worker {
+            worker.wait().await;
+        }
+        self._sandbox_web_search_worker.wait().await;
+        self._sandbox_task_plan_worker.wait().await;
+        self._sandbox_exec_worker.wait().await;
+        self._agent_run_scratch_reaper.wait().await;
+        self._blob_retirement_worker.wait().await;
+        self._blob_orphan_auditor.wait().await;
+        self._approval_judge_worker.wait().await;
+        self._mcp_supervisor.wait().await;
+        self._gateway_model_sync.wait().await;
     }
 }
 
@@ -1730,6 +1808,7 @@ async fn bind_inner(
     // approvals are durable, while one process still owns the complete data
     // directory and its worker set.
     let instance_lock = InstanceLock::acquire(&config)?;
+    let mut store_ownership = store_ownership::StoreOwnership::acquire(&config).await?;
     let sandbox_container_admission = sandbox_admission::resolve(&config);
     let sandbox_spawn_execution_location = sandbox_container_admission.execution_location;
     let db = connect_db(&config).await?;
@@ -2189,7 +2268,6 @@ async fn bind_inner(
             }
         })
     };
-    drop(queued_turn_promoter);
     let server_store = state.store.clone();
     let data_dir = state.config.data_dir.clone();
     let mcp_runtime = state.mcp.clone();
@@ -2202,6 +2280,11 @@ async fn bind_inner(
     let local_addr = listener
         .local_addr()
         .map_err(|e| AgentError::config(format!("no local address: {e}")))?;
+    // Binding builds the complete runtime before `serve` starts its periodic
+    // lease check. Recheck at the last safe point before recovery and workers
+    // start so a connection lost during boot cannot leave a duplicate runtime
+    // alive beside the process that acquires the released lease.
+    store_ownership.verify().await?;
     // Publish the loopback base and take the code-mode recovery pass, then run
     // it in the background. It has to come after the bind — a session
     // re-attached before the address is known comes back with no approval
@@ -2211,7 +2294,7 @@ async fn bind_inner(
     // turn submitted into it is refused with `session_worker_missing`; before,
     // the same wait was spent with the port closed and the app unusable.
     let code_recovery = code.start(format!("http://{local_addr}"));
-    tokio::spawn(async move {
+    let code_recovery = tokio::spawn(async move {
         if let Err(error) = code_recovery.await {
             tracing::warn!("code-mode recovery: {}", error.message());
         }
@@ -2257,8 +2340,10 @@ async fn bind_inner(
         code_execution,
         mcp: mcp_runtime,
         gateway: gateway_runtime,
-        listener,
-        router,
+        listener: Some(listener),
+        router: Some(router),
+        _queued_turn_promoter: AbortTask(queued_turn_promoter),
+        _code_recovery: AbortTask(code_recovery),
         _turn_worker: AbortTask(turn_worker),
         _sandbox_agent_run_worker: AbortTask(sandbox_agent_run_worker),
         _sandbox_container_run_worker: sandbox_container_run_worker.map(AbortTask),
@@ -2271,6 +2356,7 @@ async fn bind_inner(
         _approval_judge_worker: AbortTask(approval_judge_worker),
         _mcp_supervisor: AbortTask(mcp_supervisor),
         _gateway_model_sync: AbortTask(gateway_model_sync),
+        _store_ownership: store_ownership,
         _instance_lock: instance_lock,
         _listen_endpoint: listen_endpoint,
     })
