@@ -63,7 +63,7 @@ use crate::storage::{
     RequestToolApprovalOutcome, RequestTurnCancellationOutcome, ReservedQueuedTurnOutcome,
     ReservedTurnAcceptanceOutcome, ResolveSandboxToolCallOutcome, ResolveToolCallOutcome,
     ResumeTurnForAgentRunWaitSetOutcome, RetrySandboxToolCallOutcome, Store,
-    SubmitAgentRunResultOutcome, TurnLeaseFence,
+    SubmitAgentRunResultOutcome, TurnEventAppend, TurnLeaseFence,
 };
 use crate::PermissionMode;
 
@@ -2767,6 +2767,18 @@ impl Store for DbStore {
             event,
         )
         .await
+    }
+
+    async fn append_turn_events(
+        &self,
+        chat_id: ChatId,
+        turn_id: TurnId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<Utc>,
+        events: &[TurnEventAppend],
+    ) -> Result<Option<Vec<i64>>> {
+        ops::conversation::append_turn_events(self, chat_id, turn_id, lease_token, now, events)
+            .await
     }
 
     async fn recover_exact_turn_terminal_event(

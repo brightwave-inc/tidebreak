@@ -12,7 +12,7 @@ use cap_std::fs::{Dir, DirBuilder};
 #[cfg(unix)]
 use cap_std::fs::{DirBuilderExt as CapDirBuilderExt, PermissionsExt as CapPermissionsExt};
 use chrono::Utc;
-use futures::channel::mpsc::{unbounded, UnboundedReceiver};
+use futures::channel::mpsc::{unbounded, TryRecvError, UnboundedReceiver};
 use futures::StreamExt;
 use tidebreak_core::{
     Agent, AgentConfig, AgentError, AgentEvent, AgentRunExecutionLocation, AgentRunWaitCondition,
@@ -20,8 +20,9 @@ use tidebreak_core::{
     ClaimedAgentEvent, CompleteTurnRunOutcome, ForegroundAgentWaitRequest, MessageId,
     ParkTurnForAgentRunWaitSetOutcome, ParkTurnForClientCallOutcome, RecordTurnFailureOutcome,
     Result, SandboxAgentSpawnRequest, SandboxSpawnCheckpointRequest, SecretProvider,
-    SequencedEvent, Store, ToolRegistry, ToolScratch, TurnCheckpointProgress, TurnFailureRetry,
-    TurnId, TurnRun, TurnRunStatus, SPAWN_SANDBOX_AGENT_TOOL, WAIT_FOR_AGENTS_TOOL,
+    SequencedEvent, Store, ToolRegistry, ToolScratch, TurnCheckpointProgress, TurnEventAppend,
+    TurnFailureRetry, TurnId, TurnRun, TurnRunStatus, SPAWN_SANDBOX_AGENT_TOOL,
+    WAIT_FOR_AGENTS_TOOL,
 };
 use tokio::sync::{watch, Notify};
 
@@ -152,6 +153,136 @@ enum EventAppend {
     LeaseLost,
 }
 
+/// Ceiling on how many pending events one journal transaction carries.
+const EVENT_BATCH_MAX: usize = 64;
+
+/// How long a batch made only of streamed deltas waits for the next one before
+/// it is journaled. Short enough that a reader cannot tell, long enough that a
+/// provider streaming a token every few milliseconds shares one commit across
+/// several of them.
+const EVENT_BATCH_WINDOW: Duration = Duration::from_millis(25);
+
+/// What the worker loop takes off the claimed-turn event channel next.
+///
+/// The variants differ in size, but a value lives for one loop iteration on the
+/// streaming hot path, so boxing the smaller one would trade a few stack bytes
+/// for an allocation per emission.
+#[allow(clippy::large_enum_variant)]
+enum Emission {
+    /// Adjacent pending events with ascending ordinals, journaled together.
+    Pending(Vec<TurnEventAppend>),
+    /// Anything that is not a pending append: a committed or recovered event,
+    /// or a flush request.
+    Other(ClaimedAgentEvent),
+}
+
+/// Groups adjacent [`ClaimedAgentEvent::Pending`] emissions so the worker can
+/// journal them in one transaction.
+///
+/// The agent enqueues one emission per streamed chunk. Draining whatever is
+/// already buffered, and waiting a short window for more when the run so far is
+/// only streamed deltas, turns a transaction per delta into a transaction per
+/// burst while keeping every emission in channel order: a non-pending emission
+/// ends the run and is handed back on the next call.
+///
+/// `next` is cancel-safe. Every partially collected run and every looked-ahead
+/// emission lives on the batcher, so a `select!` that drops the future loses
+/// nothing.
+struct EmissionBatcher {
+    receiver: UnboundedReceiver<ClaimedAgentEvent>,
+    pending: Vec<TurnEventAppend>,
+    lookahead: Option<ClaimedAgentEvent>,
+    closed: bool,
+    window: Duration,
+}
+
+impl EmissionBatcher {
+    fn new(receiver: UnboundedReceiver<ClaimedAgentEvent>, window: Duration) -> Self {
+        Self {
+            receiver,
+            pending: Vec::new(),
+            lookahead: None,
+            closed: false,
+            window,
+        }
+    }
+
+    async fn next(&mut self) -> Option<Emission> {
+        if self.pending.is_empty() {
+            let first = match self.lookahead.take() {
+                Some(item) => item,
+                None if self.closed => return None,
+                None => match self.receiver.next().await {
+                    Some(item) => item,
+                    None => {
+                        self.closed = true;
+                        return None;
+                    }
+                },
+            };
+            match first {
+                ClaimedAgentEvent::Pending { ordinal, event } => self.push_pending(ordinal, event),
+                other => return Some(Emission::Other(other)),
+            }
+        }
+        loop {
+            if self.pending.len() >= EVENT_BATCH_MAX {
+                return Some(self.flush());
+            }
+            let item = match self.receiver.try_recv() {
+                Ok(item) => Some(item),
+                Err(TryRecvError::Closed) => {
+                    self.closed = true;
+                    None
+                }
+                Err(TryRecvError::Empty) if self.closed || !self.pending_is_only_deltas() => None,
+                Err(TryRecvError::Empty) => {
+                    match tokio::time::timeout(self.window, self.receiver.next()).await {
+                        Ok(Some(item)) => Some(item),
+                        Ok(None) => {
+                            self.closed = true;
+                            None
+                        }
+                        Err(_) => None,
+                    }
+                }
+            };
+            match item {
+                Some(ClaimedAgentEvent::Pending { ordinal, event }) => {
+                    self.push_pending(ordinal, event);
+                }
+                Some(other) => {
+                    self.lookahead = Some(other);
+                    return Some(self.flush());
+                }
+                None => return Some(self.flush()),
+            }
+        }
+    }
+
+    fn push_pending(&mut self, ordinal: i32, event: AgentEvent) {
+        self.pending.push(TurnEventAppend {
+            attempt_event_ordinal: ordinal,
+            event,
+        });
+    }
+
+    fn flush(&mut self) -> Emission {
+        Emission::Pending(std::mem::take(&mut self.pending))
+    }
+
+    fn pending_is_only_deltas(&self) -> bool {
+        self.pending.iter().all(|entry| {
+            matches!(
+                entry.event,
+                AgentEvent::TextDelta { .. }
+                    | AgentEvent::ReasoningDelta { .. }
+                    | AgentEvent::ToolCallArgsDelta { .. }
+            )
+        })
+    }
+}
+
 enum ClaimAction {
     Idle,
     Terminalized,
@@ -280,20 +411,47 @@ fn freeze_foreground_turn_surface_with_folders(
 async fn drain_committed_events(
     events: &EventBus,
     chat_id: tidebreak_core::ChatId,
-    emissions: &mut UnboundedReceiver<ClaimedAgentEvent>,
+    emissions: &mut EmissionBatcher,
 ) {
-    while let Some(emission) = emissions.next().await {
-        match emission {
-            ClaimedAgentEvent::Committed { event, .. } => {
-                let _ = events.sender(chat_id).send(event);
-            }
-            ClaimedAgentEvent::Recovered { .. } => {}
-            ClaimedAgentEvent::Flush(acknowledge) => {
-                let _ = acknowledge.send(());
-            }
-            ClaimedAgentEvent::Pending { .. } => {}
+    // Pending events the batcher collected but never journaled are discarded
+    // exactly like pending emissions still in the channel.
+    emissions.pending.clear();
+    let drain = |emission: ClaimedAgentEvent| match emission {
+        ClaimedAgentEvent::Committed { event, .. } => {
+            let _ = events.sender(chat_id).send(event);
         }
+        ClaimedAgentEvent::Recovered { .. } => {}
+        ClaimedAgentEvent::Flush(acknowledge) => {
+            let _ = acknowledge.send(());
+        }
+        ClaimedAgentEvent::Pending { .. } => {}
+    };
+    if let Some(emission) = emissions.lookahead.take() {
+        drain(emission);
     }
+    if emissions.closed {
+        return;
+    }
+    while let Some(emission) = emissions.receiver.next().await {
+        drain(emission);
+    }
+}
+
+/// Check that a pending run continues the attempt's ordinal sequence exactly
+/// and return how many ordinals it consumes.
+fn expect_ordinal_run(turn_id: TurnId, ordinal: i32, batch: &[TurnEventAppend]) -> Result<i32> {
+    let exhausted = || AgentError::msg(format!("turn {turn_id} event ordinal exhausted"));
+    let mut expected = ordinal;
+    for entry in batch {
+        if entry.attempt_event_ordinal != expected {
+            return Err(AgentError::msg(format!(
+                "turn {turn_id} emitted event ordinal {}, expected {expected}",
+                entry.attempt_event_ordinal
+            )));
+        }
+        expected = expected.checked_add(1).ok_or_else(exhausted)?;
+    }
+    i32::try_from(batch.len()).map_err(|_| exhausted())
 }
 
 fn client_checkpoint_is_valid(
@@ -1221,7 +1379,8 @@ impl TurnWorker {
                 agent = agent.with_blobs(blobs);
             }
             let chat = chat.clone();
-            let (events_tx, mut events_rx) = unbounded();
+            let (events_tx, events_rx) = unbounded();
+            let mut events_rx = EmissionBatcher::new(events_rx, EVENT_BATCH_WINDOW);
             let mut drive = AbortOnDrop(tokio::spawn(async move {
                 agent
                     .run_claimed_turn(&chat, turn.id, output_message_id, ordinal, &events_tx)
@@ -1239,26 +1398,21 @@ impl TurnWorker {
                     }
                     emission = events_rx.next(), if channel_open => {
                         match emission {
-                            Some(ClaimedAgentEvent::Pending { ordinal: event_ordinal, event }) => {
-                                if event_ordinal != ordinal {
-                                    return Err(AgentError::msg(format!(
-                                        "turn {} emitted event ordinal {event_ordinal}, expected {ordinal}",
-                                        turn.id
-                                    )));
-                                }
-                                match self.append_event(&turn, lease_token, event_ordinal, &event).await? {
+                            Some(Emission::Pending(batch)) => {
+                                let consumed = expect_ordinal_run(turn.id, ordinal, &batch)?;
+                                match self.append_events(&turn, lease_token, &batch).await? {
                                     EventAppend::Committed => {
-                                        ordinal = ordinal.checked_add(1).ok_or_else(|| {
+                                        ordinal = ordinal.checked_add(consumed).ok_or_else(|| {
                                             AgentError::msg(format!("turn {} event ordinal exhausted", turn.id))
                                         })?;
                                     }
                                     EventAppend::Cancelling => {
-                                        // The agent assigns ordinals before enqueueing. This
-                                        // emission is consumed even though cancellation won its
-                                        // append, so advance past it before draining any already
-                                        // buffered emissions. A later atomically committed event
-                                        // may legitimately follow this journal gap.
-                                        ordinal = ordinal.checked_add(1).ok_or_else(|| {
+                                        // The agent assigns ordinals before enqueueing. These
+                                        // emissions are consumed even though cancellation won
+                                        // their append, so advance past them before draining any
+                                        // already buffered emissions. A later atomically committed
+                                        // event may legitimately follow this journal gap.
+                                        ordinal = ordinal.checked_add(consumed).ok_or_else(|| {
                                             AgentError::msg(format!(
                                                 "turn {} event ordinal exhausted",
                                                 turn.id
@@ -1281,7 +1435,7 @@ impl TurnWorker {
                                     }
                                 }
                             }
-                            Some(ClaimedAgentEvent::Committed { ordinal: event_ordinal, event }) => {
+                            Some(Emission::Other(ClaimedAgentEvent::Committed { ordinal: event_ordinal, event })) => {
                                 if event_ordinal != ordinal {
                                     return Err(AgentError::msg(format!(
                                         "turn {} committed event ordinal {event_ordinal}, expected {ordinal}",
@@ -1293,7 +1447,7 @@ impl TurnWorker {
                                     AgentError::msg(format!("turn {} event ordinal exhausted", turn.id))
                                 })?;
                             }
-                            Some(ClaimedAgentEvent::Recovered { ordinal: event_ordinal, event: _ }) => {
+                            Some(Emission::Other(ClaimedAgentEvent::Recovered { ordinal: event_ordinal, event: _ })) => {
                                 if event_ordinal != ordinal {
                                     return Err(AgentError::msg(format!(
                                         "turn {} recovered event ordinal {event_ordinal}, expected {ordinal}",
@@ -1304,8 +1458,11 @@ impl TurnWorker {
                                     AgentError::msg(format!("turn {} event ordinal exhausted", turn.id))
                                 })?;
                             }
-                            Some(ClaimedAgentEvent::Flush(acknowledge)) => {
+                            Some(Emission::Other(ClaimedAgentEvent::Flush(acknowledge))) => {
                                 let _ = acknowledge.send(());
+                            }
+                            Some(Emission::Other(ClaimedAgentEvent::Pending { .. })) => {
+                                unreachable!("the batcher never hands back a pending emission alone")
                             }
                             None => channel_open = false,
                         }
@@ -2536,27 +2693,38 @@ impl TurnWorker {
         ordinal: i32,
         event: &AgentEvent,
     ) -> Result<EventAppend> {
+        let entry = TurnEventAppend {
+            attempt_event_ordinal: ordinal,
+            event: event.clone(),
+        };
+        self.append_events(turn, lease_token, std::slice::from_ref(&entry))
+            .await
+    }
+
+    /// Journal a run of pending events in one store transaction and publish
+    /// each one in order once the run commits.
+    async fn append_events(
+        &self,
+        turn: &TurnRun,
+        lease_token: uuid::Uuid,
+        events: &[TurnEventAppend],
+    ) -> Result<EventAppend> {
         loop {
             match self
                 .store
-                .append_turn_event(
-                    turn.chat_id,
-                    turn.id,
-                    lease_token,
-                    ordinal,
-                    Utc::now(),
-                    event,
-                )
+                .append_turn_events(turn.chat_id, turn.id, lease_token, Utc::now(), events)
                 .await
             {
-                Ok(Some(seq)) => {
-                    self.publish(
-                        turn.chat_id,
-                        SequencedEvent {
-                            seq,
-                            event: event.clone(),
-                        },
-                    );
+                Ok(Some(seqs)) => {
+                    for (entry, seq) in events.iter().zip(seqs) {
+                        self.publish(
+                            turn.chat_id,
+                            SequencedEvent {
+                                seq,
+                                event: entry.event.clone(),
+                            },
+                        );
+                    }
                     return Ok(EventAppend::Committed);
                 }
                 Ok(None) => match self.lease_state_retry(turn, lease_token).await {
@@ -3448,7 +3616,7 @@ mod committed_event_drain_tests {
         let events = EventBus::default();
         let chat_id = tidebreak_core::ChatId::new();
         let mut live = events.subscribe(chat_id);
-        let (sender, mut receiver) = unbounded();
+        let (sender, receiver) = unbounded();
         sender
             .unbounded_send(ClaimedAgentEvent::Pending {
                 ordinal: 2,
@@ -3471,6 +3639,7 @@ mod committed_event_drain_tests {
             })
             .unwrap();
         drop(sender);
+        let mut receiver = EmissionBatcher::new(receiver, Duration::ZERO);
 
         drain_committed_events(&events, chat_id, &mut receiver).await;
 
@@ -3479,6 +3648,192 @@ mod committed_event_drain_tests {
             live.try_recv(),
             Err(tokio::sync::broadcast::error::TryRecvError::Empty)
         ));
+    }
+
+    fn pending_delta(ordinal: i32, text: &str) -> ClaimedAgentEvent {
+        ClaimedAgentEvent::Pending {
+            ordinal,
+            event: AgentEvent::TextDelta { text: text.into() },
+        }
+    }
+
+    fn batch_texts(emission: Option<Emission>) -> Vec<(i32, String)> {
+        match emission {
+            Some(Emission::Pending(batch)) => batch
+                .into_iter()
+                .map(|entry| match entry.event {
+                    AgentEvent::TextDelta { text } => (entry.attempt_event_ordinal, text),
+                    other => panic!("unexpected batched event {other:?}"),
+                })
+                .collect(),
+            other => panic!("expected a pending batch, got {}", describe(other.as_ref())),
+        }
+    }
+
+    fn describe(emission: Option<&Emission>) -> &'static str {
+        match emission {
+            None => "closed channel",
+            Some(Emission::Pending(_)) => "pending batch",
+            Some(Emission::Other(ClaimedAgentEvent::Committed { .. })) => "committed",
+            Some(Emission::Other(ClaimedAgentEvent::Recovered { .. })) => "recovered",
+            Some(Emission::Other(ClaimedAgentEvent::Flush(_))) => "flush",
+            Some(Emission::Other(ClaimedAgentEvent::Pending { .. })) => "lone pending",
+        }
+    }
+
+    /// Adjacent pending deltas already buffered on the channel come off as one
+    /// batch, and the emission that ends the run is handed back next, in order.
+    #[tokio::test]
+    async fn batcher_groups_adjacent_pending_events_and_preserves_order() {
+        let (sender, receiver) = unbounded();
+        let mut batcher = EmissionBatcher::new(receiver, Duration::ZERO);
+        for (ordinal, text) in [(2, "Hel"), (3, "lo"), (4, ", ")] {
+            sender.unbounded_send(pending_delta(ordinal, text)).unwrap();
+        }
+        let committed = SequencedEvent {
+            seq: 9,
+            event: AgentEvent::UserSteered {
+                message_id: MessageId::new(),
+                content: "steer".into(),
+            },
+        };
+        sender
+            .unbounded_send(ClaimedAgentEvent::Committed {
+                ordinal: 5,
+                event: committed.clone(),
+            })
+            .unwrap();
+        sender.unbounded_send(pending_delta(6, "world")).unwrap();
+        let (acknowledge, acknowledged) = futures::channel::oneshot::channel();
+        sender
+            .unbounded_send(ClaimedAgentEvent::Flush(acknowledge))
+            .unwrap();
+        drop(sender);
+
+        assert_eq!(
+            batch_texts(batcher.next().await),
+            vec![
+                (2, "Hel".to_owned()),
+                (3, "lo".to_owned()),
+                (4, ", ".to_owned())
+            ]
+        );
+        match batcher.next().await {
+            Some(Emission::Other(ClaimedAgentEvent::Committed { ordinal, event })) => {
+                assert_eq!(ordinal, 5);
+                assert_eq!(event, committed);
+            }
+            other => panic!(
+                "expected the committed event, got {}",
+                describe(other.as_ref())
+            ),
+        }
+        assert_eq!(
+            batch_texts(batcher.next().await),
+            vec![(6, "world".to_owned())]
+        );
+        match batcher.next().await {
+            Some(Emission::Other(ClaimedAgentEvent::Flush(acknowledge))) => {
+                acknowledge.send(()).unwrap();
+            }
+            other => panic!("expected the flush, got {}", describe(other.as_ref())),
+        }
+        acknowledged.await.unwrap();
+        assert!(batcher.next().await.is_none());
+        assert!(
+            batcher.next().await.is_none(),
+            "a closed batcher stays closed"
+        );
+    }
+
+    /// A run made only of streamed deltas waits the window for the next one; a
+    /// run holding anything else is journaled as soon as the channel is empty.
+    #[tokio::test]
+    async fn batcher_waits_for_more_deltas_but_not_behind_other_events() {
+        let (sender, receiver) = unbounded();
+        let mut batcher = EmissionBatcher::new(receiver, Duration::from_secs(5));
+        sender.unbounded_send(pending_delta(1, "a")).unwrap();
+        let late_sender = sender.clone();
+        let late = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            late_sender.unbounded_send(pending_delta(2, "b")).unwrap();
+            late_sender
+                .unbounded_send(ClaimedAgentEvent::Pending {
+                    ordinal: 3,
+                    event: AgentEvent::StreamInterrupted,
+                })
+                .unwrap();
+        });
+        let first = tokio::time::timeout(Duration::from_secs(2), batcher.next())
+            .await
+            .expect("a non-delta emission ends the wait before the window elapses");
+        late.await.unwrap();
+        match first {
+            Some(Emission::Pending(batch)) => {
+                assert_eq!(
+                    batch
+                        .iter()
+                        .map(|entry| entry.attempt_event_ordinal)
+                        .collect::<Vec<_>>(),
+                    vec![1, 2, 3],
+                    "the late delta and the interrupt joined the open batch"
+                );
+                assert!(matches!(batch[2].event, AgentEvent::StreamInterrupted));
+            }
+            other => panic!("expected a pending batch, got {}", describe(other.as_ref())),
+        }
+
+        sender
+            .unbounded_send(ClaimedAgentEvent::Pending {
+                ordinal: 4,
+                event: AgentEvent::StreamInterrupted,
+            })
+            .unwrap();
+        let second = tokio::time::timeout(Duration::from_millis(500), batcher.next())
+            .await
+            .expect("a run without deltas does not wait for the window");
+        assert_eq!(
+            match second {
+                Some(Emission::Pending(batch)) => batch.len(),
+                other => panic!("expected a pending batch, got {}", describe(other.as_ref())),
+            },
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn batcher_caps_one_transaction_at_the_batch_ceiling() {
+        let (sender, receiver) = unbounded();
+        let mut batcher = EmissionBatcher::new(receiver, Duration::ZERO);
+        let total = i32::try_from(EVENT_BATCH_MAX).unwrap() + 3;
+        for ordinal in 1..=total {
+            sender.unbounded_send(pending_delta(ordinal, "x")).unwrap();
+        }
+        drop(sender);
+
+        assert_eq!(batch_texts(batcher.next().await).len(), EVENT_BATCH_MAX);
+        let tail = batch_texts(batcher.next().await);
+        assert_eq!(tail.len(), 3);
+        assert_eq!(tail[0].0, i32::try_from(EVENT_BATCH_MAX).unwrap() + 1);
+        assert!(batcher.next().await.is_none());
+    }
+
+    #[test]
+    fn ordinal_run_must_continue_the_attempt_exactly() {
+        let turn = TurnId::new();
+        let run = |ordinals: &[i32]| {
+            ordinals
+                .iter()
+                .map(|ordinal| TurnEventAppend {
+                    attempt_event_ordinal: *ordinal,
+                    event: AgentEvent::TextDelta { text: "x".into() },
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(expect_ordinal_run(turn, 4, &run(&[4, 5, 6])).unwrap(), 3);
+        assert!(expect_ordinal_run(turn, 4, &run(&[5, 6])).is_err());
+        assert!(expect_ordinal_run(turn, 4, &run(&[4, 6])).is_err());
+        assert!(expect_ordinal_run(turn, i32::MAX - 1, &run(&[i32::MAX - 1, i32::MAX])).is_err());
     }
 
     #[test]

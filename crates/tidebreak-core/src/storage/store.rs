@@ -3147,6 +3147,48 @@ pub trait Store: Send + Sync {
         turn_storage_unavailable()
     }
 
+    /// Append a run of nonterminal events owned by one live turn attempt in a
+    /// single transaction.
+    ///
+    /// Each entry carries the same `(lease_token, attempt_event_ordinal)`
+    /// identity as [`append_turn_event`](Self::append_turn_event) and follows
+    /// the same rules; ordinals must ascend within the batch. Stores that
+    /// override this commit the whole run under one chat write lock, one turn
+    /// write lock, and one lease check, so a streaming turn that produces many
+    /// small text deltas does not pay a transaction per delta. The default
+    /// appends one at a time and stops at the first entry the lease no longer
+    /// owns.
+    ///
+    /// Returns the sequence assigned to each entry, in order, or `None` when
+    /// the attempt no longer owns a live running lease.
+    async fn append_turn_events(
+        &self,
+        chat_id: ChatId,
+        turn_id: TurnId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+        events: &[TurnEventAppend],
+    ) -> Result<Option<Vec<i64>>> {
+        let mut seqs = Vec::with_capacity(events.len());
+        for entry in events {
+            match self
+                .append_turn_event(
+                    chat_id,
+                    turn_id,
+                    lease_token,
+                    entry.attempt_event_ordinal,
+                    now,
+                    &entry.event,
+                )
+                .await?
+            {
+                Some(seq) => seqs.push(seq),
+                None => return Ok(None),
+            }
+        }
+        Ok(Some(seqs))
+    }
+
     /// Recover a terminal event only when it was committed by this exact lease
     /// with the byte-equivalent payload.
     ///

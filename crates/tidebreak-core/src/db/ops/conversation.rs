@@ -20,7 +20,7 @@ use crate::provider::MessageReasoning;
 use crate::storage::{
     ChatTerminalTurnSnapshot, ChatTerminalTurnStatus, ChatToolActivitySnapshot,
     ChatToolActivityStatus, ChatTranscriptSnapshot, DeleteChatOutcome, MessageInvokedSkills,
-    MoveChatOutcome,
+    MoveChatOutcome, TurnEventAppend,
 };
 use crate::PermissionMode;
 
@@ -1447,6 +1447,40 @@ pub(in crate::db) async fn append_turn_event(
     now: chrono::DateTime<Utc>,
     event: &AgentEvent,
 ) -> Result<Option<i64>> {
+    let entry = TurnEventAppend {
+        attempt_event_ordinal,
+        event: event.clone(),
+    };
+    Ok(append_turn_events(
+        store,
+        chat_id,
+        turn_id,
+        lease_token,
+        now,
+        std::slice::from_ref(&entry),
+    )
+    .await?
+    .map(|seqs| seqs[0]))
+}
+
+/// Journal a run of nonterminal turn events under one transaction.
+///
+/// The chat write lock, turn write lock, and lease check are taken once for the
+/// whole run, so a streaming turn pays one commit for however many text deltas
+/// arrived together instead of one per delta. Every entry is still identified
+/// by `(lease_token, attempt_event_ordinal)`: an entry whose identity already
+/// exists with the same payload recovers its original sequence, and one that
+/// exists with different data is an error. A batch that mixes recovered and
+/// fresh entries validates the lease before inserting the fresh ones, exactly
+/// as a single append would.
+pub(in crate::db) async fn append_turn_events(
+    store: &DbStore,
+    chat_id: ChatId,
+    turn_id: TurnId,
+    lease_token: uuid::Uuid,
+    now: chrono::DateTime<Utc>,
+    events: &[TurnEventAppend],
+) -> Result<Option<Vec<i64>>> {
     if turn_id.0.is_nil() {
         return Err(AgentError::Store("event turn id must not be nil".into()));
     }
@@ -1455,30 +1489,39 @@ pub(in crate::db) async fn append_turn_event(
             "event lease token must not be nil".into(),
         ));
     }
-    if !(1..i32::MAX).contains(&attempt_event_ordinal) {
+    if events.is_empty() {
         return Err(AgentError::Store(
-            "attempt event ordinal must be positive and below the terminal slot".into(),
+            "turn event batch must carry at least one event".into(),
         ));
     }
-    if matches!(
-        event,
-        AgentEvent::TurnCompleted { .. }
-            | AgentEvent::TurnRefused { .. }
-            | AgentEvent::TurnFailed { .. }
-            | AgentEvent::TurnCancelled { .. }
-    ) {
-        return Err(AgentError::Store(
-            "terminal turn events must be committed by turn resolution".into(),
-        ));
-    }
-    if let AgentEvent::TurnStarted {
-        turn_id: payload_turn_id,
-    } = event
-    {
-        if *payload_turn_id != turn_id {
-            return Err(AgentError::Store(format!(
-                "turn-started event names {payload_turn_id}, not authoritative turn {turn_id}"
-            )));
+    let mut previous_ordinal = None;
+    for entry in events {
+        let attempt_event_ordinal = entry.attempt_event_ordinal;
+        if !(1..i32::MAX).contains(&attempt_event_ordinal) {
+            return Err(AgentError::Store(
+                "attempt event ordinal must be positive and below the terminal slot".into(),
+            ));
+        }
+        if previous_ordinal.is_some_and(|previous| attempt_event_ordinal <= previous) {
+            return Err(AgentError::Store(
+                "turn event batch ordinals must ascend".into(),
+            ));
+        }
+        previous_ordinal = Some(attempt_event_ordinal);
+        if is_terminal_event(&entry.event) {
+            return Err(AgentError::Store(
+                "terminal turn events must be committed by turn resolution".into(),
+            ));
+        }
+        if let AgentEvent::TurnStarted {
+            turn_id: payload_turn_id,
+        } = &entry.event
+        {
+            if *payload_turn_id != turn_id {
+                return Err(AgentError::Store(format!(
+                    "turn-started event names {payload_turn_id}, not authoritative turn {turn_id}"
+                )));
+            }
         }
     }
     let now = canonical_db_timestamp(now)?;
@@ -1492,28 +1535,46 @@ pub(in crate::db) async fn append_turn_event(
         return Ok(None);
     }
 
-    if let Some(existing) = entities::event::Entity::find()
+    let existing = entities::event::Entity::find()
         .filter(entities::event::Column::LeaseToken.eq(lease_token))
-        .filter(entities::event::Column::AttemptEventOrdinal.eq(attempt_event_ordinal))
-        .one(&transaction)
+        .filter(
+            entities::event::Column::AttemptEventOrdinal
+                .is_in(events.iter().map(|entry| entry.attempt_event_ordinal)),
+        )
+        .all(&transaction)
         .await
-        .map_err(store_err)?
-    {
-        let payload = serde_json::from_value::<AgentEvent>(existing.payload.clone())?;
-        if existing.chat_id != chat_id.0
-            || existing.turn_id != Some(turn_id.0)
-            || existing.lease_token != Some(lease_token)
-            || existing.attempt_event_ordinal != Some(attempt_event_ordinal)
-            || existing.terminal
-            || payload != *event
+        .map_err(store_err)?;
+    let mut recovered: HashMap<i32, i64> = HashMap::with_capacity(existing.len());
+    for row in existing {
+        let Some(attempt_event_ordinal) = row.attempt_event_ordinal else {
+            continue;
+        };
+        let Some(entry) = events
+            .iter()
+            .find(|entry| entry.attempt_event_ordinal == attempt_event_ordinal)
+        else {
+            continue;
+        };
+        let payload = serde_json::from_value::<AgentEvent>(row.payload.clone())?;
+        if row.chat_id != chat_id.0
+            || row.turn_id != Some(turn_id.0)
+            || row.lease_token != Some(lease_token)
+            || row.terminal
+            || payload != entry.event
         {
             return Err(AgentError::Store(format!(
                 "turn event identity ({lease_token}, {attempt_event_ordinal}) was reused with different data"
             )));
         }
-        let seq = existing.seq;
+        recovered.insert(attempt_event_ordinal, row.seq);
+    }
+    if recovered.len() == events.len() {
+        let seqs = events
+            .iter()
+            .map(|entry| recovered[&entry.attempt_event_ordinal])
+            .collect();
         transaction.commit().await.map_err(store_err)?;
-        return Ok(Some(seq));
+        return Ok(Some(seqs));
     }
 
     let Some(claim) = entities::turn_claim::Entity::find_by_id(lease_token)
@@ -1551,18 +1612,32 @@ pub(in crate::db) async fn append_turn_event(
         return Ok(None);
     }
 
-    let seq = append_event_on(
-        &transaction,
-        chat_id,
-        Some(turn_id),
-        Some(lease_token),
-        Some(attempt_event_ordinal),
-        None,
-        event,
-    )
-    .await?;
+    let mut next_seq = next_event_seq(&transaction, chat_id).await?;
+    let mut seqs = Vec::with_capacity(events.len());
+    for entry in events {
+        if let Some(seq) = recovered.get(&entry.attempt_event_ordinal) {
+            seqs.push(*seq);
+            continue;
+        }
+        let seq = next_seq;
+        next_seq = next_seq.checked_add(1).ok_or_else(|| {
+            AgentError::Store(format!("event sequence exhausted for chat {chat_id}"))
+        })?;
+        insert_event_row(
+            &transaction,
+            chat_id,
+            seq,
+            Some(turn_id),
+            Some(lease_token),
+            Some(entry.attempt_event_ordinal),
+            None,
+            &entry.event,
+        )
+        .await?;
+        seqs.push(seq);
+    }
     transaction.commit().await.map_err(store_err)?;
-    Ok(Some(seq))
+    Ok(Some(seqs))
 }
 
 pub(in crate::db::ops) async fn append_event_on<C>(
@@ -1577,15 +1652,50 @@ pub(in crate::db::ops) async fn append_event_on<C>(
 where
     C: ConnectionTrait,
 {
+    let seq = next_event_seq(conn, chat_id).await?;
+    insert_event_row(
+        conn,
+        chat_id,
+        seq,
+        turn_id,
+        lease_token,
+        attempt_event_ordinal,
+        scan_token,
+        event,
+    )
+    .await?;
+    Ok(seq)
+}
+
+/// The sequence the next event appended to this chat takes.
+async fn next_event_seq<C>(conn: &C, chat_id: ChatId) -> Result<i64>
+where
+    C: ConnectionTrait,
+{
     let last = entities::event::Entity::find()
         .filter(entities::event::Column::ChatId.eq(chat_id.0))
         .order_by_desc(entities::event::Column::Seq)
         .one(conn)
         .await
         .map_err(store_err)?;
-    let seq = last
-        .map_or(Some(1), |model| model.seq.checked_add(1))
-        .ok_or_else(|| AgentError::Store(format!("event sequence exhausted for chat {chat_id}")))?;
+    last.map_or(Some(1), |model| model.seq.checked_add(1))
+        .ok_or_else(|| AgentError::Store(format!("event sequence exhausted for chat {chat_id}")))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_event_row<C>(
+    conn: &C,
+    chat_id: ChatId,
+    seq: i64,
+    turn_id: Option<TurnId>,
+    lease_token: Option<uuid::Uuid>,
+    attempt_event_ordinal: Option<i32>,
+    scan_token: Option<uuid::Uuid>,
+    event: &AgentEvent,
+) -> Result<()>
+where
+    C: ConnectionTrait,
+{
     entities::event::ActiveModel {
         chat_id: Set(chat_id.0),
         seq: Set(seq),
@@ -1600,7 +1710,7 @@ where
     .insert(conn)
     .await
     .map_err(store_err)?;
-    Ok(seq)
+    Ok(())
 }
 
 fn is_terminal_event(event: &AgentEvent) -> bool {

@@ -336,7 +336,7 @@ pub use storage::{
     ReservedTurnAcceptanceOutcome, ResolveSandboxToolCallOutcome, ResolveToolCallOutcome,
     ResumeTurnForAgentRunWaitSetOutcome, RetrySandboxToolCallOutcome, SandboxAdmissionMode,
     SandboxProvision, SandboxProvisionState, SecretProvider, Store, SubmitAgentRunResultOutcome,
-    TurnLeaseFence, MAX_PENDING_ROOT_ATTACHMENT_CHANGES,
+    TurnEventAppend, TurnLeaseFence, MAX_PENDING_ROOT_ATTACHMENT_CHANGES,
 };
 pub use task_plan::{
     open_task_plan_steps, parse_update_task_plan_arguments, sandbox_update_task_plan_tool_spec,
