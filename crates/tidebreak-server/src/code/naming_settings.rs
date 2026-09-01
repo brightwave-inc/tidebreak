@@ -9,18 +9,13 @@ pub(crate) const AUTO_RENAME_BRANCHES_KEY: &str = "code.git.auto_rename_branches
 pub(crate) const BRANCH_PREFIX_MODE_KEY: &str = "code.git.branch_prefix_mode";
 pub(crate) const CUSTOM_BRANCH_PREFIX_KEY: &str = "code.git.custom_branch_prefix";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum BranchPrefixMode {
+    #[default]
     Account,
     Custom,
     None,
-}
-
-impl Default for BranchPrefixMode {
-    fn default() -> Self {
-        Self::Account
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]

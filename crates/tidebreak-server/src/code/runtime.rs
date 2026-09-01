@@ -2499,10 +2499,8 @@ impl CodeRuntime {
     /// The forge login used for account-prefixed branches, when one is known.
     pub(crate) async fn branch_account_name(&self, owner: &OwnerId) -> Option<String> {
         #[cfg(test)]
-        if self.git_credentials().is_none() {
-            // Tests must not inherit the developer machine's `gh` login.
-            return None;
-        }
+        // Tests must not inherit the developer machine's `gh` login.
+        self.git_credentials()?;
         if let Some(lender) = self.git_credentials() {
             let identity = lender.git_forge_identity(owner).await.ok()?;
             return match identity.attribution {
