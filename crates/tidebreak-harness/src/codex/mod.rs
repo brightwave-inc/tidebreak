@@ -432,7 +432,7 @@ pub(crate) fn auth_override_present(env: &[(std::ffi::OsString, std::ffi::OsStri
 pub(crate) fn observe_auth_override(
     env: &[(std::ffi::OsString, std::ffi::OsString)],
 ) -> Option<crate::AuthOverrideSignal> {
-    if crate::probe::env_sets_any(env, &["OPENAI_API_KEY", "OPENAI_BASE_URL"]) {
+    if crate::probe::env_sets_any(env, crate::probe::CODEX_AUTH_ENV_VARS) {
         return Some(crate::AuthOverrideSignal::Environment);
     }
     config_declares_model_provider(env).then_some(crate::AuthOverrideSignal::EngineConfig)

@@ -86,14 +86,10 @@ fn read_settings(env: &[(std::ffi::OsString, std::ffi::OsString)]) -> Option<ser
 }
 
 /// Environment variables that authenticate or reroute Claude Code without
-/// the vendor login [`observe_auth`] observes.
-const AUTH_OVERRIDE_VARS: &[&str] = &[
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_AUTH_TOKEN",
-    "ANTHROPIC_BASE_URL",
-    "CLAUDE_CODE_USE_BEDROCK",
-    "CLAUDE_CODE_USE_VERTEX",
-];
+/// the vendor login [`observe_auth`] observes. Defined next to the child
+/// allowlist in [`crate::probe`] so a name detection counts as working auth
+/// is guaranteed to reach the spawned engine child.
+const AUTH_OVERRIDE_VARS: &[&str] = crate::probe::CLAUDE_AUTH_ENV_VARS;
 
 /// Whether this environment could authenticate Claude Code without the
 /// vendor login [`observe_auth`] observes: an API key, auth token, or
