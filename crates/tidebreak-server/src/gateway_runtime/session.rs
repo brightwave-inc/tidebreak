@@ -32,7 +32,7 @@ pub(crate) async fn retire_superseded_gateway_session(
 ) -> Result<()> {
     /// Long enough for a healthy gateway to answer a revoke, short enough
     /// that a dead one is a hiccup at boot rather than a hang.
-    pub(super) const REVOKE_TIMEOUT: Duration = Duration::from_secs(5);
+    const REVOKE_TIMEOUT: Duration = Duration::from_secs(5);
 
     let vault = CredentialVault::new(secrets.clone());
     let Ok(Some(credentials)) = vault.load().await else {
@@ -80,9 +80,7 @@ pub(super) fn same_gateway_session(
     left: &crate::connectors::GatewayCredentials,
     right: &crate::connectors::GatewayCredentials,
 ) -> bool {
-    pub(super) fn durable(
-        credentials: &crate::connectors::GatewayCredentials,
-    ) -> Option<serde_json::Value> {
+    fn durable(credentials: &crate::connectors::GatewayCredentials) -> Option<serde_json::Value> {
         let mut value = serde_json::to_value(credentials).ok()?;
         value.as_object_mut()?.remove("access_tokens");
         Some(value)
