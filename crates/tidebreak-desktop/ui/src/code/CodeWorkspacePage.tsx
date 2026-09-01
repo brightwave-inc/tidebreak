@@ -1,91 +1,26 @@
-import {
-  DndContext,
-  DragOverlay,
-  PointerSensor,
-  closestCenter,
-  pointerWithin,
-  useDroppable,
-  useSensor,
-  useSensors,
-  type CollisionDetection,
-  type DragEndEvent,
-  type PointerSensorOptions,
-} from "@dnd-kit/core";
-import {
-  lazy,
-  Suspense,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  useSyncExternalStore,
-  type PointerEvent as ReactPointerEvent,
-  type ReactNode,
-} from "react";
-import { ArrowDown, Bot, CircleDotDashed } from "lucide-react";
-import { useDefaultLayout, useGroupRef } from "react-resizable-panels";
-import { toast } from "sonner";
-
-import type { ApiClient } from "../api/client";
-import type {
-  Attention,
-  CodeApprovalSnapshot,
-  CodeForkTranscript,
-  PermissionMode,
-  CodeRepoSnapshot,
-  CodeSessionSnapshot,
-  CodeSubagentStatus,
-  CodeSubagentSummary,
-  CodeWatchSnapshot,
-  CodeWorkspaceSnapshot,
-  HarnessKind,
-  ModelInfo,
-  ReasoningEffort,
-} from "../api/types";
-import { useNavigate, useSearch } from "@tanstack/react-router";
-
-import { useApp } from "@/AppContext";
-import { copyPlainText } from "@/ClipboardCopyButton";
-import { attachedRemotely } from "@/host";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
-  ResizableHandle,
-  ResizablePanel,
-  ResizablePanelGroup,
-} from "@/components/ui/resizable";
-import { Skeleton } from "@/components/ui/skeleton";
-import { PanelLayout } from "@/panel/PanelLayout";
-import type { LayoutState, PanelContent } from "@/panel/panelTypes";
-import { useLayoutState, usePanelNav } from "@/panel/usePanelNav";
-import { RouteFrame } from "@/RouteFrame";
-import { QueueTray, useCodeQueueApi } from "@/QueueTray";
-import { useRefreshSignals } from "@/RefreshSignals";
-import { followScrollBehavior } from "@/ChatScroll";
-import { useStreamStalled } from "@/useStreamStalled";
-import { useTranscriptFollow } from "@/useTranscriptFollow";
-import { cn, friendlyErrorMessage } from "@/lib/utils";
-import { ErrorBoundary } from "@/ErrorBoundary";
-import { MarkdownLinkProvider } from "@/MessageMarkdown";
-import { usePortalOverlayOpen } from "@/lib/usePortalOverlayOpen";
+  centerEditorTabId,
+  CenterTabIcon,
+  centerTabParts,
+  CHAT_PANEL_ID,
+  CodeCenterTabs,
+  type CodeConversationTab,
+  conversationTabId,
+  EDITOR_PANEL_ID,
+  SPLIT_EDITOR_PANEL_ID,
+} from "./CodeCenterTabs";
 import {
-  SHELL_SHORTCUTS,
-  shortcutKeycaps,
-  usesCommandModifier,
-  type ShellShortcutAction,
-} from "@/ShellShortcuts";
-import { AttentionBadge } from "./AttentionBadge";
-import { attentionMarkForDigest, STATUS_MARK } from "./statusTone";
-import {
-  codeBrowserIds,
-  codeTerminalIds,
+  adoptCodeTerminalId,
   closeAllEditorTabs,
   closeCodeChromeTab,
   closeEditorTab,
   closeEditorTabsToRight,
   closeOtherEditorTabs,
+  codeBrowserIds,
   type CodeEditorRegion,
+  codeTerminalIds,
+  findCodeTerminalTab,
   focusCodeChromeTab,
   focusConversation,
   focusedEditorPosition,
@@ -94,96 +29,23 @@ import {
   moveEditorTab,
   openCodeEditor,
   removedCodeBrowserIds,
+  removedCodeTerminalIds,
   reorderEditorTab,
   splitCodeChromeLayout,
-  adoptCodeTerminalId,
-  findCodeTerminalTab,
-  removedCodeTerminalIds,
 } from "./codeChrome";
-import {
-  centerEditorTabId,
-  centerTabParts,
-  CenterTabIcon,
-  CHAT_PANEL_ID,
-  CodeCenterTabs,
-  type CodeConversationTab,
-  conversationTabId,
-  EDITOR_PANEL_ID,
-  SPLIT_EDITOR_PANEL_ID,
-} from "./CodeCenterTabs";
-import { DiffPanel } from "./DiffPanel";
-import { closeCodeBrowser } from "./browser/browserHost";
-import { seedBrowserSession } from "./browser/browserPersistence";
-
-const FileViewer = lazy(async () => {
-  const module = await import("./FileViewer");
-  return { default: module.FileViewer };
-});
-const CodeBrowserTab = lazy(async () => {
-  const module = await import("./browser/CodeBrowserTab");
-  return { default: module.CodeBrowserTab };
-});
-import {
-  codeModelsFromHarnessListing,
-  useCodeCatalogStore,
-} from "./CodeCatalogStore";
+import type {
+  CodeForkTranscript,
+  CodeRepoSnapshot,
+  CodeSessionSnapshot,
+  CodeWorkspaceSnapshot,
+  HarnessKind,
+  PermissionMode,
+  ReasoningEffort,
+} from "../api/types";
 import { CodeInspector, WorkspaceDeliveryPrTab } from "./CodeInspector";
-import { DiffOverview } from "./DiffOverview";
-import { useCodeUiStore } from "./CodeUiStore";
-import { publishCodeImage } from "../attachments";
-import { hasLocalHostAuthority } from "../host";
-import { uploadImageAttachment } from "../ImageAttachments";
-import { forkFraming, forkTranscriptFile } from "./fork";
-import {
-  useCodeUpdatesStore,
-  useConversationDigests,
-  useSessionDigest,
-} from "./CodeUpdatesStore";
-import { liveCodeSessions } from "./parsers";
-import { CodeComposer } from "./CodeComposer";
 import { CodeQuickOpen } from "./CodeQuickOpen";
-import { WorkspaceWorkflowControl } from "./WorkspaceWorkflowControl";
-import {
-  acquireCodeSessionFromClient,
-  releaseCodeSession,
-} from "./CodeSessionRegistry";
-import { submitAcceptedTurn } from "./CodeSessionSend";
+import { CodeSessionPane } from "./workspace/CodeSessionPane";
 import { CodeSidebar } from "./CodeSidebar";
-import { CodeTranscript } from "./CodeTranscript";
-import { SessionOriginBanner } from "./SessionOriginBanner";
-import {
-  applyTurnRewrite,
-  mainAgentTranscriptItems,
-  subagentTranscriptItems,
-  type CodeTranscriptItem,
-} from "./CodeSessionReducer";
-import {
-  dropEditorTab,
-  findEditorPanel,
-  isEditorStripDropId,
-  offersSplitDrop,
-  EDITOR_SPLIT_DROP_ID,
-} from "./editorDrag";
-import { FOCUS_RING } from "./interactive";
-import {
-  StartSessionPrompt,
-  WorkspaceSessionStartingState,
-} from "./StartSessionPrompt";
-import { TerminalPane } from "./TerminalPane";
-import { useCodeWorkspacePr } from "./useCodeWorkspacePr";
-import { useCodeContentRevision } from "./useLiveContent";
-import { SessionLifecycleIndicator } from "./SessionLifecycleIndicator";
-import { SessionPermissionIndicator } from "./SessionPermissionIndicator";
-import { WorkspaceHeader } from "./WorkspaceHeader";
-import { canOpenInExternalEditor } from "./codeWorktreeHost";
-import {
-  WorkspaceOverflowMenu,
-  openWorkspaceFileInEditor,
-  useWorkspaceCardCommands,
-  workspaceHeaderCommands,
-} from "./workspaceActions";
-import { tidebreakProductRepo } from "./uneffMe";
-import { sessionActivityLabel, isPutAway } from "./workspaceCards";
 import {
   DEFAULT_INSPECTOR_LAYOUT,
   fitsInspectorSplit,
@@ -194,15 +56,120 @@ import {
   MIN_WORKSPACE_SIZE,
   usableInspectorLayout,
 } from "./inspectorLayout";
+import { DiffOverview } from "./DiffOverview";
+import { DiffPanel } from "./DiffPanel";
 import {
-  createPermissionModes,
+  DndContext,
+  type DragEndEvent,
+  DragOverlay,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core";
+import { ErrorBoundary } from "@/ErrorBoundary";
+import {
+  clearFirstTurnRecovery,
+  type FirstTurnRecovery,
+  writeFirstTurnRecovery,
+} from "./workspace/firstTurnRecovery";
+import type { LayoutState, PanelContent } from "@/panel/panelTypes";
+import {
+  browserTitlesForLayout,
+  conversationTabLabel,
+  MAX_WORKSPACE_TERMINALS,
+  nameTerminals,
+  renderCodePanel,
+  useCodeShortcutHints,
+  useMeasuredWidth,
+} from "./workspace/layout";
+import { MarkdownLinkProvider } from "@/MessageMarkdown";
+import { PanelLayout } from "@/panel/PanelLayout";
+import {
+  PendingApprovalBadge,
+  SessionAttentionBadge,
+} from "./workspace/badges";
+import {
+  ResizableHandle,
+  ResizablePanel,
+  ResizablePanelGroup,
+} from "@/components/ui/resizable";
+import { RouteFrame } from "@/RouteFrame";
+import { SessionLifecycleIndicator } from "./SessionLifecycleIndicator";
+import { SessionPermissionIndicator } from "./SessionPermissionIndicator";
+import { Skeleton } from "@/components/ui/skeleton";
+import {
+  SplitDropZone,
+  tabDropTarget,
+  TabPointerSensor,
+} from "./workspace/tabDrag";
+import {
+  StartSessionPrompt,
+  WorkspaceSessionStartingState,
+} from "./StartSessionPrompt";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { TerminalPane } from "./TerminalPane";
+import { WatchTaskBar } from "./workspace/subagents";
+import { WorkspaceHeader } from "./WorkspaceHeader";
+import {
+  openWorkspaceFileInEditor,
+  useWorkspaceCardCommands,
+  workspaceHeaderCommands,
+  WorkspaceOverflowMenu,
+} from "./workspaceActions";
+import { WorkspaceWorkflowControl } from "./WorkspaceWorkflowControl";
+import { attachedRemotely } from "@/host";
+import { attentionMarkForDigest } from "./statusTone";
+import { canOpenInExternalEditor } from "./codeWorktreeHost";
+import { closeCodeBrowser } from "./browser/browserHost";
+import { cn, friendlyErrorMessage } from "@/lib/utils";
+import { copyPlainText } from "@/ClipboardCopyButton";
+import { dropEditorTab, findEditorPanel, offersSplitDrop } from "./editorDrag";
+import {
   fenceReasonText,
   gatewayCodeModels,
-  harnessCodeModels,
-  HARNESS_LABELS,
   preferredCodeModels,
   requiresHarnessModelIds,
 } from "./labels";
+import { forkFraming, forkTranscriptFile } from "./fork";
+import { hasLocalHostAuthority } from "../host";
+import { isPutAway, sessionActivityLabel } from "./workspaceCards";
+import { liveCodeSessions } from "./parsers";
+import { publishCodeImage } from "../attachments";
+import { seedBrowserSession } from "./browser/browserPersistence";
+import { tidebreakProductRepo } from "./uneffMe";
+import { toast } from "sonner";
+import { uploadImageAttachment } from "../ImageAttachments";
+import { useApp } from "@/AppContext";
+import { useCodeCatalogStore } from "./CodeCatalogStore";
+import { useCodeContentRevision } from "./useLiveContent";
+import { useCodeUiStore } from "./CodeUiStore";
+import {
+  useCodeUpdatesStore,
+  useConversationDigests,
+  useSessionDigest,
+} from "./CodeUpdatesStore";
+import { useCodeWorkspacePr } from "./useCodeWorkspacePr";
+import { useDefaultLayout, useGroupRef } from "react-resizable-panels";
+import { useLayoutState, usePanelNav } from "@/panel/usePanelNav";
+import { useNavigate, useSearch } from "@tanstack/react-router";
+import { usePortalOverlayOpen } from "@/lib/usePortalOverlayOpen";
+
+const FileViewer = lazy(async () => {
+  const module = await import("./FileViewer");
+  return { default: module.FileViewer };
+});
+
+const CodeBrowserTab = lazy(async () => {
+  const module = await import("./browser/CodeBrowserTab");
+  return { default: module.CodeBrowserTab };
+});
 
 /**
  * One workspace: header, transcript, composer, and the fence/reap path.
@@ -211,7 +178,6 @@ import {
  * share one socket. This page is the only mounted session view in the
  * walking skeleton.
  */
-
 export function CodeWorkspacePage({ workspaceId }: { workspaceId: string }) {
   return (
     <RouteFrame sidebar={<CodeSidebar />}>
@@ -220,85 +186,6 @@ export function CodeWorkspacePage({ workspaceId }: { workspaceId: string }) {
         <CodeWorkspaceBody key={workspaceId} workspaceId={workspaceId} />
       </div>
     </RouteFrame>
-  );
-}
-
-/**
- * Stable empty ladder. A fresh `[]` per render is a new snapshot every time,
- * and zustand v5 loops on referentially unstable selector results.
- */
-const EMPTY_EFFORTS: readonly ReasoningEffort[] = [];
-
-type FirstTurnRecovery = {
-  id: string;
-  sessionId: string;
-  draft: string;
-  forkSource: CodeForkTranscript | null;
-  message: string;
-  status: "sending" | "failed";
-};
-
-const firstTurnRecoveryByClient = new WeakMap<
-  ApiClient,
-  Map<string, FirstTurnRecovery>
->();
-const firstTurnRecoveryListeners = new Set<() => void>();
-
-function readFirstTurnRecovery(
-  client: ApiClient,
-  sessionId: string,
-): FirstTurnRecovery | null {
-  return firstTurnRecoveryByClient.get(client)?.get(sessionId) ?? null;
-}
-
-function writeFirstTurnRecovery(
-  client: ApiClient,
-  recovery: FirstTurnRecovery,
-): void {
-  let recoveries = firstTurnRecoveryByClient.get(client);
-  if (!recoveries) {
-    recoveries = new Map();
-    firstTurnRecoveryByClient.set(client, recoveries);
-  }
-  recoveries.set(recovery.sessionId, recovery);
-  for (const listener of firstTurnRecoveryListeners) listener();
-}
-
-function clearFirstTurnRecovery(
-  client: ApiClient,
-  sessionId: string,
-  recoveryId: string,
-): void {
-  const recoveries = firstTurnRecoveryByClient.get(client);
-  if (recoveries?.get(sessionId)?.id !== recoveryId) return;
-  recoveries.delete(sessionId);
-  for (const listener of firstTurnRecoveryListeners) listener();
-}
-
-function updateFirstTurnRecovery(
-  client: ApiClient,
-  sessionId: string,
-  recoveryId: string,
-  update: (current: FirstTurnRecovery) => FirstTurnRecovery,
-): void {
-  const current = readFirstTurnRecovery(client, sessionId);
-  if (!current || current.id !== recoveryId) return;
-  writeFirstTurnRecovery(client, update(current));
-}
-
-function useFirstTurnRecovery(
-  client: ApiClient,
-  sessionId: string,
-): FirstTurnRecovery | null {
-  return useSyncExternalStore(
-    (listener) => {
-      firstTurnRecoveryListeners.add(listener);
-      return () => {
-        firstTurnRecoveryListeners.delete(listener);
-      };
-    },
-    () => readFirstTurnRecovery(client, sessionId),
-    () => null,
   );
 }
 
@@ -1863,1129 +1750,4 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
       )}
     </MarkdownLinkProvider>
   );
-}
-
-/**
- * The pointer sensor, minus the controls that live inside a tab.
- *
- * A tab's close button sits within the draggable, so without this a press that
- * drifts a few pixels would pick the tab up rather than close it. A control
- * opts itself out by carrying the marker attribute.
- */
-class TabPointerSensor extends PointerSensor {
-  static activators = [
-    {
-      eventName: "onPointerDown" as const,
-      handler: (
-        { nativeEvent: event }: ReactPointerEvent,
-        { onActivation }: PointerSensorOptions,
-      ) => {
-        if (!event.isPrimary || event.button !== 0) return false;
-        const target = event.target;
-        if (!(target instanceof Element)) return true;
-        if (target.closest('[data-no-drag="true"]')) return false;
-        onActivation?.({ event });
-        return true;
-      },
-    },
-  ];
-}
-
-/**
- * The drop target under the pointer, with the nearest one as a fallback.
- *
- * A strip contains its tabs and overlaps the split zone, so it collides on
- * every drop that lands on either. Dropping it whenever something more specific
- * was hit is what makes a tab a reorder and the strip's open space an append.
- * The nearest-center fallback covers the frames where a fast drag has the
- * pointer outside every registered box.
- */
-const tabDropTarget: CollisionDetection = (args) => {
-  const under = pointerWithin(args);
-  const collisions = under.length > 0 ? under : closestCenter(args);
-  const specific = collisions.filter(
-    (collision) => !isEditorStripDropId(String(collision.id)),
-  );
-  return specific.length > 0 ? specific : collisions;
-};
-
-/** The mid-drag target that offers to open the tab beside the conversation. */
-function SplitDropZone() {
-  const { isOver, setNodeRef } = useDroppable({ id: EDITOR_SPLIT_DROP_ID });
-  return (
-    <div
-      ref={setNodeRef}
-      data-testid="split-drop-zone"
-      data-over={isOver ? "true" : undefined}
-      className="workspace-split-drop-zone absolute inset-y-3 right-3 z-10 flex w-[min(40%,22rem)] flex-col items-center justify-center gap-2 rounded-xl border border-border bg-background/92 px-6 text-center shadow-lg backdrop-blur-md data-[over=true]:border-ring data-[over=true]:bg-accent/60"
-    >
-      <span className="grid size-9 place-items-center rounded-lg bg-muted text-foreground">
-        <span className="grid grid-cols-2 gap-0.5" aria-hidden>
-          <span className="h-4 w-2 rounded-[2px] bg-foreground/25" />
-          <span className="h-4 w-2 rounded-[2px] bg-foreground" />
-        </span>
-      </span>
-      <span className="text-sm font-semibold">Open beside the agent</span>
-      <span className="max-w-44 text-xs leading-relaxed text-muted-foreground">
-        Drop here to create a working pane on the right.
-      </span>
-    </div>
-  );
-}
-
-function useCodeShortcutHints(): { terminal: string; review: string } {
-  return useMemo(() => {
-    const command = usesCommandModifier(navigator.userAgent);
-    return {
-      terminal: shortcutHint("toggle-code-terminal", command),
-      review: shortcutHint("toggle-code-review", command),
-    };
-  }, []);
-}
-
-function browserTitlesForLayout(layout: LayoutState): Record<string, string> {
-  return Object.fromEntries(
-    codeBrowserIds(layout).map((browserId) => [browserId, "Browser"]),
-  );
-}
-
-/**
- * Shells one workspace may hold at once, matching the server's own cap. The
- * plus menu stops offering another rather than letting the create fail.
- */
-const MAX_WORKSPACE_TERMINALS = 8;
-
-/**
- * Track one element's width, in CSS pixels.
- *
- * The width stays `null` until an observer reports, so a caller can tell
- * "not measured yet" from "measured and narrow" and avoid deciding on a zero
- * it read before layout ran. The callback ref re-attaches whenever the
- * element behind it changes, which is what keeps the reading live across the
- * split going up and coming down.
- */
-function useMeasuredWidth(): {
-  paneRef: (element: HTMLElement | null) => void;
-  width: number | null;
-} {
-  const [width, setWidth] = useState<number | null>(null);
-  const observerRef = useRef<ResizeObserver | null>(null);
-
-  useEffect(() => () => observerRef.current?.disconnect(), []);
-
-  const paneRef = useCallback((element: HTMLElement | null) => {
-    observerRef.current?.disconnect();
-    observerRef.current = null;
-    if (!element || typeof ResizeObserver === "undefined") return;
-    setWidth(element.getBoundingClientRect().width);
-    const observer = new ResizeObserver((entries) => {
-      const entry = entries[0];
-      if (entry) setWidth(entry.contentRect.width);
-    });
-    observer.observe(element);
-    observerRef.current = observer;
-  }, []);
-
-  return { paneRef, width };
-}
-
-/**
- * Give every open shell a tab label, keeping the ones already assigned.
- *
- * Several shells in a strip all reading "Terminal" would be untellable apart,
- * so each takes the lowest number no other open shell is using. A number is
- * released when its tab closes, which is also when its shell ends.
- */
-function nameTerminals(
-  current: Readonly<Record<string, string>>,
-  terminalIds: readonly string[],
-): Record<string, string> {
-  const kept: Record<string, string> = {};
-  for (const id of terminalIds) {
-    const existing = current[id];
-    if (existing) kept[id] = existing;
-  }
-  const taken = new Set(Object.values(kept));
-  for (const id of terminalIds) {
-    if (kept[id]) continue;
-    let ordinal = 1;
-    while (taken.has(`Terminal ${ordinal}`)) ordinal += 1;
-    kept[id] = `Terminal ${ordinal}`;
-    taken.add(kept[id]);
-  }
-  const unchanged =
-    Object.keys(kept).length === Object.keys(current).length &&
-    Object.entries(kept).every(([id, label]) => current[id] === label);
-  return unchanged ? (current as Record<string, string>) : kept;
-}
-
-/** Native child webviews must yield whenever a portaled app surface overlaps them. */
-
-function shortcutHint(id: ShellShortcutAction, command: boolean): string {
-  const def = SHELL_SHORTCUTS.find((item) => item.id === id);
-  return def ? shortcutKeycaps(def, command).join("") : "";
-}
-
-/**
- * The side region beside the conversation.
- *
- * Every panel it used to draw has become a center tab, so a link naming one
- * lands here and says so rather than rendering an empty frame.
- */
-function renderCodePanel() {
-  return (
-    <p className="text-muted-foreground px-3 py-6 text-sm">
-      This panel is not available here.
-    </p>
-  );
-}
-
-function SessionAttentionBadge({
-  sessionId,
-  client,
-  fallback,
-}: {
-  sessionId: string;
-  client: ApiClient;
-  fallback: Attention | undefined;
-}) {
-  const store = useRegisteredCodeSession(sessionId, client);
-  const live = store((state) => state.attention);
-  const attention = live ?? fallback;
-  // The lifecycle indicator owns live motion in this header. Keep the
-  // attention mark for states that carry separate information.
-  if (attention?.state.type === "working") return null;
-  return <AttentionBadge compact attention={attention} />;
-}
-
-function PendingApprovalBadge({
-  sessionId,
-  client,
-}: {
-  sessionId: string;
-  client: ApiClient;
-}) {
-  const store = useRegisteredCodeSession(sessionId, client);
-  // The selector must return a primitive: zustand v5 re-renders whenever the
-  // snapshot is not referentially stable, so a fresh array here loops forever.
-  const pending = store(
-    (state) =>
-      state.items.filter(
-        (item) => item.kind === "approval" && item.state === "pending",
-      ).length,
-  );
-  if (pending === 0) return null;
-  const noun = pending === 1 ? "approval" : "approvals";
-  return (
-    <button
-      type="button"
-      data-testid="pending-approval-badge"
-      // The count alone names a state, not a control. This button scrolls the
-      // transcript to the first parked approval, so its name says so.
-      aria-label={`Jump to ${pending} pending ${noun}`}
-      className={cn(
-        "cursor-pointer rounded-full border-0 bg-transparent p-0",
-        FOCUS_RING,
-      )}
-      onClick={() => {
-        document
-          .querySelector('[data-code-approval-state="pending"]')
-          ?.scrollIntoView({
-            block: "nearest",
-            behavior: followScrollBehavior(false),
-          });
-      }}
-    >
-      <Badge variant="warning" size="sm" className="tabular-nums">
-        {pending} {noun}
-      </Badge>
-    </button>
-  );
-}
-
-function CodeSessionPane({
-  session,
-  workspaceId,
-  client,
-  catalogModels,
-  defaultModelKey,
-  disabled,
-  onOpenTurnDiff,
-  onForkFromTurn,
-  subagentCallId,
-  subagentSummary,
-  onBackFromSubagent,
-  composerOverride,
-}: {
-  session: CodeSessionSnapshot;
-  workspaceId: string;
-  client: ApiClient;
-  catalogModels: ModelInfo[];
-  defaultModelKey: string | null;
-  disabled: boolean;
-  /** Scope the review sidebar to one turn's changes, from a turn's diffstat. */
-  onOpenTurnDiff?: (turnId: string) => void;
-  /** Fork this conversation at the end of one turn, from its seam row. */
-  onForkFromTurn?: (turnId: string) => void;
-  /** The spanning Task call to inspect inside this still-mounted session. */
-  subagentCallId?: string;
-  /** Current bounded rail summary, when the Task is still in the digest. */
-  subagentSummary?: CodeSubagentSummary;
-  onBackFromSubagent?: () => void;
-  /**
-   * Replace the composer. A watch task's transcript is read-along: the sweep
-   * drives its turns, so the seat where the user would type carries the watch
-   * controls instead.
-   */
-  composerOverride?: ReactNode;
-}) {
-  const follow = useTranscriptFollow();
-  const store = useRegisteredCodeSession(session.id, client);
-  const firstTurnRecovery = useFirstTurnRecovery(client, session.id);
-  const items = store((state) => state.items);
-  const busy = store((state) => state.busy);
-  const hydrated = store((state) => state.hydrated);
-  const animateStreaming = store((state) => state.animateStreaming);
-  const connectionState = store((state) => state.connectionState);
-  const lastUsage = store((state) => state.lastUsage);
-  // The reducer's own applied-event cursor is the activity signal the stall
-  // timer wants: every delta, tool result, and boundary advances it.
-  const lastSeq = store((state) => state.lastSeq);
-  const transcriptSubagent = useMemo(
-    () =>
-      subagentCallId
-        ? subagentSummaryFromTranscript(items, subagentCallId)
-        : null,
-    [items, subagentCallId],
-  );
-  const selectedSubagent = subagentCallId
-    ? (subagentSummary ?? transcriptSubagent)
-    : null;
-  const turnRewrites = useCodeUpdatesStore(
-    (state) => state.turnRewrites[session.id],
-  );
-  const transcriptItems = useMemo(() => {
-    const base = subagentCallId
-      ? subagentTranscriptItems(items, subagentCallId)
-      : mainAgentTranscriptItems(items);
-    if (!turnRewrites) return base;
-    let next = base;
-    for (const [turnId, notice] of Object.entries(turnRewrites)) {
-      const stored = next.some(
-        (item) =>
-          item.kind === "assistant" &&
-          item.turnId === turnId &&
-          item.parentCallId === null &&
-          Boolean(item.rewrite),
-      );
-      if (stored && notice.state !== "rewritten") continue;
-      next = applyTurnRewrite(next, turnId, {
-        rewrite: notice.rewrite,
-        rewriteState: notice.state,
-      });
-    }
-    return next;
-  }, [items, subagentCallId, turnRewrites]);
-  const transcriptBusy = subagentCallId
-    ? selectedSubagent?.status === "running"
-    : busy;
-  const streamStalled = useStreamStalled(transcriptBusy, lastSeq);
-  const storeLifecycle = store((state) => state.lifecycle);
-  // Archive search opens ended sessions. Hydration then writes idle because
-  // the journal has no ended event, and that would resurrect the composer.
-  const lifecycle =
-    session.lifecycle === "ended"
-      ? "ended"
-      : (storeLifecycle ?? session.lifecycle);
-  const [approvals, setApprovals] = useState<
-    Record<string, CodeApprovalSnapshot>
-  >({});
-  const [decidingId, setDecidingId] = useState<string | null>(null);
-  const [approvalError, setApprovalError] = useState<string | undefined>();
-  const sessionQueue = useCodeQueueApi(client, session.id);
-  // No `?? []` fallback here: a fresh array is a new snapshot every render,
-  // and zustand v5 loops on referentially unstable snapshots.
-  const cachedModels = useCodeCatalogStore(
-    (state) => state.modelsByHarness[session.harness_kind],
-  );
-  const rememberHarnessModels = useCodeCatalogStore(
-    (state) => state.rememberHarnessModels,
-  );
-  // The ladder a code session runs on belongs to the engine, not to whichever
-  // catalog the model row came from.
-  const engineEfforts =
-    useCodeCatalogStore(
-      (state) => state.effortsByHarness[session.harness_kind],
-    ) ?? EMPTY_EFFORTS;
-  const modelOptions = useMemo(() => {
-    const gateway = gatewayCodeModels(
-      catalogModels,
-      session.harness_kind,
-      defaultModelKey,
-    );
-    const listed =
-      requiresHarnessModelIds(session.harness_kind) &&
-      cachedModels === undefined
-        ? []
-        : preferredCodeModels(
-            session.harness_kind,
-            cachedModels ?? [],
-            gateway,
-          );
-    if (
-      !session.model ||
-      listed.some((option) => option.id === session.model)
-    ) {
-      return listed;
-    }
-    // Historical or engine-default sessions can name a model that is hidden
-    // from today's catalog. Keep that truthful current model visible instead
-    // of silently labeling the session as whichever row is now default.
-    return [
-      ...harnessCodeModels(
-        [{ id: session.model, label: session.model }],
-        session.harness_kind,
-      ),
-      ...listed,
-    ];
-  }, [
-    cachedModels,
-    catalogModels,
-    defaultModelKey,
-    session.harness_kind,
-    session.model,
-  ]);
-  const inferred = modelOptions.find((option) => option.default)?.id;
-  const [model, setModel] = useState(session.model ?? inferred);
-  // The recap is derived after a turn completes and published on the digest
-  // channel rather than the journal, so the transcript reads it from here
-  // instead of from an item the reducer built.
-  const sessionDigest = useSessionDigest(workspaceId, session.id);
-  type SessionSettings = {
-    permissionMode: PermissionMode;
-    reasoningEffort: ReasoningEffort | null;
-    fastMode: boolean;
-  };
-  const settingsFromSession = useCallback(
-    (snapshot: CodeSessionSnapshot): SessionSettings => ({
-      permissionMode: snapshot.permission_mode,
-      reasoningEffort: snapshot.reasoning_effort ?? null,
-      fastMode: snapshot.fast_mode,
-    }),
-    [],
-  );
-  const initialSettings: SessionSettings = {
-    permissionMode: session.permission_mode,
-    reasoningEffort: session.reasoning_effort ?? null,
-    fastMode: session.fast_mode,
-  };
-  // One confirmed baseline plus ordered optimistic patches keeps a full
-  // response from an older write from erasing a choice that is still queued.
-  const [settings, setSettings] = useState(initialSettings);
-  const settingsRef = useRef(initialSettings);
-  const confirmedSettingsRef = useRef(initialSettings);
-  const pendingSettingsWritesRef = useRef(
-    new Map<number, Partial<SessionSettings>>(),
-  );
-  const settingsWriteQueueRef = useRef<Promise<void>>(Promise.resolve());
-  const settingsWriteGenerationRef = useRef(0);
-  const settingsScopeRef = useRef(session.id);
-  const [settingsPending, setSettingsPending] = useState(false);
-  const pendingReasoningEffortRef = useRef<{
-    value: ReasoningEffort | null;
-  } | null>(null);
-  const reconcileSettings = useCallback(() => {
-    let next = { ...confirmedSettingsRef.current };
-    for (const patch of pendingSettingsWritesRef.current.values()) {
-      next = { ...next, ...patch };
-    }
-    const pendingReasoningEffort = pendingReasoningEffortRef.current;
-    if (pendingReasoningEffort) {
-      next.reasoningEffort = pendingReasoningEffort.value;
-    }
-    settingsRef.current = next;
-    setSettings(next);
-  }, []);
-
-  function queueSettingsWrite(
-    patch: Partial<SessionSettings>,
-    write: () => Promise<CodeSessionSnapshot>,
-    failureMessage: string,
-  ) {
-    const scope = session.id;
-    const generation = ++settingsWriteGenerationRef.current;
-    pendingSettingsWritesRef.current.set(generation, patch);
-    reconcileSettings();
-    setSettingsPending(true);
-
-    const result = settingsWriteQueueRef.current.then(() => {
-      if (settingsScopeRef.current !== scope) return null;
-      return write();
-    });
-    settingsWriteQueueRef.current = result.then(
-      () => undefined,
-      () => undefined,
-    );
-    void result.then(
-      (updated) => {
-        if (!updated || settingsScopeRef.current !== scope) return;
-        confirmedSettingsRef.current = settingsFromSession(updated);
-        pendingSettingsWritesRef.current.delete(generation);
-        reconcileSettings();
-        setSettingsPending(pendingSettingsWritesRef.current.size > 0);
-      },
-      (err) => {
-        if (settingsScopeRef.current !== scope) return;
-        pendingSettingsWritesRef.current.delete(generation);
-        reconcileSettings();
-        setSettingsPending(pendingSettingsWritesRef.current.size > 0);
-        toast.error(friendlyErrorMessage(err, failureMessage));
-      },
-    );
-  }
-
-  useEffect(() => {
-    setModel(session.model ?? inferred);
-  }, [inferred, session.model]);
-
-  useEffect(() => {
-    if (settingsScopeRef.current !== session.id) {
-      settingsScopeRef.current = session.id;
-      settingsWriteGenerationRef.current += 1;
-      pendingSettingsWritesRef.current.clear();
-      settingsWriteQueueRef.current = Promise.resolve();
-      pendingReasoningEffortRef.current = null;
-      setSettingsPending(false);
-    }
-    // A refreshed row can still carry the stored effort while a mid-turn
-    // choice waits for its first submission. Reconciliation keeps that choice
-    // and any queued writes on top of the confirmed row.
-    confirmedSettingsRef.current = settingsFromSession(session);
-    reconcileSettings();
-  }, [
-    reconcileSettings,
-    session.id,
-    session.permission_mode,
-    session.reasoning_effort,
-    session.fast_mode,
-    settingsFromSession,
-  ]);
-
-  useEffect(() => {
-    // An empty list is a finished fetch: this engine advertised no models.
-    // Treating [] as "not yet loaded" remembers a new [] forever.
-    //
-    // The fetch runs even when a gateway catalog already supplies the rows,
-    // because this route is also where the engine's effort ladder comes from
-    // and a gateway row carries the chat catalog's instead.
-    if (cachedModels !== undefined) return;
-    let cancelled = false;
-    void client.listCodeHarnessModels(session.harness_kind).then(
-      (listed) => {
-        if (cancelled) return;
-        rememberHarnessModels(
-          session.harness_kind,
-          codeModelsFromHarnessListing(listed, session.harness_kind),
-          listed.reasoning_efforts,
-        );
-      },
-      () => undefined,
-    );
-    return () => {
-      cancelled = true;
-    };
-  }, [cachedModels, client, rememberHarnessModels, session.harness_kind]);
-  const doctorEntry = useCodeCatalogStore(
-    (state) =>
-      state.doctor?.harnesses.find(
-        (entry) => entry.kind === session.harness_kind,
-      ) ?? null,
-  );
-  // Doctor caps decide what this engine's picker offers; without a doctor
-  // row yet, show everything and let the server refuse.
-  const availableModes: PermissionMode[] = doctorEntry
-    ? createPermissionModes(doctorEntry.caps)
-    : ["plan", "ask", "auto", "allow"];
-  const steeringSupported = doctorEntry?.caps.mid_turn_steering === "supported";
-  const turnRunning = busy || lifecycle === "running";
-  const composerHistory = useMemo(
-    () =>
-      items
-        .flatMap((item) =>
-          item.kind === "user" && item.text.trim() ? [item.text] : [],
-        )
-        .reverse(),
-    [items],
-  );
-
-  // `items` is a fresh array on every streamed delta, so keying the fetch on it
-  // would list approvals again for every token of a turn. Only an approval
-  // appearing or changing state can change what the list would return.
-  const approvalKey = useMemo(
-    () =>
-      items
-        .filter((item) => item.kind === "approval")
-        .map((item) => `${item.approvalId}:${item.state}`)
-        .join(","),
-    [items],
-  );
-
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const rows = await client.listCodeApprovals({ sessionId: session.id });
-        if (cancelled) return;
-        const next: Record<string, CodeApprovalSnapshot> = {};
-        for (const row of rows) next[row.id] = row;
-        setApprovals(next);
-      } catch {
-        // The journal still surfaces the card; the body loads on the next poll.
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [client, session.id, approvalKey]);
-
-  // This pane re-renders on every streamed delta, so a callback written inline
-  // in the transcript's props would be a new identity each time and would
-  // re-render every row in the transcript with it.
-  const decideApproval = useCallback(
-    async (
-      approvalId: string,
-      decision: "approve" | "deny",
-      feedback?: string,
-    ) => {
-      setDecidingId(approvalId);
-      setApprovalError(undefined);
-      try {
-        const next = await client.decideCodeApproval(approvalId, {
-          decision,
-          feedback,
-        });
-        setApprovals((current) => ({ ...current, [approvalId]: next }));
-      } catch (err) {
-        setApprovalError(
-          friendlyErrorMessage(err, "Could not record that decision"),
-        );
-      } finally {
-        setDecidingId(null);
-      }
-    },
-    [client],
-  );
-
-  function send(
-    message: string,
-    attachments?: readonly { blob_id: string; media_type: string }[],
-  ) {
-    const pendingReasoningEffort = pendingReasoningEffortRef.current;
-    const recoveryAtSend = firstTurnRecovery;
-    // Sending is a deliberate return to the tail: whatever the reader was
-    // reading, they now want to watch their own turn run.
-    follow.armFollow();
-    follow.requestSmoothFollow();
-    // Outcome and refusal both belong to the composer: it says whether the
-    // message ran or queued, and it holds the draft when the server refuses.
-    // A queued outcome needs no state here — the tray reads the durable queue
-    // on the signal below and shows the row.
-    return submitAcceptedTurn(store.getState().update, () =>
-      pendingReasoningEffort
-        ? client.submitCodeTurn(
-            session.id,
-            message,
-            model ?? undefined,
-            attachments,
-            pendingReasoningEffort.value,
-          )
-        : client.submitCodeTurn(
-            session.id,
-            message,
-            model ?? undefined,
-            attachments,
-          ),
-    ).then((outcome) => {
-      if (outcome.kind === "queued") {
-        useRefreshSignals.getState().signal("queuedTurns");
-      }
-      if (pendingReasoningEffortRef.current === pendingReasoningEffort) {
-        pendingReasoningEffortRef.current = null;
-      }
-      if (recoveryAtSend?.status === "failed") {
-        clearFirstTurnRecovery(client, session.id, recoveryAtSend.id);
-      }
-      return outcome;
-    });
-  }
-
-  function changePermissionMode(mode: PermissionMode) {
-    queueSettingsWrite(
-      { permissionMode: mode },
-      () => client.setCodeSessionPermissionMode(session.id, mode),
-      "Could not change the mode",
-    );
-  }
-
-  function changeReasoningEffort(effort: ReasoningEffort | null) {
-    // A running turn keeps the effort it started with. The selected level
-    // rides on the next submission, where the server also makes it sticky.
-    if (turnRunning) {
-      pendingReasoningEffortRef.current = { value: effort };
-      settingsRef.current = { ...settingsRef.current, reasoningEffort: effort };
-      setSettings(settingsRef.current);
-      return;
-    }
-    pendingReasoningEffortRef.current = null;
-    queueSettingsWrite(
-      { reasoningEffort: effort },
-      () => client.setCodeSessionReasoningEffort(session.id, effort),
-      "Could not change the reasoning",
-    );
-  }
-
-  function changeFastMode(fastMode: boolean) {
-    queueSettingsWrite(
-      { fastMode },
-      () => client.setCodeSessionFastMode(session.id, fastMode),
-      "Could not change fast mode",
-    );
-  }
-
-  async function steer(message: string) {
-    const expectedTurnId = store.getState().activeTurnId;
-    if (!expectedTurnId) {
-      throw new Error("The active turn changed. Try Redirect again.");
-    }
-    await client.steerCodeSession(session.id, expectedTurnId, message);
-  }
-
-  async function interrupt() {
-    try {
-      await client.interruptCodeSession(session.id);
-    } catch (err) {
-      toast.error(friendlyErrorMessage(err, "Could not interrupt"));
-    }
-  }
-
-  return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      {subagentCallId && (
-        <SubagentContextBar
-          name={selectedSubagent?.name ?? "Subagent unavailable"}
-          status={selectedSubagent?.status ?? "unavailable"}
-          onBack={onBackFromSubagent}
-        />
-      )}
-      {!subagentCallId && session.external_origin && (
-        <SessionOriginBanner origin={session.external_origin} />
-      )}
-      <div className={cn("message-view", follow.fadeClass)}>
-        {connectionState === "reconnecting" && (
-          <p
-            role="status"
-            className="text-info-foreground pointer-events-none absolute inset-x-0 top-2 z-[1] text-center text-xs [animation:code-reveal_140ms_ease-out] motion-reduce:animate-none"
-          >
-            Reconnecting to the session…
-          </p>
-        )}
-        <CodeTranscript
-          items={transcriptItems}
-          sessionId={session.id}
-          hydrated={hydrated}
-          busy={transcriptBusy}
-          streamStalled={streamStalled}
-          animateStreaming={animateStreaming}
-          approvals={approvals}
-          decidingId={decidingId}
-          approvalError={approvalError}
-          onOpenTurnDiff={onOpenTurnDiff}
-          onForkFromTurn={subagentCallId ? undefined : onForkFromTurn}
-          onReveal={follow.pauseFollow}
-          scrollRef={follow.scrollRef}
-          contentRef={follow.contentRef}
-          onScroll={follow.onScroll}
-          onDecide={decideApproval}
-          recap={sessionDigest?.recap}
-          emptyState={
-            subagentCallId
-              ? subagentEmptyState(selectedSubagent?.status)
-              : undefined
-          }
-        />
-        <button
-          type="button"
-          className={cn(
-            "border-border text-foreground bg-background hover:bg-accent pointer-events-none absolute bottom-3 left-1/2 z-[1] inline-flex -translate-x-1/2 cursor-pointer items-center justify-center rounded-full border p-2 opacity-0 shadow transition-[opacity,background-color] duration-[140ms] ease-out motion-reduce:transition-none",
-            FOCUS_RING,
-            follow.scrolledAway && "pointer-events-auto opacity-100",
-          )}
-          aria-label="Scroll to latest"
-          aria-hidden={!follow.scrolledAway}
-          tabIndex={follow.scrolledAway ? 0 : -1}
-          onClick={() => follow.armFollow(followScrollBehavior(false))}
-        >
-          <ArrowDown size={16} />
-        </button>
-      </div>
-      {composerOverride}
-      {lifecycle !== "ended" && !composerOverride && !subagentCallId && (
-        <>
-          <div className="shrink-0 px-[clamp(0.5rem,4%,5rem)]">
-            <QueueTray
-              queue={sessionQueue}
-              active={turnRunning}
-              onStop={interrupt}
-            />
-          </div>
-          <CodeComposer
-            running={turnRunning}
-            disabled={disabled || firstTurnRecovery?.status === "sending"}
-            permissionMode={settings.permissionMode}
-            availableModes={availableModes}
-            reasoningEffort={settings.reasoningEffort}
-            fastMode={settings.fastMode}
-            settingsPending={settingsPending}
-            engineEfforts={engineEfforts}
-            harness={session.harness_kind}
-            model={model ?? undefined}
-            modelOptions={modelOptions}
-            modelLoading={
-              requiresHarnessModelIds(session.harness_kind) &&
-              cachedModels === undefined
-            }
-            promptScope={workspaceId}
-            sessionId={session.id}
-            history={composerHistory}
-            slashCommands={doctorEntry?.commands}
-            searchPaths={(query) =>
-              client
-                .listCodeWorkspaceTree(workspaceId, { query })
-                .then((tree) => tree.paths)
-            }
-            workspaceFiles={
-              firstTurnRecovery?.forkSource
-                ? {
-                    items: [forkTranscriptFile(firstTurnRecovery.forkSource)],
-                    onRemove: () =>
-                      updateFirstTurnRecovery(
-                        client,
-                        session.id,
-                        firstTurnRecovery.id,
-                        (current) => ({ ...current, forkSource: null }),
-                      ),
-                  }
-                : undefined
-            }
-            recovery={
-              firstTurnRecovery
-                ? {
-                    id: firstTurnRecovery.id,
-                    draft: firstTurnRecovery.draft,
-                  }
-                : undefined
-            }
-            onModelChange={setModel}
-            onModeChange={
-              doctorEntry?.relaunch_composes_permission_mode === false &&
-              session.harness_resume_ref
-                ? undefined
-                : changePermissionMode
-            }
-            onEffortChange={
-              doctorEntry?.caps.reasoning_levels === "unsupported"
-                ? undefined
-                : changeReasoningEffort
-            }
-            onFastModeChange={changeFastMode}
-            contextUsage={
-              lastUsage
-                ? {
-                    // The engine's own reading of the prompt still resident
-                    // after its last model call. The four counts below are the
-                    // turn's spend across every call, which on a long turn runs
-                    // to several times this.
-                    contextTokens: lastUsage.context_tokens,
-                    spend: {
-                      input: lastUsage.input_tokens,
-                      output: lastUsage.output_tokens,
-                      cacheRead: lastUsage.cache_read_input_tokens,
-                      cacheWrite: lastUsage.cache_creation_input_tokens,
-                    },
-                    contextWindow: catalogModels.find(
-                      (entry) => entry.id === model || entry.key === model,
-                    )?.context_window,
-                    modelName:
-                      modelOptions.find((option) => option.id === model)
-                        ?.label ??
-                      model ??
-                      undefined,
-                  }
-                : null
-            }
-            onSend={send}
-            onSteer={steeringSupported ? steer : undefined}
-            onInterrupt={interrupt}
-          />
-          {firstTurnRecovery && (
-            <p
-              role={firstTurnRecovery.status === "failed" ? "alert" : "status"}
-              className={cn(
-                "mx-auto w-full max-w-3xl px-2 pt-1 text-xs",
-                firstTurnRecovery.status === "failed"
-                  ? "text-critical-foreground"
-                  : "text-muted-foreground",
-              )}
-            >
-              {firstTurnRecovery.message}
-            </p>
-          )}
-        </>
-      )}
-    </div>
-  );
-}
-
-function useRegisteredCodeSession(sessionId: string, client: ApiClient) {
-  const storeRef = useRef<ReturnType<
-    typeof acquireCodeSessionFromClient
-  > | null>(null);
-  if (storeRef.current === null) {
-    storeRef.current = acquireCodeSessionFromClient(sessionId, client);
-  }
-  useEffect(() => {
-    return () => {
-      releaseCodeSession(sessionId);
-      storeRef.current = null;
-    };
-  }, [sessionId, client]);
-  return storeRef.current;
-}
-
-type SubagentViewStatus = CodeSubagentStatus | "unavailable";
-
-function subagentSummaryFromTranscript(
-  items: readonly CodeTranscriptItem[],
-  callId: string,
-): CodeSubagentSummary | null {
-  const task = items.find(
-    (item) =>
-      item.kind === "tool" &&
-      item.parentCallId === null &&
-      item.callId === callId &&
-      item.name === "Task",
-  );
-  if (!task || task.kind !== "tool") return null;
-  return {
-    call_id: callId,
-    name: toolDetailSubject(task.detail) || task.name,
-    status:
-      task.status === "running"
-        ? "running"
-        : task.status === "succeeded"
-          ? "done"
-          : "failed",
-  };
-}
-
-function toolDetailSubject(
-  detail: Extract<CodeTranscriptItem, { kind: "tool" }>["detail"],
-): string;
-function toolDetailSubject(
-  detail: Extract<CodeTranscriptItem, { kind: "tool" }>["detail"],
-): string {
-  switch (detail.kind) {
-    case "command":
-      return detail.cmd;
-    case "file_read":
-    case "file_edit":
-      return detail.path;
-    case "search":
-      return detail.query;
-    case "other":
-      return detail.summary;
-  }
-}
-
-function subagentEmptyState(status: CodeSubagentStatus | undefined): {
-  title: string;
-  description: string;
-} {
-  switch (status) {
-    case "running":
-      return {
-        title: "Waiting for this subagent",
-        description:
-          "It is still running, but it has not produced attributed transcript output yet.",
-      };
-    case "done":
-      return {
-        title: "No captured subagent output",
-        description:
-          "This subagent completed without leaving attributed assistant or tool activity.",
-      };
-    case "failed":
-      return {
-        title: "No captured subagent output",
-        description:
-          "This subagent ended before attributed assistant or tool activity was captured.",
-      };
-    default:
-      return {
-        title: "Subagent unavailable",
-        description:
-          "This link no longer matches a captured Task in the parent session.",
-      };
-  }
-}
-
-function SubagentContextBar({
-  name,
-  status,
-  onBack,
-}: {
-  name: string;
-  status: SubagentViewStatus;
-  onBack?: () => void;
-}) {
-  const label =
-    status === "running"
-      ? "Running"
-      : status === "done"
-        ? "Completed"
-        : status === "failed"
-          ? "Failed"
-          : "Unavailable";
-  const variant =
-    status === "running"
-      ? "info"
-      : status === "done"
-        ? "success"
-        : status === "failed"
-          ? "critical"
-          : "outline";
-  return (
-    <div
-      className="border-border-subtle bg-background/85 mx-auto mt-3 flex w-[calc(100%-2rem)] max-w-3xl items-center gap-2 rounded-lg border px-3 py-2 shadow-[0_1px_2px_color-mix(in_oklch,var(--foreground)_4%,transparent)]"
-      data-testid="subagent-context-bar"
-    >
-      <span className="grid size-7 shrink-0 place-items-center text-muted-foreground">
-        <Bot className="size-3.5" aria-hidden />
-      </span>
-      <div className="min-w-0 flex-1">
-        <div className="flex min-w-0 items-center gap-2">
-          <span className="truncate text-xs font-semibold" title={name}>
-            {name}
-          </span>
-          <Badge variant={variant} size="sm" className="shrink-0">
-            {label}
-          </Badge>
-        </div>
-        <p className="text-muted-foreground text-xs">Read-only subagent view</p>
-      </div>
-      <Button type="button" variant="ghost" size="sm" onClick={onBack}>
-        Back to main agent
-      </Button>
-    </div>
-  );
-}
-
-/**
- * The watch task's seat in the transcript view: the sweep drives this
- * session's turns, so instead of a composer the reader gets what the watch
- * is doing and the two decisions that are theirs — stop it, or go back.
- */
-function WatchTaskBar({
-  client,
-  workspaceId,
-  watch,
-  onBack,
-  onStopped,
-}: {
-  client: Pick<ApiClient, "stopCodeWatch">;
-  workspaceId: string;
-  watch: CodeWatchSnapshot | undefined;
-  onBack: () => void;
-  onStopped: () => void;
-}) {
-  const [stopping, setStopping] = useState(false);
-  const active =
-    watch !== undefined &&
-    (watch.state === "watching" ||
-      watch.state === "fixing" ||
-      watch.state === "blocked");
-  const label = !watch
-    ? "This watch task has finished."
-    : watch.state === "fixing"
-      ? `Fixing PR #${watch.pr_number}${watch.cycles > 0 ? ` · fix turn ${watch.cycles}` : ""}`
-      : watch.state === "blocked"
-        ? `Watch blocked${watch.detail ? `: ${watch.detail}` : ""}`
-        : watch.state === "watching"
-          ? `Watching PR #${watch.pr_number}${watch.detail ? ` · ${watch.detail}` : ""}`
-          : `Watch ${watch.state}${watch.detail ? `: ${watch.detail}` : ""}`;
-  return (
-    <div
-      className="border-border-subtle bg-background/80 mx-auto mb-3 flex w-full max-w-3xl items-center gap-2 rounded-md border px-3 py-2 text-xs"
-      data-testid="watch-task-bar"
-    >
-      <CircleDotDashed
-        className={cn(
-          "size-3.5 shrink-0",
-          watch?.state === "blocked"
-            ? STATUS_MARK.warning
-            : STATUS_MARK.pending,
-        )}
-        aria-hidden
-      />
-      <span className="min-w-0 flex-1 truncate" title={watch?.detail}>
-        {label}
-      </span>
-      {active && (
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          disabled={stopping}
-          onClick={() => {
-            setStopping(true);
-            client
-              .stopCodeWatch(workspaceId)
-              .then(() => onStopped())
-              .catch((err) => {
-                toast.error(
-                  friendlyErrorMessage(err, "Could not stop the watch"),
-                );
-              })
-              .finally(() => setStopping(false));
-          }}
-        >
-          {stopping ? "Stopping…" : "Stop watching"}
-        </Button>
-      )}
-      <Button type="button" variant="ghost" size="sm" onClick={onBack}>
-        Back to main task
-      </Button>
-    </div>
-  );
-}
-
-/**
- * A tab label for one of a workspace's agents.
- *
- * The first agent is the one the workspace was started with, so it keeps the
- * name the rest of the surface uses. The others are named by engine, numbered
- * only when the same engine runs more than once.
- */
-function conversationTabLabel(
-  session: CodeSessionSnapshot,
-  index: number,
-  sessions: readonly CodeSessionSnapshot[],
-): string {
-  if (index === 0) return "Main agent";
-  const label = HARNESS_LABELS[session.harness_kind];
-  const same = sessions.filter(
-    (entry, at) => at > 0 && entry.harness_kind === session.harness_kind,
-  );
-  if (same.length < 2) return label;
-  return `${label} ${same.indexOf(session) + 1}`;
 }
