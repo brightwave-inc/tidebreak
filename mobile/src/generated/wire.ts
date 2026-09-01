@@ -3757,6 +3757,28 @@ url?: string, };
 export type PullRequestCheckBucket = "pass" | "pending" | "fail" | "skipped";
 
 /**
+ * Per-bucket check counts carried beside the display summary, so a reader
+ * never parses numbers back out of the prose.
+ */
+export type PullRequestCheckCounts = {
+/**
+ * Checks that passed.
+ */
+passing: number,
+/**
+ * Checks queued or still running.
+ */
+pending: number,
+/**
+ * Checks that failed.
+ */
+failing: number,
+/**
+ * Checks the host deliberately skipped or cancelled.
+ */
+skipped: number, };
+
+/**
  * One pull-request comment: an issue comment, a review body, or an inline
  * review comment. Never persisted; fetched live from the host.
  */
@@ -3833,6 +3855,11 @@ title?: string,
  * One-line checks summary.
  */
 checks_summary?: string | null,
+/**
+ * Structured counts behind `checks_summary`. Absent on digests written
+ * before the counts shipped.
+ */
+check_counts?: PullRequestCheckCounts,
 /**
  * Individual checks, when the host reported any.
  */
