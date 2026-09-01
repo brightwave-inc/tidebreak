@@ -743,6 +743,7 @@ describe("parseCodeWorkspacePr", () => {
       url: "https://github.com/example/demo/pull/12",
       state: "open",
       checks_summary: "1 passing, 0 pending, 0 failing, 1 skipped",
+      check_counts: { passing: 1, pending: 0, failing: 0, skipped: 1 },
       checks: [
         { name: "ci / rust", bucket: "pass" },
         { name: "release draft", bucket: "skipped", detail: "skipping" },
@@ -792,6 +793,18 @@ describe("parseCodeWorkspacePr", () => {
   it("rejects a mistyped merge-status field", () => {
     expect(
       parseCodeWorkspacePr({ ...pr, pr: { ...pr.pr, draft: "yes" } }),
+    ).toBeNull();
+  });
+
+  it("rejects mistyped check counts", () => {
+    expect(
+      parseCodeWorkspacePr({
+        ...pr,
+        pr: {
+          ...pr.pr,
+          check_counts: { passing: "1", pending: 0, failing: 0, skipped: 0 },
+        },
+      }),
     ).toBeNull();
   });
 });

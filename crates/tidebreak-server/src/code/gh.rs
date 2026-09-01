@@ -459,6 +459,7 @@ pub(crate) async fn create_pull_request(
         state: "open".into(),
         title: None,
         checks_summary: None,
+        check_counts: None,
         checks: None,
         draft: None,
         merged: None,
@@ -530,6 +531,7 @@ pub(crate) async fn create_pull_request_rest(
             .and_then(serde_json::Value::as_str)
             .map(ToOwned::to_owned),
         checks_summary: None,
+        check_counts: None,
         checks: None,
         draft: fact.get("isDraft").and_then(serde_json::Value::as_bool),
         merged: Some(false),
@@ -1387,33 +1389,6 @@ fn shell_single_quote(value: &str) -> String {
 #[cfg(windows)]
 fn powershell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
-}
-
-/// One line for the digest header: passing, pending, and failing counts in
-/// the order a reader triages them.
-pub(crate) fn summarize_checks(checks: &[tidebreak_core::PullRequestCheck]) -> Option<String> {
-    use tidebreak_core::PullRequestCheckBucket;
-
-    if checks.is_empty() {
-        return Some("no checks".into());
-    }
-    let mut passing = 0_u32;
-    let mut failing = 0_u32;
-    let mut pending = 0_u32;
-    let mut skipped = 0_u32;
-    for check in checks {
-        match check.bucket {
-            PullRequestCheckBucket::Pass => passing += 1,
-            PullRequestCheckBucket::Fail => failing += 1,
-            PullRequestCheckBucket::Pending => pending += 1,
-            PullRequestCheckBucket::Skipped => skipped += 1,
-        }
-    }
-    let mut summary = format!("{passing} passing, {pending} pending, {failing} failing");
-    if skipped > 0 {
-        summary.push_str(&format!(", {skipped} skipped"));
-    }
-    Some(summary)
 }
 
 fn pr_number_from_url(url: &str) -> Option<u64> {
@@ -2471,28 +2446,6 @@ mod tests {
 
         assert!(parse_raw_http("gh: command not found").is_none());
         assert!(parse_raw_http("").is_none());
-    }
-
-    #[test]
-    fn checks_summary_counts_buckets() {
-        use tidebreak_core::{PullRequestCheck, PullRequestCheckBucket};
-        let check = |name: &str, bucket: PullRequestCheckBucket| PullRequestCheck {
-            name: name.into(),
-            bucket,
-            detail: None,
-            url: None,
-        };
-        let checks = vec![
-            check("lint", PullRequestCheckBucket::Pass),
-            check("test", PullRequestCheckBucket::Pending),
-            check("fmt", PullRequestCheckBucket::Fail),
-            check("release", PullRequestCheckBucket::Skipped),
-        ];
-        assert_eq!(
-            summarize_checks(&checks).as_deref(),
-            Some("1 passing, 1 pending, 1 failing, 1 skipped")
-        );
-        assert_eq!(summarize_checks(&[]).as_deref(), Some("no checks"));
     }
 
     #[tokio::test]

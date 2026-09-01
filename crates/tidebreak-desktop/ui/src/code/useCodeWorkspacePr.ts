@@ -167,6 +167,12 @@ function pullRequestDigestSignature(pr: PullRequestDigest | undefined): string {
     pr.state,
     pr.title,
     pr.checks_summary,
+    pr.check_counts && [
+      pr.check_counts.passing,
+      pr.check_counts.pending,
+      pr.check_counts.failing,
+      pr.check_counts.skipped,
+    ],
     pr.checks?.map((check) => [
       check.name,
       check.bucket,

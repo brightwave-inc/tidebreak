@@ -193,9 +193,10 @@ pub use code::{
     CodeWorkspaceStatus, Diffstat, ExternalMessageRecord, ExternalSessionResolution,
     FileChangeKind, GrantRotation, HarnessCaps, HarnessCommand, HarnessKind, HarnessNoticeLevel,
     HarnessTier, IncarnationAdmission, IncarnationState, PullRequestCheck, PullRequestCheckBucket,
-    PullRequestComment, PullRequestCommentKind, PullRequestDigest, QuickAction, RepoId,
-    SequencedCodeEvent, ToolDetail, ToolOutcome, WorkspaceId, MAX_EVENT_TEXT_CHARS,
-    MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS, MAX_SESSION_SUBAGENTS, MAX_TOOL_SUMMARY_CHARS,
+    PullRequestCheckCounts, PullRequestComment, PullRequestCommentKind, PullRequestDigest,
+    QuickAction, RepoId, SequencedCodeEvent, ToolDetail, ToolOutcome, WorkspaceId,
+    MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS, MAX_SESSION_SUBAGENTS,
+    MAX_TOOL_SUMMARY_CHARS,
 };
 pub use compaction::{
     CompactionPolicy, CompactionSelection, CompactionSourceBoundary, CompactionTokenBounds,

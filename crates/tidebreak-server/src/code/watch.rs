@@ -978,6 +978,7 @@ mod tests {
             state: "open".to_owned(),
             title: Some("demo".to_owned()),
             checks_summary: None,
+            check_counts: None,
             checks: None,
             draft: Some(false),
             merged: Some(false),

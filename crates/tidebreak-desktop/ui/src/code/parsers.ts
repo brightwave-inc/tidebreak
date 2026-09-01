@@ -135,6 +135,7 @@ import type {
   CodeFileChange as WireCodeFileChange,
   Diffstat as WireDiffstat,
   PullRequestDigest as WirePullRequestDigest,
+  PullRequestCheckCounts as WirePullRequestCheckCounts,
   PullRequestComment as WirePullRequestComment,
   CodePrCommentsSnapshot as WireCodePrCommentsSnapshot,
   HarnessCaps as WireHarnessCaps,
@@ -2164,6 +2165,7 @@ export function parsePullRequestDigest(
       "state",
       "title",
       "checks_summary",
+      "check_counts",
       "checks",
       "draft",
       "merged",
@@ -2196,12 +2198,18 @@ export function parsePullRequestDigest(
   }
   const checks = parsePullRequestChecks(value.checks);
   if (value.checks !== undefined && !checks) return null;
+  const counts =
+    value.check_counts === undefined || value.check_counts === null
+      ? undefined
+      : parsePullRequestCheckCounts(value.check_counts);
+  if (counts === null) return null;
   return {
     number: value.number,
     state: value.state,
     ...(value.url ? { url: value.url } : {}),
     ...(value.title ? { title: value.title } : {}),
     ...(value.checks_summary ? { checks_summary: value.checks_summary } : {}),
+    ...(counts ? { check_counts: counts } : {}),
     ...(checks && checks.length > 0 ? { checks } : {}),
     ...(typeof value.draft === "boolean" ? { draft: value.draft } : {}),
     ...(typeof value.merged === "boolean" ? { merged: value.merged } : {}),
@@ -2251,6 +2259,32 @@ function parsePullRequestChecks(
     });
   }
   return checks;
+}
+
+function parsePullRequestCheckCounts(
+  value: unknown,
+): WirePullRequestCheckCounts | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WirePullRequestCheckCounts>(value, [
+      "passing",
+      "pending",
+      "failing",
+      "skipped",
+    ]) ||
+    !isNonNegativeInteger(value.passing) ||
+    !isNonNegativeInteger(value.pending) ||
+    !isNonNegativeInteger(value.failing) ||
+    !isNonNegativeInteger(value.skipped)
+  ) {
+    return null;
+  }
+  return {
+    passing: value.passing,
+    pending: value.pending,
+    failing: value.failing,
+    skipped: value.skipped,
+  };
 }
 
 export function parseCodeWorkspacePr(

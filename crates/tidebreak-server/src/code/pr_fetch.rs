@@ -29,10 +29,10 @@ use serde_json::Value;
 use crate::obo_gateway::GitCredential;
 use tidebreak_core::{
     CodePullRequestFact, CodePullRequestState, PullRequestCheck, PullRequestCheckBucket,
-    PullRequestDigest,
+    PullRequestCheckCounts, PullRequestDigest,
 };
 
-use super::gh::{run_gh, run_gh_http, summarize_checks, RawHttpResponse};
+use super::gh::{run_gh, run_gh_http, RawHttpResponse};
 
 /// Ceiling on concurrent GitHub reads through the gate, across every host.
 const GATE_PERMITS: usize = 4;
@@ -503,12 +503,14 @@ pub(crate) fn digest_from_parts(
     review_decision: Option<String>,
     in_merge_queue: Option<bool>,
 ) -> PullRequestDigest {
+    let counts = PullRequestCheckCounts::from_checks(checks);
     PullRequestDigest {
         number: pull.number,
         url: pull.url.clone(),
         state: pull.state.clone(),
         title: pull.title.clone(),
-        checks_summary: summarize_checks(checks),
+        checks_summary: Some(counts.summary_line()),
+        check_counts: Some(counts),
         checks: (!checks.is_empty()).then(|| checks.to_vec()),
         draft: pull.draft,
         merged: Some(pull.state == "merged"),

@@ -139,7 +139,53 @@ describe("checkCounts", () => {
     });
   });
 
-  it("falls back to the one-line summary the host sends", () => {
+  it("reads the structured counts when the check list is absent", () => {
+    expect(
+      checkCounts({
+        check_counts: { passing: 3, pending: 1, failing: 2, skipped: 1 },
+        checks_summary: "3 passing, 1 pending, 2 failing, 1 skipped",
+      }),
+    ).toEqual({
+      total: 7,
+      passing: 3,
+      pending: 1,
+      failing: 2,
+      skipped: 1,
+    });
+  });
+
+  it("trusts the structured counts over the summary wording", () => {
+    // A reworded summary must not move the numbers.
+    expect(
+      checkCounts({
+        check_counts: { passing: 2, pending: 0, failing: 1, skipped: 0 },
+        checks_summary: "2 green, 1 red",
+      }),
+    ).toEqual({
+      total: 3,
+      passing: 2,
+      pending: 0,
+      failing: 1,
+      skipped: 0,
+    });
+  });
+
+  it("still counts the check list first when both arrive", () => {
+    expect(
+      checkCounts({
+        checks: [{ bucket: "pass" }, { bucket: "fail" }],
+        check_counts: { passing: 9, pending: 9, failing: 9, skipped: 9 },
+      }),
+    ).toEqual({
+      total: 2,
+      passing: 1,
+      pending: 0,
+      failing: 1,
+      skipped: 0,
+    });
+  });
+
+  it("falls back to the one-line summary an old digest carries", () => {
     expect(checkCounts({ checks_summary: "2 passing, 1 failing" })).toEqual({
       total: 3,
       passing: 2,
