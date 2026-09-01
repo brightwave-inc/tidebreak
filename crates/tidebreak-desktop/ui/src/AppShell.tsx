@@ -250,6 +250,7 @@ export function AppShell() {
   const [dismissedUpdateVersion, setDismissedUpdateVersion] = useState(() =>
     window.localStorage.getItem(DISMISSED_UPDATE_VERSION_KEY),
   );
+  const [explicitUpdateCheckOpen, setExplicitUpdateCheckOpen] = useState(false);
   const openChatId = useActiveChatId();
   const savingTitle = useChatListStore((state) => state.savingTitle);
   const renameChatDraft = useChatListStore((state) => state.renameChatDraft);
@@ -273,13 +274,14 @@ export function AppShell() {
   const currentShortcutMode = () =>
     shellShortcutMode(router.state.location.pathname);
 
-  // The native "Check for Updates…" menu item lands the reader on the
-  // Updates settings panel and runs the same explicit check the panel's
-  // button does, so the result (up to date, or an update staged) is visible.
+  // The native "Check for Updates…" menu item keeps the reader in place and
+  // raises the update card while the explicit check runs. Automatic checks
+  // stay quiet unless they stage an update.
   useNativeHostEvent(UPDATE_CHECK_REQUESTED_EVENT, () => {
-    const updatesPath: string = "/settings/updates";
-    void navigate({ to: updatesPath });
-    void desktopUpdates.check();
+    setExplicitUpdateCheckOpen(true);
+    void desktopUpdates
+      .check()
+      .finally(() => setExplicitUpdateCheckOpen(false));
   });
 
   /**
@@ -1129,6 +1131,18 @@ export function AppShell() {
           )}
           <SidebarExpandStrip macOverlay={macOverlayTitlebar} />
           <ComputerUseIndicator />
+          {explicitUpdateCheckOpen &&
+            desktopUpdates.state.status !== "ready" && (
+              <UpdateReadyCard
+                status={
+                  desktopUpdates.state.status === "downloading"
+                    ? "downloading"
+                    : "checking"
+                }
+                version={desktopUpdates.state.version}
+                onDismiss={() => setExplicitUpdateCheckOpen(false)}
+              />
+            )}
           {desktopUpdates.state.status === "ready" &&
             dismissedUpdateVersion !==
               (desktopUpdates.state.version ?? UNKNOWN_UPDATE_VERSION) && (

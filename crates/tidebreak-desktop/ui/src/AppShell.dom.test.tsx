@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import {
+  act,
   cleanup,
   render,
   screen,
@@ -112,6 +113,15 @@ const desktopUpdateState = vi.hoisted(() => ({
   enabled: true,
 }));
 const restartDesktop = vi.hoisted(() => vi.fn(async () => {}));
+const checkDesktop = vi.hoisted(() => vi.fn());
+const tauriIsTauri = vi.hoisted(() => vi.fn(() => false));
+const nativeEventListeners = vi.hoisted(() => new Map<string, () => void>());
+const listenToNativeEvent = vi.hoisted(() =>
+  vi.fn(async (event: string, handler: () => void) => {
+    nativeEventListeners.set(event, handler);
+    return () => nativeEventListeners.delete(event);
+  }),
+);
 
 /** One waiting question, as the shell's cross-chat read returns it. */
 /** One chat-surface inbox entry holding a single parked question. */
@@ -255,15 +265,20 @@ vi.mock("./host", () => ({
   hasLocalHostAuthority: () => hasNativeHost(),
 }));
 
+vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@tauri-apps/api/core")>()),
+  isTauri: tauriIsTauri,
+}));
+
 vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn(async () => () => {}),
+  listen: listenToNativeEvent,
 }));
 
 vi.mock("./updates", () => ({
   UPDATE_CHECK_REQUESTED_EVENT: "desktop-update-check-requested",
   useDesktopUpdates: () => ({
     state: desktopUpdateState,
-    check: vi.fn(),
+    check: checkDesktop,
     restart: restartDesktop,
     upToDate: false,
   }),
@@ -421,7 +436,13 @@ beforeEach(() => {
   desktopUpdateState.version = null;
   desktopUpdateState.error = null;
   desktopUpdateState.enabled = true;
+  checkDesktop.mockReset();
+  checkDesktop.mockImplementation(async () => ({ ...desktopUpdateState }));
   restartDesktop.mockClear();
+  tauriIsTauri.mockReset();
+  tauriIsTauri.mockReturnValue(false);
+  nativeEventListeners.clear();
+  listenToNativeEvent.mockClear();
   postMessage.mockClear();
   getPolicy.mockClear();
   getPolicy.mockResolvedValue(unmanaged);
@@ -1065,6 +1086,37 @@ describe("app shell", () => {
 
     await waitFor(() =>
       expect(router.state.location.pathname).toBe("/c/chat-1"),
+    );
+  });
+
+  it("checks for updates in a card without leaving the current screen", async () => {
+    tauriIsTauri.mockReturnValue(true);
+    let finishCheck = () => {};
+    checkDesktop.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishCheck = () => resolve({ ...desktopUpdateState });
+        }),
+    );
+    const { router } = await mountApp({ at: "/c/chat-1" });
+    await screen.findByTestId("transcript");
+    await waitFor(() =>
+      expect(nativeEventListeners.has("desktop-update-check-requested")).toBe(
+        true,
+      ),
+    );
+
+    act(() => nativeEventListeners.get("desktop-update-check-requested")?.());
+
+    expect(await screen.findByLabelText("Checking for updates")).toBeVisible();
+    expect(router.state.location.pathname).toBe("/c/chat-1");
+    expect(checkDesktop).toHaveBeenCalledOnce();
+
+    await act(async () => finishCheck());
+    await waitFor(() =>
+      expect(
+        screen.queryByLabelText("Checking for updates"),
+      ).not.toBeInTheDocument(),
     );
   });
 

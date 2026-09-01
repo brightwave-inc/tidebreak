@@ -39,8 +39,8 @@ use crate::host_access::HostAccess;
 
 const UPDATE_STATE_EVENT: &str = "desktop-update-state";
 /// Raised to the renderer when the native "Check for Updates…" menu item is
-/// chosen; the UI opens the Updates settings panel and runs an explicit check
-/// there so the outcome (up to date, or an update staged) is visible.
+/// chosen; the UI opens a transient update card and runs an explicit check
+/// without moving the reader away from the current screen.
 pub(crate) const UPDATE_CHECK_REQUESTED_EVENT: &str = "desktop-update-check-requested";
 const UPDATE_CHECK_STARTUP_DELAY: Duration = Duration::from_secs(15);
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
