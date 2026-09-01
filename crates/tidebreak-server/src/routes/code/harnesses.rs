@@ -11,7 +11,7 @@ use super::types::{
 use crate::code::harness_label;
 use crate::code::harness_llm::relay_covered;
 use crate::obo_gateway::GatewayCompatModel;
-use tidebreak_core::HarnessKind;
+use tidebreak_core::{CapLevel, HarnessKind};
 
 /// The doctor surface, served from the memoized probes (decision 0034).
 pub async fn list_harnesses(code: ScopedCode) -> Result<Json<HarnessDoctorReport>, ServerError> {
@@ -71,7 +71,7 @@ pub async fn list_harness_models(
         ));
     }
     let hosted = code.harness_llm_relay_active();
-    let (models, source) = if hosted {
+    let (mut models, source) = if hosted {
         (
             hosted_models(&code, kind).await?,
             HarnessModelSource::ModelGateway,
@@ -93,10 +93,39 @@ pub async fn list_harness_models(
             HarnessModelSource::Harness,
         )
     };
+    let reasoning_supported = adapter.capabilities(&probe).reasoning_levels == CapLevel::Supported;
+    let engine_reasoning_efforts = if reasoning_supported {
+        adapter.reasoning_efforts(&probe)
+    } else {
+        Vec::new()
+    };
+    let snapshot = if reasoning_supported {
+        code.gateway_model_snapshot().await
+    } else {
+        None
+    };
+    if let Some(snapshot) = snapshot {
+        for model in &mut models {
+            let Some(model_efforts) =
+                crate::providers::gateway_reasoning_efforts_for_model(&snapshot, &model.id)
+            else {
+                continue;
+            };
+            model.reasoning_efforts = if engine_reasoning_efforts.is_empty() {
+                model_efforts.to_vec()
+            } else {
+                engine_reasoning_efforts
+                    .iter()
+                    .copied()
+                    .filter(|effort| model_efforts.contains(effort))
+                    .collect()
+            };
+        }
+    }
     // An engine that states one ladder for every model says so directly. One
     // that states a ladder per row — Codex — has no single answer, so the
     // outer bound is the union of what its rows advertise.
-    let mut reasoning_efforts = adapter.reasoning_efforts(&probe);
+    let mut reasoning_efforts = engine_reasoning_efforts;
     if reasoning_efforts.is_empty() {
         reasoning_efforts = models
             .iter()
@@ -123,11 +152,11 @@ pub async fn list_harness_models(
 /// when the unused listing is down. OpenCode ids are provider-qualified so
 /// its request body selects the provider wired to that listing:
 /// `anthropic/{raw}` for Anthropic and `model-gateway/{raw}` for OpenAI
-/// Responses. Duplicate raw ids prefer the Anthropic surface. Gateway rows
-/// carry no per-model effort ladder or fast-mode promise — the engine's
-/// own ladder above is the honest outer bound — and only the Anthropic
-/// surface's `is_family_default` annotation claims a default. The wiring
-/// per engine is [`crate::code::harness_llm::spawn_wiring`].
+/// Responses. Duplicate raw ids prefer the Anthropic surface. Compat rows
+/// carry no effort ladder, so [`list_harness_models`] overlays the member
+/// catalog before returning them. They carry no fast-mode promise. Only the
+/// Anthropic surface's `is_family_default` annotation claims a default. The
+/// wiring per engine is [`crate::code::harness_llm::spawn_wiring`].
 async fn hosted_models(
     code: &ScopedCode,
     kind: HarnessKind,

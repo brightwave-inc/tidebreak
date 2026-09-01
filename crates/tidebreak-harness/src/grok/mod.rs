@@ -24,14 +24,31 @@ use crate::{HarnessAdapter, HarnessError, HarnessProbe, HarnessSession, SessionS
 
 const AUTH_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// The ladder `grok --reasoning-effort` takes on the pinned 1.0.4. The CLI
-/// names them itself when it refuses one, and it tops out below `max`.
-pub(crate) const EFFORT_LADDER: &[ReasoningEffort] = &[
+/// The ladder `grok --reasoning-effort` takes through 1.0.4.
+pub(crate) const EFFORT_LADDER_1_0_4: &[ReasoningEffort] = &[
     ReasoningEffort::Low,
     ReasoningEffort::Medium,
     ReasoningEffort::High,
     ReasoningEffort::XHigh,
 ];
+
+/// Grok 1.0.5 replaced `medium` and `xhigh` with `max`.
+pub(crate) const EFFORT_LADDER_1_0_5: &[ReasoningEffort] = &[
+    ReasoningEffort::Low,
+    ReasoningEffort::High,
+    ReasoningEffort::Max,
+];
+
+pub(super) fn effort_ladder_for_version(version: Option<&str>) -> &'static [ReasoningEffort] {
+    match crate::probe::version_patch_line(version) {
+        Some(version) if version >= (1, 0, 5) => EFFORT_LADDER_1_0_5,
+        _ => EFFORT_LADDER_1_0_4,
+    }
+}
+
+fn effort_ladder(probe: &HarnessProbe) -> &'static [ReasoningEffort] {
+    effort_ladder_for_version(probe.version.as_deref())
+}
 
 /// Grok CLI adapter. Capabilities below are for the captured version
 /// 1.0.4: verified flags are `Supported`/`Unsupported`; anything not
@@ -119,8 +136,8 @@ impl HarnessAdapter for GrokAdapter {
         caps
     }
 
-    fn reasoning_efforts(&self, _probe: &HarnessProbe) -> Vec<ReasoningEffort> {
-        EFFORT_LADDER.to_vec()
+    fn reasoning_efforts(&self, probe: &HarnessProbe) -> Vec<ReasoningEffort> {
+        effort_ladder(probe).to_vec()
     }
 
     async fn list_models(&self, probe: &HarnessProbe) -> Vec<crate::ListedHarnessModel> {
@@ -131,7 +148,7 @@ impl HarnessAdapter for GrokAdapter {
             crate::prefer_gateway_models(
                 crate::list_cli_models(binary, &["models"], &probe.env).await,
             ),
-            EFFORT_LADDER,
+            effort_ladder(probe),
         )
     }
 
@@ -442,6 +459,22 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_efforts_follow_the_installed_patch_release() {
+        assert_eq!(
+            effort_ladder_for_version(Some("grok 1.0.4 (d846eb93d94d) [stable]")),
+            EFFORT_LADDER_1_0_4
+        );
+        assert_eq!(
+            effort_ladder_for_version(Some("grok 1.0.5 (5115b46bc909) [stable]")),
+            EFFORT_LADDER_1_0_5
+        );
+        assert_eq!(
+            effort_ladder_for_version(Some("grok 1.1.0 [stable]")),
+            EFFORT_LADDER_1_0_5
+        );
+    }
+
+    #[test]
     fn checked_in_stop_reasons_are_allowlisted() {
         for version in ["1.0.4", "1.0.5"] {
             for entry in std::fs::read_dir(fixture_dir(version)).unwrap() {
@@ -538,6 +571,7 @@ mod tests {
             mode: PermissionMode::Auto,
             model: None,
             effort: None,
+            effort_ladder: EFFORT_LADDER_1_0_4,
         })
         .unwrap();
         assert!(!plan.argv.iter().any(|arg| {
@@ -572,6 +606,7 @@ mod tests {
             mode: PermissionMode::Allow,
             model: None,
             effort: None,
+            effort_ladder: EFFORT_LADDER_1_0_4,
         })
         .unwrap();
         assert!(plan.argv.iter().any(|arg| arg == "--always-approve"));

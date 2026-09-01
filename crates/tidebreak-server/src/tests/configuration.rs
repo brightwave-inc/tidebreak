@@ -2354,6 +2354,7 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
                 },
             ],
             model_protocols: Default::default(),
+            model_reasoning_efforts: Default::default(),
             member_catalog: None,
             catalog_etag: None,
         },
@@ -3786,6 +3787,7 @@ async fn a_superseded_gateway_session_never_reads_usable() {
                 ..Default::default()
             }],
             model_protocols: std::collections::BTreeMap::new(),
+            model_reasoning_efforts: Default::default(),
             member_catalog: Some("v1".into()),
             catalog_etag: None,
         },
@@ -3868,6 +3870,7 @@ async fn a_credential_appearance_cannot_admit_a_plain_gateway_execution_key() {
                 ..Default::default()
             }],
             model_protocols: Default::default(),
+            model_reasoning_efforts: Default::default(),
             member_catalog: Some("v1".into()),
             catalog_etag: None,
         },
@@ -5695,6 +5698,7 @@ fn caller_snapshot() -> providers::GatewayModelSnapshot {
         ]
         .into_iter()
         .collect(),
+        model_reasoning_efforts: Default::default(),
         member_catalog: Some("v1".into()),
         catalog_etag: None,
     }

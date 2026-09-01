@@ -2190,7 +2190,8 @@ async fn bind_inner(
             .on_behalf_of_gateway
             .clone()
             .map(|gateway| Arc::new(code::harness_llm::HarnessLlmRelay::new(gateway))),
-    );
+    )
+    .with_gateway_runtime(state.gateway.clone());
     // A self-host machine owns its filesystem. Clones land under the data
     // directory unless an operator set a destination (decision 70).
     #[allow(unused_mut)]

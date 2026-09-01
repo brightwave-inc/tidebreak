@@ -168,6 +168,7 @@ async fn managed_compaction_and_message_admission_share_the_frozen_gateway_ident
                 ..Default::default()
             }],
             model_protocols: Default::default(),
+            model_reasoning_efforts: Default::default(),
             member_catalog: None,
             catalog_etag: None,
         },

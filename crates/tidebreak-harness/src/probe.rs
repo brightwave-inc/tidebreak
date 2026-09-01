@@ -533,6 +533,27 @@ pub(crate) fn version_minor_line(version: Option<&str>) -> Option<(u64, u64)> {
         })
 }
 
+/// The first `major.minor.patch` a version line states.
+pub(crate) fn version_patch_line(version: Option<&str>) -> Option<(u64, u64, u64)> {
+    version
+        .into_iter()
+        .flat_map(str::split_whitespace)
+        .find_map(|candidate| {
+            let candidate = candidate.strip_prefix('v').unwrap_or(candidate);
+            let mut parts = candidate.split('.');
+            let major = parts.next()?.parse::<u64>().ok()?;
+            let minor = parts.next()?.parse::<u64>().ok()?;
+            let patch = parts
+                .next()?
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse::<u64>()
+                .ok()?;
+            Some((major, minor, patch))
+        })
+}
+
 /// Whether a probed version states a `major.minor` other than the pinned
 /// line. A missing or unparseable version is not off-line: with nothing to
 /// compare, an adapter keeps the pinned capture's flags rather than degrading
@@ -1413,6 +1434,12 @@ eval "$cmd"
             Some((1, 0))
         );
         assert_eq!(version_minor_line(Some("v1.18.18")), Some((1, 18)));
+        assert_eq!(version_minor_line(Some("v1.18")), Some((1, 18)));
+        assert_eq!(
+            version_patch_line(Some("grok 1.0.5 (5115b46bc909) [stable]")),
+            Some((1, 0, 5))
+        );
+        assert_eq!(version_patch_line(Some("v1.18")), None);
         assert_eq!(version_minor_line(Some("development build")), None);
         assert_eq!(version_minor_line(None), None);
         assert!(off_pinned_line(Some("3.0.1 (Claude Code)"), (2, 1)));

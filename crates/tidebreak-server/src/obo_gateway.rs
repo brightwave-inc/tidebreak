@@ -685,19 +685,20 @@ impl OboGateway {
                     "the Model Gateway returned an unreadable catalog: {error}"
                 ))
             })?;
-        let (models, model_protocols) = crate::providers::member_catalog_models(catalog);
+        let converted = crate::providers::member_catalog_models(catalog);
         // The gateway is trusted for entitlements, not for shapes: the
         // caller's set is held to the same bounds as user-entered custom
         // models, exactly like the managed sync.
-        crate::providers::validate_custom_models(&models).map_err(|error| {
+        crate::providers::validate_custom_models(&converted.models).map_err(|error| {
             AgentError::msg(format!("the Model Gateway catalog was rejected: {error:?}"))
         })?;
         Ok(CatalogFetch::Fresh {
             snapshot: crate::providers::GatewayModelSnapshot {
                 gateway_url: self.gateway_base_url.clone(),
                 installation_id: None,
-                models,
-                model_protocols,
+                models: converted.models,
+                model_protocols: converted.model_protocols,
+                model_reasoning_efforts: converted.model_reasoning_efforts,
                 member_catalog: Some(crate::connectors::MEMBER_CATALOG_V1.to_owned()),
                 catalog_etag: etag.clone(),
             },

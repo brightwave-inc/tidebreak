@@ -794,6 +794,7 @@ mod tests {
                     ..Default::default()
                 }],
                 model_protocols: Default::default(),
+                model_reasoning_efforts: Default::default(),
                 member_catalog: None,
                 catalog_etag: None,
             },
@@ -935,6 +936,7 @@ mod tests {
                 ..Default::default()
             }],
             model_protocols,
+            model_reasoning_efforts: Default::default(),
             member_catalog: Some("v1".into()),
             catalog_etag: Some("fixture".into()),
         };
