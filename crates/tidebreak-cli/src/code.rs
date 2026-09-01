@@ -1550,12 +1550,77 @@ fn approval_kind(kind: &CodeApprovalKind) -> String {
         CodeApprovalKind::FileWrite { paths } => format!("write {}", paths.join(",")),
         CodeApprovalKind::Network { summary } => format!("network {summary}"),
         CodeApprovalKind::Other { summary } => summary.clone(),
-        CodeApprovalKind::ToolUse { preview, .. } => {
-            format!("tool {}", preview.summary().unwrap_or("call"))
-        }
+        // Decision 0018: the listing shows the literal action, never the
+        // call's own display-only narration.
+        CodeApprovalKind::ToolUse { preview, .. } => format!("tool {}", tool_action_line(preview)),
         CodeApprovalKind::Questions { questions } => format!("questions ({})", questions.len()),
         CodeApprovalKind::Plan { proposed_mode } => format!("plan -> {proposed_mode}"),
     }
+}
+
+/// The literal action a tool_use approval asks consent for, as one line.
+/// Argument boundaries survive: an element containing a space is quoted so it
+/// still reads as one argument.
+fn tool_action_line(preview: &tidebreak_core::ToolActionPreview) -> String {
+    use tidebreak_core::ToolActionPreview;
+    match preview {
+        ToolActionPreview::Exec {
+            command,
+            args,
+            cwd,
+            files,
+            summary: _,
+        } => {
+            let mut line = std::iter::once(command.as_str())
+                .chain(args.iter().map(String::as_str))
+                .map(quote_argument)
+                .collect::<Vec<_>>()
+                .join(" ");
+            if cwd != "." {
+                line.push_str(&format!("  (cwd {cwd})"));
+            }
+            if !files.is_empty() {
+                line.push_str(&format!("  (staged {})", files.join(", ")));
+            }
+            line
+        }
+        ToolActionPreview::Search { query, summary: _ } => format!("search: {query}"),
+        ToolActionPreview::WebSearch {
+            query,
+            domains,
+            start_published_at,
+            end_published_at,
+            summary: _,
+        } => {
+            let mut line = format!("web search: {query}");
+            if !domains.is_empty() {
+                line.push_str(&format!("  (sites {})", domains.join(", ")));
+            }
+            if let Some(start) = start_published_at {
+                line.push_str(&format!("  (published after {start})"));
+            }
+            if let Some(end) = end_published_at {
+                line.push_str(&format!("  (published before {end})"));
+            }
+            line
+        }
+        ToolActionPreview::WebExtract { url, summary: _ } => format!("fetch: {url}"),
+        ToolActionPreview::WriteFile { path, summary: _ } => format!("write: {path}"),
+        ToolActionPreview::DelegateAgent { task, network: _ } => format!("agent: {task}"),
+    }
+}
+
+fn quote_argument(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_owned();
+    }
+    if value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "_@%+=:,./-".contains(c))
+    {
+        return value.to_owned();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn tool_detail(detail: &tidebreak_core::ToolDetail) -> String {
@@ -2420,6 +2485,26 @@ mod tests {
 
     fn id() -> String {
         uuid::Uuid::nil().to_string()
+    }
+
+    #[test]
+    fn a_tool_use_listing_shows_the_literal_action_not_the_narration() {
+        let kind = CodeApprovalKind::ToolUse {
+            preview: tidebreak_core::ToolActionPreview::Exec {
+                command: "rm".into(),
+                args: vec!["-rf".into(), "two words".into()],
+                cwd: "work".into(),
+                files: vec!["notes.md".into()],
+                summary: Some("Cleaning temporary caches".into()),
+            },
+            offered_grants: Vec::new(),
+        };
+        let line = approval_kind(&kind);
+        assert_eq!(
+            line,
+            "tool rm -rf 'two words'  (cwd work)  (staged notes.md)"
+        );
+        assert!(!line.contains("Cleaning"));
     }
 
     #[test]
