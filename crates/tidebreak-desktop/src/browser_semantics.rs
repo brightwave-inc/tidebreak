@@ -180,54 +180,6 @@ struct RawTextProbe {
     uninspectable_regions: usize,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct SameDocumentNavigationObservation {
-    pub(crate) sequence: u64,
-    pub(crate) url: String,
-}
-
-pub(crate) async fn browser_install_same_document_navigation_observer(
-    webview: &Webview,
-) -> Result<SameDocumentNavigationObservation, String> {
-    #[cfg(target_os = "macos")]
-    {
-        evaluate_json(webview, same_document_navigation_observer_script()).await
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        webview
-            .eval(same_document_navigation_observer_script())
-            .map_err(|error| format!("browser host: {error}"))?;
-        let url = webview
-            .url()
-            .map_err(|error| format!("browser host: {error}"))?;
-        Ok(SameDocumentNavigationObservation {
-            sequence: 0,
-            url: url.to_string(),
-        })
-    }
-}
-
-pub(crate) async fn browser_read_same_document_navigation_observer(
-    webview: &Webview,
-) -> Result<Option<SameDocumentNavigationObservation>, String> {
-    #[cfg(target_os = "macos")]
-    {
-        evaluate_json(webview, same_document_navigation_observer_read_script()).await
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let url = webview
-            .url()
-            .map_err(|error| format!("browser host: {error}"))?;
-        Ok(Some(SameDocumentNavigationObservation {
-            sequence: 0,
-            url: url.to_string(),
-        }))
-    }
-}
-
 pub(crate) async fn browser_semantic_snapshot(
     app: &AppHandle,
     registry: &BrowserRegistry,
@@ -2759,14 +2711,6 @@ fn inspect_overlay_script() -> String {
     INSPECT_OVERLAY_SCRIPT.replace("__SENSITIVE_FIELD_POLICY__", SENSITIVE_FIELD_POLICY)
 }
 
-fn same_document_navigation_observer_script() -> &'static str {
-    SAME_DOCUMENT_NAVIGATION_OBSERVER_SCRIPT
-}
-
-fn same_document_navigation_observer_read_script() -> &'static str {
-    SAME_DOCUMENT_NAVIGATION_OBSERVER_READ_SCRIPT
-}
-
 fn screenshot_privacy_script(watch_key: &str, finish: bool) -> Result<String, String> {
     let watch_key = serde_json::to_string(watch_key).map_err(|error| error.to_string())?;
     Ok(SCREENSHOT_PRIVACY_SCRIPT
@@ -3601,64 +3545,6 @@ const REMOVE_INSPECT_OVERLAY_SCRIPT: &str = r#"
   document.getElementById("__tidebreak_inspect_style__")?.remove();
   delete window.__tidebreak_highlight_inspect__;
   return "removed";
-})()
-"#;
-
-const SAME_DOCUMENT_NAVIGATION_OBSERVER_SCRIPT: &str = r#"
-(() => {
-  const STATE_KEY = "__tidebreak_same_document_navigation__";
-  const active = window[STATE_KEY];
-  if (active && !active.cancelled) {
-    active.capture("reconcile");
-    return JSON.stringify({ sequence: active.sequence, url: active.url });
-  }
-
-  const state = {
-    cancelled: false,
-    interval: null,
-    sequence: 0,
-    url: String(location.href),
-    capture: null,
-  };
-  const capture = () => {
-    if (state.cancelled) return;
-    const next = String(location.href);
-    if (next === state.url) return;
-    state.url = next;
-    state.sequence += 1;
-  };
-  state.capture = capture;
-
-  for (const method of ["pushState", "replaceState"]) {
-    const original = history[method].bind(history);
-    history[method] = (...args) => {
-      const result = original(...args);
-      capture(method);
-      return result;
-    };
-  }
-  addEventListener("popstate", capture, true);
-  addEventListener("hashchange", capture, true);
-  // The host reads (and captures) on its own cadence; this only catches a
-  // location change no listener saw, so it can be slow.
-  state.interval = setInterval(capture, 1000);
-  addEventListener("pagehide", () => {
-    state.cancelled = true;
-    clearInterval(state.interval);
-    removeEventListener("popstate", capture, true);
-    removeEventListener("hashchange", capture, true);
-  }, { once: true });
-  window[STATE_KEY] = state;
-  return JSON.stringify({ sequence: state.sequence, url: state.url });
-})()
-"#;
-
-const SAME_DOCUMENT_NAVIGATION_OBSERVER_READ_SCRIPT: &str = r#"
-(() => {
-  const state = window.__tidebreak_same_document_navigation__;
-  if (!state || state.cancelled) return "null";
-  state.capture("native_read");
-  return JSON.stringify({ sequence: state.sequence, url: state.url });
 })()
 "#;
 
@@ -4734,18 +4620,6 @@ mod tests {
         assert!(source.contains("TidebreakBrowserSemantics"));
         assert!(source.contains("BROWSER_SEMANTICS_CONTENT_WORLD"));
         assert!(source.contains("evaluateJavaScript_inFrame_inContentWorld_completionHandler"));
-    }
-
-    #[test]
-    fn same_document_navigation_observer_covers_history_and_location_events() {
-        let script = same_document_navigation_observer_script();
-        assert!(script.contains("[\"pushState\", \"replaceState\"]"));
-        assert!(script.contains("addEventListener(\"popstate\""));
-        assert!(script.contains("addEventListener(\"hashchange\""));
-        assert!(script.contains("setInterval(capture, 1000)"));
-        assert!(script.contains("clearInterval(state.interval)"));
-        assert!(!script.contains("__TAURI_INTERNALS__"));
-        assert!(!script.contains("window.ipc"));
     }
 
     #[test]

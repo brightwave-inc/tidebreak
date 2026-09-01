@@ -33,9 +33,10 @@ use crate::browser_profile::{BrowserProfileStore, ManagedBrowserProfile};
 use crate::browser_recovery::{
     LegacyBrowserImportResult, LegacyBrowserSession, RecoveredBrowserSession,
 };
-use crate::browser_semantics::{
-    browser_inject_inspect_overlay, browser_install_same_document_navigation_observer,
-    browser_read_same_document_navigation_observer, browser_remove_inspect_overlay,
+use crate::browser_semantics::{browser_inject_inspect_overlay, browser_remove_inspect_overlay};
+#[cfg(target_os = "macos")]
+use crate::browser_url_observer::{
+    observe_browser_url, stop_observing_browser_url, BrowserUrlChangeHandler,
 };
 
 const BROWSER_LABEL_PREFIX: &str = "code-browser-";
@@ -46,19 +47,30 @@ const MAX_BROWSER_URL_CHARS: usize = 8_192;
 const MAX_JS_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const AGENT_NAVIGATION_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const AGENT_NAVIGATION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
-/// How often the host reads the in-page navigation observer while the tab is
-/// showing. The page captures `pushState` and friends the instant they happen;
-/// this is only the latency before the URL bar reflects it.
+/// How often the host reads the view's URL while the tab is showing, on the
+/// platforms without a native URL observer. macOS pushes every change through
+/// `browser_url_observer` and never polls.
+#[cfg(not(target_os = "macos"))]
 const SAME_DOCUMENT_NAVIGATION_POLL_INTERVAL: std::time::Duration =
     std::time::Duration::from_millis(250);
 /// The cadence while the tab is hidden. Nothing shows the URL, so the read
 /// waits; a hidden tab only checks that it is still the same document.
+#[cfg(not(target_os = "macos"))]
 const SAME_DOCUMENT_NAVIGATION_HIDDEN_POLL_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(2);
 #[cfg(target_os = "macos")]
 const PROFILE_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 #[cfg(target_os = "macos")]
 const PROFILE_CLOSE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// One URL change reported by the native view. `loading` is true while a
+/// cross-document navigation is in flight, so the page-load events own that
+/// URL and a same-document push must not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BrowserUrlChange {
+    pub(crate) url: String,
+    pub(crate) loading: bool,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -333,7 +345,7 @@ pub(crate) async fn code_browser_command(
             )?;
             if let Some(webview) = existing {
                 registry.ensure_workspace(&request.browser_id, &request.workspace_id)?;
-                webview.close().map_err(browser_error)?;
+                close_browser_webview(&webview)?;
             }
             registry.remove(&request.browser_id, &request.workspace_id)?;
             registry.forget_recovery(&owner_id, &request.browser_id, &request.workspace_id)?;
@@ -584,6 +596,8 @@ fn create_browser(
     let load_browser = browser_id.to_owned();
     let load_workspace = workspace_id.to_owned();
     let load_registry = registry.clone();
+    #[cfg(not(target_os = "macos"))]
+    let load_renderer_url = renderer_url.clone();
     let title_main = main.clone();
     let title_browser = browser_id.to_owned();
     let title_workspace = workspace_id.to_owned();
@@ -739,15 +753,21 @@ fn create_browser(
                     origin: None,
                 },
             );
+            // macOS observes the view's URL natively from creation; the
+            // fallback below only reads the view on the other platforms.
+            #[cfg(target_os = "macos")]
+            let _ = &webview;
+            #[cfg(not(target_os = "macos"))]
             if matches!(payload.event(), PageLoadEvent::Finished) {
                 if let Some(document_epoch) = snapshot.document_epoch {
-                    start_same_document_navigation_observer(
+                    start_same_document_navigation_poll(
                         load_main.clone(),
                         load_registry.clone(),
                         load_browser.clone(),
                         load_workspace.clone(),
                         instance_id,
                         document_epoch,
+                        load_renderer_url.clone(),
                         webview,
                     );
                 }
@@ -857,9 +877,25 @@ fn create_browser(
             return Err(browser_error(error));
         }
     };
+    #[cfg(target_os = "macos")]
+    if let Err(error) = observe_browser_url(
+        &webview,
+        same_document_navigation_handler(
+            main.clone(),
+            registry.clone(),
+            browser_id.to_owned(),
+            workspace_id.to_owned(),
+            instance_id,
+            renderer_url.clone(),
+        ),
+    ) {
+        let _ = close_browser_webview(&webview);
+        registry.remove_instance(browser_id, workspace_id, instance_id);
+        return Err(error);
+    }
     if !visible {
         if let Err(error) = webview.hide() {
-            let _ = webview.close();
+            let _ = close_browser_webview(&webview);
             registry.remove_instance(browser_id, workspace_id, instance_id);
             return Err(browser_error(error));
         }
@@ -867,35 +903,126 @@ fn create_browser(
     registry.snapshot(browser_id, workspace_id)
 }
 
+/// Close a managed browser view, detaching the native URL observer first so
+/// nothing keeps watching a view that is going away.
+fn close_browser_webview(webview: &Webview) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let _ = stop_observing_browser_url(webview);
+    webview.close().map_err(browser_error)
+}
+
+/// Build the handler the native URL observer calls on the main thread. It
+/// hands each change to one ordered task so the registry sees pushes in the
+/// order the view reported them, and the main thread never waits on the
+/// registry or the recovery store.
+#[cfg(target_os = "macos")]
+fn same_document_navigation_handler(
+    main: Webview,
+    registry: BrowserRegistry,
+    browser_id: String,
+    workspace_id: String,
+    instance_id: u64,
+    renderer_url: Option<Url>,
+) -> BrowserUrlChangeHandler {
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<BrowserUrlChange>();
+    tauri::async_runtime::spawn(async move {
+        while let Some(change) = receiver.recv().await {
+            apply_browser_url_change(
+                &main,
+                &registry,
+                &browser_id,
+                &workspace_id,
+                instance_id,
+                renderer_url.as_ref(),
+                &change,
+            );
+        }
+    });
+    Box::new(move |change| {
+        let _ = sender.send(change);
+    })
+}
+
+/// Record one reported URL as a same-document navigation when it qualifies,
+/// and tell the renderer. Returns the snapshot it emitted, if any.
+fn apply_browser_url_change(
+    main: &Webview,
+    registry: &BrowserRegistry,
+    browser_id: &str,
+    workspace_id: &str,
+    instance_id: u64,
+    renderer_url: Option<&Url>,
+    change: &BrowserUrlChange,
+) -> Option<BrowserSnapshot> {
+    let snapshot = registry.snapshot(browser_id, workspace_id).ok()?;
+    let (document_epoch, url) = same_document_navigation_target(&snapshot, change, renderer_url)?;
+    let snapshot = registry.same_document_navigation(
+        browser_id,
+        workspace_id,
+        instance_id,
+        document_epoch,
+        url.to_string(),
+    )?;
+    emit_event(
+        main,
+        CodeBrowserEvent {
+            workspace_id: workspace_id.to_owned(),
+            browser_id: browser_id.to_owned(),
+            kind: "same_document_navigation",
+            url: snapshot.url.clone(),
+            title: snapshot.title.clone(),
+            message: None,
+            load_state: snapshot.load_state,
+            document_epoch: snapshot.document_epoch,
+            controller: snapshot.controller.clone(),
+            agent_access: snapshot.agent_access.clone(),
+            origin: None,
+        },
+    );
+    Some(snapshot)
+}
+
+/// Decide whether a reported URL is a same-document navigation of the
+/// document the registry currently holds. Cross-document loads are left to
+/// the page-load events: the view is still loading, or the registry has not
+/// seen the document finish, or the origin moved.
+fn same_document_navigation_target(
+    snapshot: &BrowserSnapshot,
+    change: &BrowserUrlChange,
+    renderer_url: Option<&Url>,
+) -> Option<(u64, Url)> {
+    if change.loading || snapshot.load_state != Some(BrowserLoadState::Ready) {
+        return None;
+    }
+    let document_epoch = snapshot.document_epoch?;
+    let current = snapshot.url.as_deref()?;
+    if current == change.url {
+        return None;
+    }
+    let expected_origin = BrowserOrigin::from_url(current)?;
+    let url = validated_same_document_url(&change.url, renderer_url, &expected_origin).ok()?;
+    Some((document_epoch, url))
+}
+
+/// Poll the view's URL for same-document navigation on the platforms that
+/// have no native URL observer. The loop ends when the document changes.
+#[cfg(not(target_os = "macos"))]
 #[allow(
     clippy::too_many_arguments,
-    reason = "the observer fence keeps native view, workspace, and document identity explicit"
+    reason = "the poll fence keeps native view, workspace, and document identity explicit"
 )]
-fn start_same_document_navigation_observer(
+fn start_same_document_navigation_poll(
     main: Webview,
     registry: BrowserRegistry,
     browser_id: String,
     workspace_id: String,
     instance_id: u64,
     document_epoch: u64,
+    renderer_url: Option<Url>,
     webview: Webview,
 ) {
     tauri::async_runtime::spawn(async move {
-        let Ok(snapshot) = registry.snapshot(&browser_id, &workspace_id) else {
-            return;
-        };
-        if snapshot.document_epoch != Some(document_epoch) {
-            return;
-        }
-        let Some(expected_origin) = snapshot.url.as_deref().and_then(BrowserOrigin::from_url)
-        else {
-            return;
-        };
-        let renderer_url = main.url().ok();
-        let mut observer_installed = false;
-        let mut last_sequence = None;
         let mut cadence = SAME_DOCUMENT_NAVIGATION_POLL_INTERVAL;
-
         loop {
             tokio::time::sleep(cadence).await;
             let Ok(snapshot) = registry.snapshot(&browser_id, &workspace_id) else {
@@ -905,72 +1032,27 @@ fn start_same_document_navigation_observer(
                 return;
             }
             // A hidden tab shows no URL bar, so there is nothing to keep
-            // current; the page keeps capturing and the first visible read
-            // catches up on whatever moved.
+            // current; the first visible read catches up on whatever moved.
             if snapshot.visible == Some(false) {
                 cadence = SAME_DOCUMENT_NAVIGATION_HIDDEN_POLL_INTERVAL;
                 continue;
             }
             cadence = SAME_DOCUMENT_NAVIGATION_POLL_INTERVAL;
-
-            let observation = if observer_installed {
-                match browser_read_same_document_navigation_observer(&webview).await {
-                    Ok(Some(observation)) => Some(observation),
-                    Ok(None) | Err(_) => {
-                        observer_installed = false;
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-            let observation = match observation {
-                Some(observation) => observation,
-                None => match browser_install_same_document_navigation_observer(&webview).await {
-                    Ok(observation) => {
-                        observer_installed = true;
-                        observation
-                    }
-                    Err(_) => continue,
-                },
-            };
-            if last_sequence == Some(observation.sequence)
-                && snapshot.url.as_deref() == Some(observation.url.as_str())
-            {
-                continue;
-            }
-            last_sequence = Some(observation.sequence);
-            let Ok(url) = validated_same_document_url(
-                &observation.url,
-                renderer_url.as_ref(),
-                &expected_origin,
-            ) else {
+            let Ok(url) = webview.url() else {
                 continue;
             };
-            let Some(snapshot) = registry.same_document_navigation(
+            let change = BrowserUrlChange {
+                url: url.to_string(),
+                loading: false,
+            };
+            apply_browser_url_change(
+                &main,
+                &registry,
                 &browser_id,
                 &workspace_id,
                 instance_id,
-                document_epoch,
-                url.to_string(),
-            ) else {
-                continue;
-            };
-            emit_event(
-                &main,
-                CodeBrowserEvent {
-                    workspace_id: workspace_id.clone(),
-                    browser_id: browser_id.clone(),
-                    kind: "same_document_navigation",
-                    url: snapshot.url,
-                    title: snapshot.title,
-                    message: None,
-                    load_state: snapshot.load_state,
-                    document_epoch: snapshot.document_epoch,
-                    controller: snapshot.controller,
-                    agent_access: snapshot.agent_access,
-                    origin: None,
-                },
+                renderer_url.as_ref(),
+                &change,
             );
         }
     });
@@ -1209,7 +1291,7 @@ async fn close_profile_sessions(
         .collect::<Result<Vec<_>, _>>()?;
     for label in &labels {
         if let Some(webview) = app.get_webview(label) {
-            webview.close().map_err(browser_error)?;
+            close_browser_webview(&webview)?;
         }
     }
 
@@ -1642,6 +1724,90 @@ mod tests {
         assert!(validated_same_document_url("not a url", None, &origin).is_err());
         assert!(validated_same_document_url("javascript:alert(1)", None, &origin).is_err());
         assert!(validated_same_document_url("https://other.example/", None, &origin).is_err());
+    }
+
+    fn ready_snapshot(url: &str) -> BrowserSnapshot {
+        let mut snapshot = BrowserSnapshot::missing("browser-1", "workspace-1");
+        snapshot.exists = true;
+        snapshot.url = Some(url.to_owned());
+        snapshot.load_state = Some(BrowserLoadState::Ready);
+        snapshot.document_epoch = Some(3);
+        snapshot
+    }
+
+    fn change(url: &str, loading: bool) -> BrowserUrlChange {
+        BrowserUrlChange {
+            url: url.to_owned(),
+            loading,
+        }
+    }
+
+    #[test]
+    fn pushed_url_changes_become_same_document_navigation_on_the_ready_document() {
+        let snapshot = ready_snapshot("https://example.com/start");
+        let (epoch, url) = same_document_navigation_target(
+            &snapshot,
+            &change("https://example.com/start?view=details#summary", false),
+            None,
+        )
+        .unwrap();
+        assert_eq!(epoch, 3);
+        assert_eq!(
+            url.as_str(),
+            "https://example.com/start?view=details#summary"
+        );
+    }
+
+    #[test]
+    fn pushed_url_changes_leave_cross_document_loads_to_the_page_load_events() {
+        let ready = ready_snapshot("https://example.com/start");
+        // The view reports a provisional URL while it is still loading.
+        assert!(same_document_navigation_target(
+            &ready,
+            &change("https://example.com/next", true),
+            None
+        )
+        .is_none());
+        // The registry has not seen the document finish yet.
+        let mut loading = ready_snapshot("https://example.com/start");
+        loading.load_state = Some(BrowserLoadState::Loading);
+        assert!(same_document_navigation_target(
+            &loading,
+            &change("https://example.com/next", false),
+            None
+        )
+        .is_none());
+        let mut fresh = ready_snapshot("https://example.com/start");
+        fresh.document_epoch = None;
+        assert!(same_document_navigation_target(
+            &fresh,
+            &change("https://example.com/next", false),
+            None
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn pushed_url_changes_ignore_repeats_and_origin_moves() {
+        let snapshot = ready_snapshot("https://example.com/start");
+        assert!(same_document_navigation_target(
+            &snapshot,
+            &change("https://example.com/start", false),
+            None
+        )
+        .is_none());
+        assert!(same_document_navigation_target(
+            &snapshot,
+            &change("https://other.example/start", false),
+            None
+        )
+        .is_none());
+        assert!(same_document_navigation_target(
+            &snapshot,
+            &change("javascript:alert(1)", false),
+            None
+        )
+        .is_none());
     }
 
     #[test]

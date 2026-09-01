@@ -33,6 +33,8 @@ mod browser_runtime_adapter;
     reason = "the staged browser bridge is test-covered and will be wired in #2339 and #2340"
 )]
 mod browser_semantics;
+#[cfg(target_os = "macos")]
+mod browser_url_observer;
 mod channel;
 mod chat_debug;
 mod client_execution;
