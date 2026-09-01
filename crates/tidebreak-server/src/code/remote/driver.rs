@@ -222,6 +222,10 @@ pub(crate) struct PumpReport {
     /// The environment rejected the credential; the row is held open and
     /// the next pump after a sign-in resumes the drain.
     pub sign_in_required: bool,
+    /// The events read failed with a retryable transport fault, so nothing
+    /// drained. The caller waits before pumping again: re-issuing the read
+    /// at once would hammer an environment that just said it is unavailable.
+    pub read_unavailable: bool,
 }
 
 /// The stop reason recorded when the environment ends a sandbox.
@@ -617,7 +621,8 @@ impl RemoteDriver<'_> {
             Ok(read) => read,
             Err(error) if error.is_retryable() => {
                 // A transport fault is the next pump's problem, not a lifecycle
-                // signal.
+                // signal. Say so, because the next pump must wait for it.
+                report.read_unavailable = true;
                 return Ok(report);
             }
             Err(RemoteSandboxError::SignInRequired(detail)) => {
