@@ -64,8 +64,13 @@ pub(crate) mod generate {
             if declares {
                 let name = T::ident(self.cfg);
                 let docs = T::docs().unwrap_or_default();
+                let declaration = T::decl(self.cfg)
+                    .lines()
+                    .map(str::trim_end)
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 self.out
-                    .insert(name, format!("{docs}export {}\n", T::decl(self.cfg)));
+                    .insert(name, format!("{docs}export {declaration}\n"));
             }
             T::visit_dependencies(self);
         }
@@ -504,6 +509,15 @@ mod tests {
     #[test]
     fn the_generated_bindings_are_current() {
         generate::check_or_update(BINDINGS, &rendered_bindings(), REGENERATE);
+    }
+
+    #[test]
+    fn the_generated_bindings_have_no_trailing_whitespace() {
+        let generated = rendered_bindings();
+        assert!(
+            generated.lines().all(|line| line == line.trim_end()),
+            "generated wire types contain trailing whitespace"
+        );
     }
 
     /// The runtime list is parsed out of the generated union, so the parse has to
