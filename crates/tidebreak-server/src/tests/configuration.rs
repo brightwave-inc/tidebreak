@@ -167,6 +167,30 @@ async fn settings_default_then_update_roundtrips() {
     assert_eq!(settings["compaction"]["min_threshold_tokens"], 40000);
     assert_eq!(settings["compaction"]["protect_recent_messages"], 8);
 
+    // A later Git-only update preserves the existing recap preference.
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/settings")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "git_source_control": { "branch_prefix_mode": "none" }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let settings: serde_json::Value = json_body(response).await;
+    assert_eq!(settings["code_turn_recaps_enabled"], false);
+    assert_eq!(settings["git_source_control"]["branch_prefix_mode"], "none");
+
     // GET reflects the update.
     let response = router
         .oneshot(
