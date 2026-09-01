@@ -16,6 +16,13 @@
 //! prove that renderer-only drafts, dialogs, or editor state have been saved,
 //! so an unfocused window is not sufficient consent to replace and restart the
 //! application.
+//!
+//! The restart itself does not interrupt session work. Before the bundle is
+//! replaced the embedded server parks every code session at a turn boundary
+//! (the idle-park path of decision 0064) and hands back chat turn leases, so
+//! the relaunched process resumes sessions instead of fencing orphaned
+//! engine children. A code turn still running at the quiesce deadline fails
+//! the restart with a retryable message rather than being interrupted.
 
 use std::future::Future;
 #[cfg(any(test, target_os = "macos"))]
@@ -38,7 +45,7 @@ pub(crate) const UPDATE_CHECK_REQUESTED_EVENT: &str = "desktop-update-check-requ
 const UPDATE_CHECK_STARTUP_DELAY: Duration = Duration::from_secs(15);
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const UPDATE_CHECK_ERROR: &str = "Could not check for updates. Try again later.";
-const UPDATE_PREPARE_ERROR: &str = "Could not prepare the update. Try again later.";
+pub(crate) const UPDATE_PREPARE_ERROR: &str = "Could not prepare the update. Try again later.";
 const UPDATE_INSTALL_ERROR: &str = "Could not install the update. Try again later.";
 const UPDATE_WITHDRAWN_ERROR: &str =
     "The downloaded update is no longer published. Tidebreak will keep checking.";
@@ -377,11 +384,11 @@ struct InstallResolutionError {
     message: &'static str,
 }
 
-fn retryable_update_state(version: String, message: &'static str) -> DesktopUpdateState {
+fn retryable_update_state(version: String, message: impl Into<String>) -> DesktopUpdateState {
     DesktopUpdateState {
         status: DesktopUpdateStatus::Ready,
         version: Some(version),
-        error: Some(message.to_owned()),
+        error: Some(message.into()),
         enabled: updates_enabled(),
     }
 }
@@ -391,9 +398,12 @@ struct FailedInstall<E> {
     resume_error: Option<String>,
 }
 
-/// Run the synchronous bundle replacement only after the broker's admission
-/// barrier has drained. The closures keep the ordering contract directly
-/// testable without constructing a packaged Tauri updater in unit tests.
+/// Run the synchronous bundle replacement only after the quiesce closure has
+/// brought the process to a safe point — session work parked at turn
+/// boundaries, then the broker's admission barrier drained. The closures keep
+/// the ordering contract directly testable without constructing a packaged
+/// Tauri updater in unit tests. The quiesce closure owns unwinding its own
+/// partial progress: an error from it must leave everything resumed.
 async fn install_behind_broker_barrier<E, Q, QF, I, R, RF, S, SF>(
     quiesce: Q,
     install: I,
@@ -477,6 +487,12 @@ async fn take_staged_and_restart(app: AppHandle) -> Result<(), String> {
 
     let version = staged.update.version.clone();
     let host_access = app.state::<HostAccess>();
+    // The quiesce brings session work to a safe point before the broker
+    // drains — code sessions park at a turn boundary and chat leases are
+    // handed back (`HostAccess::quiesce_for_update`) — so the relaunch
+    // resumes work instead of fencing orphans. A refusal, such as a code
+    // turn still running at the deadline, arrives as a sentence the panel
+    // shows as-is, with the partial quiesce already unwound.
     let install_result = install_behind_broker_barrier(
         || host_access.quiesce_for_update(),
         || staged.update.install(&staged.bytes),
@@ -487,13 +503,13 @@ async fn take_staged_and_restart(app: AppHandle) -> Result<(), String> {
 
     match install_result {
         Err(error) => {
-            eprintln!("tidebreak-desktop: could not quiesce host broker for update: {error}");
+            eprintln!("tidebreak-desktop: could not quiesce for update: {error}");
             store_staged(&app, Some(staged));
-            set_update_state(&app, retryable_update_state(version, UPDATE_PREPARE_ERROR));
+            set_update_state(&app, retryable_update_state(version, error.clone()));
             app.state::<UpdateManager>()
                 .busy
                 .store(false, Ordering::Release);
-            Err(UPDATE_PREPARE_ERROR.to_owned())
+            Err(error)
         }
         Ok(Err(failure)) => {
             eprintln!(

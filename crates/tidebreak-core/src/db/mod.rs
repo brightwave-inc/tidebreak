@@ -1803,6 +1803,15 @@ impl Store for DbStore {
         ops::turn::heartbeat_turn_run(self, id, lease_token, now, lease_expires_at).await
     }
 
+    async fn expire_turn_run_lease(
+        &self,
+        id: TurnId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<bool> {
+        ops::turn::expire_turn_run_lease(self, id, lease_token, now).await
+    }
+
     async fn fence_turn_lease(
         &self,
         id: TurnId,

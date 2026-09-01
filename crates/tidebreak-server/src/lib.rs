@@ -103,6 +103,7 @@ mod state;
 mod store_ownership;
 mod task_plan_tool;
 mod turn_worker;
+mod update_quiesce;
 mod vault_secrets;
 mod view_frames;
 pub mod voice_transcription;
@@ -213,6 +214,7 @@ pub use pairing::{
     PendingRegistration,
 };
 pub use state::{AppState, LocalVoiceError, LocalVoiceRunner, LocalVoiceState, LocalVoiceStatus};
+pub use update_quiesce::UpdateQuiesce;
 
 pub(crate) const MAX_RAW_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_WEB_SEARCH_CREDENTIAL_BODY_BYTES: usize = 16 * 1024;
@@ -1266,6 +1268,9 @@ pub struct Server {
     /// The one gateway runtime, handed to pairing so a registered pending
     /// pairing lands in the same slot the sign-in surface reads.
     gateway: Arc<gateway_runtime::GatewayRuntime>,
+    /// Brings live work to a restart-safe point before an update replaces
+    /// the bundle; see `update_quiesce`.
+    update_quiesce: update_quiesce::UpdateQuiesce,
     listener: Option<TcpListener>,
     router: Option<Router>,
     // Keep every process-local worker before `_store_ownership`. Rust drops
@@ -1395,6 +1400,12 @@ impl Server {
     /// beyond the store — see [`register_pending_pairing`].
     pub fn pairing_handle(&self) -> PairingHandle {
         PairingHandle::new(self.store.clone(), self.mcp.clone(), self.gateway.clone())
+    }
+
+    /// The handle a restart-to-update uses to park code sessions at a turn
+    /// boundary and hand back chat turn leases before replacing the bundle.
+    pub fn update_quiesce(&self) -> UpdateQuiesce {
+        self.update_quiesce.clone()
     }
 
     /// Run the accept loop until the process exits.
@@ -2304,6 +2315,7 @@ async fn bind_inner(
         state.blob_retirement_wake.clone(),
         blob_orphan_auditor::BlobOrphanAuditorConfig::default(),
     );
+    let (chat_quiesce_worker, chat_quiesce_control) = update_quiesce::chat_quiesce_pair();
     let turn_worker = turn_worker::TurnWorker::new(
         state.store.clone(),
         state.resolver.clone(),
@@ -2328,7 +2340,8 @@ async fn bind_inner(
     .with_blob_write_locks(state.blob_writes.clone())
     .with_mcp_runtime(state.mcp.clone())
     .with_exec_folder_context(code_execution.clone())
-    .with_diagnostics(state.diagnostics.clone());
+    .with_diagnostics(state.diagnostics.clone())
+    .with_update_quiesce(chat_quiesce_worker);
     let sandbox_worker_config = sandbox_agent_run_worker::SandboxAgentRunWorkerConfig::default()
         .with_delegated_file_executor(client_executor_id.is_some());
     let sandbox_agent_run_worker = sandbox_agent_run_worker::SandboxAgentRunWorker::with_attempts(
@@ -2474,6 +2487,7 @@ async fn bind_inner(
         code_execution,
         mcp: mcp_runtime,
         gateway: gateway_runtime,
+        update_quiesce: update_quiesce::UpdateQuiesce::new(code, chat_quiesce_control),
         listener: Some(listener),
         router: Some(router),
         _queued_turn_promoter: AbortTask(queued_turn_promoter),

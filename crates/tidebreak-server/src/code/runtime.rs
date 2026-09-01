@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use tokio::time::Instant as TokioInstant;
 
 use tidebreak_core::db::code::{
@@ -224,6 +224,11 @@ pub(crate) struct CodeRuntime {
     /// Last pin-install failure per kind. Cleared on a successful install.
     pin_install_errors: Mutex<HashMap<HarnessKind, String>>,
     workers: Mutex<HashMap<CodeSessionId, WorkerHandle>>,
+    /// Flips true while the process quiesces for a restart-to-update. Every
+    /// session worker subscribes: the flag holds queue drains, refuses new
+    /// turn starts at the worktree boundary, and parks idle engine children
+    /// immediately. See `crate::update_quiesce`.
+    update_quiesce: watch::Sender<bool>,
     /// Serializes writer admission with workspace lifecycle transitions.
     workspace_lifecycles: Mutex<HashMap<WorkspaceId, Arc<tokio::sync::Mutex<()>>>>,
     /// One turn at a time per worktree, shared by every session in it.
@@ -477,6 +482,7 @@ impl CodeRuntime {
             probes: Mutex::new(HashMap::new()),
             pin_install_errors: Mutex::new(HashMap::new()),
             workers: Mutex::new(HashMap::new()),
+            update_quiesce: watch::channel(false).0,
             workspace_lifecycles: Mutex::new(HashMap::new()),
             worktree_turns: Mutex::new(HashMap::new()),
             hot_prs: super::pr_refresh::HotPullRequests::default(),
@@ -616,6 +622,7 @@ impl CodeRuntime {
             probes: Mutex::new(HashMap::new()),
             pin_install_errors: Mutex::new(HashMap::new()),
             workers: Mutex::new(HashMap::new()),
+            update_quiesce: watch::channel(false).0,
             workspace_lifecycles: Mutex::new(HashMap::new()),
             worktree_turns: Mutex::new(HashMap::new()),
             hot_prs: super::pr_refresh::HotPullRequests::default(),
@@ -3810,6 +3817,115 @@ impl CodeRuntime {
         Ok(resolved)
     }
 
+    /// Begin an update quiesce: session workers hold their queue drains, no
+    /// new turn starts, and idle engine children park immediately. Turns
+    /// already in flight run to their boundary; [`Self::await_update_quiesce`]
+    /// is how the caller waits for that. See `crate::update_quiesce`.
+    pub(crate) fn begin_update_quiesce(&self) {
+        self.update_quiesce.send_replace(true);
+        self.wake_all_workers();
+    }
+
+    /// Reopen turn admission after an update that did not install. Parked
+    /// children stay parked; the next turn respawns and resumes them exactly
+    /// as an idle park does (decision 0064).
+    pub(crate) fn end_update_quiesce(&self) {
+        self.update_quiesce.send_replace(false);
+        self.wake_all_workers();
+    }
+
+    pub(crate) fn update_quiesce_active(&self) -> bool {
+        *self.update_quiesce.borrow()
+    }
+
+    fn wake_all_workers(&self) {
+        for handle in self.workers.lock().expect("code workers").values() {
+            wake_queue(handle);
+        }
+    }
+
+    /// Wait until no local session is mid-turn and no engine child is live,
+    /// or fail with a sentence the updater can show as-is. Remote sessions
+    /// run their engine in a sandbox and survive a restart on their own, so
+    /// they never appear here — the worker map only holds local sessions.
+    pub(crate) async fn await_update_quiesce(&self, deadline: Duration) -> Result<(), String> {
+        let deadline_at = Instant::now() + deadline;
+        // Turn starts are fenced by the worktree lock, not by the database:
+        // a starting turn holds its workspace's lock from before it re-reads
+        // the quiesce flag until the turn ends, and the flag is already up.
+        // Acquiring and releasing every lock therefore proves each workspace
+        // is past any start that raced the flag — whoever takes a lock after
+        // this sees the flag and refuses. Without this pass, a poll of the
+        // stored lifecycle could observe Idle in the window between a turn
+        // winning its lock and persisting Running, and the update would exit
+        // over an engine turn that was about to start.
+        let worktree_turns: Vec<Arc<tokio::sync::Mutex<()>>> = self
+            .worktree_turns
+            .lock()
+            .expect("code worktree turn locks")
+            .values()
+            .cloned()
+            .collect();
+        for worktree_turn in worktree_turns {
+            let remaining = deadline_at.saturating_duration_since(Instant::now());
+            match tokio::time::timeout(remaining, worktree_turn.lock()).await {
+                Ok(guard) => drop(guard),
+                Err(_) => {
+                    return Err(
+                        "A code session is still working on a turn. Try again once it \
+                                finishes — the update stays ready."
+                            .to_owned(),
+                    );
+                }
+            }
+        }
+        // Past every turn boundary; now wait for the workers to park their
+        // engine children and for the stored rows to agree.
+        loop {
+            let ids: Vec<CodeSessionId> = self
+                .workers
+                .lock()
+                .expect("code workers")
+                .keys()
+                .copied()
+                .collect();
+            let mut busy = 0usize;
+            for id in ids {
+                match tidebreak_core::db::code::get_session_all_owners(&self.db, id).await {
+                    Ok(Some(session)) => {
+                        if session.lifecycle == CodeSessionLifecycle::Running
+                            || session.child_pid.is_some()
+                        {
+                            busy += 1;
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        return Err(format!(
+                            "could not read code sessions while preparing the update: {error}"
+                        ));
+                    }
+                }
+            }
+            if busy == 0 {
+                return Ok(());
+            }
+            if Instant::now() >= deadline_at {
+                return Err(if busy == 1 {
+                    "A code session is still working on a turn. Try again once it finishes — \
+                     the update stays ready."
+                        .to_owned()
+                } else {
+                    format!(
+                        "{busy} code sessions are still working on turns. Try again once they \
+                         finish — the update stays ready."
+                    )
+                });
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
     pub(crate) async fn submit_turn(
         &self,
         owner: &OwnerId,
@@ -3965,7 +4081,10 @@ impl CodeRuntime {
         let backlog = !tidebreak_core::db::code::list_queued_turns(&self.db, owner, id)
             .await?
             .is_empty();
-        if in_flight || backlog {
+        // An update quiesce parks the send too: the row survives the restart
+        // and drains after the relaunch, so nothing typed during the short
+        // install window is lost or refused.
+        if in_flight || backlog || self.update_quiesce_active() {
             if !queue_if_busy {
                 return Err(ServerError::conflict_kind(
                     "trigger_turn_busy",
@@ -4003,6 +4122,19 @@ impl CodeRuntime {
                     return Err(ServerError::conflict_kind(
                         "trigger_turn_busy",
                         "the trigger turn was not accepted because the workspace became busy",
+                    ));
+                }
+                return self
+                    .park_follow_up(owner, &handle, &session, message, attachments)
+                    .await;
+            }
+            // The quiesce flag flipped while this send was in flight. Park it
+            // the same way: the durable row runs after the relaunch.
+            Err(WorkerError::UpdateQuiesced) => {
+                if !queue_if_busy {
+                    return Err(ServerError::conflict_kind(
+                        "trigger_turn_busy",
+                        "the trigger turn was not accepted because the app is restarting to update",
                     ));
                 }
                 return self
@@ -6373,6 +6505,7 @@ impl CodeRuntime {
                     == CapLevel::Supported,
             },
             self.worktree_turn_lock(attached.workspace_id),
+            self.update_quiesce.subscribe(),
         );
         self.workers
             .lock()
@@ -7105,6 +7238,13 @@ fn map_worker(err: WorkerError) -> ServerError {
         WorkerError::WorktreeBusy => ServerError::conflict_kind(
             "workspace_busy",
             "another session in this workspace is mid-turn",
+        ),
+        // Also intercepted and parked by `submit_turn`. A caller that still
+        // sees it raced the restart itself; a conflict reads better than a
+        // 500 from a process that is about to relaunch.
+        WorkerError::UpdateQuiesced => ServerError::conflict_kind(
+            "update_quiesced",
+            "Tidebreak is restarting for an update; the turn starts after the relaunch",
         ),
     }
 }

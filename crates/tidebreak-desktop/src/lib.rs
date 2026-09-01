@@ -1062,6 +1062,9 @@ async fn boot_server(
     });
     // Unblock any pairing task parked on a deep link that arrived pre-boot.
     let _ = store_tx.send(Some(server.pairing_handle()));
+    // Let restart-to-update park sessions at a safe point before installing.
+    app.state::<host_access::HostAccess>()
+        .initialize_update_quiesce(server.update_quiesce())?;
     let base_url = format!("http://{}", server.local_addr());
     let token = server.token().to_string();
     let executor_token = server.client_executor_token().to_string();

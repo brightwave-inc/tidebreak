@@ -33,6 +33,10 @@ pub(crate) struct HostAccess {
     pub(super) control_plane: OnceCell<ControlPlaneClient>,
     pub(super) receipts: ReceiptStore,
     staged_folders: OnceCell<std::sync::Arc<dyn tidebreak_server::code_execution::StagedFolders>>,
+    /// The embedded server's update-quiesce handle, installed at server boot.
+    /// [`Self::quiesce_for_update`] runs it before the broker drain so a
+    /// restart-to-update parks sessions at a safe point first.
+    server_quiesce: OnceCell<tidebreak_server::UpdateQuiesce>,
     /// Which machine this client is attached to. Host authority applies to the
     /// local one only, so every native command consults this first.
     remote: std::sync::Arc<crate::remote::RemoteAttachment>,
@@ -64,6 +68,7 @@ impl HostAccess {
             control_plane: OnceCell::new(),
             receipts,
             staged_folders: OnceCell::new(),
+            server_quiesce: OnceCell::new(),
             remote,
         })
     }
@@ -107,6 +112,16 @@ impl HostAccess {
         self.store
             .set(store)
             .map_err(|_| "host access store was initialized more than once".to_owned())
+    }
+
+    /// Install the embedded server's update-quiesce handle at server boot.
+    pub(crate) fn initialize_update_quiesce(
+        &self,
+        quiesce: tidebreak_server::UpdateQuiesce,
+    ) -> Result<(), String> {
+        self.server_quiesce
+            .set(quiesce)
+            .map_err(|_| "server update quiesce was initialized more than once".to_owned())
     }
 
     /// Drop conversation-scoped broker rows whose chats no longer exist.
@@ -217,14 +232,31 @@ impl HostAccess {
         self.broker.shutdown().await;
     }
 
+    /// Bring the process to a restart-safe point for an update.
+    ///
+    /// Session work first — code sessions park at a turn boundary, chat turn
+    /// leases are handed back — then the broker's admission barrier drains.
+    /// The error is a sentence the Updates panel shows as-is; a partial
+    /// quiesce is unwound before returning it. Before the server boots there
+    /// is no session work, so only the broker drains.
     pub(crate) async fn quiesce_for_update(&self) -> Result<(), String> {
-        self.broker
-            .quiesce_for_update()
-            .await
-            .map_err(|error| error.to_string())
+        if let Some(server) = self.server_quiesce.get() {
+            server.quiesce_for_update().await?;
+        }
+        if let Err(error) = self.broker.quiesce_for_update().await {
+            eprintln!("tidebreak-desktop: could not quiesce host broker for update: {error}");
+            if let Some(server) = self.server_quiesce.get() {
+                server.resume_after_failed_update();
+            }
+            return Err(crate::updater::UPDATE_PREPARE_ERROR.to_owned());
+        }
+        Ok(())
     }
 
     pub(crate) async fn resume_after_failed_update(&self) -> Result<(), String> {
+        if let Some(server) = self.server_quiesce.get() {
+            server.resume_after_failed_update();
+        }
         self.broker
             .resume_after_failed_update()
             .await

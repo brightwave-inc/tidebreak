@@ -1082,6 +1082,35 @@ pub(in crate::db) async fn heartbeat_turn_run(
     Ok(heartbeat.rows_affected == 1)
 }
 
+pub(in crate::db) async fn expire_turn_run_lease(
+    store: &DbStore,
+    id: TurnId,
+    lease_token: uuid::Uuid,
+    now: chrono::DateTime<Utc>,
+) -> Result<bool> {
+    let now = canonical_db_timestamp(now)?;
+    let expired = entities::turn_run::Entity::update_many()
+        .col_expr(
+            entities::turn_run::Column::LeaseExpiresAt,
+            sea_orm::sea_query::Expr::value(Some(now)),
+        )
+        .col_expr(
+            entities::turn_run::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .filter(entities::turn_run::Column::Id.eq(id.0))
+        .filter(entities::turn_run::Column::Status.is_in([
+            TurnRunStatus::Running.as_str(),
+            TurnRunStatus::Cancelling.as_str(),
+        ]))
+        .filter(entities::turn_run::Column::LeaseToken.eq(lease_token))
+        .filter(entities::turn_run::Column::LeaseExpiresAt.gt(now))
+        .exec(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(expired.rows_affected == 1)
+}
+
 pub(in crate::db) async fn fence_turn_lease(
     store: &DbStore,
     id: TurnId,
