@@ -16,8 +16,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tidebreak_core::{
-    BoundedError, CodeUsage, Diffstat, FileChangeKind, HarnessCaps, HarnessCommand, HarnessKind,
-    HarnessNoticeLevel, PermissionMode, ReasoningEffort, ToolDetail, ToolOutcome,
+    BoundedError, CodeApprovalKind, CodeUsage, Diffstat, FileChangeKind, GrantScope, HarnessCaps,
+    HarnessCommand, HarnessKind, HarnessNoticeLevel, PermissionMode, ReasoningEffort, ToolDetail,
+    ToolOutcome, UserQuestionAnswer,
 };
 
 pub mod browser_channel;
@@ -220,6 +221,15 @@ pub enum HarnessEvent {
         /// request without a captured body.
         #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
         raw: serde_json::Value,
+        /// Exact structured classification, when the engine can state one.
+        ///
+        /// An engine that classifies its own request precisely — the internal
+        /// engine's tool, questions, and plan approvals — ships it here so
+        /// the server persists it instead of guessing from `raw`. External
+        /// adapters leave it `None` and the server keeps its best-effort
+        /// classification.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<CodeApprovalKind>,
     },
     /// An approval was decided (observed on the stream, or after [`HarnessSession::decide`]).
     ApprovalResolved {
@@ -310,6 +320,51 @@ pub enum ApprovalDecision {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         feedback: Option<String>,
     },
+    /// Approve, and mint a standing grant at this scope.
+    ///
+    /// Accepted only by engines declaring `standing_grants` in their
+    /// capability vector; every other adapter rejects it with
+    /// [`HarnessError::DecisionUnsupported`]. The route layer never offers
+    /// the rung for an engine that does not declare the capability, so the
+    /// rejection is a backstop, not a UI path (decision 0033 / 0048).
+    ApproveWithGrant {
+        /// The scope the decider granted.
+        scope: GrantScope,
+    },
+    /// Answer a structured questions approval.
+    ///
+    /// Accepted only by engines declaring `user_questions`.
+    Answers {
+        /// The supplied answers, already validated by the caller.
+        answers: Vec<UserQuestionAnswer>,
+    },
+    /// Decide a plan approval.
+    ///
+    /// Accepted only by engines declaring `plan_mode` with a plan-approval
+    /// channel. On acceptance the caller follows with
+    /// [`HarnessSession::set_permission_mode`] per the engine's declared
+    /// lifecycle; this decision itself does not change the posture.
+    PlanDecision {
+        /// Whether the plan was accepted.
+        approve: bool,
+        /// Feedback returned to the engine, when any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        feedback: Option<String>,
+    },
+}
+
+impl From<ApprovalDecision> for tidebreak_core::ApprovalDecisionKind {
+    fn from(decision: ApprovalDecision) -> Self {
+        match decision {
+            ApprovalDecision::Approve => Self::Approve,
+            ApprovalDecision::Deny { feedback } => Self::Deny { feedback },
+            ApprovalDecision::ApproveWithGrant { scope } => Self::ApprovedWithGrant { scope },
+            ApprovalDecision::Answers { answers } => Self::Answered { answers },
+            ApprovalDecision::PlanDecision { approve, feedback } => {
+                Self::PlanDecided { approve, feedback }
+            }
+        }
+    }
 }
 
 /// One user turn to feed the engine.
@@ -372,6 +427,77 @@ pub enum TurnOutcome {
         /// Bounded description — exit code or signal, plus captured stderr.
         /// Safe to journal.
         detail: String,
+    },
+    /// The engine durably checkpointed the turn and released it; the turn
+    /// resumes through [`HarnessSession::resume_turn`] once the awaited
+    /// dependency resolves.
+    ///
+    /// Only engines declaring `durable_parks` may return this. The turn is
+    /// neither finished nor failed: no terminal turn event was emitted, and
+    /// the caller persists `park_ref` so a restarted worker can resume
+    /// against durable state rather than a live process.
+    Parked {
+        /// Engine-owned opaque token naming the checkpoint. The caller
+        /// stores it verbatim and hands it back on resume.
+        park_ref: String,
+        /// What the park waits on, so the caller knows when to resume.
+        waiting_on: ParkWait,
+    },
+}
+
+/// The dependency a parked turn waits on.
+///
+/// Ids are the durable server-side identifiers (approval rows, tool call
+/// ids, agent run ids) rendered as strings, so the contract stays neutral
+/// about which id space an engine's host uses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ParkWait {
+    /// A pending approval row: a tool approval, a questions card, or a plan
+    /// proposal.
+    Approval {
+        /// Durable approval id.
+        approval_id: String,
+    },
+    /// A tool call executed outside the engine, by a client the server
+    /// leases.
+    ClientToolCall {
+        /// Durable tool call id.
+        call_id: String,
+    },
+    /// A set of background agent runs; the turn resumes when all settle.
+    AgentRuns {
+        /// Durable agent run ids.
+        run_ids: Vec<String>,
+    },
+}
+
+/// What resolved a parked turn's wait, handed to
+/// [`HarnessSession::resume_turn`].
+///
+/// Each variant is a notification, not a payload: the resolution itself —
+/// the decision, the tool result, the run outcomes — is durable before
+/// resume is called, and the engine reads it from its own state. Passing
+/// bodies here would make the resume message a second copy of durable
+/// truth.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResumeInput {
+    /// The awaited approval was decided, with this decision.
+    ApprovalDecided {
+        /// The approval that settled.
+        approval_id: String,
+        /// The decision, already durably recorded.
+        decision: ApprovalDecision,
+    },
+    /// The awaited client tool call completed and its result is durable.
+    ClientToolCompleted {
+        /// The call that settled.
+        call_id: String,
+    },
+    /// Every awaited agent run settled.
+    AgentRunsSettled {
+        /// The runs that settled.
+        run_ids: Vec<String>,
     },
 }
 
@@ -582,8 +708,11 @@ pub struct SessionSpec {
     pub env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
     /// Approval-channel wiring, when the server has one to offer.
     pub approval: Option<ApprovalChannelSpec>,
-    /// Absolute engine binary, already resolved by [`probe`].
-    pub binary: PathBuf,
+    /// Absolute engine binary, already resolved by [`probe`], or `None` for
+    /// an engine that runs in-process and spawns no child. Adapters that
+    /// drive an external CLI refuse a spec without one
+    /// ([`HarnessError::NotFound`]).
+    pub binary: Option<PathBuf>,
     /// Where normalized events go.
     pub sink: Arc<dyn HarnessEventSink>,
     /// Browser channel wiring, when the trusted browser runtime has
@@ -664,6 +793,24 @@ pub trait HarnessSession: Send + Sync {
     /// that died is how an interrupted or crashed turn ends up journaled as a
     /// success.
     async fn run_turn(&self, input: TurnInput) -> Result<TurnOutcome, HarnessError>;
+
+    /// Continue a turn that ended as [`TurnOutcome::Parked`], once the wait
+    /// it named has resolved.
+    ///
+    /// Events flow to the sink exactly as in [`Self::run_turn`], continuing
+    /// after the checkpoint rather than replaying it. A resumed turn may
+    /// park again. The default refuses: only an engine declaring
+    /// `durable_parks` implements this, and it must accept every `park_ref`
+    /// it has returned — including across a relaunch, because the park is
+    /// durable and the process that minted it may be gone.
+    async fn resume_turn(
+        &self,
+        park_ref: String,
+        input: ResumeInput,
+    ) -> Result<TurnOutcome, HarnessError> {
+        let _ = (park_ref, input);
+        Err(HarnessError::ParkResumeUnsupported)
+    }
 
     /// Resolve a pending approval through the engine's native channel.
     async fn decide(
@@ -823,6 +970,19 @@ pub enum HarnessError {
     /// The adapter has no verified same-turn steering channel.
     #[error("mid-turn steering is not available on this engine")]
     SteeringUnsupported,
+    /// The engine cannot park a turn durably or resume one.
+    ///
+    /// The default for every engine whose capability vector declares
+    /// `durable_parks` as anything but supported.
+    #[error("durable turn parks are not available on this engine")]
+    ParkResumeUnsupported,
+    /// The engine's native channel cannot express this approval decision.
+    ///
+    /// A backstop: the route layer only offers decisions the engine's
+    /// capability vector declares, so reaching this means a caller skipped
+    /// the gate.
+    #[error("this engine cannot take that approval decision: {0}")]
+    DecisionUnsupported(String),
     /// The native engine refused a steer for the currently active turn.
     #[error("the engine refused mid-turn steering: {0}")]
     SteeringRejected(String),
@@ -911,6 +1071,62 @@ pub fn is_absolute_executable(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The decision and park-wait shapes ride `HarnessEvent` payloads and the
+    /// scripted-harness script variable, so their tags are a contract.
+    #[test]
+    fn decisions_and_park_waits_round_trip() {
+        let decisions = [
+            ApprovalDecision::ApproveWithGrant {
+                scope: GrantScope::WholeTool,
+            },
+            ApprovalDecision::Answers {
+                answers: vec![UserQuestionAnswer {
+                    question_id: "q1".into(),
+                    selected_option_ids: vec!["a".into()],
+                    custom_answer: None,
+                }],
+            },
+            ApprovalDecision::PlanDecision {
+                approve: false,
+                feedback: Some("tighten the scope".into()),
+            },
+        ];
+        let tags = ["approve_with_grant", "answers", "plan_decision"];
+        for (decision, tag) in decisions.iter().zip(tags) {
+            let json = serde_json::to_value(decision).unwrap();
+            assert_eq!(json["type"], tag);
+            let back: ApprovalDecision = serde_json::from_value(json).unwrap();
+            assert_eq!(&back, decision);
+        }
+        let wait = ParkWait::AgentRuns {
+            run_ids: vec!["run-1".into(), "run-2".into()],
+        };
+        let json = serde_json::to_value(&wait).unwrap();
+        assert_eq!(json["type"], "agent_runs");
+        assert_eq!(serde_json::from_value::<ParkWait>(json).unwrap(), wait);
+    }
+
+    /// Every decision maps onto exactly one journal resolution kind.
+    #[test]
+    fn every_decision_has_a_journal_resolution() {
+        use tidebreak_core::ApprovalDecisionKind as Kind;
+        assert_eq!(Kind::from(ApprovalDecision::Approve), Kind::Approve);
+        assert_eq!(
+            Kind::from(ApprovalDecision::Deny { feedback: None }),
+            Kind::Deny { feedback: None }
+        );
+        assert_eq!(
+            Kind::from(ApprovalDecision::PlanDecision {
+                approve: true,
+                feedback: None
+            }),
+            Kind::PlanDecided {
+                approve: true,
+                feedback: None
+            }
+        );
+    }
 
     #[test]
     fn claude_codex_and_grok_recompose_permission_mode_on_relaunch() {

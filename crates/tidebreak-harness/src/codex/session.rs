@@ -867,7 +867,7 @@ impl CodexSession {
             *self.stdout.lock().expect("codex stdout") = None;
         }
         let plan = compose_app_server_plan(
-            &self.spec.binary,
+            self.spec.binary.as_deref().ok_or(HarnessError::NotFound)?,
             &self.spec.extra_argv,
             &self.spec.worktree,
             &self.spec.extra_env,
@@ -1316,10 +1316,19 @@ impl HarnessSession for CodexSession {
                     approval.call_id
                 ))
             })?;
-        // Captured channel carries accept/decline only — no rejection string.
+        // Captured channel carries accept/decline only — no rejection string,
+        // and none of the richer decision variants (caps say so; this is the
+        // backstop).
         let token = match decision {
             ApprovalDecision::Approve => "accept",
             ApprovalDecision::Deny { .. } => "decline",
+            ApprovalDecision::ApproveWithGrant { .. }
+            | ApprovalDecision::Answers { .. }
+            | ApprovalDecision::PlanDecision { .. } => {
+                return Err(HarnessError::DecisionUnsupported(
+                    "the codex approval channel takes accept or decline".into(),
+                ));
+            }
         };
         self.write_message(&json!({ "id": rpc_id, "result": { "decision": token } }))
             .await?;
@@ -1917,7 +1926,7 @@ done
             relay_key_env: None,
             env: Vec::new(),
             approval: None,
-            binary: PathBuf::from("codex"),
+            binary: Some(PathBuf::from("codex")),
             sink,
             browser: None,
         })
@@ -1973,7 +1982,7 @@ done
             relay_key_env: None,
             env: Vec::new(),
             approval: None,
-            binary: binary.to_path_buf(),
+            binary: Some(binary.to_path_buf()),
             sink: Arc::new(SilentSink),
             browser: None,
         }

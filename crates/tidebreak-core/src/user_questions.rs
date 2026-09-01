@@ -131,7 +131,7 @@ impl AskUserQuestionsArgs {
 }
 
 /// One supplied answer. Omitted questions are explicitly skipped.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(deny_unknown_fields)]
 pub struct UserQuestionAnswer {
     pub question_id: String,

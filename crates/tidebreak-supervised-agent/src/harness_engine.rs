@@ -224,7 +224,7 @@ impl HarnessEngine {
                 relay_key_env,
                 env,
                 approval: None,
-                binary,
+                binary: Some(binary),
                 sink: self.sink.clone(),
                 browser: None,
             })
@@ -417,6 +417,11 @@ impl HarnessTurn {
                 // honest default for the ones that end cleanly without it.
                 Some(Terminal::Completed) | None => TurnEnd::Completed { success: true },
             },
+            TurnOutcome::Parked { .. } => TurnEnd::Fatal {
+                // No first-party CLI parks; a supervised engine that did
+                // would need resume wiring this runner does not have.
+                message: "the engine parked the turn, which this runner does not support".into(),
+            },
             TurnOutcome::Incomplete { detail } => {
                 if self.interrupted || self.sink.read() == Some(Terminal::Interrupted) {
                     TurnEnd::Interrupted
@@ -607,6 +612,9 @@ mod tests {
                 native_interrupt: CapLevel::Unknown,
                 image_input: CapLevel::Unknown,
                 slash_commands: CapLevel::Unknown,
+                durable_parks: CapLevel::Unsupported,
+                user_questions: CapLevel::Unsupported,
+                standing_grants: CapLevel::Unsupported,
             }
         }
 

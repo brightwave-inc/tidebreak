@@ -478,6 +478,9 @@ const fullCaps: HarnessCaps = {
   native_interrupt: "supported",
   image_input: "supported",
   slash_commands: "supported",
+  durable_parks: "unsupported",
+  user_questions: "unsupported",
+  standing_grants: "unsupported",
 };
 
 function doctorEntry(

@@ -504,7 +504,7 @@ impl OpencodeSession {
         }
         let port = pick_loopback_port()?;
         let plan = compose_serve_plan(
-            &self.spec.binary,
+            self.spec.binary.as_deref().ok_or(HarnessError::NotFound)?,
             &self.spec.extra_argv,
             &self.spec.worktree,
             &self.spec.env,
@@ -871,6 +871,13 @@ impl HarnessSession for OpencodeSession {
                 }
                 value
             }
+            ApprovalDecision::ApproveWithGrant { .. }
+            | ApprovalDecision::Answers { .. }
+            | ApprovalDecision::PlanDecision { .. } => {
+                return Err(HarnessError::DecisionUnsupported(
+                    "the opencode permission reply takes once or reject".into(),
+                ));
+            }
         };
         let query = self.directory_query();
         let (status, parsed) = self
@@ -1034,7 +1041,7 @@ mod tests {
             relay_key_env: None,
             env: Vec::new(),
             approval: None,
-            binary: std::path::PathBuf::from("opencode"),
+            binary: Some(std::path::PathBuf::from("opencode")),
             sink: std::sync::Arc::new(Discard),
             browser: None,
         })
@@ -1198,7 +1205,9 @@ mod tests {
     #[tokio::test]
     async fn recorded_stream_failure_retires_the_child_before_reconnect() {
         let mut session = unit_session();
-        session.spec.binary = std::path::PathBuf::from("__tidebreak_missing_opencode_binary__");
+        session.spec.binary = Some(std::path::PathBuf::from(
+            "__tidebreak_missing_opencode_binary__",
+        ));
         let (sender, stream) = sse_event_channel(2, 1_024);
         sender.fail("recorded stream failure".into()).await;
         *session.events.lock().await = Some(stream);

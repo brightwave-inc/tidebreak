@@ -26,7 +26,7 @@
  * same way but shown only here and on the result card, never on an approval
  * card — see `docs/decisions/0018-tool-call-narration.md`.
  */
-export type AgentActivityDetail = { "kind": "exec", command: string, args: Array<string>,
+export type AgentActivityDetail = { "kind": "exec", command: string, args: Array<string>, 
 /**
  * The model's own sentence about this step, when it wrote one.
  *
@@ -119,7 +119,7 @@ export type AgentRunId = string;
  * are not copied directly into it. Typed activity headlines are projected
  * separately.
  */
-export type AgentRunProgressLine = {
+export type AgentRunProgressLine = { 
 /**
  * Monotonic per-run ordering. Pass the page's `next_sequence` back as
  * `after_sequence` to read only what has arrived since.
@@ -129,7 +129,7 @@ sequence: number, text: string, at: string, };
 /**
  * One resumable page of a background run's live progress.
  */
-export type AgentRunProgressPage = { entries: Array<AgentRunProgressLine>,
+export type AgentRunProgressPage = { entries: Array<AgentRunProgressLine>, 
 /**
  * The cursor to resume from: the highest sequence in this page, or the
  * requested cursor when the page is empty. A reader that polls with this
@@ -143,31 +143,31 @@ next_sequence: number, };
  * Worker lease tokens, scheduling budgets, and other executor-facing fields
  * intentionally remain inside the server/store boundary.
  */
-export type AgentRunSnapshot = { id: AgentRunId, parent_id: AgentRunId | null, tier: AgentRunTier, execution_location: AgentRunExecutionLocation,
+export type AgentRunSnapshot = { id: AgentRunId, parent_id: AgentRunId | null, tier: AgentRunTier, execution_location: AgentRunExecutionLocation, 
 /**
  * Active host code-execution backend for `exec`, not the run-loop seat.
  *
  * See [`ExecProviderSnapshot`]. Read from the current host
  * setting at list time — the same selection the next `exec` would use.
  */
-code_execution_provider: ExecProviderSnapshot, status: AgentRunStatus,
+code_execution_provider: ExecProviderSnapshot, status: AgentRunStatus, 
 /**
  * Completed provider calls accumulated across every attempt.
  */
-model_steps: number,
+model_steps: number, 
 /**
  * Disjoint provider usage accumulated across every attempt. Providers
  * without cache telemetry leave both cache fields at zero.
  */
-usage: AgentRunUsageSnapshot,
+usage: AgentRunUsageSnapshot, 
 /**
  * The exact bounded task delegated by the visible spawn step.
  */
-task: string | null, started_at: string | null, finished_at: string | null,
+task: string | null, started_at: string | null, finished_at: string | null, 
 /**
  * Stable, bounded classification suitable for renderer display.
  */
-last_error_code: string | null,
+last_error_code: string | null, 
 /**
  * The currently checkpointed, renderer-safe activity, if any.
  *
@@ -175,7 +175,7 @@ last_error_code: string | null,
  * arguments, results, provider call identities, executor leases, or raw
  * executor diagnostics.
  */
-activity: AgentActivitySnapshot | null,
+activity: AgentActivitySnapshot | null, 
 /**
  * Files a background run submitted as its deliverables, in its own order.
  *
@@ -183,7 +183,7 @@ activity: AgentActivitySnapshot | null,
  * by name; nothing here is host-authored, and a run that submitted nothing
  * carries an empty list.
  */
-submitted_outputs: Array<SubmittedOutputSnapshot>,
+submitted_outputs: Array<SubmittedOutputSnapshot>, 
 /**
  * How far this run's own task plan has got, when it keeps one.
  *
@@ -194,7 +194,7 @@ submitted_outputs: Array<SubmittedOutputSnapshot>,
  * additive: every run before this field existed, and every foreground
  * coordinator, reads back in the shape it always had.
  */
-task_plan?: AgentRunTaskPlanProgress,
+task_plan?: AgentRunTaskPlanProgress, 
 /**
  * Bounded terminal display text returned to the parent, if settled.
  */
@@ -212,11 +212,11 @@ export type AgentRunStatus = "active" | "queued" | "running" | "cancelling" | "w
  * is one delegated task from start to finish, so the run is the only scope
  * its plan ever had.
  */
-export type AgentRunTaskPlan = { run_id: AgentRunId,
+export type AgentRunTaskPlan = { run_id: AgentRunId, 
 /**
  * The steps, in order.
  */
-steps: Array<TaskPlanStep>,
+steps: Array<TaskPlanStep>, 
 /**
  * When the last replacement committed.
  */
@@ -235,7 +235,7 @@ updated_at: string, };
  * Copying it as stored is therefore not a gap in the clamp; it is the same
  * rule enforced one surface earlier.
  */
-export type AgentRunTaskPlanProgress = { completed: number, total: number,
+export type AgentRunTaskPlanProgress = { completed: number, total: number, 
 /**
  * The one step marked `in_progress`, when there is one.
  */
@@ -264,15 +264,15 @@ export type AgentRunUsageSnapshot = { input_tokens: number, output_tokens: numbe
  * carries neither a selection nor an answer, which is how the card knows to
  * say so.
  */
-export type AnsweredUserQuestion = {
+export type AnsweredUserQuestion = { 
 /**
  * The prompt the reader answered.
  */
-question: string,
+question: string, 
 /**
  * Labels of the options chosen, in the order the question listed them.
  */
-selected?: Array<string>,
+selected?: Array<string>, 
 /**
  * The reader's own words, when the question allowed them.
  */
@@ -281,19 +281,19 @@ custom_answer?: string, };
 /**
  * One app's detail: the summary fields plus its revision history.
  */
-export type AppDetail = { id: AppId, name: string,
+export type AppDetail = { id: AppId, name: string, 
 /**
  * Creation time of the first revision.
  */
-created_at: string,
+created_at: string, 
 /**
  * Creation time of the current revision.
  */
-updated_at: string,
+updated_at: string, 
 /**
  * Revision currently presented as the app's content.
  */
-current_revision: AppRevisionId,
+current_revision: AppRevisionId, 
 /**
  * Every retained revision, newest first.
  */
@@ -312,12 +312,12 @@ export type AppGatewayPageOutcome = "ready" | "no_gateway" | "not_registered" | 
 /**
  * One answer: an outcome, and whatever came with it.
  */
-export type AppGatewayPageResult = { outcome: AppGatewayPageOutcome,
+export type AppGatewayPageResult = { outcome: AppGatewayPageOutcome, 
 /**
  * The app's page at the gateway, present exactly when `outcome` is
  * `ready`.
  */
-url?: string,
+url?: string, 
 /**
  * The gateway's own message, when the outcome carries one.
  */
@@ -337,43 +337,43 @@ message?: string, };
  * rows themselves: a manifest with both a folder row and a network row —
  * local or gateway — can read files and reach the network.
  */
-export type AppGrantBindingState = {
+export type AppGrantBindingState = { 
 /**
  * Connected app the manifest binds, by record id, for an app-keyed
  * binding.
  */
-app: ConnectedAppId | null,
+app: ConnectedAppId | null, 
 /**
  * Connected folder the manifest binds, by broker root id, for a folder
  * binding.
  */
-folder: HostRootId | null,
+folder: HostRootId | null, 
 /**
  * Gateway connected app the manifest binds, by the gateway's own app id,
  * for a gateway binding. The id alone — never the gateway that serves
  * it.
  */
-gateway_app: string | null,
+gateway_app: string | null, 
 /**
  * The access level a folder binding requests.
  */
-access: FolderAccess | null,
+access: FolderAccess | null, 
 /**
  * The bound connected app's, folder's, or gateway app's display name,
  * absent when nothing configured, approved, or readable answers to the
  * id — the sheet says so instead of showing a raw id alone.
  */
-name: string | null,
+name: string | null, 
 /**
  * Catalog `operationId`s the current manifest pins under this app, for a
  * `rest_api` or gateway binding.
  */
-operation_ids: Array<string> | null,
+operation_ids: Array<string> | null, 
 /**
  * Whether the live grant covers every listed capability under this
  * binding and its target still matches the granted fingerprint.
  */
-granted: boolean,
+granted: boolean, 
 /**
  * Whether a grant names this binding's target but it changed — a
  * reconfigured record, a disconnected folder — since consent: the
@@ -390,7 +390,7 @@ definition_changed: boolean, };
  * the folders, and any environment or credential values they select, are
  * deliberately absent from this projection.
  */
-export type AppGrantState = {
+export type AppGrantState = { 
 /**
  * Whether a live grant fully covers the current manifest with every
  * bound definition unchanged since consent — the "no sheet needed"
@@ -398,7 +398,7 @@ export type AppGrantState = {
  * nothing to consent to, so no sheet is shown. When `false`,
  * (re-)consent is required before every pinned capability is invokable.
  */
-granted: boolean,
+granted: boolean, 
 /**
  * The current manifest's bindings, one entry per bound connected app or
  * folder.
@@ -444,7 +444,7 @@ export type AppRevisionId = string;
  * One revision row: identity and position only. The manifest and the
  * bundle's content address stay server-side.
  */
-export type AppRevisionSummary = { id: AppRevisionId,
+export type AppRevisionSummary = { id: AppRevisionId, 
 /**
  * One-based position in the app's revision history.
  */
@@ -453,19 +453,19 @@ ordinal: number, created_at: string, };
 /**
  * One library row.
  */
-export type AppSummary = { id: AppId,
+export type AppSummary = { id: AppId, 
 /**
  * Display name, following the current revision's manifest.
  */
-name: string,
+name: string, 
 /**
  * Number of retained revisions, always at least one.
  */
-revision_count: number,
+revision_count: number, 
 /**
  * Creation time of the current revision.
  */
-updated_at: string,
+updated_at: string, 
 /**
  * Whether a live grant fully covers the app right now — the same
  * verdict `GET /apps/{id}/grant` reports, so the library badge and the
@@ -490,11 +490,27 @@ export type ApprovalClass = "read_only" | "workspace" | "sensitive";
 /**
  * Outcome recorded on [`CodeEvent::ApprovalResolved`].
  */
-export type ApprovalDecisionKind = { "type": "approve" } | { "type": "deny",
+export type ApprovalDecisionKind = { "type": "approve" } | { "type": "deny", 
 /**
  * Feedback returned to the engine, when any.
  */
-feedback?: string, } | { "type": "abandoned" };
+feedback?: string, } | { "type": "abandoned" } | { "type": "approved_with_grant", 
+/**
+ * The scope the decider granted.
+ */
+scope: GrantScope, } | { "type": "answered", 
+/**
+ * The supplied answers, already validated and bounded.
+ */
+answers: Array<UserQuestionAnswer>, } | { "type": "plan_decided", 
+/**
+ * Whether the plan was accepted.
+ */
+approve: boolean, 
+/**
+ * Feedback returned to the engine, when any.
+ */
+feedback?: string, };
 
 /**
  * How wide a standing grant the human chose, narrowest first.
@@ -523,11 +539,11 @@ export type AssistantCitationSnapshot = { id: AssistantCitationId, ordinal: numb
  * must agree when the state is `NeedsYou`; [`Attention::needs_you`] enforces
  * that at construction.
  */
-export type Attention = {
+export type Attention = { 
 /**
  * The state.
  */
-state: AttentionState,
+state: AttentionState, 
 /**
  * Who or what set it.
  */
@@ -541,23 +557,23 @@ export type AttentionSource = "structured" | "heuristic" | "lifecycle" | "user";
 /**
  * Server-computed attention for one unit of supervised work.
  */
-export type AttentionState = { "type": "working" } | { "type": "needs_you",
+export type AttentionState = { "type": "working" } | { "type": "needs_you", 
 /**
  * Short prompt shown on the badge.
  */
-prompt: string,
+prompt: string, 
 /**
  * How this need was detected.
  */
-source: AttentionSource, } | { "type": "stalled",
+source: AttentionSource, } | { "type": "stalled", 
 /**
  * Seconds of observed silence.
  */
-idle_secs: number, } | { "type": "done_unreviewed" } | { "type": "idle" } | { "type": "fenced",
+idle_secs: number, } | { "type": "done_unreviewed" } | { "type": "idle" } | { "type": "fenced", 
 /**
  * Why it was fenced.
  */
-reason: FenceReason, } | { "type": "manual",
+reason: FenceReason, } | { "type": "manual", 
 /**
  * User-supplied note.
  */
@@ -575,7 +591,7 @@ export type AutoJudgeStatus = "judging" | "approved" | "declined";
 /**
  * Bounded error carried on [`CodeEvent::TurnFailed`].
  */
-export type BoundedError = {
+export type BoundedError = { 
 /**
  * Short message, already truncated by the adapter.
  */
@@ -594,47 +610,47 @@ export type CapLevel = "supported" | "unsupported" | "unknown";
 /**
  * A persistent conversation with an exact, ordered host-root projection.
  */
-export type Chat = {
+export type Chat = { 
 /**
  * Stable identifier.
  */
-id: ChatId,
+id: ChatId, 
 /**
  * The project this chat belongs to, or `None` for a loose (projectless) chat.
  */
-project_id: ProjectId | null,
+project_id: ProjectId | null, 
 /**
  * Human-facing title; `None` until one is set or derived.
  */
-title: string | null,
+title: string | null, 
 /**
  * The model this chat runs against, or `None` to use the configured default.
  */
-model: string | null,
+model: string | null, 
 /**
  * Reasoning-effort override for this chat, honored only by models that
  * expose the control; `None` leaves the provider's default in force.
  */
-reasoning_effort: ReasoningEffort | null,
+reasoning_effort: ReasoningEffort | null, 
 /**
  * How much this chat lets the agent do between approvals; `None` means
  * [`PermissionMode::Ask`].
  */
-permission_mode: PermissionMode | null,
+permission_mode: PermissionMode | null, 
 /**
  * Outbound network access for code execution in this chat.
  */
-network_policy: NetworkPolicy,
+network_policy: NetworkPolicy, 
 /**
  * CAS revision of this conversation's exact root projection.
  */
-attachment_revision: number,
+attachment_revision: number, 
 /**
  * Ordered opaque roots available for future broker-backed operations.
  * Live broker authorization remains mandatory and may revoke access at any
  * time, regardless of this projection.
  */
-root_attachments: Array<ChatRootAttachment>,
+root_attachments: Array<ChatRootAttachment>, 
 /**
  * When the chat was created.
  */
@@ -651,18 +667,18 @@ export type ChatId = string;
  * A renderer-safe durable transcript entry. Internal routing and tool state
  * deliberately remain behind the server boundary.
  */
-export type ChatMessageSnapshot = { id: MessageId, role: TranscriptRole, content: string, created_at: string, citations: Array<AssistantCitationSnapshot>,
+export type ChatMessageSnapshot = { id: MessageId, role: TranscriptRole, content: string, created_at: string, citations: Array<AssistantCitationSnapshot>, 
 /**
  * Images submitted with this user message. These are durable identity and
  * geometry only; image bytes remain behind a chat-scoped authenticated
  * endpoint and never enter the transcript payload.
  */
-image_attachments?: Array<TranscriptImageAttachment>,
+image_attachments?: Array<TranscriptImageAttachment>, 
 /**
  * Files submitted with this user message. Their bytes remain behind the
  * existing chat-scoped document endpoints.
  */
-file_attachments?: Array<TranscriptFileAttachment>,
+file_attachments?: Array<TranscriptFileAttachment>, 
 /**
  * Skills this user message explicitly invoked, in submitted order. Absent
  * for the ordinary message that invoked none.
@@ -672,11 +688,11 @@ invoked_skills?: Array<string>, };
 /**
  * One pathless root in a conversation's exact ordered projection.
  */
-export type ChatRootAttachment = {
+export type ChatRootAttachment = { 
 /**
  * Opaque broker root identity. This value grants no authority by itself.
  */
-root_id: HostRootId,
+root_id: HostRootId, 
 /**
  * Product-level provenance for ordering and future management UI.
  */
@@ -690,12 +706,12 @@ origin: RootAttachmentOrigin, };
  * message-less failed and cancelled turns remain first-class transcript entries
  * carrying the partial prose and reasoning the reader already saw live.
  */
-export type ChatTerminalTurnSnapshot = { turn_id: TurnId, message_id?: MessageId, status: ChatTerminalTurnStatus, partial_content: string, reasoning?: string, refusal?: RendererRefusal, failure_category?: TurnFailureCategory, failure_detail?: string, failure_model?: RendererModelIdentity, file_changes: Array<ExecFileChangeSummary>,
+export type ChatTerminalTurnSnapshot = { turn_id: TurnId, message_id?: MessageId, status: ChatTerminalTurnStatus, partial_content: string, reasoning?: string, refusal?: RendererRefusal, failure_category?: TurnFailureCategory, failure_detail?: string, failure_model?: RendererModelIdentity, file_changes: Array<ExecFileChangeSummary>, 
 /**
  * Skills the user explicitly invoked for this turn, in submitted order.
  * Absent for the ordinary turn that invoked none.
  */
-invoked_skills?: Array<string>,
+invoked_skills?: Array<string>, 
 /**
  * Token accounting for the turn, so a freshly opened chat can show
  * context usage without waiting for the next turn to finish.
@@ -709,7 +725,7 @@ export type ChatTerminalTurnStatus = "completed" | "failed" | "cancelled";
  * metadata, executor identity, lease, or diagnostic detail. The only action or
  * result it can carry is one a tool explicitly projects through a closed type.
  */
-export type ChatToolActivitySnapshot = {
+export type ChatToolActivitySnapshot = { 
 /**
  * Canonical call id, the same [`crate::id::CallId`] the live event stream
  * carried for this call.
@@ -721,7 +737,7 @@ export type ChatToolActivitySnapshot = {
  * and every replayed app view fetched a payload the server could only
  * reject.
  */
-call_id: CallId,
+call_id: CallId, 
 /**
  * Allowlisted renderer tool name, never a provider-supplied one.
  *
@@ -734,18 +750,18 @@ call_id: CallId,
  * on both sides while silently dropping the allowlist the renderer's copy
  * and icon tables are keyed on.
  */
-tool: RendererToolName,
+tool: RendererToolName, 
 /**
  * Closed projection of what the call did, when its tool has one. Rebuilt
  * from the arguments it ran with, so history describes the same action
  * the live stream did.
  */
-action?: ToolActionPreview,
+action?: ToolActionPreview, 
 /**
  * Closed projection of an actionable result. Arbitrary result text is
  * never included.
  */
-result?: ToolResultPreview,
+result?: ToolResultPreview, 
 /**
  * Set when this call retained a projection that no longer deserializes.
  *
@@ -770,12 +786,12 @@ export type ChatToolActivityStatus = "completed" | "failed" | "denied" | "cancel
  * The renderer uses the watermark to subscribe only to future events, avoiding
  * duplicate text when reopening a completed conversation.
  */
-export type ChatTranscript = { messages: Array<ChatMessageSnapshot>,
+export type ChatTranscript = { messages: Array<ChatMessageSnapshot>, 
 /**
  * Finished tool activity from terminal turns, projected through a fixed
  * renderer-safe allowlist. Canonical tool records never cross this API.
  */
-tool_activity: Array<ChatToolActivitySnapshot>,
+tool_activity: Array<ChatToolActivitySnapshot>, 
 /**
  * Status and streamed presentation for every terminal turn. This owns
  * terminal metadata even when no assistant message was committed.
@@ -785,11 +801,11 @@ terminal_turns: Array<ChatTerminalTurnSnapshot>, last_event_seq: number, };
 /**
  * Hint that a turn recorded a checkpoint. The diff body is loaded separately.
  */
-export type CheckpointHint = {
+export type CheckpointHint = { 
 /**
  * Hidden ref name, when known.
  */
-checkpoint_ref?: string,
+checkpoint_ref?: string, 
 /**
  * Bounded diffstat.
  */
@@ -866,32 +882,50 @@ export type CodeApprovalId = string;
 /**
  * Best-effort classification of what an approval is asking.
  */
-export type CodeApprovalKind = { "type": "command",
+export type CodeApprovalKind = { "type": "command", 
 /**
  * Command string.
  */
-cmd: string,
+cmd: string, 
 /**
  * Working directory, when reported.
  */
-cwd?: string | null, } | { "type": "file_write",
+cwd?: string | null, } | { "type": "file_write", 
 /**
  * Paths involved.
  */
-paths: Array<string>, } | { "type": "network",
+paths: Array<string>, } | { "type": "network", 
 /**
  * Host or summary the engine reported.
  */
-summary: string, } | { "type": "other",
+summary: string, } | { "type": "other", 
 /**
  * Engine-provided summary.
  */
-summary: string, };
+summary: string, } | { "type": "tool_use", 
+/**
+ * The action exactly as the consent decision will read it.
+ */
+preview: ToolActionPreview, 
+/**
+ * Grant rungs the decider may mint, narrowest first. Empty when the
+ * call supports no standing grant.
+ */
+offered_grants: Array<GrantScope>, } | { "type": "questions", 
+/**
+ * The questions, bounded by the engine's own validation.
+ */
+questions: Array<UserQuestion>, } | { "type": "plan", 
+/**
+ * Permission mode the conversation moves to when the plan is
+ * accepted.
+ */
+proposed_mode: PermissionMode, };
 
 /**
  * One parked or decided engine approval.
  */
-export type CodeApprovalSnapshot = { id: CodeApprovalId, session_id: CodeSessionId, turn_id: CodeTurnId, kind: CodeApprovalKind,
+export type CodeApprovalSnapshot = { id: CodeApprovalId, session_id: CodeSessionId, turn_id: CodeTurnId, kind: CodeApprovalKind, 
 /**
  * Exact JSON the engine sent, already size-capped. The card renders this.
  */
@@ -910,15 +944,15 @@ export type CodeApprovalState = "pending" | "approved" | "denied" | "abandoned";
  * storage a fork transcript uses. The prompt names it and the engine opens
  * it; nothing is uploaded and nothing is indexable.
  */
-export type CodeCheckLog = {
+export type CodeCheckLog = { 
 /**
  * Check name as the host reports it.
  */
-check: string, path: string, byte_len: number,
+check: string, path: string, byte_len: number, 
 /**
  * True when the file holds only the tail of the job log.
  */
-truncated: boolean,
+truncated: boolean, 
 /**
  * The job's host URL. A check without one has no log to download, so
  * every entry here has one.
@@ -937,7 +971,7 @@ export type CodeCheckLogError = { check: string, message: string, };
  * URL that names no Actions job — is simply absent from both lists. The
  * caller still names it in the prompt from the digest it already holds.
  */
-export type CodeCheckLogsSnapshot = {
+export type CodeCheckLogsSnapshot = { 
 /**
  * Head the logs were read against, when the host reported one.
  */
@@ -962,24 +996,24 @@ export type CodeCommitSnapshot = { sha: string, message: string, stat: Diffstat,
  * What the connect approval page renders: the identity being linked and
  * the CSRF token its "is this you?" POST must echo.
  */
-export type CodeConnectPage = {
+export type CodeConnectPage = { 
 /**
  * Which channel family is linking (for example `slack`).
  */
-channel_kind: string,
+channel_kind: string, 
 /**
  * The person's display name in the channel.
  */
-display_name: string,
+display_name: string, 
 /**
  * The channel workspace's human name.
  */
-workspace_name: string, avatar_url?: string,
+workspace_name: string, avatar_url?: string, 
 /**
  * `pending` or `approved`; a completed or expired link renders
  * nothing.
  */
-state: string,
+state: string, 
 /**
  * Echo this in the approve POST.
  */
@@ -1006,7 +1040,7 @@ export type CodeDeliveryPrAttentionReason = "changes_requested" | "checks_failed
  * User-initiated global PR action. Code-changing actions deliberately do not
  * exist here; they remain workspace-scoped agent prompts.
  */
-export type CodeDeliveryPullRequestAction = { "type": "mark_ready" } | { "type": "merge", method: CodePrMergeMethod, auto: boolean, admin: boolean, expected_head_sha: string, } | { "type": "create_stack",
+export type CodeDeliveryPullRequestAction = { "type": "mark_ready" } | { "type": "merge", method: CodePrMergeMethod, auto: boolean, admin: boolean, expected_head_sha: string, } | { "type": "create_stack", 
 /**
  * The chain to register, bottom to top. Every pull request's base
  * ref must match the previous one's head ref.
@@ -1019,18 +1053,18 @@ export type CodeDeliveryPullRequestActionBody = { target: CodeDeliveryPullReques
  * Full PR drawer payload. Conversation entries retain the existing bounded
  * comment contract used by workspace PRs.
  */
-export type CodeDeliveryPullRequestDetail = { summary: CodeDeliveryPullRequestSummary, body: string, labels: Array<string>, assignees: Array<string>, requested_reviewers: Array<string>, changed_files: number, additions: number, deletions: number,
+export type CodeDeliveryPullRequestDetail = { summary: CodeDeliveryPullRequestSummary, body: string, labels: Array<string>, assignees: Array<string>, requested_reviewers: Array<string>, changed_files: number, additions: number, deletions: number, 
 /**
  * The full stack chain this pull request belongs to, bottom to top,
  * when the host reported one. Absent on hosts without stacked pull
  * requests.
  */
-stack?: Array<CodeDeliveryStackMember>, commits: number, merged_by?: string,
+stack?: Array<CodeDeliveryStackMember>, commits: number, merged_by?: string, 
 /**
  * Empty when the diff could not be read. Truncated by `files_truncated`
  * rather than paged: the panel is a review aid, not a diff viewer.
  */
-files: Array<CodeDeliveryPullRequestFile>, files_truncated: boolean, comments: Array<PullRequestComment>,
+files: Array<CodeDeliveryPullRequestFile>, files_truncated: boolean, comments: Array<PullRequestComment>, 
 /**
  * Section reads that failed after the pull request itself loaded.
  */
@@ -1042,7 +1076,7 @@ errors: Array<CodeDeliverySourceError>, can_mark_ready: boolean, can_merge: bool
  * `patch` is the host's unified hunk text and is absent for binary files and
  * for diffs GitHub declines to render. It is bounded by the host, not stored.
  */
-export type CodeDeliveryPullRequestFile = { path: string,
+export type CodeDeliveryPullRequestFile = { path: string, 
 /**
  * `added`, `modified`, `removed`, `renamed`, `copied`, or `changed`.
  */
@@ -1052,7 +1086,7 @@ status: string, additions: number, deletions: number, previous_path?: string, pa
  * Server-side PR query. Saved views are client-owned; their resolved filters
  * are sent here so paging remains bounded across many repositories.
  */
-export type CodeDeliveryPullRequestQuery = { repositories: Array<CodeGitHubRepositoryTarget>, search?: string, states: Array<string>, review_states: Array<string>, check_states: Array<string>, authors: Array<string>, attention_only: boolean, ready_only: boolean, tidebreak_linked?: boolean, updated_after?: string, cursor?: string, limit?: number,
+export type CodeDeliveryPullRequestQuery = { repositories: Array<CodeGitHubRepositoryTarget>, search?: string, states: Array<string>, review_states: Array<string>, check_states: Array<string>, authors: Array<string>, attention_only: boolean, ready_only: boolean, tidebreak_linked?: boolean, updated_after?: string, cursor?: string, limit?: number, 
 /**
  * Skip the short list cache and reread GitHub.
  *
@@ -1064,27 +1098,27 @@ refresh: boolean, };
 /**
  * Pull request row shared by the overview and notification monitor.
  */
-export type CodeDeliveryPullRequestSummary = { id: string, repository: CodeGitHubRepositoryRef, number: number, url: string, title: string, state: string, draft: boolean, author?: string, author_avatar_url?: string, head_branch: string, base_branch: string, head_sha?: string, review_decision?: string, mergeable?: string, merge_state_status?: string, auto_merge_enabled: boolean,
+export type CodeDeliveryPullRequestSummary = { id: string, repository: CodeGitHubRepositoryRef, number: number, url: string, title: string, state: string, draft: boolean, author?: string, author_avatar_url?: string, head_branch: string, base_branch: string, head_sha?: string, review_decision?: string, mergeable?: string, merge_state_status?: string, auto_merge_enabled: boolean, 
 /**
  * True when the last reliable host observation placed the pull request
  * in its merge queue. Absent when the list read cannot answer.
  */
-in_merge_queue?: boolean,
+in_merge_queue?: boolean, 
 /**
  * Issue comments visible from the list read. Review and inline comments
  * remain detail-only, so an absent count means unknown rather than zero.
  */
-comment_count?: number, checks: Array<CodeDeliveryCheck>, attention_reasons: Array<CodeDeliveryPrAttentionReason>, ready_to_merge: boolean, workspace_links: Array<CodeDeliveryWorkspaceLink>,
+comment_count?: number, checks: Array<CodeDeliveryCheck>, attention_reasons: Array<CodeDeliveryPrAttentionReason>, ready_to_merge: boolean, workspace_links: Array<CodeDeliveryWorkspaceLink>, 
 /**
  * The host stack this pull request belongs to (GitHub stacked pull
  * requests), when the host reported one. Identifies the stack, not the
  * PR.
  */
-stack_number?: number,
+stack_number?: number, 
 /**
  * Total layers in that stack, bottom to top, including merged ones.
  */
-stack_size?: number,
+stack_size?: number, 
 /**
  * The pull request this one is stacked on. Host stack order wins when
  * the host reported a stack; branch inference from the durable fact set
@@ -1092,7 +1126,7 @@ stack_size?: number,
  * or filter still resolves. Absent when the base is the default branch
  * or nothing tracked owns it.
  */
-stack_parent_number?: number,
+stack_parent_number?: number, 
 /**
  * A stack-shaped chain of inferred edges the host has no stack for,
  * bottom to top, when one resolves gaplessly around this pull request
@@ -1101,7 +1135,7 @@ stack_parent_number?: number,
  * — without it, merging a layer lands it into the branch below rather
  * than the default branch, which is easy to do by accident.
  */
-unregistered_stack_numbers?: Array<number>, labels: Array<string>, created_at: string, updated_at: string,
+unregistered_stack_numbers?: Array<number>, labels: Array<string>, created_at: string, updated_at: string, 
 /**
  * Set only once the pull request merged. `state` alone cannot separate a
  * merged pull request from a closed one on every host response, and the
@@ -1136,7 +1170,7 @@ export type CodeDeliveryRunActionBody = { target: CodeDeliveryRunTarget, action:
 
 export type CodeDeliveryRunAttentionReason = "failure" | "timed_out" | "action_required" | "startup_failure";
 
-export type CodeDeliveryRunDetail = { summary: CodeDeliveryRunSummary, jobs: Array<CodeDeliveryWorkflowJob>, deployment_statuses: Array<CodeDeliveryDeploymentStatus>, can_rerun_failed: boolean,
+export type CodeDeliveryRunDetail = { summary: CodeDeliveryRunSummary, jobs: Array<CodeDeliveryWorkflowJob>, deployment_statuses: Array<CodeDeliveryDeploymentStatus>, can_rerun_failed: boolean, 
 /**
  * Section reads that failed after the run or deployment itself loaded.
  */
@@ -1144,7 +1178,7 @@ errors: Array<CodeDeliverySourceError>, };
 
 export type CodeDeliveryRunKind = "workflow_run" | "deployment";
 
-export type CodeDeliveryRunQuery = { repositories: Array<CodeGitHubRepositoryTarget>, search?: string, kinds: Array<CodeDeliveryRunKind>, statuses: Array<string>, conclusions: Array<string>, workflows: Array<string>, environments: Array<string>, branches: Array<string>, events: Array<string>, actors: Array<string>, attention_only: boolean, tidebreak_linked?: boolean, created_after?: string, cursor?: string, limit?: number,
+export type CodeDeliveryRunQuery = { repositories: Array<CodeGitHubRepositoryTarget>, search?: string, kinds: Array<CodeDeliveryRunKind>, statuses: Array<string>, conclusions: Array<string>, workflows: Array<string>, environments: Array<string>, branches: Array<string>, events: Array<string>, actors: Array<string>, attention_only: boolean, tidebreak_linked?: boolean, created_after?: string, cursor?: string, limit?: number, 
 /**
  * Skip the short list cache and reread GitHub. See the pull-request query.
  */
@@ -1167,15 +1201,15 @@ export type CodeDeliverySourceError = { repository?: CodeGitHubRepositoryTarget,
 /**
  * One layer of a pull-request stack, in bottom-to-top order.
  */
-export type CodeDeliveryStackMember = { number: number,
+export type CodeDeliveryStackMember = { number: number, 
 /**
  * Host state token (open, closed).
  */
-state: string, draft: boolean,
+state: string, draft: boolean, 
 /**
  * Set once this layer merged.
  */
-merged_at?: string,
+merged_at?: string, 
 /**
  * Head branch name.
  */
@@ -1186,7 +1220,7 @@ export type CodeDeliveryWorkflowJob = { id: number, name: string, status: string
 /**
  * One Tidebreak workspace that plausibly produced a remote delivery item.
  */
-export type CodeDeliveryWorkspaceLink = { workspace_id: WorkspaceId, repo_id: RepoId, title: string, branch_name: string, status: CodeWorkspaceStatus, exact: boolean,
+export type CodeDeliveryWorkspaceLink = { workspace_id: WorkspaceId, repo_id: RepoId, title: string, branch_name: string, status: CodeWorkspaceStatus, exact: boolean, 
 /**
  * Durable attribution behind this link, when one is stored: the
  * workspace authored or contributed to the pull request (decision 77).
@@ -1201,69 +1235,69 @@ relation?: CodePullRequestRelation, };
  * variant), and `#[non_exhaustive]` so new event kinds can be added without
  * breaking downstream consumers.
  */
-export type CodeEvent = { "type": "session_started",
+export type CodeEvent = { "type": "session_started", 
 /**
  * Which engine.
  */
-harness_kind: HarnessKind,
+harness_kind: HarnessKind, 
 /**
  * Version observed at launch.
  */
-harness_version: string,
+harness_version: string, 
 /**
  * Engine-native resume token, when the stream reported one.
  */
-resume_ref?: string, } | { "type": "turn_started",
+resume_ref?: string, } | { "type": "turn_started", 
 /**
  * The turn being processed.
  */
-turn_id: CodeTurnId, } | { "type": "assistant_delta",
+turn_id: CodeTurnId, } | { "type": "assistant_delta", 
 /**
  * The text fragment to append.
  */
-text: string, } | { "type": "assistant_message",
+text: string, } | { "type": "assistant_message", 
 /**
  * The message text.
  */
-text: string,
+text: string, 
 /**
  * The `Task` call this message ran inside, when a harness subagent
  * produced it (decision 52). Absent on the parent's own messages.
  */
-parent_call_id?: string, } | { "type": "reasoning_delta",
+parent_call_id?: string, } | { "type": "reasoning_delta", 
 /**
  * The reasoning fragment.
  */
-text: string, } | { "type": "tool_started",
+text: string, } | { "type": "tool_started", 
 /**
  * Engine-native call id.
  */
-call_id: string,
+call_id: string, 
 /**
  * Tool name as the engine reported it.
  */
-name: string,
+name: string, 
 /**
  * Display-oriented classification.
  */
-detail: ToolDetail,
+detail: ToolDetail, 
 /**
  * The `Task` call this call ran inside, when a harness subagent
  * issued it (decision 52). Absent on the parent's own calls.
  */
-parent_call_id?: string, } | { "type": "tool_completed",
+parent_call_id?: string, } | { "type": "tool_completed", 
 /**
  * Engine-native call id.
  */
-call_id: string,
+call_id: string, 
 /**
  * How it finished.
  */
-outcome: ToolOutcome,
+outcome: ToolOutcome, 
 /**
  * Bounded preview of the result.
  */
-preview: string,
+preview: string, 
 /**
  * Classification rebuilt from the call's complete arguments.
  *
@@ -1273,72 +1307,72 @@ preview: string,
  * and renderers merge it into the started call. It is `None` when
  * the engine's completion payload carries no arguments.
  */
-detail?: ToolDetail,
+detail?: ToolDetail, 
 /**
  * The `Task` call this call ran inside, when a harness subagent
  * issued it (decision 52). Absent on the parent's own calls.
  */
-parent_call_id?: string, } | { "type": "file_changed",
+parent_call_id?: string, } | { "type": "file_changed", 
 /**
  * Path relative to the worktree, when the engine reports one.
  */
-path: string,
+path: string, 
 /**
  * Kind of change.
  */
-kind: FileChangeKind,
+kind: FileChangeKind, 
 /**
  * Bounded diffstat.
  */
-diffstat: Diffstat, } | { "type": "approval_requested",
+diffstat: Diffstat, } | { "type": "approval_requested", 
 /**
  * Hint id; the row is the source of truth.
  */
-approval_id: CodeApprovalId, } | { "type": "approval_resolved",
+approval_id: CodeApprovalId, } | { "type": "approval_resolved", 
 /**
  * The approval that was decided.
  */
-approval_id: CodeApprovalId,
+approval_id: CodeApprovalId, 
 /**
  * The decision.
  */
-decision: ApprovalDecisionKind, } | { "type": "user_steered",
+decision: ApprovalDecisionKind, } | { "type": "user_steered", 
 /**
  * The steered user text, already bounded.
  */
-text: string, } | { "type": "turn_completed",
+text: string, } | { "type": "turn_completed", 
 /**
  * Token accounting as reported by the engine.
  */
-usage: CodeUsage,
+usage: CodeUsage, 
 /**
  * Checkpoint recorded at turn end, when any.
  */
-checkpoint?: CheckpointHint, } | { "type": "turn_failed",
+checkpoint?: CheckpointHint, } | { "type": "turn_failed", 
 /**
  * Bounded error.
  */
-error: BoundedError, } | { "type": "turn_interrupted" } | { "type": "checkpoint_recorded",
+error: BoundedError, } | { "type": "turn_interrupted" } | { "type": "checkpoint_recorded", 
 /**
  * The turn that ended at this checkpoint.
  */
-turn_id: CodeTurnId,
+turn_id: CodeTurnId, 
 /**
  * Bounded diffstat.
  */
-diffstat: Diffstat, } | { "type": "harness_notice",
+diffstat: Diffstat, } | { "type": "harness_notice", 
 /**
  * Severity.
  */
-level: HarnessNoticeLevel,
+level: HarnessNoticeLevel, 
 /**
  * Bounded message.
  */
-message: string, } | { "type": "attention_changed",
+message: string, } | { "type": "attention_changed", 
 /**
  * New state.
  */
-state: AttentionState,
+state: AttentionState, 
 /**
  * Who or what set it.
  */
@@ -1353,7 +1387,7 @@ export type CodeFileChange = { path: string, kind: FileChangeKind, insertions: n
  * Body of `POST /code/sessions/{id}/fork`. An absent body forks at the
  * newest turn.
  */
-export type CodeForkBody = {
+export type CodeForkBody = { 
 /**
  * Fork at the end of this turn; later turns stay out of the handoff.
  */
@@ -1367,20 +1401,20 @@ at_turn?: CodeTurnId, };
  * is the fork's own directory, which also holds one full per-turn record —
  * `turn-0007.md` for turn 7 — and any retained image attachments.
  */
-export type CodeForkTranscript = { path: string, dir: string, byte_len: number,
+export type CodeForkTranscript = { path: string, dir: string, byte_len: number, 
 /**
  * Complete turn histories the condensed transcript renders in full.
  */
-turns: number,
+turns: number, 
 /**
  * Turns the fork covers, up to and including the fork point.
  */
-total_turns: number,
+total_turns: number, 
 /**
  * The fork point's turn ordinal, present when the conversation
  * continued past it — later turns are excluded from the handoff.
  */
-at_turn_ordinal?: number,
+at_turn_ordinal?: number, 
 /**
  * True when bounded replay omitted whole turn histories or the file size
  * cap reduced the oldest turns or the end of one oversized turn.
@@ -1429,33 +1463,33 @@ export type CodeGrantId = string;
  * secrets: the token pair exists only in the mint response the adapter
  * kept.
  */
-export type CodeGrantSnapshot = { id: CodeGrantId,
+export type CodeGrantSnapshot = { id: CodeGrantId, 
 /**
  * Which channel family linked (for example `slack`).
  */
-channel_kind: string,
+channel_kind: string, 
 /**
  * The channel's identity for the linked user.
  */
-external_identity: string,
+external_identity: string, 
 /**
  * The channel user's display name at connect time, when this grant came
  * from the connect flow.
  */
-display_name?: string,
+display_name?: string, 
 /**
  * The channel's workspace identity, shown so an owner can revoke a
  * whole workspace at once.
  */
-workspace_identity: string,
+workspace_identity: string, 
 /**
  * The channel workspace's display name at connect time.
  */
-workspace_name?: string,
+workspace_name?: string, 
 /**
  * The linked user's safe public avatar URL at connect time.
  */
-avatar_url?: string, rotated_at?: string, created_at: string, revoked_at?: string,
+avatar_url?: string, rotated_at?: string, created_at: string, revoked_at?: string, 
 /**
  * Why the grant was revoked, in owner-facing words. A theft-triggered
  * revoke reaches the owner here.
@@ -1470,7 +1504,7 @@ revoked_reason?: string, };
  * percentage to a pipe, so there is no bar to show — only which of the three
  * the engine is in.
  */
-export type CodeHarnessInstallSnapshot = { kind: HarnessKind,
+export type CodeHarnessInstallSnapshot = { kind: HarnessKind, 
 /**
  * The pinned version being installed.
  */
@@ -1480,11 +1514,11 @@ version?: string, phase: string, done: boolean, error?: string, };
  * `GET /code/workspaces/{id}/pr/comments`: the PR conversation, read live
  * from the host and never persisted.
  */
-export type CodePrCommentsSnapshot = {
+export type CodePrCommentsSnapshot = { 
 /**
  * PR number the comments belong to.
  */
-number: number,
+number: number, 
 /**
  * Issue comments, review bodies, and inline review comments, ordered by
  * creation time.
@@ -1560,37 +1594,37 @@ export type CodeSessionActivity = "agent" | "shell" | "monitor" | "subagents" | 
 /**
  * Cheap per-session digest on `/code/updates`.
  */
-export type CodeSessionDigest = { workspace: WorkspaceId, session: CodeSessionId, kind: CodeSessionKind,
+export type CodeSessionDigest = { workspace: WorkspaceId, session: CodeSessionId, kind: CodeSessionKind, 
 /**
  * Engine identity for list surfaces that collapse several sessions into
  * one workspace row. Optional on the wire so a desktop can still read a
  * digest from an older server during an update.
  */
-harness_kind?: HarnessKind, lifecycle: CodeSessionLifecycle, attention: Attention, title: string, turn_count: number,
+harness_kind?: HarnessKind, lifecycle: CodeSessionLifecycle, attention: Attention, title: string, turn_count: number, 
 /**
  * Timestamp trigger delivery uses to rank candidate sessions: the newest
  * turn start, or session creation before the first turn. Optional so a
  * desktop can still read a digest from an older server during an update.
  */
-trigger_target_at?: string,
+trigger_target_at?: string, 
 /**
  * What the live turn is occupied with, while running.
  */
-activity?: CodeSessionActivity, pr_state?: PullRequestDigest,
+activity?: CodeSessionActivity, pr_state?: PullRequestDigest, 
 /**
  * How many pull requests hold a durable attribution to this workspace
  * (decision 77). Absent when none do.
  */
-pr_count?: number,
+pr_count?: number, 
 /**
  * Watch progress, present only on `kind: watch` digests.
  */
-watch_state?: CodeWatchState, watch_detail?: string, watch_cycles?: number,
+watch_state?: CodeWatchState, watch_detail?: string, watch_cycles?: number, 
 /**
  * Harness subagents on this session, present only when any were
  * observed (decision 52).
  */
-subagents?: Array<CodeSubagentSummary>,
+subagents?: Array<CodeSubagentSummary>, 
 /**
  * Where this session stands, in a sentence, derived from the newest turn
  * that carries one. Absent until a turn has been recapped, and on
@@ -1602,11 +1636,11 @@ recap?: string, };
  * Where an externally created session came from. The desktop renders it
  * as the provenance banner; a session the desktop created carries none.
  */
-export type CodeSessionExternalOrigin = {
+export type CodeSessionExternalOrigin = { 
 /**
  * The channel family, for example `slack`.
  */
-channel_kind: string,
+channel_kind: string, 
 /**
  * The channel's durable conversation identity, opaque to the server.
  * For Slack this is `workspace/channel/thread_ts`, which the desktop
@@ -1632,15 +1666,15 @@ export type CodeSessionLifecycle = "created" | "idle" | "running" | "fenced" | "
 /**
  * One durable conversation with an external agent engine.
  */
-export type CodeSessionSnapshot = { id: CodeSessionId, workspace_id: WorkspaceId, kind: CodeSessionKind, harness_kind: HarnessKind, harness_version?: string, harness_resume_ref?: string, permission_mode: PermissionMode, model?: string,
+export type CodeSessionSnapshot = { id: CodeSessionId, workspace_id: WorkspaceId, kind: CodeSessionKind, harness_kind: HarnessKind, harness_version?: string, harness_resume_ref?: string, permission_mode: PermissionMode, model?: string, 
 /**
  * Absent means the engine's own default, which is not any level.
  */
-reasoning_effort?: ReasoningEffort,
+reasoning_effort?: ReasoningEffort, 
 /**
  * Whether this session runs its turns in the engine's fast mode.
  */
-fast_mode: boolean, lifecycle: CodeSessionLifecycle, fence_reason?: FenceReason, attention: Attention, unrecognized_event_count: number, created_at: string,
+fast_mode: boolean, lifecycle: CodeSessionLifecycle, fence_reason?: FenceReason, attention: Attention, unrecognized_event_count: number, created_at: string, 
 /**
  * Present when an external channel created the session.
  */
@@ -1668,15 +1702,15 @@ export type CodeSubagentStatus = "running" | "done" | "failed";
  * session: the harness owns its lifecycle, so the server can neither steer
  * nor resume it (decision 52).
  */
-export type CodeSubagentSummary = {
+export type CodeSubagentSummary = { 
 /**
  * The spanning `Task` call's engine-native id.
  */
-call_id: string,
+call_id: string, 
 /**
  * Display name: the Task's description or the tool name.
  */
-name: string,
+name: string, 
 /**
  * Status derived from the spanning call.
  */
@@ -1748,7 +1782,7 @@ export type CodeTurnRewriteState = "rewriting" | "rewritten" | "failed";
 /**
  * One user→engine turn.
  */
-export type CodeTurnSnapshot = { id: CodeTurnId, session_id: CodeSessionId, ordinal: number, status: CodeTurnStatus, model?: string, fast_mode: boolean, user_input: string, attachments: Array<ImageRef>, usage?: CodeUsage, checkpoint_ref?: string, diffstat?: Diffstat, started_at: string, ended_at?: string,
+export type CodeTurnSnapshot = { id: CodeTurnId, session_id: CodeSessionId, ordinal: number, status: CodeTurnStatus, model?: string, fast_mode: boolean, user_input: string, attachments: Array<ImageRef>, usage?: CodeUsage, checkpoint_ref?: string, diffstat?: Diffstat, started_at: string, ended_at?: string, 
 /**
  * Lucid rewrite of the closing message. The journal keeps the original.
  */
@@ -1764,42 +1798,42 @@ export type CodeTurnStatus = "running" | "completed" | "failed" | "interrupted";
  *
  * A connect is restated as [`Self::Snapshot`]; later notices are live only.
  */
-export type CodeUpdateNotice = { "type": "snapshot",
+export type CodeUpdateNotice = { "type": "snapshot", 
 /**
  * One row per live session.
  */
-sessions: Array<CodeSessionDigest>, } | { "type": "digest", workspace: WorkspaceId, session: CodeSessionId, kind: CodeSessionKind,
+sessions: Array<CodeSessionDigest>, } | { "type": "digest", workspace: WorkspaceId, session: CodeSessionId, kind: CodeSessionKind, 
 /**
  * Engine identity for the session represented by this digest.
  */
-harness_kind?: HarnessKind, lifecycle: CodeSessionLifecycle, attention: Attention, title: string, turn_count: number,
+harness_kind?: HarnessKind, lifecycle: CodeSessionLifecycle, attention: Attention, title: string, turn_count: number, 
 /**
  * Timestamp trigger delivery uses to rank candidate sessions.
  */
-trigger_target_at?: string,
+trigger_target_at?: string, 
 /**
  * What the live turn is occupied with, while running.
  */
-activity?: CodeSessionActivity,
+activity?: CodeSessionActivity, 
 /**
  * Boxed to keep the notice enum's variants near one size; the wire
  * shape is unchanged.
  */
-pr_state?: PullRequestDigest,
+pr_state?: PullRequestDigest, 
 /**
  * How many pull requests hold a durable attribution to this
  * workspace (decision 77). Absent when none do.
  */
-pr_count?: number,
+pr_count?: number, 
 /**
  * Watch progress, present only on `kind: watch` digests.
  */
-watch_state?: CodeWatchState, watch_detail?: string, watch_cycles?: number,
+watch_state?: CodeWatchState, watch_detail?: string, watch_cycles?: number, 
 /**
  * Harness subagents on this session, present only when any were
  * observed (decision 52).
  */
-subagents?: Array<CodeSubagentSummary>,
+subagents?: Array<CodeSubagentSummary>, 
 /**
  * Where this session stands, in a sentence, derived from the newest
  * turn that carries one.
@@ -1831,23 +1865,23 @@ recap?: string, } | { "type": "terminal_activity", workspace_id: WorkspaceId, te
  * multiple of the prompt that was actually resident. That reading has its own
  * field: [`CodeUsage::context_tokens`].
  */
-export type CodeUsage = {
+export type CodeUsage = { 
 /**
  * Fresh, uncached input tokens. Excludes both cache fields.
  */
-input_tokens: number,
+input_tokens: number, 
 /**
  * Output tokens, summed over the turn's model calls.
  */
-output_tokens: number,
+output_tokens: number, 
 /**
  * Cache-read input tokens, when the engine reports them.
  */
-cache_read_input_tokens: number,
+cache_read_input_tokens: number, 
 /**
  * Cache-write input tokens, when the engine reports them.
  */
-cache_creation_input_tokens: number,
+cache_creation_input_tokens: number, 
 /**
  * Prompt tokens resident on the turn's final model call — what actually
  * occupied the context window at the end of the turn.
@@ -1860,7 +1894,7 @@ cache_creation_input_tokens: number,
  *
  * Zero when the engine does not publish enough to compute it.
  */
-context_tokens: number,
+context_tokens: number, 
 /**
  * Prompt tokens resident on the turn's first model call, when the engine
  * publishes per-call usage. This exposes startup context separately from
@@ -1913,13 +1947,13 @@ export type CodeWorkspaceHistorySearchSource = "turn_user_input" | "turn_narrati
 /**
  * PR + checks digest plus the local git facts the PR card needs.
  */
-export type CodeWorkspacePrSnapshot = { dirty: boolean, unpushed: boolean, ahead: number, has_upstream: boolean, suggested_commit_message: string, pr?: PullRequestDigest, gh_found: boolean, gh_authenticated?: boolean, remediation: string,
+export type CodeWorkspacePrSnapshot = { dirty: boolean, unpushed: boolean, ahead: number, has_upstream: boolean, suggested_commit_message: string, pr?: PullRequestDigest, gh_found: boolean, gh_authenticated?: boolean, remediation: string, 
 /**
  * The identity a push from this machine acts as: the deployment's
  * GitHub App bot account (decision 63) or the caller's own login
  * (decision 65). The UI states this plainly beside the push control.
  */
-pushes_as?: string,
+pushes_as?: string, 
 /**
  * Whether `pushes_as` is the caller's own account (decision 65)
  * rather than the deployment's App.
@@ -1930,15 +1964,15 @@ pushes_as_self?: boolean, watch?: CodeWatchSnapshot, };
  * One pull request attributed to a workspace, from the durable fact store
  * (decision 77). A projection of the stored snapshot — no live host read.
  */
-export type CodeWorkspacePullRequestFact = { host: string, repo_owner: string, repo_name: string, number: number, url: string, title: string,
+export type CodeWorkspacePullRequestFact = { host: string, repo_owner: string, repo_name: string, number: number, url: string, title: string, 
 /**
  * Coarse lifecycle: `open`, `merged`, or `closed`.
  */
-state: string, draft: boolean, author?: string, head_branch: string, base_branch: string, head_sha?: string,
+state: string, draft: boolean, author?: string, head_branch: string, base_branch: string, head_sha?: string, 
 /**
  * How the workspace is tied to it.
  */
-relation: CodePullRequestRelation, created_at: string, updated_at: string, merged_at?: string, closed_at?: string,
+relation: CodePullRequestRelation, created_at: string, updated_at: string, merged_at?: string, closed_at?: string, 
 /**
  * When the store last confirmed this snapshot against the host.
  */
@@ -1963,12 +1997,12 @@ export type CodeWorkspaceSearchMatch = { path: string, line_number: number, line
 /**
  * One isolated workspace (worktree + branch) on a repo.
  */
-export type CodeWorkspaceSnapshot = { id: WorkspaceId, repo_id: RepoId, title: string, worktree_path: string, branch_name: string, base_ref: string, status: CodeWorkspaceStatus, pr?: PullRequestDigest, created_at: string, archived_at?: string, released_at?: string,
+export type CodeWorkspaceSnapshot = { id: WorkspaceId, repo_id: RepoId, title: string, worktree_path: string, branch_name: string, base_ref: string, status: CodeWorkspaceStatus, pr?: PullRequestDigest, created_at: string, archived_at?: string, released_at?: string, 
 /**
  * Commit the released branch pointed at, so a client can name the work
  * without the branch existing.
  */
-released_tip?: string,
+released_tip?: string, 
 /**
  * Stored bundle size, for reporting what a release reclaimed.
  */
@@ -2004,7 +2038,7 @@ export type CodeWorktreeRoot = { root?: string, effective_root: string, default_
 /**
  * What one on-demand compaction did.
  */
-export type CompactionRun = {
+export type CompactionRun = { 
 /**
  * Whether a checkpoint was written. `false` is a complete, ordinary answer:
  * the chat had too little history to give up, its recent messages are all
@@ -2016,19 +2050,19 @@ compacted: boolean, };
 /**
  * Host-tunable chat compaction cadence and retention.
  */
-export type CompactionSettings = {
+export type CompactionSettings = { 
 /**
  * Compact when unabridged tokens exceed this fraction of the context window.
  */
-threshold_fraction: number,
+threshold_fraction: number, 
 /**
  * After compaction, keep about this fraction of the window as raw recent history.
  */
-target_fraction: number,
+target_fraction: number, 
 /**
  * Absolute floor applied before scaling by context window.
  */
-min_threshold_tokens: number,
+min_threshold_tokens: number, 
 /**
  * Newest durable messages that must never enter the compacted prefix.
  */
@@ -2051,33 +2085,33 @@ export type ConnectedAppId = string;
  * health projection, a `rest_api` entry carries catalog and credential
  * *status* — never transport definitions, documents, or values.
  */
-export type ConnectedAppInfo = { "kind": "mcp_server",
+export type ConnectedAppInfo = { "kind": "mcp_server", 
 /**
  * The record id app bindings name.
  */
-id: ConnectedAppId,
+id: ConnectedAppId, 
 /**
  * Display name — also the namespace the server's tools mount under.
  */
-name: string, health: McpHealth, tool_count: number,
+name: string, health: McpHealth, tool_count: number, 
 /**
  * The bare mounted tool names (after the `mcp__{server}__` prefix),
  * bounded by the per-server discovery cap. Names only — never
  * remote-authored descriptions — the consent sheet's posture.
  */
-tools: Array<string>, diagnostic: string | null,
+tools: Array<string>, diagnostic: string | null, 
 /**
  * The curated-list entry this server matched, when Tidebreak has
  * exercised it end to end. `null` is the community tier: mounted and
  * usable, just not something we have driven ourselves. A label, not
  * a gate — nothing about the mount changes either way.
  */
-curated: McpCuration | null,
+curated: McpCuration | null, 
 /**
  * The gateway MCP endpoint slug this record mounts, when it is
  * gateway-backed rather than a local stdio/HTTP definition.
  */
-gateway_endpoint: string | null,
+gateway_endpoint: string | null, 
 /**
  * Display names of the organization's entitled apps that ride this
  * record's gateway endpoint. Empty for local records — and, by
@@ -2085,32 +2119,32 @@ gateway_endpoint: string | null,
  * the apps surface: the entry then renders without org-app names
  * rather than erroring.
  */
-gateway_apps: Array<string>,
+gateway_apps: Array<string>, 
 /**
  * How many local mini-apps hold a live grant binding this record —
  * a count only, never app names or ids, the renderer-safety posture
  * of this surface. Grants of library-deleted apps do not count.
  */
-used_by_app_count: number, } | { "kind": "rest_api",
+used_by_app_count: number, } | { "kind": "rest_api", 
 /**
  * The record id app bindings name.
  */
-id: ConnectedAppId, name: string, base_url: string,
+id: ConnectedAppId, name: string, base_url: string, 
 /**
  * Operations the ingested catalog declares.
  */
-operation_count: number,
+operation_count: number, 
 /**
  * Hex SHA-256 of the raw OpenAPI document the catalog was ingested
  * from.
  */
-document_sha256: string, credential_status: RestCredentialStatus,
+document_sha256: string, credential_status: RestCredentialStatus, 
 /**
  * Where the stored credential value is placed at request time, when
  * one is referenced. The placement (and a custom header *name*) is
  * configuration; the value never appears on this surface.
  */
-placement: CredentialPlacement | null, updated_at: string,
+placement: CredentialPlacement | null, updated_at: string, 
 /**
  * How many local mini-apps hold a live grant binding this record —
  * a count only, never app names or ids, the renderer-safety posture
@@ -2121,7 +2155,7 @@ used_by_app_count: number, };
 /**
  * The renderer's listing of every configured connected app, across kinds.
  */
-export type ConnectedAppsInfo = {
+export type ConnectedAppsInfo = { 
 /**
  * MCP entries in the runtime's configuration order, then REST entries in
  * storage order (oldest first).
@@ -2153,28 +2187,28 @@ export type ConsentResource = { "kind": "action_scope", scope: GrantScope, } | {
  * One statement of consent the agent currently holds, whatever store it
  * lives in.
  */
-export type ConsentStatementSnapshot = {
+export type ConsentStatementSnapshot = { 
 /**
  * What a revocation of this statement names, and where to send it.
  */
-handle: ConsentHandle,
+handle: ConsentHandle, 
 /**
  * How far the statement reaches — one chat, or every chat in a project.
  */
-level: GrantLevel,
+level: GrantLevel, 
 /**
  * The name of whatever the level points at, for provenance. `None` when
  * that chat or project is untitled.
  */
-level_title: string | null,
+level_title: string | null, 
 /**
  * The class of action the user allowed.
  */
-verb: ConsentVerb,
+verb: ConsentVerb, 
 /**
  * What the verb is allowed to touch.
  */
-resource: ConsentResource,
+resource: ConsentResource, 
 /**
  * The trusted interaction through which consent was captured.
  */
@@ -2207,15 +2241,15 @@ export type CredentialPlacement = "bearer" | { "header": string };
  * xAI rows may opt into the capabilities its first-party Responses adapter
  * actually carries end to end.
  */
-export type CustomModelConfig = {
+export type CustomModelConfig = { 
 /**
  * Exact model id sent to the endpoint.
  */
-id: string,
+id: string, 
 /**
  * Optional human-facing label.
  */
-display_name?: string | null,
+display_name?: string | null, 
 /**
  * The provider-side id a managed gateway routes this model to, when the
  * gateway reports one that differs from `id`.
@@ -2224,7 +2258,7 @@ display_name?: string | null,
  * leaves it unset, and nothing in the settings UI offers it. It exists so
  * a deployment-aliased id can still be recognized as a curated model.
  */
-upstream_id?: string | null,
+upstream_id?: string | null, 
 /**
  * Alternate gateway ids that also resolve to this model — the
  * deployment-shaped spellings the member catalog reports, offered to
@@ -2233,23 +2267,23 @@ upstream_id?: string | null,
  * Populated only by gateway model sync from a catalog-serving gateway;
  * a user-entered custom model leaves it empty.
  */
-aliases?: Array<string>,
+aliases?: Array<string>, 
 /**
  * Context limit used by Tidebreak's reducer.
  */
-context_window: number,
+context_window: number, 
 /**
  * Maximum output sent to the endpoint.
  */
-max_output_tokens: number,
+max_output_tokens: number, 
 /**
  * Inputs Tidebreak may place on this model's request.
  */
-input_modalities: Array<InputModality>,
+input_modalities: Array<InputModality>, 
 /**
  * Whether the model uses xAI's reasoning request shape.
  */
-supports_reasoning: boolean,
+supports_reasoning: boolean, 
 /**
  * Reasoning-effort levels accepted by the model, ascending.
  */
@@ -2271,11 +2305,11 @@ export type DetachedAdmissionDenialReason = "no_scoped_model_token" | "no_extern
  * providers that cannot host background runs at all — every precondition is
  * simply unestablished for them, and the fail-closed evaluation names each.
  */
-export type DetachedAdmissionProviderInfo = { provider: ExecProviderKind,
+export type DetachedAdmissionProviderInfo = { provider: ExecProviderKind, 
 /**
  * Whether the gate would admit a detached run hosted by this provider.
  */
-admitted: boolean,
+admitted: boolean, 
 /**
  * Every unmet precondition, named — not just the first.
  */
@@ -2284,19 +2318,19 @@ denials: Array<DetachedAdmissionDenialReason>, };
 /**
  * Bounded add/delete counts for a diff. Bodies live on a GET route.
  */
-export type Diffstat = {
+export type Diffstat = { 
 /**
  * Files touched.
  */
-files: number,
+files: number, 
 /**
  * Lines added.
  */
-insertions: number,
+insertions: number, 
 /**
  * Lines deleted.
  */
-deletions: number,
+deletions: number, 
 /**
  * True when the underlying diff was truncated.
  */
@@ -2351,25 +2385,25 @@ export type ExecBackend = "local" | "e2b" | "daytona" | "docker";
 /**
  * Renderer-safe configuration and readiness.
  */
-export type ExecConfigInfo = { provider?: ExecProviderKind, timeout_ms: number, available: boolean,
+export type ExecConfigInfo = { provider?: ExecProviderKind, timeout_ms: number, available: boolean, 
 /**
  * Why the *selected* provider cannot run, when it cannot. Absent while
  * execution is available or no provider is selected at all.
  */
-unavailable_reason?: ExecUnavailableReason, has_credential: boolean,
+unavailable_reason?: ExecUnavailableReason, has_credential: boolean, 
 /**
  * One row per shipped provider: whether it could run here at all, and the
  * reason it could not. This is what makes an unusable host legible —
  * "paste an E2B key" is visible instead of being inferred from a generic
  * execution failure.
  */
-providers: Array<ExecProviderAvailability>,
+providers: Array<ExecProviderAvailability>, 
 /**
  * The configured egress policy and each managed provider's enforcement
  * status, so the renderer can present the policy and disclose which
  * providers actually restrict egress today.
  */
-egress: ExecEgressInfo,
+egress: ExecEgressInfo, 
 /**
  * Per-provider detached-admission evaluation: for each execution
  * provider, whether the fail-closed gate (issue #824) would admit a
@@ -2398,14 +2432,14 @@ export type ExecDegradation = "sandbox_image_unavailable";
  * A managed provider's egress-enforcement status, as host knowledge rather
  * than a claim the backend makes about itself.
  */
-export type ExecEgressEnforcement = { provider: ExecProviderKind, status: EgressEnforcementStatus,
+export type ExecEgressEnforcement = { provider: ExecProviderKind, status: EgressEnforcementStatus, 
 /**
  * Destinations the vendor's mechanism keeps reachable regardless of the
  * configured policy — each a short purpose string straight from the
  * enforcement model, so the settings surface can show the caveat inline
  * instead of burying it in prose the user skims past.
  */
-gaps: Array<string>,
+gaps: Array<string>, 
 /**
  * A precondition the boundary is gated on that the host cannot verify
  * statically ("Daytona org tier 3+"). Present only for a
@@ -2418,13 +2452,13 @@ requirement?: string, };
 /**
  * Renderer-safe egress policy plus per-provider enforcement disclosure.
  */
-export type ExecEgressInfo = {
+export type ExecEgressInfo = { 
 /**
  * The configured host policy. `Open` is the default: managed sandboxes are
  * created with open internet access. An allowlist restricts every managed
  * sandbox created afterwards.
  */
-policy: EgressConfig,
+policy: EgressConfig, 
 /**
  * One row per managed provider, stating whether its egress restriction is
  * confirmed against the live vendor API or still pending confirmation.
@@ -2512,31 +2546,31 @@ export type ExecUnavailableReason = "unsupported_platform" | "missing_sandbox_bi
  * Why a session is fenced: observed but not controlled, until an explicit
  * user reap resolves it.
  */
-export type FenceReason = { "type": "orphan_alive" } | { "type": "probe_ambiguous",
+export type FenceReason = { "type": "orphan_alive" } | { "type": "probe_ambiguous", 
 /**
  * Bounded human-readable detail.
  */
-detail: string, } | { "type": "resume_lost",
+detail: string, } | { "type": "resume_lost", 
 /**
  * Bounded human-readable detail, as the engine reported it.
  */
-detail: string, } | { "type": "repeated_turn_failures",
+detail: string, } | { "type": "repeated_turn_failures", 
 /**
  * How many turns failed in a row.
  */
-count: number,
+count: number, 
 /**
  * Bounded detail from the last failure, as the engine reported it.
  */
-detail: string, } | { "type": "incarnation_unresolved",
+detail: string, } | { "type": "incarnation_unresolved", 
 /**
  * Bounded human-readable detail.
  */
-detail: string, } | { "type": "sandbox_lost",
+detail: string, } | { "type": "sandbox_lost", 
 /**
  * Bounded detail, as the environment classified it.
  */
-detail: string, } | { "type": "terminal_flush_missing",
+detail: string, } | { "type": "terminal_flush_missing", 
 /**
  * Bounded human-readable detail.
  */
@@ -2565,7 +2599,7 @@ export type FolderAccess = "read" | "read_write";
  * One entitled connected app, with the slugs of the MCP endpoints that
  * aggregate it — the `mcp:<slug>` resources a mount would request.
  */
-export type GatewayAppInfo = { id: string, name: string, app_kind: string, enabled: boolean, mcp_endpoint_slugs: Array<string>,
+export type GatewayAppInfo = { id: string, name: string, app_kind: string, enabled: boolean, mcp_endpoint_slugs: Array<string>, 
 /**
  * The gateway's readiness for this app when the member catalog reports
  * one: `ready`, `not_connected`, or `authorization_required`. `None`
@@ -2573,7 +2607,7 @@ export type GatewayAppInfo = { id: string, name: string, app_kind: string, enabl
  * no readiness rather than guessing. An unfamiliar value renders as
  * not-ready copy, never an error: the set is the gateway's to grow.
  */
-connection?: string,
+connection?: string, 
 /**
  * How many live local-app grants bind this gateway app — the same
  * "Used by N local apps" line the connected-apps page carries per record,
@@ -2586,7 +2620,7 @@ used_by_app_count: number, };
  * to, fetched live from the gateway (never cached: a revoked grant is gone
  * on the next request).
  */
-export type GatewayApps = {
+export type GatewayApps = { 
 /**
  * False when the connected gateway predates the JSON apps surface; the
  * renderer hides the section instead of showing an empty list as "none".
@@ -2600,7 +2634,7 @@ supported: boolean, apps: Array<GatewayAppInfo>, };
  * with a usable URL (the retired `configured`/`enabled` bits collapsed into
  * its presence).
  */
-export type GatewayStatus = { base_url?: string, signed_in: boolean, account_hint?: string, installation_id?: string, model_count: number,
+export type GatewayStatus = { base_url?: string, signed_in: boolean, account_hint?: string, installation_id?: string, model_count: number, 
 /**
  * The member-catalog contract revision the last model sync read, or
  * `None` while unsynced or against a gateway that predates
@@ -2644,27 +2678,27 @@ export type HarnessAuthMode = "local_sign_in" | "gateway_managed" | "gateway_rel
  * Constructed exhaustively — there is no [`Default`] — so a new flag is a
  * compile break at every adapter.
  */
-export type HarnessCaps = {
+export type HarnessCaps = { 
 /**
  * The engine can resume a prior session from a native resume ref.
  */
-resume: CapLevel,
+resume: CapLevel, 
 /**
  * The engine streams partial assistant text.
  */
-streaming_deltas: CapLevel,
+streaming_deltas: CapLevel, 
 /**
  * The engine exposes a structured approval channel.
  */
-structured_approvals: CapLevel,
+structured_approvals: CapLevel, 
 /**
  * The engine accepts a mid-turn user message.
  */
-mid_turn_steering: CapLevel,
+mid_turn_steering: CapLevel, 
 /**
  * The engine has a read-only / plan posture the adapter can select.
  */
-plan_mode: CapLevel,
+plan_mode: CapLevel, 
 /**
  * The engine has a workspace-write / auto posture the adapter can select.
  *
@@ -2673,24 +2707,24 @@ plan_mode: CapLevel,
  * approval cards; without it, Auto runs unsupervised and the product
  * states so where the mode is chosen (decision 0038).
  */
-auto_mode: CapLevel,
+auto_mode: CapLevel, 
 /**
  * The engine has an allow-everything / bypass posture the adapter can
  * select. Composed only when the session is in Allow (decision 0039).
  */
-allow_mode: CapLevel,
+allow_mode: CapLevel, 
 /**
  * The engine accepts a reasoning-effort control.
  */
-reasoning_levels: CapLevel,
+reasoning_levels: CapLevel, 
 /**
  * The engine emits native file-change events.
  */
-native_file_change_events: CapLevel,
+native_file_change_events: CapLevel, 
 /**
  * The engine honors a native interrupt.
  */
-native_interrupt: CapLevel,
+native_interrupt: CapLevel, 
 /**
  * The engine consumes an image on its machine-readable input path.
  *
@@ -2698,7 +2732,7 @@ native_interrupt: CapLevel,
  * proves a captured image round-trip. The product must not offer
  * attachments otherwise.
  */
-image_input: CapLevel,
+image_input: CapLevel, 
 /**
  * The engine has a discoverable slash-command vocabulary.
  *
@@ -2706,16 +2740,46 @@ image_input: CapLevel,
  * always pass-through. This flag only says a machine-readable listing
  * exists to feed the composer popup.
  */
-slash_commands: CapLevel, };
+slash_commands: CapLevel, 
+/**
+ * The engine can end a turn as a durable checkpoint and continue it
+ * later: `run_turn` may return a parked outcome, and `resume_turn`
+ * picks the turn up once the awaited dependency resolves.
+ *
+ * External engines hold their turn state in a live process and have no
+ * channel that survives one, so they declare `Unsupported`. The flag
+ * exists for engines whose turn state is durable — the internal engine
+ * first (decision 0048 step 5).
+ */
+durable_parks: CapLevel, 
+/**
+ * The engine raises structured user-question approvals and accepts an
+ * answers decision on them.
+ *
+ * Distinct from `structured_approvals`, which only says a consent
+ * channel exists: this flag says the engine can ask the user a
+ * multiple-choice question mid-turn and consume the structured answer.
+ */
+user_questions: CapLevel, 
+/**
+ * The engine accepts an approve-with-standing-grant decision, minting
+ * durable consent that outlives the approval.
+ *
+ * Decision 0033 keeps external harnesses verbatim-payload with no
+ * standing grants; that posture is this flag declared `Unsupported`,
+ * not a separate subsystem. The internal engine's grant ladders
+ * declare it `Supported`.
+ */
+standing_grants: CapLevel, };
 
 /**
  * One engine-owned slash command, captured from the engine's own listing.
  */
-export type HarnessCommand = {
+export type HarnessCommand = { 
 /**
  * The word typed after `/`. No leading slash.
  */
-name: string,
+name: string, 
 /**
  * One-line description from the engine, already bounded.
  */
@@ -2724,7 +2788,7 @@ description: string, };
 /**
  * One engine's probe, capabilities, and remediation.
  */
-export type HarnessDoctorEntry = { kind: HarnessKind, found: boolean,
+export type HarnessDoctorEntry = { kind: HarnessKind, found: boolean, 
 /**
  * Whether Tidebreak ships a pin it can download for this engine.
  *
@@ -2732,7 +2796,7 @@ export type HarnessDoctorEntry = { kind: HarnessKind, found: boolean,
  * the download starts; the doctor is not a gate the reader must clear
  * first.
  */
-installable: boolean, path?: string, version?: string, tier: HarnessTier, caps: HarnessCaps, commands: Array<HarnessCommand>, authenticated?: boolean,
+installable: boolean, path?: string, version?: string, tier: HarnessTier, caps: HarnessCaps, commands: Array<HarnessCommand>, authenticated?: boolean, 
 /**
  * How a session of this engine authenticates here: the engine's own
  * local sign-in, a credential override that authenticates without one
@@ -2742,7 +2806,7 @@ installable: boolean, path?: string, version?: string, tier: HarnessTier, caps: 
  * observation, which on a hosted or gateway-managed machine is not what
  * a session authenticates with.
  */
-auth_mode: HarnessAuthMode, remediation: string, stderr: string, unrecognized_event_count: number,
+auth_mode: HarnessAuthMode, remediation: string, stderr: string, unrecognized_event_count: number, 
 /**
  * Whether relaunching a session applies a permission mode chosen after
  * it started. False for engines that fix the mode on session create
@@ -2766,11 +2830,11 @@ export type HarnessKind = "claude_code" | "codex" | "opencode" | "grok";
 /**
  * One model row offered for a harness session.
  */
-export type HarnessModel = { id: string, label: string, default: boolean,
+export type HarnessModel = { id: string, label: string, default: boolean, 
 /**
  * Effort levels this row accepts, ascending. Empty hides the control.
  */
-reasoning_efforts: Array<ReasoningEffort>,
+reasoning_efforts: Array<ReasoningEffort>, 
 /**
  * Whether this row can serve the engine's fast mode. `false` hides the
  * control, the same way an empty effort ladder does.
@@ -2780,7 +2844,7 @@ fast_mode: boolean, };
 /**
  * `GET /code/harnesses/{kind}/models`.
  */
-export type HarnessModelList = { kind: HarnessKind, models: Array<HarnessModel>,
+export type HarnessModelList = { kind: HarnessKind, models: Array<HarnessModel>, 
 /**
  * Every effort level this engine accepts, ascending, across all models.
  *
@@ -2844,23 +2908,23 @@ export type ImageMediaType = "png" | "jpeg" | "webp" | "gif";
  * id is an opaque content-derived UUID, never a filesystem path, so it reveals
  * nothing about where the bytes live on disk.
  */
-export type ImageRef = {
+export type ImageRef = { 
 /**
  * Content-addressed blob holding the pixels.
  */
-blob_id: string,
+blob_id: string, 
 /**
  * Format the bytes were sniffed as at ingest.
  */
-media_type: ImageMediaType,
+media_type: ImageMediaType, 
 /**
  * Pixel width, read from the image header.
  */
-width: number,
+width: number, 
 /**
  * Pixel height, read from the image header.
  */
-height: number,
+height: number, 
 /**
  * Size of the stored bytes.
  */
@@ -2878,11 +2942,11 @@ export type InboxConversation = { "surface": "chat", chat_id: ChatId, } | { "sur
 /**
  * One conversation that wants the reader, and why.
  */
-export type InboxEntrySnapshot = { conversation: InboxConversation,
+export type InboxEntrySnapshot = { conversation: InboxConversation, 
 /**
  * Absent, not null, while the conversation is still untitled.
  */
-title?: string, attention: Attention,
+title?: string, attention: Attention, 
 /**
  * The parked calls behind this attention, oldest first.
  *
@@ -2890,7 +2954,7 @@ title?: string, attention: Attention,
  * code approval route, which carries the verbatim payload decision 33
  * requires and which a deep link reaches.
  */
-items: Array<InboxItemSnapshot>,
+items: Array<InboxItemSnapshot>, 
 /**
  * When the oldest thing here started waiting, for ordering.
  */
@@ -2908,12 +2972,12 @@ export type InboxItemKind = "tool_approval" | "question" | "plan_review" | "fold
 /**
  * One item waiting on the reader, and where to go to answer it.
  */
-export type InboxItemSnapshot = {
+export type InboxItemSnapshot = { 
 /**
  * With the entry's conversation, the deep link back to the exact
  * transcript position the item paused at.
  */
-turn_id: TurnId, call_id: CallId, kind: InboxItemKind,
+turn_id: TurnId, call_id: CallId, kind: InboxItemKind, 
 /**
  * The tool under review, for an approval. Absent for the other kinds,
  * whose tool is implied by the kind. Closed renderer vocabulary: an
@@ -2933,7 +2997,7 @@ export type InputModality = "text" | "image";
  * Renderer-safe resolved policy. Carries only what surfaces need to render
  * managed state: the verdict, the locked gateway URL, and its authority.
  */
-export type ManagedPolicy = { managed: boolean, gateway_url?: string,
+export type ManagedPolicy = { managed: boolean, gateway_url?: string, 
 /**
  * The gateway a hosted deployment authenticates its own callers against
  * (`docs/decisions/0049-gateway-authenticated-hosted-machines.md`).
@@ -2951,14 +3015,14 @@ export type ManagedPolicy = { managed: boolean, gateway_url?: string,
  * hosted machine locks nothing, and its stored provider configuration
  * still wins (decision 51, rule 3).
  */
-hosted_gateway_url?: string, source: ManagedPolicySource,
+hosted_gateway_url?: string, source: ManagedPolicySource, 
 /**
  * True when `source` asserted management but its gateway URL is missing,
  * unreadable, or invalid. The profile stays managed with no usable URL —
  * fail closed — and surfaces can name the authority that needs repair
  * instead of showing an opaque error.
  */
-misconfigured: boolean,
+misconfigured: boolean, 
 /**
  * A deep-link pairing awaiting the sign-in that is its consent. Runtime
  * state merged in by the `/policy` route from [`GatewayRuntime`]
@@ -2966,7 +3030,7 @@ misconfigured: boolean,
  * [`resolve`] always leaves it `None` — and only ever present while the
  * profile is unmanaged.
  */
-pending_gateway_url?: string,
+pending_gateway_url?: string, 
 /**
  * The highest permission mode any chat may run under, when the OS policy
  * asserts one. A ceiling, not a fixed mode: the reader may always pick a
@@ -2974,7 +3038,7 @@ pending_gateway_url?: string,
  * Asserted per key, so it binds even when no gateway URL is deployed and
  * the profile is otherwise unmanaged.
  */
-permission_mode_ceiling?: PermissionMode,
+permission_mode_ceiling?: PermissionMode, 
 /**
  * True when the OS policy explicitly allows local stdio MCP servers on a
  * managed profile. False by default — the managed lockdown covers every
@@ -2998,16 +3062,16 @@ export type MarkNotificationsReadResult = { marked: number, };
  * without one is "community". One field cannot disagree with itself the way
  * a separate boolean and a separate record could.
  */
-export type McpCuration = {
+export type McpCuration = { 
 /**
  * The curated list's own name for the server, which need not match the
  * namespace the reader configured it under.
  */
-display_name: string,
+display_name: string, 
 /**
  * `YYYY-MM-DD` the entry was last exercised end to end.
  */
-tested_on: string,
+tested_on: string, 
 /**
  * One sentence on what was exercised, for the reader deciding how much
  * the badge is worth.
@@ -3026,14 +3090,14 @@ export type McpHealth = "initializing" | "healthy" | "degraded" | "reconnecting"
  * [`validate_servers`] enforces that process fields stay with `command` and
  * `bearer_token_env` stays with `url`.
  */
-export type McpServerDefinition = { name: string, command: string | null, args: Array<string>,
+export type McpServerDefinition = { name: string, command: string | null, args: Array<string>, 
 /**
  * Names of the environment variables this server is given directly. The
  * values live in the secret store under [`env_secret_key`] and never
  * enter this type, so they neither persist in the connected-app record
  * nor project through the API.
  */
-env: Array<string>,
+env: Array<string>, 
 /**
  * Inbound-only: values for [`env`](Self::env) names being set or
  * changed. A commit writes these into the secret store and drops them; a
@@ -3041,27 +3105,27 @@ env: Array<string>,
  * which is what makes "leave blank to keep" work. `skip_serializing`
  * keeps them out of both the persisted record and every projection.
  */
-env_values?: { [key in string]: string },
+env_values?: { [key in string]: string }, 
 /**
  * Parent environment names to forward. Their values never enter this type.
  */
-env_from: Array<string>, cwd: string | null,
+env_from: Array<string>, cwd: string | null, 
 /**
  * Streamable HTTP endpoint for a remote server.
  */
-url: string | null,
+url: string | null, 
 /**
  * Parent environment name holding the HTTP bearer token. The value is
  * resolved at connect time and never enters this type.
  */
-bearer_token_env: string | null,
+bearer_token_env: string | null, 
 /**
  * Endpoint slug of a gateway MCP endpoint, mounted through the signed-in
  * model-gateway session. The endpoint URL and its short-lived bearer are
  * resolved from the session at every connection and never enter this
  * type.
  */
-gateway_endpoint: string | null, request_timeout_ms: number, enabled: boolean,
+gateway_endpoint: string | null, request_timeout_ms: number, enabled: boolean, 
 /**
  * The plugin this server was synthesized from, when it is plugin-sourced.
  *
@@ -3075,21 +3139,21 @@ plugin: string | null, };
  * One renderer-safe server projection. Resolved `env_from` values and child
  * process details are intentionally absent.
  */
-export type McpServerInfo = { health: McpHealth, tool_count: number, diagnostic: string | null,
+export type McpServerInfo = { health: McpHealth, tool_count: number, diagnostic: string | null, 
 /**
  * The curated-list entry this definition matches, when Tidebreak has
  * exercised the server end to end. `null` means community: mounted and
  * usable, just not something we have driven ourselves. Derived from the
  * definition on every read, never stored.
  */
-curated: McpCuration | null, name: string, command: string | null, args: Array<string>,
+curated: McpCuration | null, name: string, command: string | null, args: Array<string>, 
 /**
  * Names of the environment variables this server is given directly. The
  * values live in the secret store under [`env_secret_key`] and never
  * enter this type, so they neither persist in the connected-app record
  * nor project through the API.
  */
-env: Array<string>,
+env: Array<string>, 
 /**
  * Inbound-only: values for [`env`](Self::env) names being set or
  * changed. A commit writes these into the secret store and drops them; a
@@ -3097,27 +3161,27 @@ env: Array<string>,
  * which is what makes "leave blank to keep" work. `skip_serializing`
  * keeps them out of both the persisted record and every projection.
  */
-env_values?: { [key in string]: string },
+env_values?: { [key in string]: string }, 
 /**
  * Parent environment names to forward. Their values never enter this type.
  */
-env_from: Array<string>, cwd: string | null,
+env_from: Array<string>, cwd: string | null, 
 /**
  * Streamable HTTP endpoint for a remote server.
  */
-url: string | null,
+url: string | null, 
 /**
  * Parent environment name holding the HTTP bearer token. The value is
  * resolved at connect time and never enters this type.
  */
-bearer_token_env: string | null,
+bearer_token_env: string | null, 
 /**
  * Endpoint slug of a gateway MCP endpoint, mounted through the signed-in
  * model-gateway session. The endpoint URL and its short-lived bearer are
  * resolved from the session at every connection and never enter this
  * type.
  */
-gateway_endpoint: string | null, request_timeout_ms: number, enabled: boolean,
+gateway_endpoint: string | null, request_timeout_ms: number, enabled: boolean, 
 /**
  * The plugin this server was synthesized from, when it is plugin-sourced.
  *
@@ -3137,15 +3201,15 @@ export type McpViewSession = { frame_path: string, };
 /**
  * Body of `POST /code/workspaces/{id}/pr/merge`.
  */
-export type MergeCodePrBody = {
+export type MergeCodePrBody = { 
 /**
  * The repository and pull request shown in the confirmation.
  */
-target: CodeDeliveryPullRequestTarget,
+target: CodeDeliveryPullRequestTarget, 
 /**
  * The pull request head shown in the confirmation.
  */
-expected_head_sha: string, method: CodePrMergeMethod,
+expected_head_sha: string, method: CodePrMergeMethod, 
 /**
  * True arms host auto-merge instead of merging immediately.
  */
@@ -3159,34 +3223,34 @@ export type MessageId = string;
 /**
  * A selectable model in the catalog.
  */
-export type ModelInfo = {
+export type ModelInfo = { 
 /**
  * Stable provider-qualified selection key used by settings and chats.
  */
-key: string,
+key: string, 
 /**
  * The identifier passed to the provider and stored as `chat.model`.
  */
-id: string,
+id: string, 
 /**
  * Human-readable label for the selector (e.g. `"Claude Opus 4.8"`).
  */
-display_name: string,
+display_name: string, 
 /**
  * The provider that serves the model.
  */
-provider: ProviderKind,
+provider: ProviderKind, 
 /**
  * The vendor whose curated model this row is, when that differs from the
  * provider serving it — a gateway-served model whose id exactly matches a
  * curated one. For presentation only (icon and branding); routing still
  * uses `provider`, and a client falls back to it when this is null.
  */
-vendor: ProviderKind | null,
+vendor: ProviderKind | null, 
 /**
  * How thoroughly Tidebreak has exercised this provider/model combination.
  */
-verification: VerificationTier,
+verification: VerificationTier, 
 /**
  * Whether a picker shows this model without being asked for the full
  * catalog — the curated default-visible set.
@@ -3197,37 +3261,37 @@ verification: VerificationTier,
  * `model_visibility_overrides` setting; the server never filters the
  * catalog by it.
  */
-recommended: boolean,
+recommended: boolean, 
 /**
  * Whether the provider is enabled, configured, credentialed, and able to
  * serve this model at its configured endpoint/location.
  */
-available: boolean,
+available: boolean, 
 /**
  * Approximate context window in tokens.
  */
-context_window: number,
+context_window: number, 
 /**
  * Maximum model output in tokens.
  */
-max_output_tokens: number,
+max_output_tokens: number, 
 /**
  * Input modalities accepted by the model.
  */
-input_modalities: Array<InputModality>,
+input_modalities: Array<InputModality>, 
 /**
  * Whether the model can produce an internal reasoning stream.
  */
-supports_reasoning: boolean,
+supports_reasoning: boolean, 
 /**
  * Whether this provider/model route accepts function tools.
  */
-supports_tools: boolean,
+supports_tools: boolean, 
 /**
  * Whether this provider/model route can enforce the strict response schema
  * utility work depends on.
  */
-supports_structured_output: boolean,
+supports_structured_output: boolean, 
 /**
  * The reasoning-effort levels this model accepts, ascending. Empty when
  * the model exposes no effort control, which is what a client checks
@@ -3237,7 +3301,7 @@ supports_structured_output: boolean,
  * is the same union a chat's stored effort has, and a client cannot offer
  * a level it could not then set.
  */
-reasoning_efforts: Array<ReasoningEffort>,
+reasoning_efforts: Array<ReasoningEffort>, 
 /**
  * Whether the model accepts image input alongside text.
  */
@@ -3254,16 +3318,16 @@ export type ModelRole = "chat" | "utility";
 /**
  * One named model role and what it resolves to right now.
  */
-export type ModelRoleInfo = {
+export type ModelRoleInfo = { 
 /**
  * The role this row describes.
  */
-role: ModelRole,
+role: ModelRole, 
 /**
  * The catalog key the user selected for this role, or `None` when the role
  * is left automatic.
  */
-selection: string | null,
+selection: string | null, 
 /**
  * The catalog key this role resolves to right now, selection or not.
  *
@@ -3335,11 +3399,11 @@ export type OutputWriteMode = "create" | "replace";
  * an action, not to a sentence about one. See
  * `docs/decisions/0018-tool-call-narration.md`.
  */
-export type PendingApprovalSnapshot = { call_id: CallId, turn_id: TurnId, action: RendererToolName, approval: ToolApprovalKind, class: ApprovalClass,
+export type PendingApprovalSnapshot = { call_id: CallId, turn_id: TurnId, action: RendererToolName, approval: ToolApprovalKind, class: ApprovalClass, 
 /**
  * Absent, not null, when the tool projects no action.
  */
-preview?: ToolActionPreview, can_approve: boolean, can_remember: boolean,
+preview?: ToolActionPreview, can_approve: boolean, can_remember: boolean, 
 /**
  * Complete standing-grant ladder for this exact call, narrowest first.
  *
@@ -3347,7 +3411,7 @@ preview?: ToolActionPreview, can_approve: boolean, can_remember: boolean,
  * the whole ladder because command policy may refuse exact and whole-tool
  * grants as well as prefixes.
  */
-grant_rungs: Array<ApprovalGrantRung>,
+grant_rungs: Array<ApprovalGrantRung>, 
 /**
  * Where the Auto-mode judge stands, when one was engaged. Absent means
  * no judge ever owned this card.
@@ -3424,15 +3488,15 @@ export type PluginCapability = "write-files" | "network" | "host-install" | "liv
 /**
  * Everything this installation has, in the state it is in.
  */
-export type PluginCatalog = {
+export type PluginCatalog = { 
 /**
  * Bundles in load order (by slug), each with its members.
  */
-plugins: Array<PluginInfo>,
+plugins: Array<PluginInfo>, 
 /**
  * Skills no bundle claims — user-authored packages land here.
  */
-skills: Array<PluginSkillInfo>,
+skills: Array<PluginSkillInfo>, 
 /**
  * Every installed prompt, bundled or standalone, in one flat list.
  *
@@ -3468,11 +3532,11 @@ export type PluginCompatibilityStatus = "compatible" | "limited" | "unchecked";
 /**
  * Body of `PUT /plugins/enabled`. Absent names are left alone.
  */
-export type PluginEnableUpdate = {
+export type PluginEnableUpdate = { 
 /**
  * Bundle flags to set, by slug.
  */
-plugins: { [key in string]: boolean },
+plugins: { [key in string]: boolean }, 
 /**
  * Skill flags to set, by slug. Setting one inside a disabled bundle is
  * allowed and remembered; it takes effect when the bundle comes back.
@@ -3482,31 +3546,31 @@ skills: { [key in string]: boolean }, };
 /**
  * One bundle, as a management surface renders it.
  */
-export type PluginInfo = {
+export type PluginInfo = { 
 /**
  * The slug the toggle route addresses it by.
  */
-name: string, display_name: string, description: string, category: PluginCategory,
+name: string, display_name: string, description: string, category: PluginCategory, 
 /**
  * Where the bundle was loaded from; host-derived, never claimed.
  */
-origin: PluginOrigin,
+origin: PluginOrigin, 
 /**
  * What the bundle can do, derived by the host from what it contains.
  * Never self-declared: a manifest has no key for this.
  */
-capabilities: Array<PluginCapability>,
+capabilities: Array<PluginCapability>, 
 /**
  * Import-time static compatibility disclosure. A hand-authored bundle is
  * explicitly unchecked; imported bundles say whether they fit the
  * prepared sandbox image and why not.
  */
-compatibility: PluginCompatibility,
+compatibility: PluginCompatibility, 
 /**
  * Whether the bundle is on. Off gates every member regardless of the
  * member's own flag, which the member entries still report unchanged.
  */
-enabled: boolean,
+enabled: boolean, 
 /**
  * Member skills in manifest order.
  */
@@ -3529,24 +3593,24 @@ export type PluginOrigin = "builtin" | "user";
  * [`get_prompt_body`] when the user actually picks one, so the catalog stays
  * bytes per entry no matter how long the prompts are.
  */
-export type PluginPromptInfo = {
+export type PluginPromptInfo = { 
 /**
  * The slug the body route addresses it by.
  */
-name: string,
+name: string, 
 /**
  * The tip a card or popover shows.
  */
-description: string,
+description: string, 
 /**
  * Where the package was loaded from; host-derived, never claimed.
  */
-origin: PromptOrigin,
+origin: PromptOrigin, 
 /**
  * The bundle that claims this prompt, if any. `None` is a standalone
  * package — every user-authored prompt is one.
  */
-plugin: string | null,
+plugin: string | null, 
 /**
  * Whether the prompt is offered. A prompt has no flag of its own: a
  * bundled one follows its bundle, and a standalone one is always on.
@@ -3556,11 +3620,11 @@ enabled: boolean, };
 /**
  * One skill, inside a bundle or standing alone.
  */
-export type PluginSkillInfo = { name: string, description: string,
+export type PluginSkillInfo = { name: string, description: string, 
 /**
  * Where the package was loaded from; host-derived, never claimed.
  */
-origin: SkillOrigin,
+origin: SkillOrigin, 
 /**
  * The skill's *own* flag, independent of any owning bundle's — so a UI
  * can show the member choices that come back when a bundle is re-enabled.
@@ -3572,24 +3636,24 @@ enabled: boolean, };
  * corpus. A chat may belong to a project or stand alone — unlike some designs
  * that make a project mandatory, Tidebreak keeps loose, projectless chats.
  */
-export type Project = {
+export type Project = { 
 /**
  * Stable identifier.
  */
-id: ProjectId,
+id: ProjectId, 
 /**
  * Human-facing title.
  */
-title: string | null,
+title: string | null, 
 /**
  * CAS revision of the ordered root projection.
  */
-attachment_revision: number,
+attachment_revision: number, 
 /**
  * Ordered opaque root defaults for conversations created in this project.
  * These ids are product state, never host authorization.
  */
-root_attachments: Array<HostRootId>,
+root_attachments: Array<HostRootId>, 
 /**
  * When the project was created.
  */
@@ -3606,7 +3670,7 @@ export type ProjectId = string;
  * Its own route for the same reason skill instructions have one: the catalog
  * is fetched far more often than any one prompt is inserted.
  */
-export type PromptBody = { name: string,
+export type PromptBody = { name: string, 
 /**
  * The `PROMPT.md` markdown below the frontmatter — exactly what goes into
  * the composer. It is never composed into the model's operating prompt;
@@ -3630,27 +3694,27 @@ export type ProviderAuthMode = "api_key" | "chatgpt";
 /**
  * Public view of a provider — never includes the credential itself.
  */
-export type ProviderInfo = {
+export type ProviderInfo = { 
 /**
  * Provider kind.
  */
-kind: ProviderKind,
+kind: ProviderKind, 
 /**
  * Whether the provider is enabled for routing.
  */
-enabled: boolean,
+enabled: boolean, 
 /**
  * Configured base URL, if any.
  */
-base_url?: string,
+base_url?: string, 
 /**
  * Whether a credential is stored (never the credential itself).
  */
-has_credential: boolean,
+has_credential: boolean, 
 /**
  * How OpenAI (or similarly dual-mode providers) is authenticated.
  */
-auth_mode?: ProviderAuthMode,
+auth_mode?: ProviderAuthMode, 
 /**
  * Explicit configured model entries for this endpoint.
  */
@@ -3665,19 +3729,19 @@ export type ProviderKind = "anthropic" | "openai" | "xai" | "gemini" | "firework
 /**
  * One CI check on a pull request.
  */
-export type PullRequestCheck = {
+export type PullRequestCheck = { 
 /**
  * Check name as the host reports it.
  */
-name: string,
+name: string, 
 /**
  * pass, pending, fail, or skipped.
  */
-bucket: PullRequestCheckBucket,
+bucket: PullRequestCheckBucket, 
 /**
  * Host status phrase, when distinct from the bucket.
  */
-detail?: string,
+detail?: string, 
 /**
  * Host URL for this check, when known.
  */
@@ -3692,45 +3756,45 @@ export type PullRequestCheckBucket = "pass" | "pending" | "fail" | "skipped";
  * One pull-request comment: an issue comment, a review body, or an inline
  * review comment. Never persisted; fetched live from the host.
  */
-export type PullRequestComment = {
+export type PullRequestComment = { 
 /**
  * Where on the PR the comment lives.
  */
-kind: PullRequestCommentKind,
+kind: PullRequestCommentKind, 
 /**
  * Stable host identifier, normalized to text across GraphQL and REST
  * comment shapes.
  */
-id?: string,
+id?: string, 
 /**
  * Author login, when the host reported one.
  */
-author?: string,
+author?: string, 
 /**
  * Author avatar URL, when the host reported one.
  */
-avatar_url?: string,
+avatar_url?: string, 
 /**
  * Host page for the comment or review, when available.
  */
-url?: string,
+url?: string, 
 /**
  * Host creation timestamp, verbatim.
  */
-created_at?: string,
+created_at?: string, 
 /**
  * Comment body, markdown as the host stores it.
  */
-body: string,
+body: string, 
 /**
  * Lowercased review verdict (approved, changes_requested, commented), on
  * review bodies only.
  */
-review_state?: string,
+review_state?: string, 
 /**
  * File path, on inline review comments.
  */
-path?: string,
+path?: string, 
 /**
  * Line number, on inline review comments when the host reports one.
  */
@@ -3744,64 +3808,64 @@ export type PullRequestCommentKind = "issue" | "review" | "inline";
 /**
  * Bounded pull-request digest stored on a workspace.
  */
-export type PullRequestDigest = {
+export type PullRequestDigest = { 
 /**
  * PR number on the host.
  */
-number: number,
+number: number, 
 /**
  * Host URL, when known.
  */
-url?: string | null,
+url?: string | null, 
 /**
  * Host state token (open, merged, closed, …).
  */
-state: string,
+state: string, 
 /**
  * PR title, when the host reported one.
  */
-title?: string,
+title?: string, 
 /**
  * One-line checks summary.
  */
-checks_summary?: string | null,
+checks_summary?: string | null, 
 /**
  * Individual checks, when the host reported any.
  */
-checks?: Array<PullRequestCheck>,
+checks?: Array<PullRequestCheck>, 
 /**
  * True when the host reports the PR as a draft.
  */
-draft?: boolean,
+draft?: boolean, 
 /**
  * True when the host reports the PR merged.
  */
-merged?: boolean,
+merged?: boolean, 
 /**
  * Lowercased host review decision (approved, changes_requested, review_required).
  */
-review_decision?: string,
+review_decision?: string, 
 /**
  * Lowercased host mergeability (mergeable, conflicting, unknown).
  */
-mergeable?: string,
+mergeable?: string, 
 /**
  * Lowercased host merge-state status (clean, blocked, behind, dirty, …).
  */
-merge_state_status?: string,
+merge_state_status?: string, 
 /**
  * Head branch name on the host.
  */
-head_branch?: string,
+head_branch?: string, 
 /**
  * Base branch name on the host.
  */
-base_branch?: string,
+base_branch?: string, 
 /**
  * Head commit SHA the digest was read against, when the host reported
  * one. The watch sweep uses it to avoid re-fixing the same head.
  */
-head_sha?: string,
+head_sha?: string, 
 /**
  * True when auto-merge is enabled on the host.
  */
@@ -3823,43 +3887,43 @@ export type QueuedCodeTurn = { id: CodeTurnId, session_id: CodeSessionId, messag
  * turn. Rows are FIFO by `position` within a chat and fully durable: a queue
  * survives restarts and is visible to every client on the chat.
  */
-export type QueuedTurn = {
+export type QueuedTurn = { 
 /**
  * The turn id this row becomes when promoted.
  */
-id: TurnId,
+id: TurnId, 
 /**
  * Owning chat.
  */
-chat_id: ChatId,
+chat_id: ChatId, 
 /**
  * Byte-exact user message.
  */
-content: string,
+content: string, 
 /**
  * Image-attachment ids, in display order.
  */
-attachments: Array<string>,
+attachments: Array<string>, 
 /**
  * Chat-owned document ids.
  */
-file_attachments: Array<DocumentId>,
+file_attachments: Array<DocumentId>, 
 /**
  * Skills the user explicitly invoked.
  */
-invoked_skills: Array<string>,
+invoked_skills: Array<string>, 
 /**
  * Whether the message was dictated.
  */
-voice_input_used: boolean,
+voice_input_used: boolean, 
 /**
  * FIFO order within the chat.
  */
-position: number,
+position: number, 
 /**
  * When the message was queued.
  */
-created_at: string,
+created_at: string, 
 /**
  * When it was last edited or reordered.
  */
@@ -3868,15 +3932,15 @@ updated_at: string, };
 /**
  * A named command the user can run in a workspace.
  */
-export type QuickAction = {
+export type QuickAction = { 
 /**
  * Display name.
  */
-name: string,
+name: string, 
 /**
  * Command to run in the worktree.
  */
-command: string,
+command: string, 
 /**
  * When true, run once after workspace creation.
  */
@@ -3900,59 +3964,59 @@ auto_run_on_create: boolean, };
  */
 export type ReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
-export type RendererAgentEvent = { "type": "turn_started", turn_id: TurnId, } | { "type": "text_delta", text: string, } | { "type": "reasoning_delta", text: string, } | { "type": "stream_interrupted" } | { "type": "tool_call_started", call_id: CallId, name: RendererToolName, } | { "type": "tool_call_args_delta", call_id: CallId, } | { "type": "user_questions_asked", call_id: CallId, turn_id: TurnId, } | { "type": "plan_proposed", call_id: CallId, turn_id: TurnId, } | { "type": "task_plan_updated", call_id: CallId, turn_id: TurnId, } | { "type": "approval_required", call_id: CallId, action: RendererToolName, approval: ToolApprovalKind, class: ApprovalClass,
+export type RendererAgentEvent = { "type": "turn_started", turn_id: TurnId, } | { "type": "text_delta", text: string, } | { "type": "reasoning_delta", text: string, } | { "type": "stream_interrupted" } | { "type": "tool_call_started", call_id: CallId, name: RendererToolName, } | { "type": "tool_call_args_delta", call_id: CallId, } | { "type": "user_questions_asked", call_id: CallId, turn_id: TurnId, } | { "type": "plan_proposed", call_id: CallId, turn_id: TurnId, } | { "type": "task_plan_updated", call_id: CallId, turn_id: TurnId, } | { "type": "approval_required", call_id: CallId, action: RendererToolName, approval: ToolApprovalKind, class: ApprovalClass, 
 /**
  * Whether the Auto-mode judge owns this card right now. The card
  * stays fully actionable either way; this only adds the "deciding
  * automatically" hint.
  */
-auto_judging: boolean,
+auto_judging: boolean, 
 /**
  * Complete standing-grant ladder for this exact call, narrowest first.
  * Empty means only one-shot approval is available.
  */
-grant_rungs: Array<ApprovalGrantRung>,
+grant_rungs: Array<ApprovalGrantRung>, 
 /**
  * The one deliberate opening in this boundary. A human cannot consent
  * to a command they are not shown, so a tool may project a closed,
  * field-by-field view of the action under review. Tools without one
  * send nothing, as every tool did before.
  */
-preview?: ToolActionPreview, } | { "type": "approval_decided", call_id: CallId, approved: boolean, } | { "type": "tool_call_completed", call_id: CallId, status: RendererToolStatus,
+preview?: ToolActionPreview, } | { "type": "approval_decided", call_id: CallId, approved: boolean, } | { "type": "tool_call_completed", call_id: CallId, status: RendererToolStatus, 
 /**
  * A bounded, server-authored reason the renderer can act on without
  * receiving model-facing output or executor diagnostics.
  */
-failure?: RendererToolFailure,
+failure?: RendererToolFailure, 
 /**
  * What the call did, when its tool projects it. Approval is not the
  * only moment a person needs to see the action.
  */
-action?: ToolActionPreview,
+action?: ToolActionPreview, 
 /**
  * What the call produced. A command's output is the reason it ran;
  * withholding it leaves the transcript asserting that something
  * happened without ever showing what.
  */
-result?: ToolResultPreview, } | { "type": "turn_completed", usage: RendererTurnUsage, } | { "type": "turn_refused", refusal: RendererRefusal, usage: RendererTurnUsage, } | { "type": "turn_failed",
+result?: ToolResultPreview, } | { "type": "turn_completed", usage: RendererTurnUsage, } | { "type": "turn_refused", refusal: RendererRefusal, usage: RendererTurnUsage, } | { "type": "turn_failed", 
 /**
  * Why the turn failed, at the only resolution a client can act on.
  * The internal `kind` stays behind the server; allowlisted provider
  * diagnostics may cross separately as `detail`.
  */
-category: TurnFailureCategory,
+category: TurnFailureCategory, 
 /**
  * Bounded provider diagnostic, when the failure originated upstream.
  */
-detail?: string, model?: RendererModelIdentity, } | { "type": "turn_cancelled", usage: RendererTurnUsage, } | { "type": "user_steered", message_id: MessageId, text: string, } | { "type": "context_truncated",
+detail?: string, model?: RendererModelIdentity, } | { "type": "turn_cancelled", usage: RendererTurnUsage, } | { "type": "user_steered", message_id: MessageId, text: string, } | { "type": "context_truncated", 
 /**
  * Estimated transcript tokens before the reduction.
  */
-original_tokens: number,
+original_tokens: number, 
 /**
  * Estimated transcript tokens after fitting to the budget.
  */
-fitted_tokens: number, } | { "type": "compaction_started" } | { "type": "compaction_finished",
+fitted_tokens: number, } | { "type": "compaction_started" } | { "type": "compaction_finished", 
 /**
  * Whether a new (or confirmed) checkpoint was stored.
  */
@@ -4023,19 +4087,19 @@ export type RendererToolStatus = "completed" | "failed";
  * It is a faithful measure of what the turn cost and a ceiling on what the
  * window held.
  */
-export type RendererTurnUsage = {
+export type RendererTurnUsage = { 
 /**
  * Fresh prompt tokens, excluding both cache figures below.
  */
-input_tokens: number,
+input_tokens: number, 
 /**
  * Tokens the model generated.
  */
-output_tokens: number,
+output_tokens: number, 
 /**
  * Prompt tokens served from the provider's cache.
  */
-cache_read_input_tokens: number,
+cache_read_input_tokens: number, 
 /**
  * Prompt tokens written to the provider's cache.
  */
@@ -4072,19 +4136,19 @@ export type RestCredentialStatus = "none" | "configured" | "missing";
  * and how big or how many. A tool that wants to say more than that is
  * describing something this projection does not cover.
  */
-export type ResultEntry = { kind: ResultEntryKind,
+export type ResultEntry = { kind: ResultEntryKind, 
 /**
  * The row's name — a file name, a source title, a page title.
  */
-label: string,
+label: string, 
 /**
  * A secondary hint beside the name — a path, a domain, a section.
  */
-detail: string | null,
+detail: string | null, 
 /**
  * Trailing meta — a size, a count, a status word.
  */
-meta: string | null,
+meta: string | null, 
 /**
  * The document's media type, when the row is a document with one.
  *
@@ -4094,7 +4158,7 @@ meta: string | null,
  * own closed mapping with a generic fallback. `default` because retained
  * projections predate the field.
  */
-media_type: string | null,
+media_type: string | null, 
 /**
  * The durable record this row names, when the renderer can open one.
  *
@@ -4109,7 +4173,7 @@ media_type: string | null,
  * [`Output`]: ResultEntryKind::Output
  * [`App`]: ResultEntryKind::App
  */
-target_id: string | null,
+target_id: string | null, 
 /**
  * The public page this row opens, when it names one.
  *
@@ -4144,14 +4208,14 @@ export type ResultEntryKind = "file" | "folder" | "source" | "passage" | "link" 
  * Two fields because that is what a failure row reads as: the thing that
  * failed, and why.
  */
-export type ResultFailure = {
+export type ResultFailure = { 
 /**
  * What failed, when the tool can name it. `None` when the tool cannot —
  * a folder it could not even read the name of — and the row then leads
  * with a generic noun rather than being dropped. A failure the reader
  * never sees is worse than one it cannot fully name.
  */
-label: string | null,
+label: string | null, 
 /**
  * Why it failed, in the tool's own words.
  *
@@ -4178,25 +4242,25 @@ export type RootAttachmentOrigin = "project_default" | "conversation";
 /**
  * One event on the per-session WebSocket.
  */
-export type SequencedCodeEventFrame = {
+export type SequencedCodeEventFrame = { 
 /**
  * Journal position. On a `transient` frame this is the cursor the event
  * streamed behind, not a position the frame occupies — resume from it
  * and you lose nothing, because no row holds this event.
  */
-seq: number, event: CodeEvent, replayed?: boolean,
+seq: number, event: CodeEvent, replayed?: boolean, 
 /**
  * Set on a live-only event the journal does not hold: assistant deltas,
  * and the catch-up delta a mid-turn reader gets on connect. Apply it but
  * do not advance the resume cursor. A reconnect may receive the complete
  * current tail with `replacement` set (record 57).
  */
-transient?: boolean,
+transient?: boolean, 
 /**
  * Set on a transient assistant delta that contains the complete live
  * tail. Replace the current assistant buffer instead of appending it.
  */
-replacement?: boolean,
+replacement?: boolean, 
 /**
  * Set on the first replayed frame of a capped window: older events above
  * the requested cursor were dropped, and the history in front of this
@@ -4213,41 +4277,41 @@ export type SetCodeWorktreeRootBody = { root: string | null, };
  * Runtime settings a client can read. The API key itself is never returned —
  * it lives in the `SecretProvider`, not the store — only whether one is set.
  */
-export type Settings = {
+export type Settings = { 
 /**
  * The model turns run against, or `None` to use the server's default.
  */
-model: string | null,
+model: string | null, 
 /**
  * Whether a model API key is configured (never the key itself).
  */
-has_api_key: boolean,
+has_api_key: boolean, 
 /**
  * The sticky new-chat defaults, so a composer for a chat that does not
  * exist yet can show what `POST /chats` will seed.
  */
-chat_defaults: StickyChatDefaults,
+chat_defaults: StickyChatDefaults, 
 /**
  * Preferred maximum concurrent background agents. Spawn unsettled
  * children on one origin turn are further capped at
  * [`AgentRun::MAX_ACTIVE_BACKGROUND_AGENTS`] (wait_for_agents membership).
  */
-max_active_background_agents: number,
+max_active_background_agents: number, 
 /**
  * Model steps a background agent takes before it must check in.
  *
  * A cadence, not a cap: reaching it never fails the run — the agent wraps
  * up with what it has and reports back for direction.
  */
-sandbox_agent_checkin_steps: number,
+sandbox_agent_checkin_steps: number, 
 /**
  * Consecutive failed tool calls after which a background agent checks in.
  */
-sandbox_agent_error_checkin: number,
+sandbox_agent_error_checkin: number, 
 /**
  * When and how hard semantic compaction may run.
  */
-compaction: CompactionSettings,
+compaction: CompactionSettings, 
 /**
  * Per-model deviations from the catalog's `recommended` flag, keyed by the
  * same provider-qualified selection key `ModelInfo.key` and a chat's model
@@ -4262,17 +4326,17 @@ compaction: CompactionSettings,
  * and never filters `GET /models` by it. A hidden model remains fully
  * valid for existing chats, replay, and explicit selection.
  */
-model_visibility_overrides: { [key in string]: ModelVisibility },
+model_visibility_overrides: { [key in string]: ModelVisibility }, 
 /**
  * Whether the computer-use capability (screen capture + app control) is
  * enabled. Read at boot; turning it off unregisters the tools on the next
  * launch.
  */
-computer_use_enabled: boolean,
+computer_use_enabled: boolean, 
 /**
  * Whether completed code turns receive a one-line recap. Default on.
  */
-code_turn_recaps_enabled: boolean,
+code_turn_recaps_enabled: boolean, 
 /**
  * Whether completed code turns rewrite their closing message into lucid
  * prose. Default off.
@@ -4291,7 +4355,7 @@ export type SignInProgress = { "state": "idle" } | { "state": "pending", authori
  * where a catalog row is bytes, and the catalog is fetched far more often
  * than any one skill is read.
  */
-export type SkillInstructions = { name: string,
+export type SkillInstructions = { name: string, 
 /**
  * The `SKILL.md` markdown body, with the frontmatter removed — what the
  * model is taught when the skill is staged, shown to the reader verbatim.
@@ -4311,23 +4375,23 @@ export type SkillOrigin = "builtin" | "user";
  * What a document declares, for the configuration form's operation picker.
  * Renderer-safe: ids, methods, paths, and truncated summaries only.
  */
-export type SpecPreviewInfo = {
+export type SpecPreviewInfo = { 
 /**
  * Hex SHA-256 of the raw document — the pin the upsert must carry back
  * with a URL source.
  */
-document_sha256: string, operations: Array<SpecPreviewOperation>,
+document_sha256: string, operations: Array<SpecPreviewOperation>, 
 /**
  * Operations the document declares that cannot be selected (no
  * well-formed `operationId`, an over-bound path, or a repeated id).
  */
-unlistable: number,
+unlistable: number, 
 /**
  * Whether the operation list was cut at the inventory bound.
  */
 truncated: boolean, };
 
-export type SpecPreviewOperation = { operation_id: string,
+export type SpecPreviewOperation = { operation_id: string, 
 /**
  * Lowercase HTTP method, as a path item declares it.
  */
@@ -4338,16 +4402,16 @@ method: string, path: string, summary: string | null, };
  * to recognize it later and withdraw it. Grant scopes are already closed
  * renderer-safe projections, so the snapshot carries them verbatim.
  */
-export type StandingGrantSnapshot = {
+export type StandingGrantSnapshot = { 
 /**
  * The approval decision that created the grant — also the handle a
  * revocation names.
  */
-source_call_id: CallId,
+source_call_id: CallId, 
 /**
  * How far the grant reaches — one chat, or every chat in a project.
  */
-level: GrantLevel,
+level: GrantLevel, 
 /**
  * The name of whatever the level points at, for provenance. `None` when
  * that chat or project is untitled.
@@ -4367,7 +4431,7 @@ export type StickyChatDefaults = { model: string | null, reasoning_effort: Reaso
 /**
  * One file a background run submitted, as the renderer sees it.
  */
-export type SubmittedOutputSnapshot = { output_id: OutputId,
+export type SubmittedOutputSnapshot = { output_id: OutputId, 
 /**
  * The name the run gave the file, which is the output's name.
  */
@@ -4376,15 +4440,15 @@ filename: string, };
 /**
  * Renderer-safe durable projection of a chat's current plan.
  */
-export type TaskPlan = {
+export type TaskPlan = { 
 /**
  * The turn whose call last replaced this plan.
  */
-turn_id: TurnId,
+turn_id: TurnId, 
 /**
  * The steps, in order.
  */
-steps: Array<TaskPlanStep>,
+steps: Array<TaskPlanStep>, 
 /**
  * When the last replacement committed.
  */
@@ -4393,11 +4457,11 @@ updated_at: string, };
 /**
  * One step of the plan.
  */
-export type TaskPlanStep = {
+export type TaskPlanStep = { 
 /**
  * What this step does, as one short imperative line.
  */
-content: string,
+content: string, 
 /**
  * Where the step stands: `pending` before it starts, `in_progress` while
  * it is being worked on (at most one step at a time), `completed` after.
@@ -4424,20 +4488,20 @@ export type TaskPlanStepStatus = "pending" | "in_progress" | "completed";
  * identity ([`Self::without_summary`]), because a call that could describe
  * itself to a consent decision could describe itself favourably.
  */
-export type ToolActionPreview = { "tool": "exec",
+export type ToolActionPreview = { "tool": "exec", 
 /**
  * Executable name or path the model chose.
  */
-command: string,
+command: string, 
 /**
  * Arguments passed directly to the executable.
  */
-args: Array<string>,
+args: Array<string>, 
 /**
  * Working directory relative to the chat's private scratch, never a
  * host path.
  */
-cwd: string,
+cwd: string, 
 /**
  * Scratch-relative files and directories staged into the sandbox
  * before the command runs, empty when the model staged none.
@@ -4454,49 +4518,49 @@ cwd: string,
  * nothing, which is narrower than what they were given for and so
  * sends a call that stages anything back to the person.
  */
-files: Array<string>,
+files: Array<string>, 
 /**
  * Display-only narration; see the type's documentation.
  */
-summary?: string, } | { "tool": "search", query: string,
+summary?: string, } | { "tool": "search", query: string, 
 /**
  * Display-only narration; see the type's documentation.
  */
-summary?: string, } | { "tool": "web_search", query: string,
+summary?: string, } | { "tool": "web_search", query: string, 
 /**
  * Sites the search is confined to, empty when the model named none.
  */
-domains: Array<string>,
+domains: Array<string>, 
 /**
  * Earliest publication date the search will accept, as the model
  * wrote it. Kept verbatim rather than reformatted: the card's job is
  * to show what the provider is actually told.
  */
-start_published_at: string | null,
+start_published_at: string | null, 
 /**
  * Latest publication date the search will accept.
  */
-end_published_at: string | null,
+end_published_at: string | null, 
 /**
  * Display-only narration; see the type's documentation.
  */
-summary?: string, } | { "tool": "web_extract", url: string,
+summary?: string, } | { "tool": "web_extract", url: string, 
 /**
  * Display-only narration; see the type's documentation.
  */
-summary?: string, } | { "tool": "write_file",
+summary?: string, } | { "tool": "write_file", 
 /**
  * Workspace-relative destination path, never a host path.
  */
-path: string,
+path: string, 
 /**
  * Display-only narration; see the type's documentation.
  */
-summary?: string, } | { "tool": "delegate_agent",
+summary?: string, } | { "tool": "delegate_agent", 
 /**
  * The child's self-contained task, as the model wrote it.
  */
-task: string,
+task: string, 
 /**
  * The network policy the child inherits from this chat.
  */
@@ -4515,27 +4579,27 @@ export type ToolApprovalKind = "search_may_share_query_and_excerpts" | "web_sear
 /**
  * Display-oriented classification of a tool the engine started.
  */
-export type ToolDetail = { "kind": "command",
+export type ToolDetail = { "kind": "command", 
 /**
  * Command string.
  */
-cmd: string,
+cmd: string, 
 /**
  * Working directory, when reported.
  */
-cwd: string, } | { "kind": "file_edit",
+cwd: string, } | { "kind": "file_edit", 
 /**
  * Path being edited.
  */
-path: string, } | { "kind": "file_read",
+path: string, } | { "kind": "file_read", 
 /**
  * Path being read.
  */
-path: string, } | { "kind": "search",
+path: string, } | { "kind": "search", 
 /**
  * Query string.
  */
-query: string, } | { "kind": "other",
+query: string, } | { "kind": "other", 
 /**
  * Bounded summary.
  */
@@ -4552,78 +4616,78 @@ export type ToolOutcome = "succeeded" | "failed" | "denied";
  * A command's output is the whole reason to run it. Withholding it leaves the
  * transcript asserting that something happened without ever showing what.
  */
-export type ToolResultPreview = { "tool": "exec",
+export type ToolResultPreview = { "tool": "exec", 
 /**
  * Process exit status, or `None` when it was killed by a signal.
  */
-exit_code: number | null,
+exit_code: number | null, 
 /**
  * Whether the provider stopped the command at its time limit.
  */
-timed_out: boolean,
+timed_out: boolean, 
 /**
  * Whether the provider dropped output past its capture limit.
  */
-output_truncated: boolean, stdout: string, stderr: string,
+output_truncated: boolean, stdout: string, stderr: string, 
 /**
  * Preview images emitted by the command, in model-facing priority order.
  */
-images?: Array<ImageRef>,
+images?: Array<ImageRef>, 
 /**
  * Durable outputs the command's `output/` files created or updated.
  * Files that still match their published version are not news and are
  * not listed. Defaulted so exec rows persisted before the field
  * existed read back unchanged.
  */
-outputs?: Array<ResultEntry>,
+outputs?: Array<ResultEntry>, 
 /**
  * How the execution backend fell short of its intended setup, when it
  * did. Reported on the first execution that degrades and not on the
  * ones after it, so a chat says this once rather than on every card.
  */
-degraded?: ExecDegradation,
+degraded?: ExecDegradation, 
 /**
  * Which backend ran the command. Defaulted so exec rows persisted
  * before the field existed read back unchanged.
  */
-backend?: ExecBackend, } | { "tool": "web_search_provider_required" } | { "tool": "mcp_app",
+backend?: ExecBackend, } | { "tool": "web_search_provider_required" } | { "tool": "mcp_app", 
 /**
  * The configured MCP server namespace that serves the view.
  */
-server: string,
+server: string, 
 /**
  * The validated `ui://` document reference.
  */
-resource_uri: string, } | { "tool": "entries", entries: Array<ResultEntry>,
+resource_uri: string, } | { "tool": "entries", entries: Array<ResultEntry>, 
 /**
  * What the same call could not do. Bounded and counted on the same
  * terms as `entries`, and elided into the same tally: the card's job
  * is to be honest about how much it is not showing, and a hidden
  * failure is the worst thing to hide.
  */
-failures: Array<ResultFailure>,
+failures: Array<ResultFailure>, 
 /**
  * Rows past [`MAX_RESULT_ENTRIES`], counted rather than shown. A card
  * that silently lists the first fifty of two hundred results is
  * telling the reader something false.
  */
-elided: number, } | { "tool": "user_questions", answers: Array<AnsweredUserQuestion>,
+elided: number, } | { "tool": "user_questions", answers: Array<AnsweredUserQuestion>, 
 /**
  * Whatever the reader added on their own, when they added any.
  */
-additional_context?: string, } | { "tool": "plan_decision", title: string, plan: string,
+additional_context?: string, } | { "tool": "plan_decision", title: string, plan: string, 
 /**
  * Whether the reader approved the plan as proposed.
  */
-accepted: boolean,
+accepted: boolean, 
 /**
  * What the reader asked to change, when they sent it back.
  */
-feedback?: string, } | { "tool": "screen_capture",
+feedback?: string, } | { "tool": "screen_capture", 
 /**
  * The captured screenshot, content-addressed in the blob store.
  */
-image: ImageRef,
+image: ImageRef, 
 /**
  * How many interactive elements were marked on the capture, so the
  * card can say "capture with N controls" without the model's text.
@@ -4638,15 +4702,15 @@ export type TranscriptFileAttachment = { document_id: DocumentId, name: string, 
 /**
  * One renderer-safe image identity attached to a historical user message.
  */
-export type TranscriptImageAttachment = {
+export type TranscriptImageAttachment = { 
 /**
  * Content-addressed opaque attachment identity, not a host path.
  */
-attachment_id: string,
+attachment_id: string, 
 /**
  * Sniffed IANA media type from the trusted image ingest boundary.
  */
-media_type: string,
+media_type: string, 
 /**
  * Header-derived dimensions, bounded at image publication.
  */
@@ -4706,6 +4770,11 @@ export type UpdateCodeTriggerBody = { enabled: boolean, };
 export type UserQuestion = { id: string, header: string, question: string, options: Array<UserQuestionOption>, question_type: UserQuestionType, allow_free_form: boolean, };
 
 /**
+ * One supplied answer. Omitted questions are explicitly skipped.
+ */
+export type UserQuestionAnswer = { question_id: string, selected_option_ids?: Array<string>, custom_answer?: string | null, };
+
+/**
  * One selectable answer choice.
  */
 export type UserQuestionOption = { id: string, label: string, description: string, };
@@ -4725,25 +4794,25 @@ export type VerificationTier = "verified" | "unverified";
  * selection, credential presence, and the configured instance URL — key
  * material never crosses the secret boundary.
  */
-export type WebSearchConfigInfo = { provider?: WebSearchProviderKind,
+export type WebSearchConfigInfo = { provider?: WebSearchProviderKind, 
 /**
  * Which search a turn gets. Orthogonal to the fields below, which report
  * only the host provider's readiness: a vendor turn is unaffected by all
  * of them.
  */
-mode: WebSearchMode, timeout_ms: number,
+mode: WebSearchMode, timeout_ms: number, 
 /**
  * Whether a key is stored for the selected provider. Always false for a
  * credential-free provider, which has no key slot at all — read
  * [`Self::available`] to know whether search will actually run.
  */
-has_credential: boolean,
+has_credential: boolean, 
 /**
  * Whether the selected provider has everything it needs to be invoked.
  *
  * A key for the credentialed providers, an instance URL for SearXNG.
  */
-available: boolean,
+available: boolean, 
 /**
  * The configured SearXNG instance URL, in the canonical form the host
  * stored. It is safe to return: validation forbids embedded credentials.

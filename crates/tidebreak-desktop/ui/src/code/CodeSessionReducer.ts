@@ -38,6 +38,10 @@ const RESOLVED_APPROVAL_STATE: Record<
   approve: "approved",
   deny: "denied",
   abandoned: "abandoned",
+  approved_with_grant: "approved",
+  answered: "approved",
+  // An accepted plan; a rejected one is special-cased where this is read.
+  plan_decided: "approved",
 };
 
 export type CodeTranscriptItem =
@@ -1017,7 +1021,10 @@ export function reduceCodeSessionEvent(
 
     case "approval_resolved": {
       const approvalId = event.approval_id;
-      const nextState = RESOLVED_APPROVAL_STATE[event.decision.type];
+      const nextState =
+        event.decision.type === "plan_decided" && !event.decision.approve
+          ? "denied"
+          : RESOLVED_APPROVAL_STATE[event.decision.type];
       return {
         state: {
           ...state,

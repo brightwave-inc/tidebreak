@@ -530,6 +530,7 @@ impl OpencodeStreamParser {
         vec![HarnessEvent::ApprovalRequested {
             harness_ref: HarnessApprovalRef::engine(call_id),
             raw: props.clone(),
+            kind: None,
         }]
     }
 

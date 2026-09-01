@@ -412,6 +412,7 @@ impl CodexStreamParser {
         vec![HarnessEvent::ApprovalRequested {
             harness_ref: HarnessApprovalRef::engine(call_id),
             raw: params.clone(),
+            kind: None,
         }]
     }
 

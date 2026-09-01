@@ -20,7 +20,7 @@ use tidebreak_harness::child::ChildPid;
 use tidebreak_harness::{
     AdapterRegistry, ApprovalCompleter, ApprovalDecision, HarnessAdapter, HarnessApprovalRef,
     HarnessError, HarnessEvent, HarnessEventSink, HarnessProbe, HarnessSession, HostEnv,
-    ListedHarnessModel, SessionSpec, TurnInput, TurnOutcome,
+    ListedHarnessModel, ParkWait, ResumeInput, SessionSpec, TurnInput, TurnOutcome,
 };
 use tokio::sync::{oneshot, watch};
 
@@ -110,6 +110,15 @@ pub(crate) struct ScriptedAdapter {
     allow_mode: CapLevel,
     image_input: CapLevel,
     reasoning_levels: CapLevel,
+    durable_parks: CapLevel,
+    user_questions: CapLevel,
+    standing_grants: CapLevel,
+    /// Park the turn after this many script events: `run_turn` plays the
+    /// prefix and returns [`TurnOutcome::Parked`]; `resume_turn` plays the
+    /// rest. `None` scripts an ordinary turn.
+    park_after: Option<(usize, String, ParkWait)>,
+    /// Every resume the session was handed, shared for assertions.
+    resumes: Arc<std::sync::Mutex<Vec<(String, ResumeInput)>>>,
     models: Vec<ListedHarnessModel>,
     /// Whether this engine takes a new mode without being relaunched.
     live_mode_switch: bool,
@@ -169,6 +178,11 @@ impl ScriptedAdapter {
             allow_mode: CapLevel::Unsupported,
             image_input: CapLevel::Unknown,
             reasoning_levels: CapLevel::Unsupported,
+            durable_parks: CapLevel::Unsupported,
+            user_questions: CapLevel::Unsupported,
+            standing_grants: CapLevel::Unsupported,
+            park_after: None,
+            resumes: Arc::new(std::sync::Mutex::new(Vec::new())),
             models: Vec::new(),
             live_mode_switch: false,
             posture_fixed: false,
@@ -265,6 +279,41 @@ impl ScriptedAdapter {
     pub(crate) fn with_image_input(mut self, level: CapLevel) -> Self {
         self.image_input = level;
         self
+    }
+
+    /// Declares the durable-park capability and, when parking, where the
+    /// script splits: `run_turn` plays `events[..split]` and parks with this
+    /// ref and wait; `resume_turn` plays the rest.
+    #[allow(dead_code)]
+    pub(crate) fn with_parked_turn(
+        mut self,
+        split: usize,
+        park_ref: impl Into<String>,
+        waiting_on: ParkWait,
+    ) -> Self {
+        self.durable_parks = CapLevel::Supported;
+        self.park_after = Some((split, park_ref.into(), waiting_on));
+        self
+    }
+
+    /// Declares the structured user-questions capability.
+    #[allow(dead_code)]
+    pub(crate) fn with_user_questions(mut self, level: CapLevel) -> Self {
+        self.user_questions = level;
+        self
+    }
+
+    /// Declares the standing-grant decision capability.
+    #[allow(dead_code)]
+    pub(crate) fn with_standing_grants(mut self, level: CapLevel) -> Self {
+        self.standing_grants = level;
+        self
+    }
+
+    /// Every `resume_turn` the sessions were handed, in order.
+    #[allow(dead_code)]
+    pub(crate) fn resumes(&self) -> Vec<(String, ResumeInput)> {
+        self.resumes.lock().expect("scripted resumes").clone()
     }
 
     /// Declares an effort ladder, the way every adapter but opencode has one.
@@ -439,6 +488,9 @@ impl HarnessAdapter for ScriptedAdapter {
             native_interrupt: CapLevel::Supported,
             image_input: self.image_input,
             slash_commands: CapLevel::Unknown,
+            durable_parks: self.durable_parks,
+            user_questions: self.user_questions,
+            standing_grants: self.standing_grants,
         }
     }
 
@@ -495,6 +547,10 @@ impl HarnessAdapter for ScriptedAdapter {
             worktree: spec.worktree.clone(),
             writes: self.writes.clone(),
             turn_delay: self.turn_delay,
+            user_questions: self.user_questions,
+            standing_grants: self.standing_grants,
+            park_after: self.park_after.clone(),
+            resumes: self.resumes.clone(),
         }))
     }
 }
@@ -531,6 +587,10 @@ struct ScriptedSession {
     worktree: PathBuf,
     writes: Vec<ScriptedWrite>,
     turn_delay: Duration,
+    user_questions: CapLevel,
+    standing_grants: CapLevel,
+    park_after: Option<(usize, String, ParkWait)>,
+    resumes: Arc<std::sync::Mutex<Vec<(String, ResumeInput)>>>,
 }
 
 /// One turn as the engine received it.
@@ -547,9 +607,10 @@ pub(crate) struct ScriptedTurnInput {
 }
 
 impl ScriptedSession {
-    /// Emit the script, stopping early when the worker interrupts.
-    async fn play_script(&self) -> TurnOutcome {
-        for event in &self.events {
+    /// Emit one range of the script, stopping early when the worker
+    /// interrupts.
+    async fn play_script(&self, events: &[HarnessEvent]) -> TurnOutcome {
+        for event in events {
             if self.interrupt.load(Ordering::SeqCst) {
                 return self.stopped().await;
             }
@@ -637,11 +698,45 @@ impl HarnessSession for ScriptedSession {
         // idle park timer (decision 0064).
         self.pid
             .set(self.child_pid.map(|pid| pid as u32).filter(|pid| *pid != 0));
-        let outcome = self.play_script().await;
+        let outcome = if let Some((split, park_ref, waiting_on)) = &self.park_after {
+            let split = (*split).min(self.events.len());
+            match self.play_script(&self.events[..split]).await {
+                TurnOutcome::Clean if !self.interrupt.load(Ordering::SeqCst) => {
+                    TurnOutcome::Parked {
+                        park_ref: park_ref.clone(),
+                        waiting_on: waiting_on.clone(),
+                    }
+                }
+                other => other,
+            }
+        } else {
+            self.play_script(&self.events).await
+        };
         if !self.session_long_child {
             self.pid.clear();
         }
         Ok(outcome)
+    }
+
+    async fn resume_turn(
+        &self,
+        park_ref: String,
+        input: ResumeInput,
+    ) -> Result<TurnOutcome, HarnessError> {
+        let Some((split, expected, _)) = &self.park_after else {
+            return Err(HarnessError::ParkResumeUnsupported);
+        };
+        if &park_ref != expected {
+            return Err(HarnessError::Other(format!(
+                "no parked turn with ref {park_ref}"
+            )));
+        }
+        self.resumes
+            .lock()
+            .expect("scripted resumes")
+            .push((park_ref, input));
+        let split = (*split).min(self.events.len());
+        Ok(self.play_script(&self.events[split..]).await)
     }
 
     async fn decide(
@@ -649,6 +744,21 @@ impl HarnessSession for ScriptedSession {
         approval: HarnessApprovalRef,
         decision: ApprovalDecision,
     ) -> Result<(), HarnessError> {
+        // Honest to the declared caps, the way a real adapter's channel is.
+        let refused = match &decision {
+            ApprovalDecision::ApproveWithGrant { .. } => {
+                self.standing_grants != CapLevel::Supported
+            }
+            ApprovalDecision::Answers { .. } => self.user_questions != CapLevel::Supported,
+            ApprovalDecision::Approve
+            | ApprovalDecision::Deny { .. }
+            | ApprovalDecision::PlanDecision { .. } => false,
+        };
+        if refused {
+            return Err(HarnessError::DecisionUnsupported(
+                "the scripted engine does not declare that decision".into(),
+            ));
+        }
         self.approver.complete(&approval, decision).await?;
         if !self.approval_ack_delay.is_zero() {
             tokio::time::sleep(self.approval_ack_delay).await;
@@ -838,4 +948,157 @@ pub(crate) fn plain_text_script() -> Vec<HarnessEvent> {
             },
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tidebreak_core::{CodeUsage, PermissionMode};
+
+    /// Sink that collects every emitted event for assertions.
+    #[derive(Default)]
+    struct CollectingSink {
+        events: std::sync::Mutex<Vec<HarnessEvent>>,
+    }
+
+    #[async_trait]
+    impl HarnessEventSink for CollectingSink {
+        async fn emit(&self, event: HarnessEvent) {
+            self.events.lock().expect("collected events").push(event);
+        }
+    }
+
+    fn spec(sink: Arc<CollectingSink>, worktree: &Path) -> SessionSpec {
+        SessionSpec {
+            worktree: worktree.to_path_buf(),
+            allowed_read_roots: Vec::new(),
+            permission_mode: PermissionMode::Ask,
+            model: None,
+            reasoning_effort: None,
+            fast_mode: false,
+            resume_ref: None,
+            extra_argv: Vec::new(),
+            extra_env: Vec::new(),
+            relay_key_env: None,
+            env: Vec::new(),
+            approval: None,
+            binary: Some(PathBuf::from("/scripted/engine")),
+            sink,
+            browser: None,
+        }
+    }
+
+    fn split_script() -> Vec<HarnessEvent> {
+        vec![
+            HarnessEvent::TurnStarted,
+            HarnessEvent::AssistantDelta {
+                text: "before the park".into(),
+            },
+            HarnessEvent::AssistantDelta {
+                text: "after the park".into(),
+            },
+            HarnessEvent::TurnCompleted {
+                usage: CodeUsage::default(),
+            },
+        ]
+    }
+
+    fn turn_input() -> TurnInput {
+        TurnInput {
+            text: "go".into(),
+            model: None,
+            reasoning_effort: None,
+            fast_mode: false,
+            images: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_parked_turn_resumes_through_the_adapter() {
+        let dir = tempfile::tempdir().unwrap();
+        let adapter = ScriptedAdapter::new(split_script()).with_parked_turn(
+            2,
+            "checkpoint-1",
+            ParkWait::Approval {
+                approval_id: "approval-9".into(),
+            },
+        );
+        let sink = Arc::new(CollectingSink::default());
+        let session = adapter
+            .launch(spec(sink.clone(), dir.path()))
+            .await
+            .unwrap();
+
+        let outcome = session.run_turn(turn_input()).await.unwrap();
+        let TurnOutcome::Parked {
+            park_ref,
+            waiting_on,
+        } = outcome
+        else {
+            panic!("expected a parked outcome, got {outcome:?}");
+        };
+        assert_eq!(park_ref, "checkpoint-1");
+        assert_eq!(
+            waiting_on,
+            ParkWait::Approval {
+                approval_id: "approval-9".into()
+            }
+        );
+        assert_eq!(sink.events.lock().unwrap().len(), 2, "prefix only");
+
+        let resumed = session
+            .resume_turn(
+                park_ref,
+                ResumeInput::ApprovalDecided {
+                    approval_id: "approval-9".into(),
+                    decision: ApprovalDecision::Approve,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(resumed, TurnOutcome::Clean);
+        let events = sink.events.lock().unwrap();
+        assert!(matches!(
+            events.last(),
+            Some(HarnessEvent::TurnCompleted { .. })
+        ));
+        assert_eq!(events.len(), 4, "the resume plays the remainder once");
+        assert_eq!(adapter.resumes().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn resume_is_refused_without_the_capability() {
+        let dir = tempfile::tempdir().unwrap();
+        let adapter = ScriptedAdapter::new(split_script());
+        let sink = Arc::new(CollectingSink::default());
+        let session = adapter.launch(spec(sink, dir.path())).await.unwrap();
+        let error = session
+            .resume_turn(
+                "checkpoint-1".into(),
+                ResumeInput::ClientToolCompleted {
+                    call_id: "call-1".into(),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, HarnessError::ParkResumeUnsupported));
+    }
+
+    #[tokio::test]
+    async fn rich_decisions_are_refused_unless_declared() {
+        let dir = tempfile::tempdir().unwrap();
+        let adapter = ScriptedAdapter::new(split_script());
+        let sink = Arc::new(CollectingSink::default());
+        let session = adapter.launch(spec(sink, dir.path())).await.unwrap();
+        let error = session
+            .decide(
+                HarnessApprovalRef::engine("call-1"),
+                ApprovalDecision::Answers {
+                    answers: Vec::new(),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, HarnessError::DecisionUnsupported(_)));
+    }
 }

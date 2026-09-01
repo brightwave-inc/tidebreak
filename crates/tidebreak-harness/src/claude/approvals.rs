@@ -67,6 +67,10 @@ impl PermissionPromptResponse {
     }
 
     /// Build the captured response shape from a normalized decision.
+    ///
+    /// The captured channel carries allow/deny only, so the richer decision
+    /// variants have no encoding here; [`super::session`] rejects them
+    /// before this runs.
     #[must_use]
     pub fn from_decision(decision: &ApprovalDecision) -> Self {
         match decision {
@@ -83,6 +87,12 @@ impl PermissionPromptResponse {
                         .unwrap_or_else(|| "denied".into()),
                 ),
             },
+            ApprovalDecision::ApproveWithGrant { .. }
+            | ApprovalDecision::Answers { .. }
+            | ApprovalDecision::PlanDecision { .. } => Self {
+                behavior: PermissionBehavior::Deny,
+                message: Some("this engine cannot take that decision".into()),
+            },
         }
     }
 }
@@ -93,6 +103,7 @@ pub fn event_from_prompt_request(request: &PermissionPromptRequest) -> HarnessEv
     HarnessEvent::ApprovalRequested {
         harness_ref: HarnessApprovalRef::engine(request.tool_use_id.clone()),
         raw: serde_json::to_value(request).unwrap_or(serde_json::Value::Null),
+        kind: None,
     }
 }
 
@@ -123,7 +134,9 @@ mod tests {
         assert_eq!(request.tool_name, "Write");
         assert!(!request.tool_use_id.is_empty());
         match event_from_prompt_request(&request) {
-            HarnessEvent::ApprovalRequested { harness_ref, raw } => {
+            HarnessEvent::ApprovalRequested {
+                harness_ref, raw, ..
+            } => {
                 assert_eq!(harness_ref.call_id, request.tool_use_id);
                 assert_eq!(raw["tool_name"], "Write");
             }

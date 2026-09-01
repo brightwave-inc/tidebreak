@@ -6617,7 +6617,7 @@ impl CodeRuntime {
             relay_key_env,
             env: probe.env.clone(),
             approval,
-            binary,
+            binary: Some(binary),
             sink: sink.clone() as Arc<dyn HarnessEventSink>,
             browser,
         };
@@ -7038,7 +7038,7 @@ impl CodeRuntime {
             .commands
             .send(crate::code::session_worker::WorkerCommand::Decide {
                 approval: native_ref,
-                decision: decision.clone(),
+                decision: Box::new(decision.clone()),
                 reply,
             })
             .await
@@ -7084,12 +7084,7 @@ impl CodeRuntime {
             .await?;
             return Err(error);
         }
-        let event_decision = match &decision {
-            ApprovalDecision::Approve => ApprovalDecisionKind::Approve,
-            ApprovalDecision::Deny { feedback } => ApprovalDecisionKind::Deny {
-                feedback: feedback.clone(),
-            },
-        };
+        let event_decision = tidebreak_core::ApprovalDecisionKind::from(decision.clone());
         let Some(settlement) = settle_approval_claim(
             &self.db,
             owner,

@@ -236,6 +236,28 @@ pub enum ApprovalDecisionKind {
     /// showing the request. A separate event would let an un-updated reader
     /// keep rendering a pending card that can never be acted on.
     Abandoned,
+    /// Approved, and a standing grant was minted at this scope.
+    ///
+    /// Only engines declaring `standing_grants` resolve an approval this way
+    /// (decision 0048: external harnesses keep no standing grants).
+    ApprovedWithGrant {
+        /// The scope the decider granted.
+        scope: crate::GrantScope,
+    },
+    /// A questions approval was answered.
+    Answered {
+        /// The supplied answers, already validated and bounded.
+        answers: Vec<crate::UserQuestionAnswer>,
+    },
+    /// A plan approval was decided.
+    PlanDecided {
+        /// Whether the plan was accepted.
+        approve: bool,
+        /// Feedback returned to the engine, when any.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        feedback: Option<String>,
+    },
 }
 
 /// One event in an external agent-engine session's journal.
@@ -408,6 +430,36 @@ mod tests {
         let json = serde_json::to_value(&ev).unwrap();
         assert_eq!(json["type"], "assistant_delta");
         assert_eq!(json["text"], "hi");
+    }
+
+    /// The structured resolutions added for the internal engine (decision
+    /// 0048 step 5) are a storage format like every other decision kind:
+    /// pin their tags and round-trip them.
+    #[test]
+    fn structured_decision_kinds_round_trip() {
+        let kinds = [
+            ApprovalDecisionKind::ApprovedWithGrant {
+                scope: crate::GrantScope::WholeTool,
+            },
+            ApprovalDecisionKind::Answered {
+                answers: vec![crate::UserQuestionAnswer {
+                    question_id: "q1".into(),
+                    selected_option_ids: vec!["a".into()],
+                    custom_answer: None,
+                }],
+            },
+            ApprovalDecisionKind::PlanDecided {
+                approve: true,
+                feedback: None,
+            },
+        ];
+        let tags = ["approved_with_grant", "answered", "plan_decided"];
+        for (kind, tag) in kinds.iter().zip(tags) {
+            let json = serde_json::to_value(kind).unwrap();
+            assert_eq!(json["type"], tag);
+            let back: ApprovalDecisionKind = serde_json::from_value(json).unwrap();
+            assert_eq!(&back, kind);
+        }
     }
 
     fn id(n: u128) -> Uuid {

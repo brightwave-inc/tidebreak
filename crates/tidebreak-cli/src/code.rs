@@ -1550,6 +1550,11 @@ fn approval_kind(kind: &CodeApprovalKind) -> String {
         CodeApprovalKind::FileWrite { paths } => format!("write {}", paths.join(",")),
         CodeApprovalKind::Network { summary } => format!("network {summary}"),
         CodeApprovalKind::Other { summary } => summary.clone(),
+        CodeApprovalKind::ToolUse { preview, .. } => {
+            format!("tool {}", preview.summary().unwrap_or("call"))
+        }
+        CodeApprovalKind::Questions { questions } => format!("questions ({})", questions.len()),
+        CodeApprovalKind::Plan { proposed_mode } => format!("plan -> {proposed_mode}"),
     }
 }
 
@@ -2701,6 +2706,9 @@ mod tests {
                 native_interrupt: CapLevel::Supported,
                 image_input: CapLevel::Unknown,
                 slash_commands: CapLevel::Unknown,
+                durable_parks: CapLevel::Unsupported,
+                user_questions: CapLevel::Unsupported,
+                standing_grants: CapLevel::Unsupported,
             }
         }
         // Every engine honors Allow, so every engine starts there.
