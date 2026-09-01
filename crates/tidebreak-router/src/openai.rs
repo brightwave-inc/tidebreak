@@ -377,6 +377,14 @@ pub(crate) fn build_request_json_for(
         "store": false,
         "max_output_tokens": req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
     });
+    // OpenAI's automatic prompt cache otherwise keys only on prefix hash, so
+    // concurrent conversations with a shared system prefix thrash each other.
+    // xAI's Responses surface does not document this field.
+    if profile == ResponsesProfile::OpenAi {
+        if let Some(conversation) = req.conversation {
+            body["prompt_cache_key"] = json!(conversation.to_string());
+        }
+    }
 
     if req.reasoning_model {
         if let Some(effort) = req.reasoning_effort {
@@ -1176,6 +1184,17 @@ mod tests {
         assert_eq!(body["tools"][0]["name"], "exec");
         assert_eq!(body["max_output_tokens"], 1024);
         assert!(body.get("messages").is_none());
+        assert!(body.get("prompt_cache_key").is_none());
+
+        let conversation = tidebreak_core::id::ChatId::new();
+        let with_conversation = ChatRequest {
+            conversation: Some(conversation),
+            ..req
+        };
+        let body = build_request_json(&with_conversation).unwrap();
+        assert_eq!(body["prompt_cache_key"], conversation.to_string());
+        let xai = build_request_json_for(&with_conversation, ResponsesProfile::Xai).unwrap();
+        assert!(xai.get("prompt_cache_key").is_none());
     }
 
     #[test]
