@@ -11,8 +11,8 @@
 //! nothing, and the promotion reports stale instead of running old content.
 
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, Set,
-    TransactionTrait,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder,
+    QuerySelect, Set, TransactionTrait,
 };
 
 use crate::code::{CodeQueuedTurn, CodeSessionId, CodeTurn, CodeTurnId};
@@ -67,6 +67,28 @@ pub async fn list_queued_turns(
     session_id: CodeSessionId,
 ) -> Result<Vec<CodeQueuedTurn>> {
     list_on(&store.conn, owner, session_id).await
+}
+
+/// Every session that has at least one queued message, across every owner.
+///
+/// The remote sweep's system path: promotion only matters where a queue
+/// exists, so the sweep asks for those sessions instead of walking every
+/// session row on the machine.
+pub async fn sessions_with_queued_turns_all_owners(
+    store: &DbStore,
+) -> Result<Vec<(OwnerId, CodeSessionId)>> {
+    entities::code_queued_turn::Entity::find()
+        .select_only()
+        .column(entities::code_queued_turn::Column::Owner)
+        .column(entities::code_queued_turn::Column::SessionId)
+        .distinct()
+        .into_tuple::<(String, uuid::Uuid)>()
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .map(|(owner, session_id)| Ok((OwnerId::new(&owner)?, CodeSessionId(session_id))))
+        .collect()
 }
 
 /// The FIFO head, or `None` when the queue is empty.
