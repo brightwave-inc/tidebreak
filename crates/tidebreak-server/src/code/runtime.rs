@@ -3850,6 +3850,37 @@ impl CodeRuntime {
     /// they never appear here — the worker map only holds local sessions.
     pub(crate) async fn await_update_quiesce(&self, deadline: Duration) -> Result<(), String> {
         let deadline_at = Instant::now() + deadline;
+        // Turn starts are fenced by the worktree lock, not by the database:
+        // a starting turn holds its workspace's lock from before it re-reads
+        // the quiesce flag until the turn ends, and the flag is already up.
+        // Acquiring and releasing every lock therefore proves each workspace
+        // is past any start that raced the flag — whoever takes a lock after
+        // this sees the flag and refuses. Without this pass, a poll of the
+        // stored lifecycle could observe Idle in the window between a turn
+        // winning its lock and persisting Running, and the update would exit
+        // over an engine turn that was about to start.
+        let worktree_turns: Vec<Arc<tokio::sync::Mutex<()>>> = self
+            .worktree_turns
+            .lock()
+            .expect("code worktree turn locks")
+            .values()
+            .cloned()
+            .collect();
+        for worktree_turn in worktree_turns {
+            let remaining = deadline_at.saturating_duration_since(Instant::now());
+            match tokio::time::timeout(remaining, worktree_turn.lock()).await {
+                Ok(guard) => drop(guard),
+                Err(_) => {
+                    return Err(
+                        "A code session is still working on a turn. Try again once it \
+                                finishes — the update stays ready."
+                            .to_owned(),
+                    );
+                }
+            }
+        }
+        // Past every turn boundary; now wait for the workers to park their
+        // engine children and for the stored rows to agree.
         loop {
             let ids: Vec<CodeSessionId> = self
                 .workers

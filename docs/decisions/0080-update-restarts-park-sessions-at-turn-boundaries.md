@@ -52,10 +52,14 @@ Code mode parks at turn boundaries:
 - Idle engine children park immediately through the 0064 path, which clears
   the recorded pid, so recovery has nothing to fence. In-flight turns run to
   completion and their workers park on the way back to idle.
-- The quiesce waits up to 20 s for in-flight turns to reach their boundary.
-  A turn still running then fails the quiesce: the update stays staged, the
-  panel shows a retryable message, and admission reopens. A code turn is
-  never interrupted for an update, because no engine can resume one.
+- The quiesce waits up to 20 s for in-flight turns to reach their boundary,
+  and proves the boundary through the worktree locks themselves: after the
+  flag is up it acquires and releases every workspace's turn lock, so a
+  start that raced the flag has either finished or will re-read the flag
+  under its own acquisition and refuse. A turn still running at the
+  deadline fails the quiesce: the update stays staged, the panel shows a
+  retryable message, and admission reopens. A code turn is never
+  interrupted for an update, because no engine can resume one.
 
 Chat drains and hands leases back:
 

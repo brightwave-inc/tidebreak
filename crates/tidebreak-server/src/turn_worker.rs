@@ -131,6 +131,13 @@ pub(crate) struct TurnWorker {
     /// Update-quiesce channel pair, when this worker serves a process that
     /// can restart to update. `None` in tests that install none.
     quiesce: Option<crate::update_quiesce::ChatQuiesceWorker>,
+    /// Every durable claim this worker currently executes, entered at claim
+    /// time — before the task is spawned — and removed when the task settles,
+    /// abort included. The update drain hands leases back from this set
+    /// rather than from [`TurnGuard`], whose registration happens only deep
+    /// inside `run_turn`: a claim aborted before it registered there would
+    /// otherwise keep its lease and make the relaunched worker wait it out.
+    update_claims: Arc<std::sync::Mutex<std::collections::HashMap<uuid::Uuid, TurnId>>>,
     #[cfg(test)]
     post_drive_pause: Option<(Arc<Notify>, Arc<Notify>)>,
 }
@@ -150,6 +157,22 @@ enum ClaimAction {
 enum HeartbeatOutcome {
     Cancelling,
     LeaseLost,
+}
+
+/// Removes one entry from the worker's claim set when its task settles —
+/// normal return and abort alike, because both drop the task's future.
+struct UpdateClaimEntry {
+    claims: Arc<std::sync::Mutex<std::collections::HashMap<uuid::Uuid, TurnId>>>,
+    lease_token: uuid::Uuid,
+}
+
+impl Drop for UpdateClaimEntry {
+    fn drop(&mut self) {
+        self.claims
+            .lock()
+            .expect("update claims")
+            .remove(&self.lease_token);
+    }
 }
 
 /// Exact foreground capability surface retained for one live turn execution.
@@ -440,6 +463,7 @@ impl TurnWorker {
             diagnostics: Arc::new(crate::diagnostics::Diagnostics::new()),
             config,
             quiesce: None,
+            update_claims: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             #[cfg(test)]
             post_drive_pause: None,
         }
@@ -579,7 +603,21 @@ impl TurnWorker {
                     Ok(ClaimAction::Claimed(turn, lease_token)) => {
                         pending_claim_token = None;
                         let worker = self.clone();
-                        turns.spawn(async move { worker.process(*turn, lease_token).await });
+                        // Enter the claim before the task exists, so the
+                        // update drain's snapshot can never miss a claim the
+                        // abort is about to orphan.
+                        self.update_claims
+                            .lock()
+                            .expect("update claims")
+                            .insert(lease_token, turn.id);
+                        let entry = UpdateClaimEntry {
+                            claims: self.update_claims.clone(),
+                            lease_token,
+                        };
+                        turns.spawn(async move {
+                            let _entry = entry;
+                            worker.process(*turn, lease_token).await
+                        });
                         idle_delay = self.config.idle_min;
                     }
                     Ok(ClaimAction::Terminalized) => {
@@ -678,7 +716,13 @@ impl TurnWorker {
                 _ = &mut grace => break,
             }
         }
-        let remaining = self.signals.active_claims();
+        let remaining: Vec<(TurnId, uuid::Uuid)> = self
+            .update_claims
+            .lock()
+            .expect("update claims")
+            .iter()
+            .map(|(lease_token, turn_id)| (*turn_id, *lease_token))
+            .collect();
         turns.shutdown().await;
         for (turn_id, lease_token) in remaining {
             if let Err(error) = self
