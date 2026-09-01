@@ -90,7 +90,7 @@ similar = "=3.2.0"
 tempfile = { workspace = true }
 # Pinned source archives accepted by the plugin importer. These versions are
 # already present in Cargo.lock; making them direct leaves resolution unchanged.
-flate2 = "=1.1.9"
+flate2 = "=1.1.10"
 tar = "=0.4.46"
 url = { workspace = true }
 # Readability + HTML parse stack for native page extraction.

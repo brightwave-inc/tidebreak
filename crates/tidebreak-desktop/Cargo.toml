@@ -36,7 +36,7 @@ chrono = { workspace = true }
 cap-fs-ext.workspace = true
 cap-std.workspace = true
 futures.workspace = true
-flate2 = "=1.1.9"
+flate2 = "=1.1.10"
 minisign-verify.workspace = true
 tidebreak-code-execution = { path = "../tidebreak-code-execution" }
 tidebreak-core = { path = "../tidebreak-core", default-features = false, features = ["keychain"] }
