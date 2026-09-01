@@ -4281,7 +4281,7 @@ code_turn_recaps_enabled: boolean,
  * Whether completed code turns rewrite their closing message into lucid
  * prose. Default off.
  */
-rewrite_closing_messages: boolean, 
+rewrite_closing_messages: boolean,
 /**
  * How new code repositories name workspace branches for this user.
  */
