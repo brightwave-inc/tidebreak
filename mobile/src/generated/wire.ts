@@ -494,7 +494,23 @@ export type ApprovalDecisionKind = { "type": "approve" } | { "type": "deny",
 /**
  * Feedback returned to the engine, when any.
  */
-feedback?: string, } | { "type": "abandoned" };
+feedback?: string, } | { "type": "abandoned" } | { "type": "approved_with_grant",
+/**
+ * The scope the decider granted.
+ */
+scope: GrantScope, } | { "type": "answered",
+/**
+ * The supplied answers, already validated and bounded.
+ */
+answers: Array<UserQuestionAnswer>, } | { "type": "plan_decided",
+/**
+ * Whether the plan was accepted.
+ */
+approve: boolean,
+/**
+ * Feedback returned to the engine, when any.
+ */
+feedback?: string, };
 
 /**
  * How wide a standing grant the human chose, narrowest first.
@@ -580,6 +596,8 @@ export type BoundedError = {
  * Short message, already truncated by the adapter.
  */
 message: string, };
+
+export type BranchPrefixMode = "account" | "custom" | "none";
 
 /**
  * Identifies one tool call, stable across its request/approval/result.
@@ -886,7 +904,25 @@ summary: string, } | { "type": "other",
 /**
  * Engine-provided summary.
  */
-summary: string, };
+summary: string, } | { "type": "tool_use",
+/**
+ * The action exactly as the consent decision will read it.
+ */
+preview: ToolActionPreview,
+/**
+ * Grant rungs the decider may mint, narrowest first. Empty when the
+ * call supports no standing grant.
+ */
+offered_grants: Array<GrantScope>, } | { "type": "questions",
+/**
+ * The questions, bounded by the engine's own validation.
+ */
+questions: Array<UserQuestion>, } | { "type": "plan",
+/**
+ * Permission mode the conversation moves to when the plan is
+ * accepted.
+ */
+proposed_mode: PermissionMode, };
 
 /**
  * One parked or decided engine approval.
@@ -2610,6 +2646,8 @@ export type GatewayStatus = { base_url?: string, signed_in: boolean, account_hin
  */
 member_catalog?: string, sign_in: SignInProgress, };
 
+export type GitSourceControlSettings = { auto_rename_branches: boolean, branch_prefix_mode: BranchPrefixMode, custom_branch_prefix?: string, account_prefix?: string, effective_branch_prefix: string, };
+
 /**
  * How far a standing grant reaches.
  *
@@ -2706,7 +2744,37 @@ image_input: CapLevel,
  * always pass-through. This flag only says a machine-readable listing
  * exists to feed the composer popup.
  */
-slash_commands: CapLevel, };
+slash_commands: CapLevel,
+/**
+ * The engine can end a turn as a durable checkpoint and continue it
+ * later: `run_turn` may return a parked outcome, and `resume_turn`
+ * picks the turn up once the awaited dependency resolves.
+ *
+ * External engines hold their turn state in a live process and have no
+ * channel that survives one, so they declare `Unsupported`. The flag
+ * exists for engines whose turn state is durable — the internal engine
+ * first (decision 0048 step 5).
+ */
+durable_parks: CapLevel,
+/**
+ * The engine raises structured user-question approvals and accepts an
+ * answers decision on them.
+ *
+ * Distinct from `structured_approvals`, which only says a consent
+ * channel exists: this flag says the engine can ask the user a
+ * multiple-choice question mid-turn and consume the structured answer.
+ */
+user_questions: CapLevel,
+/**
+ * The engine accepts an approve-with-standing-grant decision, minting
+ * durable consent that outlives the approval.
+ *
+ * Decision 0033 keeps external harnesses verbatim-payload with no
+ * standing grants; that posture is this flag declared `Unsupported`,
+ * not a separate subsystem. The internal engine's grant ladders
+ * declare it `Supported`.
+ */
+standing_grants: CapLevel, };
 
 /**
  * One engine-owned slash command, captured from the engine's own listing.
@@ -3615,6 +3683,19 @@ export type PromptBody = { name: string,
 body: string, };
 
 /**
+ * How long a cached prompt prefix stays readable between requests.
+ *
+ * The user's choice, not a heuristic: a longer retention costs more to write
+ * (2× base input on Anthropic versus 1.25× for the default) and buys nothing
+ * while calls land seconds apart, but keeps the prefix warm across the
+ * minutes-long pauses of a human-paced conversation, where every reply past
+ * the default window otherwise rewrites the whole transcript at the write
+ * premium. Providers without a retention control ignore this, like every
+ * other request control they cannot express.
+ */
+export type PromptCacheRetention = "five_minutes" | "one_hour";
+
+/**
  * Which source a validated prompt package was loaded from.
  *
  * Host-derived from the load path, never from manifest content, so a user
@@ -3687,6 +3768,28 @@ url?: string, };
  * Coarse CI bucket used to color a check row.
  */
 export type PullRequestCheckBucket = "pass" | "pending" | "fail" | "skipped";
+
+/**
+ * Per-bucket check counts carried beside the display summary, so a reader
+ * never parses numbers back out of the prose.
+ */
+export type PullRequestCheckCounts = {
+/**
+ * Checks that passed.
+ */
+passing: number,
+/**
+ * Checks queued or still running.
+ */
+pending: number,
+/**
+ * Checks that failed.
+ */
+failing: number,
+/**
+ * Checks the host deliberately skipped or cancelled.
+ */
+skipped: number, };
 
 /**
  * One pull-request comment: an issue comment, a review body, or an inline
@@ -3765,6 +3868,11 @@ title?: string,
  * One-line checks summary.
  */
 checks_summary?: string | null,
+/**
+ * Structured counts behind `checks_summary`. Absent on digests written
+ * before the counts shipped.
+ */
+check_counts?: PullRequestCheckCounts,
 /**
  * Individual checks, when the host reported any.
  */
@@ -4264,6 +4372,13 @@ compaction: CompactionSettings,
  */
 model_visibility_overrides: { [key in string]: ModelVisibility },
 /**
+ * How long a conversation's prompt-cache entries stay readable, for
+ * providers with a retention control. Default `five_minutes`; `one_hour`
+ * costs more per cache write but keeps the conversation prefix warm
+ * across slower replies.
+ */
+prompt_cache_retention: PromptCacheRetention,
+/**
  * Whether the computer-use capability (screen capture + app control) is
  * enabled. Read at boot; turning it off unregisters the tools on the next
  * launch.
@@ -4277,7 +4392,11 @@ code_turn_recaps_enabled: boolean,
  * Whether completed code turns rewrite their closing message into lucid
  * prose. Default off.
  */
-rewrite_closing_messages: boolean, };
+rewrite_closing_messages: boolean,
+/**
+ * How new code repositories name workspace branches for this user.
+ */
+git_source_control: GitSourceControlSettings, };
 
 /**
  * Renderer-safe progress of the current sign-in attempt.
@@ -4704,6 +4823,11 @@ export type UpdateCodeTriggerBody = { enabled: boolean, };
  * One bounded question shown to the user.
  */
 export type UserQuestion = { id: string, header: string, question: string, options: Array<UserQuestionOption>, question_type: UserQuestionType, allow_free_form: boolean, };
+
+/**
+ * One supplied answer. Omitted questions are explicitly skipped.
+ */
+export type UserQuestionAnswer = { question_id: string, selected_option_ids?: Array<string>, custom_answer?: string | null, };
 
 /**
  * One selectable answer choice.

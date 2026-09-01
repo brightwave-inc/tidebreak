@@ -313,9 +313,23 @@ where
     C: ConnectionTrait,
 {
     let (state, feedback) = match &decision {
-        ApprovalDecisionKind::Approve => (CodeApprovalState::Approved, None),
+        ApprovalDecisionKind::Approve | ApprovalDecisionKind::ApprovedWithGrant { .. } => {
+            (CodeApprovalState::Approved, None)
+        }
         ApprovalDecisionKind::Deny { feedback } => (CodeApprovalState::Denied, feedback.clone()),
         ApprovalDecisionKind::Abandoned => (CodeApprovalState::Abandoned, None),
+        // Structured resolutions settle the row as approved: the substance
+        // (answers, plan verdict) rides the journal event and the engine's
+        // own state, not this row.
+        ApprovalDecisionKind::Answered { .. } => (CodeApprovalState::Approved, None),
+        ApprovalDecisionKind::PlanDecided { approve, feedback } => (
+            if *approve {
+                CodeApprovalState::Approved
+            } else {
+                CodeApprovalState::Denied
+            },
+            feedback.clone(),
+        ),
     };
     let mut update = entities::code_approval::Entity::update_many()
         .col_expr(

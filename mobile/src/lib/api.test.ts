@@ -65,6 +65,9 @@ const caps = {
   native_interrupt: "supported",
   image_input: "unsupported",
   slash_commands: "supported",
+  durable_parks: "unsupported",
+  user_questions: "unsupported",
+  standing_grants: "unsupported",
 };
 
 const harness = {
@@ -314,6 +317,34 @@ describe("mobile supervision API contracts", () => {
       parseCodeApproval({
         ...approval,
         kind: { type: "command", cmd: "" },
+      }),
+    ).not.toBeNull();
+    // Structured kinds from an engine behind the adapter parse as cards too.
+    expect(
+      parseCodeApproval({
+        ...approval,
+        kind: {
+          type: "tool_use",
+          preview: { kind: "other", summary: "Run the export" },
+          offered_grants: [],
+        },
+      }),
+    ).not.toBeNull();
+    expect(
+      parseCodeApproval({
+        ...approval,
+        kind: {
+          type: "questions",
+          questions: [
+            { id: "q1", question: "Which region?", options: [] },
+          ],
+        },
+      }),
+    ).not.toBeNull();
+    expect(
+      parseCodeApproval({
+        ...approval,
+        kind: { type: "plan", proposed_mode: "auto_edit" },
       }),
     ).not.toBeNull();
 

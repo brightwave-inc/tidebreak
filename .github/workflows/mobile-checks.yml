@@ -5,10 +5,12 @@ on:
     branches: [main]
     paths:
       - "mobile/**"
+      - "crates/tidebreak-desktop/ui/src/generated/wire.ts"
       - ".github/workflows/mobile-checks.yml"
   pull_request:
     paths:
       - "mobile/**"
+      - "crates/tidebreak-desktop/ui/src/generated/wire.ts"
       - ".github/workflows/mobile-checks.yml"
 
 permissions:

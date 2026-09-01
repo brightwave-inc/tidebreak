@@ -55,6 +55,65 @@ describe("code approval presentation", () => {
     );
   });
 
+  it("shows the literal action for tool_use, never the model's narration", () => {
+    // Decision 0018: the display-only summary must not reach the consent card.
+    expect(
+      approvalSummary({
+        type: "tool_use",
+        preview: {
+          tool: "exec",
+          command: "rm",
+          args: ["-rf", "cache"],
+          cwd: "work",
+          files: ["notes.md"],
+          summary: "Cleaning temporary caches",
+        },
+        offered_grants: [],
+      }),
+    ).toBe("rm -rf cache\n# working directory: work\n# staged files: notes.md");
+    expect(
+      approvalSummary({
+        type: "tool_use",
+        preview: {
+          tool: "web_extract",
+          url: "https://example.com/report",
+          summary: "Reading the report",
+        },
+        offered_grants: [],
+      }),
+    ).toBe("https://example.com/report\n# fetched from the public web");
+    // Argument boundaries survive: one argument with a space is not two.
+    expect(
+      approvalSummary({
+        type: "tool_use",
+        preview: {
+          tool: "exec",
+          command: "git",
+          args: ["commit", "-m", "fix: two words"],
+          cwd: ".",
+          files: [],
+        },
+        offered_grants: [],
+      }),
+    ).toBe("git commit -m 'fix: two words'");
+    // The provider-bound filters are part of the action being consented to.
+    expect(
+      approvalSummary({
+        type: "tool_use",
+        preview: {
+          tool: "web_search",
+          query: "tidebreak",
+          domains: [],
+          start_published_at: "2026-01-01",
+          end_published_at: null,
+        },
+        offered_grants: [],
+      }),
+    ).toBe(
+      "tidebreak\n# published on or after 2026-01-01\n# sent to the configured web search provider",
+    );
+  });
+
   it("pretty-prints the complete server-capped harness payload", () => {
     expect(formatApprovalPayload('{"cmd":"cargo test"}')).toBe(
       '{\n  "cmd": "cargo test"\n}',

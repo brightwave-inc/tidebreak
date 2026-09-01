@@ -659,6 +659,34 @@ pub enum CodeApprovalKind {
         /// Engine-provided summary.
         summary: String,
     },
+    /// A tool call with an exact, server-built preview and a grant ladder.
+    ///
+    /// Raised only by engines declaring `standing_grants`; the classification
+    /// is exact rather than best-effort, so `harness_raw` stays null on rows
+    /// carrying it. One approval surface, two honesty postures (decision
+    /// 0048): external engines ship verbatim raw with a guessed kind, the
+    /// internal engine ships this and no raw.
+    ToolUse {
+        /// The action exactly as the consent decision will read it.
+        preview: crate::ToolActionPreview,
+        /// Grant rungs the decider may mint, narrowest first. Empty when the
+        /// call supports no standing grant.
+        offered_grants: Vec<crate::GrantScope>,
+    },
+    /// The engine asks the user structured questions before continuing.
+    Questions {
+        /// The questions, bounded by the engine's own validation.
+        questions: Vec<crate::UserQuestion>,
+    },
+    /// The engine proposes a plan and asks to leave plan mode.
+    ///
+    /// The plan body is loaded from the approvals route, not carried here —
+    /// plans routinely exceed journal payload bounds.
+    Plan {
+        /// Permission mode the conversation moves to when the plan is
+        /// accepted.
+        proposed_mode: PermissionMode,
+    },
 }
 
 /// Persisted repository record.

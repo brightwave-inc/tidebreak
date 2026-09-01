@@ -1,6 +1,7 @@
 import { useEffect, useId, useState, type ReactNode } from "react";
 
 import type { CodeApprovalSnapshot } from "../api/types";
+import { toolPreviewPresentation } from "../ToolPreview";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -67,38 +68,42 @@ export function CodeApprovalCard({
           reach it. Whatever it asked for did not run on your say-so.
         </p>
       )}
-      <div>
-        <button
-          type="button"
-          className={cn(
-            "text-muted-foreground hover:text-foreground cursor-pointer rounded-sm text-xs",
-            FOCUS_RING,
-            HOVER_TINT,
-          )}
-          aria-expanded={payloadOpen}
-          aria-controls={payloadOpen ? payloadId : undefined}
-          onClick={() => {
-            onReveal?.();
-            setPayloadOpen((current) => !current);
-          }}
-        >
-          Harness payload
-        </button>
-        <Reveal open={payloadOpen}>
-          {/*
+      {/* A structured approval from the internal engine carries no verbatim
+          payload; a disclosure that reveals nothing reads as a broken card. */}
+      {approval.harness_raw_json.length > 0 && (
+        <div>
+          <button
+            type="button"
+            className={cn(
+              "text-muted-foreground hover:text-foreground cursor-pointer rounded-sm text-xs",
+              FOCUS_RING,
+              HOVER_TINT,
+            )}
+            aria-expanded={payloadOpen}
+            aria-controls={payloadOpen ? payloadId : undefined}
+            onClick={() => {
+              onReveal?.();
+              setPayloadOpen((current) => !current);
+            }}
+          >
+            Harness payload
+          </button>
+          <Reveal open={payloadOpen}>
+            {/*
             One `pre`, not two: the scroll container is itself a `pre`, and a
             nested one carried the browser's own `white-space: pre`, so the
             wrapping asked for here never applied and a single long JSON line
             scrolled sideways instead.
           */}
-          <ScrollableContainer
-            id={payloadId}
-            className="bg-muted text-muted-foreground mt-2 max-h-48 rounded-md p-3 font-mono text-xs break-words whitespace-pre-wrap"
-          >
-            {prettyRaw(approval.harness_raw_json)}
-          </ScrollableContainer>
-        </Reveal>
-      </div>
+            <ScrollableContainer
+              id={payloadId}
+              className="bg-muted text-muted-foreground mt-2 max-h-48 rounded-md p-3 font-mono text-xs break-words whitespace-pre-wrap"
+            >
+              {prettyRaw(approval.harness_raw_json)}
+            </ScrollableContainer>
+          </Reveal>
+        </div>
+      )}
       {!decided && !denying && (
         <div className="flex flex-wrap gap-2">
           <Button
@@ -213,6 +218,35 @@ function ApprovalKindBody({ approval }: { approval: CodeApprovalSnapshot }) {
           {otherSummary(approval.kind.summary)}
         </p>
       );
+    case "tool_use":
+      // Decision 0018: the literal action, never the call's own narration.
+      return (
+        <pre className="bg-muted overflow-x-auto rounded-md p-2 font-mono text-md break-words whitespace-pre-wrap">
+          {toolPreviewPresentation(approval.kind.preview).detail}
+        </pre>
+      );
+    case "questions":
+      return (
+        <ul className="space-y-2">
+          {approval.kind.questions.map((question) => (
+            <li key={question.id}>
+              <p className="text-md break-words">{question.question}</p>
+              {question.options.length > 0 && (
+                <p className="text-muted-foreground text-xs break-words">
+                  {question.options.map((option) => option.label).join(" · ")}
+                </p>
+              )}
+            </li>
+          ))}
+        </ul>
+      );
+    case "plan":
+      return (
+        <p className="text-muted-foreground text-md break-words">
+          The engine proposed a plan. Accepting moves the session to{" "}
+          <span className="font-mono">{approval.kind.proposed_mode}</span>.
+        </p>
+      );
   }
 }
 
@@ -268,6 +302,12 @@ function approvalTitle(approval: CodeApprovalSnapshot): string {
       return "Run this command?";
     case "network":
       return "Allow this network access?";
+    case "tool_use":
+      return "Run this tool?";
+    case "questions":
+      return "Answer these questions?";
+    case "plan":
+      return "Approve this plan?";
     default:
       return "Allow this?";
   }

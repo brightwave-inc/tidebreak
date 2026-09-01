@@ -62,7 +62,9 @@ pub(crate) enum WorkerCommand {
     },
     Decide {
         approval: HarnessApprovalRef,
-        decision: ApprovalDecision,
+        // Boxed: the grant-carrying decision variants dwarf every other
+        // command (clippy::large_enum_variant).
+        decision: Box<ApprovalDecision>,
         reply: oneshot::Sender<Result<(), WorkerError>>,
     },
     Interrupt {
@@ -453,7 +455,8 @@ impl LiveSink {
                 "approval capability does not match its session, row, and worker epoch".into(),
             ));
         }
-        self.record_approval(approval_id, harness_ref, raw).await
+        self.record_approval(approval_id, harness_ref, raw, None)
+            .await
     }
 
     async fn record_approval(
@@ -461,6 +464,7 @@ impl LiveSink {
         approval_id: CodeApprovalId,
         harness_ref: &tidebreak_harness::HarnessApprovalRef,
         raw: &serde_json::Value,
+        kind: Option<&tidebreak_core::CodeApprovalKind>,
     ) -> Result<CodeApproval, WorkerError> {
         let existing = *self.turn_id.lock().expect("code sink turn");
         let turn_id = match existing {
@@ -488,7 +492,9 @@ impl LiveSink {
             id: approval_id,
             session_id: self.session_id,
             turn_id,
-            kind: kind_from_raw(raw),
+            // An engine that classifies its own request precisely ships the
+            // kind on the event; otherwise the server guesses from raw.
+            kind: kind.cloned().unwrap_or_else(|| kind_from_raw(raw)),
             harness_raw: persist_harness_raw(&harness_ref.call_id, raw),
             native_call_id: Some(harness_ref.call_id.clone()),
             server_capability: capability.map(|binding| binding.token.clone()),
@@ -575,9 +581,14 @@ impl HarnessEventSink for LiveSink {
         ) {
             self.persist_pending_resume_ref().await;
         }
-        if let HarnessEvent::ApprovalRequested { harness_ref, raw } = &event {
+        if let HarnessEvent::ApprovalRequested {
+            harness_ref,
+            raw,
+            kind,
+        } = &event
+        {
             if let Err(error) = self
-                .record_approval(CodeApprovalId::new(), harness_ref, raw)
+                .record_approval(CodeApprovalId::new(), harness_ref, raw, kind.as_ref())
                 .await
             {
                 warn!(
@@ -1099,7 +1110,7 @@ async fn apply_control(
         } => {
             let result = match tokio::time::timeout(
                 APPROVAL_CONTROL_TIMEOUT,
-                engine.decide(approval, decision),
+                engine.decide(approval, *decision),
             )
             .await
             {
@@ -1765,6 +1776,12 @@ async fn drive_turn_inner(
             let detail = match outcome {
                 TurnOutcome::Clean => None,
                 TurnOutcome::Incomplete { detail } => Some(detail),
+                // No registered engine declares durable_parks yet; a park
+                // reaching this worker is a contract violation, and failing
+                // the turn loudly beats stranding it open.
+                TurnOutcome::Parked { .. } => {
+                    Some("the engine parked the turn, which this worker does not support".into())
+                }
             };
             // An engine that died on us says why on stderr. That belongs in
             // the journal, not only in a log line nobody reading the session
@@ -2726,14 +2743,7 @@ fn map_event(event: HarnessEvent, turn_id: Option<CodeTurnId>) -> Option<CodeEve
         }
         HarnessEvent::ApprovalResolved { decision, .. } => CodeEvent::ApprovalResolved {
             approval_id: CodeApprovalId::new(),
-            decision: match decision {
-                tidebreak_harness::ApprovalDecision::Approve => {
-                    tidebreak_core::ApprovalDecisionKind::Approve
-                }
-                tidebreak_harness::ApprovalDecision::Deny { feedback } => {
-                    tidebreak_core::ApprovalDecisionKind::Deny { feedback }
-                }
-            },
+            decision: decision.into(),
         },
         HarnessEvent::UserSteered { text } => CodeEvent::UserSteered { text },
         HarnessEvent::TurnCompleted { usage } => CodeEvent::TurnCompleted {
@@ -2999,7 +3009,7 @@ mod tests {
                 relay_key_env: None,
                 env: Vec::new(),
                 approval: None,
-                binary: std::path::PathBuf::from("/scripted/engine"),
+                binary: Some(std::path::PathBuf::from("/scripted/engine")),
                 sink: sink.clone() as Arc<dyn tidebreak_harness::HarnessEventSink>,
                 browser: None,
             })
@@ -3111,7 +3121,7 @@ mod tests {
                 relay_key_env: None,
                 env: Vec::new(),
                 approval: None,
-                binary: std::path::PathBuf::from("/scripted/engine"),
+                binary: Some(std::path::PathBuf::from("/scripted/engine")),
                 sink: sink.clone() as Arc<dyn tidebreak_harness::HarnessEventSink>,
                 browser: None,
             })
@@ -3737,7 +3747,7 @@ mod tests {
                 relay_key_env: None,
                 env: Vec::new(),
                 approval: None,
-                binary: std::path::PathBuf::from("/scripted/engine"),
+                binary: Some(std::path::PathBuf::from("/scripted/engine")),
                 sink: sink.clone() as Arc<dyn tidebreak_harness::HarnessEventSink>,
                 browser: None,
             })

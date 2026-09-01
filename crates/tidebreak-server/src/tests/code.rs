@@ -355,6 +355,7 @@ fn write_approval_script(call_id: &str, content: &str) -> Vec<HarnessEvent> {
                 "input": { "file_path": "/workspace/probe.txt", "content": content },
                 "tool_use_id": call_id
             }),
+            kind: None,
         },
         HarnessEvent::AssistantDelta {
             text: "after the decision".into(),
@@ -404,6 +405,7 @@ fn undecided_approval_script(call_id: &str) -> Vec<HarnessEvent> {
                 "input": { "command": "rm -rf /tmp/scratch" },
                 "tool_use_id": call_id
             }),
+            kind: None,
         },
         HarnessEvent::TurnCompleted {
             usage: Default::default(),

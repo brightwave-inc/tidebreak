@@ -234,6 +234,13 @@ impl HarnessAdapter for ClaudeCodeAdapter {
             native_interrupt: CapLevel::Supported,
             image_input: CapLevel::Supported,
             slash_commands: CapLevel::Unknown,
+            // Tidebreak contract concepts, not protocol surface: an external
+            // engine's turn state lives in its process, so nothing here can
+            // park durably, take structured answers, or mint standing grants
+            // (decisions 0033, 0048).
+            durable_parks: CapLevel::Unsupported,
+            user_questions: CapLevel::Unsupported,
+            standing_grants: CapLevel::Unsupported,
         };
         // Off the captured 2.1 line — a declared newer engine, say — the
         // stream contract and permission flags are stable documented
@@ -270,7 +277,7 @@ impl HarnessAdapter for ClaudeCodeAdapter {
     }
 
     async fn launch(&self, spec: SessionSpec) -> Result<Box<dyn HarnessSession>, HarnessError> {
-        if !spec.binary.is_absolute() {
+        if !spec.binary.as_deref().is_some_and(Path::is_absolute) {
             return Err(HarnessError::NotFound);
         }
         Ok(Box::new(ClaudeSession::new(spec)))
@@ -642,7 +649,9 @@ mod tests {
             serde_json::from_value(raw["params"]["arguments"].clone()).unwrap();
         let event = crate::claude::approvals::event_from_prompt_request(&request);
         match event {
-            HarnessEvent::ApprovalRequested { harness_ref, raw } => {
+            HarnessEvent::ApprovalRequested {
+                harness_ref, raw, ..
+            } => {
                 assert_eq!(harness_ref.call_id, request.tool_use_id);
                 assert_eq!(raw["tool_name"], "Write");
             }

@@ -85,7 +85,7 @@ impl GrokSession {
     ) -> Result<LaunchPlan, HarnessError> {
         let relay_auth = self.relay_auth_file()?;
         compose_print_plan(PrintLaunch {
-            binary: &self.spec.binary,
+            binary: self.spec.binary.as_deref().ok_or(HarnessError::NotFound)?,
             extra_argv: &self.spec.extra_argv,
             cwd: &self.spec.worktree,
             extra_env: &self.spec.extra_env,

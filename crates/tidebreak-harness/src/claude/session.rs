@@ -546,7 +546,12 @@ impl ClaudeSession {
         // keeps one child serving the whole session (decision 0057). Images
         // ride the same pipe as stream-json user content (decision 0046).
         let mut argv = vec![
-            self.spec.binary.to_string_lossy().into_owned(),
+            self.spec
+                .binary
+                .as_deref()
+                .ok_or(HarnessError::NotFound)?
+                .to_string_lossy()
+                .into_owned(),
             "-p".into(),
             "--output-format".into(),
             "stream-json".into(),
@@ -1081,6 +1086,16 @@ impl HarnessSession for ClaudeSession {
         approval: HarnessApprovalRef,
         decision: ApprovalDecision,
     ) -> Result<(), HarnessError> {
+        if matches!(
+            decision,
+            ApprovalDecision::ApproveWithGrant { .. }
+                | ApprovalDecision::Answers { .. }
+                | ApprovalDecision::PlanDecision { .. }
+        ) {
+            return Err(HarnessError::DecisionUnsupported(
+                "the claude permission prompt takes allow or deny".into(),
+            ));
+        }
         let Some(channel) = &self.spec.approval else {
             return Err(HarnessError::Other(
                 "this session has no approval channel".into(),
@@ -1453,7 +1468,7 @@ mod tests {
             relay_key_env: None,
             env: Vec::new(),
             approval: None,
-            binary,
+            binary: Some(binary),
             sink,
             browser: None,
         })
@@ -1623,7 +1638,7 @@ done
             relay_key_env: None,
             env: Vec::new(),
             approval: None,
-            binary: PathBuf::from("/usr/bin/claude"),
+            binary: Some(PathBuf::from("/usr/bin/claude")),
             sink: Arc::new(Discard),
             browser: None,
         });
@@ -1826,7 +1841,7 @@ done
             relay_key_env: None,
             env: Vec::new(),
             approval: Some(approval),
-            binary: dir.path().join("claude"),
+            binary: Some(dir.path().join("claude")),
             sink: Arc::new(Discard),
             browser: Some(browser),
         });
@@ -1881,7 +1896,7 @@ done
             relay_key_env: None,
             env: Vec::new(),
             approval: None,
-            binary: dir.path().join("claude"),
+            binary: Some(dir.path().join("claude")),
             sink: Arc::new(Discard),
             browser: None,
         });

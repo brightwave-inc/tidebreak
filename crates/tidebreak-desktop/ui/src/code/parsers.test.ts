@@ -1008,6 +1008,28 @@ describe("parseCodeEvent", () => {
       parseCodeEvent({ ...completed, detail: { kind: "command", cmd: 7 } }),
     ).toBeNull();
   });
+
+  it("takes structured approval resolutions alongside the plain ones", () => {
+    for (const decision of [
+      { type: "approved_with_grant", scope: { tool: "export", rung: "turn" } },
+      { type: "answered", answers: [{ id: "q1", choice: "us-east" }] },
+      { type: "plan_decided", approve: false, feedback: "Split the plan." },
+    ]) {
+      const resolved = {
+        type: "approval_resolved",
+        approval_id: "appr-1",
+        decision,
+      };
+      expect(parseCodeEvent(resolved)).toEqual(resolved);
+    }
+    expect(
+      parseCodeEvent({
+        type: "approval_resolved",
+        approval_id: "appr-1",
+        decision: { type: "escalated" },
+      }),
+    ).toBeNull();
+  });
 });
 
 describe("liveCodeSessions", () => {

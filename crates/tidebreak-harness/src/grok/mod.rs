@@ -125,6 +125,12 @@ impl HarnessAdapter for GrokAdapter {
             native_interrupt: CapLevel::Supported,
             image_input: CapLevel::Unknown,
             slash_commands: CapLevel::Unknown,
+            // Tidebreak contract concepts, not protocol surface (decisions
+            // 0033, 0048): no external engine parks durably, takes
+            // structured answers, or mints standing grants.
+            durable_parks: CapLevel::Unsupported,
+            user_questions: CapLevel::Unsupported,
+            standing_grants: CapLevel::Unsupported,
         };
         // Off the captured 1.0 line the unprompted-write observation behind
         // Auto no longer holds; a later default posture is unproven
@@ -153,11 +159,11 @@ impl HarnessAdapter for GrokAdapter {
     }
 
     async fn launch(&self, spec: SessionSpec) -> Result<Box<dyn HarnessSession>, HarnessError> {
-        if !spec.binary.is_absolute() {
+        let Some(binary) = spec.binary.as_deref().filter(|path| path.is_absolute()) else {
             return Err(HarnessError::NotFound);
-        }
+        };
         crate::grok::session::refuse_unhonored_mode(spec.permission_mode)?;
-        let version = observe_version(&spec.binary, &spec.env)
+        let version = observe_version(binary, &spec.env)
             .await
             .unwrap_or_else(|_| "unknown".into());
         Ok(Box::new(GrokSession::new(spec, version)))

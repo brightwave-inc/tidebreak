@@ -99,6 +99,12 @@ impl HarnessAdapter for OpencodeAdapter {
             native_interrupt: CapLevel::Supported,
             image_input: CapLevel::Unknown,
             slash_commands: CapLevel::Unknown,
+            // Tidebreak contract concepts, not protocol surface (decisions
+            // 0033, 0048): no external engine parks durably, takes
+            // structured answers, or mints standing grants.
+            durable_parks: CapLevel::Unsupported,
+            user_questions: CapLevel::Unsupported,
+            standing_grants: CapLevel::Unsupported,
         };
         // Off the captured 1.18 line the missing-effort finding no longer
         // applies: a later minor may grow an engine ladder, so the verdict
@@ -120,7 +126,11 @@ impl HarnessAdapter for OpencodeAdapter {
     }
 
     async fn launch(&self, spec: SessionSpec) -> Result<Box<dyn HarnessSession>, HarnessError> {
-        if !spec.binary.is_absolute() {
+        if !spec
+            .binary
+            .as_deref()
+            .is_some_and(std::path::Path::is_absolute)
+        {
             return Err(HarnessError::NotFound);
         }
         // The serve child spawns on the first turn, not here (decision 0064),

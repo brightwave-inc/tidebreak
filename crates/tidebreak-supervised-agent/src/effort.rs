@@ -174,6 +174,9 @@ mod tests {
                 native_interrupt: CapLevel::Unknown,
                 image_input: CapLevel::Unknown,
                 slash_commands: CapLevel::Unknown,
+                durable_parks: CapLevel::Unsupported,
+                user_questions: CapLevel::Unsupported,
+                standing_grants: CapLevel::Unsupported,
             }
         }
 

@@ -99,3 +99,64 @@ export const DecisionFailed: Story = {
     error: "The decision could not be saved. The command has not run.",
   },
 };
+
+/**
+ * A structured tool_use approval from an engine behind the adapter. The card
+ * shows the literal action — argv, working directory, staged files — and
+ * never the call's own display-only narration (decision 0018).
+ */
+export const ToolUse: Story = {
+  args: {
+    approval: {
+      ...pending,
+      kind: {
+        type: "tool_use",
+        preview: {
+          tool: "exec",
+          command: "python3",
+          args: ["analyze.py", "--input", "sales report.csv"],
+          cwd: "work",
+          files: ["sales report.csv"],
+          summary: "Analyzing the sales report",
+        },
+        offered_grants: [],
+      },
+      harness_raw_json: "",
+    },
+  },
+};
+
+export const Questions: Story = {
+  args: {
+    approval: {
+      ...pending,
+      kind: {
+        type: "questions",
+        questions: [
+          {
+            id: "region",
+            header: "Region",
+            question: "Which region should the deploy target?",
+            options: [
+              { id: "east", label: "us-east", description: "" },
+              { id: "west", label: "us-west", description: "" },
+            ],
+            question_type: "single_select",
+            allow_free_form: false,
+          },
+        ],
+      },
+      harness_raw_json: "",
+    },
+  },
+};
+
+export const Plan: Story = {
+  args: {
+    approval: {
+      ...pending,
+      kind: { type: "plan", proposed_mode: "auto" },
+      harness_raw_json: "",
+    },
+  },
+};

@@ -79,6 +79,9 @@ const CAPS = {
   native_interrupt: "supported",
   image_input: "unknown",
   slash_commands: "unknown",
+  durable_parks: "unsupported",
+  user_questions: "unsupported",
+  standing_grants: "unsupported",
 } as const;
 
 function entry(

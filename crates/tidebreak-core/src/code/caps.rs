@@ -89,6 +89,30 @@ pub struct HarnessCaps {
     /// always pass-through. This flag only says a machine-readable listing
     /// exists to feed the composer popup.
     pub slash_commands: CapLevel,
+    /// The engine can end a turn as a durable checkpoint and continue it
+    /// later: `run_turn` may return a parked outcome, and `resume_turn`
+    /// picks the turn up once the awaited dependency resolves.
+    ///
+    /// External engines hold their turn state in a live process and have no
+    /// channel that survives one, so they declare `Unsupported`. The flag
+    /// exists for engines whose turn state is durable — the internal engine
+    /// first (decision 0048 step 5).
+    pub durable_parks: CapLevel,
+    /// The engine raises structured user-question approvals and accepts an
+    /// answers decision on them.
+    ///
+    /// Distinct from `structured_approvals`, which only says a consent
+    /// channel exists: this flag says the engine can ask the user a
+    /// multiple-choice question mid-turn and consume the structured answer.
+    pub user_questions: CapLevel,
+    /// The engine accepts an approve-with-standing-grant decision, minting
+    /// durable consent that outlives the approval.
+    ///
+    /// Decision 0033 keeps external harnesses verbatim-payload with no
+    /// standing grants; that posture is this flag declared `Unsupported`,
+    /// not a separate subsystem. The internal engine's grant ladders
+    /// declare it `Supported`.
+    pub standing_grants: CapLevel,
 }
 
 /// One engine-owned slash command, captured from the engine's own listing.
@@ -120,10 +144,15 @@ mod tests {
             native_interrupt: CapLevel::Supported,
             image_input: CapLevel::Unknown,
             slash_commands: CapLevel::Unknown,
+            durable_parks: CapLevel::Unsupported,
+            user_questions: CapLevel::Unsupported,
+            standing_grants: CapLevel::Unsupported,
         };
         assert_eq!(caps.resume, CapLevel::Supported);
         assert_eq!(caps.structured_approvals, CapLevel::Unknown);
         assert_eq!(caps.image_input, CapLevel::Unknown);
         assert_eq!(caps.slash_commands, CapLevel::Unknown);
+        assert_eq!(caps.durable_parks, CapLevel::Unsupported);
+        assert_eq!(caps.standing_grants, CapLevel::Unsupported);
     }
 }

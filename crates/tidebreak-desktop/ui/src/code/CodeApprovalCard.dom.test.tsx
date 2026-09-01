@@ -37,7 +37,91 @@ const pendingWrite: CodeApprovalSnapshot = {
   requested_at: "2026-08-15T12:00:00.000Z",
 };
 
+const pendingToolUse: CodeApprovalSnapshot = {
+  id: "appr-3",
+  session_id: "sess-1",
+  turn_id: "turn-1",
+  kind: {
+    type: "tool_use",
+    preview: {
+      tool: "exec",
+      command: "rm",
+      args: ["-rf", "two words"],
+      cwd: "work",
+      files: ["notes.md"],
+      summary: "Cleaning temporary caches",
+    },
+    offered_grants: [],
+  },
+  harness_raw_json: "",
+  state: "pending",
+  requested_at: "2026-08-15T12:00:00.000Z",
+};
+
+const pendingQuestions: CodeApprovalSnapshot = {
+  id: "appr-4",
+  session_id: "sess-1",
+  turn_id: "turn-1",
+  kind: {
+    type: "questions",
+    questions: [
+      {
+        id: "q1",
+        header: "Region",
+        question: "Which region should the deploy target?",
+        options: [
+          { id: "east", label: "us-east", description: "" },
+          { id: "west", label: "us-west", description: "" },
+        ],
+        question_type: "single_select",
+        allow_free_form: false,
+      },
+    ],
+  },
+  harness_raw_json: "",
+  state: "pending",
+  requested_at: "2026-08-15T12:00:00.000Z",
+};
+
+const pendingPlan: CodeApprovalSnapshot = {
+  id: "appr-5",
+  session_id: "sess-1",
+  turn_id: "turn-1",
+  kind: { type: "plan", proposed_mode: "auto" },
+  harness_raw_json: "",
+  state: "pending",
+  requested_at: "2026-08-15T12:00:00.000Z",
+};
+
 describe("CodeApprovalCard", () => {
+  it("shows the literal tool action, never the model's narration", () => {
+    render(<CodeApprovalCard approval={pendingToolUse} onDecide={vi.fn()} />);
+    expect(screen.getByText("Run this tool?")).toBeInTheDocument();
+    const detail = screen.getByText(/rm -rf 'two words'/);
+    expect(detail.tagName).toBe("PRE");
+    expect(detail.textContent).toContain("# working directory: work");
+    expect(detail.textContent).toContain("# staged files: notes.md");
+    // Decision 0018: the display-only summary never reaches the consent card.
+    expect(
+      screen.queryByText(/Cleaning temporary caches/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("lists the questions and options the engine is asking", () => {
+    render(<CodeApprovalCard approval={pendingQuestions} onDecide={vi.fn()} />);
+    expect(screen.getByText("Answer these questions?")).toBeInTheDocument();
+    expect(
+      screen.getByText("Which region should the deploy target?"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("us-east · us-west")).toBeInTheDocument();
+  });
+
+  it("names the mode a plan approval would move the session to", () => {
+    render(<CodeApprovalCard approval={pendingPlan} onDecide={vi.fn()} />);
+    expect(screen.getByText("Approve this plan?")).toBeInTheDocument();
+    expect(screen.getByText("auto")).toBeInTheDocument();
+  });
+
   it("leads with the command and keeps the harness payload collapsed", () => {
     render(<CodeApprovalCard approval={pendingCommand} onDecide={vi.fn()} />);
     expect(screen.getByText("Run this command?")).toBeInTheDocument();
