@@ -30,6 +30,8 @@ type BrowserScenario =
   | "failure"
   | "popup"
   | "download"
+  | "download-failed"
+  | "download-saved"
   | "viewport-fit"
   | "viewport-desktop"
   | "viewport-tablet"
@@ -314,6 +316,21 @@ function BrowserStory({
             message="Downloads stay blocked until Tidebreak has a bounded destination"
             actionLabel="Open externally"
             onAction={fn()}
+            onDismiss={fn()}
+          />
+        )}
+        {scenario === "download-failed" && (
+          <BrowserNoticeRow
+            message="report.md: The downloaded text file is not valid UTF-8"
+            actionLabel="Open externally"
+            onAction={fn()}
+            onDismiss={fn()}
+          />
+        )}
+        {scenario === "download-saved" && (
+          <BrowserNoticeRow
+            tone="info"
+            message="Saved quarterly-report.pdf to Outputs"
             onDismiss={fn()}
           />
         )}
@@ -740,6 +757,12 @@ export const Failure: Story = {
 export const PopupBlocked: Story = { args: { scenario: "popup" } };
 
 export const DownloadBlocked: Story = { args: { scenario: "download" } };
+
+export const DownloadFailed: Story = {
+  args: { scenario: "download-failed" },
+};
+
+export const DownloadSaved: Story = { args: { scenario: "download-saved" } };
 
 export const Compact: Story = { args: { scenario: "agent", compact: true } };
 

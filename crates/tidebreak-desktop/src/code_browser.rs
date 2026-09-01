@@ -24,6 +24,9 @@ use crate::browser_control::{
     BrowserAgentAccess, BrowserController, BrowserDispatchEffect, BrowserLoadState,
     BrowserNavigationDecision, BrowserRegistry, BrowserSnapshot, ManagedBrowserRegistration,
 };
+use crate::browser_downloads::{
+    publish_completed_download, BrowserDownloadFinished, BrowserDownloadStore,
+};
 #[cfg(any(target_os = "macos", test))]
 use crate::browser_profile::normalize_website_host;
 use crate::browser_profile::{BrowserProfileStore, ManagedBrowserProfile};
@@ -186,6 +189,7 @@ pub(crate) async fn code_browser_command(
     app: AppHandle,
     registry: tauri::State<'_, BrowserRegistry>,
     profiles: tauri::State<'_, BrowserProfileStore>,
+    downloads: tauri::State<'_, BrowserDownloadStore>,
     request: CodeBrowserCommandRequest,
 ) -> Result<BrowserSnapshot, String> {
     validated_workspace_id(&request.workspace_id)?;
@@ -193,6 +197,7 @@ pub(crate) async fn code_browser_command(
     let existing = app.get_webview(&label);
     let registry = registry.inner().clone();
     let profiles = profiles.inner().clone();
+    let downloads = downloads.inner().clone();
 
     match request.action {
         CodeBrowserAction::Create {
@@ -225,6 +230,7 @@ pub(crate) async fn code_browser_command(
                 &app,
                 &registry,
                 &profiles,
+                &downloads,
                 profile,
                 &request.workspace_id,
                 &request.browser_id,
@@ -237,6 +243,7 @@ pub(crate) async fn code_browser_command(
         }
         CodeBrowserAction::ResetProfile { reset_id } => {
             validated_profile_reset_id(reset_id)?;
+            downloads.cancel_browser(&request.browser_id)?;
             let _lifecycle = profiles.lock_lifecycle().await;
             reset_browser_profile(
                 &app,
@@ -310,6 +317,7 @@ pub(crate) async fn code_browser_command(
             registry.snapshot(&request.browser_id, &request.workspace_id)
         }
         CodeBrowserAction::Close => {
+            downloads.cancel_browser(&request.browser_id)?;
             let owner_id = OwnerId::local();
             registry.ensure_recovery_binding(
                 &owner_id,
@@ -519,6 +527,7 @@ fn create_browser(
     app: &AppHandle,
     registry: &BrowserRegistry,
     profiles: &BrowserProfileStore,
+    downloads: &BrowserDownloadStore,
     profile: ManagedBrowserProfile,
     workspace_id: &str,
     browser_id: &str,
@@ -572,9 +581,11 @@ fn create_browser(
     let title_browser = browser_id.to_owned();
     let title_workspace = workspace_id.to_owned();
     let title_registry = registry.clone();
-    let download_main = main.clone();
+    let download_app = app.clone();
     let download_browser = browser_id.to_owned();
     let download_workspace = workspace_id.to_owned();
+    let download_registry = registry.clone();
+    let download_store = downloads.clone();
 
     let builder = WebviewBuilder::new(label, WebviewUrl::External(target));
     #[cfg(target_os = "macos")]
@@ -764,26 +775,68 @@ fn create_browser(
                 },
             );
         })
-        .on_download(move |_webview, event| {
-            if let DownloadEvent::Requested { url, .. } = event {
-                emit_event(
-                    &download_main,
-                    CodeBrowserEvent {
-                        workspace_id: download_workspace.clone(),
-                        browser_id: download_browser.clone(),
-                        kind: "download_blocked",
-                        url: Some(url.to_string()),
-                        title: None,
-                        message: None,
-                        load_state: None,
-                        document_epoch: None,
-                        controller: None,
-                        agent_access: None,
-                        origin: None,
-                    },
-                );
+        .on_download(move |_webview, event| match event {
+            DownloadEvent::Requested { url, destination } => {
+                match download_store.begin(
+                    &download_registry,
+                    &download_browser,
+                    &download_workspace,
+                    &url,
+                    destination,
+                ) {
+                    Ok(started) => {
+                        *destination = started.destination;
+                        emit_download_event(
+                            &download_app,
+                            &download_workspace,
+                            &download_browser,
+                            "download_started",
+                            None,
+                            format!("Saving {} to Outputs", started.filename),
+                        );
+                        true
+                    }
+                    Err(message) => {
+                        emit_download_event(
+                            &download_app,
+                            &download_workspace,
+                            &download_browser,
+                            "download_blocked",
+                            Some(url.to_string()),
+                            message,
+                        );
+                        false
+                    }
+                }
             }
-            false
+            DownloadEvent::Finished { url, path, success } => {
+                match download_store.finish(&download_browser, &url, path.as_deref(), success) {
+                    Ok(BrowserDownloadFinished::Publish(receipt)) => {
+                        publish_completed_download(download_app.clone(), receipt, url.to_string());
+                    }
+                    Ok(BrowserDownloadFinished::Rejected { filename, message }) => {
+                        emit_download_event(
+                            &download_app,
+                            &download_workspace,
+                            &download_browser,
+                            "download_failed",
+                            Some(url.to_string()),
+                            format!("{filename}: {message}"),
+                        );
+                    }
+                    Ok(BrowserDownloadFinished::Ignored) => {}
+                    Err(message) => emit_download_event(
+                        &download_app,
+                        &download_workspace,
+                        &download_browser,
+                        "download_failed",
+                        Some(url.to_string()),
+                        message,
+                    ),
+                }
+                true
+            }
+            _ => false,
         });
 
     let webview = match window.add_child(
@@ -1454,6 +1507,35 @@ fn validated_profile_reset_id(reset_id: u64) -> Result<(), String> {
 
 fn emit_event(main: &Webview, event: CodeBrowserEvent) {
     let _ = main.emit(CODE_BROWSER_EVENT, event);
+}
+
+pub(crate) fn emit_download_event(
+    app: &AppHandle,
+    workspace_id: &str,
+    browser_id: &str,
+    kind: &'static str,
+    url: Option<String>,
+    message: String,
+) {
+    let Some(main) = app.get_webview("main") else {
+        return;
+    };
+    emit_event(
+        &main,
+        CodeBrowserEvent {
+            workspace_id: workspace_id.to_owned(),
+            browser_id: browser_id.to_owned(),
+            kind,
+            url,
+            title: None,
+            message: Some(message),
+            load_state: None,
+            document_epoch: None,
+            controller: None,
+            agent_access: None,
+            origin: None,
+        },
+    );
 }
 
 fn emit_controller_event(app: &AppHandle, snapshot: &BrowserSnapshot) {

@@ -14,13 +14,14 @@
 //! verified against the revision's recorded length and digest before they are
 //! returned.
 
+use std::fs;
 use std::io::Read as _;
 use std::path::Path;
 use std::sync::Arc;
 
 use cap_fs_ext::{DirExt as _, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::ambient_authority;
-use cap_std::fs::{Dir, OpenOptions};
+use cap_std::fs::{Dir, DirBuilder, OpenOptions};
 use sha2::{Digest, Sha256};
 
 use tidebreak_core::{
@@ -125,6 +126,65 @@ pub fn open_chat_scratch(scratch_root: &Path, chat_id: ChatId) -> Result<Dir, St
     }
     root.open_dir_nofollow(&chat_name)
         .map_err(|_| "Output content is unavailable".to_owned())
+}
+
+/// Open or create the exact conversation's private scratch directory.
+///
+/// Native host operations use this when they publish an output before a turn
+/// has created the chat directory. Every path component is checked without
+/// following symlinks before the returned capability can write below it.
+pub fn open_or_create_chat_scratch(scratch_root: &Path, chat_id: ChatId) -> Result<Dir, String> {
+    match fs::symlink_metadata(scratch_root) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => return Err("Private output storage is invalid".to_owned()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut builder = fs::DirBuilder::new();
+            builder.recursive(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt as _;
+                builder.mode(0o700);
+            }
+            builder
+                .create(scratch_root)
+                .map_err(|_| "Could not create private outputs".to_owned())?;
+        }
+        Err(_) => return Err("Could not inspect private outputs".to_owned()),
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(scratch_root, fs::Permissions::from_mode(0o700))
+            .map_err(|_| "Could not secure private outputs".to_owned())?;
+    }
+
+    let root = open_regular_directory(scratch_root)?
+        .ok_or_else(|| "Could not open private outputs".to_owned())?;
+    let chat_name = chat_id.to_string();
+    if !is_regular_child_directory(&root, &chat_name)? {
+        let mut builder = DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use cap_std::fs::DirBuilderExt as _;
+            builder.mode(0o700);
+        }
+        match root.create_dir_with(&chat_name, &builder) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return Err("Could not create private output storage".to_owned()),
+        }
+    }
+    if !is_regular_child_directory(&root, &chat_name)? {
+        return Err("Private output storage is invalid".to_owned());
+    }
+    #[cfg(unix)]
+    {
+        use cap_std::fs::PermissionsExt as _;
+        root.set_permissions(&chat_name, cap_std::fs::Permissions::from_mode(0o700))
+            .map_err(|_| "Could not secure private output storage".to_owned())?;
+    }
+    root.open_dir_nofollow(&chat_name)
+        .map_err(|_| "Could not open private output storage".to_owned())
 }
 
 /// Read one immutable revision's complete bytes.
@@ -299,6 +359,53 @@ mod tests {
         assert!(
             read_output_revision_bytes(scratch.path(), output.chat_id, &output, &revision).is_err()
         );
+    }
+
+    #[test]
+    fn chat_scratch_is_created_with_private_directories() {
+        let parent = tempfile::tempdir().unwrap();
+        let scratch_root = parent.path().join("scratch");
+        let chat_id = ChatId::new();
+
+        let _scratch = open_or_create_chat_scratch(&scratch_root, chat_id).unwrap();
+
+        assert!(scratch_root.is_dir());
+        assert!(scratch_root.join(chat_id.to_string()).is_dir());
+        assert!(open_chat_scratch(&scratch_root, chat_id).is_ok());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                fs::metadata(&scratch_root).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            assert_eq!(
+                fs::metadata(scratch_root.join(chat_id.to_string()))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn chat_scratch_creation_refuses_symlinked_storage() {
+        use std::os::unix::fs::symlink;
+
+        let parent = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let scratch_root = parent.path().join("scratch");
+        symlink(outside.path(), &scratch_root).unwrap();
+        assert!(open_or_create_chat_scratch(&scratch_root, ChatId::new()).is_err());
+
+        fs::remove_file(&scratch_root).unwrap();
+        fs::create_dir(&scratch_root).unwrap();
+        let chat_id = ChatId::new();
+        symlink(outside.path(), scratch_root.join(chat_id.to_string())).unwrap();
+        assert!(open_or_create_chat_scratch(&scratch_root, chat_id).is_err());
     }
 
     #[cfg(unix)]

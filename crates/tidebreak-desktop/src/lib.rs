@@ -24,6 +24,7 @@ mod broker;
     reason = "the staged browser bridge is test-covered and will be wired in #2339 and #2340"
 )]
 mod browser_control;
+mod browser_downloads;
 mod browser_profile;
 mod browser_recovery;
 mod browser_runtime_adapter;
@@ -919,6 +920,7 @@ pub fn run() {
             browser_registry.initialize_private_state(&data)?;
             app.manage(browser_registry);
             app.manage(browser_profile::BrowserProfileStore::open(&data)?);
+            app.manage(browser_downloads::BrowserDownloadStore::open(&data)?);
             let home = home_dir(&handle)?;
             // Built before anything that reaches the host: `server_info`
             // consults the attachment first, because a remote client must not
@@ -1074,6 +1076,10 @@ async fn boot_server(
     let recovery_app = app.clone();
     tauri::async_runtime::spawn(async move {
         client_execution::recover_folder_access_receipts(recovery_app).await;
+    });
+    let browser_download_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        browser_downloads::recover_browser_downloads(browser_download_app).await;
     });
     let folder_operation_app = app.clone();
     tauri::async_runtime::spawn(async move {

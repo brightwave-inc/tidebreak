@@ -8,8 +8,8 @@
 //! durable, exportable output revision. The bytes land in the exact
 //! conversation's private scratch under the same write-once revision path as a
 //! text deliverable, so every downstream surface (the desktop catalog, preview,
-//! and Save As… export) treats an accepted binary artifact exactly like any
-//! other output.
+//! and Save As… export) treats an accepted artifact exactly like any other
+//! output.
 
 use std::io::Read as _;
 
@@ -19,9 +19,10 @@ use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 
 use crate::deliverable::{
-    media_type_is_editable_text, output_revision_relative_path, revision_byte_ceiling,
-    validate_editable_text_content, CreateOutput, DeliverableKind, NewOutputRevision,
-    OutputRevision, RevisionProducer, MAX_BINARY_DELIVERABLE_BYTES, OUTPUTS_DIRECTORY,
+    deliverable_media_type, media_type_is_editable_text, output_revision_relative_path,
+    revision_byte_ceiling, validate_binary_deliverable, validate_editable_text_content,
+    CreateOutput, DeliverableKind, NewOutputRevision, OutputRevision, RevisionProducer,
+    MAX_BINARY_DELIVERABLE_BYTES, OUTPUTS_DIRECTORY,
 };
 use crate::error::{AgentError, Result};
 use crate::id::{ChatId, OutputId, OutputRevisionId};
@@ -43,7 +44,8 @@ pub struct WorkspaceArtifactProposal {
     pub chat_id: ChatId,
     /// Portable display filename shown in the catalog and save dialog.
     pub filename: String,
-    /// Declared media type of the artifact, validated as binary.
+    /// Declared media type of the artifact. Curated text filenames must use
+    /// their canonical media type; other filenames use the binary path.
     pub media_type: String,
     /// Caller-minted revision identity, also the private-scratch filename.
     pub revision_id: OutputRevisionId,
@@ -71,11 +73,7 @@ pub async fn accept_workspace_artifact(
     if proposal.content.is_empty() {
         return Err(AgentError::Store("workspace artifact is empty".into()));
     }
-    if proposal.content.len() > MAX_BINARY_DELIVERABLE_BYTES {
-        return Err(AgentError::Store(format!(
-            "workspace artifact is too large (maximum {MAX_BINARY_DELIVERABLE_BYTES} bytes)"
-        )));
-    }
+    let kind = workspace_artifact_kind(proposal)?;
 
     let byte_len = proposal.content.len() as u64;
     let sha256: [u8; 32] = Sha256::digest(&proposal.content).into();
@@ -97,8 +95,8 @@ pub async fn accept_workspace_artifact(
         id: proposal.revision_id,
         byte_len,
         sha256,
-        // A binary artifact carries no retrieval citations: it is host-accepted
-        // bytes, not a turn's cited text.
+        // A host-accepted artifact carries no retrieval citations. It contains
+        // transferred bytes, not cited text from a turn.
         turn_id: None,
         producing_run_id: None,
         created_at: proposal.created_at,
@@ -115,13 +113,38 @@ pub async fn accept_workspace_artifact(
                 id: proposal.output_id,
                 chat_id: proposal.chat_id,
                 filename: proposal.filename.clone(),
-                kind: DeliverableKind::Binary {
-                    media_type: proposal.media_type.clone(),
-                },
+                kind,
                 revision,
             })
             .await
     }
+}
+
+fn workspace_artifact_kind(proposal: &WorkspaceArtifactProposal) -> Result<DeliverableKind> {
+    if let Some(expected_media_type) = deliverable_media_type(&proposal.filename) {
+        if proposal.media_type != expected_media_type {
+            return Err(AgentError::Store(format!(
+                "workspace text artifact must use media type {expected_media_type}"
+            )));
+        }
+        let content = std::str::from_utf8(&proposal.content)
+            .map_err(|_| AgentError::Store("workspace text artifact is not valid UTF-8".into()))?;
+        validate_editable_text_content(content).map_err(|message| {
+            AgentError::Store(format!("workspace text artifact is invalid: {message}"))
+        })?;
+        return Ok(DeliverableKind::Text);
+    }
+
+    validate_binary_deliverable(&proposal.filename, &proposal.media_type)
+        .map_err(|message| AgentError::Store(format!("invalid workspace artifact: {message}")))?;
+    if proposal.content.len() > MAX_BINARY_DELIVERABLE_BYTES {
+        return Err(AgentError::Store(format!(
+            "workspace artifact is too large (maximum {MAX_BINARY_DELIVERABLE_BYTES} bytes)"
+        )));
+    }
+    Ok(DeliverableKind::Binary {
+        media_type: proposal.media_type.clone(),
+    })
 }
 
 /// Restore an output to the content of one of its earlier revisions.
