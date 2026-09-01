@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
+import { useNowWhile } from "./BackgroundAgentPanel";
 import { Button } from "@/components/ui/button";
 import {
   resumeComputerUseControl,
@@ -22,12 +23,15 @@ function appLabel(appName: string | null, bundleId: string): string {
 export function ComputerUseIndicator() {
   const snapshot = useComputerUseState();
   // The active banner re-arms to hidden once control has been idle past its
-  // window; the tick keeps that honest without a native timer.
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 5_000);
-    return () => clearInterval(timer);
-  }, []);
+  // window; the tick keeps that honest without a native timer. It only runs
+  // while the banner is up: with no session on record — the common case for a
+  // shell-mounted component — or one already idled out, nothing on screen
+  // depends on the time and nothing re-renders. The tick's job is the
+  // re-render itself, which re-evaluates this line; the crossing tick renders
+  // the banner away and stops the interval with it.
+  const showActive =
+    snapshot.active !== null && Date.now() < snapshot.active.visibleUntilMillis;
+  useNowWhile(showActive);
 
   // In-flight invokes, keyed per card (or "control" for Stop/Resume). The
   // ref is the guard against a second click landing while the first is
@@ -59,8 +63,6 @@ export function ComputerUseIndicator() {
       });
   }
 
-  const showActive =
-    snapshot.active !== null && now < snapshot.active.visibleUntilMillis;
   if (!snapshot.halted && !showActive) {
     return null;
   }

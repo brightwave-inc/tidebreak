@@ -271,6 +271,24 @@ type MessageListProps = {
   >;
 };
 
+// Defaults for the background-agent props feed the grouping memo below, so
+// they are module constants: a fresh `[]` or `() => {}` per render would be a
+// new dependency every time and the memo would never hold.
+const NO_BACKGROUND_AGENT_RUNS: AgentRun[] = [];
+const noRetryBackgroundAgentRuns = () => undefined;
+const noCancelBackgroundAgentRun = async () => undefined;
+const noLoadBackgroundAgentActivity = async (): Promise<
+  AgentActivityHistoryEntry[]
+> => [];
+const noLoadBackgroundAgentTaskPlan = async (): Promise<null> => null;
+const noLoadBackgroundAgentProgress = async (
+  _runId: string,
+  afterSequence: number,
+): Promise<AgentRunProgress> => ({
+  entries: [],
+  nextSequence: afterSequence,
+});
+
 export function MessageList({
   messages,
   chatId,
@@ -286,17 +304,14 @@ export function MessageList({
   decidingApprovalCalls,
   approvalErrors,
   grantScope,
-  backgroundAgentRuns = [],
+  backgroundAgentRuns = NO_BACKGROUND_AGENT_RUNS,
   backgroundAgentRunsLoading = false,
   backgroundAgentRunsError = null,
-  onRetryBackgroundAgentRuns = () => undefined,
-  onCancelBackgroundAgentRun = async () => undefined,
-  onLoadBackgroundAgentActivity = async () => [],
-  onLoadBackgroundAgentTaskPlan = async () => null,
-  onLoadBackgroundAgentProgress = async (_runId, afterSequence) => ({
-    entries: [],
-    nextSequence: afterSequence,
-  }),
+  onRetryBackgroundAgentRuns = noRetryBackgroundAgentRuns,
+  onCancelBackgroundAgentRun = noCancelBackgroundAgentRun,
+  onLoadBackgroundAgentActivity = noLoadBackgroundAgentActivity,
+  onLoadBackgroundAgentTaskPlan = noLoadBackgroundAgentTaskPlan,
+  onLoadBackgroundAgentProgress = noLoadBackgroundAgentProgress,
   onOpenBackgroundAgent,
   onOpenOutput,
   busy,
@@ -332,16 +347,8 @@ export function MessageList({
     if (!turn) return undefined;
     return { failureId: turn.failureId, onRetry: () => onRetryTurn(turn) };
   }, [messages, onRetryTurn]);
-  const { items: messageItems, lastTurnStart } = groupMessageItems(
-    messages,
-    busy,
-    animateStreaming,
-    onApproval,
-    approvalState,
-    imageClient,
-    chatId,
-    changeClient,
-    {
+  const backgroundAgents = useMemo(
+    () => ({
       runs: backgroundAgentRuns,
       loading: backgroundAgentRunsLoading,
       error: backgroundAgentRunsError,
@@ -353,8 +360,50 @@ export function MessageList({
       open: onOpenBackgroundAgent,
       openOutput: onOpenOutput,
       client: backgroundAgentClient,
-    },
-    retry,
+    }),
+    [
+      backgroundAgentRuns,
+      backgroundAgentRunsLoading,
+      backgroundAgentRunsError,
+      onRetryBackgroundAgentRuns,
+      onCancelBackgroundAgentRun,
+      onLoadBackgroundAgentActivity,
+      onLoadBackgroundAgentTaskPlan,
+      onLoadBackgroundAgentProgress,
+      onOpenBackgroundAgent,
+      onOpenOutput,
+      backgroundAgentClient,
+    ],
+  );
+  // Grouping walks the whole transcript and builds every row's element; memoized
+  // so a render whose inputs are unchanged (a scroll, a pending-card flag)
+  // reuses the rows instead of rebuilding a long conversation's worth.
+  const { items: messageItems, lastTurnStart } = useMemo(
+    () =>
+      groupMessageItems(
+        messages,
+        busy,
+        animateStreaming,
+        onApproval,
+        approvalState,
+        imageClient,
+        chatId,
+        changeClient,
+        backgroundAgents,
+        retry,
+      ),
+    [
+      messages,
+      busy,
+      animateStreaming,
+      onApproval,
+      approvalState,
+      imageClient,
+      chatId,
+      changeClient,
+      backgroundAgents,
+      retry,
+    ],
   );
   // Only greet a genuinely empty, fully-hydrated conversation. While an
   // existing chat's transcript is still loading it is transiently empty; showing
