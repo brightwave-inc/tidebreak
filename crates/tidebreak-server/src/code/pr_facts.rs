@@ -1,10 +1,13 @@
 //! Post-turn pull-request fact detection (decision 77).
 //!
 //! After a turn closes, this module reads the turn's journaled shell
-//! commands, recognizes the two acts that mint attribution — `gh pr create`
-//! and `git push` — and confirms each against GitHub before writing a
-//! `code_pull_request` fact and its workspace attribution. The transcript is
-//! a hint, never the fact: no row is written without a confirming `gh` read.
+//! commands, recognizes `gh pr create` and `git push`, and confirms each
+//! against GitHub before writing a `code_pull_request` fact and its workspace
+//! attribution. It also checks a workspace checkout changed by the turn when
+//! the checkout is clean, still on the workspace branch, and its current
+//! commit exactly matches an open pull request head. The transcript and
+//! checkout are evidence, never the fact: no row is written without a
+//! confirming `gh` read.
 //!
 //! Everything here is best-effort. A detector failure never fails the turn,
 //! and a miss is corrected by the reconcile sweep's exact-tier matching.
@@ -17,8 +20,8 @@ use serde_json::Value;
 use tracing::debug;
 
 use tidebreak_core::db::code::{
-    insert_pull_request_attribution, list_recent_events, promote_attribution_to_authored,
-    save_pull_request_fact,
+    get_turn, get_workspace, insert_pull_request_attribution, list_recent_events,
+    promote_attribution_to_authored, save_pull_request_fact,
 };
 use tidebreak_core::{
     CodeEvent, CodePullRequestAttribution, CodePullRequestDiscovery, CodePullRequestFact,
@@ -68,7 +71,7 @@ struct PushAct {
     branch: Option<String>,
 }
 
-/// Scan one closed turn's journaled commands and mint confirmed facts.
+/// Scan one closed turn's commands and changed checkout for confirmed facts.
 ///
 /// Never returns an error and never touches the turn: every failure is a
 /// debug log. Runs after the turn's terminal event is journaled, so the
@@ -227,6 +230,17 @@ pub(crate) async fn sweep_turn_for_pull_request_acts(
         confirmed_any |= confirm_push(db, session, &command, &push, gh_search_path).await;
     }
 
+    // A long turn can push its create or push command out of the bounded
+    // journal tail. Other GitHub clients can also open the pull request
+    // without producing either command. The checkpoint records whether this
+    // turn changed the workspace checkout. A clean checkout still on the
+    // workspace branch whose local HEAD exactly matches an open host head is
+    // enough to recover that missed tie without attributing a read-only review
+    // or an unpushed edit.
+    if confirms < MAX_CONFIRM_READS_PER_TURN {
+        confirmed_any |= confirm_changed_checkout(db, session, turn_id, gh_search_path).await;
+    }
+
     // The turn moved this workspace's pull request. Nothing else marks it:
     // route mutations dirty the row for the user's own actions, and the
     // agent's push is neither. Left unmarked, the watch's next assessment
@@ -236,6 +250,120 @@ pub(crate) async fn sweep_turn_for_pull_request_acts(
             hot.mark(&session.owner, session.workspace_id);
         }
     }
+}
+
+/// Confirm the changed workspace checkout against an open pull request head.
+///
+/// Reports whether a fact landed, so the caller can mark the workspace hot.
+async fn confirm_changed_checkout(
+    db: &DbStore,
+    session: &CodeSession,
+    turn_id: CodeTurnId,
+    gh_search_path: Option<&str>,
+) -> bool {
+    let turn = match get_turn(db, &session.owner, turn_id).await {
+        Ok(Some(turn)) => turn,
+        Ok(None) => return false,
+        Err(err) => {
+            debug!("pr fact detector could not read the turn checkpoint: {err}");
+            return false;
+        }
+    };
+    if !turn
+        .diffstat
+        .as_ref()
+        .is_some_and(|diffstat| diffstat.files > 0)
+    {
+        return false;
+    }
+
+    let workspace = match get_workspace(db, &session.owner, session.workspace_id).await {
+        Ok(Some(workspace)) if !workspace.is_remote() => workspace,
+        Ok(_) => return false,
+        Err(err) => {
+            debug!("pr fact detector could not read the changed workspace: {err}");
+            return false;
+        }
+    };
+    let checkout = Path::new(&workspace.worktree_path);
+    match git_read(checkout, &["status", "--porcelain"]).await {
+        Ok(status) if status.is_empty() => {}
+        Ok(_) => return false,
+        Err(err) => {
+            debug!("pr fact detector could not inspect the changed checkout: {err}");
+            return false;
+        }
+    }
+
+    let Some(branch) = current_branch(checkout).await else {
+        return false;
+    };
+    if branch != workspace.branch_name {
+        return false;
+    }
+    let head = match git_read(checkout, &["rev-parse", "HEAD"]).await {
+        Ok(head) if !head.is_empty() => head,
+        Ok(_) => return false,
+        Err(err) => {
+            debug!("pr fact detector could not read the changed checkout head: {err}");
+            return false;
+        }
+    };
+    let target = match repository_target_from_path(checkout).await {
+        Ok(target) => target,
+        Err(err) => {
+            debug!("pr fact detector could not resolve the changed checkout: {err}");
+            return false;
+        }
+    };
+    let values = match list_pull_requests_for_head_raw(
+        &target.host,
+        &target.owner,
+        &target.name,
+        &branch,
+        gh_search_path,
+    )
+    .await
+    {
+        Ok(values) => values,
+        Err(err) => {
+            debug!("pr fact detector could not confirm the changed checkout: {err}");
+            return false;
+        }
+    };
+    let matching = values
+        .into_iter()
+        .filter(|value| {
+            value
+                .get("state")
+                .and_then(Value::as_str)
+                .is_some_and(|state| state.eq_ignore_ascii_case("open"))
+                && value
+                    .get("headRefName")
+                    .and_then(Value::as_str)
+                    .is_some_and(|candidate| candidate == branch)
+                && value
+                    .get("headRefOid")
+                    .and_then(Value::as_str)
+                    .is_some_and(|candidate| candidate == head)
+        })
+        .collect();
+    let Some(value) = newest_by_created(matching) else {
+        return false;
+    };
+    record_confirmed_fact(
+        db,
+        &session.owner,
+        session.workspace_id,
+        Some(session.id),
+        None,
+        &target,
+        &value,
+        CodePullRequestRelation::Contributed,
+        CodePullRequestDiscovery::Command,
+    )
+    .await
+    .is_some()
 }
 
 /// Confirm one `gh pr create` against the host and mint an authored fact.

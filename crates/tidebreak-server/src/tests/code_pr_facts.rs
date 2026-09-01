@@ -10,14 +10,15 @@ use super::*;
 use std::os::unix::fs::PermissionsExt;
 
 use tidebreak_core::db::code::{
-    append_event, get_pull_request_fact, insert_repo, insert_session, insert_turn,
-    insert_workspace, list_attributed_facts_for_workspace,
+    append_event, get_pull_request_fact, get_turn, insert_repo, insert_session, insert_turn,
+    insert_workspace, list_attributed_facts_for_workspace, list_pull_request_attributions,
+    save_turn,
 };
 use tidebreak_core::{
     Attention, AttentionSource, CodeEvent, CodePullRequestRelation, CodePullRequestState, CodeRepo,
     CodeSession, CodeSessionId, CodeSessionKind, CodeSessionLifecycle, CodeTurn, CodeTurnId,
-    CodeTurnStatus, CodeWorkspace, CodeWorkspaceStatus, HarnessKind, OwnerId, PermissionMode,
-    RepoId, ToolDetail, ToolOutcome, WorkspaceId,
+    CodeTurnStatus, CodeWorkspace, CodeWorkspaceStatus, Diffstat, HarnessKind, OwnerId,
+    PermissionMode, RepoId, ToolDetail, ToolOutcome, WorkspaceId,
 };
 
 use crate::code::pr_facts;
@@ -68,6 +69,10 @@ fn init_github_shaped_repo(dir: &std::path::Path) -> std::path::PathBuf {
 /// A gh shim that answers auth, one view, and one head-scoped list, and logs
 /// every invocation. Anything else fails loudly.
 fn write_gh_shim(dir: &std::path::Path, log: &std::path::Path) {
+    write_gh_shim_with_view(dir, log, VIEW_JSON);
+}
+
+fn write_gh_shim_with_view(dir: &std::path::Path, log: &std::path::Path, view_json: &str) {
     let body = format!(
         "#!/bin/sh\n\
          echo \"$@\" >> {log}\n\
@@ -76,11 +81,11 @@ fn write_gh_shim(dir: &std::path::Path, log: &std::path::Path) {
            exit 0\n\
          fi\n\
          if [ \"$1\" = pr ] && [ \"$2\" = view ]; then\n\
-           echo '{VIEW_JSON}'\n\
+           echo '{view_json}'\n\
            exit 0\n\
          fi\n\
          if [ \"$1\" = pr ] && [ \"$2\" = list ]; then\n\
-           echo '[{VIEW_JSON}]'\n\
+           echo '[{view_json}]'\n\
            exit 0\n\
          fi\n\
          echo unexpected \"$@\" >&2\n\
@@ -88,6 +93,25 @@ fn write_gh_shim(dir: &std::path::Path, log: &std::path::Path) {
         log = log.display(),
     );
     write_executable(&dir.join("gh"), &body);
+}
+
+async fn mark_turn_checkout_changed(
+    store: &tidebreak_core::DbStore,
+    session: &CodeSession,
+    turn_id: CodeTurnId,
+) {
+    let mut turn = get_turn(store, &session.owner, turn_id)
+        .await
+        .unwrap()
+        .unwrap();
+    turn.checkpoint_ref = Some("refs/tidebreak/checkpoints/test".into());
+    turn.diffstat = Some(Diffstat {
+        files: 1,
+        insertions: 1,
+        deletions: 0,
+        truncated: false,
+    });
+    save_turn(store, &session.owner, &turn).await.unwrap();
 }
 
 async fn seeded(
@@ -409,6 +433,159 @@ async fn a_turn_that_pushed_nothing_leaves_the_hot_tier_alone() {
     .await;
 
     assert!(hot.live().is_empty());
+}
+
+#[tokio::test]
+async fn a_changed_clean_checkout_recovers_an_open_pull_request() {
+    let (dir, store) = temp_db_store("pr-facts-checkout.db").await;
+    let work = init_github_shaped_repo(dir.path());
+    let (session, turn_id) = seeded(&store, &work).await;
+
+    std::fs::write(work.join("changed.txt"), "from the turn\n").unwrap();
+    run(&work, &["git", "add", "changed.txt"]);
+    run(&work, &["git", "commit", "-m", "change from turn"]);
+    let head = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&work)
+        .output()
+        .unwrap();
+    assert!(head.status.success());
+    let head = String::from_utf8(head.stdout).unwrap();
+    let head = head.trim();
+
+    let shim = dir.path().join("bin");
+    std::fs::create_dir_all(&shim).unwrap();
+    let view = VIEW_JSON.replace("aaa111", head);
+    write_gh_shim_with_view(&shim, &dir.path().join("gh.log"), &view);
+    mark_turn_checkout_changed(&store, &session, turn_id).await;
+
+    let hot = crate::code::pr_refresh::HotPullRequests::default();
+    let search_path = shim.display().to_string();
+    pr_facts::sweep_turn_for_pull_request_acts(
+        &store,
+        &session,
+        turn_id,
+        Some(&search_path),
+        Some(&hot),
+    )
+    .await;
+
+    let owner = OwnerId::local();
+    let attributed = list_attributed_facts_for_workspace(&store, &owner, session.workspace_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        attributed.len(),
+        1,
+        "gh calls:\n{}",
+        std::fs::read_to_string(dir.path().join("gh.log")).unwrap_or_default()
+    );
+    assert_eq!(attributed[0].0.number, 412);
+    assert_eq!(attributed[0].1, CodePullRequestRelation::Contributed);
+    let sources = list_pull_request_attributions(&store, &owner)
+        .await
+        .unwrap();
+    assert_eq!(sources.len(), 1);
+    assert_eq!(
+        sources[0].discovered_via,
+        tidebreak_core::CodePullRequestDiscovery::Command
+    );
+    assert_eq!(hot.live(), vec![(owner, session.workspace_id)]);
+}
+
+#[tokio::test]
+async fn a_changed_checkout_does_not_claim_a_different_pull_request_head() {
+    let (dir, store) = temp_db_store("pr-facts-checkout-head.db").await;
+    let work = init_github_shaped_repo(dir.path());
+    let shim = dir.path().join("bin");
+    std::fs::create_dir_all(&shim).unwrap();
+    write_gh_shim(&shim, &dir.path().join("gh.log"));
+    let (session, turn_id) = seeded(&store, &work).await;
+    mark_turn_checkout_changed(&store, &session, turn_id).await;
+
+    let search_path = shim.display().to_string();
+    pr_facts::sweep_turn_for_pull_request_acts(&store, &session, turn_id, Some(&search_path), None)
+        .await;
+
+    assert!(
+        list_attributed_facts_for_workspace(&store, &session.owner, session.workspace_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn a_changed_dirty_checkout_does_not_claim_a_matching_pull_request_head() {
+    let (dir, store) = temp_db_store("pr-facts-checkout-dirty.db").await;
+    let work = init_github_shaped_repo(dir.path());
+    let head = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&work)
+        .output()
+        .unwrap();
+    assert!(head.status.success());
+    let head = String::from_utf8(head.stdout).unwrap();
+    let view = VIEW_JSON.replace("aaa111", head.trim());
+
+    let shim = dir.path().join("bin");
+    std::fs::create_dir_all(&shim).unwrap();
+    let log = dir.path().join("gh.log");
+    write_gh_shim_with_view(&shim, &log, &view);
+    let (session, turn_id) = seeded(&store, &work).await;
+    mark_turn_checkout_changed(&store, &session, turn_id).await;
+    std::fs::write(work.join("unpushed.txt"), "not on the pull request\n").unwrap();
+
+    let search_path = shim.display().to_string();
+    pr_facts::sweep_turn_for_pull_request_acts(&store, &session, turn_id, Some(&search_path), None)
+        .await;
+
+    assert!(
+        list_attributed_facts_for_workspace(&store, &session.owner, session.workspace_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(!log.exists(), "a dirty checkout should not reach GitHub");
+}
+
+#[tokio::test]
+async fn a_changed_checkout_on_another_branch_does_not_claim_its_pull_request() {
+    let (dir, store) = temp_db_store("pr-facts-checkout-branch.db").await;
+    let work = init_github_shaped_repo(dir.path());
+    let (session, turn_id) = seeded(&store, &work).await;
+    run(&work, &["git", "checkout", "-b", "review-branch"]);
+    let head = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&work)
+        .output()
+        .unwrap();
+    assert!(head.status.success());
+    let head = String::from_utf8(head.stdout).unwrap();
+    let view = VIEW_JSON
+        .replace("feat/x", "review-branch")
+        .replace("aaa111", head.trim());
+
+    let shim = dir.path().join("bin");
+    std::fs::create_dir_all(&shim).unwrap();
+    let log = dir.path().join("gh.log");
+    write_gh_shim_with_view(&shim, &log, &view);
+    mark_turn_checkout_changed(&store, &session, turn_id).await;
+
+    let search_path = shim.display().to_string();
+    pr_facts::sweep_turn_for_pull_request_acts(&store, &session, turn_id, Some(&search_path), None)
+        .await;
+
+    assert!(
+        list_attributed_facts_for_workspace(&store, &session.owner, session.workspace_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !log.exists(),
+        "a checkout on another branch should not reach GitHub"
+    );
 }
 
 #[tokio::test]
