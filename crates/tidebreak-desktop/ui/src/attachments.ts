@@ -219,5 +219,3 @@ function parseFailedImage(value: unknown): FailedImage {
   }
   return { fileName: value.fileName, message: value.message };
 }
-
-

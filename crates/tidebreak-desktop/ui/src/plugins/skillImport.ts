@@ -65,5 +65,3 @@ function parseIssues(value: unknown): SkillImportIssue[] | null {
   }
   return issues;
 }
-
-

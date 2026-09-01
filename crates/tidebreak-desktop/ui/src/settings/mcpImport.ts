@@ -442,5 +442,3 @@ function validGatewayEndpoint(slug: string): boolean {
 function unique(values: string[]): string[] {
   return [...new Set(values)];
 }
-
-
