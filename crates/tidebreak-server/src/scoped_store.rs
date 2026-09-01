@@ -500,11 +500,6 @@ impl ScopedStore {
             .await
     }
 
-    /// [`Store::list_events`].
-    pub async fn list_events(&self, chat_id: ChatId, after: i64) -> Result<Vec<SequencedEvent>> {
-        self.store.list_events(chat_id, after).await
-    }
-
     /// [`Store::list_events_for_call`].
     pub async fn list_events_for_call(
         &self,
