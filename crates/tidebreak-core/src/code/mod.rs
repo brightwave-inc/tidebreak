@@ -835,10 +835,13 @@ impl CodePullRequestState {
 
 /// How strongly a workspace is tied to a pull request (decision 77).
 ///
-/// Only two acts mint attribution: `gh pr create` (authored) and a push whose
-/// branch is or becomes a pull request's head (contributed). Reading,
-/// checking out, commenting on, closing, or merging a pull request never
-/// does, so review and triage agents stay out of the attributed set.
+/// `gh pr create` mints authored attribution. A push whose branch is or
+/// becomes a pull request's head mints contributed attribution. A changed,
+/// clean workspace checkout also mints contributed attribution when it remains
+/// on the workspace branch and its current commit exactly matches an open pull
+/// request head. Reading, checking out, commenting on, closing, or merging a
+/// pull request never does, so review and triage agents stay out of the
+/// attributed set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum CodePullRequestRelation {
@@ -875,7 +878,8 @@ impl CodePullRequestRelation {
 #[serde(rename_all = "snake_case")]
 pub enum CodePullRequestDiscovery {
     /// The post-turn detector saw the act in the session's journaled shell
-    /// commands and confirmed it against the host.
+    /// commands, or recovered the changed workspace checkout, and confirmed
+    /// it against the host.
     Command,
     /// The reconcile sweep matched the pull request to the workspace by
     /// number or head SHA.

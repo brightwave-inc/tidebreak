@@ -51,28 +51,35 @@ Tidebreak wishes were true. Checks, review decisions, and mergeability are
 deliberately excluded — they stay live-only in the delivery reads, where a
 20–30 second cache is the right freshness.
 
-**Attribution is minted by exactly two acts.** `gh pr create` makes a
-workspace the pull request's author (`authored`); `git push` whose branch is
-or becomes a pull request's head makes it a contributor (`contributed`).
-Views, checkouts, comments, closes, and merges never mint attribution, so a
-review agent that triages thirty pull requests claims none of them, while an
-agent that pushes a fix commit to someone else's pull request correctly
-appears as working on it. One row per `(pull_request, workspace)` holds the
-strongest claim; a contributed row upgrades to authored when authoring
-evidence appears. Attribution rows carry the session and, when the act ran
-inside a subagent's `Task` span, its `parent_call_id` — so "which agent
-opened this" is answerable down to the child row.
+**Attribution comes from confirmed repository changes.** `gh pr create` makes
+a workspace the pull request's author (`authored`); `git push` whose branch is
+or becomes a pull request's head makes it a contributor (`contributed`). The
+post-turn detector also recovers a contributed tie from the workspace
+checkout when the turn checkpoint changed files, the checkout is clean, and
+it remains on the workspace branch with a current commit that exactly matches
+an open pull request head. This fallback catches create and push commands that
+fell outside the bounded journal tail, and pull requests opened through
+another GitHub client. Views, checkouts, comments, closes, and merges alone
+never mint attribution, so a review agent that triages thirty pull requests
+claims none of them. One row per
+`(pull_request, workspace)` holds the strongest claim; a contributed row
+upgrades to authored when authoring evidence appears. Attribution rows carry
+the session and, when the act ran inside a subagent's `Task` span, its
+`parent_call_id` — so "which agent opened this" is answerable down to the
+child row.
 
-**The transcript is a hint, never the fact.** A post-turn detector reads the
-closed turn's journaled commands, recognizes the two acts through
+**Local evidence is a hint, never the fact.** A post-turn detector reads the
+closed turn's journaled commands, recognizes create and push through
 `simple_command_argvs` (which fails closed on substitutions and parse
 errors), and then confirms each candidate against the host with one
-repository-qualified `gh` read before writing anything. A command whose
-completion the engine reported as failed is never confirmed — the read
-could match an older pull request on the same branch and mis-attribute it.
-The detector is best-effort and bounded (journal tail, parse count, and
-confirm count are capped per turn); it never fails or delays the turn, and
-it journals no new event kind. The user-initiated create and push routes
+repository-qualified `gh` read before writing anything. If the command tail
+does not carry either act, the detector can inspect the turn checkpoint and
+workspace checkout under the exact clean-checkout and matching-head rules
+above. A command whose completion the engine reported as failed is never
+confirmed — the read could match an older pull request on the same branch and
+mis-attribute it. The detector is best-effort and bounded (journal tail,
+parse count, and confirm count are capped per turn); it never fails the turn,
+and it journals no new event kind. The user-initiated create and push routes
 mint through the same confirm-then-record helper.
 
 **The reconcile sweep owns freshness and the misses.** A later slice adds a
@@ -133,15 +140,16 @@ produced.
 
 - Two new tables and three nullable `code_repo` columns, appended as
   migration `m20260822_000009_code_pull_request_facts` per record 61.
-- Every turn end runs a bounded journal scan; turns with no `gh pr create`
-  or `git push` cost a few hundred event deserializations and no GitHub
-  read. Turns with candidates cost up to four `gh` reads.
+- Every turn end runs a bounded journal scan. A turn with no create, push, or
+  changed checkpoint costs a few hundred event deserializations and no GitHub
+  read. A changed, clean checkout can add one read. Turns remain capped at
+  four confirming reads.
 - Attribution survives workspace archive and release (plain foreign keys to
   soft-removed rows), so the bird's-eye view keeps history the workspace
   list no longer shows.
-- `discovered_via` distinguishes a confirmed act (`command`) from sweep
-  matching (`reconcile`); the user-initiated routes record `command`, since
-  they confirm the same way.
+- `discovered_via` distinguishes post-turn confirmation (`command`) from
+  sweep matching (`reconcile`); the user-initiated routes record `command`,
+  since they confirm the same way.
 - A pull request opened from an auxiliary terminal in an untracked
   repository is invisible until something else makes the repository
   tracked. Revisit if that gap turns out to be common — the hook would be a
@@ -158,6 +166,10 @@ produced.
 - A journaled `git push` to a branch with an open pull request mints
   `contributed`; the same push when the branch has no pull request mints
   nothing.
+- A turn that changed the workspace checkout mints `contributed` when the
+  checkout is clean, remains on the workspace branch, and its current commit
+  exactly matches an open pull request head. Another branch, a different head,
+  or uncommitted work mints nothing.
 - A `gh pr view`, `gh pr comment`, or `gh pr merge` in the journal mints
   nothing — the case a wrong implementation most plausibly passes, since
   the strings look similar.
