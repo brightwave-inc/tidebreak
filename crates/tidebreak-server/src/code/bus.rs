@@ -32,7 +32,7 @@ use tidebreak_core::{
     CodeSessionLifecycle, CodeSubagentSummary, CodeTurnId, CodeWatchState, HarnessKind, OwnerId,
     PullRequestDigest, RepoId, SequencedCodeEvent, WorkspaceId, MAX_EVENT_TEXT_CHARS,
 };
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Notify};
 
 const LIVE_BUFFER: usize = 256;
 const UPDATES_BUFFER: usize = 256;
@@ -137,6 +137,9 @@ pub(crate) enum TurnRewriteState {
 pub(crate) struct CodeEventBus {
     channels: Mutex<HashMap<CodeSessionId, LiveSession>>,
     updates: Mutex<HashMap<OwnerId, broadcast::Sender<CodeLiveUpdate>>>,
+    /// Fires when a `/code/updates` socket subscribes, so background work
+    /// that slows down while nobody is looking can speed back up at once.
+    updates_attached: Notify,
 }
 
 /// One session's live state: the channel, plus the small facts that only the
@@ -206,6 +209,7 @@ impl Default for CodeEventBus {
         Self {
             channels: Mutex::new(HashMap::new()),
             updates: Mutex::new(HashMap::new()),
+            updates_attached: Notify::new(),
         }
     }
 }
@@ -332,8 +336,40 @@ impl CodeEventBus {
 
     /// Subscribe to one owner's updates. The receiver is the only view of the
     /// channel a `/code/updates` socket gets, and it carries nothing else.
+    ///
+    /// Subscribing also wakes [`Self::updates_attached`] waiters. A
+    /// `/code/updates` socket is how a client says it is looking, and sweeps
+    /// that back off while nobody is use that moment to return to their fast
+    /// cadence.
     pub(crate) fn subscribe_updates(&self, owner: &OwnerId) -> broadcast::Receiver<CodeLiveUpdate> {
-        self.updates_sender(owner).subscribe()
+        let receiver = self.updates_sender(owner).subscribe();
+        self.updates_attached.notify_one();
+        receiver
+    }
+
+    /// Whether any client currently holds a `/code/updates` subscription.
+    ///
+    /// This is the server's "someone is looking" signal for code mode: the
+    /// desktop keeps that socket open for as long as it runs, and the CLI
+    /// opens it to watch. Counting receivers is exact because a dropped
+    /// socket drops its receiver with it.
+    pub(crate) fn has_updates_subscribers(&self) -> bool {
+        self.updates
+            .lock()
+            .expect("code updates bus lock")
+            .values()
+            .any(|sender| sender.receiver_count() > 0)
+    }
+
+    /// Resolve the next time a `/code/updates` socket subscribes.
+    ///
+    /// One pending wake is retained if nobody is waiting when a subscription
+    /// lands, so a caller that checks [`Self::has_updates_subscribers`] and
+    /// then waits cannot miss an attach that fell between the two. The cost
+    /// is at most one spurious wake, which callers absorb by re-reading the
+    /// subscriber count.
+    pub(crate) async fn updates_attached(&self) {
+        self.updates_attached.notified().await;
     }
 
     /// Publish a notice to one owner. Publishers name the owner the notice
@@ -373,5 +409,35 @@ fn append_bounded(buffer: &mut String, text: &str) {
     match text.char_indices().nth(room) {
         Some((cut, _)) => buffer.push_str(&text[..cut]),
         None => buffer.push_str(text),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn updates_subscribers_are_counted_and_attach_wakes_waiters() {
+        let bus = CodeEventBus::default();
+        let owner = OwnerId::new("owner-a").unwrap();
+        assert!(!bus.has_updates_subscribers());
+
+        let receiver = bus.subscribe_updates(&owner);
+        assert!(bus.has_updates_subscribers());
+        // The attach that landed before anyone waited is retained, so a sweep
+        // that checked the count first and then waited still wakes.
+        tokio::time::timeout(Duration::from_secs(1), bus.updates_attached())
+            .await
+            .expect("subscribing wakes the attach signal");
+
+        drop(receiver);
+        assert!(!bus.has_updates_subscribers());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), bus.updates_attached())
+                .await
+                .is_err(),
+            "a drop is not an attach"
+        );
     }
 }
