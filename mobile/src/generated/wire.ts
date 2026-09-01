@@ -4959,3 +4959,14 @@ export const RENDERER_TOOL_NAMES = [
   "create_app",
   "other",
 ] as const;
+
+/**
+ * Guard limits shared with the server and the CLI, in code points.
+ *
+ * The decoders bound every opaque string they will draw. These are the
+ * ceilings, generated from `tidebreak_server::wire::limits` so every
+ * client applies the same numbers.
+ */
+export const MAX_WIRE_ID_CHARS = 128;
+export const MAX_WIRE_TIMESTAMP_CHARS = 64;
+export const MAX_WIRE_CURSOR_CHARS = 256;

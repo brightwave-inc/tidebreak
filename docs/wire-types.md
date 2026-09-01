@@ -12,6 +12,8 @@ The TypeScript is now generated from the Rust definitions.
 ```sh
 # Rewrite the generated bindings after changing a wire type.
 UPDATE_WIRE_TYPES=1 cargo test -p tidebreak-server
+# Copy them into the mobile app, which pins its copy byte-for-byte.
+pnpm --dir mobile sync-wire
 ```
 
 Output is checked in under `crates/tidebreak-desktop/ui/src/generated/`. Without
