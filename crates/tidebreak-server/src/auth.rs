@@ -811,16 +811,14 @@ pub fn origin_value_is_this_app(origin: &axum::http::HeaderValue) -> bool {
 /// The origins the packaged webview loads its frontend from.
 ///
 /// Tauri serves `frontendDist` over its own protocol: `tauri://localhost` on
-/// macOS and Linux, `http(s)://tauri.localhost` on Windows. `null` is here
-/// because a document on a non-http scheme is reported as an opaque origin by
-/// some webviews, and refusing it would take the packaged app's own requests
-/// down; it grants nothing a page could not already reach without an `Origin`
-/// header at all.
+/// macOS and Linux, `http(s)://tauri.localhost` on Windows. A packaged webview
+/// that sends no `Origin` is admitted by [`origin_is_this_app`]'s absent-header
+/// path. `null` is not listed: sandboxed iframes report `Origin: null` while
+/// still running script.
 const APP_ORIGINS: &[&str] = &[
     "tauri://localhost",
     "http://tauri.localhost",
     "https://tauri.localhost",
-    "null",
 ];
 
 /// The Vite dev server, in debug builds only — `build.devUrl` in
@@ -971,7 +969,13 @@ mod tests {
             "tauri://localhost"
         )])));
         // A CLI or SDK attaches no Origin at all; only browsers do.
+        // The packaged webview that omits Origin is admitted on this path.
         assert!(origin_is_this_app(&HeaderMap::new()));
+        // Sandboxed iframes report Origin: null but still run script.
+        assert!(!origin_is_this_app(&headers(&[(
+            axum::http::header::ORIGIN,
+            "null"
+        )])));
     }
 
     /// DNS rebinding: the request reaches loopback, but the name the browser
