@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
 
 use tokio::sync::Notify;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use tidebreak_core::db::code::{get_session, latest_incarnations_of_live_sessions_all_owners};
 use tidebreak_core::{CodeSessionId, CodeSessionLifecycle, DbStore, IncarnationState, OwnerId};
@@ -25,6 +25,7 @@ use tidebreak_core::{CodeSessionId, CodeSessionLifecycle, DbStore, IncarnationSt
 use super::super::runtime::CodeRuntime;
 use super::driver::{sweep_stale_intents, RemoteDriver, RemoteSpawnSettings};
 use super::SandboxProvisioner;
+use crate::retry::LaneBackoff;
 
 /// The safety-net interval between passes while an incarnation is draining.
 /// Wakes carry the normal traffic; this bounds how long a missed wake or a
@@ -38,8 +39,15 @@ const IDLE_SWEEP_FLOOR: std::time::Duration = std::time::Duration::from_secs(20)
 /// The held wait a pump task asks the events read to hold.
 const PUMP_HELD_WAIT_SECONDS: u16 = 20;
 
-/// How long a pump task sleeps after a transport fault before retrying.
+/// How long a pump task sleeps after its first fault before retrying. Each
+/// consecutive fault doubles the wait up to [`PUMP_FAULT_BACKOFF_CAP`]; one
+/// read that goes through resets it. Retryable faults count too: an
+/// unavailable environment answers the events read at once, and without a
+/// wait the pump would re-issue it as fast as the store answers.
 const PUMP_FAULT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Ceiling on the wait between pump retries while faults persist.
+const PUMP_FAULT_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// How long promotion leaves a session alone after a machine-side refusal
 /// (cap full, sign-in needed). Refusals journal a notice and poke attention;
@@ -160,7 +168,9 @@ impl RemoteSessions {
         pumps.insert(
             session,
             tokio::spawn(async move {
-                let wake = pump_session(runtime, Arc::clone(&remote), owner, session).await;
+                let backoff = LaneBackoff::new(PUMP_FAULT_BACKOFF, PUMP_FAULT_BACKOFF_CAP);
+                let wake =
+                    pump_session(runtime, Arc::clone(&remote), owner, session, backoff).await;
                 // Free the slot before waking: the pass this wake starts
                 // must see no entry, or it skips the respawn and waits out
                 // a floor instead. The entry is always this task's own —
@@ -191,11 +201,15 @@ impl Drop for RemoteSessions {
 /// incarnation or a fence may leave a queue head to promote; a sign-in wait
 /// does not, and waking on it would respawn the pump in a tight loop until
 /// the owner signs in, so that exit waits for the floor.
+///
+/// `backoff` paces the retries after a fault, retryable or hard: the wait
+/// doubles per consecutive fault and one clean pump resets it.
 async fn pump_session(
     runtime: Weak<CodeRuntime>,
     remote: Arc<RemoteSessions>,
     owner: OwnerId,
     session_id: CodeSessionId,
+    mut backoff: LaneBackoff,
 ) -> bool {
     loop {
         let Some(runtime) = runtime.upgrade() else {
@@ -212,7 +226,17 @@ async fn pump_session(
         }
         let driver = remote.driver(&runtime.db, runtime.bus.as_ref());
         match driver.pump(&mut session, PUMP_HELD_WAIT_SECONDS).await {
+            Ok(report) if report.read_unavailable => {
+                // The environment is unavailable; the read came back at
+                // once instead of holding the wait. Pace the retry so the
+                // pump does not spin on a transport that is down.
+                let wait = backoff.next_delay();
+                debug!(session = %session_id, ?wait, "the sandbox stream is unavailable; backing off");
+                drop(runtime);
+                tokio::time::sleep(wait).await;
+            }
             Ok(report) => {
+                backoff.reset();
                 if report.sign_in_required {
                     // Nothing drains until the owner signs in; the sweep
                     // brings the task back to try again.
@@ -223,11 +247,12 @@ async fn pump_session(
                 }
             }
             Err(error) => {
-                warn!(session = %session_id, %error, "a remote pump failed; backing off");
+                let wait = backoff.next_delay();
+                warn!(session = %session_id, %error, ?wait, "a remote pump failed; backing off");
                 // Drop the runtime handle across the sleep so shutdown is
                 // not held open by a backoff.
                 drop(runtime);
-                tokio::time::sleep(PUMP_FAULT_BACKOFF).await;
+                tokio::time::sleep(wait).await;
             }
         }
     }
@@ -354,6 +379,8 @@ mod tests {
         spawns: StdMutex<Vec<SpawnArguments>>,
         sends: StdMutex<Vec<String>>,
         event_reads: StdMutex<VecDeque<SandboxEvents>>,
+        /// Every events read issued, scripted or not.
+        event_reads_issued: StdMutex<usize>,
         cancels: StdMutex<Vec<String>>,
     }
 
@@ -399,6 +426,7 @@ mod tests {
             _sandbox_id: &str,
             _cursor: EventCursor,
         ) -> Result<SandboxEvents, RemoteSandboxError> {
+            *self.event_reads_issued.lock().unwrap() += 1;
             self.event_reads
                 .lock()
                 .unwrap()
@@ -980,6 +1008,57 @@ mod tests {
 
     /// A fenced remote session reaps through the driver: the sandbox is
     /// cancelled and no local worker is spawned.
+    /// While the environment is unavailable, the events read answers at once
+    /// with a retryable fault. The pump must wait between reads rather than
+    /// re-issue the request as fast as the store answers; a tight loop here
+    /// hammers a transport that just said it is down.
+    #[tokio::test]
+    async fn an_unavailable_environment_backs_the_pump_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, fake, owner, repo) = runtime_with_remote(dir.path()).await;
+        let workspace = runtime
+            .create_remote_workspace(&owner, repo.id, Some("remote".into()))
+            .await
+            .unwrap();
+        let session = runtime
+            .create_remote_session(
+                &owner,
+                workspace.id,
+                HarnessKind::ClaudeCode,
+                session_settings(),
+            )
+            .await
+            .unwrap();
+        runtime
+            .submit_turn(&owner, session.id, "start".into(), None, None, Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(fake.spawns.lock().unwrap().len(), 1);
+        // No scripted reads: every events request answers Unavailable.
+        assert!(fake.event_reads.lock().unwrap().is_empty());
+
+        let remote = runtime.remote_sessions().unwrap();
+        let initial = std::time::Duration::from_millis(40);
+        let pump = tokio::spawn(pump_session(
+            Arc::downgrade(&runtime),
+            remote,
+            owner.clone(),
+            session.id,
+            LaneBackoff::new(initial, initial * 4),
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        pump.abort();
+
+        // The waits are at least 20, 40, 80, then 80ms each, so at most
+        // seven reads fit in the window. An unpaced loop issues hundreds.
+        let reads = *fake.event_reads_issued.lock().unwrap();
+        assert!(reads >= 2, "the pump never retried the read");
+        assert!(
+            reads <= 10,
+            "the pump issued {reads} reads in 400ms; it must wait between retryable faults"
+        );
+    }
+
     #[tokio::test]
     async fn a_remote_reap_cancels_the_sandbox_and_spawns_nothing() {
         let dir = tempfile::tempdir().unwrap();
