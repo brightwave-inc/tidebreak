@@ -507,6 +507,15 @@ const CHILD_ENV_ALLOWED_NAMES: &[&str] = &[
     // `tidebreak-server` spawns `gh` under this filter, and gh resolves a
     // relocated config directory through this path (not a secret).
     "GH_CONFIG_DIR",
+    // Outbound-trust configuration `tidebreak-supervised-agent` merges into
+    // the session snapshot (`Trust::environment` via `HarnessEngine::launch`):
+    // behind the sidecar's TLS-intercepting egress, an engine child without
+    // these loses every HTTPS call. They carry CA-bundle paths, not secrets.
+    "SSL_CERT_FILE",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+    "GIT_SSL_CAINFO",
+    "NODE_EXTRA_CA_CERTS",
     // Windows children cannot start, resolve commands, or write temp files
     // without these; on Unix they are simply absent.
     "SYSTEMROOT",
@@ -1648,12 +1657,23 @@ mod environment_tests {
             ("HOME", "/home/probe"),
             ("LC_ALL", "en_US.UTF-8"),
             ("XDG_CONFIG_HOME", "/home/probe/.config"),
+            ("SSL_CERT_FILE", "/run/trust/bundle.pem"),
+            ("NODE_EXTRA_CA_CERTS", "/run/trust/sidecar-ca.pem"),
             ("AWS_SECRET_ACCESS_KEY", "planted"),
             ("GITHUB_TOKEN", "planted"),
             ("ANTHROPIC_API_KEY", "planted"),
             ("OPENAI_API_KEY", "planted"),
         ]);
-        for name in ["PATH", "HOME", "LC_ALL", "XDG_CONFIG_HOME"] {
+        for name in [
+            "PATH",
+            "HOME",
+            "LC_ALL",
+            "XDG_CONFIG_HOME",
+            // The supervised runtime merges CA trust into the snapshot; a
+            // child that loses it cannot make outbound HTTPS calls.
+            "SSL_CERT_FILE",
+            "NODE_EXTRA_CA_CERTS",
+        ] {
             assert!(
                 filtered.iter().any(|(key, _)| key == name),
                 "{name} must survive the child filter"
