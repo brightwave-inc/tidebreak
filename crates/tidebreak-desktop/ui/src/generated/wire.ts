@@ -959,6 +959,33 @@ export type CodeCloneJobSnapshot = { id: string, phase: string, percent?: number
 export type CodeCommitSnapshot = { sha: string, message: string, stat: Diffstat, };
 
 /**
+ * What the connect approval page renders: the identity being linked and
+ * the CSRF token its "is this you?" POST must echo.
+ */
+export type CodeConnectPage = { 
+/**
+ * Which channel family is linking (for example `slack`).
+ */
+channel_kind: string, 
+/**
+ * The person's display name in the channel.
+ */
+display_name: string, 
+/**
+ * The channel workspace's human name.
+ */
+workspace_name: string, avatar_url?: string, 
+/**
+ * `pending` or `approved`; a completed or expired link renders
+ * nothing.
+ */
+state: string, 
+/**
+ * Echo this in the approve POST.
+ */
+csrf: string, expires_at: string, };
+
+/**
  * Delivery mutation result. A partial rerun returns every per-run outcome.
  */
 export type CodeDeliveryActionResult = { success: boolean, message: string, rerun_outcomes?: Array<CodeDeliveryRerunOutcome>, };
@@ -1391,6 +1418,49 @@ export type CodeGithubRepositories = { repositories: Array<CodeGithubRepository>
  * One GitHub repository the add-repository picker can offer.
  */
 export type CodeGithubRepository = { full_name: string, private: boolean, description?: string, };
+
+/**
+ * Identifies one adapter grant: a channel user's link to this machine.
+ */
+export type CodeGrantId = string;
+
+/**
+ * One adapter grant, as the desktop grants list renders it. Carries no
+ * secrets: the token pair exists only in the mint response the adapter
+ * kept.
+ */
+export type CodeGrantSnapshot = { id: CodeGrantId, 
+/**
+ * Which channel family linked (for example `slack`).
+ */
+channel_kind: string, 
+/**
+ * The channel's identity for the linked user.
+ */
+external_identity: string, 
+/**
+ * The channel user's display name at connect time, when this grant came
+ * from the connect flow.
+ */
+display_name?: string, 
+/**
+ * The channel's workspace identity, shown so an owner can revoke a
+ * whole workspace at once.
+ */
+workspace_identity: string, 
+/**
+ * The channel workspace's display name at connect time.
+ */
+workspace_name?: string, 
+/**
+ * The linked user's safe public avatar URL at connect time.
+ */
+avatar_url?: string, rotated_at?: string, created_at: string, revoked_at?: string, 
+/**
+ * Why the grant was revoked, in owner-facing words. A theft-triggered
+ * revoke reaches the owner here.
+ */
+revoked_reason?: string, };
 
 /**
  * State of one warm harness install, returned by

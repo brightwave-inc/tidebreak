@@ -214,6 +214,7 @@ pub(crate) const MAX_RAW_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_WEB_SEARCH_CREDENTIAL_BODY_BYTES: usize = 16 * 1024;
 const MAX_CODE_EXECUTION_CONFIG_BODY_BYTES: usize = 1_024;
 const MAX_CODE_EXECUTION_CREDENTIAL_BODY_BYTES: usize = 16 * 1024;
+const MAX_EXTERNAL_CONNECT_BODY_BYTES: usize = 16 * 1024;
 
 /// Build the router: unauthenticated health check plus the token-guarded API.
 pub fn app(state: AppState) -> Router {
@@ -608,6 +609,23 @@ pub fn app(state: AppState) -> Router {
             "/external/grants/rotate",
             post(routes::code::external_rotate),
         )
+        // The connect bootstrap: start requires the deployment's narrow
+        // adapter service bearer. Status and completion require the separate
+        // per-handshake confirmation capability returned only to that caller.
+        // The owner's view and approve stay on the authenticated API.
+        .route(
+            "/external/connect",
+            post(routes::code::connect_start)
+                .layer(RequestBodyLimitLayer::new(MAX_EXTERNAL_CONNECT_BODY_BYTES)),
+        )
+        .route(
+            "/external/connect/{nonce}/status",
+            get(routes::code::connect_status),
+        )
+        .route(
+            "/external/connect/{nonce}/complete",
+            post(routes::code::connect_complete),
+        )
         .with_state(state.clone());
 
     let api = Router::new()
@@ -862,6 +880,17 @@ pub fn app(state: AppState) -> Router {
             axum::routing::delete(routes::delete_standing_grant),
         )
         .route("/chats/{id}/events", get(routes::chat_events))
+        .route("/code/grants", get(routes::code::list_grants))
+        .route("/code/grants/{id}/revoke", post(routes::code::revoke_grant))
+        .route(
+            "/code/grants/revoke-workspace",
+            post(routes::code::revoke_workspace_grants),
+        )
+        .route("/external/connect/{nonce}", get(routes::code::connect_view))
+        .route(
+            "/external/connect/{nonce}/approve",
+            post(routes::code::connect_approve),
+        )
         .route(
             "/code/repos",
             post(routes::code::create_repo).get(routes::code::list_repos),
@@ -1904,6 +1933,7 @@ async fn bind_inner(
         os_policy,
     )?
     .with_on_behalf_of_gateway(on_behalf_of_gateway);
+    state.adapter_bootstrap_tokens = auth::AdapterBootstrapTokens::from_env()?.map(Arc::new);
     state.agent_run_wake = agent_run_wake;
     state.sandbox_attempts = sandbox_attempts;
     state.sandbox_steering = sandbox_steering;

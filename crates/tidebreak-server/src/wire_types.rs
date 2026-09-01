@@ -414,6 +414,8 @@ mod tests {
         generate::collect_from::<crate::routes::code::CodeRepoSnapshot>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeWorkspaceSnapshot>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeStorageSnapshot>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::CodeConnectPage>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::CodeGrantSnapshot>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeSessionSnapshot>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeTurnSnapshot>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeAnalyticsSnapshot>(&cfg, &mut out);

@@ -194,6 +194,7 @@ aspirational.
 | `TIDEBREAK_AUTH_GATEWAY_URL` | one auth mode required | — | Public Model Gateway identity URL exposed to clients and, by default, used for live validation. HTTPS required except for loopback development. |
 | `TIDEBREAK_AUTH_GATEWAY_VERIFIER_URL` | no | `TIDEBREAK_AUTH_GATEWAY_URL` | Optional server-to-server Gateway URL for principal validation when the public origin is not cluster-routable. Requires Gateway auth. |
 | `TIDEBREAK_AUTH_TOKENS_FILE` | one auth mode required | — | Standalone compatibility: path to the static token file above. Mutually exclusive with Gateway auth. |
+| `TIDEBREAK_ADAPTER_BOOTSTRAP_TOKENS` | no | unset | Comma-separated service bearers allowed to start an external channel connect handshake. Each value must be 32–512 header-safe characters. Leave unset to disable connect start. To rotate without downtime, add the new value, move the adapter, then remove the old value. |
 | `TIDEBREAK_DATA_DIR` | no | `./.tidebreak` | Instance lock, logs, per-turn scratch. Durable state lives in PostgreSQL, not here. |
 | `TIDEBREAK_LOG` | no | built-in policy | `tracing` filter directives, e.g. `debug` or `warn,tidebreak_server=trace`. An invalid spec falls back to the default. |
 | `TIDEBREAK_DIAGNOSTICS_LOG` | no | `off,tidebreak_diagnostics=info` | `tracing` filter directives for the bounded structured JSONL log. See [Diagnostics](diagnostics.md). |

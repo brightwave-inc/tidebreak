@@ -1187,3 +1187,25 @@ pub(crate) enum CodeExternalGrantRetiredRefresh {
     GrantId,
     RetiredAt,
 }
+
+#[derive(DeriveIden)]
+pub(crate) enum CodeConnectHandshake {
+    Table,
+    Id,
+    NonceHash,
+    ConfirmHash,
+    Csrf,
+    ChannelKind,
+    ExternalIdentity,
+    WorkspaceIdentity,
+    DisplayName,
+    WorkspaceName,
+    AvatarUrl,
+    State,
+    ApprovalOwner,
+    GrantId,
+    CreatedAt,
+    ExpiresAt,
+    ApprovedAt,
+    CompletedAt,
+}

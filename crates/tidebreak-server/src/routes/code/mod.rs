@@ -20,6 +20,7 @@ mod browser;
 mod delivery;
 mod external;
 mod git;
+mod grants;
 mod harnesses;
 mod llm;
 mod repos;
@@ -55,6 +56,10 @@ pub(crate) use git::{
     refresh_workspace_pr, run_workspace_action, start_workspace_watch, stop_workspace_watch,
     write_workspace_check_logs,
 };
+pub(crate) use grants::{
+    connect_approve, connect_complete, connect_start, connect_status, connect_view, list_grants,
+    revoke_grant, revoke_workspace_grants,
+};
 pub(crate) use harnesses::{
     install_harness, list_harness_models, list_harnesses, refresh_harnesses,
 };
@@ -87,17 +92,17 @@ pub(crate) use types::{
     CodeAnalyticsPricingCoverage, CodeAnalyticsRange, CodeAnalyticsRepository,
     CodeAnalyticsSnapshot, CodeAnalyticsTotals, CodeApprovalDecisionBody, CodeApprovalSnapshot,
     CodeCheckLog, CodeCheckLogError, CodeCheckLogsSnapshot, CodeCloneDefaults,
-    CodeCloneJobSnapshot, CodeCommitSnapshot, CodeDeliveryActionResult,
+    CodeCloneJobSnapshot, CodeCommitSnapshot, CodeConnectPage, CodeDeliveryActionResult,
     CodeDeliveryPullRequestActionBody, CodeDeliveryPullRequestDetail, CodeDeliveryPullRequestFile,
     CodeDeliveryPullRequestQuery, CodeDeliveryPullRequestTarget, CodeDeliveryPullRequestsPage,
     CodeDeliveryRepositoriesSnapshot, CodeDeliveryRunActionBody, CodeDeliveryRunDetail,
     CodeDeliveryRunQuery, CodeDeliveryRunTarget, CodeDeliveryRunsPage, CodeFileChange,
     CodeForkBody, CodeForkTranscript, CodeGithubRepositories, CodeGithubRepository,
-    CodeHarnessInstallSnapshot, CodePrCommentsSnapshot, CodePushSnapshot, CodeRepoSnapshot,
-    CodeRepoSource, CodeRepoSources, CodeRepoStorageSnapshot, CodeSessionDebug, CodeSessionDigest,
-    CodeSessionSnapshot, CodeStorageAction, CodeStorageSnapshot, CodeTerminalActivityNotice,
-    CodeTerminalRead, CodeTerminalSnapshot, CodeTriggerSnapshot, CodeTurnSnapshot,
-    CodeUpdateNotice, CodeWorkspaceBlob, CodeWorkspaceDiff, CodeWorkspaceFiles,
+    CodeGrantSnapshot, CodeHarnessInstallSnapshot, CodePrCommentsSnapshot, CodePushSnapshot,
+    CodeRepoSnapshot, CodeRepoSource, CodeRepoSources, CodeRepoStorageSnapshot, CodeSessionDebug,
+    CodeSessionDigest, CodeSessionSnapshot, CodeStorageAction, CodeStorageSnapshot,
+    CodeTerminalActivityNotice, CodeTerminalRead, CodeTerminalSnapshot, CodeTriggerSnapshot,
+    CodeTurnSnapshot, CodeUpdateNotice, CodeWorkspaceBlob, CodeWorkspaceDiff, CodeWorkspaceFiles,
     CodeWorkspaceHistorySearchMatch, CodeWorkspaceHistorySearchSource, CodeWorkspacePrSnapshot,
     CodeWorkspacePullRequests, CodeWorkspaceSearch, CodeWorkspaceSearchMatch,
     CodeWorkspaceSnapshot, CodeWorkspaceStorageSnapshot, CodeWorkspaceTree, CodeWorktreeRoot,

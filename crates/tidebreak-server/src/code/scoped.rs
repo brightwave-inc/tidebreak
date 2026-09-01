@@ -769,6 +769,62 @@ impl ScopedCode {
         self.runtime.reap(&self.owner, id).await
     }
 
+    // ------------------------------------------------------------------
+    // Adapter grants and the connect handshake (docs/slack-sessions.md).
+    // ------------------------------------------------------------------
+
+    pub(crate) async fn list_adapter_grants(
+        &self,
+    ) -> Result<Vec<tidebreak_core::CodeExternalGrant>, ServerError> {
+        self.runtime.list_adapter_grants(&self.owner).await
+    }
+
+    pub(crate) async fn list_adapter_grant_profiles(
+        &self,
+    ) -> Result<Vec<tidebreak_core::CodeGrantProfile>, ServerError> {
+        self.runtime.list_adapter_grant_profiles(&self.owner).await
+    }
+
+    pub(crate) async fn revoke_adapter_grant(
+        &self,
+        id: tidebreak_core::CodeGrantId,
+        reason: &str,
+    ) -> Result<Option<tidebreak_core::CodeExternalGrant>, ServerError> {
+        self.runtime
+            .revoke_adapter_grant(&self.owner, id, reason)
+            .await
+    }
+
+    pub(crate) async fn revoke_workspace_grants(
+        &self,
+        channel_kind: &str,
+        workspace_identity: &str,
+        reason: &str,
+    ) -> Result<Vec<tidebreak_core::CodeExternalGrant>, ServerError> {
+        self.runtime
+            .revoke_workspace_grants(&self.owner, channel_kind, workspace_identity, reason)
+            .await
+    }
+
+    pub(crate) async fn view_connect_handshake(
+        &self,
+        nonce: &str,
+    ) -> Result<Option<(tidebreak_core::CodeConnectHandshake, String)>, ServerError> {
+        self.runtime
+            .view_connect_handshake(&self.owner, nonce)
+            .await
+    }
+
+    pub(crate) async fn approve_connect_handshake(
+        &self,
+        nonce: &str,
+        csrf: &str,
+    ) -> Result<Option<tidebreak_core::CodeConnectHandshake>, ServerError> {
+        self.runtime
+            .approve_connect_handshake(&self.owner, nonce, csrf)
+            .await
+    }
+
     pub(crate) async fn set_permission_mode(
         &self,
         id: CodeSessionId,

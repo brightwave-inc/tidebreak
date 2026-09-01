@@ -187,6 +187,15 @@ delivery for that grant's sessions, not just future calls. The desktop
 settings and the Slack App Home both list active grants with a revoke
 control, including revoke-whole-workspace.
 
+The pre-grant connect route is not anonymous. Each machine accepts one or
+more operator-provisioned adapter bootstrap bearers. The shared adapter keeps
+the active bearer with that machine's operator-written directory entry and
+uses it only to start a handshake. The machine returns a separate 15-minute
+confirmation capability, which the adapter encrypts with its token-vault key
+before it stores the pending row and presents on status and completion. This
+keeps an arbitrary caller from manufacturing a convincing approval and keeps
+a forwarded approval link from completing without the adapter.
+
 State the compromise honestly: a compromised adapter can submit prompts
 to existing sessions of every connected user and read those sessions'
 events. It cannot pick repositories freely, because session creation in a

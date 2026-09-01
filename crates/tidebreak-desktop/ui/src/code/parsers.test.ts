@@ -8,6 +8,7 @@ import {
   parseCodeCloneDefaults,
   parseCodeCloneJob,
   parseCodeCommit,
+  parseCodeGrant,
   parseCodeDeliveryActionResult,
   parseCodeDeliveryPullRequestDetail,
   parseCodeDeliveryPullRequestsPage,
@@ -598,6 +599,37 @@ describe("parseCodeApproval", () => {
         requested_at: "2026-08-15T12:00:00.000Z",
       }),
     ).toBeNull();
+  });
+});
+
+describe("parseCodeGrant", () => {
+  const grant = {
+    id: "grant-1",
+    channel_kind: "slack",
+    external_identity: "U04CASEY",
+    display_name: "Casey Nakamura",
+    workspace_identity: "T04ACME",
+    workspace_name: "Acme Corp",
+    avatar_url: "https://example.com/avatar.png",
+    created_at: "2026-08-20T10:00:00.000Z",
+  };
+
+  it("keeps the identity details shown during connect", () => {
+    expect(parseCodeGrant(grant)).toEqual(grant);
+  });
+
+  it("accepts grants minted before connect profiles existed", () => {
+    const {
+      display_name: _displayName,
+      workspace_name: _workspaceName,
+      avatar_url: _avatarUrl,
+      ...older
+    } = grant;
+    expect(parseCodeGrant(older)).toEqual(older);
+  });
+
+  it("rejects malformed optional identity details", () => {
+    expect(parseCodeGrant({ ...grant, avatar_url: 7 })).toBeNull();
   });
 });
 

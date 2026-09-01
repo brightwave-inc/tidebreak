@@ -65,6 +65,7 @@ impl MigratorTrait for Migrator {
             Box::new(CodeExternalEvents),
             Box::new(CodeTurnRewrite),
             Box::new(CodeExternalGrants),
+            Box::new(CodeConnectHandshakes),
         ]
     }
 }
@@ -3212,6 +3213,154 @@ impl MigrationTrait for CodeExternalGrants {
     }
 }
 
+/// The connect handshake behind a grant (docs/slack-sessions.md, stage 2).
+///
+/// One row per connect card the adapter posts. The nonce is stored as a
+/// hash and is one-time; the row walks pending -> approved -> completed,
+/// and only the completed step — the adapter's closing confirm after its
+/// DM proves control of the channel account — mints anything. A forwarded
+/// link can reach "approved" at most, which binds nothing.
+struct CodeConnectHandshakes;
+
+impl MigrationName for CodeConnectHandshakes {
+    fn name(&self) -> &str {
+        "m20260828_000028_code_connect_handshakes"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for CodeConnectHandshakes {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(idens::CodeConnectHandshake::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(idens::CodeConnectHandshake::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeConnectHandshake::NonceHash)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeConnectHandshake::ConfirmHash)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeConnectHandshake::Csrf)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeConnectHandshake::ChannelKind)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeConnectHandshake::ExternalIdentity)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeConnectHandshake::WorkspaceIdentity)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeConnectHandshake::DisplayName)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeConnectHandshake::WorkspaceName)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(idens::CodeConnectHandshake::AvatarUrl).text())
+                    .col(
+                        ColumnDef::new(idens::CodeConnectHandshake::State)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(idens::CodeConnectHandshake::ApprovalOwner).text())
+                    .col(ColumnDef::new(idens::CodeConnectHandshake::GrantId).uuid())
+                    .col(
+                        ColumnDef::new(idens::CodeConnectHandshake::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeConnectHandshake::ExpiresAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeConnectHandshake::ApprovedAt)
+                            .timestamp_with_time_zone(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::CodeConnectHandshake::CompletedAt)
+                            .timestamp_with_time_zone(),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_code_connect_handshake_grant")
+                            .from(
+                                idens::CodeConnectHandshake::Table,
+                                idens::CodeConnectHandshake::GrantId,
+                            )
+                            .to(
+                                idens::CodeExternalGrant::Table,
+                                idens::CodeExternalGrant::Id,
+                            )
+                            .on_delete(ForeignKeyAction::SetNull),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("ix_code_connect_handshake_nonce")
+                    .table(idens::CodeConnectHandshake::Table)
+                    .col(idens::CodeConnectHandshake::NonceHash)
+                    .unique()
+                    .if_not_exists()
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("ix_code_connect_handshake_grant")
+                    .table(idens::CodeConnectHandshake::Table)
+                    .col(idens::CodeConnectHandshake::GrantId)
+                    .unique()
+                    .if_not_exists()
+                    .to_owned(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .drop_table(
+                Table::drop()
+                    .table(idens::CodeConnectHandshake::Table)
+                    .if_exists()
+                    .to_owned(),
+            )
+            .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
@@ -3288,12 +3437,41 @@ mod tests {
                 "m20260828_000025_code_external_events",
                 "m20260828_000026_code_turn_rewrite",
                 "m20260828_000027_code_external_grants",
+                "m20260828_000028_code_connect_handshakes",
             ]
         );
         assert!(db
             .query_one_raw(Statement::from_string(
                 DbBackend::Sqlite,
                 "SELECT owner FROM app LIMIT 1".to_owned(),
+            ))
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn connect_handshake_migration_rolls_back_its_ephemeral_table() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        Migrator::up(&db, None).await.unwrap();
+        assert!(db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' \
+                 AND name = 'code_connect_handshake'"
+                    .to_owned(),
+            ))
+            .await
+            .unwrap()
+            .is_some());
+
+        Migrator::down(&db, Some(1)).await.unwrap();
+        assert!(db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' \
+                 AND name = 'code_connect_handshake'"
+                    .to_owned(),
             ))
             .await
             .unwrap()

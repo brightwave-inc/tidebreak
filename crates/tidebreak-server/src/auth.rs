@@ -56,9 +56,10 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
-use axum::extract::{Request, State};
+use axum::extract::{FromRequestParts, Request, State};
 use axum::http::{
     header::{AUTHORIZATION, HOST, ORIGIN, SEC_WEBSOCKET_PROTOCOL, UPGRADE},
+    request::Parts,
     HeaderMap, HeaderName, StatusCode,
 };
 use axum::middleware::Next;
@@ -67,6 +68,7 @@ use axum::Json;
 use futures::StreamExt as _;
 use tidebreak_core::{AgentError, Profile, Result};
 
+use crate::error::ServerError;
 use crate::principal::{AuthContext, Principal, Role, UserId};
 use crate::state::AppState;
 
@@ -86,6 +88,103 @@ pub const CLIENT_EXECUTOR_HEADER: HeaderName =
 
 /// Scoped credential for publishing caller-held bytes into one chat.
 pub const LOCAL_IMPORT_HEADER: HeaderName = HeaderName::from_static("x-tidebreak-local-import");
+
+/// Comma-separated adapter bootstrap bearers accepted by the pre-grant
+/// connect route. Several values allow a zero-downtime rotation: add the new
+/// value, move the adapter, then remove the old one.
+pub(crate) const ADAPTER_BOOTSTRAP_TOKENS_ENV: &str = "TIDEBREAK_ADAPTER_BOOTSTRAP_TOKENS";
+
+/// The narrow service credentials allowed to start an external connect flow.
+///
+/// This type deliberately implements neither `Debug` nor serialization. The
+/// credentials live only in process memory and authorize no owner API or
+/// post-connect adapter route.
+pub(crate) struct AdapterBootstrapTokens {
+    tokens: Vec<std::sync::Arc<str>>,
+}
+
+impl AdapterBootstrapTokens {
+    /// Read and validate the optional token set once at boot.
+    pub(crate) fn from_env() -> Result<Option<Self>> {
+        Self::parse(std::env::var(ADAPTER_BOOTSTRAP_TOKENS_ENV).ok())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(token: &str) -> Self {
+        Self::parse(Some(token.to_owned()))
+            .expect("the adapter bootstrap test token is valid")
+            .expect("the adapter bootstrap test token is present")
+    }
+
+    fn parse(value: Option<String>) -> Result<Option<Self>> {
+        let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
+            return Ok(None);
+        };
+        let mut tokens: Vec<std::sync::Arc<str>> = Vec::new();
+        for raw in value.split(',') {
+            let token = raw.trim();
+            if !(32..=512).contains(&token.len()) {
+                return Err(AgentError::config(format!(
+                    "{ADAPTER_BOOTSTRAP_TOKENS_ENV} entries must be 32 to 512 characters"
+                )));
+            }
+            if !token.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'~' | b'-')
+            }) {
+                return Err(AgentError::config(format!(
+                    "{ADAPTER_BOOTSTRAP_TOKENS_ENV} entries must use only letters, digits, `.`, `_`, `~`, or `-`"
+                )));
+            }
+            if tokens.iter().any(|existing| existing.as_ref() == token) {
+                return Err(AgentError::config(format!(
+                    "{ADAPTER_BOOTSTRAP_TOKENS_ENV} contains a duplicate token"
+                )));
+            }
+            tokens.push(token.to_owned().into());
+        }
+        if tokens.len() > 4 {
+            return Err(AgentError::config(format!(
+                "{ADAPTER_BOOTSTRAP_TOKENS_ENV} accepts at most four rotation values"
+            )));
+        }
+        Ok(Some(Self { tokens }))
+    }
+
+    fn accepts(&self, presented: &str) -> bool {
+        let mut accepted = false;
+        for token in &self.tokens {
+            accepted |= constant_time_eq(token.as_bytes(), presented.as_bytes());
+        }
+        accepted
+    }
+}
+
+/// Authenticates the adapter service before it can create a connect approval.
+///
+/// The adapter does not hold a grant yet, so this credential is distinct from
+/// both owner bearers and the grant tokens minted at completion.
+pub(crate) struct AdapterBootstrapAuth;
+
+impl FromRequestParts<AppState> for AdapterBootstrapAuth {
+    type Rejection = ServerError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> std::result::Result<Self, Self::Rejection> {
+        let accepted = state
+            .adapter_bootstrap_tokens
+            .as_deref()
+            .zip(extract_token(&parts.headers))
+            .is_some_and(|(configured, presented)| configured.accepts(presented));
+        if !accepted {
+            return Err(ServerError::unauthorized(
+                "the adapter bootstrap token is invalid",
+            ));
+        }
+        Ok(Self)
+    }
+}
 
 /// Public, non-secret authentication metadata for native clients attaching to
 /// a hosted machine. A client uses this to discover that it should mint a
@@ -896,6 +995,35 @@ mod tests {
     const ALICE_FIRST: &str = "alice-token-one-padded-to-thirty-two";
     const ALICE_SECOND: &str = "alice-token-two-padded-to-thirty-two";
     const BOB_TOKEN: &str = "bob-token-padded-out-to-thirty-two-x";
+    const ADAPTER_FIRST: &str = "adapter-token-one-padded-to-thirty-two";
+    const ADAPTER_SECOND: &str = "adapter-token-two-padded-to-thirty-two";
+
+    #[test]
+    fn adapter_bootstrap_tokens_support_bounded_rotation() {
+        let tokens =
+            AdapterBootstrapTokens::parse(Some(format!("{ADAPTER_FIRST}, {ADAPTER_SECOND}")))
+                .unwrap()
+                .unwrap();
+        assert!(tokens.accepts(ADAPTER_FIRST));
+        assert!(tokens.accepts(ADAPTER_SECOND));
+        assert!(!tokens.accepts("adapter-token-wrong-padded-to-thirty-two"));
+
+        for invalid in [
+            "short".to_owned(),
+            format!("{ADAPTER_FIRST},{ADAPTER_FIRST}"),
+            format!("{}!", "a".repeat(32)),
+            [ADAPTER_FIRST; 5].join(","),
+        ] {
+            assert!(
+                AdapterBootstrapTokens::parse(Some(invalid)).is_err(),
+                "an unsafe bootstrap token set must fail boot"
+            );
+        }
+        assert!(AdapterBootstrapTokens::parse(None).unwrap().is_none());
+        assert!(AdapterBootstrapTokens::parse(Some("  ".to_owned()))
+            .unwrap()
+            .is_none());
+    }
 
     #[test]
     fn token_map_parses_the_documented_format_and_resolves_exactly() {

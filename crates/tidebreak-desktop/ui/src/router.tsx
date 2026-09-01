@@ -30,6 +30,7 @@ import {
   codeDeliverySearchFrom,
 } from "./code/CodeDeliveryPage";
 import { CodeWorkspacePage } from "./code/CodeWorkspacePage";
+import { ConnectApprovalRoute } from "./ConnectApprovalRoute";
 
 const rootRoute = createRootRoute({ component: AppShell });
 
@@ -344,8 +345,19 @@ const settingsSectionRoutes = SETTINGS_SECTIONS.map((section) =>
   }),
 );
 
+/**
+ * The connect approval a channel's connect card links to. Standalone: the
+ * person arrives from outside the app, not from the rail.
+ */
+const connectApprovalRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/connect/$nonce",
+  component: ConnectApprovalRoute,
+});
+
 export const routeTree = rootRoute.addChildren([
   homeRoute,
+  connectApprovalRoute,
   appsRoute,
   appDetailRoute,
   pluginsRoute,

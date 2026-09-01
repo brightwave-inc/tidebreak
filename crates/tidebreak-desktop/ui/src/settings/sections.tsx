@@ -15,6 +15,7 @@ import {
   Terminal,
   Waypoints,
   Zap,
+  MessagesSquare,
 } from "lucide-react";
 
 import { useApp } from "@/AppContext";
@@ -35,6 +36,7 @@ import { WebSearchPanel } from "./WebSearchPanel";
 import { VoiceTranscriptionPanel } from "./VoiceTranscriptionPanel";
 import { CodingHarnessesPanel } from "./CodingHarnessesPanel";
 import { QuickActionsPanel } from "./QuickActionsPanel";
+import { ChannelsPanel } from "./ChannelsPanel";
 
 /**
  * Each section reads what it needs from the shell context rather than being
@@ -190,6 +192,11 @@ function QuickActionsSection() {
   return <QuickActionsPanel />;
 }
 
+function ChannelsSection() {
+  const { client } = useApp();
+  return <ChannelsPanel client={client} />;
+}
+
 export type SettingsSectionDef = {
   /** The path segment under `/settings`, and its address. */
   path: string;
@@ -305,6 +312,14 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     icon: Zap,
     iconClass: "text-icon-violet",
     Component: QuickActionsSection,
+  },
+  {
+    path: "channels",
+    label: "Channels",
+    group: "capabilities",
+    icon: MessagesSquare,
+    iconClass: "text-icon-green",
+    Component: ChannelsSection,
   },
   {
     path: "connected-apps",
