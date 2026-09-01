@@ -124,42 +124,50 @@ export type CodeDeliveryNotification = {
   target: CodeDeliveryNotificationTarget;
 };
 
-export const DEFAULT_DELIVERY_NOTIFICATION_RULES: CodeDeliveryNotificationRule[] =
-  [
-    {
-      id: "pull_request_attention",
-      enabled: true,
-      repositoryKeys: [],
-      tidebreakLinkedOnly: false,
-    },
-    {
-      id: "pull_request_ready",
-      enabled: true,
-      repositoryKeys: [],
-      tidebreakLinkedOnly: false,
-    },
-    {
-      id: "run_failure",
-      enabled: true,
-      repositoryKeys: [],
-      tidebreakLinkedOnly: false,
-    },
-  ];
+const LEGACY_DEFAULT_NOTIFICATION_RULES: CodeDeliveryNotificationRule[] = [
+  {
+    id: "pull_request_attention",
+    enabled: true,
+    repositoryKeys: [],
+    tidebreakLinkedOnly: false,
+  },
+  {
+    id: "pull_request_ready",
+    enabled: true,
+    repositoryKeys: [],
+    tidebreakLinkedOnly: false,
+  },
+  {
+    id: "run_failure",
+    enabled: true,
+    repositoryKeys: [],
+    tidebreakLinkedOnly: false,
+  },
+];
 
-type PersistedCodeDeliveryState = {
-  version: 1;
+type StoredCodeDeliveryState = {
   manualRepositories: CodeGitHubRepositoryRef[];
   excludedRegisteredRepoIds: string[];
   pinnedRepositoryKeys: string[];
   savedViews: CodeDeliverySavedView[];
-  notificationRules: CodeDeliveryNotificationRule[];
   notifications: CodeDeliveryNotification[];
   seenFingerprints: Record<string, string>;
   lastPollAt: string | null;
   knownAuthors: CodeDeliveryAuthor[];
 };
 
-type CodeDeliveryStore = Omit<PersistedCodeDeliveryState, "version"> & {
+type PersistedCodeDeliveryState = StoredCodeDeliveryState & {
+  version: 1;
+  notificationRulesMigrated?: true;
+  notificationRules?: CodeDeliveryNotificationRule[];
+};
+
+type HydratedCodeDeliveryState = StoredCodeDeliveryState & {
+  /** Old rules stay here until every mapped server trigger is armed. */
+  legacyNotificationRules: CodeDeliveryNotificationRule[] | null;
+};
+
+type CodeDeliveryStore = HydratedCodeDeliveryState & {
   polling: boolean;
   monitorError: string | null;
   lastSuccessfulPollAt: string | null;
@@ -180,9 +188,8 @@ type CodeDeliveryStore = Omit<PersistedCodeDeliveryState, "version"> & {
   setRepositoryPinned: (key: string, pinned: boolean) => void;
   upsertSavedView: (view: CodeDeliverySavedView) => void;
   removeSavedView: (id: string) => void;
-  updateNotificationRule: (
-    id: CodeDeliveryNotificationRuleKind,
-    patch: Partial<Omit<CodeDeliveryNotificationRule, "id">>,
+  completeNotificationRuleMigration: (
+    rules: CodeDeliveryNotificationRule[],
   ) => void;
   ingestDeliveryPoll: (
     pullRequests: readonly CodeDeliveryPullRequestSummary[],
@@ -203,24 +210,21 @@ type CodeDeliveryStore = Omit<PersistedCodeDeliveryState, "version"> & {
   reset: () => void;
 };
 
-function emptyPersistedState(): PersistedCodeDeliveryState {
+function emptyPersistedState(): HydratedCodeDeliveryState {
   return {
-    version: STORAGE_VERSION,
     manualRepositories: [],
     excludedRegisteredRepoIds: [],
     pinnedRepositoryKeys: [],
     savedViews: [],
-    notificationRules: DEFAULT_DELIVERY_NOTIFICATION_RULES.map((rule) => ({
-      ...rule,
-    })),
     notifications: [],
     seenFingerprints: {},
     lastPollAt: null,
     knownAuthors: [],
+    legacyNotificationRules: null,
   };
 }
 
-function readPersistedState(): PersistedCodeDeliveryState {
+function readPersistedState(): HydratedCodeDeliveryState {
   if (typeof window === "undefined") return emptyPersistedState();
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
@@ -239,11 +243,13 @@ function persist(state: CodeDeliveryStore): string | null {
     excludedRegisteredRepoIds: state.excludedRegisteredRepoIds,
     pinnedRepositoryKeys: state.pinnedRepositoryKeys,
     savedViews: state.savedViews,
-    notificationRules: state.notificationRules,
     notifications: state.notifications,
     seenFingerprints: state.seenFingerprints,
     lastPollAt: state.lastPollAt,
     knownAuthors: state.knownAuthors,
+    ...(state.legacyNotificationRules
+      ? { notificationRules: state.legacyNotificationRules }
+      : { notificationRulesMigrated: true }),
   };
   try {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
@@ -384,12 +390,9 @@ export const useCodeDeliveryStore = create<CodeDeliveryStore>()((set, get) => {
       set({ savedViews: get().savedViews.filter((view) => view.id !== id) });
       persistCurrent();
     },
-    updateNotificationRule: (id, patch) => {
-      set({
-        notificationRules: get().notificationRules.map((rule) =>
-          rule.id === id ? { ...rule, ...patch, id } : rule,
-        ),
-      });
+    completeNotificationRuleMigration: (rules) => {
+      if (get().legacyNotificationRules !== rules) return;
+      set({ legacyNotificationRules: null });
       persistCurrent();
     },
     ingestDeliveryPoll: (
@@ -540,10 +543,7 @@ export function rememberedPullRequestPage(
 }
 
 function buildDeliveryPoll(
-  state: Pick<
-    CodeDeliveryStore,
-    "notificationRules" | "notifications" | "seenFingerprints"
-  >,
+  state: Pick<CodeDeliveryStore, "notifications" | "seenFingerprints">,
   pullRequests: readonly CodeDeliveryPullRequestSummary[],
   runs: readonly CodeDeliveryRunSummary[],
   receivedAt: string,
@@ -557,7 +557,6 @@ function buildDeliveryPoll(
   const cutoff = now - MAX_NOTIFICATION_AGE_MS;
   const seen = { ...state.seenFingerprints };
   const incoming: CodeDeliveryNotification[] = [];
-  const rules = new Map(state.notificationRules.map((rule) => [rule.id, rule]));
 
   for (const pullRequest of pullRequests) {
     if (Date.parse(pullRequest.updated_at) < cutoff) continue;
@@ -571,7 +570,6 @@ function buildDeliveryPoll(
       maybeAddNotification(
         incoming,
         seen,
-        rules.get("pull_request_attention"),
         pullRequest,
         fingerprint,
         receivedAt,
@@ -591,7 +589,6 @@ function buildDeliveryPoll(
       maybeAddNotification(
         incoming,
         seen,
-        rules.get("pull_request_ready"),
         pullRequest,
         fingerprint,
         receivedAt,
@@ -618,14 +615,7 @@ function buildDeliveryPoll(
       run.status,
       run.conclusion ?? "",
     ].join(":");
-    maybeAddRunNotification(
-      incoming,
-      seen,
-      rules.get("run_failure"),
-      run,
-      fingerprint,
-      receivedAt,
-    );
+    maybeAddRunNotification(incoming, seen, run, fingerprint, receivedAt);
   }
 
   const notifications = [...incoming, ...state.notifications]
@@ -682,7 +672,6 @@ function deliveryErrorMessage(error: unknown): string {
 function maybeAddNotification(
   incoming: CodeDeliveryNotification[],
   seen: Record<string, string>,
-  rule: CodeDeliveryNotificationRule | undefined,
   pullRequest: CodeDeliveryPullRequestSummary,
   fingerprint: string,
   receivedAt: string,
@@ -692,15 +681,6 @@ function maybeAddNotification(
     detail: string;
   },
 ): void {
-  if (
-    !ruleApplies(
-      rule,
-      pullRequest.repository,
-      pullRequest.workspace_links.length > 0,
-    )
-  ) {
-    return;
-  }
   if (seen[fingerprint]) return;
   seen[fingerprint] = receivedAt;
   incoming.push({
@@ -727,13 +707,10 @@ function maybeAddNotification(
 function maybeAddRunNotification(
   incoming: CodeDeliveryNotification[],
   seen: Record<string, string>,
-  rule: CodeDeliveryNotificationRule | undefined,
   run: CodeDeliveryRunSummary,
   fingerprint: string,
   receivedAt: string,
 ): void {
-  if (!ruleApplies(rule, run.repository, run.workspace_links.length > 0))
-    return;
   if (seen[fingerprint]) return;
   seen[fingerprint] = receivedAt;
   incoming.push({
@@ -756,19 +733,6 @@ function maybeAddRunNotification(
       id: run.github_id,
     },
   });
-}
-
-function ruleApplies(
-  rule: CodeDeliveryNotificationRule | undefined,
-  repository: CodeGitHubRepositoryRef,
-  tidebreakLinked: boolean,
-): boolean {
-  if (!rule?.enabled) return false;
-  if (rule.tidebreakLinkedOnly && !tidebreakLinked) return false;
-  return (
-    rule.repositoryKeys.length === 0 ||
-    rule.repositoryKeys.includes(codeDeliveryRepositoryKey(repository))
-  );
 }
 
 export function codeDeliveryRepositoryKey(
@@ -917,41 +881,49 @@ function parseKnownAuthors(value: unknown): CodeDeliveryAuthor[] {
   return authors.slice(0, MAX_KNOWN_AUTHORS);
 }
 
-function parsePersistedState(
-  value: unknown,
-): PersistedCodeDeliveryState | null {
+function parsePersistedState(value: unknown): HydratedCodeDeliveryState | null {
   if (!isRecord(value) || value.version !== STORAGE_VERSION) return null;
   const manualRepositories = parseRepositoryRefs(value.manualRepositories);
   const savedViews = parseSavedViews(value.savedViews);
-  const notificationRules = parseNotificationRules(value.notificationRules);
   const notifications = parseNotifications(value.notifications);
+  const rulesMigrated = value.notificationRulesMigrated === true;
+  const notificationRules = rulesMigrated
+    ? null
+    : parseNotificationRules(value.notificationRules);
   if (
     !manualRepositories ||
     !stringArray(value.excludedRegisteredRepoIds) ||
     !stringArray(value.pinnedRepositoryKeys) ||
     !savedViews ||
-    !notificationRules ||
+    !(
+      value.notificationRulesMigrated === undefined ||
+      value.notificationRulesMigrated === true
+    ) ||
+    (!rulesMigrated && !notificationRules) ||
     !notifications ||
     !isStringRecord(value.seenFingerprints) ||
     !(value.lastPollAt === null || typeof value.lastPollAt === "string")
   ) {
     return null;
   }
-  const byRule = new Map(notificationRules.map((rule) => [rule.id, rule]));
-  for (const fallback of DEFAULT_DELIVERY_NOTIFICATION_RULES) {
-    if (!byRule.has(fallback.id)) byRule.set(fallback.id, { ...fallback });
+  const byRule = new Map(
+    (notificationRules ?? []).map((rule) => [rule.id, rule]),
+  );
+  if (!rulesMigrated) {
+    for (const fallback of LEGACY_DEFAULT_NOTIFICATION_RULES) {
+      if (!byRule.has(fallback.id)) byRule.set(fallback.id, { ...fallback });
+    }
   }
   return {
-    version: STORAGE_VERSION,
     manualRepositories,
     excludedRegisteredRepoIds: [...value.excludedRegisteredRepoIds],
     pinnedRepositoryKeys: [...value.pinnedRepositoryKeys],
     savedViews,
-    notificationRules: [...byRule.values()],
     notifications,
     seenFingerprints: { ...value.seenFingerprints },
     lastPollAt: value.lastPollAt,
     knownAuthors: parseKnownAuthors(value.knownAuthors),
+    legacyNotificationRules: rulesMigrated ? null : [...byRule.values()],
   };
 }
 

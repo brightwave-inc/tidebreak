@@ -1,11 +1,112 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import type { CodeDeliveryRunQuery } from "../api/types";
+import type {
+  CodeDeliveryRunQuery,
+  CodeGitHubRepositoryRef,
+} from "../api/types";
+import type { CodeDeliveryNotificationRule } from "./CodeDeliveryStore";
 import {
+  migrateLegacyNotificationRules,
   monitorRuns,
   monitorSince,
   nextMonitorDelayMs,
 } from "./CodeDeliveryMonitor";
+
+const repository: CodeGitHubRepositoryRef = {
+  host: "github.com",
+  owner: "brightwave-inc",
+  name: "tidebreak",
+  name_with_owner: "brightwave-inc/tidebreak",
+  url: "https://github.com/brightwave-inc/tidebreak",
+  tidebreak_repo_id: "repo-1",
+};
+
+const attentionRule: CodeDeliveryNotificationRule = {
+  id: "pull_request_attention",
+  enabled: true,
+  repositoryKeys: [],
+  tidebreakLinkedOnly: false,
+};
+
+describe("migrateLegacyNotificationRules", () => {
+  it("arms every mapped rule as a server notification trigger", async () => {
+    const listCodeTriggers = vi.fn(async () => []);
+    const createCodeTrigger = vi.fn(async () => ({}) as never);
+
+    await expect(
+      migrateLegacyNotificationRules(
+        { listCodeTriggers, createCodeTrigger },
+        [attentionRule],
+        { repositories: [repository], errors: [] },
+      ),
+    ).resolves.toBe(true);
+
+    expect(listCodeTriggers).toHaveBeenCalledWith("repo-1");
+    expect(createCodeTrigger.mock.calls).toEqual([
+      ["repo-1", "changes_requested", "notify"],
+      ["repo-1", "conflicts", "notify"],
+    ]);
+  });
+
+  it("keeps the migration pending when repository discovery is partial", async () => {
+    const listCodeTriggers = vi.fn(async () => []);
+    const createCodeTrigger = vi.fn(async () => ({}) as never);
+
+    await expect(
+      migrateLegacyNotificationRules(
+        { listCodeTriggers, createCodeTrigger },
+        [attentionRule],
+        {
+          repositories: [repository],
+          errors: [{ kind: "github", message: "one repository failed" }],
+        },
+      ),
+    ).resolves.toBe(false);
+
+    expect(createCodeTrigger).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries only missing rows after a partial migration", async () => {
+    const listCodeTriggers = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          id: "trigger-existing",
+          repo_id: "repo-1",
+          condition: "changes_requested",
+          action: "notify",
+          enabled: false,
+          created_at: "2026-08-29T12:00:00Z",
+          updated_at: "2026-08-29T12:01:00Z",
+        },
+      ]);
+    const createCodeTrigger = vi
+      .fn()
+      .mockResolvedValueOnce({})
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce({});
+
+    await expect(
+      migrateLegacyNotificationRules(
+        { listCodeTriggers, createCodeTrigger },
+        [attentionRule],
+        { repositories: [repository], errors: [] },
+      ),
+    ).rejects.toThrow("offline");
+    await migrateLegacyNotificationRules(
+      { listCodeTriggers, createCodeTrigger },
+      [attentionRule],
+      { repositories: [repository], errors: [] },
+    );
+
+    expect(createCodeTrigger.mock.calls).toEqual([
+      ["repo-1", "changes_requested", "notify"],
+      ["repo-1", "conflicts", "notify"],
+      ["repo-1", "conflicts", "notify"],
+    ]);
+  });
+});
 
 describe("nextMonitorDelayMs", () => {
   it("has no safety or hidden poll clock", () => {
