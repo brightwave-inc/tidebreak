@@ -96,6 +96,26 @@ impl ChatGptAuthConfig {
     pub fn for_test(auth_base: &str) -> Result<Self> {
         let base = reqwest::Url::parse(auth_base)
             .map_err(|_| chatgpt_error("configuration", "auth base URL is invalid"))?;
+        let loopback = base.host_str().is_some_and(|host| {
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+        });
+        if base.scheme() != "http"
+            || !loopback
+            || !base.username().is_empty()
+            || base.password().is_some()
+            || base.query().is_some()
+            || base.fragment().is_some()
+        {
+            return Err(chatgpt_error(
+                "configuration",
+                "test auth base URL must use a credential-free loopback HTTP origin",
+            ));
+        }
         let join = |path: &str| -> Result<reqwest::Url> {
             let mut root = base.to_string();
             if !root.ends_with('/') {
@@ -728,5 +748,31 @@ mod tests {
         let config = ChatGptAuthConfig::production();
         assert_eq!(config.redirect_uri(), REDIRECT_URI);
         assert_eq!(config.originator(), ORIGINATOR);
+    }
+
+    #[test]
+    fn test_config_refuses_non_loopback_auth_origins() {
+        for invalid in [
+            "https://auth.example",
+            "http://localhost.attacker.example",
+            "http://user:password@localhost",
+            "http://localhost?redirect=https://auth.example",
+            "http://localhost#fragment",
+        ] {
+            assert!(
+                ChatGptAuthConfig::for_test(invalid).is_err(),
+                "accepted unsafe test auth origin: {invalid}"
+            );
+        }
+        for valid in [
+            "http://localhost",
+            "http://127.0.0.1:8080",
+            "http://[::1]:8080",
+        ] {
+            assert!(
+                ChatGptAuthConfig::for_test(valid).is_ok(),
+                "refused loopback test auth origin: {valid}"
+            );
+        }
     }
 }
