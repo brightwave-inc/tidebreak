@@ -15,8 +15,16 @@ import {
 import { desktopNotificationsEnabled } from "./NotificationPreferences";
 import { useNotifications } from "./NotificationStore";
 import { useRefreshSignals } from "./RefreshSignals";
+import { useVisibilityGatedPoll } from "./useVisibilityGatedPoll";
 
-const POLL_INTERVAL_MS = 10_000;
+/**
+ * Safety-net cadence. The open chat's stream and the code digest socket both
+ * signal a finished turn; the timer covers a background chat that finished
+ * with no stream open. Hidden, it slows rather than stops — the native notice
+ * for an away reader is exactly what a hidden window still owes.
+ */
+const POLL_INTERVAL_MS = 30_000;
+const HIDDEN_POLL_INTERVAL_MS = 60_000;
 
 const storeActions = useNotifications.getState();
 
@@ -90,21 +98,18 @@ export function useAgentNotifications(client: ApiClient | null): void {
       void read();
     };
     void read();
-    const interval = window.setInterval(() => void read(), POLL_INTERVAL_MS);
     return () => {
       cancelled = true;
       seq += 1;
-      window.clearInterval(interval);
       refreshRef.current = null;
     };
   }, [client]);
 
-  const lastSignalRef = useRef(notificationsSignal);
-  useEffect(() => {
-    if (lastSignalRef.current === notificationsSignal) return;
-    lastSignalRef.current = notificationsSignal;
-    refreshRef.current?.();
-  }, [notificationsSignal]);
+  useVisibilityGatedPoll(() => refreshRef.current?.(), POLL_INTERVAL_MS, {
+    enabled: client !== null,
+    hiddenIntervalMs: HIDDEN_POLL_INTERVAL_MS,
+    revision: notificationsSignal,
+  });
 
   useEffect(() => {
     if (!client) return;

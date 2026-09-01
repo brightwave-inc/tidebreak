@@ -3639,7 +3639,9 @@ const SAME_DOCUMENT_NAVIGATION_OBSERVER_SCRIPT: &str = r#"
   }
   addEventListener("popstate", capture, true);
   addEventListener("hashchange", capture, true);
-  state.interval = setInterval(capture, 100);
+  // The host reads (and captures) on its own cadence; this only catches a
+  // location change no listener saw, so it can be slow.
+  state.interval = setInterval(capture, 1000);
   addEventListener("pagehide", () => {
     state.cancelled = true;
     clearInterval(state.interval);
@@ -4740,7 +4742,7 @@ mod tests {
         assert!(script.contains("[\"pushState\", \"replaceState\"]"));
         assert!(script.contains("addEventListener(\"popstate\""));
         assert!(script.contains("addEventListener(\"hashchange\""));
-        assert!(script.contains("setInterval(capture, 100)"));
+        assert!(script.contains("setInterval(capture, 1000)"));
         assert!(script.contains("clearInterval(state.interval)"));
         assert!(!script.contains("__TAURI_INTERNALS__"));
         assert!(!script.contains("window.ipc"));

@@ -46,8 +46,15 @@ const MAX_BROWSER_URL_CHARS: usize = 8_192;
 const MAX_JS_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const AGENT_NAVIGATION_START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const AGENT_NAVIGATION_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
+/// How often the host reads the in-page navigation observer while the tab is
+/// showing. The page captures `pushState` and friends the instant they happen;
+/// this is only the latency before the URL bar reflects it.
 const SAME_DOCUMENT_NAVIGATION_POLL_INTERVAL: std::time::Duration =
-    std::time::Duration::from_millis(100);
+    std::time::Duration::from_millis(250);
+/// The cadence while the tab is hidden. Nothing shows the URL, so the read
+/// waits; a hidden tab only checks that it is still the same document.
+const SAME_DOCUMENT_NAVIGATION_HIDDEN_POLL_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(2);
 #[cfg(target_os = "macos")]
 const PROFILE_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 #[cfg(target_os = "macos")]
@@ -887,17 +894,24 @@ fn start_same_document_navigation_observer(
         let renderer_url = main.url().ok();
         let mut observer_installed = false;
         let mut last_sequence = None;
-        let mut interval = tokio::time::interval(SAME_DOCUMENT_NAVIGATION_POLL_INTERVAL);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut cadence = SAME_DOCUMENT_NAVIGATION_POLL_INTERVAL;
 
         loop {
-            interval.tick().await;
+            tokio::time::sleep(cadence).await;
             let Ok(snapshot) = registry.snapshot(&browser_id, &workspace_id) else {
                 return;
             };
             if snapshot.document_epoch != Some(document_epoch) {
                 return;
             }
+            // A hidden tab shows no URL bar, so there is nothing to keep
+            // current; the page keeps capturing and the first visible read
+            // catches up on whatever moved.
+            if snapshot.visible == Some(false) {
+                cadence = SAME_DOCUMENT_NAVIGATION_HIDDEN_POLL_INTERVAL;
+                continue;
+            }
+            cadence = SAME_DOCUMENT_NAVIGATION_POLL_INTERVAL;
 
             let observation = if observer_installed {
                 match browser_read_same_document_navigation_observer(&webview).await {

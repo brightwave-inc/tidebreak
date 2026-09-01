@@ -6,8 +6,16 @@ import { requestUserAttention } from "./host";
 import { useInbox } from "./Inbox";
 import { usePendingPrompts } from "./PendingPrompts";
 import { useRefreshSignals } from "./RefreshSignals";
+import { useVisibilityGatedPoll } from "./useVisibilityGatedPoll";
 
-const POLL_INTERVAL_MS = 10_000;
+/**
+ * Safety-net cadence. The event stream signals the open chat's prompts as
+ * they park; the timer covers chats that are not open, whose parked work has
+ * no stream to announce it. Hidden, it slows rather than stops: a question
+ * parking in a background chat still wants the dock bounce.
+ */
+const POLL_INTERVAL_MS = 30_000;
+const HIDDEN_POLL_INTERVAL_MS = 60_000;
 
 const promptActions = usePendingPrompts.getState();
 const attentionActions = useChatAttention.getState();
@@ -99,12 +107,10 @@ export function useChatPromptWatcher(
 
     refreshRef.current = readAll;
     readAll();
-    const interval = window.setInterval(readAll, POLL_INTERVAL_MS);
 
     return () => {
       cancelled = true;
       summarySeq += 1;
-      window.clearInterval(interval);
       refreshRef.current = null;
     };
   }, [client]);
@@ -203,28 +209,11 @@ export function useChatPromptWatcher(
   }, [client, chatId]);
 
   // Only a signal raised after this mounted means anything; the counters are
-  // app-wide and may already be well past zero on arrival.
-  const lastSignalsRef = useRef({
-    questions: questionsSignal,
-    plans: plansSignal,
-    folder: folderSignal,
-    writeback: writebackSignal,
+  // app-wide and may already be well past zero on arrival. Counters only
+  // grow, so their sum moves on any one of them.
+  useVisibilityGatedPoll(() => refreshRef.current?.(), POLL_INTERVAL_MS, {
+    enabled: client !== null,
+    hiddenIntervalMs: HIDDEN_POLL_INTERVAL_MS,
+    revision: questionsSignal + plansSignal + folderSignal + writebackSignal,
   });
-  useEffect(() => {
-    const last = lastSignalsRef.current;
-    if (
-      last.questions === questionsSignal &&
-      last.plans === plansSignal &&
-      last.folder === folderSignal &&
-      last.writeback === writebackSignal
-    )
-      return;
-    lastSignalsRef.current = {
-      questions: questionsSignal,
-      plans: plansSignal,
-      folder: folderSignal,
-      writeback: writebackSignal,
-    };
-    refreshRef.current?.();
-  }, [questionsSignal, plansSignal, folderSignal, writebackSignal]);
 }

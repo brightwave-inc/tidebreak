@@ -61,6 +61,7 @@ import type { LayoutState, PanelContent } from "@/panel/panelTypes";
 import { useLayoutState, usePanelNav } from "@/panel/usePanelNav";
 import { RouteFrame } from "@/RouteFrame";
 import { QueueTray, useCodeQueueApi } from "@/QueueTray";
+import { useRefreshSignals } from "@/RefreshSignals";
 import { followScrollBehavior } from "@/ChatScroll";
 import { useStreamStalled } from "@/useStreamStalled";
 import { useTranscriptFollow } from "@/useTranscriptFollow";
@@ -2487,8 +2488,8 @@ function CodeSessionPane({
     follow.requestSmoothFollow();
     // Outcome and refusal both belong to the composer: it says whether the
     // message ran or queued, and it holds the draft when the server refuses.
-    // A queued outcome needs no state here — the tray polls the durable queue
-    // and shows the row.
+    // A queued outcome needs no state here — the tray reads the durable queue
+    // on the signal below and shows the row.
     return submitAcceptedTurn(store.getState().update, () =>
       pendingReasoningEffort
         ? client.submitCodeTurn(
@@ -2505,6 +2506,9 @@ function CodeSessionPane({
             attachments,
           ),
     ).then((outcome) => {
+      if (outcome.kind === "queued") {
+        useRefreshSignals.getState().signal("queuedTurns");
+      }
       if (pendingReasoningEffortRef.current === pendingReasoningEffort) {
         pendingReasoningEffortRef.current = null;
       }

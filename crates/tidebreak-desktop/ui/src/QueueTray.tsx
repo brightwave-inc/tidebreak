@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ArrowUpRight,
   ChevronDown,
@@ -12,8 +12,13 @@ import { toast } from "sonner";
 
 import type { ApiClient } from "./api";
 import { friendlyErrorMessage } from "./lib/utils";
+import { useRefreshSignals } from "./RefreshSignals";
+import { useVisibilityGatedPoll } from "./useVisibilityGatedPoll";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+
+/** Safety net under the turn-boundary and enqueue signals, while a turn is live or rows show. */
+const QUEUE_POLL_MS = 15_000;
 
 /** One queued message, in the vocabulary the tray renders. */
 export type QueueTrayRow = { id: string; content: string };
@@ -104,7 +109,7 @@ export function QueueTray({
   const [editing, setEditing] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState("");
   const [busy, setBusy] = useState(false);
-  const timerRef = useRef<number | null>(null);
+  const queuedSignal = useRefreshSignals((state) => state.queuedTurns);
 
   const refresh = useCallback(async () => {
     try {
@@ -116,15 +121,17 @@ export function QueueTray({
     }
   }, [queue]);
 
+  // Read when the queue or the turn ahead of it changes: a mount, the
+  // active turn starting or ending, and every `queuedTurns` signal (a send
+  // parked a row, a turn boundary let the promoter run). The slow timer
+  // below is the net under those, and only while there is anything to watch.
   useEffect(() => {
     void refresh();
-    // Poll while a turn is live (promotion imminent) or rows remain visible.
-    if (!active && queued.length === 0) return;
-    timerRef.current = window.setInterval(() => void refresh(), 1500);
-    return () => {
-      if (timerRef.current !== null) window.clearInterval(timerRef.current);
-    };
-  }, [refresh, active, queued.length > 0]);
+  }, [refresh, active]);
+  useVisibilityGatedPoll(() => void refresh(), QUEUE_POLL_MS, {
+    enabled: active || queued.length > 0,
+    revision: queuedSignal,
+  });
 
   async function act(action: () => Promise<unknown>, failure: string) {
     setBusy(true);
