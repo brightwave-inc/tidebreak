@@ -151,6 +151,7 @@ fn open_pr_digest(number: u64) -> PullRequestDigest {
         state: "open".into(),
         title: None,
         checks_summary: None,
+        check_counts: None,
         checks: None,
         draft: None,
         merged: None,

@@ -17,6 +17,13 @@ import type { StatusTone } from "./statusTone";
 
 /** One check as either wire shape reports it. */
 type CheckLike = { bucket: string; name?: string };
+/** Per-bucket counts as the digest carries them beside the summary string. */
+type CheckCountsLike = {
+  passing: number;
+  pending: number;
+  failing: number;
+  skipped: number;
+};
 export type PrStateInput = {
   state: string;
   draft?: boolean | null;
@@ -29,6 +36,7 @@ export type PrStateInput = {
   auto_merge_enabled?: boolean | null;
   in_merge_queue?: boolean | null;
   checks?: readonly CheckLike[] | null;
+  check_counts?: CheckCountsLike | null;
   checks_summary?: string | null;
 };
 
@@ -134,11 +142,15 @@ export type CheckCounts = {
 };
 
 /**
- * One pass over the check rollup — the single counter. Falls back to the
- * one-line summary the host sends when it did not report individual checks.
+ * One pass over the check rollup — the single counter. Without individual
+ * checks it reads the structured counts the digest sends beside the summary
+ * string. The regex over the summary prose is the last resort for digests
+ * written before the counts shipped: the server persists digests, so an old
+ * row (or an old server) can still surface a summary with neither list nor
+ * counts.
  */
 export function checkCounts(
-  pr: Pick<PrStateInput, "checks" | "checks_summary">,
+  pr: Pick<PrStateInput, "checks" | "check_counts" | "checks_summary">,
 ): CheckCounts {
   const checks = pr.checks ?? [];
   if (checks.length > 0) {
@@ -157,6 +169,16 @@ export function checkCounts(
       else counts.skipped += 1;
     }
     return counts;
+  }
+  if (pr.check_counts) {
+    const { passing, pending, failing, skipped } = pr.check_counts;
+    return {
+      passing,
+      pending,
+      failing,
+      skipped,
+      total: passing + pending + failing + skipped,
+    };
   }
   const summary = pr.checks_summary ?? "";
   const passing = Number(/(\d+) passing/.exec(summary)?.[1] ?? 0);

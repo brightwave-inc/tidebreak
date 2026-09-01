@@ -766,6 +766,7 @@ async fn pull_request_write_preserves_a_concurrent_workspace_rename() {
         state: "open".into(),
         title: Some("PR title".into()),
         checks_summary: None,
+        check_counts: None,
         checks: None,
         draft: Some(false),
         merged: Some(false),

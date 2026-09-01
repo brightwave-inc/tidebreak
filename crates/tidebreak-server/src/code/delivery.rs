@@ -4013,6 +4013,7 @@ pub(crate) fn digest_from_summary(item: &CodeDeliveryPullRequestSummary) -> Pull
         state: item.state.clone(),
         title: Some(item.title.clone()),
         checks_summary: None,
+        check_counts: None,
         checks: Some(
             item.checks
                 .iter()

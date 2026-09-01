@@ -21,7 +21,9 @@ use serde_json::Value;
 
 use crate::obo_gateway::GitCredential;
 use crate::routes::code::types::CodeGitHubRepositoryTarget;
-use tidebreak_core::{PullRequestCheck, PullRequestCheckBucket, PullRequestDigest};
+use tidebreak_core::{
+    PullRequestCheck, PullRequestCheckBucket, PullRequestCheckCounts, PullRequestDigest,
+};
 
 /// Timeout for one REST call — the same bound the `gh` runner gets.
 const REST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -725,13 +727,15 @@ pub(crate) async fn pull_request_digest(
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned)
     };
+    let counts = PullRequestCheckCounts::from_checks(&checks);
     Ok(Some(PullRequestDigest {
         number,
         url: text("/html_url"),
         merged: Some(state == "merged"),
         state,
         title: text("/title"),
-        checks_summary: super::gh::summarize_checks(&checks),
+        checks_summary: Some(counts.summary_line()),
+        check_counts: Some(counts),
         checks: (!checks.is_empty()).then_some(checks),
         draft: detail.get("draft").and_then(Value::as_bool),
         // REST has no review-decision projection; the field stays unstated

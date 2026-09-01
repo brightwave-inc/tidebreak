@@ -740,6 +740,12 @@ pub(crate) fn digest_from_fact(fact: &CodePullRequestFact) -> tidebreak_core::Pu
         state: fact.state.as_str().to_owned(),
         title: Some(fact.title.clone()),
         checks_summary: live.and_then(|live| live.checks_summary.clone()),
+        // The live tier stores the summary and the check list, not the
+        // counts; rows written with a check list re-derive them, and rows
+        // old enough to carry only the summary stay uncounted.
+        check_counts: live
+            .and_then(|live| live.checks.as_deref())
+            .map(tidebreak_core::PullRequestCheckCounts::from_checks),
         checks: live.and_then(|live| live.checks.clone()),
         draft: Some(fact.draft),
         merged: Some(fact.state == CodePullRequestState::Merged),

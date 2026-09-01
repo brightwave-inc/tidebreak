@@ -455,6 +455,58 @@ pub enum PullRequestCheckBucket {
     Skipped,
 }
 
+/// Per-bucket check counts carried beside the display summary, so a reader
+/// never parses numbers back out of the prose.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct PullRequestCheckCounts {
+    /// Checks that passed.
+    pub passing: u32,
+    /// Checks queued or still running.
+    pub pending: u32,
+    /// Checks that failed.
+    pub failing: u32,
+    /// Checks the host deliberately skipped or cancelled.
+    pub skipped: u32,
+}
+
+impl PullRequestCheckCounts {
+    /// Tally one check rollup into buckets.
+    #[must_use]
+    pub fn from_checks(checks: &[PullRequestCheck]) -> Self {
+        let mut counts = Self::default();
+        for check in checks {
+            match check.bucket {
+                PullRequestCheckBucket::Pass => counts.passing += 1,
+                PullRequestCheckBucket::Pending => counts.pending += 1,
+                PullRequestCheckBucket::Fail => counts.failing += 1,
+                PullRequestCheckBucket::Skipped => counts.skipped += 1,
+            }
+        }
+        counts
+    }
+
+    /// One line for the digest header: passing, pending, and failing counts
+    /// in the order a reader triages them. Display only — the structured
+    /// counts travel beside it on the digest.
+    #[must_use]
+    pub fn summary_line(&self) -> String {
+        if self.passing == 0 && self.pending == 0 && self.failing == 0 && self.skipped == 0 {
+            return "no checks".to_owned();
+        }
+        let Self {
+            passing,
+            pending,
+            failing,
+            skipped,
+        } = self;
+        let mut summary = format!("{passing} passing, {pending} pending, {failing} failing");
+        if *skipped > 0 {
+            summary.push_str(&format!(", {skipped} skipped"));
+        }
+        summary
+    }
+}
+
 /// Bounded pull-request digest stored on a workspace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct PullRequestDigest {
@@ -472,6 +524,11 @@ pub struct PullRequestDigest {
     /// One-line checks summary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checks_summary: Option<String>,
+    /// Structured counts behind `checks_summary`. Absent on digests written
+    /// before the counts shipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub check_counts: Option<PullRequestCheckCounts>,
     /// Individual checks, when the host reported any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -2097,6 +2154,7 @@ mod tests {
             state: "open".to_owned(),
             title: None,
             checks_summary: None,
+            check_counts: None,
             checks: None,
             draft: None,
             merged: None,
@@ -2118,6 +2176,46 @@ mod tests {
             detail: None,
             url: None,
         }
+    }
+
+    /// The counts and the summary line come from one tally, and the numbers
+    /// in the prose are the numbers in the struct — the UI reads the struct,
+    /// so a wording change here must never move a count.
+    #[test]
+    fn check_counts_match_the_summary_line_numbers() {
+        let checks = vec![
+            check(PullRequestCheckBucket::Pass),
+            check(PullRequestCheckBucket::Pass),
+            check(PullRequestCheckBucket::Pending),
+            check(PullRequestCheckBucket::Fail),
+            check(PullRequestCheckBucket::Skipped),
+        ];
+        let counts = PullRequestCheckCounts::from_checks(&checks);
+        assert_eq!(
+            counts,
+            PullRequestCheckCounts {
+                passing: 2,
+                pending: 1,
+                failing: 1,
+                skipped: 1,
+            }
+        );
+        assert_eq!(
+            counts.summary_line(),
+            "2 passing, 1 pending, 1 failing, 1 skipped"
+        );
+
+        // The skipped clause only appears when something was skipped.
+        let unskipped = PullRequestCheckCounts::from_checks(&[
+            check(PullRequestCheckBucket::Pass),
+            check(PullRequestCheckBucket::Fail),
+        ]);
+        assert_eq!(unskipped.summary_line(), "1 passing, 0 pending, 1 failing");
+
+        // No checks at all keeps the historic wording.
+        let empty = PullRequestCheckCounts::from_checks(&[]);
+        assert_eq!(empty, PullRequestCheckCounts::default());
+        assert_eq!(empty.summary_line(), "no checks");
     }
 
     #[test]
