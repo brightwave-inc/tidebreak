@@ -236,6 +236,8 @@ async fn seed_owner(
             rewrite: None,
             started_at: now(),
             ended_at: None,
+            park_ref: None,
+            park_wait: None,
         },
     )
     .await
@@ -1705,6 +1707,8 @@ async fn a_turn_attachment_stays_live_after_its_session_ends() {
             rewrite: None,
             started_at: now(),
             ended_at: Some(now()),
+            park_ref: None,
+            park_wait: None,
         },
     )
     .await
@@ -4106,6 +4110,8 @@ fn turn_for(row: &CodeQueuedTurn, ordinal: i64) -> CodeTurn {
         rewrite: None,
         started_at: now(),
         ended_at: None,
+        park_ref: None,
+        park_wait: None,
     }
 }
 

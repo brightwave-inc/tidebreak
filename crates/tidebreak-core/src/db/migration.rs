@@ -66,6 +66,7 @@ impl MigratorTrait for Migrator {
             Box::new(CodeTurnRewrite),
             Box::new(CodeExternalGrants),
             Box::new(CodeConnectHandshakes),
+            Box::new(CodeTurnPark),
         ]
     }
 }
@@ -3361,6 +3362,214 @@ impl MigrationTrait for CodeConnectHandshakes {
     }
 }
 
+/// Durable turn parks (decision 0048 step 5): an engine declaring
+/// `durable_parks` may checkpoint a turn and release it; the turn row then
+/// records the engine's checkpoint token and what it waits on, and the
+/// status check admits the new `waiting` state.
+struct CodeTurnPark;
+
+impl MigrationName for CodeTurnPark {
+    fn name(&self) -> &str {
+        "m20260901_000001_code_turn_park"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for CodeTurnPark {
+    fn use_transaction(&self) -> Option<bool> {
+        // The SQLite branch rebuilds the table under a manually managed
+        // transaction with foreign keys disabled; PostgreSQL runs its own.
+        None
+    }
+
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        if manager.has_column("code_turn", "park_ref").await? {
+            return Ok(());
+        }
+        match manager.get_database_backend() {
+            DbBackend::Postgres => {
+                let transaction = manager.begin().await?;
+                transaction
+                    .get_connection()
+                    .execute_unprepared(
+                        r#"
+DO $repair$
+DECLARE
+    old_constraint text;
+BEGIN
+    FOR old_constraint IN
+        SELECT constraint_row.conname
+        FROM pg_constraint AS constraint_row
+        JOIN pg_attribute AS attribute_row
+          ON attribute_row.attrelid = constraint_row.conrelid
+         AND attribute_row.attnum = ANY (constraint_row.conkey)
+        WHERE constraint_row.conrelid = 'code_turn'::regclass
+          AND constraint_row.contype = 'c'
+          AND attribute_row.attname = 'status'
+    LOOP
+        EXECUTE format(
+            'ALTER TABLE "code_turn" DROP CONSTRAINT %I',
+            old_constraint
+        );
+    END LOOP;
+END
+$repair$;
+ALTER TABLE "code_turn"
+    ADD CONSTRAINT "code_turn_status_check"
+    CHECK ("status" IN (
+        'running', 'waiting', 'completed', 'failed', 'interrupted'
+    ));
+ALTER TABLE "code_turn" ADD COLUMN "park_ref" text;
+ALTER TABLE "code_turn" ADD COLUMN "park_wait" jsonb;
+"#,
+                    )
+                    .await?;
+                transaction.commit().await
+            }
+            DbBackend::Sqlite => rebuild_sqlite_code_turn_for_parks(manager).await,
+            backend => Err(DbErr::Custom(format!(
+                "unsupported database backend for turn park migration: {backend:?}"
+            ))),
+        }
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // A downgrade keeps the columns and the widened check; a parked row
+        // would otherwise become unreadable instead of recoverable.
+        Ok(())
+    }
+}
+
+#[cfg(feature = "sqlite")]
+async fn rebuild_sqlite_code_turn_for_parks(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+    use sea_orm::sqlx::Acquire as _;
+    use sea_orm::DatabaseExecutor;
+
+    let DatabaseExecutor::Connection(database) = manager.get_connection() else {
+        return Err(DbErr::Custom(
+            "SQLite turn park rebuild requires the migration connection".to_owned(),
+        ));
+    };
+    let mut connection = database
+        .get_sqlite_connection_pool()
+        .acquire()
+        .await
+        .map_err(|error| DbErr::Custom(format!("acquire SQLite migration connection: {error}")))?;
+    sea_orm::sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *connection)
+        .await
+        .map_err(|error| DbErr::Custom(format!("disable SQLite foreign keys: {error}")))?;
+
+    let mut transaction = connection
+        .begin()
+        .await
+        .map_err(|error| DbErr::Custom(format!("begin SQLite turn park rebuild: {error}")))?;
+    let rebuild = async {
+        for statement in [
+            r#"DROP TABLE IF EXISTS "code_turn_park""#,
+            r#"
+CREATE TABLE "code_turn_park" (
+    "id" uuid_text NOT NULL PRIMARY KEY,
+    "owner" text NOT NULL DEFAULT 'local',
+    "session_id" uuid_text NOT NULL,
+    "ordinal" integer NOT NULL,
+    "status" text NOT NULL,
+    "user_input" text NOT NULL,
+    "user_input_blob_id" uuid_text,
+    "checkpoint_ref" text,
+    "diffstat" jsonb_text,
+    "usage" jsonb_text,
+    "narrative" text,
+    "started_at" timestamp_with_timezone_text NOT NULL,
+    "ended_at" timestamp_with_timezone_text,
+    "model" text,
+    "fast_mode" boolean NOT NULL DEFAULT FALSE,
+    "rewrite" text,
+    "park_ref" text,
+    "park_wait" jsonb_text,
+    FOREIGN KEY ("session_id") REFERENCES "code_session" ("id"),
+    CHECK ("status" IN ('running', 'waiting', 'completed', 'failed', 'interrupted')),
+    CHECK ("ordinal" >= 1)
+)"#,
+            r#"
+INSERT INTO "code_turn_park" (
+    "id", "owner", "session_id", "ordinal", "status", "user_input",
+    "user_input_blob_id", "checkpoint_ref", "diffstat", "usage", "narrative",
+    "started_at", "ended_at", "model", "fast_mode", "rewrite"
+)
+SELECT
+    "id", "owner", "session_id", "ordinal", "status", "user_input",
+    "user_input_blob_id", "checkpoint_ref", "diffstat", "usage", "narrative",
+    "started_at", "ended_at", "model", "fast_mode", "rewrite"
+FROM "code_turn""#,
+            r#"DROP TABLE "code_turn""#,
+            r#"ALTER TABLE "code_turn_park" RENAME TO "code_turn""#,
+            r#"CREATE UNIQUE INDEX "idx_code_turn_session_ordinal"
+                ON "code_turn" ("session_id", "ordinal")"#,
+        ] {
+            sea_orm::sqlx::query(statement)
+                .execute(&mut *transaction)
+                .await?;
+        }
+        Ok::<(), sea_orm::sqlx::Error>(())
+    }
+    .await;
+
+    let rebuild = match rebuild {
+        Ok(()) => transaction
+            .commit()
+            .await
+            .map_err(|error| DbErr::Custom(format!("commit SQLite turn park rebuild: {error}"))),
+        Err(error) => {
+            let rollback = transaction.rollback().await;
+            match rollback {
+                Ok(()) => Err(DbErr::Custom(format!(
+                    "rebuild SQLite turn table for parks: {error}"
+                ))),
+                Err(rollback) => Err(DbErr::Custom(format!(
+                    "rebuild SQLite turn table for parks: {error}; rollback failed: {rollback}"
+                ))),
+            }
+        }
+    };
+
+    let enable = match sea_orm::sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&mut *connection)
+        .await
+    {
+        Ok(_) => {
+            sea_orm::sqlx::query_scalar::<_, i64>("PRAGMA foreign_keys")
+                .fetch_one(&mut *connection)
+                .await
+        }
+        Err(error) => Err(error),
+    }
+    .map_err(|error| DbErr::Custom(format!("restore SQLite foreign keys: {error}")))
+    .and_then(|enabled| {
+        if enabled == 1 {
+            Ok(())
+        } else {
+            Err(DbErr::Custom(
+                "restore SQLite foreign keys: PRAGMA remained disabled".to_owned(),
+            ))
+        }
+    });
+    match (rebuild, enable) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(rebuild), Err(enable)) => {
+            Err(DbErr::Custom(format!("{rebuild}; additionally, {enable}")))
+        }
+    }
+}
+
+#[cfg(not(feature = "sqlite"))]
+async fn rebuild_sqlite_code_turn_for_parks(_manager: &SchemaManager<'_>) -> Result<(), DbErr> {
+    Err(DbErr::Custom(
+        "SQLite turn park migration support is not compiled".to_owned(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
@@ -3438,6 +3647,7 @@ mod tests {
                 "m20260828_000026_code_turn_rewrite",
                 "m20260828_000027_code_external_grants",
                 "m20260828_000028_code_connect_handshakes",
+                "m20260901_000001_code_turn_park",
             ]
         );
         assert!(db
@@ -3465,7 +3675,8 @@ mod tests {
             .unwrap()
             .is_some());
 
-        Migrator::down(&db, Some(1)).await.unwrap();
+        // Two steps: the turn park migration sits above the handshake one.
+        Migrator::down(&db, Some(2)).await.unwrap();
         assert!(db
             .query_one_raw(Statement::from_string(
                 DbBackend::Sqlite,
@@ -3934,6 +4145,24 @@ mod tests {
         assert_eq!(attachment.try_get::<i32>("", "width").unwrap(), 1);
         assert_eq!(attachment.try_get::<i32>("", "height").unwrap(), 1);
         assert_eq!(attachment.try_get::<i64>("", "byte_len").unwrap(), 8);
+
+        // The park rebuild recreates code_turn; the seeded row must survive
+        // with its status intact and the new columns empty.
+        let turn = db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT status, park_ref IS NULL AS park_ref_null, \
+                        park_wait IS NULL AS park_wait_null \
+                 FROM code_turn \
+                 WHERE id = '00000000-0000-0000-0000-000000000104'"
+                    .to_owned(),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(turn.try_get::<String>("", "status").unwrap(), "completed");
+        assert!(turn.try_get::<bool>("", "park_ref_null").unwrap());
+        assert!(turn.try_get::<bool>("", "park_wait_null").unwrap());
 
         let fire = db
             .query_one_raw(Statement::from_string(

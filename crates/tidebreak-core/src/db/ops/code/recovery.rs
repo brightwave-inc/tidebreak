@@ -127,7 +127,13 @@ async fn settle_interrupted_session(
     let running_turns = entities::code_turn::Entity::find()
         .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
         .filter(entities::code_turn::Column::SessionId.eq(session_id.0))
-        .filter(entities::code_turn::Column::Status.eq(CodeTurnStatus::Running.as_str()))
+        // Waiting counts: a parked turn's engine checkpoint survives, but
+        // its in-memory wait died with the worker, so recovery closes it
+        // the same way until an engine can resume from durable state.
+        .filter(entities::code_turn::Column::Status.is_in([
+            CodeTurnStatus::Running.as_str(),
+            CodeTurnStatus::Waiting.as_str(),
+        ]))
         .order_by_desc(entities::code_turn::Column::Ordinal)
         .limit(2)
         .all(&transaction)
@@ -160,7 +166,10 @@ async fn settle_interrupted_session(
             )
             .filter(entities::code_turn::Column::Id.eq(turn.id))
             .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
-            .filter(entities::code_turn::Column::Status.eq(CodeTurnStatus::Running.as_str()))
+            .filter(entities::code_turn::Column::Status.is_in([
+                CodeTurnStatus::Running.as_str(),
+                CodeTurnStatus::Waiting.as_str(),
+            ]))
             .exec(&transaction)
             .await
             .map_err(store_err)?;

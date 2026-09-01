@@ -194,7 +194,7 @@ pub use code::{
     FileChangeKind, GrantRotation, HarnessCaps, HarnessCommand, HarnessKind, HarnessNoticeLevel,
     HarnessTier, IncarnationAdmission, IncarnationState, PullRequestCheck, PullRequestCheckBucket,
     PullRequestCheckCounts, PullRequestComment, PullRequestCommentKind, PullRequestDigest,
-    QuickAction, RepoId, SequencedCodeEvent, ToolDetail, ToolOutcome, WorkspaceId,
+    QuickAction, RepoId, SequencedCodeEvent, ToolDetail, ToolOutcome, TurnParkWait, WorkspaceId,
     MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS, MAX_SESSION_SUBAGENTS,
     MAX_TOOL_SUMMARY_CHARS,
 };

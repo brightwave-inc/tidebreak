@@ -6967,7 +6967,7 @@ impl CodeRuntime {
         &self,
         owner: &OwnerId,
         id: CodeApprovalId,
-        decision: ApprovalDecision,
+        request: ApprovalDecisionRequest,
     ) -> Result<CodeApproval, ServerError> {
         let initial = self.get_approval(owner, id).await?;
         if !initial.state.is_pending() {
@@ -7025,6 +7025,9 @@ impl CodeRuntime {
                 "the worker that requested this approval is no longer attached",
             ));
         }
+        let adapter = self.adapter(session.harness_kind)?;
+        let probe = self.probe(adapter.as_ref()).await;
+        let decision = resolve_decision_request(&approval, &adapter.capabilities(&probe), request)?;
         let native_ref = Self::native_approval_ref(owner, &approval)?;
         let claim = uuid::Uuid::new_v4();
         let Some(_) = claim_approval(
@@ -8033,5 +8036,112 @@ mod managed_node_wait_tests {
                 .expect("existing harness"),
             harness_binary
         );
+    }
+}
+
+/// One decision as the wire requested it, before the server resolves it
+/// against the approval row and the engine's declared capabilities.
+///
+/// A grant is named by index into the rungs the approval's kind offered, so
+/// a client can only pick a scope the card showed (the same rule chat's
+/// grant rungs follow); the server resolves the concrete scope here.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ApprovalDecisionRequest {
+    Approve,
+    Deny {
+        feedback: Option<String>,
+    },
+    ApproveWithGrant {
+        grant_index: u32,
+    },
+    Answers {
+        answers: Vec<tidebreak_core::UserQuestionAnswer>,
+    },
+    PlanDecision {
+        approve: bool,
+        feedback: Option<String>,
+    },
+}
+
+/// Resolve a requested decision into the engine-channel decision, refusing
+/// anything the approval's kind or the engine's capability vector cannot
+/// carry. One approval surface, capability-gated decisions (decision 0048).
+fn resolve_decision_request(
+    approval: &CodeApproval,
+    caps: &tidebreak_core::HarnessCaps,
+    request: ApprovalDecisionRequest,
+) -> Result<ApprovalDecision, ServerError> {
+    use tidebreak_core::CodeApprovalKind as Kind;
+    let structured_mismatch = |wanted: &str| {
+        ServerError::unprocessable_kind(
+            "approval_decision_mismatch",
+            format!("this approval takes {wanted}"),
+        )
+    };
+    match request {
+        ApprovalDecisionRequest::Approve => match &approval.kind {
+            // Structured kinds have structured decisions; a bare approve on
+            // them would drop the payload the engine is waiting for.
+            Kind::Questions { .. } => Err(structured_mismatch("answers")),
+            Kind::Plan { .. } => Err(structured_mismatch("a plan decision")),
+            _ => Ok(ApprovalDecision::Approve),
+        },
+        // Denying is always expressible: it is the fail-closed path.
+        ApprovalDecisionRequest::Deny { feedback } => Ok(ApprovalDecision::Deny { feedback }),
+        ApprovalDecisionRequest::ApproveWithGrant { grant_index } => {
+            if caps.standing_grants != CapLevel::Supported {
+                return Err(ServerError::unprocessable_kind(
+                    "standing_grants_unavailable",
+                    "this engine keeps no standing grants",
+                ));
+            }
+            let Kind::ToolUse { offered_grants, .. } = &approval.kind else {
+                return Err(structured_mismatch("approve or deny"));
+            };
+            let scope = offered_grants
+                .get(usize::try_from(grant_index).unwrap_or(usize::MAX))
+                .cloned()
+                .ok_or_else(|| {
+                    ServerError::unprocessable_kind(
+                        "grant_rung_unknown",
+                        format!("this approval offered no grant rung {grant_index}"),
+                    )
+                })?;
+            Ok(ApprovalDecision::ApproveWithGrant { scope })
+        }
+        ApprovalDecisionRequest::Answers { answers } => {
+            if caps.user_questions != CapLevel::Supported {
+                return Err(ServerError::unprocessable_kind(
+                    "user_questions_unavailable",
+                    "this engine takes no structured answers",
+                ));
+            }
+            let Kind::Questions { questions } = &approval.kind else {
+                return Err(structured_mismatch("approve or deny"));
+            };
+            let asked: std::collections::HashSet<&str> = questions
+                .iter()
+                .map(|question| question.id.as_str())
+                .collect();
+            let mut seen = std::collections::HashSet::new();
+            let well_formed = answers.iter().all(|answer| {
+                answer.shape_is_well_formed()
+                    && asked.contains(answer.question_id.as_str())
+                    && seen.insert(answer.question_id.as_str())
+            });
+            if !well_formed || answers.is_empty() {
+                return Err(ServerError::unprocessable_kind(
+                    "answers_invalid",
+                    "the answers do not match the questions this approval asked",
+                ));
+            }
+            Ok(ApprovalDecision::Answers { answers })
+        }
+        ApprovalDecisionRequest::PlanDecision { approve, feedback } => {
+            let Kind::Plan { .. } = &approval.kind else {
+                return Err(structured_mismatch("approve or deny"));
+            };
+            Ok(ApprovalDecision::PlanDecision { approve, feedback })
+        }
     }
 }

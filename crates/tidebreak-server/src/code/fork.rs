@@ -1211,6 +1211,8 @@ mod tests {
             rewrite: None,
             started_at: chrono::Utc::now(),
             ended_at: None,
+            park_ref: None,
+            park_wait: None,
         }
     }
 

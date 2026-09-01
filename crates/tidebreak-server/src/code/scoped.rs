@@ -27,7 +27,6 @@ use tidebreak_core::{
     CodeWorkspace, Diffstat, HarnessKind, OwnerId, PermissionMode, ReasoningEffort, RepoId,
     SequencedCodeEvent, WorkspaceId,
 };
-use tidebreak_harness::ApprovalDecision;
 
 use super::checkpoint::ChangedFile;
 use super::clone::CloneRequest;
@@ -893,7 +892,7 @@ impl ScopedCode {
     pub(crate) async fn decide_approval(
         &self,
         id: CodeApprovalId,
-        decision: ApprovalDecision,
+        decision: super::runtime::ApprovalDecisionRequest,
     ) -> Result<CodeApproval, ServerError> {
         self.runtime
             .decide_approval(&self.owner, id, decision)

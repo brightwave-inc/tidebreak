@@ -141,7 +141,7 @@ fn build_snapshot(
             CodeTurnStatus::Interrupted => {
                 totals.interrupted_turns = totals.interrupted_turns.saturating_add(1)
             }
-            CodeTurnStatus::Running => {
+            CodeTurnStatus::Running | CodeTurnStatus::Waiting => {
                 totals.running_turns = totals.running_turns.saturating_add(1)
             }
         }

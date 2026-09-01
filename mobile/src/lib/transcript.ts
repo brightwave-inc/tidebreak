@@ -57,7 +57,9 @@ export function hydrateTurnHistory(
   }
   const running = [...turns]
     .sort((left, right) => right.ordinal - left.ordinal)
-    .find((turn) => turn.status === "running");
+    .find(
+      (turn) => turn.status === "running" || turn.status === "waiting",
+    );
   return {
     ...state,
     // The row request and event replay race. Once any replayed event has

@@ -137,7 +137,8 @@ fn from_turn_status(
         CodeTurnStatus::Completed => TurnStatus::Completed,
         CodeTurnStatus::Failed => TurnStatus::Failed,
         CodeTurnStatus::Interrupted => TurnStatus::Cancelled,
-        CodeTurnStatus::Running => TurnStatus::Running,
+        // A parked turn is still in flight from a follower's seat.
+        CodeTurnStatus::Running | CodeTurnStatus::Waiting => TurnStatus::Running,
     };
     CodeTurnResult {
         status,
