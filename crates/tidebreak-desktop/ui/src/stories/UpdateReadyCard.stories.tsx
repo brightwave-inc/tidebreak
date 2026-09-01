@@ -4,7 +4,13 @@ import { fn } from "storybook/test";
 
 import { UpdateReadyCard } from "@/UpdateReadyCard";
 
-function UpdateReadyCardStory({ version }: { version: string | null }) {
+function UpdateReadyCardStory({
+  status,
+  version,
+}: {
+  status: "checking" | "downloading" | "ready";
+  version: string | null;
+}) {
   const [visible, setVisible] = useState(true);
   return (
     <div className="h-screen bg-page-background p-8">
@@ -19,10 +25,17 @@ function UpdateReadyCardStory({ version }: { version: string | null }) {
           The card stays available without blocking the work underneath it.
         </p>
       </div>
-      {visible && (
+      {visible && status === "ready" && (
         <UpdateReadyCard
           version={version}
           onRestart={fn()}
+          onDismiss={() => setVisible(false)}
+        />
+      )}
+      {visible && status !== "ready" && (
+        <UpdateReadyCard
+          status={status}
+          version={version}
           onDismiss={() => setVisible(false)}
         />
       )}
@@ -31,16 +44,24 @@ function UpdateReadyCardStory({ version }: { version: string | null }) {
 }
 
 const meta = {
-  title: "Shell/Update ready card",
+  title: "Shell/Update card",
   component: UpdateReadyCardStory,
   parameters: { layout: "fullscreen" },
-  args: { version: "0.59.0" },
+  args: { status: "ready", version: "0.59.0" },
 } satisfies Meta<typeof UpdateReadyCardStory>;
 
 export default meta;
 type Story = StoryObj<typeof meta>;
 
 export const Ready: Story = {};
+
+export const Checking: Story = {
+  args: { status: "checking", version: null },
+};
+
+export const Downloading: Story = {
+  args: { status: "downloading", version: "0.59.0" },
+};
 
 export const VersionUnavailable: Story = {
   args: { version: null },
