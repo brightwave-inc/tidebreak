@@ -726,6 +726,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         let expected = std::env::current_dir().unwrap().join(".tidebreak");
@@ -738,6 +739,7 @@ mod tests {
         let config = Config::from_vars(
             Some(String::new()),
             Some(OsString::from("/data")),
+            None,
             None,
             None,
             None,
@@ -869,6 +871,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap_err()
         .to_string();
@@ -881,6 +884,7 @@ mod tests {
             Some("desktop".into()),
             Some(OsString::from("/data")),
             Some("s3://tidebreak/blobs".into()),
+            None,
             None,
             None,
             None,
@@ -910,7 +914,8 @@ mod tests {
             None,
             None,
             None,
-            None
+            None,
+            None,
         )
         .is_err());
     }
@@ -1120,6 +1125,7 @@ mod tests {
         let config = Config::from_vars(
             Some("self_host".into()),
             Some(OsString::from("/data")),
+            Some("s3://tidebreak/blobs".into()),
             None,
             None,
             None,
@@ -1195,7 +1201,7 @@ mod tests {
         )
         .unwrap();
         let error = Config::from_vars(
-            None, None, None, None, None, None, None, None, None, None, None, vault,
+            None, None, None, None, None, None, None, None, None, None, None, None, vault,
         )
         .unwrap_err()
         .to_string();

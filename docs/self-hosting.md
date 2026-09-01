@@ -13,7 +13,7 @@ branch; where something is not built yet, it says so.
 
 ## What the self-host profile is
 
-Selecting `TIDEBREAK_PROFILE=self_host` changes four things about the server:
+Selecting `TIDEBREAK_PROFILE=self_host` changes five things about the server:
 
 - **The store is PostgreSQL**, opened from `TIDEBREAK_DATABASE_URL`, and the
   binary must be built with tidebreak-server's `postgres` feature for the
@@ -462,7 +462,6 @@ read the self-host section of
 [how Tidebreak works](how-tidebreak-works.md#self-host) — it is the canonical
 account. In summary, and each of these is a reason not to put irreplaceable
 data in a self-host deployment yet:
-
 
 - Tidebreak enforces one active server process per PostgreSQL database through
   a dedicated advisory lease. A second process refuses boot even when it uses
