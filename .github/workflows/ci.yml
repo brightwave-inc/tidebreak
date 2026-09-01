@@ -741,7 +741,11 @@ jobs:
     name: test
     needs: changes
     if: ${{ needs.changes.outputs.workspace == 'true' }}
-    runs-on: ubuntu-latest
+    # Prefer an 8 vCPU larger runner: this lane splits roughly evenly between
+    # compiling and running tests, and both scale with cores. Set
+    # CI_TEST_RUNNER to the provisioned label. If the variable is unset, the
+    # job uses ubuntu-latest so a missing larger runner cannot stall merges.
+    runs-on: ${{ vars.CI_TEST_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 20
     env:
       CARGO_INCREMENTAL: 0
@@ -755,6 +759,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install toolchain (honors rust-toolchain.toml)
         run: rustup show
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2.86.5
+        with:
+          tool: cargo-nextest@0.9.143
       - name: Set up compiler cache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
@@ -777,20 +785,17 @@ jobs:
       - name: Fetch the complete workspace lockfile
         if: ${{ github.ref == 'refs/heads/main' }}
         run: cargo fetch --locked
-      # Linux ETXTBSY still hits a freshly written fake harness binary on a
-      # loaded runner. Three attempts cover that without dropping the contract.
+      # nextest schedules tests from every binary in parallel, so the few
+      # long-running suites overlap instead of queuing behind each other, and
+      # its per-test retries absorb the Linux ETXTBSY race that still hits a
+      # freshly written fake harness binary on a loaded runner — without
+      # rerunning the whole workspace the way the old shell retry loop did.
+      # nextest does not run doctests; the workspace has none, and one added
+      # later must move its assertion into a unit test to be covered here.
       - name: headless tests
-        run: |
-          attempts=3
-          for attempt in $(seq 1 "$attempts"); do
-            if cargo test --workspace --exclude tidebreak-desktop --locked; then
-              exit 0
-            fi
-            echo "headless tests failed on attempt ${attempt}/${attempts}" >&2
-            if [[ "$attempt" -eq "$attempts" ]]; then
-              exit 1
-            fi
-          done
+        run: >-
+          cargo nextest run --workspace --exclude tidebreak-desktop
+          --locked --retries 2
 
   postgres:
     name: postgres state machine
