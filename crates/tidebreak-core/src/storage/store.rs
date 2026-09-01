@@ -2032,6 +2032,24 @@ pub trait Store: Send + Sync {
         turn_storage_unavailable()
     }
 
+    /// Give up one exact live turn lease so the next claim scan reclaims it.
+    ///
+    /// Sets the lease expiry to `now` when the turn is still running or
+    /// cancelling under this exact token with a live lease, and returns
+    /// whether that write landed. The turn itself stays as it is; the next
+    /// worker to scan — this process after a restart, usually — re-claims it
+    /// as expired work and resumes the attempt ladder. Used when a process
+    /// knows it is about to exit (a restart-to-update) and does not want its
+    /// successor to wait out the lease.
+    async fn expire_turn_run_lease(
+        &self,
+        _id: TurnId,
+        _lease_token: uuid::Uuid,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        turn_storage_unavailable()
+    }
+
     /// Report whether `lease_token` still owns the exact live segment of a turn.
     ///
     /// Returns [`TurnLeaseFence::Current`] only while the turn is running or

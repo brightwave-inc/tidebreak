@@ -1285,6 +1285,14 @@ impl Store for PauseTerminalStore {
     ) -> Result<tidebreak_core::TurnLeaseFence> {
         self.inner.fence_turn_lease(id, lease_token, now).await
     }
+    async fn expire_turn_run_lease(
+        &self,
+        id: TurnId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool> {
+        self.inner.expire_turn_run_lease(id, lease_token, now).await
+    }
     async fn complete_turn_run_and_append_event(
         &self,
         id: TurnId,

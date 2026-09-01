@@ -16,6 +16,13 @@
 //! prove that renderer-only drafts, dialogs, or editor state have been saved,
 //! so an unfocused window is not sufficient consent to replace and restart the
 //! application.
+//!
+//! The restart itself does not interrupt session work. Before the bundle is
+//! replaced the embedded server parks every code session at a turn boundary
+//! (the idle-park path of decision 0064) and hands back chat turn leases, so
+//! the relaunched process resumes sessions instead of fencing orphaned
+//! engine children. A code turn still running at the quiesce deadline fails
+//! the restart with a retryable message rather than being interrupted.
 
 use std::future::Future;
 #[cfg(any(test, target_os = "macos"))]
@@ -95,6 +102,22 @@ pub(crate) struct UpdateManager {
     state: Mutex<DesktopUpdateState>,
     staged: Mutex<Option<StagedUpdate>>,
     busy: AtomicBool,
+}
+
+/// The embedded server's update-quiesce handle, installed once the server
+/// boots. `None` until then — with no server there is no session work to
+/// bring to a safe point.
+#[derive(Default)]
+pub(crate) struct ServerQuiesceSlot(Mutex<Option<tidebreak_server::UpdateQuiesce>>);
+
+impl ServerQuiesceSlot {
+    pub(crate) fn install(&self, handle: tidebreak_server::UpdateQuiesce) {
+        *self.0.lock().expect("server quiesce slot poisoned") = Some(handle);
+    }
+
+    fn current(&self) -> Option<tidebreak_server::UpdateQuiesce> {
+        self.0.lock().expect("server quiesce slot poisoned").clone()
+    }
 }
 
 pub(crate) const fn updates_enabled() -> bool {
@@ -377,11 +400,11 @@ struct InstallResolutionError {
     message: &'static str,
 }
 
-fn retryable_update_state(version: String, message: &'static str) -> DesktopUpdateState {
+fn retryable_update_state(version: String, message: impl Into<String>) -> DesktopUpdateState {
     DesktopUpdateState {
         status: DesktopUpdateStatus::Ready,
         version: Some(version),
-        error: Some(message.to_owned()),
+        error: Some(message.into()),
         enabled: updates_enabled(),
     }
 }
@@ -391,9 +414,12 @@ struct FailedInstall<E> {
     resume_error: Option<String>,
 }
 
-/// Run the synchronous bundle replacement only after the broker's admission
-/// barrier has drained. The closures keep the ordering contract directly
-/// testable without constructing a packaged Tauri updater in unit tests.
+/// Run the synchronous bundle replacement only after the quiesce closure has
+/// brought the process to a safe point — session work parked at turn
+/// boundaries, then the broker's admission barrier drained. The closures keep
+/// the ordering contract directly testable without constructing a packaged
+/// Tauri updater in unit tests. The quiesce closure owns unwinding its own
+/// partial progress: an error from it must leave everything resumed.
 async fn install_behind_broker_barrier<E, Q, QF, I, R, RF, S, SF>(
     quiesce: Q,
     install: I,
@@ -477,23 +503,49 @@ async fn take_staged_and_restart(app: AppHandle) -> Result<(), String> {
 
     let version = staged.update.version.clone();
     let host_access = app.state::<HostAccess>();
+    // Bring session work to a safe point before the broker drains: code
+    // sessions park at a turn boundary and chat leases are handed back, so
+    // the relaunch resumes instead of fencing orphans. A quiesce refusal —
+    // a code turn still running at the deadline — arrives as a sentence the
+    // panel shows as-is, and the server has already resumed itself.
+    let server_quiesce = app.state::<ServerQuiesceSlot>().current();
+    let quiesce_server = server_quiesce.clone();
+    let resume_server = server_quiesce;
     let install_result = install_behind_broker_barrier(
-        || host_access.quiesce_for_update(),
+        || async {
+            if let Some(server) = &quiesce_server {
+                server.quiesce_for_update().await?;
+            }
+            if let Err(error) = host_access.quiesce_for_update().await {
+                eprintln!("tidebreak-desktop: could not quiesce host broker for update: {error}");
+                if let Some(server) = &quiesce_server {
+                    server.resume_after_failed_update();
+                }
+                return Err(UPDATE_PREPARE_ERROR.to_owned());
+            }
+            Ok(())
+        },
         || staged.update.install(&staged.bytes),
-        || host_access.resume_after_failed_update(),
+        || async {
+            let result = host_access.resume_after_failed_update().await;
+            if let Some(server) = &resume_server {
+                server.resume_after_failed_update();
+            }
+            result
+        },
         || host_access.shutdown(),
     )
     .await;
 
     match install_result {
         Err(error) => {
-            eprintln!("tidebreak-desktop: could not quiesce host broker for update: {error}");
+            eprintln!("tidebreak-desktop: could not quiesce for update: {error}");
             store_staged(&app, Some(staged));
-            set_update_state(&app, retryable_update_state(version, UPDATE_PREPARE_ERROR));
+            set_update_state(&app, retryable_update_state(version, error.clone()));
             app.state::<UpdateManager>()
                 .busy
                 .store(false, Ordering::Release);
-            Err(UPDATE_PREPARE_ERROR.to_owned())
+            Err(error)
         }
         Ok(Err(failure)) => {
             eprintln!(

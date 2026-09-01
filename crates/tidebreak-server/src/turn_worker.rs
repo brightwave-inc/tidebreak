@@ -23,7 +23,16 @@ use tidebreak_core::{
     SequencedEvent, Store, ToolRegistry, ToolScratch, TurnCheckpointProgress, TurnFailureRetry,
     TurnId, TurnRun, TurnRunStatus, SPAWN_SANDBOX_AGENT_TOOL, WAIT_FOR_AGENTS_TOOL,
 };
-use tokio::sync::Notify;
+use tokio::sync::{watch, Notify};
+
+/// How long running chat turns may keep going after a restart-to-update asks
+/// this worker to drain, before the rest are aborted and their leases handed
+/// back. Long enough for a turn that was already wrapping up; short enough
+/// that the restart never waits on a long agentic run it can safely resume.
+#[cfg(not(test))]
+const CHAT_QUIESCE_TURN_GRACE: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const CHAT_QUIESCE_TURN_GRACE: Duration = Duration::from_millis(100);
 use tracing::Instrument as _;
 
 use crate::approvals::ApprovalBroker;
@@ -119,6 +128,9 @@ pub(crate) struct TurnWorker {
     private_scratch_root: Option<PathBuf>,
     diagnostics: Arc<crate::diagnostics::Diagnostics>,
     config: TurnWorkerConfig,
+    /// Update-quiesce channel pair, when this worker serves a process that
+    /// can restart to update. `None` in tests that install none.
+    quiesce: Option<crate::update_quiesce::ChatQuiesceWorker>,
     #[cfg(test)]
     post_drive_pause: Option<(Arc<Notify>, Arc<Notify>)>,
 }
@@ -427,6 +439,7 @@ impl TurnWorker {
             private_scratch_root,
             diagnostics: Arc::new(crate::diagnostics::Diagnostics::new()),
             config,
+            quiesce: None,
             #[cfg(test)]
             post_drive_pause: None,
         }
@@ -508,6 +521,17 @@ impl TurnWorker {
         self
     }
 
+    /// Attach the update-quiesce channel pair: a restart-to-update flips
+    /// `request` and this worker stops claiming, drains, and reports on
+    /// `drained`. See [`crate::update_quiesce`].
+    pub(crate) fn with_update_quiesce(
+        mut self,
+        quiesce: crate::update_quiesce::ChatQuiesceWorker,
+    ) -> Self {
+        self.quiesce = Some(quiesce);
+        self
+    }
+
     /// Pause after a foreground drive has returned but before its outcome is
     /// interpreted. Tests use this exact seam to make terminal-state races
     /// deterministic instead of relying on scheduler timing.
@@ -527,9 +551,29 @@ impl TurnWorker {
         let mut failure_backoff =
             LaneBackoff::new(self.config.failure_delay, self.config.failure_delay_cap);
         let mut pending_claim_token = None;
+        let mut quiesce_request = self.quiesce.as_ref().map(|q| q.request.clone());
         loop {
+            if self.quiesce_requested(quiesce_request.as_mut()) {
+                self.drain_for_update(&mut turns).await;
+                // Parked until a failed install resumes; a successful install
+                // exits the process instead.
+                if let Some(request) = quiesce_request.as_mut() {
+                    while *request.borrow_and_update() {
+                        if request.changed().await.is_err() {
+                            return;
+                        }
+                    }
+                }
+                if let Some(quiesce) = &self.quiesce {
+                    let _ = quiesce.drained.send(false);
+                }
+                idle_delay = self.config.idle_min;
+                continue;
+            }
             let mut scan_failed = false;
-            while turns.len() < self.config.max_concurrency {
+            while turns.len() < self.config.max_concurrency
+                && !self.quiesce_requested(quiesce_request.as_mut())
+            {
                 let lease_token = *pending_claim_token.get_or_insert_with(uuid::Uuid::new_v4);
                 match self.claim_once(lease_token).await {
                     Ok(ClaimAction::Claimed(turn, lease_token)) => {
@@ -555,8 +599,16 @@ impl TurnWorker {
             }
 
             if turns.len() == self.config.max_concurrency {
-                if let Some(result) = turns.join_next().await {
-                    log_turn_result(result);
+                // Keep watching the quiesce request even while saturated, or
+                // a full complement of long turns would hold the drain past
+                // its deadline.
+                tokio::select! {
+                    result = turns.join_next() => {
+                        if let Some(result) = result {
+                            log_turn_result(result);
+                        }
+                    }
+                    _ = Self::quiesce_flipped(quiesce_request.as_mut()) => {}
                 }
                 idle_delay = self.config.idle_min;
                 continue;
@@ -583,7 +635,66 @@ impl TurnWorker {
                 _ = self.wake.notified() => {
                     idle_delay = self.config.idle_min;
                 }
+                _ = Self::quiesce_flipped(quiesce_request.as_mut()) => {
+                    idle_delay = self.config.idle_min;
+                }
             }
+        }
+    }
+
+    /// Whether a restart-to-update is asking this worker to stop claiming.
+    fn quiesce_requested(&self, request: Option<&mut watch::Receiver<bool>>) -> bool {
+        request.is_some_and(|request| *request.borrow_and_update())
+    }
+
+    /// Resolves when the quiesce request changes; pends forever without one,
+    /// or once its sender is gone.
+    async fn quiesce_flipped(request: Option<&mut watch::Receiver<bool>>) {
+        let Some(request) = request else {
+            return std::future::pending().await;
+        };
+        if request.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+
+    /// Drain for a restart-to-update: give running turns a short grace to
+    /// finish, then abort the rest and hand their durable leases back so the
+    /// relaunched worker re-claims them immediately. An abort is exactly the
+    /// crash the lease protocol recovers from — the retry rebuilds the
+    /// transcript and re-runs only the model call that was in flight — so the
+    /// drain never refuses; the grace only saves re-running that call for
+    /// turns that were about to finish anyway.
+    async fn drain_for_update(&self, turns: &mut tokio::task::JoinSet<Result<TurnWorkerOutcome>>) {
+        let grace = tokio::time::sleep(CHAT_QUIESCE_TURN_GRACE);
+        tokio::pin!(grace);
+        while !turns.is_empty() {
+            tokio::select! {
+                result = turns.join_next() => {
+                    if let Some(result) = result {
+                        log_turn_result(result);
+                    }
+                }
+                _ = &mut grace => break,
+            }
+        }
+        let remaining = self.signals.active_claims();
+        turns.shutdown().await;
+        for (turn_id, lease_token) in remaining {
+            if let Err(error) = self
+                .store
+                .expire_turn_run_lease(turn_id, lease_token, Utc::now())
+                .await
+            {
+                // The lease then simply expires on its own clock after the
+                // relaunch; slower, not lost.
+                eprintln!(
+                    "tidebreak: could not hand back the lease on turn {turn_id} for update: {error}"
+                );
+            }
+        }
+        if let Some(quiesce) = &self.quiesce {
+            let _ = quiesce.drained.send(true);
         }
     }
 

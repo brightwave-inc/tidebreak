@@ -960,6 +960,20 @@ impl TurnGuard {
         }
     }
 
+    /// Snapshot every attempt currently executing in this process.
+    ///
+    /// The update quiesce path uses this to know which durable leases this
+    /// process still holds before it exits, so it can hand them back rather
+    /// than make its successor wait out the lease.
+    pub fn active_claims(&self) -> Vec<(TurnId, Uuid)> {
+        self.active
+            .lock()
+            .unwrap()
+            .values()
+            .map(|handles| (handles.turn_id, handles.lease_token))
+            .collect()
+    }
+
     /// Trip cancellation only for the exact turn currently executing locally.
     pub fn cancel(&self, chat_id: ChatId, turn_id: TurnId) -> bool {
         match self.active.lock().unwrap().get(&chat_id) {

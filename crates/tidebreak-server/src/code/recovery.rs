@@ -1118,6 +1118,7 @@ mod tests {
                 engine_reads_images: false,
             },
             std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            tokio::sync::watch::channel(false).1,
         );
         let (reply, _turn) = tokio::sync::oneshot::channel();
         handle

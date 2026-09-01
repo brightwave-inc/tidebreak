@@ -3664,6 +3664,76 @@ async fn fence_turn_lease_reports_only_the_exact_live_segment() {
 }
 
 #[tokio::test]
+async fn an_expired_lease_handback_makes_the_turn_immediately_reclaimable() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let turn_id = TurnId::new();
+    let accepted = match store
+        .accept_turn(turn_id, chat.id, "gpt-5", "hello")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
+    };
+    let claimed_at = accepted.available_at + chrono::Duration::seconds(1);
+    let token = uuid::Uuid::new_v4();
+    let expiry = claimed_at + chrono::Duration::minutes(1);
+    let claimed = store
+        .claim_turn_run(token, claimed_at, expiry)
+        .await
+        .unwrap()
+        .turn
+        .unwrap();
+    assert_eq!(claimed.lease_token, Some(token));
+
+    // A wrong token hands nothing back; the live lease stays untouched.
+    let handback_at = claimed_at + chrono::Duration::seconds(5);
+    assert!(!store
+        .expire_turn_run_lease(turn_id, uuid::Uuid::new_v4(), handback_at)
+        .await
+        .unwrap());
+    assert_eq!(
+        store
+            .get_turn_run(turn_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .lease_expires_at,
+        Some(expiry)
+    );
+
+    // The exact token hands the lease back: the expiry drops to now, and the
+    // next scan — the relaunched process — reclaims without waiting it out.
+    assert!(store
+        .expire_turn_run_lease(turn_id, token, handback_at)
+        .await
+        .unwrap());
+    let reclaim_at = handback_at + chrono::Duration::seconds(1);
+    let second_token = uuid::Uuid::new_v4();
+    let reclaimed = store
+        .claim_turn_run(
+            second_token,
+            reclaim_at,
+            reclaim_at + chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+        .turn
+        .unwrap();
+    assert_eq!(reclaimed.id, turn_id);
+    assert_eq!(reclaimed.status, TurnRunStatus::Running);
+    assert_eq!(reclaimed.lease_token, Some(second_token));
+
+    // Handing back an already-superseded lease is a no-op.
+    assert!(!store
+        .expire_turn_run_lease(turn_id, token, reclaim_at + chrono::Duration::seconds(1))
+        .await
+        .unwrap());
+}
+
+#[tokio::test]
 async fn turn_claim_and_heartbeat_require_the_exact_live_lease() {
     let (_dir, store) = temp_store().await;
     let chat = sample_chat();

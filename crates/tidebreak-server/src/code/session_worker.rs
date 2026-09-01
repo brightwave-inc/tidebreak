@@ -135,6 +135,11 @@ pub(crate) enum WorkerError {
     /// length of someone else's turn.
     #[error("another session in this workspace is mid-turn")]
     WorktreeBusy,
+    /// The process is quiescing for a restart-to-update, so no new turn may
+    /// start. A send is parked as a durable queue row by `submit_turn`; a
+    /// queued row stays in the queue and drains after the relaunch.
+    #[error("Tidebreak is restarting for an update; the turn starts after the relaunch")]
+    UpdateQuiesced,
 }
 
 pub(crate) struct WorkerHandle {
@@ -158,13 +163,18 @@ pub(crate) struct WorkerHandle {
 pub(crate) struct TurnQueue {
     pub(crate) wake: Arc<Notify>,
     worktree: Arc<tokio::sync::Mutex<()>>,
+    /// Flips true while the process quiesces for a restart-to-update: the
+    /// drain holds, no new turn starts, and the idle loop parks the engine
+    /// child immediately instead of waiting out the idle timer.
+    quiesce: watch::Receiver<bool>,
 }
 
 impl TurnQueue {
-    fn new(worktree: Arc<tokio::sync::Mutex<()>>) -> Self {
+    fn new(worktree: Arc<tokio::sync::Mutex<()>>, quiesce: watch::Receiver<bool>) -> Self {
         Self {
             wake: Arc::new(Notify::new()),
             worktree,
+            quiesce,
         }
     }
 }
@@ -189,6 +199,9 @@ enum TurnWait {
 struct WorktreeTurn<'a> {
     lock: &'a tokio::sync::Mutex<()>,
     wait: TurnWait,
+    /// The process-wide update-quiesce flag, re-read after the lock is won:
+    /// a turn must not start while a restart-to-update waits for boundaries.
+    quiesce: &'a watch::Receiver<bool>,
 }
 
 /// Where a turn's attachments come from, and where they can be put.
@@ -700,10 +713,11 @@ pub(crate) fn spawn_session_worker(
     sink: Arc<LiveSink>,
     attachments: AttachmentStore,
     worktree_turn: Arc<tokio::sync::Mutex<()>>,
+    quiesce: watch::Receiver<bool>,
 ) -> WorkerHandle {
     let (tx, rx) = mpsc::channel(8);
     let spawn_epoch = session.spawn_epoch;
-    let queue = TurnQueue::new(worktree_turn);
+    let queue = TurnQueue::new(worktree_turn, quiesce);
     let approval_decisions = Arc::new(tokio::sync::Mutex::new(()));
     tokio::spawn(run_worker(
         session,
@@ -753,21 +767,39 @@ async fn run_worker(
         let _ = save_session(&sink.db, &session).await;
     }
 
+    let mut quiesce = queue.quiesce.clone();
+    // A dropped quiesce sender (tests, teardown) must not hot-loop the select.
+    let mut quiesce_live = true;
     loop {
         if session_was_ended(&sink.db, &mut session).await {
             break;
         }
-        drain_queued(
-            &mut session,
-            engine.as_ref(),
-            &sink,
-            &queue,
-            &store,
-            &mut commands,
-        )
-        .await;
+        let quiescing = *quiesce.borrow_and_update();
+        if quiescing {
+            // A restart-to-update is waiting on this session: hold the drain
+            // and release the engine child now rather than on the idle timer.
+            // Rows in the durable queue stay put and drain after the relaunch.
+            if engine.child_pid().is_some() {
+                park_idle_engine(&mut session, engine.as_ref(), &sink).await;
+            }
+        } else {
+            drain_queued(
+                &mut session,
+                engine.as_ref(),
+                &sink,
+                &queue,
+                &store,
+                &mut commands,
+            )
+            .await;
+        }
         tokio::select! {
             _ = queue.wake.notified() => {}
+            changed = quiesce.changed(), if quiesce_live => {
+                if changed.is_err() {
+                    quiesce_live = false;
+                }
+            }
             command = commands.recv() => match command {
                 Some(WorkerCommand::RunTurn {
                     message,
@@ -784,6 +816,7 @@ async fn run_worker(
                         WorktreeTurn {
                             lock: &queue.worktree,
                             wait: TurnWait::Send,
+                            quiesce: &queue.quiesce,
                         },
                         QueuedFollowUp {
                             message,
@@ -842,8 +875,9 @@ async fn run_worker(
             // An idle engine child is cache, not an invariant (decision 0064).
             // The timer only exists while the engine reports a live child, so
             // a parked session — or an engine with no between-turn child —
-            // arms nothing.
-            _ = tokio::time::sleep(PARK_AFTER_IDLE), if engine.child_pid().is_some() => {
+            // arms nothing. During an update quiesce the timer is only the
+            // retry for a park that failed above, so it comes back fast.
+            _ = tokio::time::sleep(if quiescing { QUIESCE_PARK_RETRY } else { PARK_AFTER_IDLE }), if engine.child_pid().is_some() => {
                 park_idle_engine(&mut session, engine.as_ref(), &sink).await;
             }
         }
@@ -920,6 +954,14 @@ const APPROVAL_CONTROL_TIMEOUT: Duration = Duration::from_secs(1);
 const PARK_AFTER_IDLE: Duration = Duration::from_secs(15 * 60);
 #[cfg(test)]
 const PARK_AFTER_IDLE: Duration = Duration::from_millis(150);
+
+/// Retry cadence for a park that failed while an update quiesce is waiting
+/// on this session. Outside a quiesce a failed park just waits for the next
+/// idle window.
+#[cfg(not(test))]
+const QUIESCE_PARK_RETRY: Duration = Duration::from_millis(500);
+#[cfg(test)]
+const QUIESCE_PARK_RETRY: Duration = Duration::from_millis(50);
 
 /// Release an idle engine child (decision 0064) and clear the row's pid so
 /// nothing reads the dead process as live. The next turn respawns and
@@ -1189,6 +1231,11 @@ async fn drain_queued(
         if session_was_ended(&sink.db, session).await {
             return;
         }
+        // An update quiesce holds the whole drain: the rows stay put, visibly
+        // queued, and the relaunched worker drains them.
+        if *queue.quiesce.borrow() {
+            return;
+        }
         match queue_paused(&sink.db, &session.owner, session.id).await {
             Ok(true) => return,
             Ok(false) => {}
@@ -1228,6 +1275,7 @@ async fn drain_queued(
             WorktreeTurn {
                 lock: &queue.worktree,
                 wait: TurnWait::Queued,
+                quiesce: &queue.quiesce,
             },
             follow_up,
         )
@@ -1442,6 +1490,13 @@ async fn drive_turn_inner(
     // read a session that may be minutes stale by now.
     if session_was_ended(&sink.db, session).await {
         return Err(WorkerError::Conflict("session has ended".into()));
+    }
+    // So does a restart-to-update that started during the wait: it is
+    // counting turn boundaries, and a turn that starts now holds it for the
+    // turn's whole length. The message is not lost — a send is parked by the
+    // route, and a queued row stays in the queue for the relaunch.
+    if *worktree.quiesce.borrow() {
+        return Err(WorkerError::UpdateQuiesced);
     }
     let workspace = get_workspace(&sink.db, &session.owner, session.workspace_id)
         .await
@@ -1961,6 +2016,7 @@ fn code_turn_outcome(result: &Result<CodeTurn, WorkerError>) -> &'static str {
         Err(WorkerError::Failed(_)) => "error",
         Err(WorkerError::TriggerDeliveryAccepted) => "trigger_delivery_accepted",
         Err(WorkerError::WorktreeBusy) => "worktree_busy",
+        Err(WorkerError::UpdateQuiesced) => "update_quiesced",
     }
 }
 
@@ -2959,6 +3015,7 @@ mod tests {
                 engine_reads_images: false,
             },
             Arc::new(tokio::sync::Mutex::new(())),
+            tokio::sync::watch::channel(false).1,
         );
 
         let committed = CodeSessionExecutionSettings {
@@ -3088,6 +3145,7 @@ mod tests {
                 engine_reads_images: false,
             },
             worktree_lock.clone(),
+            tokio::sync::watch::channel(false).1,
         );
 
         let later = CodeSessionExecutionSettings {
@@ -3645,5 +3703,100 @@ mod tests {
         // own terminal" would be wrong on a hosted machine.
         let kept = sink.legible_turn_error("authentication_error: sign in required".into());
         assert_eq!(kept.message, "authentication_error: sign in required");
+    }
+
+    #[tokio::test]
+    async fn an_update_quiesce_refuses_new_turns_until_resumed() {
+        let (directory, store, sink, session_id) = seeded_sink().await;
+        let owner = OwnerId::local();
+        let mut session = get_session(&store, &owner, session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        session.lifecycle = CodeSessionLifecycle::Idle;
+        assert!(save_session(&store, &session).await.unwrap());
+
+        let worktree = directory.path().join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let private = directory.path().join("private");
+        std::fs::create_dir(&private).unwrap();
+        let private_root =
+            super::super::scratch::ScratchRoot::open_for_test(&private).expect("scratch root");
+        let adapter = ScriptedAdapter::new(plain_text_script());
+        let engine = adapter
+            .launch(SessionSpec {
+                worktree,
+                allowed_read_roots: Vec::new(),
+                permission_mode: session.permission_mode,
+                model: session.model.clone(),
+                reasoning_effort: session.reasoning_effort,
+                fast_mode: session.fast_mode,
+                resume_ref: None,
+                extra_argv: Vec::new(),
+                extra_env: Vec::new(),
+                relay_key_env: None,
+                env: Vec::new(),
+                approval: None,
+                binary: std::path::PathBuf::from("/scripted/engine"),
+                sink: sink.clone() as Arc<dyn tidebreak_harness::HarnessEventSink>,
+                browser: None,
+            })
+            .await
+            .unwrap();
+        let (quiesce_tx, quiesce_rx) = watch::channel(true);
+        let handle = spawn_session_worker(
+            session.clone(),
+            engine,
+            sink,
+            AttachmentStore {
+                blobs: None,
+                private_root,
+                engine_reads_images: false,
+            },
+            Arc::new(tokio::sync::Mutex::new(())),
+            quiesce_rx,
+        );
+
+        // While the quiesce holds, a send must not start a turn: the caller
+        // (submit_turn) parks it as a durable queue row instead.
+        let (reply, refused) = oneshot::channel();
+        handle
+            .commands
+            .send(WorkerCommand::RunTurn {
+                message: "hello".into(),
+                attachments: Vec::new(),
+                trigger_delivery: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        match refused.await.unwrap() {
+            Err(WorkerError::UpdateQuiesced) => {}
+            other => panic!("expected an update-quiesced refusal, got {other:?}"),
+        }
+        assert!(list_turns(&store, &owner, session_id)
+            .await
+            .unwrap()
+            .is_empty());
+
+        // Ending the quiesce (a failed install) reopens admission; the same
+        // send now runs to completion.
+        quiesce_tx.send_replace(false);
+        let (reply, ran) = oneshot::channel();
+        handle
+            .commands
+            .send(WorkerCommand::RunTurn {
+                message: "hello again".into(),
+                attachments: Vec::new(),
+                trigger_delivery: None,
+                reply,
+            })
+            .await
+            .unwrap();
+        ran.await.unwrap().expect("the turn runs after the resume");
+        assert_eq!(
+            list_turns(&store, &owner, session_id).await.unwrap().len(),
+            1
+        );
     }
 }
