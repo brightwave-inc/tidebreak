@@ -6,6 +6,8 @@ import {
   MAX_WIRE_TIMESTAMP_CHARS,
   bounded,
   boundedBlock,
+  boundedRaw,
+  boundedStringList,
   isFiniteNumber,
   isMember,
   isNonNegativeInteger,
@@ -46,8 +48,10 @@ describe("bounded readers", () => {
     expect(bounded("plain ascii, punctuation; and “quotes”", 100)).toBe(true);
   });
 
-  it("boundedBlock keeps newlines and tabs as structure but nothing else", () => {
+  it("boundedBlock keeps newlines, carriage returns, and tabs but nothing else", () => {
     expect(boundedBlock("line one\n\tline two", 100)).toBe(true);
+    expect(boundedBlock("crlf body\r\n", 100)).toBe(true);
+    expect(boundedBlock("a\u000cb", 100)).toBe(false);
     expect(boundedBlock("a\u001b[31mred", 100)).toBe(false);
     expect(boundedBlock("a\u202eb", 100)).toBe(false);
     expect(boundedBlock("x".repeat(5), 4)).toBe(false);
@@ -66,7 +70,30 @@ describe("bounded readers", () => {
       expect(bounded(notString, 10)).toBe(false);
       expect(boundedBlock(notString, 10)).toBe(false);
       expect(nonEmptyBounded(notString, 10)).toBe(false);
+      expect(boundedRaw(notString, 10)).toBe(false);
     }
+  });
+
+  it("count code points on a string longer than the limit in UTF-16 units", () => {
+    // Six UTF-16 units, three code points: fits a limit of three.
+    expect(bounded("😀😀😀", 3)).toBe(true);
+    expect(boundedBlock("😀😀😀", 3)).toBe(true);
+    expect(boundedRaw("😀😀😀", 3)).toBe(true);
+    expect(boundedRaw("😀😀😀", 2)).toBe(false);
+  });
+
+  it("boundedRaw bounds the length and nothing else", () => {
+    expect(boundedRaw("\u001b[31m\r\u202e\u0000", 10)).toBe(true);
+    expect(boundedRaw("x".repeat(11), 10)).toBe(false);
+  });
+
+  it("boundedStringList applies the line clamp to every entry", () => {
+    expect(boundedStringList([], 4)).toBe(true);
+    expect(boundedStringList(["a", "bcde"], 4)).toBe(true);
+    expect(boundedStringList(["a", "bcdef"], 4)).toBe(false);
+    expect(boundedStringList(["a", "b\n"], 4)).toBe(false);
+    expect(boundedStringList(["a", 1], 4)).toBe(false);
+    expect(boundedStringList("a", 4)).toBe(false);
   });
 });
 
