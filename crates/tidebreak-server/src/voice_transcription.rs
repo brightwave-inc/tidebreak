@@ -346,7 +346,11 @@ pub async fn transcribe(
         .file_name(format!("recording.{extension}"))
         .mime_str(content_type)
         .map_err(|_| ServerError::bad_request("invalid voice recording content type"))?;
-    let response = reqwest::Client::new()
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| ServerError::internal("OpenAI transcription client failed"))?;
+    let response = client
         .post("https://api.openai.com/v1/audio/transcriptions")
         .bearer_auth(key)
         .multipart(
