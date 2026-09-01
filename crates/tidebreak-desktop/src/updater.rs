@@ -45,7 +45,7 @@ pub(crate) const UPDATE_CHECK_REQUESTED_EVENT: &str = "desktop-update-check-requ
 const UPDATE_CHECK_STARTUP_DELAY: Duration = Duration::from_secs(15);
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const UPDATE_CHECK_ERROR: &str = "Could not check for updates. Try again later.";
-const UPDATE_PREPARE_ERROR: &str = "Could not prepare the update. Try again later.";
+pub(crate) const UPDATE_PREPARE_ERROR: &str = "Could not prepare the update. Try again later.";
 const UPDATE_INSTALL_ERROR: &str = "Could not install the update. Try again later.";
 const UPDATE_WITHDRAWN_ERROR: &str =
     "The downloaded update is no longer published. Tidebreak will keep checking.";
@@ -102,22 +102,6 @@ pub(crate) struct UpdateManager {
     state: Mutex<DesktopUpdateState>,
     staged: Mutex<Option<StagedUpdate>>,
     busy: AtomicBool,
-}
-
-/// The embedded server's update-quiesce handle, installed once the server
-/// boots. `None` until then — with no server there is no session work to
-/// bring to a safe point.
-#[derive(Default)]
-pub(crate) struct ServerQuiesceSlot(Mutex<Option<tidebreak_server::UpdateQuiesce>>);
-
-impl ServerQuiesceSlot {
-    pub(crate) fn install(&self, handle: tidebreak_server::UpdateQuiesce) {
-        *self.0.lock().expect("server quiesce slot poisoned") = Some(handle);
-    }
-
-    fn current(&self) -> Option<tidebreak_server::UpdateQuiesce> {
-        self.0.lock().expect("server quiesce slot poisoned").clone()
-    }
 }
 
 pub(crate) const fn updates_enabled() -> bool {
@@ -503,36 +487,16 @@ async fn take_staged_and_restart(app: AppHandle) -> Result<(), String> {
 
     let version = staged.update.version.clone();
     let host_access = app.state::<HostAccess>();
-    // Bring session work to a safe point before the broker drains: code
-    // sessions park at a turn boundary and chat leases are handed back, so
-    // the relaunch resumes instead of fencing orphans. A quiesce refusal —
-    // a code turn still running at the deadline — arrives as a sentence the
-    // panel shows as-is, and the server has already resumed itself.
-    let server_quiesce = app.state::<ServerQuiesceSlot>().current();
-    let quiesce_server = server_quiesce.clone();
-    let resume_server = server_quiesce;
+    // The quiesce brings session work to a safe point before the broker
+    // drains — code sessions park at a turn boundary and chat leases are
+    // handed back (`HostAccess::quiesce_for_update`) — so the relaunch
+    // resumes work instead of fencing orphans. A refusal, such as a code
+    // turn still running at the deadline, arrives as a sentence the panel
+    // shows as-is, with the partial quiesce already unwound.
     let install_result = install_behind_broker_barrier(
-        || async {
-            if let Some(server) = &quiesce_server {
-                server.quiesce_for_update().await?;
-            }
-            if let Err(error) = host_access.quiesce_for_update().await {
-                eprintln!("tidebreak-desktop: could not quiesce host broker for update: {error}");
-                if let Some(server) = &quiesce_server {
-                    server.resume_after_failed_update();
-                }
-                return Err(UPDATE_PREPARE_ERROR.to_owned());
-            }
-            Ok(())
-        },
+        || host_access.quiesce_for_update(),
         || staged.update.install(&staged.bytes),
-        || async {
-            let result = host_access.resume_after_failed_update().await;
-            if let Some(server) = &resume_server {
-                server.resume_after_failed_update();
-            }
-            result
-        },
+        || host_access.resume_after_failed_update(),
         || host_access.shutdown(),
     )
     .await;

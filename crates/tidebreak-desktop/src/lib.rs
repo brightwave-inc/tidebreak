@@ -845,7 +845,6 @@ pub fn run() {
         .manage(deep_link::PairingStore::new(store_rx))
         .manage(documents::PendingLibraryDrop::default())
         .manage(updater::UpdateManager::default())
-        .manage(updater::ServerQuiesceSlot::default())
         .invoke_handler(tauri::generate_handler![
             server_info,
             remote_machine_state,
@@ -1064,8 +1063,8 @@ async fn boot_server(
     // Unblock any pairing task parked on a deep link that arrived pre-boot.
     let _ = store_tx.send(Some(server.pairing_handle()));
     // Let restart-to-update park sessions at a safe point before installing.
-    app.state::<updater::ServerQuiesceSlot>()
-        .install(server.update_quiesce());
+    app.state::<host_access::HostAccess>()
+        .initialize_update_quiesce(server.update_quiesce())?;
     let base_url = format!("http://{}", server.local_addr());
     let token = server.token().to_string();
     let executor_token = server.client_executor_token().to_string();
