@@ -42,9 +42,9 @@ pub(super) struct ImportRequest {
 }
 
 /// Exact bytes selected for one import and the overlay they came from, if any.
-struct SourceBytes {
-    bytes: Vec<u8>,
-    staged_root: Option<PathBuf>,
+pub(super) struct SourceBytes {
+    pub(super) bytes: Vec<u8>,
+    pub(super) staged_root: Option<PathBuf>,
 }
 
 enum PublishError {
@@ -137,15 +137,16 @@ async fn read_source_bytes(
     select_source_bytes(
         staged_root,
         &request.path,
-        read_broker_source_bytes(state, context, request),
+        read_broker_file_bytes(state, context, request.root_id, &request.path),
     )
     .await
 }
 
-async fn read_broker_source_bytes(
+pub(super) async fn read_broker_file_bytes(
     state: &HostAccess,
     context: AuthoritativeContext,
-    request: &ImportRequest,
+    root_id: RootId,
+    path: &RelativePath,
 ) -> Result<Vec<u8>, StoredResolution> {
     let result = state
         .broker
@@ -154,8 +155,8 @@ async fn read_broker_source_bytes(
             request_id: tidebreak_host_broker::RequestId::new(),
             context: context.execution,
             request: OperationRequest::ReadFileBinary(PathRequest {
-                root_id: request.root_id,
-                path: request.path.clone(),
+                root_id,
+                path: path.clone(),
             }),
         })
         .await;
@@ -180,7 +181,7 @@ async fn read_broker_source_bytes(
 /// A missing staged path may represent a deletion by exec. Polling the broker
 /// read in that case would resurrect the pre-turn file, so the fallback future
 /// is deliberately left untouched whenever an overlay was selected.
-async fn select_source_bytes<BrokerRead>(
+pub(super) async fn select_source_bytes<BrokerRead>(
     staged_root: Option<PathBuf>,
     path: &RelativePath,
     broker_read: BrokerRead,
@@ -215,7 +216,10 @@ where
 /// bytes do not cross its transport. The file handle is opened relative to a
 /// descriptor-pinned directory, and the second length check refuses a file
 /// that grows while it is being read rather than silently truncating it.
-async fn read_staged_file_bytes(overlay: &std::path::Path, path: &RelativePath) -> Option<Vec<u8>> {
+pub(super) async fn read_staged_file_bytes(
+    overlay: &std::path::Path,
+    path: &RelativePath,
+) -> Option<Vec<u8>> {
     let (prefix, name) = path
         .as_str()
         .rsplit_once('/')
@@ -248,7 +252,7 @@ async fn read_staged_file_bytes(overlay: &std::path::Path, path: &RelativePath) 
 /// `ListRoots` is the cheapest operation that answers exactly that: the broker
 /// filters its result by the same per-root read authorization an operation
 /// would need, so a detached or revoked root simply stops appearing.
-async fn root_is_still_attached(
+pub(super) async fn root_is_still_attached(
     state: &HostAccess,
     context: AuthoritativeContext,
     root_id: RootId,
@@ -268,7 +272,7 @@ async fn root_is_still_attached(
     )
 }
 
-fn current_staged_root(
+pub(super) fn current_staged_root(
     state: &HostAccess,
     context: AuthoritativeContext,
     root_id: RootId,
@@ -279,7 +283,7 @@ fn current_staged_root(
         .staged_root(ChatId::from(context.chat_id), root_id)
 }
 
-fn selected_staging_is_current(
+pub(super) fn selected_staging_is_current(
     state: &HostAccess,
     context: AuthoritativeContext,
     root_id: RootId,

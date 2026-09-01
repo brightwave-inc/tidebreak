@@ -431,3 +431,96 @@ async fn a_foreground_revision_projects_only_its_turns_durable_evidence() {
     );
     assert!(!history.to_string().contains("not-evidence"));
 }
+
+#[tokio::test]
+async fn exact_output_reauthorization_rejects_other_chats_and_stale_heads() {
+    use sha2::{Digest as _, Sha256};
+
+    let (router, token, store, _dir) = test_app_without_turn_worker().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let other = make_chat(&router, &bearer).await;
+    let output_id = OutputId::new();
+    let first_revision = OutputRevisionId::new();
+    let first_bytes = b"first revision";
+    let first_digest: [u8; 32] = Sha256::digest(first_bytes).into();
+    let now = chrono::Utc::now();
+
+    store
+        .create_output(&CreateOutput {
+            id: output_id,
+            chat_id: chat.id,
+            filename: "report.txt".to_owned(),
+            kind: DeliverableKind::Text,
+            revision: NewOutputRevision {
+                id: first_revision,
+                byte_len: first_bytes.len() as u64,
+                sha256: first_digest,
+                turn_id: None,
+                producing_run_id: None,
+                created_at: now,
+            },
+        })
+        .await
+        .unwrap();
+
+    crate::output_files::require_exact_revision(
+        &store,
+        chat.id,
+        output_id,
+        first_revision,
+        first_bytes.len() as u64,
+        first_digest,
+    )
+    .await
+    .unwrap();
+    assert!(crate::output_files::require_exact_revision(
+        &store,
+        other.id,
+        output_id,
+        first_revision,
+        first_bytes.len() as u64,
+        first_digest,
+    )
+    .await
+    .is_err());
+
+    let second_revision = OutputRevisionId::new();
+    let second_bytes = b"second revision";
+    let second_digest: [u8; 32] = Sha256::digest(second_bytes).into();
+    store
+        .append_output_revision(
+            output_id,
+            &NewOutputRevision {
+                id: second_revision,
+                byte_len: second_bytes.len() as u64,
+                sha256: second_digest,
+                turn_id: None,
+                producing_run_id: None,
+                created_at: now + chrono::Duration::seconds(1),
+            },
+        )
+        .await
+        .unwrap();
+
+    assert!(crate::output_files::require_exact_revision(
+        &store,
+        chat.id,
+        output_id,
+        first_revision,
+        first_bytes.len() as u64,
+        first_digest,
+    )
+    .await
+    .is_err());
+    crate::output_files::require_exact_revision(
+        &store,
+        chat.id,
+        output_id,
+        second_revision,
+        second_bytes.len() as u64,
+        second_digest,
+    )
+    .await
+    .unwrap();
+}

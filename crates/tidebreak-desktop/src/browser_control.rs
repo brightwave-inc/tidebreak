@@ -301,9 +301,23 @@ struct BrowserConfirmationRecord {
     browser_id: String,
     workspace_id: String,
     origin: BrowserOrigin,
+    required_capability: BrowserGrantCapability,
     action_type: String,
     target_label: Option<String>,
+    binding: Option<BrowserConfirmationBinding>,
     expires_at: Instant,
+}
+
+/// Private exact-resource identity covered by one native confirmation.
+///
+/// The digest and length never enter renderer state or browser audit output.
+/// They only prevent a resource from changing between the prompt and native
+/// dispatch.
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) struct BrowserConfirmationBinding {
+    pub(crate) filename: String,
+    pub(crate) byte_len: u64,
+    pub(crate) sha256: [u8; 32],
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1304,31 +1318,45 @@ impl BrowserRegistry {
     /// Record one native act-time confirmation. Only native browser executor
     /// code can receive the returned opaque id; there is no renderer command
     /// for enumerating or redeeming confirmation records.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "confirmation scope and exact resource identity stay explicit at the native boundary"
+    )]
     pub(crate) fn record_native_confirmation(
         &self,
         capability_id: Uuid,
         browser_id: &str,
         origin: &BrowserOrigin,
+        required_capability: BrowserGrantCapability,
         action_type: &str,
         target_label: Option<&str>,
+        binding: Option<&BrowserConfirmationBinding>,
     ) -> Result<Uuid, String> {
         self.record_native_confirmation_for(
             capability_id,
             browser_id,
             origin,
+            required_capability,
             action_type,
             target_label,
+            binding,
             AGENT_CONFIRMATION_TTL,
         )
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the expiry override extends the same explicit confirmation boundary"
+    )]
     fn record_native_confirmation_for(
         &self,
         capability_id: Uuid,
         browser_id: &str,
         origin: &BrowserOrigin,
+        required_capability: BrowserGrantCapability,
         action_type: &str,
         target_label: Option<&str>,
+        binding: Option<&BrowserConfirmationBinding>,
         ttl: Duration,
     ) -> Result<Uuid, String> {
         let mut state = self.lock();
@@ -1351,9 +1379,9 @@ impl BrowserRegistry {
             &state,
             &capability.workspace_id,
             origin,
-            BrowserGrantCapability::BrowserControlOrigin,
+            required_capability,
         ) {
-            return Err("browser origin is not shared for control".to_owned());
+            return Err("browser origin is not shared for this operation".to_owned());
         }
         let confirmation_id = Uuid::new_v4();
         state.confirmations.insert(
@@ -1363,6 +1391,7 @@ impl BrowserRegistry {
                 browser_id: browser_id.to_owned(),
                 workspace_id: capability.workspace_id,
                 origin: origin.clone(),
+                required_capability,
                 action_type: clean_audit_text(
                     action_type,
                     MAX_AUDIT_ACTION_CHARS,
@@ -1371,6 +1400,7 @@ impl BrowserRegistry {
                 target_label: target_label.map(|value| {
                     clean_audit_text(value, MAX_AUDIT_TARGET_CHARS, "unlabeled target")
                 }),
+                binding: binding.cloned(),
                 expires_at: Instant::now() + ttl,
             },
         );
@@ -1393,6 +1423,44 @@ impl BrowserRegistry {
         target_label: Option<&str>,
         effect: BrowserDispatchEffect,
         confirmation_id: Option<Uuid>,
+        dispatch: F,
+    ) -> Result<T, String>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<T, String>>,
+    {
+        self.dispatch_agent_with_confirmation_binding(
+            capability_id,
+            browser_id,
+            origin,
+            required_capability,
+            action_type,
+            target_label,
+            effect,
+            confirmation_id,
+            None,
+            dispatch,
+        )
+        .await
+    }
+
+    /// Dispatch one operation whose native confirmation covers an exact
+    /// resource identity in addition to the semantic browser target.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "security-sensitive authorization inputs stay explicit at the native dispatch boundary"
+    )]
+    pub(crate) async fn dispatch_agent_with_confirmation_binding<T, F, Fut>(
+        &self,
+        capability_id: Uuid,
+        browser_id: &str,
+        origin: &BrowserOrigin,
+        required_capability: BrowserGrantCapability,
+        action_type: &str,
+        target_label: Option<&str>,
+        effect: BrowserDispatchEffect,
+        confirmation_id: Option<Uuid>,
+        confirmation_binding: Option<BrowserConfirmationBinding>,
         dispatch: F,
     ) -> Result<T, String>
     where
@@ -1426,6 +1494,7 @@ impl BrowserRegistry {
                 target_label.as_deref(),
                 effect,
                 confirmation_id,
+                confirmation_binding.as_ref(),
                 false,
             )?
         };
@@ -1459,6 +1528,7 @@ impl BrowserRegistry {
                 target_label.as_deref(),
                 effect,
                 confirmation_id,
+                confirmation_binding.as_ref(),
                 true,
             )
         };
@@ -2229,6 +2299,7 @@ fn authorize_agent_dispatch(
     target_label: Option<&str>,
     effect: BrowserDispatchEffect,
     confirmation_id: Option<Uuid>,
+    confirmation_binding: Option<&BrowserConfirmationBinding>,
     consume_confirmation: bool,
 ) -> Result<BrowserAgentCapability, String> {
     let capability = active_capability(state, capability_id)?.clone();
@@ -2267,8 +2338,10 @@ fn authorize_agent_dispatch(
             || confirmation.browser_id != browser_id
             || confirmation.workspace_id != capability.workspace_id
             || confirmation.origin != *origin
+            || confirmation.required_capability != required_capability
             || confirmation.action_type != action_type
             || confirmation.target_label.as_deref() != target_label
+            || confirmation.binding.as_ref() != confirmation_binding
         {
             return Err("browser confirmation does not match this action".to_owned());
         }
@@ -3540,8 +3613,10 @@ mod tests {
                 capability,
                 "browser-1",
                 &origin,
+                BrowserGrantCapability::BrowserControlOrigin,
                 "submit_form",
                 Some("Create deployment"),
+                None,
             )
             .unwrap();
         {
@@ -3551,8 +3626,13 @@ mod tests {
             assert_eq!(record.browser_id, "browser-1");
             assert_eq!(record.workspace_id, "workspace-1");
             assert_eq!(record.origin, origin);
+            assert_eq!(
+                record.required_capability,
+                BrowserGrantCapability::BrowserControlOrigin
+            );
             assert_eq!(record.action_type, "submit_form");
             assert_eq!(record.target_label.as_deref(), Some("Create deployment"));
+            assert!(record.binding.is_none());
         }
 
         let missing_ran = Arc::new(AtomicBool::new(false));
@@ -3638,8 +3718,10 @@ mod tests {
                 capability,
                 "browser-1",
                 &origin,
+                BrowserGrantCapability::BrowserControlOrigin,
                 "submit_form",
                 Some("Create deployment"),
+                None,
                 Duration::ZERO,
             )
             .unwrap();
@@ -3658,6 +3740,114 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.contains("confirmation is unavailable"));
+    }
+
+    #[tokio::test]
+    async fn upload_confirmations_bind_capability_and_exact_file_digest() {
+        let (registry, _, origin, capability, _private) = controlled_registry();
+        registry
+            .grant_browser_access(
+                "browser-1",
+                "workspace-1",
+                &origin,
+                BrowserOriginScope::Origin {
+                    origin: origin.clone(),
+                },
+                &[BrowserGrantCapability::BrowserTransferFiles],
+            )
+            .unwrap();
+        let binding = BrowserConfirmationBinding {
+            filename: "report.pdf".to_owned(),
+            byte_len: 4,
+            sha256: [7; 32],
+        };
+        let confirmation = registry
+            .record_native_confirmation(
+                capability,
+                "browser-1",
+                &origin,
+                BrowserGrantCapability::BrowserTransferFiles,
+                "upload_file",
+                Some("File input"),
+                Some(&binding),
+            )
+            .unwrap();
+
+        let capability_mismatch_ran = Arc::new(AtomicBool::new(false));
+        let error = registry
+            .dispatch_agent_with_confirmation_binding(
+                capability,
+                "browser-1",
+                &origin,
+                BrowserGrantCapability::BrowserControlOrigin,
+                "upload_file",
+                Some("File input"),
+                BrowserDispatchEffect::Consequential,
+                Some(confirmation),
+                Some(binding.clone()),
+                {
+                    let ran = Arc::clone(&capability_mismatch_ran);
+                    move || async move {
+                        ran.store(true, Ordering::SeqCst);
+                        Ok(())
+                    }
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(error.contains("does not match"));
+        assert!(!capability_mismatch_ran.load(Ordering::SeqCst));
+
+        let mut changed = binding.clone();
+        changed.sha256[0] ^= 1;
+        let digest_mismatch_ran = Arc::new(AtomicBool::new(false));
+        let error = registry
+            .dispatch_agent_with_confirmation_binding(
+                capability,
+                "browser-1",
+                &origin,
+                BrowserGrantCapability::BrowserTransferFiles,
+                "upload_file",
+                Some("File input"),
+                BrowserDispatchEffect::Consequential,
+                Some(confirmation),
+                Some(changed),
+                {
+                    let ran = Arc::clone(&digest_mismatch_ran);
+                    move || async move {
+                        ran.store(true, Ordering::SeqCst);
+                        Ok(())
+                    }
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(error.contains("does not match"));
+        assert!(!digest_mismatch_ran.load(Ordering::SeqCst));
+
+        let exact_ran = Arc::new(AtomicBool::new(false));
+        registry
+            .dispatch_agent_with_confirmation_binding(
+                capability,
+                "browser-1",
+                &origin,
+                BrowserGrantCapability::BrowserTransferFiles,
+                "upload_file",
+                Some("File input"),
+                BrowserDispatchEffect::Consequential,
+                Some(confirmation),
+                Some(binding),
+                {
+                    let ran = Arc::clone(&exact_ran);
+                    move || async move {
+                        ran.store(true, Ordering::SeqCst);
+                        Ok(())
+                    }
+                },
+            )
+            .await
+            .unwrap();
+        assert!(exact_ran.load(Ordering::SeqCst));
     }
 
     #[tokio::test]

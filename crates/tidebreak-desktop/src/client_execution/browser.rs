@@ -10,20 +10,28 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex as StdMutex, MutexGuard as StdMutexGuard};
 
 use base64::Engine as _;
+use sha2::{Digest as _, Sha256};
 use tauri::{AppHandle, Manager};
 use tidebreak_core::{
     validate_browser_act_arguments, validate_browser_list_arguments,
     validate_browser_navigate_arguments, validate_browser_screenshot_arguments,
-    validate_browser_snapshot_arguments, validate_browser_wait_arguments, BrowserActArgs,
-    BrowserListArgs, BrowserListResult, BrowserNavigateArgs, BrowserPageSnapshot,
-    BrowserScreenshotArgs, BrowserScreenshotResult, BrowserSnapshotArgs, BrowserWaitArgs,
-    BrowserWaitResult, CallId, ChatId, ImageRef, ToolCallExecution, ToolCallRecord, ToolCallStatus,
+    validate_browser_snapshot_arguments, validate_browser_upload_arguments,
+    validate_browser_wait_arguments, BrowserActArgs, BrowserGrantCapability, BrowserListArgs,
+    BrowserListResult, BrowserNavigateArgs, BrowserOrigin, BrowserPageSnapshot,
+    BrowserScreenshotArgs, BrowserScreenshotResult, BrowserSnapshotArgs, BrowserUploadArgs,
+    BrowserUploadResource, BrowserUploadStatus, BrowserWaitArgs, BrowserWaitResult, CallId, ChatId,
+    ImageRef, OutputId, OutputRevisionId, ToolCallExecution, ToolCallRecord, ToolCallStatus,
     BROWSER_ACT_TOOL, BROWSER_LIST_TOOL, BROWSER_NAVIGATE_TOOL, BROWSER_SCREENSHOT_TOOL,
-    BROWSER_SNAPSHOT_TOOL, BROWSER_WAIT_TOOL,
+    BROWSER_SNAPSHOT_TOOL, BROWSER_UPLOAD_TOOL, BROWSER_WAIT_TOOL,
+};
+use tidebreak_host_broker::{RelativePath, RootId, MAX_READ_FILE_BINARY_BYTES};
+use tidebreak_server::output_files::{
+    read_output_revision_bytes, require_exact_revision, require_live_output,
 };
 use uuid::Uuid;
 
-use crate::browser_control::BrowserRegistry;
+use crate::browser_control::{BrowserConfirmationBinding, BrowserRegistry};
+use crate::browser_semantics::BrowserUploadFile;
 use crate::host_access::{AuthoritativeContext, HostAccess};
 use crate::image_attachments::PublishedImageAttachment;
 use crate::AppState;
@@ -427,6 +435,7 @@ fn is_foreground_browser_call(call: &ToolCallRecord) -> bool {
         BROWSER_WAIT_TOOL => validate_browser_wait_arguments(&call.arguments),
         BROWSER_SCREENSHOT_TOOL => validate_browser_screenshot_arguments(&call.arguments),
         BROWSER_ACT_TOOL => validate_browser_act_arguments(&call.arguments),
+        BROWSER_UPLOAD_TOOL => validate_browser_upload_arguments(&call.arguments),
         _ => false,
     }
 }
@@ -537,8 +546,389 @@ async fn execute_operation(
                 Err(error) => map_native_error(Some(&arguments.browser_id), error),
             }
         }
+        BROWSER_UPLOAD_TOOL => {
+            let Ok(arguments) = serde_json::from_value::<BrowserUploadArgs>(call.arguments.clone())
+            else {
+                return invalid_request();
+            };
+            match execute_browser_upload_operation(
+                app,
+                state,
+                registry,
+                context,
+                capability_id,
+                arguments.clone(),
+            )
+            .await
+            {
+                Ok(result) => completed(&result),
+                Err(error) => map_native_error(Some(&arguments.browser_id), error),
+            }
+        }
         _ => invalid_request(),
     }
+}
+
+enum BrowserUploadSourceIdentity {
+    Output {
+        output_id: OutputId,
+        revision_id: OutputRevisionId,
+        filename: String,
+        media_type: String,
+        byte_len: u64,
+        sha256: [u8; 32],
+    },
+    ConnectedFile {
+        root_id: RootId,
+        path: RelativePath,
+    },
+}
+
+struct ResolvedBrowserUploadSource {
+    identity: BrowserUploadSourceIdentity,
+    file: BrowserUploadFile,
+}
+
+async fn execute_browser_upload_operation(
+    app: &AppHandle,
+    state: &HostAccess,
+    registry: &BrowserRegistry,
+    context: AuthoritativeContext,
+    capability_id: Uuid,
+    arguments: BrowserUploadArgs,
+) -> Result<tidebreak_core::BrowserUploadResult, String> {
+    if !arguments.is_well_formed() {
+        return Err("browser upload request is not valid".to_owned());
+    }
+    let host_snapshot = registry.begin_agent_observation(capability_id, &arguments.browser_id)?;
+    if !host_snapshot
+        .engine
+        .as_ref()
+        .is_some_and(|engine| engine.capabilities.semantic_actions)
+    {
+        return Ok(crate::browser_semantics::browser_upload_result(
+            &arguments,
+            BrowserUploadStatus::EngineFailure,
+            "Trusted browser file attachment is not available on this platform.",
+            None,
+        ));
+    }
+    if !host_snapshot
+        .agent_access
+        .as_ref()
+        .is_some_and(|access| access.can_transfer_files)
+    {
+        return Err("browser origin is not shared for this operation".to_owned());
+    }
+    let workspace_id = host_snapshot.workspace_id;
+    let origin = host_snapshot
+        .url
+        .as_deref()
+        .and_then(BrowserOrigin::from_url)
+        .ok_or_else(|| "browser has no authorized HTTP origin".to_owned())?;
+    let target = match registry.semantic_target(
+        &arguments.browser_id,
+        &workspace_id,
+        &arguments.snapshot_id,
+        arguments.document_epoch,
+        &arguments.target_ref,
+    ) {
+        Ok(target) => target,
+        Err(crate::browser_control::BrowserTargetError::StaleTarget) => {
+            return Ok(crate::browser_semantics::browser_upload_result(
+                &arguments,
+                BrowserUploadStatus::StaleTarget,
+                "The page or target changed. Take a new snapshot before uploading.",
+                None,
+            ));
+        }
+        Err(crate::browser_control::BrowserTargetError::BrowserHidden) => {
+            return Ok(crate::browser_semantics::browser_upload_result(
+                &arguments,
+                BrowserUploadStatus::HiddenTab,
+                "Bring this browser tab to the foreground before uploading.",
+                None,
+            ));
+        }
+    };
+    if !crate::browser_semantics::is_file_input(&target) {
+        return Ok(crate::browser_semantics::browser_upload_result(
+            &arguments,
+            BrowserUploadStatus::InvalidTarget,
+            "The selected target is not a file input. Use a file-input ref from the latest snapshot.",
+            None,
+        ));
+    }
+
+    let initial = resolve_browser_upload_source(app, state, context, &arguments.resource).await?;
+    let target_label = "File input".to_owned();
+    let _ = registry.set_agent_action(
+        capability_id,
+        &arguments.browser_id,
+        Some("Waiting for upload confirmation"),
+        false,
+    );
+    let approved = crate::browser_semantics::native_browser_upload_choice(
+        app,
+        &origin,
+        &target_label,
+        &initial.file,
+    )
+    .await?;
+    if !approved {
+        let _ = registry.set_agent_action(capability_id, &arguments.browser_id, None, false);
+        return Ok(crate::browser_semantics::browser_upload_result(
+            &arguments,
+            BrowserUploadStatus::Declined,
+            "The user declined this browser upload. Do not retry it without direction.",
+            None,
+        ));
+    }
+
+    let confirmation_binding = initial.file.binding.clone();
+    let confirmation_id = registry.record_native_confirmation(
+        capability_id,
+        &arguments.browser_id,
+        &origin,
+        BrowserGrantCapability::BrowserTransferFiles,
+        "upload_file",
+        Some(&target_label),
+        Some(&confirmation_binding),
+    )?;
+    let browser_id = arguments.browser_id.clone();
+    let dispatch_app = app.clone();
+    let dispatch_registry = registry.clone();
+    let identity = initial.identity;
+    drop(initial.file);
+    let result = registry
+        .dispatch_agent_with_confirmation_binding(
+            capability_id,
+            &browser_id,
+            &origin,
+            BrowserGrantCapability::BrowserTransferFiles,
+            "upload_file",
+            Some(&target_label),
+            crate::browser_control::BrowserDispatchEffect::Consequential,
+            Some(confirmation_id),
+            Some(confirmation_binding.clone()),
+            move || async move {
+                let confirmed =
+                    reresolve_browser_upload_source(&dispatch_app, state, context, &identity)
+                        .await
+                        .map_err(|_| {
+                            "browser upload resource changed before attachment".to_owned()
+                        })?;
+                if confirmed.binding != confirmation_binding {
+                    return Err("browser upload resource changed before attachment".to_owned());
+                }
+                crate::browser_semantics::execute_browser_upload(
+                    dispatch_app,
+                    dispatch_registry,
+                    capability_id,
+                    workspace_id,
+                    arguments,
+                    confirmed,
+                )
+                .await
+            },
+        )
+        .await;
+    if result.is_err() {
+        let _ = registry.set_agent_action(capability_id, &host_snapshot.browser_id, None, false);
+    }
+    result.map_err(|error| {
+        if error == "browser confirmation does not match this action" {
+            "browser upload resource changed before attachment".to_owned()
+        } else {
+            error
+        }
+    })
+}
+
+async fn resolve_browser_upload_source(
+    app: &AppHandle,
+    state: &HostAccess,
+    context: AuthoritativeContext,
+    resource: &BrowserUploadResource,
+) -> Result<ResolvedBrowserUploadSource, String> {
+    match resource {
+        BrowserUploadResource::Output { output_id } => {
+            resolve_output_upload_source(app, state, context, OutputId::from(*output_id)).await
+        }
+        BrowserUploadResource::ConnectedFile { root_id, path } => {
+            let root_id = RootId::from_uuid(*root_id)
+                .map_err(|_| "browser upload resource is unavailable".to_owned())?;
+            let path = RelativePath::parse(path)
+                .map_err(|_| "browser upload resource is unavailable".to_owned())?;
+            if path.is_root() {
+                return Err("browser upload resource is unavailable".to_owned());
+            }
+            let file = resolve_connected_file_upload(state, context, root_id, &path).await?;
+            Ok(ResolvedBrowserUploadSource {
+                identity: BrowserUploadSourceIdentity::ConnectedFile { root_id, path },
+                file,
+            })
+        }
+    }
+}
+
+async fn reresolve_browser_upload_source(
+    app: &AppHandle,
+    state: &HostAccess,
+    context: AuthoritativeContext,
+    identity: &BrowserUploadSourceIdentity,
+) -> Result<BrowserUploadFile, String> {
+    match identity {
+        BrowserUploadSourceIdentity::Output {
+            output_id,
+            revision_id,
+            filename,
+            media_type,
+            byte_len,
+            sha256,
+        } => {
+            let store = state
+                .store()
+                .ok_or_else(|| "browser upload resource is unavailable".to_owned())?;
+            let chat_id = ChatId::from(context.chat_id);
+            require_exact_revision(store, chat_id, *output_id, *revision_id, *byte_len, *sha256)
+                .await
+                .map_err(|_| "browser upload resource changed before attachment".to_owned())?;
+            let (output, revision) = require_live_output(store, chat_id, *output_id)
+                .await
+                .map_err(|_| "browser upload resource changed before attachment".to_owned())?;
+            if revision.id != *revision_id
+                || output.filename != *filename
+                || output.media_type != *media_type
+            {
+                return Err("browser upload resource changed before attachment".to_owned());
+            }
+            read_output_upload_file(app, chat_id, output, revision).await
+        }
+        BrowserUploadSourceIdentity::ConnectedFile { root_id, path } => {
+            resolve_connected_file_upload(state, context, *root_id, path).await
+        }
+    }
+}
+
+async fn resolve_output_upload_source(
+    app: &AppHandle,
+    state: &HostAccess,
+    context: AuthoritativeContext,
+    output_id: OutputId,
+) -> Result<ResolvedBrowserUploadSource, String> {
+    let store = state
+        .store()
+        .ok_or_else(|| "browser upload resource is unavailable".to_owned())?;
+    let chat_id = ChatId::from(context.chat_id);
+    let (output, revision) = require_live_output(store, chat_id, output_id)
+        .await
+        .map_err(|_| "browser upload resource is unavailable".to_owned())?;
+    let identity = BrowserUploadSourceIdentity::Output {
+        output_id,
+        revision_id: revision.id,
+        filename: output.filename.clone(),
+        media_type: output.media_type.clone(),
+        byte_len: revision.byte_len,
+        sha256: revision.sha256,
+    };
+    let file = read_output_upload_file(app, chat_id, output, revision).await?;
+    Ok(ResolvedBrowserUploadSource { identity, file })
+}
+
+async fn read_output_upload_file(
+    app: &AppHandle,
+    chat_id: ChatId,
+    output: tidebreak_core::OutputRecord,
+    revision: tidebreak_core::OutputRevision,
+) -> Result<BrowserUploadFile, String> {
+    if revision.byte_len > MAX_READ_FILE_BINARY_BYTES as u64
+        || tidebreak_core::validate_portable_filename(&output.filename).is_err()
+    {
+        return Err("browser upload resource is unavailable".to_owned());
+    }
+    let scratch_root = crate::data_dir(app)?.join("scratch");
+    let filename = output.filename.clone();
+    let media_type = output.media_type.clone();
+    let binding = BrowserConfirmationBinding {
+        filename: filename.clone(),
+        byte_len: revision.byte_len,
+        sha256: revision.sha256,
+    };
+    let bytes = tauri::async_runtime::spawn_blocking(move || {
+        read_output_revision_bytes(&scratch_root, chat_id, &output, &revision)
+    })
+    .await
+    .map_err(|_| "browser upload resource is unavailable".to_owned())?
+    .map_err(|_| "browser upload resource is unavailable".to_owned())?;
+    make_browser_upload_file(filename, media_type, bytes, binding)
+}
+
+async fn resolve_connected_file_upload(
+    state: &HostAccess,
+    context: AuthoritativeContext,
+    root_id: RootId,
+    path: &RelativePath,
+) -> Result<BrowserUploadFile, String> {
+    let filename = path
+        .as_str()
+        .rsplit('/')
+        .next()
+        .filter(|name| tidebreak_core::validate_portable_filename(name).is_ok())
+        .ok_or_else(|| "browser upload resource is unavailable".to_owned())?
+        .to_owned();
+    let staged_root = super::source_import::current_staged_root(state, context, root_id);
+    if staged_root.is_some()
+        && !super::source_import::root_is_still_attached(state, context, root_id).await
+    {
+        return Err("browser upload resource is unavailable".to_owned());
+    }
+    let source = super::source_import::select_source_bytes(
+        staged_root,
+        path,
+        super::source_import::read_broker_file_bytes(state, context, root_id, path),
+    )
+    .await
+    .map_err(|_| "browser upload resource is unavailable".to_owned())?;
+    if !super::source_import::root_is_still_attached(state, context, root_id).await
+        || !super::source_import::selected_staging_is_current(
+            state,
+            context,
+            root_id,
+            source.staged_root.as_deref(),
+        )
+    {
+        return Err("browser upload resource is unavailable".to_owned());
+    }
+    let media_type = tidebreak_server::media_type::sniff_media_type(&source.bytes, Some(&filename));
+    let binding = BrowserConfirmationBinding {
+        filename: filename.clone(),
+        byte_len: source.bytes.len() as u64,
+        sha256: Sha256::digest(&source.bytes).into(),
+    };
+    make_browser_upload_file(filename, media_type, source.bytes, binding)
+}
+
+fn make_browser_upload_file(
+    filename: String,
+    media_type: String,
+    bytes: Vec<u8>,
+    binding: BrowserConfirmationBinding,
+) -> Result<BrowserUploadFile, String> {
+    if bytes.len() > MAX_READ_FILE_BINARY_BYTES
+        || bytes.len() as u64 != binding.byte_len
+        || <[u8; 32]>::from(Sha256::digest(&bytes)) != binding.sha256
+        || filename != binding.filename
+        || tidebreak_core::validate_portable_filename(&filename).is_err()
+    {
+        return Err("browser upload resource is unavailable".to_owned());
+    }
+    Ok(BrowserUploadFile {
+        filename,
+        media_type,
+        bytes,
+        binding,
+    })
 }
 
 fn completed_snapshot(result: &BrowserPageSnapshot) -> StoredResolution {
@@ -707,6 +1097,18 @@ fn map_native_error(browser_id: Option<&str>, error: String) -> StoredResolution
             "Browser access is not available right now. Try again.",
         );
     }
+    if inner == "browser upload resource is unavailable" {
+        return unavailable(
+            "browser_upload_resource_unavailable",
+            "That output or connected file is not available to this conversation. Choose a current resource and try again.",
+        );
+    }
+    if inner == "browser upload resource changed before attachment" {
+        return unavailable(
+            "browser_upload_resource_changed",
+            "That file changed before Tidebreak could attach it. Take a new browser snapshot, confirm the current file, and try again.",
+        );
+    }
     if inner == "browser is hidden" {
         return unavailable(
             "browser_hidden",
@@ -792,7 +1194,7 @@ mod tests {
     }
 
     #[test]
-    fn discovery_accepts_only_the_six_validated_foreground_browser_tools() {
+    fn discovery_accepts_only_the_seven_validated_foreground_browser_tools() {
         assert!(is_foreground_browser_call(&call(
             BROWSER_LIST_TOOL,
             serde_json::json!({}),
@@ -836,6 +1238,19 @@ mod tests {
                 "action": { "type": "click" }
             }),
         )));
+        assert!(is_foreground_browser_call(&call(
+            BROWSER_UPLOAD_TOOL,
+            serde_json::json!({
+                "browser_id": "browser-1",
+                "snapshot_id": "snapshot-1",
+                "document_epoch": 1,
+                "ref": "ref-1",
+                "resource": {
+                    "kind": "output",
+                    "output_id": Uuid::new_v4()
+                }
+            }),
+        )));
         assert!(!is_foreground_browser_call(&call(
             BROWSER_ACT_TOOL,
             serde_json::json!({
@@ -851,6 +1266,20 @@ mod tests {
             serde_json::json!({
                 "browser_id": "browser-1",
                 "url": "file:///etc/passwd"
+            }),
+        )));
+        assert!(!is_foreground_browser_call(&call(
+            BROWSER_UPLOAD_TOOL,
+            serde_json::json!({
+                "browser_id": "browser-1",
+                "snapshot_id": "snapshot-1",
+                "document_epoch": 1,
+                "ref": "ref-1",
+                "resource": {
+                    "kind": "connected_file",
+                    "root_id": Uuid::new_v4(),
+                    "path": "../secret.txt"
+                }
             }),
         )));
         let mut raw = call(BROWSER_LIST_TOOL, serde_json::json!({}));
@@ -908,6 +1337,75 @@ mod tests {
     }
 
     #[test]
+    fn upload_files_require_exact_portable_bounded_identity() {
+        let bytes = b"exact upload bytes".to_vec();
+        let binding = BrowserConfirmationBinding {
+            filename: "report.pdf".to_owned(),
+            byte_len: bytes.len() as u64,
+            sha256: Sha256::digest(&bytes).into(),
+        };
+        let file = make_browser_upload_file(
+            binding.filename.clone(),
+            "application/pdf".to_owned(),
+            bytes.clone(),
+            binding.clone(),
+        )
+        .unwrap();
+        assert_eq!(file.filename, "report.pdf");
+        assert_eq!(file.bytes, bytes);
+        assert!(file.binding == binding);
+
+        let mut changed_digest = binding.clone();
+        changed_digest.sha256[0] ^= 1;
+        assert!(make_browser_upload_file(
+            binding.filename.clone(),
+            "application/pdf".to_owned(),
+            bytes.clone(),
+            changed_digest,
+        )
+        .is_err());
+
+        let mut changed_length = binding.clone();
+        changed_length.byte_len += 1;
+        assert!(make_browser_upload_file(
+            binding.filename.clone(),
+            "application/pdf".to_owned(),
+            bytes.clone(),
+            changed_length,
+        )
+        .is_err());
+
+        for filename in ["../secret", ".hidden", "folder/report.pdf", "report?.pdf"] {
+            let malicious = BrowserConfirmationBinding {
+                filename: filename.to_owned(),
+                byte_len: bytes.len() as u64,
+                sha256: Sha256::digest(&bytes).into(),
+            };
+            assert!(make_browser_upload_file(
+                filename.to_owned(),
+                "application/octet-stream".to_owned(),
+                bytes.clone(),
+                malicious,
+            )
+            .is_err());
+        }
+
+        let oversized = vec![0; MAX_READ_FILE_BINARY_BYTES + 1];
+        let oversized_binding = BrowserConfirmationBinding {
+            filename: "large.bin".to_owned(),
+            byte_len: oversized.len() as u64,
+            sha256: Sha256::digest(&oversized).into(),
+        };
+        assert!(make_browser_upload_file(
+            oversized_binding.filename.clone(),
+            "application/octet-stream".to_owned(),
+            oversized,
+            oversized_binding,
+        )
+        .is_err());
+    }
+
+    #[test]
     fn screenshot_resolution_keeps_pixels_and_base64_out_of_durable_output() {
         let image = ImageRef {
             blob_id: Uuid::new_v4(),
@@ -958,6 +1456,22 @@ mod tests {
             panic!("another controller must fail");
         };
         assert_eq!(error_code, "browser_busy");
+
+        let StoredResolution::Failed { error_code, .. } = map_native_error(
+            Some("browser-1"),
+            "browser upload resource is unavailable".to_owned(),
+        ) else {
+            panic!("an unavailable logical resource must fail");
+        };
+        assert_eq!(error_code, "browser_upload_resource_unavailable");
+
+        let StoredResolution::Failed { error_code, .. } = map_native_error(
+            Some("browser-1"),
+            "browser upload resource changed before attachment".to_owned(),
+        ) else {
+            panic!("a changed logical resource must fail");
+        };
+        assert_eq!(error_code, "browser_upload_resource_changed");
     }
 
     #[test]

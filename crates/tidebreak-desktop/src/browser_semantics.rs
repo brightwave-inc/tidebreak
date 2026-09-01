@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 
+use base64::Engine as _;
 use serde::Deserialize;
 use tauri::{AppHandle, Manager, Webview};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -23,8 +24,8 @@ use uuid::Uuid;
 
 use crate::{
     browser_control::{
-        BrowserDispatchEffect, BrowserLoadState, BrowserRegistry, BrowserSnapshot,
-        BrowserTargetError, BrowserTargetFingerprint, BrowserTargetRecord,
+        BrowserConfirmationBinding, BrowserDispatchEffect, BrowserLoadState, BrowserRegistry,
+        BrowserSnapshot, BrowserTargetError, BrowserTargetFingerprint, BrowserTargetRecord,
     },
     code_browser::browser_label,
 };
@@ -144,6 +145,24 @@ struct NativeActionResolution {
     scroll_delta_x: Option<f64>,
     #[serde(default)]
     scroll_delta_y: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawBrowserUploadResult {
+    status: tidebreak_core::BrowserUploadStatus,
+    message: String,
+}
+
+/// Exact file bytes resolved by the foreground native executor.
+///
+/// This value never crosses renderer IPC. The isolated WebKit evaluation
+/// receives it only while attaching the confirmed file to the target page.
+pub(crate) struct BrowserUploadFile {
+    pub(crate) filename: String,
+    pub(crate) media_type: String,
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) binding: BrowserConfirmationBinding,
 }
 
 #[derive(Debug, Deserialize)]
@@ -399,6 +418,139 @@ async fn native_consequential_action_choice(
     receiver
         .await
         .map_err(|_| "the native browser confirmation closed unexpectedly".to_owned())
+}
+
+pub(crate) async fn native_browser_upload_choice(
+    app: &AppHandle,
+    origin: &BrowserOrigin,
+    target_label: &str,
+    file: &BrowserUploadFile,
+) -> Result<bool, String> {
+    let origin = crate::native_security_label(origin.as_str());
+    let target = crate::native_security_label(target_label);
+    let filename = crate::native_security_label(&file.filename);
+    let size = tidebreak_core::format_bytes(file.binding.byte_len);
+    let (sender, receiver) = oneshot::channel();
+    let mut dialog = app
+        .dialog()
+        .message(format!(
+            "Allow the agent to upload {filename} ({size}) to {origin}?\n\nTarget: {target}\n\nThe site controls the target and may react when the file is attached. Tidebreak will attach only these exact confirmed bytes. Every upload requires a separate confirmation."
+        ))
+        .title("Confirm browser upload")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Upload file".to_owned(),
+            "Cancel".to_owned(),
+        ));
+    if let Some(window) = app.get_webview_window("main") {
+        dialog = dialog.parent(&window);
+    }
+    dialog.show(move |approved| {
+        let _ = sender.send(approved);
+    });
+    receiver
+        .await
+        .map_err(|_| "the native browser upload confirmation closed unexpectedly".to_owned())
+}
+
+pub(crate) async fn execute_browser_upload(
+    app: AppHandle,
+    registry: BrowserRegistry,
+    capability_id: Uuid,
+    workspace_id: String,
+    arguments: tidebreak_core::BrowserUploadArgs,
+    file: BrowserUploadFile,
+) -> Result<tidebreak_core::BrowserUploadResult, String> {
+    let target = match registry.semantic_target(
+        &arguments.browser_id,
+        &workspace_id,
+        &arguments.snapshot_id,
+        arguments.document_epoch,
+        &arguments.target_ref,
+    ) {
+        Ok(target) => target,
+        Err(error) => {
+            return Ok(browser_upload_result(
+                &arguments,
+                browser_upload_status_from_target_error(error),
+                target_error_message(error),
+                None,
+            ));
+        }
+    };
+    if !is_file_input(&target) {
+        return Ok(browser_upload_result(
+            &arguments,
+            tidebreak_core::BrowserUploadStatus::InvalidTarget,
+            "The selected target is not a file input. Use a file-input ref from the latest snapshot.",
+            None,
+        ));
+    }
+
+    registry.begin_agent_observation(capability_id, &arguments.browser_id)?;
+    let label = browser_label(&arguments.browser_id)?;
+    let webview = app
+        .get_webview(&label)
+        .ok_or_else(|| "browser session is not open".to_owned())?;
+    let script = browser_upload_script(&target, &file)?;
+    let raw: RawBrowserUploadResult = evaluate_json(&webview, &script).await?;
+    if raw.status == tidebreak_core::BrowserUploadStatus::Uploaded {
+        registry.invalidate_semantic_snapshot(
+            &arguments.browser_id,
+            &workspace_id,
+            &arguments.snapshot_id,
+        );
+        return Ok(browser_upload_result(
+            &arguments,
+            raw.status,
+            "File attached. Take a new snapshot before the next browser action.",
+            Some((&file.filename, file.binding.byte_len)),
+        ));
+    }
+    Ok(browser_upload_result(
+        &arguments,
+        raw.status,
+        &raw.message,
+        None,
+    ))
+}
+
+pub(crate) fn is_file_input(target: &BrowserTargetRecord) -> bool {
+    target.fingerprint.tag == "input"
+        && target.fingerprint.input_type.as_deref() == Some("file")
+        && target.fingerprint.sensitive
+}
+
+fn browser_upload_status_from_target_error(
+    error: BrowserTargetError,
+) -> tidebreak_core::BrowserUploadStatus {
+    match error {
+        BrowserTargetError::StaleTarget => tidebreak_core::BrowserUploadStatus::StaleTarget,
+        BrowserTargetError::BrowserHidden => tidebreak_core::BrowserUploadStatus::HiddenTab,
+    }
+}
+
+pub(crate) fn browser_upload_result(
+    request: &tidebreak_core::BrowserUploadArgs,
+    status: tidebreak_core::BrowserUploadStatus,
+    message: &str,
+    file: Option<(&str, u64)>,
+) -> tidebreak_core::BrowserUploadResult {
+    tidebreak_core::BrowserUploadResult {
+        browser_id: request.browser_id.clone(),
+        snapshot_id: request.snapshot_id.clone(),
+        document_epoch: request.document_epoch,
+        target_ref: request.target_ref.clone(),
+        status,
+        message: message.to_owned(),
+        requires_resnapshot: matches!(
+            status,
+            tidebreak_core::BrowserUploadStatus::Uploaded
+                | tidebreak_core::BrowserUploadStatus::StaleTarget
+        ),
+        filename: file.map(|(filename, _)| filename.to_owned()),
+        bytes: file.map(|(_, bytes)| bytes),
+    }
 }
 
 fn marker_for_snapshot(snapshot_id: &str) -> String {
@@ -1171,8 +1323,10 @@ pub(crate) async fn browser_native_act(
             capability_id,
             &arguments.browser_id,
             &origin,
+            BrowserGrantCapability::BrowserControlOrigin,
             &action_type,
             target_label.as_deref(),
+            None,
         )?)
     } else {
         None
@@ -2558,6 +2712,37 @@ fn native_action_resolution_script(
     });
     let payload = serde_json::to_string(&payload).map_err(|error| error.to_string())?;
     Ok(NATIVE_ACTION_RESOLUTION_SCRIPT
+        .replace("__TARGET_IDENTITY_STORE__", TARGET_IDENTITY_STORE_SCRIPT)
+        .replace("__SENSITIVE_FIELD_POLICY__", SENSITIVE_FIELD_POLICY)
+        .replace("__PAYLOAD__", &payload))
+}
+
+fn browser_upload_script(
+    target: &BrowserTargetRecord,
+    file: &BrowserUploadFile,
+) -> Result<String, String> {
+    let payload = serde_json::json!({
+        "framePath": target.frame_path,
+        "selector": target.selector,
+        "marker": target.marker,
+        "markerValue": target.marker_value,
+        "fingerprint": {
+            "tag": target.fingerprint.tag,
+            "role": target.fingerprint.role,
+            "name": target.fingerprint.name,
+            "inputType": target.fingerprint.input_type,
+            "href": target.fingerprint.href,
+            "sensitive": target.fingerprint.sensitive,
+        },
+        "file": {
+            "name": file.filename,
+            "mediaType": file.media_type,
+            "byteLen": file.binding.byte_len,
+            "contentBase64": base64::engine::general_purpose::STANDARD.encode(&file.bytes),
+        },
+    });
+    let payload = serde_json::to_string(&payload).map_err(|error| error.to_string())?;
+    Ok(BROWSER_UPLOAD_SCRIPT
         .replace("__TARGET_IDENTITY_STORE__", TARGET_IDENTITY_STORE_SCRIPT)
         .replace("__SENSITIVE_FIELD_POLICY__", SENSITIVE_FIELD_POLICY)
         .replace("__PAYLOAD__", &payload))
@@ -3985,6 +4170,136 @@ const NATIVE_ACTION_RESOLUTION_SCRIPT: &str = r#"
     optionIndex: payload.optionIndex ?? null,
     selectedIndex: payload.selectedIndex ?? null,
   });
+})()
+"#;
+
+const BROWSER_UPLOAD_SCRIPT: &str = r#"
+(() => {
+  const payload = __PAYLOAD__;
+  __TARGET_IDENTITY_STORE__
+  const clean = (value, limit = 240) => String(value || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, limit);
+  __SENSITIVE_FIELD_POLICY__
+  const roleFor = (element) => {
+    const explicit = clean(element.getAttribute("role"), 60);
+    if (explicit) return explicit;
+    const tag = element.localName;
+    const type = clean(element.getAttribute("type"), 40).toLowerCase();
+    if (tag === "input") {
+      if (type === "checkbox") return "checkbox";
+      if (type === "radio") return "radio";
+      if (["button", "submit", "reset", "image"].includes(type)) return "button";
+      return "textbox";
+    }
+    return tag || "element";
+  };
+  const result = (status, message) => JSON.stringify({ status, message });
+
+  let doc = document;
+  for (const selector of payload.framePath) {
+    const frame = doc.querySelector(selector);
+    if (!frame) return result("stale_target", "The target frame changed.");
+    try {
+      doc = frame.contentDocument;
+    } catch (_) {
+      return result("invalid_target", "The target is inside a cross-origin frame.");
+    }
+    if (!doc) return result("stale_target", "The target frame is unavailable.");
+  }
+
+  const element = doc.querySelector(payload.selector);
+  if (!element || !element.isConnected) {
+    return result("stale_target", "The target no longer exists.");
+  }
+  const targetIdentity = tidebreakTargetIdentityStore.get(element);
+  if (
+    !targetIdentity
+    || targetIdentity.snapshotMarker !== payload.marker
+    || targetIdentity.targetRef !== payload.markerValue
+  ) {
+    return result("stale_target", "The target element was replaced.");
+  }
+
+  const view = doc.defaultView;
+  if (!view) return result("stale_target", "The target document is unavailable.");
+  const isSensitive = tidebreakIsSensitiveField(element, doc);
+  const fresh = {
+    tag: element.localName || "element",
+    role: roleFor(element),
+    name: isSensitive ? "Sensitive field" : tidebreakAccessibleName(element, doc),
+    inputType: element.localName === "input"
+      ? clean(element.getAttribute("type") || "text", 40).toLowerCase()
+      : null,
+    href: element.href ? clean(element.href, 2048) : null,
+    sensitive: isSensitive,
+  };
+  if (
+    fresh.tag !== payload.fingerprint.tag
+    || fresh.role !== payload.fingerprint.role
+    || fresh.name !== payload.fingerprint.name
+    || fresh.inputType !== payload.fingerprint.inputType
+    || fresh.href !== payload.fingerprint.href
+    || fresh.sensitive !== payload.fingerprint.sensitive
+  ) {
+    return result("stale_target", "The target's identifying content changed.");
+  }
+  if (
+    !(element instanceof view.HTMLInputElement)
+    || fresh.inputType !== "file"
+    || !fresh.sensitive
+  ) {
+    return result("invalid_target", "The selected target is not a file input.");
+  }
+  if (element.disabled || element.getAttribute("aria-disabled") === "true") {
+    return result("invalid_target", "The file input is disabled.");
+  }
+
+  try {
+    if (
+      typeof view.File !== "function"
+      || typeof view.DataTransfer !== "function"
+      || typeof view.Event !== "function"
+    ) {
+      return result("engine_failure", "This browser cannot attach a file to the selected input.");
+    }
+    const decoded = view.atob(payload.file.contentBase64);
+    if (decoded.length !== payload.file.byteLen) {
+      return result("engine_failure", "The confirmed file bytes could not be decoded.");
+    }
+    const bytes = new Uint8Array(decoded.length);
+    for (let index = 0; index < decoded.length; index += 1) {
+      bytes[index] = decoded.charCodeAt(index);
+    }
+    const file = new view.File([bytes], payload.file.name, {
+      type: payload.file.mediaType,
+      lastModified: 0,
+    });
+    const transfer = new view.DataTransfer();
+    transfer.items.add(file);
+    const descriptor = Object.getOwnPropertyDescriptor(
+      view.HTMLInputElement.prototype,
+      "files",
+    );
+    if (!descriptor || typeof descriptor.set !== "function") {
+      return result("engine_failure", "This browser cannot set the selected input's files.");
+    }
+    descriptor.set.call(element, transfer.files);
+    if (
+      !element.files
+      || element.files.length !== 1
+      || element.files[0].name !== payload.file.name
+      || element.files[0].size !== payload.file.byteLen
+    ) {
+      return result("engine_failure", "The browser did not retain the confirmed file.");
+    }
+    element.dispatchEvent(new view.Event("input", { bubbles: true, composed: true }));
+    element.dispatchEvent(new view.Event("change", { bubbles: true, composed: true }));
+    return result("uploaded", "The confirmed file was attached.");
+  } catch (_) {
+    return result("engine_failure", "The browser could not attach the confirmed file.");
+  }
 })()
 "#;
 
