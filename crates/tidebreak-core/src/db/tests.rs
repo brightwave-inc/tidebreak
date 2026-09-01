@@ -23,6 +23,7 @@ mod output;
 mod parent_terminal_guard;
 mod root_attachment;
 mod sandbox_spawn_checkpoint;
+mod turn_event_batch;
 mod turn_steer;
 mod turn_terminal_usage;
 

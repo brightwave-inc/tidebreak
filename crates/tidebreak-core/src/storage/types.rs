@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::approval::ToolApproval;
 use crate::code::{CodeSessionId, CodeTurnId, WorkspaceId};
 use crate::error::Result;
-use crate::event::SequencedEvent;
+use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{AgentRunId, CallId, ChatId, MessageId, NotificationId, TurnId};
 use crate::model::{
     AgentRun, AgentRunInboxEntry, AgentRunResult, Message, MessageAttachment,
@@ -1166,6 +1166,20 @@ pub enum TurnLeaseFence {
     /// later claim, or the turn already reached a terminal state.
     Stale,
 }
+
+/// One nonterminal event queued for a batched turn append.
+///
+/// The `(lease_token, attempt_event_ordinal)` identity is the same one a single
+/// [`Store::append_turn_event`](crate::Store::append_turn_event) uses; batching
+/// only changes how many entries share a transaction.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TurnEventAppend {
+    /// Position of this event within the attempt; ascends within a batch.
+    pub attempt_event_ordinal: i32,
+    /// The event to journal.
+    pub event: AgentEvent,
+}
+
 /// Where one entry of the durable reverse-RPC operation log stands.
 ///
 /// This is the storage-tier projection of the protocol's operation state
