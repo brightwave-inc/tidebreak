@@ -76,6 +76,7 @@ import {
   type PrPromptAction,
 } from "./prActions";
 import { GithubAvatar } from "./GithubAvatar";
+import { PrCheckSummary } from "./PrCheckSummary";
 import { PrCommentCard } from "./PrCommentCard";
 import {
   expandGithubEmojiShortcodes,
@@ -1857,10 +1858,6 @@ function DiffPatch({ patch }: { patch: string }) {
 
 function PrChecks({ checks }: { checks: readonly CodeDeliveryCheck[] }) {
   const counts = checkCounts({ checks });
-  // The delivery list row summarizes the same counts through
-  // `checkSummary` in prState.ts with different wording ("passed" here,
-  // "passing" there). Folding the two into one component changes visible
-  // text, so it stays a follow-up rather than part of the file split.
   if (checks.length === 0) {
     return <p className="text-xs text-muted-foreground">No checks reported.</p>;
   }
@@ -1870,18 +1867,7 @@ function PrChecks({ checks }: { checks: readonly CodeDeliveryCheck[] }) {
     (left, right) => bucketRank(left.bucket) - bucketRank(right.bucket),
   );
   return (
-    <DetailSection
-      title="Checks"
-      action={
-        <span className="text-xs text-muted-foreground">
-          {`${counts.passing} of ${counts.total} passed${
-            counts.failing > 0 ? `, ${counts.failing} failed` : ""
-          }${counts.pending > 0 ? `, ${counts.pending} pending` : ""}${
-            counts.skipped > 0 ? `, ${counts.skipped} skipped` : ""
-          }`}
-        </span>
-      }
-    >
+    <DetailSection title="Checks" action={<PrCheckSummary counts={counts} />}>
       <div className="flex flex-col rounded-lg border border-border-subtle">
         {ordered.map((check, index) => (
           <button
