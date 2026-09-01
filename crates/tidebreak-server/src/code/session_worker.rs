@@ -3747,7 +3747,7 @@ mod tests {
                 relay_key_env: None,
                 env: Vec::new(),
                 approval: None,
-                binary: std::path::PathBuf::from("/scripted/engine"),
+                binary: Some(std::path::PathBuf::from("/scripted/engine")),
                 sink: sink.clone() as Arc<dyn tidebreak_harness::HarnessEventSink>,
                 browser: None,
             })

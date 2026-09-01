@@ -597,6 +597,8 @@ export type BoundedError = {
  */
 message: string, };
 
+export type BranchPrefixMode = "account" | "custom" | "none";
+
 /**
  * Identifies one tool call, stable across its request/approval/result.
  */
@@ -2644,6 +2646,8 @@ export type GatewayStatus = { base_url?: string, signed_in: boolean, account_hin
  */
 member_catalog?: string, sign_in: SignInProgress, };
 
+export type GitSourceControlSettings = { auto_rename_branches: boolean, branch_prefix_mode: BranchPrefixMode, custom_branch_prefix?: string, account_prefix?: string, effective_branch_prefix: string, };
+
 /**
  * How far a standing grant reaches.
  *
@@ -4341,7 +4345,11 @@ code_turn_recaps_enabled: boolean,
  * Whether completed code turns rewrite their closing message into lucid
  * prose. Default off.
  */
-rewrite_closing_messages: boolean, };
+rewrite_closing_messages: boolean,
+/**
+ * How new code repositories name workspace branches for this user.
+ */
+git_source_control: GitSourceControlSettings, };
 
 /**
  * Renderer-safe progress of the current sign-in attempt.
