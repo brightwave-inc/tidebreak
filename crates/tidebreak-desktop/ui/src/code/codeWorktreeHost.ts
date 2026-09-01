@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import { hasLocalHostAuthority } from "@/host";
+import { isRecord } from "@/lib/guards";
 import {
   currentEditorPreference,
   type ExternalEditorId,
@@ -117,10 +118,6 @@ function isExactOpenedResult(value: unknown): boolean {
     Object.keys(value).length === 1 &&
     value.status === "opened"
   );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 /* -------------------------------------------------------------------------

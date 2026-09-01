@@ -1,5 +1,6 @@
 import { create } from "zustand";
 
+import { isRecord } from "./lib/guards";
 import type { ImportedDocument } from "./documents";
 import type { ImageAttachment } from "./ImageAttachments";
 import type { PastedTextAttachment } from "./PastedText";
@@ -41,10 +42,6 @@ function writeStoredDraft(key: string, text: string): void {
   } catch {
     // Persisting a draft is best-effort; the session still holds it.
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**

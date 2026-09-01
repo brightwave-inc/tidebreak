@@ -9,6 +9,8 @@
  * user attaches something.
  */
 
+import { isRecord } from "./lib/guards";
+
 /**
  * How many images one turn may carry, mirroring the server's ceiling so the
  * refusal lands on the attach that broke it rather than on send.
@@ -656,10 +658,6 @@ function isUuid(value: unknown): value is string {
       value,
     )
   );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isExactRecord(
