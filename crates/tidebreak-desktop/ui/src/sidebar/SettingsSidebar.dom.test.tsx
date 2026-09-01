@@ -52,5 +52,10 @@ describe("SettingsSidebar", () => {
     expect(
       within(application).getByRole("button", { name: "Updates" }),
     ).toBeVisible();
+    expect(
+      within(application).getByRole("button", {
+        name: "Git & source control",
+      }),
+    ).toBeVisible();
   });
 });

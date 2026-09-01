@@ -20,6 +20,7 @@ pub(crate) mod gh;
 pub(crate) mod grants;
 pub(crate) mod harness_install;
 pub(crate) mod harness_llm;
+pub(crate) mod naming_settings;
 pub(crate) mod pr_facts;
 pub(crate) mod pr_fetch;
 pub(crate) mod pr_refresh;

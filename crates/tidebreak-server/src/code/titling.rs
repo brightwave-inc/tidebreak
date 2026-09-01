@@ -14,9 +14,9 @@
 //! one, no matter when it lands. The placeholder never changes for the life of
 //! the workspace, so the swap stays valid on retries.
 //!
-//! Only the title moves. The branch and worktree path keep their two-word slug:
-//! they are contracts with git and the filesystem, and renaming them after
-//! creation is exactly the churn decision 0032 avoids.
+//! The worktree path keeps its two-word slug. When the user's Git settings
+//! allow it, the generated local branch follows the derived title only while
+//! it is still local-only and untouched.
 
 use std::sync::Arc;
 
@@ -156,6 +156,12 @@ async fn derive_workspace_title(
     if !set_workspace_title_if(&code.db, owner, workspace.id, &placeholder, &title).await? {
         // Renamed while the call ran; the chosen name has the floor.
         return Ok(Outcome::NotApplicable);
+    }
+    if let Err(error) = code
+        .rename_generated_workspace_branch(owner, workspace.id, &title)
+        .await
+    {
+        tracing::debug!(workspace = %workspace.id, error = ?error, "the generated branch was not renamed");
     }
     // Announced only once the write applied, on the digest channel every list
     // surface already watches.

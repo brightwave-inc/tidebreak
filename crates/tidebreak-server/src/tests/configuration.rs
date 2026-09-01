@@ -94,6 +94,15 @@ async fn settings_default_then_update_roundtrips() {
     assert_eq!(settings["compaction"]["min_threshold_tokens"], 50000);
     assert_eq!(settings["compaction"]["protect_recent_messages"], 5);
     assert_eq!(settings["code_turn_recaps_enabled"], true);
+    assert_eq!(settings["git_source_control"]["auto_rename_branches"], true);
+    assert_eq!(
+        settings["git_source_control"]["branch_prefix_mode"],
+        "account"
+    );
+    assert_eq!(
+        settings["git_source_control"]["effective_branch_prefix"],
+        "tidebreak/"
+    );
     assert!(settings.get("code_mode_enabled").is_none());
 
     // PUT a model, and it comes back.
@@ -117,6 +126,11 @@ async fn settings_default_then_update_roundtrips() {
                             "target_fraction": 0.3,
                             "min_threshold_tokens": 40000,
                             "protect_recent_messages": 8
+                        },
+                        "git_source_control": {
+                            "auto_rename_branches": false,
+                            "branch_prefix_mode": "custom",
+                            "custom_branch_prefix": "team/alex"
                         }
                     })
                     .to_string(),
@@ -129,6 +143,22 @@ async fn settings_default_then_update_roundtrips() {
     let settings: serde_json::Value = json_body(response).await;
     assert_eq!(settings["model"], "claude-x");
     assert_eq!(settings["max_active_background_agents"], 7);
+    assert_eq!(
+        settings["git_source_control"]["auto_rename_branches"],
+        false
+    );
+    assert_eq!(
+        settings["git_source_control"]["branch_prefix_mode"],
+        "custom"
+    );
+    assert_eq!(
+        settings["git_source_control"]["custom_branch_prefix"],
+        "team/alex/"
+    );
+    assert_eq!(
+        settings["git_source_control"]["effective_branch_prefix"],
+        "team/alex/"
+    );
     assert_eq!(settings["sandbox_agent_checkin_steps"], 250);
     assert_eq!(settings["sandbox_agent_error_checkin"], 3);
     assert_eq!(settings["code_turn_recaps_enabled"], false);
@@ -136,6 +166,30 @@ async fn settings_default_then_update_roundtrips() {
     assert_eq!(settings["compaction"]["target_fraction"], 0.3);
     assert_eq!(settings["compaction"]["min_threshold_tokens"], 40000);
     assert_eq!(settings["compaction"]["protect_recent_messages"], 8);
+
+    // A later Git-only update preserves the existing recap preference.
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/settings")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "git_source_control": { "branch_prefix_mode": "none" }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let settings: serde_json::Value = json_body(response).await;
+    assert_eq!(settings["code_turn_recaps_enabled"], false);
+    assert_eq!(settings["git_source_control"]["branch_prefix_mode"], "none");
 
     // GET reflects the update.
     let response = router

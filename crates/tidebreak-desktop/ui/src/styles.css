@@ -1823,6 +1823,8 @@ body {
   }
 
   .settings-panel {
+    container-name: settings-panel;
+    container-type: inline-size;
     height: 100%;
     min-height: 0;
     overflow-y: auto;
@@ -1936,7 +1938,7 @@ body {
     text-wrap: pretty;
   }
 
-  @media (min-width: 960px) {
+  @container settings-panel (min-width: 48rem) {
     .settings-section[data-has-heading] {
       grid-template-columns: minmax(10rem, 12rem) minmax(0, 1fr);
       column-gap: 2rem;

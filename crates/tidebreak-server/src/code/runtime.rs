@@ -21,9 +21,9 @@ use tidebreak_core::db::code::{
     list_sessions_for_workspace, list_triggers_for_repo, list_turns, list_workspaces,
     list_workspaces_by_status_all_owners, mark_repo_removed, queued_turn_head,
     replace_session_execution_settings, save_repo, save_workspace,
-    set_active_workspace_pull_request, settle_approval_claim, update_trigger_enabled,
-    ClaimedApprovalSettlement, CodeSessionExecutionSettings, PermissionModeChangeIntent,
-    MAX_REPLAY_EVENTS,
+    set_active_workspace_pull_request, set_workspace_branch_if, settle_approval_claim,
+    update_trigger_enabled, ClaimedApprovalSettlement, CodeSessionExecutionSettings,
+    PermissionModeChangeIntent, MAX_REPLAY_EVENTS,
 };
 use tidebreak_core::{
     ApprovalDecisionKind, Attention, AttentionSource, CapLevel, CodeApproval, CodeApprovalId,
@@ -52,6 +52,7 @@ use super::delivery::DeliveryCache;
 use super::fork;
 use super::gh::{self, ActionOutcome, CommitOutcome, GhError, PushOutcome, WorkspaceGitStatus};
 use super::harness_install::HarnessInstallJobs;
+use super::naming_settings;
 use super::recovery::{self, RecoveryAction};
 use super::session_worker::{
     attach_engine, spawn_session_worker, wake_queue, AttachmentStore, ExecutionSettingsSettlement,
@@ -61,8 +62,8 @@ use super::session_worker::{
 use super::worktree::repo_paths_equivalent;
 use super::worktree::{
     self, archive_blockers, branch_name, create_worktree, directory_bytes, prune_worktrees,
-    remove_worktree, run_archive_script, run_setup_script, slugify, unique_branch_bytes,
-    validate_repo_path, worktree_dir, WorktreeError,
+    remove_worktree, rename_local_only_branch, run_archive_script, run_setup_script, slugify,
+    unique_branch_bytes, validate_repo_path, worktree_dir, WorktreeError,
 };
 use crate::error::ServerError;
 use crate::managed_policy::ManagedPolicy;
@@ -1179,6 +1180,7 @@ impl CodeRuntime {
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "repo".into())
             });
+        let default_branch_prefix = self.default_branch_prefix(owner).await;
         let repo = CodeRepo {
             id: RepoId::new(),
             owner: owner.clone(),
@@ -1189,7 +1191,7 @@ impl CodeRuntime {
                 .unwrap_or_else(|| "main".into()),
             branch_prefix: branch_prefix
                 .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| "tidebreak/".into()),
+                .unwrap_or(default_branch_prefix),
             setup_script,
             archive_script,
             quick_actions,
@@ -1827,6 +1829,59 @@ impl CodeRuntime {
         )
         .await;
         Ok(())
+    }
+
+    /// Rename the untouched placeholder branch after background titling names
+    /// the workspace. Every guard fails closed and leaves the original branch.
+    pub(crate) async fn rename_generated_workspace_branch(
+        &self,
+        owner: &OwnerId,
+        id: WorkspaceId,
+        title: &str,
+    ) -> Result<bool, ServerError> {
+        if !naming_settings::auto_rename_branches(&*self.db, owner).await? {
+            return Ok(false);
+        }
+        let turn = self.worktree_turn_lock(id);
+        let _turn_guard = turn.lock().await;
+        let lifecycle = self.workspace_lifecycle_lock(id);
+        let _lifecycle_guard = lifecycle.lock().await;
+        let workspace = self.get_workspace(owner, id).await?;
+        if workspace.is_remote()
+            || workspace.status != CodeWorkspaceStatus::Active
+            || workspace.pr.is_some()
+            || workspace.title != title
+        {
+            return Ok(false);
+        }
+        let repo = self.get_repo(owner, workspace.repo_id).await?;
+        let expected = branch_name(&repo.branch_prefix, "", id.0.as_u128());
+        if workspace.branch_name != expected {
+            return Ok(false);
+        }
+        let next = branch_name(&repo.branch_prefix, title, id.0.as_u128());
+        if next == expected {
+            return Ok(false);
+        }
+        let path = std::path::Path::new(&workspace.worktree_path);
+        if !rename_local_only_branch(path, &expected, &next)
+            .await
+            .map_err(map_worktree)?
+        {
+            return Ok(false);
+        }
+        if !set_workspace_branch_if(&self.db, owner, id, title, &expected, &next).await? {
+            if let Err(error) = rename_local_only_branch(path, &next, &expected).await {
+                tracing::error!(
+                    workspace = %id,
+                    error = %error,
+                    "could not restore a branch after its workspace update lost the race"
+                );
+            }
+            return Ok(false);
+        }
+        super::attention::emit_workspace_digests(&self.db, &self.bus, owner, id).await;
+        Ok(true)
     }
 
     pub(crate) async fn archive_workspace(
@@ -2476,6 +2531,32 @@ impl CodeRuntime {
         if let Err(error) = gh::configure_workspace_identity(worktree, &name, &email).await {
             tracing::debug!(error, "the workspace git identity was not configured");
         }
+    }
+
+    /// The forge login used for account-prefixed branches, when one is known.
+    pub(crate) async fn branch_account_name(&self, owner: &OwnerId) -> Option<String> {
+        #[cfg(test)]
+        // Tests must not inherit the developer machine's `gh` login.
+        self.git_credentials()?;
+        if let Some(lender) = self.git_credentials() {
+            let identity = lender.git_forge_identity(owner).await.ok()?;
+            return match identity.attribution {
+                crate::obo_gateway::GitForgeAttribution::Person { login, .. } => Some(login),
+                crate::obo_gateway::GitForgeAttribution::Bot { bot_login } => {
+                    bot_login.or(Some(identity.app_name))
+                }
+            };
+        }
+        let search_path = self.gh_search_path_owned();
+        gh::observe_gh(search_path.as_deref()).await.viewer_login
+    }
+
+    async fn default_branch_prefix(&self, owner: &OwnerId) -> String {
+        let account = self.branch_account_name(owner).await;
+        naming_settings::read(&*self.db, owner, account.as_deref())
+            .await
+            .map(|settings| settings.effective_branch_prefix)
+            .unwrap_or_else(|_| "tidebreak/".to_owned())
     }
 
     /// Borrow a repository-scoped forge credential for one git operation in

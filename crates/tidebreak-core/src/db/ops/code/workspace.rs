@@ -261,6 +261,32 @@ pub async fn set_workspace_title_if(
     Ok(result.rows_affected == 1)
 }
 
+/// Set a workspace branch only while its generated title and branch still
+/// match the values the background naming task observed.
+pub async fn set_workspace_branch_if(
+    store: &DbStore,
+    owner: &OwnerId,
+    id: WorkspaceId,
+    title: &str,
+    expected_branch: &str,
+    branch: &str,
+) -> Result<bool> {
+    let result = entities::code_workspace::Entity::update_many()
+        .col_expr(
+            entities::code_workspace::Column::BranchName,
+            sea_orm::sea_query::Expr::value(branch.to_owned()),
+        )
+        .filter(entities::code_workspace::Column::Id.eq(id.0))
+        .filter(entities::code_workspace::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_workspace::Column::Title.eq(title))
+        .filter(entities::code_workspace::Column::BranchName.eq(expected_branch))
+        .filter(entities::code_workspace::Column::Status.eq(CodeWorkspaceStatus::Active.as_str()))
+        .exec(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(result.rows_affected == 1)
+}
+
 /// Delete a workspace row. Used to roll back a failed create that left no checkout.
 pub async fn delete_workspace(store: &DbStore, owner: &OwnerId, id: WorkspaceId) -> Result<bool> {
     let result = entities::code_workspace::Entity::delete_many()

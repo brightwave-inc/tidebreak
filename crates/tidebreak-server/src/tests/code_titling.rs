@@ -207,6 +207,7 @@ async fn a_first_turn_names_an_untitled_workspace() {
     assert_eq!(created.status(), reqwest::StatusCode::CREATED);
     let workspace: serde_json::Value = created.json().await.unwrap();
     let workspace_id = workspace["id"].as_str().unwrap().to_owned();
+    let original_branch = workspace["branch_name"].as_str().unwrap().to_owned();
     let placeholder = crate::code::worktree::two_word_name(
         uuid::Uuid::parse_str(&workspace_id).unwrap().as_u128(),
     );
@@ -247,6 +248,8 @@ async fn a_first_turn_names_an_untitled_workspace() {
 
     // The derived name lands in the store.
     let mut title = String::new();
+    let mut branch = original_branch.clone();
+    let mut worktree_path = String::new();
     for _ in 0..300 {
         let current: serde_json::Value = client
             .get(format!("http://{addr}/code/workspaces/{workspace_id}"))
@@ -258,12 +261,25 @@ async fn a_first_turn_names_an_untitled_workspace() {
             .await
             .unwrap();
         title = current["title"].as_str().unwrap().to_owned();
-        if title != placeholder {
+        branch = current["branch_name"].as_str().unwrap().to_owned();
+        worktree_path = current["worktree_path"].as_str().unwrap().to_owned();
+        if title != placeholder && branch != original_branch {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert_eq!(title, DERIVED_TITLE);
+    assert_eq!(branch, "tidebreak/fix-the-flaky-auth-retry-test");
+    let checked_out = std::process::Command::new("git")
+        .args(["branch", "--show-current"])
+        .current_dir(worktree_path)
+        .output()
+        .unwrap();
+    assert!(checked_out.status.success());
+    assert_eq!(
+        String::from_utf8(checked_out.stdout).unwrap().trim(),
+        branch
+    );
 
     // The naming call ran on the utility model and read the user's message.
     let requests = stub.requests.lock().unwrap().clone();

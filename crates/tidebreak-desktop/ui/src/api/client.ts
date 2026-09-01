@@ -540,6 +540,11 @@ export class ApiClient {
     computer_use_enabled?: boolean;
     code_turn_recaps_enabled?: boolean;
     rewrite_closing_messages?: boolean;
+    git_source_control?: {
+      auto_rename_branches?: boolean;
+      branch_prefix_mode?: "account" | "custom" | "none";
+      custom_branch_prefix?: string | null;
+    };
   }): Promise<RuntimeSettings> {
     return this.json("/settings", {
       method: "PUT",
