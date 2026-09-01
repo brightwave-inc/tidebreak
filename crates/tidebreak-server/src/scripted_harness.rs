@@ -974,6 +974,8 @@ mod tests {
 
     fn spec(sink: Arc<CollectingSink>, worktree: &Path) -> SessionSpec {
         SessionSpec {
+            owner: tidebreak_core::OwnerId::local(),
+            session_id: tidebreak_core::CodeSessionId::new(),
             worktree: worktree.to_path_buf(),
             allowed_read_roots: Vec::new(),
             permission_mode: PermissionMode::Ask,

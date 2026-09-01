@@ -47,6 +47,7 @@ pub(in crate::db) async fn publish(
     if let Some(owner) = owner {
         let owned = entities::chat::Entity::find_by_id(chat_id.0)
             .filter(entities::chat::Column::Owner.eq(owner.as_str()))
+            .filter(entities::chat::Column::EnginePrivate.eq(false))
             .one(&transaction)
             .await
             .map_err(store_err)?

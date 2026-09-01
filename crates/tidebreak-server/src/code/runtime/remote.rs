@@ -87,7 +87,7 @@ impl CodeRuntime {
         CodeSession {
             id: CodeSessionId::new(),
             owner: owner.clone(),
-            workspace_id,
+            workspace_id: Some(workspace_id),
             kind: CodeSessionKind::Interactive,
             harness_kind: harness,
             harness_version: None,
@@ -433,10 +433,7 @@ impl CodeRuntime {
         if session.lifecycle != CodeSessionLifecycle::Idle {
             return Ok(());
         }
-        let Ok(workspace) = self
-            .get_workspace(&session.owner, session.workspace_id)
-            .await
-        else {
+        let Ok(Some(workspace)) = self.session_workspace(&session).await else {
             return Ok(());
         };
         if !workspace.is_remote() {

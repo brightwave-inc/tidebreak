@@ -72,6 +72,7 @@ pub(in crate::db) async fn chat_attention(
         .map_err(store_err)?;
     let owned = entities::chat::Entity::find()
         .filter(entities::chat::Column::Owner.eq(owner.as_str()))
+        .filter(entities::chat::Column::EnginePrivate.eq(false))
         .all(&store.conn)
         .await
         .map_err(store_err)?

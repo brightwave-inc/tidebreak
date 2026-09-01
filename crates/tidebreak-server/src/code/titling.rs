@@ -109,11 +109,15 @@ async fn derive_workspace_title(
     let Some(session) = get_session(&code.db, owner, session_id).await? else {
         return Ok(Outcome::NotApplicable);
     };
-    let Some(claim) = TitlingClaim::acquire(code, session.workspace_id) else {
+    // A session without a workspace has no repository to name it after.
+    let Some(workspace_id) = session.workspace_id else {
+        return Ok(Outcome::NotApplicable);
+    };
+    let Some(claim) = TitlingClaim::acquire(code, workspace_id) else {
         return Ok(Outcome::NotApplicable);
     };
     let _held = claim;
-    let Some(workspace) = get_workspace(&code.db, owner, session.workspace_id).await? else {
+    let Some(workspace) = get_workspace(&code.db, owner, workspace_id).await? else {
         return Ok(Outcome::NotApplicable);
     };
     let placeholder = worktree::two_word_name(workspace.id.0.as_u128());

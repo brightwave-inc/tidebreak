@@ -246,8 +246,8 @@ pub(crate) async fn sweep_turn_for_pull_request_acts(
     // agent's push is neither. Left unmarked, the watch's next assessment
     // reads the head from before the fix turn pushed (issue 2799).
     if confirmed_any {
-        if let Some(hot) = hot {
-            hot.mark(&session.owner, session.workspace_id);
+        if let (Some(hot), Some(workspace_id)) = (hot, session.workspace_id) {
+            hot.mark(&session.owner, workspace_id);
         }
     }
 }
@@ -277,7 +277,10 @@ async fn confirm_changed_checkout(
         return false;
     }
 
-    let workspace = match get_workspace(db, &session.owner, session.workspace_id).await {
+    let Some(workspace_id) = session.workspace_id else {
+        return false;
+    };
+    let workspace = match get_workspace(db, &session.owner, workspace_id).await {
         Ok(Some(workspace)) if !workspace.is_remote() => workspace,
         Ok(_) => return false,
         Err(err) => {
@@ -354,7 +357,7 @@ async fn confirm_changed_checkout(
     record_confirmed_fact(
         db,
         &session.owner,
-        session.workspace_id,
+        workspace_id,
         Some(session.id),
         None,
         &target,
@@ -377,6 +380,9 @@ async fn confirm_create(
     preview: Option<&str>,
     gh_search_path: Option<&str>,
 ) -> bool {
+    let Some(workspace_id) = session.workspace_id else {
+        return false;
+    };
     let sniffed = preview.and_then(sniff_pull_request_url);
     let target = match resolve_create_target(create, sniffed.as_ref(), &command.cwd).await {
         Some(target) => target,
@@ -430,7 +436,7 @@ async fn confirm_create(
     record_confirmed_fact(
         db,
         &session.owner,
-        session.workspace_id,
+        workspace_id,
         Some(session.id),
         command.parent_call_id.clone(),
         &target,
@@ -453,6 +459,9 @@ async fn confirm_push(
     push: &PushAct,
     gh_search_path: Option<&str>,
 ) -> bool {
+    let Some(workspace_id) = session.workspace_id else {
+        return false;
+    };
     let cwd = push
         .cwd_override
         .clone()
@@ -511,7 +520,7 @@ async fn confirm_push(
     record_confirmed_fact(
         db,
         &session.owner,
-        session.workspace_id,
+        workspace_id,
         Some(session.id),
         command.parent_call_id.clone(),
         &target,

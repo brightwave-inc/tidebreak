@@ -698,6 +698,10 @@ impl Store for DbStore {
         ops::conversation::create_chat(self, chat, Some(owner)).await
     }
 
+    async fn create_engine_private_chat(&self, owner: &OwnerId, chat: &Chat) -> Result<()> {
+        ops::conversation::create_engine_private_chat(self, chat, owner).await
+    }
+
     async fn create_chat_with_project_defaults(&self, chat: &Chat) -> Result<Chat> {
         ops::conversation::create_chat_with_project_defaults(self, chat, None, &[]).await
     }

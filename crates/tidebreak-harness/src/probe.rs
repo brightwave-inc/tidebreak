@@ -621,7 +621,9 @@ fn engine_auth_env_allowed(
                         || upper == "CLOUD_ML_REGION"))
         }
         tidebreak_core::HarnessKind::Codex => CODEX_AUTH_ENV_VARS.contains(&upper.as_str()),
-        tidebreak_core::HarnessKind::Opencode | tidebreak_core::HarnessKind::Grok => false,
+        tidebreak_core::HarnessKind::Opencode
+        | tidebreak_core::HarnessKind::Grok
+        | tidebreak_core::HarnessKind::Internal => false,
     }
 }
 

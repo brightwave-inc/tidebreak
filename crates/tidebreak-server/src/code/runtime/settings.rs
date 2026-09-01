@@ -173,8 +173,11 @@ impl CodeRuntime {
             _ => {}
         }
 
-        let workspace = self.get_workspace(owner, session.workspace_id).await?;
-        if workspace.is_remote() {
+        let workspace = self.session_workspace(&session).await?;
+        if workspace
+            .as_ref()
+            .is_some_and(|workspace| workspace.is_remote())
+        {
             // The sandbox carries the engine. Persist the mode on the row and
             // do not relaunch a host harness against the empty worktree.
             let mut session = session;

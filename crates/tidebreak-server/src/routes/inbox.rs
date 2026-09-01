@@ -46,7 +46,8 @@ pub enum InboxConversation {
     /// workspace, so a session id alone is not a link the reader can follow.
     Code {
         session_id: CodeSessionId,
-        workspace_id: WorkspaceId,
+        /// `None` for a session with no workspace: the in-process engine's.
+        workspace_id: Option<WorkspaceId>,
     },
 }
 
@@ -167,7 +168,9 @@ pub async fn list_inbox(
                     continue;
                 }
                 entries.push(InboxEntrySnapshot {
-                    title: titles.get(&session.workspace_id).cloned(),
+                    title: session
+                        .workspace_id
+                        .and_then(|workspace_id| titles.get(&workspace_id).cloned()),
                     conversation: InboxConversation::Code {
                         session_id: session.id,
                         workspace_id: session.workspace_id,

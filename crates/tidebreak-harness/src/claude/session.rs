@@ -1457,6 +1457,8 @@ mod tests {
         permission_mode: PermissionMode,
     ) -> ClaudeSession {
         ClaudeSession::new(SessionSpec {
+            owner: tidebreak_core::OwnerId::local(),
+            session_id: tidebreak_core::CodeSessionId::new(),
             worktree: worktree.to_path_buf(),
             allowed_read_roots: Vec::new(),
             permission_mode,
@@ -1627,6 +1629,8 @@ done
     fn effort_rides_argv_and_ultra_composes_xhigh() {
         let dir = tempfile::tempdir().unwrap();
         let session = ClaudeSession::new(SessionSpec {
+            owner: tidebreak_core::OwnerId::local(),
+            session_id: tidebreak_core::CodeSessionId::new(),
             worktree: dir.path().to_path_buf(),
             allowed_read_roots: Vec::new(),
             permission_mode: PermissionMode::Ask,
@@ -1830,6 +1834,8 @@ done
             PathBuf::from("/usr/local/bin/tidebreak"),
         );
         let session = ClaudeSession::new(SessionSpec {
+            owner: tidebreak_core::OwnerId::local(),
+            session_id: tidebreak_core::CodeSessionId::new(),
             worktree: dir.path().to_path_buf(),
             allowed_read_roots: Vec::new(),
             permission_mode: PermissionMode::Plan,
@@ -1885,6 +1891,8 @@ done
     fn every_turn_reads_stream_json_from_a_stdin_that_stays_open() {
         let dir = tempfile::tempdir().unwrap();
         let session = ClaudeSession::new(SessionSpec {
+            owner: tidebreak_core::OwnerId::local(),
+            session_id: tidebreak_core::CodeSessionId::new(),
             worktree: dir.path().to_path_buf(),
             allowed_read_roots: Vec::new(),
             permission_mode: PermissionMode::Plan,

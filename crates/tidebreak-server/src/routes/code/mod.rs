@@ -73,11 +73,12 @@ pub(crate) use repos::{
 };
 pub(crate) use session_events::session_events;
 pub(crate) use sessions::{
-    create_remote_session, create_session, delete_queued_turn, fork_session, get_session_debug,
-    get_session_image, interrupt_session, list_queued_turns, list_session_turns,
-    list_workspace_sessions, patch_queued_turn, post_queue_send_now, publish_session_image,
-    put_queue_paused, reap_session, set_attention, set_session_fast_mode,
-    set_session_permission_mode, set_session_reasoning_effort, steer_session, submit_turn,
+    create_internal_session, create_remote_session, create_session, delete_queued_turn,
+    fork_session, get_session, get_session_debug, get_session_image, interrupt_session,
+    list_internal_sessions, list_queued_turns, list_session_turns, list_workspace_sessions,
+    patch_queued_turn, post_queue_send_now, publish_session_image, put_queue_paused, reap_session,
+    set_attention, set_session_fast_mode, set_session_permission_mode,
+    set_session_reasoning_effort, steer_session, submit_turn,
 };
 pub(crate) use terminals::{
     close_terminal, close_workspace_terminals, create_terminal, list_terminals, read_terminal,

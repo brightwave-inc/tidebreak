@@ -171,6 +171,10 @@ async fn hosted_models(
             .into_iter()
             .map(|row| hosted_model(row, None))
             .collect()),
+        // The in-process engine takes its model from the chat model
+        // catalog, which the models routes already serve; it lists nothing
+        // of its own here.
+        HarnessKind::Internal => Ok(Vec::new()),
         HarnessKind::Opencode => {
             let anthropic = anthropic?;
             let openai = openai?;

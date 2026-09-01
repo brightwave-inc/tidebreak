@@ -8,6 +8,7 @@ import {
   OpenCodeIcon,
   XaiIcon,
 } from "../ProviderIcons";
+import { Logomark } from "../Logomark";
 import {
   Select,
   SelectContent,
@@ -32,6 +33,7 @@ export const HARNESS_ICONS: Record<
   codex: OpenAIIcon,
   opencode: OpenCodeIcon,
   grok: XaiIcon,
+  internal: Logomark,
 };
 
 /**
@@ -99,6 +101,9 @@ export function HarnessPicker({
         </SelectTrigger>
         <SelectContent scrollButtons={false}>
           {harnesses.map((entry) => {
+            // The in-process engine hosts conversations without a
+            // workspace; it is never a pick for a repo-bound session.
+            if (entry.kind === "internal") return null;
             const reason = harnessUnusableReason(entry);
             const note =
               reason ?? (harnessNeedsDownload(entry) ? DOWNLOAD_NOTE : null);

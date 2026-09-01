@@ -128,6 +128,7 @@ fn owned_grants_condition(owner: &OwnerId) -> sea_orm::Condition {
         .column(entities::chat::Column::Id)
         .from(entities::chat::Entity)
         .and_where(entities::chat::Column::Owner.eq(owner.as_str()))
+        .and_where(entities::chat::Column::EnginePrivate.eq(false))
         .to_owned();
     let owned_projects = sea_orm::sea_query::Query::select()
         .column(entities::project::Column::Id)

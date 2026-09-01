@@ -152,12 +152,14 @@ impl CodeRuntime {
             }
         }
         let mut session = self.get_session(owner, id).await?;
-        let workspace = self.get_workspace(owner, session.workspace_id).await?;
-        if workspace.status != CodeWorkspaceStatus::Active {
-            return Err(ServerError::conflict_kind(
-                "workspace_not_ready",
-                format!("workspace is {}", workspace.status.as_str()),
-            ));
+        let workspace = self.session_workspace(&session).await?;
+        if let Some(workspace) = &workspace {
+            if workspace.status != CodeWorkspaceStatus::Active {
+                return Err(ServerError::conflict_kind(
+                    "workspace_not_ready",
+                    format!("workspace is {}", workspace.status.as_str()),
+                ));
+            }
         }
         if session.lifecycle == CodeSessionLifecycle::Fenced {
             return Err(ServerError::conflict_kind(
@@ -171,7 +173,7 @@ impl CodeRuntime {
                 "session has ended",
             ));
         }
-        if workspace.is_remote() {
+        if let Some(workspace) = workspace.as_ref().filter(|workspace| workspace.is_remote()) {
             // The sandbox path: no local worker, no worktree lock, no
             // harness probe. Everything below this branch assumes a checkout
             // on this machine.
@@ -179,7 +181,7 @@ impl CodeRuntime {
                 .submit_remote_turn(
                     owner,
                     session,
-                    &workspace,
+                    workspace,
                     message,
                     model,
                     reasoning_effort,
@@ -458,10 +460,8 @@ impl CodeRuntime {
                 "session worker is not running",
             ));
         };
-        let workspace = self
-            .get_workspace(&session.owner, session.workspace_id)
-            .await?;
-        if !workspace.is_remote() {
+        let workspace = self.session_workspace(&session).await?;
+        if !workspace.is_some_and(|workspace| workspace.is_remote()) {
             return Err(ServerError::conflict_kind(
                 "session_worker_missing",
                 "session worker is not running",
@@ -532,7 +532,10 @@ impl CodeRuntime {
         owner: &OwnerId,
         session: &CodeSession,
     ) -> Result<Option<String>, ServerError> {
-        let siblings = list_sessions_for_workspace(&self.db, owner, session.workspace_id).await?;
+        let Some(workspace_id) = session.workspace_id else {
+            return Ok(None);
+        };
+        let siblings = list_sessions_for_workspace(&self.db, owner, workspace_id).await?;
         Ok(siblings
             .iter()
             .find(|other| {
@@ -709,8 +712,11 @@ impl CodeRuntime {
                 "only a fenced session can be reaped",
             ));
         }
-        let workspace = self.get_workspace(owner, session.workspace_id).await?;
-        if workspace.is_remote() {
+        let workspace = self.session_workspace(&session).await?;
+        if workspace
+            .as_ref()
+            .is_some_and(|workspace| workspace.is_remote())
+        {
             // No worker to shut down and nothing to relaunch: the driver
             // cancels whatever the environment still holds, closes the
             // incarnation, and resolves the fence. The next turn

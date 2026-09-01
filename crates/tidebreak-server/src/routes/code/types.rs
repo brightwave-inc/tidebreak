@@ -213,7 +213,9 @@ pub struct CodeSessionExternalOrigin {
 #[derive(Debug, Clone, PartialEq, Serialize, TS)]
 pub struct CodeSessionSnapshot {
     pub id: tidebreak_core::CodeSessionId,
-    pub workspace_id: WorkspaceId,
+    /// `None` for a session that binds no workspace: the in-process
+    /// engine's (decision 0048 step 5).
+    pub workspace_id: Option<WorkspaceId>,
     pub kind: CodeSessionKind,
     pub harness_kind: HarnessKind,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1704,6 +1706,19 @@ pub struct CodeActionSnapshot {
 }
 
 /// Body of `POST /code/workspaces/{id}/sessions`.
+/// `POST /code/sessions`: a conversation with no workspace, hosted by the
+/// in-process engine (decision 0048 step 5). The engine is implied.
+#[derive(Debug, Deserialize, TS)]
+pub struct CreateInternalSessionBody {
+    pub permission_mode: PermissionMode,
+    #[serde(default)]
+    #[ts(optional)]
+    pub model: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub reasoning_effort: Option<ReasoningEffort>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateSessionBody {
@@ -2122,7 +2137,8 @@ pub struct CodeTerminalActivityNotice {
 /// Cheap per-session digest on `/code/updates`.
 #[derive(Debug, Clone, PartialEq, Serialize, TS)]
 pub struct CodeSessionDigest {
-    pub workspace: WorkspaceId,
+    /// `None` for a session that binds no workspace.
+    pub workspace: Option<WorkspaceId>,
     pub session: tidebreak_core::CodeSessionId,
     pub kind: CodeSessionKind,
     /// Engine identity for list surfaces that collapse several sessions into
@@ -2213,7 +2229,7 @@ pub enum CodeUpdateNotice {
     },
     /// One session's current digest.
     Digest {
-        workspace: WorkspaceId,
+        workspace: Option<WorkspaceId>,
         session: tidebreak_core::CodeSessionId,
         kind: CodeSessionKind,
         /// Engine identity for the session represented by this digest.

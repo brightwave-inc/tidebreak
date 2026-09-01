@@ -39,6 +39,7 @@ mod desktop_schema;
 mod diagnostics;
 mod document_decode;
 mod durable_oplog;
+mod engine;
 mod error;
 mod event_projection;
 mod exec_write_snapshot;
@@ -1067,6 +1068,11 @@ pub fn app(state: AppState) -> Router {
             "/code/workspaces/{id}/sessions",
             post(routes::code::create_session).get(routes::code::list_workspace_sessions),
         )
+        .route(
+            "/code/sessions",
+            post(routes::code::create_internal_session).get(routes::code::list_internal_sessions),
+        )
+        .route("/code/sessions/{id}", get(routes::code::get_session))
         .route(
             "/code/sessions/{id}/turns",
             post(routes::code::submit_turn).get(routes::code::list_session_turns),
@@ -2206,12 +2212,19 @@ async fn bind_inner(
     .with_gateway_runtime(state.gateway.clone());
     // A self-host machine owns its filesystem. Clones land under the data
     // directory unless an operator set a destination (decision 70).
-    #[allow(unused_mut)]
     let mut runtime = if state.config.profile == Profile::SelfHost {
         runtime.with_clone_parent_default(state.config.data_dir.join("code").join("src"))
     } else {
         runtime
     };
+    // The in-process engine drives the chat turn lane, so it needs the app
+    // state that lane runs on. Registered here, after the state exists and
+    // before the runtime is shared; the copy it keeps has no code runtime.
+    runtime
+        .adapters
+        .register(Arc::new(engine::internal::InternalAdapter::new(
+            state.clone(),
+        )));
     #[cfg(feature = "scripted-harness")]
     scripted_harness::install_from_env(&mut runtime.adapters)?;
     // Remote sessions need both halves: the configured runtime endpoint and

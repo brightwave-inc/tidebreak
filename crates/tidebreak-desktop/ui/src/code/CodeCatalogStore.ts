@@ -294,6 +294,8 @@ export const useCodeCatalogStore = create<CodeCatalogStore>()((set, get) => ({
     });
   },
   rememberSession: (session) => {
+    // A session with no workspace has no rail row to remember it under yet.
+    if (session.workspace_id === null) return;
     set({
       sessionsByWorkspace: {
         ...get().sessionsByWorkspace,

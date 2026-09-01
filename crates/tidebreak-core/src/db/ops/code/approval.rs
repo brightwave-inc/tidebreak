@@ -227,6 +227,47 @@ pub async fn settle_approval_claim(
     .await
 }
 
+/// Settle a pending approval the engine decided on its own channel — a
+/// standing grant or an auto-approval judge answered before any route did —
+/// and append its matching event.
+///
+/// Only an unclaimed pending row with this engine-native call id on this
+/// session settles; a row a decide route already claimed belongs to that
+/// route. `None` when nothing matched.
+pub async fn settle_engine_observed_approval(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+    worker_epoch: i64,
+    native_call_id: &str,
+    decision: ApprovalDecisionKind,
+    decided_at: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<ApprovalSettlement>> {
+    let Some(row) = entities::code_approval::Entity::find()
+        .filter(entities::code_approval::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_approval::Column::SessionId.eq(session_id.0))
+        .filter(entities::code_approval::Column::NativeCallId.eq(native_call_id))
+        .filter(entities::code_approval::Column::State.eq(CodeApprovalState::Pending.as_str()))
+        .filter(entities::code_approval::Column::DecisionClaim.is_null())
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+    else {
+        return Ok(None);
+    };
+    settle_approval(
+        store,
+        owner,
+        CodeApprovalId(row.id),
+        session_id,
+        worker_epoch,
+        ApprovalClaim::Unclaimed,
+        decision,
+        decided_at,
+    )
+    .await
+}
+
 /// Abandon one unclaimed pending approval and append its matching event.
 pub async fn abandon_pending_approval(
     store: &DbStore,

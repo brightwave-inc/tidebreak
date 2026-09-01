@@ -23,11 +23,13 @@ use tokio::sync::{mpsc, oneshot, watch, Notify};
 use tracing::{warn, Instrument as _};
 
 use tidebreak_core::db::code::{
-    accept_trigger_turn_delivery, append_event, append_event_with_notification, bump_spawn_epoch,
-    delete_queued_turn, get_open_turn, get_session, get_session_all_owners, get_workspace,
-    insert_approval_for_worker, insert_turn, next_turn_ordinal, promote_queued_turn, queue_paused,
-    queued_turn_head, save_session, save_turn, set_queue_paused, set_session_harness_resume_ref,
-    set_session_subagents, CodeJournalError, CodeSessionExecutionSettings,
+    accept_trigger_turn_delivery, append_event, append_event_with_notification,
+    begin_permission_mode_change, bump_spawn_epoch, cancel_permission_mode_change,
+    confirm_permission_mode_change, delete_queued_turn, get_open_turn, get_session,
+    get_session_all_owners, get_workspace, insert_approval_for_worker, insert_turn, list_approvals,
+    next_turn_ordinal, promote_queued_turn, queue_paused, queued_turn_head, save_session,
+    save_turn, set_queue_paused, set_session_harness_resume_ref, set_session_subagents,
+    settle_engine_observed_approval, CodeJournalError, CodeSessionExecutionSettings,
 };
 use tidebreak_core::{
     bound_subagents, Attention, AttentionSource, BlobStore, BoundedError, CodeApproval,
@@ -459,6 +461,40 @@ impl LiveSink {
             .await
     }
 
+    /// Settle a pending approval the engine decided itself, when one is
+    /// still waiting under this call id.
+    async fn settle_engine_observed(&self, call_id: &str, decision: ApprovalDecision) {
+        match settle_engine_observed_approval(
+            &self.db,
+            &self.owner,
+            self.session_id,
+            self.spawn_epoch,
+            call_id,
+            tidebreak_core::ApprovalDecisionKind::from(decision),
+            Utc::now(),
+        )
+        .await
+        {
+            Ok(Some(settlement)) => {
+                self.bus.publish(self.session_id, settlement.event);
+                let _ = super::attention::note_activity(
+                    &self.db,
+                    &self.bus,
+                    &self.owner,
+                    self.session_id,
+                )
+                .await;
+            }
+            Ok(None) => {}
+            Err(error) => warn!(
+                session = %self.session_id,
+                call_id,
+                error = %error,
+                "could not settle an engine-decided approval"
+            ),
+        }
+    }
+
     async fn record_approval(
         &self,
         approval_id: CodeApprovalId,
@@ -600,9 +636,18 @@ impl HarnessEventSink for LiveSink {
             }
             return;
         }
-        if matches!(event, HarnessEvent::ApprovalResolved { .. }) {
+        if let HarnessEvent::ApprovalResolved {
+            harness_ref,
+            decision,
+        } = &event
+        {
             // The decision route journals ApprovalResolved after the harness
-            // observes the decision. Ignore a duplicate emit from the engine.
+            // observes the decision, so a decided row is left alone. A row
+            // still pending and unclaimed was decided on the engine's own
+            // channel — a standing grant, an auto-approval judge — and this
+            // report is the only settlement it will get.
+            self.settle_engine_observed(&harness_ref.call_id, decision.clone())
+                .await;
             return;
         }
         if matches!(event, HarnessEvent::TurnStarted) && self.turn_id.lock().unwrap().is_some() {
@@ -1198,6 +1243,114 @@ async fn persist_turn_park(
 /// the same native channel and classification as the concurrent control path
 /// — and only a confirmed delivery resumes the turn. Every other command
 /// takes the ordinary control path.
+/// Follow an accepted plan with the permission-mode change it proposed.
+///
+/// The plan approval names the mode the engine would continue under; the
+/// decision alone leaves the posture untouched (decision 0048 step 5). So
+/// before the resume, the worker moves the engine onto that mode and
+/// persists it on the session row. A refusal from the engine is journaled
+/// and the turn still resumes: the plan was accepted, and the posture the
+/// user sees is the one the row keeps.
+async fn apply_accepted_plan_mode(
+    db: &DbStore,
+    bus: &CodeEventBus,
+    session: &mut CodeSession,
+    engine: &dyn HarnessSession,
+    input: &tidebreak_harness::ResumeInput,
+) {
+    let tidebreak_harness::ResumeInput::ApprovalDecided {
+        call_id,
+        decision: ApprovalDecision::PlanDecision { approve: true, .. },
+    } = input
+    else {
+        return;
+    };
+    let proposed = match list_approvals(db, &session.owner, None, Some(session.id)).await {
+        Ok(approvals) => approvals.into_iter().find_map(|approval| {
+            match (&approval.native_call_id, &approval.kind) {
+                (Some(native), CodeApprovalKind::Plan { proposed_mode }) if native == call_id => {
+                    Some(*proposed_mode)
+                }
+                _ => None,
+            }
+        }),
+        Err(error) => {
+            warn!(session = %session.id, error = %error, "could not read the accepted plan");
+            None
+        }
+    };
+    let Some(mode) = proposed else {
+        return;
+    };
+    if mode == session.permission_mode {
+        return;
+    }
+    // The row's own intent protocol: reserve, re-posture the engine, then
+    // confirm — so a route-level change racing this one loses cleanly.
+    let intent = match begin_permission_mode_change(db, &session.owner, session, mode).await {
+        Ok(Some(intent)) => intent,
+        Ok(None) => {
+            warn!(session = %session.id, "the plan's permission mode change lost to a concurrent one");
+            return;
+        }
+        Err(error) => {
+            warn!(session = %session.id, error = %error, "could not reserve the plan's permission mode");
+            return;
+        }
+    };
+    match engine.set_permission_mode(mode).await {
+        Ok(()) => {
+            match confirm_permission_mode_change(db, &session.owner, &intent).await {
+                Ok(true) => session.permission_mode = mode,
+                Ok(false) => {
+                    warn!(session = %session.id, "the plan's permission mode change was not confirmed");
+                    return;
+                }
+                Err(error) => {
+                    warn!(session = %session.id, error = %error, "could not confirm the plan's permission mode");
+                    return;
+                }
+            }
+            if let Err(error) = super::attention::persist_session(db, bus, session).await {
+                warn!(session = %session.id, error = %error, "could not publish the plan's permission mode");
+            }
+            let _ = persist_and_publish(
+                db,
+                bus,
+                &session.owner,
+                session.id,
+                session.spawn_epoch,
+                CodeEvent::HarnessNotice {
+                    level: HarnessNoticeLevel::Info,
+                    message: format!(
+                        "Plan accepted; the session continues in {} mode.",
+                        mode.as_str()
+                    ),
+                },
+            )
+            .await;
+        }
+        Err(error) => {
+            let _ = cancel_permission_mode_change(db, &session.owner, &intent).await;
+            let _ = persist_and_publish(
+                db,
+                bus,
+                &session.owner,
+                session.id,
+                session.spawn_epoch,
+                CodeEvent::HarnessNotice {
+                    level: HarnessNoticeLevel::Warning,
+                    message: format!(
+                        "Plan accepted, but the engine kept its {} posture: {error}",
+                        session.permission_mode.as_str()
+                    ),
+                },
+            )
+            .await;
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn await_park_resolution<'a>(
     engine: &'a dyn HarnessSession,
@@ -1676,15 +1829,17 @@ async fn drive_turn_inner(
     if *worktree.quiesce.borrow() {
         return Err(WorkerError::UpdateQuiesced);
     }
-    let workspace = get_workspace(&sink.db, &session.owner, session.workspace_id)
-        .await
-        .map_err(|error| WorkerError::Failed(error.to_string()))?
-        .ok_or_else(|| WorkerError::Conflict("workspace no longer exists".into()))?;
-    if workspace.status != CodeWorkspaceStatus::Active {
-        return Err(WorkerError::Conflict(format!(
-            "workspace is {}",
-            workspace.status.as_str()
-        )));
+    if let Some(workspace_id) = session.workspace_id {
+        let workspace = get_workspace(&sink.db, &session.owner, workspace_id)
+            .await
+            .map_err(|error| WorkerError::Failed(error.to_string()))?
+            .ok_or_else(|| WorkerError::Conflict("workspace no longer exists".into()))?;
+        if workspace.status != CodeWorkspaceStatus::Active {
+            return Err(WorkerError::Conflict(format!(
+                "workspace is {}",
+                workspace.status.as_str()
+            )));
+        }
     }
 
     // An idle send resolves settings after it owns the worktree, so a
@@ -1941,6 +2096,10 @@ async fn drive_turn_inner(
         .await
         {
             Some(input) => {
+                // An accepted plan re-postures the session before the turn
+                // continues: the decision itself never changes the mode, the
+                // engine's own channel does, and the row must say so too.
+                apply_accepted_plan_mode(db, bus, session, engine, &input).await;
                 turn.status = CodeTurnStatus::Running;
                 turn.park_ref = None;
                 turn.park_wait = None;
@@ -3145,7 +3304,7 @@ mod tests {
             &CodeSession {
                 id: session_id,
                 owner: owner.clone(),
-                workspace_id,
+                workspace_id: Some(workspace_id),
                 kind: CodeSessionKind::Interactive,
                 harness_kind,
                 harness_version: harness_version.map(str::to_owned),
@@ -3201,6 +3360,123 @@ mod tests {
         (directory, store, sink, session_id)
     }
 
+    /// An engine that answers its own approval — a standing grant, an
+    /// auto-approval judge — reports the decision on the stream, and that
+    /// report is the only settlement the row it opened will ever get.
+    #[tokio::test]
+    async fn an_engine_observed_decision_settles_its_own_approval_row() {
+        let (directory, store, sink, session_id) = seeded_sink().await;
+        let owner = OwnerId::local();
+        let mut session = get_session(&store, &owner, session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        session.lifecycle = CodeSessionLifecycle::Idle;
+        assert!(save_session(&store, &session).await.unwrap());
+
+        let worktree = directory.path().join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let private = directory.path().join("private");
+        std::fs::create_dir(&private).unwrap();
+        let private_root =
+            super::super::scratch::ScratchRoot::open_for_test(&private).expect("scratch root");
+        let script = vec![
+            HarnessEvent::TurnStarted,
+            HarnessEvent::ApprovalRequested {
+                harness_ref: tidebreak_harness::HarnessApprovalRef::engine("call-1"),
+                raw: serde_json::Value::Null,
+                kind: Some(tidebreak_core::CodeApprovalKind::Other {
+                    summary: "exec".into(),
+                }),
+            },
+            HarnessEvent::ApprovalResolved {
+                harness_ref: tidebreak_harness::HarnessApprovalRef::engine("call-1"),
+                decision: ApprovalDecision::Approve,
+            },
+            HarnessEvent::AssistantMessage {
+                text: "ran under a standing grant".into(),
+                parent_call_id: None,
+            },
+            HarnessEvent::TurnCompleted {
+                usage: CodeUsage::default(),
+            },
+        ];
+        let adapter = ScriptedAdapter::new(script).with_unattended_approvals();
+        let engine = adapter
+            .launch(SessionSpec {
+                owner: tidebreak_core::OwnerId::local(),
+                session_id: tidebreak_core::CodeSessionId::new(),
+                worktree,
+                allowed_read_roots: Vec::new(),
+                permission_mode: session.permission_mode,
+                model: session.model.clone(),
+                reasoning_effort: session.reasoning_effort,
+                fast_mode: session.fast_mode,
+                resume_ref: None,
+                extra_argv: Vec::new(),
+                extra_env: Vec::new(),
+                relay_key_env: None,
+                env: Vec::new(),
+                approval: None,
+                binary: Some(std::path::PathBuf::from("/scripted/engine")),
+                sink: sink.clone() as Arc<dyn tidebreak_harness::HarnessEventSink>,
+                browser: None,
+            })
+            .await
+            .unwrap();
+        let handle = spawn_session_worker(
+            session.clone(),
+            engine,
+            sink,
+            AttachmentStore {
+                blobs: None,
+                private_root,
+                engine_reads_images: false,
+            },
+            Arc::new(tokio::sync::Mutex::new(())),
+            tokio::sync::watch::channel(false).1,
+        );
+
+        let (turn_reply, turn_response) = oneshot::channel();
+        handle
+            .commands
+            .send(WorkerCommand::RunTurn {
+                message: "run it".into(),
+                attachments: Vec::new(),
+                trigger_delivery: None,
+                reply: turn_reply,
+            })
+            .await
+            .unwrap();
+        let turn = tokio::time::timeout(Duration::from_secs(5), turn_response)
+            .await
+            .expect("the turn completes")
+            .unwrap()
+            .unwrap();
+        assert_eq!(turn.status, CodeTurnStatus::Completed);
+
+        let approvals = list_approvals(&store, &owner, None, Some(session_id))
+            .await
+            .unwrap();
+        assert_eq!(approvals.len(), 1);
+        assert_eq!(approvals[0].state, CodeApprovalState::Approved);
+        assert_eq!(approvals[0].native_call_id.as_deref(), Some("call-1"));
+        let events = list_events(&store, &owner, session_id, 0, MAX_REPLAY_EVENTS)
+            .await
+            .unwrap();
+        assert!(
+            events.events.iter().any(|event| matches!(
+                &event.event,
+                CodeEvent::ApprovalResolved {
+                    approval_id,
+                    decision: tidebreak_core::ApprovalDecisionKind::Approve,
+                } if *approval_id == approvals[0].id
+            )),
+            "the journal records the engine's own decision"
+        );
+        let _ = handle.commands.send(WorkerCommand::Shutdown).await;
+    }
+
     #[tokio::test]
     async fn a_parked_turn_waits_durably_and_resumes_on_the_awaited_decision() {
         let (directory, store, sink, session_id) = seeded_sink().await;
@@ -3245,6 +3521,8 @@ mod tests {
             );
         let engine = adapter
             .launch(SessionSpec {
+                owner: tidebreak_core::OwnerId::local(),
+                session_id: tidebreak_core::CodeSessionId::new(),
                 worktree,
                 allowed_read_roots: Vec::new(),
                 permission_mode: session.permission_mode,
@@ -3392,6 +3670,8 @@ mod tests {
             );
         let engine = adapter
             .launch(SessionSpec {
+                owner: tidebreak_core::OwnerId::local(),
+                session_id: tidebreak_core::CodeSessionId::new(),
                 worktree,
                 allowed_read_roots: Vec::new(),
                 permission_mode: session.permission_mode,
@@ -3510,6 +3790,8 @@ mod tests {
         );
         let engine = adapter
             .launch(SessionSpec {
+                owner: tidebreak_core::OwnerId::local(),
+                session_id: tidebreak_core::CodeSessionId::new(),
                 worktree,
                 allowed_read_roots: Vec::new(),
                 permission_mode: session.permission_mode,
@@ -3608,6 +3890,8 @@ mod tests {
         let adapter = ScriptedAdapter::new(plain_text_script());
         let engine = adapter
             .launch(SessionSpec {
+                owner: tidebreak_core::OwnerId::local(),
+                session_id: tidebreak_core::CodeSessionId::new(),
                 worktree,
                 allowed_read_roots: Vec::new(),
                 permission_mode: session.permission_mode,
@@ -3720,6 +4004,8 @@ mod tests {
         let adapter = ScriptedAdapter::new(plain_text_script());
         let engine = adapter
             .launch(SessionSpec {
+                owner: tidebreak_core::OwnerId::local(),
+                session_id: tidebreak_core::CodeSessionId::new(),
                 worktree,
                 allowed_read_roots: Vec::new(),
                 permission_mode: session.permission_mode,
@@ -4346,6 +4632,8 @@ mod tests {
         let adapter = ScriptedAdapter::new(plain_text_script());
         let engine = adapter
             .launch(SessionSpec {
+                owner: tidebreak_core::OwnerId::local(),
+                session_id: tidebreak_core::CodeSessionId::new(),
                 worktree,
                 allowed_read_roots: Vec::new(),
                 permission_mode: session.permission_mode,

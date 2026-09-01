@@ -167,7 +167,7 @@ async fn seeded(
     let session = CodeSession {
         id: CodeSessionId::new(),
         owner: owner.clone(),
-        workspace_id,
+        workspace_id: Some(workspace_id),
         kind: CodeSessionKind::Interactive,
         harness_kind: HarnessKind::ClaudeCode,
         harness_version: Some("2.1.233".into()),
@@ -305,18 +305,26 @@ async fn a_journaled_create_mints_an_authored_fact() {
     assert_eq!(fact.head_branch, "feat/x");
     let first_seen = fact.first_seen_at;
 
-    let attributed = list_attributed_facts_for_workspace(&store, &owner, session.workspace_id)
-        .await
-        .unwrap();
+    let attributed = list_attributed_facts_for_workspace(
+        &store,
+        &owner,
+        session.workspace_id.expect("workspace"),
+    )
+    .await
+    .unwrap();
     assert_eq!(attributed.len(), 1);
     assert_eq!(attributed[0].1, CodePullRequestRelation::Authored);
 
     // Re-running the sweep is idempotent: one row, first_seen_at holds.
     pr_facts::sweep_turn_for_pull_request_acts(&store, &session, turn_id, Some(&search_path), None)
         .await;
-    let attributed = list_attributed_facts_for_workspace(&store, &owner, session.workspace_id)
-        .await
-        .unwrap();
+    let attributed = list_attributed_facts_for_workspace(
+        &store,
+        &owner,
+        session.workspace_id.expect("workspace"),
+    )
+    .await
+    .unwrap();
     assert_eq!(attributed.len(), 1);
     let fact = get_pull_request_fact(&store, &owner, "github.com", "acme", "tools", 412)
         .await
@@ -351,9 +359,13 @@ async fn a_journaled_push_mints_a_contributed_fact() {
         .await;
 
     let owner = OwnerId::local();
-    let attributed = list_attributed_facts_for_workspace(&store, &owner, session.workspace_id)
-        .await
-        .unwrap();
+    let attributed = list_attributed_facts_for_workspace(
+        &store,
+        &owner,
+        session.workspace_id.expect("workspace"),
+    )
+    .await
+    .unwrap();
     assert_eq!(attributed.len(), 1);
     assert_eq!(attributed[0].1, CodePullRequestRelation::Contributed);
     assert_eq!(attributed[0].0.number, 412);
@@ -397,7 +409,7 @@ async fn a_confirmed_push_marks_the_workspace_hot() {
 
     assert_eq!(
         hot.live(),
-        vec![(OwnerId::local(), session.workspace_id)],
+        vec![(OwnerId::local(), session.workspace_id.expect("workspace"))],
         "the confirmed push puts the workspace on the hot refresh tier"
     );
 }
@@ -473,9 +485,13 @@ async fn a_changed_clean_checkout_recovers_an_open_pull_request() {
     .await;
 
     let owner = OwnerId::local();
-    let attributed = list_attributed_facts_for_workspace(&store, &owner, session.workspace_id)
-        .await
-        .unwrap();
+    let attributed = list_attributed_facts_for_workspace(
+        &store,
+        &owner,
+        session.workspace_id.expect("workspace"),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         attributed.len(),
         1,
@@ -492,7 +508,10 @@ async fn a_changed_clean_checkout_recovers_an_open_pull_request() {
         sources[0].discovered_via,
         tidebreak_core::CodePullRequestDiscovery::Command
     );
-    assert_eq!(hot.live(), vec![(owner, session.workspace_id)]);
+    assert_eq!(
+        hot.live(),
+        vec![(owner, session.workspace_id.expect("workspace"))]
+    );
 }
 
 #[tokio::test]
@@ -509,12 +528,14 @@ async fn a_changed_checkout_does_not_claim_a_different_pull_request_head() {
     pr_facts::sweep_turn_for_pull_request_acts(&store, &session, turn_id, Some(&search_path), None)
         .await;
 
-    assert!(
-        list_attributed_facts_for_workspace(&store, &session.owner, session.workspace_id)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(list_attributed_facts_for_workspace(
+        &store,
+        &session.owner,
+        session.workspace_id.expect("workspace")
+    )
+    .await
+    .unwrap()
+    .is_empty());
 }
 
 #[tokio::test]
@@ -542,12 +563,14 @@ async fn a_changed_dirty_checkout_does_not_claim_a_matching_pull_request_head() 
     pr_facts::sweep_turn_for_pull_request_acts(&store, &session, turn_id, Some(&search_path), None)
         .await;
 
-    assert!(
-        list_attributed_facts_for_workspace(&store, &session.owner, session.workspace_id)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(list_attributed_facts_for_workspace(
+        &store,
+        &session.owner,
+        session.workspace_id.expect("workspace")
+    )
+    .await
+    .unwrap()
+    .is_empty());
     assert!(!log.exists(), "a dirty checkout should not reach GitHub");
 }
 
@@ -578,12 +601,14 @@ async fn a_changed_checkout_on_another_branch_does_not_claim_its_pull_request() 
     pr_facts::sweep_turn_for_pull_request_acts(&store, &session, turn_id, Some(&search_path), None)
         .await;
 
-    assert!(
-        list_attributed_facts_for_workspace(&store, &session.owner, session.workspace_id)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(list_attributed_facts_for_workspace(
+        &store,
+        &session.owner,
+        session.workspace_id.expect("workspace")
+    )
+    .await
+    .unwrap()
+    .is_empty());
     assert!(
         !log.exists(),
         "a checkout on another branch should not reach GitHub"
@@ -637,12 +662,14 @@ async fn reads_comments_and_failures_mint_nothing() {
         .await;
 
     let owner = OwnerId::local();
-    assert!(
-        list_attributed_facts_for_workspace(&store, &owner, session.workspace_id)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(list_attributed_facts_for_workspace(
+        &store,
+        &owner,
+        session.workspace_id.expect("workspace")
+    )
+    .await
+    .unwrap()
+    .is_empty());
     assert!(
         get_pull_request_fact(&store, &owner, "github.com", "acme", "tools", 412)
             .await

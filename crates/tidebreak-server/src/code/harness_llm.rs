@@ -412,10 +412,17 @@ pub(crate) fn spawn_wiring(
 /// sign-in and an uncovered one cannot run at all; everywhere else the local
 /// probe decides, and this answer does not matter.
 pub(crate) fn relay_covered(kind: HarnessKind) -> bool {
-    matches!(
-        kind,
-        HarnessKind::ClaudeCode | HarnessKind::Codex | HarnessKind::Opencode | HarnessKind::Grok
-    )
+    match kind {
+        HarnessKind::ClaudeCode
+        | HarnessKind::Codex
+        | HarnessKind::Opencode
+        | HarnessKind::Grok => true,
+        // The in-process engine never reaches the relay: it resolves
+        // inference through the server's own provider resolution, which on
+        // a hosted machine is the same gateway. Covered, in the sense the
+        // doctor asks about — it needs no local sign-in.
+        HarnessKind::Internal => true,
+    }
 }
 
 fn generate_key() -> String {
