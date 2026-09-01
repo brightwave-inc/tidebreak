@@ -1017,6 +1017,82 @@ mod tests {
         assert!(fake.spawns.lock().unwrap().is_empty());
     }
 
+    /// Remote trigger and attachment delivery stay refused until the runtime
+    /// can preserve their delivery contracts. Neither refusal may reach the
+    /// sandbox or create a turn row.
+    #[tokio::test]
+    async fn remote_inputs_without_transport_contracts_are_refused_before_delivery() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, fake, owner, repo) = runtime_with_remote(dir.path()).await;
+        let workspace = runtime
+            .create_remote_workspace(&owner, repo.id, Some("remote".into()))
+            .await
+            .unwrap();
+        let session = runtime
+            .create_remote_session(
+                &owner,
+                workspace.id,
+                HarnessKind::ClaudeCode,
+                session_settings(),
+            )
+            .await
+            .unwrap();
+
+        let trigger_error = match runtime
+            .submit_trigger_turn(
+                &owner,
+                session.id,
+                "review changed".into(),
+                tidebreak_core::CodeTriggerDeliveryId::new(),
+                uuid::Uuid::new_v4(),
+            )
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("remote trigger delivery must refuse"),
+        };
+        assert_eq!(trigger_error.kind(), "remote_triggers_unsupported");
+        assert!(
+            trigger_error.message().contains("idempotency key"),
+            "{}",
+            trigger_error.message()
+        );
+
+        let attachment_error = match runtime
+            .submit_turn(
+                &owner,
+                session.id,
+                "inspect this".into(),
+                None,
+                None,
+                vec![tidebreak_core::ImageRef {
+                    blob_id: uuid::Uuid::new_v4(),
+                    media_type: tidebreak_core::ImageMediaType::Png,
+                    width: 1,
+                    height: 1,
+                    byte_len: 1,
+                }],
+            )
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("remote attachment delivery must refuse"),
+        };
+        assert_eq!(attachment_error.kind(), "remote_attachments_unsupported");
+        assert!(
+            attachment_error.message().contains("carries text only"),
+            "{}",
+            attachment_error.message()
+        );
+
+        assert!(fake.spawns.lock().unwrap().is_empty());
+        assert!(fake.sends.lock().unwrap().is_empty());
+        assert!(latest_turn(&runtime.db, &owner, session.id)
+            .await
+            .unwrap()
+            .is_none());
+    }
+
     /// Host worktree reads refuse a remote workspace with the remote marker
     /// instead of treating the empty path as a missing checkout.
     #[tokio::test]

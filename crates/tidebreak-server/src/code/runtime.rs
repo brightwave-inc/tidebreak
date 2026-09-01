@@ -4065,15 +4065,21 @@ impl CodeRuntime {
             ));
         };
         if trigger_delivery.is_some() {
+            // Trigger delivery is at-most-once. The runtime's spawn and inbox
+            // calls accept no idempotency key and expose no replay result, so
+            // retrying an ambiguous response could run one trigger twice.
             return Err(ServerError::conflict_kind(
                 "remote_triggers_unsupported",
-                "trigger turns do not reach remote sessions yet",
+                "remote trigger turns are disabled because sandbox spawn and inbox calls have no idempotency key; submit the turn manually",
             ));
         }
         if !attachments.is_empty() {
+            // Remote messages carry text only. Until the runtime provides a
+            // bounded, owner-scoped file transfer, attachment bytes have no
+            // safe path into the sandbox.
             return Err(ServerError::conflict_kind(
                 "remote_attachments_unsupported",
-                "remote sessions do not take attachments yet",
+                "remote sessions cannot stage attachment bytes because the sandbox message contract carries text only; send the turn without attachments",
             ));
         }
         // Settings stick without local capability validation: the sandbox
