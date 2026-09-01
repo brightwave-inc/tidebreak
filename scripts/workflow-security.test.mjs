@@ -493,15 +493,10 @@ test("PR lanes are scope-gated, never label-gated", () => {
   }
   assert.match(testJob, /save-if: \$\{\{ github\.ref == 'refs\/heads\/main' \}\}/);
   assert.match(testJob, /cache-on-failure: true/);
-  // The headless lane is migrating from `cargo test` under a shell retry
-  // loop to `cargo nextest run` with per-test retries. Accept either form
-  // here so the migration can land; the pull request that switches the
-  // command re-pins this assertion to the nextest form alone.
   assert.match(
     testJob,
-    /cargo (?:test|nextest run) --workspace --exclude tidebreak-desktop\s+--locked/,
+    /cargo nextest run --workspace --exclude tidebreak-desktop\n\s+--locked --retries 2/,
   );
-  assert.match(testJob, /attempts=3|--retries 2/);
   assert.doesNotMatch(ci, /^  parsers:$/m);
   assert.doesNotMatch(ci, /outputs\.parsers|echo "parsers=/);
   assert.match(changes, /\*\.md\|docs\/\*\|assets\/\*\|\.githooks\/\*/);
