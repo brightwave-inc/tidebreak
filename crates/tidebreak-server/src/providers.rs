@@ -170,6 +170,31 @@ pub(crate) fn gateway_reasoning_efforts_for_model<'a>(
         .map(|(_, efforts)| efforts.as_slice())
 }
 
+/// Intersect a gateway model's ladder with the ladder the engine already
+/// advertises for that pick.
+///
+/// Codex is the documented exception: `adapter.reasoning_efforts` is empty
+/// because each row carries its own ladder. Prefer that row when it is
+/// present. Fall back to the engine-wide ladder, then to the gateway ladder
+/// when neither the row nor the engine states one — hosted compat listings.
+pub(crate) fn overlay_gateway_reasoning_efforts(
+    row_efforts: &[ReasoningEffort],
+    engine_efforts: &[ReasoningEffort],
+    gateway_efforts: &[ReasoningEffort],
+) -> Vec<ReasoningEffort> {
+    let base = if !row_efforts.is_empty() {
+        row_efforts
+    } else if !engine_efforts.is_empty() {
+        engine_efforts
+    } else {
+        return gateway_efforts.to_vec();
+    };
+    base.iter()
+        .copied()
+        .filter(|effort| gateway_efforts.contains(effort))
+        .collect()
+}
+
 fn gateway_selection_matches(selection: &str, id: &str) -> bool {
     selection == id
         || selection
@@ -2587,6 +2612,59 @@ mod tests {
                 "{selection}"
             );
         }
+    }
+
+    #[test]
+    fn overlay_prefers_a_codex_row_ladder_over_an_empty_engine() {
+        assert_eq!(
+            overlay_gateway_reasoning_efforts(
+                &[
+                    ReasoningEffort::Low,
+                    ReasoningEffort::High,
+                    ReasoningEffort::Ultra,
+                ],
+                &[],
+                &[
+                    ReasoningEffort::Low,
+                    ReasoningEffort::High,
+                    ReasoningEffort::Max,
+                ],
+            ),
+            vec![ReasoningEffort::Low, ReasoningEffort::High]
+        );
+    }
+
+    #[test]
+    fn overlay_intersects_an_engine_wide_ladder_when_the_row_is_empty() {
+        assert_eq!(
+            overlay_gateway_reasoning_efforts(
+                &[],
+                ReasoningEffort::ALL,
+                &[
+                    ReasoningEffort::Low,
+                    ReasoningEffort::High,
+                    ReasoningEffort::Max,
+                ],
+            ),
+            vec![
+                ReasoningEffort::Low,
+                ReasoningEffort::High,
+                ReasoningEffort::Max,
+            ]
+        );
+    }
+
+    #[test]
+    fn overlay_uses_the_gateway_ladder_when_neither_row_nor_engine_states_one() {
+        let gateway = [
+            ReasoningEffort::Low,
+            ReasoningEffort::High,
+            ReasoningEffort::Max,
+        ];
+        assert_eq!(
+            overlay_gateway_reasoning_efforts(&[], &[], &gateway),
+            gateway.to_vec()
+        );
     }
 
     async fn gateway_migration_test_store() -> (

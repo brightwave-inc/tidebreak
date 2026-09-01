@@ -111,15 +111,11 @@ pub async fn list_harness_models(
             else {
                 continue;
             };
-            model.reasoning_efforts = if engine_reasoning_efforts.is_empty() {
-                model_efforts.to_vec()
-            } else {
-                engine_reasoning_efforts
-                    .iter()
-                    .copied()
-                    .filter(|effort| model_efforts.contains(effort))
-                    .collect()
-            };
+            model.reasoning_efforts = crate::providers::overlay_gateway_reasoning_efforts(
+                &model.reasoning_efforts,
+                &engine_reasoning_efforts,
+                model_efforts,
+            );
         }
     }
     // An engine that states one ladder for every model says so directly. One

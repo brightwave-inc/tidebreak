@@ -5497,14 +5497,11 @@ impl CodeRuntime {
             return capabilities;
         };
         let engine_efforts = adapter.reasoning_efforts(probe);
-        capabilities.reasoning_efforts = if engine_efforts.is_empty() {
-            model_efforts.to_vec()
-        } else {
-            engine_efforts
-                .into_iter()
-                .filter(|effort| model_efforts.contains(effort))
-                .collect()
-        };
+        capabilities.reasoning_efforts = crate::providers::overlay_gateway_reasoning_efforts(
+            &capabilities.reasoning_efforts,
+            &engine_efforts,
+            model_efforts,
+        );
         capabilities.reasoning_known = true;
         tracing::debug!(
             harness = %adapter.kind(),
@@ -7257,6 +7254,7 @@ mod delivery_nudge_tests {
 mod selected_model_capabilities_tests {
     use super::*;
     use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
+    use tidebreak_harness::ListedHarnessModel;
 
     #[derive(Default)]
     struct NoSecrets;
@@ -7389,6 +7387,50 @@ mod selected_model_capabilities_tests {
             ]
         );
         assert!(capabilities.reasoning_known);
+    }
+
+    #[tokio::test]
+    async fn a_codex_row_ladder_intersects_the_gateway_ladder() {
+        let (runtime, _directory) =
+            runtime_with_gateway_snapshot("https://gateway.example/", "https://gateway.example/")
+                .await;
+        let adapter = ScriptedAdapter::new(plain_text_script())
+            .with_kind(HarnessKind::Codex)
+            .with_reasoning_levels(CapLevel::Supported)
+            .with_engine_reasoning_efforts(Vec::new())
+            .with_models(vec![ListedHarnessModel {
+                id: "model-gateway-model-gateway/glm-5.3".into(),
+                label: "GLM 5.3".into(),
+                default: true,
+                reasoning_efforts: vec![
+                    ReasoningEffort::Low,
+                    ReasoningEffort::High,
+                    ReasoningEffort::Ultra,
+                ],
+                fast_mode: false,
+            }]);
+
+        let capabilities = runtime
+            .selected_model_capabilities_for_owner(
+                &OwnerId::new("alice").unwrap(),
+                &adapter,
+                &scripted_probe(),
+                Some("model-gateway-model-gateway/glm-5.3"),
+            )
+            .await;
+
+        assert_eq!(
+            capabilities.reasoning_efforts,
+            vec![ReasoningEffort::Low, ReasoningEffort::High]
+        );
+        assert!(capabilities.reasoning_known);
+        let mut settings = CodeSessionExecutionSettings {
+            model: Some("model-gateway-model-gateway/glm-5.3".into()),
+            reasoning_effort: Some(ReasoningEffort::High),
+            fast_mode: false,
+        };
+        capabilities.deactivate_unsupported(&mut settings);
+        assert_eq!(settings.reasoning_effort, Some(ReasoningEffort::High));
     }
 
     #[tokio::test]

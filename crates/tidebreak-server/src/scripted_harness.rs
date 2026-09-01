@@ -111,6 +111,9 @@ pub(crate) struct ScriptedAdapter {
     image_input: CapLevel,
     reasoning_levels: CapLevel,
     models: Vec<ListedHarnessModel>,
+    /// Engine-wide effort ladder when it differs from `ReasoningEffort::ALL`.
+    /// Codex leaves this empty and states the ladder on each model row.
+    engine_reasoning_efforts: Option<Vec<ReasoningEffort>>,
     /// Whether this engine takes a new mode without being relaunched.
     live_mode_switch: bool,
     /// Whether this engine fixes its posture when it creates its session and
@@ -170,6 +173,7 @@ impl ScriptedAdapter {
             image_input: CapLevel::Unknown,
             reasoning_levels: CapLevel::Unsupported,
             models: Vec::new(),
+            engine_reasoning_efforts: None,
             live_mode_switch: false,
             posture_fixed: false,
             turns: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -282,6 +286,13 @@ impl ScriptedAdapter {
     /// Publish an exact model catalog for capability-validation tests.
     pub(crate) fn with_models(mut self, models: Vec<ListedHarnessModel>) -> Self {
         self.models = models;
+        self
+    }
+
+    /// Codex-style: reasoning is supported, but the accepted ladder lives on
+    /// each model row rather than on the engine.
+    pub(crate) fn with_engine_reasoning_efforts(mut self, efforts: Vec<ReasoningEffort>) -> Self {
+        self.engine_reasoning_efforts = Some(efforts);
         self
     }
 
@@ -443,6 +454,9 @@ impl HarnessAdapter for ScriptedAdapter {
     }
 
     fn reasoning_efforts(&self, _probe: &HarnessProbe) -> Vec<ReasoningEffort> {
+        if let Some(efforts) = &self.engine_reasoning_efforts {
+            return efforts.clone();
+        }
         if self.reasoning_levels == CapLevel::Supported {
             ReasoningEffort::ALL.to_vec()
         } else {
