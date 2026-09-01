@@ -13,6 +13,7 @@ use tokio::sync::Notify;
 use crate::bus::EventBus;
 use crate::code_execution::ConfiguredExecProvider;
 use crate::foreground_prompt::skill_summary_catalog_lines;
+use crate::lane::{LaneOutcome, LaneStep};
 use crate::resolver::ProviderResolver;
 use crate::retry::RetrySchedule;
 use crate::state::SandboxAttemptGuard;
@@ -201,6 +202,15 @@ pub(crate) enum SandboxAgentRunWorkerOutcome {
     ParentWaitSetResumed(tidebreak_core::CallId),
     ToolCheckpointed(tidebreak_core::CallId),
     LeaseLost(tidebreak_core::AgentRunId),
+}
+
+impl LaneOutcome for SandboxAgentRunWorkerOutcome {
+    fn lane_step(&self) -> LaneStep {
+        match self {
+            Self::Idle => LaneStep::Idle,
+            _ => LaneStep::Worked,
+        }
+    }
 }
 
 #[derive(Clone)]

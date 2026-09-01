@@ -47,6 +47,7 @@ mod foreground_prompt;
 mod gateway_drafts;
 mod gateway_runtime;
 pub mod host_folders;
+mod lane;
 /// Per-launch `{data_dir}/listen.json` so a CLI can attach without argv tokens.
 pub mod listen_endpoint;
 pub mod logging;

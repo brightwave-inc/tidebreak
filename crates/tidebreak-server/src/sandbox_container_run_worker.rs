@@ -11,6 +11,7 @@ use tidebreak_core::{Result, Store};
 use tidebreak_sandbox_protocol::SandboxBackend;
 use tokio::sync::Notify;
 
+use crate::lane::{self, FailureWait, LanePacing};
 use crate::resolver::ProviderResolver;
 use crate::sandbox_container_run::{SandboxContainerRunConfig, SandboxContainerRunner};
 use crate::state::SandboxSteerGuard;
@@ -109,26 +110,18 @@ impl SandboxContainerRunWorker {
     }
 
     async fn run_drive_lane(self) {
-        let mut idle_delay = self.config.idle_min;
-        loop {
-            match self.drive_one().await {
-                Ok(true) => idle_delay = self.config.idle_min,
-                Ok(false) => {
-                    tokio::select! {
-                        _ = tokio::time::sleep(idle_delay) => {}
-                        _ = self.wake.notified() => {}
-                    }
-                    idle_delay = idle_delay.saturating_mul(2).min(self.config.idle_cap);
-                }
-                Err(error) => {
-                    tracing::warn!("tidebreak: container worker iteration failed: {error}");
-                    tokio::select! {
-                        _ = tokio::time::sleep(self.config.failure_delay) => {}
-                        _ = self.wake.notified() => {}
-                    }
-                }
-            }
-        }
+        let pacing = LanePacing {
+            idle_min: self.config.idle_min,
+            idle_cap: self.config.idle_cap,
+            // A struggling store gets the same flat wait every time here; this
+            // worker has no failure cap to grow toward.
+            failure: FailureWait::Fixed(self.config.failure_delay),
+        };
+        let this = &self;
+        lane::run_lane("container worker", pacing, &self.wake, move || {
+            this.drive_one()
+        })
+        .await;
     }
 
     async fn drive_one(&self) -> Result<bool> {
