@@ -3684,7 +3684,10 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
         !isRecord(value.decision) ||
         (value.decision.type !== "approve" &&
           value.decision.type !== "deny" &&
-          value.decision.type !== "abandoned")
+          value.decision.type !== "abandoned" &&
+          value.decision.type !== "approved_with_grant" &&
+          value.decision.type !== "answered" &&
+          value.decision.type !== "plan_decided")
       ) {
         return null;
       }

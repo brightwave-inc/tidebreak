@@ -350,6 +350,23 @@ function parseApprovalKind(value: unknown): CodeApprovalKind | null {
       return typeof kind.summary === "string"
         ? (value as CodeApprovalKind)
         : null;
+    case "tool_use":
+      return record(kind.preview) &&
+        Array.isArray(kind.offered_grants)
+        ? (value as CodeApprovalKind)
+        : null;
+    case "questions":
+      return Array.isArray(kind.questions) &&
+        kind.questions.every((question) => {
+          const entry = record(question);
+          return entry !== null && typeof entry.question === "string";
+        })
+        ? (value as CodeApprovalKind)
+        : null;
+    case "plan":
+      return typeof kind.proposed_mode === "string"
+        ? (value as CodeApprovalKind)
+        : null;
     default:
       return null;
   }
