@@ -3,7 +3,12 @@
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ApiClient, ModelInfo, ModelRoleInfo } from "../api";
+import type {
+  ApiClient,
+  ModelInfo,
+  ModelRoleInfo,
+  RuntimeSettings,
+} from "../api";
 import { ModelsPanel } from "./ModelsPanel";
 
 const models: ModelInfo[] = [
@@ -105,6 +110,38 @@ const roles: ModelRoleInfo[] = [
   { role: "utility", selection: null, resolved_key: "openai::gpt-4o-mini" },
 ];
 
+// The settings document behind the panel's prompt-cache-retention read.
+const runtimeSettings: RuntimeSettings = {
+  model: null,
+  has_api_key: false,
+  chat_defaults: {
+    model: null,
+    reasoning_effort: null,
+    permission_mode: null,
+    network_policy: null,
+  },
+  max_active_background_agents: 5,
+  sandbox_agent_checkin_steps: 100,
+  sandbox_agent_error_checkin: 5,
+  compaction: {
+    threshold_fraction: 0.75,
+    target_fraction: 0.25,
+    min_threshold_tokens: 50000,
+    protect_recent_messages: 5,
+  },
+  model_visibility_overrides: {},
+  prompt_cache_retention: "five_minutes",
+  computer_use_enabled: true,
+  code_turn_recaps_enabled: true,
+  rewrite_closing_messages: false,
+  git_source_control: {
+    auto_rename_branches: true,
+    branch_prefix_mode: "account",
+    account_prefix: "alex/",
+    effective_branch_prefix: "alex/",
+  },
+};
+
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
@@ -121,7 +158,12 @@ describe("ModelsPanel", () => {
         resolved_key: selection ?? "openai::gpt-4o-mini",
       }));
     const onChanged = vi.fn();
-    const client = { listModels, putModelRole } as unknown as ApiClient;
+    const getSettings = vi.fn().mockResolvedValue(runtimeSettings);
+    const client = {
+      listModels,
+      putModelRole,
+      getSettings,
+    } as unknown as ApiClient;
     const user = userEvent.setup();
 
     render(
@@ -271,7 +313,12 @@ describe("ModelsPanel under managed policy", () => {
         selection,
         resolved_key: selection ?? "model_gateway::gw-flagship",
       }));
-    const client = { listModels, putModelRole } as unknown as ApiClient;
+    const getSettings = vi.fn().mockResolvedValue(runtimeSettings);
+    const client = {
+      listModels,
+      putModelRole,
+      getSettings,
+    } as unknown as ApiClient;
     const user = userEvent.setup();
 
     render(<ModelsPanel client={client} models={managedModels} managed />);
@@ -355,7 +402,8 @@ describe("ModelsPanel under managed policy", () => {
       .fn()
       .mockResolvedValueOnce(unsynced)
       .mockResolvedValue({ models: managedModels, roles: managedRoles });
-    const client = { listModels } as unknown as ApiClient;
+    const getSettings = vi.fn().mockResolvedValue(runtimeSettings);
+    const client = { listModels, getSettings } as unknown as ApiClient;
 
     vi.useFakeTimers();
     render(<ModelsPanel client={client} models={[]} managed />);

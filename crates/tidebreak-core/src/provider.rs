@@ -463,6 +463,34 @@ impl PromptCacheMode {
     }
 }
 
+/// How long a cached prompt prefix stays readable between requests.
+///
+/// The user's choice, not a heuristic: a longer retention costs more to write
+/// (2× base input on Anthropic versus 1.25× for the default) and buys nothing
+/// while calls land seconds apart, but keeps the prefix warm across the
+/// minutes-long pauses of a human-paced conversation, where every reply past
+/// the default window otherwise rewrites the whole transcript at the write
+/// premium. Providers without a retention control ignore this, like every
+/// other request control they cannot express.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptCacheRetention {
+    /// The provider's default window (5 minutes on Anthropic).
+    #[default]
+    FiveMinutes,
+    /// The extended window (1 hour on Anthropic).
+    OneHour,
+}
+
+impl PromptCacheRetention {
+    /// Whether this is the default retention, elided from serialized requests
+    /// like every other defaulted `ChatRequest` field.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        matches!(self, Self::FiveMinutes)
+    }
+}
+
 /// A request for one streamed model completion.
 ///
 /// The struct is constructed as a literal rather than through a builder, so it
@@ -556,6 +584,11 @@ pub struct ChatRequest {
     /// [`PromptCacheMode`]; one-shot utility calls should say so.
     #[serde(default, skip_serializing_if = "PromptCacheMode::is_conversation")]
     pub prompt_cache: PromptCacheMode,
+    /// How long the entries this request writes should stay readable. See
+    /// [`PromptCacheRetention`]; meaningless when `prompt_cache` writes
+    /// nothing.
+    #[serde(default, skip_serializing_if = "PromptCacheRetention::is_default")]
+    pub prompt_cache_retention: PromptCacheRetention,
     /// Pixels for the [`ContentBlock::Image`] blocks in `messages`.
     ///
     /// Hydrated from the blob store for exactly this request. Skipped by serde

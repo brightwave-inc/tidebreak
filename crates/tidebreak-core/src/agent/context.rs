@@ -340,6 +340,11 @@ impl Agent {
             ),
             temperature: self.config.temperature,
             reasoning_effort: self.config.reasoning_effort,
+            // The checkpoint rides the conversation cache (decision 0019), so
+            // it also rides the conversation's retention: a differing TTL here
+            // would not invalidate anything, but keeping them identical keeps
+            // the whole prefix on one policy.
+            prompt_cache_retention: self.config.prompt_cache_retention,
             // Compaction is maintenance inside the same Tidebreak turn, not a
             // second search budget. Provider limits are request-scoped, so
             // forwarding the turn's allowance here would let maintenance

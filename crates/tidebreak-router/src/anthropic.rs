@@ -14,9 +14,9 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use tidebreak_core::error::{AgentError, ProviderErrorInfo, Result};
 use tidebreak_core::provider::{
-    provider_executed_tool_call_text, ChatRequest, ContentBlock, ModelProvider, ProviderEvent,
-    ProviderId, ProviderToolReplay, ReasoningOrigin, RefusalDetails, ResponseFormat, StopReason,
-    ToolChoice, Usage,
+    provider_executed_tool_call_text, ChatRequest, ContentBlock, ModelProvider,
+    PromptCacheRetention, ProviderEvent, ProviderId, ProviderToolReplay, ReasoningOrigin,
+    RefusalDetails, ResponseFormat, StopReason, ToolChoice, Usage,
 };
 use tidebreak_core::tool::{strict_json_schema, OptionalProperties};
 use tidebreak_core::{ImageAttachments, ReasoningEffort, Role};
@@ -393,6 +393,7 @@ fn replace_paused_assistant_message(body: &mut Value, blocks: &[Value], first_pa
 fn build_request_json(req: &ChatRequest) -> Result<Value> {
     let rename_client_web_search = req.vendor_web_search.is_some();
     let caches_prompt = req.prompt_cache.writes_cache();
+    let retention = req.prompt_cache_retention;
     let messages = req
         .messages
         .iter()
@@ -426,7 +427,7 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
         // prompt can carry a cache breakpoint.
         let mut block = json!({ "type": "text", "text": system });
         if caches_prompt {
-            block["cache_control"] = ephemeral_cache_control();
+            block["cache_control"] = ephemeral_cache_control(retention);
         }
         body["system"] = json!([block]);
     }
@@ -502,7 +503,7 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
     // After the whole tool array is settled, including a structured-output tool
     // appended above.
     if caches_prompt {
-        mark_last_tool_cacheable(&mut body);
+        mark_last_tool_cacheable(&mut body, retention);
     }
     if let Some(temperature) = req.temperature {
         body["temperature"] = json!(temperature);
@@ -547,7 +548,7 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
     // actually goes on the wire — `attach_reasoning_blocks` prepends thinking
     // blocks, which count toward the lookup window.
     if caches_prompt {
-        mark_cacheable_transcript_tail(&mut body);
+        mark_cacheable_transcript_tail(&mut body, retention);
     }
     Ok(body)
 }
@@ -592,11 +593,28 @@ fn attach_reasoning_blocks(body: &mut Value, req: &ChatRequest) {
     }
 }
 
-/// The breakpoint marker. Five-minute TTL: an agentic turn's model calls land
-/// seconds apart, so the longer TTL would only double the write price for reads
-/// that already happen well inside the default window.
-fn ephemeral_cache_control() -> Value {
-    json!({ "type": "ephemeral" })
+/// The breakpoint marker.
+///
+/// The bare marker is the 5-minute TTL — right when calls land seconds apart,
+/// as an agentic turn's do, where the 1-hour TTL would only double the write
+/// price for reads that already happen well inside the default window. The
+/// user's retention setting opts a conversation into `ttl: "1h"` (2× write,
+/// same read price) for the human-paced case, where replies routinely arrive
+/// after the default window has expired and every such reply rewrites the
+/// whole prefix at the write premium.
+///
+/// The chosen TTL applies to every breakpoint this request places — tools,
+/// system, lagging, and tail alike. Anthropic rejects a request whose
+/// longer-TTL breakpoint appears after a shorter-TTL one, and the transcript
+/// breakpoints render last, so extending only them (the intuitive "just the
+/// tail" reading) is exactly the invalid order. A uniform TTL is also the
+/// cheaper-to-reason-about policy: all four breakpoints sit inside one prefix
+/// whose entries are written once and refreshed together on every read.
+fn ephemeral_cache_control(retention: PromptCacheRetention) -> Value {
+    match retention {
+        PromptCacheRetention::FiveMinutes => json!({ "type": "ephemeral" }),
+        PromptCacheRetention::OneHour => json!({ "type": "ephemeral", "ttl": "1h" }),
+    }
 }
 
 /// Put a breakpoint on the last tool definition.
@@ -609,14 +627,14 @@ fn ephemeral_cache_control() -> Value {
 ///
 /// Requires deterministic tool order to hit at all — see the note on
 /// `mark_cacheable_transcript_tail`.
-fn mark_last_tool_cacheable(body: &mut Value) {
+fn mark_last_tool_cacheable(body: &mut Value, retention: PromptCacheRetention) {
     if let Some(last) = body
         .get_mut("tools")
         .and_then(Value::as_array_mut)
         .and_then(|tools| tools.last_mut())
         .and_then(Value::as_object_mut)
     {
-        last.insert("cache_control".into(), ephemeral_cache_control());
+        last.insert("cache_control".into(), ephemeral_cache_control(retention));
     }
 }
 
@@ -670,7 +688,7 @@ fn mark_last_tool_cacheable(body: &mut Value) {
 /// shortens it. The tail itself is the one position with nothing after it, so
 /// there it moves backwards instead and the trailing thinking blocks go
 /// uncached, which costs one step's delta and never correctness.
-fn mark_cacheable_transcript_tail(body: &mut Value) {
+fn mark_cacheable_transcript_tail(body: &mut Value, retention: PromptCacheRetention) {
     /// How far Anthropic's cache lookup walks back from a breakpoint, in
     /// content blocks. The lagging breakpoint trails the tail by exactly one
     /// window, so consecutive calls keep a breakpoint within reach of one the
@@ -707,7 +725,7 @@ fn mark_cacheable_transcript_tail(body: &mut Value) {
     for position in [Some(tail), lagging].into_iter().flatten() {
         let (message_index, block_index, _) = blocks[position];
         if let Some(block) = messages[message_index]["content"][block_index].as_object_mut() {
-            block.insert("cache_control".into(), ephemeral_cache_control());
+            block.insert("cache_control".into(), ephemeral_cache_control(retention));
         }
     }
 }
@@ -1669,6 +1687,45 @@ mod tests {
     }
 
     #[test]
+    fn the_one_hour_retention_extends_every_breakpoint() {
+        let req = ChatRequest {
+            provider: Some(ProviderId::new("anthropic")),
+            model: "claude-opus-4-8".into(),
+            system: Some("be brief".into()),
+            messages: vec![
+                ChatMessage::text(Role::User, "hi"),
+                ChatMessage::text(Role::Assistant, "hello"),
+            ],
+            tools: vec![ToolSpec {
+                name: "read_file".into(),
+                description: "read a file".into(),
+                input_schema: json!({"type": "object"}),
+            }],
+            prompt_cache_retention: PromptCacheRetention::OneHour,
+            images: ImageAttachments::new(),
+            ..Default::default()
+        };
+        let body = build_request_json(&req).unwrap();
+
+        // Every breakpoint carries the TTL, none stays on the default:
+        // Anthropic rejects a 1-hour breakpoint that appears after a 5-minute
+        // one, and tools and system render before the transcript.
+        let ephemeral_1h = json!({ "type": "ephemeral", "ttl": "1h" });
+        assert_eq!(body["tools"][0]["cache_control"], ephemeral_1h);
+        assert_eq!(body["system"][0]["cache_control"], ephemeral_1h);
+        assert_eq!(
+            body["messages"][1]["content"][0]["cache_control"],
+            ephemeral_1h
+        );
+        let serialized = serde_json::to_string(&body).unwrap();
+        assert_eq!(
+            serialized.matches("cache_control").count(),
+            serialized.matches(r#""ttl":"1h""#).count(),
+            "{body}"
+        );
+    }
+
+    #[test]
     fn a_lagging_breakpoint_keeps_a_wide_tool_fan_out_inside_the_lookup_window() {
         // One model step appends an assistant message with 15 tool calls and a
         // user message with their 15 results: 30 blocks at once, beyond the
@@ -2469,7 +2526,7 @@ mod tests {
         // The transcript-tail breakpoint still lands on the true tail.
         assert_eq!(
             body["messages"][2]["content"][0]["cache_control"],
-            ephemeral_cache_control()
+            ephemeral_cache_control(PromptCacheRetention::FiveMinutes)
         );
 
         // The same native protocol served through a gateway has a distinct

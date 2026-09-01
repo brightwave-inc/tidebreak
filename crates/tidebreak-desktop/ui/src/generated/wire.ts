@@ -3619,6 +3619,19 @@ export type PromptBody = { name: string,
 body: string, };
 
 /**
+ * How long a cached prompt prefix stays readable between requests.
+ *
+ * The user's choice, not a heuristic: a longer retention costs more to write
+ * (2× base input on Anthropic versus 1.25× for the default) and buys nothing
+ * while calls land seconds apart, but keeps the prefix warm across the
+ * minutes-long pauses of a human-paced conversation, where every reply past
+ * the default window otherwise rewrites the whole transcript at the write
+ * premium. Providers without a retention control ignore this, like every
+ * other request control they cannot express.
+ */
+export type PromptCacheRetention = "five_minutes" | "one_hour";
+
+/**
  * Which source a validated prompt package was loaded from.
  *
  * Host-derived from the load path, never from manifest content, so a user
@@ -4294,6 +4307,13 @@ compaction: CompactionSettings,
  * valid for existing chats, replay, and explicit selection.
  */
 model_visibility_overrides: { [key in string]: ModelVisibility },
+/**
+ * How long a conversation's prompt-cache entries stay readable, for
+ * providers with a retention control. Default `five_minutes`; `one_hour`
+ * costs more per cache write but keeps the conversation prefix warm
+ * across slower replies.
+ */
+prompt_cache_retention: PromptCacheRetention,
 /**
  * Whether the computer-use capability (screen capture + app control) is
  * enabled. Read at boot; turning it off unregisters the tools on the next

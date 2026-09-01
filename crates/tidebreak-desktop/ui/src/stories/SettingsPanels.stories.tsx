@@ -4,10 +4,16 @@ import { fn, userEvent, within } from "storybook/test";
 import { AgentsPanel } from "@/settings/AgentsPanel";
 import { AppearancePanel } from "@/settings/AppearancePanel";
 import { CompactionPanel } from "@/settings/CompactionPanel";
+import { ModelsPanel } from "@/settings/ModelsPanel";
 import { UpdatesPanel } from "@/settings/UpdatesPanel";
+import type { PromptCacheRetention } from "@/api";
 import type { ThemeMode } from "@/theme";
 import type { DesktopUpdateState } from "@/updates";
-import { SettingsStoryHarness, storySettings } from "./SettingsStoryHarness";
+import {
+  SettingsStoryHarness,
+  storyModels,
+  storySettings,
+} from "./SettingsStoryHarness";
 
 const idleUpdate: DesktopUpdateState = {
   status: "idle",
@@ -17,9 +23,10 @@ const idleUpdate: DesktopUpdateState = {
 };
 
 type SettingsShowcaseProps = {
-  panel: "appearance" | "agents" | "context" | "updates";
+  panel: "appearance" | "agents" | "context" | "models" | "updates";
   loadState?: "ready" | "loading" | "failed";
   turnRecapsEnabled?: boolean;
+  promptCacheRetention?: PromptCacheRetention;
   theme?: ThemeMode;
   updateState?: DesktopUpdateState;
   upToDate?: boolean;
@@ -29,6 +36,7 @@ function SettingsShowcase({
   panel,
   loadState = "ready",
   turnRecapsEnabled = true,
+  promptCacheRetention = "five_minutes",
   theme = "system",
   updateState = idleUpdate,
   upToDate = false,
@@ -56,6 +64,19 @@ function SettingsShowcase({
         state={loadState === "ready" ? "configured" : loadState}
       >
         {(client) => <CompactionPanel client={client} />}
+      </SettingsStoryHarness>
+    );
+  }
+  if (panel === "models") {
+    return (
+      <SettingsStoryHarness
+        state={loadState === "ready" ? "configured" : loadState}
+        settings={{
+          ...storySettings,
+          prompt_cache_retention: promptCacheRetention,
+        }}
+      >
+        {(client) => <ModelsPanel client={client} models={storyModels} />}
       </SettingsStoryHarness>
     );
   }
@@ -118,6 +139,22 @@ export const ContextAdvanced: Story = {
 
 export const ContextFailure: Story = {
   args: { panel: "context", loadState: "failed" },
+};
+
+export const ModelsDefaultRetention: Story = {
+  args: { panel: "models" },
+};
+
+export const ModelsOneHourRetention: Story = {
+  args: { panel: "models", promptCacheRetention: "one_hour" },
+};
+
+export const ModelsLoading: Story = {
+  args: { panel: "models", loadState: "loading" },
+};
+
+export const ModelsFailure: Story = {
+  args: { panel: "models", loadState: "failed" },
 };
 
 export const UpdateReady: Story = {
