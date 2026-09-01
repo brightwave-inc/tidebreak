@@ -38,6 +38,7 @@ use super::attention::apply_trigger_attention;
 use super::delivery::{query_pull_requests_by_number, repository_target_from_local};
 use super::runtime::CodeRuntime;
 use super::session_worker::journal_event;
+use super::trigger_target_at;
 use crate::error::ServerError;
 use crate::routes::code::types::{
     CodeDeliveryPullRequestSummary, CodeDeliveryPullRequestsPage, CodeDeliveryWorkspaceLink,
@@ -1016,9 +1017,12 @@ async fn most_recently_active(
         ) {
             continue;
         }
-        let at = latest_turn(&runtime.db, owner, session.id)
-            .await?
-            .map_or(session.created_at, |turn| turn.started_at);
+        let at = trigger_target_at(
+            session.created_at,
+            latest_turn(&runtime.db, owner, session.id)
+                .await?
+                .map(|turn| turn.started_at),
+        );
         if best.as_ref().is_none_or(|(best_at, _)| at > *best_at) {
             best = Some((at, session.clone()));
         }

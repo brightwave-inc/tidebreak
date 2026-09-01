@@ -797,6 +797,7 @@ describe("pull request state in live updates", () => {
     attention: { state: { type: "working" }, source: "lifecycle" },
     title: "Fix login",
     turn_count: 3,
+    trigger_target_at: "2026-08-29T12:00:00Z",
     activity: "shell",
     pr_state: richPr,
   };
@@ -840,6 +841,16 @@ describe("pull request state in live updates", () => {
         type: "digest",
         ...digest,
         harness_kind: "cursor",
+      }),
+    ).toBeNull();
+  });
+
+  it("rejects a non-string trigger target timestamp", () => {
+    expect(
+      parseCodeUpdateNotice({
+        type: "digest",
+        ...digest,
+        trigger_target_at: 42,
       }),
     ).toBeNull();
   });

@@ -1568,6 +1568,12 @@ export type CodeSessionDigest = { workspace: WorkspaceId, session: CodeSessionId
  */
 harness_kind?: HarnessKind, lifecycle: CodeSessionLifecycle, attention: Attention, title: string, turn_count: number, 
 /**
+ * Timestamp trigger delivery uses to rank candidate sessions: the newest
+ * turn start, or session creation before the first turn. Optional so a
+ * desktop can still read a digest from an older server during an update.
+ */
+trigger_target_at?: string, 
+/**
  * What the live turn is occupied with, while running.
  */
 activity?: CodeSessionActivity, pr_state?: PullRequestDigest, 
@@ -1747,6 +1753,10 @@ sessions: Array<CodeSessionDigest>, } | { "type": "digest", workspace: Workspace
  * Engine identity for the session represented by this digest.
  */
 harness_kind?: HarnessKind, lifecycle: CodeSessionLifecycle, attention: Attention, title: string, turn_count: number, 
+/**
+ * Timestamp trigger delivery uses to rank candidate sessions.
+ */
+trigger_target_at?: string, 
 /**
  * What the live turn is occupied with, while running.
  */

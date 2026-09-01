@@ -417,6 +417,9 @@ export function noticeToAction(
         attention: notice.attention,
         title: notice.title,
         turn_count: notice.turn_count,
+        ...(notice.trigger_target_at !== undefined
+          ? { trigger_target_at: notice.trigger_target_at }
+          : {}),
         ...(notice.activity !== undefined ? { activity: notice.activity } : {}),
         ...(notice.pr_state !== undefined ? { pr_state: notice.pr_state } : {}),
         ...(notice.pr_count !== undefined ? { pr_count: notice.pr_count } : {}),

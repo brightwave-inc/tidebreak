@@ -3913,6 +3913,7 @@ export function parseCodeSessionDigest(
       "attention",
       "title",
       "turn_count",
+      "trigger_target_at",
       "activity",
       "pr_state",
       "pr_count",
@@ -3930,6 +3931,7 @@ export function parseCodeSessionDigest(
     !isMember(value.lifecycle, SESSION_LIFECYCLES) ||
     typeof value.title !== "string" ||
     !isFiniteNumber(value.turn_count) ||
+    !optionalString(value.trigger_target_at) ||
     (value.activity !== undefined &&
       !isMember(value.activity, SESSION_ACTIVITIES)) ||
     (value.pr_count !== undefined && !isFiniteNumber(value.pr_count)) ||
@@ -3960,6 +3962,9 @@ export function parseCodeSessionDigest(
     attention,
     title: value.title,
     turn_count: value.turn_count,
+    ...(value.trigger_target_at !== undefined
+      ? { trigger_target_at: value.trigger_target_at }
+      : {}),
     ...(value.activity !== undefined ? { activity: value.activity } : {}),
     ...(pr_state ? { pr_state } : {}),
     ...(value.pr_count !== undefined ? { pr_count: value.pr_count } : {}),
@@ -4010,6 +4015,7 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
           "attention",
           "title",
           "turn_count",
+          "trigger_target_at",
           "activity",
           "pr_state",
           "pr_count",
@@ -4027,6 +4033,7 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
         !isMember(value.lifecycle, SESSION_LIFECYCLES) ||
         typeof value.title !== "string" ||
         !isFiniteNumber(value.turn_count) ||
+        !optionalString(value.trigger_target_at) ||
         (value.activity !== undefined &&
           !isMember(value.activity, SESSION_ACTIVITIES)) ||
         (value.pr_count !== undefined && !isFiniteNumber(value.pr_count)) ||
@@ -4061,6 +4068,9 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
         attention,
         title: value.title,
         turn_count: value.turn_count,
+        ...(value.trigger_target_at !== undefined
+          ? { trigger_target_at: value.trigger_target_at }
+          : {}),
         ...(value.activity !== undefined ? { activity: value.activity } : {}),
         ...(pr_state ? { pr_state } : {}),
         ...(value.pr_count !== undefined ? { pr_count: value.pr_count } : {}),

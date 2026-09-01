@@ -50,6 +50,9 @@ pub(crate) struct SessionDigest {
     pub attention: Attention,
     pub title: String,
     pub turn_count: i64,
+    /// Timestamp trigger delivery uses to rank candidate sessions: the newest
+    /// turn start, or session creation before the first turn.
+    pub trigger_target_at: DateTime<Utc>,
     /// What the live turn is occupied with. Set only while lifecycle is
     /// running; older clients safely fall back to a generic running label.
     pub activity: Option<CodeSessionActivity>,

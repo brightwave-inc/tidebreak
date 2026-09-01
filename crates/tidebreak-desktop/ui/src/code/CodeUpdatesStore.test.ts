@@ -281,6 +281,7 @@ describe("reduceCodeUpdates", () => {
         attention: working,
         title: "first change",
         turn_count: 1,
+        trigger_target_at: "2026-08-29T12:30:00Z",
         activity: "monitor",
       }),
     ).toEqual({
@@ -294,6 +295,7 @@ describe("reduceCodeUpdates", () => {
         attention: working,
         title: "first change",
         turn_count: 1,
+        trigger_target_at: "2026-08-29T12:30:00Z",
         activity: "monitor",
       },
     });
