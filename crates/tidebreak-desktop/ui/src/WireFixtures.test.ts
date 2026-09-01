@@ -1,5 +1,13 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { metadataFrame } from "./ChatSessionController";
 import {
+  initialChatSessionState,
+  reduceChatSessionEvent,
+} from "./ChatSessionReducer";
+import {
+  type ChatFrame,
   RENDERER_FOLDER_ACCESS_REASON,
   parseFolderAccessRequest,
   parsePendingToolApproval,
@@ -9,6 +17,24 @@ import {
   PENDING_APPROVAL_WITHOUT_PREVIEW,
   PENDING_FOLDER_ACCESS_REQUEST,
 } from "./generated/fixtures";
+
+/**
+ * One real frame of every kind the chat socket carries, serialized by the
+ * server's own types. The same file is decoded by the CLI's tests and by the
+ * server's round trip, so the three readers of this socket cannot drift apart
+ * without one of them failing.
+ */
+const CHAT_FRAMES: { name: string; frame: ChatFrame }[] = JSON.parse(
+  readFileSync(
+    fileURLToPath(
+      new URL(
+        "../../../tidebreak-server/fixtures/chat-frames.json",
+        import.meta.url,
+      ),
+    ),
+    "utf8",
+  ),
+);
 
 /**
  * The validators, run against the server's real output.
@@ -89,5 +115,47 @@ describe("validators against real server output", () => {
     expect(PENDING_FOLDER_ACCESS_REQUEST.reason).toBe(
       RENDERER_FOLDER_ACCESS_REASON,
     );
+  });
+});
+
+describe("chat frames against real server output", () => {
+  it("carries every frame kind", () => {
+    expect(CHAT_FRAMES.length).toBeGreaterThan(20);
+    const tags = new Set(
+      CHAT_FRAMES.map(({ frame }) =>
+        "event" in frame ? frame.event.type : `metadata:${frame.metadata}`,
+      ),
+    );
+    expect(tags.has("turn_started")).toBe(true);
+    expect(tags.has("tool_call_completed")).toBe(true);
+    expect(tags.has("metadata:titled")).toBe(true);
+  });
+
+  it("reduces every journaled frame without throwing", () => {
+    // The renderer parses each frame with a cast and no runtime validation,
+    // so the reducer is the first code that reads the payload. Every real
+    // frame has to be something it can take, in journal order.
+    let state = initialChatSessionState();
+    const deps = { nextId: () => "id", now: () => "2026-09-01T00:00:00Z" };
+    let reduced = 0;
+    for (const { name, frame } of CHAT_FRAMES) {
+      if (!("event" in frame)) continue;
+      const transition = reduceChatSessionEvent(state, frame, deps);
+      expect(transition.state.lastSeq, name).toBe(frame.seq);
+      state = transition.state;
+      reduced += 1;
+    }
+    expect(reduced).toBeGreaterThan(20);
+  });
+
+  it("recognizes every metadata frame and no event frame as metadata", () => {
+    for (const { name, frame } of CHAT_FRAMES) {
+      const metadata = metadataFrame(frame);
+      if ("metadata" in frame) {
+        expect(metadata, name).toEqual(frame);
+      } else {
+        expect(metadata, name).toBeNull();
+      }
+    }
   });
 });

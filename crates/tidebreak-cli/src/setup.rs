@@ -16,7 +16,7 @@
 
 use std::io::Read as _;
 
-use tidebreak_core::{AgentError, AgentRunId, ChatId, Result, TurnId};
+use tidebreak_core::{AgentActivityDetail, AgentError, AgentRunId, ChatId, Result, TurnId};
 
 use crate::api::client::Client;
 use crate::api::wire::{McpServerInfo, McpServersInfo};
@@ -550,7 +550,7 @@ async fn execute(client: &Client, command: Command, format: OutputFormat) -> Res
                         "  {}  {}  {}{}",
                         item.at,
                         item.kind.as_str(),
-                        item.outcome,
+                        item.outcome.as_str(),
                         headline
                     );
                 }
@@ -608,42 +608,30 @@ fn first_line(text: &str) -> String {
 }
 
 /// A short suffix for one activity row: the command or query when present.
-fn activity_headline(detail: Option<&serde_json::Value>) -> String {
-    let Some(detail) = detail else {
-        return String::new();
-    };
-    if let Some(command) = detail.get("command").and_then(|value| value.as_str()) {
-        let args = detail
-            .get("args")
-            .and_then(|value| value.as_array())
-            .map(|entries| {
-                entries
-                    .iter()
-                    .filter_map(|entry| entry.as_str())
-                    .take(4)
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            })
-            .unwrap_or_default();
-        if args.is_empty() {
-            return format!("  {command}");
+fn activity_headline(detail: Option<&AgentActivityDetail>) -> String {
+    match detail {
+        Some(AgentActivityDetail::Exec { command, args, .. }) => {
+            let args = args.iter().take(4).cloned().collect::<Vec<_>>().join(" ");
+            if args.is_empty() {
+                return format!("  {command}");
+            }
+            let clipped = if args.len() > 60 {
+                format!("{}…", &args[..60])
+            } else {
+                args
+            };
+            format!("  {command} {clipped}")
         }
-        let clipped = if args.len() > 60 {
-            format!("{}…", &args[..60])
-        } else {
-            args
-        };
-        return format!("  {command} {clipped}");
+        Some(AgentActivityDetail::Search { query }) => {
+            let clipped = if query.len() > 72 {
+                format!("{}…", &query[..72])
+            } else {
+                query.clone()
+            };
+            format!("  {clipped}")
+        }
+        Some(AgentActivityDetail::File { .. }) | None => String::new(),
     }
-    if let Some(query) = detail.get("query").and_then(|value| value.as_str()) {
-        let clipped = if query.len() > 72 {
-            format!("{}…", &query[..72])
-        } else {
-            query.to_owned()
-        };
-        return format!("  {clipped}");
-    }
-    String::new()
 }
 
 /// Write one JSON object on stdout, matching print mode's one-object-per-line

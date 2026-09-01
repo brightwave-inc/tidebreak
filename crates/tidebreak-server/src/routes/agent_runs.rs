@@ -228,6 +228,24 @@ pub enum AgentActivityKind {
     ImportConnectedFile,
 }
 
+impl AgentActivityKind {
+    /// The wire spelling, for a client that lists activity as text. Pinned to
+    /// the serde rendering by `activity_names_match_the_wire`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Exec => "exec",
+            Self::WebSearch => "web_search",
+            Self::UpdateTaskPlan => "update_task_plan",
+            Self::ReadDelegatedFile => "read_delegated_file",
+            Self::ListConnectedFolders => "list_connected_folders",
+            Self::ListFolder => "list_folder",
+            Self::ReadConnectedFile => "read_connected_file",
+            Self::ImportConnectedFile => "import_connected_file",
+        }
+    }
+}
+
 /// Coarse checkpoint lifecycle suitable for display.
 ///
 /// This intentionally does not mirror all durable executor states; only live
@@ -291,6 +309,21 @@ pub enum AgentActivityOutcome {
     Completed,
     Failed,
     Cancelled,
+}
+
+impl AgentActivityOutcome {
+    /// The wire spelling, for a client that lists activity as text. Pinned to
+    /// the serde rendering by `activity_names_match_the_wire`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Waiting => "waiting",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
 }
 
 /// One renderer-safe entry in a background run's ordered activity history.

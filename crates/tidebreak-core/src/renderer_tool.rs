@@ -60,6 +60,47 @@ pub enum RendererToolName {
     Other,
 }
 
+impl RendererToolName {
+    /// The wire spelling, for a client that prints the name as text. Pinned to
+    /// the serde rendering by `as_str_matches_the_wire_spelling`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Search => "search",
+            Self::ListDocuments => "list_documents",
+            Self::ReadDocument => "read_document",
+            Self::ReadToolResult => "read_tool_result",
+            Self::WebSearch => "web_search",
+            Self::WebExtract => "web_extract",
+            Self::ReadDelegatedFile => "read_delegated_file",
+            Self::ReadFile => "read_file",
+            Self::ListDir => "list_dir",
+            Self::WriteFile => "write_file",
+            Self::RequestFolderAccess => "request_folder_access",
+            Self::ConnectFolder => "connect_folder",
+            Self::ListConnectedFolders => "list_connected_folders",
+            Self::ListFolder => "list_folder",
+            Self::ReadConnectedFile => "read_connected_file",
+            Self::ImportConnectedFile => "import_connected_file",
+            Self::WriteOutputToConnectedFolder => "write_output_to_connected_folder",
+            Self::SpawnSandboxAgent => "spawn_sandbox_agent",
+            Self::WaitForAgents => "wait_for_agents",
+            Self::AskUserQuestions => "ask_user_questions",
+            Self::ExitPlanMode => "exit_plan_mode",
+            Self::UpdateTaskPlan => "update_task_plan",
+            Self::BrowserList => "browser_list",
+            Self::BrowserNavigate => "browser_navigate",
+            Self::BrowserSnapshot => "browser_snapshot",
+            Self::BrowserWait => "browser_wait",
+            Self::BrowserScreenshot => "browser_screenshot",
+            Self::BrowserAct => "browser_act",
+            Self::Exec => "exec",
+            Self::CreateApp => "create_app",
+            Self::Other => "other",
+        }
+    }
+}
+
 impl From<&str> for RendererToolName {
     /// Fold a registered tool name onto the vocabulary.
     ///
@@ -106,6 +147,52 @@ impl From<&str> for RendererToolName {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `as_str` is what a text client prints; it must agree with what serde
+    /// writes on the wire for every variant.
+    #[test]
+    fn as_str_matches_the_wire_spelling() {
+        for name in [
+            "search",
+            "list_documents",
+            "read_document",
+            "read_tool_result",
+            "web_search",
+            crate::WEB_EXTRACT_TOOL,
+            crate::SANDBOX_READ_DELEGATED_FILE_TOOL,
+            "read_file",
+            "list_dir",
+            "write_file",
+            "request_folder_access",
+            "connect_folder",
+            "list_connected_folders",
+            "list_folder",
+            "read_connected_file",
+            "import_connected_file",
+            crate::WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL,
+            "spawn_sandbox_agent",
+            "wait_for_agents",
+            crate::ASK_USER_QUESTIONS_TOOL,
+            crate::EXIT_PLAN_MODE_TOOL,
+            crate::UPDATE_TASK_PLAN_TOOL,
+            crate::BROWSER_LIST_TOOL,
+            crate::BROWSER_NAVIGATE_TOOL,
+            crate::BROWSER_SNAPSHOT_TOOL,
+            crate::BROWSER_WAIT_TOOL,
+            crate::BROWSER_SCREENSHOT_TOOL,
+            crate::BROWSER_ACT_TOOL,
+            "exec",
+            crate::local_app::CREATE_APP_TOOL,
+            "anything_else",
+        ] {
+            let folded = RendererToolName::from(name);
+            let wire = serde_json::to_value(folded).expect("a tool name serializes");
+            assert_eq!(wire.as_str(), Some(folded.as_str()), "{name}");
+            if folded != RendererToolName::Other {
+                assert_eq!(folded.as_str(), name);
+            }
+        }
+    }
 
     /// Every registered tool name the renderer can present must survive the
     /// fold, both live and when a terminal card is rebuilt from the journal.

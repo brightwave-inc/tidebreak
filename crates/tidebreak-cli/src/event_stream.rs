@@ -11,7 +11,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::api::client::{Client, DurableTurn, EventSocket};
 use crate::api::code::{decode_event_frame, SequencedCodeEventFrame};
-use crate::api::wire::{ChatFrame, ClientEvent};
+use crate::api::wire::{RendererAgentEvent, RendererChatFrame};
 
 /// Attempts to re-open the event socket after it closes mid-turn before giving
 /// up. The retries cover a transient hiccup — an accept-loop stumble when the
@@ -34,7 +34,8 @@ pub(crate) struct EventStream {
 }
 
 pub(crate) enum StreamNext {
-    Frame(String, ClientEvent),
+    /// Boxed: an event carries tool previews and dwarfs the other arms.
+    Frame(String, Box<RendererAgentEvent>),
     Durable(DurableTurn),
     Ignore,
 }
@@ -62,7 +63,9 @@ impl EventStream {
     pub(crate) async fn recv(&mut self) -> Option<String> {
         match self.socket.next().await {
             Some(Ok(Message::Text(text))) => {
-                if let Ok(ChatFrame::Event(frame)) = serde_json::from_str::<ChatFrame>(&text) {
+                if let Ok(RendererChatFrame::Event(frame)) =
+                    serde_json::from_str::<RendererChatFrame>(&text)
+                {
                     self.last_seq = frame.seq;
                 }
                 Some(text.to_string())
@@ -81,11 +84,13 @@ impl EventStream {
     ) -> Result<StreamNext> {
         match self.socket.next().await {
             Some(Ok(Message::Text(text))) => {
-                let Ok(ChatFrame::Event(frame)) = serde_json::from_str::<ChatFrame>(&text) else {
+                let Ok(RendererChatFrame::Event(frame)) =
+                    serde_json::from_str::<RendererChatFrame>(&text)
+                else {
                     return Ok(StreamNext::Ignore);
                 };
                 self.last_seq = frame.seq;
-                Ok(StreamNext::Frame(text.to_string(), frame.event))
+                Ok(StreamNext::Frame(text.to_string(), Box::new(frame.event)))
             }
             Some(Ok(_)) => Ok(StreamNext::Ignore),
             Some(Err(_)) | None => match self.reconnect(client, chat, turn_id).await? {

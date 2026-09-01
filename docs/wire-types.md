@@ -115,6 +115,38 @@ worth knowing before adding types.
   test, and the resulting per-id build warning is silenced by the
   `no-serde-warnings` feature.
 
+## The CLI reads the same types
+
+The CLI is the third consumer of this JSON, and it used to keep its own
+hand-written mirror of the event socket in `tidebreak-cli/src/api/wire.rs`.
+Nothing tied that mirror to the server either, so a renamed field compiled on
+both sides and failed when the CLI next followed a turn.
+
+The socket's frame, event, metadata, and status types are now imported from
+`tidebreak_server::wire`, the one public module a Rust client reads the
+contract from. A rename is a compile error in the CLI the way it is a type error
+in the renderer. The module documents the strictness that comes with it:
+closed vocabularies, unknown keys rejected (`deny_unknown_fields`, matching the
+renderer's `onlyKeys` guards), and an unknown event type failing its frame.
+
+Two more things are shared through it:
+
+- **Guard limits.** `tidebreak_server::wire::limits` holds the id, timestamp,
+  and cursor ceilings. They are generated into `wire.ts` as constants, and
+  `lib/wireDecode.ts` re-exports them, so the renderer and the CLI cannot apply
+  different numbers.
+- **Chat-frame fixtures.** `crates/tidebreak-server/fixtures/chat-frames.json`
+  is one real frame of every kind the socket carries, serialized from the
+  server's own types by the same generator test (a variant without a fixture
+  fails `the_chat_frame_fixtures_cover_every_event`). The server round-trips
+  it, the CLI decodes every entry, and the renderer runs every entry through
+  its session reducer and metadata guard. A shape change shows up as a failing
+  test on whichever side did not follow it.
+
+The REST records the CLI reads (models, providers, MCP servers, agent runs,
+outputs) are still hand-written mirrors, because their server types only
+serialize today. Moving them is brightwave-inc/tidebreak#3005.
+
 ## Scope today
 
 **Generated: the whole renderer surface.** The WebSocket frame and event union, the

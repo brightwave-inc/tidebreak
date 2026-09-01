@@ -126,6 +126,30 @@ pub(crate) mod generate {
         )
     }
 
+    /// The guard limits, emitted beside the generated types.
+    ///
+    /// The renderer bounds every opaque string it draws — ids, timestamps,
+    /// cursors — and the CLI bounds the same fields before printing them. The
+    /// numbers live in `crate::wire::limits` and are generated here so the two
+    /// clients cannot disagree about what a valid payload is.
+    pub(crate) fn render_wire_limits() -> String {
+        use crate::wire::limits::{
+            MAX_WIRE_CURSOR_CHARS, MAX_WIRE_ID_CHARS, MAX_WIRE_TIMESTAMP_CHARS,
+        };
+        format!(
+            "/**\n\
+             \x20* Guard limits shared with the server and the CLI, in code points.\n\
+             \x20*\n\
+             \x20* The decoders bound every opaque string they will draw. These are the\n\
+             \x20* ceilings, generated from `tidebreak_server::wire::limits` so every\n\
+             \x20* client applies the same numbers.\n\
+             \x20*/\n\
+             export const MAX_WIRE_ID_CHARS = {MAX_WIRE_ID_CHARS};\n\
+             export const MAX_WIRE_TIMESTAMP_CHARS = {MAX_WIRE_TIMESTAMP_CHARS};\n\
+             export const MAX_WIRE_CURSOR_CHARS = {MAX_WIRE_CURSOR_CHARS};\n"
+        )
+    }
+
     /// Render the generated module, header and all, so ordering and preamble are
     /// part of the diff a reviewer sees.
     pub(crate) fn render(declarations: &Declarations, trailing: &[String]) -> String {
@@ -499,7 +523,13 @@ mod tests {
             .get("RendererToolName")
             .expect("the vocabulary is reachable from the event root");
         let names = generate::tool_names_from_union(union);
-        generate::render(&declarations, &[generate::render_tool_name_list(&names)])
+        generate::render(
+            &declarations,
+            &[
+                generate::render_tool_name_list(&names),
+                generate::render_wire_limits(),
+            ],
+        )
     }
 
     /// The WebSocket frame types, which until now had no contract at all: the
@@ -937,6 +967,403 @@ mod tests {
                 "{expected} was not reached from the root; generated: {:?}",
                 declarations.keys().collect::<Vec<_>>()
             );
+        }
+    }
+
+    /// Path of the shared chat-frame fixtures, relative to this crate.
+    ///
+    /// JSON rather than TypeScript because three decoders read it: the
+    /// renderer's tests, the CLI's tests, and this crate's own round trip.
+    const CHAT_FRAMES: &str = "fixtures/chat-frames.json";
+
+    /// One real frame of every kind the socket can carry.
+    ///
+    /// Serialized from the server's own types, so a client test that decodes
+    /// every entry proves its decoder accepts what the server sends today — and
+    /// [`the_chat_frame_fixtures_cover_every_event`] proves the list cannot
+    /// silently fall behind the event union.
+    fn chat_frame_fixtures() -> Vec<(&'static str, serde_json::Value)> {
+        use crate::event_projection::{
+            RendererAgentEvent, RendererChatFrame, RendererChatMetadata, RendererModelIdentity,
+            RendererRefusal, RendererSequencedEvent, RendererToolFailure, RendererToolFailureCode,
+            RendererToolFailureReason, RendererToolStatus, RendererTurnUsage, TurnFailureCategory,
+        };
+        use tidebreak_core::{
+            ApprovalClass, CallId, MessageId, RendererToolName, ToolActionPreview,
+            ToolApprovalKind, ToolResultPreview, TurnId,
+        };
+
+        let turn = TurnId(id(0x10));
+        let call = CallId(id(0x11));
+        let usage = RendererTurnUsage {
+            input_tokens: 120,
+            output_tokens: 34,
+            cache_read_input_tokens: 800,
+            cache_creation_input_tokens: 0,
+        };
+        let exec_preview = ToolActionPreview::Exec {
+            command: "git".into(),
+            args: vec!["status".into()],
+            cwd: ".".into(),
+            files: Vec::new(),
+            summary: Some("Checking the repository status".into()),
+        };
+        let event = |seq: i64, event: RendererAgentEvent| {
+            RendererChatFrame::Event(Box::new(RendererSequencedEvent {
+                seq,
+                event,
+                replayed: None,
+            }))
+        };
+        let frames: Vec<(&'static str, RendererChatFrame)> = vec![
+            (
+                "turn_started",
+                event(1, RendererAgentEvent::TurnStarted { turn_id: turn }),
+            ),
+            (
+                "text_delta",
+                event(
+                    2,
+                    RendererAgentEvent::TextDelta {
+                        text: "Hello".into(),
+                    },
+                ),
+            ),
+            (
+                "reasoning_delta",
+                event(
+                    3,
+                    RendererAgentEvent::ReasoningDelta {
+                        text: "Considering the request".into(),
+                    },
+                ),
+            ),
+            (
+                "stream_interrupted",
+                event(4, RendererAgentEvent::StreamInterrupted),
+            ),
+            (
+                "tool_call_started",
+                event(
+                    5,
+                    RendererAgentEvent::ToolCallStarted {
+                        call_id: call,
+                        name: RendererToolName::Exec,
+                    },
+                ),
+            ),
+            (
+                "tool_call_args_delta",
+                event(6, RendererAgentEvent::ToolCallArgsDelta { call_id: call }),
+            ),
+            (
+                "user_questions_asked",
+                event(
+                    7,
+                    RendererAgentEvent::UserQuestionsAsked {
+                        call_id: call,
+                        turn_id: turn,
+                    },
+                ),
+            ),
+            (
+                "plan_proposed",
+                event(
+                    8,
+                    RendererAgentEvent::PlanProposed {
+                        call_id: call,
+                        turn_id: turn,
+                    },
+                ),
+            ),
+            (
+                "task_plan_updated",
+                event(
+                    9,
+                    RendererAgentEvent::TaskPlanUpdated {
+                        call_id: call,
+                        turn_id: turn,
+                    },
+                ),
+            ),
+            (
+                "approval_required",
+                event(
+                    10,
+                    RendererAgentEvent::ApprovalRequired {
+                        call_id: call,
+                        action: RendererToolName::Exec,
+                        approval: ToolApprovalKind::ExecMayRunNetworkedCommand,
+                        class: ApprovalClass::Sensitive,
+                        auto_judging: false,
+                        grant_rungs: vec![
+                            crate::routes::ApprovalGrantRung::ExactAction,
+                            crate::routes::ApprovalGrantRung::CommandPrefix { tokens: 1 },
+                            crate::routes::ApprovalGrantRung::WholeTool,
+                        ],
+                        preview: Some(exec_preview.clone()),
+                    },
+                ),
+            ),
+            (
+                "approval_required_without_preview",
+                event(
+                    11,
+                    RendererAgentEvent::ApprovalRequired {
+                        call_id: call,
+                        action: RendererToolName::Other,
+                        approval: ToolApprovalKind::Unsupported,
+                        class: ApprovalClass::Sensitive,
+                        auto_judging: true,
+                        grant_rungs: Vec::new(),
+                        preview: None,
+                    },
+                ),
+            ),
+            (
+                "approval_decided",
+                event(
+                    12,
+                    RendererAgentEvent::ApprovalDecided {
+                        call_id: call,
+                        approved: true,
+                    },
+                ),
+            ),
+            (
+                "tool_call_completed",
+                event(
+                    13,
+                    RendererAgentEvent::ToolCallCompleted {
+                        call_id: call,
+                        status: RendererToolStatus::Completed,
+                        failure: None,
+                        action: Some(exec_preview),
+                        result: Some(ToolResultPreview::Exec {
+                            exit_code: Some(0),
+                            timed_out: false,
+                            output_truncated: false,
+                            stdout: "ok\n".into(),
+                            stderr: String::new(),
+                            images: Vec::new(),
+                            outputs: Vec::new(),
+                            degraded: None,
+                            backend: None,
+                        }),
+                    },
+                ),
+            ),
+            (
+                "tool_call_completed_with_failure",
+                event(
+                    14,
+                    RendererAgentEvent::ToolCallCompleted {
+                        call_id: call,
+                        status: RendererToolStatus::Failed,
+                        failure: Some(RendererToolFailure {
+                            code: RendererToolFailureCode::ExecutorUnavailable,
+                            reason: RendererToolFailureReason::LeaseExpired,
+                        }),
+                        action: None,
+                        result: None,
+                    },
+                ),
+            ),
+            (
+                "turn_completed",
+                event(15, RendererAgentEvent::TurnCompleted { usage }),
+            ),
+            (
+                "turn_refused",
+                event(
+                    16,
+                    RendererAgentEvent::TurnRefused {
+                        refusal: RendererRefusal {
+                            category: Some("safety".into()),
+                            partial_output: true,
+                        },
+                        usage,
+                    },
+                ),
+            ),
+            (
+                "turn_failed",
+                event(
+                    17,
+                    RendererAgentEvent::TurnFailed {
+                        category: TurnFailureCategory::RateLimited,
+                        detail: Some("rate limited; retry after 30s".into()),
+                        model: Some(RendererModelIdentity {
+                            id: "claude-opus-4-8".into(),
+                            provider: crate::providers::ProviderKind::Anthropic,
+                        }),
+                    },
+                ),
+            ),
+            (
+                "turn_failed_without_detail",
+                event(
+                    18,
+                    RendererAgentEvent::TurnFailed {
+                        category: TurnFailureCategory::Unknown,
+                        detail: None,
+                        model: None,
+                    },
+                ),
+            ),
+            (
+                "turn_cancelled",
+                event(19, RendererAgentEvent::TurnCancelled { usage }),
+            ),
+            (
+                "user_steered",
+                event(
+                    20,
+                    RendererAgentEvent::UserSteered {
+                        message_id: MessageId(id(0x12)),
+                        text: "Focus on the tests".into(),
+                    },
+                ),
+            ),
+            (
+                "context_truncated",
+                event(
+                    21,
+                    RendererAgentEvent::ContextTruncated {
+                        original_tokens: 180_000,
+                        fitted_tokens: 120_000,
+                    },
+                ),
+            ),
+            (
+                "compaction_started",
+                event(22, RendererAgentEvent::CompactionStarted),
+            ),
+            (
+                "compaction_finished",
+                event(
+                    23,
+                    RendererAgentEvent::CompactionFinished { compacted: true },
+                ),
+            ),
+            ("event_omitted", event(24, RendererAgentEvent::EventOmitted)),
+            (
+                "replayed_event",
+                RendererChatFrame::Event(Box::new(RendererSequencedEvent {
+                    seq: 25,
+                    event: RendererAgentEvent::TextDelta {
+                        text: "from catch-up".into(),
+                    },
+                    replayed: Some(true),
+                })),
+            ),
+            (
+                "metadata_titled",
+                RendererChatFrame::Metadata(RendererChatMetadata::Titled {
+                    title: "A chat".into(),
+                }),
+            ),
+            (
+                "metadata_file_changes_recorded",
+                RendererChatFrame::Metadata(RendererChatMetadata::FileChangesRecorded {
+                    turn_id: turn,
+                }),
+            ),
+            (
+                "metadata_sandbox_preparing",
+                RendererChatFrame::Metadata(RendererChatMetadata::SandboxPreparing {
+                    preparing: true,
+                }),
+            ),
+        ];
+        frames
+            .into_iter()
+            .map(|(name, frame)| {
+                (
+                    name,
+                    serde_json::to_value(&frame).expect("a chat frame serializes"),
+                )
+            })
+            .collect()
+    }
+
+    /// The checked-in fixture file: a JSON array of `{ "name", "frame" }`.
+    fn rendered_chat_frames() -> String {
+        let entries = chat_frame_fixtures()
+            .into_iter()
+            .map(|(name, frame)| serde_json::json!({ "name": name, "frame": frame }))
+            .collect::<Vec<_>>();
+        let mut rendered =
+            serde_json::to_string_pretty(&entries).expect("the fixture list serializes");
+        rendered.push('\n');
+        rendered
+    }
+
+    /// Three decoders read these bytes — the renderer's, the CLI's, and this
+    /// crate's own. A diff here means the socket's shape changed, and every
+    /// client test that consumes the file re-runs against the new shape.
+    #[test]
+    fn the_chat_frame_fixtures_are_current() {
+        generate::check_or_update(CHAT_FRAMES, &rendered_chat_frames(), REGENERATE);
+    }
+
+    /// Every event variant the generated union declares has a fixture, read
+    /// from the generated declaration rather than a hand-kept list so a new
+    /// variant fails here until it has one.
+    #[test]
+    fn the_chat_frame_fixtures_cover_every_event() {
+        let declarations = event_declarations();
+        let union = &declarations["RendererAgentEvent"];
+        let declared: std::collections::BTreeSet<String> = union
+            .split("\"type\": \"")
+            .skip(1)
+            .map(|rest| rest.split('"').next().expect("a closed tag").to_owned())
+            .collect();
+        assert!(
+            declared.len() > 10,
+            "the union parse found too few tags: {declared:?}"
+        );
+        let covered: std::collections::BTreeSet<String> = chat_frame_fixtures()
+            .iter()
+            .filter_map(|(_, frame)| frame.get("event"))
+            .filter_map(|event| event.get("type"))
+            .filter_map(|tag| tag.as_str())
+            .map(str::to_owned)
+            .collect();
+        let missing: Vec<_> = declared.difference(&covered).collect();
+        assert!(
+            missing.is_empty(),
+            "event types without a chat-frame fixture: {missing:?}"
+        );
+        let metadata: std::collections::BTreeSet<String> = chat_frame_fixtures()
+            .iter()
+            .filter_map(|(_, frame)| frame.get("metadata"))
+            .filter_map(|tag| tag.as_str())
+            .map(str::to_owned)
+            .collect();
+        let declared_metadata: std::collections::BTreeSet<String> = declarations
+            ["RendererChatMetadata"]
+            .split("\"metadata\": \"")
+            .skip(1)
+            .map(|rest| rest.split('"').next().expect("a closed tag").to_owned())
+            .collect();
+        let missing: Vec<_> = declared_metadata.difference(&metadata).collect();
+        assert!(
+            missing.is_empty(),
+            "metadata kinds without a chat-frame fixture: {missing:?}"
+        );
+    }
+
+    /// The server's own round trip: every fixture decodes through the public
+    /// wire types and serializes back to the same bytes, so a field that only
+    /// serializes, or only deserializes, shows up here rather than in a client.
+    #[test]
+    fn every_chat_frame_fixture_round_trips() {
+        for (name, frame) in chat_frame_fixtures() {
+            let decoded: crate::wire::RendererChatFrame = serde_json::from_value(frame.clone())
+                .unwrap_or_else(|error| panic!("fixture {name} does not decode: {error}"));
+            let again = serde_json::to_value(&decoded).expect("a decoded frame serializes");
+            assert_eq!(again, frame, "fixture {name} changed across the round trip");
         }
     }
 }

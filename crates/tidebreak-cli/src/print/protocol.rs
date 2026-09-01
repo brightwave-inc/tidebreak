@@ -14,7 +14,10 @@
 use serde::{Deserialize, Serialize};
 use tidebreak_core::CallId;
 
-use crate::api::wire::{GrantRung, PendingPlan, PendingQuestions};
+use crate::api::wire::{
+    ApprovalGrantRung, PendingPlanApproval, PendingUserQuestions, RendererToolName,
+    ToolActionPreview, ToolApprovalKind,
+};
 
 /// Version tag stamped on every event this module emits.
 pub const PROTOCOL_VERSION: &str = "v1";
@@ -24,10 +27,10 @@ pub const PROTOCOL_VERSION: &str = "v1";
 pub enum Interaction {
     Approval {
         call_id: CallId,
-        action: String,
-        approval: String,
-        grant_rungs: Vec<GrantRung>,
-        preview: Option<serde_json::Value>,
+        action: RendererToolName,
+        approval: ToolApprovalKind,
+        grant_rungs: Vec<ApprovalGrantRung>,
+        preview: Option<ToolActionPreview>,
     },
     Plan {
         call_id: CallId,
@@ -61,7 +64,7 @@ pub struct QuestionOptionPrompt {
 }
 
 impl Interaction {
-    pub fn from_plan(plan: PendingPlan) -> Self {
+    pub fn from_plan(plan: PendingPlanApproval) -> Self {
         Self::Plan {
             call_id: plan.call_id,
             title: plan.title,
@@ -69,7 +72,7 @@ impl Interaction {
         }
     }
 
-    pub fn from_questions(pending: PendingQuestions) -> Self {
+    pub fn from_questions(pending: PendingUserQuestions) -> Self {
         Self::Questions {
             call_id: pending.call_id,
             questions: pending
@@ -79,7 +82,7 @@ impl Interaction {
                     id: question.id,
                     question: question.question,
                     header: question.header,
-                    question_type: question.question_type,
+                    question_type: question.question_type.as_str().to_owned(),
                     allow_free_form: question.allow_free_form,
                     options: question
                         .options
@@ -87,7 +90,7 @@ impl Interaction {
                         .map(|option| QuestionOptionPrompt {
                             id: option.id,
                             label: option.label,
-                            description: option.description,
+                            description: Some(option.description),
                         })
                         .collect(),
                 })
@@ -189,7 +192,7 @@ pub enum Decision {
     Approval {
         approve: bool,
         reason: String,
-        grant: Option<GrantRung>,
+        grant: Option<ApprovalGrantRung>,
     },
     Plan {
         accept: bool,
@@ -294,7 +297,7 @@ enum DecisionLine {
         #[serde(default)]
         reason: Option<String>,
         #[serde(default)]
-        grant: Option<GrantRung>,
+        grant: Option<ApprovalGrantRung>,
     },
     Plan {
         #[serde(default)]
