@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use super::*;
 
 use std::net::Ipv4Addr;
@@ -715,10 +713,7 @@ struct PauseTerminalStore {
     pause_after_claim_commit: std::sync::atomic::AtomicBool,
     fail_after_heartbeat_commit: std::sync::atomic::AtomicBool,
     fail_after_completion_commit: std::sync::atomic::AtomicBool,
-    fail_after_assistant_commit: std::sync::atomic::AtomicBool,
-    assistant_append_calls: AtomicUsize,
     fail_after_park_commit: std::sync::atomic::AtomicBool,
-    pause_before_spawn_checkpoint: std::sync::atomic::AtomicBool,
     fail_after_apply_steer_commit: std::sync::atomic::AtomicBool,
     cancel_after_apply_steer_commit: std::sync::atomic::AtomicBool,
     apply_steer_cancellation_committed: Arc<Notify>,
@@ -746,10 +741,7 @@ impl PauseTerminalStore {
             pause_after_claim_commit: std::sync::atomic::AtomicBool::new(false),
             fail_after_heartbeat_commit: std::sync::atomic::AtomicBool::new(false),
             fail_after_completion_commit: std::sync::atomic::AtomicBool::new(false),
-            fail_after_assistant_commit: std::sync::atomic::AtomicBool::new(false),
-            assistant_append_calls: AtomicUsize::new(0),
             fail_after_park_commit: std::sync::atomic::AtomicBool::new(false),
-            pause_before_spawn_checkpoint: std::sync::atomic::AtomicBool::new(false),
             fail_after_apply_steer_commit: std::sync::atomic::AtomicBool::new(false),
             cancel_after_apply_steer_commit: std::sync::atomic::AtomicBool::new(false),
             apply_steer_cancellation_committed: Arc::new(Notify::new()),
@@ -788,22 +780,8 @@ impl PauseTerminalStore {
             .store(true, Ordering::SeqCst);
     }
 
-    fn fail_after_next_assistant_commit(&self) {
-        self.fail_after_assistant_commit
-            .store(true, Ordering::SeqCst);
-    }
-
-    fn assistant_append_calls(&self) -> usize {
-        self.assistant_append_calls.load(Ordering::SeqCst)
-    }
-
     fn fail_after_next_park_commit(&self) {
         self.fail_after_park_commit.store(true, Ordering::SeqCst);
-    }
-
-    fn pause_before_next_spawn_checkpoint(&self) {
-        self.pause_before_spawn_checkpoint
-            .store(true, Ordering::SeqCst);
     }
 
     fn fail_after_next_apply_steer_commit(&self) {
@@ -1383,13 +1361,6 @@ impl Store for PauseTerminalStore {
         request: &tidebreak_core::SandboxSpawnCheckpointRequest,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<Option<tidebreak_core::CheckpointSandboxSpawnOutcome>> {
-        if self
-            .pause_before_spawn_checkpoint
-            .swap(false, Ordering::SeqCst)
-        {
-            self.entered.notify_one();
-            self.release.notified().await;
-        }
         self.inner.checkpoint_sandbox_spawn(request, now).await
     }
     async fn resumed_sandbox_spawn_batch(
@@ -1543,19 +1514,9 @@ impl Store for PauseTerminalStore {
         message: &Message,
         citations: &[tidebreak_core::AssistantCitationInput],
     ) -> Result<()> {
-        self.assistant_append_calls.fetch_add(1, Ordering::SeqCst);
         self.inner
             .append_assistant_message_with_citations(message, citations)
-            .await?;
-        if self
-            .fail_after_assistant_commit
-            .swap(false, Ordering::SeqCst)
-        {
-            return Err(AgentError::Store(
-                "injected ambiguous assistant append response".into(),
-            ));
-        }
-        Ok(())
+            .await
     }
     async fn append_claimed_assistant_message_with_citations(
         &self,
@@ -1564,20 +1525,9 @@ impl Store for PauseTerminalStore {
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<tidebreak_core::AppendClaimedMessageOutcome> {
-        self.assistant_append_calls.fetch_add(1, Ordering::SeqCst);
-        let outcome = self
-            .inner
+        self.inner
             .append_claimed_assistant_message_with_citations(message, citations, lease_token, now)
-            .await?;
-        if self
-            .fail_after_assistant_commit
-            .swap(false, Ordering::SeqCst)
-        {
-            return Err(AgentError::Store(
-                "injected ambiguous claimed assistant append response".into(),
-            ));
-        }
-        Ok(outcome)
+            .await
     }
     async fn list_messages(&self, chat_id: ChatId) -> Result<Vec<Message>> {
         self.inner.list_messages(chat_id).await
@@ -2134,22 +2084,6 @@ async fn app_state_roots_blob_storage_under_the_data_directory() {
 async fn json_body<T: DeserializeOwned>(response: axum::response::Response) -> T {
     let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     serde_json::from_slice(&bytes).unwrap()
-}
-
-/// The connected-app record id behind one configured server name — how app
-/// fixtures learn what to bind after a `PUT /mcp/servers` created the record.
-async fn connected_app_id(
-    store: &Arc<dyn Store>,
-    name: &str,
-) -> tidebreak_core::id::ConnectedAppId {
-    store
-        .list_connected_apps()
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|record| record.name == name)
-        .map(|record| record.id)
-        .unwrap_or_else(|| panic!("no connected app named {name:?} is configured"))
 }
 
 /// Create a chat and return it.

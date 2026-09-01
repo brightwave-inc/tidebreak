@@ -309,3 +309,29 @@ async fn a_managed_ceiling_can_refuse_remote_allow_sessions() {
     let body: serde_json::Value = refused.json().await.unwrap();
     assert_eq!(body["kind"], "permission_mode_locked", "{body}");
 }
+
+/// Shipped in #2133 without its test attribute, so it never ran. It passes.
+#[tokio::test]
+async fn ask_is_refused_when_structured_approvals_are_unsupported() {
+    let (router, token, _runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let refused = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "ask",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(body["kind"], "permission_mode_unavailable");
+}

@@ -121,36 +121,6 @@ async fn post_message_body(
         .unwrap()
 }
 
-async fn wait_for_approvals(store: &Arc<dyn Store>, chat: ChatId, count: usize) -> Vec<CallId> {
-    for _ in 0..500 {
-        let ids = approval_call_ids(store, chat).await;
-        if ids.len() >= count {
-            return ids;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("turn should park on {count} approval cards");
-}
-
-async fn approve_delegation(router: &axum::Router, bearer: &str, chat: ChatId, call_id: CallId) {
-    let decide = router
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/chats/{chat}/approvals/{call_id}"))
-                .header(header::AUTHORIZATION, bearer)
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    serde_json::json!({"decision": "approve"}).to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(decide.status(), StatusCode::NO_CONTENT);
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn configured_model_is_used_for_the_turn() {
     let recorder = RecordingProvider::default();
