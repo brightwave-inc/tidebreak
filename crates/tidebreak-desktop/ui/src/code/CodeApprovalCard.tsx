@@ -1,6 +1,7 @@
 import { useEffect, useId, useState, type ReactNode } from "react";
 
 import type { CodeApprovalSnapshot } from "../api/types";
+import { toolPreviewPresentation } from "../ToolPreview";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { WithTooltip } from "@/components/ui/tooltip";
@@ -213,6 +214,35 @@ function ApprovalKindBody({ approval }: { approval: CodeApprovalSnapshot }) {
           {otherSummary(approval.kind.summary)}
         </p>
       );
+    case "tool_use":
+      // Decision 0018: the literal action, never the call's own narration.
+      return (
+        <pre className="bg-muted overflow-x-auto rounded-md p-2 font-mono text-md break-words whitespace-pre-wrap">
+          {toolPreviewPresentation(approval.kind.preview).detail}
+        </pre>
+      );
+    case "questions":
+      return (
+        <ul className="space-y-2">
+          {approval.kind.questions.map((question) => (
+            <li key={question.id}>
+              <p className="text-md break-words">{question.question}</p>
+              {question.options.length > 0 && (
+                <p className="text-muted-foreground text-xs break-words">
+                  {question.options.map((option) => option.label).join(" · ")}
+                </p>
+              )}
+            </li>
+          ))}
+        </ul>
+      );
+    case "plan":
+      return (
+        <p className="text-muted-foreground text-md break-words">
+          The engine proposed a plan. Accepting moves the session to{" "}
+          <span className="font-mono">{approval.kind.proposed_mode}</span>.
+        </p>
+      );
   }
 }
 
@@ -268,6 +298,12 @@ function approvalTitle(approval: CodeApprovalSnapshot): string {
       return "Run this command?";
     case "network":
       return "Allow this network access?";
+    case "tool_use":
+      return "Run this tool?";
+    case "questions":
+      return "Answer these questions?";
+    case "plan":
+      return "Approve this plan?";
     default:
       return "Allow this?";
   }

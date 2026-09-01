@@ -62,6 +62,7 @@ function toolActionDetail(preview: ToolActionPreview): string {
         preview.domains.length > 0
           ? `# limited to ${preview.domains.join(", ")}`
           : null,
+        publishedWindow(preview.start_published_at, preview.end_published_at),
         "# sent to the configured web search provider",
       ]
         .filter((line): line is string => line !== null)
@@ -77,7 +78,7 @@ function toolActionDetail(preview: ToolActionPreview): string {
       ].join("\n");
     case "exec":
       return [
-        [preview.command, ...preview.args].join(" "),
+        [preview.command, ...preview.args].map(quoteArgument).join(" "),
         preview.cwd !== "." ? `# working directory: ${preview.cwd}` : null,
         preview.files.length > 0
           ? `# staged files: ${preview.files.join(", ")}`
@@ -94,11 +95,35 @@ function networkLabel(policy: NetworkPolicy): string {
       return "no network";
     case "package_managers":
       return "package managers only";
-    case "allowed_hosts":
-      return policy.allowed_hosts.join(", ") || "listed hosts only";
+    case "allowed_hosts": {
+      const hosts = policy.allowed_hosts.join(", ") || "listed hosts only";
+      return policy.package_managers ? `${hosts}, plus package managers` : hosts;
+    }
     case "open":
       return "open";
   }
+}
+
+/**
+ * The publication window a web search will accept, or nothing when it is
+ * open at both ends. Dates stay as the model wrote them: the card's job is
+ * to show what the provider is actually told.
+ */
+function publishedWindow(from: string | null, to: string | null): string | null {
+  if (from && to) return `# published between ${from} and ${to}`;
+  if (from) return `# published on or after ${from}`;
+  if (to) return `# published on or before ${to}`;
+  return null;
+}
+
+/**
+ * Quote an argument only when leaving it bare would misrepresent where its
+ * boundaries are; a vector element containing a space is one argument.
+ */
+function quoteArgument(value: string): string {
+  if (value.length === 0) return "''";
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(value)) return value;
+  return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
 export function pendingApprovals(

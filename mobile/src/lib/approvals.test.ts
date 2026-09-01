@@ -82,6 +82,36 @@ describe("code approval presentation", () => {
         offered_grants: [],
       }),
     ).toBe("https://example.com/report\n# fetched from the public web");
+    // Argument boundaries survive: one argument with a space is not two.
+    expect(
+      approvalSummary({
+        type: "tool_use",
+        preview: {
+          tool: "exec",
+          command: "git",
+          args: ["commit", "-m", "fix: two words"],
+          cwd: ".",
+          files: [],
+        },
+        offered_grants: [],
+      }),
+    ).toBe("git commit -m 'fix: two words'");
+    // The provider-bound filters are part of the action being consented to.
+    expect(
+      approvalSummary({
+        type: "tool_use",
+        preview: {
+          tool: "web_search",
+          query: "tidebreak",
+          domains: [],
+          start_published_at: "2026-01-01",
+          end_published_at: null,
+        },
+        offered_grants: [],
+      }),
+    ).toBe(
+      "tidebreak\n# published on or after 2026-01-01\n# sent to the configured web search provider",
+    );
   });
 
   it("pretty-prints the complete server-capped harness payload", () => {
