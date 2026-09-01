@@ -32,6 +32,7 @@ const initial: RuntimeSettings = {
     protect_recent_messages: 8,
   },
   model_visibility_overrides: {},
+  prompt_cache_retention: "five_minutes",
   computer_use_enabled: true,
   code_turn_recaps_enabled: true,
   rewrite_closing_messages: false,
