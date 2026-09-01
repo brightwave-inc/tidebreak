@@ -834,6 +834,15 @@ pub struct CreateWorkspaceBody {
     pub base_ref: Option<String>,
 }
 
+/// Body of `POST /code/remote/workspaces`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateRemoteWorkspaceBody {
+    pub repo_id: RepoId,
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
 /// Body of `PATCH /code/workspaces/{id}`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1724,6 +1733,20 @@ pub struct CreateSessionBody {
     pub reasoning_effort: Option<ReasoningEffort>,
     #[serde(default)]
     pub fast_mode: bool,
+}
+
+/// Body of `POST /code/remote/workspaces/{id}/sessions`.
+///
+/// Remote sessions always run in `Allow` mode inside the configured sandbox
+/// and do not expose local-engine fast mode.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateRemoteSessionBody {
+    pub harness: HarnessKind,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub reasoning_effort: Option<ReasoningEffort>,
 }
 
 /// Body of `POST /code/sessions/{id}/mode`.

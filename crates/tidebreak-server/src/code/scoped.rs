@@ -291,6 +291,16 @@ impl ScopedCode {
             .await
     }
 
+    pub(crate) async fn create_remote_workspace(
+        &self,
+        repo_id: RepoId,
+        title: Option<String>,
+    ) -> Result<CodeWorkspace, ServerError> {
+        self.runtime
+            .create_remote_workspace(&self.owner, repo_id, title)
+            .await
+    }
+
     pub(crate) async fn list_workspaces(
         &self,
         repo_id: Option<RepoId>,
@@ -600,6 +610,17 @@ impl ScopedCode {
     ) -> Result<CodeSession, ServerError> {
         self.runtime
             .create_session(&self.owner, workspace_id, harness, settings)
+            .await
+    }
+
+    pub(crate) async fn create_remote_session(
+        &self,
+        workspace_id: WorkspaceId,
+        harness: HarnessKind,
+        settings: NewSessionSettings,
+    ) -> Result<CodeSession, ServerError> {
+        self.runtime
+            .create_remote_session(&self.owner, workspace_id, harness, settings)
             .await
     }
 

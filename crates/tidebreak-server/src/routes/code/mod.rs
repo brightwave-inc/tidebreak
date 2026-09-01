@@ -73,11 +73,11 @@ pub(crate) use repos::{
 };
 pub(crate) use session_events::session_events;
 pub(crate) use sessions::{
-    create_session, delete_queued_turn, fork_session, get_session_debug, get_session_image,
-    interrupt_session, list_queued_turns, list_session_turns, list_workspace_sessions,
-    patch_queued_turn, post_queue_send_now, publish_session_image, put_queue_paused, reap_session,
-    set_attention, set_session_fast_mode, set_session_permission_mode,
-    set_session_reasoning_effort, steer_session, submit_turn,
+    create_remote_session, create_session, delete_queued_turn, fork_session, get_session_debug,
+    get_session_image, interrupt_session, list_queued_turns, list_session_turns,
+    list_workspace_sessions, patch_queued_turn, post_queue_send_now, publish_session_image,
+    put_queue_paused, reap_session, set_attention, set_session_fast_mode,
+    set_session_permission_mode, set_session_reasoning_effort, steer_session, submit_turn,
 };
 pub(crate) use terminals::{
     close_terminal, close_workspace_terminals, create_terminal, list_terminals, read_terminal,
@@ -113,10 +113,10 @@ pub(crate) use types::{
 pub(crate) use updates::code_updates;
 pub(crate) use usage::subscription_usage;
 pub(crate) use workspaces::{
-    archive_workspace, create_workspace, get_workspace, get_workspace_blob, get_workspace_diff,
-    get_worktree_root, list_storage, list_workspace_files, list_workspace_tree, list_workspaces,
-    patch_workspace, release_workspace, restore_workspace, retry_workspace_setup, search_workspace,
-    set_worktree_root,
+    archive_workspace, create_remote_workspace, create_workspace, get_workspace,
+    get_workspace_blob, get_workspace_diff, get_worktree_root, list_storage, list_workspace_files,
+    list_workspace_tree, list_workspaces, patch_workspace, release_workspace, restore_workspace,
+    retry_workspace_setup, search_workspace, set_worktree_root,
 };
 
 // App-token handlers do not reach `AppState.code` directly. They extract a

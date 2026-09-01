@@ -4,22 +4,48 @@ use crate::extract::{Json, Path, RawBytes};
 use crate::routes::image_attachment::{
     inspect_image_bytes, require_declared_type_matches, PublishedImageAttachment,
 };
-use crate::routes::providers_models::refuse_permission_mode_over_ceiling;
+use crate::routes::providers_models::{
+    refuse_permission_mode_over_ceiling, refuse_permission_mode_over_ceiling_value,
+};
 use crate::routes::SERVED_BYTES_CONTENT_POLICY;
 use crate::state::AppState;
 use axum::body::Body;
-use axum::extract::State;
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::extract::{FromRequestParts, State};
+use axum::http::{header, request::Parts, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 
 use super::types::{
-    CodeForkTranscript, CodeSessionSnapshot, CodeTurnSnapshot, CreateSessionBody, QueuePausedBody,
-    QueuedCodeTurn, QueuedCodeTurnUpdate, QueuedCodeTurnsSnapshot, SequencedCodeEventFrame,
-    SetAttentionBody, SetFastModeBody, SetPermissionModeBody, SetReasoningEffortBody, SteerBody,
-    SubmitTurnBody,
+    CodeForkTranscript, CodeSessionSnapshot, CodeTurnSnapshot, CreateRemoteSessionBody,
+    CreateSessionBody, QueuePausedBody, QueuedCodeTurn, QueuedCodeTurnUpdate,
+    QueuedCodeTurnsSnapshot, SequencedCodeEventFrame, SetAttentionBody, SetFastModeBody,
+    SetPermissionModeBody, SetReasoningEffortBody, SteerBody, SubmitTurnBody,
 };
 use crate::code::runtime::{NewSessionSettings, SubmitTurnOutcome};
-use tidebreak_core::{CodeSessionId, TurnSteer, WorkspaceId};
+use tidebreak_core::{CodeSessionId, PermissionMode, TurnSteer, WorkspaceId};
+
+/// The managed ceiling remote session creation needs, resolved before the
+/// handler receives request fields.
+pub(crate) struct RemoteSessionPolicy {
+    permission_mode_ceiling: Option<PermissionMode>,
+}
+
+impl FromRequestParts<AppState> for RemoteSessionPolicy {
+    type Rejection = ServerError;
+
+    async fn from_request_parts(
+        _parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let permission_mode_ceiling = state.managed_policy()?.permission_mode_ceiling;
+        refuse_permission_mode_over_ceiling_value(
+            permission_mode_ceiling,
+            Some(PermissionMode::Allow),
+        )?;
+        Ok(Self {
+            permission_mode_ceiling,
+        })
+    }
+}
 
 pub async fn create_session(
     State(state): State<AppState>,
@@ -40,6 +66,35 @@ pub async fn create_session(
                 model: body.model,
                 reasoning_effort: body.reasoning_effort,
                 fast_mode: body.fast_mode,
+                permission_mode_ceiling,
+            },
+        )
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(CodeSessionSnapshot::from(session)),
+    ))
+}
+
+/// `POST /code/remote/workspaces/{id}/sessions` — create a session whose
+/// engine runs inside the configured sandbox runtime.
+pub async fn create_remote_session(
+    code: ScopedCode,
+    RemoteSessionPolicy {
+        permission_mode_ceiling,
+    }: RemoteSessionPolicy,
+    Path(workspace_id): Path<WorkspaceId>,
+    Json(body): Json<CreateRemoteSessionBody>,
+) -> Result<impl IntoResponse, ServerError> {
+    let session = code
+        .create_remote_session(
+            workspace_id,
+            body.harness,
+            NewSessionSettings {
+                permission_mode: PermissionMode::Allow,
+                model: body.model,
+                reasoning_effort: body.reasoning_effort,
+                fast_mode: false,
                 permission_mode_ceiling,
             },
         )

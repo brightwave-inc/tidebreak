@@ -11,9 +11,10 @@ use super::types::{
     ArchiveWorkspaceBody, CodeFileChange, CodeStorageSnapshot, CodeWorkspaceBlob,
     CodeWorkspaceDiff, CodeWorkspaceFiles, CodeWorkspaceHistorySearchMatch,
     CodeWorkspaceHistorySearchSource, CodeWorkspaceSearch, CodeWorkspaceSearchMatch,
-    CodeWorkspaceSnapshot, CodeWorkspaceTree, CodeWorktreeRoot, CreateWorkspaceBody,
-    ListWorkspacesQuery, PatchWorkspaceBody, SetCodeWorktreeRootBody, WorkspaceBlobQuery,
-    WorkspaceDiffQuery, WorkspaceFilesQuery, WorkspaceSearchQuery, WorkspaceTreeQuery,
+    CodeWorkspaceSnapshot, CodeWorkspaceTree, CodeWorktreeRoot, CreateRemoteWorkspaceBody,
+    CreateWorkspaceBody, ListWorkspacesQuery, PatchWorkspaceBody, SetCodeWorktreeRootBody,
+    WorkspaceBlobQuery, WorkspaceDiffQuery, WorkspaceFilesQuery, WorkspaceSearchQuery,
+    WorkspaceTreeQuery,
 };
 use tidebreak_core::WorkspaceId;
 
@@ -40,6 +41,21 @@ pub async fn create_workspace(
 ) -> Result<impl IntoResponse, ServerError> {
     let workspace = code
         .create_workspace(body.repo_id, body.title, body.base_ref)
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(CodeWorkspaceSnapshot::from(workspace)),
+    ))
+}
+
+/// `POST /code/remote/workspaces` — create a workspace whose checkout lives
+/// only in the configured sandbox runtime.
+pub async fn create_remote_workspace(
+    code: ScopedCode,
+    Json(body): Json<CreateRemoteWorkspaceBody>,
+) -> Result<impl IntoResponse, ServerError> {
+    let workspace = code
+        .create_remote_workspace(body.repo_id, body.title)
         .await?;
     Ok((
         StatusCode::CREATED,

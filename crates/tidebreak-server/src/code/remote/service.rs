@@ -275,8 +275,8 @@ mod tests {
 
     use tidebreak_core::db::code::{insert_repo, latest_turn};
     use tidebreak_core::{
-        CodeRepo, CodeSessionLifecycle, CodeTurnStatus, FenceReason, HarnessKind, OwnerId,
-        PermissionMode, RepoId,
+        CodeRepo, CodeSessionLifecycle, CodeTurnStatus, CodeWorkspaceStatus, FenceReason,
+        HarnessKind, OwnerId, PermissionMode, RepoId,
     };
 
     use super::super::super::runtime::{
@@ -556,6 +556,60 @@ mod tests {
             fake.sends.lock().unwrap().as_slice(),
             &["and then".to_owned()]
         );
+    }
+
+    /// Remote session creation must serialize with workspace lifecycle
+    /// changes so archive cannot leave a new idle session on an archived row.
+    #[tokio::test]
+    async fn remote_session_creation_rechecks_status_under_the_lifecycle_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let (runtime, _fake, owner, repo) = runtime_with_remote(dir.path()).await;
+        let workspace = runtime
+            .create_remote_workspace(&owner, repo.id, Some("remote".into()))
+            .await
+            .unwrap();
+        let lifecycle = runtime.workspace_write_lock(workspace.id);
+        let lifecycle_guard = lifecycle.lock().await;
+        let creating_runtime = runtime.clone();
+        let creating_owner = owner.clone();
+        let mut creating = tokio::spawn(async move {
+            creating_runtime
+                .create_remote_session(
+                    &creating_owner,
+                    workspace.id,
+                    HarnessKind::ClaudeCode,
+                    session_settings(),
+                )
+                .await
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut creating)
+                .await
+                .is_err(),
+            "session creation must wait for the workspace lifecycle lock"
+        );
+        assert!(tidebreak_core::db::code::compare_and_set_workspace_status(
+            &runtime.db,
+            &owner,
+            workspace.id,
+            CodeWorkspaceStatus::Active,
+            CodeWorkspaceStatus::Archiving,
+        )
+        .await
+        .unwrap());
+        drop(lifecycle_guard);
+
+        let error = tokio::time::timeout(std::time::Duration::from_secs(2), creating)
+            .await
+            .expect("session create finished after lifecycle release")
+            .expect("session create task joined")
+            .unwrap_err();
+        assert_eq!(error.kind(), "workspace_not_ready");
+        assert!(runtime
+            .list_workspace_sessions(&owner, workspace.id)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     /// A queued row edited after the sweep's snapshot does not collide with

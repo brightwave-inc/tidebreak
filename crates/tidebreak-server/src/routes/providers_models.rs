@@ -256,19 +256,41 @@ pub(super) async fn refuse_permission_mode_over_ceiling(
     };
     let policy = state.managed_policy()?;
     if !policy.permits_permission_mode(mode) {
-        return Err(ServerError::conflict_kind(
-            "permission_mode_locked",
-            format!(
-                "permission mode `{}` exceeds the maximum this managed profile allows (`{}`)",
-                mode.as_str(),
-                policy
-                    .permission_mode_ceiling
-                    .unwrap_or(PermissionMode::Allow)
-                    .as_str()
-            ),
+        return Err(permission_mode_locked_error(
+            mode,
+            policy.permission_mode_ceiling,
         ));
     }
     Ok(())
+}
+
+pub(super) fn refuse_permission_mode_over_ceiling_value(
+    permission_mode_ceiling: Option<PermissionMode>,
+    requested: Option<PermissionMode>,
+) -> Result<(), ServerError> {
+    let Some(mode) = requested else {
+        return Ok(());
+    };
+    if permission_mode_ceiling.is_some_and(|ceiling| mode > ceiling) {
+        return Err(permission_mode_locked_error(mode, permission_mode_ceiling));
+    }
+    Ok(())
+}
+
+fn permission_mode_locked_error(
+    mode: PermissionMode,
+    permission_mode_ceiling: Option<PermissionMode>,
+) -> ServerError {
+    ServerError::conflict_kind(
+        "permission_mode_locked",
+        format!(
+            "permission mode `{}` exceeds the maximum this managed profile allows (`{}`)",
+            mode.as_str(),
+            permission_mode_ceiling
+                .unwrap_or(PermissionMode::Allow)
+                .as_str()
+        ),
+    )
 }
 
 /// Refuse a BYOK credential write on a managed profile.
