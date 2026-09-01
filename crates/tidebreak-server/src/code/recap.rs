@@ -415,14 +415,14 @@ impl TurnRecap for TurnRecapper {
                 // database.
                 match recapper.derive(&owner, session_id, turn_id).await {
                     Ok(Outcome::Recapped(recap)) => {
-                        eprintln!("tidebreak: recapped code turn {turn_id}: {recap}");
+                        tracing::info!("tidebreak: recapped code turn {turn_id}: {recap}");
                     }
                     Ok(Outcome::Declined) => {
-                        eprintln!("tidebreak: left code turn {turn_id} without a recap");
+                        tracing::warn!("tidebreak: left code turn {turn_id} without a recap");
                     }
                     Ok(Outcome::NotApplicable) => {}
                     Err(error) => {
-                        eprintln!("tidebreak: could not recap code turn {turn_id}: {error}");
+                        tracing::error!("tidebreak: could not recap code turn {turn_id}: {error}");
                     }
                 }
                 // Always drain, unlike titling's retry-only follow-up: a turn

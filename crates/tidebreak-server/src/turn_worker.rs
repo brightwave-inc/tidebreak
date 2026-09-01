@@ -547,7 +547,7 @@ impl TurnWorker {
                         break;
                     }
                     Err(error) => {
-                        eprintln!("tidebreak: turn worker claim failed: {error}");
+                        tracing::warn!("tidebreak: turn worker claim failed: {error}");
                         scan_failed = true;
                         break;
                     }
@@ -764,7 +764,7 @@ impl TurnWorker {
                     // Prompt enrichment is not an authority boundary. A broker
                     // failure here leaves the list empty; the provider resolves
                     // again and returns the concrete error if `exec` is called.
-                    eprintln!(
+                    tracing::warn!(
                         "tidebreak: local exec folders unavailable for chat {}: {}",
                         chat.id, error
                     );
@@ -903,7 +903,7 @@ impl TurnWorker {
             web_search,
         );
         if let Some(prompt) = surface.agent_config.system_prompt.as_deref() {
-            eprintln!(
+            tracing::debug!(
                 "tidebreak: turn {} operating_prompt={}",
                 turn.id,
                 crate::foreground_prompt::identity(prompt)
@@ -1012,7 +1012,7 @@ impl TurnWorker {
                         turn.id,
                     )),
                     Err(error) => {
-                        eprintln!(
+                        tracing::warn!(
                             "tidebreak: private scratch unavailable for chat {}: {}",
                             chat.id, error
                         );
@@ -1157,7 +1157,7 @@ impl TurnWorker {
                             }
                             Ok(_) => {}
                             Err(error) => {
-                                eprintln!(
+                                tracing::error!(
                                     "tidebreak: turn {} steer poll failed: {error}",
                                     turn.id
                                 );
@@ -1202,7 +1202,7 @@ impl TurnWorker {
                     total_model_steps = checked_model_step_sum(total_model_steps, model_steps)?;
                     match checked_usage_sum(total_usage, usage) {
                         Ok(total) => total_usage = total,
-                        Err(error) => eprintln!(
+                        Err(error) => tracing::warn!(
                             "tidebreak: turn {} cancellation usage overflowed; acknowledging the durable baseline: {error}",
                             turn.id
                         ),
@@ -1406,7 +1406,7 @@ impl TurnWorker {
                                     // a miss never errors, it just costs more.
                                     // Logged with the durable field names so the
                                     // line is greppable across turns.
-                                    eprintln!(
+                                    tracing::debug!(
                                         "tidebreak: turn {} resolved usage input_tokens={} output_tokens={} cache_read_input_tokens={} cache_creation_input_tokens={}",
                                         turn.id,
                                         total_usage.input_tokens,
@@ -2263,7 +2263,7 @@ impl TurnWorker {
                     total_model_steps = checked_model_step_sum(total_model_steps, model_steps)?;
                     match checked_usage_sum(total_usage, usage) {
                         Ok(total) => total_usage = total,
-                        Err(error) => eprintln!(
+                        Err(error) => tracing::warn!(
                             "tidebreak: turn {} cancellation usage overflowed; acknowledging the durable baseline: {error}",
                             turn.id
                         ),
@@ -2802,7 +2802,7 @@ impl TurnWorker {
     }
 
     async fn retry_after(&self, operation: &str, turn_id: TurnId, error: &AgentError) {
-        eprintln!("tidebreak: turn {turn_id} {operation} failed; retrying exact request: {error}");
+        tracing::warn!("tidebreak: turn {turn_id} {operation} failed; retrying exact request: {error}");
         tokio::time::sleep(self.config.failure_delay).await;
     }
 
@@ -2980,8 +2980,8 @@ fn chrono_duration(duration: Duration) -> Result<chrono::Duration> {
 fn log_turn_result(result: std::result::Result<Result<TurnWorkerOutcome>, tokio::task::JoinError>) {
     match result {
         Ok(Ok(_)) => {}
-        Ok(Err(error)) => eprintln!("tidebreak: turn worker execution failed: {error}"),
-        Err(error) => eprintln!("tidebreak: turn worker task stopped: {error}"),
+        Ok(Err(error)) => tracing::error!("tidebreak: turn worker execution failed: {error}"),
+        Err(error) => tracing::error!("tidebreak: turn worker task stopped: {error}"),
     }
 }
 

@@ -256,7 +256,7 @@ impl SandboxExecWorker {
             LaneBackoff::new(self.config.failure_delay, self.config.failure_delay_cap);
         while let Some(result) = lanes.join_next().await {
             if let Err(error) = result {
-                eprintln!("tidebreak: sandbox exec worker lane stopped: {error}");
+                tracing::error!("tidebreak: sandbox exec worker lane stopped: {error}");
                 tokio::time::sleep(restart_backoff.next_delay()).await;
             }
             lanes.spawn(self.clone().run_lane());
@@ -282,7 +282,7 @@ impl SandboxExecWorker {
                     idle_delay = self.config.idle_min;
                 }
                 Err(error) => {
-                    eprintln!("tidebreak: sandbox exec worker iteration failed: {error}");
+                    tracing::warn!("tidebreak: sandbox exec worker iteration failed: {error}");
                     let delay = failure_backoff.next_delay();
                     tokio::select! {
                         _ = tokio::time::sleep(delay) => {}

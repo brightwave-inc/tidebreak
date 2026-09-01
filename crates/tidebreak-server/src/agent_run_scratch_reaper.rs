@@ -138,7 +138,7 @@ impl AgentRunScratchReaper {
             let delay = match self.sweep_once().await {
                 Ok(report) => {
                     if report.reaped > 0 || !report.failures.is_empty() {
-                        eprintln!(
+                        tracing::info!(
                             "tidebreak: agent-run scratch sweep scanned {}, reaped {}, skipped {}, remaining {}, errors {}",
                             report.scanned,
                             report.reaped,
@@ -149,11 +149,11 @@ impl AgentRunScratchReaper {
                     }
                     for failure in &report.failures {
                         match failure.run_id {
-                            Some(run_id) => eprintln!(
+                            Some(run_id) => tracing::error!(
                                 "tidebreak: agent run {run_id} scratch reap failed: {}",
                                 failure.error
                             ),
-                            None => eprintln!(
+                            None => tracing::error!(
                                 "tidebreak: agent-run scratch scan failed: {}",
                                 failure.error
                             ),
@@ -162,7 +162,7 @@ impl AgentRunScratchReaper {
                     next_delay(self.config, &report)
                 }
                 Err(error) => {
-                    eprintln!("tidebreak: agent-run scratch sweep failed: {error}");
+                    tracing::error!("tidebreak: agent-run scratch sweep failed: {error}");
                     self.config.failure_delay
                 }
             };

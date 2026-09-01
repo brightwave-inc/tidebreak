@@ -133,7 +133,7 @@ impl SandboxAgentRunWorker {
             LaneBackoff::new(self.config.failure_delay, self.config.failure_delay_cap);
         while let Some(result) = lanes.join_next().await {
             if let Err(error) = result {
-                eprintln!("tidebreak: sandbox agent worker lane stopped: {error}");
+                tracing::error!("tidebreak: sandbox agent worker lane stopped: {error}");
                 tokio::time::sleep(restart_backoff.next_delay()).await;
             }
             lanes.spawn(self.clone().run_lane());
@@ -159,7 +159,7 @@ impl SandboxAgentRunWorker {
                     idle_delay = self.config.idle_min;
                 }
                 Err(error) => {
-                    eprintln!("tidebreak: sandbox agent worker iteration failed: {error}");
+                    tracing::warn!("tidebreak: sandbox agent worker iteration failed: {error}");
                     let delay = failure_backoff.next_delay();
                     tokio::select! {
                         _ = tokio::time::sleep(delay) => {}
@@ -225,7 +225,7 @@ impl SandboxAgentRunWorker {
                 Ok(outcome) => break outcome,
                 Err(error) => {
                     recovering_ambiguous_commit = true;
-                    eprintln!(
+                    tracing::warn!(
                         "tidebreak: wait-set {wait_id} resume failed; retrying exact request: {error}"
                     );
                     tokio::select! {
@@ -1520,7 +1520,7 @@ impl SandboxAgentRunWorker {
             .append_agent_run_progress(run_id, key, narration)
             .await
         {
-            eprintln!("tidebreak: could not publish progress for run {run_id}: {error}");
+            tracing::error!("tidebreak: could not publish progress for run {run_id}: {error}");
         }
     }
 
@@ -1545,7 +1545,7 @@ impl SandboxAgentRunWorker {
                 .append_agent_run_progress(run_id, &format!("step:{depth}:tool:{index}"), &text)
                 .await
             {
-                eprintln!(
+                tracing::error!(
                     "tidebreak: could not publish provider-executed progress for run \
                      {run_id}: {error}"
                 );

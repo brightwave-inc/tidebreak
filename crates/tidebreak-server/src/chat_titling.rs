@@ -208,18 +208,18 @@ impl ChatTitler {
                 // database.
                 let should_run_pending = match titler.derive_title(chat_id, &utility).await {
                     Ok(Some(title)) => {
-                        eprintln!(
+                        tracing::info!(
                             "tidebreak: titled chat {chat_id} on {}: {title}",
                             utility.model
                         );
                         false
                     }
                     Ok(None) => {
-                        eprintln!("tidebreak: left chat {chat_id} untitled");
+                        tracing::warn!("tidebreak: left chat {chat_id} untitled");
                         true
                     }
                     Err(error) => {
-                        eprintln!(
+                        tracing::error!(
                             "tidebreak: could not derive a title for chat {chat_id}: {error}"
                         );
                         true
@@ -398,7 +398,7 @@ pub(crate) async fn derive_text_with_retries<P: Proposal>(
             Ok(Some(proposed)) => match normalize_derived(&proposed, P::MAX_CHARS) {
                 Some(text) => return Ok(Some(text)),
                 None if attempt < DERIVATION_ATTEMPTS => {
-                    eprintln!(
+                    tracing::warn!(
                         "tidebreak: {kind} attempt {attempt}/{DERIVATION_ATTEMPTS} returned an unusable answer for {subject}: {proposed:?}"
                     );
                     attempt += 1;
@@ -410,7 +410,7 @@ pub(crate) async fn derive_text_with_retries<P: Proposal>(
                 }
             },
             Err(error) if attempt < DERIVATION_ATTEMPTS => {
-                eprintln!(
+                tracing::error!(
                     "tidebreak: {kind} attempt {attempt}/{DERIVATION_ATTEMPTS} failed for {subject}: {error}"
                 );
                 attempt += 1;
