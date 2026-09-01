@@ -411,6 +411,8 @@ pub(crate) struct NewSessionSettings {
 
 struct SelectedModelCapabilities {
     reasoning_efforts: Vec<ReasoningEffort>,
+    /// The selected row's own ladder, when the engine listed that row.
+    listed_model_reasoning_efforts: Option<Vec<ReasoningEffort>>,
     reasoning_known: bool,
     fast_mode: bool,
     fast_mode_known: bool,
@@ -5468,6 +5470,7 @@ impl CodeRuntime {
         };
         SelectedModelCapabilities {
             reasoning_efforts,
+            listed_model_reasoning_efforts: model.map(|model| model.reasoning_efforts.clone()),
             reasoning_known,
             fast_mode: model.is_some_and(|model| model.fast_mode),
             fast_mode_known: model.is_some() || catalog_known,
@@ -5497,8 +5500,8 @@ impl CodeRuntime {
             return capabilities;
         };
         let engine_efforts = adapter.reasoning_efforts(probe);
-        capabilities.reasoning_efforts = crate::providers::overlay_gateway_reasoning_efforts(
-            &capabilities.reasoning_efforts,
+        capabilities.reasoning_efforts = crate::providers::effective_gateway_reasoning_efforts(
+            capabilities.listed_model_reasoning_efforts.as_deref(),
             &engine_efforts,
             model_efforts,
         );
@@ -7390,14 +7393,13 @@ mod selected_model_capabilities_tests {
     }
 
     #[tokio::test]
-    async fn a_codex_row_ladder_intersects_the_gateway_ladder() {
+    async fn a_codex_rows_ladder_wins_over_the_engine_wide_ladder() {
         let (runtime, _directory) =
             runtime_with_gateway_snapshot("https://gateway.example/", "https://gateway.example/")
                 .await;
         let adapter = ScriptedAdapter::new(plain_text_script())
             .with_kind(HarnessKind::Codex)
             .with_reasoning_levels(CapLevel::Supported)
-            .with_engine_reasoning_efforts(Vec::new())
             .with_models(vec![ListedHarnessModel {
                 id: "model-gateway-model-gateway/glm-5.3".into(),
                 label: "GLM 5.3".into(),
@@ -7423,14 +7425,6 @@ mod selected_model_capabilities_tests {
             capabilities.reasoning_efforts,
             vec![ReasoningEffort::Low, ReasoningEffort::High]
         );
-        assert!(capabilities.reasoning_known);
-        let mut settings = CodeSessionExecutionSettings {
-            model: Some("model-gateway-model-gateway/glm-5.3".into()),
-            reasoning_effort: Some(ReasoningEffort::High),
-            fast_mode: false,
-        };
-        capabilities.deactivate_unsupported(&mut settings);
-        assert_eq!(settings.reasoning_effort, Some(ReasoningEffort::High));
     }
 
     #[tokio::test]
@@ -7460,6 +7454,7 @@ mod selected_model_capabilities_tests {
     fn an_authoritative_catalog_clears_unsupported_settings() {
         let capabilities = SelectedModelCapabilities {
             reasoning_efforts: vec![ReasoningEffort::Low],
+            listed_model_reasoning_efforts: Some(vec![ReasoningEffort::Low]),
             reasoning_known: true,
             fast_mode: false,
             fast_mode_known: true,

@@ -111,8 +111,13 @@ pub async fn list_harness_models(
             else {
                 continue;
             };
-            model.reasoning_efforts = crate::providers::overlay_gateway_reasoning_efforts(
-                &model.reasoning_efforts,
+            let listed_model_efforts = if hosted && model.reasoning_efforts.is_empty() {
+                None
+            } else {
+                Some(model.reasoning_efforts.as_slice())
+            };
+            model.reasoning_efforts = crate::providers::effective_gateway_reasoning_efforts(
+                listed_model_efforts,
                 &engine_reasoning_efforts,
                 model_efforts,
             );
