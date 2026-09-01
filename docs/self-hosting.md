@@ -444,8 +444,6 @@ read the self-host section of
 account. In summary, and each of these is a reason not to put irreplaceable
 data in a self-host deployment yet:
 
-- Document and blob PostgreSQL parity is not comprehensively tested (the
-  durable turn state machine is what CI exercises against PostgreSQL).
 - Object storage is not wired.
 - Tidebreak enforces one active server process per PostgreSQL database through
   a dedicated advisory lease. A second process refuses boot even when it uses
