@@ -107,10 +107,32 @@ describe("WorkspaceCard", () => {
     const row = screen.getByRole("button", {
       name: "Fix login · Creating workspace · app",
     });
+    const progress = screen.getByRole("status", {
+      name: "Creating workspace",
+    });
     expect(row).toBeDisabled();
-    expect(screen.getByText("Creating workspace")).toBeInTheDocument();
+    expect(progress).toHaveTextContent("Creating workspace");
+    expect(progress.querySelector(".live-label-shimmer")).not.toBeNull();
+    expect(
+      progress.querySelector(".workspace-creation-progress"),
+    ).not.toBeNull();
     await user.click(row);
     expect(onOpen).not.toHaveBeenCalled();
+  });
+
+  it("keeps the creation transition visible in compact mode", () => {
+    renderCard({
+      density: "compact",
+      workspace: {
+        status: "creating",
+        branch_name: "",
+        worktree_path: "",
+      },
+    });
+
+    expect(
+      screen.getByRole("status", { name: "Creating workspace" }),
+    ).toBeInTheDocument();
   });
 
   it("keeps one menu: right-click carries every command", async () => {

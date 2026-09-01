@@ -87,7 +87,7 @@ export const SelectedAndActive: Story = {
   args: { selected: true, active: true },
 };
 
-/** A create appears in the rail while the worktree and first session start. */
+/** The rail hands off from the composer while the server creates the worktree. */
 export const Creating: Story = {
   args: {
     workspace: {
@@ -101,6 +101,15 @@ export const Creating: Story = {
     },
     visibleMeta: { repoChip: true, branch: false },
     commands: [],
+  },
+};
+
+/** Compact rails keep the same transition instead of collapsing to a spinner. */
+export const CreatingCompact: Story = {
+  args: {
+    ...Creating.args,
+    density: "compact",
+    visibleMeta: { repoChip: false, branch: false },
   },
 };
 

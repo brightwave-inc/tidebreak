@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Check, Circle } from "lucide-react";
 
 import type { ApiClient } from "../api/client";
 import type {
@@ -9,19 +10,23 @@ import type {
   ReasoningEffort,
 } from "../api/types";
 import type { ComposerWorkspaceFiles } from "@/Composer";
+import { LiveLabel } from "@/LiveLabel";
+import { Spinner } from "@/components/ui/spinner";
+import { cn } from "@/lib/utils";
 import { clampPermissionMode } from "../PermissionModeMenu";
 import { useManagedPolicy } from "../managedPolicy";
 import { CodeComposer } from "./CodeComposer";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
-import { useCodeUiStore } from "./CodeUiStore";
+import { useCodeUiStore, type WorkspaceStartup } from "./CodeUiStore";
 import { HarnessInstallNote } from "./HarnessInstallNote";
-import { HarnessPicker } from "./HarnessPicker";
+import { HARNESS_ICONS, HarnessPicker } from "./HarnessPicker";
 import {
   canInstallHarnesses,
   useWarmHarnessInstall,
 } from "./useHarnessInstall";
 import {
   CREATE_PERMISSION_MODE_FIXED,
+  HARNESS_LABELS,
   createPermissionModes,
   defaultCreatePermissionMode,
   effortLadder,
@@ -36,6 +41,123 @@ import {
 const NO_ENGINE_EFFORTS: ReasoningEffort[] = [];
 
 const NO_CATALOG_MODELS: ModelInfo[] = [];
+
+/** The page-level handoff while a newly created workspace gets its first agent. */
+export function WorkspaceSessionStartingState({
+  startup,
+}: {
+  startup: WorkspaceStartup;
+}) {
+  const label = HARNESS_LABELS[startup.harness];
+  const HarnessIcon = HARNESS_ICONS[startup.harness];
+  const sending = startup.phase === "sending_message";
+
+  return (
+    <section
+      className="flex min-h-0 flex-1 flex-col"
+      role="status"
+      aria-label="Starting session"
+      data-testid="workspace-session-starting"
+    >
+      <div className="flex min-h-0 flex-1 items-center justify-center px-6 py-10">
+        <div className="w-full max-w-md">
+          <div className="flex items-start gap-3">
+            <Spinner className="mt-1 size-4 text-live" aria-hidden />
+            <div className="min-w-0">
+              <h2 className="text-lg font-semibold">Starting your session</h2>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Tidebreak is preparing {label} in this workspace.
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-6 ml-2 border-l border-border-subtle pl-5">
+            <StartupStep label="Workspace ready" state="complete" />
+            <StartupStep
+              label={sending ? `${label} ready` : `Starting ${label}`}
+              state={sending ? "complete" : "active"}
+            />
+            <StartupStep
+              label={
+                startup.hasFirstMessage
+                  ? "Sending your first message"
+                  : "Opening the conversation"
+              }
+              state={sending ? "active" : "pending"}
+              last
+            />
+          </div>
+
+          <p className="mt-6 text-sm text-muted-foreground">
+            Your conversation appears here as soon as the session is ready.
+          </p>
+        </div>
+      </div>
+
+      <div className="relative shrink-0 px-[clamp(0.5rem,4%,5rem)] pb-2">
+        <div
+          className="rounded-xl border border-border bg-background px-3 py-3"
+          aria-hidden
+        >
+          <p className="text-sm text-muted-foreground/70">
+            {startup.hasFirstMessage
+              ? "Your first message is queued."
+              : "The composer is almost ready."}
+          </p>
+          <div className="mt-4 flex items-center justify-between gap-3">
+            <span className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+              <HarnessIcon className="size-4 shrink-0" />
+              <span className="truncate">{label}</span>
+            </span>
+            <span className="size-8 shrink-0 rounded-md bg-muted" />
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function StartupStep({
+  label,
+  state,
+  last = false,
+}: {
+  label: string;
+  state: "complete" | "active" | "pending";
+  last?: boolean;
+}) {
+  return (
+    <div
+      className={cn("relative flex items-center gap-2 pb-4", last && "pb-0")}
+    >
+      <span className="absolute -left-[1.625rem] flex size-3.5 items-center justify-center bg-page-background">
+        {state === "complete" ? (
+          <Check className="size-3.5 text-success" aria-hidden />
+        ) : state === "active" ? (
+          <Spinner className="size-3.5 text-live" aria-hidden />
+        ) : (
+          <Circle className="size-2.5 text-border" aria-hidden />
+        )}
+      </span>
+      {state === "active" ? (
+        <LiveLabel live className="text-sm">
+          {label}
+        </LiveLabel>
+      ) : (
+        <span
+          className={cn(
+            "text-sm",
+            state === "complete"
+              ? "text-foreground"
+              : "text-muted-foreground/65",
+          )}
+        >
+          {label}
+        </span>
+      )}
+    </div>
+  );
+}
 
 /**
  * Create-time harness + permission mode for a workspace with no session.

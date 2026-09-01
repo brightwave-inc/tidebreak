@@ -81,6 +81,7 @@ afterEach(() => {
     pendingComposerPrompt: null,
     pendingComposerImages: null,
     newWorkspaceDraft: EMPTY_NEW_WORKSPACE_DRAFT,
+    workspaceStartups: {},
   });
   toastError.mockReset();
   toastSuccess.mockReset();
@@ -344,8 +345,18 @@ describe("NewWorkspaceDialog", () => {
     await waitFor(() =>
       expect(router.state.location.pathname).toBe("/code/w/ws-early"),
     );
+    expect(useCodeUiStore.getState().workspaceStartups["ws-early"]).toEqual({
+      harness: "claude_code",
+      hasFirstMessage: false,
+      phase: "starting_session",
+    });
     sessionStart.resolve(
       session("ws-early", "claude_code", "2026-08-24T12:00:00.000Z"),
+    );
+    await waitFor(() =>
+      expect(
+        useCodeUiStore.getState().workspaceStartups["ws-early"],
+      ).toBeUndefined(),
     );
   });
 

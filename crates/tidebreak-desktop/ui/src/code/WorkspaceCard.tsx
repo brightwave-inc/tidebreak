@@ -13,7 +13,6 @@ import {
   FolderOpen,
   GitBranch,
   GitPullRequest,
-  LoaderCircle,
   Radar,
   RotateCcw,
   Search,
@@ -22,6 +21,7 @@ import {
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { LiveLabel } from "@/LiveLabel";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -106,10 +106,7 @@ export function WorkspaceStatusMark({
   if (creating) {
     return (
       <span role="img" aria-label="Creating workspace">
-        <LoaderCircle
-          className={cn("size-3 animate-spin", STATUS_MARK.pending)}
-          aria-hidden
-        />
+        <Spinner className={cn("size-3", STATUS_MARK.running)} aria-hidden />
       </span>
     );
   }
@@ -224,6 +221,8 @@ export function WorkspaceCard({
     <article
       className={cn(
         "group/workspace relative rounded-xl border border-transparent transition-[background-color,border-color,box-shadow,opacity] duration-150",
+        creating &&
+          "workspace-creation-card border-live-border/35 bg-live-background/25",
         selected && "border-border bg-muted/60",
         active &&
           "shadow-[0_1px_2px_color-mix(in_oklch,var(--foreground)_6%,transparent)]",
@@ -367,12 +366,16 @@ export function WorkspaceCard({
         </ContextMenuContent>
       </ContextMenu>
 
-      {density === "detailed" && (
-        <WorkspaceActivityLine
-          workspace={workspace}
-          digest={digest}
-          session={session}
-        />
+      {creating ? (
+        <WorkspaceCreationProgress />
+      ) : (
+        density === "detailed" && (
+          <WorkspaceActivityLine
+            workspace={workspace}
+            digest={digest}
+            session={session}
+          />
+        )
       )}
 
       {density === "detailed" &&
@@ -762,19 +765,6 @@ function WorkspaceActivityLine({
   digest: CodeSessionDigest | undefined;
   session: CodeSessionSnapshot | undefined;
 }) {
-  if (workspace.status === "creating") {
-    return (
-      <div
-        className={cn(
-          "flex min-w-0 items-center gap-1.5 px-2.5 pb-2 pl-7 text-xs",
-          STATUS_TEXT.pending,
-        )}
-      >
-        <LoaderCircle className="size-3 shrink-0 animate-spin" aria-hidden />
-        <span className="min-w-0 flex-1 truncate">Creating workspace</span>
-      </div>
-    );
-  }
   // The checkout survived, so the workspace is usable — but the setup script
   // never finished, and nothing else on the card would say so.
   if (workspace.status === "setup_failed") {
@@ -845,6 +835,26 @@ function WorkspaceActivityLine({
           {age === "now" ? "now" : age}
         </span>
       )}
+    </div>
+  );
+}
+
+/** A quiet, optimistic handoff while the server creates the worktree. */
+function WorkspaceCreationProgress() {
+  return (
+    <div
+      className="px-2.5 pb-2 pl-7"
+      role="status"
+      aria-label="Creating workspace"
+      data-testid="workspace-creation-progress"
+    >
+      <LiveLabel live className="block truncate text-xs">
+        Creating workspace
+      </LiveLabel>
+      <span
+        className="workspace-creation-progress mt-1.5 block h-0.5 overflow-hidden rounded-full bg-live-border/20"
+        aria-hidden
+      />
     </div>
   );
 }
