@@ -155,10 +155,13 @@ describe the current schema, not the frozen baseline.
   makes the deeper tier worth the step. Transcripts are untouched at every
   tier — the row and its journal outlive the bytes.
 
-  Non-force archive also protects ignored files. To exclude a generated
-  directory from that scan, configure its exact repository-relative path with
+  Non-force archive also protects ignored files. Inspection lists an ignored
+  directory as one path, so a generated tree does not exhaust the scan budget.
+  To exclude a generated directory from that scan, configure its exact
+  repository-relative path with
   `git config --add tidebreak.archiveDisposablePath <directory>`. Archive
-  fails closed when the scan or its configured paths exceed the safety budget.
+  fails closed when the remaining scan or its configured paths exceed the
+  safety budget.
 - **`code_session`** — `id`, `owner`, `workspace_id`, `kind`
   (`Interactive | Watch`, per
   [`0050`](decisions/0050-watch-and-fix-is-a-durable-task.md)), `harness_kind`,

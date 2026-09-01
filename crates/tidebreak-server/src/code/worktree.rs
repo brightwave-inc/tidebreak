@@ -28,7 +28,6 @@ pub(crate) const DEFAULT_SEARCH_LIMIT: u32 = 200;
 pub(crate) const MAX_SEARCH_LIMIT: u32 = 500;
 const MAX_SEARCH_QUERY_CHARS: usize = 500;
 const MAX_SEARCH_PREVIEW_CHARS: usize = 500;
-const ARCHIVE_SCAN_MAX_ENTRIES: usize = 10_000;
 const ARCHIVE_SCAN_MAX_PATH_BYTES: usize = 1024 * 1024;
 const ARCHIVE_DISPOSABLE_PATH_KEY: &str = "tidebreak.archiveDisposablePath";
 const DIRECTORY_WALK_MAX_ENTRIES: usize = 100_000;
@@ -1739,10 +1738,7 @@ async fn has_uncommitted_work(worktree_path: &Path) -> Result<bool, WorktreeErro
 
 async fn has_non_disposable_ignored_content(worktree_path: &Path) -> Result<bool, WorktreeError> {
     let disposable = archive_disposable_paths(worktree_path).await?;
-    let ignored = list_ignored_paths_bounded(worktree_path).await?;
-    Ok(ignored
-        .iter()
-        .any(|path| !path_is_disposable(Path::new(path), &disposable)))
+    ignored_listing_has_non_disposable(worktree_path, &disposable).await
 }
 
 async fn archive_disposable_paths(worktree_path: &Path) -> Result<Vec<PathBuf>, WorktreeError> {
@@ -1805,16 +1801,42 @@ fn path_is_disposable(path: &Path, disposable: &[PathBuf]) -> bool {
         .any(|configured| path.starts_with(configured))
 }
 
-async fn list_ignored_paths_bounded(worktree_path: &Path) -> Result<Vec<String>, WorktreeError> {
+fn git_pathspec(path: &Path) -> String {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn ignored_listing_args(disposable: &[PathBuf]) -> Vec<OsString> {
+    let mut args = vec![
+        OsString::from("ls-files"),
+        OsString::from("--others"),
+        OsString::from("--ignored"),
+        OsString::from("--exclude-standard"),
+        OsString::from("--directory"),
+        OsString::from("-z"),
+    ];
+    if disposable.is_empty() {
+        return args;
+    }
+    args.push(OsString::from("--"));
+    args.push(OsString::from("."));
+    for path in disposable {
+        let spec = git_pathspec(path);
+        args.push(OsString::from(format!(":!{spec}")));
+        args.push(OsString::from(format!(":!{spec}/**")));
+    }
+    args
+}
+
+async fn ignored_listing_has_non_disposable(
+    worktree_path: &Path,
+    disposable: &[PathBuf],
+) -> Result<bool, WorktreeError> {
     let mut command = Command::new("git");
     command
-        .args([
-            "ls-files",
-            "--others",
-            "--ignored",
-            "--exclude-standard",
-            "-z",
-        ])
+        .args(ignored_listing_args(disposable))
         .current_dir(worktree_path)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -1828,7 +1850,7 @@ async fn list_ignored_paths_bounded(worktree_path: &Path) -> Result<Vec<String>,
         .stdout
         .take()
         .ok_or_else(|| WorktreeError::archive_uncertain("git ls-files did not open stdout"))?;
-    let mut output = Vec::new();
+    let mut pending = Vec::new();
     let mut chunk = [0u8; 8192];
     loop {
         let read = timeout(GIT_TIMEOUT, stdout.read(&mut chunk))
@@ -1840,13 +1862,26 @@ async fn list_ignored_paths_bounded(worktree_path: &Path) -> Result<Vec<String>,
         if read == 0 {
             break;
         }
-        output.extend_from_slice(&chunk[..read]);
-        if output.len() > ARCHIVE_SCAN_MAX_PATH_BYTES {
+        pending.extend_from_slice(&chunk[..read]);
+        if take_non_disposable_ignored_path(&mut pending, disposable) {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Ok(true);
+        }
+        if pending.len() > ARCHIVE_SCAN_MAX_PATH_BYTES {
             let _ = child.kill().await;
             return Err(WorktreeError::archive_uncertain(format!(
                 "ignored-content inspection exceeded its {}-byte path budget; configure generated directories with git config --add {ARCHIVE_DISPOSABLE_PATH_KEY} <directory>",
                 ARCHIVE_SCAN_MAX_PATH_BYTES
             )));
+        }
+    }
+    if !pending.is_empty() {
+        pending.push(0);
+        if take_non_disposable_ignored_path(&mut pending, disposable) {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Ok(true);
         }
     }
     let status = timeout(GIT_TIMEOUT, child.wait())
@@ -1860,18 +1895,29 @@ async fn list_ignored_paths_bounded(worktree_path: &Path) -> Result<Vec<String>,
             "git ls-files failed during ignored-content inspection",
         ));
     }
-    let paths = output
-        .split(|byte| *byte == 0)
-        .filter(|path| !path.is_empty())
-        .map(|path| String::from_utf8_lossy(path).into_owned())
-        .collect::<Vec<_>>();
-    if paths.len() > ARCHIVE_SCAN_MAX_ENTRIES {
-        return Err(WorktreeError::archive_uncertain(format!(
-            "ignored-content inspection exceeded its {}-entry budget; configure generated directories with git config --add {ARCHIVE_DISPOSABLE_PATH_KEY} <directory>",
-            ARCHIVE_SCAN_MAX_ENTRIES
-        )));
+    Ok(false)
+}
+
+fn take_non_disposable_ignored_path(pending: &mut Vec<u8>, disposable: &[PathBuf]) -> bool {
+    let mut consumed = 0;
+    let mut found = false;
+    for (end, byte) in pending.iter().enumerate() {
+        if *byte != 0 {
+            continue;
+        }
+        let raw = String::from_utf8_lossy(&pending[consumed..end]);
+        consumed = end + 1;
+        let path = raw.trim_end_matches(['/', '\\']);
+        if path.is_empty() || path_is_disposable(Path::new(path), disposable) {
+            continue;
+        }
+        found = true;
+        break;
     }
-    Ok(paths)
+    if consumed > 0 {
+        pending.drain(..consumed);
+    }
+    found
 }
 
 async fn has_unpushed_work(worktree_path: &Path, base_ref: &str) -> Result<bool, WorktreeError> {
@@ -2381,6 +2427,62 @@ mod tests {
             archive_blockers(&path, "main").await.unwrap(),
             Some(ArchiveBlock::Unpushed)
         );
+    }
+
+    #[tokio::test]
+    async fn archive_collapses_ignored_directories_and_skips_disposable_paths() {
+        let (_dir, repo) = init_repo();
+        std::fs::write(repo.join(".gitignore"), "target/\n.env.local\n").unwrap();
+        run(&repo, &["git", "add", ".gitignore"]);
+        run(&repo, &["git", "commit", "-m", "ignore generated files"]);
+        let data = TempDir::new().unwrap();
+        let path = scratch_worktree(data.path(), "generated");
+        create_ready(&repo, &path, "tidebreak/generated", "main").await;
+        std::fs::create_dir_all(path.join("target/debug")).unwrap();
+        for i in 0..50 {
+            std::fs::write(path.join("target/debug").join(format!("obj{i}.o")), "x").unwrap();
+        }
+
+        assert_eq!(
+            archive_blockers(&path, "main").await.unwrap(),
+            Some(ArchiveBlock::IgnoredContent)
+        );
+
+        run(
+            &path,
+            &[
+                "git",
+                "config",
+                "--add",
+                "tidebreak.archiveDisposablePath",
+                "target",
+            ],
+        );
+        assert_eq!(archive_blockers(&path, "main").await.unwrap(), None);
+
+        std::fs::write(path.join(".env.local"), "SECRET=1\n").unwrap();
+        assert_eq!(
+            archive_blockers(&path, "main").await.unwrap(),
+            Some(ArchiveBlock::IgnoredContent)
+        );
+    }
+
+    #[test]
+    fn disposable_prefixes_ignore_trailing_slashes_from_directory_listings() {
+        let disposable = [PathBuf::from("target")];
+        assert!(path_is_disposable(Path::new("target"), &disposable));
+        assert!(path_is_disposable(
+            Path::new("target/debug/foo.o"),
+            &disposable
+        ));
+        assert!(!path_is_disposable(Path::new(".env.local"), &disposable));
+
+        let mut pending = b"target/\0.env.local".to_vec();
+        assert!(!take_non_disposable_ignored_path(&mut pending, &disposable));
+        assert_eq!(pending.as_slice(), b".env.local");
+        pending.push(0);
+        assert!(take_non_disposable_ignored_path(&mut pending, &disposable));
+        assert!(pending.is_empty());
     }
 
     #[tokio::test]
