@@ -283,14 +283,9 @@ pub enum CodeWorkspaceStatus {
     Active,
     /// Archive owns the checkout and rejects every new writer.
     Archiving,
-    /// Archived; worktree removed, branch kept.
+    /// Archived; worktree removed. Remote workspaces keep this state.
     Archived,
     /// Released; worktree and branch both gone, commits kept as a bundle.
-    ///
-    /// The deepest reclaim tier. A worktree is gigabytes of checkout and build
-    /// output; the branch's own commits are usually kilobytes, so bundling
-    /// them and dropping the branch frees nearly everything and still restores
-    /// exactly. The transcript is untouched at every tier.
     Released,
 }
 
@@ -766,8 +761,7 @@ pub struct CodeWorkspace {
     /// Commit the released branch pointed at, so a restore can say what it
     /// rebuilds and a reader can recognize the work without unbundling.
     pub released_tip: Option<String>,
-    /// Size of the stored bundle. Kept for the reclaim surface, which has to
-    /// report what a release actually bought without stat-ing every file.
+    /// Size of the stored bundle.
     pub bundle_bytes: Option<i64>,
 }
 

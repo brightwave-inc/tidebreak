@@ -110,7 +110,6 @@ import {
   type CodePrCommentsSnapshot,
   type CodePrMergeMethod,
   type CodeWorkspaceSnapshot,
-  type CodeStorageSnapshot,
   type CodeCloneDefaults,
   type CodeGithubRepositories,
   type CodeRepoSources,
@@ -182,7 +181,6 @@ import {
   parseCodeTerminalList,
   parseCodeTerminalRead,
   parseCodeWorkspace,
-  parseCodeStorage,
   parseCodeWorkspaceDiff,
   parseCodeWorkspaceFiles,
   parseCodeWorkspaceSearch,
@@ -2425,34 +2423,6 @@ export class ApiClient {
         ),
       ),
       "code workspace",
-    );
-  }
-
-  async releaseCodeWorkspace(
-    workspaceId: string,
-    force = false,
-  ): Promise<CodeWorkspaceSnapshot> {
-    return requireParsed(
-      parseCodeWorkspace(
-        await this.json(
-          `/code/workspaces/${encodeURIComponent(workspaceId)}/release`,
-          {
-            method: "POST",
-            headers: this.headers(true),
-            body: JSON.stringify({ force }),
-          },
-        ),
-      ),
-      "code workspace",
-    );
-  }
-
-  async listCodeStorage(): Promise<CodeStorageSnapshot> {
-    return requireParsed(
-      parseCodeStorage(
-        await this.json("/code/storage", { headers: this.headers() }),
-      ),
-      "code storage",
     );
   }
 

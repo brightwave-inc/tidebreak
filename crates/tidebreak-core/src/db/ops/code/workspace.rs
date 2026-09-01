@@ -154,6 +154,47 @@ pub async fn complete_workspace_archive(
     Ok(result.rows_affected == 1)
 }
 
+/// Finish a local archive with its recovery metadata in one durable write.
+pub async fn complete_workspace_release(
+    store: &DbStore,
+    owner: &OwnerId,
+    id: WorkspaceId,
+    archived_at: chrono::DateTime<chrono::Utc>,
+    released_tip: Option<String>,
+    bundle_bytes: Option<i64>,
+) -> Result<bool> {
+    let result = entities::code_workspace::Entity::update_many()
+        .col_expr(
+            entities::code_workspace::Column::Status,
+            sea_orm::sea_query::Expr::value(CodeWorkspaceStatus::Released.as_str()),
+        )
+        .col_expr(
+            entities::code_workspace::Column::ArchivedAt,
+            sea_orm::sea_query::Expr::value(archived_at),
+        )
+        .col_expr(
+            entities::code_workspace::Column::ReleasedAt,
+            sea_orm::sea_query::Expr::value(archived_at),
+        )
+        .col_expr(
+            entities::code_workspace::Column::ReleasedTip,
+            sea_orm::sea_query::Expr::value(released_tip),
+        )
+        .col_expr(
+            entities::code_workspace::Column::BundleBytes,
+            sea_orm::sea_query::Expr::value(bundle_bytes),
+        )
+        .filter(entities::code_workspace::Column::Id.eq(id.0))
+        .filter(entities::code_workspace::Column::Owner.eq(owner.as_str()))
+        .filter(
+            entities::code_workspace::Column::Status.eq(CodeWorkspaceStatus::Archiving.as_str()),
+        )
+        .exec(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(result.rows_affected == 1)
+}
+
 /// Persist mutable workspace fields. `id`, `repo_id`, and `created_at` stay as stored.
 pub async fn save_workspace(store: &DbStore, workspace: &CodeWorkspace) -> Result<bool> {
     let result = entities::code_workspace::Entity::update_many()

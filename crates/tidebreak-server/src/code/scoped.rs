@@ -42,7 +42,7 @@ use crate::routes::code::types::{
     CodeDeliveryPullRequestActionBody, CodeDeliveryPullRequestDetail, CodeDeliveryPullRequestQuery,
     CodeDeliveryPullRequestTarget, CodeDeliveryPullRequestsPage, CodeDeliveryRepositoriesSnapshot,
     CodeDeliveryRunActionBody, CodeDeliveryRunDetail, CodeDeliveryRunQuery, CodeDeliveryRunTarget,
-    CodeDeliveryRunsPage, CodeHarnessInstallSnapshot, CodeRepoSources, CodeStorageSnapshot,
+    CodeDeliveryRunsPage, CodeHarnessInstallSnapshot, CodeRepoSources,
     ResolveCodeDeliveryRepositoriesBody,
 };
 use crate::state::AppState;
@@ -308,10 +308,6 @@ impl ScopedCode {
         self.runtime.list_workspaces(&self.owner, repo_id).await
     }
 
-    pub(crate) async fn storage_snapshot(&self) -> Result<CodeStorageSnapshot, ServerError> {
-        self.runtime.storage_snapshot(&self.owner).await
-    }
-
     pub(crate) async fn get_workspace(
         &self,
         id: WorkspaceId,
@@ -342,14 +338,6 @@ impl ScopedCode {
         id: WorkspaceId,
     ) -> std::sync::Arc<tokio::sync::Mutex<()>> {
         self.runtime.workspace_write_lock(id)
-    }
-
-    pub(crate) async fn release_workspace(
-        &self,
-        id: WorkspaceId,
-        force: bool,
-    ) -> Result<CodeWorkspace, ServerError> {
-        self.runtime.release_workspace(&self.owner, id, force).await
     }
 
     pub(crate) async fn restore_workspace(

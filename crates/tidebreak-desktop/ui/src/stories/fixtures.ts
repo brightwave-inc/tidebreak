@@ -851,7 +851,7 @@ export const closedPrDigest: PullRequestDigest = {
   state: "closed",
 };
 
-/** A put-away workspace: worktree gone, branch and history kept. */
+/** A remote-style put-away workspace: no host worktree, history kept. */
 export const archivedWorkspace: CodeWorkspaceSnapshot = {
   ...codeWorkspace,
   id: "ws-archived",
@@ -860,10 +860,7 @@ export const archivedWorkspace: CodeWorkspaceSnapshot = {
   archived_at: "2026-08-18T17:00:00.000Z",
 };
 
-/**
- * The deepest reclaim tier: worktree and branch both gone, the branch's own
- * commits kept as a bundle so a restore still rebuilds the work exactly.
- */
+/** A local archived workspace: worktree and branch gone, commits saved as a bundle. */
 export const releasedWorkspace: CodeWorkspaceSnapshot = {
   ...codeWorkspace,
   id: "ws-released",
@@ -975,7 +972,7 @@ export const deliveryWorkspaces: CodeWorkspaceSnapshot[] = [
     worktree_path: "/Users/sam/tidebreak/worktrees/workspace-search",
     branch_name: "thet/workspace-search",
     base_ref: "main",
-    status: "archived",
+    status: "released",
     pr: {
       number: 2194,
       url: "https://github.com/brightwave-inc/tidebreak/pull/2194",
@@ -984,6 +981,9 @@ export const deliveryWorkspaces: CodeWorkspaceSnapshot[] = [
     },
     created_at: "2026-07-28T09:00:00.000Z",
     archived_at: "2026-08-18T17:00:00.000Z",
+    released_at: "2026-08-18T17:00:01.000Z",
+    released_tip: "2c9d8e7f60a1b2c3d4e5f60718293a4b5c6d7e8f",
+    bundle_bytes: 12_288,
   },
   {
     id: "ws-archived-shortcuts",
@@ -992,9 +992,12 @@ export const deliveryWorkspaces: CodeWorkspaceSnapshot[] = [
     worktree_path: "/Users/sam/tidebreak/worktrees/keyboard-shortcuts",
     branch_name: "thet/keyboard-shortcuts",
     base_ref: "main",
-    status: "archived",
+    status: "released",
     created_at: "2026-07-18T11:00:00.000Z",
     archived_at: "2026-08-12T09:30:00.000Z",
+    released_at: "2026-08-12T09:30:01.000Z",
+    released_tip: "4f2a6b8c90d1e2f3a4b5c6d7e8f90a1b2c3d4e5",
+    bundle_bytes: 8192,
   },
 ];
 

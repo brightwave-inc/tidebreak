@@ -13,10 +13,10 @@ use tokio::time::Instant as TokioInstant;
 use tidebreak_core::db::code::{
     abandon_pending_approval, arm_trigger, begin_permission_mode_change,
     cancel_permission_mode_change, claim_approval, compare_and_set_workspace_status,
-    complete_workspace_archive, confirm_permission_mode_change, delete_trigger, delete_workspace,
-    discard_permission_mode_change, fence_permission_mode_change, get_approval, get_open_turn,
-    get_repo, get_repo_by_root_path, get_session, get_workspace, insert_repo, insert_session,
-    insert_workspace, list_approvals, list_events, list_fork_events,
+    complete_workspace_archive, complete_workspace_release, confirm_permission_mode_change,
+    delete_trigger, delete_workspace, discard_permission_mode_change, fence_permission_mode_change,
+    get_approval, get_open_turn, get_repo, get_repo_by_root_path, get_session, get_workspace,
+    insert_repo, insert_session, insert_workspace, list_approvals, list_events, list_fork_events,
     list_pending_permission_mode_changes, list_repos, list_sessions, list_sessions_all_owners,
     list_sessions_for_workspace, list_triggers_for_repo, list_turns, list_workspaces,
     list_workspaces_by_status_all_owners, mark_repo_removed, queued_turn_head,
@@ -61,16 +61,13 @@ use super::session_worker::{
 #[cfg(windows)]
 use super::worktree::repo_paths_equivalent;
 use super::worktree::{
-    self, archive_blockers, branch_name, create_worktree, directory_bytes, prune_worktrees,
-    remove_worktree, rename_local_only_branch, run_archive_script, run_setup_script, slugify,
-    unique_branch_bytes, validate_repo_path, worktree_dir, WorktreeError,
+    self, archive_blockers, branch_name, create_worktree, prune_worktrees, remove_worktree,
+    rename_local_only_branch, run_archive_script, run_setup_script, slugify, validate_repo_path,
+    worktree_dir, WorktreeError,
 };
 use crate::error::ServerError;
 use crate::managed_policy::ManagedPolicy;
-use crate::routes::code::types::{
-    CodeDeliveryPullRequestTarget, CodeGitHubRepositoryTarget, CodeRepoStorageSnapshot,
-    CodeStorageAction, CodeStorageSnapshot, CodeWorkspaceStorageSnapshot,
-};
+use crate::routes::code::types::{CodeDeliveryPullRequestTarget, CodeGitHubRepositoryTarget};
 
 const MANAGED_NODE_WAIT_TIMEOUT: Duration = Duration::from_secs(300);
 const MANAGED_NODE_STARTUP_GRACE: Duration = Duration::from_secs(2);
@@ -296,6 +293,8 @@ pub(crate) struct CodeRuntime {
     archive_shutdown_timeout: AtomicBool,
     #[cfg(test)]
     fail_next_workspace_final_save: AtomicBool,
+    #[cfg(test)]
+    fail_next_workspace_release_metadata: AtomicBool,
 }
 
 /// How long one base branch's rules answer stands before the next read.
@@ -522,6 +521,8 @@ impl CodeRuntime {
             archive_shutdown_timeout: AtomicBool::new(false),
             #[cfg(test)]
             fail_next_workspace_final_save: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_next_workspace_release_metadata: AtomicBool::new(false),
         }
     }
 
@@ -677,6 +678,8 @@ impl CodeRuntime {
             archive_shutdown_timeout: AtomicBool::new(false),
             #[cfg(test)]
             fail_next_workspace_final_save: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_next_workspace_release_metadata: AtomicBool::new(false),
         }
     }
 
@@ -749,6 +752,12 @@ impl CodeRuntime {
     #[cfg(test)]
     pub(crate) fn fail_next_workspace_final_save(&self) {
         self.fail_next_workspace_final_save
+            .store(true, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_workspace_release_metadata(&self) {
+        self.fail_next_workspace_release_metadata
             .store(true, Ordering::SeqCst);
     }
 
@@ -1703,92 +1712,6 @@ impl CodeRuntime {
         Ok(list_workspaces(&self.db, owner, repo_id).await?)
     }
 
-    /// Bytes each repo and workspace currently occupy, and what the next
-    /// reclaim tier would free.
-    pub(crate) async fn storage_snapshot(
-        &self,
-        owner: &OwnerId,
-    ) -> Result<CodeStorageSnapshot, ServerError> {
-        let repos = list_repos(&self.db, owner).await?;
-        let workspaces = list_workspaces(&self.db, owner, None).await?;
-        let mut out = Vec::with_capacity(repos.len());
-        for repo in repos {
-            let members: Vec<&CodeWorkspace> = workspaces
-                .iter()
-                .filter(|workspace| workspace.repo_id == repo.id)
-                .collect();
-            let live = members.iter().any(|workspace| {
-                !matches!(
-                    workspace.status,
-                    CodeWorkspaceStatus::Archived | CodeWorkspaceStatus::Released
-                )
-            });
-            let clone_path = std::path::Path::new(&repo.root_path);
-            let clone_bytes = if clone_path.exists() {
-                i64::try_from(directory_bytes(clone_path).await).unwrap_or(i64::MAX)
-            } else {
-                0
-            };
-            let mut rows = Vec::with_capacity(members.len());
-            for workspace in members {
-                rows.push(self.workspace_storage(&repo, workspace).await);
-            }
-            out.push(CodeRepoStorageSnapshot {
-                id: repo.id,
-                display_name: repo.display_name,
-                clone_bytes,
-                clone_reclaimable: repo.cloned_from.is_some() && !live,
-                workspaces: rows,
-            });
-        }
-        Ok(CodeStorageSnapshot { repos: out })
-    }
-
-    async fn workspace_storage(
-        &self,
-        repo: &CodeRepo,
-        workspace: &CodeWorkspace,
-    ) -> CodeWorkspaceStorageSnapshot {
-        let worktree = std::path::Path::new(&workspace.worktree_path);
-        let worktree_bytes = if worktree.exists() {
-            i64::try_from(directory_bytes(worktree).await).unwrap_or(i64::MAX)
-        } else {
-            0
-        };
-        let repo_root = std::path::Path::new(&repo.root_path);
-        let branch_bytes = if workspace.status == CodeWorkspaceStatus::Archived {
-            i64::try_from(
-                unique_branch_bytes(repo_root, &workspace.base_ref, &workspace.branch_name).await,
-            )
-            .unwrap_or(i64::MAX)
-        } else {
-            0
-        };
-        let bundle_bytes = workspace.bundle_bytes.unwrap_or(0);
-        let (on_disk_bytes, next_action, next_reclaim_bytes) = match workspace.status {
-            CodeWorkspaceStatus::Released => (bundle_bytes, None, 0),
-            CodeWorkspaceStatus::Archived => {
-                (branch_bytes, Some(CodeStorageAction::Release), branch_bytes)
-            }
-            CodeWorkspaceStatus::Active => (
-                worktree_bytes,
-                Some(CodeStorageAction::Archive),
-                worktree_bytes,
-            ),
-            CodeWorkspaceStatus::Creating
-            | CodeWorkspaceStatus::SetupFailed
-            | CodeWorkspaceStatus::Archiving => (worktree_bytes, None, 0),
-        };
-        CodeWorkspaceStorageSnapshot {
-            id: workspace.id,
-            title: workspace.title.clone(),
-            status: workspace.status,
-            on_disk_bytes,
-            next_action,
-            next_reclaim_bytes,
-        }
-    }
-
     pub(crate) async fn get_workspace(
         &self,
         owner: &OwnerId,
@@ -2099,20 +2022,64 @@ impl CodeRuntime {
             );
         }
         let archived_at = workspace.archived_at.unwrap_or_else(Utc::now);
-        if !complete_workspace_archive(&self.db, &workspace.owner, workspace.id, archived_at)
-            .await?
-        {
-            let current = self.get_workspace(&workspace.owner, workspace.id).await?;
-            if current.status == CodeWorkspaceStatus::Archived {
-                return Ok(current);
+        if !workspace.is_remote() {
+            workspace = self
+                .release_workspace_after_removal(workspace, repo)
+                .await?;
+        } else {
+            workspace.status = CodeWorkspaceStatus::Archived;
+            workspace.archived_at = Some(archived_at);
+            if !complete_workspace_archive(&self.db, &workspace.owner, workspace.id, archived_at)
+                .await?
+            {
+                return Err(ServerError::conflict_kind(
+                    "workspace_lifecycle_changed",
+                    "the workspace row changed before archive completed",
+                ));
             }
+            super::attention::emit_workspace_digests(
+                &self.db,
+                &self.bus,
+                &workspace.owner,
+                workspace.id,
+            )
+            .await;
+            return Ok(workspace);
+        }
+        #[cfg(test)]
+        if self
+            .fail_next_workspace_release_metadata
+            .swap(false, Ordering::SeqCst)
+        {
             return Err(ServerError::conflict_kind(
-                "workspace_lifecycle_changed",
-                "the workspace row changed before archive completed",
+                "workspace_release_metadata_failed",
+                "injected workspace release metadata failure",
             ));
         }
-        workspace.status = CodeWorkspaceStatus::Archived;
-        workspace.archived_at = Some(archived_at);
+        if !complete_workspace_release(
+            &self.db,
+            &workspace.owner,
+            workspace.id,
+            workspace.released_at.unwrap_or(archived_at),
+            workspace.released_tip.clone(),
+            workspace.bundle_bytes,
+        )
+        .await?
+        {
+            return Err(ServerError::conflict_kind(
+                "workspace_lifecycle_changed",
+                "the workspace row changed before release completed",
+            ));
+        }
+        let repo_root = std::path::Path::new(&repo.root_path);
+        if worktree::branch_exists(repo_root, &workspace.branch_name)
+            .await
+            .map_err(map_worktree)?
+        {
+            worktree::delete_branch(repo_root, &workspace.branch_name)
+                .await
+                .map_err(map_worktree)?;
+        }
         super::attention::emit_workspace_digests(
             &self.db,
             &self.bus,
@@ -2123,6 +2090,48 @@ impl CodeRuntime {
         Ok(workspace)
     }
 
+    /// Bundle a local branch after archive removes its checkout.
+    async fn release_workspace_after_removal(
+        &self,
+        mut workspace: CodeWorkspace,
+        repo: &CodeRepo,
+    ) -> Result<CodeWorkspace, ServerError> {
+        let repo_root = std::path::Path::new(&repo.root_path);
+        if worktree::branch_exists(repo_root, &workspace.branch_name)
+            .await
+            .map_err(map_worktree)?
+        {
+            let tip = worktree::branch_tip(repo_root, &workspace.branch_name)
+                .await
+                .map_err(map_worktree)?;
+            let bundle = worktree::bundle_path(&self.data_dir, &workspace.id.0);
+            let bytes = worktree::create_bundle(
+                repo_root,
+                &workspace.base_ref,
+                &workspace.branch_name,
+                &bundle,
+            )
+            .await
+            .map_err(map_worktree)?;
+            if bytes == 0 {
+                workspace.released_tip = Some(tip);
+                workspace.bundle_bytes = None;
+            } else {
+                workspace.released_tip = Some(tip);
+                workspace.bundle_bytes = Some(i64::try_from(bytes).unwrap_or(i64::MAX));
+            }
+        } else {
+            workspace.released_tip = None;
+            workspace.bundle_bytes = None;
+        }
+
+        let archived_at = workspace.archived_at.unwrap_or_else(Utc::now);
+        workspace.status = CodeWorkspaceStatus::Released;
+        workspace.archived_at = Some(archived_at);
+        workspace.released_at = Some(archived_at);
+        Ok(workspace)
+    }
+
     fn forget_workspace_turn_lock(&self, workspace_id: WorkspaceId) {
         self.worktree_turns
             .lock()
@@ -2130,25 +2139,10 @@ impl CodeRuntime {
             .remove(&workspace_id);
     }
 
-    /// Reactivate an archived workspace at its own path, on its own branch.
-    ///
-    /// Archive keeps the branch, the session rows, and the journal; restore
-    /// puts a checkout back under them. Nothing else changes: sessions stay
-    /// Ended (a new one resumes via the stored harness ref), and the
-    /// checkpoint refs archive deleted stay gone — per-turn diffs from before
-    /// the archive cannot be reopened.
-    ///
-    /// `create_workspace`'s branch-collision check reads archived rows too,
-    /// so this route is the sanctioned way to get an archived branch back
-    /// into a workspace.
-    /// Release an archived workspace: drop its branch, keep its commits.
-    ///
-    /// The deepest reclaim tier. Archive already removed the checkout, which
-    /// is where the bytes are; what is left is the branch and the objects it
-    /// holds alive. Bundling `base..branch` captures the work this workspace
-    /// did — usually kilobytes against a checkout measured in gigabytes — so
-    /// dropping the ref frees nearly everything and a restore still rebuilds
-    /// exactly. The transcript is not touched at any tier.
+    /// Restore a saved workspace. A local archive records the exact tip,
+    /// bundles commits beyond the base when needed, and drops the ref. Restore
+    /// rebuilds the branch from that recovery data. A remote archive has no
+    /// host checkout or branch and keeps its remote recovery path.
     /// Drop a restored workspace's release bookkeeping.
     ///
     /// The bundle stays until the row carrying these cleared fields is durable.
@@ -2173,81 +2167,6 @@ impl CodeRuntime {
                 );
             }
         }
-    }
-
-    pub(crate) async fn release_workspace(
-        &self,
-        owner: &OwnerId,
-        id: WorkspaceId,
-        force: bool,
-    ) -> Result<CodeWorkspace, ServerError> {
-        let mut workspace = self.get_workspace(owner, id).await?;
-        if workspace.status == CodeWorkspaceStatus::Released {
-            return Ok(workspace);
-        }
-        if workspace.status != CodeWorkspaceStatus::Archived {
-            return Err(ServerError::conflict_kind(
-                "workspace_not_archived",
-                format!(
-                    "archive the workspace before releasing it; it is {}",
-                    workspace.status.as_str()
-                ),
-            ));
-        }
-        let repo = self.get_repo(owner, workspace.repo_id).await?;
-        let repo_root = std::path::Path::new(&repo.root_path);
-
-        // A branch that archive already lost is nothing to bundle. Record the
-        // release anyway: the tier describes what is on disk, and refusing
-        // here would strand the row in a state no action can leave.
-        if !worktree::branch_exists(repo_root, &workspace.branch_name)
-            .await
-            .map_err(map_worktree)?
-        {
-            workspace.status = CodeWorkspaceStatus::Released;
-            workspace.released_at = Some(Utc::now());
-            save_workspace(&self.db, &workspace).await?;
-            return Ok(workspace);
-        }
-
-        if !force
-            && worktree::release_is_unmerged(repo_root, &workspace.base_ref, &workspace.branch_name)
-                .await
-                .map_err(map_worktree)?
-        {
-            return Err(ServerError::conflict_kind(
-                "branch_unmerged",
-                "this branch has commits the base does not; pass force to bundle and drop it",
-            ));
-        }
-
-        let tip = worktree::branch_tip(repo_root, &workspace.branch_name)
-            .await
-            .map_err(map_worktree)?;
-        let bundle = worktree::bundle_path(&self.data_dir, &workspace.id.0);
-        let bytes = worktree::create_bundle(
-            repo_root,
-            &workspace.base_ref,
-            &workspace.branch_name,
-            &bundle,
-        )
-        .await
-        .map_err(map_worktree)?;
-
-        // Drop the ref only once the bundle is on disk and measured. The
-        // ordering is the whole safety property: a failure above leaves an
-        // archived workspace with its branch, which is exactly where it was.
-        worktree::delete_branch(repo_root, &workspace.branch_name)
-            .await
-            .map_err(map_worktree)?;
-
-        workspace.status = CodeWorkspaceStatus::Released;
-        workspace.released_at = Some(Utc::now());
-        workspace.released_tip = Some(tip);
-        workspace.bundle_bytes = Some(i64::try_from(bytes).unwrap_or(i64::MAX));
-        save_workspace(&self.db, &workspace).await?;
-        super::attention::emit_workspace_digests(&self.db, &self.bus, owner, workspace.id).await;
-        Ok(workspace)
     }
 
     pub(crate) async fn restore_workspace(
@@ -2279,16 +2198,27 @@ impl CodeRuntime {
                     "the released workspace has no recorded commit; its bundle was preserved",
                 )
             })?;
-            let bundle = worktree::bundle_path(&self.data_dir, &workspace.id.0);
-            worktree::restore_released_worktree(
-                repo_root,
-                path,
-                &workspace.branch_name,
-                &bundle,
-                released_tip,
-            )
-            .await
-            .map_err(map_worktree)?
+            if workspace.bundle_bytes.is_some() {
+                let bundle = worktree::bundle_path(&self.data_dir, &workspace.id.0);
+                worktree::restore_released_worktree(
+                    repo_root,
+                    path,
+                    &workspace.branch_name,
+                    &bundle,
+                    released_tip,
+                )
+                .await
+                .map_err(map_worktree)?
+            } else {
+                worktree::restore_released_tip_worktree(
+                    repo_root,
+                    path,
+                    &workspace.branch_name,
+                    released_tip,
+                )
+                .await
+                .map_err(map_worktree)?
+            }
         } else {
             if !worktree::branch_exists(repo_root, &workspace.branch_name)
                 .await

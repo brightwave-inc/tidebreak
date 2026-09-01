@@ -263,8 +263,7 @@ function CodeArchiveBody() {
               )}
             </div>
             <p className="mt-0.5 text-sm text-muted-foreground">
-              Search old work, inspect its pull request, or restore its
-              worktree.
+              Search old work, inspect its pull request, or restore it.
             </p>
           </div>
           <Button

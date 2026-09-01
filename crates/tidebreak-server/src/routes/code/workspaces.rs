@@ -8,13 +8,12 @@ use crate::extract::{Json, Path, Query};
 use crate::state::AppState;
 
 use super::types::{
-    ArchiveWorkspaceBody, CodeFileChange, CodeStorageSnapshot, CodeWorkspaceBlob,
-    CodeWorkspaceDiff, CodeWorkspaceFiles, CodeWorkspaceHistorySearchMatch,
-    CodeWorkspaceHistorySearchSource, CodeWorkspaceSearch, CodeWorkspaceSearchMatch,
-    CodeWorkspaceSnapshot, CodeWorkspaceTree, CodeWorktreeRoot, CreateRemoteWorkspaceBody,
-    CreateWorkspaceBody, ListWorkspacesQuery, PatchWorkspaceBody, SetCodeWorktreeRootBody,
-    WorkspaceBlobQuery, WorkspaceDiffQuery, WorkspaceFilesQuery, WorkspaceSearchQuery,
-    WorkspaceTreeQuery,
+    ArchiveWorkspaceBody, CodeFileChange, CodeWorkspaceBlob, CodeWorkspaceDiff, CodeWorkspaceFiles,
+    CodeWorkspaceHistorySearchMatch, CodeWorkspaceHistorySearchSource, CodeWorkspaceSearch,
+    CodeWorkspaceSearchMatch, CodeWorkspaceSnapshot, CodeWorkspaceTree, CodeWorktreeRoot,
+    CreateRemoteWorkspaceBody, CreateWorkspaceBody, ListWorkspacesQuery, PatchWorkspaceBody,
+    SetCodeWorktreeRootBody, WorkspaceBlobQuery, WorkspaceDiffQuery, WorkspaceFilesQuery,
+    WorkspaceSearchQuery, WorkspaceTreeQuery,
 };
 use tidebreak_core::WorkspaceId;
 
@@ -76,11 +75,6 @@ pub async fn list_workspaces(
     ))
 }
 
-/// `GET /code/storage` — reclaimable bytes per repo and workspace.
-pub async fn list_storage(code: ScopedCode) -> Result<Json<CodeStorageSnapshot>, ServerError> {
-    Ok(Json(code.storage_snapshot().await?))
-}
-
 pub async fn get_workspace(
     code: ScopedCode,
     Path(id): Path<WorkspaceId>,
@@ -119,30 +113,14 @@ pub async fn archive_workspace(
     Ok(Json(CodeWorkspaceSnapshot::from(archived)))
 }
 
-/// `POST /code/workspaces/{id}/release` — reclaim an archived workspace's branch.
-///
-/// The deepest reclaim tier. The branch's own commits are bundled beside the
-/// database and the ref is dropped, which frees the objects the branch held
-/// alive. `restore_workspace` puts it back from that bundle, so the work stays
-/// rebuildable and the transcript is untouched. 409 kinds:
-/// `workspace_not_archived`, and `branch_unmerged` (the branch has commits the
-/// base does not — pass force).
-pub async fn release_workspace(
-    code: ScopedCode,
-    Path(id): Path<WorkspaceId>,
-    Json(body): Json<ArchiveWorkspaceBody>,
-) -> Result<Json<CodeWorkspaceSnapshot>, ServerError> {
-    let released = code.release_workspace(id, body.force).await?;
-    Ok(Json(CodeWorkspaceSnapshot::from(released)))
-}
-
 /// `POST /code/workspaces/{id}/restore` — reactivate an archived workspace.
 ///
-/// The worktree comes back at the same path on the kept branch; session rows
-/// and journal history were never deleted, so the conversation is readable
-/// again the moment this returns. 409 kinds: `branch_missing` (the branch was
-/// deleted since archive — fall back to a new workspace),
-/// `released_branch_mismatch`, `released_tip_mismatch`,
+/// The worktree comes back at the same path. A released workspace rebuilds
+/// from its saved bundle; a remote workspace keeps its remote recovery path.
+/// Session rows and journal history were never deleted, so the conversation
+/// is readable again the moment this returns. 409 kinds: `branch_missing`
+/// (the branch was deleted since an older archive — fall back to a new
+/// workspace), `released_branch_mismatch`, `released_tip_mismatch`,
 /// `worktree_path_busy`, and `worktree_path_occupied`.
 pub async fn restore_workspace(
     code: ScopedCode,

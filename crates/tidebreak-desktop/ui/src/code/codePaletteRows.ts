@@ -4,7 +4,6 @@ import {
   FileText,
   GitPullRequest,
   ExternalLink,
-  HardDrive,
   MessageSquare,
   Play,
   Plus,
@@ -276,14 +275,6 @@ export function codeNavigationPaletteRows(input: {
       label: "Archived workspaces",
       icon: Archive,
       onSelect: () => input.navigate("/code/archive"),
-    },
-    {
-      id: "navigate:storage",
-      section: "navigate",
-      label: "Storage",
-      keywords: "disk reclaim archive release bytes",
-      icon: HardDrive,
-      onSelect: () => input.navigate("/code/storage"),
     },
     {
       id: "navigate:chat",

@@ -153,7 +153,7 @@ function storyClient(scenario: DeliveryScenario): ApiClient {
   const workspaces =
     scenario === "archive-empty"
       ? deliveryWorkspaces.filter(
-          (workspace) => workspace.status !== "archived",
+          (workspace) => workspace.status !== "released",
         )
       : deliveryWorkspaces;
   const refreshedMergedPullRequest = {
@@ -355,7 +355,7 @@ function storyClient(scenario: DeliveryScenario): ApiClient {
     patchCodeWorkspace: async () => deliveryWorkspaces[0]!,
     archiveCodeWorkspace: async () => ({
       ...deliveryWorkspaces[0]!,
-      status: "archived",
+      status: "released",
     }),
   } as unknown as ApiClient;
 }

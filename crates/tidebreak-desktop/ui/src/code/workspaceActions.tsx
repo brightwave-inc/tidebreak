@@ -507,16 +507,16 @@ export function useWorkspaceCardCommands(): {
         ? {
             title: `Discard changes and archive ${count} workspaces?`,
             description:
-              "Uncommitted and unpushed work is lost and a running session is stopped. Branches and their commits are kept.",
+              "Uncommitted and unpushed work is lost and a running session is stopped. Tidebreak saves the branch's commits in a bundle, then drops the branch.",
             confirmLabel: "Discard and archive",
             destructive: true,
           }
         : {
             title: `Archive ${count} workspaces?`,
             description:
-              "They leave the rail and collect in Archive. Worktrees go away; branches stay.",
+              "They leave the rail and collect in Archive. Worktrees and branches go away; Tidebreak saves a bundle so restore still rebuilds the work.",
             confirmLabel: "Archive",
-            destructive: true,
+            destructive: false,
           },
     );
     if (!ok) return;
@@ -569,7 +569,7 @@ export function useWorkspaceCardCommands(): {
     const ok = await confirm({
       title: "Discard changes and archive?",
       description:
-        "Uncommitted and unpushed work is lost and a running session is stopped. The branch and its commits are kept.",
+        "Uncommitted and unpushed work is lost and a running session is stopped. Tidebreak saves the branch's commits in a bundle, then drops the branch.",
       confirmLabel: "Discard and archive",
       destructive: true,
     });
@@ -665,7 +665,7 @@ export function useWorkspaceCardCommands(): {
     } catch (error) {
       if (error instanceof HttpError && error.kind === "branch_missing") {
         const ok = await confirm({
-          title: "The branch is gone",
+          title: "The saved work is gone",
           description:
             "This workspace's branch was deleted after it was archived, so its work cannot come back. Start a new workspace on the same repo instead?",
           confirmLabel: "New workspace",
