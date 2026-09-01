@@ -618,6 +618,7 @@ mod tests {
                 },
             ],
             model_protocols: Default::default(),
+            model_reasoning_efforts: Default::default(),
             member_catalog: None,
             catalog_etag: None,
         };

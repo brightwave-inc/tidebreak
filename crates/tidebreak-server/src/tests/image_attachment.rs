@@ -679,6 +679,7 @@ async fn an_exact_image_turn_retry_survives_a_managed_gateway_route_retarget() {
                 ..Default::default()
             }],
             model_protocols: Default::default(),
+            model_reasoning_efforts: Default::default(),
             member_catalog: Some("v1".into()),
             catalog_etag: None,
         },
@@ -770,6 +771,7 @@ async fn an_exact_image_turn_retry_survives_a_managed_gateway_route_retarget() {
                 ..Default::default()
             }],
             model_protocols: Default::default(),
+            model_reasoning_efforts: Default::default(),
             member_catalog: Some("v2".into()),
             catalog_etag: None,
         },

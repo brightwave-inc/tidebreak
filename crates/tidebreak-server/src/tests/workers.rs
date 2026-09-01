@@ -639,6 +639,7 @@ async fn worker_rejects_an_already_accepted_plain_gateway_model_before_egress() 
                 ..Default::default()
             }],
             model_protocols: Default::default(),
+            model_reasoning_efforts: Default::default(),
             member_catalog: Some("v1".into()),
             catalog_etag: None,
         },

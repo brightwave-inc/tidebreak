@@ -94,6 +94,11 @@ pub(crate) struct GatewayModelSnapshot {
     /// defaults to that protocol for backward compatibility.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) model_protocols: BTreeMap<String, GatewayModelProtocol>,
+    /// Per-model reasoning ladders stated by the member catalog. Presence is
+    /// significant: an empty list means no effort control, while absence
+    /// means an older gateway did not state a ladder.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) model_reasoning_efforts: BTreeMap<String, Vec<ReasoningEffort>>,
     /// The member-catalog contract revision the last sync read (`"v1"`),
     /// or `None` when the deployment predates `/api/v1/me/catalog` and the
     /// sync degraded to the per-surface CLI reads. Drives the "older
@@ -148,6 +153,61 @@ pub(crate) async fn read_gateway_snapshot(
         .and_then(|value| serde_json::from_value(value).ok()))
 }
 
+/// Find the model-specific reasoning ladder for a gateway-backed engine id.
+///
+/// Modelctl-generated Grok ids prefix the gateway route with the profile that
+/// owns it (`model-gateway-<profile>/...`). OpenCode uses a shorter provider
+/// prefix. The snapshot keeps the raw gateway ids, so match those wrappers
+/// without assuming that the raw id itself contains no slash.
+pub(crate) fn gateway_reasoning_efforts_for_model<'a>(
+    snapshot: &'a GatewayModelSnapshot,
+    selection: &str,
+) -> Option<&'a [ReasoningEffort]> {
+    snapshot
+        .model_reasoning_efforts
+        .iter()
+        .find(|(id, _)| gateway_selection_matches(selection, id))
+        .map(|(_, efforts)| efforts.as_slice())
+}
+
+/// Intersect one gateway model's ladder with the harness surface that carries
+/// it. A listed row wins over the engine-wide ladder. Hosted picker rows are
+/// empty compat listings, so ignore `adapter.list_models` on that path and
+/// intersect only when the picker actually used a Codex row. If the harness
+/// did not list the gateway-only row and has no engine-wide ladder, use the
+/// gateway's ladder rather than treating the missing row as unsupported.
+pub(crate) fn effective_gateway_reasoning_efforts(
+    hosted: bool,
+    listed_model_efforts: Option<&[ReasoningEffort]>,
+    engine_efforts: &[ReasoningEffort],
+    gateway_efforts: &[ReasoningEffort],
+) -> Vec<ReasoningEffort> {
+    let listed_model_efforts = if hosted { None } else { listed_model_efforts };
+    let harness_efforts = listed_model_efforts.unwrap_or(engine_efforts);
+    if harness_efforts.is_empty() && listed_model_efforts.is_none() {
+        return gateway_efforts.to_vec();
+    }
+    harness_efforts
+        .iter()
+        .copied()
+        .filter(|effort| gateway_efforts.contains(effort))
+        .collect()
+}
+
+fn gateway_selection_matches(selection: &str, id: &str) -> bool {
+    selection == id
+        || selection
+            .strip_prefix("model-gateway/")
+            .is_some_and(|raw| raw == id)
+        || selection
+            .strip_prefix("anthropic/")
+            .is_some_and(|raw| raw == id)
+        || selection
+            .strip_prefix("model-gateway-")
+            .and_then(|qualified| qualified.split_once('/'))
+            .is_some_and(|(_, raw)| raw == id)
+}
+
 /// Persist the entitled-model snapshot. Callers hold
 /// [`GATEWAY_STATE_WRITES`] across their policy recheck and this write.
 pub(crate) async fn write_gateway_snapshot(
@@ -164,13 +224,17 @@ pub(crate) async fn write_gateway_snapshot(
 /// One conversion for both consumers — the deployment-wide managed sync and
 /// the per-caller hosted fetch (decision 62) — so a model a hosted caller is
 /// offered is shaped exactly like a model the sync would have stored.
+pub(crate) struct MemberCatalogModels {
+    pub(crate) models: Vec<CustomModelConfig>,
+    pub(crate) model_protocols: BTreeMap<String, GatewayModelProtocol>,
+    pub(crate) model_reasoning_efforts: BTreeMap<String, Vec<ReasoningEffort>>,
+}
+
 pub(crate) fn member_catalog_models(
     catalog: crate::connectors::GatewayCatalog,
-) -> (
-    Vec<CustomModelConfig>,
-    BTreeMap<String, GatewayModelProtocol>,
-) {
+) -> MemberCatalogModels {
     let mut model_protocols = BTreeMap::new();
+    let mut model_reasoning_efforts = BTreeMap::new();
     let models = catalog
         .models
         .into_iter()
@@ -190,6 +254,12 @@ pub(crate) fn member_catalog_models(
             };
             let id = model.id;
             model_protocols.insert(id.clone(), protocol);
+            if let Some(efforts) = model.supported_reasoning_efforts {
+                model_reasoning_efforts.insert(id.clone(), efforts.clone());
+                for alias in &model.aliases {
+                    model_reasoning_efforts.insert(alias.clone(), efforts.clone());
+                }
+            }
             Some(CustomModelConfig {
                 id,
                 display_name: Some(model.name),
@@ -205,7 +275,11 @@ pub(crate) fn member_catalog_models(
             })
         })
         .collect();
-    (models, model_protocols)
+    MemberCatalogModels {
+        models,
+        model_protocols,
+        model_reasoning_efforts,
+    }
 }
 
 /// Clamp a gateway-reported limit into the u32 the config carries; zero and
@@ -343,6 +417,7 @@ pub(crate) async fn retire_legacy_gateway_row(
             installation_id: None,
             models: row.models,
             model_protocols: BTreeMap::new(),
+            model_reasoning_efforts: BTreeMap::new(),
             member_catalog: None,
             catalog_etag: None,
         },
@@ -2484,6 +2559,94 @@ mod tests {
         }
     }
 
+    #[test]
+    fn member_catalog_reasoning_efforts_match_generated_engine_ids() {
+        let catalog = crate::connectors::GatewayCatalog {
+            models: vec![crate::connectors::GatewayCatalogModel {
+                id: "glm-5.3".into(),
+                name: "GLM 5.3".into(),
+                protocols: vec!["openai_responses".into()],
+                aliases: vec!["zai-glm-5.3".into()],
+                supports_tools: true,
+                supports_vision: false,
+                supported_reasoning_efforts: Some(vec![
+                    ReasoningEffort::Low,
+                    ReasoningEffort::High,
+                    ReasoningEffort::Max,
+                ]),
+                context_window: Some(200_000),
+                max_output_tokens: Some(16_000),
+                provider_name: "Z.ai".into(),
+            }],
+            apps: Vec::new(),
+        };
+        let MemberCatalogModels {
+            models,
+            model_protocols,
+            model_reasoning_efforts,
+        } = member_catalog_models(catalog);
+        let snapshot = GatewayModelSnapshot {
+            gateway_url: "https://gateway.example/".into(),
+            installation_id: None,
+            models,
+            model_protocols,
+            model_reasoning_efforts,
+            member_catalog: Some("v1".into()),
+            catalog_etag: None,
+        };
+        let expected = [
+            ReasoningEffort::Low,
+            ReasoningEffort::High,
+            ReasoningEffort::Max,
+        ];
+        for selection in [
+            "glm-5.3",
+            "model-gateway/glm-5.3",
+            "model-gateway-model-gateway/glm-5.3",
+            "model-gateway-default/zai-glm-5.3",
+        ] {
+            assert_eq!(
+                gateway_reasoning_efforts_for_model(&snapshot, selection),
+                Some(expected.as_slice()),
+                "{selection}"
+            );
+        }
+    }
+
+    #[test]
+    fn gateway_efforts_preserve_a_codex_rows_narrower_ladder() {
+        let listed = [
+            ReasoningEffort::Low,
+            ReasoningEffort::High,
+            ReasoningEffort::Ultra,
+        ];
+        let gateway = [
+            ReasoningEffort::Low,
+            ReasoningEffort::High,
+            ReasoningEffort::Max,
+        ];
+
+        assert_eq!(
+            effective_gateway_reasoning_efforts(
+                false,
+                Some(&listed),
+                ReasoningEffort::ALL,
+                &gateway
+            ),
+            vec![ReasoningEffort::Low, ReasoningEffort::High]
+        );
+        assert_eq!(
+            effective_gateway_reasoning_efforts(false, None, &[], &gateway),
+            gateway
+        );
+        assert!(effective_gateway_reasoning_efforts(false, Some(&[]), &[], &gateway).is_empty());
+        assert_eq!(
+            effective_gateway_reasoning_efforts(true, Some(&listed), &[], &gateway),
+            gateway,
+            "hosted compat rows do not overlay against Codex CLI ladders"
+        );
+    }
+
     async fn gateway_migration_test_store() -> (
         DbStore,
         tempfile::TempDir,
@@ -2514,6 +2677,7 @@ mod tests {
                     ..Default::default()
                 }],
                 model_protocols: BTreeMap::new(),
+                model_reasoning_efforts: BTreeMap::new(),
                 member_catalog: Some("v1".into()),
                 catalog_etag: None,
             },
@@ -2733,6 +2897,7 @@ mod tests {
             installation_id: Some(installation_id.into()),
             models,
             model_protocols: BTreeMap::new(),
+            model_reasoning_efforts: BTreeMap::new(),
             member_catalog: Some("v1".into()),
             catalog_etag: None,
         }

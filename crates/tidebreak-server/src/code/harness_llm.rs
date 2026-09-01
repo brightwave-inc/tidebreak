@@ -131,6 +131,15 @@ impl HarnessLlmRelay {
         self.obo.compat_listings(owner).await
     }
 
+    /// The caller's model catalog, including per-model reasoning ladders when
+    /// the gateway states them.
+    pub(crate) async fn catalog(
+        &self,
+        owner: &OwnerId,
+    ) -> tidebreak_core::Result<Option<crate::providers::GatewayModelSnapshot>> {
+        self.obo.snapshot_for(owner).await
+    }
+
     /// Mint the relay key for `subject`, replacing any prior key the same
     /// session held. Reissue-on-attach is what keeps a reaped or relaunched
     /// worker from extending the life of a key an old child still knows.

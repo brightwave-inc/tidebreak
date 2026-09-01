@@ -226,6 +226,12 @@ impl GatewayRuntime {
         crate::managed_policy::resolve(&*self.provisioned_policy, &*self.os_policy)
     }
 
+    /// The synced model snapshot for the deployment named by managed policy.
+    pub(crate) async fn model_snapshot(&self) -> Result<Option<providers::GatewayModelSnapshot>> {
+        let policy = self.policy()?;
+        providers::gateway_snapshot_for_policy(&*self.store, &policy).await
+    }
+
     /// Park a shell-validated pairing until a sign-in consents to it,
     /// replacing any earlier one — the latest link is the one the user acted
     /// on. Invalidate any in-flight browser flow the same way `sign_out`
@@ -801,6 +807,7 @@ impl GatewayRuntime {
                         installation_id: None,
                         models: Vec::new(),
                         model_protocols: Default::default(),
+                        model_reasoning_efforts: Default::default(),
                         member_catalog: None,
                         catalog_etag: None,
                     },
@@ -950,6 +957,7 @@ impl GatewayRuntime {
         // that predates it degrades to the per-protocol
         // `/api/v1/cli/models` read.
         let mut model_protocols = std::collections::BTreeMap::new();
+        let mut model_reasoning_efforts = std::collections::BTreeMap::new();
         let mut member_catalog = None;
         let mut catalog_etag = None;
         let models: Vec<CustomModelConfig> = match connection.catalog(held_etag.as_deref()).await? {
@@ -970,9 +978,10 @@ impl GatewayRuntime {
             GatewayCatalogFetch::Fresh { catalog, etag } => {
                 member_catalog = Some(MEMBER_CATALOG_V1.to_owned());
                 catalog_etag = etag;
-                let (models, protocols) = providers::member_catalog_models(catalog);
-                model_protocols = protocols;
-                models
+                let converted = providers::member_catalog_models(catalog);
+                model_protocols = converted.model_protocols;
+                model_reasoning_efforts = converted.model_reasoning_efforts;
+                converted.models
             }
             GatewayCatalogFetch::Unsupported => connection
                 .models(None)
@@ -1024,6 +1033,7 @@ impl GatewayRuntime {
                 installation_id: Some(session.installation_id.clone()),
                 models,
                 model_protocols,
+                model_reasoning_efforts,
                 member_catalog,
                 catalog_etag,
             },
@@ -1926,6 +1936,7 @@ mod tests {
                 ..Default::default()
             }],
             model_protocols: std::collections::BTreeMap::from([(model.into(), protocol)]),
+            model_reasoning_efforts: Default::default(),
             member_catalog: Some("v1".into()),
             catalog_etag: None,
         };
@@ -3150,6 +3161,7 @@ mod tests {
                     },
                 ],
                 model_protocols: Default::default(),
+                model_reasoning_efforts: Default::default(),
                 member_catalog: None,
                 catalog_etag: None,
             },

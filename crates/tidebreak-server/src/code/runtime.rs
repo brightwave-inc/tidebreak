@@ -211,6 +211,9 @@ pub(crate) struct CodeRuntime {
     /// machine (decision 71). `None` everywhere else: a machine whose engines
     /// carry their own provider credentials keeps using them.
     harness_llm: Option<Arc<super::harness_llm::HarnessLlmRelay>>,
+    /// Managed-policy-aware gateway catalog on a local machine. Hosted
+    /// machines use `harness_llm` because their catalog belongs to the caller.
+    gateway_runtime: Option<Arc<crate::gateway_runtime::GatewayRuntime>>,
     /// The configured remote-session context, on a deployment with a sandbox
     /// runtime endpoint (`docs/slack-sessions.md`). `None` everywhere else;
     /// remote workspaces then refuse turns rather than half-running.
@@ -413,6 +416,8 @@ pub(crate) struct NewSessionSettings {
 
 struct SelectedModelCapabilities {
     reasoning_efforts: Vec<ReasoningEffort>,
+    /// The selected row's own ladder, when the engine listed that row.
+    listed_model_reasoning_efforts: Option<Vec<ReasoningEffort>>,
     reasoning_known: bool,
     fast_mode: bool,
     fast_mode_known: bool,
@@ -476,6 +481,7 @@ impl CodeRuntime {
             host_tool_broker,
             git_credentials,
             harness_llm,
+            gateway_runtime: None,
             remote: None,
             grant_revocations: Arc::new(super::grants::GrantRevocations::default()),
             loopback_base: Mutex::new(None),
@@ -535,6 +541,20 @@ impl CodeRuntime {
     /// The engine inference relay, on a machine that has one.
     pub(crate) fn harness_llm(&self) -> Option<Arc<super::harness_llm::HarnessLlmRelay>> {
         self.harness_llm.clone()
+    }
+
+    /// The gateway model snapshot that applies to this caller. Hosted
+    /// machines read the caller's catalog; local machines use the synced
+    /// deployment snapshot.
+    pub(crate) async fn gateway_model_snapshot(
+        &self,
+        owner: &OwnerId,
+    ) -> Option<crate::providers::GatewayModelSnapshot> {
+        if let Some(relay) = self.harness_llm() {
+            return relay.catalog(owner).await.ok().flatten();
+        }
+        let gateway = self.gateway_runtime.as_ref()?;
+        gateway.model_snapshot().await.ok().flatten()
     }
 
     /// Boot: publish the bound loopback base now, and hand back the recovery
@@ -616,6 +636,7 @@ impl CodeRuntime {
             host_tool_broker: None,
             git_credentials: None,
             harness_llm: None,
+            gateway_runtime: None,
             remote: None,
             grant_revocations: Arc::new(super::grants::GrantRevocations::default()),
             loopback_base: Mutex::new(None),
@@ -677,6 +698,15 @@ impl CodeRuntime {
         relay: Arc<super::harness_llm::HarnessLlmRelay>,
     ) -> Self {
         self.harness_llm = Some(relay);
+        self
+    }
+
+    /// Wire the managed-policy-aware gateway catalog used by local engines.
+    pub(crate) fn with_gateway_runtime(
+        mut self,
+        gateway: Arc<crate::gateway_runtime::GatewayRuntime>,
+    ) -> Self {
+        self.gateway_runtime = Some(gateway);
         self
     }
 
@@ -3676,12 +3706,14 @@ impl CodeRuntime {
             fast_mode,
         };
         if execution_settings.reasoning_effort.is_some() || execution_settings.fast_mode {
-            let selected = Self::selected_model_capabilities(
-                adapter.as_ref(),
-                &probe,
-                execution_settings.model.as_deref(),
-            )
-            .await;
+            let selected = self
+                .selected_model_capabilities_for_owner(
+                    owner,
+                    adapter.as_ref(),
+                    &probe,
+                    execution_settings.model.as_deref(),
+                )
+                .await;
             Self::validate_execution_settings(harness, &execution_settings, &selected)?;
         }
         let session = CodeSession {
@@ -4036,9 +4068,14 @@ impl CodeRuntime {
         {
             let adapter = self.adapter(session.harness_kind)?;
             let probe = self.probe(adapter.as_ref()).await;
-            let selected =
-                Self::selected_model_capabilities(adapter.as_ref(), &probe, next.model.as_deref())
-                    .await;
+            let selected = self
+                .selected_model_capabilities_for_owner(
+                    owner,
+                    adapter.as_ref(),
+                    &probe,
+                    next.model.as_deref(),
+                )
+                .await;
             if requested_effort.is_some() {
                 let requested = CodeSessionExecutionSettings {
                     model: next.model.clone(),
@@ -5441,9 +5478,14 @@ impl CodeRuntime {
         }
         let adapter = self.adapter(session.harness_kind)?;
         let probe = self.probe(adapter.as_ref()).await;
-        let selected =
-            Self::selected_model_capabilities(adapter.as_ref(), &probe, session.model.as_deref())
-                .await;
+        let selected = self
+            .selected_model_capabilities_for_owner(
+                owner,
+                adapter.as_ref(),
+                &probe,
+                session.model.as_deref(),
+            )
+            .await;
         let mut next = CodeSessionExecutionSettings::from(&session);
         selected.deactivate_unsupported(&mut next);
         next.reasoning_effort = effort;
@@ -5491,9 +5533,14 @@ impl CodeRuntime {
         }
         let adapter = self.adapter(session.harness_kind)?;
         let probe = self.probe(adapter.as_ref()).await;
-        let selected =
-            Self::selected_model_capabilities(adapter.as_ref(), &probe, session.model.as_deref())
-                .await;
+        let selected = self
+            .selected_model_capabilities_for_owner(
+                owner,
+                adapter.as_ref(),
+                &probe,
+                session.model.as_deref(),
+            )
+            .await;
         let mut next = CodeSessionExecutionSettings::from(&session);
         selected.deactivate_unsupported(&mut next);
         next.fast_mode = fast_mode;
@@ -5555,10 +5602,50 @@ impl CodeRuntime {
         };
         SelectedModelCapabilities {
             reasoning_efforts,
+            listed_model_reasoning_efforts: model.map(|model| model.reasoning_efforts.clone()),
             reasoning_known,
             fast_mode: model.is_some_and(|model| model.fast_mode),
             fast_mode_known: model.is_some() || catalog_known,
         }
+    }
+
+    async fn selected_model_capabilities_for_owner(
+        &self,
+        owner: &OwnerId,
+        adapter: &dyn HarnessAdapter,
+        probe: &HarnessProbe,
+        selected: Option<&str>,
+    ) -> SelectedModelCapabilities {
+        let mut capabilities = Self::selected_model_capabilities(adapter, probe, selected).await;
+        let Some(selected) = selected else {
+            return capabilities;
+        };
+        if adapter.capabilities(probe).reasoning_levels != CapLevel::Supported {
+            return capabilities;
+        }
+        let Some(snapshot) = self.gateway_model_snapshot(owner).await else {
+            return capabilities;
+        };
+        let Some(model_efforts) =
+            crate::providers::gateway_reasoning_efforts_for_model(&snapshot, selected)
+        else {
+            return capabilities;
+        };
+        let engine_efforts = adapter.reasoning_efforts(probe);
+        capabilities.reasoning_efforts = crate::providers::effective_gateway_reasoning_efforts(
+            self.harness_llm.is_some(),
+            capabilities.listed_model_reasoning_efforts.as_deref(),
+            &engine_efforts,
+            model_efforts,
+        );
+        capabilities.reasoning_known = true;
+        tracing::debug!(
+            harness = %adapter.kind(),
+            model = selected,
+            efforts = ?capabilities.reasoning_efforts,
+            "using the gateway model's reasoning effort ladder"
+        );
+        capabilities
     }
 
     fn validate_execution_settings(
@@ -6315,12 +6402,14 @@ impl CodeRuntime {
             ));
         }
         if session.reasoning_effort.is_some() || session.fast_mode {
-            let selected = Self::selected_model_capabilities(
-                adapter.as_ref(),
-                &probe,
-                session.model.as_deref(),
-            )
-            .await;
+            let selected = self
+                .selected_model_capabilities_for_owner(
+                    &session.owner,
+                    adapter.as_ref(),
+                    &probe,
+                    session.model.as_deref(),
+                )
+                .await;
             let mut next = CodeSessionExecutionSettings::from(&session);
             selected.deactivate_unsupported(&mut next);
             if next != CodeSessionExecutionSettings::from(&session) {
@@ -7309,6 +7398,85 @@ mod delivery_nudge_tests {
 mod selected_model_capabilities_tests {
     use super::*;
     use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
+    use tidebreak_harness::ListedHarnessModel;
+
+    #[derive(Default)]
+    struct NoSecrets;
+
+    #[async_trait::async_trait]
+    impl tidebreak_core::SecretProvider for NoSecrets {
+        async fn get_secret(&self, _key: &str) -> tidebreak_core::Result<Option<String>> {
+            Ok(None)
+        }
+
+        async fn set_secret(&self, _key: &str, _value: &str) -> tidebreak_core::Result<()> {
+            Ok(())
+        }
+
+        async fn delete_secret(&self, _key: &str) -> tidebreak_core::Result<()> {
+            Ok(())
+        }
+    }
+
+    async fn runtime_with_gateway_snapshot(
+        gateway_url: &str,
+        policy_url: &str,
+    ) -> (CodeRuntime, tempfile::TempDir) {
+        let directory = tempfile::tempdir().expect("data dir");
+        let db = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                directory.path().join("code.db").display()
+            ))
+            .await
+            .expect("db"),
+        );
+        crate::providers::write_gateway_snapshot(
+            &*db,
+            &crate::providers::GatewayModelSnapshot {
+                gateway_url: gateway_url.into(),
+                installation_id: None,
+                models: Vec::new(),
+                model_protocols: Default::default(),
+                model_reasoning_efforts: std::collections::BTreeMap::from([(
+                    "glm-5.3".into(),
+                    vec![
+                        ReasoningEffort::Low,
+                        ReasoningEffort::High,
+                        ReasoningEffort::Max,
+                    ],
+                )]),
+                member_catalog: Some("v1".into()),
+                catalog_etag: None,
+            },
+        )
+        .await
+        .expect("gateway snapshot");
+        let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
+        crate::managed_policy::provision(&*provisioned, policy_url).expect("managed policy");
+        let gateway = crate::gateway_runtime::GatewayRuntime::new(
+            db.clone(),
+            Arc::new(NoSecrets),
+            provisioned,
+            Arc::new(crate::managed_policy::NoOsPolicy),
+        );
+        let runtime =
+            CodeRuntime::with_registry(db, directory.path().to_path_buf(), AdapterRegistry::new())
+                .with_gateway_runtime(gateway);
+        (runtime, directory)
+    }
+
+    fn scripted_probe() -> HarnessProbe {
+        HarnessProbe {
+            found: true,
+            binary_path: Some(PathBuf::from("/scripted")),
+            version: Some("1.0.0".into()),
+            authenticated: Some(true),
+            stderr: String::new(),
+            env: Vec::new(),
+            commands: Vec::new(),
+        }
+    }
 
     #[tokio::test]
     async fn an_unavailable_catalog_does_not_clear_committed_settings() {
@@ -7337,10 +7505,97 @@ mod selected_model_capabilities_tests {
         assert!(settings.fast_mode);
     }
 
+    #[tokio::test]
+    async fn a_gateway_model_uses_the_model_and_engine_effort_intersection() {
+        let (runtime, _directory) =
+            runtime_with_gateway_snapshot("https://gateway.example/", "https://gateway.example/")
+                .await;
+        let adapter =
+            ScriptedAdapter::new(plain_text_script()).with_reasoning_levels(CapLevel::Supported);
+
+        let capabilities = runtime
+            .selected_model_capabilities_for_owner(
+                &OwnerId::new("alice").unwrap(),
+                &adapter,
+                &scripted_probe(),
+                Some("model-gateway-model-gateway/glm-5.3"),
+            )
+            .await;
+
+        assert_eq!(
+            capabilities.reasoning_efforts,
+            vec![
+                ReasoningEffort::Low,
+                ReasoningEffort::High,
+                ReasoningEffort::Max,
+            ]
+        );
+        assert!(capabilities.reasoning_known);
+    }
+
+    #[tokio::test]
+    async fn a_codex_rows_ladder_wins_over_the_engine_wide_ladder() {
+        let (runtime, _directory) =
+            runtime_with_gateway_snapshot("https://gateway.example/", "https://gateway.example/")
+                .await;
+        let adapter = ScriptedAdapter::new(plain_text_script())
+            .with_kind(HarnessKind::Codex)
+            .with_reasoning_levels(CapLevel::Supported)
+            .with_models(vec![ListedHarnessModel {
+                id: "model-gateway-model-gateway/glm-5.3".into(),
+                label: "GLM 5.3".into(),
+                default: true,
+                reasoning_efforts: vec![
+                    ReasoningEffort::Low,
+                    ReasoningEffort::High,
+                    ReasoningEffort::Ultra,
+                ],
+                fast_mode: false,
+            }]);
+
+        let capabilities = runtime
+            .selected_model_capabilities_for_owner(
+                &OwnerId::new("alice").unwrap(),
+                &adapter,
+                &scripted_probe(),
+                Some("model-gateway-model-gateway/glm-5.3"),
+            )
+            .await;
+
+        assert_eq!(
+            capabilities.reasoning_efforts,
+            vec![ReasoningEffort::Low, ReasoningEffort::High]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_from_another_gateway_does_not_change_engine_efforts() {
+        let (runtime, _directory) = runtime_with_gateway_snapshot(
+            "https://old.gateway.example/",
+            "https://gateway.example/",
+        )
+        .await;
+        let adapter =
+            ScriptedAdapter::new(plain_text_script()).with_reasoning_levels(CapLevel::Supported);
+
+        let capabilities = runtime
+            .selected_model_capabilities_for_owner(
+                &OwnerId::new("alice").unwrap(),
+                &adapter,
+                &scripted_probe(),
+                Some("model-gateway-model-gateway/glm-5.3"),
+            )
+            .await;
+
+        assert!(capabilities.reasoning_efforts.is_empty());
+        assert!(!capabilities.reasoning_known);
+    }
+
     #[test]
     fn an_authoritative_catalog_clears_unsupported_settings() {
         let capabilities = SelectedModelCapabilities {
             reasoning_efforts: vec![ReasoningEffort::Low],
+            listed_model_reasoning_efforts: Some(vec![ReasoningEffort::Low]),
             reasoning_known: true,
             fast_mode: false,
             fast_mode_known: true,

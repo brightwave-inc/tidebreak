@@ -967,6 +967,12 @@ impl ScopedCode {
         self.runtime.harness_llm()
     }
 
+    pub(crate) async fn gateway_model_snapshot(
+        &self,
+    ) -> Option<crate::providers::GatewayModelSnapshot> {
+        self.runtime.gateway_model_snapshot(&self.owner).await
+    }
+
     /// Warm the pinned install of one engine. See
     /// [`CodeRuntime::start_harness_install`].
     ///

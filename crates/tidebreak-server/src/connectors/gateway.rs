@@ -266,6 +266,10 @@ pub struct GatewayCatalogModel {
     pub aliases: Vec<String>,
     pub supports_tools: bool,
     pub supports_vision: bool,
+    /// Reasoning effort tokens this model accepts. Older gateways omit this
+    /// field; an empty list means the model takes no explicit effort control.
+    #[serde(default)]
+    pub supported_reasoning_efforts: Option<Vec<tidebreak_core::ReasoningEffort>>,
     pub context_window: Option<i64>,
     pub max_output_tokens: Option<i64>,
     pub provider_name: String,

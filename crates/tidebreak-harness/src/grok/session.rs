@@ -96,6 +96,7 @@ impl GrokSession {
             mode: self.permission_mode(),
             model: turn_model.or(self.spec.model.as_deref()),
             effort: turn_effort.or(self.spec.reasoning_effort),
+            effort_ladder: crate::grok::effort_ladder_for_version(Some(&self.version)),
         })
     }
 
@@ -279,6 +280,7 @@ pub(crate) struct PrintLaunch<'a> {
     pub mode: PermissionMode,
     pub model: Option<&'a str>,
     pub effort: Option<ReasoningEffort>,
+    pub effort_ladder: &'a [ReasoningEffort],
 }
 
 /// 1.0.4 honors Auto and Allow.
@@ -323,11 +325,11 @@ pub(crate) fn compose_print_plan(launch: PrintLaunch<'_>) -> Result<LaunchPlan, 
         argv.push("--model".into());
         argv.push(model.to_owned());
     }
-    // 1.0.4 refuses a level outside its own ladder by name, so degrade to the
-    // closest rung it takes rather than fail the turn on a hint.
+    // Grok refuses a level outside its version's ladder by name, so degrade to
+    // the closest rung it takes rather than fail the turn on a hint.
     if let Some(effort) = launch
         .effort
-        .and_then(|level| level.clamp_to(crate::grok::EFFORT_LADDER))
+        .and_then(|level| level.clamp_to(launch.effort_ladder))
     {
         argv.push("--reasoning-effort".into());
         argv.push(effort.as_str().to_owned());
@@ -687,6 +689,33 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
+    fn grok_1_0_5_never_receives_the_removed_xhigh_token() {
+        let plan = compose_print_plan(PrintLaunch {
+            binary: std::path::Path::new("/usr/bin/grok"),
+            extra_argv: &[],
+            cwd: std::path::Path::new("/workspace"),
+            extra_env: &[],
+            relay_auth: None,
+            relay_key_env: None,
+            resume_ref: None,
+            prompt_file: std::path::Path::new("/tmp/prompt.txt"),
+            mode: PermissionMode::Auto,
+            model: Some("model-gateway-model-gateway/glm-5.3"),
+            effort: Some(ReasoningEffort::XHigh),
+            effort_ladder: crate::grok::EFFORT_LADDER_1_0_5,
+        })
+        .unwrap();
+        assert!(
+            plan.argv
+                .windows(2)
+                .any(|pair| pair == ["--reasoning-effort", "high"]),
+            "{:#?}",
+            plan.argv
+        );
+        assert!(!plan.argv.iter().any(|arg| arg == "xhigh"));
+    }
+
+    #[test]
     fn relay_wiring_moves_the_key_into_an_auth_file_and_points_the_env_at_it() {
         let dir = tempfile::tempdir().unwrap();
         let auth_path = dir.path().join("auth.json");
@@ -708,6 +737,7 @@ mod tests {
             mode: PermissionMode::Auto,
             model: None,
             effort: None,
+            effort_ladder: crate::grok::EFFORT_LADDER_1_0_4,
         })
         .unwrap();
 
