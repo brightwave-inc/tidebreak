@@ -4,6 +4,19 @@ import { pathToFileURL } from "node:url";
 
 import { parsePrTitle } from "./check-pr-title.mjs";
 
+const THANK_YOU = "Thanks for using Tidebreak ❤️";
+
+const CATEGORY_TITLES = new Set([
+  "Breaking Changes",
+  "New Features",
+  "Bug Fixes",
+  "Performance Improvements",
+  "Dependency Updates",
+  "Reverted Changes",
+  "Maintenance",
+  "Other Changes",
+]);
+
 const SCOPED_CATEGORY_TITLES = new Set([
   "Breaking Changes",
   "New Features",
@@ -94,13 +107,13 @@ function formatCategory(lines) {
   const formatted = [];
   for (const [scope, scopeChanges] of groupedScopes) {
     if (formatted.length > 0) formatted.push("");
-    formatted.push(`#### ${scopeHeading(scope)}`, ...scopeChanges);
+    formatted.push(`### ${scopeHeading(scope)}`, ...scopeChanges);
   }
   if (flatLines.length > 0 && formatted.length > 0) {
     // A bare blank line between two bullet runs makes GitHub render both as
     // one loose list. A heading closes the grouped list before the compact
     // inline scope changes begin.
-    formatted.push("", "#### Other", ...flatLines);
+    formatted.push("", "### Other", ...flatLines);
   } else {
     formatted.push(...flatLines);
   }
@@ -113,23 +126,45 @@ export function formatReleaseNotes(body) {
   }
 
   const lines = body.split("\n");
+  if (lines[0] === THANK_YOU) {
+    lines.shift();
+    if (lines[0] === "") lines.shift();
+  }
+
   const formatted = [];
   for (let index = 0; index < lines.length; ) {
-    const heading = /^### (.+)$/.exec(lines[index]);
-    if (!heading || !SCOPED_CATEGORY_TITLES.has(heading[1])) {
+    if (/^#{1,2} What's Changed$/.test(lines[index])) {
+      formatted.push("# What's Changed");
+      index += 1;
+      continue;
+    }
+
+    const heading = /^#{2,3} (.+)$/.exec(lines[index]);
+    if (!heading || !CATEGORY_TITLES.has(heading[1])) {
       formatted.push(lines[index]);
       index += 1;
       continue;
     }
 
-    formatted.push(lines[index]);
+    formatted.push(`## ${heading[1]}`);
     const categoryStart = index + 1;
     index = categoryStart;
-    while (index < lines.length && !/^### /.test(lines[index])) index += 1;
-    formatted.push(...formatCategory(lines.slice(categoryStart, index)));
+    while (index < lines.length) {
+      const nextHeading = /^#{2,3} (.+)$/.exec(lines[index]);
+      if (nextHeading && CATEGORY_TITLES.has(nextHeading[1])) break;
+      index += 1;
+    }
+
+    const categoryLines = lines.slice(categoryStart, index);
+    formatted.push(
+      ...(SCOPED_CATEGORY_TITLES.has(heading[1]) &&
+      !categoryLines.some((line) => /^### /.test(line))
+        ? formatCategory(categoryLines)
+        : categoryLines),
+    );
   }
 
-  return formatted.join("\n");
+  return `${THANK_YOU}\n\n${formatted.join("\n")}`;
 }
 
 async function main() {

@@ -20,20 +20,22 @@ test("separates grouped and singleton scopes into tight Markdown lists", () => {
 
   assert.equal(
     formatReleaseNotes(notes),
-    `## What's Changed
+    `Thanks for using Tidebreak ❤️
 
-### New Features
-#### Desktop
+# What's Changed
+
+## New Features
+### Desktop
 - add document search ([#12](https://example.com/12)) by @octo
 - add keyboard shortcuts ([#15](https://example.com/15)) by @octo
 
-#### Other
+### Other
 - add a default workspace ([#13](https://example.com/13)) by @octo
 - **Core:** add saved searches ([#14](https://example.com/14)) by @octo
 
-### Bug Fixes
+## Bug Fixes
 - **Desktop:** prevent a startup crash ([#16](https://example.com/16)) by @octo
-### Other Changes
+## Other Changes
 - docs: update the setup guide ([#17](https://example.com/17)) by @octo
 `,
   );
@@ -46,7 +48,9 @@ test("keeps unscoped release entries in their category without a subheading", ()
 
   assert.equal(
     formatReleaseNotes(notes),
-    `### Dependency Updates
+    `Thanks for using Tidebreak ❤️
+
+## Dependency Updates
 - update sqlite ([#17](https://example.com/17)) by @octo
 `,
   );
@@ -61,9 +65,11 @@ test("uses readable acronyms in singleton scope prefixes", () => {
 
   assert.equal(
     formatReleaseNotes(notes),
-    `### Breaking Changes
+    `Thanks for using Tidebreak ❤️
+
+## Breaking Changes
 - **MCP:** replace the protocol ([#18](https://example.com/18)) by @octo
-### Other Changes
+## Other Changes
 - Plain historical change ([#19](https://example.com/19)) by @octo
 `,
   );
@@ -72,6 +78,26 @@ test("uses readable acronyms in singleton scope prefixes", () => {
 test("keeps historical titles with malformed scopes without crashing", () => {
   const notes = `### Bug Fixes
 - fix(ui/): keep release automation running ([#20](https://example.com/20)) by @octo
+`;
+
+  assert.equal(
+    formatReleaseNotes(notes),
+    `Thanks for using Tidebreak ❤️
+
+## Bug Fixes
+- fix(ui/): keep release automation running ([#20](https://example.com/20)) by @octo
+`,
+  );
+});
+
+test("keeps the larger hierarchy stable when formatting an existing draft", () => {
+  const notes = `Thanks for using Tidebreak ❤️
+
+# What's Changed
+
+## New Features
+### Desktop
+- add document search ([#12](https://example.com/12)) by @octo
 `;
 
   assert.equal(formatReleaseNotes(notes), notes);

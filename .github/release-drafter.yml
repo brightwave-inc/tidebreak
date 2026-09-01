@@ -54,11 +54,13 @@ categories:
   # fallback in the first draft. The first release version is chosen manually.
   - type: version-resolver
     semver-increment: patch
-category-template: "### $TITLE"
+category-template: "## $TITLE"
 change-template: "- $TITLE ([#$NUMBER]($URL)) by @$AUTHOR"
 change-title-escapes: '\<*_&'
 no-changes-template: "- No user-facing changes."
 template: |
-  ## What's Changed
+  Thanks for using Tidebreak ❤️
+
+  # What's Changed
 
   $CHANGES
