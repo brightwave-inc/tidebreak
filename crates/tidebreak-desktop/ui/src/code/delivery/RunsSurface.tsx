@@ -32,7 +32,7 @@ import { LoaderCircle, Workflow } from "lucide-react";
 import { PendingDetailSheet } from "./PendingDetail";
 import { RunDetailSheet } from "./RunDetailSheet";
 import { RunList } from "./RunList";
-import type { TargetDetailState } from "./PullRequestsSurface";
+import type { TargetDetailState } from "./usePullRequestDetail";
 import {
   dedupeRows,
   runMatchesTarget,
