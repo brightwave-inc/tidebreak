@@ -494,19 +494,19 @@ export type ApprovalDecisionKind = { "type": "approve" } | { "type": "deny",
 /**
  * Feedback returned to the engine, when any.
  */
-feedback?: string, } | { "type": "abandoned" } | { "type": "approved_with_grant", 
+feedback?: string, } | { "type": "abandoned" } | { "type": "approved_with_grant",
 /**
  * The scope the decider granted.
  */
-scope: GrantScope, } | { "type": "answered", 
+scope: GrantScope, } | { "type": "answered",
 /**
  * The supplied answers, already validated and bounded.
  */
-answers: Array<UserQuestionAnswer>, } | { "type": "plan_decided", 
+answers: Array<UserQuestionAnswer>, } | { "type": "plan_decided",
 /**
  * Whether the plan was accepted.
  */
-approve: boolean, 
+approve: boolean,
 /**
  * Feedback returned to the engine, when any.
  */
@@ -904,20 +904,20 @@ summary: string, } | { "type": "other",
 /**
  * Engine-provided summary.
  */
-summary: string, } | { "type": "tool_use", 
+summary: string, } | { "type": "tool_use",
 /**
  * The action exactly as the consent decision will read it.
  */
-preview: ToolActionPreview, 
+preview: ToolActionPreview,
 /**
  * Grant rungs the decider may mint, narrowest first. Empty when the
  * call supports no standing grant.
  */
-offered_grants: Array<GrantScope>, } | { "type": "questions", 
+offered_grants: Array<GrantScope>, } | { "type": "questions",
 /**
  * The questions, bounded by the engine's own validation.
  */
-questions: Array<UserQuestion>, } | { "type": "plan", 
+questions: Array<UserQuestion>, } | { "type": "plan",
 /**
  * Permission mode the conversation moves to when the plan is
  * accepted.
@@ -2744,7 +2744,7 @@ image_input: CapLevel,
  * always pass-through. This flag only says a machine-readable listing
  * exists to feed the composer popup.
  */
-slash_commands: CapLevel, 
+slash_commands: CapLevel,
 /**
  * The engine can end a turn as a durable checkpoint and continue it
  * later: `run_turn` may return a parked outcome, and `resume_turn`
@@ -2755,7 +2755,7 @@ slash_commands: CapLevel,
  * exists for engines whose turn state is durable — the internal engine
  * first (decision 0048 step 5).
  */
-durable_parks: CapLevel, 
+durable_parks: CapLevel,
 /**
  * The engine raises structured user-question approvals and accepts an
  * answers decision on them.
@@ -2764,7 +2764,7 @@ durable_parks: CapLevel,
  * channel exists: this flag says the engine can ask the user a
  * multiple-choice question mid-turn and consume the structured answer.
  */
-user_questions: CapLevel, 
+user_questions: CapLevel,
 /**
  * The engine accepts an approve-with-standing-grant decision, minting
  * durable consent that outlives the approval.
