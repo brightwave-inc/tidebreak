@@ -1,5 +1,7 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 
+import { isRecord } from "../lib/guards";
+
 export type SkillImportIssue = {
   name: string;
   reason: string;
@@ -62,8 +64,4 @@ function parseIssues(value: unknown): SkillImportIssue[] | null {
     issues.push({ name: entry.name, reason: entry.reason });
   }
   return issues;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

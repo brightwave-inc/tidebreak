@@ -24,6 +24,7 @@ import {
   type AppRestInvokeResult,
   type McpAppPayload,
 } from "./api";
+import { isRecord } from "./lib/guards";
 
 export type { McpAppPayload };
 
@@ -360,10 +361,6 @@ export function createMcpAppBridge(options: {
       disposed = true;
     },
   };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /**

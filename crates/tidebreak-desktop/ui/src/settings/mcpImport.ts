@@ -1,4 +1,5 @@
 import type { McpServerInfo } from "../api";
+import { isRecord } from "../lib/guards";
 
 const MAX_SERVERS = 32;
 const MAX_ARGS = 128;
@@ -440,8 +441,4 @@ function validGatewayEndpoint(slug: string): boolean {
 
 function unique(values: string[]): string[] {
   return [...new Set(values)];
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

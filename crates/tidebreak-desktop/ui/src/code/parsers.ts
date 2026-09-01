@@ -1,3 +1,4 @@
+import { isRecord, onlyKeys } from "../lib/guards";
 import type {
   Attention,
   AttentionSource,
@@ -3857,18 +3858,6 @@ export function parseFenceReason(value: unknown): FenceReason | null {
     };
   }
   return null;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function onlyKeys<Wire>(
-  value: Record<string, unknown>,
-  allowed: readonly (keyof Wire & string)[],
-): boolean {
-  const set = new Set<string>(allowed);
-  return Object.keys(value).every((key) => set.has(key));
 }
 
 function nonEmpty(value: unknown): value is string {

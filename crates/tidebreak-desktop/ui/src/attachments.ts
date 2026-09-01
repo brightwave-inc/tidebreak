@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import type { ApiClient } from "./api";
+import { isRecord } from "./lib/guards";
 import { parseLibraryImportBatch, type LibraryImportBatch } from "./documents";
 import {
   isSupportedImageType,
@@ -217,8 +218,4 @@ function parseFailedImage(value: unknown): FailedImage {
     throw new Error("Invalid attachment response");
   }
   return { fileName: value.fileName, message: value.message };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

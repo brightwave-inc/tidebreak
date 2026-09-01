@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import type { CitationLocator } from "@/api";
+import { isRecord } from "@/lib/guards";
 
 /**
  * Conversation outputs are read and edited over the server's HTTP routes, the
@@ -718,10 +719,6 @@ function isOpaqueId(value: unknown): value is string {
       value,
     )
   );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isExactRecord(

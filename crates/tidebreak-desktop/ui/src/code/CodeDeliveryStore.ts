@@ -1,6 +1,7 @@
 import { create } from "zustand";
 
 import type { ApiClient } from "../api/client";
+import { isRecord } from "../lib/guards";
 import type {
   CodeDeliveryPullRequestSummary,
   CodeDeliveryRepositoriesSnapshot,
@@ -1211,10 +1212,6 @@ function isStringRecord(value: unknown): value is Record<string, string> {
     isRecord(value) &&
     Object.values(value).every((item) => typeof item === "string")
   );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function nonEmpty(value: unknown): value is string {
