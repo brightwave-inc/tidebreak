@@ -171,14 +171,18 @@ pub(crate) fn gateway_reasoning_efforts_for_model<'a>(
 }
 
 /// Intersect one gateway model's ladder with the harness surface that carries
-/// it. A listed row wins over the engine-wide ladder. If the harness did not
-/// list the gateway-only row and has no engine-wide ladder, use the gateway's
-/// ladder rather than treating the missing row as unsupported.
+/// it. A listed row wins over the engine-wide ladder. Hosted picker rows are
+/// empty compat listings, so ignore `adapter.list_models` on that path and
+/// intersect only when the picker actually used a Codex row. If the harness
+/// did not list the gateway-only row and has no engine-wide ladder, use the
+/// gateway's ladder rather than treating the missing row as unsupported.
 pub(crate) fn effective_gateway_reasoning_efforts(
+    hosted: bool,
     listed_model_efforts: Option<&[ReasoningEffort]>,
     engine_efforts: &[ReasoningEffort],
     gateway_efforts: &[ReasoningEffort],
 ) -> Vec<ReasoningEffort> {
+    let listed_model_efforts = if hosted { None } else { listed_model_efforts };
     let harness_efforts = listed_model_efforts.unwrap_or(engine_efforts);
     if harness_efforts.is_empty() && listed_model_efforts.is_none() {
         return gateway_efforts.to_vec();
@@ -2623,14 +2627,24 @@ mod tests {
         ];
 
         assert_eq!(
-            effective_gateway_reasoning_efforts(Some(&listed), ReasoningEffort::ALL, &gateway),
+            effective_gateway_reasoning_efforts(
+                false,
+                Some(&listed),
+                ReasoningEffort::ALL,
+                &gateway
+            ),
             vec![ReasoningEffort::Low, ReasoningEffort::High]
         );
         assert_eq!(
-            effective_gateway_reasoning_efforts(None, &[], &gateway),
+            effective_gateway_reasoning_efforts(false, None, &[], &gateway),
             gateway
         );
-        assert!(effective_gateway_reasoning_efforts(Some(&[]), &[], &gateway).is_empty());
+        assert!(effective_gateway_reasoning_efforts(false, Some(&[]), &[], &gateway).is_empty());
+        assert_eq!(
+            effective_gateway_reasoning_efforts(true, Some(&listed), &[], &gateway),
+            gateway,
+            "hosted compat rows do not overlay against Codex CLI ladders"
+        );
     }
 
     async fn gateway_migration_test_store() -> (

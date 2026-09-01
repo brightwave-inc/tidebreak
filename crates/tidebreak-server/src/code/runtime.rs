@@ -5501,6 +5501,7 @@ impl CodeRuntime {
         };
         let engine_efforts = adapter.reasoning_efforts(probe);
         capabilities.reasoning_efforts = crate::providers::effective_gateway_reasoning_efforts(
+            self.harness_llm.is_some(),
             capabilities.listed_model_reasoning_efforts.as_deref(),
             &engine_efforts,
             model_efforts,
