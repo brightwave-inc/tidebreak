@@ -118,7 +118,7 @@
     "storybook": "10.5.10",
     "tailwindcss": "4.3.3",
     "typescript": "5.8.3",
-    "vite": "7.3.6",
+    "vite": "8.2.2",
     "vitest": "4.1.11",
     "zod": "4.1.13"
   }
