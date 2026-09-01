@@ -226,6 +226,42 @@ const TOOL_PRESENTATIONS: Record<
     complete: "Task plan updated",
     settled: "Updated the task plan",
   },
+  browser_list: {
+    label: "Check browser tabs",
+    active: "Checking browser tabs",
+    complete: "Browser tabs checked",
+    settled: "Checked browser tabs",
+  },
+  browser_navigate: {
+    label: "Open a web page",
+    active: "Opening a web page",
+    complete: "Web page opened",
+    settled: "Opened a web page",
+  },
+  browser_snapshot: {
+    label: "Inspect a web page",
+    active: "Inspecting a web page",
+    complete: "Web page inspected",
+    settled: "Inspected a web page",
+  },
+  browser_wait: {
+    label: "Wait for a web page",
+    active: "Waiting for a web page",
+    complete: "Web page wait complete",
+    settled: "Waited for a web page",
+  },
+  browser_screenshot: {
+    label: "Capture a screenshot",
+    active: "Capturing a screenshot",
+    complete: "Screenshot captured",
+    settled: "Captured a screenshot",
+  },
+  browser_act: {
+    label: "Use a web page",
+    active: "Using a web page",
+    complete: "Web page action complete",
+    settled: "Used a web page",
+  },
   spawn_sandbox_agent: {
     label: "Delegate a task",
     active: "Delegating a task",
