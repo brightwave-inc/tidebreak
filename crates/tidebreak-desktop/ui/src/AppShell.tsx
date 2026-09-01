@@ -89,6 +89,7 @@ import { CommandPaletteDialog } from "./CommandPaletteDialog";
 import { ShortcutsDialog } from "./ShortcutsDialog";
 import { useUiStore } from "./UiStore";
 import { UPDATE_CHECK_REQUESTED_EVENT, useDesktopUpdates } from "./updates";
+import { UpdateReadyCard } from "./UpdateReadyCard";
 
 /**
  * Raised by the native "Close Tab" menu item, which owns Cmd+W.
@@ -98,6 +99,8 @@ import { UPDATE_CHECK_REQUESTED_EVENT, useDesktopUpdates } from "./updates";
  * for Cmd+W means the tab in front of them.
  */
 const CLOSE_TAB_REQUESTED_EVENT = "desktop-close-tab-requested";
+const DISMISSED_UPDATE_VERSION_KEY = "tidebreak.dismissed-update-version";
+const UNKNOWN_UPDATE_VERSION = "unknown";
 
 /**
  * Run `handler` whenever the native host raises `event`.
@@ -212,6 +215,9 @@ export function AppShell() {
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [status, setStatus] = useState("starting…");
+  const [dismissedUpdateVersion, setDismissedUpdateVersion] = useState(() =>
+    window.localStorage.getItem(DISMISSED_UPDATE_VERSION_KEY),
+  );
   const openChatId = useActiveChatId();
   const savingTitle = useChatListStore((state) => state.savingTitle);
   const renameChatDraft = useChatListStore((state) => state.renameChatDraft);
@@ -894,6 +900,14 @@ export function AppShell() {
     if (confirmed) await desktopUpdates.restart();
   }
 
+  function dismissUpdateNotice() {
+    const version = desktopUpdates.state.version;
+    setDismissedUpdateVersion(version ?? UNKNOWN_UPDATE_VERSION);
+    if (version) {
+      window.localStorage.setItem(DISMISSED_UPDATE_VERSION_KEY, version);
+    }
+  }
+
   /**
    * Run boot again from the top.
    *
@@ -1026,6 +1040,15 @@ export function AppShell() {
           )}
           <SidebarExpandStrip macOverlay={macOverlayTitlebar} />
           <ComputerUseIndicator />
+          {desktopUpdates.state.status === "ready" &&
+            dismissedUpdateVersion !==
+              (desktopUpdates.state.version ?? UNKNOWN_UPDATE_VERSION) && (
+              <UpdateReadyCard
+                version={desktopUpdates.state.version}
+                onRestart={() => void onRestartForUpdate()}
+                onDismiss={dismissUpdateNotice}
+              />
+            )}
           {/* Each route renders its own rail beside its content — see RouteFrame. */}
           <div className="app-body">
             <Outlet />

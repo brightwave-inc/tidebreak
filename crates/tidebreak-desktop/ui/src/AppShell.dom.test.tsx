@@ -1074,6 +1074,10 @@ describe("app shell", () => {
     const user = userEvent.setup();
     await mountApp();
 
+    expect(await screen.findByLabelText("Update ready")).toHaveTextContent(
+      "Tidebreak 0.9.0 is downloaded and ready to install.",
+    );
+
     await user.click(
       await screen.findByRole("button", { name: "Settings, update ready" }),
     );
@@ -1099,6 +1103,32 @@ describe("app shell", () => {
       await screen.findByRole("button", { name: "Restart and update" }),
     );
     await waitFor(() => expect(restartDesktop).toHaveBeenCalledOnce());
+  });
+
+  it("keeps a dismissed update card hidden for the same version", async () => {
+    desktopUpdateState.status = "ready";
+    desktopUpdateState.version = "0.9.0";
+    const user = userEvent.setup();
+    const first = await mountApp();
+
+    await user.click(
+      await screen.findByRole("button", { name: "Dismiss update notice" }),
+    );
+    expect(screen.queryByLabelText("Update ready")).not.toBeInTheDocument();
+    expect(
+      window.localStorage.getItem("tidebreak.dismissed-update-version"),
+    ).toBe("0.9.0");
+
+    first.unmount();
+    const second = await mountApp();
+    expect(screen.queryByLabelText("Update ready")).not.toBeInTheDocument();
+
+    second.unmount();
+    desktopUpdateState.version = "0.10.0";
+    await mountApp();
+    expect(await screen.findByLabelText("Update ready")).toHaveTextContent(
+      "Tidebreak 0.10.0 is downloaded and ready to install.",
+    );
   });
 
   it("creates a project from the dialog and opens a chat inside it", async () => {

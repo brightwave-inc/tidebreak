@@ -70,9 +70,11 @@ Documentation and other maintenance-only types carry no `release-note:*` label
 and appear in a trailing **Maintenance** section instead — listed, not dropped,
 because a maintenance change can still matter to someone updating (a schema
 baseline rebuild, a toolchain requirement). Every merged PR is accounted for in
-the notes. In the rendered
-notes, the section heading supplies the type, so the draft formatter removes the
-redundant Conventional Commit prefix from each PR title. Maintenance entries
+the notes. The rendered notes open with a short thank-you. A large **What's
+Changed** heading introduces level-two release sections, and repeated scopes
+use level-three headings. The section heading supplies the type, so the draft
+formatter removes the redundant Conventional Commit prefix from each PR title.
+Maintenance entries
 keep their full prefixes: that section mixes types, so the prefix is the
 information. When a category has
 multiple user-facing changes with the same scope, the formatter groups them
