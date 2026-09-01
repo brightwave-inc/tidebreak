@@ -1477,6 +1477,56 @@ pub(crate) async fn delete_branch(repo_root: &Path, branch: &str) -> Result<(), 
         .map_err(|err| WorktreeError::internal(format!("git branch -D {branch} failed: {err}")))
 }
 
+/// Rename the branch checked out in one worktree after proving it is still
+/// local-only. A branch with an upstream or an origin tracking ref has already
+/// crossed the boundary where a background rename is safe.
+pub(crate) async fn rename_local_only_branch(
+    worktree: &Path,
+    expected: &str,
+    next: &str,
+) -> Result<bool, WorktreeError> {
+    let current = git_stdout(
+        Some(worktree),
+        &["symbolic-ref", "--quiet", "--short", "HEAD"],
+        GIT_TIMEOUT,
+    )
+    .await
+    .map_err(|error| {
+        WorktreeError::internal(format!("could not read workspace branch: {error}"))
+    })?;
+    if current.trim() != expected {
+        return Ok(false);
+    }
+    if git_stdout(
+        Some(worktree),
+        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+        GIT_TIMEOUT,
+    )
+    .await
+    .is_ok()
+    {
+        return Ok(false);
+    }
+    let tracking_ref = format!("refs/remotes/origin/{expected}");
+    if git_stdout(
+        Some(worktree),
+        &["rev-parse", "--verify", "--quiet", &tracking_ref],
+        GIT_TIMEOUT,
+    )
+    .await
+    .is_ok()
+    {
+        return Ok(false);
+    }
+    if branch_exists(worktree, next).await? {
+        return Ok(false);
+    }
+    git(Some(worktree), &["branch", "-m", next], GIT_TIMEOUT)
+        .await
+        .map_err(|error| WorktreeError::internal(format!("could not rename branch: {error}")))?;
+    Ok(true)
+}
+
 /// Drop stale worktree registrations from the repo.
 pub(crate) async fn prune_worktrees(repo_root: &Path) -> Result<(), WorktreeError> {
     git(Some(repo_root), &["worktree", "prune"], GIT_TIMEOUT)
@@ -1510,7 +1560,7 @@ pub(crate) fn slugify(value: &str) -> String {
 /// Branch name: repo prefix plus a slug of the title, or a two-word fallback.
 pub(crate) fn branch_name(prefix: &str, title: &str, seed: u128) -> String {
     let prefix = if prefix.is_empty() {
-        "tidebreak/".to_owned()
+        String::new()
     } else if prefix.ends_with('/') {
         prefix.to_owned()
     } else {

@@ -43,6 +43,11 @@ describe("AgentsPanel", () => {
       computer_use_enabled: true,
       code_turn_recaps_enabled: true,
       rewrite_closing_messages: false,
+      git_source_control: {
+        auto_rename_branches: true,
+        branch_prefix_mode: "account",
+        effective_branch_prefix: "tidebreak/",
+      },
     };
     const putSettings = vi.fn().mockResolvedValue({
       ...settings,
@@ -103,6 +108,11 @@ describe("AgentsPanel", () => {
       computer_use_enabled: true,
       code_turn_recaps_enabled: true,
       rewrite_closing_messages: false,
+      git_source_control: {
+        auto_rename_branches: true,
+        branch_prefix_mode: "account",
+        effective_branch_prefix: "tidebreak/",
+      },
     };
     const putSettings = vi.fn().mockResolvedValue({
       ...settings,

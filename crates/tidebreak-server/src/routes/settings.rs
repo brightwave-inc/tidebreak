@@ -13,6 +13,7 @@ use tidebreak_core::{
     DEFAULT_COMPACTION_TARGET_FRACTION, DEFAULT_COMPACTION_THRESHOLD_FRACTION,
 };
 
+use crate::code::naming_settings::{self, BranchPrefixMode, GitSourceControlSettings};
 use crate::code_execution::{
     self, ExecConfigInfo, ExecConfigUpdate, ExecCredentialReadiness, ExecCredentialsInfo,
 };
@@ -149,6 +150,8 @@ pub struct Settings {
     /// prose. Default off.
     #[serde(default)]
     pub rewrite_closing_messages: bool,
+    /// How new code repositories name workspace branches for this user.
+    pub git_source_control: GitSourceControlSettings,
 }
 
 /// The reader's last explicit per-chat choices — what an unspecified field of
@@ -203,6 +206,19 @@ pub struct SettingsUpdate {
     /// Default off.
     #[serde(default)]
     pub rewrite_closing_messages: Option<bool>,
+    /// Update branch naming defaults. Absent fields stay unchanged.
+    #[serde(default)]
+    pub git_source_control: Option<GitSourceControlSettingsUpdate>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct GitSourceControlSettingsUpdate {
+    #[serde(default)]
+    pub auto_rename_branches: Option<bool>,
+    #[serde(default)]
+    pub branch_prefix_mode: Option<BranchPrefixMode>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub custom_branch_prefix: Option<Option<String>>,
 }
 
 /// Partial update for [`CompactionSettings`]. Absent fields leave the current
@@ -366,6 +382,40 @@ pub async fn put_settings(
             )
             .await?;
     }
+    if let Some(update) = body.git_source_control {
+        let custom_was_present = update.custom_branch_prefix.is_some();
+        let owner = auth.principal.owner_id();
+        let current = read_git_source_control_settings(&state, &owner).await?;
+        let mode = update
+            .branch_prefix_mode
+            .unwrap_or(current.branch_prefix_mode);
+        let custom = match update.custom_branch_prefix {
+            None => current.custom_branch_prefix,
+            Some(None) => None,
+            Some(Some(value)) => Some(
+                naming_settings::normalize_custom_prefix(&value).ok_or_else(|| {
+                    ServerError::bad_request(
+                        "custom_branch_prefix must be a valid Git branch prefix",
+                    )
+                })?,
+            ),
+        };
+        if mode == BranchPrefixMode::Custom && custom.is_none() {
+            return Err(ServerError::bad_request(
+                "custom_branch_prefix is required in custom mode",
+            ));
+        }
+        if let Some(enabled) = update.auto_rename_branches {
+            naming_settings::write_auto_rename_branches(&*state.store, &owner, enabled).await?;
+        }
+        if update.branch_prefix_mode.is_some() {
+            naming_settings::write_branch_prefix_mode(&*state.store, &owner, mode).await?;
+        }
+        if custom_was_present {
+            naming_settings::write_custom_branch_prefix(&*state.store, &owner, custom.as_deref())
+                .await?;
+        }
+    }
     Ok(Json(
         read_settings(&state, &auth.principal.owner_id()).await?,
     ))
@@ -387,11 +437,23 @@ async fn read_settings(state: &AppState, owner: &OwnerId) -> Result<Settings, Se
         code_turn_recaps_enabled: crate::code::recap::turn_recaps_enabled(&*state.store).await?,
         rewrite_closing_messages: crate::code::rewrite::rewrite_closing_enabled(&*state.store)
             .await?,
+        git_source_control: read_git_source_control_settings(state, owner).await?,
     })
 }
 
 const fn default_true() -> bool {
     true
+}
+
+async fn read_git_source_control_settings(
+    state: &AppState,
+    owner: &OwnerId,
+) -> Result<GitSourceControlSettings, ServerError> {
+    let account = match state.code.as_ref() {
+        Some(code) => code.branch_account_name(owner).await,
+        None => None,
+    };
+    Ok(naming_settings::read(&*state.store, owner, account.as_deref()).await?)
 }
 
 /// Whether computer use is enabled. Default on; an explicit `false` disables

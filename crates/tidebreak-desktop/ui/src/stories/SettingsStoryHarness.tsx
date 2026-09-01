@@ -89,6 +89,12 @@ export const storySettings: RuntimeSettings = {
   computer_use_enabled: true,
   code_turn_recaps_enabled: true,
   rewrite_closing_messages: false,
+  git_source_control: {
+    auto_rename_branches: true,
+    branch_prefix_mode: "account",
+    account_prefix: "alex/",
+    effective_branch_prefix: "alex/",
+  },
 };
 
 function model(
@@ -456,6 +462,17 @@ function createSettingsStoryClient(
         compaction: body.compaction
           ? { ...settings.compaction, ...body.compaction }
           : settings.compaction,
+        git_source_control: body.git_source_control
+          ? {
+              ...settings.git_source_control,
+              ...body.git_source_control,
+              custom_branch_prefix:
+                body.git_source_control.custom_branch_prefix === null
+                  ? undefined
+                  : (body.git_source_control.custom_branch_prefix ??
+                    settings.git_source_control.custom_branch_prefix),
+            }
+          : settings.git_source_control,
       };
       return write(settings);
     },

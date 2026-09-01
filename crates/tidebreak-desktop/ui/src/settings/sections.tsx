@@ -6,6 +6,7 @@ import {
   Cpu,
   Gauge,
   Globe,
+  GitBranch,
   KeyRound,
   Palette,
   RefreshCw,
@@ -37,6 +38,7 @@ import { VoiceTranscriptionPanel } from "./VoiceTranscriptionPanel";
 import { CodingHarnessesPanel } from "./CodingHarnessesPanel";
 import { QuickActionsPanel } from "./QuickActionsPanel";
 import { ChannelsPanel } from "./ChannelsPanel";
+import { GitSourceControlPanel } from "./GitSourceControlPanel";
 
 /**
  * Each section reads what it needs from the shell context rather than being
@@ -197,6 +199,11 @@ function ChannelsSection() {
   return <ChannelsPanel client={client} />;
 }
 
+function GitSourceControlSection() {
+  const { client } = useApp();
+  return <GitSourceControlPanel client={client} />;
+}
+
 export type SettingsSectionDef = {
   /** The path segment under `/settings`, and its address. */
   path: string;
@@ -328,6 +335,14 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     icon: Blocks,
     iconClass: "text-icon-blue",
     Component: ConnectedAppsSection,
+  },
+  {
+    path: "git-source-control",
+    label: "Git & source control",
+    group: "application",
+    icon: GitBranch,
+    iconClass: "text-icon-blue",
+    Component: GitSourceControlSection,
   },
   {
     path: "permissions",

@@ -1,4 +1,5 @@
 import {
+  type BranchPrefixMode as WireBranchPrefixMode,
   type AppDetail as WireAppDetail,
   type AppGrantState as WireAppGrantState,
   type AppInvokeRefusalKind,
@@ -429,6 +430,7 @@ export type ModelCatalog = {
 
 /** Global runtime settings (`GET/PUT /settings`). */
 export type RuntimeSettings = Settings;
+export type BranchPrefixMode = WireBranchPrefixMode;
 
 /** Host-global compaction cadence, as `GET/PUT /settings` carries it. */
 export type { CompactionSettings };
