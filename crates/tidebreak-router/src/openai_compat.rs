@@ -290,6 +290,14 @@ fn build_request_json_for(req: &ChatRequest, provider_id: &str) -> Result<Value>
         "messages": messages,
         "stream": true,
     });
+    // Chat Completions `prompt_cache_key` is an OpenAI Platform field. Local
+    // and third-party compatible servers often reject unknown keys, so only
+    // the strict OpenAI id carries it — the same split as `stream_options`.
+    if provider_id == "openai" {
+        if let Some(conversation) = req.conversation {
+            body["prompt_cache_key"] = json!(conversation.to_string());
+        }
+    }
     // OpenAI reasoning models reject `max_tokens` — they want
     // `max_completion_tokens`. Fireworks and Together expose reasoning models
     // through their compatible endpoints without adopting that OpenAI-only
@@ -875,6 +883,22 @@ mod tests {
         // A non-reasoning model must never receive `reasoning_effort`, even when
         // the chat sets one — the field would be rejected by the endpoint.
         assert!(body.get("reasoning_effort").is_none());
+        assert!(body.get("prompt_cache_key").is_none());
+
+        let conversation = tidebreak_core::id::ChatId::new();
+        let with_conversation = ChatRequest {
+            conversation: Some(conversation),
+            ..req
+        };
+        // The test helper speaks as an arbitrary compatible backend.
+        assert!(build_request_json(&with_conversation)
+            .unwrap()
+            .get("prompt_cache_key")
+            .is_none());
+        let openai = build_request_json_for(&with_conversation, "openai").unwrap();
+        assert_eq!(openai["prompt_cache_key"], conversation.to_string());
+        let fireworks = build_request_json_for(&with_conversation, "fireworks").unwrap();
+        assert!(fireworks.get("prompt_cache_key").is_none());
     }
 
     #[test]
