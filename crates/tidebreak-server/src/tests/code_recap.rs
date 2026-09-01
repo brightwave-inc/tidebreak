@@ -311,7 +311,7 @@ async fn a_disabled_recap_setting_skips_the_model_call() {
         )
         .await
         .unwrap();
-    let addr = serve(router).await;
+    let addr = serve(router.clone()).await;
     let client = reqwest::Client::new();
     let repo = init_git_repo(dir.path());
 
@@ -345,20 +345,25 @@ async fn a_disabled_recap_setting_skips_the_model_call() {
         .await
         .unwrap();
     let session: serde_json::Value = session.json().await.unwrap();
-    let session_id_text = session["id"].as_str().unwrap().to_owned();
-    let session_id =
-        tidebreak_core::CodeSessionId(uuid::Uuid::parse_str(&session_id_text).unwrap());
+    let session_id = tidebreak_core::CodeSessionId(
+        uuid::Uuid::parse_str(session["id"].as_str().unwrap()).unwrap(),
+    );
 
-    let turn = client
-        .post(format!(
-            "http://{addr}/code/sessions/{session_id_text}/turns"
-        ))
-        .bearer_auth(&token)
-        .json(&serde_json::json!({ "message": "Fix the retry test" }))
-        .send()
+    let turn = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/code/sessions/{session_id}/turns"))
+                .header("authorization", format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "message": "Fix the retry test" }).to_string(),
+                ))
+                .unwrap(),
+        )
         .await
         .unwrap();
-    assert_eq!(turn.status(), reqwest::StatusCode::ACCEPTED);
+    assert_eq!(turn.status(), StatusCode::ACCEPTED);
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
