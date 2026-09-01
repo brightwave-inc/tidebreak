@@ -589,6 +589,36 @@ async fn external_events_snapshot_then_replay_then_sever_on_revoke() {
 /// grant bound to the shown identity, but only at the adapter's closing
 /// confirm — a forwarded link that is merely approved binds nothing — and
 /// the desktop lists and revokes grants, whole workspaces included.
+/// The operator's pairing probe answers only to the bootstrap token and
+/// writes nothing: the setup page learns the pairing is wrong at setup
+/// time, not at a user's first connect card.
+#[tokio::test]
+async fn the_pairing_probe_answers_only_to_the_bootstrap_token() {
+    let (router, _fake, _runtime, _repo_id, _token, _dir) = external_app_with_token().await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let missing = client
+        .get(format!("http://{addr}/external/connect/probe"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), reqwest::StatusCode::UNAUTHORIZED);
+    let wrong = client
+        .get(format!("http://{addr}/external/connect/probe"))
+        .bearer_auth("wrong-bootstrap-token-padded-to-thirty-two")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong.status(), reqwest::StatusCode::UNAUTHORIZED);
+    let ok = client
+        .get(format!("http://{addr}/external/connect/probe"))
+        .bearer_auth(ADAPTER_BOOTSTRAP_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), reqwest::StatusCode::NO_CONTENT);
+}
+
 #[tokio::test]
 async fn a_connect_handshake_mints_only_at_the_closing_confirm() {
     let (router, _fake, runtime, _repo_id, token, _dir) = external_app_with_token().await;
