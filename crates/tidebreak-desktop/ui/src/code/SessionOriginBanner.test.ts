@@ -7,9 +7,15 @@ describe("externalThreadUrl", () => {
     expect(
       externalThreadUrl({
         channel_kind: "slack",
-        external_key: "T0400000:C0812345:1724900000.123456",
+        external_key: "T0400000/C0812345/1724900000.123456",
       }),
     ).toBe("https://slack.com/archives/C0812345/p1724900000123456");
+    expect(
+      externalThreadUrl({
+        channel_kind: "slack",
+        external_key: "T1/C1/171.5",
+      }),
+    ).toBe("https://slack.com/archives/C1/p1715");
   });
 
   it("yields no link for a DM generation key", () => {
@@ -18,7 +24,7 @@ describe("externalThreadUrl", () => {
     expect(
       externalThreadUrl({
         channel_kind: "slack",
-        external_key: "T0400000:D0898765:dm:2",
+        external_key: "T0400000/D0898765/dm/2",
       }),
     ).toBeNull();
   });

@@ -28,7 +28,7 @@ export const SlackThread: Story = {
   args: {
     origin: {
       channel_kind: "slack",
-      external_key: "T0400000:C0812345:1724900000.123456",
+      external_key: "T0400000/C0812345/1724900000.123456",
     },
   },
 };
@@ -38,7 +38,7 @@ export const SlackDirectMessage: Story = {
   args: {
     origin: {
       channel_kind: "slack",
-      external_key: "T0400000:D0898765:dm:2",
+      external_key: "T0400000/D0898765/dm/2",
     },
   },
 };

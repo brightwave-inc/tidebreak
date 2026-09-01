@@ -241,7 +241,7 @@ pub struct CodeSessionExternalOrigin {
     /// The channel family, for example `slack`.
     pub channel_kind: String,
     /// The channel's durable conversation identity, opaque to the server.
-    /// For Slack this is `workspace:channel:thread_ts`, which the desktop
+    /// For Slack this is `workspace/channel/thread_ts`, which the desktop
     /// turns into a thread permalink.
     pub external_key: String,
 }

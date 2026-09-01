@@ -1609,7 +1609,7 @@ export type CodeSessionExternalOrigin = {
 channel_kind: string, 
 /**
  * The channel's durable conversation identity, opaque to the server.
- * For Slack this is `workspace:channel:thread_ts`, which the desktop
+ * For Slack this is `workspace/channel/thread_ts`, which the desktop
  * turns into a thread permalink.
  */
 external_key: string, };

@@ -20,7 +20,7 @@ function channelLabel(kind: string): string {
 /**
  * The thread permalink for a Slack origin, when the key carries one.
  *
- * The adapter's durable key is `workspace:channel:thread_ts`. A key in any
+ * The adapter's durable key is `workspace/channel/thread_ts`. A key in any
  * other shape — a DM generation key, another channel family — yields no
  * link, and the banner renders without one rather than guessing.
  */
@@ -28,7 +28,7 @@ export function externalThreadUrl(
   origin: CodeSessionExternalOrigin,
 ): string | null {
   if (origin.channel_kind !== "slack") return null;
-  const parts = origin.external_key.split(":");
+  const parts = origin.external_key.split("/");
   if (parts.length !== 3) return null;
   const [, channel, ts] = parts;
   if (!/^[A-Z0-9]+$/i.test(channel) || !/^\d+\.\d+$/.test(ts)) return null;

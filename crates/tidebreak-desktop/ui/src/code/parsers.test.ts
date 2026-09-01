@@ -387,12 +387,12 @@ describe("parseCodeSession external origin", () => {
       ...SESSION,
       external_origin: {
         channel_kind: "slack",
-        external_key: "T04:C08:1724900000.123456",
+        external_key: "T04/C08/1724900000.123456",
       },
     });
     expect(parsed?.external_origin).toEqual({
       channel_kind: "slack",
-      external_key: "T04:C08:1724900000.123456",
+      external_key: "T04/C08/1724900000.123456",
     });
   });
 
@@ -408,7 +408,7 @@ describe("parseCodeSession external origin", () => {
         ...SESSION,
         external_origin: {
           channel_kind: "slack",
-          external_key: "T04:C08:1.2",
+          external_key: "T04/C08/1.2",
           extra: true,
         },
       }),
