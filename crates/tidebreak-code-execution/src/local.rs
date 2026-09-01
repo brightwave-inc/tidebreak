@@ -115,6 +115,7 @@ pub struct LocalExecutionProvider {
     timeout: Duration,
     document_scripts_dir: Option<PathBuf>,
     shared_package_cache: Option<PathBuf>,
+    python_runtime_dirs: Vec<PathBuf>,
     managed_node_dir: Option<PathBuf>,
     network_policy: NetworkPolicy,
 }
@@ -148,6 +149,7 @@ impl LocalExecutionProvider {
             timeout,
             document_scripts_dir: None,
             shared_package_cache: None,
+            python_runtime_dirs: Vec::new(),
             managed_node_dir: None,
             network_policy: NetworkPolicy::Off,
         })
@@ -173,6 +175,21 @@ impl LocalExecutionProvider {
     #[must_use]
     pub fn with_shared_package_cache(mut self, directory: Option<PathBuf>) -> Self {
         self.shared_package_cache = directory;
+        self
+    }
+
+    /// Expose a supported host Python runtime and its linked libraries.
+    ///
+    /// Its subtree becomes readable and `<directory>/bin` precedes the system
+    /// paths, so `python3` in the sandbox matches the interpreter that acquired
+    /// the shared wheel cache.
+    #[must_use]
+    pub fn with_python_runtime(
+        mut self,
+        directory: Option<PathBuf>,
+        read_only_paths: Vec<PathBuf>,
+    ) -> Self {
+        self.python_runtime_dirs = directory.into_iter().chain(read_only_paths).collect();
         self
     }
 
@@ -403,6 +420,7 @@ impl ExecProvider for LocalExecutionProvider {
             &env_home,
             self.document_scripts_dir.as_deref(),
             self.shared_package_cache.as_deref(),
+            &self.python_runtime_dirs,
             self.managed_node_dir.as_deref(),
             &folder_grants,
         );
@@ -451,6 +469,25 @@ impl ExecProvider for LocalExecutionProvider {
                     .map_err(|_| ExecError::Sandbox("shared package cache is unavailable".into()))
             })
             .transpose()?;
+        // A user-managed runtime that disappears between turns drops out like
+        // the managed Node slot. The system Python remains available as a
+        // fallback, but it receives no package cache when it is below 3.11.
+        let python_runtime_dirs = self
+            .python_runtime_dirs
+            .first()
+            .and_then(|prefix| fs::canonicalize(prefix).ok())
+            .map(|prefix| {
+                std::iter::once(prefix)
+                    .chain(
+                        self.python_runtime_dirs
+                            .iter()
+                            .skip(1)
+                            .filter(|path| path.is_dir())
+                            .cloned(),
+                    )
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         // A runtime that has been uninstalled between turns simply drops out:
         // the profile and PATH go back to what they were rather than failing
         // the command over an absent convenience.
@@ -466,6 +503,7 @@ impl ExecProvider for LocalExecutionProvider {
             self.timeout,
             document_scripts_dir.as_deref(),
             shared_package_cache.as_deref(),
+            &python_runtime_dirs,
             managed_node_dir.as_deref(),
             &folder_grants,
             &self.network_policy,
@@ -481,6 +519,7 @@ impl ExecProvider for LocalExecutionProvider {
                         &env_home,
                         document_scripts_dir.as_deref(),
                         shared_package_cache.as_deref(),
+                        &python_runtime_dirs,
                         managed_node_dir.as_deref(),
                         &folder_grants,
                         &mut response,
@@ -871,6 +910,7 @@ async fn run_native(
     timeout: Duration,
     document_scripts_dir: Option<&Path>,
     shared_package_cache: Option<&Path>,
+    python_runtime_dirs: &[PathBuf],
     managed_node_dir: Option<&Path>,
     folder_grants: &[CanonicalExecFolderGrant],
     network_policy: &NetworkPolicy,
@@ -887,6 +927,7 @@ async fn run_native(
         developer_dir.as_deref(),
         document_scripts_dir,
         shared_package_cache,
+        python_runtime_dirs,
         managed_node_dir,
         folder_grants,
         broker.as_ref().map(LocalEgressBroker::port),
@@ -920,7 +961,11 @@ async fn run_native(
     }
     command.env(
         "PATH",
-        sandbox_path(developer_dir.as_deref(), managed_node_dir),
+        sandbox_path(
+            developer_dir.as_deref(),
+            python_runtime_dirs.first().map(PathBuf::as_path),
+            managed_node_dir,
+        ),
     );
     if let Some(directory) = document_scripts_dir {
         command.env("TIDEBREAK_EXEC_SCRIPTS", directory);
@@ -1077,14 +1122,20 @@ async fn finish_reader(mut reader: tokio::task::JoinHandle<()>) {
 #[cfg(target_os = "macos")]
 /// The sandbox's `PATH`, pinned to directories the host controls.
 ///
-/// A managed Node runtime goes first: it is the pinned interpreter Tidebreak
-/// installed and verified, and a skill's npm work should resolve it rather
-/// than whatever a system directory happens to hold. Everything after it is
-/// the fixed system set — the user's own shell `PATH` never reaches a
-/// sandboxed command.
-fn sandbox_path(developer_dir: Option<&Path>, managed_node_dir: Option<&Path>) -> String {
+/// Supported host runtimes go before the fixed system paths.
+///
+/// The directories come from host-side probes, not model input. The user's
+/// shell `PATH` never reaches a sandboxed command.
+fn sandbox_path(
+    developer_dir: Option<&Path>,
+    python_runtime_dir: Option<&Path>,
+    managed_node_dir: Option<&Path>,
+) -> String {
     let mut entries = Vec::new();
     if let Some(directory) = managed_node_dir {
+        entries.push(format!("{}/bin", directory.display()));
+    }
+    if let Some(directory) = python_runtime_dir {
         entries.push(format!("{}/bin", directory.display()));
     }
     if let Some(directory) = developer_dir {
@@ -1101,6 +1152,7 @@ fn direct_denied_host_path(
     env_home: &Path,
     document_scripts_dir: Option<&Path>,
     shared_package_cache: Option<&Path>,
+    python_runtime_dirs: &[PathBuf],
     managed_node_dir: Option<&Path>,
     folder_grants: &[CanonicalExecFolderGrant],
 ) -> Option<PathBuf> {
@@ -1114,6 +1166,7 @@ fn direct_denied_host_path(
                 env_home,
                 document_scripts_dir,
                 shared_package_cache,
+                python_runtime_dirs,
                 managed_node_dir,
                 folder_grants,
             )
@@ -1128,6 +1181,7 @@ fn annotate_seatbelt_access_denial(
     env_home: &Path,
     document_scripts_dir: Option<&Path>,
     shared_package_cache: Option<&Path>,
+    python_runtime_dirs: &[PathBuf],
     managed_node_dir: Option<&Path>,
     folder_grants: &[CanonicalExecFolderGrant],
     response: &mut ExecResponse,
@@ -1155,6 +1209,7 @@ fn annotate_seatbelt_access_denial(
                 env_home,
                 document_scripts_dir,
                 shared_package_cache,
+                python_runtime_dirs,
                 managed_node_dir,
                 folder_grants,
             )
@@ -1182,6 +1237,7 @@ fn output_contains_denied_host_path(
     env_home: &Path,
     document_scripts_dir: Option<&Path>,
     shared_package_cache: Option<&Path>,
+    python_runtime_dirs: &[PathBuf],
     managed_node_dir: Option<&Path>,
     folder_grants: &[CanonicalExecFolderGrant],
 ) -> bool {
@@ -1198,6 +1254,7 @@ fn output_contains_denied_host_path(
                 env_home,
                 document_scripts_dir,
                 shared_package_cache,
+                python_runtime_dirs,
                 managed_node_dir,
                 folder_grants,
             ) {
@@ -1235,6 +1292,7 @@ fn output_contains_denied_host_path(
                 env_home,
                 document_scripts_dir,
                 shared_package_cache,
+                python_runtime_dirs,
                 managed_node_dir,
                 folder_grants,
             )
@@ -1414,6 +1472,7 @@ fn denied_host_path(
     env_home: &Path,
     document_scripts_dir: Option<&Path>,
     shared_package_cache: Option<&Path>,
+    python_runtime_dirs: &[PathBuf],
     managed_node_dir: Option<&Path>,
     folder_grants: &[CanonicalExecFolderGrant],
 ) -> bool {
@@ -1435,10 +1494,11 @@ fn denied_host_path(
             Some(env_home),
             document_scripts_dir,
             shared_package_cache,
-            managed_node_dir,
         ]
         .into_iter()
         .flatten()
+        .chain(python_runtime_dirs.iter().map(PathBuf::as_path))
+        .chain(managed_node_dir)
         .any(|allowed| resolved.starts_with(resolve_existing_path_prefix(allowed)))
         || folder_grants.iter().any(|grant| {
             resolved.starts_with(&grant.path)
@@ -1482,6 +1542,7 @@ fn macos_profile(
     developer_dir: Option<&Path>,
     document_scripts_dir: Option<&Path>,
     shared_package_cache: Option<&Path>,
+    python_runtime_dirs: &[PathBuf],
     managed_node_dir: Option<&Path>,
     folder_grants: &[CanonicalExecFolderGrant],
     broker_port: Option<u16>,
@@ -1533,6 +1594,22 @@ fn macos_profile(
         .map(sandbox_subpath)
         .transpose()?
         .unwrap_or_default();
+    // The selected Python prefix and linked library directories are read-only.
+    // Reject any path broad enough to reopen the workspace or private HOME.
+    if python_runtime_dirs.iter().any(|runtime| {
+        runtime.parent().is_none()
+            || workspace.starts_with(runtime)
+            || env_home.starts_with(runtime)
+    }) {
+        return Err(ExecError::Sandbox(
+            "the selected Python runtime is too broad for the local sandbox".into(),
+        ));
+    }
+    let python_runtime = python_runtime_dirs
+        .iter()
+        .map(|path| sandbox_subpath(path))
+        .collect::<Result<Vec<_>, _>>()?
+        .join("\n  ");
     // The managed Node runtime joins the same read-only allowances, and for
     // the same reason: `(allow process-exec)` above is unconditional, so being
     // able to *open* the interpreter is the entire gate on running it. The
@@ -1576,10 +1653,11 @@ fn macos_profile(
             developer_dir,
             document_scripts_dir,
             shared_package_cache,
-            managed_node_dir,
         ]
         .into_iter()
         .flatten()
+        .chain(python_runtime_dirs.iter().map(PathBuf::as_path))
+        .chain(managed_node_dir)
         .chain(folder_grants.iter().flat_map(|grant| {
             std::iter::once(grant.path.as_path()).chain(grant.overlay.as_deref())
         })),
@@ -1602,7 +1680,7 @@ fn macos_profile(
          (allow file-read*)\n\
          (deny file-read*\n  {denied})\n\
          (allow file-read-metadata\n  {runtime_metadata}\n  {dynamic_metadata})\n\
-         (allow file-read*\n  {literals}\n  {runtimes}\n  {selected_runtime}\n  {document_scripts}\n  {package_cache}\n  {managed_node}\n  {granted_reads}\n  {workspace}\n  {env_home})\n\
+         (allow file-read*\n  {literals}\n  {runtimes}\n  {selected_runtime}\n  {document_scripts}\n  {package_cache}\n  {python_runtime}\n  {managed_node}\n  {granted_reads}\n  {workspace}\n  {env_home})\n\
          (allow file-write*\n  {granted_writes}\n  {workspace}\n  {env_home}\n  (literal \"/dev/null\"))\n"
     ))
 }
@@ -2739,8 +2817,9 @@ print("Operation not permitted: '" + path.replace("/", "\\u002f") + "'", file=sy
                 "/Applications/Tidebreak.app/Contents/Resources/exec-scripts",
             )),
             Some(Path::new(
-                "/Users/test/.code-execution-package-cache/cp39-darwin-arm64/wheels",
+                "/Users/test/.code-execution-package-cache/cp311-darwin-arm64/wheels",
             )),
+            &[],
             None,
             &[],
             None,
@@ -2756,7 +2835,7 @@ print("Operation not permitted: '" + path.replace("/", "\\u002f") + "'", file=sy
         assert!(profile.contains("Resources/exec-scripts"));
         // The shared package cache is readable and never writable: verified
         // artifacts flow from the host in, never from a sandbox out.
-        assert!(profile.contains(".code-execution-package-cache/cp39-darwin-arm64/wheels"));
+        assert!(profile.contains(".code-execution-package-cache/cp311-darwin-arm64/wheels"));
         let write_rule = profile
             .split("(allow file-write*")
             .nth(1)
@@ -2769,6 +2848,7 @@ print("Operation not permitted: '" + path.replace("/", "\\u002f") + "'", file=sy
             None,
             None,
             None,
+            &[],
             None,
             &[],
             None,
@@ -2781,6 +2861,7 @@ print("Operation not permitted: '" + path.replace("/", "\\u002f") + "'", file=sy
             None,
             None,
             None,
+            &[],
             None,
             &[],
             Some(43127),
@@ -2804,6 +2885,7 @@ print("Operation not permitted: '" + path.replace("/", "\\u002f") + "'", file=sy
                 None,
                 None,
                 None,
+                &[],
                 managed_node,
                 &[],
                 None,
@@ -2825,12 +2907,12 @@ print("Operation not permitted: '" + path.replace("/", "\\u002f") + "'", file=sy
 
         let developer_dir = Path::new("/Library/Developer/CommandLineTools");
         assert_eq!(
-            sandbox_path(Some(developer_dir), Some(node)),
+            sandbox_path(Some(developer_dir), None, Some(node)),
             "/Users/test/Library/Application Support/Tidebreak/node/v22.11.0/bin:\
              /Library/Developer/CommandLineTools/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin"
         );
         assert_eq!(
-            sandbox_path(None, None),
+            sandbox_path(None, None, None),
             "/usr/bin:/bin:/usr/sbin:/sbin",
             "without a managed runtime the sandbox keeps the system PATH it always had"
         );
@@ -2881,6 +2963,77 @@ print("Operation not permitted: '" + path.replace("/", "\\u002f") + "'", file=sy
         );
     }
 
+    /// A selected Python prefix follows the same read-only runtime contract as
+    /// managed Node and takes precedence over the unsupported system Python.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn supported_python_runtime_runs_in_the_sandbox() {
+        let scratch = tempfile::tempdir().unwrap();
+        let workspace = "chat-python";
+        fs::create_dir(scratch.path().join(workspace)).unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let bin = runtime.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        fs::write(bin.join("python3"), "#!/bin/sh\nprintf 'Python 3.12.9'\n").unwrap();
+        fs::set_permissions(bin.join("python3"), fs::Permissions::from_mode(0o755)).unwrap();
+        let runtime = fs::canonicalize(runtime.path()).unwrap();
+
+        let provider = LocalExecutionProvider::new(scratch.path(), Duration::from_secs(5))
+            .unwrap()
+            .with_python_runtime(Some(runtime.clone()), Vec::new());
+        let response = provider
+            .execute(request(
+                workspace,
+                "call-python-runtime",
+                "python3 --version",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.stdout, "Python 3.12.9");
+        assert!(response.stderr.is_empty());
+
+        let profile = macos_profile(
+            Path::new("/Users/test/workspace"),
+            Path::new("/Users/test/env-home"),
+            None,
+            None,
+            None,
+            std::slice::from_ref(&runtime),
+            None,
+            &[],
+            None,
+        )
+        .unwrap();
+        let write_rule = profile
+            .split("(allow file-write*")
+            .nth(1)
+            .expect("profile has a write rule");
+        assert!(!write_rule.contains(runtime.to_str().unwrap()));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn python_runtime_cannot_reopen_the_workspace_or_home() {
+        for runtime in [Path::new("/"), Path::new("/Users/test")] {
+            let runtime_dirs = [runtime.to_path_buf()];
+            let error = macos_profile(
+                Path::new("/Users/test/workspace"),
+                Path::new("/Users/test/env-home"),
+                None,
+                None,
+                None,
+                &runtime_dirs,
+                None,
+                &[],
+                None,
+            )
+            .unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("selected Python runtime is too broad"));
+        }
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn profile_compiles_read_and_write_folder_grants_without_widening_reads() {
@@ -2900,6 +3053,7 @@ print("Operation not permitted: '" + path.replace("/", "\\u002f") + "'", file=sy
             None,
             None,
             None,
+            &[],
             None,
             &grants,
             None,
@@ -2992,7 +3146,7 @@ print("Operation not permitted: '" + path.replace("/", "\\u002f") + "'", file=sy
         fs::create_dir(scratch.path().join(workspace)).unwrap();
         let cache = crate::package_cache::SharedPackageCache::open(
             &scratch.path().join(crate::package_cache::PACKAGE_CACHE_DIR),
-            "cp39-darwin-arm64",
+            "cp311-darwin-arm64",
         )
         .unwrap();
         let staging = scratch.path().join("staging");
@@ -3033,7 +3187,6 @@ print("Operation not permitted: '" + path.replace("/", "\\u002f") + "'", file=sy
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn offline_pip_install_resolves_from_the_promoted_shared_cache() {
-        const PYTHON: &str = "/usr/bin/python3";
         // A wheel is a zip archive with recorded member hashes; building one
         // directly keeps the fixture fully offline while staying a real,
         // valid wheel that pip verifies and installs like any registry
@@ -3059,10 +3212,16 @@ with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as archive:
     archive.writestr(record, out.getvalue())
 "#;
 
-        // The proof can only be as healthy as the host interpreter (see the
-        // confinement test above): without a working system python and pip
-        // there is nothing here to prove about the cache.
-        let pip_works = std::process::Command::new(PYTHON)
+        let Some(runtime) =
+            crate::package_cache::SharedPackageCache::python_runtime(Path::new("python3")).await
+        else {
+            eprintln!("skipping: no supported host Python runtime is available");
+            return;
+        };
+        // The proof can only be as healthy as the selected interpreter:
+        // without a working pip there is nothing here to prove about the
+        // cache.
+        let pip_works = std::process::Command::new(runtime.executable())
             .args(["-m", "pip", "--version"])
             .output()
             .map(|output| output.status.success())
@@ -3071,12 +3230,6 @@ with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as archive:
             eprintln!("skipping: host python/pip unusable in this environment");
             return;
         }
-        let Some(runtime_key) =
-            crate::package_cache::SharedPackageCache::runtime_key(Path::new(PYTHON)).await
-        else {
-            eprintln!("skipping: host interpreter yields no runtime key");
-            return;
-        };
 
         let scratch = tempfile::tempdir().unwrap();
         let workspace = "chat-offline-install";
@@ -3088,7 +3241,7 @@ with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as archive:
         // hand-forged.
         let staging = scratch.path().join("staging");
         fs::create_dir(&staging).unwrap();
-        let built = std::process::Command::new(PYTHON)
+        let built = std::process::Command::new(runtime.executable())
             .args(["-c", BUILD_WHEEL])
             .arg(staging.join("tidebreakproof-1.0.0-py3-none-any.whl"))
             .output()
@@ -3100,7 +3253,7 @@ with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as archive:
         );
         let cache = crate::package_cache::SharedPackageCache::open(
             &scratch.path().join(crate::package_cache::PACKAGE_CACHE_DIR),
-            &runtime_key,
+            runtime.key(),
         )
         .unwrap();
         let report = cache.verify_and_promote(&staging).unwrap();
@@ -3113,11 +3266,15 @@ with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as archive:
         // install ran with the network actually off, not merely unused.
         let provider = LocalExecutionProvider::new(scratch.path(), Duration::from_secs(120))
             .unwrap()
-            .with_shared_package_cache(Some(wheels));
+            .with_shared_package_cache(Some(wheels))
+            .with_python_runtime(
+                Some(runtime.prefix().to_owned()),
+                runtime.read_only_paths().to_vec(),
+            );
         // A python whose stdlib carries the EXTERNALLY-MANAGED marker needs
         // `--break-system-packages` (its bundled pip understands the flag);
         // passing it unconditionally would fail the older pips that don't.
-        let externally_managed = std::process::Command::new(PYTHON)
+        let externally_managed = std::process::Command::new(runtime.executable())
             .args([
                 "-c",
                 "import os, sysconfig; \
@@ -3134,7 +3291,7 @@ with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as archive:
         let install = format!(
             "if /usr/bin/curl -fsS --max-time 1 https://example.com >/dev/null 2>&1; \
              then echo network-open; else echo network-blocked; fi; \
-             {PYTHON} -m pip install --user --quiet --no-index \
+             python3 -m pip install --user --quiet --no-index \
              --disable-pip-version-check --no-input{break_flag} \
              --find-links \"$TIDEBREAK_PACKAGE_CACHE\" tidebreakproof==1.0.0"
         );
@@ -3163,7 +3320,7 @@ with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as archive:
             .execute(request(
                 workspace,
                 "call-offline-import",
-                &format!("{PYTHON} -c \"import tidebreakproof; print(tidebreakproof.MARKER)\""),
+                "python3 -c \"import tidebreakproof; print(tidebreakproof.MARKER)\"",
             ))
             .await
             .unwrap();

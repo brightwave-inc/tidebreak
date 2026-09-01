@@ -67,7 +67,7 @@ pub use overlay::{
     OVERLAY_DIR,
 };
 pub use package_cache::{
-    PromotionReport, SharedPackageCache, PACKAGE_CACHE_DIR, PACKAGE_CACHE_ENV,
+    PromotionReport, PythonRuntime, SharedPackageCache, PACKAGE_CACHE_DIR, PACKAGE_CACHE_ENV,
 };
 pub use plugins::{
     assess_plugin_compatibility, derived_capabilities, is_valid_plugin_name,

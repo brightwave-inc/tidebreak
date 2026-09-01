@@ -80,7 +80,7 @@ async fn test_store() -> (DbStore, tempfile::TempDir) {
 fn package_cache_failure_inputs_stay_latched_until_pins_change() {
     let population = Mutex::new(PackageCachePopulationState::default());
     let original = vec![
-        vec!["pillow==11.3.0".to_owned(), "numpy==2.0.2".to_owned()],
+        vec!["pillow==12.3.0".to_owned(), "numpy==2.4.6".to_owned()],
         vec!["pypdf==6.0.0".to_owned()],
     ];
     let claimed = claim_package_cache_population(&population, &original);
@@ -94,7 +94,7 @@ fn package_cache_failure_inputs_stay_latched_until_pins_change() {
     // suppressed even when the trigger presents equivalent pins reordered.
     let reordered = vec![
         vec!["pypdf==6.0.0".to_owned()],
-        vec!["numpy==2.0.2".to_owned(), "pillow==11.3.0".to_owned()],
+        vec!["numpy==2.4.6".to_owned(), "pillow==12.3.0".to_owned()],
     ];
     assert_eq!(
         claim_package_cache_population(&population, &reordered),
@@ -104,7 +104,7 @@ fn package_cache_failure_inputs_stay_latched_until_pins_change() {
     // Changing an exact pin is a new population input and legitimately gets
     // one fresh attempt.
     let changed = vec![
-        vec!["numpy==2.0.2".to_owned(), "pillow==11.3.1".to_owned()],
+        vec!["numpy==2.4.6".to_owned(), "pillow==12.3.1".to_owned()],
         vec!["pypdf==6.0.0".to_owned()],
     ];
     assert_eq!(
@@ -117,10 +117,10 @@ fn package_cache_failure_inputs_stay_latched_until_pins_change() {
 #[test]
 fn already_populated_pin_sets_are_not_scheduled_again() {
     let original = vec![
-        vec!["pillow==11.3.0".to_owned(), "numpy==2.0.2".to_owned()],
+        vec!["pillow==12.3.0".to_owned(), "numpy==2.4.6".to_owned()],
         vec!["pypdf==6.0.0".to_owned()],
     ];
-    let populated = ["numpy==2.0.2", "pillow==11.3.0"];
+    let populated = ["numpy==2.4.6", "pillow==12.3.0"];
     let pending = pending_package_cache_pin_sets(&original, |pins| {
         let mut key: Vec<&str> = pins.iter().map(String::as_str).collect();
         key.sort_unstable();
@@ -138,12 +138,12 @@ fn already_populated_pin_sets_are_not_scheduled_again() {
 fn coalesced_population_pins_are_one_sorted_union() {
     assert_eq!(
         coalesced_population_pins(&[
-            vec!["pillow==11.3.0".to_owned(), "numpy==2.0.2".to_owned()],
-            vec!["pypdf==6.0.0".to_owned(), "pillow==11.3.0".to_owned()],
+            vec!["pillow==12.3.0".to_owned(), "numpy==2.4.6".to_owned()],
+            vec!["pypdf==6.0.0".to_owned(), "pillow==12.3.0".to_owned()],
         ]),
         vec![
-            "numpy==2.0.2".to_owned(),
-            "pillow==11.3.0".to_owned(),
+            "numpy==2.4.6".to_owned(),
+            "pillow==12.3.0".to_owned(),
             "pypdf==6.0.0".to_owned(),
         ]
     );

@@ -11,7 +11,7 @@ use tidebreak_code_execution::{
     sync, DaytonaCredential, E2BCredential, ExecError, ExecFolderAccess, ExecFolderGrant,
     ExecProvider, ExecProviderKind, ExecRequest, ExecResponse, ExecutionId, ExecutionWorkspaceId,
     LocalExecutionProvider, MaterializationPrecondition, MaterializedChangeKind,
-    OutputArtifactEntry, OutputArtifactScan, OutputArtifactStatus, PreviewScan,
+    OutputArtifactEntry, OutputArtifactScan, OutputArtifactStatus, PreviewScan, PythonRuntime,
     RejectedChangeReason, RemoteSessionPool, SharedPackageCache, StagedUpload, WorkspaceFilePath,
     WorkspaceLifecycle, WorkspaceListing, WriteOverlay, WriteSnapshotSink, PACKAGE_CACHE_DIR,
 };
@@ -86,9 +86,10 @@ pub struct ConfiguredExecProvider {
     /// when the turn ends; every `exec` in between finds it here and points the
     /// sandbox at the staged copy instead of the user's folder.
     write_overlays: Mutex<HashMap<ChatId, StagedTurn>>,
-    /// The shared package cache's runtime key, probed from the sandbox
-    /// interpreter once per process. `None` disables the cache.
-    package_cache_runtime: tokio::sync::OnceCell<Option<String>>,
+    /// The supported Python runtime selected for local execution and package
+    /// caching once per process. `None` leaves the system interpreter in place
+    /// and disables the shared cache.
+    local_python_runtime: tokio::sync::OnceCell<Option<PythonRuntime>>,
     /// Population state per canonical requirement set. Successful and
     /// deterministically unresolvable sets stay settled; transient acquisition
     /// failures leave their set retryable. Tracking sets independently avoids
@@ -232,7 +233,7 @@ impl ConfiguredExecProvider {
             blob_writes: None,
             remote_sessions: RemoteSessionPool::default(),
             write_overlays: Mutex::new(HashMap::new()),
-            package_cache_runtime: tokio::sync::OnceCell::new(),
+            local_python_runtime: tokio::sync::OnceCell::new(),
             package_cache_population: Arc::new(Mutex::new(PackageCachePopulationState::default())),
             package_cache_lock: Arc::new(tokio::sync::Mutex::new(())),
             events: OnceLock::new(),
@@ -748,6 +749,27 @@ impl ConfiguredExecProvider {
             .await
     }
 
+    /// The first supported Python runtime available to both the host and the
+    /// local sandbox. The process PATH wins when it names Python 3.11 or later;
+    /// common macOS install locations cover packaged apps whose PATH contains
+    /// only system directories.
+    async fn selected_python_runtime(&self) -> Option<PythonRuntime> {
+        if !cfg!(target_os = "macos") {
+            return None;
+        }
+        self.local_python_runtime
+            .get_or_init(|| async {
+                for candidate in local_python_candidates() {
+                    if let Some(runtime) = SharedPackageCache::python_runtime(&candidate).await {
+                        return Some(runtime);
+                    }
+                }
+                None
+            })
+            .await
+            .clone()
+    }
+
     /// The shared package cache keyspace for the local sandbox interpreter.
     ///
     /// The wheel-compatibility runtime key is probed from the same interpreter
@@ -758,14 +780,8 @@ impl ConfiguredExecProvider {
         if !cfg!(target_os = "macos") {
             return None;
         }
-        let key = self
-            .package_cache_runtime
-            .get_or_init(|| async {
-                SharedPackageCache::runtime_key(std::path::Path::new(SANDBOX_PYTHON)).await
-            })
-            .await
-            .clone()?;
-        SharedPackageCache::open(&self.scratch_root.join(PACKAGE_CACHE_DIR), &key).ok()
+        let runtime = self.selected_python_runtime().await?;
+        SharedPackageCache::open(&self.scratch_root.join(PACKAGE_CACHE_DIR), runtime.key()).ok()
     }
 
     /// Whether verified offline package installs are currently possible on the
@@ -802,7 +818,7 @@ impl ConfiguredExecProvider {
     /// keep their network install path either way. User-authored skills are
     /// deliberately excluded: their pins change outside this built-in set and
     /// their installs use the ordinary networked path like any other package.
-    fn spawn_package_cache_population(&self, cache: SharedPackageCache) {
+    fn spawn_package_cache_population(&self, cache: SharedPackageCache, python: PathBuf) {
         let pin_sets = take_pending_package_cache_sets(
             &self.package_cache_population,
             &cache,
@@ -814,7 +830,7 @@ impl ConfiguredExecProvider {
         let lock = self.package_cache_lock.clone();
         let population = self.package_cache_population.clone();
         tokio::spawn(async move {
-            populate_package_cache(&lock, &population, &cache, pin_sets).await;
+            populate_package_cache(&lock, &population, &cache, &python, pin_sets).await;
         });
     }
 
@@ -858,6 +874,9 @@ impl ConfiguredExecProvider {
         let Some(cache) = self.shared_package_cache().await else {
             return;
         };
+        let Some(runtime) = self.selected_python_runtime().await else {
+            return;
+        };
         let pin_sets = take_pending_package_cache_sets(
             &self.package_cache_population,
             &cache,
@@ -870,6 +889,7 @@ impl ConfiguredExecProvider {
             &self.package_cache_lock,
             &self.package_cache_population,
             &cache,
+            runtime.executable(),
             pin_sets,
         )
         .await;
@@ -1230,6 +1250,7 @@ impl ConfiguredExecProvider {
         };
         let resolved: Box<dyn ExecProvider> = match provider {
             ExecProviderKind::Local => {
+                let python_runtime = self.selected_python_runtime().await;
                 // Mounted only once verified artifacts exist; an empty or
                 // unusable cache leaves execution exactly as it was.
                 let package_cache = match self.shared_package_cache().await {
@@ -1244,6 +1265,15 @@ impl ConfiguredExecProvider {
                     .with_network_policy(network_policy.cloned().unwrap_or_default())
                     .with_document_scripts(self.document_scripts_source.clone())
                     .with_shared_package_cache(package_cache)
+                    .with_python_runtime(
+                        python_runtime
+                            .as_ref()
+                            .map(|runtime| runtime.prefix().to_owned()),
+                        python_runtime
+                            .as_ref()
+                            .map(|runtime| runtime.read_only_paths().to_vec())
+                            .unwrap_or_default(),
+                    )
                     .with_managed_node(self.managed_node_dir().await),
                 )
             }
@@ -1562,6 +1592,24 @@ impl ConfiguredExecProvider {
     }
 }
 
+fn local_python_candidates() -> Vec<PathBuf> {
+    let mut candidates = vec![PathBuf::from("python3")];
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        candidates.extend([
+            home.join(".pyenv/shims/python3"),
+            home.join(".asdf/shims/python3"),
+            home.join(".local/share/mise/shims/python3"),
+            home.join(".local/bin/python3"),
+        ]);
+    }
+    candidates.extend([
+        PathBuf::from("/opt/homebrew/bin/python3"),
+        PathBuf::from("/usr/local/bin/python3"),
+        PathBuf::from("/usr/bin/python3"),
+    ]);
+    candidates
+}
+
 /// The pin sets one cache-population pass acquires: the baseline set, plus
 /// each skill's own pinned requirements.
 ///
@@ -1682,6 +1730,7 @@ async fn populate_package_cache(
     lock: &tokio::sync::Mutex<()>,
     population: &Mutex<PackageCachePopulationState>,
     cache: &SharedPackageCache,
+    python: &std::path::Path,
     pin_sets: Vec<Vec<String>>,
 ) {
     let _guard = lock.lock().await;
@@ -1700,10 +1749,7 @@ async fn populate_package_cache(
         return;
     }
     let union = coalesced_population_pins(&pending);
-    match cache
-        .populate_with_pip(std::path::Path::new(SANDBOX_PYTHON), &union)
-        .await
-    {
+    match cache.populate_with_pip(python, &union).await {
         Ok(report) => {
             tracing::info!(
                 sets = pending.len(),
@@ -1732,7 +1778,7 @@ async fn populate_package_cache(
                 "shared package cache population failed; isolating pin sets"
             );
             for pins in pending {
-                populate_one_pin_set(population, cache, pins).await;
+                populate_one_pin_set(population, cache, python, pins).await;
             }
         }
     }
@@ -1741,12 +1787,10 @@ async fn populate_package_cache(
 async fn populate_one_pin_set(
     population: &Mutex<PackageCachePopulationState>,
     cache: &SharedPackageCache,
+    python: &std::path::Path,
     pins: Vec<String>,
 ) {
-    let settled = match cache
-        .populate_with_pip(std::path::Path::new(SANDBOX_PYTHON), &pins)
-        .await
-    {
+    let settled = match cache.populate_with_pip(python, &pins).await {
         Ok(report) => {
             tracing::info!(
                 sets = 1,
@@ -1830,8 +1874,11 @@ impl ExecProvider for ConfiguredExecProvider {
             // the same pins a conversation installs under its per-chat HOME
             // are acquired host-side into the shared cache, so a later
             // conversation can install them with the network off.
-            if let Some(cache) = self.shared_package_cache().await {
-                self.spawn_package_cache_population(cache);
+            if let (Some(cache), Some(runtime)) = (
+                self.shared_package_cache().await,
+                self.selected_python_runtime().await,
+            ) {
+                self.spawn_package_cache_population(cache, runtime.executable().to_owned());
             }
         }
         if kind == ExecProviderKind::Local && cfg!(target_os = "macos") {

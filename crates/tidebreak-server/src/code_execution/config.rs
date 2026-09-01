@@ -29,11 +29,6 @@ pub const MIN_TIMEOUT_MS: u64 = 1_000;
 pub const MAX_TIMEOUT_MS: u64 = 120_000;
 pub(super) const MAX_NETWORK_ALLOWED_HOSTS: usize = 64;
 
-/// The interpreter the local sandbox resolves from its fixed PATH; host-side
-/// cache acquisition runs the same one, so cached wheels are compatible with
-/// the sandbox runtime by construction.
-pub(super) const SANDBOX_PYTHON: &str = "/usr/bin/python3";
-
 /// Whether a per-chat policy admits package-registry downloads, mirroring the
 /// operating prompt's truth table.
 pub(super) fn permits_package_installs(policy: &NetworkPolicy) -> bool {
