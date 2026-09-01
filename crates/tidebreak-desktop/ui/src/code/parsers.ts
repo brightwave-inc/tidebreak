@@ -1,14 +1,18 @@
 import {
+  MAX_WIRE_CURSOR_CHARS,
+  MAX_WIRE_ID_CHARS,
+  MAX_WIRE_TIMESTAMP_CHARS,
+  bounded,
+  boundedBlock,
+  boundedRaw,
+  boundedStringList,
   isFiniteNumber,
   isMember,
   isNonNegativeInteger,
   isPositiveInteger,
   isRecord,
-  isStringList,
-  nonEmptyString,
-  nullableString,
+  nonEmptyBounded,
   onlyKeys,
-  optionalString,
 } from "../lib/wireDecode";
 import type {
   Attention,
@@ -204,6 +208,78 @@ import type {
  * characters must fail here rather than render as if it were well-formed.
  */
 
+// ---------------------------------------------------------------------------
+// String bounds
+// ---------------------------------------------------------------------------
+//
+// Every string this decoder keeps goes through one of three tiers, chosen by
+// how the field is drawn rather than by who wrote it:
+//
+// - Line: drawn on one line, so a control or bidirectional character could
+//   redraw or reorder it. Titles, names, branch and base refs, paths, URLs,
+//   logins, statuses, models, versions, remediation headlines. The limit
+//   holds a PATH_MAX-sized path or a long URL; GitHub caps titles at 256 and
+//   refs well under that.
+// - Block: drawn as a block, so line breaks, carriage returns, and tabs are
+//   structure while everything else a line rejects is still rejected. PR and
+//   comment bodies (GitHub caps these at 65,536 characters), commit messages,
+//   setup and archive scripts, quick-action commands, model text and
+//   reasoning, remediation and error messages, recaps, fence details.
+// - Raw: verbatim data the reader asked to see as it is, rendered by a pane
+//   that escapes nothing and expects terminal escapes and carriage returns:
+//   blob content, diffs and patches, terminal reads, command stdout/stderr,
+//   tool result previews, search hit lines, the harness's raw approval JSON,
+//   and the user's own prompt and steer text. Only the length is bounded,
+//   with headroom over the server's own truncation points (512 KiB blobs,
+//   256 KiB diffs).
+//
+// Ids, timestamps, and cursors share the chat decoder's named limits so the
+// two clients agree on what a valid payload is. Enum-like discriminators
+// (`type`, `kind`) stay presence-only: they are matched, never drawn.
+
+/** Longest one-line field: a PATH_MAX path or a long URL still fits. */
+const MAX_CODE_LINE_CHARS = 4_096;
+
+/** Longest authored block: sixteen GitHub-sized bodies, or a long model reply. */
+const MAX_CODE_BLOCK_CHARS = 1_048_576;
+
+/** Longest verbatim payload: eight times the server's blob cap. */
+const MAX_CODE_RAW_CHARS = 4_194_304;
+
+const lineText = (value: unknown): value is string =>
+  bounded(value, MAX_CODE_LINE_CHARS);
+const nonEmptyLine = (value: unknown): value is string =>
+  nonEmptyBounded(value, MAX_CODE_LINE_CHARS);
+const optionalLine = (value: unknown): value is string | undefined =>
+  value === undefined || bounded(value, MAX_CODE_LINE_CHARS);
+const lineList = (value: unknown): value is string[] =>
+  boundedStringList(value, MAX_CODE_LINE_CHARS);
+
+const blockText = (value: unknown): value is string =>
+  boundedBlock(value, MAX_CODE_BLOCK_CHARS);
+const optionalBlock = (value: unknown): value is string | undefined =>
+  value === undefined || boundedBlock(value, MAX_CODE_BLOCK_CHARS);
+
+const rawText = (value: unknown): value is string =>
+  boundedRaw(value, MAX_CODE_RAW_CHARS);
+const optionalRaw = (value: unknown): value is string | undefined =>
+  value === undefined || boundedRaw(value, MAX_CODE_RAW_CHARS);
+
+const wireId = (value: unknown): value is string =>
+  nonEmptyBounded(value, MAX_WIRE_ID_CHARS);
+const optionalWireId = (value: unknown): value is string | undefined =>
+  value === undefined || nonEmptyBounded(value, MAX_WIRE_ID_CHARS);
+
+const timestamp = (value: unknown): value is string =>
+  nonEmptyBounded(value, MAX_WIRE_TIMESTAMP_CHARS);
+const optionalTimestamp = (value: unknown): value is string | undefined =>
+  value === undefined || nonEmptyBounded(value, MAX_WIRE_TIMESTAMP_CHARS);
+const nullableTimestamp = (value: unknown): value is string | null =>
+  value === null || nonEmptyBounded(value, MAX_WIRE_TIMESTAMP_CHARS);
+
+const optionalCursor = (value: unknown): value is string | undefined =>
+  value === undefined || nonEmptyBounded(value, MAX_WIRE_CURSOR_CHARS);
+
 const HARNESS_KINDS = new Set<HarnessKind>([
   "claude_code",
   "codex",
@@ -362,9 +438,9 @@ function parseCodeGitHubRepositoryTarget(
       "owner",
       "name",
     ]) ||
-    !nonEmptyString(value.host) ||
-    !nonEmptyString(value.owner) ||
-    !nonEmptyString(value.name)
+    !nonEmptyLine(value.host) ||
+    !nonEmptyLine(value.owner) ||
+    !nonEmptyLine(value.name)
   ) {
     return null;
   }
@@ -385,13 +461,13 @@ function parseCodeGitHubRepositoryRef(
       "default_branch",
       "tidebreak_repo_id",
     ]) ||
-    !nonEmptyString(value.host) ||
-    !nonEmptyString(value.owner) ||
-    !nonEmptyString(value.name) ||
-    !nonEmptyString(value.name_with_owner) ||
-    !nonEmptyString(value.url) ||
-    !optionalString(value.default_branch) ||
-    !optionalString(value.tidebreak_repo_id)
+    !nonEmptyLine(value.host) ||
+    !nonEmptyLine(value.owner) ||
+    !nonEmptyLine(value.name) ||
+    !nonEmptyLine(value.name_with_owner) ||
+    !nonEmptyLine(value.url) ||
+    !optionalLine(value.default_branch) ||
+    !optionalWireId(value.tidebreak_repo_id)
   ) {
     return null;
   }
@@ -424,8 +500,8 @@ function parseCodeGitHubCapability(
     typeof value.found !== "boolean" ||
     (value.authenticated !== undefined &&
       typeof value.authenticated !== "boolean") ||
-    !optionalString(value.viewer_login) ||
-    typeof value.remediation !== "string"
+    !optionalLine(value.viewer_login) ||
+    !blockText(value.remediation)
   ) {
     return null;
   }
@@ -452,9 +528,9 @@ function parseCodeDeliverySourceError(
       "message",
       "retry_at",
     ]) ||
-    !nonEmptyString(value.kind) ||
-    typeof value.message !== "string" ||
-    !optionalString(value.retry_at)
+    !nonEmptyLine(value.kind) ||
+    !blockText(value.message) ||
+    !optionalTimestamp(value.retry_at)
   ) {
     return null;
   }
@@ -485,10 +561,10 @@ function parseCodeDeliveryWorkspaceLink(
       "exact",
       "relation",
     ]) ||
-    !nonEmptyString(value.workspace_id) ||
-    !nonEmptyString(value.repo_id) ||
-    !nonEmptyString(value.title) ||
-    !nonEmptyString(value.branch_name) ||
+    !wireId(value.workspace_id) ||
+    !wireId(value.repo_id) ||
+    !nonEmptyLine(value.title) ||
+    !nonEmptyLine(value.branch_name) ||
     !isMember(value.status, WORKSPACE_STATUSES) ||
     typeof value.exact !== "boolean" ||
     (value.relation !== undefined &&
@@ -532,24 +608,24 @@ function parseCodeWorkspacePullRequestFact(
       "closed_at",
       "last_seen_at",
     ]) ||
-    !nonEmptyString(value.host) ||
-    !nonEmptyString(value.repo_owner) ||
-    !nonEmptyString(value.repo_name) ||
+    !nonEmptyLine(value.host) ||
+    !nonEmptyLine(value.repo_owner) ||
+    !nonEmptyLine(value.repo_name) ||
     !isFiniteNumber(value.number) ||
-    !nonEmptyString(value.url) ||
-    typeof value.title !== "string" ||
+    !nonEmptyLine(value.url) ||
+    !lineText(value.title) ||
     !PULL_REQUEST_FACT_STATES.has(value.state as string) ||
     typeof value.draft !== "boolean" ||
-    !optionalString(value.author) ||
-    typeof value.head_branch !== "string" ||
-    typeof value.base_branch !== "string" ||
-    !optionalString(value.head_sha) ||
+    !optionalLine(value.author) ||
+    !lineText(value.head_branch) ||
+    !lineText(value.base_branch) ||
+    !optionalWireId(value.head_sha) ||
     !isMember(value.relation, PULL_REQUEST_RELATIONS) ||
-    !nonEmptyString(value.created_at) ||
-    !nonEmptyString(value.updated_at) ||
-    !optionalString(value.merged_at) ||
-    !optionalString(value.closed_at) ||
-    !nonEmptyString(value.last_seen_at)
+    !timestamp(value.created_at) ||
+    !timestamp(value.updated_at) ||
+    !optionalTimestamp(value.merged_at) ||
+    !optionalTimestamp(value.closed_at) ||
+    !timestamp(value.last_seen_at)
   ) {
     return null;
   }
@@ -582,7 +658,7 @@ export function parseCodeWorkspacePullRequests(
     !isRecord(value) ||
     !onlyKeys<WireCodeWorkspacePullRequests>(value, ["items", "fetched_at"]) ||
     !Array.isArray(value.items) ||
-    !nonEmptyString(value.fetched_at)
+    !timestamp(value.fetched_at)
   ) {
     return null;
   }
@@ -605,10 +681,10 @@ function parseCodeDeliveryCheck(value: unknown): CodeDeliveryCheck | null {
       "url",
       "workflow_run_id",
     ]) ||
-    !nonEmptyString(value.name) ||
+    !nonEmptyLine(value.name) ||
     !isMember(value.bucket, DELIVERY_CHECK_BUCKETS) ||
-    !optionalString(value.detail) ||
-    !optionalString(value.url) ||
+    !optionalBlock(value.detail) ||
+    !optionalLine(value.url) ||
     (value.workflow_run_id !== undefined &&
       !isPositiveInteger(value.workflow_run_id))
   ) {
@@ -663,20 +739,20 @@ function parseCodeDeliveryPullRequestSummary(
       "merged_at",
       "closed_at",
     ]) ||
-    !nonEmptyString(value.id) ||
+    !wireId(value.id) ||
     !isPositiveInteger(value.number) ||
-    !nonEmptyString(value.url) ||
-    !nonEmptyString(value.title) ||
-    !nonEmptyString(value.state) ||
+    !nonEmptyLine(value.url) ||
+    !nonEmptyLine(value.title) ||
+    !nonEmptyLine(value.state) ||
     typeof value.draft !== "boolean" ||
-    !optionalString(value.author) ||
-    !optionalString(value.author_avatar_url) ||
-    !nonEmptyString(value.head_branch) ||
-    !nonEmptyString(value.base_branch) ||
-    !optionalString(value.head_sha) ||
-    !optionalString(value.review_decision) ||
-    !optionalString(value.mergeable) ||
-    !optionalString(value.merge_state_status) ||
+    !optionalLine(value.author) ||
+    !optionalLine(value.author_avatar_url) ||
+    !nonEmptyLine(value.head_branch) ||
+    !nonEmptyLine(value.base_branch) ||
+    !optionalWireId(value.head_sha) ||
+    !optionalLine(value.review_decision) ||
+    !optionalLine(value.mergeable) ||
+    !optionalLine(value.merge_state_status) ||
     typeof value.auto_merge_enabled !== "boolean" ||
     (value.in_merge_queue !== undefined &&
       typeof value.in_merge_queue !== "boolean") ||
@@ -696,11 +772,11 @@ function parseCodeDeliveryPullRequestSummary(
       (!Array.isArray(value.unregistered_stack_numbers) ||
         !value.unregistered_stack_numbers.every(isFiniteNumber))) ||
     !Array.isArray(value.workspace_links) ||
-    !isStringList(value.labels) ||
-    !nonEmptyString(value.created_at) ||
-    !nonEmptyString(value.updated_at) ||
-    !optionalString(value.merged_at) ||
-    !optionalString(value.closed_at)
+    !lineList(value.labels) ||
+    !timestamp(value.created_at) ||
+    !timestamp(value.updated_at) ||
+    !optionalTimestamp(value.merged_at) ||
+    !optionalTimestamp(value.closed_at)
   ) {
     return null;
   }
@@ -799,7 +875,7 @@ export function parseCodeDeliveryRepositories(
       "fetched_at",
     ]) ||
     !Array.isArray(value.repositories) ||
-    !nonEmptyString(value.fetched_at)
+    !timestamp(value.fetched_at)
   ) {
     return null;
   }
@@ -828,8 +904,8 @@ export function parseCodeDeliveryPullRequestsPage(
       "fetched_at",
     ]) ||
     !Array.isArray(value.items) ||
-    !optionalString(value.next_cursor) ||
-    !nonEmptyString(value.fetched_at)
+    !optionalCursor(value.next_cursor) ||
+    !timestamp(value.fetched_at)
   ) {
     return null;
   }
@@ -881,15 +957,15 @@ export function parseCodeDeliveryPullRequestDetail(
       "can_reopen",
       "can_comment",
     ]) ||
-    typeof value.body !== "string" ||
-    !isStringList(value.labels) ||
-    !isStringList(value.assignees) ||
-    !isStringList(value.requested_reviewers) ||
+    !blockText(value.body) ||
+    !lineList(value.labels) ||
+    !lineList(value.assignees) ||
+    !lineList(value.requested_reviewers) ||
     !isNonNegativeInteger(value.changed_files) ||
     !isNonNegativeInteger(value.additions) ||
     !isNonNegativeInteger(value.deletions) ||
     !isNonNegativeInteger(value.commits) ||
-    !optionalString(value.merged_by) ||
+    !optionalLine(value.merged_by) ||
     !Array.isArray(value.files) ||
     typeof value.files_truncated !== "boolean" ||
     !Array.isArray(value.comments) ||
@@ -965,11 +1041,11 @@ function parseCodeDeliveryStackMember(
       "head_sha",
     ]) ||
     !isPositiveInteger(value.number) ||
-    !nonEmptyString(value.state) ||
+    !nonEmptyLine(value.state) ||
     typeof value.draft !== "boolean" ||
-    !nonEmptyString(value.head_branch) ||
-    !optionalString(value.merged_at) ||
-    !optionalString(value.head_sha)
+    !nonEmptyLine(value.head_branch) ||
+    !optionalTimestamp(value.merged_at) ||
+    !optionalWireId(value.head_sha)
   ) {
     return null;
   }
@@ -996,12 +1072,12 @@ function parseCodeDeliveryPullRequestFile(
       "previous_path",
       "patch",
     ]) ||
-    !nonEmptyString(value.path) ||
-    !nonEmptyString(value.status) ||
+    !nonEmptyLine(value.path) ||
+    !nonEmptyLine(value.status) ||
     !isNonNegativeInteger(value.additions) ||
     !isNonNegativeInteger(value.deletions) ||
-    !optionalString(value.previous_path) ||
-    !optionalString(value.patch)
+    !optionalLine(value.previous_path) ||
+    !optionalRaw(value.patch)
   ) {
     return null;
   }
@@ -1043,29 +1119,29 @@ function parseCodeDeliveryRunSummary(
       "created_at",
       "updated_at",
     ]) ||
-    !nonEmptyString(value.id) ||
+    !wireId(value.id) ||
     !isMember(value.kind, DELIVERY_RUN_KINDS) ||
     !isPositiveInteger(value.github_id) ||
     !(
       value.run_attempt === undefined || isPositiveInteger(value.run_attempt)
     ) ||
-    !nonEmptyString(value.name) ||
-    !nonEmptyString(value.url) ||
-    !nonEmptyString(value.status) ||
-    !optionalString(value.conclusion) ||
-    !optionalString(value.workflow) ||
-    !optionalString(value.environment) ||
-    !optionalString(value.branch) ||
-    !optionalString(value.sha) ||
-    !optionalString(value.event) ||
-    !optionalString(value.actor) ||
+    !nonEmptyLine(value.name) ||
+    !nonEmptyLine(value.url) ||
+    !nonEmptyLine(value.status) ||
+    !optionalLine(value.conclusion) ||
+    !optionalLine(value.workflow) ||
+    !optionalLine(value.environment) ||
+    !optionalLine(value.branch) ||
+    !optionalWireId(value.sha) ||
+    !optionalLine(value.event) ||
+    !optionalLine(value.actor) ||
     !Array.isArray(value.attention_reasons) ||
     !value.attention_reasons.every((reason) =>
       isMember(reason, DELIVERY_RUN_ATTENTION_REASONS),
     ) ||
     !Array.isArray(value.workspace_links) ||
-    !nonEmptyString(value.created_at) ||
-    !nonEmptyString(value.updated_at)
+    !timestamp(value.created_at) ||
+    !timestamp(value.updated_at)
   ) {
     return null;
   }
@@ -1117,8 +1193,8 @@ export function parseCodeDeliveryRunsPage(
       "fetched_at",
     ]) ||
     !Array.isArray(value.items) ||
-    !optionalString(value.next_cursor) ||
-    !nonEmptyString(value.fetched_at)
+    !optionalCursor(value.next_cursor) ||
+    !timestamp(value.fetched_at)
   ) {
     return null;
   }
@@ -1158,14 +1234,13 @@ function parseCodeDeliveryWorkflowJob(
       "failed_steps",
     ]) ||
     !isPositiveInteger(value.id) ||
-    !nonEmptyString(value.name) ||
-    !nonEmptyString(value.status) ||
-    !optionalString(value.conclusion) ||
-    !nonEmptyString(value.url) ||
-    !nullableString(value.started_at) ||
-    !nullableString(value.completed_at) ||
-    !Array.isArray(value.failed_steps) ||
-    !value.failed_steps.every((item) => typeof item === "string")
+    !nonEmptyLine(value.name) ||
+    !nonEmptyLine(value.status) ||
+    !optionalLine(value.conclusion) ||
+    !nonEmptyLine(value.url) ||
+    !nullableTimestamp(value.started_at) ||
+    !nullableTimestamp(value.completed_at) ||
+    !lineList(value.failed_steps)
   ) {
     return null;
   }
@@ -1195,11 +1270,11 @@ function parseCodeDeliveryDeploymentStatus(
       "created_at",
     ]) ||
     !isPositiveInteger(value.id) ||
-    !nonEmptyString(value.state) ||
-    typeof value.description !== "string" ||
-    !optionalString(value.environment_url) ||
-    !optionalString(value.log_url) ||
-    !nonEmptyString(value.created_at)
+    !nonEmptyLine(value.state) ||
+    !blockText(value.description) ||
+    !optionalLine(value.environment_url) ||
+    !optionalLine(value.log_url) ||
+    !timestamp(value.created_at)
   ) {
     return null;
   }
@@ -1268,7 +1343,7 @@ function parseCodeDeliveryRerunOutcome(
     ) ||
     !isPositiveInteger(value.workflow_run_id) ||
     typeof value.success !== "boolean" ||
-    !optionalString(value.error)
+    !optionalBlock(value.error)
   ) {
     return null;
   }
@@ -1290,7 +1365,7 @@ export function parseCodeDeliveryActionResult(
       "rerun_outcomes",
     ]) ||
     typeof value.success !== "boolean" ||
-    typeof value.message !== "string" ||
+    !blockText(value.message) ||
     (value.rerun_outcomes !== undefined && !Array.isArray(value.rerun_outcomes))
   ) {
     return null;
@@ -1315,8 +1390,7 @@ export function parseCodeSubscriptionUsage(
     !isRecord(value) ||
     !isMember(value.source, USAGE_SOURCES) ||
     !Array.isArray(value.providers) ||
-    !Array.isArray(value.diagnostics) ||
-    !value.diagnostics.every((item) => typeof item === "string")
+    !lineList(value.diagnostics)
   ) {
     return null;
   }
@@ -1324,8 +1398,8 @@ export function parseCodeSubscriptionUsage(
   for (const provider of value.providers) {
     if (
       !isRecord(provider) ||
-      !nonEmptyString(provider.id) ||
-      !nonEmptyString(provider.label) ||
+      !wireId(provider.id) ||
+      !nonEmptyLine(provider.label) ||
       !Array.isArray(provider.accounts)
     ) {
       return null;
@@ -1334,10 +1408,10 @@ export function parseCodeSubscriptionUsage(
     for (const account of provider.accounts) {
       if (
         !isRecord(account) ||
-        !nonEmptyString(account.id) ||
-        !nonEmptyString(account.label) ||
+        !wireId(account.id) ||
+        !nonEmptyLine(account.label) ||
         typeof account.is_own !== "boolean" ||
-        typeof account.state !== "string" ||
+        !lineText(account.state) ||
         (account.updated_at_unix_seconds !== undefined &&
           !isFiniteNumber(account.updated_at_unix_seconds)) ||
         !Array.isArray(account.windows)
@@ -1348,13 +1422,13 @@ export function parseCodeSubscriptionUsage(
       for (const window of account.windows) {
         if (
           !isRecord(window) ||
-          !nonEmptyString(window.key) ||
-          !nonEmptyString(window.label) ||
+          !wireId(window.key) ||
+          !nonEmptyLine(window.label) ||
           !isFiniteNumber(window.used_percent) ||
           (window.resets_at_unix_seconds !== undefined &&
             !isFiniteNumber(window.resets_at_unix_seconds)) ||
-          !optionalString(window.status) ||
-          !optionalString(window.model_scope)
+          !optionalLine(window.status) ||
+          !optionalLine(window.model_scope)
         ) {
           return null;
         }
@@ -1442,7 +1516,7 @@ function parseCodeAnalyticsDay(value: unknown): CodeAnalyticsDay | null {
       "pull_requests_opened",
       "pull_requests_merged",
     ]) ||
-    !nonEmptyString(value.date) ||
+    !timestamp(value.date) ||
     !isNonNegativeInteger(value.sessions) ||
     !isNonNegativeInteger(value.turns) ||
     !isNonNegativeInteger(value.total_tokens) ||
@@ -1470,8 +1544,8 @@ function parseCodeAnalyticsRepository(
       "pull_requests_opened",
       "pull_requests_merged",
     ]) ||
-    !nonEmptyString(value.repo_id) ||
-    !nonEmptyString(value.name) ||
+    !wireId(value.repo_id) ||
+    !nonEmptyLine(value.name) ||
     !isNonNegativeInteger(value.sessions) ||
     !isNonNegativeInteger(value.turns) ||
     !isNonNegativeInteger(value.total_tokens) ||
@@ -1497,7 +1571,7 @@ function parseCodeAnalyticsModel(value: unknown): CodeAnalyticsModel | null {
       "estimated_cost_microusd",
       "priced",
     ]) ||
-    !optionalString(value.model_id) ||
+    !optionalLine(value.model_id) ||
     !isMember(value.harness_kind, HARNESS_KINDS) ||
     typeof value.fast_mode !== "boolean" ||
     !isNonNegativeInteger(value.sessions) ||
@@ -1550,7 +1624,7 @@ function parseCodeAnalyticsPricing(
     !isNonNegativeInteger(value.unpriced_turns) ||
     !isNonNegativeInteger(value.priced_tokens) ||
     !isNonNegativeInteger(value.unpriced_tokens) ||
-    !nonEmptyString(value.prices_as_of)
+    !timestamp(value.prices_as_of)
   ) {
     return null;
   }
@@ -1575,9 +1649,9 @@ export function parseCodeAnalytics(
       "pricing",
     ]) ||
     !isMember(value.range, ANALYTICS_RANGES) ||
-    !optionalString(value.from) ||
-    !nonEmptyString(value.through) ||
-    !optionalString(value.repo_id) ||
+    !optionalTimestamp(value.from) ||
+    !timestamp(value.through) ||
+    !optionalWireId(value.repo_id) ||
     !Array.isArray(value.daily) ||
     !Array.isArray(value.repositories) ||
     !Array.isArray(value.models) ||
@@ -1626,12 +1700,12 @@ export function parseCodeCloneJob(value: unknown): CodeCloneJobSnapshot | null {
       "error",
       "repo_id",
     ]) ||
-    !nonEmptyString(value.id) ||
-    typeof value.phase !== "string" ||
+    !wireId(value.id) ||
+    !lineText(value.phase) ||
     typeof value.done !== "boolean" ||
     (value.percent !== undefined && !isFiniteNumber(value.percent)) ||
-    !optionalString(value.error) ||
-    !optionalString(value.repo_id)
+    !optionalBlock(value.error) ||
+    !optionalWireId(value.repo_id)
   ) {
     return null;
   }
@@ -1658,10 +1732,10 @@ export function parseCodeHarnessInstall(
       "error",
     ]) ||
     !isMember(value.kind, HARNESS_KINDS) ||
-    typeof value.phase !== "string" ||
+    !lineText(value.phase) ||
     typeof value.done !== "boolean" ||
-    !optionalString(value.version) ||
-    !optionalString(value.error)
+    !optionalLine(value.version) ||
+    !optionalBlock(value.error)
   ) {
     return null;
   }
@@ -1685,9 +1759,9 @@ export function parseCodeCloneDefaults(
       "gh_authenticated",
       "gh_remediation",
     ]) ||
-    !optionalString(value.parent_dir) ||
+    !optionalLine(value.parent_dir) ||
     typeof value.gh_found !== "boolean" ||
-    typeof value.gh_remediation !== "string" ||
+    !blockText(value.gh_remediation) ||
     (value.gh_authenticated !== undefined &&
       typeof value.gh_authenticated !== "boolean")
   ) {
@@ -1719,9 +1793,9 @@ function parseCodeRepoSource(value: unknown): CodeRepoSource | null {
       "available",
       "remediation",
     ]) ||
-    typeof value.kind !== "string" ||
+    !lineText(value.kind) ||
     typeof value.available !== "boolean" ||
-    !optionalString(value.remediation)
+    !optionalBlock(value.remediation)
   ) {
     return null;
   }
@@ -1762,9 +1836,9 @@ function parseCodeGithubRepository(
       "private",
       "description",
     ]) ||
-    typeof value.full_name !== "string" ||
+    !lineText(value.full_name) ||
     typeof value.private !== "boolean" ||
-    !optionalString(value.description)
+    !optionalBlock(value.description)
   ) {
     return null;
   }
@@ -1810,8 +1884,8 @@ export function parseCodeForkTranscript(
       "at_turn_ordinal",
       "truncated",
     ]) ||
-    typeof value.path !== "string" ||
-    typeof value.dir !== "string" ||
+    !lineText(value.path) ||
+    !lineText(value.dir) ||
     typeof value.byte_len !== "number" ||
     typeof value.turns !== "number" ||
     typeof value.total_turns !== "number" ||
@@ -1844,11 +1918,11 @@ function parseCodeCheckLog(value: unknown): CodeCheckLog | null {
       "truncated",
       "url",
     ]) ||
-    !nonEmptyString(value.check) ||
-    !nonEmptyString(value.path) ||
+    !nonEmptyLine(value.check) ||
+    !nonEmptyLine(value.path) ||
     typeof value.byte_len !== "number" ||
     typeof value.truncated !== "boolean" ||
-    typeof value.url !== "string"
+    !lineText(value.url)
   ) {
     return null;
   }
@@ -1865,8 +1939,8 @@ function parseCodeCheckLogError(value: unknown): CodeCheckLogError | null {
   if (
     !isRecord(value) ||
     !onlyKeys<WireCodeCheckLogError>(value, ["check", "message"]) ||
-    !nonEmptyString(value.check) ||
-    typeof value.message !== "string"
+    !nonEmptyLine(value.check) ||
+    !blockText(value.message)
   ) {
     return null;
   }
@@ -1883,7 +1957,7 @@ export function parseCodeCheckLogsSnapshot(
       "logs",
       "errors",
     ]) ||
-    !optionalString(value.head_sha) ||
+    !optionalWireId(value.head_sha) ||
     !Array.isArray(value.logs) ||
     !Array.isArray(value.errors)
   ) {
@@ -1916,9 +1990,9 @@ export function parseCodeWorktreeRoot(value: unknown): CodeWorktreeRoot | null {
       "effective_root",
       "default_root",
     ]) ||
-    !optionalString(value.root) ||
-    typeof value.effective_root !== "string" ||
-    typeof value.default_root !== "string"
+    !optionalLine(value.root) ||
+    !lineText(value.effective_root) ||
+    !lineText(value.default_root)
   ) {
     return null;
   }
@@ -1943,14 +2017,14 @@ export function parseCodeRepo(value: unknown): CodeRepoSnapshot | null {
       "quick_actions",
       "created_at",
     ]) ||
-    !nonEmptyString(value.id) ||
-    !nonEmptyString(value.root_path) ||
-    !nonEmptyString(value.display_name) ||
-    !nonEmptyString(value.default_base_ref) ||
-    !nonEmptyString(value.branch_prefix) ||
-    !nonEmptyString(value.created_at) ||
-    !optionalString(value.setup_script) ||
-    !optionalString(value.archive_script) ||
+    !wireId(value.id) ||
+    !nonEmptyLine(value.root_path) ||
+    !nonEmptyLine(value.display_name) ||
+    !nonEmptyLine(value.default_base_ref) ||
+    !nonEmptyLine(value.branch_prefix) ||
+    !timestamp(value.created_at) ||
+    !optionalBlock(value.setup_script) ||
+    !optionalBlock(value.archive_script) ||
     !Array.isArray(value.quick_actions)
   ) {
     return null;
@@ -1986,8 +2060,8 @@ function parseQuickAction(value: unknown): WireQuickAction | null {
       "command",
       "auto_run_on_create",
     ]) ||
-    !nonEmptyString(value.name) ||
-    typeof value.command !== "string" ||
+    !nonEmptyLine(value.name) ||
+    !blockText(value.command) ||
     typeof value.auto_run_on_create !== "boolean"
   ) {
     return null;
@@ -2019,17 +2093,17 @@ export function parseCodeWorkspace(
       "released_tip",
       "bundle_bytes",
     ]) ||
-    !nonEmptyString(value.id) ||
-    !nonEmptyString(value.repo_id) ||
-    !nonEmptyString(value.title) ||
-    !nonEmptyString(value.worktree_path) ||
-    !nonEmptyString(value.branch_name) ||
-    !nonEmptyString(value.base_ref) ||
+    !wireId(value.id) ||
+    !wireId(value.repo_id) ||
+    !nonEmptyLine(value.title) ||
+    !nonEmptyLine(value.worktree_path) ||
+    !nonEmptyLine(value.branch_name) ||
+    !nonEmptyLine(value.base_ref) ||
     !isMember(value.status, WORKSPACE_STATUSES) ||
-    !nonEmptyString(value.created_at) ||
-    !optionalString(value.archived_at) ||
-    !optionalString(value.released_at) ||
-    !optionalString(value.released_tip) ||
+    !timestamp(value.created_at) ||
+    !optionalTimestamp(value.archived_at) ||
+    !optionalTimestamp(value.released_at) ||
+    !optionalWireId(value.released_tip) ||
     (value.bundle_bytes !== undefined && !isFiniteNumber(value.bundle_bytes))
   ) {
     return null;
@@ -2068,7 +2142,7 @@ export function parsePullRequestDigest(
   value: unknown,
 ): NonNullable<CodeWorkspaceSnapshot["pr"]> | null {
   const optionalStringField = (field: unknown) =>
-    field === undefined || field === null || typeof field === "string";
+    field === undefined || field === null || lineText(field);
   const optionalBooleanField = (field: unknown) =>
     field === undefined || field === null || typeof field === "boolean";
   if (
@@ -2093,7 +2167,7 @@ export function parsePullRequestDigest(
       "in_merge_queue",
     ]) ||
     !isFiniteNumber(value.number) ||
-    !nonEmptyString(value.state) ||
+    !nonEmptyLine(value.state) ||
     !optionalStringField(value.url) ||
     !optionalStringField(value.title) ||
     !optionalStringField(value.checks_summary) ||
@@ -2155,13 +2229,13 @@ function parsePullRequestChecks(
   for (const item of value) {
     if (
       !isRecord(item) ||
-      typeof item.name !== "string" ||
+      !lineText(item.name) ||
       (item.bucket !== "pass" &&
         item.bucket !== "pending" &&
         item.bucket !== "fail" &&
         item.bucket !== "skipped") ||
-      (item.detail !== undefined && typeof item.detail !== "string") ||
-      (item.url !== undefined && typeof item.url !== "string")
+      !optionalBlock(item.detail) ||
+      !optionalLine(item.url)
     ) {
       return null;
     }
@@ -2224,12 +2298,12 @@ export function parseCodeWorkspacePr(
     typeof value.unpushed !== "boolean" ||
     !isFiniteNumber(value.ahead) ||
     typeof value.has_upstream !== "boolean" ||
-    typeof value.suggested_commit_message !== "string" ||
+    !blockText(value.suggested_commit_message) ||
     typeof value.gh_found !== "boolean" ||
     (value.gh_authenticated !== undefined &&
       typeof value.gh_authenticated !== "boolean") ||
-    typeof value.remediation !== "string" ||
-    (value.pushes_as !== undefined && typeof value.pushes_as !== "string") ||
+    !blockText(value.remediation) ||
+    !optionalLine(value.pushes_as) ||
     (value.pushes_as_self !== undefined &&
       typeof value.pushes_as_self !== "boolean")
   ) {
@@ -2278,15 +2352,15 @@ export function parseCodeWatch(value: unknown): CodeWatchSnapshot | null {
       "created_at",
       "updated_at",
     ]) ||
-    !nonEmptyString(value.id) ||
-    !nonEmptyString(value.workspace_id) ||
-    !nonEmptyString(value.session_id) ||
+    !wireId(value.id) ||
+    !wireId(value.workspace_id) ||
+    !wireId(value.session_id) ||
     !isFiniteNumber(value.pr_number) ||
     !isMember(value.state, WATCH_STATES) ||
-    (value.detail !== undefined && typeof value.detail !== "string") ||
+    !optionalBlock(value.detail) ||
     !isFiniteNumber(value.cycles) ||
-    !nonEmptyString(value.created_at) ||
-    !nonEmptyString(value.updated_at)
+    !timestamp(value.created_at) ||
+    !timestamp(value.updated_at)
   ) {
     return null;
   }
@@ -2328,13 +2402,13 @@ export function parseCodeTrigger(value: unknown): CodeTriggerSnapshot | null {
       "created_at",
       "updated_at",
     ]) ||
-    !nonEmptyString(value.id) ||
-    !nonEmptyString(value.repo_id) ||
+    !wireId(value.id) ||
+    !wireId(value.repo_id) ||
     !isMember(value.condition, TRIGGER_CONDITIONS) ||
     !isMember(value.action, TRIGGER_ACTIONS) ||
     typeof value.enabled !== "boolean" ||
-    !nonEmptyString(value.created_at) ||
-    !nonEmptyString(value.updated_at)
+    !timestamp(value.created_at) ||
+    !timestamp(value.updated_at)
   ) {
     return null;
   }
@@ -2398,7 +2472,7 @@ export function parseCodePrComments(
 
 function parsePullRequestComment(value: unknown): PullRequestComment | null {
   const optionalStringField = (field: unknown) =>
-    field === undefined || field === null || typeof field === "string";
+    field === undefined || field === null || lineText(field);
   if (
     !isRecord(value) ||
     !onlyKeys<WirePullRequestComment>(value, [
@@ -2414,7 +2488,7 @@ function parsePullRequestComment(value: unknown): PullRequestComment | null {
       "line",
     ]) ||
     !isMember(value.kind, PR_COMMENT_KINDS) ||
-    typeof value.body !== "string" ||
+    !blockText(value.body) ||
     !optionalStringField(value.id) ||
     !optionalStringField(value.author) ||
     !optionalStringField(value.avatar_url) ||
@@ -2446,8 +2520,8 @@ export function parseCodeCommit(value: unknown): CodeCommitSnapshot | null {
   if (
     !isRecord(value) ||
     !onlyKeys<WireCodeCommitSnapshot>(value, ["sha", "message", "stat"]) ||
-    !nonEmptyString(value.sha) ||
-    typeof value.message !== "string"
+    !wireId(value.sha) ||
+    !blockText(value.message)
   ) {
     return null;
   }
@@ -2460,8 +2534,8 @@ export function parseCodePush(value: unknown): CodePushSnapshot | null {
   if (
     !isRecord(value) ||
     !onlyKeys<WireCodePushSnapshot>(value, ["branch", "remote"]) ||
-    !nonEmptyString(value.branch) ||
-    !nonEmptyString(value.remote)
+    !nonEmptyLine(value.branch) ||
+    !nonEmptyLine(value.remote)
   ) {
     return null;
   }
@@ -2479,11 +2553,11 @@ export function parseCodeAction(value: unknown): CodeActionSnapshot | null {
       "stderr",
       "timed_out",
     ]) ||
-    !nonEmptyString(value.name) ||
+    !nonEmptyLine(value.name) ||
     typeof value.success !== "boolean" ||
     (value.exit_code !== undefined && !isFiniteNumber(value.exit_code)) ||
-    typeof value.stdout !== "string" ||
-    typeof value.stderr !== "string" ||
+    !rawText(value.stdout) ||
+    !rawText(value.stderr) ||
     typeof value.timed_out !== "boolean"
   ) {
     return null;
@@ -2519,13 +2593,13 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
       "created_at",
       "external_origin",
     ]) ||
-    !nonEmptyString(value.id) ||
-    !nonEmptyString(value.workspace_id) ||
+    !wireId(value.id) ||
+    !wireId(value.workspace_id) ||
     !isMember(value.kind, SESSION_KINDS) ||
     !isMember(value.harness_kind, HARNESS_KINDS) ||
-    !optionalString(value.harness_version) ||
-    !optionalString(value.harness_resume_ref) ||
-    !optionalString(value.model) ||
+    !optionalLine(value.harness_version) ||
+    !optionalLine(value.harness_resume_ref) ||
+    !optionalLine(value.model) ||
     (value.reasoning_effort !== undefined &&
       !isMember(value.reasoning_effort, REASONING_EFFORTS)) ||
     // Serialized unconditionally, but tolerate its absence: a session row
@@ -2534,7 +2608,7 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
     !isMember(value.permission_mode, PERMISSION_MODES) ||
     !isMember(value.lifecycle, SESSION_LIFECYCLES) ||
     !isFiniteNumber(value.unrecognized_event_count) ||
-    !nonEmptyString(value.created_at)
+    !timestamp(value.created_at)
   ) {
     return null;
   }
@@ -2552,8 +2626,8 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
         "channel_kind",
         "external_key",
       ]) ||
-      !nonEmptyString(value.external_origin.channel_kind) ||
-      !nonEmptyString(value.external_origin.external_key))
+      !nonEmptyLine(value.external_origin.channel_kind) ||
+      !wireId(value.external_origin.external_key))
   ) {
     return null;
   }
@@ -2649,20 +2723,20 @@ export function parseCodeTurn(value: unknown): CodeTurnSnapshot | null {
       "ended_at",
       "rewrite",
     ]) ||
-    !nonEmptyString(value.id) ||
-    !nonEmptyString(value.session_id) ||
+    !wireId(value.id) ||
+    !wireId(value.session_id) ||
     !isFiniteNumber(value.ordinal) ||
     !isMember(value.status, TURN_STATUSES) ||
-    !optionalString(value.model) ||
+    !optionalLine(value.model) ||
     // Serialized unconditionally, but tolerate its absence: a turn row
     // written before this snapshot existed reads as off, which is what
     // it was.
     (value.fast_mode !== undefined && typeof value.fast_mode !== "boolean") ||
-    !optionalString(value.checkpoint_ref) ||
-    typeof value.user_input !== "string" ||
-    !nonEmptyString(value.started_at) ||
-    !optionalString(value.ended_at) ||
-    !optionalString(value.rewrite)
+    !optionalLine(value.checkpoint_ref) ||
+    !rawText(value.user_input) ||
+    !timestamp(value.started_at) ||
+    !optionalTimestamp(value.ended_at) ||
+    !optionalBlock(value.rewrite)
   ) {
     return null;
   }
@@ -2716,7 +2790,7 @@ function parseCodeTurnAttachments(
         "height",
         "byte_len",
       ]) ||
-      !nonEmptyString(item.blob_id) ||
+      !wireId(item.blob_id) ||
       !isMember(item.media_type, IMAGE_MEDIA_TYPES) ||
       !isFiniteNumber(item.width) ||
       !isFiniteNumber(item.height) ||
@@ -2757,12 +2831,12 @@ export function parseQueuedCodeTurn(value: unknown): QueuedCodeTurn | null {
       "created_at",
       "updated_at",
     ]) ||
-    !nonEmptyString(value.id) ||
-    !nonEmptyString(value.session_id) ||
-    typeof value.message !== "string" ||
+    !wireId(value.id) ||
+    !wireId(value.session_id) ||
+    !rawText(value.message) ||
     !isFiniteNumber(value.position) ||
-    !nonEmptyString(value.created_at) ||
-    !nonEmptyString(value.updated_at)
+    !timestamp(value.created_at) ||
+    !timestamp(value.updated_at)
   ) {
     return null;
   }
@@ -2798,7 +2872,7 @@ export function parseCodeWorkspaceTree(
   }
   const paths: string[] = [];
   for (const item of value.paths) {
-    if (typeof item !== "string" || item.length === 0) return null;
+    if (!nonEmptyLine(item)) return null;
     paths.push(item);
   }
   return { paths, truncated: value.truncated };
@@ -2830,10 +2904,10 @@ export function parseCodeWorkspaceSearch(
         "line_number",
         "line",
       ]) ||
-      !nonEmptyString(item.path) ||
+      !nonEmptyLine(item.path) ||
       !isFiniteNumber(item.line_number) ||
       item.line_number < 1 ||
-      typeof item.line !== "string"
+      !rawText(item.line)
     ) {
       return null;
     }
@@ -2856,15 +2930,15 @@ export function parseCodeWorkspaceSearch(
         "preview",
         "created_at",
       ]) ||
-      !nonEmptyString(item.workspace_id) ||
-      !nonEmptyString(item.workspace_title) ||
-      !nonEmptyString(item.session_id) ||
-      (item.turn_id !== undefined && !nonEmptyString(item.turn_id)) ||
+      !wireId(item.workspace_id) ||
+      !nonEmptyLine(item.workspace_title) ||
+      !wireId(item.session_id) ||
+      (item.turn_id !== undefined && !wireId(item.turn_id)) ||
       !["turn_user_input", "turn_narrative", "event"].includes(
         item.source as string,
       ) ||
-      typeof item.preview !== "string" ||
-      !nonEmptyString(item.created_at)
+      !blockText(item.preview) ||
+      !timestamp(item.created_at)
     ) {
       return null;
     }
@@ -2911,8 +2985,7 @@ export function parseCodeWorkspaceFiles(
   }
   const stat = parseDiffstat(value.stat);
   if (!stat) return null;
-  if (value.turn_id !== undefined && !nonEmptyString(value.turn_id))
-    return null;
+  if (value.turn_id !== undefined && !wireId(value.turn_id)) return null;
   return {
     files,
     truncated: value.truncated,
@@ -2932,8 +3005,8 @@ export function parseCodeWorkspaceBlob(
       "truncated",
       "binary",
     ]) ||
-    typeof value.path !== "string" ||
-    typeof value.content !== "string" ||
+    !lineText(value.path) ||
+    !rawText(value.content) ||
     typeof value.truncated !== "boolean" ||
     typeof value.binary !== "boolean"
   ) {
@@ -2959,10 +3032,10 @@ export function parseCodeWorkspaceDiff(
       "turn_id",
       "file",
     ]) ||
-    typeof value.diff !== "string" ||
+    !rawText(value.diff) ||
     typeof value.truncated !== "boolean" ||
-    !optionalString(value.turn_id) ||
-    !optionalString(value.file)
+    !optionalWireId(value.turn_id) ||
+    !optionalLine(value.file)
   ) {
     return null;
   }
@@ -2987,11 +3060,11 @@ function parseCodeFileChange(value: unknown): CodeFileChange | null {
       "deletions",
       "previous_path",
     ]) ||
-    typeof value.path !== "string" ||
+    !lineText(value.path) ||
     !isMember(value.kind, FILE_CHANGE_KINDS) ||
     !isFiniteNumber(value.insertions) ||
     !isFiniteNumber(value.deletions) ||
-    !optionalString(value.previous_path)
+    !optionalLine(value.previous_path)
   ) {
     return null;
   }
@@ -3053,12 +3126,12 @@ export function parseCodeTerminal(value: unknown): CodeTerminalSnapshot | null {
       "ended",
       "created_at",
     ]) ||
-    !nonEmptyString(value.id) ||
-    !nonEmptyString(value.workspace_id) ||
+    !wireId(value.id) ||
+    !wireId(value.workspace_id) ||
     !isFiniteNumber(value.cols) ||
     !isFiniteNumber(value.rows) ||
     typeof value.ended !== "boolean" ||
-    !nonEmptyString(value.created_at)
+    !timestamp(value.created_at)
   ) {
     return null;
   }
@@ -3097,9 +3170,9 @@ export function parseCodeTerminalRead(value: unknown): CodeTerminalRead | null {
       "truncated",
       "ended",
     ]) ||
-    !nonEmptyString(value.id) ||
-    !nonEmptyString(value.workspace_id) ||
-    typeof value.bytes !== "string" ||
+    !wireId(value.id) ||
+    !wireId(value.workspace_id) ||
+    !rawText(value.bytes) ||
     !isFiniteNumber(value.cursor) ||
     typeof value.overflow !== "boolean" ||
     typeof value.truncated !== "boolean" ||
@@ -3165,8 +3238,8 @@ export function parseHarnessModelList(
   for (const item of value.models) {
     if (
       !isRecord(item) ||
-      typeof item.id !== "string" ||
-      typeof item.label !== "string" ||
+      !lineText(item.id) ||
+      !lineText(item.label) ||
       typeof item.default !== "boolean"
     ) {
       return null;
@@ -3231,15 +3304,15 @@ export function parseHarnessDoctorEntry(
     ]) ||
     !isMember(value.kind, HARNESS_KINDS) ||
     typeof value.found !== "boolean" ||
-    !optionalString(value.path) ||
-    !optionalString(value.version) ||
+    !optionalLine(value.path) ||
+    !optionalLine(value.version) ||
     !isMember(value.tier, HARNESS_TIERS) ||
     (value.authenticated !== undefined &&
       typeof value.authenticated !== "boolean") ||
     (value.auth_mode !== undefined &&
       !isMember(value.auth_mode, HARNESS_AUTH_MODES)) ||
-    typeof value.remediation !== "string" ||
-    typeof value.stderr !== "string" ||
+    !blockText(value.remediation) ||
+    !rawText(value.stderr) ||
     !isFiniteNumber(value.unrecognized_event_count) ||
     (value.relaunch_composes_permission_mode !== undefined &&
       typeof value.relaunch_composes_permission_mode !== "boolean")
@@ -3286,9 +3359,9 @@ function parseHarnessCommands(
   for (const item of value) {
     if (
       !isRecord(item) ||
-      typeof item.name !== "string" ||
+      !lineText(item.name) ||
       item.name.length === 0 ||
-      typeof item.description !== "string"
+      !blockText(item.description)
     ) {
       return null;
     }
@@ -3396,8 +3469,8 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
           "resume_ref",
         ]) ||
         !isMember(value.harness_kind, HARNESS_KINDS) ||
-        !nonEmptyString(value.harness_version) ||
-        !optionalString(value.resume_ref)
+        !nonEmptyLine(value.harness_version) ||
+        !optionalLine(value.resume_ref)
       ) {
         return null;
       }
@@ -3415,7 +3488,7 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
           "type",
           "turn_id",
         ]) ||
-        !nonEmptyString(value.turn_id)
+        !wireId(value.turn_id)
       ) {
         return null;
       }
@@ -3423,9 +3496,12 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
     case "assistant_delta":
     case "reasoning_delta":
     case "user_steered":
+      // Model text is a block; a steer is the user's own words, kept verbatim.
       if (
         !onlyKeys(value, ["type", "text"]) ||
-        typeof value.text !== "string"
+        !(value.type === "user_steered"
+          ? rawText(value.text)
+          : blockText(value.text))
       ) {
         return null;
       }
@@ -3434,9 +3510,8 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
       // A subagent's message names its spanning `Task` call (ADR 0052).
       if (
         !onlyKeys(value, ["type", "text", "parent_call_id"]) ||
-        typeof value.text !== "string" ||
-        (value.parent_call_id !== undefined &&
-          !nonEmptyString(value.parent_call_id))
+        !blockText(value.text) ||
+        (value.parent_call_id !== undefined && !wireId(value.parent_call_id))
       ) {
         return null;
       }
@@ -3456,10 +3531,9 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
           "detail",
           "parent_call_id",
         ]) ||
-        !nonEmptyString(value.call_id) ||
-        !nonEmptyString(value.name) ||
-        (value.parent_call_id !== undefined &&
-          !nonEmptyString(value.parent_call_id))
+        !wireId(value.call_id) ||
+        !nonEmptyLine(value.name) ||
+        (value.parent_call_id !== undefined && !wireId(value.parent_call_id))
       ) {
         return null;
       }
@@ -3485,11 +3559,10 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
           "detail",
           "parent_call_id",
         ]) ||
-        !nonEmptyString(value.call_id) ||
+        !wireId(value.call_id) ||
         !isMember(value.outcome, TOOL_OUTCOMES) ||
-        typeof value.preview !== "string" ||
-        (value.parent_call_id !== undefined &&
-          !nonEmptyString(value.parent_call_id))
+        !rawText(value.preview) ||
+        (value.parent_call_id !== undefined && !wireId(value.parent_call_id))
       ) {
         return null;
       }
@@ -3545,7 +3618,7 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
           "error",
         ]) ||
         !isRecord(value.error) ||
-        typeof value.error.message !== "string"
+        !blockText(value.error.message)
       ) {
         return null;
       }
@@ -3556,7 +3629,7 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
           value,
           ["type", "turn_id", "diffstat"],
         ) ||
-        !nonEmptyString(value.turn_id)
+        !wireId(value.turn_id)
       ) {
         return null;
       }
@@ -3578,7 +3651,7 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
           "message",
         ]) ||
         !isMember(value.level, NOTICE_LEVELS) ||
-        typeof value.message !== "string"
+        !blockText(value.message)
       ) {
         return null;
       }
@@ -3590,7 +3663,7 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
     case "approval_requested":
       if (
         !onlyKeys(value, ["type", "approval_id"]) ||
-        !nonEmptyString(value.approval_id)
+        !wireId(value.approval_id)
       ) {
         return null;
       }
@@ -3598,7 +3671,7 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
     case "approval_resolved":
       if (
         !onlyKeys(value, ["type", "approval_id", "decision"]) ||
-        !nonEmptyString(value.approval_id) ||
+        !wireId(value.approval_id) ||
         !isRecord(value.decision) ||
         (value.decision.type !== "approve" &&
           value.decision.type !== "deny" &&
@@ -3639,7 +3712,7 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
           "kind",
           "diffstat",
         ]) ||
-        typeof value.path !== "string" ||
+        !lineText(value.path) ||
         !isMember(value.kind, FILE_CHANGE_KINDS)
       ) {
         return null;
@@ -3670,18 +3743,15 @@ function parseToolDetail(value: unknown): ToolDetail | null {
           "cmd",
           "cwd",
         ]) ||
-        typeof value.cmd !== "string" ||
-        typeof value.cwd !== "string"
+        !blockText(value.cmd) ||
+        !lineText(value.cwd)
       ) {
         return null;
       }
       return { kind: "command", cmd: value.cmd, cwd: value.cwd };
     case "file_edit":
     case "file_read":
-      if (
-        !onlyKeys(value, ["kind", "path"]) ||
-        typeof value.path !== "string"
-      ) {
+      if (!onlyKeys(value, ["kind", "path"]) || !lineText(value.path)) {
         return null;
       }
       return { kind: value.kind, path: value.path } as ToolDetail;
@@ -3691,7 +3761,7 @@ function parseToolDetail(value: unknown): ToolDetail | null {
           "kind",
           "query",
         ]) ||
-        typeof value.query !== "string"
+        !blockText(value.query)
       ) {
         return null;
       }
@@ -3702,7 +3772,7 @@ function parseToolDetail(value: unknown): ToolDetail | null {
           "kind",
           "summary",
         ]) ||
-        typeof value.summary !== "string"
+        !blockText(value.summary)
       ) {
         return null;
       }
@@ -3771,7 +3841,7 @@ function parseAttentionState(value: unknown): AttentionState | null {
       return { type: value.type };
     case "needs_you":
       if (
-        typeof value.prompt !== "string" ||
+        !blockText(value.prompt) ||
         !isMember(value.source, ATTENTION_SOURCES)
       ) {
         return null;
@@ -3786,7 +3856,7 @@ function parseAttentionState(value: unknown): AttentionState | null {
       return { type: "fenced", reason };
     }
     case "manual":
-      if (typeof value.note !== "string") return null;
+      if (!blockText(value.note)) return null;
       return { type: "manual", note: value.note };
     default:
       return null;
@@ -3796,24 +3866,24 @@ function parseAttentionState(value: unknown): AttentionState | null {
 export function parseFenceReason(value: unknown): FenceReason | null {
   if (!isRecord(value) || typeof value.type !== "string") return null;
   if (value.type === "orphan_alive") return { type: "orphan_alive" };
-  if (value.type === "probe_ambiguous" && typeof value.detail === "string") {
+  if (value.type === "probe_ambiguous" && blockText(value.detail)) {
     return { type: "probe_ambiguous", detail: value.detail };
   }
-  if (value.type === "resume_lost" && typeof value.detail === "string") {
+  if (value.type === "resume_lost" && blockText(value.detail)) {
     return { type: "resume_lost", detail: value.detail };
   }
   if (
     (value.type === "incarnation_unresolved" ||
       value.type === "sandbox_lost" ||
       value.type === "terminal_flush_missing") &&
-    typeof value.detail === "string"
+    blockText(value.detail)
   ) {
     return { type: value.type, detail: value.detail };
   }
   if (
     value.type === "repeated_turn_failures" &&
     typeof value.count === "number" &&
-    typeof value.detail === "string"
+    blockText(value.detail)
   ) {
     return {
       type: "repeated_turn_failures",
@@ -3832,8 +3902,8 @@ function parseSubagents(value: unknown): CodeSubagentSummary[] | null {
     if (
       !isRecord(item) ||
       !onlyKeys<CodeSubagentSummary>(item, ["call_id", "name", "status"]) ||
-      !nonEmptyString(item.call_id) ||
-      typeof item.name !== "string" ||
+      !wireId(item.call_id) ||
+      !lineText(item.name) ||
       !isMember(item.status, SUBAGENT_STATUSES)
     ) {
       return null;
@@ -3871,23 +3941,23 @@ export function parseCodeSessionDigest(
       "subagents",
       "recap",
     ]) ||
-    !nonEmptyString(value.workspace) ||
-    !nonEmptyString(value.session) ||
+    !wireId(value.workspace) ||
+    !wireId(value.session) ||
     !isMember(value.kind, SESSION_KINDS) ||
     (value.harness_kind !== undefined &&
       !isMember(value.harness_kind, HARNESS_KINDS)) ||
     !isMember(value.lifecycle, SESSION_LIFECYCLES) ||
-    typeof value.title !== "string" ||
+    !lineText(value.title) ||
     !isFiniteNumber(value.turn_count) ||
-    !optionalString(value.trigger_target_at) ||
+    !optionalTimestamp(value.trigger_target_at) ||
     (value.activity !== undefined &&
       !isMember(value.activity, SESSION_ACTIVITIES)) ||
     (value.pr_count !== undefined && !isFiniteNumber(value.pr_count)) ||
     (value.watch_state !== undefined &&
       !isMember(value.watch_state, WATCH_STATES)) ||
-    !optionalString(value.watch_detail) ||
+    !optionalBlock(value.watch_detail) ||
     (value.watch_cycles !== undefined && !isFiniteNumber(value.watch_cycles)) ||
-    !optionalString(value.recap)
+    !optionalBlock(value.recap)
   ) {
     return null;
   }
@@ -3973,24 +4043,24 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
           "subagents",
           "recap",
         ]) ||
-        !nonEmptyString(value.workspace) ||
-        !nonEmptyString(value.session) ||
+        !wireId(value.workspace) ||
+        !wireId(value.session) ||
         !isMember(value.kind, SESSION_KINDS) ||
         (value.harness_kind !== undefined &&
           !isMember(value.harness_kind, HARNESS_KINDS)) ||
         !isMember(value.lifecycle, SESSION_LIFECYCLES) ||
-        typeof value.title !== "string" ||
+        !lineText(value.title) ||
         !isFiniteNumber(value.turn_count) ||
-        !optionalString(value.trigger_target_at) ||
+        !optionalTimestamp(value.trigger_target_at) ||
         (value.activity !== undefined &&
           !isMember(value.activity, SESSION_ACTIVITIES)) ||
         (value.pr_count !== undefined && !isFiniteNumber(value.pr_count)) ||
         (value.watch_state !== undefined &&
           !isMember(value.watch_state, WATCH_STATES)) ||
-        !optionalString(value.watch_detail) ||
+        !optionalBlock(value.watch_detail) ||
         (value.watch_cycles !== undefined &&
           !isFiniteNumber(value.watch_cycles)) ||
-        !optionalString(value.recap)
+        !optionalBlock(value.recap)
       ) {
         return null;
       }
@@ -4041,12 +4111,12 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
           value,
           ["type", "job", "phase", "percent", "done", "error", "repo_id"],
         ) ||
-        !nonEmptyString(value.job) ||
-        typeof value.phase !== "string" ||
+        !wireId(value.job) ||
+        !lineText(value.phase) ||
         typeof value.done !== "boolean" ||
         (value.percent !== undefined && !isFiniteNumber(value.percent)) ||
-        !optionalString(value.error) ||
-        !optionalString(value.repo_id)
+        !optionalBlock(value.error) ||
+        !optionalWireId(value.repo_id)
       ) {
         return null;
       }
@@ -4067,10 +4137,10 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
           ["type", "kind", "version", "phase", "done", "error"],
         ) ||
         !isMember(value.kind, HARNESS_KINDS) ||
-        typeof value.phase !== "string" ||
+        !lineText(value.phase) ||
         typeof value.done !== "boolean" ||
-        !optionalString(value.version) ||
-        !optionalString(value.error)
+        !optionalLine(value.version) ||
+        !optionalBlock(value.error)
       ) {
         return null;
       }
@@ -4089,8 +4159,8 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
           value,
           ["type", "workspace_id", "terminal_id"],
         ) ||
-        !nonEmptyString(value.workspace_id) ||
-        !nonEmptyString(value.terminal_id)
+        !wireId(value.workspace_id) ||
+        !wireId(value.terminal_id)
       ) {
         return null;
       }
@@ -4106,10 +4176,10 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
           value,
           ["type", "session", "turn_id", "state", "rewrite"],
         ) ||
-        !nonEmptyString(value.session) ||
-        !nonEmptyString(value.turn_id) ||
+        !wireId(value.session) ||
+        !wireId(value.turn_id) ||
         !isMember(value.state, TURN_REWRITE_STATES) ||
-        !optionalString(value.rewrite)
+        !optionalBlock(value.rewrite)
       ) {
         return null;
       }
@@ -4133,16 +4203,16 @@ function parsePrState(value: unknown): PullRequestDigest | null {
 export function parseCodeApproval(value: unknown): CodeApprovalSnapshot | null {
   if (
     !isRecord(value) ||
-    !nonEmptyString(value.id) ||
-    !nonEmptyString(value.session_id) ||
-    !nonEmptyString(value.turn_id) ||
+    !wireId(value.id) ||
+    !wireId(value.session_id) ||
+    !wireId(value.turn_id) ||
     !isRecord(value.kind) ||
     typeof value.kind.type !== "string" ||
-    typeof value.harness_raw_json !== "string" ||
+    !rawText(value.harness_raw_json) ||
     !isMember(value.state, APPROVAL_STATES) ||
-    !nonEmptyString(value.requested_at) ||
-    (value.feedback !== undefined && typeof value.feedback !== "string") ||
-    (value.decided_at !== undefined && typeof value.decided_at !== "string")
+    !timestamp(value.requested_at) ||
+    !optionalBlock(value.feedback) ||
+    !optionalTimestamp(value.decided_at)
   ) {
     return null;
   }
@@ -4162,17 +4232,17 @@ export function parseCodeApproval(value: unknown): CodeApprovalSnapshot | null {
 export function parseCodeGrant(value: unknown): CodeGrantSnapshot | null {
   if (
     !isRecord(value) ||
-    !nonEmptyString(value.id) ||
-    !nonEmptyString(value.channel_kind) ||
-    !nonEmptyString(value.external_identity) ||
-    !optionalString(value.display_name) ||
-    !nonEmptyString(value.workspace_identity) ||
-    !optionalString(value.workspace_name) ||
-    !optionalString(value.avatar_url) ||
-    !nonEmptyString(value.created_at) ||
-    !optionalString(value.rotated_at) ||
-    !optionalString(value.revoked_at) ||
-    !optionalString(value.revoked_reason)
+    !wireId(value.id) ||
+    !nonEmptyLine(value.channel_kind) ||
+    !nonEmptyLine(value.external_identity) ||
+    !optionalLine(value.display_name) ||
+    !nonEmptyLine(value.workspace_identity) ||
+    !optionalLine(value.workspace_name) ||
+    !optionalLine(value.avatar_url) ||
+    !timestamp(value.created_at) ||
+    !optionalTimestamp(value.rotated_at) ||
+    !optionalTimestamp(value.revoked_at) ||
+    !optionalBlock(value.revoked_reason)
   ) {
     return null;
   }
@@ -4211,13 +4281,13 @@ export function parseCodeGrantList(value: unknown): CodeGrantSnapshot[] | null {
 export function parseCodeConnectPage(value: unknown): CodeConnectPage | null {
   if (
     !isRecord(value) ||
-    !nonEmptyString(value.channel_kind) ||
-    !nonEmptyString(value.display_name) ||
-    !nonEmptyString(value.workspace_name) ||
-    !optionalString(value.avatar_url) ||
-    !nonEmptyString(value.state) ||
-    !nonEmptyString(value.csrf) ||
-    !nonEmptyString(value.expires_at)
+    !nonEmptyLine(value.channel_kind) ||
+    !nonEmptyLine(value.display_name) ||
+    !nonEmptyLine(value.workspace_name) ||
+    !optionalLine(value.avatar_url) ||
+    !nonEmptyLine(value.state) ||
+    !wireId(value.csrf) ||
+    !timestamp(value.expires_at)
   ) {
     return null;
   }

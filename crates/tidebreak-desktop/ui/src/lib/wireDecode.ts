@@ -8,20 +8,20 @@
  * parser that wants to reject a payload composes these into one boolean and
  * returns `null`.
  *
- * Two conventions live side by side on purpose and the names keep them apart:
+ * Both decoders bound every string they will draw. Ids, timestamps, and
+ * cursors share the named limits below; the decoders choose their own limits
+ * for text, by how each field is rendered:
  *
- * - The code-mode decoder accepts any string and checks presence only
- *   (`nonEmptyString`, `optionalString`, `nullableString`). Its payloads come
- *   from the local server's own snapshots and are rendered through components
- *   that clamp for themselves.
- * - The chat decoder bounds every string it will draw (`bounded`,
- *   `nonEmptyBounded`, `boundedBlock`) and rejects the control and
- *   bidirectional characters that could redraw or reorder a line. Its payloads
- *   carry model- and tool-authored text straight into one-line previews.
+ * - {@link bounded} and {@link nonEmptyBounded} for a field drawn on one
+ *   line, which rejects the control and bidirectional characters that could
+ *   redraw or reorder it.
+ * - {@link boundedBlock} for a field drawn as a block, where line breaks,
+ *   carriage returns, and tabs are structure.
+ * - {@link boundedRaw} for verbatim data (blobs, diffs, terminal output)
+ *   that a dedicated pane renders as it is, so only the length is checked.
  *
- * Moving the code-mode decoder onto the bounded readers is a behavior change
- * with its own review (brightwave-inc/tidebreak#2977), so this module only
- * makes the two conventions visible next to each other.
+ * The presence-only readers remain for fields that are matched rather than
+ * drawn, and for the settings importers that read local files.
  */
 
 export { isRecord, onlyKeys } from "./guards";
@@ -97,8 +97,8 @@ export function isStringList(value: unknown): value is string[] {
 export function bounded(value: unknown, maxChars: number): value is string {
   return (
     typeof value === "string" &&
-    Array.from(value).length <= maxChars &&
-    !Array.from(value).some(forbiddenPreviewCharacter)
+    withinChars(value, maxChars) &&
+    !LINE_FORBIDDEN.test(value)
   );
 }
 
@@ -112,10 +112,12 @@ export function nonEmptyBounded(
 
 /**
  * The same clamp as {@link bounded} for a field that is drawn as a block
- * rather than a line, so line breaks and tabs are structure rather than
- * spoofing. Everything else {@link bounded} rejects is still rejected: an
- * escape sequence or a bidirectional override in a pane of command output
- * could still redraw or reorder what the reader sees.
+ * rather than a line, so line breaks, carriage returns, and tabs are
+ * structure rather than spoofing. A carriage return is admitted because
+ * GitHub-authored bodies arrive with CRLF line endings and a block renderer
+ * treats it as a space. Everything else {@link bounded} rejects is still
+ * rejected: an escape sequence or a bidirectional override in a pane of
+ * command output could still redraw or reorder what the reader sees.
  */
 export function boundedBlock(
   value: unknown,
@@ -123,15 +125,55 @@ export function boundedBlock(
 ): value is string {
   return (
     typeof value === "string" &&
-    Array.from(value).length <= maxChars &&
-    !Array.from(value).some(
-      (character) =>
-        forbiddenPreviewCharacter(character) &&
-        character !== "\n" &&
-        character !== "\t",
-    )
+    withinChars(value, maxChars) &&
+    !BLOCK_FORBIDDEN.test(value)
   );
 }
+
+/**
+ * A string within `maxChars` code points, with no character clamp at all.
+ *
+ * For verbatim data the reader asked to see as it is — file content, diffs,
+ * terminal reads, command output — where carriage returns and terminal
+ * escapes are part of the payload and the pane that draws it already expects
+ * them. The length bound still rejects a payload the server could not have
+ * produced.
+ */
+export function boundedRaw(value: unknown, maxChars: number): value is string {
+  return typeof value === "string" && withinChars(value, maxChars);
+}
+
+/** Every entry passes {@link bounded}. Empty list allowed. */
+export function boundedStringList(
+  value: unknown,
+  maxChars: number,
+): value is string[] {
+  return Array.isArray(value) && value.every((item) => bounded(item, maxChars));
+}
+
+/**
+ * Whether `value` holds at most `maxChars` code points. UTF-16 length is an
+ * upper bound on the code point count, so a string that fits by length fits
+ * without a scan; only a longer one is counted, and only until it overflows.
+ */
+function withinChars(value: string, maxChars: number): boolean {
+  if (value.length <= maxChars) return true;
+  let count = 0;
+  for (const _ of value) {
+    if (++count > maxChars) return false;
+  }
+  return true;
+}
+
+/**
+ * The characters {@link forbiddenPreviewCharacter} names, as one scan: C0 and
+ * C1 controls, U+2028/U+2029, the bidirectional embeddings, overrides, and
+ * isolates. The block form carves out `\n`, `\r`, and `\t`.
+ */
+const LINE_FORBIDDEN =
+  /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/;
+const BLOCK_FORBIDDEN =
+  /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/;
 
 /**
  * Whether one code point could break a single rendered line or reorder it:

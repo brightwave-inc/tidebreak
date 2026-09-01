@@ -1618,3 +1618,124 @@ describe("parseCodeCheckLogsSnapshot", () => {
     ).toBeNull();
   });
 });
+
+describe("string bounds", () => {
+  const page = (pr: object) => ({
+    capability: DELIVERY_CAPABILITY,
+    items: [pr],
+    errors: [],
+    fetched_at: "2026-08-20T12:10:00.000Z",
+  });
+  const oneComment = (body: string) => ({
+    number: 12,
+    comments: [
+      {
+        kind: "issue",
+        author: "alice",
+        created_at: "2026-08-16T10:00:00Z",
+        body,
+      },
+    ],
+  });
+
+  it("keeps a one-line field at its limit and drops one past it", () => {
+    const atLimit = "t".repeat(4_096);
+    expect(
+      parseCodeDeliveryPullRequestsPage(
+        page({ ...DELIVERY_PR, title: atLimit }),
+      )?.items[0]?.title,
+    ).toBe(atLimit);
+    expect(
+      parseCodeDeliveryPullRequestsPage(
+        page({ ...DELIVERY_PR, title: `${atLimit}!` }),
+      ),
+    ).toBeNull();
+  });
+
+  it("shares the id and timestamp limits with the chat decoder", () => {
+    expect(
+      parseCodeDeliveryPullRequestsPage(
+        page({ ...DELIVERY_PR, id: "i".repeat(128) }),
+      ),
+    ).not.toBeNull();
+    expect(
+      parseCodeDeliveryPullRequestsPage(
+        page({ ...DELIVERY_PR, id: "i".repeat(129) }),
+      ),
+    ).toBeNull();
+    expect(
+      parseCodeDeliveryPullRequestsPage(
+        page({ ...DELIVERY_PR, created_at: "2".repeat(65) }),
+      ),
+    ).toBeNull();
+    expect(parseCodeTurn({ ...TURN, id: " " })).toBeNull();
+  });
+
+  it("rejects a control or bidirectional character on a one-line field", () => {
+    for (const title of [
+      "fix: \u001b[31mred\u001b[0m",
+      "fix: \u202eevil",
+      "fix: two\nlines",
+    ]) {
+      expect(
+        parseCodeDeliveryPullRequestsPage(page({ ...DELIVERY_PR, title })),
+      ).toBeNull();
+    }
+    expect(
+      parseCodeDeliveryPullRequestsPage(
+        page({ ...DELIVERY_PR, head_branch: "feat/bell\u0007" }),
+      ),
+    ).toBeNull();
+    expect(
+      parseCodeDeliveryPullRequestsPage(
+        page({ ...DELIVERY_PR, labels: ["ok", "bad\u2066"] }),
+      ),
+    ).toBeNull();
+  });
+
+  it("keeps line breaks, CRLF, and tabs in a block field but nothing else", () => {
+    const crlf = "## Summary\r\n\r\n- one\r\n\t- nested\n";
+    expect(parseCodePrComments(oneComment(crlf))?.comments[0]?.body).toBe(crlf);
+    expect(parseCodePrComments(oneComment("a\u001b[2Jb"))).toBeNull();
+    expect(parseCodePrComments(oneComment("a\u202eb"))).toBeNull();
+    expect(parseCodePrComments(oneComment("x".repeat(1_048_577)))).toBeNull();
+    expect(
+      parseCodeEvent({ type: "assistant_delta", text: "line\r\nnext" }),
+    ).toEqual({ type: "assistant_delta", text: "line\r\nnext" });
+    expect(
+      parseCodeEvent({ type: "assistant_delta", text: "\u001b[1mbold" }),
+    ).toBeNull();
+  });
+
+  it("bounds verbatim payloads by length only", () => {
+    const content = "progress\r\u001b[32mdone\u001b[0m\u202e\n";
+    const blob = { path: "out.log", content, truncated: false, binary: false };
+    expect(parseCodeWorkspaceBlob(blob)).toEqual(blob);
+    expect(
+      parseCodeWorkspaceBlob({ ...blob, content: "x".repeat(4_194_305) }),
+    ).toBeNull();
+    expect(
+      parseCodeWorkspaceBlob({ ...blob, path: "out\u0007.log" }),
+    ).toBeNull();
+    const diff = {
+      diff: "--- a\n+++ b\n-\u001b[0m\n",
+      truncated: false,
+      stat: { files: 1, insertions: 0, deletions: 1, truncated: false },
+    };
+    expect(parseCodeWorkspaceDiff(diff)).toEqual(diff);
+    const preview = {
+      type: "tool_completed",
+      call_id: "toolu_1",
+      outcome: "succeeded",
+      preview: "\u001b[32m✓\u001b[0m 12 passed",
+    };
+    expect(parseCodeEvent(preview)).toEqual(preview);
+  });
+
+  it("never drops a turn over the user's own pasted text", () => {
+    const pasted = { ...TURN, user_input: "why does this print \u001b[31m?" };
+    expect(parseCodeTurn(pasted)).toEqual(pasted);
+    const steer = { type: "user_steered", text: "stop; it prints \u001b[31m" };
+    expect(parseCodeEvent(steer)).toEqual(steer);
+  });
+});
