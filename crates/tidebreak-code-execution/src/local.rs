@@ -1043,6 +1043,7 @@ async fn run_native(
     _timeout: Duration,
     _document_scripts_dir: Option<&Path>,
     _shared_package_cache: Option<&Path>,
+    _python_runtime_dirs: &[PathBuf],
     _managed_node_dir: Option<&Path>,
     _folder_grants: &[()],
     _network_policy: &NetworkPolicy,
