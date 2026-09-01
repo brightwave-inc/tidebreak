@@ -3171,6 +3171,33 @@ pub trait Store: Send + Sync {
     /// sequence order. Pass `0` to replay from the start.
     async fn list_events(&self, chat_id: ChatId, after: i64) -> Result<Vec<SequencedEvent>>;
 
+    /// Args-delta and completion events for one tool call, in sequence order.
+    ///
+    /// Durable stores filter this server-side. The default walks
+    /// [`list_events`](Self::list_events) and keeps the same two kinds.
+    async fn list_events_for_call(
+        &self,
+        chat_id: ChatId,
+        call_id: CallId,
+    ) -> Result<Vec<SequencedEvent>> {
+        Ok(self
+            .list_events(chat_id, 0)
+            .await?
+            .into_iter()
+            .filter(|event| match &event.event {
+                AgentEvent::ToolCallArgsDelta {
+                    call_id: event_call,
+                    ..
+                }
+                | AgentEvent::ToolCallCompleted {
+                    call_id: event_call,
+                    ..
+                } => *event_call == call_id,
+                _ => false,
+            })
+            .collect())
+    }
+
     // --- Durable reverse-RPC operation log (issue #858) ---
     //
     // These back the crash-safe `OperationStore` seam of
