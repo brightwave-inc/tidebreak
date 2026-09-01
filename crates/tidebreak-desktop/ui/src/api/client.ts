@@ -538,6 +538,7 @@ export class ApiClient {
       protect_recent_messages?: number;
     };
     computer_use_enabled?: boolean;
+    code_turn_recaps_enabled?: boolean;
     rewrite_closing_messages?: boolean;
   }): Promise<RuntimeSettings> {
     return this.json("/settings", {

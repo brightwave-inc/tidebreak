@@ -87,6 +87,7 @@ export const storySettings: RuntimeSettings = {
   },
   model_visibility_overrides: {},
   computer_use_enabled: true,
+  code_turn_recaps_enabled: true,
   rewrite_closing_messages: false,
 };
 
@@ -422,7 +423,11 @@ function pending<T>(): Promise<T> {
   return new Promise(() => undefined);
 }
 
-function createSettingsStoryClient(state: SettingsStoryState): ApiClient {
+function createSettingsStoryClient(
+  state: SettingsStoryState,
+  initialSettings: RuntimeSettings,
+): ApiClient {
+  let settings = initialSettings;
   const read = <T,>(value: T): Promise<T> => {
     if (state === "loading") return pending();
     if (state === "failed") {
@@ -443,8 +448,17 @@ function createSettingsStoryClient(state: SettingsStoryState): ApiClient {
   const servers = state === "managed" ? [gatewayServer] : [docsServer];
 
   const methods: SettingsClientMethods = {
-    getSettings: () => read(storySettings),
-    putSettings: () => write(storySettings),
+    getSettings: () => read(settings),
+    putSettings: (body) => {
+      settings = {
+        ...settings,
+        ...body,
+        compaction: body.compaction
+          ? { ...settings.compaction, ...body.compaction }
+          : settings.compaction,
+      };
+      return write(settings);
+    },
     putProvider: (kind) =>
       write(storyProviders.find((provider) => provider.kind === kind)!),
     deleteCredential: () => write(undefined),
@@ -561,12 +575,17 @@ function SettingsStoryRouter({ children }: { children: ReactNode }) {
 
 export function SettingsStoryHarness({
   state = "configured",
+  settings = storySettings,
   children,
 }: {
   state?: SettingsStoryState;
+  settings?: RuntimeSettings;
   children: (client: ApiClient) => ReactNode;
 }) {
-  const client = useMemo(() => createSettingsStoryClient(state), [state]);
+  const client = useMemo(
+    () => createSettingsStoryClient(state, settings),
+    [settings, state],
+  );
 
   useLayoutEffect(() => {
     useVoiceInputStore.setState({

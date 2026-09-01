@@ -7,7 +7,7 @@ import { CompactionPanel } from "@/settings/CompactionPanel";
 import { UpdatesPanel } from "@/settings/UpdatesPanel";
 import type { ThemeMode } from "@/theme";
 import type { DesktopUpdateState } from "@/updates";
-import { SettingsStoryHarness } from "./SettingsStoryHarness";
+import { SettingsStoryHarness, storySettings } from "./SettingsStoryHarness";
 
 const idleUpdate: DesktopUpdateState = {
   status: "idle",
@@ -19,6 +19,7 @@ const idleUpdate: DesktopUpdateState = {
 type SettingsShowcaseProps = {
   panel: "appearance" | "agents" | "context" | "updates";
   loadState?: "ready" | "loading" | "failed";
+  turnRecapsEnabled?: boolean;
   theme?: ThemeMode;
   updateState?: DesktopUpdateState;
   upToDate?: boolean;
@@ -27,6 +28,7 @@ type SettingsShowcaseProps = {
 function SettingsShowcase({
   panel,
   loadState = "ready",
+  turnRecapsEnabled = true,
   theme = "system",
   updateState = idleUpdate,
   upToDate = false,
@@ -38,6 +40,11 @@ function SettingsShowcase({
     return (
       <SettingsStoryHarness
         state={loadState === "ready" ? "configured" : loadState}
+        settings={
+          turnRecapsEnabled
+            ? storySettings
+            : { ...storySettings, code_turn_recaps_enabled: false }
+        }
       >
         {(client) => <AgentsPanel client={client} />}
       </SettingsStoryHarness>
@@ -81,6 +88,10 @@ export const AppearanceDark: Story = {
 
 export const Agents: Story = {
   args: { panel: "agents" },
+};
+
+export const AgentsRecapsOff: Story = {
+  args: { panel: "agents", turnRecapsEnabled: false },
 };
 
 export const AgentsLoading: Story = {

@@ -41,6 +41,7 @@ describe("AgentsPanel", () => {
       },
       model_visibility_overrides: {},
       computer_use_enabled: true,
+      code_turn_recaps_enabled: true,
       rewrite_closing_messages: false,
     };
     const putSettings = vi.fn().mockResolvedValue({
@@ -77,5 +78,54 @@ describe("AgentsPanel", () => {
         sandbox_agent_error_checkin: 3,
       }),
     );
+  });
+
+  it("turns off future code turn recaps", async () => {
+    const settings: RuntimeSettings = {
+      model: null,
+      has_api_key: false,
+      chat_defaults: {
+        model: null,
+        reasoning_effort: null,
+        permission_mode: null,
+        network_policy: null,
+      },
+      max_active_background_agents: 5,
+      sandbox_agent_checkin_steps: 100,
+      sandbox_agent_error_checkin: 5,
+      compaction: {
+        threshold_fraction: 0.75,
+        target_fraction: 0.25,
+        min_threshold_tokens: 50000,
+        protect_recent_messages: 5,
+      },
+      model_visibility_overrides: {},
+      computer_use_enabled: true,
+      code_turn_recaps_enabled: true,
+      rewrite_closing_messages: false,
+    };
+    const putSettings = vi.fn().mockResolvedValue({
+      ...settings,
+      code_turn_recaps_enabled: false,
+    });
+    const client = {
+      getSettings: vi.fn().mockResolvedValue(settings),
+      putSettings,
+    } as unknown as ApiClient;
+
+    render(<AgentsPanel client={client} />);
+    const toggle = await screen.findByRole("switch", {
+      name: "Write turn recaps",
+    });
+    expect(toggle).toBeChecked();
+
+    fireEvent.click(toggle);
+
+    await waitFor(() =>
+      expect(putSettings).toHaveBeenCalledWith({
+        code_turn_recaps_enabled: false,
+      }),
+    );
+    expect(toggle).not.toBeChecked();
   });
 });
