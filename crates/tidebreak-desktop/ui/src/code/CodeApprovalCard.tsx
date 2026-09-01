@@ -68,38 +68,42 @@ export function CodeApprovalCard({
           reach it. Whatever it asked for did not run on your say-so.
         </p>
       )}
-      <div>
-        <button
-          type="button"
-          className={cn(
-            "text-muted-foreground hover:text-foreground cursor-pointer rounded-sm text-xs",
-            FOCUS_RING,
-            HOVER_TINT,
-          )}
-          aria-expanded={payloadOpen}
-          aria-controls={payloadOpen ? payloadId : undefined}
-          onClick={() => {
-            onReveal?.();
-            setPayloadOpen((current) => !current);
-          }}
-        >
-          Harness payload
-        </button>
-        <Reveal open={payloadOpen}>
-          {/*
+      {/* A structured approval from the internal engine carries no verbatim
+          payload; a disclosure that reveals nothing reads as a broken card. */}
+      {approval.harness_raw_json.length > 0 && (
+        <div>
+          <button
+            type="button"
+            className={cn(
+              "text-muted-foreground hover:text-foreground cursor-pointer rounded-sm text-xs",
+              FOCUS_RING,
+              HOVER_TINT,
+            )}
+            aria-expanded={payloadOpen}
+            aria-controls={payloadOpen ? payloadId : undefined}
+            onClick={() => {
+              onReveal?.();
+              setPayloadOpen((current) => !current);
+            }}
+          >
+            Harness payload
+          </button>
+          <Reveal open={payloadOpen}>
+            {/*
             One `pre`, not two: the scroll container is itself a `pre`, and a
             nested one carried the browser's own `white-space: pre`, so the
             wrapping asked for here never applied and a single long JSON line
             scrolled sideways instead.
           */}
-          <ScrollableContainer
-            id={payloadId}
-            className="bg-muted text-muted-foreground mt-2 max-h-48 rounded-md p-3 font-mono text-xs break-words whitespace-pre-wrap"
-          >
-            {prettyRaw(approval.harness_raw_json)}
-          </ScrollableContainer>
-        </Reveal>
-      </div>
+            <ScrollableContainer
+              id={payloadId}
+              className="bg-muted text-muted-foreground mt-2 max-h-48 rounded-md p-3 font-mono text-xs break-words whitespace-pre-wrap"
+            >
+              {prettyRaw(approval.harness_raw_json)}
+            </ScrollableContainer>
+          </Reveal>
+        </div>
+      )}
       {!decided && !denying && (
         <div className="flex flex-wrap gap-2">
           <Button
