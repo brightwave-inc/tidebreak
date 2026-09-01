@@ -340,11 +340,13 @@ export function ChatRoute({ chatId }: { chatId: string }) {
         warmPresentationConverter();
         return;
       case "turn_began":
+        signalRefresh("queuedTurns");
         signalTurnLifecycle(
           effect.startsDifferentTurn ? "began" : "began_same_turn",
         );
         return;
       case "turn_resolved":
+        signalRefresh("queuedTurns");
         signalTurnLifecycle("resolved");
         return;
       case "invalidate_terminal_hydration":
@@ -1150,6 +1152,7 @@ export async function queueComposerMessage(
     toast.error(friendlyErrorMessage(err, "Could not queue that message."));
     return;
   }
+  useRefreshSignals.getState().signal("queuedTurns");
   onQueued();
 }
 

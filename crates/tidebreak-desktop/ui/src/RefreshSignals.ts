@@ -9,7 +9,8 @@ export type RefreshTarget =
   | "userQuestions"
   | "planApprovals"
   | "taskPlan"
-  | "notifications";
+  | "notifications"
+  | "queuedTurns";
 
 /**
  * A revision counter per pollable target.
@@ -28,6 +29,8 @@ export type RefreshSignalStore = {
   planApprovals: number;
   taskPlan: number;
   notifications: number;
+  /** A queued turn was added, promoted, or the turn ahead of it ended. */
+  queuedTurns: number;
   signal: (target: RefreshTarget) => void;
 };
 
@@ -39,6 +42,7 @@ export function createRefreshSignalStore() {
     planApprovals: 0,
     taskPlan: 0,
     notifications: 0,
+    queuedTurns: 0,
     signal: (target) =>
       set(
         (state) =>

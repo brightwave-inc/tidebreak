@@ -1,5 +1,6 @@
 import type { ApiClient } from "../api/client";
 import type { CodeTurnSnapshot, SequencedCodeEventFrame } from "../api/types";
+import { useRefreshSignals } from "../RefreshSignals";
 import { codeClientGeneration } from "./CodeClientGeneration";
 import { CodeSessionController } from "./CodeSessionController";
 import {
@@ -99,6 +100,11 @@ function createController(
       for (const effect of effects) {
         if (effect.type === "turn_began") fillPrompt(effect.turnId);
         if (effect.type === "turn_snapshot_needed") turnSnapshotNeeded = true;
+        // A turn boundary is when the promoter runs, so the queue tray reads
+        // on it instead of watching a fast timer.
+        if (effect.type === "turn_began" || effect.type === "turn_resolved") {
+          useRefreshSignals.getState().signal("queuedTurns");
+        }
       }
       if (turnSnapshotNeeded) controller.requestTurnRefresh();
     },

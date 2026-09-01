@@ -4,6 +4,7 @@ import { create } from "zustand";
 import { useApp } from "@/AppContext";
 import type { ApiClient } from "@/api/client";
 import type { CodeSubscriptionUsage } from "@/api/types";
+import { startVisibilityGatedPoll } from "@/useVisibilityGatedPoll";
 import {
   codeClientGeneration,
   isCodeClientGenerationActive,
@@ -97,13 +98,37 @@ export function useCodeSubscriptionUsage() {
     [client, refreshStore],
   );
 
-  useEffect(() => {
-    void refresh();
-    const timer = window.setInterval(() => void refresh(), REFRESH_INTERVAL_MS);
-    return () => window.clearInterval(timer);
-  }, [refresh]);
+  useEffect(() => acquireUsagePoller(client), [client]);
 
   return { report, refreshing, error, refresh };
+}
+
+/**
+ * One timer for every consumer. The rail and the analytics page both mount
+ * this hook; before this each ran its own minute clock, so an open analytics
+ * page doubled the quota reads. The first consumer reads at once and starts
+ * the clock; later ones join it; the last one leaving stops it. Hidden, the
+ * clock pauses — a quota bar nobody can see needs no refresh, and the read on
+ * return brings it current.
+ */
+let pollerConsumers = 0;
+let stopPoller: (() => void) | null = null;
+
+function acquireUsagePoller(client: ApiClient): () => void {
+  pollerConsumers += 1;
+  if (pollerConsumers === 1) {
+    const read = () =>
+      void useCodeSubscriptionUsageStore.getState().refresh(client);
+    read();
+    stopPoller = startVisibilityGatedPoll(read, REFRESH_INTERVAL_MS);
+  }
+  return () => {
+    pollerConsumers -= 1;
+    if (pollerConsumers === 0) {
+      stopPoller?.();
+      stopPoller = null;
+    }
+  };
 }
 
 export function resetCodeSubscriptionUsageStore() {

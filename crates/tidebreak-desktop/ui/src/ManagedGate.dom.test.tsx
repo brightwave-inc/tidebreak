@@ -151,7 +151,7 @@ describe("ManagedGate", () => {
 
     // The session watch notices the sign-out and lowers the gate again.
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(5_100);
+      await vi.advanceTimersByTimeAsync(60_100);
     });
     expect(screen.getByText("Sign in to continue")).toBeInTheDocument();
     expect(screen.queryByText("the open product")).not.toBeInTheDocument();
@@ -186,7 +186,7 @@ describe("ManagedGate", () => {
     expect(screen.getByText("policy: unmanaged")).toBeInTheDocument();
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(5_100);
+      await vi.advanceTimersByTimeAsync(60_100);
     });
     await act(async () => {});
     expect(screen.getByText("policy: managed")).toBeInTheDocument();
@@ -214,7 +214,7 @@ describe("ManagedGate", () => {
     // Policy flips to managed with no session: the gate comes up on the same
     // watch tick rather than at the next launch.
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(5_100);
+      await vi.advanceTimersByTimeAsync(60_100);
     });
     await act(async () => {});
     expect(screen.getByText("Sign in to continue")).toBeInTheDocument();
@@ -456,7 +456,7 @@ describe("ManagedGate", () => {
 
     // The watch's next tick recovers the status and clears the stale error.
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(5_100);
+      await vi.advanceTimersByTimeAsync(60_100);
     });
     expect(screen.queryByText(/503: starting/)).not.toBeInTheDocument();
     expect(screen.getByText("Sign in to continue")).toBeInTheDocument();

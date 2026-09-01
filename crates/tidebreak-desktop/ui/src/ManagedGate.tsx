@@ -8,14 +8,17 @@ import { ManagedPolicyContext } from "./managedPolicy";
 import { onPairingChanged } from "./host";
 import { openInBrowser } from "./openInBrowser";
 import { disconnectRemoteMachine, remoteMachineState } from "./remoteMachine";
+import { useVisibilityGatedPoll } from "./useVisibilityGatedPoll";
 import { WindowDragStrip } from "./WindowDragStrip";
 
 /** While the browser flow is pending the exchange lands out of band, so the
  * poll is what turns the gate off. Matches the settings panel's cadence. */
 const PENDING_POLL_MS = 2_000;
 /** The session watch otherwise: signed in, it is what returns a signed-out
- * reader to the gate; signed out, it notices sign-ins completed elsewhere. */
-const SESSION_WATCH_MS = 5_000;
+ * reader to the gate; signed out, it notices sign-ins completed elsewhere.
+ * The shell's pairing nudge is the prompt path, so this is a safety net, and
+ * it pauses while the window is hidden. */
+const SESSION_WATCH_MS = 60_000;
 /** A policy read that hangs is a transport failure, not an answer. */
 const POLICY_TIMEOUT_MS = 5_000;
 const POLICY_RETRY_MIN_MS = 1_000;
@@ -208,8 +211,9 @@ export function ManagedGate({
   // app is running — an MDM push, or the deep-link pairing flow mid-session —
   // and until this the renderer went on presenting the whole open surface:
   // no sign-in gate, and Providers and MCP still editable against a server
-  // that had already started refusing them. `/policy` is a local read, so the
-  // session cadence is affordable.
+  // that had already started refusing them. `/policy` is a local read; the
+  // shell's pairing nudge below is the prompt path and this cadence is the
+  // net under it.
   const watching = policyState.kind === "resolved";
   const refreshPolicy = useCallback(() => {
     void client
@@ -230,11 +234,9 @@ export function ManagedGate({
         }
       });
   }, [client]);
-  useEffect(() => {
-    if (!watching) return;
-    const timer = window.setInterval(refreshPolicy, SESSION_WATCH_MS);
-    return () => window.clearInterval(timer);
-  }, [watching, refreshPolicy]);
+  useVisibilityGatedPoll(refreshPolicy, SESSION_WATCH_MS, {
+    enabled: watching,
+  });
 
   // The shell nudges when a provision link parks a pending pairing or a
   // confirmed re-pair replaces one; refetching now instead of on the next
@@ -269,17 +271,17 @@ export function ManagedGate({
   // fetch failed, the ticks are what recover from it. Each tick retries, and
   // a success clears any stale error. One timer covers both directions —
   // pending → signed in lifts the gate, a sign-out anywhere lowers it again.
+  // Hidden, it waits: the reader returning is what shows the gate, and the
+  // read on return is what it sees.
   const pendingFlow = status?.sign_in.state === "pending";
-  useEffect(() => {
-    if (!gateActive) return;
-    const timer = window.setInterval(
-      () => {
-        void reload().catch(() => undefined);
-      },
-      pendingFlow ? PENDING_POLL_MS : SESSION_WATCH_MS,
-    );
-    return () => window.clearInterval(timer);
-  }, [gateActive, pendingFlow, reload]);
+  const refreshStatus = useCallback(() => {
+    void reload().catch(() => undefined);
+  }, [reload]);
+  useVisibilityGatedPoll(
+    refreshStatus,
+    pendingFlow ? PENDING_POLL_MS : SESSION_WATCH_MS,
+    { enabled: gateActive },
+  );
 
   async function connect() {
     if (!policy) return;
