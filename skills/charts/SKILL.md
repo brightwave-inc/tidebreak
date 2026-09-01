@@ -1,7 +1,7 @@
 ---
 name: charts
 description: Produce charts as interactive native figures (Plotly JSON) in output/, or as matplotlib PNG/SVG when an image file is needed — readable sizing, labels, and legends, validated before delivery.
-deps: { python: ["matplotlib==3.9.4"] }
+deps: { python: ["matplotlib==3.11.1"] }
 ---
 
 # Charts
@@ -76,7 +76,7 @@ Install the pinned dependency with its own `exec` call — commands have a
 bounded wall clock, and one `pip` invocation per package stays inside it:
 
 ```
-python3 -m pip install --user matplotlib==3.9.4
+python3 -m pip install --user matplotlib==3.11.1
 ```
 
 Installs work only when this chat's network policy allows package managers,

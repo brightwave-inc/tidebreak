@@ -66,6 +66,45 @@ pub struct SharedPackageCache {
     runtime_dir: PathBuf,
 }
 
+/// One supported local CPython runtime and its wheel cache key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PythonRuntime {
+    executable: PathBuf,
+    prefix: PathBuf,
+    read_only_paths: Vec<PathBuf>,
+    key: String,
+}
+
+impl PythonRuntime {
+    #[must_use]
+    pub fn executable(&self) -> &Path {
+        &self.executable
+    }
+
+    #[must_use]
+    pub fn prefix(&self) -> &Path {
+        &self.prefix
+    }
+
+    #[must_use]
+    pub fn read_only_paths(&self) -> &[PathBuf] {
+        &self.read_only_paths
+    }
+
+    #[must_use]
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+}
+
+#[derive(Deserialize)]
+struct PythonRuntimeProbe {
+    version: String,
+    key: String,
+    executable: PathBuf,
+    prefix: PathBuf,
+}
+
 /// What one verification-and-promotion pass did.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct PromotionReport {
@@ -107,6 +146,122 @@ fn is_valid_runtime_key(key: &str) -> bool {
         && key.bytes().all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
         })
+}
+
+/// Whether a CPython version can use the baseline package set.
+///
+/// The committed requirements generator verifies every stable minor from
+/// 3.11 onward. Newer runtimes remain eligible when the pinned packages
+/// publish compatible wheels, while old system interpreters do not enter a
+/// cache keyspace that can never populate.
+fn is_supported_python_version(version: &str) -> bool {
+    let Some((major, minor)) = version.split_once('.') else {
+        return false;
+    };
+    let (Ok(major), Ok(minor)) = (major.parse::<u16>(), minor.parse::<u16>()) else {
+        return false;
+    };
+    major > 3 || (major == 3 && minor >= 11)
+}
+
+#[cfg(target_os = "macos")]
+fn collect_python_runtime_binaries(directory: &Path, binaries: &mut Vec<PathBuf>) {
+    const MAX_BINARIES: usize = 4_096;
+    if binaries.len() >= MAX_BINARIES {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if binaries.len() >= MAX_BINARIES {
+            return;
+        }
+        let path = entry.path();
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if metadata.is_dir() {
+            if path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|name| {
+                    matches!(name, "site-packages" | "dist-packages" | "__pycache__")
+                })
+            {
+                continue;
+            }
+            collect_python_runtime_binaries(&path, binaries);
+            continue;
+        }
+        let extension = path.extension().and_then(|value| value.to_str());
+        if matches!(extension, Some("so" | "dylib")) {
+            binaries.push(path);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn python_runtime_read_only_paths(prefix: &Path, executable: &Path) -> Vec<PathBuf> {
+    let mut binaries = vec![executable.to_owned()];
+    collect_python_runtime_binaries(prefix, &mut binaries);
+    let mut directories = Vec::new();
+    for chunk in binaries.chunks(128) {
+        let Ok(output) = tokio::process::Command::new("/usr/bin/otool")
+            .arg("-L")
+            .args(chunk)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .output()
+            .await
+        else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+        directories.extend(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| line.split_whitespace().next())
+                .filter(|path| path.starts_with('/'))
+                .map(PathBuf::from)
+                .filter(|path| !path.starts_with(prefix))
+                .filter_map(|path| path.parent().map(Path::to_owned))
+                .flat_map(|directory| {
+                    let canonical = fs::canonicalize(&directory).ok();
+                    std::iter::once(directory).chain(canonical)
+                })
+                .filter(|path| {
+                    path.starts_with("/Applications")
+                        || path.starts_with("/Library")
+                        || path.starts_with("/Network")
+                        || path.starts_with("/Users")
+                        || path.starts_with("/Volumes")
+                        || path.starts_with("/home")
+                        || path.starts_with("/mnt")
+                        || path.starts_with("/nix")
+                        || path.starts_with("/opt")
+                        || path.starts_with("/private")
+                        || path.starts_with("/tmp")
+                        || path.starts_with("/usr/local")
+                        || path.starts_with("/var")
+                }),
+        );
+    }
+    directories.sort_unstable();
+    directories.dedup();
+    directories
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn python_runtime_read_only_paths(_prefix: &Path, _executable: &Path) -> Vec<PathBuf> {
+    Vec::new()
 }
 
 /// Whether `name` is a plausible wheel filename safe to record and serve:
@@ -430,15 +585,20 @@ impl SharedPackageCache {
         Ok(report)
     }
 
-    /// Derive the wheel-compatibility cache key from the interpreter the local
-    /// sandbox actually runs. `None` disables the cache on hosts where the
-    /// interpreter is unusable.
-    pub async fn runtime_key(python: &Path) -> Option<String> {
+    /// Resolve one supported interpreter and its wheel-compatibility cache key.
+    ///
+    /// `None` rejects an unusable interpreter, Python older than 3.11, or a
+    /// runtime whose executable does not live below its own prefix.
+    pub async fn python_runtime(python: &Path) -> Option<PythonRuntime> {
         let probe = tokio::process::Command::new(python)
             .args([
                 "-c",
-                "import platform, sys; \
-                 print(f'cp{sys.version_info[0]}{sys.version_info[1]}-{sys.platform}-{platform.machine().lower()}')",
+                "import json, platform, sys; \
+                 print(json.dumps({\
+                   'version': f'{sys.version_info[0]}.{sys.version_info[1]}', \
+                   'key': f'cp{sys.version_info[0]}{sys.version_info[1]}-{sys.platform}-{platform.machine().lower()}', \
+                   'executable': sys.executable, \
+                   'prefix': sys.prefix}))",
             ])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
@@ -452,8 +612,37 @@ impl SharedPackageCache {
         if !output.status.success() {
             return None;
         }
-        let key = String::from_utf8(output.stdout).ok()?.trim().to_owned();
-        is_valid_runtime_key(&key).then_some(key)
+        let probe: PythonRuntimeProbe = serde_json::from_slice(&output.stdout).ok()?;
+        if !is_supported_python_version(&probe.version) || !is_valid_runtime_key(&probe.key) {
+            return None;
+        }
+        let expected_tag = format!("cp{}-", probe.version.replace('.', ""));
+        if !probe.key.starts_with(&expected_tag) {
+            return None;
+        }
+        let executable = fs::canonicalize(probe.executable).ok()?;
+        let prefix = fs::canonicalize(probe.prefix).ok()?;
+        let sandbox_executable = fs::canonicalize(prefix.join("bin/python3")).ok()?;
+        if !executable.is_file()
+            || !executable.starts_with(&prefix)
+            || sandbox_executable != executable
+        {
+            return None;
+        }
+        let read_only_paths = python_runtime_read_only_paths(&prefix, &executable).await;
+        Some(PythonRuntime {
+            executable,
+            prefix,
+            read_only_paths,
+            key: probe.key,
+        })
+    }
+
+    /// Derive the wheel cache key for one supported local interpreter.
+    pub async fn runtime_key(python: &Path) -> Option<String> {
+        Self::python_runtime(python)
+            .await
+            .map(|runtime| runtime.key)
     }
 
     /// Host-side acquisition: download the exactly pinned requirements (and
@@ -564,9 +753,41 @@ mod tests {
     }
 
     #[test]
+    fn package_cache_supports_python_311_and_later() {
+        for version in ["3.9", "3.10", "2.7", "3", "three.eleven"] {
+            assert!(!is_supported_python_version(version), "{version}");
+        }
+        for version in ["3.11", "3.12", "3.13", "3.14", "3.15", "4.0"] {
+            assert!(is_supported_python_version(version), "{version}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn python_runtime_resolves_supported_interpreter_and_prefix() {
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let python = bin.join("python3");
+        let payload = serde_json::json!({
+            "version": "3.12",
+            "key": "cp312-darwin-arm64",
+            "executable": python,
+            "prefix": root.path(),
+        });
+        fs::write(&python, format!("#!/bin/sh\nprintf '%s' '{}'\n", payload)).unwrap();
+        fs::set_permissions(&python, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let runtime = SharedPackageCache::python_runtime(&python).await.unwrap();
+        assert_eq!(runtime.executable(), fs::canonicalize(&python).unwrap());
+        assert_eq!(runtime.prefix(), fs::canonicalize(root.path()).unwrap());
+        assert_eq!(runtime.key(), "cp312-darwin-arm64");
+    }
+
+    #[test]
     fn promotion_records_hashes_and_verification_refuses_tampering() {
         let root = tempfile::tempdir().unwrap();
-        let cache = SharedPackageCache::open(root.path(), "cp39-darwin-arm64").unwrap();
+        let cache = SharedPackageCache::open(root.path(), "cp311-darwin-arm64").unwrap();
         assert!(!cache.is_ready());
         assert!(SharedPackageCache::open(root.path(), "../escape").is_err());
         assert!(SharedPackageCache::open(root.path(), ".hidden").is_err());
@@ -619,7 +840,7 @@ mod tests {
         // A corrupt manifest means integrity is unknown: everything on disk is
         // invalidated instead of adopted.
         fs::write(
-            root.path().join("cp39-darwin-arm64/manifest.json"),
+            root.path().join("cp311-darwin-arm64/manifest.json"),
             b"{ not json",
         )
         .unwrap();
@@ -632,7 +853,7 @@ mod tests {
     #[test]
     fn eviction_bounds_the_cache_and_drops_the_oldest_promotions_first() {
         let root = tempfile::tempdir().unwrap();
-        let cache = SharedPackageCache::open(root.path(), "cp39-darwin-arm64").unwrap();
+        let cache = SharedPackageCache::open(root.path(), "cp311-darwin-arm64").unwrap();
         let staging = root.path().join("staging");
         fs::create_dir(&staging).unwrap();
         stage(&staging, "first-1.0-py3-none-any.whl", &[b'a'; 40]);
@@ -664,7 +885,7 @@ mod tests {
     #[test]
     fn populated_pin_sets_are_remembered_until_the_cache_is_invalidated() {
         let root = tempfile::tempdir().unwrap();
-        let cache = SharedPackageCache::open(root.path(), "cp39-darwin-arm64").unwrap();
+        let cache = SharedPackageCache::open(root.path(), "cp311-darwin-arm64").unwrap();
         let pins = vec!["pypdf==5.1.0".to_owned(), "fpdf2==2.8.3".to_owned()];
         let reordered = vec!["fpdf2==2.8.3".to_owned(), "pypdf==5.1.0".to_owned()];
         assert!(!cache.has_populated_pins(&pins));
@@ -676,7 +897,7 @@ mod tests {
         cache.record_populated_pins(&pins);
         assert!(cache.has_populated_pins(&reordered));
 
-        let reopened = SharedPackageCache::open(root.path(), "cp39-darwin-arm64").unwrap();
+        let reopened = SharedPackageCache::open(root.path(), "cp311-darwin-arm64").unwrap();
         assert!(reopened.has_populated_pins(&pins));
 
         fs::write(

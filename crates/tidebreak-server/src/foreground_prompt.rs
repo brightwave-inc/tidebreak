@@ -1662,7 +1662,7 @@ mod tests {
         // Re-pinned for the Tidebreak product identity carried by the prompt.
         assert_eq!(
             identity(&prompt),
-            "foreground-v2:sha256:8c5ddcc6e2a85de35dadca1b282791a44e0202e67225d2a26aa3b91bbf65a9e6"
+            "foreground-v2:sha256:3ef4bea725300afbc4fae6d46eea7589cef11dcf278d44d22d68961a74819593"
         );
     }
 }

@@ -135,8 +135,10 @@ test("the generator validates every supported local Python runtime", () => {
     ),
   ].map((match) => match.slice(1));
   assert.deepEqual(targets, [
-    ["macosx_11_0_arm64", "3.9", "cp39"],
-    ["macosx_11_0_arm64", "3.10", "cp310"],
+    ["macosx_11_0_arm64", "3.11", "cp311"],
+    ["macosx_11_0_arm64", "3.12", "cp312"],
+    ["macosx_11_0_arm64", "3.13", "cp313"],
+    ["macosx_11_0_arm64", "3.14", "cp314"],
   ]);
 
   assert.match(

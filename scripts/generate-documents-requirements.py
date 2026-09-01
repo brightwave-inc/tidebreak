@@ -11,13 +11,14 @@ set every execution backend guarantees), resolves their transitive closure for
 the image's platform (linux cp311) with pip, and records every
 file hash PyPI publishes for each resolved version. It also resolves the skill
 pins and the baseline pins together for every supported local sandbox runtime
-(macOS arm64 cp39 and cp310), so a pin the local backend could never install —
-the baseline set's whole promise — fails regeneration instead of making every
-local cache-population pass retry it. The Dockerfile's documents stage installs
-the result with `pip install --require-hashes`, so the publish moment trusts
-these recorded digests rather than whatever the index serves that day. Also
-asserts that every compiled package publishes an aarch64 manylinux wheel, so
-the arm64 image build cannot discover a missing wheel at publish time.
+(macOS arm64 CPython 3.11 through 3.14), so a pin the local backend could never
+install — the baseline set's whole promise — fails regeneration instead of
+making every local cache-population pass retry it. The Dockerfile's documents
+stage installs the result with `pip install --require-hashes`, so the publish
+moment trusts these recorded digests rather than whatever the index serves
+that day. It also asserts that every compiled package publishes an aarch64
+manylinux wheel, so the arm64 image build cannot discover a missing wheel at
+publish time.
 """
 
 import json
@@ -34,12 +35,14 @@ BASELINE = pathlib.Path("crates/tidebreak-code-execution/baseline_python_deps.tx
 
 OUTPUT = pathlib.Path("crates/tidebreak-sandbox-agent/documents-requirements.txt")
 
-# Keep this list aligned with the macOS system interpreters the local backend
-# supports. The static pin test guards the cp39 floor because a cp310-only pin
-# would otherwise pass image generation while failing on older local hosts.
+# Keep this list aligned with the stable CPython versions the local backend
+# supports. The static pin test guards the 3.11 floor and every later stable
+# version so an older pin cannot silently block a newer interpreter.
 LOCAL_SANDBOX_TARGETS = (
-    ("macosx_11_0_arm64", "3.9", "cp39"),
-    ("macosx_11_0_arm64", "3.10", "cp310"),
+    ("macosx_11_0_arm64", "3.11", "cp311"),
+    ("macosx_11_0_arm64", "3.12", "cp312"),
+    ("macosx_11_0_arm64", "3.13", "cp313"),
+    ("macosx_11_0_arm64", "3.14", "cp314"),
 )
 
 HEADER = """\
