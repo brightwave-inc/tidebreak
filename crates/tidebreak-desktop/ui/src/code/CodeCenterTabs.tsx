@@ -86,7 +86,7 @@ export type CodeConversationTab = {
   /** Absent on a draft, which has no engine until the reader picks one. */
   harness?: HarnessKind;
   attention?: Attention;
-  /** Only a draft closes here: ending a live agent is a server action. */
+  /** Closing removes the tab without ending the agent or its workspace. */
   closable?: boolean;
 };
 

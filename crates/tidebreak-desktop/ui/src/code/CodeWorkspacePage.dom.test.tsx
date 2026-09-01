@@ -2445,6 +2445,33 @@ describe("CodeWorkspacePage", () => {
     );
   });
 
+  it("closes a started non-Main agent tab without ending the session", async () => {
+    const client = makeClient();
+    const second: CodeSessionSnapshot = {
+      ...SESSION,
+      id: "sess-2",
+      harness_kind: "codex",
+      created_at: "2026-08-15T01:00:00.000Z",
+    };
+    client.listCodeWorkspaceSessions.mockResolvedValue([second, SESSION]);
+    const user = userEvent.setup();
+    const { router } = await mountWorkspace(client, "/code/w/ws-1?task=sess-2");
+
+    expect(
+      await screen.findByRole("tab", { name: "Codex CLI" }),
+    ).toHaveAttribute("aria-selected", "true");
+    await user.click(screen.getByRole("button", { name: "Close Codex CLI" }));
+
+    expect(screen.queryByRole("tab", { name: "Codex CLI" })).toBeNull();
+    expect(screen.getByRole("tab", { name: "Main agent" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    await waitFor(() =>
+      expect(router.state.location.search).not.toHaveProperty("task"),
+    );
+  });
+
   it("opens the New tab menu from the chord instead of the file picker", async () => {
     const client = makeClient();
     await mountWorkspace(client);

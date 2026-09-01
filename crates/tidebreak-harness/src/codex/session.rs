@@ -25,6 +25,7 @@ use crate::{
 use tidebreak_core::{PermissionMode, ReasoningEffort, MAX_NOTICE_CHARS};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
+const THREAD_LOAD_TIMEOUT: Duration = Duration::from_secs(120);
 #[cfg(not(test))]
 const PROCESS_INTERRUPT_GRACE: Duration = Duration::from_secs(2);
 #[cfg(test)]
@@ -934,7 +935,7 @@ impl CodexSession {
                 }),
             )
             .await?;
-        self.read_until_rpc(init_id).await?;
+        self.read_until_rpc(init_id, HANDSHAKE_TIMEOUT).await?;
         self.notify("initialized", None).await?;
 
         // Resume only a thread the engine has actually written. A thread that
@@ -962,7 +963,7 @@ impl CodexSession {
         };
         let resumed = method == "thread/resume";
         let thread_req = self.request(method, params).await?;
-        self.read_until_rpc(thread_req).await?;
+        self.read_until_rpc(thread_req, THREAD_LOAD_TIMEOUT).await?;
         if let Some(detail) = self.lost_resume() {
             // The stored thread is gone on the engine side. Every turn on
             // this child would fail identically, so report the lost resume
@@ -979,8 +980,12 @@ impl CodexSession {
         Ok(())
     }
 
-    async fn read_until_rpc(&self, rpc_id: i64) -> Result<(), HarnessError> {
-        let deadline = tokio::time::Instant::now() + HANDSHAKE_TIMEOUT;
+    async fn read_until_rpc(
+        &self,
+        rpc_id: i64,
+        response_timeout: Duration,
+    ) -> Result<(), HarnessError> {
+        let deadline = tokio::time::Instant::now() + response_timeout;
         loop {
             if tokio::time::Instant::now() > deadline {
                 return Err(HarnessError::Other(format!(
@@ -1689,6 +1694,12 @@ mod tests {
             ("danger-full-access", "never")
         );
         let _ = PathBuf::from("/workspace");
+    }
+
+    #[test]
+    fn thread_loads_have_time_to_restore_large_sessions() {
+        assert!(THREAD_LOAD_TIMEOUT > HANDSHAKE_TIMEOUT);
+        assert_eq!(THREAD_LOAD_TIMEOUT, Duration::from_secs(120));
     }
 
     /// A stand-in `codex app-server --stdio` that speaks just enough of the
