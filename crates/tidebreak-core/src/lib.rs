@@ -220,7 +220,7 @@ pub use computer_use::{
     COMPUTER_USE_CONTROL_TOOLS, COMPUTER_USE_TOOLS, COMPUTER_WAIT_TOOL, MAX_MARK, MAX_READ_DEPTH,
     MAX_READ_NODES, MAX_TYPE_TEXT_CHARS, MAX_WAIT_SECONDS,
 };
-pub use config::{Config, Profile};
+pub use config::{Config, Profile, VaultSecretConfig};
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use db::DbStore;
 pub use deliverable::{

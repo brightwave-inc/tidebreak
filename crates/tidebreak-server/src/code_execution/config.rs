@@ -879,10 +879,9 @@ pub async fn write_credential(
     api_key: &str,
 ) -> std::result::Result<ExecCredentialReadiness, ServerError> {
     let (key, label) = credential_spec(provider)?;
-    secrets
-        .set_secret(key, api_key)
-        .await
-        .map_err(|_| ServerError::internal(format!("{label} credential storage is unavailable")))?;
+    secrets.set_secret(key, api_key).await.map_err(|error| {
+        ServerError::credential_storage(error, format!("{label} credential storage is unavailable"))
+    })?;
     Ok(ExecCredentialReadiness {
         provider,
         has_credential: true,
@@ -894,10 +893,9 @@ pub async fn delete_credential(
     provider: ExecProviderKind,
 ) -> std::result::Result<ExecCredentialReadiness, ServerError> {
     let (key, label) = credential_spec(provider)?;
-    secrets
-        .delete_secret(key)
-        .await
-        .map_err(|_| ServerError::internal(format!("{label} credential storage is unavailable")))?;
+    secrets.delete_secret(key).await.map_err(|error| {
+        ServerError::credential_storage(error, format!("{label} credential storage is unavailable"))
+    })?;
     Ok(ExecCredentialReadiness {
         provider,
         has_credential: false,

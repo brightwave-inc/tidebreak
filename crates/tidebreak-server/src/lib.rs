@@ -103,6 +103,7 @@ mod state;
 mod store_ownership;
 mod task_plan_tool;
 mod turn_worker;
+mod vault_secrets;
 mod view_frames;
 pub mod voice_transcription;
 /// Host-owned, inert web-search configuration and provider selection.
@@ -1741,11 +1742,11 @@ async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser_par
 
 /// The secret store the configured profile keeps its credentials in.
 ///
-/// Two decorators over the OS keychain, and the order matters.
-/// [`BundledSecretProvider`] puts every key in one stored item, so an app
-/// update costs one access prompt rather than one per credential.
-/// [`CachingSecretProvider`] sits above it so a key costs one read of that
-/// item per process rather than one per turn: [`resolver::ConfiguredResolver`]
+/// Desktop stores one bundle in the OS keychain. Self-host stores the same
+/// bundle in Vault KV v2 when configured, or uses an unavailable provider that
+/// still lets provider environment variables act as read fallbacks.
+/// [`CachingSecretProvider`] sits above the bundle so a key costs one storage
+/// read per process rather than one per turn: [`resolver::ConfiguredResolver`]
 /// rebuilds its route set on every turn, and each candidate route reads its
 /// provider's credential to decide whether it exists.
 ///
@@ -1756,12 +1757,48 @@ async fn bind_configured_with_desktop_executor_and_folder_grants_and_browser_par
 /// cached `None` would then hide the session from the sync loop until
 /// restart. Its misses re-ask the store instead; an absent item answers
 /// `NoEntry` without an ACL prompt, so the slow-path rereads are cheap.
-fn secret_provider(config: &Config) -> ProfileSecrets {
-    let keychain: Arc<dyn SecretProvider> = Arc::new(match &config.keychain_service {
-        Some(service) => KeychainSecretProvider::with_service(service),
-        None => KeychainSecretProvider::new(),
-    });
-    let bundle = Arc::new(BundledSecretProvider::new(keychain));
+enum CredentialStoragePlan {
+    Desktop(Option<String>),
+    Vault(vault_secrets::ValidatedVaultConfig),
+    UnavailableSelfHost,
+}
+
+fn credential_storage_plan(config: &Config) -> Result<CredentialStoragePlan> {
+    if config.profile != Profile::SelfHost && config.vault_secrets.is_some() {
+        return Err(AgentError::config(
+            "Vault secret custody is available only with TIDEBREAK_PROFILE=self_host",
+        ));
+    }
+    match config.profile {
+        Profile::Desktop => Ok(CredentialStoragePlan::Desktop(
+            config.keychain_service.clone(),
+        )),
+        Profile::SelfHost => match &config.vault_secrets {
+            Some(vault) => Ok(CredentialStoragePlan::Vault(
+                vault_secrets::VaultSecretProvider::validate(vault)?,
+            )),
+            None => Ok(CredentialStoragePlan::UnavailableSelfHost),
+        },
+        _ => Err(AgentError::config(
+            "the configured profile is not supported",
+        )),
+    }
+}
+
+fn secret_provider(plan: CredentialStoragePlan) -> ProfileSecrets {
+    let storage: Arc<dyn SecretProvider> = match plan {
+        CredentialStoragePlan::Desktop(keychain_service) => Arc::new(match keychain_service {
+            Some(service) => KeychainSecretProvider::with_service(service),
+            None => KeychainSecretProvider::new(),
+        }),
+        CredentialStoragePlan::Vault(config) => {
+            Arc::new(vault_secrets::VaultSecretProvider::new(config))
+        }
+        CredentialStoragePlan::UnavailableSelfHost => {
+            Arc::new(vault_secrets::UnavailableSelfHostSecretProvider)
+        }
+    };
+    let bundle = Arc::new(BundledSecretProvider::new(storage));
     let provider = Arc::new(
         CachingSecretProvider::new(bundle.clone())
             .with_miss_passthrough([crate::connectors::GATEWAY_SECRET_KEY]),
@@ -1787,8 +1824,86 @@ struct ProfileSecrets {
 pub async fn rehome_configured_secrets(
     config: &Config,
 ) -> Result<Vec<(String, secret_rehome::RehomeOutcome)>> {
+    if config.profile != Profile::Desktop {
+        return Err(AgentError::config(
+            "rehome-secrets is available only for the desktop profile because self-host credentials never use the OS keychain",
+        ));
+    }
+    let plan = credential_storage_plan(config)?;
     let store = connect_store(config).await?;
-    secret_rehome::rehome_secrets(&*store, &secret_provider(config).bundle).await
+    secret_rehome::rehome_secrets(&*store, &secret_provider(plan).bundle).await
+}
+
+#[cfg(test)]
+mod profile_secret_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn self_host_without_vault_allows_fallback_reads_but_rejects_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = Config::desktop(directory.path());
+        config.profile = Profile::SelfHost;
+        let secrets = secret_provider(credential_storage_plan(&config).unwrap()).provider;
+
+        assert_eq!(secrets.get_secret("provider.test").await.unwrap(), None);
+        let error = secrets
+            .set_secret("provider.test", "value")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("TIDEBREAK_VAULT_ADDR"));
+
+        let web_search = web_search::write_credential(
+            &*secrets,
+            web_search::WebSearchProviderKind::Brave,
+            "value",
+        )
+        .await
+        .unwrap_err();
+        assert!(web_search.message().contains("TIDEBREAK_VAULT_ADDR"));
+
+        let code_execution = code_execution::write_credential(
+            &*secrets,
+            tidebreak_code_execution::ExecProviderKind::E2b,
+            "value",
+        )
+        .await
+        .unwrap_err();
+        assert!(code_execution.message().contains("TIDEBREAK_VAULT_ADDR"));
+    }
+
+    #[tokio::test]
+    async fn rehome_secrets_rejects_self_host_before_opening_its_store() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = Config::desktop(directory.path());
+        config.profile = Profile::SelfHost;
+
+        let error = rehome_configured_secrets(&config)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("desktop profile"));
+        assert!(error.contains("OS keychain"));
+    }
+
+    #[test]
+    fn desktop_storage_plan_rejects_programmatic_vault_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = Config::desktop(directory.path());
+        config.vault_secrets = Some(tidebreak_core::VaultSecretConfig {
+            address: "https://vault.example.test".into(),
+            token_file: directory.path().join("vault-token"),
+            mount: "secret".into(),
+            path: "tidebreak".into(),
+            namespace: None,
+        });
+
+        let error = match credential_storage_plan(&config) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("desktop accepted Vault settings"),
+        };
+        assert!(error.contains("TIDEBREAK_PROFILE=self_host"));
+    }
 }
 
 // Every parameter is one optional native bridge an embedding may supply;
@@ -1812,6 +1927,14 @@ async fn bind_inner(
     // routable interface, and that refusal should cost nothing and leave
     // nothing behind. See [`Config::bind_addr`].
     let bind_addr = config.bind_addr()?;
+    // Storage planning validates boot-only custody settings without
+    // reading a secret. Keep it before the lock and database so an invalid
+    // Vault address leaves no local or shared resources open.
+    let credential_storage = credential_storage_plan(&config)?;
+    let ProfileSecrets {
+        bundle: secret_bundle,
+        provider: secrets,
+    } = secret_provider(credential_storage);
     // Desktop live delivery remains process-local. Turns, steering, and tool
     // approvals are durable, while one process still owns the complete data
     // directory and its worker set.
@@ -1821,10 +1944,6 @@ async fn bind_inner(
     let sandbox_spawn_execution_location = sandbox_container_admission.execution_location;
     let db = connect_db(&config).await?;
     let store: Arc<dyn Store> = db.clone();
-    let ProfileSecrets {
-        bundle: secret_bundle,
-        provider: secrets,
-    } = secret_provider(&config);
     // An app update replaces this binary, and macOS pins a keychain item's
     // access to the creating binary's signature — so the first boot of a new
     // binary re-homes the credential bundle before any consumer reads from
@@ -1833,8 +1952,10 @@ async fn bind_inner(
     // one read+rewrite of one item, once per binary, with later boots of the
     // same binary skipping it entirely.
     // Best-effort: a failure here must not take boot down with it.
-    if let Err(error) = secret_rehome::rehome_once_per_binary(&*store, &secret_bundle).await {
-        tracing::warn!("could not re-home stored credentials: {error}");
+    if config.profile == Profile::Desktop {
+        if let Err(error) = secret_rehome::rehome_once_per_binary(&*store, &secret_bundle).await {
+            tracing::warn!("could not re-home stored credentials: {error}");
+        }
     }
     // The product boot path is where this platform's OS-managed (MDM) policy
     // reader gets selected; directly assembled AppState stays hermetic. This

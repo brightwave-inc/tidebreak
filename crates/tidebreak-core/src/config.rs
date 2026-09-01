@@ -5,7 +5,7 @@
 //! - **Boot config** — this module. The immutable, start-of-day settings needed
 //!   *before* the store exists: which [`Profile`] to run and where app data
 //!   lives. The profile selects which backend implementations get wired at boot
-//!   (SQLite vs Postgres, keychain vs KMS, …).
+//!   (SQLite vs Postgres, keychain vs Vault, …).
 //! - **Runtime settings** — the mutable, per-user settings that live in the
 //!   `Store`'s `setting` table (enabled model provider + chosen model, approval
 //!   policy, preferences). Reached with `Store::get_setting` / `set_setting`;
@@ -28,8 +28,96 @@ pub enum Profile {
     /// Single-user desktop: SQLite, OS keychain, local filesystem. The default.
     #[default]
     Desktop,
-    /// Self-hosted server: Postgres, env/KMS secrets, object storage.
+    /// Self-hosted server: Postgres, Vault or environment secrets, object storage.
     SelfHost,
+}
+
+/// HashiCorp Vault KV v2 custody for a self-host profile's stored secrets.
+///
+/// The token is read from `token_file` by the server for every Vault request.
+/// Keeping the credential out of this serializable boot config prevents it
+/// from entering diagnostics or persisted configuration by accident.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VaultSecretConfig {
+    /// Vault server base URL. HTTPS is required outside literal loopback development.
+    pub address: String,
+    /// Mounted file containing the Vault token.
+    pub token_file: PathBuf,
+    /// KV v2 mount path, such as `secret`.
+    pub mount: String,
+    /// Secret path below the mount, such as `tidebreak/production`.
+    pub path: String,
+    /// Optional Vault Enterprise or HCP namespace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+}
+
+impl VaultSecretConfig {
+    const DEFAULT_MOUNT: &'static str = "secret";
+    const DEFAULT_PATH: &'static str = "tidebreak";
+
+    fn from_vars(
+        address: Option<String>,
+        token_file: Option<OsString>,
+        mount: Option<String>,
+        path: Option<String>,
+        namespace: Option<String>,
+    ) -> Result<Option<Self>> {
+        let address = address.filter(|value| !value.trim().is_empty());
+        let token_file = token_file
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+        let mount = mount.filter(|value| !value.trim().is_empty());
+        let path = path.filter(|value| !value.trim().is_empty());
+        let namespace = namespace.filter(|value| !value.trim().is_empty());
+        let configured = address.is_some()
+            || token_file.is_some()
+            || mount.is_some()
+            || path.is_some()
+            || namespace.is_some();
+        if !configured {
+            return Ok(None);
+        }
+        let address = address.ok_or_else(|| {
+            AgentError::config(
+                "TIDEBREAK_VAULT_ADDR is required when Vault secret custody is configured",
+            )
+        })?;
+        let token_file = token_file.ok_or_else(|| {
+            AgentError::config(
+                "TIDEBREAK_VAULT_TOKEN_FILE is required when Vault secret custody is configured",
+            )
+        })?;
+        let mount = normalize_vault_path(
+            "TIDEBREAK_VAULT_MOUNT",
+            mount.as_deref().unwrap_or(Self::DEFAULT_MOUNT),
+        )?;
+        let path = normalize_vault_path(
+            "TIDEBREAK_VAULT_PATH",
+            path.as_deref().unwrap_or(Self::DEFAULT_PATH),
+        )?;
+        Ok(Some(Self {
+            address: address.trim().to_string(),
+            token_file,
+            mount,
+            path,
+            namespace: namespace.map(|value| value.trim().to_string()),
+        }))
+    }
+}
+
+fn normalize_vault_path(name: &str, value: &str) -> Result<String> {
+    let value = value.trim().trim_matches('/');
+    if value.is_empty()
+        || value
+            .split('/')
+            .any(|segment| segment.is_empty() || matches!(segment, "." | ".."))
+    {
+        return Err(AgentError::config(format!(
+            "{name} must contain non-empty path segments and no `.` or `..` segment"
+        )));
+    }
+    Ok(value.to_string())
 }
 
 /// Boot configuration.
@@ -117,6 +205,13 @@ pub struct Config {
     /// path prefix, without a trailing slash).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_url: Option<String>,
+    /// Remote credential custody for the self-host profile.
+    ///
+    /// When absent, provider environment variables remain readable, but
+    /// deployment-plane credential writes fail with an operator-facing setup
+    /// error instead of reaching the desktop OS keychain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vault_secrets: Option<VaultSecretConfig>,
     /// The address the API binds, for deployments that must be reachable from
     /// outside the machine (a container publishing a port, say). `None` — the
     /// default — keeps the loopback, ephemeral-port bind every profile has
@@ -257,6 +352,7 @@ impl Config {
             auth_gateway_url: None,
             auth_gateway_verifier_url: None,
             public_url: None,
+            vault_secrets: None,
             listen_addr: None,
             runtime_endpoint: None,
             runtime_profile: None,
@@ -277,7 +373,10 @@ impl Config {
     /// image), `TIDEBREAK_AUTH_TOKENS_FILE` or `TIDEBREAK_AUTH_GATEWAY_URL`
     /// (self-host only; exactly one is required there), optional
     /// `TIDEBREAK_AUTH_GATEWAY_VERIFIER_URL` for cluster-internal validation,
-    /// `TIDEBREAK_PUBLIC_URL` for machine-bound Gateway credentials,
+    /// `TIDEBREAK_PUBLIC_URL` for machine-bound Gateway credentials, optional
+    /// `TIDEBREAK_VAULT_ADDR` and `TIDEBREAK_VAULT_TOKEN_FILE` for self-host
+    /// credential custody, plus optional `TIDEBREAK_VAULT_MOUNT`,
+    /// `TIDEBREAK_VAULT_PATH`, and `TIDEBREAK_VAULT_NAMESPACE`,
     /// `TIDEBREAK_LISTEN_ADDR` (self-host only; default loopback on an
     /// ephemeral port), and optional `TIDEBREAK_RUNTIME_ENDPOINT` plus
     /// `TIDEBREAK_RUNTIME_PROFILE` together to enable remote sessions. Remote
@@ -285,6 +384,13 @@ impl Config {
     /// `TIDEBREAK_RUNTIME_SPAWN_SPEND_CEILING_MICROUSD`, and
     /// `TIDEBREAK_RUNTIME_SESSION_SPEND_CEILING_MICROUSD`.
     pub fn from_env() -> Result<Self> {
+        let vault_secrets = VaultSecretConfig::from_vars(
+            std::env::var("TIDEBREAK_VAULT_ADDR").ok(),
+            std::env::var_os("TIDEBREAK_VAULT_TOKEN_FILE"),
+            std::env::var("TIDEBREAK_VAULT_MOUNT").ok(),
+            std::env::var("TIDEBREAK_VAULT_PATH").ok(),
+            std::env::var("TIDEBREAK_VAULT_NAMESPACE").ok(),
+        )?;
         Self::from_vars(
             std::env::var("TIDEBREAK_PROFILE").ok(),
             std::env::var_os("TIDEBREAK_DATA_DIR"),
@@ -297,6 +403,7 @@ impl Config {
             std::env::var("TIDEBREAK_LISTEN_ADDR").ok(),
             std::env::var("TIDEBREAK_RUNTIME_ENDPOINT").ok(),
             std::env::var("TIDEBREAK_RUNTIME_PROFILE").ok(),
+            vault_secrets,
         )?
         .with_runtime_limit_vars(
             std::env::var("TIDEBREAK_RUNTIME_CONCURRENCY_CAP").ok(),
@@ -325,6 +432,7 @@ impl Config {
         listen_addr: Option<String>,
         runtime_endpoint: Option<String>,
         runtime_profile: Option<String>,
+        vault_secrets: Option<VaultSecretConfig>,
     ) -> Result<Self> {
         let profile = match profile.filter(|value| !value.is_empty()).as_deref() {
             None | Some("desktop") => Profile::Desktop,
@@ -354,6 +462,11 @@ impl Config {
         let auth_gateway_verifier_url =
             auth_gateway_verifier_url.filter(|value| !value.trim().is_empty());
         let public_url = public_url.filter(|value| !value.trim().is_empty());
+        if profile != Profile::SelfHost && vault_secrets.is_some() {
+            return Err(AgentError::config(
+                "Vault secret custody is available only with TIDEBREAK_PROFILE=self_host",
+            ));
+        }
         let listen_addr = match listen_addr.filter(|value| !value.is_empty()) {
             None => None,
             Some(value) => Some(value.parse::<SocketAddr>().map_err(|_| {
@@ -385,6 +498,7 @@ impl Config {
             auth_gateway_url,
             auth_gateway_verifier_url,
             public_url,
+            vault_secrets,
             listen_addr,
             runtime_endpoint,
             runtime_profile,
@@ -588,6 +702,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         let expected = std::env::current_dir().unwrap().join(".tidebreak");
@@ -600,6 +715,7 @@ mod tests {
         let config = Config::from_vars(
             Some(String::new()),
             Some(OsString::from("/data")),
+            None,
             None,
             None,
             None,
@@ -630,6 +746,7 @@ mod tests {
             None,
             Some("primary".into()),
             None,
+            None,
         );
         assert!(refused.is_err());
         let config = Config::from_vars(
@@ -644,6 +761,7 @@ mod tests {
             None,
             Some("primary".into()),
             Some("tidebreak-remote".into()),
+            None,
         )
         .unwrap();
         assert_eq!(config.runtime_endpoint.as_deref(), Some("primary"));
@@ -695,6 +813,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         assert_eq!(config.profile, Profile::SelfHost);
@@ -709,6 +828,7 @@ mod tests {
     fn unknown_profile_var_is_an_error() {
         assert!(Config::from_vars(
             Some("bogus".into()),
+            None,
             None,
             None,
             None,
@@ -753,6 +873,7 @@ mod tests {
             Some("0.0.0.0:8080".into()),
             None,
             None,
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -772,6 +893,7 @@ mod tests {
             None,
             None,
             Some("0.0.0.0".into()),
+            None,
             None,
             None
         )
@@ -803,6 +925,7 @@ mod tests {
             config.runtime_session_spend_ceiling_microusd,
             Some(20_000_000)
         );
+        assert_eq!(config.vault_secrets, None);
     }
 
     #[test]
@@ -842,6 +965,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         assert!(config.container_execution_enabled);
@@ -853,6 +977,7 @@ mod tests {
             None,
             None,
             Some("yes".into()),
+            None,
             None,
             None,
             None,
@@ -879,6 +1004,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -893,6 +1019,109 @@ mod tests {
             config.public_url.as_deref(),
             Some("https://tidebreak.example.test")
         );
+    }
+
+    #[test]
+    fn complete_vault_vars_are_normalized() {
+        let vault = VaultSecretConfig::from_vars(
+            Some(" https://vault.example.test ".into()),
+            Some(OsString::from("/run/secrets/vault-token")),
+            Some("/secret/".into()),
+            Some("/tidebreak/production/".into()),
+            Some(" platform/team-a ".into()),
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(vault.address, "https://vault.example.test");
+        assert_eq!(vault.token_file, PathBuf::from("/run/secrets/vault-token"));
+        assert_eq!(vault.mount, "secret");
+        assert_eq!(vault.path, "tidebreak/production");
+        assert_eq!(vault.namespace.as_deref(), Some("platform/team-a"));
+
+        let config = Config::from_vars(
+            Some("self_host".into()),
+            Some(OsString::from("/data")),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(vault.clone()),
+        )
+        .unwrap();
+        assert_eq!(config.vault_secrets, Some(vault));
+    }
+
+    #[test]
+    fn incomplete_vault_vars_are_rejected() {
+        let missing_address = VaultSecretConfig::from_vars(
+            None,
+            Some(OsString::from("/run/secrets/vault-token")),
+            None,
+            None,
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(missing_address.contains("TIDEBREAK_VAULT_ADDR"));
+
+        let missing_token_file = VaultSecretConfig::from_vars(
+            Some("https://vault.example.test".into()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(missing_token_file.contains("TIDEBREAK_VAULT_TOKEN_FILE"));
+    }
+
+    #[test]
+    fn invalid_vault_paths_are_rejected() {
+        for (mount, path) in [
+            ("/", "tidebreak"),
+            ("secret", "tidebreak//production"),
+            ("secret/../other", "tidebreak"),
+            ("secret", "./tidebreak"),
+        ] {
+            let error = VaultSecretConfig::from_vars(
+                Some("https://vault.example.test".into()),
+                Some(OsString::from("/run/secrets/vault-token")),
+                Some(mount.into()),
+                Some(path.into()),
+                None,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                error.contains("TIDEBREAK_VAULT_MOUNT") || error.contains("TIDEBREAK_VAULT_PATH"),
+                "unexpected error for mount={mount:?} path={path:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn desktop_profile_rejects_vault_settings() {
+        let vault = VaultSecretConfig::from_vars(
+            Some("https://vault.example.test".into()),
+            Some(OsString::from("/run/secrets/vault-token")),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let error = Config::from_vars(
+            None, None, None, None, None, None, None, None, None, None, None, vault,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("TIDEBREAK_PROFILE=self_host"));
     }
 
     #[test]

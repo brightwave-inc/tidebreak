@@ -15,9 +15,10 @@
 //! `tidebreak mcp <workspace>` serves the built-in read-only filesystem tools over
 //! MCP stdio, confined to the explicit workspace directory.
 //!
-//! `tidebreak rehome-secrets` rewrites the profile's stored credentials so their
-//! keychain items belong to the running binary's code signature, which is what
-//! stops macOS asking for credentials an earlier build created.
+//! `tidebreak rehome-secrets` rewrites the desktop profile's stored credentials
+//! so their keychain items belong to the running binary's code signature, which
+//! stops macOS asking for credentials an earlier build created. Self-host
+//! profiles reject this command because they never use the OS keychain.
 //!
 //! `tidebreak output list|show|revisions|export <chat> …` reads a conversation's
 //! outputs and writes one to a path, and `tidebreak attach <chat> <file>` puts a
@@ -1013,8 +1014,8 @@ async fn serve() -> Result<()> {
     server.serve().await
 }
 
-/// Rewrite this profile's stored credentials so their item belongs to this
-/// binary's code signature.
+/// Rewrite the desktop profile's stored credentials so their item belongs to
+/// this binary's code signature.
 ///
 /// macOS keeps prompting for credentials an earlier, differently signed build
 /// created — see [`tidebreak_server::secret_rehome`] for why an approval given at

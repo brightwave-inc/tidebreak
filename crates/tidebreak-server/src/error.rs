@@ -183,6 +183,16 @@ impl ServerError {
             },
         }
     }
+
+    /// Keep secret-store setup errors that an operator can fix while redacting
+    /// all other backend details behind a route-specific fallback message.
+    pub(crate) fn credential_storage(error: AgentError, fallback: impl Into<String>) -> Self {
+        if matches!(error, AgentError::Config(_)) {
+            Self::from(error)
+        } else {
+            Self::internal(fallback)
+        }
+    }
 }
 
 /// Core errors surfacing from a handler are normally internal failures. The
@@ -220,5 +230,22 @@ mod tests {
         assert_eq!(error.status, StatusCode::NOT_FOUND);
         assert_eq!(error.info.kind, "not_found");
         assert!(error.info.message.contains(&project_id.to_string()));
+    }
+
+    #[test]
+    fn credential_storage_keeps_setup_guidance_and_redacts_backend_failures() {
+        let setup = ServerError::credential_storage(
+            AgentError::config("set TIDEBREAK_VAULT_ADDR"),
+            "credential storage is unavailable",
+        );
+        assert_eq!(setup.kind(), "config");
+        assert!(setup.message().contains("TIDEBREAK_VAULT_ADDR"));
+
+        let backend = ServerError::credential_storage(
+            AgentError::Secret("private keychain detail".into()),
+            "credential storage is unavailable",
+        );
+        assert_eq!(backend.kind(), "internal");
+        assert_eq!(backend.message(), "credential storage is unavailable");
     }
 }

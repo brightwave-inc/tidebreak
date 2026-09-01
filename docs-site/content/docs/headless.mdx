@@ -567,6 +567,11 @@ export TIDEBREAK_SERVER_TOKEN=$(grep -m1 'token ' server.log | sed 's|.*token ||
 | `TIDEBREAK_PROFILE` | `desktop` (default, SQLite) or `self_host` (PostgreSQL). |
 | `TIDEBREAK_DATABASE_URL` | Required for `self_host`. |
 | `TIDEBREAK_AUTH_TOKENS_FILE` | Named bearer tokens for `self_host`. Required there. |
+| `TIDEBREAK_VAULT_ADDR` | Vault base URL for stored self-host credentials. Requires `TIDEBREAK_VAULT_TOKEN_FILE`; HTTPS is required except for literal loopback development. |
+| `TIDEBREAK_VAULT_TOKEN_FILE` | Mounted Vault token file. Tidebreak reads it for every request so rotation does not require a restart. |
+| `TIDEBREAK_VAULT_MOUNT` | Optional KV v2 mount path. Defaults to `secret`. |
+| `TIDEBREAK_VAULT_PATH` | Optional deployment path below the mount. Defaults to `tidebreak`. |
+| `TIDEBREAK_VAULT_NAMESPACE` | Optional Vault Enterprise or HCP namespace. |
 | `TIDEBREAK_MCP_CONFIG` | JSON file of external MCP server definitions to load at boot. |
 | `TIDEBREAK_KEYCHAIN_MOCK` | **Debug builds only.** Any non-empty value routes credentials to an in-memory store instead of the OS keychain, so a headless run never triggers a keychain prompt. Secrets do not survive the process. Release binaries ignore it. |
 | `TIDEBREAK_MODEL` | Overrides the model the process launches with. |
@@ -604,6 +609,11 @@ connect to a remote self-host deployment. The profile is for mutually trusting
 users of one operator's deployment — a household or a small team. It is not
 multi-tenant isolation.
 
-Document and blob storage on PostgreSQL, remote secret custody, object storage,
-and multi-process ownership are not finished. Treat self-hosting as
-experimental.
+Stored credentials use HashiCorp Vault KV v2 when
+`TIDEBREAK_VAULT_ADDR` and `TIDEBREAK_VAULT_TOKEN_FILE` are set. Without Vault,
+stored-secret reads return unset so provider environment variables remain
+fallbacks, while writes and deletes fail with setup guidance. The self-host
+profile never opens the desktop OS keychain.
+
+Document and blob storage on PostgreSQL, object storage, and multi-process
+ownership are not finished. Treat self-hosting as experimental.

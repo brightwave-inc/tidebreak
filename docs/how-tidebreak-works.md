@@ -104,7 +104,7 @@ The main local data is easy to recognize:
 | `orphaned-code-worktrees.json` | code worktrees a reset left on disk |
 | `blobs/` | retained immutable document bytes |
 | `tidebreak.lock` | proof that one process owns this data directory |
-| OS keychain | provider credentials, kept outside the database — one item per profile |
+| OS keychain | desktop provider credentials, kept outside the database — one item per profile |
 
 A schema change is an appended migration, so local data survives it
 ([decision 61](decisions/0061-schema-changes-are-migrations.md)). The marker
@@ -779,7 +779,7 @@ new session and publish its tool surface only for subsequent turns.
 The `Profile::SelfHost` shape and PostgreSQL database implementation exist, and
 CI exercises the durable turn state machine against PostgreSQL. Document/blob
 PostgreSQL parity is not comprehensively tested, and production Postgres
-wiring, remote secret custody, and object storage remain future integration
+wiring and object storage remain future integration
 work. A self-host server holds a PostgreSQL advisory lease for its lifetime, so
 another process cannot start duplicate workers against the same database;
 horizontal multi-process serving remains unsupported. Building
@@ -838,6 +838,17 @@ table configures the deployment itself, shared credentials are the point of a
 team deployment, and MCP servers are host processes. The profile targets one
 operator's small team, not adversarial tenants; multi-tenant isolation is
 explicitly not claimed.
+
+**Credential custody follows the profile.** Desktop keeps one credential
+bundle in the OS keychain. Self-host never opens that keychain. When
+`TIDEBREAK_VAULT_ADDR` and `TIDEBREAK_VAULT_TOKEN_FILE` are configured, the
+server stores the same bundle in HashiCorp Vault KV v2 under the configured
+mount and deployment path. It reads the mounted token file for every request,
+refuses redirects, bounds response bodies, and requires HTTPS except for a
+literal loopback development address. Without Vault, stored-secret reads
+return unset so provider environment variables remain fallbacks. Writes and
+deletes fail with setup guidance. The manual and boot-time keychain re-home
+paths run only for Desktop.
 
 **Where it listens.** The server binds loopback on an ephemeral port by
 default; a self-host deployment that must be reachable from outside its machine
@@ -919,7 +930,7 @@ The main next steps are:
 - add richer parsers;
 - finish the self-host profile — the request path resolves a principal and
   queries are owner-scoped (#853), so what remains is production integration:
-  Postgres document/blob parity, remote secret custody, object storage, and
+  Postgres document/blob parity, object storage, and
   distributed ownership for horizontal multi-process serving;
 - add health-aware provider failover;
 - add output deletion, version history, richer formats, and durable export

@@ -64,9 +64,10 @@ services:
       TIDEBREAK_LISTEN_ADDR: 0.0.0.0:8080
       # Log filter; see the server's `logging` module for the syntax.
       TIDEBREAK_LOG: ${TIDEBREAK_LOG:-info}
-      # Model credentials. The container has no OS keychain, so a self-host
-      # deployment supplies provider keys through the environment. Only the
-      # ones you set are used; unset variables resolve to no credential.
+      # Model credential fallbacks for this minimal stack. To save shared
+      # credentials through Tidebreak instead, mount a Vault token file and
+      # pass the TIDEBREAK_VAULT_* variables described in docs/self-hosting.md.
+      # Only the variables you set are used.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     volumes:
