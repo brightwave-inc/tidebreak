@@ -15,7 +15,8 @@
 //! prevent.
 
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set, Statement,
+    TransactionTrait,
 };
 
 use crate::code::{
@@ -464,6 +465,46 @@ pub async fn latest_incarnation(
         .map_err(store_err)?
         .map(incarnation_from_model)
         .transpose()
+}
+
+/// The latest incarnation of every session that is neither fenced nor
+/// ended, across every owner.
+///
+/// The remote sweep's system path. One query does what a session listing
+/// followed by a per-session [`latest_incarnation`] read would do, so the
+/// sweep's cost tracks the sessions still alive rather than the whole
+/// session history. Sessions with no incarnation at all are absent, which is
+/// the same answer the two-step read gives for them.
+pub async fn latest_incarnations_of_live_sessions_all_owners(
+    store: &DbStore,
+) -> Result<Vec<CodeSessionIncarnation>> {
+    let sql = format!(
+        r#"
+SELECT i.*
+FROM code_session_incarnation i
+JOIN code_session s ON s.id = i.session_id AND s.owner = i.owner
+WHERE s.lifecycle NOT IN ('{fenced}', '{ended}')
+  AND i.incarnation = (
+    SELECT MAX(later.incarnation)
+    FROM code_session_incarnation later
+    WHERE later.owner = i.owner AND later.session_id = i.session_id
+  )
+ORDER BY s.created_at DESC, i.id ASC
+"#,
+        fenced = crate::code::CodeSessionLifecycle::Fenced.as_str(),
+        ended = crate::code::CodeSessionLifecycle::Ended.as_str(),
+    );
+    entities::code_session_incarnation::Entity::find()
+        .from_raw_sql(Statement::from_string(
+            store.conn.get_database_backend(),
+            sql,
+        ))
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .map(incarnation_from_model)
+        .collect()
 }
 
 /// The session's cumulative spend across every incarnation, in micro-USD.

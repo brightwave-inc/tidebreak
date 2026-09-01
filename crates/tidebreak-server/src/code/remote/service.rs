@@ -1,26 +1,39 @@
 //! Wire remote sessions into the running server: the configured transport,
-//! the per-session pump tasks, and the periodic sweep that reconciles both.
+//! the per-session pump tasks, and the sweep that reconciles both.
 //!
-//! The sweep is the only scheduler. Every tick it closes stale intents and
+//! The sweep is the only scheduler. Every pass it closes stale intents and
 //! makes sure each incarnation that still owes events has a pump task. Pump
 //! tasks hold the long event wait; everything else is a cheap store read, so
-//! a crashed or finished task is simply respawned on the next tick from
+//! a crashed or finished task is simply respawned on the next pass from
 //! durable state.
+//!
+//! Passes are wake-driven. A submit that provisioned, a parked follow-up, an
+//! external message, or a pump task exiting wakes the sweep at once; the
+//! timer between wakes is only a safety net, and it slows right down when no
+//! incarnation is draining so an idle deployment stops paying for a scan
+//! nobody needs.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
 
+use tokio::sync::Notify;
 use tracing::warn;
 
-use tidebreak_core::db::code::{get_session, latest_incarnation, list_sessions_all_owners};
+use tidebreak_core::db::code::{get_session, latest_incarnations_of_live_sessions_all_owners};
 use tidebreak_core::{CodeSessionId, CodeSessionLifecycle, DbStore, IncarnationState, OwnerId};
 
 use super::super::runtime::CodeRuntime;
 use super::driver::{sweep_stale_intents, RemoteDriver, RemoteSpawnSettings};
 use super::SandboxProvisioner;
 
-/// How often the sweep reconciles pump tasks.
-const REMOTE_SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+/// The safety-net interval between passes while an incarnation is draining.
+/// Wakes carry the normal traffic; this bounds how long a missed wake or a
+/// pump that exited without one can go unnoticed.
+const ACTIVE_SWEEP_FLOOR: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The safety-net interval between passes while nothing remote is draining.
+/// The stale-intent cutoff is measured in minutes, so this loses nothing.
+const IDLE_SWEEP_FLOOR: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// The held wait a pump task asks the events read to hold.
 const PUMP_HELD_WAIT_SECONDS: u16 = 20;
@@ -56,12 +69,16 @@ pub(crate) struct RemoteSessions {
     /// Spawn-time settings.
     pub(crate) settings: RemoteSpawnSettings,
     /// Live pump tasks by session. The sweep prunes finished entries and
-    /// spawns missing ones; nothing else writes here.
+    /// spawns missing ones; a pump task removes its own entry on the way out
+    /// so the pass it wakes sees the slot free.
     pumps: Mutex<HashMap<CodeSessionId, tokio::task::JoinHandle<()>>>,
     /// Sessions whose queue promotion is on hold until the given instant,
     /// after a machine-side refusal. In-memory on purpose: a restart retries
     /// once and re-arms the hold from the fresh refusal.
     promotion_holds: Mutex<HashMap<CodeSessionId, std::time::Instant>>,
+    /// Wakes the sweep for an immediate pass. A wake with no waiter is kept
+    /// until the sweep next listens, so none is lost between passes.
+    sweep_wake: Notify,
 }
 
 impl RemoteSessions {
@@ -74,7 +91,13 @@ impl RemoteSessions {
             settings,
             pumps: Mutex::new(HashMap::new()),
             promotion_holds: Mutex::new(HashMap::new()),
+            sweep_wake: Notify::new(),
         })
+    }
+
+    /// Ask the sweep for a pass now instead of at its next floor.
+    pub(crate) fn wake_sweep(&self) {
+        self.sweep_wake.notify_one();
     }
 
     /// The driver view over this context for one call.
@@ -137,7 +160,16 @@ impl RemoteSessions {
         pumps.insert(
             session,
             tokio::spawn(async move {
-                pump_session(runtime, remote, owner, session).await;
+                let wake = pump_session(runtime, Arc::clone(&remote), owner, session).await;
+                // Free the slot before waking: the pass this wake starts
+                // must see no entry, or it skips the respawn and waits out
+                // a floor instead. The entry is always this task's own —
+                // the sweep only inserts where none exists, and this one
+                // stands until here.
+                remote.pumps.lock().expect("remote pumps").remove(&session);
+                if wake {
+                    remote.wake_sweep();
+                }
             }),
         );
     }
@@ -154,24 +186,29 @@ impl Drop for RemoteSessions {
 /// One session's pump loop: drain events on the held wait until the session
 /// stops being pumpable. Exits on any fault or terminal condition — the
 /// sweep respawns from durable state, so an exit is never a leak.
+///
+/// Returns whether the exit is worth an immediate sweep pass. A stopped
+/// incarnation or a fence may leave a queue head to promote; a sign-in wait
+/// does not, and waking on it would respawn the pump in a tight loop until
+/// the owner signs in, so that exit waits for the floor.
 async fn pump_session(
     runtime: Weak<CodeRuntime>,
     remote: Arc<RemoteSessions>,
     owner: OwnerId,
     session_id: CodeSessionId,
-) {
+) -> bool {
     loop {
         let Some(runtime) = runtime.upgrade() else {
-            return;
+            return false;
         };
         let Ok(Some(mut session)) = get_session(&runtime.db, &owner, session_id).await else {
-            return;
+            return false;
         };
         if matches!(
             session.lifecycle,
             CodeSessionLifecycle::Fenced | CodeSessionLifecycle::Ended
         ) {
-            return;
+            return false;
         }
         let driver = remote.driver(&runtime.db, runtime.bus.as_ref());
         match driver.pump(&mut session, PUMP_HELD_WAIT_SECONDS).await {
@@ -179,10 +216,10 @@ async fn pump_session(
                 if report.sign_in_required {
                     // Nothing drains until the owner signs in; the sweep
                     // brings the task back to try again.
-                    return;
+                    return false;
                 }
                 if report.incarnation_stopped || report.fenced.is_some() {
-                    return;
+                    return true;
                 }
             }
             Err(error) => {
@@ -202,14 +239,25 @@ pub(crate) struct RemoteSweepGuard(Option<tokio::task::JoinHandle<()>>);
 impl RemoteSweepGuard {
     pub(crate) fn spawn(runtime: Weak<CodeRuntime>) -> Self {
         let handle = tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(REMOTE_SWEEP_INTERVAL);
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
-                ticker.tick().await;
                 let Some(runtime) = runtime.upgrade() else {
                     return;
                 };
-                sweep_remote(&runtime).await;
+                let activity = sweep_remote(&runtime).await;
+                let remote = runtime.remote_sessions();
+                // Drop the strong handle across the wait so shutdown is not
+                // held open by a sleeping sweep.
+                drop(runtime);
+                let floor = sweep_floor(activity);
+                match remote {
+                    Some(remote) => {
+                        tokio::select! {
+                            () = tokio::time::sleep(floor) => {}
+                            () = remote.sweep_wake.notified() => {}
+                        }
+                    }
+                    None => tokio::time::sleep(floor).await,
+                }
             }
         });
         Self(Some(handle))
@@ -224,46 +272,57 @@ impl Drop for RemoteSweepGuard {
     }
 }
 
-/// One sweep tick: expire stale intents and reconcile pump tasks against
+/// What one sweep pass found, which sets the floor before the next.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RemoteSweepActivity {
+    /// Incarnations that still owe events and so hold a pump task.
+    pub(crate) draining: usize,
+}
+
+/// The safety-net wait after a pass: tight while something drains, slow
+/// when nothing does. Wakes cut either short.
+fn sweep_floor(activity: RemoteSweepActivity) -> std::time::Duration {
+    if activity.draining > 0 {
+        ACTIVE_SWEEP_FLOOR
+    } else {
+        IDLE_SWEEP_FLOOR
+    }
+}
+
+/// One sweep pass: expire stale intents and reconcile pump tasks against
 /// the incarnations that still owe events.
-pub(crate) async fn sweep_remote(runtime: &Arc<CodeRuntime>) {
+pub(crate) async fn sweep_remote(runtime: &Arc<CodeRuntime>) -> RemoteSweepActivity {
+    let mut activity = RemoteSweepActivity::default();
     let Some(remote) = runtime.remote_sessions() else {
-        return;
+        return activity;
     };
     if let Err(error) =
         sweep_stale_intents(&runtime.db, runtime.bus.as_ref(), chrono::Utc::now()).await
     {
         warn!(%error, "the stale-intent sweep failed");
     }
-    match list_sessions_all_owners(&runtime.db).await {
-        Ok(sessions) => {
-            for session in sessions {
-                if matches!(
-                    session.lifecycle,
-                    CodeSessionLifecycle::Fenced | CodeSessionLifecycle::Ended
-                ) {
-                    continue;
-                }
-                let Ok(Some(row)) =
-                    latest_incarnation(&runtime.db, &session.owner, session.id).await
-                else {
-                    continue;
-                };
+    // One join: the latest incarnation of every session that is neither
+    // fenced nor ended. The cost tracks live sessions, not session history.
+    match latest_incarnations_of_live_sessions_all_owners(&runtime.db).await {
+        Ok(rows) => {
+            for row in rows {
                 let drains = match row.state {
                     IncarnationState::Active => true,
                     IncarnationState::Stopped => !row.terminal_events_journaled,
                     IncarnationState::Intent => false,
                 };
                 if drains && row.sandbox_id.is_some() {
-                    remote.ensure_pump(runtime, session.owner.clone(), session.id);
+                    activity.draining += 1;
+                    remote.ensure_pump(runtime, row.owner.clone(), row.session_id);
                 }
             }
         }
-        Err(error) => warn!(%error, "could not list sessions for the remote sweep"),
+        Err(error) => warn!(%error, "could not list incarnations for the remote sweep"),
     }
     if let Err(error) = runtime.promote_remote_queue_heads().await {
         warn!(error = ?error, "remote queue promotion failed");
     }
+    activity
 }
 
 #[cfg(test)]

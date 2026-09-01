@@ -4371,6 +4371,10 @@ impl CodeRuntime {
         let outcome = driver
             .submit_turn(&mut session, workspace, &repo, &message)
             .await?;
+        // A provisioned or delivered turn has events to drain and a parked
+        // one has a head to promote; either way the sweep should look now,
+        // not at its next floor.
+        remote.wake_sweep();
         self.relay_remote_outcome(owner, &session, outcome, message, queue_if_busy)
             .await
     }
@@ -4457,18 +4461,27 @@ impl CodeRuntime {
         )
         .await
         .map_err(ServerError::from)?;
+        if let Some(remote) = self.remote_sessions() {
+            remote.wake_sweep();
+        }
         Ok(SubmitTurnOutcome::Queued(Box::new(row)))
     }
 
-    /// Promote the queue head of every idle remote session. Called from the
-    /// remote sweep; local sessions drain their own queues through their
-    /// workers and are skipped here.
+    /// Promote the queue head of every idle remote session that has one.
+    /// Called from the remote sweep; local sessions drain their own queues
+    /// through their workers and are skipped here.
     pub(crate) async fn promote_remote_queue_heads(&self) -> Result<(), ServerError> {
         if self.remote.is_none() {
             return Ok(());
         }
-        let sessions = list_sessions_all_owners(&self.db).await?;
-        for session in sessions {
+        // Only sessions holding a queue can have a head to promote, so the
+        // pass reads those rather than every session on the machine.
+        for (owner, session_id) in
+            tidebreak_core::db::code::sessions_with_queued_turns_all_owners(&self.db).await?
+        {
+            let Some(session) = get_session(&self.db, &owner, session_id).await? else {
+                continue;
+            };
             self.try_promote_remote_head(session).await?;
         }
         Ok(())
@@ -4513,9 +4526,12 @@ impl CodeRuntime {
             .submit_turn_from(&mut session, &workspace, &repo, &message, Some(&head))
             .await
         {
-            // The claim was the atomic promotion; nothing to delete.
+            // The claim was the atomic promotion; nothing to delete. A
+            // reincarnation has a fresh sandbox to pump, so the sweep
+            // looks again now rather than at its next floor.
             Ok(Outcome::Delivered { .. }) | Ok(Outcome::Reincarnated { .. }) => {
                 remote.clear_promotion_hold(session.id);
+                remote.wake_sweep();
             }
             // Permanent for this session: nothing exposes a way to raise
             // the ceiling, and every retry would re-journal the refusal

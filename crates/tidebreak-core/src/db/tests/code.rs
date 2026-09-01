@@ -5097,6 +5097,118 @@ async fn ingest_journals_once_per_sandbox_event_and_resumes_from_the_cursor() {
     .is_err());
 }
 
+/// The sweep's one-query read matches the two-step listing it replaces:
+/// every session that is neither fenced nor ended shows exactly its latest
+/// incarnation, however many it holds, and terminal sessions show nothing.
+#[tokio::test]
+async fn live_session_incarnations_match_the_per_session_read() {
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+
+    // Two incarnations: only the second is the latest.
+    let (twice, _) = seed_owner(&store, &owner, "twice").await;
+    let superseded = admitted(admit(&store, &owner, twice, 1, 8).await);
+    crate::db::code::activate_incarnation(&store, &owner, superseded.id, "sb-twice-1")
+        .await
+        .unwrap();
+    crate::db::code::stop_incarnation(&store, &owner, superseded.id, Some("done"))
+        .await
+        .unwrap();
+    crate::db::code::mark_incarnation_terminal_events_journaled(&store, &owner, superseded.id)
+        .await
+        .unwrap();
+    let latest = admitted(admit(&store, &owner, twice, 2, 8).await);
+    crate::db::code::activate_incarnation(&store, &owner, latest.id, "sb-twice-2")
+        .await
+        .unwrap();
+
+    // A reservation that has not activated is still the latest row.
+    let (reserving, _) = seed_owner(&store, &owner, "reserving").await;
+    let reserved = admitted(admit(&store, &owner, reserving, 1, 8).await);
+
+    // No incarnation at all: absent from both reads.
+    let (_bare, _) = seed_owner(&store, &owner, "bare").await;
+
+    // Terminal sessions drop out even with a live incarnation.
+    let (ended, _) = seed_owner(&store, &owner, "ended").await;
+    let ended_row = admitted(admit(&store, &owner, ended, 1, 8).await);
+    crate::db::code::activate_incarnation(&store, &owner, ended_row.id, "sb-ended")
+        .await
+        .unwrap();
+    let mut ended_session = get_session(&store, &owner, ended).await.unwrap().unwrap();
+    ended_session.lifecycle = CodeSessionLifecycle::Ended;
+    assert!(save_session(&store, &ended_session).await.unwrap());
+    let (fenced, _) = seed_owner(&store, &owner, "fenced").await;
+    let fenced_row = admitted(admit(&store, &owner, fenced, 1, 8).await);
+    crate::db::code::activate_incarnation(&store, &owner, fenced_row.id, "sb-fenced")
+        .await
+        .unwrap();
+    let mut fenced_session = get_session(&store, &owner, fenced).await.unwrap().unwrap();
+    fenced_session.lifecycle = CodeSessionLifecycle::Fenced;
+    fenced_session.fence_reason = Some(FenceReason::OrphanAlive);
+    assert!(save_session(&store, &fenced_session).await.unwrap());
+
+    let mut expected = Vec::new();
+    for session in crate::db::code::list_sessions_all_owners(&store)
+        .await
+        .unwrap()
+    {
+        if matches!(
+            session.lifecycle,
+            CodeSessionLifecycle::Fenced | CodeSessionLifecycle::Ended
+        ) {
+            continue;
+        }
+        if let Some(row) = crate::db::code::latest_incarnation(&store, &session.owner, session.id)
+            .await
+            .unwrap()
+        {
+            expected.push(row.id);
+        }
+    }
+    let joined = crate::db::code::latest_incarnations_of_live_sessions_all_owners(&store)
+        .await
+        .unwrap();
+    let got: Vec<_> = joined.iter().map(|row| row.id).collect();
+    assert_eq!(got.len(), expected.len());
+    assert!(expected.iter().all(|id| got.contains(id)));
+    assert_eq!(got.len(), 2);
+    assert!(got.contains(&latest.id));
+    assert!(got.contains(&reserved.id));
+    assert!(!got.contains(&superseded.id));
+    // The joined rows carry the full incarnation, not just its key.
+    let live = joined.iter().find(|row| row.id == latest.id).unwrap();
+    assert_eq!(live.sandbox_id.as_deref(), Some("sb-twice-2"));
+    assert_eq!(live.state, crate::code::IncarnationState::Active);
+}
+
+/// Promotion only has work where a queue exists, so the sweep's listing
+/// names each queued session once and skips sessions with nothing parked.
+#[tokio::test]
+async fn queued_session_listing_names_each_queued_session_once() {
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let (twice, _) = seed_owner(&store, &owner, "queued-twice").await;
+    let (once, _) = seed_owner(&store, &owner, "queued-once").await;
+    let (_empty, _) = seed_owner(&store, &owner, "queued-none").await;
+    enqueue_queued_turn(&store, &owner, &queued_message(twice, "first"))
+        .await
+        .unwrap();
+    enqueue_queued_turn(&store, &owner, &queued_message(twice, "second"))
+        .await
+        .unwrap();
+    enqueue_queued_turn(&store, &owner, &queued_message(once, "only"))
+        .await
+        .unwrap();
+
+    let listed = crate::db::code::sessions_with_queued_turns_all_owners(&store)
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 2);
+    assert!(listed.contains(&(owner.clone(), twice)));
+    assert!(listed.contains(&(owner.clone(), once)));
+}
+
 /// A session bound to a fresh conversation, for the external message tests.
 async fn seed_external_session(
     store: &crate::db::DbStore,
