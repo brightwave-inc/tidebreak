@@ -28,6 +28,9 @@ const harness: CodeHarnessOption = {
     native_interrupt: "supported",
     image_input: "unsupported",
     slash_commands: "supported",
+    durable_parks: "unsupported",
+    user_questions: "unsupported",
+    standing_grants: "unsupported",
   },
 };
 

@@ -10,6 +10,12 @@ export function approvalTitle(kind: CodeApprovalKind): string {
       return "Use network";
     case "other":
       return "Allow action";
+    case "tool_use":
+      return "Run tool";
+    case "questions":
+      return "Answer questions";
+    case "plan":
+      return "Review plan";
   }
 }
 
@@ -24,6 +30,12 @@ export function approvalSummary(kind: CodeApprovalKind): string {
     case "network":
     case "other":
       return kind.summary.trim() || "The engine requested approval.";
+    case "tool_use":
+      return kind.preview.summary?.trim() || "The engine requested a tool call.";
+    case "questions":
+      return kind.questions.map((question) => question.question).join("\n");
+    case "plan":
+      return `The engine proposed a plan. Accepting moves the session to ${kind.proposed_mode}.`;
   }
 }
 
