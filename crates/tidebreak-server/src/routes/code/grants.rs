@@ -130,6 +130,20 @@ pub struct ConnectStartResponse {
     pub expires_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// `GET /external/connect/probe` — the pairing check an operator's setup
+/// page runs. It proves three things and changes nothing: the machine is
+/// reachable, code mode is configured, and the presented bootstrap token
+/// is one this deployment accepts. An adapter whose token the machine
+/// refuses fails here, at setup time, instead of at a user's first
+/// connect card.
+pub async fn connect_probe(
+    State(state): State<AppState>,
+    _bootstrap: AdapterBootstrapAuth,
+) -> Result<StatusCode, ServerError> {
+    let _ = adapter_runtime(&state)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// `POST /external/connect` — the adapter parks a handshake and gets the
 /// one-time nonce for its connect card. On the external surface: the
 /// adapter holds no grant yet, and the handshake is inert until the owner

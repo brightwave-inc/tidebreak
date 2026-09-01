@@ -622,6 +622,11 @@ pub fn app(state: AppState) -> Router {
             post(routes::code::connect_start)
                 .layer(RequestBodyLimitLayer::new(MAX_EXTERNAL_CONNECT_BODY_BYTES)),
         )
+        // The operator's pairing probe: bootstrap-authenticated, no writes.
+        .route(
+            "/external/connect/probe",
+            axum::routing::get(routes::code::connect_probe),
+        )
         .route(
             "/external/connect/{nonce}/status",
             get(routes::code::connect_status),
