@@ -16,8 +16,9 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 use super::wire::{
-    AgentActivityItem, AgentRunSnapshot, ChatSummary, GrantRung, ModelCatalog, OutputPreview,
-    OutputRevisions, OutputsCatalog, PendingPlan, PendingQuestions, ProviderInfo, ProvidersList,
+    AgentActivityHistoryItem, AgentRunSnapshot, ApprovalGrantRung, Chat, ModelCatalog,
+    OutputPreview, OutputRevisions, OutputsCatalog, PendingPlanApproval, PendingUserQuestions,
+    ProviderInfo, ProvidersList,
 };
 
 /// The chat event stream once the upgrade completes.
@@ -223,12 +224,12 @@ impl Client {
     }
 
     /// One chat's record (title, model, permission mode, …).
-    pub async fn get_chat(&self, chat: ChatId) -> Result<ChatSummary> {
+    pub async fn get_chat(&self, chat: ChatId) -> Result<Chat> {
         self.get_json(format!("{}/chats/{chat}", self.base)).await
     }
 
     /// Every chat, most recently active first (server ordering).
-    pub async fn list_chats(&self) -> Result<Vec<ChatSummary>> {
+    pub async fn list_chats(&self) -> Result<Vec<Chat>> {
         self.get_json(format!("{}/chats", self.base)).await
     }
 
@@ -246,11 +247,7 @@ impl Client {
     }
 
     /// Patch the chat's permission mode; `None` clears back to `ask`.
-    pub async fn set_chat_permission_mode(
-        &self,
-        chat: ChatId,
-        mode: Option<&str>,
-    ) -> Result<ChatSummary> {
+    pub async fn set_chat_permission_mode(&self, chat: ChatId, mode: Option<&str>) -> Result<Chat> {
         let response = self
             .http
             .patch(format!("{}/chats/{chat}", self.base))
@@ -260,7 +257,7 @@ impl Client {
             .map_err(request_error)?;
         Self::expect_success(response)
             .await?
-            .json::<ChatSummary>()
+            .json::<Chat>()
             .await
             .map_err(request_error)
     }
@@ -460,7 +457,7 @@ impl Client {
         &self,
         chat: ChatId,
         run: AgentRunId,
-    ) -> Result<Vec<AgentActivityItem>> {
+    ) -> Result<Vec<AgentActivityHistoryItem>> {
         self.get_json(format!(
             "{}/chats/{chat}/agent-runs/{run}/activity",
             self.base
@@ -509,7 +506,7 @@ impl Client {
     }
 
     /// Plans awaiting review on this chat.
-    pub async fn list_pending_plans(&self, chat: ChatId) -> Result<Vec<PendingPlan>> {
+    pub async fn list_pending_plans(&self, chat: ChatId) -> Result<Vec<PendingPlanApproval>> {
         self.get_json(format!("{}/chats/{chat}/plans/pending", self.base))
             .await
     }
@@ -550,7 +547,7 @@ impl Client {
     }
 
     /// Question blocks the model is waiting on.
-    pub async fn list_pending_questions(&self, chat: ChatId) -> Result<Vec<PendingQuestions>> {
+    pub async fn list_pending_questions(&self, chat: ChatId) -> Result<Vec<PendingUserQuestions>> {
         self.get_json(format!("{}/chats/{chat}/questions/pending", self.base))
             .await
     }
@@ -660,7 +657,7 @@ impl Client {
         call_id: CallId,
         approve: bool,
         reason: &str,
-        grant: Option<GrantRung>,
+        grant: Option<ApprovalGrantRung>,
     ) -> Result<()> {
         let body = if approve {
             match grant {

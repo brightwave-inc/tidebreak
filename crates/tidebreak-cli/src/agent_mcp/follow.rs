@@ -15,7 +15,9 @@ use serde_json::json;
 use tidebreak_core::{AgentError, CallId, ChatId, Result, TurnId, REQUEST_FOLDER_ACCESS_TOOL};
 
 use crate::api::client::{Client, DurableTurn, DurableTurnStatus};
-use crate::api::wire::ClientEvent;
+use crate::api::wire::{
+    ApprovalGrantRung, RendererAgentEvent, RendererToolName, ToolActionPreview, ToolApprovalKind,
+};
 use crate::event_stream::{EventStream, StreamNext};
 use crate::print::protocol::Interaction;
 
@@ -103,7 +105,7 @@ pub(crate) async fn follow_open_stream(
         };
 
         let event = match frame {
-            StreamNext::Frame(_raw, event) => event,
+            StreamNext::Frame(_raw, event) => *event,
             StreamNext::Ignore => continue,
             StreamNext::Durable(turn) => {
                 return Ok(from_durable(turn, assistant_text));
@@ -111,25 +113,26 @@ pub(crate) async fn follow_open_stream(
         };
 
         if !ours {
-            if !matches!(&event, ClientEvent::TurnStarted { turn_id: id } if *id == turn_id) {
+            if !matches!(&event, RendererAgentEvent::TurnStarted { turn_id: id } if *id == turn_id)
+            {
                 continue;
             }
             ours = true;
         }
 
         match event {
-            ClientEvent::TextDelta { text } => assistant_text.push_str(&text),
-            ClientEvent::ToolCallStarted { call_id, name } => {
-                if name == REQUEST_FOLDER_ACCESS_TOOL {
+            RendererAgentEvent::TextDelta { text } => assistant_text.push_str(&text),
+            RendererAgentEvent::ToolCallStarted { call_id, name } => {
+                if name == RendererToolName::RequestFolderAccess {
                     folder_watch = Some(call_id);
                 }
             }
-            ClientEvent::ToolCallCompleted { call_id, .. } => {
+            RendererAgentEvent::ToolCallCompleted { call_id, .. } => {
                 if folder_watch == Some(call_id) {
                     folder_watch = None;
                 }
             }
-            ClientEvent::ApprovalRequired {
+            RendererAgentEvent::ApprovalRequired {
                 call_id,
                 action,
                 approval,
@@ -150,8 +153,8 @@ pub(crate) async fn follow_open_stream(
                     events_cursor: stream.last_seq(),
                 });
             }
-            ClientEvent::PlanProposed { call_id } => {
-                if let Some(interaction) = pending_plan(client, chat, call_id).await? {
+            RendererAgentEvent::PlanProposed { call_id, .. } => {
+                if let Some(interaction) = pending_plan(client, chat, Some(call_id)).await? {
                     return Ok(TurnResult {
                         status: TurnStatus::NeedsPlanDecision,
                         assistant_text,
@@ -160,8 +163,8 @@ pub(crate) async fn follow_open_stream(
                     });
                 }
             }
-            ClientEvent::UserQuestionsAsked { call_id } => {
-                if let Some(interaction) = pending_questions(client, chat, call_id).await? {
+            RendererAgentEvent::UserQuestionsAsked { call_id, .. } => {
+                if let Some(interaction) = pending_questions(client, chat, Some(call_id)).await? {
                     return Ok(TurnResult {
                         status: TurnStatus::NeedsAnswer,
                         assistant_text,
@@ -170,7 +173,7 @@ pub(crate) async fn follow_open_stream(
                     });
                 }
             }
-            ClientEvent::TurnCompleted { .. } => {
+            RendererAgentEvent::TurnCompleted { .. } => {
                 return Ok(TurnResult {
                     status: TurnStatus::Completed,
                     assistant_text,
@@ -178,7 +181,7 @@ pub(crate) async fn follow_open_stream(
                     events_cursor: stream.last_seq(),
                 });
             }
-            ClientEvent::TurnFailed { .. } | ClientEvent::TurnRefused { .. } => {
+            RendererAgentEvent::TurnFailed { .. } | RendererAgentEvent::TurnRefused { .. } => {
                 return Ok(TurnResult {
                     status: TurnStatus::Failed,
                     assistant_text,
@@ -186,7 +189,7 @@ pub(crate) async fn follow_open_stream(
                     events_cursor: stream.last_seq(),
                 });
             }
-            ClientEvent::TurnCancelled { .. } => {
+            RendererAgentEvent::TurnCancelled { .. } => {
                 return Ok(TurnResult {
                     status: TurnStatus::Cancelled,
                     assistant_text,
@@ -229,10 +232,10 @@ fn from_durable(turn: DurableTurn, assistant_text: String) -> TurnResult {
 
 fn pending_approval(
     call_id: CallId,
-    action: String,
-    approval: String,
-    grant_rungs: Vec<crate::api::wire::GrantRung>,
-    preview: Option<serde_json::Value>,
+    action: RendererToolName,
+    approval: ToolApprovalKind,
+    grant_rungs: Vec<ApprovalGrantRung>,
+    preview: Option<ToolActionPreview>,
 ) -> serde_json::Value {
     json!({
         "type": "approval",
@@ -254,8 +257,8 @@ fn pending_from_interaction(interaction: &Interaction) -> serde_json::Value {
             preview,
         } => pending_approval(
             *call_id,
-            action.clone(),
-            approval.clone(),
+            *action,
+            *approval,
             grant_rungs.clone(),
             preview.clone(),
         ),
@@ -404,7 +407,7 @@ pub(crate) enum Decision {
         call_id: CallId,
         approve: bool,
         reason: String,
-        grant: Option<crate::api::wire::GrantRung>,
+        grant: Option<ApprovalGrantRung>,
     },
     Plan {
         call_id: CallId,

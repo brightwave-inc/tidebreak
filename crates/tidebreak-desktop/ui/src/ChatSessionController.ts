@@ -58,7 +58,7 @@ function isWellFormedFrame(frame: SequencedEvent): boolean {
  * thing they have in common with each other: a metadata frame has no sequence,
  * so any check based on one would classify it as malformed.
  */
-function metadataFrame(frame: ChatFrame): ChatMetadataFrame | null {
+export function metadataFrame(frame: ChatFrame): ChatMetadataFrame | null {
   if (typeof frame !== "object" || frame === null) return null;
   const metadata = (frame as { metadata?: unknown }).metadata;
   if (metadata === "titled") {

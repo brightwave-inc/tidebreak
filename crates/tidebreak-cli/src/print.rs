@@ -44,7 +44,7 @@ use tidebreak_core::{
 };
 
 use crate::api::client::{Client, ClientExecutionOutcome, DurableTurn, DurableTurnStatus};
-use crate::api::wire::{ClientEvent, ToolCallStatus};
+use crate::api::wire::{RendererAgentEvent, RendererToolName, RendererToolStatus};
 use crate::event_stream::{EventStream as Stream, StreamNext};
 
 mod driver;
@@ -250,7 +250,7 @@ async fn one_turn(
         };
 
         let (raw, event) = match frame {
-            StreamNext::Frame(raw, event) => (raw, event),
+            StreamNext::Frame(raw, event) => (raw, *event),
             StreamNext::Ignore => continue,
             StreamNext::Durable(turn) => {
                 printer.reconciled(turn_id, &turn);
@@ -263,7 +263,8 @@ async fn one_turn(
             }
         };
         if !ours {
-            if !matches!(&event, ClientEvent::TurnStarted { turn_id: id } if *id == turn_id) {
+            if !matches!(&event, RendererAgentEvent::TurnStarted { turn_id: id } if *id == turn_id)
+            {
                 continue;
             }
             ours = true;
@@ -271,19 +272,19 @@ async fn one_turn(
         printer.raw(&raw);
 
         match event {
-            ClientEvent::TextDelta { text } => printer.text(&text),
-            ClientEvent::ToolCallStarted { call_id, name } => {
+            RendererAgentEvent::TextDelta { text } => printer.text(&text),
+            RendererAgentEvent::ToolCallStarted { call_id, name } => {
                 // Refused here, never routed through `settle`: a folder request
                 // is not an `Interaction`, so the driver is never asked and no
                 // decision line can answer it. Whoever is driving gets the same
                 // outcome an unattended run gets. The refusal runs off the loop,
                 // which keeps the turn's own output flowing while it waits.
-                if name == REQUEST_FOLDER_ACCESS_TOOL {
+                if name == RendererToolName::RequestFolderAccess {
                     declines.start(client, executor_token, chat, call_id, &mut printer);
                 }
                 printer.tool_started(call_id, name);
             }
-            ClientEvent::ToolCallCompleted {
+            RendererAgentEvent::ToolCallCompleted {
                 call_id, status, ..
             } => {
                 // The call is over however it ended, so a refusal still waiting
@@ -291,7 +292,7 @@ async fn one_turn(
                 declines.finished(call_id);
                 printer.tool_completed(call_id, status);
             }
-            ClientEvent::ApprovalRequired {
+            RendererAgentEvent::ApprovalRequired {
                 call_id,
                 action,
                 approval,
@@ -321,8 +322,8 @@ async fn one_turn(
             }
             // Neither can be answered without a driver, so both end the run
             // loudly if there is none.
-            ClientEvent::PlanProposed { call_id } => {
-                match pending_plan(client, chat, call_id).await {
+            RendererAgentEvent::PlanProposed { call_id, .. } => {
+                match pending_plan(client, chat, Some(call_id)).await {
                     Ok(Some(interaction)) => {
                         if let Some(halt) = settle(
                             client,
@@ -342,8 +343,8 @@ async fn one_turn(
                     Err(halt) => break halted(client, chat, turn_id, &halt, &mut printer).await,
                 }
             }
-            ClientEvent::UserQuestionsAsked { call_id } => {
-                match pending_questions(client, chat, call_id).await {
+            RendererAgentEvent::UserQuestionsAsked { call_id, .. } => {
+                match pending_questions(client, chat, Some(call_id)).await {
                     Ok(Some(interaction)) => {
                         if let Some(halt) = settle(
                             client,
@@ -362,19 +363,19 @@ async fn one_turn(
                     Err(halt) => break halted(client, chat, turn_id, &halt, &mut printer).await,
                 }
             }
-            ClientEvent::TurnCompleted { .. } => break 0,
-            ClientEvent::TurnFailed { category, .. } => {
+            RendererAgentEvent::TurnCompleted { .. } => break 0,
+            RendererAgentEvent::TurnFailed { category, .. } => {
                 printer.finish();
-                eprintln!("tidebreak: turn failed ({category})");
+                eprintln!("tidebreak: turn failed ({})", category.as_str());
                 break EXIT_TURN_UNSUCCESSFUL;
             }
-            ClientEvent::TurnRefused { refusal, .. } => {
+            RendererAgentEvent::TurnRefused { refusal, .. } => {
                 printer.finish();
                 let category = refusal.category.unwrap_or_else(|| "unspecified".to_owned());
                 eprintln!("tidebreak: turn refused ({category})");
                 break EXIT_TURN_UNSUCCESSFUL;
             }
-            ClientEvent::TurnCancelled { .. } => {
+            RendererAgentEvent::TurnCancelled { .. } => {
                 printer.finish();
                 eprintln!("tidebreak: turn cancelled");
                 break EXIT_TURN_UNSUCCESSFUL;
@@ -883,7 +884,7 @@ async fn resolve_declined(
 /// Writes the turn out in the selected format.
 struct Printer {
     format: OutputFormat,
-    tools: HashMap<CallId, String>,
+    tools: HashMap<CallId, &'static str>,
     /// Whether stdout's last text ended without a newline, so the final flush
     /// can leave the shell prompt on its own line.
     dangling_line: bool,
@@ -955,20 +956,15 @@ impl Printer {
         }));
     }
 
-    fn tool_started(&mut self, call_id: CallId, name: String) {
-        self.tools.insert(call_id, name);
+    fn tool_started(&mut self, call_id: CallId, name: RendererToolName) {
+        self.tools.insert(call_id, name.as_str());
     }
 
-    fn tool_completed(&mut self, call_id: CallId, status: ToolCallStatus) {
-        let name = self
-            .tools
-            .remove(&call_id)
-            .unwrap_or_else(|| "tool".to_owned());
+    fn tool_completed(&mut self, call_id: CallId, status: RendererToolStatus) {
+        let name = self.tools.remove(&call_id).unwrap_or("tool");
         let status = match status {
-            ToolCallStatus::Completed => "ok",
-            // An unrecognized status reads as a failure: the conservative note.
-            ToolCallStatus::Failed | ToolCallStatus::Unknown => "failed",
-            ToolCallStatus::Cancelled => "cancelled",
+            RendererToolStatus::Completed => "ok",
+            RendererToolStatus::Failed => "failed",
         };
         self.notice(&format!("tool: {name} {status}"));
     }

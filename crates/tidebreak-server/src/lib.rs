@@ -110,6 +110,7 @@ mod view_frames;
 pub mod voice_transcription;
 /// Host-owned, inert web-search configuration and provider selection.
 pub mod web_search;
+pub mod wire;
 mod wire_types;
 
 use std::fs::{OpenOptions, TryLockError};

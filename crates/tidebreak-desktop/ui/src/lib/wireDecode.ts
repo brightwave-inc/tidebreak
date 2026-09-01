@@ -30,14 +30,16 @@ export { isRecord, onlyKeys } from "./guards";
 // Shared guard limits
 // ---------------------------------------------------------------------------
 
-/** Longest opaque identifier the chat decoder accepts (call, turn, chat, run, workspace ids). */
-export const MAX_WIRE_ID_CHARS = 128;
-
-/** Longest timestamp string the chat decoder accepts. RFC 3339 needs about 35. */
-export const MAX_WIRE_TIMESTAMP_CHARS = 64;
-
-/** Longest opaque pagination cursor the chat decoder accepts. */
-export const MAX_WIRE_CURSOR_CHARS = 256;
+/**
+ * The id, timestamp, and cursor ceilings are generated from
+ * `tidebreak_server::wire::limits`, where the CLI reads the same numbers, so
+ * the two clients cannot disagree about what a valid payload is.
+ */
+export {
+  MAX_WIRE_CURSOR_CHARS,
+  MAX_WIRE_ID_CHARS,
+  MAX_WIRE_TIMESTAMP_CHARS,
+} from "../generated/wire";
 
 // ---------------------------------------------------------------------------
 // Presence-only string readers (code-mode convention)

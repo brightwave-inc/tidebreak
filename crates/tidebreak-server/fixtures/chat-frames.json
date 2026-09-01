@@ -1,0 +1,354 @@
+[
+  {
+    "frame": {
+      "event": {
+        "turn_id": "00000000-0000-0000-0000-000000000010",
+        "type": "turn_started"
+      },
+      "seq": 1
+    },
+    "name": "turn_started"
+  },
+  {
+    "frame": {
+      "event": {
+        "text": "Hello",
+        "type": "text_delta"
+      },
+      "seq": 2
+    },
+    "name": "text_delta"
+  },
+  {
+    "frame": {
+      "event": {
+        "text": "Considering the request",
+        "type": "reasoning_delta"
+      },
+      "seq": 3
+    },
+    "name": "reasoning_delta"
+  },
+  {
+    "frame": {
+      "event": {
+        "type": "stream_interrupted"
+      },
+      "seq": 4
+    },
+    "name": "stream_interrupted"
+  },
+  {
+    "frame": {
+      "event": {
+        "call_id": "00000000-0000-0000-0000-000000000011",
+        "name": "exec",
+        "type": "tool_call_started"
+      },
+      "seq": 5
+    },
+    "name": "tool_call_started"
+  },
+  {
+    "frame": {
+      "event": {
+        "call_id": "00000000-0000-0000-0000-000000000011",
+        "type": "tool_call_args_delta"
+      },
+      "seq": 6
+    },
+    "name": "tool_call_args_delta"
+  },
+  {
+    "frame": {
+      "event": {
+        "call_id": "00000000-0000-0000-0000-000000000011",
+        "turn_id": "00000000-0000-0000-0000-000000000010",
+        "type": "user_questions_asked"
+      },
+      "seq": 7
+    },
+    "name": "user_questions_asked"
+  },
+  {
+    "frame": {
+      "event": {
+        "call_id": "00000000-0000-0000-0000-000000000011",
+        "turn_id": "00000000-0000-0000-0000-000000000010",
+        "type": "plan_proposed"
+      },
+      "seq": 8
+    },
+    "name": "plan_proposed"
+  },
+  {
+    "frame": {
+      "event": {
+        "call_id": "00000000-0000-0000-0000-000000000011",
+        "turn_id": "00000000-0000-0000-0000-000000000010",
+        "type": "task_plan_updated"
+      },
+      "seq": 9
+    },
+    "name": "task_plan_updated"
+  },
+  {
+    "frame": {
+      "event": {
+        "action": "exec",
+        "approval": "exec_may_run_networked_command",
+        "auto_judging": false,
+        "call_id": "00000000-0000-0000-0000-000000000011",
+        "class": "sensitive",
+        "grant_rungs": [
+          "exact_action",
+          {
+            "command_prefix": {
+              "tokens": 1
+            }
+          },
+          "whole_tool"
+        ],
+        "preview": {
+          "args": [
+            "status"
+          ],
+          "command": "git",
+          "cwd": ".",
+          "files": [],
+          "summary": "Checking the repository status",
+          "tool": "exec"
+        },
+        "type": "approval_required"
+      },
+      "seq": 10
+    },
+    "name": "approval_required"
+  },
+  {
+    "frame": {
+      "event": {
+        "action": "other",
+        "approval": "unsupported",
+        "auto_judging": true,
+        "call_id": "00000000-0000-0000-0000-000000000011",
+        "class": "sensitive",
+        "grant_rungs": [],
+        "type": "approval_required"
+      },
+      "seq": 11
+    },
+    "name": "approval_required_without_preview"
+  },
+  {
+    "frame": {
+      "event": {
+        "approved": true,
+        "call_id": "00000000-0000-0000-0000-000000000011",
+        "type": "approval_decided"
+      },
+      "seq": 12
+    },
+    "name": "approval_decided"
+  },
+  {
+    "frame": {
+      "event": {
+        "action": {
+          "args": [
+            "status"
+          ],
+          "command": "git",
+          "cwd": ".",
+          "files": [],
+          "summary": "Checking the repository status",
+          "tool": "exec"
+        },
+        "call_id": "00000000-0000-0000-0000-000000000011",
+        "result": {
+          "exit_code": 0,
+          "output_truncated": false,
+          "stderr": "",
+          "stdout": "ok\n",
+          "timed_out": false,
+          "tool": "exec"
+        },
+        "status": "completed",
+        "type": "tool_call_completed"
+      },
+      "seq": 13
+    },
+    "name": "tool_call_completed"
+  },
+  {
+    "frame": {
+      "event": {
+        "call_id": "00000000-0000-0000-0000-000000000011",
+        "failure": {
+          "code": "executor_unavailable",
+          "reason": "lease_expired"
+        },
+        "status": "failed",
+        "type": "tool_call_completed"
+      },
+      "seq": 14
+    },
+    "name": "tool_call_completed_with_failure"
+  },
+  {
+    "frame": {
+      "event": {
+        "type": "turn_completed",
+        "usage": {
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 800,
+          "input_tokens": 120,
+          "output_tokens": 34
+        }
+      },
+      "seq": 15
+    },
+    "name": "turn_completed"
+  },
+  {
+    "frame": {
+      "event": {
+        "refusal": {
+          "category": "safety",
+          "partial_output": true
+        },
+        "type": "turn_refused",
+        "usage": {
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 800,
+          "input_tokens": 120,
+          "output_tokens": 34
+        }
+      },
+      "seq": 16
+    },
+    "name": "turn_refused"
+  },
+  {
+    "frame": {
+      "event": {
+        "category": "rate_limited",
+        "detail": "rate limited; retry after 30s",
+        "model": {
+          "id": "claude-opus-4-8",
+          "provider": "anthropic"
+        },
+        "type": "turn_failed"
+      },
+      "seq": 17
+    },
+    "name": "turn_failed"
+  },
+  {
+    "frame": {
+      "event": {
+        "category": "unknown",
+        "type": "turn_failed"
+      },
+      "seq": 18
+    },
+    "name": "turn_failed_without_detail"
+  },
+  {
+    "frame": {
+      "event": {
+        "type": "turn_cancelled",
+        "usage": {
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 800,
+          "input_tokens": 120,
+          "output_tokens": 34
+        }
+      },
+      "seq": 19
+    },
+    "name": "turn_cancelled"
+  },
+  {
+    "frame": {
+      "event": {
+        "message_id": "00000000-0000-0000-0000-000000000012",
+        "text": "Focus on the tests",
+        "type": "user_steered"
+      },
+      "seq": 20
+    },
+    "name": "user_steered"
+  },
+  {
+    "frame": {
+      "event": {
+        "fitted_tokens": 120000,
+        "original_tokens": 180000,
+        "type": "context_truncated"
+      },
+      "seq": 21
+    },
+    "name": "context_truncated"
+  },
+  {
+    "frame": {
+      "event": {
+        "type": "compaction_started"
+      },
+      "seq": 22
+    },
+    "name": "compaction_started"
+  },
+  {
+    "frame": {
+      "event": {
+        "compacted": true,
+        "type": "compaction_finished"
+      },
+      "seq": 23
+    },
+    "name": "compaction_finished"
+  },
+  {
+    "frame": {
+      "event": {
+        "type": "event_omitted"
+      },
+      "seq": 24
+    },
+    "name": "event_omitted"
+  },
+  {
+    "frame": {
+      "event": {
+        "text": "from catch-up",
+        "type": "text_delta"
+      },
+      "replayed": true,
+      "seq": 25
+    },
+    "name": "replayed_event"
+  },
+  {
+    "frame": {
+      "metadata": "titled",
+      "title": "A chat"
+    },
+    "name": "metadata_titled"
+  },
+  {
+    "frame": {
+      "metadata": "file_changes_recorded",
+      "turn_id": "00000000-0000-0000-0000-000000000010"
+    },
+    "name": "metadata_file_changes_recorded"
+  },
+  {
+    "frame": {
+      "metadata": "sandbox_preparing",
+      "preparing": true
+    },
+    "name": "metadata_sandbox_preparing"
+  }
+]

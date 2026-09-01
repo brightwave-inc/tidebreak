@@ -42,7 +42,7 @@ use ts_rs::TS;
 /// discriminator rather than by a sequence it would have to invent.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(untagged)]
-pub(crate) enum RendererChatFrame {
+pub enum RendererChatFrame {
     /// A journaled turn event at its sequence. Boxed: an event frame carries
     /// tool previews and dwarfs a metadata frame, and every frame is built
     /// once and serialized, so the indirection costs nothing on the hot path.
@@ -53,8 +53,8 @@ pub(crate) enum RendererChatFrame {
 
 /// Chat metadata pushed to an open client, outside the turn journal.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
-#[serde(tag = "metadata", rename_all = "snake_case")]
-pub(crate) enum RendererChatMetadata {
+#[serde(tag = "metadata", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RendererChatMetadata {
     /// The chat was named — by titling, for a chat that had no name.
     Titled { title: String },
     /// A post-turn file-change summary is ready for transcript hydration.
@@ -84,7 +84,8 @@ impl From<&crate::bus::ChatMetadataNotice> for RendererChatMetadata {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
-pub(crate) struct RendererSequencedEvent {
+#[serde(deny_unknown_fields)]
+pub struct RendererSequencedEvent {
     pub seq: i64,
     pub event: RendererAgentEvent,
     // True only when this frame came from durable catch-up rather than the live
@@ -113,7 +114,8 @@ pub(crate) struct RendererSequencedEvent {
 /// It is a faithful measure of what the turn cost and a ceiling on what the
 /// window held.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
-pub(crate) struct RendererTurnUsage {
+#[serde(deny_unknown_fields)]
+pub struct RendererTurnUsage {
     /// Fresh prompt tokens, excluding both cache figures below.
     pub input_tokens: u32,
     /// Tokens the model generated.
@@ -137,14 +139,16 @@ impl From<tidebreak_core::Usage> for RendererTurnUsage {
 
 /// Bounded refusal metadata safe to present in the desktop transcript.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-pub(crate) struct RendererRefusal {
+#[serde(deny_unknown_fields)]
+pub struct RendererRefusal {
     pub category: Option<String>,
     pub partial_output: bool,
 }
 
 /// Exact model route involved in a provider failure, with no diagnostics.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-pub(crate) struct RendererModelIdentity {
+#[serde(deny_unknown_fields)]
+pub struct RendererModelIdentity {
     pub id: String,
     pub provider: crate::providers::ProviderKind,
 }
@@ -167,8 +171,8 @@ impl From<&tidebreak_core::RefusalOutcome> for RendererRefusal {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum RendererAgentEvent {
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RendererAgentEvent {
     TurnStarted {
         turn_id: TurnId,
     },
@@ -309,7 +313,7 @@ pub(crate) enum RendererAgentEvent {
 /// category the scheduler acted on cannot drift apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum TurnFailureCategory {
+pub enum TurnFailureCategory {
     /// The provider throttled or shed the request. Automatic retries were
     /// already spent, but waiting and asking again is the actual remedy.
     RateLimited,
@@ -348,6 +352,19 @@ impl TurnFailureCategory {
     pub(crate) const fn retries_may_succeed(self) -> bool {
         matches!(self, Self::RateLimited | Self::Transient)
     }
+
+    /// The wire spelling, for a client that prints the category as text.
+    /// Pinned to the serde rendering by `turn_failure_category_names_match_the_wire`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RateLimited => "rate_limited",
+            Self::Auth => "auth",
+            Self::ProviderAccess => "provider_access",
+            Self::Transient => "transient",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 /// Only provider-originated diagnostics cross to the renderer. These strings
@@ -371,26 +388,27 @@ pub(crate) fn renderer_provider_failure_detail(kind: &str, detail: &str) -> Opti
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum RendererToolStatus {
+pub enum RendererToolStatus {
     Completed,
     Failed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
-pub(crate) struct RendererToolFailure {
+#[serde(deny_unknown_fields)]
+pub struct RendererToolFailure {
     pub code: RendererToolFailureCode,
     pub reason: RendererToolFailureReason,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum RendererToolFailureCode {
+pub enum RendererToolFailureCode {
     ExecutorUnavailable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum RendererToolFailureReason {
+pub enum RendererToolFailureReason {
     LeaseExpired,
 }
 
