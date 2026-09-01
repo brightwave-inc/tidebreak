@@ -242,6 +242,7 @@ async fn project_membership_fk_and_attachment_insertions_are_atomic() {
         attachment_revision: Set(0),
         created_at: Set(Utc::now()),
         owner: sea_orm::ActiveValue::NotSet,
+        engine_private: Set(false),
     };
     assert!(orphan.insert(&store.conn).await.is_err());
 

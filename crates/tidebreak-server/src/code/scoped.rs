@@ -600,6 +600,15 @@ impl ScopedCode {
             .await
     }
 
+    pub(crate) async fn create_internal_session(
+        &self,
+        settings: NewSessionSettings,
+    ) -> Result<CodeSession, ServerError> {
+        self.runtime
+            .create_internal_session(&self.owner, settings)
+            .await
+    }
+
     pub(crate) async fn create_remote_session(
         &self,
         workspace_id: WorkspaceId,
@@ -613,6 +622,10 @@ impl ScopedCode {
 
     pub(crate) async fn get_session(&self, id: CodeSessionId) -> Result<CodeSession, ServerError> {
         self.runtime.get_session(&self.owner, id).await
+    }
+
+    pub(crate) async fn list_internal_sessions(&self) -> Result<Vec<CodeSession>, ServerError> {
+        self.runtime.list_internal_sessions(&self.owner).await
     }
 
     pub(crate) async fn list_workspace_sessions(

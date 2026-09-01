@@ -67,6 +67,7 @@ impl MigratorTrait for Migrator {
             Box::new(CodeExternalGrants),
             Box::new(CodeConnectHandshakes),
             Box::new(CodeTurnPark),
+            Box::new(InternalEngineSessions),
         ]
     }
 }
@@ -3570,6 +3571,222 @@ async fn rebuild_sqlite_code_turn_for_parks(_manager: &SchemaManager<'_>) -> Res
     ))
 }
 
+/// Sessions without a workspace and the engine-private conversation behind
+/// them (decision 0048 step 5): the in-process engine hosts a code session
+/// that binds no repo-backed workspace, and keeps its durable state in a
+/// `chat` row that owner-scoped reads never list.
+struct InternalEngineSessions;
+
+impl MigrationName for InternalEngineSessions {
+    fn name(&self) -> &str {
+        "m20260901_000002_internal_engine_sessions"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for InternalEngineSessions {
+    fn use_transaction(&self) -> Option<bool> {
+        // The SQLite branch rebuilds `code_session` under a manually managed
+        // transaction with foreign keys disabled; PostgreSQL runs its own.
+        None
+    }
+
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // Both changes land together, so the chat column is the marker for
+        // the whole migration.
+        if manager.has_column("chat", "engine_private").await? {
+            return Ok(());
+        }
+        match manager.get_database_backend() {
+            DbBackend::Postgres => {
+                let transaction = manager.begin().await?;
+                transaction
+                    .get_connection()
+                    .execute_unprepared(
+                        r#"
+ALTER TABLE "code_session" ALTER COLUMN "workspace_id" DROP NOT NULL;
+ALTER TABLE "chat" ADD COLUMN "engine_private" boolean NOT NULL DEFAULT FALSE;
+"#,
+                    )
+                    .await?;
+                transaction.commit().await
+            }
+            DbBackend::Sqlite => {
+                manager
+                    .get_connection()
+                    .execute_unprepared(
+                        r#"ALTER TABLE "chat" ADD COLUMN "engine_private" boolean NOT NULL DEFAULT FALSE"#,
+                    )
+                    .await?;
+                rebuild_sqlite_code_session_without_workspace(manager).await
+            }
+            backend => Err(DbErr::Custom(format!(
+                "unsupported database backend for internal engine session migration: {backend:?}"
+            ))),
+        }
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // A downgrade keeps the nullable column and the marker; a
+        // workspace-less session would otherwise become unreadable.
+        Ok(())
+    }
+}
+
+/// SQLite cannot drop `NOT NULL` in place. Rebuild `code_session` from its
+/// own stored definition with that one constraint removed, so every column a
+/// prior migration appended survives verbatim, then restore its indexes.
+#[cfg(feature = "sqlite")]
+async fn rebuild_sqlite_code_session_without_workspace(
+    manager: &SchemaManager<'_>,
+) -> Result<(), DbErr> {
+    use sea_orm::sqlx::Acquire as _;
+    use sea_orm::sqlx::Row as _;
+    use sea_orm::DatabaseExecutor;
+
+    const TABLE: &str = "code_session";
+    const REBUILD: &str = "code_session_rebuild";
+    const COLUMN: &str = "workspace_id";
+
+    let DatabaseExecutor::Connection(database) = manager.get_connection() else {
+        return Err(DbErr::Custom(
+            "SQLite session rebuild requires the migration connection".to_owned(),
+        ));
+    };
+    let mut connection = database
+        .get_sqlite_connection_pool()
+        .acquire()
+        .await
+        .map_err(|error| DbErr::Custom(format!("acquire SQLite migration connection: {error}")))?;
+
+    let create: String = sea_orm::sqlx::query_scalar(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+    )
+    .bind(TABLE)
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(|error| DbErr::Custom(format!("read SQLite {TABLE} definition: {error}")))?;
+    let constrained = format!("\"{COLUMN}\" uuid_text NOT NULL");
+    let relaxed = format!("\"{COLUMN}\" uuid_text");
+    if !create.contains(&constrained) {
+        return Err(DbErr::Custom(format!(
+            "SQLite {TABLE} definition does not declare {COLUMN} NOT NULL as expected"
+        )));
+    }
+    let create = create.replacen(&constrained, &relaxed, 1).replacen(
+        &format!("CREATE TABLE \"{TABLE}\""),
+        &format!("CREATE TABLE \"{REBUILD}\""),
+        1,
+    );
+    if !create.starts_with(&format!("CREATE TABLE \"{REBUILD}\"")) {
+        return Err(DbErr::Custom(format!(
+            "SQLite {TABLE} definition has an unexpected shape"
+        )));
+    }
+    let indexes: Vec<String> = sea_orm::sqlx::query_scalar(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = ? \
+         AND sql IS NOT NULL ORDER BY name",
+    )
+    .bind(TABLE)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(|error| DbErr::Custom(format!("read SQLite {TABLE} indexes: {error}")))?;
+    let columns: Vec<String> = sea_orm::sqlx::query(sea_orm::sqlx::AssertSqlSafe(format!(
+        "PRAGMA table_info(\"{TABLE}\")"
+    )))
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(|error| DbErr::Custom(format!("read SQLite {TABLE} columns: {error}")))?
+    .into_iter()
+    .map(|row| row.try_get::<String, _>("name"))
+    .collect::<Result<_, _>>()
+    .map_err(|error| DbErr::Custom(format!("read SQLite {TABLE} column names: {error}")))?;
+    let column_list = columns
+        .iter()
+        .map(|name| format!("\"{name}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    sea_orm::sqlx::query("PRAGMA foreign_keys = OFF")
+        .execute(&mut *connection)
+        .await
+        .map_err(|error| DbErr::Custom(format!("disable SQLite foreign keys: {error}")))?;
+    let mut transaction = connection
+        .begin()
+        .await
+        .map_err(|error| DbErr::Custom(format!("begin SQLite session rebuild: {error}")))?;
+    let rebuild = async {
+        let mut statements = vec![
+            format!("DROP TABLE IF EXISTS \"{REBUILD}\""),
+            create,
+            format!(
+                "INSERT INTO \"{REBUILD}\" ({column_list}) SELECT {column_list} FROM \"{TABLE}\""
+            ),
+            format!("DROP TABLE \"{TABLE}\""),
+            format!("ALTER TABLE \"{REBUILD}\" RENAME TO \"{TABLE}\""),
+        ];
+        statements.extend(indexes);
+        for statement in statements {
+            sea_orm::sqlx::query(sea_orm::sqlx::AssertSqlSafe(statement))
+                .execute(&mut *transaction)
+                .await?;
+        }
+        Ok::<(), sea_orm::sqlx::Error>(())
+    }
+    .await;
+    let rebuild = match rebuild {
+        Ok(()) => transaction
+            .commit()
+            .await
+            .map_err(|error| DbErr::Custom(format!("commit SQLite session rebuild: {error}"))),
+        Err(error) => match transaction.rollback().await {
+            Ok(()) => Err(DbErr::Custom(format!(
+                "rebuild SQLite session table without a workspace: {error}"
+            ))),
+            Err(rollback) => Err(DbErr::Custom(format!(
+                "rebuild SQLite session table without a workspace: {error}; rollback failed: {rollback}"
+            ))),
+        },
+    };
+    let enable = match sea_orm::sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&mut *connection)
+        .await
+    {
+        Ok(_) => {
+            sea_orm::sqlx::query_scalar::<_, i64>("PRAGMA foreign_keys")
+                .fetch_one(&mut *connection)
+                .await
+        }
+        Err(error) => Err(error),
+    }
+    .map_err(|error| DbErr::Custom(format!("restore SQLite foreign keys: {error}")))
+    .and_then(|enabled| {
+        if enabled == 1 {
+            Ok(())
+        } else {
+            Err(DbErr::Custom(
+                "restore SQLite foreign keys: PRAGMA remained disabled".to_owned(),
+            ))
+        }
+    });
+    match (rebuild, enable) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(rebuild), Err(enable)) => {
+            Err(DbErr::Custom(format!("{rebuild}; additionally, {enable}")))
+        }
+    }
+}
+
+#[cfg(not(feature = "sqlite"))]
+async fn rebuild_sqlite_code_session_without_workspace(
+    _manager: &SchemaManager<'_>,
+) -> Result<(), DbErr> {
+    Err(DbErr::Custom(
+        "SQLite internal engine session migration support is not compiled".to_owned(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
@@ -3648,6 +3865,7 @@ mod tests {
                 "m20260828_000027_code_external_grants",
                 "m20260828_000028_code_connect_handshakes",
                 "m20260901_000001_code_turn_park",
+                "m20260901_000002_internal_engine_sessions",
             ]
         );
         assert!(db
@@ -3675,8 +3893,9 @@ mod tests {
             .unwrap()
             .is_some());
 
-        // Two steps: the turn park migration sits above the handshake one.
-        Migrator::down(&db, Some(2)).await.unwrap();
+        // Three steps: the turn park and internal engine session migrations
+        // sit above the handshake one.
+        Migrator::down(&db, Some(3)).await.unwrap();
         assert!(db
             .query_one_raw(Statement::from_string(
                 DbBackend::Sqlite,

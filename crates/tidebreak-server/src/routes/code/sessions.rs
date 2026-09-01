@@ -16,9 +16,10 @@ use axum::response::{IntoResponse, Response};
 
 use super::types::{
     CodeForkTranscript, CodeSessionExternalOrigin, CodeSessionSnapshot, CodeTurnSnapshot,
-    CreateRemoteSessionBody, CreateSessionBody, QueuePausedBody, QueuedCodeTurn,
-    QueuedCodeTurnUpdate, QueuedCodeTurnsSnapshot, SequencedCodeEventFrame, SetAttentionBody,
-    SetFastModeBody, SetPermissionModeBody, SetReasoningEffortBody, SteerBody, SubmitTurnBody,
+    CreateInternalSessionBody, CreateRemoteSessionBody, CreateSessionBody, QueuePausedBody,
+    QueuedCodeTurn, QueuedCodeTurnUpdate, QueuedCodeTurnsSnapshot, SequencedCodeEventFrame,
+    SetAttentionBody, SetFastModeBody, SetPermissionModeBody, SetReasoningEffortBody, SteerBody,
+    SubmitTurnBody,
 };
 use crate::code::runtime::{NewSessionSettings, SubmitTurnOutcome};
 use tidebreak_core::{CodeSessionId, PermissionMode, TurnSteer, WorkspaceId};
@@ -69,6 +70,29 @@ pub async fn create_session(
                 permission_mode_ceiling,
             },
         )
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(CodeSessionSnapshot::from(session)),
+    ))
+}
+
+/// `POST /code/sessions` — create a conversation with no workspace. The
+/// in-process engine hosts it (decision 0048 step 5).
+pub async fn create_internal_session(
+    State(state): State<AppState>,
+    code: ScopedCode,
+    Json(body): Json<CreateInternalSessionBody>,
+) -> Result<impl IntoResponse, ServerError> {
+    let permission_mode_ceiling = state.managed_policy()?.permission_mode_ceiling;
+    let session = code
+        .create_internal_session(NewSessionSettings {
+            permission_mode: body.permission_mode,
+            model: body.model,
+            reasoning_effort: body.reasoning_effort,
+            fast_mode: false,
+            permission_mode_ceiling,
+        })
         .await?;
     Ok((
         StatusCode::CREATED,
@@ -160,6 +184,40 @@ pub async fn list_workspace_sessions(
             })
             .collect(),
     ))
+}
+
+/// `GET /code/sessions` — the owner's conversations that bind no
+/// workspace, newest first.
+pub async fn list_internal_sessions(
+    code: ScopedCode,
+) -> Result<Json<Vec<CodeSessionSnapshot>>, ServerError> {
+    let sessions = code.list_internal_sessions().await?;
+    Ok(Json(
+        sessions
+            .into_iter()
+            .map(CodeSessionSnapshot::from)
+            .collect(),
+    ))
+}
+
+/// `GET /code/sessions/{id}` — one session by id, whatever it binds.
+pub async fn get_session(
+    code: ScopedCode,
+    Path(id): Path<CodeSessionId>,
+) -> Result<Json<CodeSessionSnapshot>, ServerError> {
+    let session = code.get_session(id).await?;
+    let origin = code
+        .external_bindings_for_sessions(&[id])
+        .await?
+        .into_iter()
+        .next()
+        .map(|binding| CodeSessionExternalOrigin {
+            channel_kind: binding.channel_kind,
+            external_key: binding.external_key,
+        });
+    let mut snapshot = CodeSessionSnapshot::from(session);
+    snapshot.external_origin = origin;
+    Ok(Json(snapshot))
 }
 
 pub async fn submit_turn(

@@ -150,11 +150,21 @@ pub enum HarnessKind {
     Opencode,
     /// Grok CLI.
     Grok,
+    /// Tidebreak's own agent loop, run in-process behind the same adapter
+    /// contract as the external engines (decision 0048 step 5). A session
+    /// with no workspace selects it.
+    Internal,
 }
 
 impl HarnessKind {
     /// Every known engine, in adapter-tier order.
-    pub const ALL: &'static [Self] = &[Self::ClaudeCode, Self::Codex, Self::Opencode, Self::Grok];
+    pub const ALL: &'static [Self] = &[
+        Self::ClaudeCode,
+        Self::Codex,
+        Self::Opencode,
+        Self::Grok,
+        Self::Internal,
+    ];
 
     /// Stable database and wire token.
     #[must_use]
@@ -164,6 +174,7 @@ impl HarnessKind {
             Self::Codex => "codex",
             Self::Opencode => "opencode",
             Self::Grok => "grok",
+            Self::Internal => "internal",
         }
     }
 
@@ -185,7 +196,16 @@ impl HarnessKind {
             Self::Codex => HarnessTier::Secondary,
             Self::Opencode => HarnessTier::Tertiary,
             Self::Grok => HarnessTier::BestEffort,
+            Self::Internal => HarnessTier::Reference,
         }
+    }
+
+    /// Whether this engine runs inside the server process and spawns no
+    /// child. Such an engine probes as found with no binary, needs no pin,
+    /// and takes its inference from the server's own provider resolution.
+    #[must_use]
+    pub const fn is_in_process(self) -> bool {
+        matches!(self, Self::Internal)
     }
 }
 
@@ -1228,10 +1248,11 @@ pub fn bound_subagents(subagents: &mut Vec<CodeSubagentSummary>) {
 pub struct CodeSession {
     /// Stable id.
     pub id: CodeSessionId,
-    /// Principal this session belongs to, denormalized from its workspace.
+    /// Principal this session belongs to.
     pub owner: crate::OwnerId,
-    /// Owning workspace.
-    pub workspace_id: WorkspaceId,
+    /// Owning workspace, or `None` for a conversation with no repo-backed
+    /// workspace: one the in-process engine hosts (decision 0048 step 5).
+    pub workspace_id: Option<WorkspaceId>,
     /// Why the session exists: user conversation or watch task.
     pub kind: CodeSessionKind,
     /// Engine this session is bound to.

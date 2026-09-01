@@ -20,7 +20,7 @@ pub(crate) fn session_value() -> CodeSession {
     CodeSession {
         id: CodeSessionId::new(),
         owner: OwnerId::local(),
-        workspace_id: WorkspaceId::new(),
+        workspace_id: Some(WorkspaceId::new()),
         kind: CodeSessionKind::Interactive,
         harness_kind: HarnessKind::ClaudeCode,
         harness_version: None,
@@ -97,7 +97,7 @@ pub(crate) async fn seed(
     };
     insert_workspace(&db, &workspace).await.unwrap();
     let mut session = session_value();
-    session.workspace_id = workspace.id;
+    session.workspace_id = Some(workspace.id);
     insert_session(&db, &session).await.unwrap();
     (db, CodeEventBus::default(), session, workspace, repo)
 }

@@ -26,6 +26,7 @@ export const HARNESS_LABELS: Record<HarnessKind, string> = {
   codex: "Codex CLI",
   opencode: "opencode",
   grok: "Grok CLI",
+  internal: "Tidebreak",
 };
 
 export const HARNESS_TIER_LABELS: Record<HarnessTier, string> = {
@@ -304,6 +305,7 @@ export const HARNESS_VENDORS: Record<
   codex: ["openai"],
   grok: ["xai"],
   opencode: null,
+  internal: null,
 };
 
 /** The vendor a picker row is branded as: curated match first, then the id. */

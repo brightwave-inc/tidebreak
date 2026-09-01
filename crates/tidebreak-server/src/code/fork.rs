@@ -1156,6 +1156,7 @@ fn harness_label(kind: HarnessKind) -> &'static str {
         HarnessKind::Codex => "Codex CLI",
         HarnessKind::Opencode => "opencode",
         HarnessKind::Grok => "Grok CLI",
+        HarnessKind::Internal => "Tidebreak",
     }
 }
 
@@ -1172,7 +1173,7 @@ mod tests {
         CodeSession {
             id: CodeSessionId::new(),
             owner: OwnerId::local(),
-            workspace_id: WorkspaceId::new(),
+            workspace_id: Some(WorkspaceId::new()),
             kind: CodeSessionKind::Interactive,
             harness_kind: HarnessKind::ClaudeCode,
             harness_version: None,

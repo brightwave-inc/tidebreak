@@ -46,9 +46,7 @@ impl CodeRuntime {
         session: CodeSession,
     ) -> Result<CodeSession, ServerError> {
         let mut session = session;
-        let workspace = self
-            .get_workspace(&session.owner, session.workspace_id)
-            .await?;
+        let workspace = self.session_workspace(&session).await?;
         let adapter = self.adapter(session.harness_kind)?;
         // Cached, so the probe `create_session` already paid for is not paid
         // again on the way into the worker.
@@ -82,12 +80,17 @@ impl CodeRuntime {
                         })?;
             }
         }
-        let binary = probe.binary_path.clone().ok_or_else(|| {
-            ServerError::unprocessable_kind(
-                "harness_not_found",
-                format!("{} has no path", session.harness_kind),
-            )
-        })?;
+        let binary = match probe.binary_path.clone() {
+            Some(binary) => Some(binary),
+            // An in-process engine has no binary to resolve.
+            None if session.harness_kind.is_in_process() => None,
+            None => {
+                return Err(ServerError::unprocessable_kind(
+                    "harness_not_found",
+                    format!("{} has no path", session.harness_kind),
+                ))
+            }
+        };
         let attached = attach_engine(
             &self.db,
             &self.bus,
@@ -114,12 +117,18 @@ impl CodeRuntime {
             self.rewrite_hook(),
             self.hot_pull_requests(),
         );
-        let approval = self.approval_channel(
-            &attached.owner,
-            attached.id,
-            attached.spawn_epoch,
-            session.permission_mode,
-        );
+        // An in-process engine parks its approvals on the adapter's own
+        // channel; the loopback MCP prompt is for engines that speak MCP.
+        let approval = if session.harness_kind.is_in_process() {
+            None
+        } else {
+            self.approval_channel(
+                &attached.owner,
+                attached.id,
+                attached.spawn_epoch,
+                session.permission_mode,
+            )
+        };
 
         // Mint a browser channel only when both halves are present: the
         // native BrowserRuntime (the desktop adapter) and the trusted
@@ -129,11 +138,12 @@ impl CodeRuntime {
         let browser = match (
             self.browser_runtime.as_ref(),
             self.browser_bridge_command.as_ref(),
+            session.workspace_id,
         ) {
-            (Some(runtime), Some(bridge)) => {
+            (Some(runtime), Some(bridge), Some(workspace)) => {
                 let browser_subject = BrowserSubject {
                     owner: session.owner.clone(),
-                    workspace: session.workspace_id,
+                    workspace,
                     session: session.id,
                 };
                 Some(
@@ -149,16 +159,19 @@ impl CodeRuntime {
             _ => None,
         };
 
-        let private_root = crate::code::scratch::workspace_root(&self.data_dir, workspace.id)
-            .map_err(|err| {
-                ServerError::internal(format!("could not open private storage: {err}"))
-            })?;
+        let private_root = match &workspace {
+            Some(workspace) => crate::code::scratch::workspace_root(&self.data_dir, workspace.id),
+            None => crate::code::scratch::session_root(&self.data_dir, session.id),
+        }
+        .map_err(|err| ServerError::internal(format!("could not open private storage: {err}")))?;
 
         // On a gateway-authenticated machine, point the engine's own
         // inference at this server's relay (decision 71): a per-session key
         // stands in for provider credentials the hosted image does not have.
         let (extra_argv, extra_env, relay_key_env) = match self.harness_llm.as_ref() {
-            Some(relay) => {
+            // An in-process engine resolves inference through the server
+            // itself; there is no child to point at the relay.
+            Some(relay) if !session.harness_kind.is_in_process() => {
                 let base = self
                     .loopback_base
                     .lock()
@@ -179,11 +192,18 @@ impl CodeRuntime {
                     Some(crate::code::harness_llm::RELAY_KEY_ENV.to_owned()),
                 )
             }
-            None => (Vec::new(), Vec::new(), None),
+            _ => (Vec::new(), Vec::new(), None),
         };
 
         let spec = SessionSpec {
-            worktree: PathBuf::from(&workspace.worktree_path),
+            owner: session.owner.clone(),
+            session_id: session.id,
+            // With no workspace the private root doubles as the working
+            // directory; the in-process engine keeps its own scratch there.
+            worktree: match &workspace {
+                Some(workspace) => PathBuf::from(&workspace.worktree_path),
+                None => private_root.path().to_path_buf(),
+            },
             allowed_read_roots: vec![private_root.path().to_path_buf()],
             permission_mode: session.permission_mode,
             model: session.model.clone(),
@@ -195,7 +215,7 @@ impl CodeRuntime {
             relay_key_env,
             env: probe.env.clone(),
             approval,
-            binary: Some(binary),
+            binary,
             sink: sink.clone() as Arc<dyn HarnessEventSink>,
             browser,
         };
@@ -252,7 +272,12 @@ impl CodeRuntime {
                 engine_reads_images: adapter.capabilities(&probe).image_input
                     == CapLevel::Supported,
             },
-            self.worktree_turn_lock(attached.workspace_id),
+            // A session with no workspace shares its working directory with
+            // nothing, so it takes a lock of its own.
+            match attached.workspace_id {
+                Some(workspace_id) => self.worktree_turn_lock(workspace_id),
+                None => Arc::new(tokio::sync::Mutex::new(())),
+            },
             self.update_quiesce.subscribe(),
         );
         self.workers

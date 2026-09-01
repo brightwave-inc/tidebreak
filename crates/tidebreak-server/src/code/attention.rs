@@ -395,14 +395,19 @@ async fn build_digest(
     db: &DbStore,
     session: &CodeSession,
 ) -> Result<SessionDigest, tidebreak_core::AgentError> {
-    let workspace = get_workspace(db, &session.owner, session.workspace_id)
-        .await?
-        .ok_or_else(|| {
-            tidebreak_core::AgentError::Store(format!(
-                "workspace {} missing for session {}",
-                session.workspace_id, session.id
-            ))
-        })?;
+    let workspace = match session.workspace_id {
+        Some(workspace_id) => Some(
+            get_workspace(db, &session.owner, workspace_id)
+                .await?
+                .ok_or_else(|| {
+                    tidebreak_core::AgentError::Store(format!(
+                        "workspace {workspace_id} missing for session {}",
+                        session.id
+                    ))
+                })?,
+        ),
+        None => None,
+    };
     let turn_count = count_turns(db, &session.owner, session.id).await?;
     // A watch session's lifecycle undersells it ("running" for hours), so its
     // digest carries the watch's own state. The row is small and local — this
@@ -421,8 +426,12 @@ async fn build_digest(
     };
     // One indexed count (decision 77). Zero stays absent so clients that
     // predate the field and workspaces that never shipped read the same.
-    let pr_count =
-        count_attributed_prs_for_workspace(db, &session.owner, session.workspace_id).await?;
+    let pr_count = match session.workspace_id {
+        Some(workspace_id) => {
+            count_attributed_prs_for_workspace(db, &session.owner, workspace_id).await?
+        }
+        None => 0,
+    };
     let turns = list_turns(db, &session.owner, session.id).await?;
     // Keep this timestamp aligned with trigger delivery's ranking rule. The
     // interface uses it to name the same session that a fire would reach.
@@ -432,6 +441,12 @@ async fn build_digest(
     // declined to recap, or one whose call is still in flight, leaves the
     // previous line standing rather than blanking the row mid-work.
     let recap = turns.into_iter().rev().find_map(|turn| turn.narrative);
+    // A session with no workspace is titled by its conversation, which
+    // nothing names yet; the client falls back to its own label.
+    let (title, pr_state) = match workspace {
+        Some(workspace) => (workspace.title, workspace.pr),
+        None => (String::new(), None),
+    };
     Ok(SessionDigest {
         workspace: session.workspace_id,
         session: session.id,
@@ -439,11 +454,11 @@ async fn build_digest(
         harness_kind: session.harness_kind,
         lifecycle: session.lifecycle,
         attention: session.attention.clone(),
-        title: workspace.title,
+        title,
         turn_count,
         trigger_target_at,
         activity,
-        pr_state: workspace.pr,
+        pr_state,
         pr_count: (pr_count > 0).then_some(pr_count),
         watch_state: watch.as_ref().map(|watch| watch.state),
         watch_detail: watch.as_ref().and_then(|watch| watch.detail.clone()),
@@ -594,7 +609,7 @@ mod tests {
         CodeSession {
             id: CodeSessionId::new(),
             owner: tidebreak_core::OwnerId::local(),
-            workspace_id: WorkspaceId::new(),
+            workspace_id: Some(WorkspaceId::new()),
             kind: CodeSessionKind::Interactive,
             harness_kind: tidebreak_core::HarnessKind::ClaudeCode,
             harness_version: None,

@@ -311,6 +311,32 @@ fixture manifests — deliberately not transcribed here, so this page cannot
 drift from captured reality
 ([`0031`](decisions/0031-harness-adapter-boundary.md)).
 
+### The internal engine
+
+Decision 48 step 5 puts Tidebreak's own agent loop behind the same contract.
+`HarnessKind::Internal` is registered by
+`crates/tidebreak-server/src/engine/internal/`, and a session created with
+no workspace (`POST /code/sessions`) selects it; the workspace-bound create
+path refuses it. The engine probes as found with no binary, needs no pin,
+and takes its inference from the server's own provider resolution.
+
+Its durable state is one engine-private conversation per session, keyed by
+the session id and hidden from every owner-scoped chat read. `run_turn`
+admits the message to the chat turn lane, follows the chat journal, and
+translates each event into a `HarnessEvent`; `decide` resolves a tool
+approval on the chat approval broker, answers a questions card, or decides
+a plan. A questions card or a plan proposal ends the leg as
+`TurnOutcome::Parked` on an approval the worker minted, and the answer or
+plan decision resumes it through `resume_turn`. An accepted plan re-postures
+the session: the worker calls `set_permission_mode` with the mode the
+approval proposed before it resumes the turn.
+
+The capability vector is what carries the difference from an external
+engine: `durable_parks`, `user_questions`, and `standing_grants` are
+`Supported`, so the decision route offers answers, plan decisions, and the
+grant ladder only here. Routes and workers speak only sessions, turns, the
+journal, and approvals to it; nothing reaches the loop another way.
+
 ## The event vocabulary
 
 `CodeEvent` (journal payload; internally tagged, `#[non_exhaustive]`,
@@ -355,6 +381,8 @@ to; transcribing every route here only buys a page that drifts.
 ```
 POST/GET        /code/repos                GET/PATCH/DELETE /code/repos/{id}
 GET             /code/repos/sources        POST /code/repos/clone    GET /code/repos/clone/{job}
+POST/GET        /code/sessions             a session with no workspace (internal engine)
+GET             /code/sessions/{id}
 GET             /code/harnesses            doctor    POST /code/harnesses/refresh
 POST            /code/harnesses/{kind}/install       warm the pinned install (0041)
 GET             /code/harnesses/{kind}/models

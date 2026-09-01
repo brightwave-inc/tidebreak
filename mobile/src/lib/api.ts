@@ -115,7 +115,7 @@ function codeWorkspaceStatus(value: unknown): value is CodeWorkspaceStatus {
 }
 
 function harnessKind(value: unknown): value is HarnessKind {
-  return ["claude_code", "codex", "opencode", "grok"].includes(
+  return ["claude_code", "codex", "opencode", "grok", "internal"].includes(
     String(value),
   );
 }

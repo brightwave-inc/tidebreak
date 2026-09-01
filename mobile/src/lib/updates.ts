@@ -183,6 +183,8 @@ export function harnessLabel(kind: string | undefined): string {
       return "opencode";
     case "grok":
       return "Grok CLI";
+    case "internal":
+      return "Tidebreak";
     default:
       return kind ?? "Unknown harness";
   }

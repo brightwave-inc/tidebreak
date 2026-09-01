@@ -38,7 +38,7 @@ mod outputs;
 mod plans;
 mod plugins;
 mod projects_chats;
-mod providers_models;
+pub(crate) mod providers_models;
 mod root_attachment;
 mod settings;
 mod task_plan;

@@ -71,7 +71,7 @@ where
     entities::code_session::ActiveModel {
         id: Set(session.id.0),
         owner: Set(session.owner.as_str().to_owned()),
-        workspace_id: Set(session.workspace_id.0),
+        workspace_id: Set(session.workspace_id.map(|workspace| workspace.0)),
         kind: Set(session.kind.as_str().to_owned()),
         harness_kind: Set(session.harness_kind.as_str().to_owned()),
         harness_version: Set(session.harness_version.clone()),
@@ -1079,7 +1079,7 @@ pub(super) fn session_from_row(row: entities::code_session::Model) -> Result<Cod
     Ok(CodeSession {
         id: CodeSessionId(row.id),
         owner: OwnerId::new(&row.owner)?,
-        workspace_id: WorkspaceId(row.workspace_id),
+        workspace_id: row.workspace_id.map(WorkspaceId),
         kind,
         harness_kind,
         harness_version: row.harness_version,

@@ -84,7 +84,7 @@ async fn seed_owner(
         &CodeSession {
             id: session_id,
             owner: owner.clone(),
-            workspace_id,
+            workspace_id: Some(workspace_id),
             kind: CodeSessionKind::Interactive,
             harness_kind: HarnessKind::ClaudeCode,
             harness_version: None,

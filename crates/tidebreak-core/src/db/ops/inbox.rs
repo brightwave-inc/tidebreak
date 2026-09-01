@@ -32,6 +32,7 @@ pub(in crate::db) async fn list_inbox_items(
     // an item can never name a conversation the reader may not see.
     let chats = entities::chat::Entity::find()
         .filter(entities::chat::Column::Owner.eq(owner.as_str()))
+        .filter(entities::chat::Column::EnginePrivate.eq(false))
         .all(&store.conn)
         .await
         .map_err(store_err)?

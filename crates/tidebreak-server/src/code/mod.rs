@@ -56,6 +56,23 @@ pub(crate) fn trigger_target_at(
     latest_turn_started_at.unwrap_or(session_created_at)
 }
 
+/// The workspace a session binds, when it binds one.
+///
+/// A session with no workspace (the in-process engine's) answers `None`
+/// rather than a missing-row error, so callers that need a checkout can
+/// skip the work instead of failing the session.
+pub(crate) async fn session_workspace(
+    db: &tidebreak_core::db::DbStore,
+    session: &tidebreak_core::CodeSession,
+) -> Result<Option<tidebreak_core::CodeWorkspace>, tidebreak_core::AgentError> {
+    match session.workspace_id {
+        Some(workspace_id) => {
+            tidebreak_core::db::code::get_workspace(db, &session.owner, workspace_id).await
+        }
+        None => Ok(None),
+    }
+}
+
 /// The display name the product uses for an engine, wherever copy names one.
 pub(crate) fn harness_label(kind: tidebreak_core::HarnessKind) -> &'static str {
     match kind {
@@ -63,6 +80,7 @@ pub(crate) fn harness_label(kind: tidebreak_core::HarnessKind) -> &'static str {
         tidebreak_core::HarnessKind::Codex => "Codex CLI",
         tidebreak_core::HarnessKind::Opencode => "opencode",
         tidebreak_core::HarnessKind::Grok => "Grok CLI",
+        tidebreak_core::HarnessKind::Internal => "Tidebreak",
     }
 }
 

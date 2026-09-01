@@ -101,6 +101,10 @@ pub mod chat {
         pub attachment_revision: i64,
         pub created_at: DateTimeUtc,
         pub owner: String,
+        /// True when the in-process engine owns this row as the durable
+        /// state behind a code session. Owner-scoped reads never see it:
+        /// the conversation is reachable only through its session.
+        pub engine_private: bool,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -1790,7 +1794,9 @@ pub mod code_session {
         #[sea_orm(primary_key, auto_increment = false)]
         pub id: Uuid,
         pub owner: String,
-        pub workspace_id: Uuid,
+        /// `None` for a session with no repo-backed workspace: one the
+        /// in-process engine hosts (decision 0048 step 5).
+        pub workspace_id: Option<Uuid>,
         pub kind: String,
         pub harness_kind: String,
         pub harness_version: Option<String>,

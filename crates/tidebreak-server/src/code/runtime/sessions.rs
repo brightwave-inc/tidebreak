@@ -40,6 +40,12 @@ impl CodeRuntime {
             permission_mode_ceiling,
         }: NewSessionSettings,
     ) -> Result<CodeSession, ServerError> {
+        if harness.is_in_process() {
+            return Err(ServerError::conflict_kind(
+                "harness_needs_no_workspace",
+                "the internal engine hosts conversations without a workspace; create one without a workspace instead",
+            ));
+        }
         let lifecycle = self.workspace_lifecycle_lock(workspace_id);
         let _lifecycle_guard = lifecycle.lock().await;
         let workspace = self.get_workspace(owner, workspace_id).await?;
@@ -86,7 +92,7 @@ impl CodeRuntime {
                     false
                 }
             };
-            if !skip_pin {
+            if !skip_pin && !harness.is_in_process() {
                 match self.ensure_pinned_harness(harness, false).await {
                     Ok(binary) => {
                         self.record_pin_install(harness, Ok(()));
@@ -131,7 +137,7 @@ impl CodeRuntime {
             }
         }
         refuse_unhonored_mode(harness, permission_mode, &caps)?;
-        if probe.binary_path.is_none() {
+        if probe.binary_path.is_none() && !harness.is_in_process() {
             return Err(ServerError::unprocessable_kind(
                 "harness_not_found",
                 format!("{harness} has no path"),
@@ -157,7 +163,7 @@ impl CodeRuntime {
         let session = CodeSession {
             id: CodeSessionId::new(),
             owner: owner.clone(),
-            workspace_id,
+            workspace_id: Some(workspace_id),
             kind,
             harness_kind: harness,
             harness_version: probe.version.clone(),
@@ -195,6 +201,78 @@ impl CodeRuntime {
                 "could not record the session baseline; its first turn diffs against the base ref"
             );
         }
+        self.attach_and_spawn_worker(session).await
+    }
+
+    /// Create a conversation with no workspace, hosted by the in-process
+    /// engine (decision 0048 step 5).
+    ///
+    /// The workspace-bound create path probes an installed engine and pins
+    /// a checkout; this one needs neither. Everything after the row — the
+    /// worker, the journal, approvals — is the same machinery.
+    pub(crate) async fn create_internal_session(
+        &self,
+        owner: &OwnerId,
+        NewSessionSettings {
+            permission_mode,
+            model,
+            reasoning_effort,
+            fast_mode,
+            permission_mode_ceiling,
+        }: NewSessionSettings,
+    ) -> Result<CodeSession, ServerError> {
+        let harness = HarnessKind::Internal;
+        let adapter = self.adapter(harness)?;
+        let probe = self.probe_for_session_create(adapter.as_ref()).await;
+        let caps = adapter.capabilities(&probe);
+        refuse_ceiling_with_no_offered_mode(permission_mode_ceiling, harness, &caps)?;
+        if let Some(ceiling) = permission_mode_ceiling {
+            if permission_mode > ceiling {
+                return Err(ServerError::conflict_kind(
+                    "permission_mode_locked",
+                    format!(
+                        "permission mode `{}` exceeds the maximum this managed profile allows (`{}`)",
+                        permission_mode.as_str(),
+                        ceiling.as_str()
+                    ),
+                ));
+            }
+        }
+        refuse_unhonored_mode(harness, permission_mode, &caps)?;
+        let execution_settings = CodeSessionExecutionSettings {
+            model: normalize_model(model),
+            reasoning_effort,
+            fast_mode,
+        };
+        if execution_settings.fast_mode {
+            return Err(ServerError::unprocessable_kind(
+                "fast_mode_unsupported",
+                "the internal engine has no fast mode",
+            ));
+        }
+        let session = CodeSession {
+            id: CodeSessionId::new(),
+            owner: owner.clone(),
+            workspace_id: None,
+            kind: CodeSessionKind::Interactive,
+            harness_kind: harness,
+            harness_version: probe.version.clone(),
+            harness_resume_ref: None,
+            permission_mode,
+            model: execution_settings.model,
+            reasoning_effort: execution_settings.reasoning_effort,
+            fast_mode: false,
+            lifecycle: CodeSessionLifecycle::Created,
+            fence_reason: None,
+            child_pid: None,
+            child_process_identity: None,
+            spawn_epoch: 0,
+            attention: Attention::working(AttentionSource::Lifecycle),
+            unrecognized_event_count: 0,
+            subagents: Vec::new(),
+            created_at: Utc::now(),
+        };
+        insert_session(&self.db, &session).await?;
         self.attach_and_spawn_worker(session).await
     }
 
@@ -326,7 +404,7 @@ impl CodeRuntime {
         if session.lifecycle == CodeSessionLifecycle::Ended {
             return Ok(());
         }
-        if let Ok(workspace) = self.get_workspace(owner, session.workspace_id).await {
+        if let Ok(Some(workspace)) = self.session_workspace(&session).await {
             if workspace.is_remote() {
                 self.cancel_remote_sandbox(&session).await;
             }
@@ -413,6 +491,18 @@ impl CodeRuntime {
         Ok(list_sessions_for_workspace(&self.db, owner, workspace_id).await?)
     }
 
+    /// The owner's sessions that bind no workspace, newest first.
+    pub(crate) async fn list_internal_sessions(
+        &self,
+        owner: &OwnerId,
+    ) -> Result<Vec<CodeSession>, ServerError> {
+        Ok(tidebreak_core::db::code::list_sessions(&self.db, owner)
+            .await?
+            .into_iter()
+            .filter(|session| session.workspace_id.is_none())
+            .collect())
+    }
+
     /// The external bindings behind `session_ids`, for provenance display.
     /// Sessions the desktop created have none and are simply absent.
     pub(crate) async fn external_bindings_for_sessions(
@@ -492,7 +582,7 @@ impl CodeRuntime {
     ) -> Result<fork::WrittenTranscript, ServerError> {
         let session = self.get_session(owner, session_id).await?;
         let workspace = self
-            .require_live_workspace(owner, session.workspace_id)
+            .require_live_workspace(owner, Self::require_workspace_id(&session)?)
             .await?;
         let private_root = crate::code::scratch::workspace_root(&self.data_dir, workspace.id)
             .map_err(|err| {

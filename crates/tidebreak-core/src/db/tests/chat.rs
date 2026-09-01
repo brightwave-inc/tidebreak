@@ -51,6 +51,7 @@ async fn chats_stored_before_the_effort_scale_widened_still_load() {
             attachment_revision: Set(0),
             created_at: Set(chat.created_at),
             owner: sea_orm::ActiveValue::NotSet,
+            engine_private: Set(false),
         }
         .insert(&store.conn)
         .await

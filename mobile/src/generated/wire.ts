@@ -1611,7 +1611,11 @@ export type CodeSessionActivity = "agent" | "shell" | "monitor" | "subagents" | 
 /**
  * Cheap per-session digest on `/code/updates`.
  */
-export type CodeSessionDigest = { workspace: WorkspaceId, session: CodeSessionId, kind: CodeSessionKind,
+export type CodeSessionDigest = {
+/**
+ * `None` for a session that binds no workspace.
+ */
+workspace: WorkspaceId | null, session: CodeSessionId, kind: CodeSessionKind,
 /**
  * Engine identity for list surfaces that collapse several sessions into
  * one workspace row. Optional on the wire so a desktop can still read a
@@ -1683,7 +1687,12 @@ export type CodeSessionLifecycle = "created" | "idle" | "running" | "fenced" | "
 /**
  * One durable conversation with an external agent engine.
  */
-export type CodeSessionSnapshot = { id: CodeSessionId, workspace_id: WorkspaceId, kind: CodeSessionKind, harness_kind: HarnessKind, harness_version?: string, harness_resume_ref?: string, permission_mode: PermissionMode, model?: string,
+export type CodeSessionSnapshot = { id: CodeSessionId,
+/**
+ * `None` for a session that binds no workspace: the in-process
+ * engine's (decision 0048 step 5).
+ */
+workspace_id: WorkspaceId | null, kind: CodeSessionKind, harness_kind: HarnessKind, harness_version?: string, harness_resume_ref?: string, permission_mode: PermissionMode, model?: string,
 /**
  * Absent means the engine's own default, which is not any level.
  */
@@ -1809,7 +1818,7 @@ export type CodeUpdateNotice = { "type": "snapshot",
 /**
  * One row per live session.
  */
-sessions: Array<CodeSessionDigest>, } | { "type": "digest", workspace: WorkspaceId, session: CodeSessionId, kind: CodeSessionKind,
+sessions: Array<CodeSessionDigest>, } | { "type": "digest", workspace: WorkspaceId | null, session: CodeSessionId, kind: CodeSessionKind,
 /**
  * Engine identity for the session represented by this digest.
  */
@@ -2829,7 +2838,7 @@ export type HarnessDoctorReport = { harnesses: Array<HarnessDoctorEntry>, };
  * Named after the shipped adapters. The traits those adapters implement
  * stay engine-neutral; this enum is only the catalog of known engines.
  */
-export type HarnessKind = "claude_code" | "codex" | "opencode" | "grok";
+export type HarnessKind = "claude_code" | "codex" | "opencode" | "grok" | "internal";
 
 /**
  * One model row offered for a harness session.
@@ -2941,7 +2950,11 @@ byte_len: number, };
  * (the repository check `chat_and_code_entities_do_not_cross_reference`
  * enforces it). When step 5 merges the entities this collapses to one id.
  */
-export type InboxConversation = { "surface": "chat", chat_id: ChatId, } | { "surface": "code", session_id: CodeSessionId, workspace_id: WorkspaceId, };
+export type InboxConversation = { "surface": "chat", chat_id: ChatId, } | { "surface": "code", session_id: CodeSessionId,
+/**
+ * `None` for a session with no workspace: the in-process engine's.
+ */
+workspace_id: WorkspaceId | null, };
 
 /**
  * One conversation that wants the reader, and why.

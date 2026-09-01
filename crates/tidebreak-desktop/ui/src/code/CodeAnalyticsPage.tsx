@@ -989,6 +989,8 @@ function harnessLabel(kind: HarnessKind): string {
       return "opencode";
     case "grok":
       return "Grok";
+    case "internal":
+      return "Tidebreak";
   }
 }
 

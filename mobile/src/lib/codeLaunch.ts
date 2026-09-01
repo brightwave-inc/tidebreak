@@ -10,6 +10,7 @@ export const HARNESS_LABELS: Record<HarnessKind, string> = {
   codex: "Codex CLI",
   opencode: "opencode",
   grok: "Grok CLI",
+  internal: "Tidebreak",
 };
 
 export const PERMISSION_MODE_LABELS: Record<PermissionMode, string> = {

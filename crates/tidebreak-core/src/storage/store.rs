@@ -413,6 +413,20 @@ pub trait Store: Send + Sync {
 
     /// Persist a new chat owned by `owner`. When `chat.project_id` is set,
     /// the project must belong to the same owner.
+    /// Create the conversation the in-process engine keeps behind one code
+    /// session (decision 0048 step 5).
+    ///
+    /// The row belongs to `owner` for provider resolution and grant scoping,
+    /// but it is the engine's durable state rather than a conversation of
+    /// theirs: every owner-scoped chat read excludes it, so it is reachable
+    /// only through the session that owns it. Engine-side reads use the
+    /// unscoped accessors.
+    async fn create_engine_private_chat(&self, _owner: &OwnerId, _chat: &Chat) -> Result<()> {
+        Err(AgentError::Store(
+            "engine-private conversations are not implemented by this Store".into(),
+        ))
+    }
+
     async fn create_chat_scoped(&self, owner: &OwnerId, chat: &Chat) -> Result<()> {
         let _ = owner;
         self.create_chat(chat).await

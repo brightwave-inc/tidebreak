@@ -91,6 +91,9 @@ pub fn spawn_wiring(
                 ("GROK_MODELS_BASE_URL".into(), format!("{openai}/v1")),
             ],
         ),
+        // The in-process engine spawns no child and resolves its inference
+        // through the server itself; there is nothing to wire.
+        HarnessKind::Internal => (Vec::new(), Vec::new()),
     }
 }
 
