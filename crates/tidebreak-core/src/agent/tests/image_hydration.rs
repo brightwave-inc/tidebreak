@@ -33,7 +33,7 @@ impl BlobStore for MemBlobs {
         Ok(self.bytes.lock().unwrap().get(&id).cloned())
     }
 
-    fn delete(&self, id: uuid::Uuid) -> Result<()> {
+    async fn delete(&self, id: uuid::Uuid) -> Result<()> {
         self.bytes.lock().unwrap().remove(&id);
         Ok(())
     }

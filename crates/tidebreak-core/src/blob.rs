@@ -11,7 +11,9 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use uuid::Uuid;
 
-use crate::{AgentError, BlobMetadata, BlobStore, BlobStream, DocumentBlob, Result};
+use crate::{
+    AgentError, BlobInventoryItem, BlobMetadata, BlobStore, BlobStream, DocumentBlob, Result,
+};
 
 /// Filesystem-backed opaque byte storage.
 ///
@@ -228,19 +230,83 @@ impl BlobStore for FsBlobStore {
         Ok(Some(Box::pin(stream)))
     }
 
-    fn delete(&self, id: Uuid) -> Result<()> {
+    async fn inventory(&self) -> Result<Vec<BlobInventoryItem>> {
+        let root = Arc::clone(&self.root);
+        tokio::task::spawn_blocking(move || inventory(&root))
+            .await
+            .map_err(|error| AgentError::Store(format!("blob inventory task failed: {error}")))?
+    }
+
+    async fn modified_at(&self, id: Uuid) -> Result<Option<std::time::SystemTime>> {
+        let path = self.blob_path(id);
+        tokio::task::spawn_blocking(move || match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_file() => metadata
+                .modified()
+                .map(Some)
+                .map_err(|error| blob_error("read modification time", error)),
+            Ok(_) => Ok(None),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(blob_error("read metadata", error)),
+        })
+        .await
+        .map_err(|error| AgentError::Store(format!("blob metadata task failed: {error}")))?
+    }
+
+    async fn delete(&self, id: Uuid) -> Result<()> {
         let path = self.blob_path(id);
         let root = Arc::clone(&self.root);
         let access = Arc::clone(&self.access);
-        let _guard = access
-            .write()
-            .map_err(|_| AgentError::Store("blob store lock poisoned".into()))?;
-        match fs::remove_file(path) {
-            Ok(()) => sync_directory(&root),
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(blob_error("delete file", error)),
-        }
+        tokio::task::spawn_blocking(move || {
+            let _guard = access
+                .write()
+                .map_err(|_| AgentError::Store("blob store lock poisoned".into()))?;
+            match fs::remove_file(path) {
+                Ok(()) => sync_directory(&root),
+                Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(blob_error("delete file", error)),
+            }
+        })
+        .await
+        .map_err(|error| AgentError::Store(format!("blob delete task failed: {error}")))?
     }
+}
+
+fn inventory(root: &Path) -> Result<Vec<BlobInventoryItem>> {
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(blob_error("read directory", error)),
+    };
+    let mut items = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| blob_error("read directory entry", error))?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Some(id) = name.strip_suffix(".blob").and_then(|id| id.parse().ok()) else {
+            continue;
+        };
+        if name != format!("{id}.blob") {
+            continue;
+        }
+        let file_type = entry
+            .file_type()
+            .map_err(|error| blob_error("read file type", error))?;
+        if !file_type.is_file() {
+            continue;
+        }
+        let metadata = entry
+            .metadata()
+            .map_err(|error| blob_error("read metadata", error))?;
+        items.push(BlobInventoryItem {
+            id,
+            modified_at: metadata
+                .modified()
+                .map_err(|error| blob_error("read modification time", error))?,
+        });
+    }
+    items.sort_unstable_by_key(|item| item.id);
+    Ok(items)
 }
 
 fn write_streamed_blob(
@@ -422,8 +488,8 @@ mod tests {
             reopened.get(id).await.unwrap().as_deref(),
             Some(&b"first"[..])
         );
-        reopened.delete(id).unwrap();
-        reopened.delete(id).unwrap();
+        reopened.delete(id).await.unwrap();
+        reopened.delete(id).await.unwrap();
         assert_eq!(reopened.get(id).await.unwrap(), None);
     }
 

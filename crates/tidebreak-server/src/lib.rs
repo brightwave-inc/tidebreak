@@ -2033,7 +2033,7 @@ async fn bind_inner(
     let resolver: Arc<dyn resolver::ProviderResolver> = resolver;
     #[cfg(feature = "scripted-provider")]
     let resolver = scripted_provider::resolver_from_env()?.unwrap_or(resolver);
-    let blobs: Arc<dyn BlobStore> = Arc::new(FsBlobStore::new(config.data_dir.join("blobs")));
+    let blobs = configured_blob_store(&config).await?;
     // The same lock root `AppState` uses. `BlobWriteGuard` rendezvouses through
     // permanent lock files, so a second handle over the directory excludes
     // against the first rather than shadowing it.
@@ -2294,7 +2294,7 @@ async fn bind_inner(
 
     let blob_orphan_auditor = blob_orphan_auditor::BlobOrphanAuditor::new(
         state.store.clone(),
-        state.config.data_dir.join("blobs"),
+        state.blobs.clone(),
         state.blob_writes.clone(),
         state.blob_retirement_wake.clone(),
         blob_orphan_auditor::BlobOrphanAuditorConfig::default(),
@@ -2489,6 +2489,30 @@ async fn bind_inner(
         _instance_lock: instance_lock,
         _listen_endpoint: listen_endpoint,
     })
+}
+
+async fn configured_blob_store(config: &Config) -> Result<Arc<dyn BlobStore>> {
+    let Some(url) = config.blob_store_url.as_deref() else {
+        return Ok(Arc::new(FsBlobStore::new(config.data_dir.join("blobs"))));
+    };
+    if config.profile != Profile::SelfHost {
+        return Err(AgentError::config(
+            "object storage is only available for the self-host profile",
+        ));
+    }
+    #[cfg(feature = "postgres")]
+    {
+        let store = tidebreak_core::ObjectBlobStore::from_s3_url(url)?;
+        store.probe().await?;
+        Ok(Arc::new(store))
+    }
+    #[cfg(not(feature = "postgres"))]
+    {
+        let _ = url;
+        Err(AgentError::config(
+            "self-host object storage requires the server's postgres feature",
+        ))
+    }
 }
 
 /// Assemble the tools and per-turn tuning for a real launch.

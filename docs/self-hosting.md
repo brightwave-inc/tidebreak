@@ -13,7 +13,7 @@ branch; where something is not built yet, it says so.
 
 ## What the self-host profile is
 
-Selecting `TIDEBREAK_PROFILE=self_host` changes four things about the server:
+Selecting `TIDEBREAK_PROFILE=self_host` changes five things about the server:
 
 - **The store is PostgreSQL**, opened from `TIDEBREAK_DATABASE_URL`, and the
   binary must be built with tidebreak-server's `postgres` feature for the
@@ -24,6 +24,9 @@ Selecting `TIDEBREAK_PROFILE=self_host` changes four things about the server:
   the operator-managed token file. Both resolve to a named principal carrying
   a role. Chats, projects, documents, transcripts, code workspaces, and event
   streams are owner-scoped to that principal.
+- **Blob bytes live in S3-compatible object storage**, selected by
+  `TIDEBREAK_BLOB_STORE_URL`. PostgreSQL keeps the document catalog and
+  references; the bucket keeps immutable source bytes, images, and artifacts.
 - **Boot fails closed.** The server refuses to open the shared store unless
   exactly one of `TIDEBREAK_AUTH_GATEWAY_URL` or
   `TIDEBREAK_AUTH_TOKENS_FILE` is valid — a shared database never comes up
@@ -253,6 +256,8 @@ aspirational.
 | --- | --- | --- | --- |
 | `TIDEBREAK_PROFILE` | yes | `desktop` | `self_host` (or `selfhost`) selects this profile. Anything else is desktop or a config error. |
 | `TIDEBREAK_DATABASE_URL` | yes (self-host) | — | PostgreSQL connection string for the shared store. |
+| `TIDEBREAK_BLOB_STORE_URL` | yes (self-host) | — | S3 bucket and optional prefix, for example `s3://company-tidebreak/production`. Credentials, region, and an optional compatible endpoint come from standard `AWS_*` variables. |
+| `AWS_DEFAULT_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_ENDPOINT_URL_S3`, `AWS_ALLOW_HTTP` | depends on provider | AWS defaults | Configure AWS S3 or an S3-compatible endpoint. Keep `AWS_ALLOW_HTTP=false` outside isolated development networks. Role, web-identity, and container credential variables are also accepted. |
 | `TIDEBREAK_AUTH_GATEWAY_URL` | one auth mode required | — | Public Model Gateway identity URL exposed to clients and, by default, used for live validation. HTTPS required except for loopback development. |
 | `TIDEBREAK_AUTH_GATEWAY_VERIFIER_URL` | no | `TIDEBREAK_AUTH_GATEWAY_URL` | Optional server-to-server Gateway URL for principal validation when the public origin is not cluster-routable. Requires Gateway auth. |
 | `TIDEBREAK_AUTH_TOKENS_FILE` | one auth mode required | — | Standalone compatibility: path to the static token file above. Mutually exclusive with Gateway auth. |
@@ -287,9 +292,13 @@ cd deploy/self-host
 umask 077
 printf 'alice %s admin\n' "$(openssl rand -hex 32)" > tokens
 
-# 2. Database password and provider key.
+# 2. Database password, object storage, and provider key.
 cat > .env <<'EOF'
 POSTGRES_PASSWORD=<a long random string>
+TIDEBREAK_BLOB_STORE_URL=s3://company-tidebreak/production
+AWS_DEFAULT_REGION=us-east-1
+AWS_ACCESS_KEY_ID=<your access key>
+AWS_SECRET_ACCESS_KEY=<your secret key>
 ANTHROPIC_API_KEY=<your key>
 EOF
 chmod 600 .env
@@ -397,8 +406,11 @@ that happens not to include request headers today.
 
 ## Backup
 
-**Back up the `tidebreak-postgres` volume.** All durable state — chats,
-projects, documents, transcripts, the event journal — lives in PostgreSQL.
+**Back up PostgreSQL and the object-store prefix.** PostgreSQL holds chats,
+projects, document records, transcripts, and the event journal. The bucket
+holds the immutable blob bytes those records reference. Restore both from the
+same backup window.
+
 The `tidebreak-data` volume holds only the instance lock, logs, and per-turn
 scratch, and is safe to lose.
 
@@ -413,6 +425,13 @@ Restore into a fresh, empty database before starting the server against it.
 The `.env` file is not in either volume. Back it up separately as a secret. In
 standalone compatibility mode, back up the tokens file too; Gateway-backed
 mode has no Tidebreak token file.
+
+Grant `s3:ListBucket` for the configured prefix. Grant `s3:GetObject`,
+`s3:PutObject`, `s3:DeleteObject`, and `s3:AbortMultipartUpload` only for
+objects below that prefix. Configure the bucket to abort incomplete multipart
+uploads after a day. Also expire completed objects in the `_uploads/` path
+below that prefix after a day because streamed writes publish through that
+temporary path.
 
 ## Upgrading
 
@@ -444,7 +463,6 @@ read the self-host section of
 account. In summary, and each of these is a reason not to put irreplaceable
 data in a self-host deployment yet:
 
-- Object storage is not wired.
 - Tidebreak enforces one active server process per PostgreSQL database through
   a dedicated advisory lease. A second process refuses boot even when it uses
   another data directory. Horizontal multi-process serving remains unsupported

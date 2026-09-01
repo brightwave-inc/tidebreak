@@ -1,12 +1,10 @@
 //! Conservative grace-period discovery of unreferenced source blobs.
 
 use std::collections::VecDeque;
-use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use tidebreak_core::{AgentError, Result, Store};
+use tidebreak_core::{AgentError, BlobInventoryItem, BlobStore, Result, Store};
 use tokio::sync::{Mutex, Notify};
 use uuid::Uuid;
 
@@ -52,7 +50,7 @@ pub(crate) struct BlobOrphanAuditFailure {
 #[derive(Clone)]
 pub(crate) struct BlobOrphanAuditor {
     store: Arc<dyn Store>,
-    blob_root: Arc<PathBuf>,
+    blobs: Arc<dyn BlobStore>,
     blob_writes: Arc<BlobWriteGuard>,
     wake: Arc<Notify>,
     audit: Arc<Mutex<()>>,
@@ -70,7 +68,7 @@ struct ScanResult {
 impl BlobOrphanAuditor {
     pub(crate) fn new(
         store: Arc<dyn Store>,
-        blob_root: impl Into<PathBuf>,
+        blobs: Arc<dyn BlobStore>,
         blob_writes: Arc<BlobWriteGuard>,
         wake: Arc<Notify>,
         config: BlobOrphanAuditorConfig,
@@ -78,7 +76,7 @@ impl BlobOrphanAuditor {
         assert!(config.batch_size > 0);
         Self {
             store,
-            blob_root: Arc::new(blob_root.into()),
+            blobs,
             blob_writes,
             wake,
             audit: Arc::new(Mutex::new(())),
@@ -131,12 +129,7 @@ impl BlobOrphanAuditor {
             .ok_or_else(|| AgentError::msg("blob orphan grace period exceeds system time"))?;
         let mut inventory = self.inventory.lock().await;
         let scan = if inventory.is_empty() {
-            let root = Arc::clone(&self.blob_root);
-            let scan = tokio::task::spawn_blocking(move || scan_candidates(&root, cutoff))
-                .await
-                .map_err(|error| {
-                    AgentError::Store(format!("blob orphan scan task failed: {error}"))
-                })??;
+            let scan = scan_inventory(self.blobs.inventory().await?, cutoff);
             inventory.extend(scan.candidates.iter().copied());
             Some(scan)
         } else {
@@ -173,12 +166,11 @@ impl BlobOrphanAuditor {
 
     async fn audit_blob(&self, blob_id: Uuid, cutoff: SystemTime) -> Result<bool> {
         let _permit = self.blob_writes.acquire(blob_id).await?;
-        let path = self.blob_root.join(format!("{blob_id}.blob"));
-        let still_eligible = tokio::task::spawn_blocking(move || eligible_file(&path, cutoff))
-            .await
-            .map_err(|error| {
-                AgentError::Store(format!("blob orphan metadata task failed: {error}"))
-            })??;
+        let still_eligible = self
+            .blobs
+            .modified_at(blob_id)
+            .await?
+            .is_some_and(|modified| modified <= cutoff);
         if !still_eligible {
             return Ok(false);
         }
@@ -196,95 +188,27 @@ fn next_delay(config: BlobOrphanAuditorConfig, report: &BlobOrphanAuditReport) -
     }
 }
 
-fn scan_candidates(root: &Path, cutoff: SystemTime) -> Result<ScanResult> {
-    let entries = match std::fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(ScanResult {
-                scanned: 0,
-                eligible: 0,
-                candidates: VecDeque::new(),
-                failures: Vec::new(),
-            });
-        }
-        Err(error) => return Err(scan_error("read blob directory", error)),
-    };
-    let mut scanned = 0;
-    let mut eligible = Vec::new();
-    let mut failures = Vec::new();
-    for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(error) => {
-                failures.push(BlobOrphanAuditFailure {
-                    blob_id: None,
-                    error: scan_error("read blob directory entry", error).to_string(),
-                });
-                continue;
-            }
-        };
-        let Some(blob_id) = blob_id_from_name(&entry.file_name()) else {
-            continue;
-        };
-        scanned += 1;
-        match entry.file_type().and_then(|kind| {
-            if kind.is_file() {
-                entry.metadata().map(Some)
-            } else {
-                Ok(None)
-            }
-        }) {
-            Ok(Some(metadata)) => match metadata.modified() {
-                Ok(modified) if modified <= cutoff => eligible.push(blob_id),
-                Ok(_) => {}
-                Err(error) => failures.push(BlobOrphanAuditFailure {
-                    blob_id: Some(blob_id),
-                    error: scan_error("read blob modification time", error).to_string(),
-                }),
-            },
-            Ok(None) => {}
-            Err(error) => failures.push(BlobOrphanAuditFailure {
-                blob_id: Some(blob_id),
-                error: scan_error("read blob metadata", error).to_string(),
-            }),
-        }
-    }
+fn scan_inventory(items: Vec<BlobInventoryItem>, cutoff: SystemTime) -> ScanResult {
+    let scanned = items.len();
+    let mut eligible = items
+        .into_iter()
+        .filter(|item| item.modified_at <= cutoff)
+        .map(|item| item.id)
+        .collect::<Vec<_>>();
     eligible.sort_unstable();
     let eligible_count = eligible.len();
-    let candidates = eligible.into();
-    Ok(ScanResult {
+    ScanResult {
         scanned,
         eligible: eligible_count,
-        candidates,
-        failures,
-    })
-}
-
-fn eligible_file(path: &Path, cutoff: SystemTime) -> Result<bool> {
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_file() => Ok(metadata
-            .modified()
-            .map_err(|error| scan_error("read blob modification time", error))?
-            <= cutoff),
-        Ok(_) => Ok(false),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(scan_error("read blob metadata", error)),
+        candidates: eligible.into(),
+        failures: Vec::new(),
     }
-}
-
-fn blob_id_from_name(name: &OsStr) -> Option<Uuid> {
-    let name = name.to_str()?;
-    let id = name.strip_suffix(".blob")?.parse::<Uuid>().ok()?;
-    (name == format!("{id}.blob")).then_some(id)
-}
-
-fn scan_error(action: &str, error: std::io::Error) -> AgentError {
-    AgentError::Store(format!("failed to {action}: {error}"))
 }
 
 #[cfg(test)]
 mod tests {
     use std::fs::{File, FileTimes};
+    use std::path::Path;
 
     use tidebreak_core::{
         BlobRetirementStatus, BlobStore, DbStore, DocumentBlob, DocumentId, DocumentSourceUpsert,
@@ -347,7 +271,7 @@ mod tests {
     ) -> BlobOrphanAuditor {
         BlobOrphanAuditor::new(
             store,
-            root,
+            Arc::new(FsBlobStore::new(root)),
             Arc::new(BlobWriteGuard::new(root.join("locks"))),
             wake,
             config(batch_size),
@@ -548,7 +472,7 @@ mod tests {
         std::fs::create_dir_all(lock_root.join(format!("{poison}.lock"))).unwrap();
         let auditor = BlobOrphanAuditor::new(
             store.clone(),
-            &root,
+            Arc::new(FsBlobStore::new(&root)),
             Arc::new(BlobWriteGuard::new(lock_root)),
             Arc::new(Notify::new()),
             config(2),

@@ -16,6 +16,7 @@
 #   - a tokens file at ./tokens, naming at least one `admin` user (see
 #     docs/self-hosting.md for the format; a file with no admin refuses to boot)
 #   - POSTGRES_PASSWORD set in the environment or a .env file beside this one
+#   - TIDEBREAK_BLOB_STORE_URL set to an operator-owned S3 bucket and prefix
 
 name: tidebreak-self-host
 
@@ -55,15 +56,26 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # Static AWS keys and an optional compatible endpoint belong in `.env`
+    # when the deployment uses them. Do not pin those names to empty strings
+    # here: `AmazonS3Builder::from_env` treats an empty `AWS_ACCESS_KEY_ID` as
+    # a static credential and ignores instance credentials, and an empty
+    # `AWS_ENDPOINT_URL_S3` becomes the client endpoint.
+    env_file:
+      - .env
     environment:
       TIDEBREAK_PROFILE: self_host
       TIDEBREAK_DATABASE_URL: postgres://tidebreak:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/tidebreak
+      TIDEBREAK_BLOB_STORE_URL: ${TIDEBREAK_BLOB_STORE_URL:?set TIDEBREAK_BLOB_STORE_URL in .env}
       TIDEBREAK_AUTH_TOKENS_FILE: /run/tidebreak/tokens
       TIDEBREAK_DATA_DIR: /var/lib/tidebreak
       # All interfaces of the container, published to loopback only below.
       TIDEBREAK_LISTEN_ADDR: 0.0.0.0:8080
       # Log filter; see the server's `logging` module for the syntax.
       TIDEBREAK_LOG: ${TIDEBREAK_LOG:-info}
+      # Standard AWS variables configure AWS S3 or an S3-compatible service.
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+      AWS_ALLOW_HTTP: ${AWS_ALLOW_HTTP:-false}
       # Model credential fallbacks for this minimal stack. To save shared
       # credentials through Tidebreak instead, mount a Vault token file and
       # pass the TIDEBREAK_VAULT_* variables described in docs/self-hosting.md.

@@ -129,6 +129,9 @@ pub struct Config {
     pub profile: Profile,
     /// Directory holding the app's data (database, blobs, …).
     pub data_dir: PathBuf,
+    /// S3 bucket and optional prefix used by the self-host blob store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blob_store_url: Option<String>,
     /// Keychain service name secrets are stored under; `None` uses the
     /// default (`tidebreak`). Host applications whose builds must not share
     /// secret state — a dev build running beside an installed release — set
@@ -340,6 +343,7 @@ impl Config {
         Self {
             profile: Profile::Desktop,
             data_dir: data_dir.into(),
+            blob_store_url: None,
             keychain_service: None,
             bundle_id: None,
             exec_scripts_dir: None,
@@ -368,6 +372,8 @@ impl Config {
     /// `TIDEBREAK_PROFILE` (default `desktop`), `TIDEBREAK_DATA_DIR` (default
     /// `./.tidebreak` under the current directory — desktop/CLI clients should set
     /// this to the platform's app-data location),
+    /// `TIDEBREAK_BLOB_STORE_URL` (required for self-host; an S3 bucket and
+    /// optional prefix),
     /// `TIDEBREAK_CONTAINER_EXECUTION_ENABLED` (default `false`),
     /// `TIDEBREAK_CONTAINER_IMAGE` (defaulting to the server's default agent
     /// image), `TIDEBREAK_AUTH_TOKENS_FILE` or `TIDEBREAK_AUTH_GATEWAY_URL`
@@ -394,6 +400,7 @@ impl Config {
         Self::from_vars(
             std::env::var("TIDEBREAK_PROFILE").ok(),
             std::env::var_os("TIDEBREAK_DATA_DIR"),
+            std::env::var("TIDEBREAK_BLOB_STORE_URL").ok(),
             std::env::var("TIDEBREAK_CONTAINER_EXECUTION_ENABLED").ok(),
             std::env::var("TIDEBREAK_CONTAINER_IMAGE").ok(),
             std::env::var_os("TIDEBREAK_AUTH_TOKENS_FILE"),
@@ -423,6 +430,7 @@ impl Config {
     fn from_vars(
         profile: Option<String>,
         data_dir: Option<OsString>,
+        blob_store_url: Option<String>,
         container_execution_enabled: Option<String>,
         container_image: Option<String>,
         auth_tokens_file: Option<OsString>,
@@ -445,6 +453,20 @@ impl Config {
                 .map_err(|e| AgentError::config(format!("no working directory: {e}")))?
                 .join(".tidebreak"),
         };
+        let blob_store_url = blob_store_url.filter(|value| !value.trim().is_empty());
+        match (profile, blob_store_url.as_deref()) {
+            (Profile::SelfHost, None) => {
+                return Err(AgentError::config(
+                    "TIDEBREAK_BLOB_STORE_URL is required for self-host",
+                ));
+            }
+            (Profile::Desktop, Some(_)) => {
+                return Err(AgentError::config(
+                    "TIDEBREAK_BLOB_STORE_URL is only valid for self-host",
+                ));
+            }
+            _ => {}
+        }
         let container_execution_enabled =
             match container_execution_enabled.filter(|value| !value.is_empty()) {
                 None => false,
@@ -486,6 +508,7 @@ impl Config {
         Ok(Self {
             profile,
             data_dir,
+            blob_store_url,
             keychain_service: None,
             bundle_id: None,
             exec_scripts_dir: None,
@@ -703,6 +726,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         let expected = std::env::current_dir().unwrap().join(".tidebreak");
@@ -715,6 +739,7 @@ mod tests {
         let config = Config::from_vars(
             Some(String::new()),
             Some(OsString::from("/data")),
+            None,
             None,
             None,
             None,
@@ -744,6 +769,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             Some("primary".into()),
             None,
             None,
@@ -752,6 +778,7 @@ mod tests {
         let config = Config::from_vars(
             None,
             Some(OsString::from("/data")),
+            None,
             None,
             None,
             None,
@@ -804,6 +831,7 @@ mod tests {
         let config = Config::from_vars(
             Some("self_host".into()),
             Some(OsString::from("/data")),
+            Some("s3://tidebreak/blobs".into()),
             None,
             None,
             Some(OsString::from("/etc/tidebreak/tokens")),
@@ -819,9 +847,57 @@ mod tests {
         assert_eq!(config.profile, Profile::SelfHost);
         assert_eq!(config.data_dir, PathBuf::from("/data"));
         assert_eq!(
+            config.blob_store_url.as_deref(),
+            Some("s3://tidebreak/blobs")
+        );
+        assert_eq!(
             config.auth_tokens_file,
             Some(PathBuf::from("/etc/tidebreak/tokens"))
         );
+    }
+
+    #[test]
+    fn self_host_requires_a_blob_store_url() {
+        let error = Config::from_vars(
+            Some("self_host".into()),
+            Some(OsString::from("/data")),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("TIDEBREAK_BLOB_STORE_URL is required for self-host"));
+    }
+
+    #[test]
+    fn desktop_rejects_a_blob_store_url() {
+        let error = Config::from_vars(
+            Some("desktop".into()),
+            Some(OsString::from("/data")),
+            Some("s3://tidebreak/blobs".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("TIDEBREAK_BLOB_STORE_URL is only valid for self-host"));
     }
 
     #[test]
@@ -838,7 +914,8 @@ mod tests {
             None,
             None,
             None,
-            None
+            None,
+            None,
         )
         .is_err());
     }
@@ -864,6 +941,7 @@ mod tests {
         let config = Config::from_vars(
             Some("self_host".into()),
             Some(OsString::from("/data")),
+            Some("s3://tidebreak/blobs".into()),
             None,
             None,
             None,
@@ -886,6 +964,7 @@ mod tests {
         assert!(Config::from_vars(
             Some("self_host".into()),
             None,
+            Some("s3://tidebreak/blobs".into()),
             None,
             None,
             None,
@@ -911,6 +990,7 @@ mod tests {
     fn legacy_config_without_keychain_service_defaults_to_none() {
         let config = serde_json::from_str::<Config>(r#"{"data_dir":"/data"}"#).unwrap();
         assert_eq!(config.keychain_service, None);
+        assert_eq!(config.blob_store_url, None);
         assert_eq!(config.exec_scripts_dir, None);
         assert_eq!(config.exec_skills_dir, None);
         assert!(!config.container_execution_enabled);
@@ -956,6 +1036,7 @@ mod tests {
         let config = Config::from_vars(
             None,
             Some(OsString::from("/data")),
+            None,
             Some("true".into()),
             Some("tidebreak-sandbox-agent:dev".into()),
             None,
@@ -974,6 +1055,7 @@ mod tests {
             Some("tidebreak-sandbox-agent:dev")
         );
         assert!(Config::from_vars(
+            None,
             None,
             None,
             Some("yes".into()),
@@ -995,6 +1077,7 @@ mod tests {
         let config = Config::from_vars(
             Some("self_host".into()),
             Some(OsString::from("/data")),
+            Some("s3://tidebreak/blobs".into()),
             None,
             None,
             None,
@@ -1042,6 +1125,7 @@ mod tests {
         let config = Config::from_vars(
             Some("self_host".into()),
             Some(OsString::from("/data")),
+            Some("s3://tidebreak/blobs".into()),
             None,
             None,
             None,
@@ -1117,7 +1201,7 @@ mod tests {
         )
         .unwrap();
         let error = Config::from_vars(
-            None, None, None, None, None, None, None, None, None, None, None, vault,
+            None, None, None, None, None, None, None, None, None, None, None, None, vault,
         )
         .unwrap_err()
         .to_string();

@@ -615,5 +615,6 @@ stored-secret reads return unset so provider environment variables remain
 fallbacks, while writes and deletes fail with setup guidance. The self-host
 profile never opens the desktop OS keychain.
 
-Document and blob storage on PostgreSQL, object storage, and multi-process
-ownership are not finished. Treat self-hosting as experimental.
+Multi-process ownership is not finished. Self-host blob bytes use
+the S3-compatible bucket named by `TIDEBREAK_BLOB_STORE_URL`. Treat
+self-hosting as experimental.

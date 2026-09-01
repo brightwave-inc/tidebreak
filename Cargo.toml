@@ -77,6 +77,7 @@ base64 = "=0.23.1"
 minisign-verify = "=0.2.5"
 libc = "=0.2.189"
 async-stream = "=0.3.6"
+object_store = { version = "=0.14.1", default-features = false, features = ["aws"] }
 axum = { version = "=0.8.9", features = ["ws"] }
 tempfile = "=3.27.0"
 trash = { version = "=5.2.6", default-features = false, features = ["coinit_apartmentthreaded"] }

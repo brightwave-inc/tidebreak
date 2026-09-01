@@ -578,7 +578,7 @@ impl BlobStore for RangeOnlyBlobStore {
         Ok(Some(stream::once(async move { Ok(bytes) }).boxed()))
     }
 
-    fn delete(&self, _id: uuid::Uuid) -> Result<()> {
+    async fn delete(&self, _id: uuid::Uuid) -> Result<()> {
         Ok(())
     }
 }
@@ -633,7 +633,7 @@ impl BlobStore for CancellationAwareBlobStore {
         })))
     }
 
-    fn delete(&self, _id: uuid::Uuid) -> Result<()> {
+    async fn delete(&self, _id: uuid::Uuid) -> Result<()> {
         Ok(())
     }
 }
@@ -652,8 +652,8 @@ impl BlobStore for FirstPutGatedBlobStore {
         self.inner.get(id).await
     }
 
-    fn delete(&self, id: uuid::Uuid) -> Result<()> {
-        self.inner.delete(id)
+    async fn delete(&self, id: uuid::Uuid) -> Result<()> {
+        self.inner.delete(id).await
     }
 }
 
@@ -2376,6 +2376,37 @@ fn one_server_process_owns_a_desktop_data_directory() {
         .expect("a released directory is reclaimable even though the lock file is still there");
     assert!(dir.path().join("tidebreak.lock").exists());
     drop(reclaimed);
+}
+
+#[tokio::test]
+async fn desktop_profile_selects_the_filesystem_blob_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = Config::desktop(dir.path());
+    let blobs = configured_blob_store(&config).await.unwrap();
+    let id = Uuid::new_v4();
+    blobs.put(id, b"desktop blob".to_vec()).await.unwrap();
+
+    assert_eq!(
+        std::fs::read(dir.path().join("blobs").join(format!("{id}.blob"))).unwrap(),
+        b"desktop blob"
+    );
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn self_host_profile_selects_object_storage_and_redacts_url_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = Config::desktop(dir.path());
+    config.profile = Profile::SelfHost;
+    config.blob_store_url = Some("s3://access:secret@bucket/prefix".into());
+
+    let error = match configured_blob_store(&config).await {
+        Ok(_) => panic!("self-host must select the configured object store"),
+        Err(error) => error.to_string(),
+    };
+    assert!(error.contains("TIDEBREAK_BLOB_STORE_URL"));
+    assert!(!error.contains("access"));
+    assert!(!error.contains("secret"));
 }
 
 /// The MCP App view frame contract, at the HTTP boundary: minting requires

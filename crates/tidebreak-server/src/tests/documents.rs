@@ -615,6 +615,7 @@ async fn document_file_content_preserves_document_scope_before_blob_access() {
         .unwrap();
     tidebreak_core::FsBlobStore::new(dir.path().join("blobs"))
         .delete(source_blob.id)
+        .await
         .unwrap();
     assert_eq!(
         request_document_file_content(
