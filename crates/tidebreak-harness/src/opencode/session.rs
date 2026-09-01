@@ -521,6 +521,7 @@ impl OpencodeSession {
             .stderr(Stdio::piped());
         apply_child_env_tokio(
             &mut command,
+            tidebreak_core::HarnessKind::Opencode,
             self.spec.env.iter().cloned(),
             &plan.env,
             self.spec.browser.as_ref(),

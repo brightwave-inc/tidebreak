@@ -411,7 +411,32 @@ fn prepend_managed_node_path(
 }
 
 fn process_env_without_tidebreak() -> Vec<(OsString, OsString)> {
-    filter_child_env(std::env::vars_os())
+    strip_tidebreak_env(std::env::vars_os())
+}
+
+/// Drop only the reserved `TIDEBREAK_` namespace and malformed names from a
+/// captured snapshot. This keeps the stored probe environment complete —
+/// auth-override detection reads credentials like `ANTHROPIC_API_KEY` out
+/// of it — while [`filter_child_env`] separately narrows what a spawned
+/// child may inherit.
+fn strip_tidebreak_env<I, K, V>(vars: I) -> Vec<(OsString, OsString)>
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: Into<OsString>,
+    V: Into<OsString>,
+{
+    let filtered = vars.into_iter().filter_map(|(key, value)| {
+        let key = key.into();
+        let name = key.to_string_lossy();
+        if name.is_empty()
+            || name.contains('=')
+            || name.to_ascii_uppercase().starts_with("TIDEBREAK_")
+        {
+            return None;
+        }
+        Some((key, value.into()))
+    });
+    merge_environment(Vec::new(), filtered, cfg!(windows))
 }
 
 async fn capture_shell_env(host: &HostEnv) -> Result<Vec<(OsString, OsString)>, ProbeError> {
@@ -446,10 +471,170 @@ fn windows_process_env(host: &HostEnv) -> Vec<(OsString, OsString)> {
     } else {
         std::env::vars_os().collect()
     };
-    filter_child_env(merge_environment(base, host.env.iter().cloned(), true))
+    strip_tidebreak_env(merge_environment(base, host.env.iter().cloned(), true))
 }
 
-/// Drop Tidebreak-prefixed variables from a captured shell snapshot.
+/// Environment variables Claude Code's auth-mode detection
+/// (`crate::claude::observe_auth_override`) reads as the engine's own live
+/// auth: a key, token, or endpoint override, or a Bedrock/Vertex switch.
+///
+/// Defined here, next to [`CHILD_ENV_ALLOWED_NAMES`], so detection and the
+/// child filter cannot drift: whatever detection counts as working auth,
+/// [`filter_engine_child_env`] hands to this engine's session child — and
+/// only this engine's.
+pub(crate) const CLAUDE_AUTH_ENV_VARS: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+];
+
+/// Environment variables Codex's auth-mode detection
+/// (`crate::codex::observe_auth_override`) reads as the engine's own live
+/// auth, shared with the child filter for the same no-drift reason as
+/// [`CLAUDE_AUTH_ENV_VARS`]. Codex's config-file admission surface names
+/// its own environment keys inside `$CODEX_HOME/config.toml`; the filter
+/// reads those through [`crate::codex::config_provider_env_keys`] rather
+/// than this static list.
+pub(crate) const CODEX_AUTH_ENV_VARS: &[&str] = &["OPENAI_API_KEY", "OPENAI_BASE_URL"];
+
+/// Variables a spawned child may inherit from a captured shell snapshot,
+/// matched on the ASCII-uppercased name.
+///
+/// This is an allowlist for the same reason the exec path in
+/// `tidebreak-code-execution` builds on `env_clear()`: a coding-engine turn
+/// can read its whole environment with one `env` call, so every ambient
+/// credential the user's shell rc exports — `GITHUB_TOKEN`, an `AWS_*`
+/// secret for unrelated tooling, a random rc export — is one prompt
+/// injection away from exfiltration. A variable missing from this list
+/// fails visibly in the child; a leaked secret fails silently, so anything
+/// not demonstrably required stays out. Everything Tidebreak itself wires
+/// into a child — settings `extra_env`, the session relay key, the browser
+/// capability file — is applied after this filter (see
+/// [`crate::browser_channel::apply_child_env_tokio`]) and never needs an
+/// entry here.
+///
+/// The deliberate exception is the engine's own provider auth — but scoped
+/// to the engine that authenticates with it, never this shared base list.
+/// Session create (`refuse_signed_out_harness`) and the doctor
+/// (`resolve_auth_mode`) read [`CLAUDE_AUTH_ENV_VARS`] and
+/// [`CODEX_AUTH_ENV_VARS`] out of the unfiltered snapshot and treat a hit
+/// as that engine's working auth mode: a signed-out engine with a shell-rc
+/// `ANTHROPIC_API_KEY` is allowed to start a session on that basis, so the
+/// session child must actually receive the variable or its first turn 401s
+/// — the failure issue 2653 asked create to refuse. That per-engine
+/// invariant lives in [`filter_engine_child_env`]: whatever detection
+/// counts as working auth for engine X reaches engine X's session child,
+/// and nothing else's — an Anthropic credential handed to a Codex, Grok,
+/// or opencode child (or any probe/`gh` spawn under plain
+/// [`filter_child_env`]) would be exactly the cross-context disclosure this
+/// allowlist exists to stop.
+const CHILD_ENV_ALLOWED_NAMES: &[&str] = &[
+    // Command resolution: the probe prepends the managed Node runtime and
+    // the login-shell PATH here, and every pinned engine entrypoint needs
+    // its interpreter found through it.
+    "PATH",
+    // Engine state lives under the home directory: `~/.claude`, `~/.codex`,
+    // and the `~/.config` fallbacks all resolve through HOME.
+    "HOME",
+    // POSIX session identity and terminal basics.
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "TERM",
+    "LANG",
+    "TMPDIR",
+    // `tidebreak-server` spawns `gh` under this filter, and gh resolves a
+    // relocated config directory through this path (not a secret).
+    "GH_CONFIG_DIR",
+    // Codex resolves its config directory through this path (not a secret).
+    // Auth-mode detection reads the same `$CODEX_HOME/config.toml` for a
+    // custom model provider, so the child must look where detection looked.
+    "CODEX_HOME",
+    // Outbound-trust configuration `tidebreak-supervised-agent` merges into
+    // the session snapshot (`Trust::environment` via `HarnessEngine::launch`):
+    // behind the sidecar's TLS-intercepting egress, an engine child without
+    // these loses every HTTPS call. They carry CA-bundle paths, not secrets.
+    "SSL_CERT_FILE",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+    "GIT_SSL_CAINFO",
+    "NODE_EXTRA_CA_CERTS",
+    // Windows children cannot start, resolve commands, or write temp files
+    // without these; on Unix they are simply absent.
+    "SYSTEMROOT",
+    "SYSTEMDRIVE",
+    "WINDIR",
+    "COMSPEC",
+    "PATHEXT",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "PROGRAMDATA",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "USERNAME",
+    "TEMP",
+    "TMP",
+];
+
+/// Allowed name prefixes: locale configuration and the XDG base directories
+/// engines use to find their config and cache trees.
+const CHILD_ENV_ALLOWED_PREFIXES: &[&str] = &["LC_", "XDG_"];
+
+fn child_env_allowed(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    CHILD_ENV_ALLOWED_NAMES.contains(&upper.as_str())
+        || CHILD_ENV_ALLOWED_PREFIXES
+            .iter()
+            .any(|prefix| upper.starts_with(prefix))
+}
+
+/// Whether `name` is an auth variable `kind`'s own detection reads as this
+/// machine's working auth, mirrored exactly: opencode and Grok detection
+/// reads no environment names ([`crate::auth_override_present`] grants them
+/// the benefit of the doubt without looking), so their children receive no
+/// auth variables at all.
+///
+/// The Bedrock/Vertex switches are pure flags whose supporting credentials
+/// live under other names, so those pass only when the user set the switch:
+/// with `CLAUDE_CODE_USE_BEDROCK` the engine's inference runs on the AWS
+/// credential chain, so `AWS_*` is its configured auth; without the switch
+/// (or for any other engine) the same variables are unrelated secrets and
+/// stay out. Vertex likewise needs its project/region variables and the ADC
+/// pointer (`GOOGLE_APPLICATION_CREDENTIALS`).
+fn engine_auth_env_allowed(
+    kind: tidebreak_core::HarnessKind,
+    name: &str,
+    bedrock: bool,
+    vertex: bool,
+) -> bool {
+    let upper = name.to_ascii_uppercase();
+    match kind {
+        tidebreak_core::HarnessKind::ClaudeCode => {
+            CLAUDE_AUTH_ENV_VARS.contains(&upper.as_str())
+                || (bedrock && upper.starts_with("AWS_"))
+                || (vertex
+                    && (upper.starts_with("GOOGLE_")
+                        || upper.starts_with("ANTHROPIC_VERTEX_")
+                        || upper == "CLOUD_ML_REGION"))
+        }
+        tidebreak_core::HarnessKind::Codex => CODEX_AUTH_ENV_VARS.contains(&upper.as_str()),
+        tidebreak_core::HarnessKind::Opencode | tidebreak_core::HarnessKind::Grok => false,
+    }
+}
+
+/// Narrow a captured shell snapshot to the environment a spawned child may
+/// inherit: the [`CHILD_ENV_ALLOWED_NAMES`] allowlist, minus malformed
+/// names. The reserved `TIDEBREAK_` namespace is excluded by construction —
+/// nothing in the allowlist matches it.
+///
+/// No auth variable survives this filter. It is the right shape for probe
+/// spawns (`--version`, model listings, auth-status checks) and non-engine
+/// children (`gh`, the gateway usage CLI); an engine *session* child goes
+/// through [`filter_engine_child_env`] instead, which adds that one
+/// engine's own auth signals.
 #[must_use]
 pub fn filter_child_env<I, K, V>(vars: I) -> Vec<(OsString, OsString)>
 where
@@ -460,13 +645,65 @@ where
     let filtered = vars.into_iter().filter_map(|(key, value)| {
         let key = key.into();
         let name = key.to_string_lossy();
-        if name.is_empty()
-            || name.contains('=')
-            || name.to_ascii_uppercase().starts_with("TIDEBREAK_")
-        {
+        if name.is_empty() || name.contains('=') || !child_env_allowed(&name) {
             return None;
         }
         Some((key, value.into()))
+    });
+    merge_environment(Vec::new(), filtered, cfg!(windows))
+}
+
+/// [`filter_child_env`] plus the auth variables `kind`'s own auth-mode
+/// detection reads, for spawning that engine's session child.
+///
+/// This is where the create/doctor consistency invariant lives: a session
+/// that `refuse_signed_out_harness` admitted because detection saw
+/// engine-auth variables in the snapshot must hand those same variables to
+/// the engine child, or its first turn 401s (issue 2653). The pass-through
+/// is per engine — [`engine_auth_env_allowed`] — so one engine's credential
+/// is never disclosed to another engine's prompt-injectable child.
+///
+/// Codex has a second admission surface with the same obligation: detection
+/// admits on a `$CODEX_HOME/config.toml` that declares a model provider,
+/// and such a provider reads its credential from whatever environment key
+/// the config names (`env_key`, `env_http_headers`). Those config-named
+/// variables ([`crate::codex::config_provider_env_keys`], resolved from
+/// this same snapshot) are forwarded to a Codex child only — bounded to
+/// exactly the names the config declares.
+#[must_use]
+pub fn filter_engine_child_env<I, K, V>(
+    kind: tidebreak_core::HarnessKind,
+    vars: I,
+) -> Vec<(OsString, OsString)>
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: Into<OsString>,
+    V: Into<OsString>,
+{
+    let vars: Vec<(OsString, OsString)> = vars
+        .into_iter()
+        .map(|(key, value)| (key.into(), value.into()))
+        .collect();
+    // The same non-empty rule detection's `env_sets_any` applies to the
+    // auth variables themselves.
+    let bedrock = kind == tidebreak_core::HarnessKind::ClaudeCode
+        && env_sets_any(&vars, &["CLAUDE_CODE_USE_BEDROCK"]);
+    let vertex = kind == tidebreak_core::HarnessKind::ClaudeCode
+        && env_sets_any(&vars, &["CLAUDE_CODE_USE_VERTEX"]);
+    let config_auth_keys = if kind == tidebreak_core::HarnessKind::Codex {
+        crate::codex::config_provider_env_keys(&vars)
+    } else {
+        Vec::new()
+    };
+    let filtered = vars.into_iter().filter(|(key, _)| {
+        let name = key.to_string_lossy();
+        !name.is_empty()
+            && !name.contains('=')
+            && (child_env_allowed(&name)
+                || engine_auth_env_allowed(kind, &name, bedrock, vertex)
+                || config_auth_keys
+                    .iter()
+                    .any(|named| env_key_eq(std::ffi::OsStr::new(named), key, cfg!(windows))))
     });
     merge_environment(Vec::new(), filtered, cfg!(windows))
 }
@@ -1231,19 +1468,26 @@ eval "$cmd"
         assert_eq!(profile.as_deref(), Some("from-profile"));
         assert!(std::env::var_os("PROFILE_ONLY_VAR").is_none());
         let filtered = filter_child_env(capture.env);
-        assert!(filtered
-            .iter()
-            .any(|(key, value)| { key == "PROFILE_ONLY_VAR" && value == "from-profile" }));
+        // The snapshot keeps profile-sourced variables for detection, but a
+        // child inherits only the allowlist: an arbitrary profile export
+        // stays out while the profile-built PATH survives.
+        assert!(filtered.iter().all(|(key, _)| key != "PROFILE_ONLY_VAR"));
         assert!(filtered.iter().all(|(key, _)| {
             !key.to_string_lossy()
                 .to_ascii_uppercase()
                 .starts_with("TIDEBREAK_")
         }));
+        let path = filtered
+            .iter()
+            .find(|(key, _)| key == "PATH")
+            .map(|(_, value)| value.clone())
+            .expect("profile-built PATH reaches the child");
+        assert!(std::env::split_paths(&path).any(|entry| entry == dir.path()));
 
         let mut child = Command::new("/bin/sh");
         child
             .arg("-c")
-            .arg("printf %s \"$PROFILE_ONLY_VAR\"")
+            .arg("printf %s \"${PROFILE_ONLY_VAR-unset}\"")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -1253,7 +1497,7 @@ eval "$cmd"
             child.env(key, value);
         }
         let output = child.output().await.unwrap();
-        assert_eq!(String::from_utf8_lossy(&output.stdout), "from-profile");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "unset");
     }
 
     #[tokio::test]
@@ -1562,10 +1806,275 @@ mod environment_tests {
     fn filter_rejects_case_varied_tidebreak_and_invalid_environment_keys() {
         let filtered = filter_child_env([
             ("tidebreak_secret", "nope"),
-            ("GOOD", "yes"),
+            ("HOME", "/home/probe"),
             ("BAD=KEY", "nope"),
         ]);
-        assert_eq!(filtered, [(OsString::from("GOOD"), OsString::from("yes"))]);
+        assert_eq!(
+            filtered,
+            [(OsString::from("HOME"), OsString::from("/home/probe"))]
+        );
+    }
+
+    #[test]
+    fn child_env_is_an_allowlist_that_drops_planted_secrets() {
+        // A shell rc that exports ambient credentials must not hand them to
+        // a probe or non-engine child, while the session basics still
+        // arrive. Engine-auth variables pass only through the per-engine
+        // filter below, never this base one.
+        let filtered = filter_child_env([
+            ("PATH", "/usr/bin"),
+            ("HOME", "/home/probe"),
+            ("LC_ALL", "en_US.UTF-8"),
+            ("XDG_CONFIG_HOME", "/home/probe/.config"),
+            ("SSL_CERT_FILE", "/run/trust/bundle.pem"),
+            ("NODE_EXTRA_CA_CERTS", "/run/trust/sidecar-ca.pem"),
+            ("AWS_SECRET_ACCESS_KEY", "planted"),
+            ("GITHUB_TOKEN", "planted"),
+            ("ANTHROPIC_API_KEY", "planted"),
+            ("OPENAI_API_KEY", "planted"),
+        ]);
+        for name in [
+            "PATH",
+            "HOME",
+            "LC_ALL",
+            "XDG_CONFIG_HOME",
+            // The supervised runtime merges CA trust into the snapshot; a
+            // child that loses it cannot make outbound HTTPS calls.
+            "SSL_CERT_FILE",
+            "NODE_EXTRA_CA_CERTS",
+        ] {
+            assert!(
+                filtered.iter().any(|(key, _)| key == name),
+                "{name} must survive the child filter"
+            );
+        }
+        for name in [
+            "AWS_SECRET_ACCESS_KEY",
+            "GITHUB_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+        ] {
+            assert!(
+                filtered.iter().all(|(key, _)| key != name),
+                "{name} must not reach a non-engine child environment"
+            );
+        }
+    }
+
+    #[test]
+    fn engine_children_receive_only_their_own_auth_signals() {
+        // Auth-mode detection reads each engine's variables as its live auth
+        // (issue 2653): a session admitted on their evidence must hand them
+        // to that engine's child, or its first turn 401s — and to no other
+        // engine's child, or one provider's credential is disclosed to an
+        // unrelated prompt-injectable process.
+        use tidebreak_core::HarnessKind;
+        let snapshot = [
+            ("HOME", "/home/probe"),
+            ("SSL_CERT_FILE", "/run/trust/bundle.pem"),
+            ("ANTHROPIC_API_KEY", "sk-ant"),
+            ("ANTHROPIC_BASE_URL", "https://gateway.example"),
+            ("OPENAI_API_KEY", "sk-oai"),
+            ("OPENAI_BASE_URL", "https://oai-gateway.example"),
+            ("GITHUB_TOKEN", "planted"),
+        ];
+        let claude = filter_engine_child_env(HarnessKind::ClaudeCode, snapshot);
+        for name in ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "SSL_CERT_FILE"] {
+            assert!(
+                claude.iter().any(|(key, _)| key == name),
+                "{name} must survive for a Claude Code launch"
+            );
+        }
+        for name in ["OPENAI_API_KEY", "OPENAI_BASE_URL", "GITHUB_TOKEN"] {
+            assert!(
+                claude.iter().all(|(key, _)| key != name),
+                "{name} must not reach a Claude Code child"
+            );
+        }
+        let codex = filter_engine_child_env(HarnessKind::Codex, snapshot);
+        for name in ["OPENAI_API_KEY", "OPENAI_BASE_URL", "SSL_CERT_FILE"] {
+            assert!(
+                codex.iter().any(|(key, _)| key == name),
+                "{name} must survive for a Codex launch"
+            );
+        }
+        for name in ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GITHUB_TOKEN"] {
+            assert!(
+                codex.iter().all(|(key, _)| key != name),
+                "{name} must not reach a Codex child"
+            );
+        }
+        // Detection reads no environment names for these engines, so their
+        // children receive no auth variables at all.
+        for kind in [HarnessKind::Opencode, HarnessKind::Grok] {
+            let filtered = filter_engine_child_env(kind, snapshot);
+            for name in [
+                "ANTHROPIC_API_KEY",
+                "ANTHROPIC_BASE_URL",
+                "OPENAI_API_KEY",
+                "OPENAI_BASE_URL",
+                "GITHUB_TOKEN",
+            ] {
+                assert!(
+                    filtered.iter().all(|(key, _)| key != name),
+                    "{name} must not reach a {kind:?} child"
+                );
+            }
+            assert!(
+                filtered.iter().any(|(key, _)| key == "HOME"),
+                "session basics still reach a {kind:?} child"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_mode_flags_gate_their_supporting_credentials() {
+        use tidebreak_core::HarnessKind;
+        // Without the Bedrock switch, AWS credentials are unrelated secrets
+        // even for the engine that could use them.
+        let unrelated = filter_engine_child_env(
+            HarnessKind::ClaudeCode,
+            [("AWS_SECRET_ACCESS_KEY", "planted")],
+        );
+        assert!(unrelated
+            .iter()
+            .all(|(key, _)| key != "AWS_SECRET_ACCESS_KEY"));
+
+        // With the switch set, the engine's inference runs on the AWS
+        // credential chain: detection reads the flag as working auth, so the
+        // chain the flag needs must reach the child with it.
+        let bedrock_snapshot = [
+            ("CLAUDE_CODE_USE_BEDROCK", "1"),
+            ("AWS_SECRET_ACCESS_KEY", "aws-secret"),
+            ("AWS_REGION", "us-east-1"),
+            ("GITHUB_TOKEN", "planted"),
+        ];
+        let bedrock = filter_engine_child_env(HarnessKind::ClaudeCode, bedrock_snapshot);
+        for name in [
+            "CLAUDE_CODE_USE_BEDROCK",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_REGION",
+        ] {
+            assert!(
+                bedrock.iter().any(|(key, _)| key == name),
+                "{name} must survive the child filter in Bedrock mode"
+            );
+        }
+        assert!(
+            bedrock.iter().all(|(key, _)| key != "GITHUB_TOKEN"),
+            "a mode switch must not widen the filter beyond its own provider"
+        );
+        // The switch is Claude Code's auth mode: the same snapshot hands no
+        // AWS credential to another engine's child.
+        let codex = filter_engine_child_env(HarnessKind::Codex, bedrock_snapshot);
+        for name in ["CLAUDE_CODE_USE_BEDROCK", "AWS_SECRET_ACCESS_KEY"] {
+            assert!(
+                codex.iter().all(|(key, _)| key != name),
+                "{name} must not reach a Codex child"
+            );
+        }
+
+        let vertex = filter_engine_child_env(
+            HarnessKind::ClaudeCode,
+            [
+                ("CLAUDE_CODE_USE_VERTEX", "1"),
+                ("GOOGLE_APPLICATION_CREDENTIALS", "/home/probe/adc.json"),
+                ("CLOUD_ML_REGION", "us-east5"),
+                ("ANTHROPIC_VERTEX_PROJECT_ID", "probe-project"),
+            ],
+        );
+        for name in [
+            "CLAUDE_CODE_USE_VERTEX",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "CLOUD_ML_REGION",
+            "ANTHROPIC_VERTEX_PROJECT_ID",
+        ] {
+            assert!(
+                vertex.iter().any(|(key, _)| key == name),
+                "{name} must survive the child filter in Vertex mode"
+            );
+        }
+        // An empty switch is not set — the same non-empty rule detection's
+        // `env_sets_any` applies.
+        let unset = filter_engine_child_env(
+            HarnessKind::ClaudeCode,
+            [
+                ("CLAUDE_CODE_USE_BEDROCK", ""),
+                ("AWS_SECRET_ACCESS_KEY", "planted"),
+            ],
+        );
+        assert!(unset.iter().all(|(key, _)| key != "AWS_SECRET_ACCESS_KEY"));
+    }
+
+    #[test]
+    fn codex_config_declared_provider_keys_reach_only_codex_children() {
+        use tidebreak_core::HarnessKind;
+        // A gateway-managed machine authenticates Codex through a
+        // config-declared provider whose credential lives under whatever
+        // environment key the config names. Detection admits the session on
+        // that declaration, so the child must receive exactly the named
+        // variables (issue 2653) — and no other engine's child may.
+        let codex_home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            codex_home.path().join("config.toml"),
+            r#"model_provider = "gateway"
+
+[model_providers.gateway]
+name = "Gateway"
+base_url = "https://gateway.example/v1"
+env_key = "GATEWAY_TEST_KEY"
+env_http_headers = { "X-Gateway-Auth" = "GATEWAY_TEST_HEADER" }
+"#,
+        )
+        .unwrap();
+        let os = OsString::from;
+        let snapshot = vec![
+            (os("CODEX_HOME"), codex_home.path().as_os_str().to_owned()),
+            (os("GATEWAY_TEST_KEY"), os("gw-secret")),
+            (os("GATEWAY_TEST_HEADER"), os("gw-header-secret")),
+            (os("GITHUB_TOKEN"), os("planted")),
+        ];
+        let codex = filter_engine_child_env(HarnessKind::Codex, snapshot.clone());
+        for name in ["CODEX_HOME", "GATEWAY_TEST_KEY", "GATEWAY_TEST_HEADER"] {
+            assert!(
+                codex.iter().any(|(key, _)| key == name),
+                "{name} must survive for a Codex launch its config names"
+            );
+        }
+        assert!(
+            codex.iter().all(|(key, _)| key != "GITHUB_TOKEN"),
+            "a config-named key must not widen the filter beyond the config"
+        );
+        let claude = filter_engine_child_env(HarnessKind::ClaudeCode, snapshot);
+        for name in ["GATEWAY_TEST_KEY", "GATEWAY_TEST_HEADER"] {
+            assert!(
+                claude.iter().all(|(key, _)| key != name),
+                "{name} must not reach a Claude Code child"
+            );
+        }
+    }
+
+    #[test]
+    fn a_declared_provider_without_env_keys_widens_nothing() {
+        // A provider that names no environment key (OAuth, an auth helper,
+        // an unauthenticated local endpoint) authenticates through files
+        // under `$CODEX_HOME`; its declaration must not let ambient
+        // variables through.
+        let codex_home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            codex_home.path().join("config.toml"),
+            "[model_providers.local]\nname = \"Local\"\nbase_url = \"http://127.0.0.1:8080/v1\"\n",
+        )
+        .unwrap();
+        let os = OsString::from;
+        let filtered = filter_engine_child_env(
+            tidebreak_core::HarnessKind::Codex,
+            vec![
+                (os("CODEX_HOME"), codex_home.path().as_os_str().to_owned()),
+                (os("AMBIENT_SECRET"), os("planted")),
+            ],
+        );
+        assert!(filtered.iter().all(|(key, _)| key != "AMBIENT_SECRET"));
     }
 }
 

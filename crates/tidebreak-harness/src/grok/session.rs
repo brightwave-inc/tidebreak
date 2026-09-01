@@ -556,6 +556,7 @@ impl GrokSession {
             .stderr(Stdio::piped());
         apply_child_env_tokio(
             &mut command,
+            tidebreak_core::HarnessKind::Grok,
             self.spec.env.iter().cloned(),
             &plan.env,
             self.spec.browser.as_ref(),

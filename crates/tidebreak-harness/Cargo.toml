@@ -27,6 +27,7 @@ thiserror = { workspace = true }
 tidebreak-core = { path = "../tidebreak-core", default-features = false }
 tidebreak-managed-node = { path = "../tidebreak-managed-node" }
 tokio = { workspace = true, features = ["io-util", "macros", "process", "rt", "sync", "time"] }
+toml = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 

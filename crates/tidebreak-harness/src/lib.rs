@@ -45,9 +45,9 @@ pub use launch::{
 };
 pub use pin::{ensure_installed, managed_binary, pin_for, HarnessPin, PINS};
 pub use probe::{
-    display_model_label, filter_child_env, infer_listed_default, list_cli_models, observe_version,
-    prefer_gateway_models, probe_shell, resolve_binary, with_reasoning_efforts, DeclaredBinary,
-    HostEnv, ListedHarnessModel, ProbeCapture, ProbeError,
+    display_model_label, filter_child_env, filter_engine_child_env, infer_listed_default,
+    list_cli_models, observe_version, prefer_gateway_models, probe_shell, resolve_binary,
+    with_reasoning_efforts, DeclaredBinary, HostEnv, ListedHarnessModel, ProbeCapture, ProbeError,
 };
 
 /// Whether some auth mode besides the vendor login a probe observes could
@@ -602,8 +602,9 @@ impl BrowserChannelSpec {
     /// Adapter-owned environment key injected into every engine child.
     ///
     /// Adapters reject `TIDEBREAK_` keys from settings with
-    /// [`Self::is_reserved_env_key`], while [`filter_child_env`] strips the
-    /// same namespace from the shell snapshot. [`Self::inject_env_tokio`]
+    /// [`Self::is_reserved_env_key`], while [`filter_child_env`] narrows the
+    /// shell snapshot to an allowlist that excludes the same namespace.
+    /// [`Self::inject_env_tokio`]
     /// then runs after `plan.env`, making this the final child value.
     pub const ENV_KEY: &'static str = "TIDEBREAK_BROWSER_CAPFILE";
 
@@ -704,7 +705,10 @@ pub struct SessionSpec {
     /// namespace is stripped.
     pub relay_key_env: Option<String>,
     /// Shell-resolved environment captured by the probe. Children run under
-    /// this snapshot, not the GUI process environment.
+    /// the [`filter_child_env`] allowlist subset of this snapshot, not the
+    /// GUI process environment — ambient shell-rc credentials never reach an
+    /// engine child. A credential a session needs travels through
+    /// [`Self::extra_env`] or the relay instead.
     pub env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
     /// Approval-channel wiring, when the server has one to offer.
     pub approval: Option<ApprovalChannelSpec>,
@@ -1170,7 +1174,11 @@ mod tests {
             ),
             (
                 std::ffi::OsString::from("GATEWAY_URL"),
-                std::ffi::OsString::from("keep"),
+                std::ffi::OsString::from("ambient"),
+            ),
+            (
+                std::ffi::OsString::from("HOME"),
+                std::ffi::OsString::from("/home/probe"),
             ),
         ];
         let env = filter_child_env(snapshot);
@@ -1179,9 +1187,12 @@ mod tests {
                 .to_ascii_uppercase()
                 .starts_with("TIDEBREAK_")
         }));
+        // The child filter is an allowlist: an arbitrary ambient variable is
+        // dropped alongside the reserved namespace, not just renamed around.
+        assert!(env.iter().all(|(key, _)| key != "GATEWAY_URL"));
         assert!(env
             .iter()
-            .any(|(key, value)| { key == "GATEWAY_URL" && value == "keep" }));
+            .any(|(key, value)| { key == "HOME" && value == "/home/probe" }));
     }
 
     #[test]

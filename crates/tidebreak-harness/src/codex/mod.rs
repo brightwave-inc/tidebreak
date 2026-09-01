@@ -442,16 +442,102 @@ pub(crate) fn auth_override_present(env: &[(std::ffi::OsString, std::ffi::OsStri
 pub(crate) fn observe_auth_override(
     env: &[(std::ffi::OsString, std::ffi::OsString)],
 ) -> Option<crate::AuthOverrideSignal> {
-    if crate::probe::env_sets_any(env, &["OPENAI_API_KEY", "OPENAI_BASE_URL"]) {
+    if crate::probe::env_sets_any(env, crate::probe::CODEX_AUTH_ENV_VARS) {
         return Some(crate::AuthOverrideSignal::Environment);
     }
     config_declares_model_provider(env).then_some(crate::AuthOverrideSignal::EngineConfig)
 }
 
-/// `$CODEX_HOME/config.toml`, defaulting to `~/.codex/config.toml`, mentions
-/// `model_provider`. A comment mentioning it also matches; that over-reads
-/// toward "may authenticate some other way", which is the safe direction.
+/// `$CODEX_HOME/config.toml`, defaulting to `~/.codex/config.toml`, declares
+/// a model provider: a top-level or per-profile `model_provider` selection,
+/// or a `[model_providers.*]` table. Parsed as TOML rather than
+/// text-matched, because two decisions hang on the same answer and must
+/// agree: create admits a signed-out session on it, and
+/// [`crate::filter_engine_child_env`] forwards the declared providers'
+/// credentials ([`config_provider_env_keys`]) to the session child. A
+/// comment that merely mentions the word authenticates nothing, so counting
+/// it would admit a session whose first turn 401s — the failure issue 2653
+/// asked create to refuse.
+///
+/// An unparseable config still admits on the textual over-read: Codex
+/// itself refuses to start on it and prints its own config error, which is
+/// more legible than refusing with "sign in" on a gateway-managed machine
+/// with a typo.
 fn config_declares_model_provider(env: &[(std::ffi::OsString, std::ffi::OsString)]) -> bool {
+    let Some(raw) = read_config(env) else {
+        return false;
+    };
+    let Ok(config) = raw.parse::<toml::Table>() else {
+        return raw.contains("model_provider");
+    };
+    config.contains_key("model_provider")
+        || config
+            .get("model_providers")
+            .and_then(toml::Value::as_table)
+            .is_some_and(|providers| !providers.is_empty())
+        || config
+            .get("profiles")
+            .and_then(toml::Value::as_table)
+            .is_some_and(|profiles| {
+                profiles.values().any(|profile| {
+                    profile
+                        .as_table()
+                        .is_some_and(|table| table.contains_key("model_provider"))
+                })
+            })
+}
+
+/// Environment names the config-declared model providers read credentials
+/// from: each `[model_providers.*]` entry's `env_key`, plus every variable
+/// its `env_http_headers` map draws a header value from.
+///
+/// This is the config half of the create/launch invariant: when
+/// [`config_declares_model_provider`] admits a signed-out session, the
+/// engine authenticates through a provider these names feed, so
+/// [`crate::filter_engine_child_env`] forwards exactly this set to a Codex
+/// child — bounded to what the config names, and to no other engine's
+/// child. A provider that names no environment key (ChatGPT OAuth, an auth
+/// helper, an unauthenticated local endpoint) reads its material from files
+/// under `$CODEX_HOME`, which the child already reaches, so it contributes
+/// nothing. An absent or unparseable config contributes nothing either.
+pub(crate) fn config_provider_env_keys(
+    env: &[(std::ffi::OsString, std::ffi::OsString)],
+) -> Vec<String> {
+    let Some(config) = read_config(env).and_then(|raw| raw.parse::<toml::Table>().ok()) else {
+        return Vec::new();
+    };
+    let Some(providers) = config
+        .get("model_providers")
+        .and_then(toml::Value::as_table)
+    else {
+        return Vec::new();
+    };
+    let mut keys: Vec<String> = Vec::new();
+    let mut push = |name: &str| {
+        if !name.is_empty() && !keys.iter().any(|existing| existing == name) {
+            keys.push(name.to_owned());
+        }
+    };
+    for provider in providers.values().filter_map(toml::Value::as_table) {
+        if let Some(key) = provider.get("env_key").and_then(toml::Value::as_str) {
+            push(key);
+        }
+        if let Some(headers) = provider
+            .get("env_http_headers")
+            .and_then(toml::Value::as_table)
+        {
+            for name in headers.values().filter_map(toml::Value::as_str) {
+                push(name);
+            }
+        }
+    }
+    keys
+}
+
+/// Raw `$CODEX_HOME/config.toml`, defaulting to `~/.codex/config.toml`,
+/// resolved from the captured snapshot the same way for detection and for
+/// the child filter, so both read the file the launched engine will read.
+fn read_config(env: &[(std::ffi::OsString, std::ffi::OsString)]) -> Option<String> {
     let config_dir = crate::probe::env_value(env, std::ffi::OsStr::new("CODEX_HOME"))
         .filter(|value| !value.is_empty())
         .map(std::path::PathBuf::from)
@@ -461,12 +547,8 @@ fn config_declares_model_provider(env: &[(std::ffi::OsString, std::ffi::OsString
                 .find(|(key, _)| key.eq_ignore_ascii_case("HOME"))
                 .map(|(_, value)| std::path::PathBuf::from(value.as_os_str()).join(".codex"))
                 .filter(|dir| !dir.as_os_str().is_empty())
-        });
-    let Some(config_dir) = config_dir else {
-        return false;
-    };
-    std::fs::read_to_string(config_dir.join("config.toml"))
-        .is_ok_and(|raw| raw.contains("model_provider"))
+        })?;
+    std::fs::read_to_string(config_dir.join("config.toml")).ok()
 }
 
 #[cfg(test)]
@@ -959,6 +1041,53 @@ mod tests {
         )
         .unwrap();
         assert!(auth_override_present(&env));
+        // A profile-scoped selection is a declaration too.
+        std::fs::write(&config, "[profiles.gw]\nmodel_provider = \"gateway\"\n").unwrap();
+        assert!(auth_override_present(&env));
+        // A comment that merely mentions the word declares nothing: admitting
+        // on it would mint a session with no credential behind it and no
+        // config-named variable for the child filter to forward.
+        std::fs::write(
+            &config,
+            "# model_provider = \"gateway\"\nmodel = \"gpt-5\"\n",
+        )
+        .unwrap();
+        assert!(!auth_override_present(&env));
+        // An unparseable config keeps the textual over-read: the engine
+        // surfaces its own config error, which beats a "sign in" refusal.
+        std::fs::write(&config, "model_provider = [unclosed\n").unwrap();
+        assert!(auth_override_present(&env));
+    }
+
+    #[test]
+    fn config_provider_env_keys_are_exactly_what_providers_name() {
+        let os = std::ffi::OsString::from;
+        let codex_home = tempfile::tempdir().unwrap();
+        let env = vec![(os("CODEX_HOME"), codex_home.path().as_os_str().to_owned())];
+        assert!(config_provider_env_keys(&env).is_empty());
+        std::fs::write(
+            codex_home.path().join("config.toml"),
+            r#"model_provider = "gateway"
+
+[model_providers.gateway]
+base_url = "https://gateway.example/v1"
+env_key = "GATEWAY_TEST_KEY"
+env_http_headers = { "X-Gateway-Auth" = "GATEWAY_TEST_HEADER" }
+
+[model_providers.other]
+base_url = "https://other.example/v1"
+env_key = "GATEWAY_TEST_KEY"
+
+[model_providers.oauth]
+base_url = "https://oauth.example/v1"
+requires_openai_auth = true
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config_provider_env_keys(&env),
+            ["GATEWAY_TEST_KEY", "GATEWAY_TEST_HEADER"]
+        );
     }
 
     #[test]

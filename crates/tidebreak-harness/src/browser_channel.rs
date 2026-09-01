@@ -10,7 +10,7 @@
 
 use std::ffi::OsString;
 
-use crate::{filter_child_env, BrowserChannelSpec};
+use crate::{filter_engine_child_env, BrowserChannelSpec};
 
 /// Adapter must inject this exact key; engines must consume it.
 ///
@@ -22,8 +22,10 @@ pub const BROWSER_CAPFILE_ENV_KEY: &str = BrowserChannelSpec::ENV_KEY;
 /// single ordering every adapter must use:
 ///
 /// 1. Clear the inherited process environment.
-/// 2. Restore the probe snapshot through [`filter_child_env`], which strips
-///    the reserved `TIDEBREAK_` namespace (case-insensitively).
+/// 2. Restore the probe snapshot through [`filter_engine_child_env`], which
+///    narrows it to the child allowlist plus `kind`'s own auth-signal
+///    variables — ambient shell-rc secrets, other engines' credentials, and
+///    the reserved `TIDEBREAK_` namespace do not survive.
 /// 3. Apply the sanitized launch-plan environment. Settings already rejected
 ///    reserved keys via [`BrowserChannelSpec::is_reserved_env_key`], so this
 ///    step can carry no adapter-owned override.
@@ -34,6 +36,7 @@ pub const BROWSER_CAPFILE_ENV_KEY: &str = BrowserChannelSpec::ENV_KEY;
 /// Some/None/final-override path. `None` adds no environment entry.
 pub fn apply_child_env_tokio<I>(
     cmd: &mut tokio::process::Command,
+    kind: tidebreak_core::HarnessKind,
     snapshot: I,
     plan_env: &[(String, String)],
     browser: Option<&BrowserChannelSpec>,
@@ -41,7 +44,7 @@ pub fn apply_child_env_tokio<I>(
     I: IntoIterator<Item = (OsString, OsString)>,
 {
     cmd.env_clear();
-    for (key, value) in filter_child_env(snapshot) {
+    for (key, value) in filter_engine_child_env(kind, snapshot) {
         cmd.env(key, value);
     }
     for (key, value) in plan_env {
@@ -66,8 +69,22 @@ mod tests {
         plan_env: &[(String, String)],
         browser: Option<&BrowserChannelSpec>,
     ) -> std::collections::BTreeMap<String, String> {
+        final_env_for(
+            tidebreak_core::HarnessKind::ClaudeCode,
+            snapshot,
+            plan_env,
+            browser,
+        )
+    }
+
+    fn final_env_for(
+        kind: tidebreak_core::HarnessKind,
+        snapshot: impl IntoIterator<Item = (OsString, OsString)>,
+        plan_env: &[(String, String)],
+        browser: Option<&BrowserChannelSpec>,
+    ) -> std::collections::BTreeMap<String, String> {
         let mut cmd = tokio::process::Command::new("/bin/true");
-        apply_child_env_tokio(&mut cmd, snapshot, plan_env, browser);
+        apply_child_env_tokio(&mut cmd, kind, snapshot, plan_env, browser);
         cmd.as_std()
             .get_envs()
             .filter_map(|(name, value)| {
@@ -139,7 +156,13 @@ mod tests {
         let mut cmd = tokio::process::Command::new("/bin/true");
         cmd.env(AMBIENT_SENTINEL, "must-be-cleared");
 
-        apply_child_env_tokio(&mut cmd, Vec::new(), &[], None);
+        apply_child_env_tokio(
+            &mut cmd,
+            tidebreak_core::HarnessKind::ClaudeCode,
+            Vec::new(),
+            &[],
+            None,
+        );
 
         assert!(
             cmd.as_std()
@@ -147,6 +170,39 @@ mod tests {
                 .all(|(name, _)| name != std::ffi::OsStr::new(AMBIENT_SENTINEL)),
             "the helper must clear command entries configured before its trusted environment is applied"
         );
+    }
+
+    #[test]
+    fn snapshot_auth_variables_reach_only_their_own_engine() {
+        // The launch path scopes the engine-auth exception per engine: the
+        // same snapshot hands each session child only the credentials its
+        // own auth-mode detection reads, never another engine's.
+        let snapshot = || {
+            vec![
+                (OsString::from("ANTHROPIC_API_KEY"), OsString::from("a")),
+                (OsString::from("OPENAI_API_KEY"), OsString::from("o")),
+            ]
+        };
+        let claude = final_env_for(
+            tidebreak_core::HarnessKind::ClaudeCode,
+            snapshot(),
+            &[],
+            None,
+        );
+        assert!(claude.contains_key("ANTHROPIC_API_KEY"));
+        assert!(!claude.contains_key("OPENAI_API_KEY"));
+        let codex = final_env_for(tidebreak_core::HarnessKind::Codex, snapshot(), &[], None);
+        assert!(codex.contains_key("OPENAI_API_KEY"));
+        assert!(!codex.contains_key("ANTHROPIC_API_KEY"));
+        for kind in [
+            tidebreak_core::HarnessKind::Opencode,
+            tidebreak_core::HarnessKind::Grok,
+        ] {
+            assert!(
+                final_env_for(kind, snapshot(), &[], None).is_empty(),
+                "{kind:?} detection reads no auth environment, so its child receives none"
+            );
+        }
     }
 
     #[test]

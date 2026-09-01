@@ -35,6 +35,12 @@ brush-parser = "=0.4.0"
 fancy-regex = "=0.19.0"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
+# Parses the same `$CODEX_HOME/config.toml` the Codex engine parses, so
+# auth-override detection and the engine child-env filter agree with the
+# engine (and each other) about what the config declares. A substring scan
+# cannot tell a declared provider from a comment, and the filter must
+# forward exactly the env keys the declared providers name.
+toml = "=1.1.4"
 schemars = { version = "=1.2.2", features = ["uuid1"] }
 # Validates tool-call arguments against the advertised input_schema at
 # dispatch. No resolvers: schemas come from the registry or a mounted MCP
