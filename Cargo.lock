@@ -7476,6 +7476,7 @@ dependencies = [
  "tidebreak-core",
  "tidebreak-managed-node",
  "tokio",
+ "toml 1.1.4+spec-1.1.0",
  "tracing",
  "uuid",
  "windows-sys 0.61.2",

@@ -493,7 +493,10 @@ pub(crate) const CLAUDE_AUTH_ENV_VARS: &[&str] = &[
 /// Environment variables Codex's auth-mode detection
 /// (`crate::codex::observe_auth_override`) reads as the engine's own live
 /// auth, shared with the child filter for the same no-drift reason as
-/// [`CLAUDE_AUTH_ENV_VARS`].
+/// [`CLAUDE_AUTH_ENV_VARS`]. Codex's config-file admission surface names
+/// its own environment keys inside `$CODEX_HOME/config.toml`; the filter
+/// reads those through [`crate::codex::config_provider_env_keys`] rather
+/// than this static list.
 pub(crate) const CODEX_AUTH_ENV_VARS: &[&str] = &["OPENAI_API_KEY", "OPENAI_BASE_URL"];
 
 /// Variables a spawned child may inherit from a captured shell snapshot,
@@ -659,6 +662,14 @@ where
 /// the engine child, or its first turn 401s (issue 2653). The pass-through
 /// is per engine — [`engine_auth_env_allowed`] — so one engine's credential
 /// is never disclosed to another engine's prompt-injectable child.
+///
+/// Codex has a second admission surface with the same obligation: detection
+/// admits on a `$CODEX_HOME/config.toml` that declares a model provider,
+/// and such a provider reads its credential from whatever environment key
+/// the config names (`env_key`, `env_http_headers`). Those config-named
+/// variables ([`crate::codex::config_provider_env_keys`], resolved from
+/// this same snapshot) are forwarded to a Codex child only — bounded to
+/// exactly the names the config declares.
 #[must_use]
 pub fn filter_engine_child_env<I, K, V>(
     kind: tidebreak_core::HarnessKind,
@@ -679,11 +690,20 @@ where
         && env_sets_any(&vars, &["CLAUDE_CODE_USE_BEDROCK"]);
     let vertex = kind == tidebreak_core::HarnessKind::ClaudeCode
         && env_sets_any(&vars, &["CLAUDE_CODE_USE_VERTEX"]);
+    let config_auth_keys = if kind == tidebreak_core::HarnessKind::Codex {
+        crate::codex::config_provider_env_keys(&vars)
+    } else {
+        Vec::new()
+    };
     let filtered = vars.into_iter().filter(|(key, _)| {
         let name = key.to_string_lossy();
         !name.is_empty()
             && !name.contains('=')
-            && (child_env_allowed(&name) || engine_auth_env_allowed(kind, &name, bedrock, vertex))
+            && (child_env_allowed(&name)
+                || engine_auth_env_allowed(kind, &name, bedrock, vertex)
+                || config_auth_keys
+                    .iter()
+                    .any(|named| env_key_eq(std::ffi::OsStr::new(named), key, cfg!(windows))))
     });
     merge_environment(Vec::new(), filtered, cfg!(windows))
 }
@@ -1957,6 +1977,77 @@ mod environment_tests {
             ],
         );
         assert!(unset.iter().all(|(key, _)| key != "AWS_SECRET_ACCESS_KEY"));
+    }
+
+    #[test]
+    fn codex_config_declared_provider_keys_reach_only_codex_children() {
+        use tidebreak_core::HarnessKind;
+        // A gateway-managed machine authenticates Codex through a
+        // config-declared provider whose credential lives under whatever
+        // environment key the config names. Detection admits the session on
+        // that declaration, so the child must receive exactly the named
+        // variables (issue 2653) — and no other engine's child may.
+        let codex_home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            codex_home.path().join("config.toml"),
+            r#"model_provider = "gateway"
+
+[model_providers.gateway]
+name = "Gateway"
+base_url = "https://gateway.example/v1"
+env_key = "GATEWAY_TEST_KEY"
+env_http_headers = { "X-Gateway-Auth" = "GATEWAY_TEST_HEADER" }
+"#,
+        )
+        .unwrap();
+        let os = OsString::from;
+        let snapshot = vec![
+            (os("CODEX_HOME"), codex_home.path().as_os_str().to_owned()),
+            (os("GATEWAY_TEST_KEY"), os("gw-secret")),
+            (os("GATEWAY_TEST_HEADER"), os("gw-header-secret")),
+            (os("GITHUB_TOKEN"), os("planted")),
+        ];
+        let codex = filter_engine_child_env(HarnessKind::Codex, snapshot.clone());
+        for name in ["CODEX_HOME", "GATEWAY_TEST_KEY", "GATEWAY_TEST_HEADER"] {
+            assert!(
+                codex.iter().any(|(key, _)| key == name),
+                "{name} must survive for a Codex launch its config names"
+            );
+        }
+        assert!(
+            codex.iter().all(|(key, _)| key != "GITHUB_TOKEN"),
+            "a config-named key must not widen the filter beyond the config"
+        );
+        let claude = filter_engine_child_env(HarnessKind::ClaudeCode, snapshot);
+        for name in ["GATEWAY_TEST_KEY", "GATEWAY_TEST_HEADER"] {
+            assert!(
+                claude.iter().all(|(key, _)| key != name),
+                "{name} must not reach a Claude Code child"
+            );
+        }
+    }
+
+    #[test]
+    fn a_declared_provider_without_env_keys_widens_nothing() {
+        // A provider that names no environment key (OAuth, an auth helper,
+        // an unauthenticated local endpoint) authenticates through files
+        // under `$CODEX_HOME`; its declaration must not let ambient
+        // variables through.
+        let codex_home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            codex_home.path().join("config.toml"),
+            "[model_providers.local]\nname = \"Local\"\nbase_url = \"http://127.0.0.1:8080/v1\"\n",
+        )
+        .unwrap();
+        let os = OsString::from;
+        let filtered = filter_engine_child_env(
+            tidebreak_core::HarnessKind::Codex,
+            vec![
+                (os("CODEX_HOME"), codex_home.path().as_os_str().to_owned()),
+                (os("AMBIENT_SECRET"), os("planted")),
+            ],
+        );
+        assert!(filtered.iter().all(|(key, _)| key != "AMBIENT_SECRET"));
     }
 }
 
