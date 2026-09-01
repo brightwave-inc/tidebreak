@@ -1,5 +1,6 @@
 //! Route handlers extracted from the parent `routes` module.
 
+use std::collections::HashMap;
 use std::future::pending;
 use std::time::Duration;
 
@@ -11,7 +12,7 @@ use serde::Deserialize;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::time::{Instant, Interval, MissedTickBehavior};
 
-use tidebreak_core::{AgentEvent, ChatId, SequencedEvent, Store};
+use tidebreak_core::{AgentEvent, ChatId, SequencedEvent, Store, TurnId};
 
 use crate::auth::{offered_handshake_subprotocol, GatewayAuthLease, WS_HANDSHAKE_SUBPROTOCOL};
 use crate::error::ServerError;
@@ -129,9 +130,16 @@ async fn stream_events(
 
     // Replay everything the client hasn't seen yet from the durable journal.
     let mut last_seq = after;
-    if replay_after(&mut socket, &*state.store, chat, &mut last_seq)
-        .await
-        .is_err()
+    let mut turn_models = TurnModelCache::default();
+    if replay_after(
+        &mut socket,
+        &*state.store,
+        chat,
+        &mut last_seq,
+        &mut turn_models,
+    )
+    .await
+    .is_err()
     {
         return;
     }
@@ -175,7 +183,13 @@ async fn stream_events(
                         // lease owners. Fill the gap from the journal before
                         // accepting this live tail; replay includes the current
                         // event because publication always follows commit.
-                        if replay_after(&mut socket, &*state.store, chat, &mut last_seq)
+                        if replay_after(
+                            &mut socket,
+                            &*state.store,
+                            chat,
+                            &mut last_seq,
+                            &mut turn_models,
+                        )
                             .await
                             .is_err()
                         {
@@ -184,14 +198,10 @@ async fn stream_events(
                         continue;
                     }
                     last_seq = event.seq;
-                    let model = state
-                        .store
-                        .list_turn_runs(chat)
-                        .await
-                        .ok()
-                        .and_then(|turns| turns.into_iter().find(|turn| !turn.status.is_terminal()))
-                        .map(|turn| turn.model);
-                    if send_event(&mut socket, &event, model.as_deref(), false).await.is_err() {
+                    if turn_models.needs_live_refresh(&event.event) {
+                        let _ = turn_models.refresh(&*state.store, chat).await;
+                    }
+                    if send_event(&mut socket, &event, turn_models.active_model(), false).await.is_err() {
                         break;
                     }
                 }
@@ -200,7 +210,13 @@ async fn stream_events(
                 // dedup above absorbs any overlap. A long/fast turn can outrun the
                 // 256-slot buffer, so this keeps an ordinary client connected.
                 Err(RecvError::Lagged(_)) => {
-                    if replay_after(&mut socket, &*state.store, chat, &mut last_seq)
+                    if replay_after(
+                        &mut socket,
+                        &*state.store,
+                        chat,
+                        &mut last_seq,
+                        &mut turn_models,
+                    )
                         .await
                         .is_err()
                     {
@@ -220,27 +236,91 @@ async fn replay_after(
     store: &dyn Store,
     chat: ChatId,
     last_seq: &mut i64,
+    turn_models: &mut TurnModelCache,
 ) -> Result<(), ()> {
     let events = store.list_events(chat, *last_seq).await.map_err(|_| ())?;
-    let turn_models = store
-        .list_turn_runs(chat)
-        .await
-        .map_err(|_| ())?
-        .into_iter()
-        .map(|turn| (turn.id, turn.model))
-        .collect::<std::collections::HashMap<_, _>>();
+    if turn_models.is_empty() {
+        turn_models.refresh(store, chat).await?;
+    }
     let mut active_turn_id = None;
     for event in events {
         *last_seq = event.seq;
         if let AgentEvent::TurnStarted { turn_id } = &event.event {
             active_turn_id = Some(*turn_id);
         }
-        let model = active_turn_id.and_then(|turn_id| turn_models.get(&turn_id));
-        send_event(socket, &event, model.map(String::as_str), true)
+        if let Some(turn_id) = active_turn_id {
+            if !turn_models.contains(turn_id) {
+                turn_models.refresh(store, chat).await?;
+            }
+        }
+        let model = active_turn_id.and_then(|turn_id| turn_models.model_for(turn_id));
+        send_event(socket, &event, model, true)
             .await
             .map_err(|_| ())?;
     }
     Ok(())
+}
+
+/// Turn → model mapping for one WebSocket session. Refreshed on turn
+/// boundaries (and on a cache miss), not per streamed delta.
+#[derive(Debug, Default)]
+struct TurnModelCache {
+    by_id: HashMap<TurnId, String>,
+    active_model: Option<String>,
+}
+
+impl TurnModelCache {
+    fn is_empty(&self) -> bool {
+        self.by_id.is_empty()
+    }
+
+    fn contains(&self, turn_id: TurnId) -> bool {
+        self.by_id.contains_key(&turn_id)
+    }
+
+    fn model_for(&self, turn_id: TurnId) -> Option<&str> {
+        self.by_id.get(&turn_id).map(String::as_str)
+    }
+
+    fn active_model(&self) -> Option<&str> {
+        self.active_model.as_deref()
+    }
+
+    fn needs_live_refresh(&self, event: &AgentEvent) -> bool {
+        self.by_id.is_empty() || is_turn_boundary(event)
+    }
+
+    fn replace_from_turns(&mut self, turns: impl IntoIterator<Item = (TurnId, String, bool)>) {
+        self.by_id.clear();
+        self.active_model = None;
+        for (id, model, terminal) in turns {
+            if self.active_model.is_none() && !terminal {
+                self.active_model = Some(model.clone());
+            }
+            self.by_id.insert(id, model);
+        }
+    }
+
+    async fn refresh(&mut self, store: &dyn Store, chat: ChatId) -> Result<(), ()> {
+        let turns = store.list_turn_runs(chat).await.map_err(|_| ())?;
+        self.replace_from_turns(
+            turns
+                .into_iter()
+                .map(|turn| (turn.id, turn.model, turn.status.is_terminal())),
+        );
+        Ok(())
+    }
+}
+
+fn is_turn_boundary(event: &AgentEvent) -> bool {
+    matches!(
+        event,
+        AgentEvent::TurnStarted { .. }
+            | AgentEvent::TurnCompleted { .. }
+            | AgentEvent::TurnRefused { .. }
+            | AgentEvent::TurnFailed { .. }
+            | AgentEvent::TurnCancelled { .. }
+    )
 }
 
 /// Send one journaled event as a frame.
@@ -266,4 +346,44 @@ async fn send_frame(socket: &mut WebSocket, frame: &RendererChatFrame) -> Result
         return Ok(());
     };
     socket.send(Message::Text(json.into())).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tidebreak_core::Usage;
+
+    #[test]
+    fn deltas_do_not_need_a_refresh_once_the_cache_is_warm() {
+        let mut cache = TurnModelCache::default();
+        let turn = TurnId::new();
+        cache.replace_from_turns([(turn, "model-a".into(), false)]);
+        assert!(!cache.needs_live_refresh(&AgentEvent::TextDelta { text: "hi".into() }));
+        assert!(!cache.needs_live_refresh(&AgentEvent::ReasoningDelta {
+            text: "think".into()
+        }));
+        assert!(cache.needs_live_refresh(&AgentEvent::TurnStarted { turn_id: turn }));
+        assert!(cache.needs_live_refresh(&AgentEvent::TurnCompleted {
+            usage: Usage::default(),
+            stop_reason: tidebreak_core::StopReason::EndTurn,
+        }));
+    }
+
+    #[test]
+    fn turn_boundary_refresh_keeps_prior_turn_models() {
+        let mut cache = TurnModelCache::default();
+        let first = TurnId::new();
+        let second = TurnId::new();
+        cache.replace_from_turns([(first, "model-a".into(), false)]);
+        assert_eq!(cache.active_model(), Some("model-a"));
+        assert_eq!(cache.model_for(first), Some("model-a"));
+
+        cache.replace_from_turns([
+            (first, "model-a".into(), true),
+            (second, "model-b".into(), false),
+        ]);
+        assert_eq!(cache.model_for(first), Some("model-a"));
+        assert_eq!(cache.model_for(second), Some("model-b"));
+        assert_eq!(cache.active_model(), Some("model-b"));
+    }
 }
