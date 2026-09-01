@@ -41,22 +41,35 @@ mod app_invoke;
 mod app_library;
 mod chat_titling;
 mod code;
+mod code_approvals;
+mod code_archive;
+mod code_attachments;
 mod code_browser;
 #[cfg(unix)]
 mod code_clone;
+mod code_create;
+mod code_doctor;
 mod code_external;
 #[cfg(unix)]
 mod code_git;
+mod code_owner_scope;
+mod code_policy;
 #[cfg(unix)]
 mod code_pr_facts;
 mod code_recap;
 #[cfg(unix)]
 mod code_reconcile;
 mod code_rewrite;
+mod code_settings;
+mod code_steer;
 mod code_terminals;
 mod code_titling;
 #[cfg(unix)]
 mod code_trigger_facts;
+mod code_triggers;
+mod code_turns;
+mod code_workspace;
+mod code_ws;
 mod compaction;
 mod configuration;
 mod conformance;
