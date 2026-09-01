@@ -768,9 +768,15 @@ export function NewWorkspaceDialog({
       return;
     }
     replaceWorkspace(pending.id, workspace);
-    await revealCreatedWorkspace(workspace, attempt);
     const prompt = attempt.startingPrompt.trim();
+    const setWorkspaceStartup = useCodeUiStore.getState().setWorkspaceStartup;
+    setWorkspaceStartup(workspace.id, {
+      harness: attempt.harness,
+      hasFirstMessage: Boolean(prompt),
+      phase: "starting_session",
+    });
     try {
+      await revealCreatedWorkspace(workspace, attempt);
       const gateway = gatewayCodeModels(
         models,
         attempt.harness,
@@ -795,6 +801,13 @@ export function NewWorkspaceDialog({
         ...(attempt.fastMode ? { fast_mode: true } : {}),
       });
       rememberSession(session);
+      if (prompt) {
+        setWorkspaceStartup(workspace.id, {
+          harness: attempt.harness,
+          hasFirstMessage: true,
+          phase: "sending_message",
+        });
+      }
       rememberCreate({
         repoId: attempt.repoId,
         harness: attempt.harness,
@@ -844,6 +857,8 @@ export function NewWorkspaceDialog({
       toast.error(
         `Workspace created, but the session could not start. ${friendlyErrorMessage(error, "Try again from the workspace.")}`,
       );
+    } finally {
+      setWorkspaceStartup(workspace.id, null);
     }
   }
 

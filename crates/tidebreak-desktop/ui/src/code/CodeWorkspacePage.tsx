@@ -164,7 +164,10 @@ import {
   EDITOR_SPLIT_DROP_ID,
 } from "./editorDrag";
 import { FOCUS_RING } from "./interactive";
-import { StartSessionPrompt } from "./StartSessionPrompt";
+import {
+  StartSessionPrompt,
+  WorkspaceSessionStartingState,
+} from "./StartSessionPrompt";
 import { TerminalPane } from "./TerminalPane";
 import { useCodeWorkspacePr } from "./useCodeWorkspacePr";
 import { useCodeContentRevision } from "./useLiveContent";
@@ -479,6 +482,9 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   );
   const rememberedSession = useCodeCatalogStore(
     (state) => state.sessionsByWorkspace[workspaceId] ?? null,
+  );
+  const workspaceStartup = useCodeUiStore(
+    (state) => state.workspaceStartups[workspaceId] ?? null,
   );
 
   layoutRef.current = layout;
@@ -1443,26 +1449,24 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                   </Button>
                 </div>
               )}
-              {startingNewAgent && workspace?.status === "active" && (
-                <StartSessionPrompt
-                  workspaceId={workspaceId}
-                  harnesses={doctorHarnesses}
-                  starting={starting}
-                  selectedMode={createMode}
-                  onSelectMode={setCreateMode}
-                  client={client}
-                  catalogModels={models}
-                  defaultModelKey={defaultModelKey}
-                  onStart={(
-                    harness,
-                    mode,
-                    message,
-                    model,
-                    draft,
-                    reasoningEffort,
-                    fastMode,
-                  ) =>
-                    startSession(
+              {workspaceStartup &&
+                workspace?.status === "active" &&
+                !draftAgent && (
+                  <WorkspaceSessionStartingState startup={workspaceStartup} />
+                )}
+              {!workspaceStartup &&
+                startingNewAgent &&
+                workspace?.status === "active" && (
+                  <StartSessionPrompt
+                    workspaceId={workspaceId}
+                    harnesses={doctorHarnesses}
+                    starting={starting}
+                    selectedMode={createMode}
+                    onSelectMode={setCreateMode}
+                    client={client}
+                    catalogModels={models}
+                    defaultModelKey={defaultModelKey}
+                    onStart={(
                       harness,
                       mode,
                       message,
@@ -1470,19 +1474,28 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                       draft,
                       reasoningEffort,
                       fastMode,
-                    )
-                  }
-                  workspaceFiles={
-                    forkSource
-                      ? {
-                          items: [forkTranscriptFile(forkSource)],
-                          onRemove: () => setForkSource(null),
-                        }
-                      : undefined
-                  }
-                />
-              )}
-              {session && !draftAgent && (
+                    ) =>
+                      startSession(
+                        harness,
+                        mode,
+                        message,
+                        model,
+                        draft,
+                        reasoningEffort,
+                        fastMode,
+                      )
+                    }
+                    workspaceFiles={
+                      forkSource
+                        ? {
+                            items: [forkTranscriptFile(forkSource)],
+                            onRemove: () => setForkSource(null),
+                          }
+                        : undefined
+                    }
+                  />
+                )}
+              {!workspaceStartup && session && !draftAgent && (
                 <CodeSessionPane
                   key={session.id}
                   session={session}
@@ -1714,7 +1727,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
           ) : undefined
         }
         sessionStatus={
-          session ? (
+          session && !workspaceStartup ? (
             <>
               <SessionAttentionBadge
                 sessionId={session.id}

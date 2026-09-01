@@ -1330,6 +1330,58 @@ body {
     }
   }
 
+  .workspace-creation-card {
+    animation: workspace-creation-enter 180ms ease-out both;
+  }
+
+  .workspace-creation-progress {
+    position: relative;
+  }
+
+  .workspace-creation-progress::after {
+    content: "";
+    position: absolute;
+    inset-block: 0;
+    left: 0;
+    width: 42%;
+    border-radius: inherit;
+    background: var(--live);
+    animation: workspace-creation-progress 1.6s ease-in-out infinite;
+  }
+
+  @keyframes workspace-creation-enter {
+    from {
+      opacity: 0;
+      transform: translateY(-0.125rem);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  @keyframes workspace-creation-progress {
+    from {
+      transform: translateX(-120%);
+    }
+    to {
+      transform: translateX(340%);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .workspace-creation-card {
+      animation: none;
+    }
+
+    .workspace-creation-progress::after {
+      width: 100%;
+      opacity: 0.45;
+      animation: none;
+      transform: none;
+    }
+  }
+
   @keyframes code-reveal {
     from {
       opacity: 0;

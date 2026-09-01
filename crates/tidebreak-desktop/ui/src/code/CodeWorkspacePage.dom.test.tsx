@@ -725,6 +725,7 @@ afterEach(() => {
     pendingComposerPrompt: null,
     pendingComposerImages: null,
     composerActionScope: null,
+    workspaceStartups: {},
     workflowShortcutPending: null,
     archivePending: false,
     newTabMenuPending: false,
@@ -791,6 +792,42 @@ describe("CodeWorkspacePage", () => {
     // The start prompt is a flex child of the pane so `mt-auto` on the
     // composer can consume the empty region under the header.
     expect(pane?.firstElementChild?.className).toMatch(/flex-1/);
+  });
+
+  it("shows the workspace handoff while the first session starts", async () => {
+    useCodeUiStore.getState().setWorkspaceStartup("ws-1", {
+      harness: "claude_code",
+      hasFirstMessage: true,
+      phase: "starting_session",
+    });
+    const client = makeClient();
+    client.listCodeWorkspaceSessions.mockResolvedValue([SESSION]);
+    await mountWorkspace(client);
+
+    const status = await screen.findByRole("status", {
+      name: "Starting session",
+    });
+    expect(status).toHaveTextContent("Starting your session");
+    expect(status).toHaveTextContent("Workspace ready");
+    expect(status).toHaveTextContent("Starting Claude Code");
+    expect(status).toHaveTextContent("Sending your first message");
+    expect(status).toHaveTextContent("Your first message is queued.");
+    expect(
+      screen.queryByText("Start a session on this workspace."),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull();
+
+    act(() =>
+      useCodeUiStore.getState().setWorkspaceStartup("ws-1", {
+        harness: "claude_code",
+        hasFirstMessage: true,
+        phase: "sending_message",
+      }),
+    );
+
+    expect(status).toHaveTextContent("Claude Code ready");
+    expect(status).toHaveTextContent("Sending your first message");
+    expect(screen.queryByText("Idle")).not.toBeInTheDocument();
   });
 
   it("restores the start draft when session creation fails", async () => {

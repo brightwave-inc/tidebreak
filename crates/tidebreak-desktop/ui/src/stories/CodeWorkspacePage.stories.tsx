@@ -68,6 +68,8 @@ type WorkspaceScenario =
   | "active"
   | "nested"
   | "start"
+  | "workspace-starting"
+  | "workspace-sending-message"
   | "session-create-failure"
   | "first-turn-failure"
   | "fork-first-turn-failure"
@@ -134,6 +136,13 @@ function subagentStorySpec(
   return isSubagentScenario(scenario) ? SUBAGENT_STORIES[scenario] : null;
 }
 
+function isWorkspaceStartupScenario(scenario: WorkspaceScenario): boolean {
+  return (
+    scenario === "workspace-starting" ||
+    scenario === "workspace-sending-message"
+  );
+}
+
 const repo: CodeRepoSnapshot = {
   id: "repo-tidebreak",
   root_path: "/Users/sam/tidebreak",
@@ -171,6 +180,14 @@ const workspace: CodeWorkspaceSnapshot = {
   branch_name: "thet/ui-pane-redesign",
   base_ref: "main",
   pr: pullRequest,
+};
+
+const startupWorkspace: CodeWorkspaceSnapshot = {
+  ...workspace,
+  title: "Smooth workspace creation",
+  worktree_path: "/Users/sam/tidebreak/worktrees/smooth-workspace-creation",
+  branch_name: "thet/smooth-workspace-creation",
+  pr: undefined,
 };
 
 const otherWorkspaces: CodeWorkspaceSnapshot[] = [
@@ -570,14 +587,22 @@ function updateDigests(scenario: WorkspaceScenario): CodeSessionDigest[] {
     watch_detail: "storybook build is still running",
     watch_cycles: 1,
   };
+  if (isWorkspaceStartupScenario(scenario)) return [needsYou, shipped];
   return scenario === "nested"
     ? [current, watch, needsYou, shipped]
     : [current, needsYou, shipped];
 }
 
 function storyClient(scenario: WorkspaceScenario): ApiClient {
+  const currentWorkspace = isWorkspaceStartupScenario(scenario)
+    ? startupWorkspace
+    : workspace;
+  const currentPrSnapshot = isWorkspaceStartupScenario(scenario)
+    ? { ...prSnapshot, dirty: false, ahead: 0, pr: undefined }
+    : prSnapshot;
   const sessions =
     scenario === "start" ||
+    scenario === "workspace-starting" ||
     scenario === "session-create-failure" ||
     scenario === "first-turn-failure" ||
     scenario === "loading" ||
@@ -592,7 +617,7 @@ function storyClient(scenario: WorkspaceScenario): ApiClient {
       ? () => pending<CodeWorkspaceSnapshot>()
       : scenario === "failure"
         ? () => Promise.reject(new Error("Could not reach this workspace."))
-        : async () => workspace;
+        : async () => currentWorkspace;
 
   return {
     getCodeWorkspace: loadWorkspace,
@@ -611,7 +636,7 @@ function storyClient(scenario: WorkspaceScenario): ApiClient {
       }),
     getCodeRepo: async () => repo,
     listCodeRepos: async () => [repo],
-    listCodeWorkspaces: async () => [workspace, ...otherWorkspaces],
+    listCodeWorkspaces: async () => [currentWorkspace, ...otherWorkspaces],
     getHarnessDoctor: async () => harnessDoctor,
     listCodeHarnessModels: async (kind: CodeSessionSnapshot["harness_kind"]) =>
       scenario === "settings-pending"
@@ -635,8 +660,8 @@ function storyClient(scenario: WorkspaceScenario): ApiClient {
       socketAfterOpen(() =>
         onNotice({ type: "snapshot", sessions: updateDigests(scenario) }),
       ),
-    getCodeWorkspacePr: async () => prSnapshot,
-    refreshCodeWorkspacePr: async () => prSnapshot,
+    getCodeWorkspacePr: async () => currentPrSnapshot,
+    refreshCodeWorkspacePr: async () => currentPrSnapshot,
     getCodeDeliveryPullRequestDetail: async () => ({
       summary: {
         id: `github.com/example/tidebreak#${prSnapshot.pr?.number ?? 0}`,
@@ -790,8 +815,8 @@ function storyClient(scenario: WorkspaceScenario): ApiClient {
       branch: workspace.branch_name,
       remote: "origin",
     }),
-    createCodePullRequest: async () => prSnapshot,
-    mergeCodePr: async () => prSnapshot,
+    createCodePullRequest: async () => currentPrSnapshot,
+    mergeCodePr: async () => currentPrSnapshot,
     startCodeWatch: async () => ({
       id: "watch-pane-redesign",
       workspace_id: workspace.id,
@@ -916,6 +941,7 @@ function resetStoryState(
     inspectorScope: null,
     pendingComposerPrompt: null,
     composerActionScope: null,
+    workspaceStartups: {},
     newWorkspaceOpen: false,
     addRepoOpen: false,
   });
@@ -946,6 +972,19 @@ function WorkspacePageStory({
 }) {
   const [state] = useState(() => {
     resetStoryState(reviewOpen, sidebarCollapsed, storedInspectorLayout);
+    if (
+      scenario === "workspace-starting" ||
+      scenario === "workspace-sending-message"
+    ) {
+      useCodeUiStore.getState().setWorkspaceStartup(workspace.id, {
+        harness: "claude_code",
+        hasFirstMessage: true,
+        phase:
+          scenario === "workspace-starting"
+            ? "starting_session"
+            : "sending_message",
+      });
+    }
     const client = storyClient(scenario);
     return { client, router: storyRouter(client, initialUrl) };
   });
@@ -1452,6 +1491,32 @@ export const EmptySubagentTranscript: Story = {
 /** A workspace with no session keeps the first prompt calm and centered. */
 export const StartSession: Story = {
   args: { scenario: "start", reviewOpen: false },
+};
+
+/** The workspace page carries the handoff while the first agent starts. */
+export const StartingSession: Story = {
+  args: { scenario: "workspace-starting", reviewOpen: false },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const status = await canvas.findByRole("status", {
+      name: "Starting session",
+    });
+    await expect(status).toHaveTextContent("Starting Claude Code");
+    await expect(status).toHaveTextContent("Your first message is queued.");
+  },
+};
+
+/** Once the agent exists, the same surface carries the first message into chat. */
+export const SendingFirstMessage: Story = {
+  args: { scenario: "workspace-sending-message", reviewOpen: false },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const status = await canvas.findByRole("status", {
+      name: "Starting session",
+    });
+    await expect(status).toHaveTextContent("Claude Code ready");
+    await expect(status).toHaveTextContent("Sending your first message");
+  },
 };
 
 /** A creation failure leaves the start surface mounted and restores its draft. */

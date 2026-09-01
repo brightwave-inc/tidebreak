@@ -114,6 +114,13 @@ export type PendingComposerImages = {
   files: readonly File[];
 };
 
+/** The new-workspace dialog is still preparing this workspace's first agent. */
+export type WorkspaceStartup = {
+  harness: HarnessKind;
+  hasFirstMessage: boolean;
+  phase: "starting_session" | "sending_message";
+};
+
 function readStoredCreateDefaults(): CodeCreateDefaults | null {
   try {
     const raw = window.localStorage.getItem(LAST_CREATE_KEY);
@@ -305,6 +312,12 @@ export type CodeUiStore = {
   inspectorScope: InspectorScope | null;
   railPrefs: CodeRailPrefs;
   lastCreate: CodeCreateDefaults | null;
+  /** Optimistic first-agent handoffs, keyed by the workspace that owns them. */
+  workspaceStartups: Record<string, WorkspaceStartup>;
+  setWorkspaceStartup: (
+    workspaceId: string,
+    startup: WorkspaceStartup | null,
+  ) => void;
   /**
    * A terminal has been asked for from outside the workspace page — the
    * chord, or a rail command on a workspace that is not on screen yet. The
@@ -448,6 +461,21 @@ export const useCodeUiStore = create<CodeUiStore>()((set, get) => ({
   inspectorScope: null,
   railPrefs: readStoredRailPrefs(),
   lastCreate: readStoredCreateDefaults(),
+  workspaceStartups: {},
+  setWorkspaceStartup: (workspaceId, startup) =>
+    set((state) => {
+      if (startup) {
+        return {
+          workspaceStartups: {
+            ...state.workspaceStartups,
+            [workspaceId]: startup,
+          },
+        };
+      }
+      const { [workspaceId]: _removed, ...workspaceStartups } =
+        state.workspaceStartups;
+      return { workspaceStartups };
+    }),
   terminalPending: false,
   pendingComposerPrompt: null,
   pendingComposerImages: null,
@@ -641,6 +669,7 @@ export function resetCodeUiHostState(): void {
     newWorkspaceOpen: false,
     newWorkspaceRepoId: undefined,
     newWorkspaceDraft: EMPTY_NEW_WORKSPACE_DRAFT,
+    workspaceStartups: {},
     addRepoOpen: false,
     inspectorScope: null,
     terminalPending: false,
