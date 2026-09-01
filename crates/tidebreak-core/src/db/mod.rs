@@ -2801,6 +2801,14 @@ impl Store for DbStore {
         ops::conversation::list_events(self, chat_id, after).await
     }
 
+    async fn list_events_for_call(
+        &self,
+        chat_id: ChatId,
+        call_id: CallId,
+    ) -> Result<Vec<SequencedEvent>> {
+        ops::conversation::list_events_for_call(self, chat_id, call_id).await
+    }
+
     async fn claim_operation(
         &self,
         run_id: uuid::Uuid,

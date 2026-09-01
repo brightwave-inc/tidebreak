@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
-use crate::id::{AgentRunId, ChatId, HostRootId, MessageId, ProjectId, TurnId};
+use crate::id::{AgentRunId, CallId, ChatId, HostRootId, MessageId, ProjectId, TurnId};
 use crate::model::{
     validate_chat_root_projection, validate_chat_root_projection_against_project, Chat,
     ChatRootAttachment, Message, OwnerId, ReasoningEffort, Role, RootAttachmentOrigin,
@@ -1160,6 +1160,8 @@ where
 const TEXT_DELTA_TAG: &str = "text_delta";
 const REASONING_DELTA_TAG: &str = "reasoning_delta";
 const TURN_REFUSED_TAG: &str = "turn_refused";
+const TOOL_CALL_ARGS_DELTA_TAG: &str = "tool_call_args_delta";
+const TOOL_CALL_COMPLETED_TAG: &str = "tool_call_completed";
 
 /// Read only tool calls whose owning foreground turn has reached a terminal
 /// state. A live call is reconstructed from the event journal instead: showing
@@ -1616,14 +1618,53 @@ pub(in crate::db) async fn list_events(
     chat_id: ChatId,
     after: i64,
 ) -> Result<Vec<SequencedEvent>> {
-    entities::event::Entity::find()
-        .filter(entities::event::Column::ChatId.eq(chat_id.0))
-        .filter(entities::event::Column::Seq.gt(after))
-        .order_by_asc(entities::event::Column::Seq)
-        .all(&store.conn)
-        .await
-        .map_err(store_err)?
-        .into_iter()
+    decode_sequenced_events(
+        entities::event::Entity::find()
+            .filter(entities::event::Column::ChatId.eq(chat_id.0))
+            .filter(entities::event::Column::Seq.gt(after))
+            .order_by_asc(entities::event::Column::Seq)
+            .all(&store.conn)
+            .await
+            .map_err(store_err)?,
+    )
+}
+
+/// Journal rows for one tool call: args deltas and completions, in seq order.
+///
+/// The payload JSON is the only place `call_id` lives, so this filters
+/// server-side the same way terminal-turn snapshots already filter on
+/// `type`. Call ids are UUIDs; interpolating the hyphenated form is safe
+/// and avoids a `?` placeholder inside a JSON expression (Postgres treats
+/// `?` as a jsonb operator).
+pub(in crate::db) async fn list_events_for_call(
+    store: &DbStore,
+    chat_id: ChatId,
+    call_id: CallId,
+) -> Result<Vec<SequencedEvent>> {
+    let call_id = call_id.0;
+    let matches = match store.conn.get_database_backend() {
+        DatabaseBackend::Postgres => format!(
+            "payload ->> 'type' IN ('{TOOL_CALL_ARGS_DELTA_TAG}', '{TOOL_CALL_COMPLETED_TAG}') \
+             AND payload ->> 'call_id' = '{call_id}'"
+        ),
+        _ => format!(
+            "json_extract(payload, '$.type') IN ('{TOOL_CALL_ARGS_DELTA_TAG}', '{TOOL_CALL_COMPLETED_TAG}') \
+             AND json_extract(payload, '$.call_id') = '{call_id}'"
+        ),
+    };
+    decode_sequenced_events(
+        entities::event::Entity::find()
+            .filter(entities::event::Column::ChatId.eq(chat_id.0))
+            .filter(sea_orm::sea_query::Expr::cust(matches))
+            .order_by_asc(entities::event::Column::Seq)
+            .all(&store.conn)
+            .await
+            .map_err(store_err)?,
+    )
+}
+
+fn decode_sequenced_events(rows: Vec<entities::event::Model>) -> Result<Vec<SequencedEvent>> {
+    rows.into_iter()
         .map(|model| {
             Ok(SequencedEvent {
                 seq: model.seq,

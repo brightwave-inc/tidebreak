@@ -110,7 +110,7 @@ pub async fn get_mcp_app_payload(
     Path((chat_id, call_id)): Path<(ChatId, CallId)>,
 ) -> Result<Json<McpAppPayload>, ServerError> {
     store.require_chat(chat_id).await?;
-    let events = store.list_events(chat_id, 0).await?;
+    let events = store.list_events_for_call(chat_id, call_id).await?;
     mcp_app_payload_from_events(&events, call_id)
         .map(Json)
         .ok_or_else(|| ServerError::not_found("no MCP App payload for this call"))
@@ -562,5 +562,38 @@ mod mcp_app_payload_tests {
         )];
         assert!(mcp_app_payload_from_events(&events, call).is_none());
         assert!(mcp_app_payload_from_events(&events, CallId::new()).is_none());
+    }
+
+    #[test]
+    fn later_completion_for_the_same_call_wins() {
+        let call = CallId::new();
+        let events = vec![
+            sequenced(
+                1,
+                AgentEvent::ToolCallCompleted {
+                    call_id: call,
+                    output: ToolOutput::text("first").with_ui_view(ToolUiView {
+                        server: "gateway".into(),
+                        resource_uri: "ui://gateway/app.html".into(),
+                    }),
+                    action: None,
+                    result: None,
+                },
+            ),
+            sequenced(
+                2,
+                AgentEvent::ToolCallCompleted {
+                    call_id: call,
+                    output: ToolOutput::text("second").with_ui_view(ToolUiView {
+                        server: "gateway".into(),
+                        resource_uri: "ui://gateway/app.html".into(),
+                    }),
+                    action: None,
+                    result: None,
+                },
+            ),
+        ];
+        let payload = mcp_app_payload_from_events(&events, call).expect("payload exists");
+        assert_eq!(payload.content, "second");
     }
 }

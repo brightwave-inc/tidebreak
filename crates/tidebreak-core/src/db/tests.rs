@@ -8832,6 +8832,111 @@ async fn event_journal_assigns_per_chat_seq_and_replays_after_cursor() {
 }
 
 #[tokio::test]
+async fn list_events_for_call_returns_only_that_calls_args_and_completion() {
+    use crate::event::AgentEvent;
+    use crate::id::CallId;
+    use crate::tool::ToolOutput;
+
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+
+    let wanted = CallId::new();
+    let other = CallId::new();
+    store
+        .append_event(
+            chat.id,
+            &AgentEvent::ToolCallArgsDelta {
+                call_id: other,
+                fragment: "{\"skip\":true}".into(),
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .append_event(
+            chat.id,
+            &AgentEvent::TextDelta {
+                text: "noise".into(),
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .append_event(
+            chat.id,
+            &AgentEvent::ToolCallArgsDelta {
+                call_id: wanted,
+                fragment: "{\"operation\":".into(),
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .append_event(
+            chat.id,
+            &AgentEvent::ToolCallArgsDelta {
+                call_id: wanted,
+                fragment: "\"list\"}".into(),
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .append_event(
+            chat.id,
+            &AgentEvent::ToolCallCompleted {
+                call_id: wanted,
+                output: ToolOutput::text("ok"),
+                action: None,
+                result: None,
+            },
+        )
+        .await
+        .unwrap();
+    store
+        .append_event(
+            chat.id,
+            &AgentEvent::ToolCallCompleted {
+                call_id: other,
+                output: ToolOutput::text("other"),
+                action: None,
+                result: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let events = store.list_events_for_call(chat.id, wanted).await.unwrap();
+    assert_eq!(events.len(), 3);
+    assert_eq!(
+        events.iter().map(|event| event.seq).collect::<Vec<_>>(),
+        vec![3, 4, 5]
+    );
+    match &events[0].event {
+        AgentEvent::ToolCallArgsDelta { call_id, fragment } => {
+            assert_eq!(*call_id, wanted);
+            assert_eq!(fragment, "{\"operation\":");
+        }
+        other => panic!("expected args delta, got {other:?}"),
+    }
+    match &events[2].event {
+        AgentEvent::ToolCallCompleted {
+            call_id, output, ..
+        } => {
+            assert_eq!(*call_id, wanted);
+            assert_eq!(output.content, "ok");
+        }
+        other => panic!("expected completion, got {other:?}"),
+    }
+    assert!(store
+        .list_events_for_call(chat.id, CallId::new())
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
 async fn durable_turn_events_are_bound_and_reserve_one_terminal_slot() {
     use crate::event::AgentEvent;
     use crate::provider::{StopReason, Usage};
