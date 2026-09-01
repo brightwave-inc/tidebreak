@@ -15,10 +15,10 @@ use axum::http::{header, request::Parts, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 
 use super::types::{
-    CodeForkTranscript, CodeSessionSnapshot, CodeTurnSnapshot, CreateRemoteSessionBody,
-    CreateSessionBody, QueuePausedBody, QueuedCodeTurn, QueuedCodeTurnUpdate,
-    QueuedCodeTurnsSnapshot, SequencedCodeEventFrame, SetAttentionBody, SetFastModeBody,
-    SetPermissionModeBody, SetReasoningEffortBody, SteerBody, SubmitTurnBody,
+    CodeForkTranscript, CodeSessionExternalOrigin, CodeSessionSnapshot, CodeTurnSnapshot,
+    CreateRemoteSessionBody, CreateSessionBody, QueuePausedBody, QueuedCodeTurn,
+    QueuedCodeTurnUpdate, QueuedCodeTurnsSnapshot, SequencedCodeEventFrame, SetAttentionBody,
+    SetFastModeBody, SetPermissionModeBody, SetReasoningEffortBody, SteerBody, SubmitTurnBody,
 };
 use crate::code::runtime::{NewSessionSettings, SubmitTurnOutcome};
 use tidebreak_core::{CodeSessionId, PermissionMode, TurnSteer, WorkspaceId};
@@ -105,15 +105,59 @@ pub async fn create_remote_session(
     ))
 }
 
+/// One session as a snapshot with its external origin attached.
+///
+/// Every handler that hands the desktop a single session goes through
+/// here: the desktop writes the answer over its listed row, so a snapshot
+/// that hard-coded no origin would erase the provenance banner on the
+/// next reap, mode change, or attention edit.
+async fn snapshot_with_origin(
+    code: &ScopedCode,
+    session: tidebreak_core::CodeSession,
+) -> Result<CodeSessionSnapshot, ServerError> {
+    let origin = code
+        .external_bindings_for_sessions(&[session.id])
+        .await?
+        .into_iter()
+        .next()
+        .map(|binding| CodeSessionExternalOrigin {
+            channel_kind: binding.channel_kind,
+            external_key: binding.external_key,
+        });
+    let mut snapshot = CodeSessionSnapshot::from(session);
+    snapshot.external_origin = origin;
+    Ok(snapshot)
+}
+
 pub async fn list_workspace_sessions(
     code: ScopedCode,
     Path(workspace_id): Path<WorkspaceId>,
 ) -> Result<Json<Vec<CodeSessionSnapshot>>, ServerError> {
     let sessions = code.list_workspace_sessions(workspace_id).await?;
+    let ids: Vec<CodeSessionId> = sessions.iter().map(|session| session.id).collect();
+    let origins: std::collections::HashMap<CodeSessionId, CodeSessionExternalOrigin> = code
+        .external_bindings_for_sessions(&ids)
+        .await?
+        .into_iter()
+        .map(|binding| {
+            (
+                binding.session_id,
+                CodeSessionExternalOrigin {
+                    channel_kind: binding.channel_kind,
+                    external_key: binding.external_key,
+                },
+            )
+        })
+        .collect();
     Ok(Json(
         sessions
             .into_iter()
-            .map(CodeSessionSnapshot::from)
+            .map(|session| {
+                let origin = origins.get(&session.id).cloned();
+                let mut snapshot = CodeSessionSnapshot::from(session);
+                snapshot.external_origin = origin;
+                snapshot
+            })
             .collect(),
     ))
 }
@@ -333,7 +377,7 @@ pub async fn set_attention(
     Json(body): Json<SetAttentionBody>,
 ) -> Result<Json<CodeSessionSnapshot>, ServerError> {
     let session = code.set_attention(id, body.clear, body.note).await?;
-    Ok(Json(CodeSessionSnapshot::from(session)))
+    Ok(Json(snapshot_with_origin(&code, session).await?))
 }
 
 pub async fn reap_session(
@@ -341,7 +385,10 @@ pub async fn reap_session(
     Path(id): Path<CodeSessionId>,
 ) -> Result<(StatusCode, Json<CodeSessionSnapshot>), ServerError> {
     let session = code.reap(id).await?;
-    Ok((StatusCode::OK, Json(CodeSessionSnapshot::from(session))))
+    Ok((
+        StatusCode::OK,
+        Json(snapshot_with_origin(&code, session).await?),
+    ))
 }
 
 /// `POST /code/sessions/{id}/mode` — change a session's permission mode.
@@ -358,7 +405,10 @@ pub async fn set_session_permission_mode(
 ) -> Result<(StatusCode, Json<CodeSessionSnapshot>), ServerError> {
     refuse_permission_mode_over_ceiling(&state, Some(body.permission_mode)).await?;
     let session = code.set_permission_mode(id, body.permission_mode).await?;
-    Ok((StatusCode::OK, Json(CodeSessionSnapshot::from(session))))
+    Ok((
+        StatusCode::OK,
+        Json(snapshot_with_origin(&code, session).await?),
+    ))
 }
 
 /// `POST /code/sessions/{id}/effort` — change a session's reasoning effort.
@@ -372,7 +422,10 @@ pub async fn set_session_reasoning_effort(
     Json(body): Json<SetReasoningEffortBody>,
 ) -> Result<(StatusCode, Json<CodeSessionSnapshot>), ServerError> {
     let session = code.set_reasoning_effort(id, body.reasoning_effort).await?;
-    Ok((StatusCode::OK, Json(CodeSessionSnapshot::from(session))))
+    Ok((
+        StatusCode::OK,
+        Json(snapshot_with_origin(&code, session).await?),
+    ))
 }
 
 /// `POST /code/sessions/{id}/fast-mode` — arm or disarm the engine's fast mode.
@@ -387,7 +440,10 @@ pub async fn set_session_fast_mode(
     Json(body): Json<SetFastModeBody>,
 ) -> Result<(StatusCode, Json<CodeSessionSnapshot>), ServerError> {
     let session = code.set_fast_mode(id, body.fast_mode).await?;
-    Ok((StatusCode::OK, Json(CodeSessionSnapshot::from(session))))
+    Ok((
+        StatusCode::OK,
+        Json(snapshot_with_origin(&code, session).await?),
+    ))
 }
 
 /// `POST /code/sessions/{id}/attachments/images` — publish pixels a later

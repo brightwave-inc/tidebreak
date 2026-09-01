@@ -111,6 +111,7 @@ import type {
   CodeEvent as WireCodeEvent,
   CodeRepoSnapshot as WireCodeRepoSnapshot,
   CodeSessionSnapshot as WireCodeSessionSnapshot,
+  CodeSessionExternalOrigin,
   CodeTurnSnapshot as WireCodeTurnSnapshot,
   QueuedCodeTurn as WireQueuedCodeTurn,
   CodeTerminalRead as WireCodeTerminalRead,
@@ -2567,6 +2568,7 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
       "attention",
       "unrecognized_event_count",
       "created_at",
+      "external_origin",
     ]) ||
     !nonEmpty(value.id) ||
     !nonEmpty(value.workspace_id) ||
@@ -2594,6 +2596,29 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
       ? undefined
       : parseFenceReason(value.fence_reason);
   if (value.fence_reason !== undefined && !fence_reason) return null;
+  if (
+    value.external_origin !== undefined &&
+    (!isRecord(value.external_origin) ||
+      !onlyKeys<CodeSessionExternalOrigin>(value.external_origin, [
+        "channel_kind",
+        "external_key",
+      ]) ||
+      !nonEmpty(value.external_origin.channel_kind) ||
+      !nonEmpty(value.external_origin.external_key))
+  ) {
+    return null;
+  }
+  const external_origin: CodeSessionExternalOrigin | undefined =
+    value.external_origin === undefined
+      ? undefined
+      : {
+          channel_kind: String(
+            (value.external_origin as Record<string, unknown>).channel_kind,
+          ),
+          external_key: String(
+            (value.external_origin as Record<string, unknown>).external_key,
+          ),
+        };
   return {
     id: value.id,
     workspace_id: value.workspace_id,
@@ -2616,6 +2641,7 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
       ? { reasoning_effort: value.reasoning_effort as ReasoningEffort }
       : {}),
     ...(fence_reason ? { fence_reason } : {}),
+    ...(external_origin !== undefined ? { external_origin } : {}),
   };
 }
 

@@ -234,6 +234,18 @@ pub enum CodeStorageAction {
     Release,
 }
 
+/// Where an externally created session came from. The desktop renders it
+/// as the provenance banner; a session the desktop created carries none.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+pub struct CodeSessionExternalOrigin {
+    /// The channel family, for example `slack`.
+    pub channel_kind: String,
+    /// The channel's durable conversation identity, opaque to the server.
+    /// For Slack this is `workspace/channel/thread_ts`, which the desktop
+    /// turns into a thread permalink.
+    pub external_key: String,
+}
+
 /// One durable conversation with an external agent engine.
 #[derive(Debug, Clone, PartialEq, Serialize, TS)]
 pub struct CodeSessionSnapshot {
@@ -265,6 +277,10 @@ pub struct CodeSessionSnapshot {
     pub attention: Attention,
     pub unrecognized_event_count: i64,
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Present when an external channel created the session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub external_origin: Option<CodeSessionExternalOrigin>,
 }
 
 impl From<CodeSession> for CodeSessionSnapshot {
@@ -285,6 +301,9 @@ impl From<CodeSession> for CodeSessionSnapshot {
             attention: session.attention,
             unrecognized_event_count: session.unrecognized_event_count,
             created_at: session.created_at,
+            // Provenance is a separate lookup; the handlers that serve the
+            // desktop attach it.
+            external_origin: None,
         }
     }
 }

@@ -381,6 +381,41 @@ describe("parseCodeSession attention states", () => {
   });
 });
 
+describe("parseCodeSession external origin", () => {
+  it("carries a well-formed origin through", () => {
+    const parsed = parseCodeSession({
+      ...SESSION,
+      external_origin: {
+        channel_kind: "slack",
+        external_key: "T04/C08/1724900000.123456",
+      },
+    });
+    expect(parsed?.external_origin).toEqual({
+      channel_kind: "slack",
+      external_key: "T04/C08/1724900000.123456",
+    });
+  });
+
+  it("rejects an origin with unknown keys or empty parts", () => {
+    expect(
+      parseCodeSession({
+        ...SESSION,
+        external_origin: { channel_kind: "slack", external_key: "" },
+      }),
+    ).toBeNull();
+    expect(
+      parseCodeSession({
+        ...SESSION,
+        external_origin: {
+          channel_kind: "slack",
+          external_key: "T04/C08/1.2",
+          extra: true,
+        },
+      }),
+    ).toBeNull();
+  });
+});
+
 describe("parseCodeSessionList", () => {
   it("accepts GET /code/workspaces/{id}/sessions", () => {
     const ended = {
