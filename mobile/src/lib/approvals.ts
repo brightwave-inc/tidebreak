@@ -1,4 +1,9 @@
-import type { CodeApprovalKind, CodeApprovalSnapshot } from "../generated/wire";
+import type {
+  CodeApprovalKind,
+  CodeApprovalSnapshot,
+  NetworkPolicy,
+  ToolActionPreview,
+} from "../generated/wire";
 
 export function approvalTitle(kind: CodeApprovalKind): string {
   switch (kind.type) {
@@ -30,18 +35,69 @@ export function approvalSummary(kind: CodeApprovalKind): string {
     case "network":
     case "other":
       return kind.summary.trim() || "The engine requested approval.";
-    case "tool_use": {
-      const preview = kind.preview;
-      const summary =
-        "summary" in preview && typeof preview.summary === "string"
-          ? preview.summary.trim()
-          : "";
-      return summary || "The engine requested a tool call.";
-    }
+    case "tool_use":
+      // Decision 0018: consent is given to the literal action, never to the
+      // call's own display-only narration.
+      return toolActionDetail(kind.preview);
     case "questions":
       return kind.questions.map((question) => question.question).join("\n");
     case "plan":
       return `The engine proposed a plan. Accepting moves the session to ${kind.proposed_mode}.`;
+  }
+}
+
+
+/**
+ * The literal action a tool_use approval asks consent for, one fact per
+ * line. Mirrors the desktop's `toolPreviewPresentation().detail`; the
+ * preview's `summary` is display-only and never rendered here.
+ */
+function toolActionDetail(preview: ToolActionPreview): string {
+  switch (preview.tool) {
+    case "search":
+      return `${preview.query}\n# searched against this conversation's sources`;
+    case "web_search":
+      return [
+        preview.query,
+        preview.domains.length > 0
+          ? `# limited to ${preview.domains.join(", ")}`
+          : null,
+        "# sent to the configured web search provider",
+      ]
+        .filter((line): line is string => line !== null)
+        .join("\n");
+    case "web_extract":
+      return `${preview.url}\n# fetched from the public web`;
+    case "write_file":
+      return `${preview.path}\n# written into this work's workspace`;
+    case "delegate_agent":
+      return [
+        preview.task,
+        `# network: ${networkLabel(preview.network)}`,
+      ].join("\n");
+    case "exec":
+      return [
+        [preview.command, ...preview.args].join(" "),
+        preview.cwd !== "." ? `# working directory: ${preview.cwd}` : null,
+        preview.files.length > 0
+          ? `# staged files: ${preview.files.join(", ")}`
+          : null,
+      ]
+        .filter((line): line is string => line !== null)
+        .join("\n");
+  }
+}
+
+function networkLabel(policy: NetworkPolicy): string {
+  switch (policy.mode) {
+    case "off":
+      return "no network";
+    case "package_managers":
+      return "package managers only";
+    case "allowed_hosts":
+      return policy.allowed_hosts.join(", ") || "listed hosts only";
+    case "open":
+      return "open";
   }
 }
 

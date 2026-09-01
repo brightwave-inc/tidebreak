@@ -55,6 +55,35 @@ describe("code approval presentation", () => {
     );
   });
 
+  it("shows the literal action for tool_use, never the model's narration", () => {
+    // Decision 0018: the display-only summary must not reach the consent card.
+    expect(
+      approvalSummary({
+        type: "tool_use",
+        preview: {
+          tool: "exec",
+          command: "rm",
+          args: ["-rf", "cache"],
+          cwd: "work",
+          files: ["notes.md"],
+          summary: "Cleaning temporary caches",
+        },
+        offered_grants: [],
+      }),
+    ).toBe("rm -rf cache\n# working directory: work\n# staged files: notes.md");
+    expect(
+      approvalSummary({
+        type: "tool_use",
+        preview: {
+          tool: "web_extract",
+          url: "https://example.com/report",
+          summary: "Reading the report",
+        },
+        offered_grants: [],
+      }),
+    ).toBe("https://example.com/report\n# fetched from the public web");
+  });
+
   it("pretty-prints the complete server-capped harness payload", () => {
     expect(formatApprovalPayload('{"cmd":"cargo test"}')).toBe(
       '{\n  "cmd": "cargo test"\n}',
