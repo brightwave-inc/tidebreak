@@ -373,6 +373,9 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(
     catalog.sessionsByWorkspace[workspaceId]?.id ?? null,
   );
+  const [closedConversationIds, setClosedConversationIds] = useState<
+    Set<string>
+  >(() => new Set());
 
   // Optimistic catalog mutations also govern the open page. Archive can hide
   // the rail card before filesystem cleanup finishes; reflecting that same
@@ -1096,16 +1099,21 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     }
   }
 
-  /**
-   * Close a conversation tab.
-   *
-   * Only the draft closes here. A started agent holds a worktree and a running
-   * engine, so ending one is a server action rather than a tab control.
-   */
+  /** Close a conversation tab without ending its agent or workspace. */
   function closeConversation(sessionId: string | null) {
-    if (sessionId !== null) return;
-    setDraftAgent(false);
-    setForkSource(null);
+    if (sessionId === null) {
+      setDraftAgent(false);
+      setForkSource(null);
+    } else {
+      const index = conversations.findIndex((entry) => entry.id === sessionId);
+      if (index <= 0) return;
+      setClosedConversationIds((current) => {
+        const next = new Set(current);
+        next.add(sessionId);
+        return next;
+      });
+      if (sessionId !== activeSessionId) return;
+    }
     const first = conversations[0];
     if (first) selectConversation(first.id);
     else setActiveSessionId(null);
@@ -1152,15 +1160,23 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
       conversations[0]?.id ??
       null);
   const conversationTabs = useMemo<CodeConversationTab[]>(() => {
-    const tabs: CodeConversationTab[] = conversations.map((entry, index) => {
-      const digest = conversationDigests[entry.id];
-      return {
-        id: entry.id,
-        label: conversationTabLabel(entry, index, conversations),
-        harness: entry.harness_kind,
-        attention: attentionMarkForDigest(digest),
-      };
-    });
+    const tabs: CodeConversationTab[] = conversations
+      .filter(
+        (entry, index) => index === 0 || !closedConversationIds.has(entry.id),
+      )
+      .map((entry) => {
+        const index = conversations.findIndex(
+          (conversation) => conversation.id === entry.id,
+        );
+        const digest = conversationDigests[entry.id];
+        return {
+          id: entry.id,
+          label: conversationTabLabel(entry, index, conversations),
+          harness: entry.harness_kind,
+          attention: attentionMarkForDigest(digest),
+          closable: index > 0,
+        };
+      });
     // A draft has no engine yet, so it wears the generic agent glyph. It is
     // also the one closable tab: nothing is running behind it. A workspace
     // with no agents at all still gets one, so the strip always names the
@@ -1173,7 +1189,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
       });
     }
     return tabs;
-  }, [conversationDigests, conversations, draftAgent]);
+  }, [closedConversationIds, conversationDigests, conversations, draftAgent]);
 
   /** The picker shows for a first agent and for every one added after it. */
   const startingNewAgent = draftAgent || !session;

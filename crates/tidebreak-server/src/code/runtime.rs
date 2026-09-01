@@ -1832,17 +1832,15 @@ impl CodeRuntime {
         // Blockers first: a refused archive must leave the workspace exactly as
         // it was, and running the hook script is not "exactly as it was".
         self.refuse_running_sessions(owner, id, force).await?;
-        if path.exists() {
+        if path.exists() && !force {
             if let Some(block) = archive_blockers(&path, &workspace.base_ref)
                 .await
                 .map_err(map_worktree)?
             {
-                if !force {
-                    return Err(ServerError::conflict_kind(
-                        block.as_str(),
-                        "workspace has uncommitted or unpushed work; pass force to discard it",
-                    ));
-                }
+                return Err(ServerError::conflict_kind(
+                    block.as_str(),
+                    "workspace has uncommitted or unpushed work; pass force to discard it",
+                ));
             }
         }
         {
@@ -1972,11 +1970,11 @@ impl CodeRuntime {
                     err.to_string(),
                 ));
             }
-            if let Some(block) = archive_blockers(path, &workspace.base_ref)
-                .await
-                .map_err(map_worktree)?
-            {
-                if !force {
+            if !force {
+                if let Some(block) = archive_blockers(path, &workspace.base_ref)
+                    .await
+                    .map_err(map_worktree)?
+                {
                     return Err(ServerError::conflict_kind(
                         block.as_str(),
                         "workspace changed during archive; the checkout was preserved",

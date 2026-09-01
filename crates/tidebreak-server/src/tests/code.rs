@@ -1741,6 +1741,42 @@ async fn archive_requires_force_when_the_tree_is_dirty() {
 }
 
 #[tokio::test]
+async fn force_archive_skips_ignored_content_inspection() {
+    let (router, token, _runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let path = workspace["worktree_path"].as_str().unwrap();
+
+    assert!(std::process::Command::new("git")
+        .args([
+            "config",
+            "--add",
+            "tidebreak.archiveDisposablePath",
+            "../outside-worktree",
+        ])
+        .current_dir(path)
+        .status()
+        .unwrap()
+        .success());
+
+    let forced = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/archive",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "force": true }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(forced.status(), reqwest::StatusCode::OK);
+    assert!(!std::path::Path::new(path).exists());
+}
+
+#[tokio::test]
 async fn no_force_archive_of_a_dirty_workspace_leaves_an_idle_session() {
     let (router, token, runtime, dir) = code_app(plain_text_script()).await;
     let addr = serve(router).await;

@@ -160,12 +160,14 @@ export const ManyConversations: Story = {
         label: "Codex",
         harness: "codex",
         attention: attentionWorking,
+        closable: true,
       },
       {
         id: "session-3",
         label: "opencode",
         harness: "opencode",
         attention: attentionDoneUnreviewed,
+        closable: true,
       },
     ],
   },
@@ -179,7 +181,7 @@ export const ForkFromTabMenu: Story = {
   args: { conversations: MAIN_AGENT },
 };
 
-/** A new agent the reader has opened but not started: the one closable tab. */
+/** A new agent the reader has opened but not started. */
 export const DraftConversation: Story = {
   args: {
     conversations: [

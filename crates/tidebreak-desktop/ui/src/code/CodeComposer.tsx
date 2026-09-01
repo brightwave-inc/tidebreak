@@ -1107,7 +1107,7 @@ export function CodeComposer({
         busy={running}
         cancelError={null}
         cancelPending={false}
-        disabled={Boolean(disabled || submitPending)}
+        disabled={Boolean(disabled || (submitPending && !running))}
         draft={draft}
         history={history}
         harnessMenu={harnessMenu}

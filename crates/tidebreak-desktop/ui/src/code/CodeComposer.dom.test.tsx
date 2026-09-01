@@ -411,6 +411,51 @@ describe("CodeComposer", () => {
     expect(box).toHaveValue("");
   });
 
+  it("accepts guidance once a pending submit becomes an active turn", async () => {
+    let resolveSend!: () => void;
+    const onSend = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSend = resolve;
+        }),
+    );
+    const onInterrupt = vi.fn();
+    const view = renderComposer(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        onSend={onSend}
+        onInterrupt={onInterrupt}
+      />,
+    );
+
+    const box = screen.getByRole("textbox", { name: "Message" });
+    fireEvent.change(box, { target: { value: "start the work" } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith("start the work"));
+
+    view.rerender(
+      <AppContextProvider value={app()}>
+        <CodeComposer
+          running
+          permissionMode="ask"
+          onSend={onSend}
+          onInterrupt={onInterrupt}
+        />
+      </AppContextProvider>,
+    );
+
+    expect(screen.getByRole("textbox", { name: "Message" })).toBeEnabled();
+    fireEvent.change(screen.getByRole("textbox", { name: "Message" }), {
+      target: { value: "use the smaller change" },
+    });
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue(
+      "use the smaller change",
+    );
+
+    resolveSend();
+  });
+
   it("steers mid-turn when the harness supports it", async () => {
     useUiStore.setState({ activeTurnSendMode: "steer" });
     const onSteer = vi.fn().mockResolvedValue(undefined);
