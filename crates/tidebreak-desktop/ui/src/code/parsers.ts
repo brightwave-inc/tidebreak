@@ -1,4 +1,15 @@
-import { isRecord, onlyKeys } from "../lib/guards";
+import {
+  isFiniteNumber,
+  isMember,
+  isNonNegativeInteger,
+  isPositiveInteger,
+  isRecord,
+  isStringList,
+  nonEmptyString,
+  nullableString,
+  onlyKeys,
+  optionalString,
+} from "../lib/wireDecode";
 import type {
   Attention,
   AttentionSource,
@@ -354,9 +365,9 @@ function parseCodeGitHubRepositoryTarget(
       "owner",
       "name",
     ]) ||
-    !nonEmpty(value.host) ||
-    !nonEmpty(value.owner) ||
-    !nonEmpty(value.name)
+    !nonEmptyString(value.host) ||
+    !nonEmptyString(value.owner) ||
+    !nonEmptyString(value.name)
   ) {
     return null;
   }
@@ -377,11 +388,11 @@ function parseCodeGitHubRepositoryRef(
       "default_branch",
       "tidebreak_repo_id",
     ]) ||
-    !nonEmpty(value.host) ||
-    !nonEmpty(value.owner) ||
-    !nonEmpty(value.name) ||
-    !nonEmpty(value.name_with_owner) ||
-    !nonEmpty(value.url) ||
+    !nonEmptyString(value.host) ||
+    !nonEmptyString(value.owner) ||
+    !nonEmptyString(value.name) ||
+    !nonEmptyString(value.name_with_owner) ||
+    !nonEmptyString(value.url) ||
     !optionalString(value.default_branch) ||
     !optionalString(value.tidebreak_repo_id)
   ) {
@@ -444,7 +455,7 @@ function parseCodeDeliverySourceError(
       "message",
       "retry_at",
     ]) ||
-    !nonEmpty(value.kind) ||
+    !nonEmptyString(value.kind) ||
     typeof value.message !== "string" ||
     !optionalString(value.retry_at)
   ) {
@@ -477,10 +488,10 @@ function parseCodeDeliveryWorkspaceLink(
       "exact",
       "relation",
     ]) ||
-    !nonEmpty(value.workspace_id) ||
-    !nonEmpty(value.repo_id) ||
-    !nonEmpty(value.title) ||
-    !nonEmpty(value.branch_name) ||
+    !nonEmptyString(value.workspace_id) ||
+    !nonEmptyString(value.repo_id) ||
+    !nonEmptyString(value.title) ||
+    !nonEmptyString(value.branch_name) ||
     !isMember(value.status, WORKSPACE_STATUSES) ||
     typeof value.exact !== "boolean" ||
     (value.relation !== undefined &&
@@ -524,11 +535,11 @@ function parseCodeWorkspacePullRequestFact(
       "closed_at",
       "last_seen_at",
     ]) ||
-    !nonEmpty(value.host) ||
-    !nonEmpty(value.repo_owner) ||
-    !nonEmpty(value.repo_name) ||
+    !nonEmptyString(value.host) ||
+    !nonEmptyString(value.repo_owner) ||
+    !nonEmptyString(value.repo_name) ||
     !isFiniteNumber(value.number) ||
-    !nonEmpty(value.url) ||
+    !nonEmptyString(value.url) ||
     typeof value.title !== "string" ||
     !PULL_REQUEST_FACT_STATES.has(value.state as string) ||
     typeof value.draft !== "boolean" ||
@@ -537,11 +548,11 @@ function parseCodeWorkspacePullRequestFact(
     typeof value.base_branch !== "string" ||
     !optionalString(value.head_sha) ||
     !isMember(value.relation, PULL_REQUEST_RELATIONS) ||
-    !nonEmpty(value.created_at) ||
-    !nonEmpty(value.updated_at) ||
+    !nonEmptyString(value.created_at) ||
+    !nonEmptyString(value.updated_at) ||
     !optionalString(value.merged_at) ||
     !optionalString(value.closed_at) ||
-    !nonEmpty(value.last_seen_at)
+    !nonEmptyString(value.last_seen_at)
   ) {
     return null;
   }
@@ -574,7 +585,7 @@ export function parseCodeWorkspacePullRequests(
     !isRecord(value) ||
     !onlyKeys<WireCodeWorkspacePullRequests>(value, ["items", "fetched_at"]) ||
     !Array.isArray(value.items) ||
-    !nonEmpty(value.fetched_at)
+    !nonEmptyString(value.fetched_at)
   ) {
     return null;
   }
@@ -597,7 +608,7 @@ function parseCodeDeliveryCheck(value: unknown): CodeDeliveryCheck | null {
       "url",
       "workflow_run_id",
     ]) ||
-    !nonEmpty(value.name) ||
+    !nonEmptyString(value.name) ||
     !isMember(value.bucket, DELIVERY_CHECK_BUCKETS) ||
     !optionalString(value.detail) ||
     !optionalString(value.url) ||
@@ -655,16 +666,16 @@ function parseCodeDeliveryPullRequestSummary(
       "merged_at",
       "closed_at",
     ]) ||
-    !nonEmpty(value.id) ||
+    !nonEmptyString(value.id) ||
     !isPositiveInteger(value.number) ||
-    !nonEmpty(value.url) ||
-    !nonEmpty(value.title) ||
-    !nonEmpty(value.state) ||
+    !nonEmptyString(value.url) ||
+    !nonEmptyString(value.title) ||
+    !nonEmptyString(value.state) ||
     typeof value.draft !== "boolean" ||
     !optionalString(value.author) ||
     !optionalString(value.author_avatar_url) ||
-    !nonEmpty(value.head_branch) ||
-    !nonEmpty(value.base_branch) ||
+    !nonEmptyString(value.head_branch) ||
+    !nonEmptyString(value.base_branch) ||
     !optionalString(value.head_sha) ||
     !optionalString(value.review_decision) ||
     !optionalString(value.mergeable) ||
@@ -689,8 +700,8 @@ function parseCodeDeliveryPullRequestSummary(
         !value.unregistered_stack_numbers.every(isFiniteNumber))) ||
     !Array.isArray(value.workspace_links) ||
     !isStringList(value.labels) ||
-    !nonEmpty(value.created_at) ||
-    !nonEmpty(value.updated_at) ||
+    !nonEmptyString(value.created_at) ||
+    !nonEmptyString(value.updated_at) ||
     !optionalString(value.merged_at) ||
     !optionalString(value.closed_at)
   ) {
@@ -791,7 +802,7 @@ export function parseCodeDeliveryRepositories(
       "fetched_at",
     ]) ||
     !Array.isArray(value.repositories) ||
-    !nonEmpty(value.fetched_at)
+    !nonEmptyString(value.fetched_at)
   ) {
     return null;
   }
@@ -821,7 +832,7 @@ export function parseCodeDeliveryPullRequestsPage(
     ]) ||
     !Array.isArray(value.items) ||
     !optionalString(value.next_cursor) ||
-    !nonEmpty(value.fetched_at)
+    !nonEmptyString(value.fetched_at)
   ) {
     return null;
   }
@@ -957,9 +968,9 @@ function parseCodeDeliveryStackMember(
       "head_sha",
     ]) ||
     !isPositiveInteger(value.number) ||
-    !nonEmpty(value.state) ||
+    !nonEmptyString(value.state) ||
     typeof value.draft !== "boolean" ||
-    !nonEmpty(value.head_branch) ||
+    !nonEmptyString(value.head_branch) ||
     !optionalString(value.merged_at) ||
     !optionalString(value.head_sha)
   ) {
@@ -988,8 +999,8 @@ function parseCodeDeliveryPullRequestFile(
       "previous_path",
       "patch",
     ]) ||
-    !nonEmpty(value.path) ||
-    !nonEmpty(value.status) ||
+    !nonEmptyString(value.path) ||
+    !nonEmptyString(value.status) ||
     !isNonNegativeInteger(value.additions) ||
     !isNonNegativeInteger(value.deletions) ||
     !optionalString(value.previous_path) ||
@@ -1007,13 +1018,6 @@ function parseCodeDeliveryPullRequestFile(
       : {}),
     ...(value.patch !== undefined ? { patch: value.patch } : {}),
   };
-}
-
-/** Every entry is a string. Used for the PR label and login lists. */
-function isStringList(value: unknown): value is string[] {
-  return (
-    Array.isArray(value) && value.every((item) => typeof item === "string")
-  );
 }
 
 function parseCodeDeliveryRunSummary(
@@ -1042,15 +1046,15 @@ function parseCodeDeliveryRunSummary(
       "created_at",
       "updated_at",
     ]) ||
-    !nonEmpty(value.id) ||
+    !nonEmptyString(value.id) ||
     !isMember(value.kind, DELIVERY_RUN_KINDS) ||
     !isPositiveInteger(value.github_id) ||
     !(
       value.run_attempt === undefined || isPositiveInteger(value.run_attempt)
     ) ||
-    !nonEmpty(value.name) ||
-    !nonEmpty(value.url) ||
-    !nonEmpty(value.status) ||
+    !nonEmptyString(value.name) ||
+    !nonEmptyString(value.url) ||
+    !nonEmptyString(value.status) ||
     !optionalString(value.conclusion) ||
     !optionalString(value.workflow) ||
     !optionalString(value.environment) ||
@@ -1063,8 +1067,8 @@ function parseCodeDeliveryRunSummary(
       isMember(reason, DELIVERY_RUN_ATTENTION_REASONS),
     ) ||
     !Array.isArray(value.workspace_links) ||
-    !nonEmpty(value.created_at) ||
-    !nonEmpty(value.updated_at)
+    !nonEmptyString(value.created_at) ||
+    !nonEmptyString(value.updated_at)
   ) {
     return null;
   }
@@ -1117,7 +1121,7 @@ export function parseCodeDeliveryRunsPage(
     ]) ||
     !Array.isArray(value.items) ||
     !optionalString(value.next_cursor) ||
-    !nonEmpty(value.fetched_at)
+    !nonEmptyString(value.fetched_at)
   ) {
     return null;
   }
@@ -1157,10 +1161,10 @@ function parseCodeDeliveryWorkflowJob(
       "failed_steps",
     ]) ||
     !isPositiveInteger(value.id) ||
-    !nonEmpty(value.name) ||
-    !nonEmpty(value.status) ||
+    !nonEmptyString(value.name) ||
+    !nonEmptyString(value.status) ||
     !optionalString(value.conclusion) ||
-    !nonEmpty(value.url) ||
+    !nonEmptyString(value.url) ||
     !nullableString(value.started_at) ||
     !nullableString(value.completed_at) ||
     !Array.isArray(value.failed_steps) ||
@@ -1194,11 +1198,11 @@ function parseCodeDeliveryDeploymentStatus(
       "created_at",
     ]) ||
     !isPositiveInteger(value.id) ||
-    !nonEmpty(value.state) ||
+    !nonEmptyString(value.state) ||
     typeof value.description !== "string" ||
     !optionalString(value.environment_url) ||
     !optionalString(value.log_url) ||
-    !nonEmpty(value.created_at)
+    !nonEmptyString(value.created_at)
   ) {
     return null;
   }
@@ -1323,8 +1327,8 @@ export function parseCodeSubscriptionUsage(
   for (const provider of value.providers) {
     if (
       !isRecord(provider) ||
-      !nonEmpty(provider.id) ||
-      !nonEmpty(provider.label) ||
+      !nonEmptyString(provider.id) ||
+      !nonEmptyString(provider.label) ||
       !Array.isArray(provider.accounts)
     ) {
       return null;
@@ -1333,8 +1337,8 @@ export function parseCodeSubscriptionUsage(
     for (const account of provider.accounts) {
       if (
         !isRecord(account) ||
-        !nonEmpty(account.id) ||
-        !nonEmpty(account.label) ||
+        !nonEmptyString(account.id) ||
+        !nonEmptyString(account.label) ||
         typeof account.is_own !== "boolean" ||
         typeof account.state !== "string" ||
         (account.updated_at_unix_seconds !== undefined &&
@@ -1347,8 +1351,8 @@ export function parseCodeSubscriptionUsage(
       for (const window of account.windows) {
         if (
           !isRecord(window) ||
-          !nonEmpty(window.key) ||
-          !nonEmpty(window.label) ||
+          !nonEmptyString(window.key) ||
+          !nonEmptyString(window.label) ||
           !isFiniteNumber(window.used_percent) ||
           (window.resets_at_unix_seconds !== undefined &&
             !isFiniteNumber(window.resets_at_unix_seconds)) ||
@@ -1441,7 +1445,7 @@ function parseCodeAnalyticsDay(value: unknown): CodeAnalyticsDay | null {
       "pull_requests_opened",
       "pull_requests_merged",
     ]) ||
-    !nonEmpty(value.date) ||
+    !nonEmptyString(value.date) ||
     !isNonNegativeInteger(value.sessions) ||
     !isNonNegativeInteger(value.turns) ||
     !isNonNegativeInteger(value.total_tokens) ||
@@ -1469,8 +1473,8 @@ function parseCodeAnalyticsRepository(
       "pull_requests_opened",
       "pull_requests_merged",
     ]) ||
-    !nonEmpty(value.repo_id) ||
-    !nonEmpty(value.name) ||
+    !nonEmptyString(value.repo_id) ||
+    !nonEmptyString(value.name) ||
     !isNonNegativeInteger(value.sessions) ||
     !isNonNegativeInteger(value.turns) ||
     !isNonNegativeInteger(value.total_tokens) ||
@@ -1549,7 +1553,7 @@ function parseCodeAnalyticsPricing(
     !isNonNegativeInteger(value.unpriced_turns) ||
     !isNonNegativeInteger(value.priced_tokens) ||
     !isNonNegativeInteger(value.unpriced_tokens) ||
-    !nonEmpty(value.prices_as_of)
+    !nonEmptyString(value.prices_as_of)
   ) {
     return null;
   }
@@ -1575,7 +1579,7 @@ export function parseCodeAnalytics(
     ]) ||
     !isMember(value.range, ANALYTICS_RANGES) ||
     !optionalString(value.from) ||
-    !nonEmpty(value.through) ||
+    !nonEmptyString(value.through) ||
     !optionalString(value.repo_id) ||
     !Array.isArray(value.daily) ||
     !Array.isArray(value.repositories) ||
@@ -1625,7 +1629,7 @@ export function parseCodeCloneJob(value: unknown): CodeCloneJobSnapshot | null {
       "error",
       "repo_id",
     ]) ||
-    !nonEmpty(value.id) ||
+    !nonEmptyString(value.id) ||
     typeof value.phase !== "string" ||
     typeof value.done !== "boolean" ||
     (value.percent !== undefined && !isFiniteNumber(value.percent)) ||
@@ -1843,8 +1847,8 @@ function parseCodeCheckLog(value: unknown): CodeCheckLog | null {
       "truncated",
       "url",
     ]) ||
-    !nonEmpty(value.check) ||
-    !nonEmpty(value.path) ||
+    !nonEmptyString(value.check) ||
+    !nonEmptyString(value.path) ||
     typeof value.byte_len !== "number" ||
     typeof value.truncated !== "boolean" ||
     typeof value.url !== "string"
@@ -1864,7 +1868,7 @@ function parseCodeCheckLogError(value: unknown): CodeCheckLogError | null {
   if (
     !isRecord(value) ||
     !onlyKeys<WireCodeCheckLogError>(value, ["check", "message"]) ||
-    !nonEmpty(value.check) ||
+    !nonEmptyString(value.check) ||
     typeof value.message !== "string"
   ) {
     return null;
@@ -1942,12 +1946,12 @@ export function parseCodeRepo(value: unknown): CodeRepoSnapshot | null {
       "quick_actions",
       "created_at",
     ]) ||
-    !nonEmpty(value.id) ||
-    !nonEmpty(value.root_path) ||
-    !nonEmpty(value.display_name) ||
-    !nonEmpty(value.default_base_ref) ||
-    !nonEmpty(value.branch_prefix) ||
-    !nonEmpty(value.created_at) ||
+    !nonEmptyString(value.id) ||
+    !nonEmptyString(value.root_path) ||
+    !nonEmptyString(value.display_name) ||
+    !nonEmptyString(value.default_base_ref) ||
+    !nonEmptyString(value.branch_prefix) ||
+    !nonEmptyString(value.created_at) ||
     !optionalString(value.setup_script) ||
     !optionalString(value.archive_script) ||
     !Array.isArray(value.quick_actions)
@@ -1985,7 +1989,7 @@ function parseQuickAction(value: unknown): WireQuickAction | null {
       "command",
       "auto_run_on_create",
     ]) ||
-    !nonEmpty(value.name) ||
+    !nonEmptyString(value.name) ||
     typeof value.command !== "string" ||
     typeof value.auto_run_on_create !== "boolean"
   ) {
@@ -2018,14 +2022,14 @@ export function parseCodeWorkspace(
       "released_tip",
       "bundle_bytes",
     ]) ||
-    !nonEmpty(value.id) ||
-    !nonEmpty(value.repo_id) ||
-    !nonEmpty(value.title) ||
-    !nonEmpty(value.worktree_path) ||
-    !nonEmpty(value.branch_name) ||
-    !nonEmpty(value.base_ref) ||
+    !nonEmptyString(value.id) ||
+    !nonEmptyString(value.repo_id) ||
+    !nonEmptyString(value.title) ||
+    !nonEmptyString(value.worktree_path) ||
+    !nonEmptyString(value.branch_name) ||
+    !nonEmptyString(value.base_ref) ||
     !isMember(value.status, WORKSPACE_STATUSES) ||
-    !nonEmpty(value.created_at) ||
+    !nonEmptyString(value.created_at) ||
     !optionalString(value.archived_at) ||
     !optionalString(value.released_at) ||
     !optionalString(value.released_tip) ||
@@ -2092,8 +2096,8 @@ function parseCodeRepoStorage(value: unknown): CodeRepoStorageSnapshot | null {
       "clone_reclaimable",
       "workspaces",
     ]) ||
-    !nonEmpty(value.id) ||
-    !nonEmpty(value.display_name) ||
+    !nonEmptyString(value.id) ||
+    !nonEmptyString(value.display_name) ||
     !isFiniteNumber(value.clone_bytes) ||
     typeof value.clone_reclaimable !== "boolean" ||
     !Array.isArray(value.workspaces)
@@ -2128,8 +2132,8 @@ function parseCodeWorkspaceStorage(
       "next_action",
       "next_reclaim_bytes",
     ]) ||
-    !nonEmpty(value.id) ||
-    !nonEmpty(value.title) ||
+    !nonEmptyString(value.id) ||
+    !nonEmptyString(value.title) ||
     !isMember(value.status, WORKSPACE_STATUSES) ||
     !isFiniteNumber(value.on_disk_bytes) ||
     !isFiniteNumber(value.next_reclaim_bytes) ||
@@ -2179,7 +2183,7 @@ export function parsePullRequestDigest(
       "in_merge_queue",
     ]) ||
     !isFiniteNumber(value.number) ||
-    !nonEmpty(value.state) ||
+    !nonEmptyString(value.state) ||
     !optionalStringField(value.url) ||
     !optionalStringField(value.title) ||
     !optionalStringField(value.checks_summary) ||
@@ -2364,15 +2368,15 @@ export function parseCodeWatch(value: unknown): CodeWatchSnapshot | null {
       "created_at",
       "updated_at",
     ]) ||
-    !nonEmpty(value.id) ||
-    !nonEmpty(value.workspace_id) ||
-    !nonEmpty(value.session_id) ||
+    !nonEmptyString(value.id) ||
+    !nonEmptyString(value.workspace_id) ||
+    !nonEmptyString(value.session_id) ||
     !isFiniteNumber(value.pr_number) ||
     !isMember(value.state, WATCH_STATES) ||
     (value.detail !== undefined && typeof value.detail !== "string") ||
     !isFiniteNumber(value.cycles) ||
-    !nonEmpty(value.created_at) ||
-    !nonEmpty(value.updated_at)
+    !nonEmptyString(value.created_at) ||
+    !nonEmptyString(value.updated_at)
   ) {
     return null;
   }
@@ -2414,13 +2418,13 @@ export function parseCodeTrigger(value: unknown): CodeTriggerSnapshot | null {
       "created_at",
       "updated_at",
     ]) ||
-    !nonEmpty(value.id) ||
-    !nonEmpty(value.repo_id) ||
+    !nonEmptyString(value.id) ||
+    !nonEmptyString(value.repo_id) ||
     !isMember(value.condition, TRIGGER_CONDITIONS) ||
     !isMember(value.action, TRIGGER_ACTIONS) ||
     typeof value.enabled !== "boolean" ||
-    !nonEmpty(value.created_at) ||
-    !nonEmpty(value.updated_at)
+    !nonEmptyString(value.created_at) ||
+    !nonEmptyString(value.updated_at)
   ) {
     return null;
   }
@@ -2532,7 +2536,7 @@ export function parseCodeCommit(value: unknown): CodeCommitSnapshot | null {
   if (
     !isRecord(value) ||
     !onlyKeys<WireCodeCommitSnapshot>(value, ["sha", "message", "stat"]) ||
-    !nonEmpty(value.sha) ||
+    !nonEmptyString(value.sha) ||
     typeof value.message !== "string"
   ) {
     return null;
@@ -2546,8 +2550,8 @@ export function parseCodePush(value: unknown): CodePushSnapshot | null {
   if (
     !isRecord(value) ||
     !onlyKeys<WireCodePushSnapshot>(value, ["branch", "remote"]) ||
-    !nonEmpty(value.branch) ||
-    !nonEmpty(value.remote)
+    !nonEmptyString(value.branch) ||
+    !nonEmptyString(value.remote)
   ) {
     return null;
   }
@@ -2565,7 +2569,7 @@ export function parseCodeAction(value: unknown): CodeActionSnapshot | null {
       "stderr",
       "timed_out",
     ]) ||
-    !nonEmpty(value.name) ||
+    !nonEmptyString(value.name) ||
     typeof value.success !== "boolean" ||
     (value.exit_code !== undefined && !isFiniteNumber(value.exit_code)) ||
     typeof value.stdout !== "string" ||
@@ -2605,8 +2609,8 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
       "created_at",
       "external_origin",
     ]) ||
-    !nonEmpty(value.id) ||
-    !nonEmpty(value.workspace_id) ||
+    !nonEmptyString(value.id) ||
+    !nonEmptyString(value.workspace_id) ||
     !isMember(value.kind, SESSION_KINDS) ||
     !isMember(value.harness_kind, HARNESS_KINDS) ||
     !optionalString(value.harness_version) ||
@@ -2620,7 +2624,7 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
     !isMember(value.permission_mode, PERMISSION_MODES) ||
     !isMember(value.lifecycle, SESSION_LIFECYCLES) ||
     !isFiniteNumber(value.unrecognized_event_count) ||
-    !nonEmpty(value.created_at)
+    !nonEmptyString(value.created_at)
   ) {
     return null;
   }
@@ -2638,8 +2642,8 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
         "channel_kind",
         "external_key",
       ]) ||
-      !nonEmpty(value.external_origin.channel_kind) ||
-      !nonEmpty(value.external_origin.external_key))
+      !nonEmptyString(value.external_origin.channel_kind) ||
+      !nonEmptyString(value.external_origin.external_key))
   ) {
     return null;
   }
@@ -2735,8 +2739,8 @@ export function parseCodeTurn(value: unknown): CodeTurnSnapshot | null {
       "ended_at",
       "rewrite",
     ]) ||
-    !nonEmpty(value.id) ||
-    !nonEmpty(value.session_id) ||
+    !nonEmptyString(value.id) ||
+    !nonEmptyString(value.session_id) ||
     !isFiniteNumber(value.ordinal) ||
     !isMember(value.status, TURN_STATUSES) ||
     !optionalString(value.model) ||
@@ -2746,7 +2750,7 @@ export function parseCodeTurn(value: unknown): CodeTurnSnapshot | null {
     (value.fast_mode !== undefined && typeof value.fast_mode !== "boolean") ||
     !optionalString(value.checkpoint_ref) ||
     typeof value.user_input !== "string" ||
-    !nonEmpty(value.started_at) ||
+    !nonEmptyString(value.started_at) ||
     !optionalString(value.ended_at) ||
     !optionalString(value.rewrite)
   ) {
@@ -2802,7 +2806,7 @@ function parseCodeTurnAttachments(
         "height",
         "byte_len",
       ]) ||
-      !nonEmpty(item.blob_id) ||
+      !nonEmptyString(item.blob_id) ||
       !isMember(item.media_type, IMAGE_MEDIA_TYPES) ||
       !isFiniteNumber(item.width) ||
       !isFiniteNumber(item.height) ||
@@ -2843,12 +2847,12 @@ export function parseQueuedCodeTurn(value: unknown): QueuedCodeTurn | null {
       "created_at",
       "updated_at",
     ]) ||
-    !nonEmpty(value.id) ||
-    !nonEmpty(value.session_id) ||
+    !nonEmptyString(value.id) ||
+    !nonEmptyString(value.session_id) ||
     typeof value.message !== "string" ||
     !isFiniteNumber(value.position) ||
-    !nonEmpty(value.created_at) ||
-    !nonEmpty(value.updated_at)
+    !nonEmptyString(value.created_at) ||
+    !nonEmptyString(value.updated_at)
   ) {
     return null;
   }
@@ -2916,7 +2920,7 @@ export function parseCodeWorkspaceSearch(
         "line_number",
         "line",
       ]) ||
-      !nonEmpty(item.path) ||
+      !nonEmptyString(item.path) ||
       !isFiniteNumber(item.line_number) ||
       item.line_number < 1 ||
       typeof item.line !== "string"
@@ -2942,15 +2946,15 @@ export function parseCodeWorkspaceSearch(
         "preview",
         "created_at",
       ]) ||
-      !nonEmpty(item.workspace_id) ||
-      !nonEmpty(item.workspace_title) ||
-      !nonEmpty(item.session_id) ||
-      (item.turn_id !== undefined && !nonEmpty(item.turn_id)) ||
+      !nonEmptyString(item.workspace_id) ||
+      !nonEmptyString(item.workspace_title) ||
+      !nonEmptyString(item.session_id) ||
+      (item.turn_id !== undefined && !nonEmptyString(item.turn_id)) ||
       !["turn_user_input", "turn_narrative", "event"].includes(
         item.source as string,
       ) ||
       typeof item.preview !== "string" ||
-      !nonEmpty(item.created_at)
+      !nonEmptyString(item.created_at)
     ) {
       return null;
     }
@@ -2997,7 +3001,8 @@ export function parseCodeWorkspaceFiles(
   }
   const stat = parseDiffstat(value.stat);
   if (!stat) return null;
-  if (value.turn_id !== undefined && !nonEmpty(value.turn_id)) return null;
+  if (value.turn_id !== undefined && !nonEmptyString(value.turn_id))
+    return null;
   return {
     files,
     truncated: value.truncated,
@@ -3138,12 +3143,12 @@ export function parseCodeTerminal(value: unknown): CodeTerminalSnapshot | null {
       "ended",
       "created_at",
     ]) ||
-    !nonEmpty(value.id) ||
-    !nonEmpty(value.workspace_id) ||
+    !nonEmptyString(value.id) ||
+    !nonEmptyString(value.workspace_id) ||
     !isFiniteNumber(value.cols) ||
     !isFiniteNumber(value.rows) ||
     typeof value.ended !== "boolean" ||
-    !nonEmpty(value.created_at)
+    !nonEmptyString(value.created_at)
   ) {
     return null;
   }
@@ -3182,8 +3187,8 @@ export function parseCodeTerminalRead(value: unknown): CodeTerminalRead | null {
       "truncated",
       "ended",
     ]) ||
-    !nonEmpty(value.id) ||
-    !nonEmpty(value.workspace_id) ||
+    !nonEmptyString(value.id) ||
+    !nonEmptyString(value.workspace_id) ||
     typeof value.bytes !== "string" ||
     !isFiniteNumber(value.cursor) ||
     typeof value.overflow !== "boolean" ||
@@ -3472,7 +3477,7 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
           "resume_ref",
         ]) ||
         !isMember(value.harness_kind, HARNESS_KINDS) ||
-        !nonEmpty(value.harness_version) ||
+        !nonEmptyString(value.harness_version) ||
         !optionalString(value.resume_ref)
       ) {
         return null;
@@ -3491,7 +3496,7 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
           "type",
           "turn_id",
         ]) ||
-        !nonEmpty(value.turn_id)
+        !nonEmptyString(value.turn_id)
       ) {
         return null;
       }
@@ -3511,7 +3516,8 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
       if (
         !onlyKeys(value, ["type", "text", "parent_call_id"]) ||
         typeof value.text !== "string" ||
-        (value.parent_call_id !== undefined && !nonEmpty(value.parent_call_id))
+        (value.parent_call_id !== undefined &&
+          !nonEmptyString(value.parent_call_id))
       ) {
         return null;
       }
@@ -3531,9 +3537,10 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
           "detail",
           "parent_call_id",
         ]) ||
-        !nonEmpty(value.call_id) ||
-        !nonEmpty(value.name) ||
-        (value.parent_call_id !== undefined && !nonEmpty(value.parent_call_id))
+        !nonEmptyString(value.call_id) ||
+        !nonEmptyString(value.name) ||
+        (value.parent_call_id !== undefined &&
+          !nonEmptyString(value.parent_call_id))
       ) {
         return null;
       }
@@ -3559,10 +3566,11 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
           "detail",
           "parent_call_id",
         ]) ||
-        !nonEmpty(value.call_id) ||
+        !nonEmptyString(value.call_id) ||
         !isMember(value.outcome, TOOL_OUTCOMES) ||
         typeof value.preview !== "string" ||
-        (value.parent_call_id !== undefined && !nonEmpty(value.parent_call_id))
+        (value.parent_call_id !== undefined &&
+          !nonEmptyString(value.parent_call_id))
       ) {
         return null;
       }
@@ -3629,7 +3637,7 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
           value,
           ["type", "turn_id", "diffstat"],
         ) ||
-        !nonEmpty(value.turn_id)
+        !nonEmptyString(value.turn_id)
       ) {
         return null;
       }
@@ -3663,7 +3671,7 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
     case "approval_requested":
       if (
         !onlyKeys(value, ["type", "approval_id"]) ||
-        !nonEmpty(value.approval_id)
+        !nonEmptyString(value.approval_id)
       ) {
         return null;
       }
@@ -3671,7 +3679,7 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
     case "approval_resolved":
       if (
         !onlyKeys(value, ["type", "approval_id", "decision"]) ||
-        !nonEmpty(value.approval_id) ||
+        !nonEmptyString(value.approval_id) ||
         !isRecord(value.decision) ||
         (value.decision.type !== "approve" &&
           value.decision.type !== "deny" &&
@@ -3894,37 +3902,6 @@ export function parseFenceReason(value: unknown): FenceReason | null {
   return null;
 }
 
-function nonEmpty(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0;
-}
-
-function optionalString(value: unknown): value is string | undefined {
-  return value === undefined || typeof value === "string";
-}
-
-function nullableString(value: unknown): value is string | null {
-  return value === null || typeof value === "string";
-}
-
-function isMember<T extends string>(
-  value: unknown,
-  allowed: ReadonlySet<T>,
-): value is T {
-  return typeof value === "string" && allowed.has(value as T);
-}
-
-function isFiniteNumber(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value);
-}
-
-function isNonNegativeInteger(value: unknown): value is number {
-  return Number.isSafeInteger(value) && (value as number) >= 0;
-}
-
-function isPositiveInteger(value: unknown): value is number {
-  return Number.isSafeInteger(value) && (value as number) > 0;
-}
-
 /** `undefined` stays undefined; a present list must be well-formed. */
 function parseSubagents(value: unknown): CodeSubagentSummary[] | null {
   if (!Array.isArray(value)) return null;
@@ -3933,7 +3910,7 @@ function parseSubagents(value: unknown): CodeSubagentSummary[] | null {
     if (
       !isRecord(item) ||
       !onlyKeys<CodeSubagentSummary>(item, ["call_id", "name", "status"]) ||
-      !nonEmpty(item.call_id) ||
+      !nonEmptyString(item.call_id) ||
       typeof item.name !== "string" ||
       !isMember(item.status, SUBAGENT_STATUSES)
     ) {
@@ -3972,8 +3949,8 @@ export function parseCodeSessionDigest(
       "subagents",
       "recap",
     ]) ||
-    !nonEmpty(value.workspace) ||
-    !nonEmpty(value.session) ||
+    !nonEmptyString(value.workspace) ||
+    !nonEmptyString(value.session) ||
     !isMember(value.kind, SESSION_KINDS) ||
     (value.harness_kind !== undefined &&
       !isMember(value.harness_kind, HARNESS_KINDS)) ||
@@ -4074,8 +4051,8 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
           "subagents",
           "recap",
         ]) ||
-        !nonEmpty(value.workspace) ||
-        !nonEmpty(value.session) ||
+        !nonEmptyString(value.workspace) ||
+        !nonEmptyString(value.session) ||
         !isMember(value.kind, SESSION_KINDS) ||
         (value.harness_kind !== undefined &&
           !isMember(value.harness_kind, HARNESS_KINDS)) ||
@@ -4142,7 +4119,7 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
           value,
           ["type", "job", "phase", "percent", "done", "error", "repo_id"],
         ) ||
-        !nonEmpty(value.job) ||
+        !nonEmptyString(value.job) ||
         typeof value.phase !== "string" ||
         typeof value.done !== "boolean" ||
         (value.percent !== undefined && !isFiniteNumber(value.percent)) ||
@@ -4190,8 +4167,8 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
           value,
           ["type", "workspace_id", "terminal_id"],
         ) ||
-        !nonEmpty(value.workspace_id) ||
-        !nonEmpty(value.terminal_id)
+        !nonEmptyString(value.workspace_id) ||
+        !nonEmptyString(value.terminal_id)
       ) {
         return null;
       }
@@ -4207,8 +4184,8 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
           value,
           ["type", "session", "turn_id", "state", "rewrite"],
         ) ||
-        !nonEmpty(value.session) ||
-        !nonEmpty(value.turn_id) ||
+        !nonEmptyString(value.session) ||
+        !nonEmptyString(value.turn_id) ||
         !isMember(value.state, TURN_REWRITE_STATES) ||
         !optionalString(value.rewrite)
       ) {
@@ -4234,14 +4211,14 @@ function parsePrState(value: unknown): PullRequestDigest | null {
 export function parseCodeApproval(value: unknown): CodeApprovalSnapshot | null {
   if (
     !isRecord(value) ||
-    !nonEmpty(value.id) ||
-    !nonEmpty(value.session_id) ||
-    !nonEmpty(value.turn_id) ||
+    !nonEmptyString(value.id) ||
+    !nonEmptyString(value.session_id) ||
+    !nonEmptyString(value.turn_id) ||
     !isRecord(value.kind) ||
     typeof value.kind.type !== "string" ||
     typeof value.harness_raw_json !== "string" ||
     !isMember(value.state, APPROVAL_STATES) ||
-    !nonEmpty(value.requested_at) ||
+    !nonEmptyString(value.requested_at) ||
     (value.feedback !== undefined && typeof value.feedback !== "string") ||
     (value.decided_at !== undefined && typeof value.decided_at !== "string")
   ) {
@@ -4263,14 +4240,14 @@ export function parseCodeApproval(value: unknown): CodeApprovalSnapshot | null {
 export function parseCodeGrant(value: unknown): CodeGrantSnapshot | null {
   if (
     !isRecord(value) ||
-    !nonEmpty(value.id) ||
-    !nonEmpty(value.channel_kind) ||
-    !nonEmpty(value.external_identity) ||
+    !nonEmptyString(value.id) ||
+    !nonEmptyString(value.channel_kind) ||
+    !nonEmptyString(value.external_identity) ||
     !optionalString(value.display_name) ||
-    !nonEmpty(value.workspace_identity) ||
+    !nonEmptyString(value.workspace_identity) ||
     !optionalString(value.workspace_name) ||
     !optionalString(value.avatar_url) ||
-    !nonEmpty(value.created_at) ||
+    !nonEmptyString(value.created_at) ||
     !optionalString(value.rotated_at) ||
     !optionalString(value.revoked_at) ||
     !optionalString(value.revoked_reason)
@@ -4312,13 +4289,13 @@ export function parseCodeGrantList(value: unknown): CodeGrantSnapshot[] | null {
 export function parseCodeConnectPage(value: unknown): CodeConnectPage | null {
   if (
     !isRecord(value) ||
-    !nonEmpty(value.channel_kind) ||
-    !nonEmpty(value.display_name) ||
-    !nonEmpty(value.workspace_name) ||
+    !nonEmptyString(value.channel_kind) ||
+    !nonEmptyString(value.display_name) ||
+    !nonEmptyString(value.workspace_name) ||
     !optionalString(value.avatar_url) ||
-    !nonEmpty(value.state) ||
-    !nonEmpty(value.csrf) ||
-    !nonEmpty(value.expires_at)
+    !nonEmptyString(value.state) ||
+    !nonEmptyString(value.csrf) ||
+    !nonEmptyString(value.expires_at)
   ) {
     return null;
   }
