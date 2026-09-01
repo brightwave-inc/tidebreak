@@ -39,6 +39,7 @@ use crate::approvals::ApprovalBroker;
 use crate::bus::EventBus;
 use crate::chat_titling::ChatTitler;
 use crate::exec_write_snapshot::TurnScratchJournal;
+use crate::lane::IdleDelay;
 use crate::mcp_config::McpRuntime;
 use crate::resolver::ProviderResolver;
 use crate::retry::{LaneBackoff, RetryAttempt, RetrySchedule};
@@ -576,7 +577,7 @@ impl TurnWorker {
 
     pub(crate) async fn run(self) {
         let mut turns = tokio::task::JoinSet::new();
-        let mut idle_delay = self.config.idle_min;
+        let mut idle_delay = IdleDelay::new(self.config.idle_min, self.config.idle_cap);
         let mut failure_backoff =
             LaneBackoff::new(self.config.failure_delay, self.config.failure_delay_cap);
         let mut pending_claim_token = None;
@@ -596,7 +597,7 @@ impl TurnWorker {
                 if let Some(quiesce) = &self.quiesce {
                     let _ = quiesce.drained.send(false);
                 }
-                idle_delay = self.config.idle_min;
+                idle_delay.reset();
                 continue;
             }
             let mut scan_failed = false;
@@ -623,11 +624,11 @@ impl TurnWorker {
                             let _entry = entry;
                             worker.process(*turn, lease_token).await
                         });
-                        idle_delay = self.config.idle_min;
+                        idle_delay.reset();
                     }
                     Ok(ClaimAction::Terminalized) => {
                         pending_claim_token = None;
-                        idle_delay = self.config.idle_min;
+                        idle_delay.reset();
                     }
                     Ok(ClaimAction::Idle) => {
                         pending_claim_token = None;
@@ -653,7 +654,7 @@ impl TurnWorker {
                     }
                     _ = Self::quiesce_flipped(quiesce_request.as_mut()) => {}
                 }
-                idle_delay = self.config.idle_min;
+                idle_delay.reset();
                 continue;
             }
 
@@ -661,25 +662,25 @@ impl TurnWorker {
                 failure_backoff.next_delay()
             } else {
                 failure_backoff.reset();
-                idle_delay
+                idle_delay.current()
             };
             tokio::select! {
                 result = turns.join_next(), if !turns.is_empty() => {
                     if let Some(result) = result {
                         log_turn_result(result);
                     }
-                    idle_delay = self.config.idle_min;
+                    idle_delay.reset();
                 }
                 _ = tokio::time::sleep(delay) => {
                     if !scan_failed {
-                        idle_delay = idle_delay.saturating_mul(2).min(self.config.idle_cap);
+                        idle_delay.grow();
                     }
                 }
                 _ = self.wake.notified() => {
-                    idle_delay = self.config.idle_min;
+                    idle_delay.reset();
                 }
                 _ = Self::quiesce_flipped(quiesce_request.as_mut()) => {
-                    idle_delay = self.config.idle_min;
+                    idle_delay.reset();
                 }
             }
         }

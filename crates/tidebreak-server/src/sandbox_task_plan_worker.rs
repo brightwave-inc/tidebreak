@@ -20,6 +20,7 @@ use tidebreak_core::{
 };
 use tokio::sync::Notify;
 
+use crate::lane::{self, LaneOutcome, LanePacing, LaneStep};
 use crate::retry::LaneBackoff;
 
 const CANDIDATE_BATCH_SIZE: u64 = 16;
@@ -56,6 +57,18 @@ pub(crate) enum SandboxTaskPlanWorkerOutcome {
     LeaseLost(tidebreak_core::CallId),
 }
 
+impl LaneOutcome for SandboxTaskPlanWorkerOutcome {
+    fn lane_step(&self) -> LaneStep {
+        match self {
+            Self::Idle => LaneStep::Idle,
+            _ => LaneStep::Worked,
+        }
+    }
+}
+
+/// The name this worker's lanes log under.
+const LANE_NAME: &str = "sandbox task-plan worker";
+
 #[derive(Clone)]
 pub(crate) struct SandboxTaskPlanWorker {
     store: Arc<dyn Store>,
@@ -79,49 +92,30 @@ impl SandboxTaskPlanWorker {
     }
 
     pub(crate) async fn run(self) {
-        let mut lanes = tokio::task::JoinSet::new();
-        for _ in 0..self.config.max_concurrency {
-            lanes.spawn(self.clone().run_lane());
-        }
-        let mut restart_backoff =
-            LaneBackoff::new(self.config.failure_delay, self.config.failure_delay_cap);
-        while let Some(result) = lanes.join_next().await {
-            if let Err(error) = result {
-                tracing::error!("tidebreak: sandbox task-plan worker lane stopped: {error}");
-                tokio::time::sleep(restart_backoff.next_delay()).await;
-            }
-            lanes.spawn(self.clone().run_lane());
-        }
+        lane::supervise_lanes(
+            LANE_NAME,
+            self.config.max_concurrency,
+            LaneBackoff::new(self.config.failure_delay, self.config.failure_delay_cap),
+            move || self.clone().run_lane(),
+        )
+        .await;
     }
 
     async fn run_lane(self) {
-        let mut idle_delay = self.config.idle_min;
-        let mut failure_backoff =
-            LaneBackoff::new(self.config.failure_delay, self.config.failure_delay_cap);
-        loop {
-            match self.run_once().await {
-                Ok(SandboxTaskPlanWorkerOutcome::Idle) => {
-                    failure_backoff.reset();
-                    tokio::select! {
-                        _ = tokio::time::sleep(idle_delay) => {}
-                        _ = self.wake.notified() => {}
-                    }
-                    idle_delay = idle_delay.saturating_mul(2).min(self.config.idle_cap);
-                }
-                Ok(_) => {
-                    failure_backoff.reset();
-                    idle_delay = self.config.idle_min;
-                }
-                Err(error) => {
-                    tracing::warn!("tidebreak: sandbox task-plan worker iteration failed: {error}");
-                    let delay = failure_backoff.next_delay();
-                    tokio::select! {
-                        _ = tokio::time::sleep(delay) => {}
-                        _ = self.wake.notified() => {}
-                    }
-                }
-            }
-        }
+        let this = &self;
+        lane::run_lane(LANE_NAME, self.pacing(), &self.wake, move || {
+            this.run_once()
+        })
+        .await;
+    }
+
+    fn pacing(&self) -> LanePacing {
+        LanePacing::backoff(
+            self.config.idle_min,
+            self.config.idle_cap,
+            self.config.failure_delay,
+            self.config.failure_delay_cap,
+        )
     }
 
     /// Claim and resolve one exact persisted plan checkpoint.

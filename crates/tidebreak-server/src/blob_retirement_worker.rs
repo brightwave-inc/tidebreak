@@ -9,7 +9,8 @@ use tidebreak_core::{AgentError, BlobRetirement, BlobRetirementStatus, BlobStore
 use tokio::sync::Notify;
 use uuid::Uuid;
 
-use crate::retry::{LaneBackoff, RetryAttempt, RetrySchedule};
+use crate::lane::{self, LaneOutcome, LanePacing, LaneStep};
+use crate::retry::{RetryAttempt, RetrySchedule};
 use crate::state::BlobWriteGuard;
 
 #[derive(Debug, Clone, Copy)]
@@ -59,6 +60,15 @@ pub(crate) enum BlobRetirementWorkerOutcome {
     LeaseLost(Uuid),
 }
 
+impl LaneOutcome for BlobRetirementWorkerOutcome {
+    fn lane_step(&self) -> LaneStep {
+        match self {
+            Self::Idle => LaneStep::Idle,
+            _ => LaneStep::Worked,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct BlobRetirementWorker {
     store: Arc<dyn Store>,
@@ -94,33 +104,17 @@ impl BlobRetirementWorker {
     }
 
     pub(crate) async fn run(self) {
-        let mut idle_delay = self.config.idle_min;
-        let mut failure_backoff =
-            LaneBackoff::new(self.config.failure_delay, self.config.failure_delay_cap);
-        loop {
-            match self.run_once().await {
-                Ok(BlobRetirementWorkerOutcome::Idle) => {
-                    failure_backoff.reset();
-                    tokio::select! {
-                        _ = tokio::time::sleep(idle_delay) => {}
-                        _ = self.wake.notified() => {}
-                    }
-                    idle_delay = idle_delay.saturating_mul(2).min(self.config.idle_cap);
-                }
-                Ok(_) => {
-                    failure_backoff.reset();
-                    idle_delay = self.config.idle_min;
-                }
-                Err(error) => {
-                    tracing::warn!("tidebreak: blob retirement worker iteration failed: {error}");
-                    let delay = failure_backoff.next_delay();
-                    tokio::select! {
-                        _ = tokio::time::sleep(delay) => {}
-                        _ = self.wake.notified() => {}
-                    }
-                }
-            }
-        }
+        let pacing = LanePacing::backoff(
+            self.config.idle_min,
+            self.config.idle_cap,
+            self.config.failure_delay,
+            self.config.failure_delay_cap,
+        );
+        let this = &self;
+        lane::run_lane("blob retirement worker", pacing, &self.wake, move || {
+            this.run_once()
+        })
+        .await;
     }
 
     pub(crate) async fn run_once(&self) -> Result<BlobRetirementWorkerOutcome> {
