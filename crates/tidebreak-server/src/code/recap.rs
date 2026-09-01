@@ -60,6 +60,10 @@ use crate::resolver::ProviderResolver;
 
 use super::bus::CodeEventBus;
 
+/// Store key. Default on: completed code turns receive a one-line recap unless
+/// the reader turns the feature off in agent settings.
+pub(crate) const TURN_RECAPS_SETTING: &str = "code.turn_recaps";
+
 /// Longest recap stored, and the bound the schema states.
 ///
 /// Two plain sentences fit comfortably; a third does not. The bound is enforced
@@ -129,8 +133,9 @@ pub(crate) enum Outcome {
     Recapped(String),
     /// The model declined: the turn is not worth a line.
     Declined,
-    /// Nothing to do — the turn is missing, unfinished, already recapped, has
-    /// nothing to describe, or this machine has no utility model.
+    /// Nothing to do — recaps are off, the turn is missing, unfinished,
+    /// already recapped, has nothing to describe, or this machine has no
+    /// utility model.
     NotApplicable,
 }
 
@@ -222,6 +227,9 @@ impl TurnRecapper {
         session_id: CodeSessionId,
         turn_id: CodeTurnId,
     ) -> Result<Outcome> {
+        if !turn_recaps_enabled(&*self.store).await? {
+            return Ok(Outcome::NotApplicable);
+        }
         let Some(turn) = get_turn(&self.db, owner, turn_id).await? else {
             return Ok(Outcome::NotApplicable);
         };
@@ -427,6 +435,17 @@ impl TurnRecap for TurnRecapper {
             }
         });
     }
+}
+
+/// Whether completed code turns receive one-line recaps. Default on.
+pub(crate) async fn turn_recaps_enabled(
+    store: &dyn tidebreak_core::Store,
+) -> tidebreak_core::Result<bool> {
+    Ok(store
+        .get_setting(TURN_RECAPS_SETTING)
+        .await?
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true))
 }
 
 /// A session's place in [`TurnRecapper::in_flight`], released on drop.

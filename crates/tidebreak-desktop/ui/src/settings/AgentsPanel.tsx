@@ -5,6 +5,7 @@ import type { ApiClient } from "../api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { Switch } from "@/components/ui/switch";
 import { useUiStore, type ActiveTurnSendMode } from "../UiStore";
 import {
   SettingsError,
@@ -28,8 +29,10 @@ export function AgentsPanel({ client }: { client: ApiClient }) {
   const [limit, setLimit] = useState("");
   const [checkinSteps, setCheckinSteps] = useState("");
   const [errorCheckin, setErrorCheckin] = useState("");
+  const [turnRecapsEnabled, setTurnRecapsEnabled] = useState(true);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [savingTurnRecaps, setSavingTurnRecaps] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -41,6 +44,7 @@ export function AgentsPanel({ client }: { client: ApiClient }) {
         setLimit(String(settings.max_active_background_agents));
         setCheckinSteps(String(settings.sandbox_agent_checkin_steps));
         setErrorCheckin(String(settings.sandbox_agent_error_checkin));
+        setTurnRecapsEnabled(settings.code_turn_recaps_enabled);
       })
       .catch((err) => {
         if (!cancelled) setError(String(err));
@@ -106,10 +110,28 @@ export function AgentsPanel({ client }: { client: ApiClient }) {
     }
   }
 
+  async function saveTurnRecaps(enabled: boolean) {
+    const previous = turnRecapsEnabled;
+    setTurnRecapsEnabled(enabled);
+    setSavingTurnRecaps(true);
+    setError(null);
+    try {
+      const settings = await client.putSettings({
+        code_turn_recaps_enabled: enabled,
+      });
+      setTurnRecapsEnabled(settings.code_turn_recaps_enabled);
+    } catch (err) {
+      setTurnRecapsEnabled(previous);
+      setError(String(err));
+    } finally {
+      setSavingTurnRecaps(false);
+    }
+  }
+
   return (
     <SettingsPanel
       title="Agents"
-      description="Choose how messages behave around active work, how much delegated work a conversation may run, and how often agents report back."
+      description="Choose how messages behave around active work, whether coding turns write recaps, and how delegated agents report back."
       busy={loading}
     >
       <SettingsSection
@@ -151,6 +173,22 @@ export function AgentsPanel({ client }: { client: ApiClient }) {
             </span>
           </label>
         </RadioGroup>
+      </SettingsSection>
+      <SettingsSection
+        title="Turn recaps"
+        description="After a coding turn finishes, Tidebreak can add a one-line update beside the turn result."
+      >
+        <SettingsField
+          label="Write turn recaps"
+          hint="Uses the utility model after each completed coding turn. Turning this off affects future turns; existing recaps stay in the transcript."
+        >
+          <Switch
+            checked={turnRecapsEnabled}
+            disabled={loading || savingTurnRecaps}
+            onCheckedChange={(enabled) => void saveTurnRecaps(enabled)}
+            aria-label="Write turn recaps"
+          />
+        </SettingsField>
       </SettingsSection>
       <SettingsSection>
         <SettingsField

@@ -299,6 +299,100 @@ async fn a_completed_turn_is_recapped_onto_the_digest() {
     );
 }
 
+/// Turning recaps off prevents the utility-model call for later turns.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_disabled_recap_setting_skips_the_model_call() {
+    let (router, token, stub, runtime, dir) = code_recap_app().await;
+    runtime
+        .db
+        .set_setting(
+            crate::code::recap::TURN_RECAPS_SETTING,
+            &serde_json::json!(false),
+        )
+        .await
+        .unwrap();
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+
+    let registered = client
+        .post(format!("http://{addr}/code/repos"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "path": repo }))
+        .send()
+        .await
+        .unwrap();
+    let repo_body: serde_json::Value = registered.json().await.unwrap();
+    let created = client
+        .post(format!("http://{addr}/code/workspaces"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "repo_id": repo_body["id"] }))
+        .send()
+        .await
+        .unwrap();
+    let workspace: serde_json::Value = created.json().await.unwrap();
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            workspace["id"].as_str().unwrap()
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap();
+    let session: serde_json::Value = session.json().await.unwrap();
+    let session_id = tidebreak_core::CodeSessionId(
+        uuid::Uuid::parse_str(session["id"].as_str().unwrap()).unwrap(),
+    );
+
+    let turn = client
+        .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "message": "Fix the retry test" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(turn.status(), reqwest::StatusCode::ACCEPTED);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let turns = tidebreak_core::db::code::list_turns(
+            &runtime.db,
+            &tidebreak_core::OwnerId::local(),
+            session_id,
+        )
+        .await
+        .unwrap();
+        if turns
+            .last()
+            .is_some_and(|turn| turn.status == tidebreak_core::CodeTurnStatus::Completed)
+        {
+            assert!(turns
+                .last()
+                .and_then(|turn| turn.narrative.as_ref())
+                .is_none());
+            break;
+        }
+        tokio::time::timeout_at(deadline, tokio::time::sleep(Duration::from_millis(20)))
+            .await
+            .expect("the scripted turn completes before the deadline");
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let recap_calls = stub
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| request.to_string().contains("session_recap"))
+        .count();
+    assert_eq!(recap_calls, 0);
+}
+
 /// No utility model, no recap — and no failed turn either.
 ///
 /// A machine with nothing to run background work on is the ordinary case for a

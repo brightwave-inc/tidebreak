@@ -4250,6 +4250,10 @@ model_visibility_overrides: { [key in string]: ModelVisibility },
  */
 computer_use_enabled: boolean, 
 /**
+ * Whether completed code turns receive a one-line recap. Default on.
+ */
+code_turn_recaps_enabled: boolean, 
+/**
  * Whether completed code turns rewrite their closing message into lucid
  * prose. Default off.
  */

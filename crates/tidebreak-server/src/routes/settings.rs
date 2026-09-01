@@ -142,6 +142,9 @@ pub struct Settings {
     /// enabled. Read at boot; turning it off unregisters the tools on the next
     /// launch.
     pub computer_use_enabled: bool,
+    /// Whether completed code turns receive a one-line recap. Default on.
+    #[serde(default = "default_true")]
+    pub code_turn_recaps_enabled: bool,
     /// Whether completed code turns rewrite their closing message into lucid
     /// prose. Default off.
     #[serde(default)]
@@ -193,6 +196,9 @@ pub struct SettingsUpdate {
     /// at the next boot (the tools register or not then).
     #[serde(default)]
     pub computer_use_enabled: Option<bool>,
+    /// Set the code-turn recap switch. Absent leaves it unchanged. Default on.
+    #[serde(default)]
+    pub code_turn_recaps_enabled: Option<bool>,
     /// Set the closing-message rewrite switch. Absent leaves it unchanged.
     /// Default off.
     #[serde(default)]
@@ -342,6 +348,15 @@ pub async fn put_settings(
             )
             .await?;
     }
+    if let Some(enabled) = body.code_turn_recaps_enabled {
+        state
+            .store
+            .set_setting(
+                crate::code::recap::TURN_RECAPS_SETTING,
+                &serde_json::json!(enabled),
+            )
+            .await?;
+    }
     if let Some(enabled) = body.rewrite_closing_messages {
         state
             .store
@@ -369,9 +384,14 @@ async fn read_settings(state: &AppState, owner: &OwnerId) -> Result<Settings, Se
         compaction: read_compaction_settings(&*state.store).await?,
         model_visibility_overrides: read_model_visibility_overrides(&*state.store).await?,
         computer_use_enabled: read_computer_use_enabled(&*state.store).await?,
+        code_turn_recaps_enabled: crate::code::recap::turn_recaps_enabled(&*state.store).await?,
         rewrite_closing_messages: crate::code::rewrite::rewrite_closing_enabled(&*state.store)
             .await?,
     })
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 /// Whether computer use is enabled. Default on; an explicit `false` disables
