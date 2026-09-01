@@ -345,12 +345,14 @@ async fn a_disabled_recap_setting_skips_the_model_call() {
         .await
         .unwrap();
     let session: serde_json::Value = session.json().await.unwrap();
-    let session_id = tidebreak_core::CodeSessionId(
-        uuid::Uuid::parse_str(session["id"].as_str().unwrap()).unwrap(),
-    );
+    let session_id_text = session["id"].as_str().unwrap().to_owned();
+    let session_id =
+        tidebreak_core::CodeSessionId(uuid::Uuid::parse_str(&session_id_text).unwrap());
 
     let turn = client
-        .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+        .post(format!(
+            "http://{addr}/code/sessions/{session_id_text}/turns"
+        ))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "message": "Fix the retry test" }))
         .send()
