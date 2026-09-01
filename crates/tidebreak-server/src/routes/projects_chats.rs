@@ -865,10 +865,12 @@ pub async fn delete_chat(
             match cleanup {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
-                    eprintln!("tidebreak: could not remove private scratch for chat {id}: {error}");
+                    tracing::error!(
+                        "tidebreak: could not remove private scratch for chat {id}: {error}"
+                    );
                 }
                 Err(error) => {
-                    eprintln!(
+                    tracing::error!(
                         "tidebreak: private scratch cleanup task stopped for chat {id}: {error}"
                     );
                 }
@@ -963,7 +965,7 @@ async fn erase_deleted_chat_agent_run_workspaces(
             )
             .await
             {
-                eprintln!(
+                tracing::error!(
                     "tidebreak: could not destroy agent-run workspace for chat {chat_id} run {run_id}: {error}"
                 );
             }
@@ -978,7 +980,7 @@ async fn erase_deleted_chat_agent_run_workspaces(
             match std::fs::remove_dir_all(&path) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => eprintln!(
+                Err(error) => tracing::error!(
                     "tidebreak: could not remove agent-run scratch for chat {chat_id} run {run_id}: {error}"
                 ),
             }
@@ -986,6 +988,8 @@ async fn erase_deleted_chat_agent_run_workspaces(
     })
     .await;
     if let Err(error) = cleanup {
-        eprintln!("tidebreak: agent-run scratch cleanup task stopped for chat {chat_id}: {error}");
+        tracing::error!(
+            "tidebreak: agent-run scratch cleanup task stopped for chat {chat_id}: {error}"
+        );
     }
 }

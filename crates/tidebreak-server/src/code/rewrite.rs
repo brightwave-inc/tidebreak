@@ -309,14 +309,16 @@ impl TurnRewrite for TurnRewriter {
             loop {
                 match rewriter.derive(&owner, session_id, turn_id).await {
                     Ok(Outcome::Rewritten(_)) => {
-                        eprintln!("tidebreak: rewrote code turn {turn_id}");
+                        tracing::info!("tidebreak: rewrote code turn {turn_id}");
                     }
                     Ok(Outcome::Declined) => {
-                        eprintln!("tidebreak: left code turn {turn_id} without a rewrite");
+                        tracing::warn!("tidebreak: left code turn {turn_id} without a rewrite");
                     }
                     Ok(Outcome::NotApplicable) => {}
                     Err(error) => {
-                        eprintln!("tidebreak: could not rewrite code turn {turn_id}: {error}");
+                        tracing::error!(
+                            "tidebreak: could not rewrite code turn {turn_id}: {error}"
+                        );
                     }
                 }
                 let Some(next) = claim.take_pending_or_release() else {

@@ -83,14 +83,14 @@ pub(crate) fn spawn_for_turn(
     tokio::spawn(async move {
         match derive_workspace_title(&state, &code, &owner, session_id, &message).await {
             Ok(Outcome::Named(title)) => {
-                eprintln!("tidebreak: named a code workspace: {title}");
+                tracing::info!("tidebreak: named a code workspace: {title}");
             }
             Ok(Outcome::Declined) => {
-                eprintln!("tidebreak: left a code workspace on its generated name");
+                tracing::warn!("tidebreak: left a code workspace on its generated name");
             }
             Ok(Outcome::NotApplicable) => {}
             Err(error) => {
-                eprintln!("tidebreak: could not derive a workspace title: {error}");
+                tracing::error!("tidebreak: could not derive a workspace title: {error}");
             }
         }
     });

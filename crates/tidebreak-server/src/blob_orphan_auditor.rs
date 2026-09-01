@@ -90,7 +90,7 @@ impl BlobOrphanAuditor {
             let delay = match self.audit_once().await {
                 Ok(report) => {
                     if report.enqueued > 0 || !report.failures.is_empty() {
-                        eprintln!(
+                        tracing::info!(
                             "tidebreak: blob orphan audit scanned {}, eligible {}, enqueued {}, skipped {}, remaining {}, errors {}",
                             report.scanned,
                             report.eligible,
@@ -102,19 +102,22 @@ impl BlobOrphanAuditor {
                     }
                     for failure in &report.failures {
                         match failure.blob_id {
-                            Some(blob_id) => eprintln!(
+                            Some(blob_id) => tracing::error!(
                                 "tidebreak: blob {blob_id} orphan audit failed: {}",
                                 failure.error
                             ),
                             None => {
-                                eprintln!("tidebreak: blob orphan scan failed: {}", failure.error)
+                                tracing::error!(
+                                    "tidebreak: blob orphan scan failed: {}",
+                                    failure.error
+                                )
                             }
                         }
                     }
                     next_delay(self.config, &report)
                 }
                 Err(error) => {
-                    eprintln!("tidebreak: blob orphan audit failed: {error}");
+                    tracing::error!("tidebreak: blob orphan audit failed: {error}");
                     self.config.failure_delay
                 }
             };

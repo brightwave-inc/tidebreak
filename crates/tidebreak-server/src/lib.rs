@@ -2410,7 +2410,7 @@ async fn bind_inner(
             loop {
                 tick.tick().await;
                 if let Err(error) = routes::promote_queued_turns(&state).await {
-                    eprintln!("tidebreak: queued-turn promotion failed: {error:?}");
+                    tracing::error!("tidebreak: queued-turn promotion failed: {error:?}");
                 }
             }
         })

@@ -766,7 +766,7 @@ pub(crate) async fn promote_queued_turns(state: &AppState) -> Result<(), ServerE
             continue;
         };
         let dropped = |reason: &str| {
-            eprintln!(
+            tracing::warn!(
                 "tidebreak: dropping queued message {} for chat {chat_id}: {reason}",
                 next.id
             );

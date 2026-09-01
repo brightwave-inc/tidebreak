@@ -102,8 +102,8 @@ impl SandboxContainerRunWorker {
         lanes.spawn(self.run_maintenance_lane());
         while let Some(result) = lanes.join_next().await {
             match result {
-                Ok(()) => eprintln!("tidebreak: container worker lane stopped unexpectedly"),
-                Err(error) => eprintln!("tidebreak: container worker lane stopped: {error}"),
+                Ok(()) => tracing::error!("tidebreak: container worker lane stopped unexpectedly"),
+                Err(error) => tracing::error!("tidebreak: container worker lane stopped: {error}"),
             }
         }
     }
@@ -121,7 +121,7 @@ impl SandboxContainerRunWorker {
                     idle_delay = idle_delay.saturating_mul(2).min(self.config.idle_cap);
                 }
                 Err(error) => {
-                    eprintln!("tidebreak: container worker iteration failed: {error}");
+                    tracing::warn!("tidebreak: container worker iteration failed: {error}");
                     tokio::select! {
                         _ = tokio::time::sleep(self.config.failure_delay) => {}
                         _ = self.wake.notified() => {}
@@ -152,14 +152,14 @@ impl SandboxContainerRunWorker {
             match self.runner.recover().await {
                 Ok(_) => {
                     if let Err(error) = self.runner.sweep().await {
-                        eprintln!("tidebreak: container worker sweep failed: {error}");
+                        tracing::error!("tidebreak: container worker sweep failed: {error}");
                     }
                 }
                 Err(error) => {
                     // Do not sweep after an incomplete recovery pass: a
                     // reclaimable run must be re-driven before its container
                     // can be considered an orphan.
-                    eprintln!("tidebreak: container worker recovery failed: {error}");
+                    tracing::error!("tidebreak: container worker recovery failed: {error}");
                 }
             }
             tokio::time::sleep(self.config.maintenance_interval).await;

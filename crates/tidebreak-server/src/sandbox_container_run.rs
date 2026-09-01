@@ -353,7 +353,7 @@ impl HostModelProxy {
             return Ok(!self.cancel.is_cancelled());
         };
         guard.authorize_egress(&self.cancel).await.map_err(|error| {
-            eprintln!(
+            tracing::error!(
                 "tidebreak: host model proxy could not revalidate its execution fence: {error}"
             );
         })
@@ -512,7 +512,7 @@ impl CapabilityResponder for HostModelProxy {
             Err(error) => {
                 // A transport-safe, retryable refusal: re-issuing the same
                 // operation identity may succeed once the provider is reachable.
-                eprintln!("tidebreak: host model proxy could not start inference: {error}");
+                tracing::error!("tidebreak: host model proxy could not start inference: {error}");
                 return Response::Error(ErrorResponse::new(
                     ErrorCode::Internal,
                     "host model inference could not start",
@@ -553,7 +553,7 @@ impl CapabilityResponder for HostModelProxy {
                             ));
                         }
                     }
-                    eprintln!(
+                    tracing::error!(
                         "tidebreak: host model proxy inference failed: {}",
                         error.message
                     );
@@ -2185,7 +2185,7 @@ impl SandboxContainerRunner {
     /// bounds the credential when the issuer cannot be reached.
     async fn revoke_scoped_token(&self, run_uuid: Uuid) {
         if let Err(error) = self.token_issuer.revoke(run_uuid).await {
-            eprintln!(
+            tracing::error!(
                 "tidebreak: could not revoke the scoped model token for run {run_uuid}: {error}"
             );
         }
@@ -2276,7 +2276,7 @@ impl SandboxContainerRunner {
                 return DrainOutcome::Failed("container no longer exists".to_owned());
             }
             Err(error) => {
-                eprintln!("tidebreak: container address unavailable, will reattach: {error}");
+                tracing::warn!("tidebreak: container address unavailable, will reattach: {error}");
                 return DrainOutcome::Disconnected;
             }
         };
@@ -2354,7 +2354,7 @@ impl SandboxContainerRunner {
                                 )
                                 .await
                             {
-                                eprintln!("tidebreak: could not publish progress for run {run_id}: {error}");
+                                tracing::error!("tidebreak: could not publish progress for run {run_id}: {error}");
                             }
                         }
                         _ => {}
@@ -2366,7 +2366,7 @@ impl SandboxContainerRunner {
                         // drive reattaches; the instruction is not re-sent,
                         // because guidance the run never saw is the caller's to
                         // repeat, not the host's to replay later out of context.
-                        eprintln!("tidebreak: a steering instruction was not delivered: {error}");
+                        tracing::warn!("tidebreak: a steering instruction was not delivered: {error}");
                     }
                 }
             }
@@ -2414,11 +2414,11 @@ impl SandboxContainerRunner {
                     .record_late_container_result_evidence(*run_id.as_uuid(), text)
                     .await
                 {
-                    Ok(true) => eprintln!(
+                    Ok(true) => tracing::info!(
                         "tidebreak: retained a late container result for run {run_id} as evidence"
                     ),
                     Ok(false) => {}
-                    Err(error) => eprintln!(
+                    Err(error) => tracing::error!(
                         "tidebreak: could not retain a late container result for run {run_id}: {error}"
                     ),
                 }
@@ -2468,27 +2468,29 @@ impl SandboxContainerRunner {
         // destroyed, and idempotently for runs that never minted one.
         self.revoke_scoped_token(run_uuid).await;
         if let Err(error) = self.store.enqueue_sandbox_teardown(run_uuid).await {
-            eprintln!("tidebreak: could not persist a container teardown obligation: {error}");
+            tracing::error!(
+                "tidebreak: could not persist a container teardown obligation: {error}"
+            );
         }
         for attempt in 0..3u32 {
             match self.backend.destroy(handle).await {
                 Ok(()) => {
                     if let Err(error) = self.store.complete_sandbox_teardown(run_uuid).await {
-                        eprintln!(
+                        tracing::warn!(
                             "tidebreak: container teardown confirmed but not recorded: {error}"
                         );
                     }
                     return;
                 }
                 Err(error) => {
-                    eprintln!(
+                    tracing::warn!(
                         "tidebreak: container teardown attempt {attempt} unconfirmed: {error}"
                     );
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
             }
         }
-        eprintln!(
+        tracing::warn!(
             "tidebreak: container teardown for {} left unconfirmed; the sweep re-drives it",
             handle.reference
         );
@@ -2557,7 +2559,7 @@ impl SandboxContainerRunner {
             .lapse_sandbox_provisions(chrono::Utc::now())
             .await?;
         for record in &lapsed {
-            eprintln!(
+            tracing::warn!(
                 "tidebreak: sandbox provisioning intent for run {} lapsed; its tag is reclaimable",
                 record.run_id
             );
@@ -2609,7 +2611,7 @@ impl SandboxContainerRunner {
         match self.backend.reclaim_orphans(&live).await {
             Ok(reclaimed) => {
                 for handle in &reclaimed {
-                    eprintln!(
+                    tracing::info!(
                         "tidebreak: reclaimed an orphaned sandbox container {}",
                         handle.reference
                     );
@@ -2619,7 +2621,9 @@ impl SandboxContainerRunner {
                 }
             }
             Err(error) => {
-                eprintln!("tidebreak: the sandbox orphan sweep proved nothing this pass: {error}");
+                tracing::warn!(
+                    "tidebreak: the sandbox orphan sweep proved nothing this pass: {error}"
+                );
             }
         }
         Ok(())

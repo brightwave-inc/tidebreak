@@ -213,7 +213,7 @@ impl OperationStore for DurableOperationStore {
             // committed claim, executing the effect would risk a double spend the
             // log could not later fence. Refuse conservatively.
             Err(error) => {
-                eprintln!("tidebreak: durable operation-log claim failed, refusing conservatively: {error}");
+                tracing::warn!("tidebreak: durable operation-log claim failed, refusing conservatively: {error}");
                 ClaimOutcome::ClaimedElsewhere
             }
         }
@@ -234,7 +234,7 @@ impl OperationStore for DurableOperationStore {
         match block_on(self.state_op(id)) {
             Ok(state) => state,
             Err(error) => {
-                eprintln!("tidebreak: durable operation-log state read failed: {error}");
+                tracing::error!("tidebreak: durable operation-log state read failed: {error}");
                 None
             }
         }
@@ -242,7 +242,7 @@ impl OperationStore for DurableOperationStore {
 
     fn evict(&self, id: OperationId) {
         if let Err(error) = block_on(self.evict_op(id)) {
-            eprintln!("tidebreak: durable operation-log eviction failed: {error}");
+            tracing::error!("tidebreak: durable operation-log eviction failed: {error}");
         }
     }
 
@@ -252,7 +252,7 @@ impl OperationStore for DurableOperationStore {
         match block_on(self.len_op()) {
             Ok(len) => len,
             Err(error) => {
-                eprintln!("tidebreak: durable operation-log length read failed: {error}");
+                tracing::error!("tidebreak: durable operation-log length read failed: {error}");
                 0
             }
         }
@@ -262,7 +262,7 @@ impl OperationStore for DurableOperationStore {
         match block_on(self.retained_body_count_op()) {
             Ok(count) => count,
             Err(error) => {
-                eprintln!("tidebreak: durable retained operation-body count failed: {error}");
+                tracing::error!("tidebreak: durable retained operation-body count failed: {error}");
                 0
             }
         }
