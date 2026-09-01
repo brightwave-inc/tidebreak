@@ -8,9 +8,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use tidebreak_core::{
-    AgentRun, ChatId, CompactionPolicy, OwnerId, PermissionMode, ReasoningEffort, Store, TurnId,
-    DEFAULT_COMPACTION_MIN_THRESHOLD_TOKENS, DEFAULT_COMPACTION_PROTECT_RECENT_MESSAGES,
-    DEFAULT_COMPACTION_TARGET_FRACTION, DEFAULT_COMPACTION_THRESHOLD_FRACTION,
+    AgentRun, ChatId, CompactionPolicy, OwnerId, PermissionMode, PromptCacheRetention,
+    ReasoningEffort, Store, TurnId, DEFAULT_COMPACTION_MIN_THRESHOLD_TOKENS,
+    DEFAULT_COMPACTION_PROTECT_RECENT_MESSAGES, DEFAULT_COMPACTION_TARGET_FRACTION,
+    DEFAULT_COMPACTION_THRESHOLD_FRACTION,
 };
 
 use crate::code::naming_settings::{self, BranchPrefixMode, GitSourceControlSettings};
@@ -139,6 +140,12 @@ pub struct Settings {
     /// valid for existing chats, replay, and explicit selection.
     #[serde(default)]
     pub model_visibility_overrides: BTreeMap<String, ModelVisibility>,
+    /// How long a conversation's prompt-cache entries stay readable, for
+    /// providers with a retention control. Default `five_minutes`; `one_hour`
+    /// costs more per cache write but keeps the conversation prefix warm
+    /// across slower replies.
+    #[serde(default)]
+    pub prompt_cache_retention: PromptCacheRetention,
     /// Whether the computer-use capability (screen capture + app control) is
     /// enabled. Read at boot; turning it off unregisters the tools on the next
     /// launch.
@@ -195,6 +202,10 @@ pub struct SettingsUpdate {
     /// express a deletion at all.
     #[serde(default)]
     pub model_visibility_overrides: Option<BTreeMap<String, ModelVisibility>>,
+    /// Set the prompt-cache retention. Absent leaves it unchanged. Default
+    /// `five_minutes`.
+    #[serde(default)]
+    pub prompt_cache_retention: Option<PromptCacheRetention>,
     /// Set the computer-use master switch. Absent leaves it unchanged. Applies
     /// at the next boot (the tools register or not then).
     #[serde(default)]
@@ -355,6 +366,15 @@ pub async fn put_settings(
             )
             .await?;
     }
+    if let Some(retention) = body.prompt_cache_retention {
+        state
+            .store
+            .set_setting(
+                crate::routes::PROMPT_CACHE_RETENTION_SETTING,
+                &serde_json::json!(retention),
+            )
+            .await?;
+    }
     if let Some(enabled) = body.computer_use_enabled {
         state
             .store
@@ -433,6 +453,7 @@ async fn read_settings(state: &AppState, owner: &OwnerId) -> Result<Settings, Se
         sandbox_agent_error_checkin: read_sandbox_agent_error_checkin(&*state.store).await?,
         compaction: read_compaction_settings(&*state.store).await?,
         model_visibility_overrides: read_model_visibility_overrides(&*state.store).await?,
+        prompt_cache_retention: read_prompt_cache_retention(&*state.store).await?,
         computer_use_enabled: read_computer_use_enabled(&*state.store).await?,
         code_turn_recaps_enabled: crate::code::recap::turn_recaps_enabled(&*state.store).await?,
         rewrite_closing_messages: crate::code::rewrite::rewrite_closing_enabled(&*state.store)
@@ -499,6 +520,18 @@ pub(crate) async fn read_model_visibility_overrides(
 ) -> tidebreak_core::Result<BTreeMap<String, ModelVisibility>> {
     Ok(store
         .get_setting(MODEL_VISIBILITY_OVERRIDES_SETTING)
+        .await?
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default())
+}
+
+/// The stored prompt-cache retention, or the default (`five_minutes`) when
+/// unset or unreadable.
+pub(crate) async fn read_prompt_cache_retention(
+    store: &dyn Store,
+) -> tidebreak_core::Result<PromptCacheRetention> {
+    Ok(store
+        .get_setting(crate::routes::PROMPT_CACHE_RETENTION_SETTING)
         .await?
         .and_then(|value| serde_json::from_value(value).ok())
         .unwrap_or_default())

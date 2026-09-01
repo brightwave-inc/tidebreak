@@ -5,6 +5,7 @@ import type {
   ModelRole,
   ModelRoleInfo,
   ModelSelectionKey,
+  PromptCacheRetention,
   ProviderKind,
 } from "../api";
 import {
@@ -73,6 +74,12 @@ const ROLES: {
   },
 ];
 
+/** The two retention windows the settings API accepts, in menu order. */
+const RETENTION_OPTIONS: { value: PromptCacheRetention; label: string }[] = [
+  { value: "five_minutes", label: "5 minutes (default)" },
+  { value: "one_hour", label: "1 hour" },
+];
+
 export function ModelsPanel({
   client,
   models,
@@ -92,6 +99,8 @@ export function ModelsPanel({
   const [catalog, setCatalog] = useState<ModelInfo[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState<ModelRole | null>(null);
+  const [retention, setRetention] = useState<PromptCacheRetention | null>(null);
+  const [savingRetention, setSavingRetention] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // `managed` is a dependency on purpose: a policy flip mid-session re-reads
@@ -143,6 +152,23 @@ export function ModelsPanel({
     return () => window.clearInterval(timer);
   }, [client, managed]);
 
+  // The prompt-cache retention rides the global settings document rather than
+  // the model catalog, so it loads on its own read.
+  useEffect(() => {
+    let cancelled = false;
+    void client
+      .getSettings()
+      .then((settings) => {
+        if (!cancelled) setRetention(settings.prompt_cache_retention);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(String(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [client]);
+
   // Unmanaged renders from the shell's catalog exactly as it always has;
   // managed renders from the panel's own fetch, which the watch keeps current.
   const catalogModels = managed ? (catalog ?? models) : models;
@@ -166,6 +192,24 @@ export function ModelsPanel({
       setError(String(err));
     } finally {
       setSaving(null);
+    }
+  }
+
+  async function saveRetention(next: PromptCacheRetention) {
+    const previous = retention;
+    setRetention(next);
+    setSavingRetention(true);
+    setError(null);
+    try {
+      const settings = await client.putSettings({
+        prompt_cache_retention: next,
+      });
+      setRetention(settings.prompt_cache_retention);
+    } catch (err) {
+      setRetention(previous);
+      setError(String(err));
+    } finally {
+      setSavingRetention(false);
     }
   }
 
@@ -222,6 +266,31 @@ export function ModelsPanel({
           )}
         </>
       )}
+      <SettingsSection title="Prompt caching">
+        <SettingsField
+          label="Prompt cache retention"
+          hint="How long the provider keeps a conversation's prompt cached between replies. Longer retention costs slightly more to write, and saves money and latency when replies come more slowly. Applies to Anthropic models."
+        >
+          <Select
+            value={retention ?? undefined}
+            disabled={retention === null || savingRetention}
+            onValueChange={(next) =>
+              void saveRetention(next as PromptCacheRetention)
+            }
+          >
+            <SelectTrigger aria-label="Prompt cache retention">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {RETENTION_OPTIONS.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </SettingsField>
+      </SettingsSection>
       {error && <SettingsError>{error}</SettingsError>}
     </SettingsPanel>
   );

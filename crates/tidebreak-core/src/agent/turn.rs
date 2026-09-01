@@ -550,6 +550,7 @@ impl Agent {
                         max_tokens: self.config.max_tokens,
                         temperature: self.config.temperature,
                         reasoning_effort: self.config.reasoning_effort,
+                        prompt_cache_retention: self.config.prompt_cache_retention,
                         vendor_web_search,
                         images: prefix.images,
                         ..Default::default()

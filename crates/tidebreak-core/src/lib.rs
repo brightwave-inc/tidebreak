@@ -296,8 +296,9 @@ pub use preview::{
 };
 pub use provider::{
     provider_executed_tool_call_text, ChatMessage, ChatRequest, ContentBlock, MessageReasoning,
-    ModelProvider, PromptCacheMode, ProviderEvent, ProviderId, ProviderToolReplay, ReasoningOrigin,
-    RefusalDetails, RefusalOutcome, ResponseFormat, StopReason, ToolChoice, Usage, VendorWebSearch,
+    ModelProvider, PromptCacheMode, PromptCacheRetention, ProviderEvent, ProviderId,
+    ProviderToolReplay, ReasoningOrigin, RefusalDetails, RefusalOutcome, ResponseFormat,
+    StopReason, ToolChoice, Usage, VendorWebSearch,
 };
 pub use renderer_tool::RendererToolName;
 pub use secret_bundle::{

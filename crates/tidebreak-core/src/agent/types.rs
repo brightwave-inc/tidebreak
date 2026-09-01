@@ -125,6 +125,9 @@ pub struct AgentConfig {
     pub tool_scratch: Option<ToolScratch>,
     /// When and how hard semantic compaction may run this turn.
     pub compaction: CompactionPolicy,
+    /// How long this turn's prompt-cache entries stay readable, for providers
+    /// with a retention control.
+    pub prompt_cache_retention: crate::provider::PromptCacheRetention,
     /// How this turn reaches the web.
     pub web_search: TurnWebSearch,
 }
@@ -195,6 +198,7 @@ impl Default for AgentConfig {
             context_window: DEFAULT_CONTEXT_WINDOW,
             tool_scratch: None,
             compaction: CompactionPolicy::default(),
+            prompt_cache_retention: crate::provider::PromptCacheRetention::default(),
             web_search: TurnWebSearch::Host,
         }
     }

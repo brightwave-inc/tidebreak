@@ -100,6 +100,7 @@ import {
   type PluginPromptInfo as WirePluginPromptInfo,
   type PluginSkillInfo as WirePluginSkillInfo,
   type PromptBody as WirePromptBody,
+  type PromptCacheRetention as WirePromptCacheRetention,
   type SkillOrigin as WireSkillOrigin,
   type SkillInstructions as WireSkillInstructions,
   type NetworkPolicy as WireNetworkPolicy,
@@ -347,6 +348,9 @@ export type ModelSelectionKey = `${ProviderKind}::${string}`;
 
 /** A reader's deviation from a model's curated `recommended` default. */
 export type ModelVisibility = WireModelVisibility;
+
+/** How long a conversation's prompt-cache entries stay readable. */
+export type PromptCacheRetention = WirePromptCacheRetention;
 
 /** One message waiting to run as its own turn once the chat is free. */
 export type QueuedTurn = WireQueuedTurn;

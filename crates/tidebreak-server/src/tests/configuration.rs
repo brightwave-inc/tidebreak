@@ -103,6 +103,7 @@ async fn settings_default_then_update_roundtrips() {
         settings["git_source_control"]["effective_branch_prefix"],
         "tidebreak/"
     );
+    assert_eq!(settings["prompt_cache_retention"], "five_minutes");
     assert!(settings.get("code_mode_enabled").is_none());
 
     // PUT a model, and it comes back.
@@ -121,6 +122,7 @@ async fn settings_default_then_update_roundtrips() {
                         "sandbox_agent_checkin_steps": 250,
                         "sandbox_agent_error_checkin": 3,
                         "code_turn_recaps_enabled": false,
+                        "prompt_cache_retention": "one_hour",
                         "compaction": {
                             "threshold_fraction": 0.8,
                             "target_fraction": 0.3,
@@ -162,6 +164,7 @@ async fn settings_default_then_update_roundtrips() {
     assert_eq!(settings["sandbox_agent_checkin_steps"], 250);
     assert_eq!(settings["sandbox_agent_error_checkin"], 3);
     assert_eq!(settings["code_turn_recaps_enabled"], false);
+    assert_eq!(settings["prompt_cache_retention"], "one_hour");
     assert_eq!(settings["compaction"]["threshold_fraction"], 0.8);
     assert_eq!(settings["compaction"]["target_fraction"], 0.3);
     assert_eq!(settings["compaction"]["min_threshold_tokens"], 40000);
@@ -208,6 +211,7 @@ async fn settings_default_then_update_roundtrips() {
     assert_eq!(settings["sandbox_agent_checkin_steps"], 250);
     assert_eq!(settings["sandbox_agent_error_checkin"], 3);
     assert_eq!(settings["code_turn_recaps_enabled"], false);
+    assert_eq!(settings["prompt_cache_retention"], "one_hour");
     assert_eq!(settings["compaction"]["threshold_fraction"], 0.8);
     assert_eq!(settings["compaction"]["protect_recent_messages"], 8);
 }

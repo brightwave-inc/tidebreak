@@ -42,6 +42,7 @@ import {
   type ModelVisibility,
   type NetworkPolicy,
   type PendingFolderAccessRequest,
+  type PromptCacheRetention,
   type QueuedCodeTurn,
   type QueuedTurn,
   type PendingOutputWritebackRequest,
@@ -531,6 +532,7 @@ export class ApiClient {
     sandbox_agent_checkin_steps?: number;
     sandbox_agent_error_checkin?: number;
     model_visibility_overrides?: Record<string, ModelVisibility>;
+    prompt_cache_retention?: PromptCacheRetention;
     compaction?: {
       threshold_fraction?: number;
       target_fraction?: number;

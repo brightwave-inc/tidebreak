@@ -1170,6 +1170,8 @@ impl TurnWorker {
             let mut heartbeat_open = true;
             let mut config = surface.agent_config.clone();
             config.compaction = crate::routes::read_compaction_policy(&*self.store).await?;
+            config.prompt_cache_retention =
+                crate::routes::read_prompt_cache_retention(&*self.store).await?;
             config.max_steps = remaining_steps;
             // A parked segment belongs to the same Tidebreak turn. The first
             // segment may already have offered the provider its complete
