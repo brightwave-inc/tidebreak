@@ -386,7 +386,10 @@ pub async fn post_message(
                 state.turn_job_wake.notify_one();
                 return Ok(StatusCode::ACCEPTED);
             }
-            BeginTurnAdmissionOutcome::Queued => return Ok(StatusCode::ACCEPTED),
+            BeginTurnAdmissionOutcome::Queued => {
+                state.queued_turn_wake.notify_one();
+                return Ok(StatusCode::ACCEPTED);
+            }
             BeginTurnAdmissionOutcome::IdentityConflict => {
                 return Err(ServerError::conflict(format!(
                     "turn {} was already reserved with different input or by another chat",
@@ -449,7 +452,8 @@ pub async fn post_message(
                             .await?
                         {
                             ReservedQueuedTurnOutcome::Queued(_) => {
-                                return Ok(StatusCode::ACCEPTED)
+                                state.queued_turn_wake.notify_one();
+                                return Ok(StatusCode::ACCEPTED);
                             }
                             ReservedQueuedTurnOutcome::LeaseLost => continue 'reserve,
                         }
@@ -565,6 +569,9 @@ pub async fn put_queue_paused(
         .store
         .set_setting(&queue_paused_setting(id), &serde_json::json!(body.paused))
         .await?;
+    if !body.paused {
+        state.queued_turn_wake.notify_one();
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -572,8 +579,8 @@ pub async fn put_queue_paused(
 /// promoter's next sweep starts the oldest queued message.
 ///
 /// Promotion stays with the sweep: the idempotent try-and-delete in
-/// [`promote_queued_turns`] owns the exact ordering guarantees, and the sweep
-/// runs on a sub-second cadence, so this route only needs to release the
+/// [`promote_queued_turns`] owns the exact ordering guarantees, and the wake
+/// below runs it near-immediately, so this route only needs to release the
 /// gate. A chat that was not paused is unaffected, making the call safe to
 /// repeat.
 pub async fn post_queue_send_now(
@@ -586,6 +593,7 @@ pub async fn post_queue_send_now(
         .store
         .set_setting(&queue_paused_setting(id), &serde_json::json!(false))
         .await?;
+    state.queued_turn_wake.notify_one();
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -741,6 +749,10 @@ pub async fn post_cancel(
     // child. Wake its worker promptly; durable claims remain the source of
     // truth if this notification is lost.
     state.agent_run_wake.notify_one();
+    // Cancelling not-yet-running work terminalizes it atomically above,
+    // freeing the chat's live slot without a worker segment; a cancelled
+    // running turn wakes the promoter again from its worker.
+    state.queued_turn_wake.notify_one();
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -819,4 +831,23 @@ pub(crate) async fn promote_queued_turns(state: &AppState) -> Result<(), ServerE
         }
     }
     Ok(())
+}
+
+/// Run [`promote_queued_turns`] whenever `queued_turn_wake` fires, with
+/// `floor` as the fallback cadence for a lost or never-sent notification.
+///
+/// Sweep first, then wait: a notification that lands mid-sweep is held as the
+/// `Notify` permit, so the next `notified()` completes immediately instead of
+/// being lost between checks. The sweep is idempotent, so a coalesced or
+/// spurious wake only costs one cheap re-read.
+pub(crate) async fn run_queued_turn_promoter(state: AppState, floor: std::time::Duration) {
+    loop {
+        if let Err(error) = promote_queued_turns(&state).await {
+            tracing::error!("tidebreak: queued-turn promotion failed: {error:?}");
+        }
+        tokio::select! {
+            _ = state.queued_turn_wake.notified() => {}
+            _ = tokio::time::sleep(floor) => {}
+        }
+    }
 }

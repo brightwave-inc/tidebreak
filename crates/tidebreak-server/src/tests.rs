@@ -1913,6 +1913,7 @@ fn spawn_turn_worker_with_config(state: &AppState, config: turn_worker::TurnWork
         state.active_turns.clone(),
         state.turn_job_wake.clone(),
         state.agent_run_wake.clone(),
+        state.queued_turn_wake.clone(),
         state.agent_config.clone(),
         None,
         config,

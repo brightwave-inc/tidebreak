@@ -123,6 +123,9 @@ pub(crate) struct TurnWorker {
     titler: Arc<ChatTitler>,
     wake: Arc<Notify>,
     sandbox_agent_wake: Arc<Notify>,
+    /// Wakes the queued-turn promoter when a turn reaches a terminal state,
+    /// freeing the chat's live slot for its oldest queued message.
+    queued_turn_wake: Arc<Notify>,
     agent_config: AgentConfig,
     exec_folder_context: Option<Arc<crate::code_execution::ConfiguredExecProvider>>,
     private_scratch_root: Option<PathBuf>,
@@ -426,6 +429,7 @@ impl TurnWorker {
         signals: Arc<TurnGuard>,
         wake: Arc<Notify>,
         sandbox_agent_wake: Arc<Notify>,
+        queued_turn_wake: Arc<Notify>,
         agent_config: AgentConfig,
         private_scratch_root: Option<PathBuf>,
         config: TurnWorkerConfig,
@@ -457,6 +461,7 @@ impl TurnWorker {
             titler,
             wake,
             sandbox_agent_wake,
+            queued_turn_wake,
             agent_config,
             exec_folder_context: None,
             private_scratch_root,
@@ -752,6 +757,9 @@ impl TurnWorker {
         if let Some(terminal) = action.terminal_event {
             self.publish(terminal.chat_id, terminal.event);
             self.wake.notify_one();
+            // The expired turn's chat slot is free; its oldest queued message
+            // may now be promotable.
+            self.queued_turn_wake.notify_one();
             return Ok(ClaimAction::Terminalized);
         }
         let Some(turn) = action.turn else {
@@ -823,6 +831,17 @@ impl TurnWorker {
                 "foreground turn segment completed"
             );
         });
+        if matches!(
+            outcome,
+            Ok(TurnWorkerOutcome::Completed(_)
+                | TurnWorkerOutcome::Cancelled(_)
+                | TurnWorkerOutcome::Failed(_))
+        ) {
+            // The chat's live slot is free; its oldest queued message may now
+            // be promotable. Errored and lease-lost segments terminalize later
+            // through `claim_once`, which wakes the promoter itself.
+            self.queued_turn_wake.notify_one();
+        }
         outcome
     }
 
