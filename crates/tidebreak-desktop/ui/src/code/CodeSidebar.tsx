@@ -5,7 +5,6 @@ import {
   BarChart3,
   FolderPlus,
   GitPullRequest,
-  HardDrive,
   Plus,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -506,11 +505,7 @@ function CodeDestinations({
 }: {
   pathname: string;
   onNavigate: (
-    to:
-      | "/code/delivery/pull-requests"
-      | "/code/analytics"
-      | "/code/archive"
-      | "/code/storage",
+    to: "/code/delivery/pull-requests" | "/code/analytics" | "/code/archive",
   ) => void;
 }) {
   const destinations = [
@@ -535,13 +530,6 @@ function CodeDestinations({
       to: "/code/archive" as const,
       active: pathname === "/code/archive",
       icon: Archive,
-    },
-    {
-      type: "route" as const,
-      label: "Storage",
-      to: "/code/storage" as const,
-      active: pathname === "/code/storage",
-      icon: HardDrive,
     },
   ];
   return (

@@ -971,7 +971,6 @@ pub fn app(state: AppState) -> Router {
             "/code/remote/workspaces/{id}/sessions",
             post(routes::code::create_remote_session),
         )
-        .route("/code/storage", get(routes::code::list_storage))
         .route(
             "/code/workspaces/{id}",
             get(routes::code::get_workspace).patch(routes::code::patch_workspace),
@@ -979,10 +978,6 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/code/workspaces/{id}/archive",
             post(routes::code::archive_workspace),
-        )
-        .route(
-            "/code/workspaces/{id}/release",
-            post(routes::code::release_workspace),
         )
         .route(
             "/code/workspaces/{id}/restore",

@@ -30,7 +30,6 @@ const MAX_SEARCH_QUERY_CHARS: usize = 500;
 const MAX_SEARCH_PREVIEW_CHARS: usize = 500;
 const ARCHIVE_SCAN_MAX_PATH_BYTES: usize = 1024 * 1024;
 const ARCHIVE_DISPOSABLE_PATH_KEY: &str = "tidebreak.archiveDisposablePath";
-const DIRECTORY_WALK_MAX_ENTRIES: usize = 100_000;
 const WORKTREE_OPERATION_SUFFIX: &str = ".tidebreak-operation";
 const WORKTREE_REGISTRATION_MARKER: &str = "tidebreak-operation.json";
 
@@ -584,6 +583,26 @@ pub(crate) async fn restore_released_worktree(
     let mut operation =
         reserve_worktree_target(repo_root, worktree_path, branch, released_tip).await?;
     let restored = match restore_released_branch(&operation, bundle).await {
+        Ok(restored) => restored,
+        Err(err) => {
+            operation.rollback().await;
+            return Err(err);
+        }
+    };
+    operation.branch_created = restored == RestoredBranch::Created;
+    operation.add_existing_branch_or_rollback().await
+}
+
+/// Re-create a released branch directly from a commit the repository retains.
+pub(crate) async fn restore_released_tip_worktree(
+    repo_root: &Path,
+    worktree_path: &Path,
+    branch: &str,
+    released_tip: &str,
+) -> Result<WorktreeOperation, WorktreeError> {
+    let mut operation =
+        reserve_worktree_target(repo_root, worktree_path, branch, released_tip).await?;
+    let restored = match restore_released_tip(&operation).await {
         Ok(restored) => restored,
         Err(err) => {
             operation.rollback().await;
@@ -1305,32 +1324,6 @@ pub(crate) async fn branch_tip(repo_root: &Path, branch: &str) -> Result<String,
     Ok(sha.trim().to_owned())
 }
 
-/// Whether a released branch would strand commits nothing else can reach.
-///
-/// Release drops the branch, so the question archive asks about the checkout
-/// is asked here about the history: are these commits merged into the base, or
-/// would dropping the ref be the only copy going away? The bundle means the
-/// answer is recoverable either way — this is what the confirmation is for,
-/// not a correctness gate.
-pub(crate) async fn release_is_unmerged(
-    repo_root: &Path,
-    base_ref: &str,
-    branch: &str,
-) -> Result<bool, WorktreeError> {
-    let count = git_stdout(
-        Some(repo_root),
-        &[
-            "rev-list",
-            "--count",
-            &format!("{base_ref}..refs/heads/{branch}"),
-        ],
-        GIT_TIMEOUT,
-    )
-    .await
-    .map_err(|err| WorktreeError::internal(format!("git rev-list failed: {err}")))?;
-    Ok(count.trim().parse::<u64>().unwrap_or(1) > 0)
-}
-
 /// Bundle a branch's own commits and return the file's size.
 ///
 /// The range is `base..branch`, not the whole history: the base is still in
@@ -1343,6 +1336,20 @@ pub(crate) async fn create_bundle(
     branch: &str,
     out: &Path,
 ) -> Result<u64, WorktreeError> {
+    let count = git_stdout(
+        Some(repo_root),
+        &[
+            "rev-list",
+            "--count",
+            &format!("{base_ref}..refs/heads/{branch}"),
+        ],
+        GIT_TIMEOUT,
+    )
+    .await
+    .map_err(|err| WorktreeError::internal(format!("git rev-list failed for {branch}: {err}")))?;
+    if count.trim() == "0" {
+        return Ok(0);
+    }
     if let Some(parent) = out.parent() {
         tokio::fs::create_dir_all(parent).await.map_err(|err| {
             WorktreeError::internal(format!(
@@ -1424,35 +1431,8 @@ async fn restore_released_branch(
                          {expected_tip}"
                 ),
             ))
-        } else if branch_exists(repo_root, branch).await? {
-            require_branch_tip(repo_root, branch, expected_tip)
-                .await
-                .map(|()| RestoredBranch::Existing)
-                .map_err(|_| {
-                    WorktreeError::conflict(
-                        "released_branch_mismatch",
-                        format!(
-                            "branch {branch} exists at a different commit; the released \
-                                 bundle was preserved"
-                        ),
-                    )
-                })
         } else {
-            match create_branch_at(repo_root, branch, expected_tip).await {
-                Ok(()) => Ok(RestoredBranch::Created),
-                Err(_) => require_branch_tip(repo_root, branch, expected_tip)
-                    .await
-                    .map(|()| RestoredBranch::Existing)
-                    .map_err(|_| {
-                        WorktreeError::conflict(
-                            "released_branch_mismatch",
-                            format!(
-                                "branch {branch} was created at a different commit; the \
-                                     released bundle was preserved"
-                            ),
-                        )
-                    }),
-            }
+            restore_released_tip(operation).await
         }
     }
     .await;
@@ -1465,10 +1445,51 @@ async fn restore_released_branch(
     result
 }
 
+/// Restore the released branch at the recorded commit without reading a bundle.
+async fn restore_released_tip(
+    operation: &WorktreeOperation,
+) -> Result<RestoredBranch, WorktreeError> {
+    let repo_root = &operation.repo_root;
+    let branch = operation.marker.branch.as_str();
+    let expected_tip = operation.marker.expected_tip.as_str();
+    resolve_ref(repo_root, expected_tip).await?;
+    if branch_exists(repo_root, branch).await? {
+        require_branch_tip(repo_root, branch, expected_tip)
+            .await
+            .map(|()| RestoredBranch::Existing)
+            .map_err(|_| {
+                WorktreeError::conflict(
+                    "released_branch_mismatch",
+                    format!(
+                        "branch {branch} exists at a different commit; the released work was \
+                         preserved"
+                    ),
+                )
+            })
+    } else {
+        match create_branch_at(repo_root, branch, expected_tip).await {
+            Ok(()) => Ok(RestoredBranch::Created),
+            Err(_) => require_branch_tip(repo_root, branch, expected_tip)
+                .await
+                .map(|()| RestoredBranch::Existing)
+                .map_err(|_| {
+                    WorktreeError::conflict(
+                        "released_branch_mismatch",
+                        format!(
+                            "branch {branch} was created at a different commit; the released \
+                             work was preserved"
+                        ),
+                    )
+                }),
+        }
+    }
+}
+
 /// Delete a branch, discarding the ref whether or not it merged.
 ///
-/// Release has already bundled the commits, so `-D` is the honest flag: `-d`
-/// would refuse exactly the unmerged branches release exists to reclaim.
+/// Release has already recorded the exact tip and bundled any branch-only
+/// commits, so `-D` is the honest flag: `-d` would refuse exactly the unmerged
+/// branches release exists to reclaim.
 pub(crate) async fn delete_branch(repo_root: &Path, branch: &str) -> Result<(), WorktreeError> {
     git(Some(repo_root), &["branch", "-D", branch], GIT_TIMEOUT)
         .await
@@ -2057,155 +2078,6 @@ async fn git_stdout(cwd: Option<&Path>, args: &[&str], limit: Duration) -> Resul
     Ok(git(cwd, args, limit).await?.stdout)
 }
 
-/// Bytes a path occupies on disk. Symlinks are skipped so a walk cannot
-/// escape the tree. Caps the number of entries so a huge worktree still
-/// answers.
-pub(crate) async fn directory_bytes(path: &Path) -> u64 {
-    let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || directory_bytes_sync(&path))
-        .await
-        .unwrap_or(0)
-}
-
-fn directory_bytes_sync(path: &Path) -> u64 {
-    let mut total = 0u64;
-    let mut seen = 0usize;
-    let mut stack = vec![path.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            seen += 1;
-            if seen > DIRECTORY_WALK_MAX_ENTRIES {
-                return total;
-            }
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if file_type.is_symlink() {
-                continue;
-            }
-            if file_type.is_dir() {
-                stack.push(entry.path());
-                continue;
-            }
-            if file_type.is_file() {
-                if let Ok(metadata) = entry.metadata() {
-                    total = total.saturating_add(metadata.len());
-                }
-            }
-        }
-    }
-    total
-}
-
-/// Unpacked size of objects reachable from `branch` but not from `base`.
-///
-/// That is what a release would drop from the clone (minus the tiny bundle
-/// that remains). A missing branch or range is zero, not an error: the
-/// reclaim surface still has to render.
-pub(crate) async fn unique_branch_bytes(repo_root: &Path, base_ref: &str, branch: &str) -> u64 {
-    if !branch_exists(repo_root, branch).await.unwrap_or(false) {
-        return 0;
-    }
-    let range = format!("{base_ref}..{branch}");
-    let listed = git_stdout(
-        Some(repo_root),
-        &["rev-list", "--objects", "--no-object-names", &range],
-        GIT_TIMEOUT,
-    )
-    .await
-    .unwrap_or_default();
-    let objects: String = listed
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .flat_map(|line| [line, "\n"])
-        .collect();
-    if objects.is_empty() {
-        return 0;
-    }
-    let sizes = git_stdin(
-        repo_root,
-        &["cat-file", "--batch-check=%(objectsize)"],
-        objects.as_bytes(),
-    )
-    .await
-    .unwrap_or_default();
-    sizes
-        .lines()
-        .filter_map(|line| line.trim().parse::<u64>().ok())
-        .fold(0u64, u64::saturating_add)
-}
-
-async fn git_stdin(cwd: &Path, args: &[&str], stdin: &[u8]) -> Result<String, String> {
-    let mut command = Command::new("git");
-    command
-        .args(args)
-        .current_dir(cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .env("GIT_TERMINAL_PROMPT", "0");
-    let mut child = command
-        .spawn()
-        .map_err(|err| format!("failed to spawn git: {err}"))?;
-    let stdin_pipe = child.stdin.take();
-    let stdout_pipe = child.stdout.take();
-    let stderr_pipe = child.stderr.take();
-    let stdin_bytes = stdin.to_vec();
-    let write = async move {
-        if let Some(mut pipe) = stdin_pipe {
-            pipe.write_all(&stdin_bytes)
-                .await
-                .map_err(|err| format!("failed to write git stdin: {err}"))?;
-        }
-        Ok::<(), String>(())
-    };
-    let read_out = async move {
-        let mut buf = Vec::new();
-        if let Some(mut pipe) = stdout_pipe {
-            pipe.read_to_end(&mut buf)
-                .await
-                .map_err(|err| format!("failed to read git stdout: {err}"))?;
-        }
-        Ok::<Vec<u8>, String>(buf)
-    };
-    let read_err = async move {
-        let mut buf = Vec::new();
-        if let Some(mut pipe) = stderr_pipe {
-            pipe.read_to_end(&mut buf)
-                .await
-                .map_err(|err| format!("failed to read git stderr: {err}"))?;
-        }
-        Ok::<Vec<u8>, String>(buf)
-    };
-    let output = timeout(GIT_TIMEOUT, async {
-        let ((), stdout, stderr) = tokio::try_join!(write, read_out, read_err)?;
-        let status = child
-            .wait()
-            .await
-            .map_err(|err| format!("git {} failed: {err}", args.join(" ")))?;
-        Ok::<_, String>((status, stdout, stderr))
-    })
-    .await
-    .map_err(|_| format!("git {} timed out", args.join(" ")))??;
-    let (status, stdout, stderr) = output;
-    let stdout = String::from_utf8_lossy(&stdout).into_owned();
-    if status.success() {
-        Ok(stdout)
-    } else {
-        let stderr = String::from_utf8_lossy(&stderr).trim().to_owned();
-        Err(if stderr.is_empty() {
-            stdout.trim().to_owned()
-        } else {
-            stderr
-        })
-    }
-}
-
 async fn git_nul_stdout(
     cwd: Option<&Path>,
     args: &[&str],
@@ -2780,7 +2652,7 @@ mod tests {
         ));
     }
 
-    /// The whole premise of the release tier: a bundle of `base..branch`
+    /// The whole premise of archive: a bundle of `base..branch`
     /// carries the work, so dropping the branch is recoverable.
     #[tokio::test]
     async fn a_released_branch_round_trips_through_its_bundle() {
@@ -2791,10 +2663,6 @@ mod tests {
         run(&repo, &["git", "commit", "-m", "add the feature"]);
         let tip = branch_tip(&repo, "tidebreak/work").await.unwrap();
         run(&repo, &["git", "checkout", "main"]);
-
-        assert!(release_is_unmerged(&repo, "main", "tidebreak/work")
-            .await
-            .unwrap());
 
         let bundle = dir.path().join("work.bundle");
         let bytes = create_bundle(&repo, "main", "tidebreak/work", &bundle)
@@ -2851,25 +2719,6 @@ mod tests {
             bytes < 100_000,
             "bundle carried the base: {bytes} bytes for a one-line commit"
         );
-    }
-
-    /// A merged branch is the case release does not have to warn about.
-    #[tokio::test]
-    async fn a_merged_branch_is_not_reported_unmerged() {
-        let (_dir, repo) = init_repo();
-        run(&repo, &["git", "checkout", "-b", "tidebreak/merged"]);
-        std::fs::write(repo.join("merged.txt"), "done\n").unwrap();
-        run(&repo, &["git", "add", "merged.txt"]);
-        run(&repo, &["git", "commit", "-m", "merged work"]);
-        run(&repo, &["git", "checkout", "main"]);
-        run(
-            &repo,
-            &["git", "merge", "--no-ff", "-m", "merge", "tidebreak/merged"],
-        );
-
-        assert!(!release_is_unmerged(&repo, "main", "tidebreak/merged")
-            .await
-            .unwrap());
     }
 
     /// A corrupt bundle must fail before it half-populates the object store.
@@ -2967,30 +2816,5 @@ mod tests {
         assert!(!branch_exists(&repo, "tidebreak/released").await.unwrap());
         assert!(bundle.exists());
         assert!(!path.exists());
-    }
-
-    #[tokio::test]
-    async fn directory_bytes_counts_files_and_skips_symlinks() {
-        let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("a.txt"), b"hello").unwrap();
-        std::fs::create_dir(dir.path().join("nested")).unwrap();
-        std::fs::write(dir.path().join("nested/b.txt"), b"world!").unwrap();
-        assert_eq!(directory_bytes(dir.path()).await, 11);
-    }
-
-    #[tokio::test]
-    async fn unique_branch_bytes_are_zero_on_the_base_and_positive_with_a_commit() {
-        let (_dir, repo) = init_repo();
-        assert_eq!(unique_branch_bytes(&repo, "main", "main").await, 0);
-
-        run(&repo, &["git", "checkout", "-b", "tidebreak/bytes"]);
-        std::fs::write(repo.join("payload.bin"), vec![7u8; 4096]).unwrap();
-        run(&repo, &["git", "add", "payload.bin"]);
-        run(&repo, &["git", "commit", "-m", "payload"]);
-        let unique = unique_branch_bytes(&repo, "main", "tidebreak/bytes").await;
-        assert!(
-            unique >= 4096,
-            "unique objects should include the 4 KiB blob, got {unique}"
-        );
     }
 }

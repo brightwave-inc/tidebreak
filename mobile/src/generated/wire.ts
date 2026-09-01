@@ -1581,11 +1581,6 @@ export type CodeRepoSource = { kind: string, available: boolean, remediation?: s
 export type CodeRepoSources = { sources: Array<CodeRepoSource>, chooses_destination: boolean, };
 
 /**
- * One repository on the reclaim surface.
- */
-export type CodeRepoStorageSnapshot = { id: RepoId, display_name: string, clone_bytes: number, clone_reclaimable: boolean, workspaces: Array<CodeWorkspaceStorageSnapshot>, };
-
-/**
  * What a running interactive session is actually occupied with. This is
  * intentionally coarser than a transcript tool name: list surfaces need to
  * distinguish agent generation, a shell, a passive monitor, and delegated
@@ -1681,16 +1676,6 @@ fast_mode: boolean, lifecycle: CodeSessionLifecycle, fence_reason?: FenceReason,
  * Present when an external channel created the session.
  */
 external_origin?: CodeSessionExternalOrigin, };
-
-/**
- * The next reclaim tier a workspace can take.
- */
-export type CodeStorageAction = "archive" | "release";
-
-/**
- * Reclaimable disk for every repo and workspace the principal owns.
- */
-export type CodeStorageSnapshot = { repos: Array<CodeRepoStorageSnapshot>, };
 
 /**
  * Status of a harness subagent, derived from its spanning `Task` call
@@ -2014,11 +1999,6 @@ bundle_bytes?: number, };
  * Status of a persisted workspace.
  */
 export type CodeWorkspaceStatus = "creating" | "setup_failed" | "active" | "archiving" | "archived" | "released";
-
-/**
- * One workspace's current footprint and the next reclaim step.
- */
-export type CodeWorkspaceStorageSnapshot = { id: WorkspaceId, title: string, status: CodeWorkspaceStatus, on_disk_bytes: number, next_action?: CodeStorageAction, next_reclaim_bytes: number, };
 
 /**
  * Bounded path listing for `GET /code/workspaces/{id}/tree`.

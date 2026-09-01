@@ -99,13 +99,12 @@ pub(crate) use types::{
     CodeDeliveryRunQuery, CodeDeliveryRunTarget, CodeDeliveryRunsPage, CodeFileChange,
     CodeForkBody, CodeForkTranscript, CodeGithubRepositories, CodeGithubRepository,
     CodeGrantSnapshot, CodeHarnessInstallSnapshot, CodePrCommentsSnapshot, CodePushSnapshot,
-    CodeRepoSnapshot, CodeRepoSource, CodeRepoSources, CodeRepoStorageSnapshot, CodeSessionDebug,
-    CodeSessionDigest, CodeSessionSnapshot, CodeStorageAction, CodeStorageSnapshot,
-    CodeTerminalActivityNotice, CodeTerminalRead, CodeTerminalSnapshot, CodeTriggerSnapshot,
-    CodeTurnSnapshot, CodeUpdateNotice, CodeWorkspaceBlob, CodeWorkspaceDiff, CodeWorkspaceFiles,
-    CodeWorkspaceHistorySearchMatch, CodeWorkspaceHistorySearchSource, CodeWorkspacePrSnapshot,
-    CodeWorkspacePullRequests, CodeWorkspaceSearch, CodeWorkspaceSearchMatch,
-    CodeWorkspaceSnapshot, CodeWorkspaceStorageSnapshot, CodeWorkspaceTree, CodeWorktreeRoot,
+    CodeRepoSnapshot, CodeRepoSource, CodeRepoSources, CodeSessionDebug, CodeSessionDigest,
+    CodeSessionSnapshot, CodeTerminalActivityNotice, CodeTerminalRead, CodeTerminalSnapshot,
+    CodeTriggerSnapshot, CodeTurnSnapshot, CodeUpdateNotice, CodeWorkspaceBlob, CodeWorkspaceDiff,
+    CodeWorkspaceFiles, CodeWorkspaceHistorySearchMatch, CodeWorkspaceHistorySearchSource,
+    CodeWorkspacePrSnapshot, CodeWorkspacePullRequests, CodeWorkspaceSearch,
+    CodeWorkspaceSearchMatch, CodeWorkspaceSnapshot, CodeWorkspaceTree, CodeWorktreeRoot,
     CreateCodeTriggerBody, HarnessDoctorReport, HarnessModelList, MergeCodePrBody, QueuedCodeTurn,
     ResolveCodeDeliveryRepositoriesBody, SequencedCodeEventFrame, SetCodeWorktreeRootBody,
     UpdateCodeTriggerBody,
@@ -114,8 +113,8 @@ pub(crate) use updates::code_updates;
 pub(crate) use usage::subscription_usage;
 pub(crate) use workspaces::{
     archive_workspace, create_remote_workspace, create_workspace, get_workspace,
-    get_workspace_blob, get_workspace_diff, get_worktree_root, list_storage, list_workspace_files,
-    list_workspace_tree, list_workspaces, patch_workspace, release_workspace, restore_workspace,
+    get_workspace_blob, get_workspace_diff, get_worktree_root, list_workspace_files,
+    list_workspace_tree, list_workspaces, patch_workspace, restore_workspace,
     retry_workspace_setup, search_workspace, set_worktree_root,
 };
 
