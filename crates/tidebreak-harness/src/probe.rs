@@ -411,7 +411,32 @@ fn prepend_managed_node_path(
 }
 
 fn process_env_without_tidebreak() -> Vec<(OsString, OsString)> {
-    filter_child_env(std::env::vars_os())
+    strip_tidebreak_env(std::env::vars_os())
+}
+
+/// Drop only the reserved `TIDEBREAK_` namespace and malformed names from a
+/// captured snapshot. This keeps the stored probe environment complete —
+/// auth-override detection reads credentials like `ANTHROPIC_API_KEY` out
+/// of it — while [`filter_child_env`] separately narrows what a spawned
+/// child may inherit.
+fn strip_tidebreak_env<I, K, V>(vars: I) -> Vec<(OsString, OsString)>
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: Into<OsString>,
+    V: Into<OsString>,
+{
+    let filtered = vars.into_iter().filter_map(|(key, value)| {
+        let key = key.into();
+        let name = key.to_string_lossy();
+        if name.is_empty()
+            || name.contains('=')
+            || name.to_ascii_uppercase().starts_with("TIDEBREAK_")
+        {
+            return None;
+        }
+        Some((key, value.into()))
+    });
+    merge_environment(Vec::new(), filtered, cfg!(windows))
 }
 
 async fn capture_shell_env(host: &HostEnv) -> Result<Vec<(OsString, OsString)>, ProbeError> {
@@ -446,10 +471,76 @@ fn windows_process_env(host: &HostEnv) -> Vec<(OsString, OsString)> {
     } else {
         std::env::vars_os().collect()
     };
-    filter_child_env(merge_environment(base, host.env.iter().cloned(), true))
+    strip_tidebreak_env(merge_environment(base, host.env.iter().cloned(), true))
 }
 
-/// Drop Tidebreak-prefixed variables from a captured shell snapshot.
+/// Variables a spawned child may inherit from a captured shell snapshot,
+/// matched on the ASCII-uppercased name.
+///
+/// This is an allowlist for the same reason the exec path in
+/// `tidebreak-code-execution` builds on `env_clear()`: a coding-engine turn
+/// can read its whole environment with one `env` call, so every ambient
+/// credential the user's shell rc exports — `GITHUB_TOKEN`, `AWS_*`,
+/// `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` — is one prompt injection away
+/// from exfiltration. A variable missing from this list fails visibly in
+/// the child; a leaked secret fails silently, so anything not demonstrably
+/// required stays out. Everything Tidebreak itself wires into a child —
+/// settings `extra_env`, the session relay key, the browser capability
+/// file — is applied after this filter (see
+/// [`crate::browser_channel::apply_child_env_tokio`]) and never needs an
+/// entry here.
+const CHILD_ENV_ALLOWED_NAMES: &[&str] = &[
+    // Command resolution: the probe prepends the managed Node runtime and
+    // the login-shell PATH here, and every pinned engine entrypoint needs
+    // its interpreter found through it.
+    "PATH",
+    // Engine state lives under the home directory: `~/.claude`, `~/.codex`,
+    // and the `~/.config` fallbacks all resolve through HOME.
+    "HOME",
+    // POSIX session identity and terminal basics.
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "TERM",
+    "LANG",
+    "TMPDIR",
+    // `tidebreak-server` spawns `gh` under this filter, and gh resolves a
+    // relocated config directory through this path (not a secret).
+    "GH_CONFIG_DIR",
+    // Windows children cannot start, resolve commands, or write temp files
+    // without these; on Unix they are simply absent.
+    "SYSTEMROOT",
+    "SYSTEMDRIVE",
+    "WINDIR",
+    "COMSPEC",
+    "PATHEXT",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "PROGRAMDATA",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "USERNAME",
+    "TEMP",
+    "TMP",
+];
+
+/// Allowed name prefixes: locale configuration and the XDG base directories
+/// engines use to find their config and cache trees.
+const CHILD_ENV_ALLOWED_PREFIXES: &[&str] = &["LC_", "XDG_"];
+
+fn child_env_allowed(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    CHILD_ENV_ALLOWED_NAMES.contains(&upper.as_str())
+        || CHILD_ENV_ALLOWED_PREFIXES
+            .iter()
+            .any(|prefix| upper.starts_with(prefix))
+}
+
+/// Narrow a captured shell snapshot to the environment a spawned child may
+/// inherit: the [`CHILD_ENV_ALLOWED_NAMES`] allowlist, minus malformed
+/// names. The reserved `TIDEBREAK_` namespace is excluded by construction —
+/// nothing in the allowlist matches it.
 #[must_use]
 pub fn filter_child_env<I, K, V>(vars: I) -> Vec<(OsString, OsString)>
 where
@@ -460,10 +551,7 @@ where
     let filtered = vars.into_iter().filter_map(|(key, value)| {
         let key = key.into();
         let name = key.to_string_lossy();
-        if name.is_empty()
-            || name.contains('=')
-            || name.to_ascii_uppercase().starts_with("TIDEBREAK_")
-        {
+        if name.is_empty() || name.contains('=') || !child_env_allowed(&name) {
             return None;
         }
         Some((key, value.into()))
@@ -1210,19 +1298,26 @@ eval "$cmd"
         assert_eq!(profile.as_deref(), Some("from-profile"));
         assert!(std::env::var_os("PROFILE_ONLY_VAR").is_none());
         let filtered = filter_child_env(capture.env);
-        assert!(filtered
-            .iter()
-            .any(|(key, value)| { key == "PROFILE_ONLY_VAR" && value == "from-profile" }));
+        // The snapshot keeps profile-sourced variables for detection, but a
+        // child inherits only the allowlist: an arbitrary profile export
+        // stays out while the profile-built PATH survives.
+        assert!(filtered.iter().all(|(key, _)| key != "PROFILE_ONLY_VAR"));
         assert!(filtered.iter().all(|(key, _)| {
             !key.to_string_lossy()
                 .to_ascii_uppercase()
                 .starts_with("TIDEBREAK_")
         }));
+        let path = filtered
+            .iter()
+            .find(|(key, _)| key == "PATH")
+            .map(|(_, value)| value.clone())
+            .expect("profile-built PATH reaches the child");
+        assert!(std::env::split_paths(&path).any(|entry| entry == dir.path()));
 
         let mut child = Command::new("/bin/sh");
         child
             .arg("-c")
-            .arg("printf %s \"$PROFILE_ONLY_VAR\"")
+            .arg("printf %s \"${PROFILE_ONLY_VAR-unset}\"")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -1232,7 +1327,7 @@ eval "$cmd"
             child.env(key, value);
         }
         let output = child.output().await.unwrap();
-        assert_eq!(String::from_utf8_lossy(&output.stdout), "from-profile");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "unset");
     }
 
     #[tokio::test]
@@ -1535,10 +1630,46 @@ mod environment_tests {
     fn filter_rejects_case_varied_tidebreak_and_invalid_environment_keys() {
         let filtered = filter_child_env([
             ("tidebreak_secret", "nope"),
-            ("GOOD", "yes"),
+            ("HOME", "/home/probe"),
             ("BAD=KEY", "nope"),
         ]);
-        assert_eq!(filtered, [(OsString::from("GOOD"), OsString::from("yes"))]);
+        assert_eq!(
+            filtered,
+            [(OsString::from("HOME"), OsString::from("/home/probe"))]
+        );
+    }
+
+    #[test]
+    fn child_env_is_an_allowlist_that_drops_planted_secrets() {
+        // A shell rc that exports ambient credentials must not hand them to
+        // an engine child, while the session basics still arrive.
+        let filtered = filter_child_env([
+            ("PATH", "/usr/bin"),
+            ("HOME", "/home/probe"),
+            ("LC_ALL", "en_US.UTF-8"),
+            ("XDG_CONFIG_HOME", "/home/probe/.config"),
+            ("AWS_SECRET_ACCESS_KEY", "planted"),
+            ("GITHUB_TOKEN", "planted"),
+            ("ANTHROPIC_API_KEY", "planted"),
+            ("OPENAI_API_KEY", "planted"),
+        ]);
+        for name in ["PATH", "HOME", "LC_ALL", "XDG_CONFIG_HOME"] {
+            assert!(
+                filtered.iter().any(|(key, _)| key == name),
+                "{name} must survive the child filter"
+            );
+        }
+        for name in [
+            "AWS_SECRET_ACCESS_KEY",
+            "GITHUB_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+        ] {
+            assert!(
+                filtered.iter().all(|(key, _)| key != name),
+                "{name} must not reach the child environment"
+            );
+        }
     }
 }
 

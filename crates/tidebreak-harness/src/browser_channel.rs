@@ -22,8 +22,9 @@ pub const BROWSER_CAPFILE_ENV_KEY: &str = BrowserChannelSpec::ENV_KEY;
 /// single ordering every adapter must use:
 ///
 /// 1. Clear the inherited process environment.
-/// 2. Restore the probe snapshot through [`filter_child_env`], which strips
-///    the reserved `TIDEBREAK_` namespace (case-insensitively).
+/// 2. Restore the probe snapshot through [`filter_child_env`], which narrows
+///    it to the child allowlist — ambient shell-rc secrets and the reserved
+///    `TIDEBREAK_` namespace do not survive.
 /// 3. Apply the sanitized launch-plan environment. Settings already rejected
 ///    reserved keys via [`BrowserChannelSpec::is_reserved_env_key`], so this
 ///    step can carry no adapter-owned override.
