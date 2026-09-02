@@ -2207,6 +2207,41 @@ describe("CodeWorkspacePage", () => {
     expect(router.state.location.pathname).toBe(`/code/w/${WORKSPACE.id}`);
   });
 
+  it("says no workspace was created and holds no prompt when an in-place Uneff me fails", async () => {
+    const client = makeClient();
+    enableStartHarness(client);
+    client.listCodeWorkspaceSessions.mockResolvedValue([SESSION]);
+    client.createCodeSession.mockRejectedValueOnce(new Error("engine down"));
+    const debug =
+      deferred<Awaited<ReturnType<typeof client.getCodeSessionDebug>>>();
+    client.getCodeSessionDebug.mockReturnValueOnce(debug.promise);
+    await mountWorkspace(client);
+    const user = userEvent.setup();
+
+    await screen.findByRole("heading", { name: /Fix login/ });
+    await user.click(screen.getByRole("button", { name: "Workspace actions" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Uneff me" }));
+
+    // The handoff never claims a workspace is coming.
+    const status = await screen.findByRole("status", {
+      name: "Starting session",
+    });
+    expect(status).not.toHaveTextContent("new workspace");
+    expect(status).toHaveTextContent("takes over here");
+    debug.resolve({ session: { id: "sess-1" }, turns: [], events: [] });
+
+    await waitFor(() =>
+      expect(useCodeUiStore.getState().workspaceStartups).toEqual({}),
+    );
+    expect(client.createCodeSession).toHaveBeenCalledTimes(1);
+    expect(client.submitCodeTurn).not.toHaveBeenCalled();
+    // The generated prompt does not land in this workspace's composer.
+    expect(useCodeUiStore.getState().pendingComposerPrompt).toBeNull();
+    expect(
+      screen.queryByText(/Workspace created, but the session could not start/),
+    ).toBeNull();
+  });
+
   it("keeps git and comments in the review sidebar, and opens the terminal as a tab", async () => {
     const client = makeClient();
     const { router } = await mountWorkspace(client);

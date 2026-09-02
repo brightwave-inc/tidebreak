@@ -994,6 +994,7 @@ function WorkspacePageStory({
         phase: "preparing",
         heading: UNEFF_STARTUP_HEADING,
         preparation: uneffPreparationSteps({ step: "debug" }),
+        target: "this_workspace",
       });
     }
     const client = storyClient(scenario);
@@ -1518,8 +1519,9 @@ export const StartingSession: Story = {
 };
 
 /**
- * Uneff me borrows the same surface before its session exists: the source
- * workspace shows the debug report being collected ahead of the usual steps.
+ * Uneff me borrows the same surface before its session exists. With no
+ * Tidebreak checkout the agent starts here, so the copy promises no new
+ * workspace: the report is collected, then the agent takes over in place.
  */
 export const UneffMePreparing: Story = {
   args: { scenario: "uneff-preparing", reviewOpen: false },
@@ -1530,7 +1532,10 @@ export const UneffMePreparing: Story = {
     });
     await expect(status).toHaveTextContent("Getting Tidebreak ready to help");
     await expect(status).toHaveTextContent("Collecting the debug report");
-    await expect(status).toHaveTextContent("Workspace ready");
+    await expect(status).toHaveTextContent(
+      "The new agent takes over here as soon as it starts.",
+    );
+    await expect(status).not.toHaveTextContent("new workspace");
   },
 };
 

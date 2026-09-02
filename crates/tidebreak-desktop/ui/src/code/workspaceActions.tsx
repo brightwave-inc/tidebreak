@@ -53,6 +53,7 @@ import { startFirstSession } from "./startWorkspaceSession";
 import {
   UNEFF_STARTUP_HEADING,
   prepareUneffMe,
+  tidebreakProductRepo,
   uneffPreparationSteps,
   uneffSessionSettings,
 } from "./uneffMe";
@@ -661,9 +662,13 @@ export function useWorkspaceCardCommands(): {
       catalog.repos.find((repo) => repo.id === context.workspace.repo_id)
         ?.display_name ?? context.workspace.repo_id;
     const setWorkspaceStartup = useCodeUiStore.getState().setWorkspaceStartup;
+    const target = tidebreakProductRepo(catalog.repos)
+      ? ("new_workspace" as const)
+      : ("this_workspace" as const);
     const startup = {
       harness: settings.harness,
       heading: UNEFF_STARTUP_HEADING,
+      target,
     };
     const showPreparation = (preparation: WorkspaceStartupStep[]) =>
       setWorkspaceStartup(sourceId, {
@@ -736,7 +741,9 @@ export function useWorkspaceCardCommands(): {
       });
       return;
     }
-    // No checkout: a new agent in this workspace, shown once it exists.
+    // No checkout: a new agent in this workspace, shown once it exists. The
+    // prompt is generated, so a failed start does not leave a hundred
+    // kilobytes of JSON in a composer that belongs to another conversation.
     await startFirstSession({
       client,
       workspace: context.workspace,
@@ -744,7 +751,8 @@ export function useWorkspaceCardCommands(): {
       prompt,
       models,
       defaultModelKey,
-      startup: { heading: UNEFF_STARTUP_HEADING, preparation },
+      startup: { heading: UNEFF_STARTUP_HEADING, preparation, target },
+      holdPromptOnFailure: false,
       onSessionCreated: (session) =>
         void navigate({
           to: "/code/w/$workspaceId",

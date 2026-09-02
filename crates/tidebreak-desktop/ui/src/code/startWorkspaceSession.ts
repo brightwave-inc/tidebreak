@@ -82,8 +82,14 @@ export async function startFirstSession(input: {
   images?: readonly File[];
   models: readonly ModelInfo[];
   defaultModelKey?: string | null;
-  /** Heading and preparation steps the handoff keeps showing. */
-  startup?: Pick<WorkspaceStartup, "heading" | "preparation">;
+  /** Heading, preparation steps, and target the handoff keeps showing. */
+  startup?: Pick<WorkspaceStartup, "heading" | "preparation" | "target">;
+  /**
+   * Keep the prompt in the workspace composer when the start fails. True for
+   * words the reader typed. False for a generated prompt landing in a
+   * workspace whose composer already belongs to another conversation.
+   */
+  holdPromptOnFailure?: boolean;
   /** Open the workspace before its session starts. */
   reveal?: () => Promise<void>;
   onSessionCreated?: (
@@ -99,13 +105,24 @@ export async function startFirstSession(input: {
     harness: settings.harness,
   };
   const setWorkspaceStartup = useCodeUiStore.getState().setWorkspaceStartup;
+  const hold = input.holdPromptOnFailure ?? true;
   const holdPrompt = () => {
-    if (prompt) {
+    if (prompt && hold) {
       useCodeUiStore
         .getState()
         .offerComposerPrompt(workspace.id, prompt, images);
     }
   };
+  // The copy has to match what the reader just watched happen.
+  const created = input.startup?.target !== "this_workspace";
+  const sessionFailed = created
+    ? "Workspace created, but the session could not start."
+    : "The session could not start.";
+  const turnFailed =
+    "Session started, but the first message could not be sent.";
+  const retry = hold
+    ? "Send it from the workspace composer."
+    : "Try again from the workspace menu.";
   setWorkspaceStartup(workspace.id, {
     ...base,
     hasFirstMessage: Boolean(prompt),
@@ -159,9 +176,7 @@ export async function startFirstSession(input: {
         // Never drop typed words or pasted images: the workspace composer
         // holds them.
         holdPrompt();
-        toast.error(
-          `Session started, but the first message could not be sent. ${friendlyErrorMessage(error, "Send it from the workspace composer.")}`,
-        );
+        toast.error(`${turnFailed} ${friendlyErrorMessage(error, retry)}`);
       }
     }
     return session;
@@ -170,7 +185,7 @@ export async function startFirstSession(input: {
     // and start-session on the workspace page picks them up.
     holdPrompt();
     toast.error(
-      `Workspace created, but the session could not start. ${friendlyErrorMessage(error, "Try again from the workspace.")}`,
+      `${sessionFailed} ${friendlyErrorMessage(error, hold ? "Try again from the workspace." : retry)}`,
     );
     return null;
   } finally {

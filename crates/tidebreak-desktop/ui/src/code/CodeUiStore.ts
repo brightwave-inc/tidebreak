@@ -134,8 +134,13 @@ export type WorkspaceStartup = {
   phase: "preparing" | "starting_session" | "sending_message";
   /** Heading over the steps. Omitted, the handoff reads as a plain create. */
   heading?: string;
-  /** Steps that ran before the workspace existed, in order. */
+  /** Steps that ran before the session existed, in order. */
   preparation?: readonly WorkspaceStartupStep[];
+  /**
+   * Where the agent lands. A create hands the reader to a new workspace; an
+   * Uneff me with no Tidebreak checkout starts the agent where they are.
+   */
+  target?: "new_workspace" | "this_workspace";
 };
 
 function readStoredCreateDefaults(): CodeCreateDefaults | null {

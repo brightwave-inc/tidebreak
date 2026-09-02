@@ -59,8 +59,11 @@ export function WorkspaceSessionStartingState({
   const preparing = startup.phase === "preparing";
   const sending = startup.phase === "sending_message";
   const preparation = startup.preparation ?? [];
+  const here = startup.target === "this_workspace";
   const creating =
-    preparing && preparation.every((step) => step.state === "complete");
+    preparing &&
+    !here &&
+    preparation.every((step) => step.state === "complete");
 
   return (
     <section
@@ -78,7 +81,7 @@ export function WorkspaceSessionStartingState({
                 {startup.heading ?? "Starting your session"}
               </h2>
               <p className="mt-1 text-sm text-muted-foreground">
-                {preparing
+                {preparing && !here
                   ? `Tidebreak is getting a workspace ready for ${label}.`
                   : `Tidebreak is preparing ${label} in this workspace.`}
               </p>
@@ -93,10 +96,14 @@ export function WorkspaceSessionStartingState({
                 state={step.state}
               />
             ))}
-            <StartupStep
-              label={creating ? "Creating workspace" : "Workspace ready"}
-              state={preparing ? (creating ? "active" : "pending") : "complete"}
-            />
+            {!here && (
+              <StartupStep
+                label={creating ? "Creating workspace" : "Workspace ready"}
+                state={
+                  !preparing ? "complete" : creating ? "active" : "pending"
+                }
+              />
+            )}
             <StartupStep
               label={sending ? `${label} ready` : `Starting ${label}`}
               state={sending ? "complete" : preparing ? "pending" : "active"}
@@ -113,9 +120,11 @@ export function WorkspaceSessionStartingState({
           </div>
 
           <p className="mt-6 text-sm text-muted-foreground">
-            {preparing
+            {preparing && !here
               ? "You move to the new workspace as soon as it exists."
-              : "Your conversation appears here as soon as the session is ready."}
+              : here
+                ? "The new agent takes over here as soon as it starts."
+                : "Your conversation appears here as soon as the session is ready."}
           </p>
         </div>
       </div>
