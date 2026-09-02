@@ -374,26 +374,31 @@ export function sessionRowLabel(digest: CodeSessionDigest): string {
 /**
  * Copy for the workspace card's session line.
  *
- * A live turn names the activity and the turn count. A parked turn prefers
- * the recap when one exists — that is the complete-state read — and falls
- * back to the short lifecycle word so the agent is still visible.
+ * A live turn names what it is doing right now: the command, path, or query
+ * the engine is waiting on when the server captured one, the activity
+ * category otherwise. A parked turn prefers the recap when one exists — that
+ * is the complete-state read — and falls back to the short lifecycle word so
+ * the agent is still visible. No tallies: how many turns have run is not
+ * what a reader scanning the rail wants to know.
  */
 export function sessionActivityLineLabel(digest: CodeSessionDigest): string {
   if (digest.attention.state.type === "needs_you") {
     return digest.attention.state.prompt || "Needs you";
   }
+  if (digest.lifecycle === "running") {
+    // Subagents keep their count: the child rows name them. Everything else
+    // shows the tool's own subject when the digest carries one, so a reader
+    // sees `cargo test -p tidebreak-server` rather than "Shell running".
+    const detail = digest.activity_detail?.trim();
+    if (detail && !hasRunningSubagents(digest)) return detail;
+    return sessionActivityLabel(digest);
+  }
   const recap = digest.recap?.trim();
-  if (recap && digest.lifecycle !== "running") return recap;
-  const status =
-    digest.lifecycle === "running"
-      ? sessionActivityLabel(digest)
-      : sessionRowLabel(digest);
-  const turns =
-    digest.turn_count === 1 ? "1 turn" : `${digest.turn_count} turns`;
-  return `${status} · ${turns}`;
+  if (recap) return recap;
+  return sessionRowLabel(digest);
 }
 
-/** Precise running-state copy for a workspace row. */
+/** Coarse running-state copy: the activity category, never a tool subject. */
 export function sessionActivityLabel(digest: CodeSessionDigest): string {
   const runningSubagents =
     digest.subagents?.filter((entry) => entry.status === "running").length ?? 0;
@@ -417,6 +422,13 @@ export function sessionActivityLabel(digest: CodeSessionDigest): string {
     case undefined:
       return "Agent working";
   }
+}
+
+function hasRunningSubagents(digest: CodeSessionDigest): boolean {
+  return (
+    digest.activity === "subagents" ||
+    (digest.subagents?.some((entry) => entry.status === "running") ?? false)
+  );
 }
 
 /**

@@ -1726,7 +1726,13 @@ trigger_target_at?: string,
 /**
  * What the live turn is occupied with, while running.
  */
-activity?: CodeSessionActivity, pr_state?: PullRequestDigest,
+activity?: CodeSessionActivity,
+/**
+ * The subject of the tool the live turn is waiting on: the command,
+ * path, query, or task description. Present only while `activity`
+ * names a tool, and bounded to one line.
+ */
+activity_detail?: string, pr_state?: PullRequestDigest,
 /**
  * How many pull requests hold a durable attribution to this workspace
  * (decision 77). Absent when none do.
@@ -1926,6 +1932,11 @@ trigger_target_at?: string,
  * What the live turn is occupied with, while running.
  */
 activity?: CodeSessionActivity,
+/**
+ * The subject of the tool the live turn is waiting on, while
+ * `activity` names one.
+ */
+activity_detail?: string,
 /**
  * Boxed to keep the notice enum's variants near one size; the wire
  * shape is unchanged.

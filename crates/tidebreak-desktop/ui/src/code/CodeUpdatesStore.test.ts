@@ -283,6 +283,7 @@ describe("reduceCodeUpdates", () => {
         turn_count: 1,
         trigger_target_at: "2026-08-29T12:30:00Z",
         activity: "monitor",
+        activity_detail: "waiting for a background command",
       }),
     ).toEqual({
       type: "digest",
@@ -297,6 +298,7 @@ describe("reduceCodeUpdates", () => {
         turn_count: 1,
         trigger_target_at: "2026-08-29T12:30:00Z",
         activity: "monitor",
+        activity_detail: "waiting for a background command",
       },
     });
     expect(
