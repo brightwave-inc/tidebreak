@@ -18,4 +18,4 @@ mod validation;
 mod tests;
 
 pub(crate) use runtime::*;
-pub(crate) use types::*;
+pub use types::*;

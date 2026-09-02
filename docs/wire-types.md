@@ -145,9 +145,19 @@ Two more things are shared through it:
   its session reducer and metadata guard. A shape change shows up as a failing
   test on whichever side did not follow it.
 
-The REST records the CLI reads (models, providers, MCP servers, agent runs,
-outputs) are still hand-written mirrors, because their server types only
-serialize today. Moving them is brightwave-inc/tidebreak#3005.
+- **REST records.** The model catalog, the provider list, the MCP server
+  listing, agent runs, and conversation outputs are the routes' own response
+  types, re-exported from `tidebreak_server::wire` with `Deserialize` and
+  `deny_unknown_fields`. One record tolerates unknown keys: `McpServerInfo`
+  flattens its definition, and serde cannot guard across a flatten, so its
+  envelope `McpServersInfo` is the guarded shape. The output records carry
+  typed timestamps and a `producedBy` enum rather than preformatted strings.
+  `crates/tidebreak-server/fixtures/rest-records.json` holds one real value
+  per record (`{ name, type, value }`, the type naming the wire type it
+  decodes through), serialized by the same generator test; the server
+  round-trips every entry and the CLI decodes every entry. The renderer does
+  not read this file: its REST validators are exercised against
+  `generated/fixtures.ts` and the generated types.
 
 ## Scope today
 

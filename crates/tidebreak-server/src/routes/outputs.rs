@@ -58,69 +58,99 @@ const MAX_OUTPUT_REVISION_SOURCES: usize = 20;
 pub const MAX_OUTPUT_REVISION_BODY_BYTES: usize = 2 * tidebreak_core::MAX_DELIVERABLE_BYTES;
 
 /// One row of the outputs catalog.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
+///
+/// The output records are also read back by the CLI through [`crate::wire`],
+/// so they reject unknown keys the way the renderer's guards do.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DeliverableSummary {
-    output_id: OutputId,
-    filename: String,
-    media_type: String,
-    size_bytes: u64,
-    revision_count: u32,
-    updated_at: String,
+    pub output_id: OutputId,
+    pub filename: String,
+    pub media_type: String,
+    pub size_bytes: u64,
+    pub revision_count: u32,
+    pub updated_at: chrono::DateTime<Utc>,
     /// Background run that produced the current revision, when the output was
     /// submitted by a background agent rather than a foreground turn. A display
     /// key, not authority.
-    producing_run_id: Option<uuid::Uuid>,
+    pub producing_run_id: Option<uuid::Uuid>,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DeliverablesCatalog {
-    deliverables: Vec<DeliverableSummary>,
-    truncated: bool,
+    pub deliverables: Vec<DeliverableSummary>,
+    /// Whether the conversation has more outputs than one answer carries.
+    pub truncated: bool,
 }
 
 /// A bounded text preview of one exact revision.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DeliverablePreview {
-    output_id: OutputId,
-    filename: String,
-    media_type: String,
+    pub output_id: OutputId,
+    pub filename: String,
+    pub media_type: String,
     /// Lets a detail view gate its version-history affordance without a second
     /// catalog fetch.
-    revision_count: u32,
+    pub revision_count: u32,
     /// The revision this preview (or empty binary placeholder) was built from,
     /// so a viewer can address the same immutable bytes.
-    revision_id: OutputRevisionId,
-    content: String,
-    truncated: bool,
+    pub revision_id: OutputRevisionId,
+    pub content: String,
+    pub truncated: bool,
 }
 
 /// One row of an output's version history.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OutputRevisionInfo {
-    revision_id: OutputRevisionId,
-    ordinal: u32,
-    size_bytes: u64,
-    created_at: String,
-    /// Who produced the revision: `agent` (a foreground turn),
-    /// `backgroundAgent` (a run), or `user` (an edit or a restore).
-    produced_by: &'static str,
-    is_current: bool,
+    pub revision_id: OutputRevisionId,
+    pub ordinal: u32,
+    pub size_bytes: u64,
+    pub created_at: chrono::DateTime<Utc>,
+    pub produced_by: OutputRevisionProducer,
+    pub is_current: bool,
     /// Durable evidence retrieved by the foreground turn that produced this
     /// revision. User and background-run revisions have no turn, so they carry
     /// an empty list rather than borrowing evidence from another producer.
-    sources: Vec<OutputRevisionSource>,
+    pub sources: Vec<OutputRevisionSource>,
+}
+
+/// Who produced a revision.
+///
+/// Spelled in camelCase on the wire because the output routes answer in the
+/// shape the desktop renderer already validates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OutputRevisionProducer {
+    /// A foreground turn.
+    Agent,
+    /// A background run.
+    BackgroundAgent,
+    /// An edit or a restore.
+    User,
+}
+
+impl OutputRevisionProducer {
+    /// The wire spelling, for a client that prints the producer without a
+    /// serde round trip. Pinned to the serde form by a test in [`crate::wire`].
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OutputRevisionProducer::Agent => "agent",
+            OutputRevisionProducer::BackgroundAgent => "backgroundAgent",
+            OutputRevisionProducer::User => "user",
+        }
+    }
 }
 
 /// One durable evidence reference belonging to a revision's producing turn.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
-    rename_all_fields = "camelCase"
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
 )]
 pub enum OutputRevisionSource {
     Document {
@@ -135,11 +165,11 @@ pub enum OutputRevisionSource {
     },
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OutputRevisionsCatalog {
-    output_id: OutputId,
-    revisions: Vec<OutputRevisionInfo>,
+    pub output_id: OutputId,
+    pub revisions: Vec<OutputRevisionInfo>,
 }
 
 /// Publish a user's edit of a text output as a new user-authored revision.
@@ -315,13 +345,13 @@ pub async fn list_chat_output_revisions(
                 revision_id: revision.id,
                 ordinal: revision.ordinal,
                 size_bytes: revision.byte_len,
-                created_at: revision.created_at.to_rfc3339(),
+                created_at: revision.created_at,
                 produced_by: if revision.producing_run_id.is_some() {
-                    "backgroundAgent"
+                    OutputRevisionProducer::BackgroundAgent
                 } else if revision.turn_id.is_some() {
-                    "agent"
+                    OutputRevisionProducer::Agent
                 } else {
-                    "user"
+                    OutputRevisionProducer::User
                 },
                 is_current: revision.id == output.current_revision,
                 sources: revision
@@ -640,7 +670,7 @@ fn summary_from_record(
         media_type: output.media_type.clone(),
         size_bytes: revision.byte_len,
         revision_count: output.revision_count,
-        updated_at: output.updated_at.to_rfc3339(),
+        updated_at: output.updated_at,
         producing_run_id: revision.producing_run_id.map(|run_id| *run_id.as_uuid()),
     })
 }

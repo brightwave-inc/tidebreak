@@ -1430,7 +1430,12 @@ pub struct CatalogModel {
 }
 
 /// Public view of a provider — never includes the credential itself.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
+//
+// Also read back by the CLI through [`crate::wire`], so it rejects unknown
+// keys the way the renderer's guards do. A plain comment, not a doc comment,
+// so the generated `wire.ts` does not carry it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(deny_unknown_fields)]
 pub struct ProviderInfo {
     /// Provider kind.
     pub kind: ProviderKind,
@@ -1458,6 +1463,17 @@ pub enum ProviderAuthMode {
     ApiKey,
     /// ChatGPT subscription OAuth.
     Chatgpt,
+}
+
+impl ProviderAuthMode {
+    /// The wire spelling, for a client that prints the mode without a serde
+    /// round trip. Pinned to the serde form by a test in [`crate::wire`].
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProviderAuthMode::ApiKey => "api_key",
+            ProviderAuthMode::Chatgpt => "chatgpt",
+        }
+    }
 }
 
 /// Deserialize a present field (including JSON `null`) as `Some(..)`;

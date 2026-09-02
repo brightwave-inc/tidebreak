@@ -151,9 +151,9 @@ async fn execute(client: &Client, command: Command, format: OutputFormat) -> Res
                 return emit(&serde_json::json!({ "providers": providers_json(&providers) }));
             }
             for provider in providers {
-                let credential = match (provider.has_credential, provider.auth_mode.as_deref()) {
+                let credential = match (provider.has_credential, provider.auth_mode) {
                     (false, _) => "no credential".to_owned(),
-                    (true, Some(mode)) => format!("credential: {mode}"),
+                    (true, Some(mode)) => format!("credential: {}", mode.as_str()),
                     (true, None) => "credential: stored".to_owned(),
                 };
                 let base_url = provider
@@ -365,8 +365,8 @@ async fn execute(client: &Client, command: Command, format: OutputFormat) -> Res
         Command::McpRemove { name } => {
             let listing = client.get_mcp_servers().await?;
             if let Some(plugin) = decode_mcp(&listing)?.servers.iter().find_map(|server| {
-                (server.name == name)
-                    .then(|| server.plugin.clone())
+                (server.definition.name == name)
+                    .then(|| server.definition.plugin.clone())
                     .flatten()
             }) {
                 return Err(AgentError::msg(format!(
@@ -459,7 +459,7 @@ async fn execute(client: &Client, command: Command, format: OutputFormat) -> Res
                 return Ok(());
             }
             for run in runs {
-                let tier = run.tier.as_deref().unwrap_or("-");
+                let tier = run.tier.as_str();
                 let task = run
                     .task
                     .as_deref()
@@ -477,7 +477,8 @@ async fn execute(client: &Client, command: Command, format: OutputFormat) -> Res
                 };
                 println!(
                     "{:<36}  {tier:<10}  {:<12}  outs={outs}  {task}",
-                    run.id, run.status
+                    run.id,
+                    run.status.as_str()
                 );
             }
         }
@@ -504,19 +505,16 @@ async fn execute(client: &Client, command: Command, format: OutputFormat) -> Res
             if let Some(parent) = snapshot.parent_id {
                 println!("parent              {parent}");
             }
-            println!(
-                "tier                {}",
-                snapshot.tier.as_deref().unwrap_or("-")
-            );
+            println!("tier                {}", snapshot.tier.as_str());
             println!(
                 "execution_location  {}",
-                snapshot.execution_location.as_deref().unwrap_or("-")
+                snapshot.execution_location.as_str()
             );
             println!(
                 "code_execution_provider  {}",
-                snapshot.code_execution_provider.as_deref().unwrap_or("-")
+                snapshot.code_execution_provider.as_str()
             );
-            println!("status              {}", snapshot.status);
+            println!("status              {}", snapshot.status.as_str());
             if let Some(error) = &snapshot.last_error_code {
                 println!("last_error_code     {error}");
             }
@@ -677,24 +675,25 @@ fn credentialed(readiness: &serde_json::Value) -> String {
 }
 
 fn print_mcp_server(server: &McpServerInfo) {
-    let transport = server
+    let definition = &server.definition;
+    let transport = definition
         .command
         .as_deref()
-        .or(server.url.as_deref())
-        .or(server.gateway_endpoint.as_deref())
+        .or(definition.url.as_deref())
+        .or(definition.gateway_endpoint.as_deref())
         .unwrap_or("-");
-    let source = match &server.plugin {
+    let source = match &definition.plugin {
         Some(plugin) => format!(" (from the {plugin} plugin)"),
         None => String::new(),
     };
-    let state = if server.enabled {
+    let state = if definition.enabled {
         server.health.as_str()
     } else {
         "disabled"
     };
     println!(
         "{:<24} {state:<14} {:>3} tools  {transport}{source}",
-        server.name, server.tool_count
+        definition.name, server.tool_count
     );
     if let Some(diagnostic) = &server.diagnostic {
         println!("    {diagnostic}");
@@ -755,6 +754,7 @@ fn providers_json(providers: &[crate::api::wire::ProviderInfo]) -> Vec<serde_jso
 mod tests {
     use super::*;
     use tidebreak_core::Config;
+    use tidebreak_server::wire::ProviderKind;
 
     /// The point of the whole family: a credential stored through the CLI is
     /// live on the profile the next command (and the next turn) resolves
@@ -775,7 +775,7 @@ mod tests {
         let before = client.list_providers().await.expect("list providers");
         let anthropic = before
             .iter()
-            .find(|provider| provider.kind == "anthropic")
+            .find(|provider| provider.kind == ProviderKind::Anthropic)
             .expect("anthropic is a known provider");
         assert!(
             !anthropic.has_credential && !anthropic.enabled,
@@ -799,7 +799,7 @@ mod tests {
         let after = client.list_providers().await.expect("list providers");
         let anthropic = after
             .iter()
-            .find(|provider| provider.kind == "anthropic")
+            .find(|provider| provider.kind == ProviderKind::Anthropic)
             .expect("anthropic is a known provider");
         assert!(
             anthropic.has_credential && anthropic.enabled,
@@ -819,7 +819,7 @@ mod tests {
         assert!(
             !after
                 .iter()
-                .any(|provider| provider.kind == "anthropic" && provider.has_credential),
+                .any(|provider| provider.kind == ProviderKind::Anthropic && provider.has_credential),
             "removing the credential must take it out of the listing"
         );
 

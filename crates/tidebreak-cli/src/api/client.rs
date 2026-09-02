@@ -16,9 +16,9 @@ use tokio_tungstenite::tungstenite::http::HeaderValue;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
 use super::wire::{
-    AgentActivityHistoryItem, AgentRunSnapshot, ApprovalGrantRung, Chat, ModelCatalog,
-    OutputPreview, OutputRevisions, OutputsCatalog, PendingPlanApproval, PendingUserQuestions,
-    ProviderInfo, ProvidersList,
+    AgentActivityHistoryItem, AgentRunSnapshot, ApprovalGrantRung, Chat, DeliverablePreview,
+    DeliverablesCatalog, ModelCatalog, OutputRevisionsCatalog, PendingPlanApproval,
+    PendingUserQuestions, ProviderInfo, ProvidersList,
 };
 
 /// The chat event stream once the upgrade completes.
@@ -757,7 +757,7 @@ impl Client {
     // ------------------------------------------------------------------
 
     /// The conversation's live outputs.
-    pub async fn list_outputs(&self, chat: ChatId) -> Result<OutputsCatalog> {
+    pub async fn list_outputs(&self, chat: ChatId) -> Result<DeliverablesCatalog> {
         self.get_json(format!("{}/chats/{chat}/outputs", self.base))
             .await
     }
@@ -768,7 +768,7 @@ impl Client {
         chat: ChatId,
         output: OutputId,
         revision: Option<OutputRevisionId>,
-    ) -> Result<OutputPreview> {
+    ) -> Result<DeliverablePreview> {
         let url = match revision {
             None => format!("{}/chats/{chat}/outputs/{output}", self.base),
             Some(revision) => format!(
@@ -784,7 +784,7 @@ impl Client {
         &self,
         chat: ChatId,
         output: OutputId,
-    ) -> Result<OutputRevisions> {
+    ) -> Result<OutputRevisionsCatalog> {
         self.get_json(format!(
             "{}/chats/{chat}/outputs/{output}/revisions",
             self.base

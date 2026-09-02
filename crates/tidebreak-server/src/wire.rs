@@ -27,6 +27,19 @@
 //!   the renderer ships with its server and never sees a newer event, so a
 //!   tolerant client would be the only surface with a different contract.
 //!
+//! # REST records
+//!
+//! The records the CLI reads over HTTP — the model catalog, the provider
+//! list, the MCP server listing, agent runs, and conversation outputs — are
+//! the same response types the routes serialize, re-exported below. They
+//! carry the same contract as the frames: closed vocabularies and
+//! `deny_unknown_fields` on every record but one. [`McpServerInfo`] flattens
+//! its definition, and serde cannot guard unknown keys across a flatten, so
+//! that record alone tolerates them; its envelope, [`McpServersInfo`], does
+//! not. The fixtures in `fixtures/rest-records.json` hold one real value per
+//! record, serialized by the generator test in `wire_types.rs`, and the CLI
+//! decodes every entry.
+//!
 //! # Limits
 //!
 //! [`limits`] holds the guard sizes the renderer applies to opaque strings on
@@ -42,6 +55,20 @@ pub use crate::event_projection::{
 pub use crate::providers::ProviderKind;
 pub use crate::routes::{
     AgentActivityHistoryItem, AgentActivityKind, AgentActivityOutcome, ApprovalGrantRung,
+};
+
+// REST records (brightwave-inc/tidebreak#3005). One block per route family.
+pub use crate::mcp_config::{McpHealth, McpServerDefinition, McpServerInfo, McpServersInfo};
+pub use crate::mcp_curated::McpCuration;
+pub use crate::model_registry::{InputModality, VerificationTier};
+pub use crate::model_roles::ModelRole;
+pub use crate::providers::{CustomModelConfig, ProviderAuthMode, ProviderInfo};
+pub use crate::routes::{
+    AgentActivitySnapshot, AgentActivityStatus, AgentRunSnapshot, AgentRunTaskPlanProgress,
+    AgentRunUsageSnapshot, DeliverablePreview, DeliverableSummary, DeliverablesCatalog,
+    ExecProviderSnapshot, ModelCatalog, ModelInfo, ModelRoleInfo, OutputRevisionInfo,
+    OutputRevisionProducer, OutputRevisionSource, OutputRevisionsCatalog, ProvidersList,
+    SubmittedOutputSnapshot,
 };
 
 /// Guard sizes for the opaque strings a client draws from this surface.
@@ -112,6 +139,43 @@ mod tests {
             AgentActivityOutcome::Cancelled,
         ] {
             assert_eq!(outcome.as_str(), wire_name(&outcome));
+        }
+    }
+
+    /// The REST records' `as_str` helpers exist for the same reason, and are
+    /// pinned the same way.
+    #[test]
+    fn rest_record_names_match_the_wire() {
+        for health in [
+            McpHealth::Initializing,
+            McpHealth::Healthy,
+            McpHealth::Degraded,
+            McpHealth::Reconnecting,
+            McpHealth::Disabled,
+        ] {
+            assert_eq!(health.as_str(), wire_name(&health));
+        }
+        for mode in [ProviderAuthMode::ApiKey, ProviderAuthMode::Chatgpt] {
+            assert_eq!(mode.as_str(), wire_name(&mode));
+        }
+        for producer in [
+            OutputRevisionProducer::Agent,
+            OutputRevisionProducer::BackgroundAgent,
+            OutputRevisionProducer::User,
+        ] {
+            assert_eq!(producer.as_str(), wire_name(&producer));
+        }
+        for role in ModelRole::ALL {
+            assert_eq!(role.as_str(), wire_name(role));
+        }
+        for provider in [
+            ExecProviderSnapshot::Local,
+            ExecProviderSnapshot::E2b,
+            ExecProviderSnapshot::Daytona,
+            ExecProviderSnapshot::Docker,
+            ExecProviderSnapshot::Off,
+        ] {
+            assert_eq!(provider.as_str(), wire_name(&provider));
         }
     }
 

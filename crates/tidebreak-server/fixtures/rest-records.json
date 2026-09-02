@@ -1,0 +1,312 @@
+[
+  {
+    "name": "model_catalog",
+    "type": "ModelCatalog",
+    "value": {
+      "models": [
+        {
+          "available": true,
+          "context_window": 1000000,
+          "display_name": "Claude Opus 5",
+          "id": "claude-opus-5",
+          "input_modalities": [
+            "text",
+            "image"
+          ],
+          "key": "anthropic::claude-opus-5",
+          "max_output_tokens": 64000,
+          "multimodal": true,
+          "provider": "anthropic",
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "recommended": true,
+          "supports_reasoning": true,
+          "supports_structured_output": true,
+          "supports_tools": true,
+          "vendor": null,
+          "verification": "verified"
+        },
+        {
+          "available": false,
+          "context_window": 200000,
+          "display_name": "Claude Opus 5",
+          "id": "claude-opus-5",
+          "input_modalities": [
+            "text"
+          ],
+          "key": "model_gateway::claude-opus-5",
+          "max_output_tokens": 32000,
+          "multimodal": false,
+          "provider": "model_gateway",
+          "reasoning_efforts": [],
+          "recommended": false,
+          "supports_reasoning": false,
+          "supports_structured_output": false,
+          "supports_tools": true,
+          "vendor": "anthropic",
+          "verification": "unverified"
+        }
+      ],
+      "roles": [
+        {
+          "resolved_key": "anthropic::claude-opus-5",
+          "role": "chat",
+          "selection": "anthropic::claude-opus-5"
+        },
+        {
+          "resolved_key": null,
+          "role": "utility",
+          "selection": null
+        }
+      ]
+    }
+  },
+  {
+    "name": "providers",
+    "type": "ProvidersList",
+    "value": {
+      "providers": [
+        {
+          "auth_mode": "api_key",
+          "enabled": true,
+          "has_credential": true,
+          "kind": "anthropic",
+          "models": []
+        },
+        {
+          "base_url": "http://localhost:11434/v1",
+          "enabled": false,
+          "has_credential": false,
+          "kind": "openai_compatible",
+          "models": [
+            {
+              "context_window": 32768,
+              "display_name": "Llama",
+              "id": "llama",
+              "input_modalities": [
+                "text"
+              ],
+              "max_output_tokens": 4096,
+              "reasoning_efforts": [],
+              "supports_reasoning": false
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "mcp_servers",
+    "type": "McpServersInfo",
+    "value": {
+      "servers": [
+        {
+          "args": [
+            "-y",
+            "@modelcontextprotocol/server-filesystem"
+          ],
+          "bearer_token_env": null,
+          "command": "npx",
+          "curated": {
+            "display_name": "Filesystem",
+            "notes": "Read and write under one root.",
+            "tested_on": "2026-08-01"
+          },
+          "cwd": "/tmp",
+          "diagnostic": null,
+          "enabled": true,
+          "env": [
+            "FS_ROOT"
+          ],
+          "env_from": [
+            "HOME"
+          ],
+          "gateway_endpoint": null,
+          "health": "healthy",
+          "name": "filesystem",
+          "plugin": null,
+          "request_timeout_ms": 30000,
+          "tool_count": 11,
+          "url": null
+        },
+        {
+          "args": [],
+          "bearer_token_env": null,
+          "command": null,
+          "curated": null,
+          "cwd": null,
+          "diagnostic": "turned off",
+          "enabled": false,
+          "env": [],
+          "env_from": [],
+          "gateway_endpoint": "linear",
+          "health": "disabled",
+          "name": "linear",
+          "plugin": "linear-plugin",
+          "request_timeout_ms": 30000,
+          "tool_count": 0,
+          "url": null
+        }
+      ]
+    }
+  },
+  {
+    "name": "agent_run_running",
+    "type": "AgentRunSnapshot",
+    "value": {
+      "activity": {
+        "kind": "exec",
+        "status": "running"
+      },
+      "code_execution_provider": "docker",
+      "created_at": "2025-09-01T04:13:10Z",
+      "execution_location": "container",
+      "finished_at": null,
+      "id": "00000000-0000-0000-0000-000000000030",
+      "last_error_code": null,
+      "model_steps": 3,
+      "parent_id": null,
+      "spawn_call_id": "00000000-0000-0000-0000-000000000031",
+      "started_at": "2025-09-01T04:13:20Z",
+      "status": "running",
+      "submitted_outputs": [],
+      "task": "Summarize the quarterly report",
+      "task_plan": {
+        "completed": 1,
+        "current": "Read the report",
+        "total": 3,
+        "updated_at": "2025-09-01T04:13:50Z"
+      },
+      "terminal_text": null,
+      "tier": "background",
+      "updated_at": "2025-09-01T04:13:50Z",
+      "usage": {
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 800,
+        "input_tokens": 1200,
+        "output_tokens": 340
+      }
+    }
+  },
+  {
+    "name": "agent_run_completed",
+    "type": "AgentRunSnapshot",
+    "value": {
+      "activity": null,
+      "code_execution_provider": "off",
+      "created_at": "2025-09-01T04:14:50Z",
+      "execution_location": "in_process",
+      "finished_at": "2025-09-01T04:16:40Z",
+      "id": "00000000-0000-0000-0000-000000000032",
+      "last_error_code": "provider_rate_limited",
+      "model_steps": 7,
+      "parent_id": "00000000-0000-0000-0000-000000000030",
+      "spawn_call_id": null,
+      "started_at": "2025-09-01T04:15:00Z",
+      "status": "completed",
+      "submitted_outputs": [
+        {
+          "filename": "summary.md",
+          "output_id": "00000000-0000-0000-0000-000000000040"
+        }
+      ],
+      "task": null,
+      "terminal_text": "Done.",
+      "tier": "foreground",
+      "updated_at": "2025-09-01T04:16:40Z",
+      "usage": {
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "input_tokens": 0,
+        "output_tokens": 0
+      }
+    }
+  },
+  {
+    "name": "outputs",
+    "type": "DeliverablesCatalog",
+    "value": {
+      "deliverables": [
+        {
+          "filename": "summary.md",
+          "mediaType": "text/markdown",
+          "outputId": "00000000-0000-0000-0000-000000000040",
+          "producingRunId": "00000000-0000-0000-0000-000000000032",
+          "revisionCount": 3,
+          "sizeBytes": 1234,
+          "updatedAt": "2025-09-01T04:18:20Z"
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "name": "output_preview",
+    "type": "DeliverablePreview",
+    "value": {
+      "content": "# Summary\n\nOne paragraph.\n",
+      "filename": "summary.md",
+      "mediaType": "text/markdown",
+      "outputId": "00000000-0000-0000-0000-000000000040",
+      "revisionCount": 3,
+      "revisionId": "00000000-0000-0000-0000-000000000043",
+      "truncated": true
+    }
+  },
+  {
+    "name": "output_revisions",
+    "type": "OutputRevisionsCatalog",
+    "value": {
+      "outputId": "00000000-0000-0000-0000-000000000040",
+      "revisions": [
+        {
+          "createdAt": "2025-09-01T04:15:00Z",
+          "isCurrent": false,
+          "ordinal": 1,
+          "producedBy": "agent",
+          "revisionId": "00000000-0000-0000-0000-000000000041",
+          "sizeBytes": 900,
+          "sources": [
+            {
+              "citationId": "00000000-0000-0000-0000-000000000050",
+              "documentId": "00000000-0000-0000-0000-000000000051",
+              "kind": "document",
+              "locator": {
+                "end": 3,
+                "kind": "pages",
+                "start": 2
+              }
+            },
+            {
+              "domain": "example.com",
+              "kind": "web",
+              "label": "Quarterly report",
+              "url": "https://example.com/report"
+            }
+          ]
+        },
+        {
+          "createdAt": "2025-09-01T04:16:40Z",
+          "isCurrent": false,
+          "ordinal": 2,
+          "producedBy": "backgroundAgent",
+          "revisionId": "00000000-0000-0000-0000-000000000042",
+          "sizeBytes": 1100,
+          "sources": []
+        },
+        {
+          "createdAt": "2025-09-01T04:18:20Z",
+          "isCurrent": true,
+          "ordinal": 3,
+          "producedBy": "user",
+          "revisionId": "00000000-0000-0000-0000-000000000043",
+          "sizeBytes": 1234,
+          "sources": []
+        }
+      ]
+    }
+  }
+]
