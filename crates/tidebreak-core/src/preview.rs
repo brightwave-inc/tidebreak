@@ -1320,7 +1320,7 @@ fn survives_clamp(value: &str) -> bool {
 /// later shows verbatim — see [`crate::task_plan`]. A surface that clamps on
 /// read and a surface that rejects on write must agree on the character set, or
 /// the writer produces payloads the reader silently drops.
-pub(crate) fn preview_formatting_character(character: char) -> bool {
+pub fn preview_formatting_character(character: char) -> bool {
     character.is_control()
         || matches!(
             character,

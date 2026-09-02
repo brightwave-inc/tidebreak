@@ -16,9 +16,10 @@ use tidebreak_core::db::code::{
     list_sessions_for_workspace, list_turns, replace_session_attention, save_session,
 };
 use tidebreak_core::{
-    Attention, AttentionSource, AttentionState, CodeApprovalState, CodeEvent, CodeSession,
-    CodeSessionActivity, CodeSessionId, CodeSessionKind, CodeSessionLifecycle, CodeSubagentStatus,
-    CodeTurnStatus, DbStore, OwnerId, ToolDetail, WorkspaceId,
+    preview_formatting_character, Attention, AttentionSource, AttentionState, CodeApprovalState,
+    CodeEvent, CodeSession, CodeSessionActivity, CodeSessionId, CodeSessionKind,
+    CodeSessionLifecycle, CodeSubagentStatus, CodeTurnStatus, DbStore, OwnerId, ToolDetail,
+    WorkspaceId,
 };
 
 use super::bus::{CodeEventBus, CodeLiveUpdate, SessionDigest};
@@ -542,9 +543,22 @@ fn session_activity(
 
 /// One line naming what the tool is doing, or nothing when the detail has no
 /// subject yet (an engine can open a call before its arguments stream in).
+///
+/// The subject is harness text, so this clamps it the way every other
+/// one-line projection does: the first line, minus any character that could
+/// redraw or reorder it, and nothing at all when that leaves nothing. The
+/// desktop rejects a digest whose detail carries such a character, and a
+/// rejected digest blanks the whole rail.
 fn activity_detail(detail: &ToolDetail) -> Option<String> {
     let subject = detail.subject().trim();
-    let first_line = subject.lines().next().unwrap_or("").trim();
+    let first_line: String = subject
+        .lines()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .filter(|character| !preview_formatting_character(*character))
+        .collect();
+    let first_line = first_line.trim();
     if first_line.is_empty() {
         return None;
     }
@@ -798,6 +812,27 @@ mod tests {
                 summary: "   ".into()
             }),
             None
+        );
+    }
+
+    #[test]
+    fn activity_detail_strips_what_a_line_cannot_carry() {
+        // A tab, an escape, and a bidi override: the desktop rejects a digest
+        // carrying any of them, so the clamp removes them before the wire.
+        let detail = activity_detail(&ToolDetail::Command {
+            cmd: "printf\t'\u{1b}[31m'\u{202e}&& cargo test".into(),
+            cwd: "/workspace".into(),
+        })
+        .expect("the command still names its subject");
+        assert_eq!(detail, "printf'[31m'&& cargo test");
+        assert!(!detail.chars().any(preview_formatting_character));
+
+        assert_eq!(
+            activity_detail(&ToolDetail::Other {
+                summary: "\u{202e}\t\u{7f}".into()
+            }),
+            None,
+            "a subject that clamps away to nothing is omitted, not sent empty"
         );
     }
 
