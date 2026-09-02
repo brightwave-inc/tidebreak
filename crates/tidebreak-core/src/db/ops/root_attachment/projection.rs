@@ -93,13 +93,13 @@ pub(super) async fn set_chat_revision<C>(
 where
     C: sea_orm::ConnectionTrait,
 {
-    let updated = entities::chat::Entity::update_many()
+    let updated = entities::code_session::Entity::update_many()
         .col_expr(
-            entities::chat::Column::AttachmentRevision,
+            entities::code_session::Column::AttachmentRevision,
             Expr::value(after),
         )
-        .filter(entities::chat::Column::Id.eq(chat_id.0))
-        .filter(entities::chat::Column::AttachmentRevision.eq(before))
+        .filter(entities::code_session::Column::Id.eq(chat_id.0))
+        .filter(entities::code_session::Column::AttachmentRevision.eq(before))
         .exec(conn)
         .await
         .map_err(store_err)?;

@@ -309,13 +309,13 @@ pub(in crate::db) async fn decide(
     // the call, so the resumed turn can never read the plan surface again
     // while believing the plan was accepted.
     if let Some(mode) = request.decision.mode_after() {
-        let chat = entities::chat::Entity::find_by_id(request.chat_id.0)
+        let chat = entities::code_session::Entity::find_by_id(request.chat_id.0)
             .one(&transaction)
             .await
             .map_err(store_err)?
             .ok_or_else(|| AgentError::Store("plan chat disappeared".into()))?;
-        let mut active_chat: entities::chat::ActiveModel = chat.into();
-        active_chat.permission_mode = Set(Some(mode.as_str().to_owned()));
+        let mut active_chat: entities::code_session::ActiveModel = chat.into();
+        active_chat.permission_mode = Set(mode.as_str().to_owned());
         active_chat.update(&transaction).await.map_err(store_err)?;
     }
 

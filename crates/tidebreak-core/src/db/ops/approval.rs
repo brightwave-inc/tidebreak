@@ -19,6 +19,7 @@ use crate::storage::{
 use crate::tool::ApprovalClass;
 
 use super::super::{entities, store_err, DbStore};
+use super::conversation::internal_sessions;
 use super::turn::canonical_db_timestamp;
 use super::{acquire_chat_write_lock, acquire_tool_call_write_lock, acquire_turn_write_lock};
 
@@ -89,7 +90,7 @@ async fn chat_project_id<C>(conn: &C, chat_id: ChatId) -> Result<Option<crate::i
 where
     C: ConnectionTrait,
 {
-    Ok(entities::chat::Entity::find_by_id(chat_id.0)
+    Ok(entities::code_session::Entity::find_by_id(chat_id.0)
         .one(conn)
         .await
         .map_err(store_err)?
@@ -125,10 +126,10 @@ fn grant_level_from_row(
 /// delete the grant with its parent, so the derivation cannot dangle or drift.
 fn owned_grants_condition(owner: &OwnerId) -> sea_orm::Condition {
     let owned_chats = sea_orm::sea_query::Query::select()
-        .column(entities::chat::Column::Id)
-        .from(entities::chat::Entity)
-        .and_where(entities::chat::Column::Owner.eq(owner.as_str()))
-        .and_where(entities::chat::Column::EnginePrivate.eq(false))
+        .column(entities::code_session::Column::Id)
+        .from(entities::code_session::Entity)
+        .and_where(entities::code_session::Column::Owner.eq(owner.as_str()))
+        .cond_where(internal_sessions())
         .to_owned();
     let owned_projects = sea_orm::sea_query::Query::select()
         .column(entities::project::Column::Id)

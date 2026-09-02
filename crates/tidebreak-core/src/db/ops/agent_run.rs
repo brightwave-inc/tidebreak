@@ -88,6 +88,31 @@ where
     Ok(id)
 }
 
+/// Give a session the foreground coordinator run its turn lane admits
+/// against, if it has none yet.
+///
+/// A conversation created through the chat routes gets the run with the
+/// row; a session the code runtime created gets it here, when the internal
+/// engine first hosts it (decision 0048 step 5). A session that does not
+/// exist is an error, not a creation.
+pub(in crate::db) async fn ensure_foreground_agent_run(
+    store: &DbStore,
+    chat_id: ChatId,
+) -> Result<()> {
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !acquire_chat_write_lock(&transaction, chat_id).await? {
+        transaction.rollback().await.map_err(store_err)?;
+        return Err(AgentError::Store(format!(
+            "session {chat_id} has no conversation row"
+        )));
+    }
+    if find_foreground_on(&transaction, chat_id).await?.is_none() {
+        insert_foreground_agent_run_on(&transaction, chat_id, Utc::now()).await?;
+    }
+    transaction.commit().await.map_err(store_err)?;
+    Ok(())
+}
+
 pub(in crate::db) async fn find_foreground_agent_run_on<C>(
     conn: &C,
     chat_id: ChatId,

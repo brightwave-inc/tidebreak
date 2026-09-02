@@ -104,11 +104,33 @@ where
             Some(serde_json::to_value(&session.subagents)?)
         }),
         created_at: Set(session.created_at),
+        // The conversation columns start at their creation defaults; the
+        // chat routes fill them in once the session is read as a chat.
+        project_id: Set(None),
+        title: Set(None),
+        network_policy: Set(serde_json::to_string(&crate::NetworkPolicy::default())?),
+        attachment_revision: Set(0),
     }
     .insert(connection)
     .await
     .map_err(store_err)?;
     Ok(())
+}
+
+/// The session rows the code runtime drives (decision 0048 step 5).
+///
+/// A chat is a session too: a row with no workspace, the internal harness,
+/// and the code-owned columns at rest. It becomes the runtime's the moment a
+/// worker attaches (`spawn_epoch` bumps, `lifecycle` leaves `idle`), and a
+/// session created with a workspace is the runtime's from the start. Every
+/// listing the runtime or the code routes take applies this, so boot
+/// recovery, the sweeps, and `GET /code/sessions` never enumerate a
+/// conversation that only the chat routes have touched.
+pub(in crate::db) fn code_runtime_sessions() -> sea_orm::Condition {
+    sea_orm::Condition::any()
+        .add(entities::code_session::Column::WorkspaceId.is_not_null())
+        .add(entities::code_session::Column::SpawnEpoch.gt(0))
+        .add(entities::code_session::Column::Lifecycle.ne(CodeSessionLifecycle::Idle.as_str()))
 }
 
 /// Load one of the owner's sessions by id.
@@ -718,6 +740,7 @@ pub async fn bump_spawn_epoch(
 pub async fn list_sessions(store: &DbStore, owner: &OwnerId) -> Result<Vec<CodeSession>> {
     entities::code_session::Entity::find()
         .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+        .filter(code_runtime_sessions())
         .order_by_desc(entities::code_session::Column::CreatedAt)
         .all(&store.conn)
         .await
@@ -752,6 +775,7 @@ pub async fn list_sessions_for_workspace(
 /// route may call it.
 pub async fn list_sessions_all_owners(store: &DbStore) -> Result<Vec<CodeSession>> {
     entities::code_session::Entity::find()
+        .filter(code_runtime_sessions())
         .order_by_desc(entities::code_session::Column::CreatedAt)
         .all(&store.conn)
         .await
@@ -773,6 +797,7 @@ pub async fn list_sessions_by_lifecycle_all_owners(
 ) -> Result<Vec<CodeSession>> {
     entities::code_session::Entity::find()
         .filter(entities::code_session::Column::Lifecycle.eq(lifecycle.as_str().to_owned()))
+        .filter(code_runtime_sessions())
         .all(&store.conn)
         .await
         .map_err(store_err)?

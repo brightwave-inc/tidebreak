@@ -26,48 +26,67 @@ async fn set_chat_model_updates_then_clears() {
     assert_eq!(store.get_chat(chat.id).await.unwrap().unwrap().model, None);
 }
 
+/// A chat is a session row, and the session column is not nullable: a chat
+/// created or updated with no permission mode stores the default and reads
+/// it back, where the chat table used to keep the null (decision 0048
+/// step 5).
 #[tokio::test]
-async fn chats_stored_before_the_effort_scale_widened_still_load() {
+async fn an_unset_permission_mode_reads_back_as_the_default() {
     let (_dir, store) = temp_store().await;
-    // Written the way a release before `none`/`xhigh`/`max` existed wrote them:
-    // straight into the column, with no chance to migrate the token.
-    for (stored, expected) in [
-        ("low", Some(ReasoningEffort::Low)),
-        ("medium", Some(ReasoningEffort::Medium)),
-        ("high", Some(ReasoningEffort::High)),
-        // A token this build does not recognize is dropped, not fatal — the
-        // chat still opens on the provider default.
-        ("aggressive", None),
-    ] {
-        let chat = sample_chat();
-        entities::chat::ActiveModel {
-            id: Set(chat.id.0),
-            project_id: Set(None),
-            title: Set(chat.title.clone()),
-            model: Set(None),
-            reasoning_effort: Set(Some(stored.to_owned())),
-            permission_mode: Set(None),
-            network_policy: Set(r#"{"mode":"off"}"#.into()),
-            attachment_revision: Set(0),
-            created_at: Set(chat.created_at),
-            owner: sea_orm::ActiveValue::NotSet,
-            engine_private: Set(false),
-        }
-        .insert(&store.conn)
+    let mut chat = sample_chat();
+    chat.permission_mode = None;
+    store.create_chat(&chat).await.unwrap();
+    assert_eq!(
+        store
+            .get_chat(chat.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .permission_mode,
+        Some(PermissionMode::DEFAULT)
+    );
+
+    store
+        .update_chat_metadata(
+            chat.id,
+            None,
+            None,
+            None,
+            Some(Some(PermissionMode::Plan)),
+            None,
+        )
         .await
         .unwrap();
-        assert_eq!(
-            store
-                .get_chat(chat.id)
-                .await
-                .unwrap()
-                .unwrap()
-                .reasoning_effort,
-            expected,
-            "stored effort {stored} no longer loads"
-        );
-    }
+    assert_eq!(
+        store
+            .get_chat(chat.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .permission_mode,
+        Some(PermissionMode::Plan)
+    );
+    store
+        .update_chat_metadata(chat.id, None, None, None, Some(None), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .get_chat(chat.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .permission_mode,
+        Some(PermissionMode::DEFAULT)
+    );
+}
 
+/// A token from before the effort scale widened is dropped when the chat
+/// row becomes a session row (`ConversationsAreSessions` in the migration
+/// tests); every level this build can write reads back as itself.
+#[tokio::test]
+async fn every_effort_level_round_trips() {
+    let (_dir, store) = temp_store().await;
     // Every level this build can write reads back as itself.
     for effort in ReasoningEffort::ALL {
         let mut chat = sample_chat();

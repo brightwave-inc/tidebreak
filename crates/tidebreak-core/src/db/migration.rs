@@ -68,6 +68,7 @@ impl MigratorTrait for Migrator {
             Box::new(CodeConnectHandshakes),
             Box::new(CodeTurnPark),
             Box::new(InternalEngineSessions),
+            Box::new(ConversationsAreSessions),
         ]
     }
 }
@@ -1580,7 +1581,8 @@ impl MigrationTrait for Baseline {
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         // Reverse creation order, so no table is dropped while another still
-        // references it.
+        // references it. A later migration may have retired a baseline table
+        // (`chat` became `code_session` rows); its rows are gone with it.
         for entry in baseline::tables().into_iter().rev() {
             let name = entry
                 .table
@@ -1588,7 +1590,7 @@ impl MigrationTrait for Baseline {
                 .expect("every baseline table statement names its table")
                 .clone();
             manager
-                .drop_table(Table::drop().table(name).to_owned())
+                .drop_table(Table::drop().table(name).if_exists().to_owned())
                 .await?;
         }
         Ok(())
@@ -3562,6 +3564,277 @@ fn relax_code_session_workspace(create: &str) -> Result<String, DbErr> {
     Ok(create.replacen(CONSTRAINED, RELAXED, 1))
 }
 
+/// A chat is a session (decision 0048 step 5): every `chat` row becomes a
+/// `code_session` row with no workspace and the internal harness, the twenty
+/// foreign keys that named `chat` name `code_session`, and the `chat` table
+/// goes. The engine-private conversation slice C kept beside a session is
+/// deleted rather than extended: the session row is the conversation row.
+///
+/// Chat attention stays derived from `turn_run` and the inbox projection
+/// (`ops::chat_attention`). A migrated row carries the idle state only so
+/// the column is well formed; the turn lane merge reconciles the two.
+struct ConversationsAreSessions;
+
+impl MigrationName for ConversationsAreSessions {
+    fn name(&self) -> &str {
+        "m20260902_000001_conversations_are_sessions"
+    }
+}
+
+/// The tables whose foreign key named `chat`, in the frozen baseline.
+const CHAT_REFERENCING_TABLES: &[&str] = &[
+    "agent_run",
+    "chat_image_publication",
+    "chat_root_attachment",
+    "context_checkpoint",
+    "event",
+    "exec_file_change",
+    "message",
+    "message_attachment",
+    "message_document_attachment",
+    "message_identity",
+    "output",
+    "plan_request",
+    "queued_turn",
+    "root_attachment_change",
+    "standing_tool_grant",
+    "task_plan",
+    "tool_call",
+    "turn_admission",
+    "turn_run",
+    "user_question_request",
+];
+
+/// The conversation columns `code_session` gains, as SQLite `ADD COLUMN`
+/// definitions. The network policy keeps the historical `off` default so a
+/// row inserted without one reads as it always did.
+const SQLITE_CONVERSATION_COLUMNS: &[(&str, &str)] = &[
+    (
+        "project_id",
+        r#""project_id" uuid_text REFERENCES "project" ("id") ON DELETE RESTRICT"#,
+    ),
+    ("title", r#""title" text"#),
+    (
+        "network_policy",
+        r#""network_policy" text NOT NULL DEFAULT '{"mode":"off"}'"#,
+    ),
+    (
+        "attachment_revision",
+        r#""attachment_revision" integer NOT NULL DEFAULT 0 CHECK ("attachment_revision" >= 0) CHECK ("attachment_revision" <= 9007199254740991)"#,
+    ),
+];
+
+/// Copy every chat that has no session row yet, then hand the conversation
+/// columns to the sessions that already exist (slice C's engine-private
+/// pairs share an id by construction). Both statements are idempotent, so a
+/// SQLite retry can run them again. `attention_state` is bound as the one
+/// backend-specific literal.
+fn conversation_copy_statements(attention_idle: &str) -> [String; 2] {
+    [
+        format!(
+            r#"
+INSERT INTO "code_session" (
+    "id", "owner", "workspace_id", "kind", "harness_kind", "permission_mode",
+    "permission_mode_revision", "model", "reasoning_effort", "fast_mode",
+    "lifecycle", "spawn_epoch", "attention_state", "attention_source",
+    "unrecognized_event_count", "created_at", "project_id", "title",
+    "network_policy", "attachment_revision"
+)
+SELECT
+    "chat"."id", "chat"."owner", NULL, 'interactive', 'internal',
+    CASE
+        WHEN "chat"."permission_mode" IN ('plan', 'ask', 'auto', 'allow')
+        THEN "chat"."permission_mode"
+        ELSE 'ask'
+    END,
+    0, "chat"."model",
+    CASE
+        WHEN "chat"."reasoning_effort" IN (
+            'none', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'
+        )
+        THEN "chat"."reasoning_effort"
+        ELSE NULL
+    END,
+    FALSE, 'idle', 0, {attention_idle}, 'lifecycle', 0, "chat"."created_at",
+    "chat"."project_id", "chat"."title", "chat"."network_policy",
+    "chat"."attachment_revision"
+FROM "chat"
+WHERE NOT EXISTS (
+    SELECT 1 FROM "code_session" WHERE "code_session"."id" = "chat"."id"
+)"#
+        ),
+        r#"
+UPDATE "code_session" SET
+    "project_id" = (
+        SELECT "project_id" FROM "chat" WHERE "chat"."id" = "code_session"."id"
+    ),
+    "title" = (
+        SELECT "title" FROM "chat" WHERE "chat"."id" = "code_session"."id"
+    ),
+    "network_policy" = (
+        SELECT "network_policy" FROM "chat" WHERE "chat"."id" = "code_session"."id"
+    ),
+    "attachment_revision" = (
+        SELECT "attachment_revision" FROM "chat" WHERE "chat"."id" = "code_session"."id"
+    )
+WHERE "id" IN (SELECT "id" FROM "chat")"#
+            .to_owned(),
+    ]
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for ConversationsAreSessions {
+    fn use_transaction(&self) -> Option<bool> {
+        // The SQLite branch rebuilds twenty tables, each under its own
+        // manually managed transaction with foreign keys disabled;
+        // PostgreSQL runs its own.
+        None
+    }
+
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // The migration has landed once the session carries the conversation
+        // columns and the chat table is gone. The SQLite path cannot be one
+        // transaction, so a retry checks both halves and finishes whichever
+        // an interrupted attempt left undone.
+        if manager.has_column("code_session", "project_id").await?
+            && !manager.has_table("chat").await?
+        {
+            return Ok(());
+        }
+        match manager.get_database_backend() {
+            DbBackend::Postgres => {
+                let [copy, adopt] = conversation_copy_statements(r#"'{"type":"idle"}'::jsonb"#);
+                let transaction = manager.begin().await?;
+                let connection = transaction.get_connection();
+                connection
+                    .execute_unprepared(
+                        r#"
+ALTER TABLE "code_session"
+    ADD COLUMN "project_id" uuid,
+    ADD COLUMN "title" text,
+    ADD COLUMN "network_policy" text NOT NULL DEFAULT '{"mode":"off"}',
+    ADD COLUMN "attachment_revision" bigint NOT NULL DEFAULT 0
+        CHECK ("attachment_revision" >= 0)
+        CHECK ("attachment_revision" <= 9007199254740991),
+    ADD CONSTRAINT "fk_code_session_project"
+        FOREIGN KEY ("project_id") REFERENCES "project" ("id") ON DELETE RESTRICT;
+"#,
+                    )
+                    .await?;
+                connection.execute_unprepared(&copy).await?;
+                connection.execute_unprepared(&adopt).await?;
+                connection
+                    .execute_unprepared(
+                        r#"
+DO $repoint$
+DECLARE
+    reference record;
+BEGIN
+    FOR reference IN
+        SELECT
+            constraint_row.conrelid::regclass::text AS table_name,
+            constraint_row.conname AS constraint_name,
+            (
+                SELECT string_agg(quote_ident(attribute_row.attname), ', ' ORDER BY key.ordinality)
+                FROM unnest(constraint_row.conkey) WITH ORDINALITY AS key(attnum, ordinality)
+                JOIN pg_attribute AS attribute_row
+                  ON attribute_row.attrelid = constraint_row.conrelid
+                 AND attribute_row.attnum = key.attnum
+            ) AS columns,
+            constraint_row.confdeltype AS delete_action
+        FROM pg_constraint AS constraint_row
+        WHERE constraint_row.confrelid = 'chat'::regclass
+          AND constraint_row.contype = 'f'
+    LOOP
+        EXECUTE format(
+            'ALTER TABLE %s DROP CONSTRAINT %I',
+            reference.table_name,
+            reference.constraint_name
+        );
+        EXECUTE format(
+            'ALTER TABLE %s ADD CONSTRAINT %I FOREIGN KEY (%s) REFERENCES "code_session" ("id")%s',
+            reference.table_name,
+            reference.constraint_name,
+            reference.columns,
+            CASE reference.delete_action
+                WHEN 'c' THEN ' ON DELETE CASCADE'
+                WHEN 'r' THEN ' ON DELETE RESTRICT'
+                WHEN 'n' THEN ' ON DELETE SET NULL'
+                WHEN 'd' THEN ' ON DELETE SET DEFAULT'
+                ELSE ''
+            END
+        );
+    END LOOP;
+END
+$repoint$;
+DROP TABLE "chat";
+"#,
+                    )
+                    .await?;
+                transaction.commit().await
+            }
+            DbBackend::Sqlite => {
+                let connection = manager.get_connection();
+                for (column, definition) in SQLITE_CONVERSATION_COLUMNS {
+                    if manager.has_column("code_session", column).await? {
+                        continue;
+                    }
+                    connection
+                        .execute_unprepared(&format!(
+                            "ALTER TABLE \"code_session\" ADD COLUMN {definition}"
+                        ))
+                        .await?;
+                }
+                let [copy, adopt] = conversation_copy_statements(r#"'{"type":"idle"}'"#);
+                let transaction = manager.begin().await?;
+                transaction
+                    .get_connection()
+                    .execute_unprepared(&copy)
+                    .await?;
+                transaction
+                    .get_connection()
+                    .execute_unprepared(&adopt)
+                    .await?;
+                transaction.commit().await?;
+                for table in CHAT_REFERENCING_TABLES {
+                    rebuild_sqlite_table(manager, table, repoint_chat_reference).await?;
+                }
+                connection
+                    .execute_unprepared(r#"DROP TABLE "chat""#)
+                    .await
+                    .map(|_| ())
+            }
+            backend => Err(DbErr::Custom(format!(
+                "unsupported database backend for conversation session migration: {backend:?}"
+            ))),
+        }
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // The chat rows now live on `code_session`; recreating `chat` would
+        // leave every conversation's history pointing at a table nothing
+        // writes.
+        Ok(())
+    }
+}
+
+/// Point a stored SQLite definition's chat foreign key at `code_session`.
+/// A definition that no longer names `chat` comes back unchanged, so a retry
+/// after an interrupted attempt skips the tables it already rebuilt; one
+/// that names it more than once is a shape this migration never expected.
+fn repoint_chat_reference(create: &str) -> Result<String, DbErr> {
+    const CHAT: &str = r#"REFERENCES "chat" ("id")"#;
+    const SESSION: &str = r#"REFERENCES "code_session" ("id")"#;
+
+    match create.matches(CHAT).count() {
+        0 => Ok(create.to_owned()),
+        1 => Ok(create.replacen(CHAT, SESSION, 1)),
+        count => Err(DbErr::Custom(format!(
+            "SQLite definition names the chat table {count} times: {create}"
+        ))),
+    }
+}
+
 /// Rebuild a SQLite table from its own stored definition with `rewrite`
 /// applied to the `CREATE TABLE` text, then restore its indexes.
 ///
@@ -3808,6 +4081,7 @@ mod tests {
                 "m20260828_000028_code_connect_handshakes",
                 "m20260901_000001_code_turn_park",
                 "m20260901_000002_internal_engine_sessions",
+                "m20260902_000001_conversations_are_sessions",
             ]
         );
         assert!(db
@@ -3835,9 +4109,9 @@ mod tests {
             .unwrap()
             .is_some());
 
-        // Three steps: the turn park and internal engine session migrations
-        // sit above the handshake one.
-        Migrator::down(&db, Some(3)).await.unwrap();
+        // Four steps: the turn park, internal engine session, and
+        // conversation merge migrations sit above the handshake one.
+        Migrator::down(&db, Some(4)).await.unwrap();
         assert!(db
             .query_one_raw(Statement::from_string(
                 DbBackend::Sqlite,
@@ -3964,6 +4238,249 @@ mod tests {
     /// This checks the internal ordering contract. The versioned release tests
     /// cover the older schema that users actually upgrade from, including the
     /// backend-specific statements in later migrations.
+    /// The rows a pre-merge profile carries: a conversation with two
+    /// messages, a completed turn, its coordinator run, a terminal journal
+    /// row, and a tool call, plus the engine-private pair slice C kept for
+    /// one internal session.
+    async fn seed_pre_merge_conversations(db: &sea_orm::DatabaseConnection) {
+        db.execute_unprepared(
+            r#"
+INSERT INTO chat (
+    id, title, created_at, permission_mode, reasoning_effort, network_policy,
+    owner, engine_private
+) VALUES (
+    '00000000-0000-0000-0000-00000000a001', 'kept', '2026-09-01T00:00:00Z',
+    NULL, 'aggressive', '{"mode":"open"}', 'local', FALSE
+);
+INSERT INTO chat (
+    id, title, created_at, permission_mode, network_policy, owner, engine_private
+) VALUES (
+    '00000000-0000-0000-0000-00000000b001', 'private', '2026-09-01T00:00:00Z',
+    'plan', '{"mode":"open"}', 'local', TRUE
+);
+INSERT INTO code_session (
+    id, owner, workspace_id, kind, harness_kind, permission_mode, lifecycle,
+    spawn_epoch, attention_state, attention_source, created_at
+) VALUES (
+    '00000000-0000-0000-0000-00000000b001', 'local', NULL, 'interactive',
+    'internal', 'plan', 'idle', 1, '{"type":"idle"}', 'lifecycle',
+    '2026-09-01T00:00:00Z'
+);
+INSERT INTO message (id, chat_id, turn_id, seq, role, content, created_at) VALUES (
+    '00000000-0000-0000-0000-00000000a002', '00000000-0000-0000-0000-00000000a001',
+    '00000000-0000-0000-0000-00000000a004', 1, 'user', 'hi', '2026-09-01T00:00:00Z'
+);
+INSERT INTO message (id, chat_id, turn_id, seq, role, content, created_at) VALUES (
+    '00000000-0000-0000-0000-00000000a003', '00000000-0000-0000-0000-00000000a001',
+    '00000000-0000-0000-0000-00000000a004', 2, 'assistant', 'hello',
+    '2026-09-01T00:00:01Z'
+);
+INSERT INTO agent_run (
+    id, chat_id, tier, execution_location, depth, status, attempt_count,
+    max_attempts, claim_count, available_at, created_at, updated_at
+) VALUES (
+    '00000000-0000-0000-0000-00000000a005', '00000000-0000-0000-0000-00000000a001',
+    'foreground', 'in_process', 0, 'active', 0, 0, 0, '2026-09-01T00:00:00Z',
+    '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z'
+);
+INSERT INTO turn_run (
+    id, chat_id, agent_run_id, input_message_id, output_message_id, model,
+    invoked_skills, status, attempt_count, max_attempts, claim_count,
+    available_at, started_at, finished_at, created_at, updated_at
+) VALUES (
+    '00000000-0000-0000-0000-00000000a004', '00000000-0000-0000-0000-00000000a001',
+    '00000000-0000-0000-0000-00000000a005', '00000000-0000-0000-0000-00000000a002',
+    '00000000-0000-0000-0000-00000000a003', 'scripted', '[]', 'completed', 1, 5, 1,
+    '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z', '2026-09-01T00:00:02Z',
+    '2026-09-01T00:00:00Z', '2026-09-01T00:00:02Z'
+);
+INSERT INTO event (chat_id, seq, turn_id, terminal, payload, created_at) VALUES (
+    '00000000-0000-0000-0000-00000000a001', 1, '00000000-0000-0000-0000-00000000a004',
+    TRUE, '{"type":"turn_completed"}', '2026-09-01T00:00:02Z'
+);
+INSERT INTO tool_call (
+    id, chat_id, turn_id, provider_id, history_order, name, arguments, execution,
+    status, result, created_at, resolved_at
+) VALUES (
+    '00000000-0000-0000-0000-00000000a006', '00000000-0000-0000-0000-00000000a001',
+    '00000000-0000-0000-0000-00000000a004', 'scripted', 1, 'exec', '{}', 'server',
+    'completed', 'ok', '2026-09-01T00:00:01Z', '2026-09-01T00:00:01Z'
+)"#,
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn count(db: &sea_orm::DatabaseConnection, sql: &str) -> i64 {
+        db.query_one_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            format!("SELECT count(*) AS n FROM {sql}"),
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get::<i64>("", "n")
+        .unwrap()
+    }
+
+    /// What every path into the merged schema must leave behind: no chat
+    /// table, every seeded row reachable, every foreign key satisfied, the
+    /// plain chat a session with the conversation columns and the code
+    /// columns at rest, and the engine-private pair one row that kept its
+    /// code state.
+    async fn assert_conversations_merged(db: &sea_orm::DatabaseConnection) {
+        assert!(db
+            .query_all_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "PRAGMA foreign_key_check".to_owned(),
+            ))
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            count(db, "sqlite_master WHERE type = 'table' AND name = 'chat'").await,
+            0
+        );
+        assert_eq!(count(db, "code_session").await, 2);
+        for (table, expected) in [
+            ("message", 2),
+            ("agent_run", 1),
+            ("turn_run", 1),
+            ("event", 1),
+            ("tool_call", 1),
+        ] {
+            assert_eq!(
+                count(
+                    db,
+                    &format!("{table} WHERE chat_id = '00000000-0000-0000-0000-00000000a001'")
+                )
+                .await,
+                expected,
+                "{table} rows did not survive"
+            );
+        }
+        let plain = db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT workspace_id, harness_kind, kind, lifecycle, spawn_epoch, \
+                 permission_mode, reasoning_effort, attention_state, attention_source, \
+                 title, network_policy, attachment_revision \
+                 FROM code_session WHERE id = '00000000-0000-0000-0000-00000000a001'"
+                    .to_owned(),
+            ))
+            .await
+            .unwrap()
+            .expect("the chat became a session");
+        assert_eq!(
+            plain.try_get::<Option<String>>("", "workspace_id").unwrap(),
+            None
+        );
+        assert_eq!(
+            plain.try_get::<String>("", "harness_kind").unwrap(),
+            "internal"
+        );
+        assert_eq!(plain.try_get::<String>("", "kind").unwrap(), "interactive");
+        assert_eq!(plain.try_get::<String>("", "lifecycle").unwrap(), "idle");
+        assert_eq!(plain.try_get::<i64>("", "spawn_epoch").unwrap(), 0);
+        assert_eq!(
+            plain.try_get::<String>("", "permission_mode").unwrap(),
+            "ask"
+        );
+        assert_eq!(
+            plain
+                .try_get::<Option<String>>("", "reasoning_effort")
+                .unwrap(),
+            None,
+            "a token this build does not recognize is dropped, not fatal"
+        );
+        assert_eq!(
+            plain.try_get::<String>("", "attention_state").unwrap(),
+            r#"{"type":"idle"}"#
+        );
+        assert_eq!(
+            plain.try_get::<String>("", "attention_source").unwrap(),
+            "lifecycle"
+        );
+        assert_eq!(plain.try_get::<String>("", "title").unwrap(), "kept");
+        assert_eq!(
+            plain.try_get::<String>("", "network_policy").unwrap(),
+            r#"{"mode":"open"}"#
+        );
+        assert_eq!(plain.try_get::<i64>("", "attachment_revision").unwrap(), 0);
+        let pair = db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT spawn_epoch, permission_mode, title \
+                 FROM code_session WHERE id = '00000000-0000-0000-0000-00000000b001'"
+                    .to_owned(),
+            ))
+            .await
+            .unwrap()
+            .expect("the engine-private pair is one row");
+        assert_eq!(pair.try_get::<i64>("", "spawn_epoch").unwrap(), 1);
+        assert_eq!(
+            pair.try_get::<String>("", "permission_mode").unwrap(),
+            "plan"
+        );
+        assert_eq!(pair.try_get::<String>("", "title").unwrap(), "private");
+        let fresh = Database::connect("sqlite::memory:").await.unwrap();
+        Migrator::up(&fresh, None).await.unwrap();
+        assert_eq!(schema_of(db).await, schema_of(&fresh).await);
+    }
+
+    /// A pre-merge SQLite profile keeps every row while the chat table
+    /// becomes session rows and twenty foreign keys move with it.
+    #[tokio::test]
+    async fn a_pre_merge_database_keeps_its_conversations_as_sessions() {
+        use sea_orm_migration::MigrationTrait as _;
+
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let steps = Migrator::migrations().len();
+        Migrator::up(&db, Some(u32::try_from(steps - 1).unwrap()))
+            .await
+            .unwrap();
+        seed_pre_merge_conversations(&db).await;
+
+        Migrator::up(&db, None).await.unwrap();
+
+        assert_conversations_merged(&db).await;
+        // A second pass finds the marker and changes nothing.
+        let manager = SchemaManager::new(&db);
+        super::ConversationsAreSessions.up(&manager).await.unwrap();
+        assert_conversations_merged(&db).await;
+    }
+
+    /// The SQLite branch runs many autocommit steps. An attempt that added a
+    /// column and rebuilt one table before dying must finish on the next
+    /// start: the columns it added are skipped, the table it rebuilt comes
+    /// back unchanged, and the rest lands.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn an_interrupted_conversation_merge_finishes_on_retry() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let steps = Migrator::migrations().len();
+        Migrator::up(&db, Some(u32::try_from(steps - 1).unwrap()))
+            .await
+            .unwrap();
+        seed_pre_merge_conversations(&db).await;
+        let manager = SchemaManager::new(&db);
+        let (column, definition) = super::SQLITE_CONVERSATION_COLUMNS[0];
+        db.execute_unprepared(&format!(
+            "ALTER TABLE \"code_session\" ADD COLUMN {definition}"
+        ))
+        .await
+        .unwrap();
+        assert!(manager.has_column("code_session", column).await.unwrap());
+        super::rebuild_sqlite_table(&manager, "message", super::repoint_chat_reference)
+            .await
+            .unwrap();
+        assert!(manager.has_table("chat").await.unwrap());
+
+        Migrator::up(&db, None).await.unwrap();
+
+        assert_conversations_merged(&db).await;
+    }
+
     /// The SQLite branch of the internal engine migration runs two
     /// autocommit steps. An attempt that rebuilt `code_session` and died
     /// before the marker column must finish on the next start, not report
@@ -3971,8 +4488,11 @@ mod tests {
     #[tokio::test]
     async fn an_interrupted_internal_engine_migration_finishes_on_retry() {
         let db = Database::connect("sqlite::memory:").await.unwrap();
-        let steps = Migrator::migrations().len();
-        Migrator::up(&db, Some(u32::try_from(steps - 1).unwrap()))
+        let steps = Migrator::migrations()
+            .iter()
+            .position(|migration| migration.name() == "m20260901_000002_internal_engine_sessions")
+            .expect("the internal engine session migration is in the chain");
+        Migrator::up(&db, Some(u32::try_from(steps).unwrap()))
             .await
             .unwrap();
         // The first attempt: the rebuild lands, the marker does not.
@@ -3982,7 +4502,7 @@ mod tests {
             .unwrap();
         assert!(!manager.has_column("chat", "engine_private").await.unwrap());
 
-        Migrator::up(&db, None).await.unwrap();
+        Migrator::up(&db, Some(1)).await.unwrap();
 
         assert!(manager.has_column("chat", "engine_private").await.unwrap());
         let workspace_column = db
@@ -3996,6 +4516,8 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(workspace_column.try_get::<i32>("", "not_null").unwrap(), 0);
+        // The rest of the chain then lands on the fresh schema.
+        Migrator::up(&db, None).await.unwrap();
         let fresh = Database::connect("sqlite::memory:").await.unwrap();
         Migrator::up(&fresh, None).await.unwrap();
         assert_eq!(schema_of(&db).await, schema_of(&fresh).await);

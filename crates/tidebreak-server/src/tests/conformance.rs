@@ -88,7 +88,10 @@ async fn sticky_chat_defaults_are_isolated_between_self_host_users() {
     assert_eq!(patched.status(), StatusCode::OK);
 
     let bob_chat = make_chat(&router, &bob).await;
-    assert_eq!(bob_chat.permission_mode, None);
+    assert_eq!(
+        bob_chat.permission_mode,
+        Some(tidebreak_core::PermissionMode::Ask)
+    );
     assert_eq!(
         bob_chat.network_policy,
         tidebreak_core::NetworkPolicy::default()

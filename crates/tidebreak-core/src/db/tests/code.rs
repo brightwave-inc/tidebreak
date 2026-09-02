@@ -24,7 +24,8 @@ use crate::db::code::{
     CodeJournalError, CodeSessionExecutionSettings, CodeTranscriptSearchSource, MAX_REPLAY_EVENTS,
 };
 use crate::{
-    BlobRetirementStatus, ImageMediaType, ImageRef, OwnerId, PermissionMode, ReasoningEffort, Store,
+    BlobRetirementStatus, ChatId, ImageMediaType, ImageRef, OwnerId, PermissionMode,
+    ReasoningEffort, Store,
 };
 use chrono::Utc;
 use sea_orm::ConnectionTrait;
@@ -1889,8 +1890,90 @@ async fn a_capped_replay_keeps_the_newest_events_and_admits_the_head_is_gone() {
     );
 }
 
-/// ADR 0030: no chat entity references a code-mode table or id type, and no
-/// code-mode entity references a chat table or id type.
+/// Decision 0048 step 5: one id resolves in one space. A conversation is a
+/// session row, so the chat store and the session store read the same row
+/// by the same id. A chat the code runtime has never driven is not one of
+/// the runtime's sessions, and a session an external engine drives is not a
+/// chat.
+#[tokio::test]
+async fn one_id_resolves_in_one_space() {
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+
+    let chat = super::sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let as_session = get_session(&store, &owner, CodeSessionId(chat.id.0))
+        .await
+        .unwrap()
+        .expect("a chat resolves as a session");
+    assert_eq!(as_session.workspace_id, None);
+    assert_eq!(as_session.harness_kind, HarnessKind::Internal);
+    assert_eq!(as_session.lifecycle, CodeSessionLifecycle::Idle);
+    assert_eq!(as_session.spawn_epoch, 0);
+    assert!(
+        list_sessions(&store, &owner).await.unwrap().is_empty(),
+        "a chat the runtime never drove is not a runtime session"
+    );
+
+    let session_id = CodeSessionId::new();
+    insert_session(
+        &store,
+        &CodeSession {
+            id: session_id,
+            owner: owner.clone(),
+            workspace_id: None,
+            kind: CodeSessionKind::Interactive,
+            harness_kind: HarnessKind::Internal,
+            harness_version: None,
+            harness_resume_ref: None,
+            permission_mode: PermissionMode::Plan,
+            model: Some("scripted".into()),
+            reasoning_effort: None,
+            fast_mode: false,
+            lifecycle: CodeSessionLifecycle::Idle,
+            fence_reason: None,
+            child_pid: None,
+            child_process_identity: None,
+            spawn_epoch: 1,
+            attention: Attention::working(AttentionSource::Lifecycle),
+            unrecognized_event_count: 0,
+            subagents: Vec::new(),
+            created_at: now(),
+        },
+    )
+    .await
+    .unwrap();
+    let as_chat = store
+        .get_chat(ChatId(session_id.0))
+        .await
+        .unwrap()
+        .expect("an internal session resolves as a chat");
+    assert_eq!(as_chat.permission_mode, Some(PermissionMode::Plan));
+    assert_eq!(as_chat.model.as_deref(), Some("scripted"));
+    assert_eq!(as_chat.title, None);
+    assert!(store
+        .list_chats()
+        .await
+        .unwrap()
+        .iter()
+        .any(|listed| listed.id.0 == session_id.0));
+    assert!(list_sessions(&store, &owner)
+        .await
+        .unwrap()
+        .iter()
+        .any(|listed| listed.id == session_id));
+
+    let (external, _turn) = seed_owner(&store, &owner, "example").await;
+    assert!(
+        store.get_chat(ChatId(external.0)).await.unwrap().is_none(),
+        "a session an external engine drives is not a chat"
+    );
+}
+
+/// Decision 0048 step 5: the session row is the conversation row, so a chat
+/// entity may name `code_session` and nothing else on the code side, no
+/// code-mode entity names a chat id, and the chat and code ops stay apart
+/// until the turn lane and journal merge.
 #[test]
 fn chat_and_code_entities_do_not_cross_reference() {
     fn without_comments(source: &str) -> String {
@@ -1961,8 +2044,7 @@ fn chat_and_code_entities_do_not_cross_reference() {
             );
         } else if current_mod != "code_event" {
             assert!(
-                !line.contains("code_session")
-                    && !line.contains("code_workspace")
+                !line.contains("code_workspace")
                     && !line.contains("code_repo")
                     && !line.contains("CodeSessionId")
                     && !line.contains("RepoId")

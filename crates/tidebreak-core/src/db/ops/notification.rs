@@ -40,7 +40,7 @@ pub(in crate::db) async fn record_work_turn_notification_on<C>(
 where
     C: ConnectionTrait,
 {
-    let Some(chat) = entities::chat::Entity::find_by_id(chat_id.0)
+    let Some(chat) = entities::code_session::Entity::find_by_id(chat_id.0)
         .one(conn)
         .await
         .map_err(store_err)?

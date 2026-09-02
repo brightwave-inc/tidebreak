@@ -8,6 +8,8 @@ use sea_orm::{
 };
 use serde_json::Value;
 
+use crate::attention::{AttentionSource, AttentionState};
+use crate::code::{CodeSessionKind, CodeSessionLifecycle, HarnessKind};
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{AgentRunId, CallId, ChatId, HostRootId, MessageId, ProjectId, TurnId};
@@ -108,36 +110,25 @@ where
         })
 }
 
+/// The session rows that are conversations: no repo-backed workspace and
+/// the internal harness (decision 0048 step 5). A session an external
+/// engine drives has no transcript and no turn lane, so every chat read
+/// applies this and never sees one.
+pub(in crate::db) fn internal_sessions() -> sea_orm::Condition {
+    sea_orm::Condition::all()
+        .add(entities::code_session::Column::WorkspaceId.is_null())
+        .add(entities::code_session::Column::HarnessKind.eq(HarnessKind::Internal.as_str()))
+}
+
 pub(in crate::db) async fn create_chat(
     store: &DbStore,
     chat: &Chat,
     owner: Option<&OwnerId>,
 ) -> Result<()> {
-    create_chat_inner(store, chat, owner, false).await
-}
-
-/// Create the conversation the in-process engine keeps behind one code
-/// session. The row is the engine's durable state, not a conversation of
-/// the owner's: every owner-scoped chat read excludes it, so it is reachable
-/// only through the session that owns it (decision 0048 step 5).
-pub(in crate::db) async fn create_engine_private_chat(
-    store: &DbStore,
-    chat: &Chat,
-    owner: &OwnerId,
-) -> Result<()> {
-    create_chat_inner(store, chat, Some(owner), true).await
-}
-
-async fn create_chat_inner(
-    store: &DbStore,
-    chat: &Chat,
-    owner: Option<&OwnerId>,
-    engine_private: bool,
-) -> Result<()> {
     let transaction = store.conn.begin().await.map_err(store_err)?;
     let project_roots = load_chat_project_roots(&transaction, chat.project_id, owner).await?;
     validate_chat_attachments(chat, &project_roots)?;
-    insert_chat_on(&transaction, chat, owner, engine_private).await?;
+    insert_chat_on(&transaction, chat, owner).await?;
     insert_foreground_agent_run_on(&transaction, chat.id, chat.created_at).await?;
     transaction.commit().await.map_err(store_err)?;
     Ok(())
@@ -157,6 +148,9 @@ pub(in crate::db) async fn create_chat_with_project_defaults(
     let transaction = store.conn.begin().await.map_err(store_err)?;
     let project_roots = load_chat_project_roots(&transaction, base.project_id, owner).await?;
     let mut chat = base.clone();
+    // The session row stores the mode itself, so the conversation handed back
+    // says what a later read says.
+    chat.permission_mode = Some(chat.permission_mode.unwrap_or(PermissionMode::DEFAULT));
     chat.root_attachments = project_roots
         .into_iter()
         .map(|root_id| ChatRootAttachment {
@@ -168,7 +162,7 @@ pub(in crate::db) async fn create_chat_with_project_defaults(
         chat.attachment_revision = 1;
     }
     validate_chat_root_projection(&chat).map_err(|message| AgentError::Store(message.into()))?;
-    insert_chat_on(&transaction, &chat, owner, false).await?;
+    insert_chat_on(&transaction, &chat, owner).await?;
     insert_foreground_agent_run_on(&transaction, chat.id, chat.created_at).await?;
     for (key, value) in settings {
         entities::setting::Entity::insert(entities::setting::ActiveModel {
@@ -219,33 +213,62 @@ where
     Ok(project_from_models(model, roots)?.root_attachments)
 }
 
-async fn insert_chat_on<C>(
-    conn: &C,
-    chat: &Chat,
-    owner: Option<&OwnerId>,
-    engine_private: bool,
-) -> Result<()>
+async fn insert_chat_on<C>(conn: &C, chat: &Chat, owner: Option<&OwnerId>) -> Result<()>
 where
     C: ConnectionTrait,
 {
-    entities::chat::ActiveModel {
+    // A conversation is a session the internal engine hosts (decision 0048
+    // step 5): no workspace, the internal harness, and the code-owned columns
+    // at rest until a session worker attaches. Attention stays derived from
+    // `turn_run` (see `ops::chat_attention`); the idle state written here
+    // only keeps the column well formed.
+    entities::code_session::ActiveModel {
         id: Set(chat.id.0),
-        engine_private: Set(engine_private),
-        project_id: Set(chat.project_id.map(|p| p.0)),
-        title: Set(chat.title.clone()),
+        // The local owner rides the column default (which also keeps this
+        // insert valid against a pre-owner schema in the upgrade tests); only
+        // a named principal writes the column explicitly.
+        owner: match owner {
+            Some(owner) if !owner.is_local() => Set(owner.as_str().to_owned()),
+            _ => sea_orm::ActiveValue::NotSet,
+        },
+        workspace_id: Set(None),
+        kind: Set(CodeSessionKind::Interactive.as_str().to_owned()),
+        harness_kind: Set(HarnessKind::Internal.as_str().to_owned()),
+        harness_version: Set(None),
+        harness_resume_ref: Set(None),
+        // The session column is not nullable; an unset chat mode has always
+        // meant the default.
+        permission_mode: Set(chat
+            .permission_mode
+            .unwrap_or(PermissionMode::DEFAULT)
+            .as_str()
+            .to_owned()),
+        permission_mode_revision: Set(0),
+        permission_mode_intent: Set(None),
+        permission_mode_intent_revision: Set(None),
+        permission_mode_intent_epoch: Set(None),
+        permission_mode_intent_lifecycle: Set(None),
         model: Set(chat.model.clone()),
         // A newly-created chat has no reasoning override (it is set later via
         // `update_chat_metadata`), so leave the column unset when absent — the DB
-        // defaults it to NULL. This also keeps `create_chat` insertable against a
-        // store migrated only to an older schema (the upgrade-safety tests).
+        // defaults it to NULL.
         reasoning_effort: match &chat.reasoning_effort {
             Some(effort) => Set(Some(effort.as_str().to_owned())),
             None => sea_orm::ActiveValue::NotSet,
         },
-        permission_mode: match &chat.permission_mode {
-            Some(mode) => Set(Some(mode.as_str().to_owned())),
-            None => sea_orm::ActiveValue::NotSet,
-        },
+        fast_mode: Set(false),
+        lifecycle: Set(CodeSessionLifecycle::Idle.as_str().to_owned()),
+        fence_reason: Set(None),
+        child_pid: Set(None),
+        child_process_identity: Set(None),
+        spawn_epoch: Set(0),
+        attention_state: Set(serde_json::to_value(AttentionState::Idle)?),
+        attention_source: Set(AttentionSource::Lifecycle.as_str().to_owned()),
+        unrecognized_event_count: Set(0),
+        subagents: Set(None),
+        created_at: Set(chat.created_at),
+        project_id: Set(chat.project_id.map(|p| p.0)),
+        title: Set(chat.title.clone()),
         // Always persist the creation-time choice explicitly. The column's
         // historical off default remains untouched so existing databases and
         // rows are not migrated when the product default changes.
@@ -255,14 +278,6 @@ where
             })?,
         ),
         attachment_revision: Set(chat.attachment_revision),
-        created_at: Set(chat.created_at),
-        // The local owner rides the column default (which also keeps this
-        // insert valid against a pre-owner schema in the upgrade tests); only
-        // a named principal writes the column explicitly.
-        owner: match owner {
-            Some(owner) if !owner.is_local() => Set(owner.as_str().to_owned()),
-            _ => sea_orm::ActiveValue::NotSet,
-        },
     }
     .insert(conn)
     .await
@@ -315,11 +330,11 @@ pub(in crate::db) async fn move_chat_to_project(
     }
     // Someone else's conversation is indistinguishable from an absent one
     // (#853). The owner cannot change under the write lock above.
-    let mut query = entities::chat::Entity::find_by_id(id.0);
+    let mut query = entities::code_session::Entity::find_by_id(id.0);
     if let Some(owner) = owner {
         query = query
-            .filter(entities::chat::Column::Owner.eq(owner.as_str()))
-            .filter(entities::chat::Column::EnginePrivate.eq(false));
+            .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+            .filter(internal_sessions());
     }
     let Some(model) = query.one(&transaction).await.map_err(store_err)? else {
         transaction.rollback().await.map_err(store_err)?;
@@ -380,16 +395,16 @@ pub(in crate::db) async fn move_chat_to_project(
     validate_chat_root_projection_against_project(&chat, &project_roots)
         .map_err(|message| AgentError::Store(message.into()))?;
 
-    let updated = entities::chat::Entity::update_many()
+    let updated = entities::code_session::Entity::update_many()
         .col_expr(
-            entities::chat::Column::ProjectId,
+            entities::code_session::Column::ProjectId,
             sea_orm::sea_query::Expr::value(project_id.map(|project_id| project_id.0)),
         )
         .col_expr(
-            entities::chat::Column::AttachmentRevision,
+            entities::code_session::Column::AttachmentRevision,
             sea_orm::sea_query::Expr::value(chat.attachment_revision),
         )
-        .filter(entities::chat::Column::Id.eq(id.0))
+        .filter(entities::code_session::Column::Id.eq(id.0))
         .exec(&transaction)
         .await
         .map_err(store_err)?;
@@ -419,12 +434,12 @@ pub(in crate::db) async fn set_chat_model(
     id: ChatId,
     model: Option<String>,
 ) -> Result<()> {
-    entities::chat::Entity::update_many()
+    entities::code_session::Entity::update_many()
         .col_expr(
-            entities::chat::Column::Model,
+            entities::code_session::Column::Model,
             sea_orm::sea_query::Expr::value(model),
         )
-        .filter(entities::chat::Column::Id.eq(id.0))
+        .filter(entities::code_session::Column::Id.eq(id.0))
         .exec(&store.conn)
         .await
         .map_err(store_err)?;
@@ -436,12 +451,12 @@ pub(in crate::db) async fn set_chat_title(
     id: ChatId,
     title: Option<String>,
 ) -> Result<()> {
-    entities::chat::Entity::update_many()
+    entities::code_session::Entity::update_many()
         .col_expr(
-            entities::chat::Column::Title,
+            entities::code_session::Column::Title,
             sea_orm::sea_query::Expr::value(title),
         )
-        .filter(entities::chat::Column::Id.eq(id.0))
+        .filter(entities::code_session::Column::Id.eq(id.0))
         .exec(&store.conn)
         .await
         .map_err(store_err)?;
@@ -458,13 +473,13 @@ pub(in crate::db) async fn set_chat_title_if_unset(
     id: ChatId,
     title: &str,
 ) -> Result<bool> {
-    let result = entities::chat::Entity::update_many()
+    let result = entities::code_session::Entity::update_many()
         .col_expr(
-            entities::chat::Column::Title,
+            entities::code_session::Column::Title,
             sea_orm::sea_query::Expr::value(title),
         )
-        .filter(entities::chat::Column::Id.eq(id.0))
-        .filter(entities::chat::Column::Title.is_null())
+        .filter(entities::code_session::Column::Id.eq(id.0))
+        .filter(entities::code_session::Column::Title.is_null())
         .exec(&store.conn)
         .await
         .map_err(store_err)?;
@@ -488,31 +503,31 @@ pub(in crate::db) async fn update_chat_metadata(
         && permission_mode.is_none()
         && network_policy.is_none()
     {
-        let mut query = entities::chat::Entity::find_by_id(id.0);
+        let mut query = entities::code_session::Entity::find_by_id(id.0);
         if let Some(owner) = owner {
             query = query
-                .filter(entities::chat::Column::Owner.eq(owner.as_str()))
-                .filter(entities::chat::Column::EnginePrivate.eq(false));
+                .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+                .filter(internal_sessions());
         }
         return Ok(query.one(&store.conn).await.map_err(store_err)?.is_some());
     }
 
-    let mut update = entities::chat::Entity::update_many();
+    let mut update = entities::code_session::Entity::update_many();
     if let Some(title) = title {
         update = update.col_expr(
-            entities::chat::Column::Title,
+            entities::code_session::Column::Title,
             sea_orm::sea_query::Expr::value(title),
         );
     }
     if let Some(model) = model {
         update = update.col_expr(
-            entities::chat::Column::Model,
+            entities::code_session::Column::Model,
             sea_orm::sea_query::Expr::value(model),
         );
     }
     if let Some(reasoning_effort) = reasoning_effort {
         update = update.col_expr(
-            entities::chat::Column::ReasoningEffort,
+            entities::code_session::Column::ReasoningEffort,
             sea_orm::sea_query::Expr::value(
                 reasoning_effort.map(|effort| effort.as_str().to_owned()),
             ),
@@ -520,8 +535,13 @@ pub(in crate::db) async fn update_chat_metadata(
     }
     if let Some(permission_mode) = permission_mode {
         update = update.col_expr(
-            entities::chat::Column::PermissionMode,
-            sea_orm::sea_query::Expr::value(permission_mode.map(|mode| mode.as_str().to_owned())),
+            entities::code_session::Column::PermissionMode,
+            sea_orm::sea_query::Expr::value(
+                permission_mode
+                    .unwrap_or(PermissionMode::DEFAULT)
+                    .as_str()
+                    .to_owned(),
+            ),
         );
     }
     if let Some(network_policy) = network_policy {
@@ -529,15 +549,15 @@ pub(in crate::db) async fn update_chat_metadata(
             AgentError::Store(format!("could not encode chat network policy: {error}"))
         })?;
         update = update.col_expr(
-            entities::chat::Column::NetworkPolicy,
+            entities::code_session::Column::NetworkPolicy,
             sea_orm::sea_query::Expr::value(encoded),
         );
     }
-    let mut update = update.filter(entities::chat::Column::Id.eq(id.0));
+    let mut update = update.filter(entities::code_session::Column::Id.eq(id.0));
     if let Some(owner) = owner {
         update = update
-            .filter(entities::chat::Column::Owner.eq(owner.as_str()))
-            .filter(entities::chat::Column::EnginePrivate.eq(false));
+            .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+            .filter(internal_sessions());
     }
     let result = update.exec(&store.conn).await.map_err(store_err)?;
     Ok(result.rows_affected == 1)
@@ -548,11 +568,9 @@ pub(in crate::db) async fn get_chat(
     id: ChatId,
     owner: Option<&OwnerId>,
 ) -> Result<Option<Chat>> {
-    let mut query = entities::chat::Entity::find_by_id(id.0);
+    let mut query = entities::code_session::Entity::find_by_id(id.0).filter(internal_sessions());
     if let Some(owner) = owner {
-        query = query
-            .filter(entities::chat::Column::Owner.eq(owner.as_str()))
-            .filter(entities::chat::Column::EnginePrivate.eq(false));
+        query = query.filter(entities::code_session::Column::Owner.eq(owner.as_str()));
     }
     let mut rows = query
         .find_with_related(entities::chat_root_attachment::Entity)
@@ -566,7 +584,7 @@ pub(in crate::db) async fn get_chat(
 }
 
 pub(in crate::db) async fn chat_owner(store: &DbStore, id: ChatId) -> Result<Option<OwnerId>> {
-    let Some(model) = entities::chat::Entity::find_by_id(id.0)
+    let Some(model) = entities::code_session::Entity::find_by_id(id.0)
         .one(&store.conn)
         .await
         .map_err(store_err)?
@@ -580,11 +598,9 @@ pub(in crate::db) async fn list_chats(
     store: &DbStore,
     owner: Option<&OwnerId>,
 ) -> Result<Vec<Chat>> {
-    let mut query = entities::chat::Entity::find();
+    let mut query = entities::code_session::Entity::find().filter(internal_sessions());
     if let Some(owner) = owner {
-        query = query
-            .filter(entities::chat::Column::Owner.eq(owner.as_str()))
-            .filter(entities::chat::Column::EnginePrivate.eq(false));
+        query = query.filter(entities::code_session::Column::Owner.eq(owner.as_str()));
     }
     let mut chats = query
         .find_with_related(entities::chat_root_attachment::Entity)
@@ -623,19 +639,23 @@ pub(in crate::db) async fn delete_chat(
     }
     // Someone else's chat is indistinguishable from an absent one (#853). The
     // owner cannot change while the write lock above is held: no owner
-    // transfer exists.
+    // transfer exists. A session an external engine drives is not a chat,
+    // and this cascade is the only deleter of a conversation row: it never
+    // reaches one that has a workspace.
+    let mut conversation =
+        entities::code_session::Entity::find_by_id(chat_id.0).filter(internal_sessions());
     if let Some(owner) = owner {
-        let owned = entities::chat::Entity::find_by_id(chat_id.0)
-            .filter(entities::chat::Column::Owner.eq(owner.as_str()))
-            .filter(entities::chat::Column::EnginePrivate.eq(false))
-            .one(&transaction)
-            .await
-            .map_err(store_err)?
-            .is_some();
-        if !owned {
-            transaction.rollback().await.map_err(store_err)?;
-            return Ok(DeleteChatOutcome::NotFound);
-        }
+        conversation =
+            conversation.filter(entities::code_session::Column::Owner.eq(owner.as_str()));
+    }
+    if conversation
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .is_none()
+    {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(DeleteChatOutcome::NotFound);
     }
 
     let roots_attached = entities::chat_root_attachment::Entity::find()
@@ -951,7 +971,7 @@ pub(in crate::db) async fn delete_chat(
         .exec(&transaction)
         .await
         .map_err(store_err)?;
-    entities::chat::Entity::delete_by_id(chat_id.0)
+    entities::code_session::Entity::delete_by_id(chat_id.0)
         .exec(&transaction)
         .await
         .map_err(store_err)?;
@@ -977,9 +997,9 @@ pub(in crate::db) async fn get_chat_transcript(
     }
     // Someone else's transcript is indistinguishable from an absent one (#853).
     if let Some(owner) = owner {
-        let owned = entities::chat::Entity::find_by_id(chat_id.0)
-            .filter(entities::chat::Column::Owner.eq(owner.as_str()))
-            .filter(entities::chat::Column::EnginePrivate.eq(false))
+        let owned = entities::code_session::Entity::find_by_id(chat_id.0)
+            .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+            .filter(internal_sessions())
             .one(&transaction)
             .await
             .map_err(store_err)?
@@ -1824,7 +1844,7 @@ fn decode_sequenced_events(rows: Vec<entities::event::Model>) -> Result<Vec<Sequ
 }
 
 fn chat_from_models(
-    model: entities::chat::Model,
+    model: entities::code_session::Model,
     rows: Vec<entities::chat_root_attachment::Model>,
 ) -> Result<Chat> {
     if rows.len() > MAX_ROOT_ATTACHMENTS {
@@ -1860,10 +1880,7 @@ fn chat_from_models(
             .reasoning_effort
             .as_deref()
             .and_then(ReasoningEffort::from_str),
-        permission_mode: model
-            .permission_mode
-            .as_deref()
-            .and_then(PermissionMode::from_str),
+        permission_mode: PermissionMode::from_str(&model.permission_mode),
         network_policy: serde_json::from_str(&model.network_policy).map_err(|error| {
             AgentError::Store(format!(
                 "chat {} has an invalid network policy: {error}",

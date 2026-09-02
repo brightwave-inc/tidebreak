@@ -17,6 +17,7 @@ use crate::model::OwnerId;
 use super::super::{entities, store_err, DbStore};
 use super::acquire_chat_write_lock;
 use super::blob as blob_ops;
+use super::conversation::internal_sessions;
 
 /// Establish `chat_id`'s authority to attach `image`.
 ///
@@ -45,9 +46,9 @@ pub(in crate::db) async fn publish(
         return Ok(false);
     }
     if let Some(owner) = owner {
-        let owned = entities::chat::Entity::find_by_id(chat_id.0)
-            .filter(entities::chat::Column::Owner.eq(owner.as_str()))
-            .filter(entities::chat::Column::EnginePrivate.eq(false))
+        let owned = entities::code_session::Entity::find_by_id(chat_id.0)
+            .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+            .filter(internal_sessions())
             .one(&transaction)
             .await
             .map_err(store_err)?

@@ -16,6 +16,7 @@ use crate::{
 };
 
 use super::super::{entities, store_err, DbStore};
+use super::conversation::internal_sessions;
 
 /// One renderer-owned prompt that is parked, before it is projected for a
 /// particular caller. Rows arrive grouped by kind and ordered within each.
@@ -39,9 +40,9 @@ pub(in crate::db) async fn list_pending_chat_prompts(
 ) -> Result<Vec<PendingChatPrompt>> {
     let visible = match owner {
         Some(owner) => Some(
-            entities::chat::Entity::find()
-                .filter(entities::chat::Column::Owner.eq(owner.as_str()))
-                .filter(entities::chat::Column::EnginePrivate.eq(false))
+            entities::code_session::Entity::find()
+                .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+                .filter(internal_sessions())
                 .all(&store.conn)
                 .await
                 .map_err(store_err)?
