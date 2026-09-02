@@ -399,6 +399,7 @@ mod tests {
         generate::collect_from::<tidebreak_core::MemoryDigest>(&cfg, &mut out);
         generate::collect_from::<tidebreak_core::MemoryRevision>(&cfg, &mut out);
         generate::collect_from::<tidebreak_core::MemoryIngestReceipt>(&cfg, &mut out);
+        generate::collect_from::<tidebreak_core::MemorySweepStatus>(&cfg, &mut out);
         generate::collect_from::<crate::routes::CreateMemoryRecordBody>(&cfg, &mut out);
         generate::collect_from::<crate::routes::UpdateMemoryRecordBody>(&cfg, &mut out);
         generate::collect_from::<crate::routes::MemoryStatusBody>(&cfg, &mut out);

@@ -1254,3 +1254,30 @@ pub(crate) enum MemoryRevision {
     Snapshot,
     CreatedAt,
 }
+
+#[derive(DeriveIden)]
+pub(crate) enum MemorySweepScope {
+    Table,
+    Owner,
+    ScopeKind,
+    ScopeRef,
+    Fingerprint,
+    ProposalId,
+    LastModelStepAt,
+    CreatedAt,
+    UpdatedAt,
+}
+
+#[derive(DeriveIden)]
+pub(crate) enum MemorySweepRun {
+    Table,
+    Owner,
+    RanAt,
+    ScopeKind,
+    ScopeRef,
+    Outcome,
+    Expired,
+    Proposed,
+    CreatedAt,
+    UpdatedAt,
+}

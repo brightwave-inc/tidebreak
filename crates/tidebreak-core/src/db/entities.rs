@@ -2329,3 +2329,52 @@ pub mod memory_revision {
 
     impl ActiveModelBehavior for ActiveModel {}
 }
+
+pub mod memory_sweep_scope {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "memory_sweep_scope")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub owner: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub scope_kind: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub scope_ref: String,
+        pub fingerprint: String,
+        pub proposal_id: Option<Uuid>,
+        pub last_model_step_at: Option<DateTimeUtc>,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod memory_sweep_run {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "memory_sweep_run")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub owner: String,
+        pub ran_at: DateTimeUtc,
+        pub scope_kind: Option<String>,
+        pub scope_ref: Option<String>,
+        pub outcome: String,
+        pub expired: i64,
+        pub proposed: i64,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}

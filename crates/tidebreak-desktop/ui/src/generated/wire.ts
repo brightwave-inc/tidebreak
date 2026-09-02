@@ -3680,6 +3680,49 @@ export type MemoryStatus = "tracking" | "proposed" | "active" | "archived" | "re
 export type MemoryStatusBody = { expected_revision: number, status: MemoryStatus, };
 
 /**
+ * Why one maintenance pass ended the way it did for an owner.
+ *
+ * Mechanical expiry runs on every pass; the outcome names what happened to
+ * the bounded consolidation step, which is the part that can wait, park, or
+ * need a model.
+ */
+export type MemorySweepOutcome = "proposed" | "declined" | "parked" | "unchanged" | "owner_busy" | "no_model" | "rate_limited";
+
+/**
+ * The maintenance sweep's last completed pass for one owner.
+ */
+export type MemorySweepRun = {
+/**
+ * When the pass completed.
+ */
+ran_at: string,
+/**
+ * The scope the consolidation step considered, when one was picked.
+ */
+scope: MemoryScope | null,
+/**
+ * What happened to the consolidation step.
+ */
+outcome: MemorySweepOutcome,
+/**
+ * Records mechanically archived by this pass.
+ */
+expired: number,
+/**
+ * Merge proposals this pass stored for review.
+ */
+proposed: number, };
+
+/**
+ * Answer of `GET /memory/sweep`: the last run, or `None` before the first.
+ */
+export type MemorySweepStatus = {
+/**
+ * The most recent completed pass for the caller.
+ */
+last_run: MemorySweepRun | null, };
+
+/**
  * Whether a backend guarantees that a returned write is durable now.
  */
 export type MemoryWriteState = "committed" | "pending";

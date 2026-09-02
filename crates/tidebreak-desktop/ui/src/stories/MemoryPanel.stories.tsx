@@ -5,6 +5,7 @@ import type {
   MemoryRecord,
   MemoryRevision,
   MemorySettings,
+  MemorySweepStatus,
 } from "@/api";
 import { MemoryPanel } from "@/settings/MemoryPanel";
 
@@ -90,6 +91,38 @@ function digestFor(records: MemoryRecord[], byteCap = 8192) {
   };
 }
 
+const neverRan: MemorySweepStatus = { last_run: null };
+
+const sweptWithProposal: MemorySweepStatus = {
+  last_run: {
+    ran_at: "2026-09-02T08:30:00Z",
+    scope: { kind: "personal" },
+    outcome: "proposed",
+    expired: 1,
+    proposed: 1,
+  },
+};
+
+const sweptParked: MemorySweepStatus = {
+  last_run: {
+    ran_at: "2026-09-02T08:30:00Z",
+    scope: { kind: "personal" },
+    outcome: "parked",
+    expired: 0,
+    proposed: 0,
+  },
+};
+
+const sweptWithoutModel: MemorySweepStatus = {
+  last_run: {
+    ran_at: "2026-09-02T08:30:00Z",
+    scope: { kind: "personal" },
+    outcome: "no_model",
+    expired: 0,
+    proposed: 0,
+  },
+};
+
 const settingsWith = (memory: MemorySettings) =>
   ({ memory }) as unknown as Awaited<ReturnType<ApiClient["getSettings"]>>;
 
@@ -99,6 +132,7 @@ function stubClient(
     fail?: boolean;
     revisions?: MemoryRevision[];
     memory?: MemorySettings;
+    sweep?: MemorySweepStatus;
   },
 ): ApiClient {
   let memory: MemorySettings = options?.memory ?? {
@@ -124,6 +158,10 @@ function stubClient(
     getMemoryDigest: async () => {
       if (options?.fail) throw new Error("The memory backend is unavailable.");
       return digestFor(records.filter((record) => record.status === "active"));
+    },
+    getMemorySweepStatus: async () => {
+      if (options?.fail) throw new Error("The memory backend is unavailable.");
+      return options?.sweep ?? neverRan;
     },
     getMemoryRevisions: async () => options?.revisions ?? [],
   } as unknown as ApiClient;
@@ -182,7 +220,38 @@ export const DigestNearCap: Story = {
       listMemoryRecords: async () => [active, proposal],
       getMemoryDigest: async () =>
         digestFor([active], Math.max(1, digestFor([active]).byte_len - 1)),
+      getMemorySweepStatus: async () => neverRan,
       getMemoryRevisions: async () => revisions,
     } as unknown as ApiClient,
+  },
+};
+
+/** Maintenance archived an expired record and proposed a merge for review. */
+export const MaintenanceProposed: Story = {
+  args: {
+    client: stubClient([proposal, active, hypothesis], {
+      revisions,
+      sweep: sweptWithProposal,
+    }),
+  },
+};
+
+/** A dismissed merge parked the scope until its records change. */
+export const MaintenanceParked: Story = {
+  args: {
+    client: stubClient([active, hypothesis], {
+      revisions: [],
+      sweep: sweptParked,
+    }),
+  },
+};
+
+/** No utility model resolves, so only mechanical expiry runs. */
+export const MaintenanceNoModel: Story = {
+  args: {
+    client: stubClient([active, hypothesis], {
+      revisions: [],
+      sweep: sweptWithoutModel,
+    }),
   },
 };

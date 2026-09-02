@@ -3177,6 +3177,13 @@ pub mod code {
     pub use super::ops::code::*;
 }
 
+/// Durable state for the memory maintenance sweep. Separate from the
+/// [`crate::MemoryBackend`] trait: the sweep is a product driver above the
+/// backend boundary, not a capability a backend declares.
+pub mod memory_sweep {
+    pub use super::ops::memory_sweep::*;
+}
+
 /// SeaORM entity models. Kept internal — the public `Store` API speaks the domain
 /// types (`Chat`, `Message`), never these, so the ORM never leaks into the
 /// crate's contract.

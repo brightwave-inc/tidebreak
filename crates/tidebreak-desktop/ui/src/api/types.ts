@@ -133,6 +133,9 @@ import {
   type MemoryScope as WireMemoryScope,
   type MemorySearchHit as WireMemorySearchHit,
   type MemoryStatus as WireMemoryStatus,
+  type MemorySweepOutcome as WireMemorySweepOutcome,
+  type MemorySweepRun as WireMemorySweepRun,
+  type MemorySweepStatus as WireMemorySweepStatus,
   type ExecBackend,
   type ExecDegradation,
   type ExecFileChangeSummary as WireExecFileChangeSummary,
@@ -1239,6 +1242,9 @@ export type MemorySettings = WireMemorySettings;
 export type MemoryScope = WireMemoryScope;
 export type MemorySearchHit = WireMemorySearchHit;
 export type MemoryStatus = WireMemoryStatus;
+export type MemorySweepOutcome = WireMemorySweepOutcome;
+export type MemorySweepRun = WireMemorySweepRun;
+export type MemorySweepStatus = WireMemorySweepStatus;
 
 /** One isolated worktree + branch on a repo. */
 export type CodeWorkspaceSnapshot = WireCodeWorkspaceSnapshot;

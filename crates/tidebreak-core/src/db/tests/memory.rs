@@ -302,3 +302,134 @@ async fn an_active_cap_failure_rolls_back_the_record_and_revision() {
         1
     );
 }
+
+/// A merge proposal justifies itself through its superseding links, so the
+/// storage layer must reject one whose sources do not resolve rather than
+/// store it evidence-less.
+#[tokio::test]
+async fn a_merge_proposal_with_unresolvable_sources_is_rejected() {
+    let (_directory, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let source = user_record(
+        MemoryScope::Personal,
+        MemoryStatus::Active,
+        "When rebasing",
+        "Rebase before trusting green.",
+        7,
+    );
+    store.put(&owner, source.clone()).await.unwrap();
+
+    let missing = MemoryRecordId::new();
+    let mut proposal = user_record(
+        MemoryScope::Personal,
+        MemoryStatus::Proposed,
+        "When updating a branch",
+        "Rebase onto main and rerun checks before trusting green.",
+        8,
+    );
+    proposal.provenance.author = MemoryAuthor::Model;
+    proposal.links = vec![
+        MemoryLink {
+            record_id: source.id,
+            relation: MemoryLinkRelation::Supersedes,
+        },
+        MemoryLink {
+            record_id: missing,
+            relation: MemoryLinkRelation::Supersedes,
+        },
+    ];
+    assert_eq!(
+        store.put(&owner, proposal.clone()).await,
+        Err(MemoryError::InvalidRecord(format!(
+            "linked memory record {missing} does not exist"
+        )))
+    );
+    assert!(store.get(&owner, proposal.id).await.unwrap().is_none());
+}
+
+/// Approving a merge is one transaction: a source that cannot archive rolls
+/// back the sources that could, and the proposal stays proposed.
+#[tokio::test]
+async fn a_failed_merge_approval_leaves_every_source_untouched() {
+    let (_directory, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let first = user_record(
+        MemoryScope::Personal,
+        MemoryStatus::Active,
+        "When publishing releases",
+        "Tag before publishing.",
+        9,
+    );
+    let second = user_record(
+        MemoryScope::Personal,
+        MemoryStatus::Active,
+        "When drafting releases",
+        "Draft the notes before tagging.",
+        10,
+    );
+    store.put(&owner, first.clone()).await.unwrap();
+    store.put(&owner, second.clone()).await.unwrap();
+
+    let mut proposal = user_record(
+        MemoryScope::Personal,
+        MemoryStatus::Proposed,
+        "When cutting a release",
+        "Draft the notes, tag, then publish.",
+        11,
+    );
+    proposal.provenance.author = MemoryAuthor::Model;
+    proposal.links = vec![
+        MemoryLink {
+            record_id: first.id,
+            relation: MemoryLinkRelation::Supersedes,
+        },
+        MemoryLink {
+            record_id: second.id,
+            relation: MemoryLinkRelation::Supersedes,
+        },
+    ];
+    store.put(&owner, proposal.clone()).await.unwrap();
+
+    // Archive one source after the proposal stored, so approval finds it
+    // no longer active and must fail midway.
+    store
+        .set_status(
+            &owner,
+            MemoryStatusChange {
+                id: second.id,
+                expected_revision: 1,
+                status: MemoryStatus::Archived,
+            },
+        )
+        .await
+        .unwrap();
+
+    let error = store
+        .set_status(
+            &owner,
+            MemoryStatusChange {
+                id: proposal.id,
+                expected_revision: 1,
+                status: MemoryStatus::Active,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, MemoryError::InvalidRecord(_)));
+
+    let untouched = store.get(&owner, first.id).await.unwrap().unwrap();
+    assert_eq!(untouched.status, MemoryStatus::Active);
+    assert_eq!(untouched.revision, 1);
+    assert_eq!(untouched.superseded_by, None);
+    assert_eq!(
+        store
+            .revision_history(&owner, first.id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let still_proposed = store.get(&owner, proposal.id).await.unwrap().unwrap();
+    assert_eq!(still_proposed.status, MemoryStatus::Proposed);
+    assert_eq!(still_proposed.revision, 1);
+}

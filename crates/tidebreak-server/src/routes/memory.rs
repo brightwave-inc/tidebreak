@@ -285,6 +285,21 @@ pub async fn digest(
     Ok(Json(memory.assemble_context(scope.scope()?).await?))
 }
 
+/// `GET /memory/sweep` — the maintenance sweep's last completed pass.
+pub async fn sweep_status(
+    axum::extract::State(state): axum::extract::State<crate::state::AppState>,
+    auth: crate::principal::AuthContext,
+) -> Result<Json<tidebreak_core::MemorySweepStatus>, ServerError> {
+    let Some(db) = state.memory.as_ref() else {
+        return Err(ServerError::internal(
+            "memory storage is not configured on this server",
+        ));
+    };
+    Ok(Json(
+        crate::memory_sweep::sweep_status(db, &auth.principal.owner_id()).await?,
+    ))
+}
+
 /// `GET /memory/records/{id}/revisions` — return an owned record's history.
 pub async fn revisions(
     memory: ScopedMemory,

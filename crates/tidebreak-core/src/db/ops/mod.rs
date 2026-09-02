@@ -23,6 +23,7 @@ pub(in crate::db) mod document;
 pub(in crate::db) mod exec_file_change;
 pub(in crate::db) mod inbox;
 pub(in crate::db) mod memory;
+pub(in crate::db) mod memory_sweep;
 pub(in crate::db) mod message_attachment;
 pub(in crate::db) mod message_document_attachment;
 pub(in crate::db) mod notification;
