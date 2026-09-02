@@ -184,7 +184,7 @@ pub async fn discover_openapi_documents(
 }
 
 async fn probe_location(url: &str) -> Option<SpecDiscoveryCandidate> {
-    match fetch_spec_document_detailed(url, SpecRedirectPolicy::SameOrigin).await {
+    match fetch_spec_document_detailed(url, SpecRedirectPolicy::SameOrigin, false).await {
         Ok(fetched) => Some(classify_document(
             url,
             fetched.content_type.as_deref(),

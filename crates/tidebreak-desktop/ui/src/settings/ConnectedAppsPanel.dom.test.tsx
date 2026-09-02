@@ -76,6 +76,7 @@ const listing: ConnectedAppsInfo = {
       placement: "bearer",
       updated_at: "2026-08-03T00:00:00Z",
       used_by_app_count: 1,
+      allow_loopback_http: false,
     },
   ],
 };
@@ -298,6 +299,7 @@ describe("ConnectedAppsPanel", () => {
           base_url: "https://api.example.com/v2",
           openapi_document: '{"openapi": "3.0.3"}',
           credential: { set: { value: SECRET, placement: "bearer" } },
+          allow_loopback_http: false,
         },
       ),
     );
@@ -379,6 +381,7 @@ describe("ConnectedAppsPanel", () => {
           document_sha256: "cd".repeat(32),
           operation_ids: ["listOrganizations"],
           credential: "none",
+          allow_loopback_http: false,
         },
       ),
     );
@@ -528,5 +531,34 @@ describe("ConnectedAppsPanel", () => {
       "JSON invalid JSON syntax at line 2, column 5. Check line 2, column 5",
     );
     expect(alert).not.toHaveTextContent(/^400:/);
+  });
+
+  it("requires loopback HTTP consent before save and hints at MCP for /mcp paths", async () => {
+    const client = api();
+    const user = userEvent.setup();
+    render(<ConnectedAppsPanel client={client} managed={false} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: /Add REST API/ }),
+    );
+    await user.type(screen.getByLabelText(/^Name$/), "Local");
+    await user.type(
+      screen.getByLabelText(/Base URL/),
+      "http://127.0.0.1:23373/v0/mcp",
+    );
+    expect(
+      screen.getByText(/Settings → MCP servers as a remote HTTP server/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/sends the credential in clear text to 127.0.0.1 only/),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Save$/ })).toBeDisabled();
+
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: /Send the credential in clear text to this loopback address/,
+      }),
+    );
+    expect(screen.getByRole("button", { name: /^Save$/ })).toBeEnabled();
   });
 });
