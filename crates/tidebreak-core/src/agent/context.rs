@@ -507,6 +507,12 @@ impl Agent {
         if self.config.web_search != super::types::TurnWebSearch::Host {
             specs.retain(|spec| spec.name != crate::WEB_SEARCH_TOOL);
         }
+        // The memory verb rides with the memory digest: the surface that
+        // composed no digest withheld the verb from the prompt, and the wire
+        // list must agree or the model is offered a tool the turn refuses.
+        if !self.config.memory_tool {
+            specs.retain(|spec| spec.name != crate::MEMORY_TOOL);
+        }
         specs
     }
 

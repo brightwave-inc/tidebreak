@@ -100,6 +100,22 @@ impl Tool for MemoryTool {
                 ));
             }
         }
+        // The global switch composes no digest and withholds the verb; an
+        // unadvertised call must not read or propose past it either.
+        let enabled = self
+            .store
+            .get_setting(crate::routes::MEMORY_ENABLED_SETTING)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true);
+        if !enabled {
+            return Ok(ToolOutput::failed(
+                ToolErrorCategory::UserDeclined,
+                "memory is switched off in settings; do not retry",
+            ));
+        }
         // Memory rows are owner-scoped at every backend operation. Fail
         // closed when the store cannot name the person this conversation
         // belongs to, rather than defaulting anyone onto the local scope.

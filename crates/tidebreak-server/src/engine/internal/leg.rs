@@ -437,10 +437,12 @@ fn freeze_foreground_turn_surface_with_folders(
     // composes no digest — an incognito chat, memory switched off, no
     // backend, or an owner the store cannot name — must not advertise a verb
     // whose reads and proposals it is refusing.
-    if memory_digest.is_none() {
+    let memory_tool = memory_digest.is_some() && agent_config.tools_supported;
+    if !memory_tool {
         specs.retain(|spec| spec.name != tidebreak_core::MEMORY_TOOL);
     }
     agent_config.web_search = web_search;
+    agent_config.memory_tool = memory_tool;
     agent_config.system_prompt = Some(crate::foreground_prompt::compose_for_surface(
         &specs,
         exec_folders,
@@ -3638,6 +3640,58 @@ mod committed_event_drain_tests {
             prompt.contains("exec"),
             "off must not empty the rest of the tool surface: {prompt}"
         );
+    }
+
+    #[test]
+    fn a_turn_without_a_memory_digest_withholds_the_memory_verb_from_the_wire() {
+        let mut registry = ToolRegistry::new();
+        registry.register_client(
+            tidebreak_core::memory_tool_spec(),
+            tidebreak_core::ApprovalClass::ReadOnly,
+        );
+        registry.register_client(
+            tidebreak_core::ToolSpec {
+                name: "exec".into(),
+                description: "run a command".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            },
+            tidebreak_core::ApprovalClass::Sensitive,
+        );
+        let registry = Arc::new(registry);
+        let freeze = |memory_digest: Option<&str>| {
+            freeze_foreground_turn_surface_with_folders(
+                registry.clone(),
+                &AgentConfig {
+                    tools_supported: true,
+                    ..AgentConfig::default()
+                },
+                &[],
+                &[],
+                &[],
+                &tidebreak_core::NetworkPolicy::default(),
+                crate::code_execution::DEFAULT_TIMEOUT_MS,
+                false,
+                None,
+                None,
+                false,
+                tidebreak_core::TurnWebSearch::Off,
+                memory_digest,
+            )
+        };
+
+        // No digest: the prompt and the wire list agree that there is no verb.
+        let off = freeze(None);
+        assert!(!off.agent_config.memory_tool);
+        let prompt = off.agent_config.system_prompt.as_deref().unwrap();
+        assert!(
+            !prompt.contains(tidebreak_core::MEMORY_TOOL),
+            "a digest-less turn still described the memory verb: {prompt}"
+        );
+        assert!(prompt.contains("exec"), "the rest of the surface stays");
+
+        // An empty digest still composes, so the verb rides along.
+        let on = freeze(Some(""));
+        assert!(on.agent_config.memory_tool);
     }
 
     #[test]
