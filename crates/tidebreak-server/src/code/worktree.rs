@@ -157,6 +157,8 @@ impl ArchiveBlock {
 pub(crate) enum WorktreeError {
     #[error("{0}")]
     User(String),
+    #[error("You cannot start from `{looked_for}`. None of these resolve: {tried}. Choose a reachable base ref and try again.")]
+    MissingBaseRef { looked_for: String, tried: String },
     #[error("{0}")]
     Internal(String),
     #[error("{0}")]
@@ -168,6 +170,16 @@ pub(crate) enum WorktreeError {
 impl WorktreeError {
     pub(crate) fn user(message: impl Into<String>) -> Self {
         Self::User(message.into())
+    }
+
+    fn missing_base_ref(looked_for: impl Into<String>, candidates: &[String]) -> Self {
+        let looked_for = looked_for.into();
+        let tried = if candidates.is_empty() {
+            looked_for.clone()
+        } else {
+            candidates.join(", ")
+        };
+        Self::MissingBaseRef { looked_for, tried }
     }
 
     fn internal(message: impl Into<String>) -> Self {
@@ -507,6 +519,76 @@ pub(crate) async fn validate_repo_path(path: &Path) -> Result<ValidatedRepo, Wor
         ))
     })?;
     Ok(ValidatedRepo { toplevel })
+}
+
+/// Resolve the default base ref from the repository instead of assuming `main`.
+///
+/// Tries the configured ref, then the target of `refs/remotes/origin/HEAD`,
+/// then `main`, then `master`, then the current branch. A remote-only
+/// `origin/<name>` is accepted when the local branch does not exist.
+pub(crate) async fn resolve_default_base_ref(
+    repo_root: &Path,
+    configured: Option<&str>,
+) -> Result<String, WorktreeError> {
+    let configured = configured.map(str::trim).filter(|value| !value.is_empty());
+
+    let mut logical = Vec::new();
+    if let Some(configured) = configured {
+        push_unique(&mut logical, configured.to_owned());
+    }
+    if let Some(origin_default) = origin_head_branch(repo_root).await {
+        push_unique(&mut logical, origin_default);
+    }
+    push_unique(&mut logical, "main".into());
+    push_unique(&mut logical, "master".into());
+    if let Some(current) = current_branch_name(repo_root).await {
+        push_unique(&mut logical, current);
+    }
+
+    let looked_for = configured
+        .map(str::to_owned)
+        .or_else(|| logical.first().cloned())
+        .unwrap_or_else(|| "main".into());
+
+    let mut tried = Vec::new();
+    for name in &logical {
+        for candidate in base_ref_candidates(name) {
+            if tried.contains(&candidate) {
+                continue;
+            }
+            tried.push(candidate.clone());
+            if verify_commit(repo_root, &candidate).await?.is_some() {
+                return Ok(candidate);
+            }
+        }
+    }
+
+    Err(WorktreeError::missing_base_ref(looked_for, &tried))
+}
+
+/// Resolve one requested ref, including `origin/<name>` when the local branch
+/// is missing. Does not walk sibling default names.
+pub(crate) async fn resolve_named_base_ref(
+    repo_root: &Path,
+    reference: &str,
+) -> Result<String, WorktreeError> {
+    let reference = reference.trim();
+    if reference.is_empty() {
+        return Err(WorktreeError::user(
+            "You cannot start from an empty base ref.",
+        ));
+    }
+    let mut tried = Vec::new();
+    for candidate in base_ref_candidates(reference) {
+        if tried.contains(&candidate) {
+            continue;
+        }
+        tried.push(candidate.clone());
+        if verify_commit(repo_root, &candidate).await?.is_some() {
+            return Ok(candidate);
+        }
+    }
+    Err(WorktreeError::missing_base_ref(reference, &tried))
 }
 
 /// Create a worktree and branch under the Tidebreak data directory.
@@ -1011,14 +1093,96 @@ fn worktree_operation_marker_path(worktree_path: &Path) -> Result<PathBuf, Workt
 }
 
 async fn resolve_ref(repo_root: &Path, reference: &str) -> Result<String, WorktreeError> {
-    git_stdout(
+    let reference = reference.trim();
+    for candidate in base_ref_candidates(reference) {
+        if let Some(commit) = verify_commit(repo_root, &candidate).await? {
+            return Ok(commit);
+        }
+    }
+    Err(WorktreeError::user(format!(
+        "You cannot resolve `{reference}` because that ref is missing."
+    )))
+}
+
+fn base_ref_candidates(reference: &str) -> Vec<String> {
+    let reference = reference.trim();
+    if reference.is_empty() {
+        return Vec::new();
+    }
+    let mut candidates = vec![reference.to_owned()];
+    if reference != "HEAD" && !reference.starts_with("refs/") && !reference.starts_with("origin/") {
+        candidates.push(format!("origin/{reference}"));
+    }
+    candidates
+}
+
+fn push_unique(names: &mut Vec<String>, name: String) {
+    if !name.is_empty() && !names.contains(&name) {
+        names.push(name);
+    }
+}
+
+fn short_branch_name(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let stripped = value
+        .strip_prefix("refs/remotes/origin/")
+        .or_else(|| value.strip_prefix("refs/heads/"))
+        .or_else(|| value.strip_prefix("origin/"))
+        .unwrap_or(value);
+    if stripped.is_empty() || stripped == "HEAD" {
+        None
+    } else {
+        Some(stripped.to_owned())
+    }
+}
+
+async fn origin_head_branch(repo_root: &Path) -> Option<String> {
+    let value = git_stdout(
         Some(repo_root),
-        &["rev-parse", &format!("{reference}^{{commit}}")],
+        &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
         GIT_TIMEOUT,
     )
     .await
-    .map(|tip| tip.trim().to_owned())
-    .map_err(|error| WorktreeError::user(format!("could not resolve {reference}: {error}")))
+    .ok()?;
+    short_branch_name(&value)
+}
+
+async fn current_branch_name(repo_root: &Path) -> Option<String> {
+    let value = git_stdout(
+        Some(repo_root),
+        &["symbolic-ref", "--quiet", "--short", "HEAD"],
+        GIT_TIMEOUT,
+    )
+    .await
+    .ok()?;
+    short_branch_name(&value)
+}
+
+async fn verify_commit(repo_root: &Path, reference: &str) -> Result<Option<String>, WorktreeError> {
+    let revision = format!("{reference}^{{commit}}");
+    match git_stdout(
+        Some(repo_root),
+        &["rev-parse", "--verify", "--quiet", &revision],
+        GIT_TIMEOUT,
+    )
+    .await
+    {
+        Ok(commit) => {
+            let commit = commit.trim();
+            if commit.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(commit.to_owned()))
+            }
+        }
+        Err(error) if error.is_empty() => Ok(None),
+        Err(error) => Err(WorktreeError::internal(format!(
+            "could not resolve {reference}: {error}"
+        ))),
+    }
 }
 
 async fn create_branch_at(
@@ -2237,6 +2401,126 @@ mod tests {
         assert!(
             !listed.contains("ghost"),
             "stale worktree left behind: {listed}"
+        );
+    }
+
+    fn init_named_repo(branch: &str, commit: bool) -> (TempDir, PathBuf) {
+        let dir = TempDir::new().unwrap();
+        let repo = dir.path().join("origin");
+        std::fs::create_dir_all(&repo).unwrap();
+        run(&repo, &["git", "init", "-b", branch]);
+        run(&repo, &["git", "config", "user.email", "dev@example.com"]);
+        run(&repo, &["git", "config", "user.name", "Dev"]);
+        if commit {
+            std::fs::write(repo.join("README.md"), "hello\n").unwrap();
+            run(&repo, &["git", "add", "README.md"]);
+            run(&repo, &["git", "commit", "-m", "init"]);
+        }
+        (dir, repo)
+    }
+
+    #[tokio::test]
+    async fn default_base_ref_uses_trunk_when_main_is_missing() {
+        let (_dir, repo) = init_named_repo("trunk", true);
+        let resolved = resolve_default_base_ref(&repo, Some("main")).await.unwrap();
+        assert_eq!(resolved, "trunk");
+        let data = TempDir::new().unwrap();
+        let path = scratch_worktree(data.path(), "from-trunk");
+        create_ready(&repo, &path, "tidebreak/from-trunk", &resolved).await;
+        assert!(path.join("README.md").is_file());
+    }
+
+    #[tokio::test]
+    async fn default_base_ref_uses_origin_when_the_local_branch_is_missing() {
+        let (_dir, repo) = init_named_repo("trunk", true);
+        let tip = git_stdout(Some(&repo), &["rev-parse", "HEAD"], GIT_TIMEOUT)
+            .await
+            .unwrap();
+        run(
+            &repo,
+            &["git", "update-ref", "refs/remotes/origin/trunk", &tip],
+        );
+        run(
+            &repo,
+            &[
+                "git",
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/trunk",
+            ],
+        );
+        run(&repo, &["git", "checkout", "--detach", "HEAD"]);
+        run(&repo, &["git", "branch", "-D", "trunk"]);
+
+        let resolved = resolve_default_base_ref(&repo, Some("main")).await.unwrap();
+        assert_eq!(resolved, "origin/trunk");
+    }
+
+    #[tokio::test]
+    async fn named_base_ref_does_not_fall_through_to_the_current_branch() {
+        let (_dir, repo) = init_named_repo("trunk", true);
+        let err = resolve_named_base_ref(&repo, "feature-x")
+            .await
+            .unwrap_err();
+        match &err {
+            WorktreeError::MissingBaseRef { looked_for, tried } => {
+                assert_eq!(looked_for, "feature-x");
+                assert!(tried.contains("feature-x"), "{tried}");
+                assert!(
+                    !tried.contains("trunk"),
+                    "an explicit miss must not walk sibling defaults: {tried}"
+                );
+            }
+            other => panic!("expected MissingBaseRef, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn default_base_ref_prefers_origin_head_over_main() {
+        let (_dir, repo) = init_named_repo("trunk", true);
+        run(&repo, &["git", "branch", "main"]);
+        let tip = git_stdout(Some(&repo), &["rev-parse", "HEAD"], GIT_TIMEOUT)
+            .await
+            .unwrap();
+        run(
+            &repo,
+            &["git", "update-ref", "refs/remotes/origin/trunk", &tip],
+        );
+        run(
+            &repo,
+            &["git", "update-ref", "refs/remotes/origin/main", &tip],
+        );
+        run(
+            &repo,
+            &[
+                "git",
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/trunk",
+            ],
+        );
+
+        let resolved = resolve_default_base_ref(&repo, None).await.unwrap();
+        assert_eq!(resolved, "trunk");
+    }
+
+    #[tokio::test]
+    async fn default_base_ref_names_the_missing_ref_when_nothing_resolves() {
+        let (_dir, repo) = init_named_repo("trunk", false);
+        let err = resolve_default_base_ref(&repo, Some("main"))
+            .await
+            .unwrap_err();
+        match &err {
+            WorktreeError::MissingBaseRef { looked_for, tried } => {
+                assert_eq!(looked_for, "main");
+                assert!(tried.contains("main"), "{tried}");
+                assert!(tried.contains("trunk"), "{tried}");
+            }
+            other => panic!("expected MissingBaseRef, got {other:?}"),
+        }
+        assert!(
+            err.to_string().contains("`main`"),
+            "error must name the missing ref: {err}"
         );
     }
 

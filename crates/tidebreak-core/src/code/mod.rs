@@ -757,6 +757,8 @@ pub struct CodeRepo {
     /// Display name.
     pub display_name: String,
     /// Default base ref for new workspaces.
+    ///
+    /// Resolved from the repository when you do not set one.
     pub default_base_ref: String,
     /// Prefix applied to workspace branch names.
     pub branch_prefix: String,

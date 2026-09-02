@@ -813,6 +813,9 @@ fn map_worktree(err: WorktreeError) -> ServerError {
                 ServerError::bad_request_kind("worktree", message)
             }
         }
+        missing @ WorktreeError::MissingBaseRef { .. } => {
+            ServerError::bad_request_kind("missing_base_ref", missing.to_string())
+        }
         WorktreeError::Internal(message) => ServerError::internal(message),
         WorktreeError::ArchiveUncertain(message) => {
             ServerError::conflict_kind("archive_inspection_uncertain", message)
