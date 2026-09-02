@@ -24,6 +24,7 @@ import {
 } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import { friendlyErrorMessage } from "@/lib/utils";
+import { memoryStatusVariant } from "../memoryStatus";
 import {
   SettingsError,
   SettingsField,
@@ -418,7 +419,7 @@ function MemoryRecordRow({
           </span>
         </span>
         <span className="flex shrink-0 items-center gap-2">
-          <Badge variant={statusVariant(record.status)} size="sm">
+          <Badge variant={memoryStatusVariant(record.status)} size="sm">
             {record.status}
           </Badge>
           <span className="font-mono text-xs text-muted-foreground">
@@ -458,7 +459,7 @@ function MemoryDetail({
         <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 text-xs">
           <dt className="text-muted-foreground">Status</dt>
           <dd>
-            <Badge variant={statusVariant(record.status)} size="sm">
+            <Badge variant={memoryStatusVariant(record.status)} size="sm">
               {record.status}
             </Badge>
           </dd>
@@ -551,15 +552,6 @@ function MemoryDetail({
       </div>
     </SettingsSection>
   );
-}
-
-function statusVariant(
-  status: MemoryStatus,
-): "success" | "warning" | "secondary" | "critical" {
-  if (status === "active") return "success";
-  if (status === "proposed") return "warning";
-  if (status === "rejected") return "critical";
-  return "secondary";
 }
 
 function formatDay(timestamp: string): string {

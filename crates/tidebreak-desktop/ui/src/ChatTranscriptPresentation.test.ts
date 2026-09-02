@@ -409,6 +409,7 @@ describe("terminal transcript presentation", () => {
           partial_content: "",
           refusal: { category: "cyber", partial_output: false },
           file_changes: [],
+          memory_proposals: [],
           usage: NO_USAGE,
           voice_input_used: false,
           finished_at: "2026-07-19T10:00:00Z",
@@ -420,6 +421,7 @@ describe("terminal transcript presentation", () => {
           partial_content: "",
           refusal: { category: "general_harms", partial_output: true },
           file_changes: [],
+          memory_proposals: [],
           usage: NO_USAGE,
           voice_input_used: false,
           finished_at: "2026-07-19T10:01:00Z",
@@ -487,6 +489,7 @@ describe("terminal transcript presentation", () => {
           partial_content: "Partial answer",
           reasoning: "Considering the first approach",
           file_changes: [],
+          memory_proposals: [],
           usage: NO_USAGE,
           voice_input_used: false,
           finished_at: "2026-07-19T10:01:00Z",
@@ -499,6 +502,7 @@ describe("terminal transcript presentation", () => {
           failure_category: "transient",
           failure_model: { id: "gpt-5.6-sol", provider: "openai" },
           file_changes: [],
+          memory_proposals: [],
           usage: NO_USAGE,
           voice_input_used: false,
           finished_at: "2026-07-19T10:02:00Z",
@@ -565,6 +569,7 @@ describe("terminal transcript presentation", () => {
           partial_content: "",
           reasoning: "Considering the first approach",
           file_changes: [],
+          memory_proposals: [],
           usage: NO_USAGE,
           voice_input_used: false,
           finished_at: "2026-07-19T10:01:00Z",
@@ -602,5 +607,71 @@ describe("terminal transcript presentation", () => {
     expect(refusalCopy(null, false)).toBe(
       "The model declined this response because it matched a safety policy.",
     );
+  });
+
+  it("surfaces a turn's memory proposals right after the turn that produced them", () => {
+    const record = {
+      id: "record-1",
+      scope: { kind: "personal" as const },
+      kind: "lesson" as const,
+      status: "proposed" as const,
+      title: "When changing database migrations",
+      body: "Run the migration chain test before publishing.",
+      provenance: {
+        author: "model" as const,
+        origin: {
+          chat_id: "chat-1",
+          turn_id: "turn-remembered",
+          code_session_id: null,
+          code_turn_id: null,
+          workspace_id: null,
+        },
+        evidence: [{ kind: "message" as const, message_id: "answer" }],
+      },
+      links: [],
+      expires_at: null,
+      superseded_by: null,
+      observation_count: 0,
+      revision: 1,
+      created_at: "2026-07-19T10:01:00Z",
+      updated_at: "2026-07-19T10:01:00Z",
+    };
+    const presented = presentChatTranscript({
+      messages: [
+        {
+          id: "answer",
+          role: "assistant",
+          content: "Done",
+          created_at: "2026-07-19T10:00:00Z",
+          citations: [],
+        },
+      ],
+      tool_activity: [],
+      terminal_turns: [
+        {
+          turn_id: "turn-remembered",
+          message_id: "answer",
+          status: "completed",
+          partial_content: "",
+          file_changes: [],
+          memory_proposals: [record],
+          usage: NO_USAGE,
+          voice_input_used: false,
+          finished_at: "2026-07-19T10:01:00Z",
+        },
+      ],
+      last_event_seq: 21,
+    });
+
+    expect(
+      presented.messages.map((message) => [message.id, message.role]),
+    ).toEqual([
+      ["answer", "assistant"],
+      ["memory:turn-remembered", "memory_proposals"],
+    ]);
+    expect(presented.messages[1]).toMatchObject({
+      turnId: "turn-remembered",
+      records: [record],
+    });
   });
 });

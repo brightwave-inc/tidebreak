@@ -3,6 +3,7 @@ import type {
   ChatMessage,
   ChatTerminalTurn,
   ChatToolActivity,
+  MemoryRecord,
   RendererRefusal,
   ToolActionPreview,
   ToolResultPreview,
@@ -67,6 +68,13 @@ export type HydratedTranscriptEntry =
       kind: "change_summary";
       turnId: string;
       files: ExecFileChangeSummary[];
+      createdAt: string;
+    }
+  | {
+      id: string;
+      kind: "memory_proposals";
+      turnId: string;
+      records: MemoryRecord[];
       createdAt: string;
     };
 
@@ -182,6 +190,17 @@ export function hydrateTranscriptHistory(
         kind: "change_summary" as const,
         turnId: turn.turn_id,
         files: turn.file_changes,
+        createdAt: turn.finished_at,
+      })),
+    // What the turn proposed remembering, right after the turn that proposed
+    // it — the same placement its change summary gets.
+    ...terminalTurns
+      .filter((turn) => turn.memory_proposals.length > 0)
+      .map((turn) => ({
+        id: `memory:${turn.turn_id}`,
+        kind: "memory_proposals" as const,
+        turnId: turn.turn_id,
+        records: turn.memory_proposals,
         createdAt: turn.finished_at,
       })),
   ];

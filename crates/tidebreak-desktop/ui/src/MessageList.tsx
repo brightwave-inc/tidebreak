@@ -13,6 +13,7 @@ import type {
   ToolActionPreview,
   ToolResultPreview,
   ExecFileChangeSummary,
+  MemoryRecord,
   ModelInfo,
 } from "./api";
 import { ApprovalCard, type GrantScopeName } from "./ApprovalCard";
@@ -59,6 +60,10 @@ import { useSourceNav } from "./panel/SourceNav";
 import { TurnFailureNotice, turnFailureOffersRetry } from "./TurnFailureNotice";
 import type { TurnFailureCategory } from "./generated/wire";
 import { ChangeSummaryCard } from "./ChangeSummaryCard";
+import {
+  MemoryProposalCard,
+  type MemoryProposalClient,
+} from "./MemoryProposalCard";
 
 export type ChatMessage =
   | {
@@ -136,6 +141,13 @@ export type ChatMessage =
       role: "change_summary";
       turnId: string;
       files: ExecFileChangeSummary[];
+      createdAt?: string;
+    }
+  | {
+      id: string;
+      role: "memory_proposals";
+      turnId: string;
+      records: MemoryRecord[];
       createdAt?: string;
     };
 
@@ -269,6 +281,7 @@ type MessageListProps = {
     ApiClient,
     "getFileChangePreview" | "undoFileChange" | "undoTurnFileChanges"
   >;
+  memoryClient?: MemoryProposalClient;
 };
 
 // Defaults for the background-agent props feed the grouping memo below, so
@@ -333,6 +346,7 @@ export function MessageList({
   imageClient,
   executionConfigClient,
   changeClient,
+  memoryClient,
   backgroundAgentClient,
 }: MessageListProps) {
   // Stable identity between renders so memoized rows only re-render when the
@@ -389,6 +403,7 @@ export function MessageList({
         imageClient,
         chatId,
         changeClient,
+        memoryClient,
         backgroundAgents,
         retry,
       ),
@@ -401,6 +416,7 @@ export function MessageList({
       imageClient,
       chatId,
       changeClient,
+      memoryClient,
       backgroundAgents,
       retry,
     ],
@@ -583,6 +599,7 @@ export function groupMessageItems(
     ApiClient,
     "getFileChangePreview" | "undoFileChange" | "undoTurnFileChanges"
   >,
+  memoryClient?: MemoryProposalClient,
   backgroundAgents: {
     runs: AgentRun[];
     loading: boolean;
@@ -670,6 +687,7 @@ export function groupMessageItems(
           imageClient={imageClient}
           chatId={chatId}
           changeClient={changeClient}
+          memoryClient={memoryClient}
           onRetry={retry?.failureId === message.id ? retry.onRetry : undefined}
         />,
       );
@@ -1113,6 +1131,7 @@ function MessageBubbleImpl({
   imageClient,
   chatId,
   changeClient,
+  memoryClient,
   onRetry,
 }: {
   message: ChatMessage;
@@ -1126,6 +1145,7 @@ function MessageBubbleImpl({
     ApiClient,
     "getFileChangePreview" | "undoFileChange" | "undoTurnFileChanges"
   >;
+  memoryClient?: MemoryProposalClient;
   /** Present only on the transcript's newest retryable failure. */
   onRetry?: () => void;
 }) {
@@ -1281,6 +1301,17 @@ function MessageBubbleImpl({
         turnId={message.turnId}
         files={message.files}
         client={changeClient}
+      />
+    );
+  }
+
+  if (message.role === "memory_proposals") {
+    if (!memoryClient) return null;
+    return (
+      <MemoryProposalCard
+        turnId={message.turnId}
+        records={message.records}
+        client={memoryClient}
       />
     );
   }

@@ -76,6 +76,7 @@ describe("sessionFromOpenedChat", () => {
             status: "completed",
             partial_content: "",
             file_changes: [],
+            memory_proposals: [],
             usage: USAGE,
             voice_input_used: false,
             finished_at: "2026-07-19T10:00:00Z",

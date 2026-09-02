@@ -56,6 +56,7 @@ import {
 } from "./ComposerMentions";
 import {
   ComposerToolsMenu,
+  type ComposerMemoryIncognito,
   type ComposerNetwork,
   type ComposerReasoning,
 } from "./ComposerToolsMenu";
@@ -355,6 +356,7 @@ export type ComposerProps = {
   contextUsage?: ContextUsageReading | null;
   network?: ComposerNetwork;
   reasoning?: ComposerReasoning;
+  memoryIncognito?: ComposerMemoryIncognito;
   plugins?: ComposerPlugins;
   slash?: ComposerSlash;
   images?: ComposerImages;
@@ -408,6 +410,7 @@ export function Composer({
   contextUsage,
   network,
   reasoning,
+  memoryIncognito,
   plugins,
   slash,
   images,
@@ -1272,6 +1275,7 @@ export function Composer({
             }
             network={network}
             reasoning={reasoning}
+            memoryIncognito={memoryIncognito}
             plugins={
               slash && slash.options.length > 0
                 ? {
