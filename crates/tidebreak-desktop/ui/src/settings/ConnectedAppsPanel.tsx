@@ -104,7 +104,7 @@ function draftFor(existing: RestEntry | null): Draft {
 }
 
 /** Host of a typed URL that is plain HTTP to a loopback IP literal, else null. */
-export function loopbackHttpHost(urlText: string): string | null {
+function loopbackHttpHost(urlText: string): string | null {
   try {
     const url = new URL(urlText.trim());
     if (url.protocol !== "http:") return null;
@@ -125,7 +125,7 @@ export function loopbackHttpHost(urlText: string): string | null {
 }
 
 /** REST form URLs whose path is an MCP HTTP endpoint, not an OpenAPI base. */
-export function looksLikeMcpEndpoint(urlText: string): boolean {
+function looksLikeMcpEndpoint(urlText: string): boolean {
   try {
     const path = new URL(urlText.trim()).pathname
       .replace(/\/+$/, "")
