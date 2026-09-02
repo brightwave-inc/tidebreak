@@ -26,6 +26,7 @@ import { useApp } from "@/AppContext";
 import { HttpError } from "../api/client";
 import { Composer, type ComposerWorkspaceFiles } from "../Composer";
 import { messageWithWorkspaceFiles } from "./fork";
+import { useComposerDraft, useComposerDrafts } from "../ComposerDrafts";
 import {
   IMAGE_MEDIA_TYPES,
   readyImageAttachmentIds,
@@ -767,7 +768,10 @@ export function CodeComposer({
 }) {
   const { client } = useApp();
   const composerPromptScope = promptScope ?? sessionId ?? "code";
-  const [draft, setDraft] = useState("");
+  // Settings unmounts this composer. Keep the unsent text in the same
+  // store chat uses, keyed by session so one draft cannot leak into another.
+  const draftKey = sessionId ?? composerPromptScope;
+  const draft = useComposerDraft(draftKey);
   const [pastedTexts, setPastedTexts] = useState<PastedTextAttachment[]>([]);
   const [selectedModel, setSelectedModel] = useState(model ?? "");
   // Optimistic: the picker moves on click and the session row catches up when
@@ -782,7 +786,16 @@ export function CodeComposer({
   const [steerPending, setSteerPending] = useState(false);
   const [steerError, setSteerError] = useState<string | null>(null);
   const [steerStatus, setSteerStatus] = useState<string | null>(null);
-  const draftRef = useRef("");
+  const draftRef = useRef(draft);
+  const setDraft = useCallback(
+    (update: string | ((current: string) => string)) => {
+      const current = useComposerDrafts.getState().drafts[draftKey] ?? "";
+      const next = typeof update === "function" ? update(current) : update;
+      draftRef.current = next;
+      useComposerDrafts.getState().setDraft(draftKey, next);
+    },
+    [draftKey],
+  );
   const pastedTextsRef = useRef<PastedTextAttachment[]>([]);
   const appliedRecoveryRef = useRef<{
     id: string;
@@ -868,6 +881,9 @@ export function CodeComposer({
       return;
     }
     setDraft((current) => {
+      // A remount already restored this composer's store draft. Re-appending
+      // the recovered prompt would duplicate it after you edit and leave.
+      if (current) return current;
       const next = appendRecoveredDraft(current, recoveryDraft);
       draftRef.current = next;
       return next;
