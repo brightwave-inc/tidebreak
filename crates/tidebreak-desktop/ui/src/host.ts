@@ -343,3 +343,13 @@ export function copyChatDebugBundle(chatId: string): Promise<string> {
 export function saveChatDebugBundle(chatId: string): Promise<boolean> {
   return invoke("save_chat_debug_bundle", { request: { chatId } });
 }
+
+/** Save portable workspace configuration through the native save dialog. */
+export function saveWorkspaceConfig(contents: string): Promise<boolean> {
+  return invoke("save_workspace_config", { request: { contents } });
+}
+
+/** Open a portable workspace configuration through the native file dialog. */
+export function pickWorkspaceConfig(): Promise<string | null> {
+  return invoke("pick_workspace_config");
+}

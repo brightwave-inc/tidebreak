@@ -61,6 +61,7 @@ mod trusted_folders;
 mod updater;
 mod voice_transcription;
 mod whisper_install;
+mod workspace_config;
 
 /// Connection details the webview needs to reach the API it is attached to.
 #[derive(Clone, Serialize)]
@@ -871,6 +872,8 @@ pub fn run() {
             deliverables::export_deliverable,
             chat_debug::copy_chat_debug_bundle,
             chat_debug::save_chat_debug_bundle,
+            workspace_config::save_workspace_config,
+            workspace_config::pick_workspace_config,
             office_pdf::convert_office_to_pdf,
             office_install::install_presentation_converter,
             office_install::cancel_presentation_converter_install,

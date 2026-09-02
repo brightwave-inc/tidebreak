@@ -22,6 +22,10 @@ import type {
   WebSearchCredentialReadiness,
   WebSearchMode,
   WebSearchProviderKind,
+  WorkspaceConfigApplyRequest,
+  WorkspaceConfigApplyResult,
+  WorkspaceConfigDocument,
+  WorkspaceConfigPreview,
 } from "../types";
 import { type Constructor, HttpCore, throwIfNotOk } from "./http";
 
@@ -270,6 +274,30 @@ export function withSettingsApi<TBase extends Constructor<HttpCore>>(
       return this.json(`/code-execution/credentials/${provider}`, {
         method: "DELETE",
         headers: this.headers(),
+      });
+    }
+
+    exportWorkspaceConfig(): Promise<WorkspaceConfigDocument> {
+      return this.json("/workspace-config", { headers: this.headers() });
+    }
+
+    previewWorkspaceConfig(
+      document: unknown,
+    ): Promise<WorkspaceConfigPreview> {
+      return this.json("/workspace-config/preview", {
+        method: "POST",
+        headers: this.headers(true),
+        body: JSON.stringify(document),
+      });
+    }
+
+    applyWorkspaceConfig(
+      body: WorkspaceConfigApplyRequest,
+    ): Promise<WorkspaceConfigApplyResult> {
+      return this.json("/workspace-config/apply", {
+        method: "POST",
+        headers: this.headers(true),
+        body: JSON.stringify(body),
       });
     }
   };

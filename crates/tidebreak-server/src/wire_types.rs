@@ -453,6 +453,14 @@ mod tests {
         // Likewise its own endpoint root: the live progress stream is paged by
         // its own route rather than embedded in a snapshot.
         generate::collect_from::<crate::routes::AgentRunProgressPage>(&cfg, &mut out);
+        generate::collect_from::<crate::workspace_config::WorkspaceConfigDocument>(&cfg, &mut out);
+        generate::collect_from::<crate::workspace_config::WorkspaceConfigPreview>(&cfg, &mut out);
+        generate::collect_from::<crate::workspace_config::WorkspaceConfigApplyRequest>(
+            &cfg, &mut out,
+        );
+        generate::collect_from::<crate::workspace_config::WorkspaceConfigApplyResult>(
+            &cfg, &mut out,
+        );
         generate::collect_from::<crate::routes::code::CodeRepoSnapshot>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeWorkspaceSnapshot>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeConnectPage>(&cfg, &mut out);

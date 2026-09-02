@@ -47,6 +47,8 @@ attach_dropped_chat_files: claims the operating-system drop this window received
 export_library_document: writes a source document's bytes wherever the native save dialog sends them.
 export_deliverable: writes an output revision to a destination chosen in the native save dialog.
 save_chat_debug_bundle: writes the untruncated debug bundle to a file chosen in the native save dialog.
+save_workspace_config: writes a portable workspace configuration to a file chosen in the native save dialog.
+pick_workspace_config: opens a portable workspace configuration through the native file dialog.
 copy_chat_debug_bundle: returns the clipboard-sized bundle on the same user gesture the webview requires for a clipboard write.
 import_skills: opens the native folder picker and copies validated local skill packages into this desktop profile.
 

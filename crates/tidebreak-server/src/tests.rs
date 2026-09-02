@@ -84,6 +84,7 @@ mod root_attachment;
 mod sandbox;
 mod websocket;
 mod workers;
+mod workspace_config;
 
 use conversations::patch_chat;
 use lifecycle::{post_json, post_native_json, steer_turn, steer_turn_with_id};

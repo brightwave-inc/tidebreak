@@ -19,8 +19,16 @@ import {
   SettingsPanel,
   SettingsSection,
 } from "./primitives";
+import { PortableConfigSection } from "./PortableConfigSection";
 
-type GitSettingsClient = Pick<ApiClient, "getSettings" | "putSettings">;
+type GitSettingsClient = Pick<
+  ApiClient,
+  | "getSettings"
+  | "putSettings"
+  | "exportWorkspaceConfig"
+  | "previewWorkspaceConfig"
+  | "applyWorkspaceConfig"
+>;
 type GitSettings = RuntimeSettings["git_source_control"];
 
 function prefixStem(prefix: string | undefined): string {
@@ -217,6 +225,7 @@ export function GitSourceControlPanel({
           </SettingsSection>
         )
       )}
+      <PortableConfigSection client={client} />
     </SettingsPanel>
   );
 }

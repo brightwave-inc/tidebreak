@@ -465,6 +465,10 @@ impl McpRuntime {
             .clone()
     }
 
+    pub(crate) async fn definitions(&self) -> Vec<McpServerDefinition> {
+        self.state.lock().await.definitions.clone()
+    }
+
     pub(crate) async fn info(&self) -> McpServersInfo {
         let state = self.state.lock().await;
         McpServersInfo {
