@@ -159,6 +159,87 @@ pub(in crate::db) async fn take_lease_on_turn(
     Ok(Some(()))
 }
 
+/// Write the user transcript row for a turn that was inserted without one.
+///
+/// The session worker's `insert_turn` path has no message. The internal
+/// engine rebuilds the prompt from `message`, so the text has to land
+/// there before `LegDriver::run_turn`.
+pub(in crate::db) async fn ensure_turn_input_message(
+    store: &DbStore,
+    id: TurnId,
+    content: &str,
+) -> Result<()> {
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    let Some(existing) = entities::code_turn::Entity::find_by_id(id.0)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+    else {
+        transaction.commit().await.map_err(store_err)?;
+        return Err(AgentError::Store(format!("turn {id} does not exist")));
+    };
+    if existing.input_message_id.is_some() {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(());
+    }
+    let chat_id = ChatId(existing.session_id);
+    if !acquire_chat_write_lock(&transaction, chat_id).await? {
+        return Err(AgentError::Store(format!("chat {chat_id} does not exist")));
+    }
+    let now = super::agent_run::database_now(&transaction).await?;
+    let input_message_id = MessageId::new();
+    if !reserve_message_identity_on(
+        &transaction,
+        input_message_id,
+        chat_id,
+        id,
+        MESSAGE_IDENTITY_OWNER_MESSAGE,
+    )
+    .await?
+    {
+        return Err(AgentError::Store(format!(
+            "turn input message identity {input_message_id} is already reserved"
+        )));
+    }
+    entities::message::ActiveModel {
+        id: Set(input_message_id.0),
+        chat_id: Set(chat_id.0),
+        turn_id: Set(id.0),
+        seq: Set(next_message_seq_on(&transaction, chat_id).await?),
+        role: Set("user".into()),
+        content: Set(content.into()),
+        llm_content: Set(None),
+        reasoning: Set(None),
+        turn_lease_token: Set(None),
+        created_at: Set(now),
+    }
+    .insert(&transaction)
+    .await
+    .map_err(store_err)?;
+    let updated = entities::code_turn::Entity::update_many()
+        .col_expr(
+            entities::code_turn::Column::InputMessageId,
+            sea_orm::sea_query::Expr::value(Some(input_message_id.0)),
+        )
+        .col_expr(
+            entities::code_turn::Column::UserInput,
+            sea_orm::sea_query::Expr::value(content.to_owned()),
+        )
+        .filter(entities::code_turn::Column::Id.eq(id.0))
+        .filter(entities::code_turn::Column::InputMessageId.is_null())
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    if updated.rows_affected != 1 {
+        transaction.rollback().await.map_err(store_err)?;
+        return Err(AgentError::Store(format!(
+            "turn {id} gained an input message from another writer"
+        )));
+    }
+    transaction.commit().await.map_err(store_err)?;
+    Ok(())
+}
+
 pub(in crate::db) async fn get_turn(store: &DbStore, id: TurnId) -> Result<Option<TurnRun>> {
     entities::code_turn::Entity::find_by_id(id.0)
         .one(&store.conn)

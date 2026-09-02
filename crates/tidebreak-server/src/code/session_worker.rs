@@ -882,20 +882,49 @@ async fn run_worker(
         } else if session.harness_kind == HarnessKind::Internal
             && open.status == CodeTurnStatus::Running
         {
-            let input = TurnInput {
-                turn_id: Some(open.id),
-                text: open.user_input.clone(),
-                model: session.model.clone(),
-                reasoning_effort: session.reasoning_effort,
-                fast_mode: session.fast_mode,
-                images: Vec::new(),
-            };
-            if let Err(error) = engine.run_turn(input).await {
-                warn!(
-                    session = %session.id,
-                    error = %error,
-                    "could not resume the running internal turn after a worker restart"
-                );
+            let lease_token = uuid::Uuid::new_v4();
+            let now = Utc::now();
+            let claimed = sink
+                .db
+                .take_lease_on_turn(
+                    tidebreak_core::TurnId(open.id.0),
+                    lease_token,
+                    now,
+                    now + chrono::Duration::seconds(60),
+                )
+                .await;
+            match claimed {
+                Ok(Some(())) => {
+                    let input = TurnInput {
+                        turn_id: Some(open.id),
+                        text: open.user_input.clone(),
+                        model: session.model.clone(),
+                        reasoning_effort: session.reasoning_effort,
+                        fast_mode: session.fast_mode,
+                        images: Vec::new(),
+                    };
+                    if let Err(error) = engine.run_turn(input).await {
+                        warn!(
+                            session = %session.id,
+                            error = %error,
+                            "could not resume the running internal turn after a worker restart"
+                        );
+                    }
+                }
+                Ok(None) => {
+                    warn!(
+                        session = %session.id,
+                        turn = %open.id,
+                        "could not reclaim the running internal turn after a worker restart"
+                    );
+                }
+                Err(error) => {
+                    warn!(
+                        session = %session.id,
+                        error = %error,
+                        "could not reclaim the running internal turn after a worker restart"
+                    );
+                }
             }
         }
     }
@@ -2610,6 +2639,9 @@ async fn drive_turn_inner(
     sink.set_turn(turn.id);
 
     let lease_token = if session.harness_kind == HarnessKind::Internal {
+        db.ensure_turn_input_message(tidebreak_core::TurnId(turn.id.0), &message)
+            .await
+            .map_err(|err| WorkerError::Failed(err.to_string()))?;
         let lease_token = uuid::Uuid::new_v4();
         let now = Utc::now();
         let lease_expires_at = now + chrono::Duration::seconds(60);

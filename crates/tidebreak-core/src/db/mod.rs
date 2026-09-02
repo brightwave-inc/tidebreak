@@ -188,6 +188,11 @@ impl DbStore {
         ops::turn::take_lease_on_turn(self, id, lease_token, now, lease_expires_at).await
     }
 
+    /// Persist the user transcript row for a turn inserted without one.
+    pub async fn ensure_turn_input_message(&self, id: TurnId, content: &str) -> Result<()> {
+        ops::turn::ensure_turn_input_message(self, id, content).await
+    }
+
     /// Extend one exact live turn lease. Returns whether the write landed.
     pub async fn heartbeat_turn_lease(
         &self,
