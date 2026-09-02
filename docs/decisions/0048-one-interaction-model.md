@@ -1,6 +1,6 @@
 # 48. One interaction model for chat and code
 
-- Status: Proposed
+- Status: Proposed (amended 2026-09-01, see [Amendment](#amendment-2026-09-01))
 - Date: 2026-08-19
 - Owners: server, code mode
 - Related: [`0030-code-mode-separate-surface.md`](0030-code-mode-separate-surface.md),
@@ -193,3 +193,32 @@ territory).
   involved.
 - Owner scoping (step 1) validates as in decision 47: no cross-owner rows,
   and no cross-owner events on the updates channel.
+
+## Amendment (2026-09-01)
+
+Step 5 lands as a stack, and two of its parts are now settled differently
+from the text above.
+
+**The internals merge; the surfaces stay separate for now.** Chat and code
+entities still merge into the code-shaped structures — session, turn,
+journal, approvals — and the id spaces still become one. The user-facing
+collapse into one surface, where context alone selects behavior, is
+deferred: the desktop keeps a chat page and a code page over the one
+model, and decision 30's "no user-facing mode choice" destination waits
+on that model having run in production. This is a sequencing choice, not
+a rejection; nothing in the merged model prevents the collapse later.
+
+**The chat routes become aliases, not a flag day.** Once chat rows are
+sessions, `/chats/*` handlers become thin aliases over the session routes
+and stay until every client reads sessions directly. That aliasing is
+permitted by this record's own criterion: it maps one route family onto
+one set of entities, not one side's entities into the other side's shapes.
+
+**The internal engine as first merged is transitional.** The first slice
+that put the internal loop behind the adapter (#3010) kept chat's tables
+as the engine's durable state and translated that journal into the code
+journal — the "one journal over two execution backends" fallback this
+record names. It is the bridge, not the end state: the entity merge
+retires those tables, and the engine writes the journal natively.
+
+The rest of this record stands.
