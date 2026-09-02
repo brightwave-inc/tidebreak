@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Weak};
 
 use tidebreak_core::{
-    AgentConfig, AgentError, AgentRunId, BlobStore, CallId, CancelToken, ChatId, Config,
+    AgentConfig, AgentError, AgentRunId, BlobStore, CallId, CancelToken, ChatId, Config, DbStore,
     FsBlobStore, Profile, Result, SecretProvider, SteerInbox, Store, ToolRegistry, TurnId,
 };
 use tokio::sync::{mpsc, Notify, Semaphore};
@@ -118,6 +118,10 @@ pub struct AppState {
     pub(crate) diagnostics: Arc<crate::diagnostics::Diagnostics>,
     /// Durable metadata, conversation state, and the event journal.
     pub store: Arc<dyn Store>,
+    /// The same database as [`Self::store`], where memory routes need the
+    /// backend trait. `None` keeps the public constructor compatible with
+    /// test adapters; production boot installs it beside the store.
+    pub(crate) memory: Option<Arc<DbStore>>,
     /// Durable raw bytes and generated artifacts under the configured data directory.
     pub blobs: Arc<dyn BlobStore>,
     /// Builds the model provider for each turn from the configured credentials.
@@ -421,6 +425,7 @@ impl AppState {
             config: Arc::new(config),
             diagnostics,
             store: store.clone(),
+            memory: None,
             blobs,
             resolver,
             secrets,

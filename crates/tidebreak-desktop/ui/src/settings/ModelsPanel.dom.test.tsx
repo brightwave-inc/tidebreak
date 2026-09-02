@@ -140,6 +140,7 @@ const runtimeSettings: RuntimeSettings = {
     account_prefix: "alex/",
     effective_branch_prefix: "alex/",
   },
+  memory: { enabled: true, capture_enabled: false, capture_ready: false },
 };
 
 afterEach(() => {

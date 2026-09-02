@@ -17,6 +17,7 @@ import {
   Waypoints,
   Zap,
   MessagesSquare,
+  Brain,
 } from "lucide-react";
 
 import { useApp } from "@/AppContext";
@@ -39,6 +40,7 @@ import { CodingHarnessesPanel } from "./CodingHarnessesPanel";
 import { QuickActionsPanel } from "./QuickActionsPanel";
 import { ChannelsPanel } from "./ChannelsPanel";
 import { GitSourceControlPanel } from "./GitSourceControlPanel";
+import { MemoryPanel } from "./MemoryPanel";
 
 /**
  * Each section reads what it needs from the shell context rather than being
@@ -204,6 +206,11 @@ function GitSourceControlSection() {
   return <GitSourceControlPanel client={client} />;
 }
 
+function MemorySection() {
+  const { client } = useApp();
+  return <MemoryPanel client={client} />;
+}
+
 export type SettingsSectionDef = {
   /** The path segment under `/settings`, and its address. */
   path: string;
@@ -327,6 +334,14 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     icon: MessagesSquare,
     iconClass: "text-icon-green",
     Component: ChannelsSection,
+  },
+  {
+    path: "memory",
+    label: "Memory",
+    group: "capabilities",
+    icon: Brain,
+    iconClass: "text-icon-violet",
+    Component: MemorySection,
   },
   {
     path: "connected-apps",

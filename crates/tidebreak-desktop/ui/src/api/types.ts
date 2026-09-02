@@ -117,6 +117,22 @@ import {
   type ChatTerminalTurnSnapshot,
   type ChatToolActivitySnapshot,
   type ChatToolActivityStatus,
+  type MemoryCaps as WireMemoryCaps,
+  type MemoryDigest as WireMemoryDigest,
+  type MemoryAuthor as WireMemoryAuthor,
+  type MemoryEvidence as WireMemoryEvidence,
+  type MemoryKind as WireMemoryKind,
+  type MemoryLink as WireMemoryLink,
+  type MemoryLinkRelation as WireMemoryLinkRelation,
+  type MemoryOrigin as WireMemoryOrigin,
+  type MemoryProvenance as WireMemoryProvenance,
+  type MemoryRecord as WireMemoryRecord,
+  type MemoryRecordId as WireMemoryRecordId,
+  type MemoryRevision as WireMemoryRevision,
+  type MemorySettings as WireMemorySettings,
+  type MemoryScope as WireMemoryScope,
+  type MemorySearchHit as WireMemorySearchHit,
+  type MemoryStatus as WireMemoryStatus,
   type ExecBackend,
   type ExecDegradation,
   type ExecFileChangeSummary as WireExecFileChangeSummary,
@@ -1205,6 +1221,24 @@ export type CodeDeliveryDeploymentStatus = WireCodeDeliveryDeploymentStatus;
 export type CodeDeliveryRepositoriesSnapshot =
   WireCodeDeliveryRepositoriesSnapshot;
 export type CodeDeliveryActionResult = WireCodeDeliveryActionResult;
+
+/** Durable memory records and the backend capabilities that serve them. */
+export type MemoryCaps = WireMemoryCaps;
+export type MemoryDigest = WireMemoryDigest;
+export type MemoryAuthor = WireMemoryAuthor;
+export type MemoryEvidence = WireMemoryEvidence;
+export type MemoryKind = WireMemoryKind;
+export type MemoryLink = WireMemoryLink;
+export type MemoryLinkRelation = WireMemoryLinkRelation;
+export type MemoryOrigin = WireMemoryOrigin;
+export type MemoryProvenance = WireMemoryProvenance;
+export type MemoryRecord = WireMemoryRecord;
+export type MemoryRecordId = WireMemoryRecordId;
+export type MemoryRevision = WireMemoryRevision;
+export type MemorySettings = WireMemorySettings;
+export type MemoryScope = WireMemoryScope;
+export type MemorySearchHit = WireMemorySearchHit;
+export type MemoryStatus = WireMemoryStatus;
 
 /** One isolated worktree + branch on a repo. */
 export type CodeWorkspaceSnapshot = WireCodeWorkspaceSnapshot;

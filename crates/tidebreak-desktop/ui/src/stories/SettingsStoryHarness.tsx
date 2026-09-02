@@ -96,6 +96,7 @@ export const storySettings: RuntimeSettings = {
     account_prefix: "alex/",
     effective_branch_prefix: "alex/",
   },
+  memory: { enabled: true, capture_enabled: false, capture_ready: false },
 };
 
 function model(
@@ -474,6 +475,16 @@ function createSettingsStoryClient(
                     settings.git_source_control.custom_branch_prefix),
             }
           : settings.git_source_control,
+        memory: body.memory
+          ? {
+              ...settings.memory,
+              ...body.memory,
+              capture_ready:
+                (body.memory.enabled ?? settings.memory.enabled) &&
+                (body.memory.capture_enabled ??
+                  settings.memory.capture_enabled),
+            }
+          : settings.memory,
       };
       return write(settings);
     },

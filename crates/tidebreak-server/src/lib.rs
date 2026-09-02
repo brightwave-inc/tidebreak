@@ -92,6 +92,7 @@ pub mod sandbox_docker;
 mod sandbox_exec_worker;
 mod sandbox_task_plan_worker;
 mod sandbox_web_search_worker;
+mod scoped_memory;
 mod scoped_model_token;
 mod scoped_store;
 #[cfg(any(test, feature = "scripted-harness"))]
@@ -664,6 +665,28 @@ pub fn app(state: AppState) -> Router {
                 )),
         )
         .route("/models", get(routes::list_models))
+        .route("/memory/capabilities", get(routes::capabilities))
+        .route(
+            "/memory/records",
+            get(routes::list_records).post(routes::create_record),
+        )
+        .route(
+            "/memory/records/{id}",
+            get(routes::get_record)
+                .patch(routes::update_record)
+                .delete(routes::delete_record),
+        )
+        .route(
+            "/memory/records/{id}/status",
+            axum::routing::put(routes::set_record_status),
+        )
+        .route("/memory/records/{id}/revisions", get(routes::revisions))
+        .route("/memory/search", get(routes::search))
+        .route("/memory/digest", get(routes::digest))
+        .route(
+            "/memory/ingest",
+            post(routes::ingest).layer(DefaultBodyLimit::max(routes::MAX_MEMORY_BODY_BYTES)),
+        )
         .route("/web-search", get(routes::get_web_search_config))
         .route(
             "/code-execution",
@@ -2164,6 +2187,9 @@ async fn bind_inner(
         os_policy,
     )?
     .with_on_behalf_of_gateway(on_behalf_of_gateway);
+    // Memory routes need the backend trait the concrete database implements;
+    // the same connection `store` wraps, not a second one.
+    state.memory = Some(db.clone());
     state.adapter_bootstrap_tokens = auth::AdapterBootstrapTokens::from_env()?.map(Arc::new);
     state.agent_run_wake = agent_run_wake;
     state.sandbox_attempts = sandbox_attempts;

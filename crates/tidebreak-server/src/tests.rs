@@ -78,6 +78,7 @@ mod documents;
 mod gateway_drafts;
 mod image_attachment;
 mod lifecycle;
+mod memory;
 mod outputs;
 mod root_attachment;
 mod sandbox;

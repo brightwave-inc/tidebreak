@@ -16,6 +16,12 @@ pub(crate) const PROMPT_CACHE_RETENTION_SETTING: &str = "models.prompt_cache_ret
 /// Master switch for the computer-use capability (screen capture + app
 /// control). Default on; setting it false unregisters the tools at boot.
 pub(crate) const COMPUTER_USE_ENABLED_SETTING: &str = "computer_use.enabled";
+/// Master switch for durable memory. Default on; explicit reads and writes
+/// stay available even when no utility model is configured.
+pub(crate) const MEMORY_ENABLED_SETTING: &str = "memory.enabled";
+/// Master switch for post-turn memory capture. Capture also requires a
+/// resolvable utility model.
+pub(crate) const MEMORY_CAPTURE_ENABLED_SETTING: &str = "memory.capture.enabled";
 
 mod agent_runs;
 mod app_gateway_page;
@@ -33,6 +39,7 @@ mod events;
 pub(crate) mod image_attachment;
 mod inbox;
 mod mcp_gateway;
+mod memory;
 mod notifications;
 mod outputs;
 mod plans;
@@ -60,6 +67,7 @@ pub use events::*;
 pub use image_attachment::*;
 pub use inbox::*;
 pub use mcp_gateway::*;
+pub use memory::*;
 pub use notifications::*;
 pub use outputs::*;
 pub use plans::*;

@@ -73,6 +73,7 @@ impl MigratorTrait for Migrator {
             Box::new(ConversationsAreSessions),
             Box::new(one_journal::OneJournal),
             Box::new(one_approval_surface::OneApprovalSurface),
+            Box::new(MemoryRecords),
         ]
     }
 }
@@ -4043,6 +4044,260 @@ async fn rebuild_sqlite_table(
     )))
 }
 
+/// Durable, owner-scoped memory records and immutable revision snapshots.
+struct MemoryRecords;
+
+impl MigrationName for MemoryRecords {
+    fn name(&self) -> &str {
+        "m20260902_000004_memory_records"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for MemoryRecords {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(idens::MemoryScopeState::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(idens::MemoryScopeState::Owner)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::MemoryScopeState::ScopeKind)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::MemoryScopeState::ScopeRef)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::MemoryScopeState::AutoCommit)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
+                    .col(
+                        ColumnDef::new(idens::MemoryScopeState::ActiveRecordCap)
+                            .big_integer()
+                            .not_null()
+                            .default(crate::DEFAULT_MEMORY_ACTIVE_RECORD_CAP as i64),
+                    )
+                    .col(
+                        ColumnDef::new(idens::MemoryScopeState::DigestByteCap)
+                            .big_integer()
+                            .not_null()
+                            .default(crate::DEFAULT_MEMORY_DIGEST_BYTES as i64),
+                    )
+                    .col(
+                        ColumnDef::new(idens::MemoryScopeState::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::MemoryScopeState::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .primary_key(
+                        Index::create()
+                            .col(idens::MemoryScopeState::Owner)
+                            .col(idens::MemoryScopeState::ScopeKind)
+                            .col(idens::MemoryScopeState::ScopeRef),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_table(
+                Table::create()
+                    .table(idens::MemoryRecord::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(idens::MemoryRecord::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(ColumnDef::new(idens::MemoryRecord::Owner).text().not_null())
+                    .col(
+                        ColumnDef::new(idens::MemoryRecord::ScopeKind)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(idens::MemoryRecord::RepoId).uuid())
+                    .col(ColumnDef::new(idens::MemoryRecord::Kind).text().not_null())
+                    .col(
+                        ColumnDef::new(idens::MemoryRecord::Status)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(idens::MemoryRecord::Title).text().not_null())
+                    .col(ColumnDef::new(idens::MemoryRecord::Body).text().not_null())
+                    .col(
+                        ColumnDef::new(idens::MemoryRecord::Provenance)
+                            .json_binary()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::MemoryRecord::Links)
+                            .json_binary()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(idens::MemoryRecord::ExpiresAt).timestamp_with_time_zone())
+                    .col(ColumnDef::new(idens::MemoryRecord::SupersededBy).uuid())
+                    .col(
+                        ColumnDef::new(idens::MemoryRecord::ObservationCount)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::MemoryRecord::Revision)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::MemoryRecord::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::MemoryRecord::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_memory_record_repo")
+                            .from(idens::MemoryRecord::Table, idens::MemoryRecord::RepoId)
+                            .to(idens::CodeRepo::Table, idens::CodeRepo::Id)
+                            .on_delete(ForeignKeyAction::Restrict),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_memory_record_superseded_by")
+                            .from(
+                                idens::MemoryRecord::Table,
+                                idens::MemoryRecord::SupersededBy,
+                            )
+                            .to(idens::MemoryRecord::Table, idens::MemoryRecord::Id)
+                            .on_delete(ForeignKeyAction::SetNull),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("ix_memory_record_owner_scope_status")
+                    .table(idens::MemoryRecord::Table)
+                    .col(idens::MemoryRecord::Owner)
+                    .col(idens::MemoryRecord::ScopeKind)
+                    .col(idens::MemoryRecord::RepoId)
+                    .col(idens::MemoryRecord::Status)
+                    .col(idens::MemoryRecord::UpdatedAt)
+                    .if_not_exists()
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("ix_memory_record_owner_status")
+                    .table(idens::MemoryRecord::Table)
+                    .col(idens::MemoryRecord::Owner)
+                    .col(idens::MemoryRecord::Status)
+                    .if_not_exists()
+                    .to_owned(),
+            )
+            .await?;
+
+        manager
+            .create_table(
+                Table::create()
+                    .table(idens::MemoryRevision::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(idens::MemoryRevision::Id)
+                            .uuid()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::MemoryRevision::RecordId)
+                            .uuid()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::MemoryRevision::Owner)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::MemoryRevision::Ordinal)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::MemoryRevision::Snapshot)
+                            .json_binary()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::MemoryRevision::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_memory_revision_record")
+                            .from(
+                                idens::MemoryRevision::Table,
+                                idens::MemoryRevision::RecordId,
+                            )
+                            .to(idens::MemoryRecord::Table, idens::MemoryRecord::Id)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("ix_memory_revision_record_ordinal")
+                    .table(idens::MemoryRevision::Table)
+                    .col(idens::MemoryRevision::RecordId)
+                    .col(idens::MemoryRevision::Ordinal)
+                    .unique()
+                    .if_not_exists()
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("ix_memory_revision_owner_record")
+                    .table(idens::MemoryRevision::Table)
+                    .col(idens::MemoryRevision::Owner)
+                    .col(idens::MemoryRevision::RecordId)
+                    .if_not_exists()
+                    .to_owned(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // Memory records are user data. A rollback must not delete them.
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
@@ -4125,6 +4380,7 @@ mod tests {
                 "m20260902_000001_conversations_are_sessions",
                 "m20260902_000002_one_journal",
                 "m20260902_000003_one_approval_surface",
+                "m20260902_000004_memory_records",
             ]
         );
         assert!(db

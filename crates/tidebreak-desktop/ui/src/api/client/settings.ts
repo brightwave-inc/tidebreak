@@ -170,6 +170,10 @@ export function withSettingsApi<TBase extends Constructor<HttpCore>>(
         branch_prefix_mode?: "account" | "custom" | "none";
         custom_branch_prefix?: string | null;
       };
+      memory?: {
+        enabled?: boolean;
+        capture_enabled?: boolean;
+      };
     }): Promise<RuntimeSettings> {
       return this.json("/settings", {
         method: "PUT",
