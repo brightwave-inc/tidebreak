@@ -709,6 +709,21 @@ pub async fn list_chat_messages(
     store: ScopedStore,
     Path(id): Path<ChatId>,
 ) -> Result<Json<ChatTranscript>, ServerError> {
+    if let Some(runtime) = state.code.as_ref() {
+        if let Some(session) = tidebreak_core::db::code::get_session_all_owners(
+            &runtime.db,
+            tidebreak_core::CodeSessionId(id.0),
+        )
+        .await?
+        {
+            if session.harness_kind != tidebreak_core::HarnessKind::Internal {
+                return Err(ServerError::unprocessable_kind(
+                    "transcript_unsupported",
+                    "this engine does not store a chat transcript",
+                ));
+            }
+        }
+    }
     let transcript = store
         .get_chat_transcript(id)
         .await?

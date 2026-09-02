@@ -27,7 +27,7 @@ pub struct TurnRun {
     pub input_message_id: MessageId,
     /// Exact designated terminal assistant message committed with successful
     /// completion. The composite database FK enforces its message/chat/turn
-    /// identity; [`Store::complete_turn_run`](crate::storage::Store::complete_turn_run)
+    /// identity; [`Store::complete_turn`](crate::storage::Store::complete_turn)
     /// enforces the assistant role because a foreign key cannot bind a literal
     /// role value.
     pub output_message_id: Option<MessageId>,

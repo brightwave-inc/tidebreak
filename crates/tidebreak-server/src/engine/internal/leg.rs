@@ -891,7 +891,7 @@ impl LegDriver {
         for (turn_id, lease_token) in remaining {
             if let Err(error) = self
                 .store
-                .expire_turn_run_lease(turn_id, lease_token, Utc::now())
+                .expire_turn_lease(turn_id, lease_token, Utc::now())
                 .await
             {
                 // The lease then simply expires on its own clock after the
@@ -911,7 +911,7 @@ impl LegDriver {
         let lease_expires_at = now + chrono_duration(self.config.lease)?;
         let action = self
             .store
-            .claim_turn_run(lease_token, now, lease_expires_at)
+            .claim_turn(lease_token, now, lease_expires_at)
             .await?;
         if let Some(terminal) = action.terminal_event {
             self.publish(terminal.chat_id, terminal.event);
@@ -1004,7 +1004,11 @@ impl LegDriver {
         outcome
     }
 
-    async fn run_turn(&self, turn: TurnRun, lease_token: uuid::Uuid) -> Result<LegDriverOutcome> {
+    pub(crate) async fn run_turn(
+        &self,
+        turn: TurnRun,
+        lease_token: uuid::Uuid,
+    ) -> Result<LegDriverOutcome> {
         if turn.status != TurnRunStatus::Running || turn.lease_token != Some(lease_token) {
             return Err(AgentError::msg(format!(
                 "claimed turn {} has an invalid execution identity",
@@ -1703,7 +1707,7 @@ impl LegDriver {
                     let continue_after_steer = loop {
                         let completion = if let Some(refusal) = refusal.clone() {
                             self.store
-                                .complete_refused_turn_run_with_citations_and_append_event(
+                                .complete_refused_turn_with_citations_and_append_event(
                                     turn.id,
                                     lease_token,
                                     expected_steer_revision,
@@ -1717,7 +1721,7 @@ impl LegDriver {
                                 .await
                         } else {
                             self.store
-                                .complete_turn_run_with_citations_and_append_event(
+                                .complete_turn_with_citations_and_append_event(
                                     turn.id,
                                     lease_token,
                                     expected_steer_revision,
@@ -2777,7 +2781,7 @@ impl LegDriver {
             };
             match self
                 .store
-                .heartbeat_turn_run(turn.id, lease_token, now, now + lease)
+                .heartbeat_turn(turn.id, lease_token, now, now + lease)
                 .await
             {
                 Ok(true) => return LeaseState::Running,
@@ -2799,7 +2803,7 @@ impl LegDriver {
 
     async fn lease_state_retry(&self, turn: &TurnRun, lease_token: uuid::Uuid) -> LeaseState {
         loop {
-            match self.store.get_turn_run(turn.id).await {
+            match self.store.get_turn(turn.id).await {
                 Ok(Some(current))
                     if current.lease_token == Some(lease_token)
                         && current.attempt_count == turn.attempt_count
@@ -2828,7 +2832,7 @@ impl LegDriver {
         lease_token: uuid::Uuid,
     ) -> LiveTurnState {
         loop {
-            match self.store.get_turn_run(turn.id).await {
+            match self.store.get_turn(turn.id).await {
                 Ok(Some(current))
                     if current.lease_token == Some(lease_token)
                         && current.attempt_count == turn.attempt_count
@@ -2858,7 +2862,7 @@ impl LegDriver {
         terminal: TerminalIdentity<'_>,
     ) -> ResolutionState {
         loop {
-            match self.store.get_turn_run(turn.id).await {
+            match self.store.get_turn(turn.id).await {
                 Ok(Some(current)) if current.attempt_count == turn.attempt_count => {
                     if current.status == terminal.status() {
                         if !terminal.matches_turn(&current) {
@@ -3076,7 +3080,7 @@ impl LegDriver {
         loop {
             match self
                 .store
-                .record_turn_run_failure_and_append_event(
+                .record_turn_failure_and_append_event(
                     turn.id,
                     lease_token,
                     Utc::now(),

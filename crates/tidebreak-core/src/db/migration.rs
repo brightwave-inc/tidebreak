@@ -27,6 +27,7 @@ mod baseline;
 mod idens;
 mod one_approval_surface;
 mod one_journal;
+mod one_turn_lane;
 
 #[cfg(test)]
 pub(crate) use baseline::tables_for_test;
@@ -75,6 +76,7 @@ impl MigratorTrait for Migrator {
             Box::new(one_approval_surface::OneApprovalSurface),
             Box::new(MemoryRecords),
             Box::new(MemorySweepState),
+            Box::new(one_turn_lane::OneTurnLane),
         ]
     }
 }
@@ -3967,21 +3969,45 @@ async fn rebuild_sqlite_table(
         .into_iter()
         .map(|row| row.try_get::<String, _>("name"))
         .collect::<Result<_, _>>()?;
-        let column_list = columns
+        let mut dest_columns: Vec<String> = columns
             .iter()
             .filter(|name| rebuilt_columns.contains(name))
+            .cloned()
+            .collect();
+        let mut select_columns = dest_columns.clone();
+        let rebuilt_has_session = rebuilt_columns.iter().any(|name| name == "session_id");
+        let rebuilt_has_chat = rebuilt_columns.iter().any(|name| name == "chat_id");
+        let source_has_chat = columns.iter().any(|name| name == "chat_id");
+        let source_has_session = columns.iter().any(|name| name == "session_id");
+        if rebuilt_has_session && !rebuilt_has_chat && source_has_chat && !source_has_session {
+            dest_columns.push("session_id".to_owned());
+            select_columns.push("chat_id".to_owned());
+        }
+        let dest_list = dest_columns
+            .iter()
+            .map(|name| format!("\"{name}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let select_list = select_columns
+            .iter()
             .map(|name| format!("\"{name}\""))
             .collect::<Vec<_>>()
             .join(", ");
         let mut statements = vec![
             format!(
-                "INSERT INTO \"{rebuild_table}\" ({column_list}) \
-                 SELECT {column_list} FROM \"{table}\""
+                "INSERT INTO \"{rebuild_table}\" ({dest_list}) \
+                 SELECT {select_list} FROM \"{table}\""
             ),
             format!("DROP TABLE \"{table}\""),
             format!("ALTER TABLE \"{rebuild_table}\" RENAME TO \"{table}\""),
         ];
-        statements.extend(indexes);
+        statements.extend(indexes.into_iter().map(|sql| {
+            if rebuilt_has_session && !rebuilt_has_chat {
+                sql.replace(r#""chat_id""#, r#""session_id""#)
+            } else {
+                sql
+            }
+        }));
         for statement in statements {
             sea_orm::sqlx::query(sea_orm::sqlx::AssertSqlSafe(statement))
                 .execute(&mut *transaction)
@@ -4500,6 +4526,7 @@ mod tests {
                 "m20260902_000003_one_approval_surface",
                 "m20260902_000004_memory_records",
                 "m20260902_000005_memory_sweep_state",
+                "m20260903_000001_one_turn_lane",
             ]
         );
         assert!(db
@@ -4869,13 +4896,18 @@ INSERT INTO tool_call (
         for (table, expected) in [
             ("message", 2),
             ("agent_run", 1),
-            ("turn_run", 1),
+            ("code_turn", 1),
             ("tool_call", 1),
         ] {
+            let filter = if table == "code_turn" {
+                "session_id"
+            } else {
+                "chat_id"
+            };
             assert_eq!(
                 count(
                     db,
-                    &format!("{table} WHERE chat_id = X'0000000000000000000000000000a001'")
+                    &format!("{table} WHERE {filter} = X'0000000000000000000000000000a001'")
                 )
                 .await,
                 expected,

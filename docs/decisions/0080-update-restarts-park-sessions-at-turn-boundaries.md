@@ -127,3 +127,12 @@ Installation stays an explicit user action; nothing here installs silently.
 - Manual: restart-to-update with an idle code session, with a mid-turn code
   session (expect the retryable refusal), and with a streaming chat turn
   (expect the turn to continue shortly after relaunch).
+
+## Amendment (2026-09-02)
+
+`HarnessCaps::mid_turn_resume` is the flag that distinguishes the two
+quiesce halves. The internal engine declares `Supported`: an update abort
+hands the `code_turn` lease back and boot recovery leaves a pid-less
+running turn for the claim scan. Every other adapter declares
+`Unsupported` and still waits for a turn boundary. D4a keeps both halves
+wired; D4b unifies them on this flag.

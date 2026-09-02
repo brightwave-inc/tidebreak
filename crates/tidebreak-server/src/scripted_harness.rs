@@ -491,6 +491,8 @@ impl HarnessAdapter for ScriptedAdapter {
             durable_parks: self.durable_parks,
             user_questions: self.user_questions,
             standing_grants: self.standing_grants,
+            mid_turn_resume: CapLevel::Unsupported,
+            transcript: CapLevel::Unsupported,
         }
     }
 
@@ -1011,6 +1013,7 @@ mod tests {
 
     fn turn_input() -> TurnInput {
         TurnInput {
+            turn_id: None,
             text: "go".into(),
             model: None,
             reasoning_effort: None,

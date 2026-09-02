@@ -32,7 +32,7 @@ pub(in crate::db) use cancellation::{
     request_turn_cancellation_and_append_event,
 };
 
-pub(in crate::db) async fn complete_turn_run(
+pub(in crate::db) async fn complete_turn(
     store: &DbStore,
     id: TurnId,
     lease_token: uuid::Uuid,
@@ -40,7 +40,7 @@ pub(in crate::db) async fn complete_turn_run(
     now: chrono::DateTime<Utc>,
     output: &Message,
 ) -> Result<Option<CompleteTurnRunOutcome>> {
-    Ok(complete_turn_run_inner(
+    Ok(complete_turn_inner(
         store,
         id,
         lease_token,
@@ -56,7 +56,7 @@ pub(in crate::db) async fn complete_turn_run(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(in crate::db) async fn complete_turn_run_and_append_event(
+pub(in crate::db) async fn complete_turn_and_append_event(
     store: &DbStore,
     id: TurnId,
     lease_token: uuid::Uuid,
@@ -68,7 +68,7 @@ pub(in crate::db) async fn complete_turn_run_and_append_event(
     stop_reason: StopReason,
 ) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
     let event = AgentEvent::TurnCompleted { usage, stop_reason };
-    complete_turn_run_inner(
+    complete_turn_inner(
         store,
         id,
         lease_token,
@@ -83,7 +83,7 @@ pub(in crate::db) async fn complete_turn_run_and_append_event(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(in crate::db) async fn complete_turn_run_with_citations_and_append_event(
+pub(in crate::db) async fn complete_turn_with_citations_and_append_event(
     store: &DbStore,
     id: TurnId,
     lease_token: uuid::Uuid,
@@ -96,7 +96,7 @@ pub(in crate::db) async fn complete_turn_run_with_citations_and_append_event(
     stop_reason: StopReason,
 ) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
     let event = AgentEvent::TurnCompleted { usage, stop_reason };
-    complete_turn_run_inner(
+    complete_turn_inner(
         store,
         id,
         lease_token,
@@ -111,7 +111,7 @@ pub(in crate::db) async fn complete_turn_run_with_citations_and_append_event(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(in crate::db) async fn complete_refused_turn_run_with_citations_and_append_event(
+pub(in crate::db) async fn complete_refused_turn_with_citations_and_append_event(
     store: &DbStore,
     id: TurnId,
     lease_token: uuid::Uuid,
@@ -130,7 +130,7 @@ pub(in crate::db) async fn complete_refused_turn_run_with_citations_and_append_e
         )));
     }
     let event = AgentEvent::TurnRefused { usage, refusal };
-    complete_turn_run_inner(
+    complete_turn_inner(
         store,
         id,
         lease_token,
@@ -162,7 +162,7 @@ pub(in crate::db) async fn recover_exact_completed_turn_event(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn complete_turn_run_inner(
+async fn complete_turn_inner(
     store: &DbStore,
     id: TurnId,
     lease_token: uuid::Uuid,
@@ -206,7 +206,7 @@ async fn complete_turn_run_inner(
             "turn output timestamp must not be after completion time".into(),
         ));
     }
-    let Some(receipt) = entities::turn_claim::Entity::find_by_id(lease_token)
+    let Some(receipt) = entities::code_turn_claim::Entity::find_by_id(lease_token)
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -215,7 +215,7 @@ async fn complete_turn_run_inner(
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     };
-    let Some(existing) = entities::turn_run::Entity::find_by_id(id.0)
+    let Some(existing) = entities::code_turn::Entity::find_by_id(id.0)
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -223,7 +223,7 @@ async fn complete_turn_run_inner(
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     };
-    if output.chat_id.0 != existing.chat_id {
+    if output.chat_id.0 != existing.session_id {
         return Err(AgentError::Store(format!(
             "turn {id} output belongs to a different chat"
         )));
@@ -257,7 +257,9 @@ async fn complete_turn_run_inner(
         || existing
             .lease_expires_at
             .is_none_or(|expires_at| expires_at <= now)
-        || existing.updated_at > now
+        || existing
+            .updated_at
+            .is_some_and(|updated_at| updated_at > now)
     {
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
@@ -271,9 +273,9 @@ async fn complete_turn_run_inner(
         validate_terminal_usage(*usage, super::usage_from_turn_model(&existing)?)?;
     }
     let stale_output = existing.steer_revision != expected_steer_revision;
-    let steer_pending = entities::turn_steer::Entity::find()
-        .filter(entities::turn_steer::Column::TurnId.eq(id.0))
-        .filter(entities::turn_steer::Column::Status.eq(TurnSteerStatus::Pending.as_str()))
+    let steer_pending = entities::code_turn_steer::Entity::find()
+        .filter(entities::code_turn_steer::Column::TurnId.eq(id.0))
+        .filter(entities::code_turn_steer::Column::Status.eq(TurnSteerStatus::Pending.as_str()))
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -363,34 +365,34 @@ async fn complete_turn_run_inner(
     }
     super::super::citation::insert_for_message_on(&transaction, output, citations).await?;
 
-    let mut completed = entities::turn_run::Entity::update_many()
+    let mut completed = entities::code_turn::Entity::update_many()
         .col_expr(
-            entities::turn_run::Column::Status,
+            entities::code_turn::Column::Status,
             sea_orm::sea_query::Expr::value(TurnRunStatus::Completed.as_str()),
         )
         .col_expr(
-            entities::turn_run::Column::OutputMessageId,
+            entities::code_turn::Column::OutputMessageId,
             sea_orm::sea_query::Expr::value(Some(output.id.0)),
         )
         .col_expr(
-            entities::turn_run::Column::LeaseToken,
+            entities::code_turn::Column::LeaseToken,
             sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
         )
         .col_expr(
-            entities::turn_run::Column::LeaseExpiresAt,
+            entities::code_turn::Column::LeaseExpiresAt,
             sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
         )
         .col_expr(
-            entities::turn_run::Column::FinishedAt,
+            entities::code_turn::Column::EndedAt,
             sea_orm::sea_query::Expr::value(Some(now)),
         )
         .col_expr(
-            entities::turn_run::Column::UpdatedAt,
+            entities::code_turn::Column::UpdatedAt,
             sea_orm::sea_query::Expr::value(now),
         );
     if let Some(model_steps) = terminal_model_steps {
         completed = completed.col_expr(
-            entities::turn_run::Column::ModelSteps,
+            entities::code_turn::Column::ModelSteps,
             sea_orm::sea_query::Expr::value(model_steps),
         );
     }
@@ -402,32 +404,32 @@ async fn complete_turn_run_inner(
     {
         completed = completed
             .col_expr(
-                entities::turn_run::Column::InputTokens,
+                entities::code_turn::Column::InputTokens,
                 sea_orm::sea_query::Expr::value(i64::from(usage.input_tokens)),
             )
             .col_expr(
-                entities::turn_run::Column::OutputTokens,
+                entities::code_turn::Column::OutputTokens,
                 sea_orm::sea_query::Expr::value(i64::from(usage.output_tokens)),
             )
             .col_expr(
-                entities::turn_run::Column::CacheReadInputTokens,
+                entities::code_turn::Column::CacheReadInputTokens,
                 sea_orm::sea_query::Expr::value(i64::from(usage.cache_read_input_tokens)),
             )
             .col_expr(
-                entities::turn_run::Column::CacheCreationInputTokens,
+                entities::code_turn::Column::CacheCreationInputTokens,
                 sea_orm::sea_query::Expr::value(i64::from(usage.cache_creation_input_tokens)),
             );
     }
     let completed = completed
-        .filter(entities::turn_run::Column::Id.eq(id.0))
-        .filter(entities::turn_run::Column::Status.eq(TurnRunStatus::Running.as_str()))
-        .filter(entities::turn_run::Column::AttemptCount.eq(receipt.attempt_count))
-        .filter(entities::turn_run::Column::ClaimCount.eq(receipt.claim_count))
-        .filter(entities::turn_run::Column::LeaseToken.eq(lease_token))
-        .filter(entities::turn_run::Column::LeaseExpiresAt.eq(existing.lease_expires_at))
-        .filter(entities::turn_run::Column::LeaseExpiresAt.gt(now))
-        .filter(entities::turn_run::Column::UpdatedAt.eq(existing.updated_at))
-        .filter(entities::turn_run::Column::UpdatedAt.lte(now))
+        .filter(entities::code_turn::Column::Id.eq(id.0))
+        .filter(entities::code_turn::Column::Status.eq(TurnRunStatus::Running.as_str()))
+        .filter(entities::code_turn::Column::AttemptCount.eq(receipt.attempt_count))
+        .filter(entities::code_turn::Column::ClaimCount.eq(receipt.claim_count))
+        .filter(entities::code_turn::Column::LeaseToken.eq(lease_token))
+        .filter(entities::code_turn::Column::LeaseExpiresAt.eq(existing.lease_expires_at))
+        .filter(entities::code_turn::Column::LeaseExpiresAt.gt(now))
+        .filter(entities::code_turn::Column::UpdatedAt.eq(existing.updated_at))
+        .filter(entities::code_turn::Column::UpdatedAt.lte(now))
         .exec(&transaction)
         .await
         .map_err(store_err)?;
@@ -439,12 +441,12 @@ async fn complete_turn_run_inner(
     let sequenced_event = append_terminal_event_on(
         &transaction,
         id,
-        ChatId(existing.chat_id),
+        ChatId(existing.session_id),
         Some(lease_token),
         terminal_event,
     )
     .await?;
-    let completed = entities::turn_run::Entity::find_by_id(id.0)
+    let completed = entities::code_turn::Entity::find_by_id(id.0)
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -489,7 +491,7 @@ fn validate_terminal_usage(total: Usage, checkpoint: Usage) -> Result<()> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(in crate::db) async fn record_turn_run_failure(
+pub(in crate::db) async fn record_turn_failure(
     store: &DbStore,
     id: TurnId,
     lease_token: uuid::Uuid,
@@ -500,7 +502,7 @@ pub(in crate::db) async fn record_turn_run_failure(
     error_code: &str,
     error_detail: Option<&str>,
 ) -> Result<Option<RecordTurnFailureOutcome>> {
-    Ok(record_turn_run_failure_inner(
+    Ok(record_turn_failure_inner(
         store,
         id,
         lease_token,
@@ -517,7 +519,7 @@ pub(in crate::db) async fn record_turn_run_failure(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(in crate::db) async fn record_turn_run_failure_and_append_event(
+pub(in crate::db) async fn record_turn_failure_and_append_event(
     store: &DbStore,
     id: TurnId,
     lease_token: uuid::Uuid,
@@ -534,7 +536,7 @@ pub(in crate::db) async fn record_turn_run_failure_and_append_event(
             message: error_detail.unwrap_or(error_code).to_owned(),
         },
     };
-    record_turn_run_failure_inner(
+    record_turn_failure_inner(
         store,
         id,
         lease_token,
@@ -550,7 +552,7 @@ pub(in crate::db) async fn record_turn_run_failure_and_append_event(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn record_turn_run_failure_inner(
+async fn record_turn_failure_inner(
     store: &DbStore,
     id: TurnId,
     lease_token: uuid::Uuid,
@@ -643,7 +645,7 @@ async fn record_turn_run_failure_inner(
             terminal_event: sequenced_event,
         }));
     }
-    let Some(claim) = entities::turn_claim::Entity::find_by_id(lease_token)
+    let Some(claim) = entities::code_turn_claim::Entity::find_by_id(lease_token)
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -652,7 +654,7 @@ async fn record_turn_run_failure_inner(
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     };
-    let Some(turn) = entities::turn_run::Entity::find_by_id(id.0)
+    let Some(turn) = entities::code_turn::Entity::find_by_id(id.0)
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -667,7 +669,7 @@ async fn record_turn_run_failure_inner(
         || turn
             .lease_expires_at
             .is_none_or(|expires_at| expires_at <= now)
-        || turn.updated_at > now
+        || turn.updated_at.is_some_and(|updated_at| updated_at > now)
     {
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
@@ -725,9 +727,10 @@ async fn record_turn_run_failure_inner(
         }
         super::super::approval::close_pending_for_terminal_turn_on(&transaction, id, now).await?;
     }
-    let receipt = entities::turn_failure::ActiveModel {
+    let receipt = entities::code_turn_failure::ActiveModel {
         lease_token: Set(lease_token),
         turn_id: Set(id.0),
+        owner: Set(claim.owner.clone()),
         attempt_count: Set(claim.attempt_count),
         model_steps: Set(model_steps),
         input_tokens: Set(i64::from(usage.input_tokens)),
@@ -744,74 +747,74 @@ async fn record_turn_run_failure_inner(
     .await
     .map_err(store_err)?;
 
-    let update = entities::turn_run::Entity::update_many()
+    let update = entities::code_turn::Entity::update_many()
         .col_expr(
-            entities::turn_run::Column::Status,
+            entities::code_turn::Column::Status,
             sea_orm::sea_query::Expr::value(result_status.as_str()),
         )
         .col_expr(
-            entities::turn_run::Column::LeaseToken,
+            entities::code_turn::Column::LeaseToken,
             sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
         )
         .col_expr(
-            entities::turn_run::Column::LeaseExpiresAt,
+            entities::code_turn::Column::LeaseExpiresAt,
             sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
         )
         .col_expr(
-            entities::turn_run::Column::LastErrorCode,
+            entities::code_turn::Column::LastErrorCode,
             sea_orm::sea_query::Expr::value(Some(error_code.to_owned())),
         )
         .col_expr(
-            entities::turn_run::Column::ModelSteps,
+            entities::code_turn::Column::ModelSteps,
             sea_orm::sea_query::Expr::value(model_steps),
         )
         .col_expr(
-            entities::turn_run::Column::InputTokens,
+            entities::code_turn::Column::InputTokens,
             sea_orm::sea_query::Expr::value(i64::from(usage.input_tokens)),
         )
         .col_expr(
-            entities::turn_run::Column::OutputTokens,
+            entities::code_turn::Column::OutputTokens,
             sea_orm::sea_query::Expr::value(i64::from(usage.output_tokens)),
         )
         .col_expr(
-            entities::turn_run::Column::CacheReadInputTokens,
+            entities::code_turn::Column::CacheReadInputTokens,
             sea_orm::sea_query::Expr::value(i64::from(usage.cache_read_input_tokens)),
         )
         .col_expr(
-            entities::turn_run::Column::CacheCreationInputTokens,
+            entities::code_turn::Column::CacheCreationInputTokens,
             sea_orm::sea_query::Expr::value(i64::from(usage.cache_creation_input_tokens)),
         )
         .col_expr(
-            entities::turn_run::Column::LastErrorDetail,
+            entities::code_turn::Column::LastErrorDetail,
             sea_orm::sea_query::Expr::value(error_detail.map(str::to_owned)),
         )
         .col_expr(
-            entities::turn_run::Column::UpdatedAt,
+            entities::code_turn::Column::UpdatedAt,
             sea_orm::sea_query::Expr::value(now),
         );
     let update = match result_status {
         TurnRunStatus::RetryWait => update.col_expr(
-            entities::turn_run::Column::AvailableAt,
+            entities::code_turn::Column::AvailableAt,
             sea_orm::sea_query::Expr::value(
                 requested_retry_at.expect("retry-wait failure has a retry time"),
             ),
         ),
         TurnRunStatus::Failed => update.col_expr(
-            entities::turn_run::Column::FinishedAt,
+            entities::code_turn::Column::EndedAt,
             sea_orm::sea_query::Expr::value(Some(now)),
         ),
         _ => unreachable!("failure resolution has a constrained result status"),
     };
     let updated = update
-        .filter(entities::turn_run::Column::Id.eq(id.0))
-        .filter(entities::turn_run::Column::Status.eq(TurnRunStatus::Running.as_str()))
-        .filter(entities::turn_run::Column::AttemptCount.eq(claim.attempt_count))
-        .filter(entities::turn_run::Column::ClaimCount.eq(claim.claim_count))
-        .filter(entities::turn_run::Column::LeaseToken.eq(lease_token))
-        .filter(entities::turn_run::Column::LeaseExpiresAt.eq(turn.lease_expires_at))
-        .filter(entities::turn_run::Column::LeaseExpiresAt.gt(now))
-        .filter(entities::turn_run::Column::UpdatedAt.eq(turn.updated_at))
-        .filter(entities::turn_run::Column::UpdatedAt.lte(now))
+        .filter(entities::code_turn::Column::Id.eq(id.0))
+        .filter(entities::code_turn::Column::Status.eq(TurnRunStatus::Running.as_str()))
+        .filter(entities::code_turn::Column::AttemptCount.eq(claim.attempt_count))
+        .filter(entities::code_turn::Column::ClaimCount.eq(claim.claim_count))
+        .filter(entities::code_turn::Column::LeaseToken.eq(lease_token))
+        .filter(entities::code_turn::Column::LeaseExpiresAt.eq(turn.lease_expires_at))
+        .filter(entities::code_turn::Column::LeaseExpiresAt.gt(now))
+        .filter(entities::code_turn::Column::UpdatedAt.eq(turn.updated_at))
+        .filter(entities::code_turn::Column::UpdatedAt.lte(now))
         .exec(&transaction)
         .await
         .map_err(store_err)?;
@@ -825,7 +828,7 @@ async fn record_turn_run_failure_inner(
         append_terminal_event_on(
             &transaction,
             id,
-            ChatId(turn.chat_id),
+            ChatId(turn.session_id),
             Some(lease_token),
             terminal_event,
         )
@@ -902,7 +905,7 @@ async fn exact_turn_failure_on<C>(
 where
     C: ConnectionTrait,
 {
-    let Some(existing) = entities::turn_failure::Entity::find_by_id(lease_token)
+    let Some(existing) = entities::code_turn_failure::Entity::find_by_id(lease_token)
         .one(conn)
         .await
         .map_err(store_err)?
@@ -926,7 +929,9 @@ where
     Ok(Some(turn_failure_from_model(existing)?))
 }
 
-fn turn_failure_from_model(model: entities::turn_failure::Model) -> Result<TurnFailureReceipt> {
+fn turn_failure_from_model(
+    model: entities::code_turn_failure::Model,
+) -> Result<TurnFailureReceipt> {
     let result_status = turn_run_status_from_db(&model.result_status)?;
     if !matches!(
         result_status,
@@ -975,7 +980,7 @@ async fn exact_completed_turn_on(
     output: &Message,
     citations: &[crate::AssistantCitationInput],
 ) -> Result<Option<TurnRun>> {
-    let Some(receipt) = entities::turn_claim::Entity::find_by_id(lease_token)
+    let Some(receipt) = entities::code_turn_claim::Entity::find_by_id(lease_token)
         .one(&store.conn)
         .await
         .map_err(store_err)?
@@ -983,7 +988,7 @@ async fn exact_completed_turn_on(
     else {
         return Ok(None);
     };
-    let Some(existing) = entities::turn_run::Entity::find_by_id(id.0)
+    let Some(existing) = entities::code_turn::Entity::find_by_id(id.0)
         .one(&store.conn)
         .await
         .map_err(store_err)?
@@ -1026,11 +1031,11 @@ async fn journal_chat_id(
     if !journal_terminal {
         return Ok(None);
     }
-    Ok(entities::turn_run::Entity::find_by_id(id.0)
+    Ok(entities::code_turn::Entity::find_by_id(id.0)
         .one(&store.conn)
         .await
         .map_err(store_err)?
-        .map(|turn| ChatId(turn.chat_id)))
+        .map(|turn| ChatId(turn.session_id)))
 }
 
 pub(super) async fn append_terminal_event_on<C>(

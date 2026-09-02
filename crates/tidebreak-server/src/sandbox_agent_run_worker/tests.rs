@@ -531,7 +531,7 @@ async fn admit_sandbox(
     input: &str,
 ) -> tidebreak_core::AgentRun {
     let running = store
-        .list_turn_runs(chat_id)
+        .list_turns(chat_id)
         .await
         .unwrap()
         .into_iter()
@@ -562,7 +562,7 @@ async fn admit_sandbox(
         let now = std::cmp::max(queued.available_at, queued.updated_at)
             + chrono::Duration::microseconds(1);
         let turn = store
-            .claim_turn_run(lease, now, now + chrono::Duration::hours(1))
+            .claim_turn(lease, now, now + chrono::Duration::hours(1))
             .await
             .unwrap()
             .turn
@@ -645,7 +645,7 @@ async fn ready_wait_set_for_test(
     let foreground_lease = uuid::Uuid::new_v4();
     let now = Utc::now();
     let foreground = store
-        .claim_turn_run(foreground_lease, now, now + chrono::Duration::minutes(1))
+        .claim_turn(foreground_lease, now, now + chrono::Duration::minutes(1))
         .await
         .unwrap()
         .turn
@@ -762,7 +762,7 @@ async fn sandbox_run_inherits_the_chat_model_and_reasoning_effort() {
     let lease = uuid::Uuid::new_v4();
     let now = Utc::now();
     store
-        .claim_turn_run(lease, now, now + chrono::Duration::hours(1))
+        .claim_turn(lease, now, now + chrono::Duration::hours(1))
         .await
         .unwrap()
         .turn
@@ -1688,7 +1688,7 @@ async fn durable_wait_set_scan_resumes_and_publishes_without_a_wake() {
         .await
         .expect("resumed wait should wake the turn worker");
     assert_eq!(
-        store.get_turn_run(turn_id).await.unwrap().unwrap().status,
+        store.get_turn(turn_id).await.unwrap().unwrap().status,
         TurnRunStatus::Resuming
     );
 
@@ -1739,7 +1739,7 @@ async fn ambiguous_wait_set_resume_retries_exactly_then_publishes_and_wakes() {
         .await
         .expect("ambiguous wait recovery should wake the turn worker");
     assert_eq!(
-        store.get_turn_run(turn_id).await.unwrap().unwrap().status,
+        store.get_turn(turn_id).await.unwrap().unwrap().status,
         TurnRunStatus::Resuming
     );
     assert_eq!(
@@ -1906,7 +1906,7 @@ async fn folder_proposal_completes_the_child_then_resumes_the_parent_without_a_t
     let foreground_lease = uuid::Uuid::new_v4();
     let now = chrono::Utc::now();
     let foreground = store
-        .claim_turn_run(foreground_lease, now, now + chrono::Duration::minutes(1))
+        .claim_turn(foreground_lease, now, now + chrono::Duration::minutes(1))
         .await
         .unwrap()
         .turn
@@ -3124,7 +3124,7 @@ async fn desktop_worker_checkpoints_one_exact_delegated_file_read() {
     let foreground_lease = uuid::Uuid::new_v4();
     let now = Utc::now();
     let turn = store
-        .claim_turn_run(foreground_lease, now, now + chrono::Duration::minutes(1))
+        .claim_turn(foreground_lease, now, now + chrono::Duration::minutes(1))
         .await
         .unwrap()
         .turn
@@ -3297,7 +3297,7 @@ async fn running_turn_on_model(store: &Arc<dyn Store>, chat_id: ChatId, model: &
         .unwrap();
     let now = Utc::now();
     store
-        .claim_turn_run(uuid::Uuid::new_v4(), now, now + chrono::Duration::hours(1))
+        .claim_turn(uuid::Uuid::new_v4(), now, now + chrono::Duration::hours(1))
         .await
         .unwrap()
         .turn

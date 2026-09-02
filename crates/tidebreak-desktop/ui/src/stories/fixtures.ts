@@ -481,6 +481,8 @@ const fullCaps: HarnessCaps = {
   durable_parks: "unsupported",
   user_questions: "unsupported",
   standing_grants: "unsupported",
+  mid_turn_resume: "unsupported",
+  transcript: "unsupported",
 };
 
 function doctorEntry(

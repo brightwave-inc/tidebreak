@@ -65,6 +65,12 @@ its meaning until the queue default has soaked).
 - The promoter is poll-based at 750 ms; if that cadence ever matters, wire it
   to the turn-resolution wake instead.
 
+The admission ledger that decision 9 used to serialize a client turn id
+across processes is retired. Identity lives on `code_turn.fingerprint`
+(and `code_queued_turn.fingerprint`); with one consumer — the session
+worker — there is no reservation to take over. The FIFO queue itself
+survives as `code_queued_turn`.
+
 Revisit if: multiple clients need a shared send-mode default (promote the
 localStorage choice to a setting), or promotion-order guarantees beyond FIFO
 are wanted (priorities, scheduling).

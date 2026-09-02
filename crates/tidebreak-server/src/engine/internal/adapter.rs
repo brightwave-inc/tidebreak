@@ -9,7 +9,9 @@ use tidebreak_harness::{
     HarnessAdapter, HarnessError, HarnessProbe, HarnessSession, HostEnv, ListedHarnessModel,
     SessionSpec,
 };
+use tokio::sync::Semaphore;
 
+use super::leg::{LegDriver, LegDriverConfig};
 use super::session::InternalSession;
 use crate::code::bus::CodeEventBus;
 use crate::state::AppState;
@@ -27,11 +29,39 @@ pub(crate) struct InternalAdapter {
     state: AppState,
     db: Arc<DbStore>,
     bus: Arc<CodeEventBus>,
+    /// Process-wide ceiling on concurrent internal-engine model calls.
+    /// Sized from the same config as [`LegDriverConfig`].
+    concurrency: Arc<Semaphore>,
+    driver: LegDriver,
 }
 
 impl InternalAdapter {
     pub(crate) fn new(state: AppState, db: Arc<DbStore>, bus: Arc<CodeEventBus>) -> Self {
-        Self { state, db, bus }
+        let driver = LegDriver::new(
+            state.store.clone(),
+            state.resolver.clone(),
+            state.secrets.clone(),
+            state.provisioned_policy.clone(),
+            state.os_policy.clone(),
+            state.tools.clone(),
+            state.approvals.clone(),
+            state.events.clone(),
+            state.active_turns.clone(),
+            state.turn_job_wake.clone(),
+            state.agent_run_wake.clone(),
+            state.queued_turn_wake.clone(),
+            state.agent_config.clone(),
+            Some(state.config.data_dir.join("scratch")),
+            LegDriverConfig::default(),
+        )
+        .with_mcp_runtime(state.mcp.clone());
+        Self {
+            state,
+            db,
+            bus,
+            concurrency: Arc::new(Semaphore::new(LegDriverConfig::default().max_concurrency)),
+            driver,
+        }
     }
 }
 
@@ -76,6 +106,8 @@ impl HarnessAdapter for InternalAdapter {
             durable_parks: CapLevel::Supported,
             user_questions: CapLevel::Supported,
             standing_grants: CapLevel::Supported,
+            mid_turn_resume: CapLevel::Supported,
+            transcript: CapLevel::Supported,
         }
     }
 
@@ -90,9 +122,15 @@ impl HarnessAdapter for InternalAdapter {
     }
 
     async fn launch(&self, spec: SessionSpec) -> Result<Box<dyn HarnessSession>, HarnessError> {
-        let session =
-            InternalSession::launch(self.state.clone(), self.db.clone(), self.bus.clone(), spec)
-                .await?;
+        let session = InternalSession::launch(
+            self.state.clone(),
+            self.db.clone(),
+            self.bus.clone(),
+            self.concurrency.clone(),
+            self.driver.clone(),
+            spec,
+        )
+        .await?;
         Ok(Box::new(session))
     }
 }

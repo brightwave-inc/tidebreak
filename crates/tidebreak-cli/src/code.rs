@@ -2824,6 +2824,8 @@ mod tests {
                 durable_parks: CapLevel::Unsupported,
                 user_questions: CapLevel::Unsupported,
                 standing_grants: CapLevel::Unsupported,
+                mid_turn_resume: CapLevel::Unsupported,
+                transcript: CapLevel::Unsupported,
             }
         }
         // Every engine honors Allow, so every engine starts there.

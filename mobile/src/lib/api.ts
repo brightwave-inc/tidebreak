@@ -187,6 +187,8 @@ function parseHarnessCaps(value: unknown): HarnessCaps | null {
     durable_parks: caps.durable_parks,
     user_questions: caps.user_questions,
     standing_grants: caps.standing_grants,
+    mid_turn_resume: caps.mid_turn_resume,
+    transcript: caps.transcript,
   };
 }
 

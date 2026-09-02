@@ -747,7 +747,7 @@ async fn an_exact_image_turn_retry_survives_a_managed_gateway_route_retarget() {
         StatusCode::ACCEPTED
     );
     let accepted = store
-        .get_turn_run(turn_id)
+        .get_turn(turn_id)
         .await
         .unwrap()
         .expect("the image turn was accepted");
@@ -804,7 +804,7 @@ async fn an_exact_image_turn_retry_survives_a_managed_gateway_route_retarget() {
     );
     assert_eq!(
         store
-            .get_turn_run(turn_id)
+            .get_turn(turn_id)
             .await
             .unwrap()
             .expect("the accepted turn remains durable")

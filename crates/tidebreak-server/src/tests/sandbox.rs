@@ -750,7 +750,7 @@ async fn delegated_file_routes_are_native_only_and_expose_only_exact_broker_auth
     let turn_lease = uuid::Uuid::new_v4();
     let now = chrono::Utc::now();
     let turn = store
-        .claim_turn_run(turn_lease, now, now + chrono::Duration::minutes(5))
+        .claim_turn(turn_lease, now, now + chrono::Duration::minutes(5))
         .await
         .unwrap()
         .turn

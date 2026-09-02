@@ -379,8 +379,15 @@ const PULL_REQUEST_RELATIONS = new Set<CodePullRequestRelation>([
 ]);
 const PULL_REQUEST_FACT_STATES = new Set<string>(["open", "merged", "closed"]);
 const TURN_STATUSES = new Set<CodeTurnStatus>([
+  "queued",
   "running",
   "waiting",
+  "cancelling",
+  "waiting_for_client",
+  "waiting_for_agent_run",
+  "cancelling_client",
+  "resuming",
+  "retry_wait",
   "completed",
   "failed",
   "interrupted",
@@ -3432,6 +3439,8 @@ function parseHarnessCaps(value: unknown): HarnessCaps | null {
       "durable_parks",
       "user_questions",
       "standing_grants",
+      "mid_turn_resume",
+      "transcript",
     ]) ||
     !isMember(value.resume, CAP_LEVELS) ||
     !isMember(value.streaming_deltas, CAP_LEVELS) ||
@@ -3447,7 +3456,9 @@ function parseHarnessCaps(value: unknown): HarnessCaps | null {
     !isMember(value.slash_commands, CAP_LEVELS) ||
     !isMember(value.durable_parks, CAP_LEVELS) ||
     !isMember(value.user_questions, CAP_LEVELS) ||
-    !isMember(value.standing_grants, CAP_LEVELS)
+    !isMember(value.standing_grants, CAP_LEVELS) ||
+    !isMember(value.mid_turn_resume, CAP_LEVELS) ||
+    !isMember(value.transcript, CAP_LEVELS)
   ) {
     return null;
   }
@@ -3467,6 +3478,8 @@ function parseHarnessCaps(value: unknown): HarnessCaps | null {
     durable_parks: value.durable_parks,
     user_questions: value.user_questions,
     standing_grants: value.standing_grants,
+    mid_turn_resume: value.mid_turn_resume,
+    transcript: value.transcript,
   };
 }
 

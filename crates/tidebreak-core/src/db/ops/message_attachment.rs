@@ -1,17 +1,15 @@
 //! Durable identity for the images a message was submitted with.
 //!
-//! Rows here are the second class of live blob reference in the schema, after
-//! `document.source_blob_id`. They store identity only — a content-addressed
-//! blob id plus bounded metadata — so nothing on this path can leak pixels or a
-//! filesystem location.
+//! Rows live on `code_turn_attachment` with a nullable `message_id` so the
+//! worker can read by turn and the transcript can read by message.
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use sea_orm::{
     ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
 };
 
 use crate::error::{AgentError, Result};
-use crate::id::{ChatId, MessageId};
+use crate::id::{ChatId, MessageId, TurnId};
 use crate::image::{ImageMediaType, ImageRef};
 use crate::model::{MessageAttachment, MAX_MESSAGE_ATTACHMENTS};
 
@@ -19,10 +17,6 @@ use super::super::{entities, store_err, DbStore};
 use super::blob as blob_ops;
 
 /// Reject an attachment list before any of it reaches the database.
-///
-/// The schema range-checks the same bounds, but failing here keeps the error a
-/// typed store error the product can surface, rather than a backend-specific
-/// constraint violation.
 pub(in crate::db) fn validate(images: &[ImageRef]) -> Result<()> {
     if images.len() > MAX_MESSAGE_ATTACHMENTS {
         return Err(AgentError::Store(format!(
@@ -43,23 +37,13 @@ pub(in crate::db) fn validate(images: &[ImageRef]) -> Result<()> {
 }
 
 /// Record `images` against `message_id` in submission order.
-///
-/// Runs inside the caller's transaction so attachments commit atomically with
-/// the message and turn that introduced them. Each blob gains a live reference
-/// as of this commit, so any queued retirement for it is cancelled in the same
-/// transaction — otherwise a retirement enqueued moments earlier could delete
-/// bytes this message now depends on.
-///
-/// Blobs are visited in ascending id order for the same reason
-/// [`blob_ops::replace_reference_on`] orders its mutations: the retirement
-/// row locks are per blob id, and a consistent global order keeps concurrent
-/// writers from deadlocking on PostgreSQL.
 pub(in crate::db) async fn insert_on<C>(
     conn: &C,
     chat_id: ChatId,
+    turn_id: TurnId,
     message_id: MessageId,
     images: &[ImageRef],
-    now: chrono::DateTime<Utc>,
+    _now: chrono::DateTime<Utc>,
 ) -> Result<()>
 where
     C: ConnectionTrait,
@@ -68,17 +52,21 @@ where
         return Ok(());
     }
     validate(images)?;
+    let owner = session_owner_on(conn, chat_id).await?;
+    let next_ordinal = next_ordinal_on(conn, turn_id).await?;
 
     let rows = images
         .iter()
         .enumerate()
-        .map(|(ordinal, image)| {
-            let ordinal = i32::try_from(ordinal)
-                .map_err(|_| AgentError::Store("image attachment ordinal overflow".to_owned()))?;
-            Ok(entities::message_attachment::ActiveModel {
-                message_id: Set(message_id.0),
+        .map(|(offset, image)| {
+            let ordinal =
+                next_ordinal.saturating_add(i32::try_from(offset).map_err(|_| {
+                    AgentError::Store("image attachment ordinal overflow".to_owned())
+                })?);
+            Ok(entities::code_turn_attachment::ActiveModel {
+                turn_id: Set(turn_id.0),
                 ordinal: Set(ordinal),
-                chat_id: Set(chat_id.0),
+                owner: Set(owner.clone()),
                 blob_id: Set(image.blob_id),
                 media_type: Set(image.media_type.as_str().to_owned()),
                 width: Set(i32::try_from(image.width).map_err(|_| {
@@ -90,11 +78,11 @@ where
                 byte_len: Set(i64::try_from(image.byte_len).map_err(|_| {
                     AgentError::Store("image attachment byte length overflow".to_owned())
                 })?),
-                created_at: Set(now),
+                message_id: Set(Some(message_id.0)),
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    entities::message_attachment::Entity::insert_many(rows)
+    entities::code_turn_attachment::Entity::insert_many(rows)
         .exec_without_returning(conn)
         .await
         .map_err(store_err)?;
@@ -123,16 +111,20 @@ pub(in crate::db) async fn list_for_chat_on<C>(
 where
     C: ConnectionTrait,
 {
-    entities::message_attachment::Entity::find()
-        .filter(entities::message_attachment::Column::ChatId.eq(chat_id.0))
-        .order_by_asc(entities::message_attachment::Column::CreatedAt)
-        .order_by_asc(entities::message_attachment::Column::MessageId)
-        .order_by_asc(entities::message_attachment::Column::Ordinal)
+    let turn_ids = turn_ids_for_session_on(conn, chat_id).await?;
+    if turn_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = entities::code_turn_attachment::Entity::find()
+        .filter(entities::code_turn_attachment::Column::TurnId.is_in(turn_ids))
+        .filter(entities::code_turn_attachment::Column::MessageId.is_not_null())
+        .order_by_asc(entities::code_turn_attachment::Column::MessageId)
+        .order_by_asc(entities::code_turn_attachment::Column::Ordinal)
         .all(conn)
         .await
-        .map_err(store_err)?
-        .into_iter()
-        .map(from_model)
+        .map_err(store_err)?;
+    rows.into_iter()
+        .map(|row| from_model(row, chat_id))
         .collect()
 }
 
@@ -144,9 +136,9 @@ pub(in crate::db) async fn list_for_message_on<C>(
 where
     C: ConnectionTrait,
 {
-    entities::message_attachment::Entity::find()
-        .filter(entities::message_attachment::Column::MessageId.eq(message_id.0))
-        .order_by_asc(entities::message_attachment::Column::Ordinal)
+    entities::code_turn_attachment::Entity::find()
+        .filter(entities::code_turn_attachment::Column::MessageId.eq(message_id.0))
+        .order_by_asc(entities::code_turn_attachment::Column::Ordinal)
         .all(conn)
         .await
         .map_err(store_err)?
@@ -156,10 +148,6 @@ where
 }
 
 /// Distinct blobs referenced by any attachment in `chat_id`, ascending.
-///
-/// Ascending order is the same global blob-id lock order the rest of the
-/// retirement path uses, so a caller can enqueue retirements straight from this
-/// list without risking a lock cycle.
 pub(in crate::db) async fn list_chat_blob_ids_on<C>(
     conn: &C,
     chat_id: ChatId,
@@ -167,11 +155,15 @@ pub(in crate::db) async fn list_chat_blob_ids_on<C>(
 where
     C: ConnectionTrait,
 {
-    let mut blob_ids = entities::message_attachment::Entity::find()
+    let turn_ids = turn_ids_for_session_on(conn, chat_id).await?;
+    if turn_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut blob_ids = entities::code_turn_attachment::Entity::find()
         .select_only()
-        .column(entities::message_attachment::Column::BlobId)
+        .column(entities::code_turn_attachment::Column::BlobId)
         .distinct()
-        .filter(entities::message_attachment::Column::ChatId.eq(chat_id.0))
+        .filter(entities::code_turn_attachment::Column::TurnId.is_in(turn_ids))
         .into_tuple::<uuid::Uuid>()
         .all(conn)
         .await
@@ -182,31 +174,78 @@ where
 }
 
 /// Remove every attachment in `chat_id`, returning nothing.
-///
-/// Callers own retirement of the freed blobs; this only drops the references.
 pub(in crate::db) async fn delete_for_chat_on<C>(conn: &C, chat_id: ChatId) -> Result<()>
 where
     C: ConnectionTrait,
 {
-    entities::message_attachment::Entity::delete_many()
-        .filter(entities::message_attachment::Column::ChatId.eq(chat_id.0))
+    let turn_ids = turn_ids_for_session_on(conn, chat_id).await?;
+    if turn_ids.is_empty() {
+        return Ok(());
+    }
+    entities::code_turn_attachment::Entity::delete_many()
+        .filter(entities::code_turn_attachment::Column::TurnId.is_in(turn_ids))
         .exec(conn)
         .await
         .map_err(store_err)?;
     Ok(())
 }
 
-fn from_model(model: entities::message_attachment::Model) -> Result<MessageAttachment> {
+async fn session_owner_on<C>(conn: &C, chat_id: ChatId) -> Result<String>
+where
+    C: ConnectionTrait,
+{
+    entities::code_session::Entity::find_by_id(chat_id.0)
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .map(|session| session.owner)
+        .ok_or_else(|| AgentError::Store(format!("session {chat_id} does not exist")))
+}
+
+async fn turn_ids_for_session_on<C>(conn: &C, chat_id: ChatId) -> Result<Vec<uuid::Uuid>>
+where
+    C: ConnectionTrait,
+{
+    entities::code_turn::Entity::find()
+        .select_only()
+        .column(entities::code_turn::Column::Id)
+        .filter(entities::code_turn::Column::SessionId.eq(chat_id.0))
+        .into_tuple::<uuid::Uuid>()
+        .all(conn)
+        .await
+        .map_err(store_err)
+}
+
+async fn next_ordinal_on<C>(conn: &C, turn_id: TurnId) -> Result<i32>
+where
+    C: ConnectionTrait,
+{
+    let last = entities::code_turn_attachment::Entity::find()
+        .filter(entities::code_turn_attachment::Column::TurnId.eq(turn_id.0))
+        .order_by_desc(entities::code_turn_attachment::Column::Ordinal)
+        .one(conn)
+        .await
+        .map_err(store_err)?;
+    Ok(last.map_or(0, |row| row.ordinal.saturating_add(1)))
+}
+
+fn from_model(
+    model: entities::code_turn_attachment::Model,
+    chat_id: ChatId,
+) -> Result<MessageAttachment> {
+    let message_id = model.message_id.ok_or_else(|| {
+        AgentError::Store("code turn attachment is missing a transcript message".into())
+    })?;
     Ok(MessageAttachment {
-        message_id: MessageId(model.message_id),
-        chat_id: ChatId(model.chat_id),
+        message_id: MessageId(message_id),
+        chat_id,
         ordinal: model.ordinal,
         image: image_from_model(&model)?,
-        created_at: model.created_at,
+        created_at: DateTime::<Utc>::UNIX_EPOCH,
     })
 }
 
-fn image_from_model(model: &entities::message_attachment::Model) -> Result<ImageRef> {
+fn image_from_model(model: &entities::code_turn_attachment::Model) -> Result<ImageRef> {
     let media_type = ImageMediaType::parse(&model.media_type).ok_or_else(|| {
         AgentError::Store(format!(
             "unknown image attachment media type: {}",

@@ -2005,6 +2005,7 @@ done
     #[cfg(unix)]
     fn turn(text: &str) -> TurnInput {
         TurnInput {
+            turn_id: None,
             text: text.into(),
             model: None,
             reasoning_effort: None,
@@ -2670,6 +2671,7 @@ done
             async move {
                 session
                     .run_turn(TurnInput {
+                        turn_id: None,
                         text: "first turn".into(),
                         model: None,
                         reasoning_effort: None,

@@ -1,72 +1,47 @@
-//! One live internal-engine session: a conversation the chat turn lane runs,
-//! watched and steered through the adapter contract.
+//! One live internal-engine session: the chat agent loop under a durable
+//! turn lease.
 //!
-//! The lane journals its turn straight into the session's code journal
-//! (decision 0048 step 5), so the engine has nothing to translate. It follows
-//! that journal for the turn it admitted and hands the session worker the
-//! one fact the journal does not carry on its own: the terminal outcome that
-//! closes the worker's turn row. The lane mints its own approval rows — a
-//! consent card, a questions park, a plan park are each one `code_approval`
-//! row whose id is the call id — so the engine parks on the row it finds and
-//! decides through the same store operations the chat routes use.
+//! `run_turn` drives [`LegDriver::run_turn`] for the row the session worker
+//! already inserted and claimed. Client waits still end the leg and drop the
+//! lease so the claim scan can pick the turn up again.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use tokio::sync::broadcast;
-use tracing::debug;
+use tokio::sync::Semaphore;
 
 use tidebreak_core::db::DbStore;
 use tidebreak_core::storage::DecidePlanOutcome;
 use tidebreak_core::{
-    chat_journal, AcceptTurnOutcome, AcceptTurnSteerOutcome, AnswerUserQuestions,
-    AnswerUserQuestionsOutcome, AnswerUserQuestionsRequest, ApprovalDecisionKind, Attention,
-    AttentionSource, BeginTurnAdmissionOutcome, CallId, ChatId, CodeApprovalKind, CodeEvent,
-    CodeSessionId, CodeTurnStatus, DecidePlanRequest, GrantLevel, GrantScope, ImageRef,
-    InternalApprovalRequest, OwnerId, PermissionMode, PlanDecision, PlanDecisionChoice,
-    ReservedTurnAcceptanceOutcome, SequencedCodeEvent, SequencedEvent, StandingGrant,
-    ToolApprovalStatus, TurnAdmissionRequest, TurnId, TurnSteerId, DEFAULT_ACCEPTED_PLAN_MODE,
+    chat_journal, AcceptTurnSteerOutcome, AnswerUserQuestions, AnswerUserQuestionsOutcome,
+    AnswerUserQuestionsRequest, CallId, ChatId, CodeApprovalKind, CodeSessionId, CodeTurnStatus,
+    DecidePlanRequest, OwnerId, PermissionMode, PlanDecision, PlanDecisionChoice,
+    ToolApprovalStatus, TurnId, TurnSteerId, DEFAULT_ACCEPTED_PLAN_MODE,
 };
 use tidebreak_harness::{
-    ApprovalDecision, HarnessApprovalRef, HarnessError, HarnessEvent, HarnessEventSink,
-    HarnessSession, ParkWait, ResumeInput, SessionSpec, TurnImage, TurnInput, TurnOutcome,
+    ApprovalDecision, HarnessApprovalRef, HarnessError, HarnessSession, ResumeInput, SessionSpec,
+    TurnInput, TurnOutcome,
 };
 
-use crate::code::bus::{CodeEventBus, CodeLiveEvent};
+use crate::code::bus::CodeEventBus;
+use crate::engine::internal::leg::{LegDriver, LegDriverOutcome};
 use crate::state::AppState;
-
-/// How long one admission reservation may sit before the engine gives up.
-const ADMISSION_LEASE: chrono::Duration = chrono::Duration::seconds(30);
-
-/// How many journal rows one catch-up read takes at a time.
-const CATCH_UP_PAGE: u64 = 512;
-
-/// The turn the engine is driving right now, and how far along the journal
-/// it has read.
-struct ActiveTurn {
-    turn_id: TurnId,
-    /// Last journal sequence handled, so a resume or a lagged bus
-    /// subscription picks up exactly after it.
-    last_seq: i64,
-    /// Whether this turn's own `TurnStarted` has been seen; events before it
-    /// belong to an earlier turn's tail.
-    started: bool,
-}
 
 pub(super) struct InternalSession {
     state: AppState,
     db: Arc<DbStore>,
+    #[allow(dead_code)]
     bus: Arc<CodeEventBus>,
+    concurrency: Arc<Semaphore>,
+    driver: LegDriver,
     owner: OwnerId,
+    #[allow(dead_code)]
     session_id: CodeSessionId,
     chat_id: ChatId,
-    sink: Arc<dyn HarnessEventSink>,
-    active: Mutex<Option<ActiveTurn>>,
-    /// Tool approvals acknowledged through [`HarnessSession::decide`]. The
-    /// session decision route settles those rows and journals the decision
-    /// on the code bus; the chat's live channel hears it from here.
+    active: Mutex<Option<TurnId>>,
+    /// Tool approvals acknowledged through [`HarnessSession::decide`].
     decided: Mutex<HashSet<CallId>>,
 }
 
@@ -79,6 +54,8 @@ impl InternalSession {
         state: AppState,
         db: Arc<DbStore>,
         bus: Arc<CodeEventBus>,
+        concurrency: Arc<Semaphore>,
+        driver: LegDriver,
         spec: SessionSpec,
     ) -> Result<Self, HarnessError> {
         // The session row is the conversation row (decision 0048 step 5):
@@ -125,10 +102,11 @@ impl InternalSession {
             state,
             db,
             bus,
+            concurrency,
+            driver,
             owner: spec.owner,
             session_id: spec.session_id,
             chat_id,
-            sink: spec.sink,
             active: Mutex::new(None),
             decided: Mutex::new(HashSet::new()),
         };
@@ -153,415 +131,30 @@ impl InternalSession {
         if turn.status != CodeTurnStatus::Waiting || turn.park_ref.is_none() {
             return Ok(());
         }
-        // `active` is the chat-lane turn id from `submit`, not the code
-        // turn row. Look up the live `turn_run` so interrupt and steer
-        // still address the parked lane turn after a restart.
-        let Some(run) = self
-            .state
-            .store
-            .list_turn_runs(self.chat_id)
-            .await
-            .map_err(store_error)?
-            .into_iter()
-            .find(|run| run.status.is_live())
-        else {
-            return Ok(());
-        };
-        let last_seq = self.journal_tail().await?;
-        *self.active.lock().expect("active turn") = Some(ActiveTurn {
-            turn_id: run.id,
-            last_seq,
-            started: true,
-        });
+        *self.active.lock().expect("active turn") = Some(TurnId(turn.id.0));
         Ok(())
     }
 
     fn active_turn(&self) -> Option<TurnId> {
-        self.active
-            .lock()
-            .expect("active turn")
-            .as_ref()
-            .map(|active| active.turn_id)
+        *self.active.lock().expect("active turn")
     }
 
-    fn last_seq(&self) -> i64 {
-        self.active
-            .lock()
-            .expect("active turn")
-            .as_ref()
-            .map_or(0, |active| active.last_seq)
-    }
-
-    async fn emit(&self, event: HarnessEvent) {
-        self.sink.emit(event).await;
-    }
-
-    /// The newest journal sequence, so a turn admitted next is read from
-    /// its first row.
-    async fn journal_tail(&self) -> Result<i64, HarnessError> {
-        Ok(
-            tidebreak_core::db::code::list_recent_events(&self.db, &self.owner, self.session_id, 1)
-                .await
-                .map_err(store_error)?
-                .first()
-                .map_or(0, |event| event.seq),
-        )
-    }
-
-    /// Publish turn images through chat's attachment model: sniff and bound
-    /// them the way chat ingest does, put the bytes, and reserve the chat's
-    /// authority to attach each id.
-    async fn publish_turn_images(
-        &self,
-        images: Vec<TurnImage>,
-    ) -> Result<Vec<ImageRef>, HarnessError> {
-        let mut published = Vec::with_capacity(images.len());
-        for image in images {
-            let inspected = crate::routes::image_attachment::inspect_image_bytes(&image.bytes)
-                .map_err(|error| HarnessError::Other(error.message().to_owned()))?;
-            let _blob_write = self
-                .state
-                .blob_writes
-                .acquire(inspected.blob_id)
-                .await
-                .map_err(store_error)?;
-            self.state
-                .blobs
-                .put(inspected.blob_id, image.bytes)
-                .await
-                .map_err(store_error)?;
-            if !self
-                .state
-                .store
-                .publish_chat_image_scoped(&self.owner, self.chat_id, &inspected)
-                .await
-                .map_err(store_error)?
-            {
-                return Err(HarnessError::ResumeLost(format!(
-                    "conversation {} no longer exists",
-                    self.chat_id
-                )));
+    fn map_leg_outcome(turn_id: TurnId, outcome: LegDriverOutcome) -> TurnOutcome {
+        match outcome {
+            LegDriverOutcome::Completed(_) | LegDriverOutcome::Cancelled(_) => TurnOutcome::Clean,
+            LegDriverOutcome::WaitingForClient(_) | LegDriverOutcome::WaitingForAgentRun(_) => {
+                // Client waits keep the lease-release shape until D4b: the
+                // leg ends, the lease drops, and the turn returns to the
+                // claim scan. Do not pin the worker on the wait.
+                TurnOutcome::Clean
             }
-            published.push(inspected);
-        }
-        Ok(published)
-    }
-
-    /// Submit the user's message to the chat turn lane and return the turn
-    /// it admitted.
-    async fn submit(&self, text: &str, images: Vec<TurnImage>) -> Result<TurnId, HarnessError> {
-        let chat = self
-            .state
-            .store
-            .get_chat(self.chat_id)
-            .await
-            .map_err(store_error)?
-            .ok_or_else(|| {
-                HarnessError::ResumeLost(format!("conversation {} no longer exists", self.chat_id))
-            })?;
-        let model =
-            crate::routes::providers_models::resolve_executable_chat_model(&self.state, &chat)
-                .await
-                .map_err(|error| HarnessError::Other(error.message().to_owned()))?;
-        let attachments = self.publish_turn_images(images).await?;
-        let turn_id = TurnId::new();
-        let request = TurnAdmissionRequest {
-            id: turn_id,
-            chat_id: self.chat_id,
-            content: text.to_owned(),
-            attachments: attachments.iter().map(|image| image.blob_id).collect(),
-            file_attachments: Vec::new(),
-            invoked_skills: Vec::new(),
-            voice_input_used: false,
-        };
-        loop {
-            let lease = match self
-                .state
-                .store
-                .begin_turn_admission(&request, uuid::Uuid::new_v4(), ADMISSION_LEASE)
-                .await
-                .map_err(store_error)?
-            {
-                BeginTurnAdmissionOutcome::Acquired(lease) => lease,
-                BeginTurnAdmissionOutcome::Pending { .. } => {
-                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-                    continue;
-                }
-                // A fresh turn id cannot already be accepted or queued; the
-                // lane says so only for a replayed identity.
-                BeginTurnAdmissionOutcome::Accepted | BeginTurnAdmissionOutcome::Queued => {
-                    return Ok(turn_id);
-                }
-                BeginTurnAdmissionOutcome::IdentityConflict => {
-                    return Err(HarnessError::Other(format!(
-                        "turn {turn_id} was reserved with different input"
-                    )));
-                }
-            };
-            match self
-                .state
-                .store
-                .accept_reserved_turn_with_message_context(
-                    lease,
-                    self.chat_id,
-                    &model,
-                    text,
-                    &attachments,
-                    &[],
-                    &[],
-                    false,
-                )
-                .await
-                .map_err(store_error)?
-            {
-                ReservedTurnAcceptanceOutcome::LeaseLost => continue,
-                ReservedTurnAcceptanceOutcome::Outcome(outcome) => match *outcome {
-                    AcceptTurnOutcome::Accepted(turn) | AcceptTurnOutcome::Existing(turn) => {
-                        self.state.turn_job_wake.notify_one();
-                        return Ok(turn.id);
-                    }
-                    AcceptTurnOutcome::IdentityConflict => {
-                        let _ = self.state.store.release_turn_admission(lease).await;
-                        return Err(HarnessError::Other(format!(
-                            "turn {turn_id} was reserved with different input"
-                        )));
-                    }
-                    AcceptTurnOutcome::ChatBusy(active) => {
-                        let _ = self.state.store.release_turn_admission(lease).await;
-                        return Err(HarnessError::Other(format!(
-                            "the conversation is still running turn {}",
-                            active.id
-                        )));
-                    }
-                },
-            }
-        }
-    }
-
-    /// Follow the session's journal for `turn_id` until it reaches a
-    /// terminal event or a durable park.
-    ///
-    /// The live subscription is the wake-up; the durable journal is the
-    /// truth. A lagged subscription re-reads from the last handled
-    /// sequence, so nothing the lane journaled is skipped.
-    async fn watch(
-        &self,
-        turn_id: TurnId,
-        live: &mut broadcast::Receiver<CodeLiveEvent>,
-    ) -> Result<TurnOutcome, HarnessError> {
-        loop {
-            loop {
-                let after = self.last_seq();
-                let missed = tidebreak_core::db::code::list_events_from(
-                    &self.db,
-                    &self.owner,
-                    self.session_id,
-                    after,
-                    CATCH_UP_PAGE,
-                )
-                .await
-                .map_err(store_error)?;
-                let page = missed.len() as u64;
-                for event in missed {
-                    if let Some(outcome) = self.handle(turn_id, event).await? {
-                        return Ok(outcome);
-                    }
-                }
-                if page < CATCH_UP_PAGE {
-                    break;
-                }
-            }
-            loop {
-                match live.recv().await {
-                    Ok(CodeLiveEvent {
-                        seq: Some(seq),
-                        event,
-                        ..
-                    }) => {
-                        if let Some(outcome) = self
-                            .handle(turn_id, SequencedCodeEvent { seq, event })
-                            .await?
-                        {
-                            return Ok(outcome);
-                        }
-                    }
-                    // Live-only frames hold no row; the journal is the truth.
-                    Ok(CodeLiveEvent { seq: None, .. }) => {}
-                    Err(broadcast::error::RecvError::Lagged(dropped)) => {
-                        debug!(
-                            session = %self.session_id,
-                            dropped,
-                            "internal engine re-reads the journal after a lagged subscription"
-                        );
-                        break;
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        return Err(HarnessError::Other(
-                            "the session event bus closed under a running turn".into(),
-                        ));
-                    }
+            LegDriverOutcome::Resuming(_) => TurnOutcome::Clean,
+            LegDriverOutcome::Failed(_) | LegDriverOutcome::LeaseLost(_) => {
+                TurnOutcome::Incomplete {
+                    detail: format!("turn {turn_id} did not complete"),
                 }
             }
         }
-    }
-
-    /// Act on one journaled row. `Some` closes the leg.
-    async fn handle(
-        &self,
-        turn_id: TurnId,
-        sequenced: SequencedCodeEvent,
-    ) -> Result<Option<TurnOutcome>, HarnessError> {
-        let SequencedCodeEvent { seq, event } = sequenced;
-        {
-            let mut active = self.active.lock().expect("active turn");
-            let Some(active) = active.as_mut() else {
-                return Ok(None);
-            };
-            if seq <= active.last_seq {
-                return Ok(None);
-            }
-            active.last_seq = seq;
-            match &event {
-                CodeEvent::TurnStarted { turn_id: started } if started.0 == turn_id.0 => {
-                    active.started = true;
-                }
-                _ if !active.started => return Ok(None),
-                _ => {}
-            }
-        }
-        let closed = match event {
-            // The lane minted the row and journaled the request; the engine
-            // only marks the session as waiting on the reader.
-            CodeEvent::ApprovalRequested {
-                request: Some(InternalApprovalRequest::ToolUse { .. }),
-                ..
-            } => {
-                self.note_waiting("an approval is waiting").await;
-                false
-            }
-            // A park: the row the lane minted is the one the worker waits
-            // on, keyed by the call id the row's id is.
-            CodeEvent::ApprovalRequested {
-                approval_id,
-                request:
-                    Some(
-                        InternalApprovalRequest::Questions { .. }
-                        | InternalApprovalRequest::Plan { .. },
-                    ),
-            } => {
-                self.note_waiting("the agent is waiting on you").await;
-                let call_id = CallId(approval_id.0).to_string();
-                return Ok(Some(TurnOutcome::Parked {
-                    park_ref: call_id.clone(),
-                    waiting_on: ParkWait::Approval { call_id },
-                }));
-            }
-            CodeEvent::ApprovalRequested { request: None, .. } => false,
-            CodeEvent::ApprovalResolved {
-                approval_id,
-                decision,
-            } => {
-                let call_id = CallId(approval_id.0);
-                // A decision the session route delivered was settled and
-                // journaled by the runtime on the code bus; the chat's live
-                // channel hears it from here. Every other settlement was
-                // published by the chat-side path that made it.
-                let delivered = self.decided.lock().expect("decided").remove(&call_id);
-                if delivered {
-                    if let ApprovalDecisionKind::ApprovedWithGrant { scope } = &decision {
-                        self.record_settled_grant(call_id, scope.clone()).await;
-                    }
-                    if let Ok(Some(event)) = chat_journal::chat_event(CodeEvent::ApprovalResolved {
-                        approval_id,
-                        decision,
-                    }) {
-                        let _ = self
-                            .state
-                            .events
-                            .sender(self.chat_id)
-                            .send_unmirrored(SequencedEvent { seq, event });
-                    }
-                }
-                self.note_activity().await;
-                false
-            }
-            // The terminal rows are already journaled; the worker still
-            // needs to hear them to close its turn row with the usage.
-            CodeEvent::TurnCompleted { usage, .. } | CodeEvent::TurnRefused { usage, .. } => {
-                self.emit(HarnessEvent::TurnCompleted { usage }).await;
-                true
-            }
-            CodeEvent::TurnFailed { error, .. } => {
-                self.emit(HarnessEvent::TurnFailed { error }).await;
-                true
-            }
-            CodeEvent::TurnInterrupted { usage: Some(_) } => {
-                self.emit(HarnessEvent::TurnInterrupted).await;
-                true
-            }
-            _ => false,
-        };
-        if closed {
-            *self.active.lock().expect("active turn") = None;
-            return Ok(Some(TurnOutcome::Clean));
-        }
-        Ok(None)
-    }
-
-    /// Mirror a grant the settlement wrote into the broker's in-memory
-    /// cache, after the fact: the cache follows the store, never leads it.
-    async fn record_settled_grant(&self, call_id: CallId, scope: GrantScope) {
-        let Ok(Some(approval)) = self.state.store.get_tool_call_approval(call_id).await else {
-            return;
-        };
-        let project_id = self
-            .state
-            .store
-            .get_chat(self.chat_id)
-            .await
-            .ok()
-            .flatten()
-            .and_then(|chat| chat.project_id);
-        if let Some(grant) = StandingGrant::scoped(
-            GrantLevel::for_chat(self.chat_id, project_id),
-            approval.tool_name,
-            approval.kind,
-            scope,
-            Utc::now(),
-        ) {
-            self.state.approvals.standing_grants().record(grant);
-        }
-    }
-
-    /// Mark the session as waiting on the reader, the way the worker does
-    /// for an approval an external engine raised.
-    async fn note_waiting(&self, prompt: &str) {
-        let _ = crate::code::attention::note_activity(
-            &self.db,
-            &self.bus,
-            &self.owner,
-            self.session_id,
-        )
-        .await;
-        let _ = crate::code::attention::apply_attention(
-            &self.db,
-            &self.bus,
-            &self.owner,
-            self.session_id,
-            Attention::needs_you(prompt, AttentionSource::Structured),
-            false,
-        )
-        .await;
-    }
-
-    async fn note_activity(&self) {
-        let _ = crate::code::attention::note_activity(
-            &self.db,
-            &self.bus,
-            &self.owner,
-            self.session_id,
-        )
-        .await;
     }
 
     /// Settle a parked continuation durably. Idempotent: the decision may
@@ -766,6 +359,9 @@ impl InternalSession {
 #[async_trait]
 impl HarnessSession for InternalSession {
     async fn run_turn(&self, input: TurnInput) -> Result<TurnOutcome, HarnessError> {
+        let _permit = self.concurrency.acquire().await.map_err(|_| {
+            HarnessError::Other("internal engine concurrency semaphore closed".into())
+        })?;
         if self.active_turn().is_some() {
             return Err(HarnessError::Other(
                 "the internal engine is already running a turn".into(),
@@ -785,21 +381,31 @@ impl HarnessSession for InternalSession {
                 .await
                 .map_err(store_error)?;
         }
-        // Subscribe before admission so the turn's first row cannot slip
-        // between the two.
-        let (mut live, _tail) = self.bus.attach(self.session_id);
-        let after = self.journal_tail().await?;
-        let turn_id = self.submit(&input.text, input.images).await?;
-        *self.active.lock().expect("active turn") = Some(ActiveTurn {
-            turn_id,
-            last_seq: after,
-            started: false,
-        });
-        let outcome = self.watch(turn_id, &mut live).await;
-        if !matches!(outcome, Ok(TurnOutcome::Parked { .. })) {
-            *self.active.lock().expect("active turn") = None;
-        }
-        outcome
+        let turn_id = input.turn_id.map(|id| TurnId(id.0)).ok_or_else(|| {
+            HarnessError::Other("the internal engine requires the host to name the turn".into())
+        })?;
+        let Some(turn) = self
+            .state
+            .store
+            .get_turn(turn_id)
+            .await
+            .map_err(store_error)?
+        else {
+            return Err(HarnessError::Other(format!(
+                "turn {turn_id} was not claimed before the leg"
+            )));
+        };
+        let Some(lease_token) = turn.lease_token else {
+            return Err(HarnessError::Other(format!("turn {turn_id} has no lease")));
+        };
+        *self.active.lock().expect("active turn") = Some(turn_id);
+        let outcome = self
+            .driver
+            .run_turn(turn, lease_token)
+            .await
+            .map_err(|error| HarnessError::Other(error.to_string()))?;
+        *self.active.lock().expect("active turn") = None;
+        Ok(Self::map_leg_outcome(turn_id, outcome))
     }
 
     async fn resume_turn(
@@ -828,13 +434,28 @@ impl HarnessSession for InternalSession {
                 "park {park_ref} did not wait on {decided}"
             )));
         }
-        let (mut live, _tail) = self.bus.attach(self.session_id);
         self.settle_park(call_id, &decision).await?;
-        let outcome = self.watch(turn_id, &mut live).await;
-        if !matches!(outcome, Ok(TurnOutcome::Parked { .. })) {
-            *self.active.lock().expect("active turn") = None;
-        }
-        outcome
+        let Some(turn) = self
+            .state
+            .store
+            .get_turn(turn_id)
+            .await
+            .map_err(store_error)?
+        else {
+            return Err(HarnessError::Other(format!(
+                "turn {turn_id} was not claimed before the resume"
+            )));
+        };
+        let Some(lease_token) = turn.lease_token else {
+            return Err(HarnessError::Other(format!("turn {turn_id} has no lease")));
+        };
+        let outcome = self
+            .driver
+            .run_turn(turn, lease_token)
+            .await
+            .map_err(|error| HarnessError::Other(error.to_string()))?;
+        *self.active.lock().expect("active turn") = None;
+        Ok(Self::map_leg_outcome(turn_id, outcome))
     }
 
     async fn decide(
@@ -881,7 +502,7 @@ impl HarnessSession for InternalSession {
                     let present = self
                         .state
                         .store
-                        .get_turn_run(turn_id)
+                        .get_turn(turn_id)
                         .await
                         .map_err(store_error)?
                         .is_some();

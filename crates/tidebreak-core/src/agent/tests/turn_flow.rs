@@ -246,7 +246,7 @@ async fn a_rejected_mixed_control_step_does_not_replay_its_thinking_on_the_retry
     let lease_token = uuid::Uuid::new_v4();
     let now = Utc::now();
     store
-        .claim_turn_run(lease_token, now, now + chrono::Duration::minutes(1))
+        .claim_turn(lease_token, now, now + chrono::Duration::minutes(1))
         .await
         .unwrap();
     let mut registry = ToolRegistry::new();
@@ -424,7 +424,7 @@ async fn claimed_turn_defers_terminal_publication_to_durable_worker() {
     let claimed_at = Utc::now();
     let lease_token = uuid::Uuid::new_v4();
     let claimed = store
-        .claim_turn_run(
+        .claim_turn(
             lease_token,
             claimed_at,
             claimed_at + chrono::Duration::minutes(1),
@@ -507,7 +507,7 @@ async fn claimed_turn_defers_terminal_publication_to_durable_worker() {
     }
 
     let completed = store
-        .complete_turn_run_and_append_event(
+        .complete_turn_and_append_event(
             turn_id,
             lease_token,
             0,
@@ -537,7 +537,7 @@ async fn claimed_turn_defers_terminal_publication_to_durable_worker() {
         Some(&terminal)
     );
     let recovered = store
-        .complete_turn_run_and_append_event(
+        .complete_turn_and_append_event(
             turn_id,
             lease_token,
             0,
@@ -580,7 +580,7 @@ async fn claimed_turn_defers_terminal_publication_to_durable_worker() {
     let failure_claimed_at = Utc::now();
     let failure_token = uuid::Uuid::new_v4();
     let failed_claim = store
-        .claim_turn_run(
+        .claim_turn(
             failure_token,
             failure_claimed_at,
             failure_claimed_at + chrono::Duration::minutes(1),
@@ -618,7 +618,7 @@ async fn claimed_turn_defers_terminal_publication_to_durable_worker() {
     )));
     let error_detail = error.to_string();
     let failure = store
-        .record_turn_run_failure_and_append_event(
+        .record_turn_failure_and_append_event(
             failed_turn_id,
             failure_token,
             Utc::now(),
@@ -652,7 +652,7 @@ async fn claimed_turn_defers_terminal_publication_to_durable_worker() {
         Some(&terminal)
     );
     let recovered = store
-        .record_turn_run_failure_and_append_event(
+        .record_turn_failure_and_append_event(
             failed_turn_id,
             failure_token,
             failure_claimed_at + chrono::Duration::hours(1),
@@ -684,7 +684,7 @@ async fn claimed_turn_defers_terminal_publication_to_durable_worker() {
     let cancellation_claimed_at = Utc::now();
     let cancellation_token = uuid::Uuid::new_v4();
     let cancelled_claim = store
-        .claim_turn_run(
+        .claim_turn(
             cancellation_token,
             cancellation_claimed_at,
             cancellation_claimed_at + chrono::Duration::minutes(1),
@@ -1286,7 +1286,7 @@ impl ModelProvider for LeaseStealingProvider {
         if self.stole.fetch_add(1, Ordering::SeqCst) == 0 {
             let outcome = self
                 .store
-                .claim_turn_run(
+                .claim_turn(
                     uuid::Uuid::new_v4(),
                     self.steal_at,
                     self.steal_at + chrono::Duration::minutes(1),
@@ -1383,7 +1383,7 @@ async fn run_claimed_refusal(events: Vec<ProviderEvent>) -> (AgentTurnOutcome, V
     };
     let lease_token = uuid::Uuid::new_v4();
     store
-        .claim_turn_run(
+        .claim_turn(
             lease_token,
             accepted.available_at,
             accepted.available_at + chrono::Duration::minutes(1),
@@ -1846,7 +1846,7 @@ async fn a_stolen_lease_fences_intermediate_tool_effects() {
     let now = Utc::now();
     let lease_token = uuid::Uuid::new_v4();
     store
-        .claim_turn_run(lease_token, now, now + chrono::Duration::minutes(1))
+        .claim_turn(lease_token, now, now + chrono::Duration::minutes(1))
         .await
         .unwrap();
 
@@ -1888,7 +1888,7 @@ async fn a_stolen_lease_fences_intermediate_tool_effects() {
         "a stolen lease must not execute tool side effects"
     );
     // The retry claim stands; the stale worker committed nothing.
-    let turn = store.get_turn_run(turn_id).await.unwrap().unwrap();
+    let turn = store.get_turn(turn_id).await.unwrap().unwrap();
     assert_eq!(turn.status, TurnRunStatus::Running);
     assert_ne!(turn.lease_token, Some(lease_token));
 }
@@ -1929,7 +1929,7 @@ async fn retry_abandons_an_inherited_pending_tool_without_replaying_it() {
     let first_claim_at = accepted.available_at;
     let first_lease = uuid::Uuid::new_v4();
     store
-        .claim_turn_run(
+        .claim_turn(
             first_lease,
             first_claim_at,
             first_claim_at + chrono::Duration::seconds(1),
@@ -1970,7 +1970,7 @@ async fn retry_abandons_an_inherited_pending_tool_without_replaying_it() {
     let retry_at = first_claim_at + chrono::Duration::seconds(2);
     let retry_lease = uuid::Uuid::new_v4();
     let retried = store
-        .claim_turn_run(
+        .claim_turn(
             retry_lease,
             retry_at,
             retry_at + chrono::Duration::minutes(1),

@@ -995,7 +995,7 @@ async fn delete_chat_erases_background_run_workspaces_immediately() {
     // finish it after the child is terminal: that retires the pending inbox
     // delivery and leaves a quiesced conversation the delete path accepts.
     let turn = store
-        .list_turn_runs(chat.id)
+        .list_turns(chat.id)
         .await
         .unwrap()
         .into_iter()
@@ -1110,7 +1110,7 @@ async fn a_retained_result_projection_survives_reopening_the_chat() {
     );
     wait_for_turn(&store, chat.id).await;
     let turn = store
-        .list_turn_runs(chat.id)
+        .list_turns(chat.id)
         .await
         .unwrap()
         .into_iter()
@@ -1214,7 +1214,7 @@ async fn transcript_tool_activity_is_allowlisted_and_redacts_canonical_tool_data
     );
     wait_for_turn(&store, chat.id).await;
     let turn = store
-        .list_turn_runs(chat.id)
+        .list_turns(chat.id)
         .await
         .unwrap()
         .into_iter()
@@ -1579,7 +1579,7 @@ async fn transcript_hydration_reconciles_an_active_steer_by_message_identity() {
     );
     for _ in 0..100 {
         if store
-            .get_turn_run(turn_id)
+            .get_turn(turn_id)
             .await
             .unwrap()
             .is_some_and(|turn| turn.status == TurnRunStatus::Running)

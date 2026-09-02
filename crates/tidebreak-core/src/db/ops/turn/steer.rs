@@ -33,7 +33,7 @@ pub(in crate::db) async fn accept_turn_steer(
     voice_input_used: bool,
 ) -> Result<AcceptTurnSteerOutcome> {
     validate_steer_input(id, turn_id, chat_id, content, invoked_skills)?;
-    if let Some(existing) = entities::turn_steer::Entity::find_by_id(id.0)
+    if let Some(existing) = entities::code_turn_steer::Entity::find_by_id(id.0)
         .one(&store.conn)
         .await
         .map_err(store_err)?
@@ -67,7 +67,7 @@ pub(in crate::db) async fn accept_turn_steer(
         return Ok(AcceptTurnSteerOutcome::TurnUnavailable);
     }
 
-    if let Some(existing) = entities::turn_steer::Entity::find_by_id(id.0)
+    if let Some(existing) = entities::code_turn_steer::Entity::find_by_id(id.0)
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -94,14 +94,14 @@ pub(in crate::db) async fn accept_turn_steer(
         return Ok(AcceptTurnSteerOutcome::IdentityConflict);
     }
 
-    let turn = entities::turn_run::Entity::find_by_id(turn_id.0)
+    let turn = entities::code_turn::Entity::find_by_id(turn_id.0)
         .one(&transaction)
         .await
         .map_err(store_err)?
         .ok_or_else(|| AgentError::Store(format!("turn {turn_id} disappeared while locked")))?;
     let status = turn_run_status_from_db(&turn.status)?;
-    let accepts_steer = turn.chat_id == chat_id.0
-        && turn.updated_at <= now
+    let accepts_steer = turn.session_id == chat_id.0
+        && turn.updated_at.is_none_or(|updated_at| updated_at <= now)
         && matches!(
             status,
             TurnRunStatus::Queued
@@ -130,7 +130,7 @@ pub(in crate::db) async fn accept_turn_steer(
     .await?
     {
         transaction.rollback().await.map_err(store_err)?;
-        if let Some(existing) = entities::turn_steer::Entity::find_by_id(id.0)
+        if let Some(existing) = entities::code_turn_steer::Entity::find_by_id(id.0)
             .one(&store.conn)
             .await
             .map_err(store_err)?
@@ -148,10 +148,11 @@ pub(in crate::db) async fn accept_turn_steer(
         return Ok(AcceptTurnSteerOutcome::IdentityConflict);
     }
 
-    let steer = entities::turn_steer::ActiveModel {
+    let steer = entities::code_turn_steer::ActiveModel {
         id: Set(id.0),
         turn_id: Set(turn_id.0),
-        chat_id: Set(chat_id.0),
+        session_id: Set(chat_id.0),
+        owner: Set(String::new()),
         content: Set(content.to_owned()),
         invoked_skills: Set(serde_json::json!(invoked_skills)),
         voice_input_used: Set(voice_input_used),
@@ -169,7 +170,7 @@ pub(in crate::db) async fn accept_turn_steer(
         Ok(steer) => steer,
         Err(error) => {
             transaction.rollback().await.map_err(store_err)?;
-            if let Some(existing) = entities::turn_steer::Entity::find_by_id(id.0)
+            if let Some(existing) = entities::code_turn_steer::Entity::find_by_id(id.0)
                 .one(&store.conn)
                 .await
                 .map_err(store_err)?
@@ -200,32 +201,32 @@ pub(in crate::db) async fn accept_turn_steer(
         && interrupt
         && super::multi_agent_run_wait::interrupt_wait_set_for_steer_on(&transaction, &turn, now)
             .await?;
-    let touched = entities::turn_run::Entity::update_many().col_expr(
-        entities::turn_run::Column::UpdatedAt,
+    let touched = entities::code_turn::Entity::update_many().col_expr(
+        entities::code_turn::Column::UpdatedAt,
         sea_orm::sea_query::Expr::value(now),
     );
     let touched = if interrupted_ordered_wait {
         touched
             .col_expr(
-                entities::turn_run::Column::Status,
+                entities::code_turn::Column::Status,
                 sea_orm::sea_query::Expr::value(TurnRunStatus::Resuming.as_str()),
             )
             .col_expr(
-                entities::turn_run::Column::AvailableAt,
+                entities::code_turn::Column::AvailableAt,
                 sea_orm::sea_query::Expr::value(now),
             )
     } else {
         touched
     }
-    .filter(entities::turn_run::Column::Id.eq(turn_id.0))
-    .filter(entities::turn_run::Column::Status.eq(&turn.status))
-    .filter(entities::turn_run::Column::AttemptCount.eq(turn.attempt_count))
-    .filter(entities::turn_run::Column::UpdatedAt.eq(turn.updated_at))
-    .filter(entities::turn_run::Column::UpdatedAt.lte(now));
+    .filter(entities::code_turn::Column::Id.eq(turn_id.0))
+    .filter(entities::code_turn::Column::Status.eq(&turn.status))
+    .filter(entities::code_turn::Column::AttemptCount.eq(turn.attempt_count))
+    .filter(entities::code_turn::Column::UpdatedAt.eq(turn.updated_at))
+    .filter(entities::code_turn::Column::UpdatedAt.lte(now));
     let touched = if status == TurnRunStatus::Running {
         touched
-            .filter(entities::turn_run::Column::LeaseToken.eq(turn.lease_token))
-            .filter(entities::turn_run::Column::LeaseExpiresAt.eq(turn.lease_expires_at))
+            .filter(entities::code_turn::Column::LeaseToken.eq(turn.lease_token))
+            .filter(entities::code_turn::Column::LeaseExpiresAt.eq(turn.lease_expires_at))
     } else {
         touched
     }
@@ -257,7 +258,7 @@ pub(in crate::db) async fn list_pending_turn_steers(
         ));
     }
     let now = canonical_db_timestamp(now)?;
-    let Some(claim) = entities::turn_claim::Entity::find_by_id(lease_token)
+    let Some(claim) = entities::code_turn_claim::Entity::find_by_id(lease_token)
         .one(&store.conn)
         .await
         .map_err(store_err)?
@@ -265,7 +266,7 @@ pub(in crate::db) async fn list_pending_turn_steers(
     else {
         return Ok(None);
     };
-    let live = entities::turn_run::Entity::find_by_id(turn_id.0)
+    let live = entities::code_turn::Entity::find_by_id(turn_id.0)
         .one(&store.conn)
         .await
         .map_err(store_err)?
@@ -277,16 +278,16 @@ pub(in crate::db) async fn list_pending_turn_steers(
                 && turn
                     .lease_expires_at
                     .is_some_and(|lease_expires_at| lease_expires_at > now)
-                && turn.updated_at <= now
+                && turn.updated_at.is_none_or(|updated_at| updated_at <= now)
         });
     if !live {
         return Ok(None);
     }
-    entities::turn_steer::Entity::find()
-        .filter(entities::turn_steer::Column::TurnId.eq(turn_id.0))
-        .filter(entities::turn_steer::Column::Status.eq(TurnSteerStatus::Pending.as_str()))
-        .order_by_asc(entities::turn_steer::Column::CreatedAt)
-        .order_by_asc(entities::turn_steer::Column::Id)
+    entities::code_turn_steer::Entity::find()
+        .filter(entities::code_turn_steer::Column::TurnId.eq(turn_id.0))
+        .filter(entities::code_turn_steer::Column::Status.eq(TurnSteerStatus::Pending.as_str()))
+        .order_by_asc(entities::code_turn_steer::Column::CreatedAt)
+        .order_by_asc(entities::code_turn_steer::Column::Id)
         .all(&store.conn)
         .await
         .map_err(store_err)?
@@ -325,11 +326,11 @@ pub(in crate::db) async fn apply_turn_steer(
         ));
     }
     let now = canonical_db_timestamp(now)?;
-    let Some(chat_id) = entities::turn_run::Entity::find_by_id(turn_id.0)
+    let Some(chat_id) = entities::code_turn::Entity::find_by_id(turn_id.0)
         .one(&store.conn)
         .await
         .map_err(store_err)?
-        .map(|turn| ChatId(turn.chat_id))
+        .map(|turn| ChatId(turn.session_id))
     else {
         return Ok(None);
     };
@@ -343,7 +344,7 @@ pub(in crate::db) async fn apply_turn_steer(
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     }
-    let Some(steer) = entities::turn_steer::Entity::find_by_id(steer_id.0)
+    let Some(steer) = entities::code_turn_steer::Entity::find_by_id(steer_id.0)
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -394,11 +395,11 @@ pub(in crate::db) async fn apply_turn_steer(
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     }
-    let earliest_pending = entities::turn_steer::Entity::find()
-        .filter(entities::turn_steer::Column::TurnId.eq(turn_id.0))
-        .filter(entities::turn_steer::Column::Status.eq(TurnSteerStatus::Pending.as_str()))
-        .order_by_asc(entities::turn_steer::Column::CreatedAt)
-        .order_by_asc(entities::turn_steer::Column::Id)
+    let earliest_pending = entities::code_turn_steer::Entity::find()
+        .filter(entities::code_turn_steer::Column::TurnId.eq(turn_id.0))
+        .filter(entities::code_turn_steer::Column::Status.eq(TurnSteerStatus::Pending.as_str()))
+        .order_by_asc(entities::code_turn_steer::Column::CreatedAt)
+        .order_by_asc(entities::code_turn_steer::Column::Id)
         .one(&transaction)
         .await
         .map_err(store_err)?;
@@ -407,7 +408,7 @@ pub(in crate::db) async fn apply_turn_steer(
         return Ok(None);
     }
 
-    let Some(claim) = entities::turn_claim::Entity::find_by_id(lease_token)
+    let Some(claim) = entities::code_turn_claim::Entity::find_by_id(lease_token)
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -416,7 +417,7 @@ pub(in crate::db) async fn apply_turn_steer(
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     };
-    let Some(turn) = entities::turn_run::Entity::find_by_id(turn_id.0)
+    let Some(turn) = entities::code_turn::Entity::find_by_id(turn_id.0)
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -431,8 +432,8 @@ pub(in crate::db) async fn apply_turn_steer(
         || turn
             .lease_expires_at
             .is_none_or(|lease_expires_at| lease_expires_at <= now)
-        || turn.updated_at > now
-        || steer.chat_id != turn.chat_id
+        || turn.updated_at.is_some_and(|updated_at| updated_at > now)
+        || steer.session_id != turn.session_id
     {
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
@@ -443,7 +444,7 @@ pub(in crate::db) async fn apply_turn_steer(
         .ok_or_else(|| AgentError::Store(format!("turn {turn_id} steer revision overflow")))?;
 
     if let Some(preceding) = preceding_assistant {
-        validate_preceding_assistant(preceding, turn_id, ChatId(turn.chat_id), now)?;
+        validate_preceding_assistant(preceding, turn_id, ChatId(turn.session_id), now)?;
         if !reserve_message_identity_on(
             &transaction,
             preceding.id,
@@ -483,7 +484,7 @@ pub(in crate::db) async fn apply_turn_steer(
     if !transfer_steer_message_identity_on(
         &transaction,
         MessageId(steer.id),
-        ChatId(steer.chat_id),
+        ChatId(steer.session_id),
         TurnId(steer.turn_id),
     )
     .await?
@@ -495,9 +496,9 @@ pub(in crate::db) async fn apply_turn_steer(
     }
     let message = entities::message::ActiveModel {
         id: Set(steer.id),
-        chat_id: Set(steer.chat_id),
+        chat_id: Set(steer.session_id),
         turn_id: Set(steer.turn_id),
-        seq: Set(next_message_seq_on(&transaction, ChatId(steer.chat_id)).await?),
+        seq: Set(next_message_seq_on(&transaction, ChatId(steer.session_id)).await?),
         role: Set("user".into()),
         content: Set(steer.content.clone()),
         llm_content: Set(crate::model::user_message_llm_content(
@@ -516,33 +517,33 @@ pub(in crate::db) async fn apply_turn_steer(
         return Err(store_err(error));
     }
 
-    let applied = entities::turn_steer::Entity::update_many()
+    let applied = entities::code_turn_steer::Entity::update_many()
         .col_expr(
-            entities::turn_steer::Column::Status,
+            entities::code_turn_steer::Column::Status,
             sea_orm::sea_query::Expr::value(TurnSteerStatus::Applied.as_str()),
         )
         .col_expr(
-            entities::turn_steer::Column::AppliedLeaseToken,
+            entities::code_turn_steer::Column::AppliedLeaseToken,
             sea_orm::sea_query::Expr::value(Some(lease_token)),
         )
         .col_expr(
-            entities::turn_steer::Column::MessageId,
+            entities::code_turn_steer::Column::MessageId,
             sea_orm::sea_query::Expr::value(Some(steer.id)),
         )
         .col_expr(
-            entities::turn_steer::Column::PrecedingAssistantMessageId,
+            entities::code_turn_steer::Column::PrecedingAssistantMessageId,
             sea_orm::sea_query::Expr::value(preceding_assistant.map(|message| message.id.0)),
         )
         .col_expr(
-            entities::turn_steer::Column::ResolvedAt,
+            entities::code_turn_steer::Column::ResolvedAt,
             sea_orm::sea_query::Expr::value(Some(now)),
         )
-        .filter(entities::turn_steer::Column::Id.eq(steer.id))
-        .filter(entities::turn_steer::Column::Status.eq(TurnSteerStatus::Pending.as_str()))
-        .filter(entities::turn_steer::Column::AppliedLeaseToken.is_null())
-        .filter(entities::turn_steer::Column::MessageId.is_null())
-        .filter(entities::turn_steer::Column::PrecedingAssistantMessageId.is_null())
-        .filter(entities::turn_steer::Column::ResolvedAt.is_null())
+        .filter(entities::code_turn_steer::Column::Id.eq(steer.id))
+        .filter(entities::code_turn_steer::Column::Status.eq(TurnSteerStatus::Pending.as_str()))
+        .filter(entities::code_turn_steer::Column::AppliedLeaseToken.is_null())
+        .filter(entities::code_turn_steer::Column::MessageId.is_null())
+        .filter(entities::code_turn_steer::Column::PrecedingAssistantMessageId.is_null())
+        .filter(entities::code_turn_steer::Column::ResolvedAt.is_null())
         .exec(&transaction)
         .await
         .map_err(store_err)?;
@@ -551,29 +552,29 @@ pub(in crate::db) async fn apply_turn_steer(
         return Ok(None);
     }
 
-    let touched = entities::turn_run::Entity::update_many()
+    let touched = entities::code_turn::Entity::update_many()
         .col_expr(
-            entities::turn_run::Column::UpdatedAt,
+            entities::code_turn::Column::UpdatedAt,
             sea_orm::sea_query::Expr::value(now),
         )
         .col_expr(
-            entities::turn_run::Column::SteerRevision,
+            entities::code_turn::Column::SteerRevision,
             sea_orm::sea_query::Expr::value(next_steer_revision),
         )
         .col_expr(
-            entities::turn_run::Column::LastSteerAppliedAt,
+            entities::code_turn::Column::LastSteerAppliedAt,
             sea_orm::sea_query::Expr::value(Some(now)),
         )
-        .filter(entities::turn_run::Column::Id.eq(turn_id.0))
-        .filter(entities::turn_run::Column::Status.eq(TurnRunStatus::Running.as_str()))
-        .filter(entities::turn_run::Column::AttemptCount.eq(claim.attempt_count))
-        .filter(entities::turn_run::Column::ClaimCount.eq(claim.claim_count))
-        .filter(entities::turn_run::Column::LeaseToken.eq(lease_token))
-        .filter(entities::turn_run::Column::LeaseExpiresAt.eq(turn.lease_expires_at))
-        .filter(entities::turn_run::Column::LeaseExpiresAt.gt(now))
-        .filter(entities::turn_run::Column::SteerRevision.eq(turn.steer_revision))
-        .filter(entities::turn_run::Column::UpdatedAt.eq(turn.updated_at))
-        .filter(entities::turn_run::Column::UpdatedAt.lte(now))
+        .filter(entities::code_turn::Column::Id.eq(turn_id.0))
+        .filter(entities::code_turn::Column::Status.eq(TurnRunStatus::Running.as_str()))
+        .filter(entities::code_turn::Column::AttemptCount.eq(claim.attempt_count))
+        .filter(entities::code_turn::Column::ClaimCount.eq(claim.claim_count))
+        .filter(entities::code_turn::Column::LeaseToken.eq(lease_token))
+        .filter(entities::code_turn::Column::LeaseExpiresAt.eq(turn.lease_expires_at))
+        .filter(entities::code_turn::Column::LeaseExpiresAt.gt(now))
+        .filter(entities::code_turn::Column::SteerRevision.eq(turn.steer_revision))
+        .filter(entities::code_turn::Column::UpdatedAt.eq(turn.updated_at))
+        .filter(entities::code_turn::Column::UpdatedAt.lte(now))
         .exec(&transaction)
         .await
         .map_err(store_err)?;
@@ -582,7 +583,7 @@ pub(in crate::db) async fn apply_turn_steer(
         return Ok(None);
     }
 
-    let applied = entities::turn_steer::Entity::find_by_id(steer.id)
+    let applied = entities::code_turn_steer::Entity::find_by_id(steer.id)
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -594,7 +595,7 @@ pub(in crate::db) async fn apply_turn_steer(
     };
     let seq = append_event_on(
         &transaction,
-        ChatId(applied.chat_id),
+        ChatId(applied.session_id),
         Some(turn_id),
         Some(lease_token),
         Some(attempt_event_ordinal),
@@ -618,20 +619,20 @@ pub(super) async fn reject_pending_turn_steers_on<C>(
 where
     C: ConnectionTrait,
 {
-    let rejected = entities::turn_steer::Entity::update_many()
+    let rejected = entities::code_turn_steer::Entity::update_many()
         .col_expr(
-            entities::turn_steer::Column::Status,
+            entities::code_turn_steer::Column::Status,
             sea_orm::sea_query::Expr::value(TurnSteerStatus::Rejected.as_str()),
         )
         .col_expr(
-            entities::turn_steer::Column::ResolvedAt,
+            entities::code_turn_steer::Column::ResolvedAt,
             sea_orm::sea_query::Expr::value(Some(resolved_at)),
         )
-        .filter(entities::turn_steer::Column::TurnId.eq(turn_id.0))
-        .filter(entities::turn_steer::Column::Status.eq(TurnSteerStatus::Pending.as_str()))
-        .filter(entities::turn_steer::Column::AppliedLeaseToken.is_null())
-        .filter(entities::turn_steer::Column::MessageId.is_null())
-        .filter(entities::turn_steer::Column::ResolvedAt.is_null())
+        .filter(entities::code_turn_steer::Column::TurnId.eq(turn_id.0))
+        .filter(entities::code_turn_steer::Column::Status.eq(TurnSteerStatus::Pending.as_str()))
+        .filter(entities::code_turn_steer::Column::AppliedLeaseToken.is_null())
+        .filter(entities::code_turn_steer::Column::MessageId.is_null())
+        .filter(entities::code_turn_steer::Column::ResolvedAt.is_null())
         .exec(conn)
         .await
         .map_err(store_err)?;
@@ -664,7 +665,7 @@ fn validate_steer_input(
 }
 
 fn exact_accepted_steer(
-    existing: entities::turn_steer::Model,
+    existing: entities::code_turn_steer::Model,
     turn_id: TurnId,
     chat_id: ChatId,
     content: &str,
@@ -676,7 +677,7 @@ fn exact_accepted_steer(
     // different skills is a different instruction, and reporting it as the
     // one already accepted would silently drop the skills it asked for.
     if existing.turn_id != turn_id.0
-        || existing.chat_id != chat_id.0
+        || existing.session_id != chat_id.0
         || existing.content != content
         || invoked_skills_from_steer(&existing)? != invoked_skills
         || existing.interrupt != interrupt
@@ -691,7 +692,7 @@ fn exact_accepted_steer(
 
 async fn ensure_exact_applied_message_on<C>(
     conn: &C,
-    steer: &entities::turn_steer::Model,
+    steer: &entities::code_turn_steer::Model,
 ) -> Result<()>
 where
     C: ConnectionTrait,
@@ -708,7 +709,7 @@ where
         .await
         .map_err(store_err)?
         .is_some_and(|message| {
-            message.chat_id == steer.chat_id
+            message.chat_id == steer.session_id
                 && message.turn_id == steer.turn_id
                 && message.role == "user"
                 && message.content == steer.content
@@ -722,7 +723,7 @@ where
         .await
         .map_err(store_err)?
         .is_some_and(|identity| {
-            identity.chat_id == steer.chat_id
+            identity.chat_id == steer.session_id
                 && identity.turn_id == steer.turn_id
                 && identity.owner == MESSAGE_IDENTITY_OWNER_MESSAGE
         });
@@ -737,7 +738,7 @@ where
 
 async fn exact_applied_event_on<C>(
     conn: &C,
-    steer: &entities::turn_steer::Model,
+    steer: &entities::code_turn_steer::Model,
     lease_token: uuid::Uuid,
     attempt_event_ordinal: i32,
 ) -> Result<SequencedEvent>
@@ -761,7 +762,7 @@ where
         message_id: MessageId(steer.id),
         content: steer.content.clone(),
     };
-    if event.session_id != steer.chat_id
+    if event.session_id != steer.session_id
         || event.turn_id != Some(steer.turn_id)
         || event.lease_token != Some(lease_token)
         || event.attempt_event_ordinal != Some(attempt_event_ordinal)
@@ -781,7 +782,7 @@ where
 
 async fn ensure_exact_preceding_message_on<C>(
     conn: &C,
-    steer: &entities::turn_steer::Model,
+    steer: &entities::code_turn_steer::Model,
     preceding: &crate::model::Message,
 ) -> Result<()>
 where
@@ -846,11 +847,11 @@ fn validate_preceding_assistant(
     Ok(())
 }
 
-fn turn_steer_from_model(model: entities::turn_steer::Model) -> Result<TurnSteer> {
+fn turn_steer_from_model(model: entities::code_turn_steer::Model) -> Result<TurnSteer> {
     Ok(TurnSteer {
         id: TurnSteerId(model.id),
         turn_id: TurnId(model.turn_id),
-        chat_id: ChatId(model.chat_id),
+        chat_id: ChatId(model.session_id),
         invoked_skills: invoked_skills_from_steer(&model)?,
         content: model.content,
         voice_input_used: model.voice_input_used,
@@ -869,7 +870,7 @@ fn turn_steer_from_model(model: entities::turn_steer::Model) -> Result<TurnSteer
 /// unusual: the accepted instruction can no longer be described honestly, so
 /// this fails instead of degrading to "no skills were invoked".
 pub(in crate::db) fn invoked_skills_from_steer(
-    model: &entities::turn_steer::Model,
+    model: &entities::code_turn_steer::Model,
 ) -> Result<Vec<String>> {
     serde_json::from_value(model.invoked_skills.clone()).map_err(|error| {
         AgentError::Store(format!(

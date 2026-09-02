@@ -2003,7 +2003,7 @@ async fn configured_router_canonicalizes_typed_models_and_rejects_wrong_or_unava
     let accepted = send_message_with_id(&router, &bearer, chat.id, turn_id, "hello").await;
     assert_eq!(accepted, StatusCode::ACCEPTED);
     assert_eq!(
-        store.get_turn_run(turn_id).await.unwrap().unwrap().model,
+        store.get_turn(turn_id).await.unwrap().unwrap().model,
         "openai::gpt-5.6-sol"
     );
 
@@ -2445,7 +2445,7 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
         StatusCode::ACCEPTED
     );
     let gateway_override_model = store
-        .get_turn_run(gateway_override_turn)
+        .get_turn(gateway_override_turn)
         .await
         .unwrap()
         .unwrap()
@@ -2498,12 +2498,7 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
         send_message_with_id(&router, &bearer, chat.id, sticky_turn, "hello").await,
         StatusCode::ACCEPTED
     );
-    let sticky_model = store
-        .get_turn_run(sticky_turn)
-        .await
-        .unwrap()
-        .unwrap()
-        .model;
+    let sticky_model = store.get_turn(sticky_turn).await.unwrap().unwrap().model;
     assert!(sticky_model.starts_with("model_gateway::__tidebreak_gateway_v1."));
     assert_eq!(
         providers::resolve_model_policy(&*store, &sticky_model, false, None)
@@ -2579,7 +2574,7 @@ async fn model_roles_resolve_at_read_time_and_honor_an_explicit_pin() {
         StatusCode::ACCEPTED
     );
     let fallback_model = store
-        .get_turn_run(fallback_turn_id)
+        .get_turn(fallback_turn_id)
         .await
         .unwrap()
         .unwrap()
@@ -3559,7 +3554,7 @@ async fn a_misconfigured_policy_gates_the_renderer_and_refuses_a_turn() {
         send_message_with_id(&router, &bearer, gated_chat.id, turn_id, "hello").await,
         StatusCode::CONFLICT
     );
-    assert!(store.get_turn_run(turn_id).await.unwrap().is_none());
+    assert!(store.get_turn(turn_id).await.unwrap().is_none());
 }
 
 pub(super) async fn put_json(
@@ -5323,7 +5318,7 @@ async fn an_invoked_skill_must_be_enabled_or_the_turn_is_refused() {
 
     let accepted = send_message_invoking(&router, &bearer, chat.id, &["presentations"]).await;
     assert_eq!(accepted.status(), StatusCode::ACCEPTED);
-    let turns = store.list_turn_runs(chat.id).await.unwrap();
+    let turns = store.list_turns(chat.id).await.unwrap();
     assert_eq!(
         turns
             .iter()
@@ -5363,7 +5358,7 @@ async fn an_invoked_skill_must_be_enabled_or_the_turn_is_refused() {
     let mixed =
         send_message_invoking(&router, &bearer, chat.id, &["charts", "no-such-skill"]).await;
     assert_eq!(mixed.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(store.list_turn_runs(chat.id).await.unwrap().len(), 1);
+    assert_eq!(store.list_turns(chat.id).await.unwrap().len(), 1);
 }
 
 /// POST guidance into a running turn that explicitly invokes skills by name.
@@ -5420,7 +5415,7 @@ async fn steering_guidance_may_invoke_skills_and_is_held_to_the_same_catalog() {
             .status(),
         StatusCode::ACCEPTED
     );
-    let turn = store.list_turn_runs(chat.id).await.unwrap()[0].id;
+    let turn = store.list_turns(chat.id).await.unwrap()[0].id;
 
     let steer_id = TurnSteerId::new();
     let accepted = steer_invoking(

@@ -2591,6 +2591,25 @@ async fn drive_turn_inner(
     }
     sink.set_turn(turn.id);
 
+    let lease_token = uuid::Uuid::new_v4();
+    let now = Utc::now();
+    let lease_expires_at = now + chrono::Duration::seconds(60);
+    let claimed = db
+        .take_lease_on_turn(
+            tidebreak_core::TurnId(turn.id.0),
+            lease_token,
+            now,
+            lease_expires_at,
+        )
+        .await
+        .map_err(|err| WorkerError::Failed(err.to_string()))?;
+    if claimed.is_none() {
+        return Err(WorkerError::Failed(format!(
+            "could not claim a lease on turn {}",
+            turn.id
+        )));
+    }
+
     session.lifecycle = CodeSessionLifecycle::Running;
     super::attention::replace_attention(
         session,
@@ -2629,6 +2648,7 @@ async fn drive_turn_inner(
         )
     };
     let mut next_input = Some(TurnInput {
+        turn_id: Some(turn.id),
         text: engine_text,
         model: turn_settings.model.clone(),
         reasoning_effort: turn_settings.reasoning_effort,
@@ -2642,6 +2662,8 @@ async fn drive_turn_inner(
     // "the engine is gone" — which would re-attach a worker to a worktree a
     // live child is still writing to.
     let mut pid_changes = engine.child_pid_changes();
+    let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(15));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // Control commands run concurrently with the turn. Awaiting one inline
     // would stop draining the child's stdout — during an interrupt's grace
     // period that is what turns a clean abort into a kill.
@@ -2701,6 +2723,17 @@ async fn drive_turn_inner(
                         record_child_process(session, pid);
                         let _ = save_session(db, session).await;
                     }
+                }
+                _ = heartbeat.tick() => {
+                    let now = Utc::now();
+                    let _ = db
+                        .heartbeat_turn_lease(
+                            tidebreak_core::TurnId(turn.id.0),
+                            lease_token,
+                            now,
+                            now + chrono::Duration::seconds(60),
+                        )
+                        .await;
                 }
             }
         };
@@ -2841,9 +2874,17 @@ async fn drive_turn_inner(
                 )
                 .await;
             }
-            if turn.status.is_open() {
+            if turn.status.is_open()
+                && !matches!(
+                    turn.status,
+                    CodeTurnStatus::WaitingForClient
+                        | CodeTurnStatus::WaitingForAgentRun
+                        | CodeTurnStatus::Waiting
+                )
+            {
                 // The stream ended without closing the turn. Only the worker
-                // knows whether that was asked for.
+                // knows whether that was asked for. Client waits keep the
+                // lease-release shape until D4b.
                 let (status, event) = if interrupted {
                     (
                         CodeTurnStatus::Interrupted,

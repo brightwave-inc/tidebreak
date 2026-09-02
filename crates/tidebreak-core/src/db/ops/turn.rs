@@ -48,17 +48,113 @@ pub(in crate::db) use multi_agent_run_wait::{
 };
 
 pub(in crate::db) use resolution::{
-    complete_refused_turn_run_with_citations_and_append_event, complete_turn_run,
-    complete_turn_run_and_append_event, complete_turn_run_with_citations_and_append_event,
-    finish_turn_cancellation, finish_turn_cancellation_and_append_event, record_turn_run_failure,
-    record_turn_run_failure_and_append_event, recover_exact_completed_turn_event,
+    complete_refused_turn_with_citations_and_append_event, complete_turn,
+    complete_turn_and_append_event, complete_turn_with_citations_and_append_event,
+    finish_turn_cancellation, finish_turn_cancellation_and_append_event, record_turn_failure,
+    record_turn_failure_and_append_event, recover_exact_completed_turn_event,
     request_turn_cancellation, request_turn_cancellation_and_append_event,
 };
 pub(in crate::db) use sandbox_spawn::{checkpoint_sandbox_spawn, resumed_sandbox_spawn_batch};
 pub(in crate::db) use steer::{accept_turn_steer, apply_turn_steer, list_pending_turn_steers};
 
-pub(in crate::db) async fn get_turn_run(store: &DbStore, id: TurnId) -> Result<Option<TurnRun>> {
-    entities::turn_run::Entity::find_by_id(id.0)
+/// Take a lease on one already-inserted turn so a session worker can drive
+/// the leg under a durable claim. Returns the running turn, or `None` when
+/// another claim already owns it.
+pub(in crate::db) async fn take_lease_on_turn(
+    store: &DbStore,
+    id: TurnId,
+    lease_token: uuid::Uuid,
+    now: chrono::DateTime<Utc>,
+    lease_expires_at: chrono::DateTime<Utc>,
+) -> Result<Option<TurnRun>> {
+    let now = canonical_db_timestamp(now)?;
+    let lease_expires_at = canonical_db_timestamp(lease_expires_at)?;
+    if lease_token.is_nil() || lease_expires_at <= now {
+        return Err(AgentError::Store(
+            "turn lease requires a non-nil token and an expiry after now".into(),
+        ));
+    }
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    let Some(existing) = entities::code_turn::Entity::find_by_id(id.0)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+    else {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    };
+    if existing.lease_token.is_some() && existing.status == TurnRunStatus::Running.as_str() {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    let next_attempt = std::cmp::Ord::max(existing.attempt_count.saturating_add(1), 1);
+    let next_claim = std::cmp::Ord::max(existing.claim_count.saturating_add(1), 1);
+    let inserted =
+        entities::code_turn_claim::Entity::insert(entities::code_turn_claim::ActiveModel {
+            token: Set(lease_token),
+            turn_id: Set(id.0),
+            owner: Set(existing.owner.clone()),
+            attempt_count: Set(next_attempt),
+            claim_count: Set(next_claim),
+            claimed_at: Set(now),
+            lease_expires_at: Set(lease_expires_at),
+        })
+        .on_conflict(
+            sea_orm::sea_query::OnConflict::new()
+                .do_nothing()
+                .to_owned(),
+        )
+        .try_insert()
+        .exec_without_returning(&transaction)
+        .await
+        .map_err(store_err)?;
+    if !matches!(inserted, TryInsertResult::Inserted(1)) {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    let updated = entities::code_turn::Entity::update_many()
+        .col_expr(
+            entities::code_turn::Column::Status,
+            sea_orm::sea_query::Expr::value(TurnRunStatus::Running.as_str()),
+        )
+        .col_expr(
+            entities::code_turn::Column::AttemptCount,
+            sea_orm::sea_query::Expr::value(next_attempt),
+        )
+        .col_expr(
+            entities::code_turn::Column::ClaimCount,
+            sea_orm::sea_query::Expr::value(next_claim),
+        )
+        .col_expr(
+            entities::code_turn::Column::LeaseToken,
+            sea_orm::sea_query::Expr::value(Some(lease_token)),
+        )
+        .col_expr(
+            entities::code_turn::Column::LeaseExpiresAt,
+            sea_orm::sea_query::Expr::value(Some(lease_expires_at)),
+        )
+        .col_expr(
+            entities::code_turn::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(Some(now)),
+        )
+        .col_expr(
+            entities::code_turn::Column::StartedAt,
+            sea_orm::sea_query::Expr::value(now),
+        )
+        .filter(entities::code_turn::Column::Id.eq(id.0))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    if updated.rows_affected != 1 {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    transaction.commit().await.map_err(store_err)?;
+    get_turn(store, id).await
+}
+
+pub(in crate::db) async fn get_turn(store: &DbStore, id: TurnId) -> Result<Option<TurnRun>> {
+    entities::code_turn::Entity::find_by_id(id.0)
         .one(&store.conn)
         .await
         .map_err(store_err)?
@@ -66,14 +162,11 @@ pub(in crate::db) async fn get_turn_run(store: &DbStore, id: TurnId) -> Result<O
         .transpose()
 }
 
-pub(in crate::db) async fn list_turn_runs(
-    store: &DbStore,
-    chat_id: ChatId,
-) -> Result<Vec<TurnRun>> {
-    entities::turn_run::Entity::find()
-        .filter(entities::turn_run::Column::ChatId.eq(chat_id.0))
-        .order_by_asc(entities::turn_run::Column::CreatedAt)
-        .order_by_asc(entities::turn_run::Column::Id)
+pub(in crate::db) async fn list_turns(store: &DbStore, chat_id: ChatId) -> Result<Vec<TurnRun>> {
+    entities::code_turn::Entity::find()
+        .filter(entities::code_turn::Column::SessionId.eq(chat_id.0))
+        .order_by_asc(entities::code_turn::Column::StartedAt)
+        .order_by_asc(entities::code_turn::Column::Id)
         .all(&store.conn)
         .await
         .map_err(store_err)?
@@ -207,84 +300,9 @@ async fn accept_turn_inner(
         .await?
         .ok_or_else(|| AgentError::Store(format!("chat {chat_id} has no foreground agent run")))?;
 
-    let admission_row = entities::turn_admission::Entity::find_by_id(id.0)
-        .one(&transaction)
-        .await
-        .map_err(store_err)?;
-    if let Some(row) = admission_row.as_ref() {
-        if !admission::request_matches(row, &request) {
-            transaction.rollback().await.map_err(store_err)?;
-            return Ok(ReservedTurnAcceptanceOutcome::Outcome(Box::new(
-                AcceptTurnOutcome::IdentityConflict,
-            )));
-        }
-        match row.state.as_str() {
-            admission::STATE_ACCEPTED => {
-                let existing = entities::turn_run::Entity::find_by_id(id.0)
-                    .one(&transaction)
-                    .await
-                    .map_err(store_err)?
-                    .ok_or_else(|| {
-                        AgentError::Store(format!(
-                            "accepted turn admission {id} is missing its turn"
-                        ))
-                    })?;
-                let existing = exact_accepted_turn_on(
-                    &transaction,
-                    existing,
-                    chat_id,
-                    foreground.id,
-                    model,
-                    content,
-                    images,
-                    documents,
-                    invoked_skills,
-                    voice_input_used,
-                )
-                .await?;
-                transaction.commit().await.map_err(store_err)?;
-                return Ok(ReservedTurnAcceptanceOutcome::Outcome(Box::new(existing)));
-            }
-            admission::STATE_PENDING => {
-                let Some(lease) = reservation else {
-                    transaction.rollback().await.map_err(store_err)?;
-                    return Ok(ReservedTurnAcceptanceOutcome::LeaseLost);
-                };
-                if !admission::lease_is_current_on(
-                    &transaction,
-                    lease,
-                    chat_id,
-                    request.fingerprint(),
-                )
-                .await?
-                {
-                    transaction.rollback().await.map_err(store_err)?;
-                    return Ok(ReservedTurnAcceptanceOutcome::LeaseLost);
-                }
-            }
-            admission::STATE_QUEUED => {
-                transaction.rollback().await.map_err(store_err)?;
-                return Ok(if reservation.is_some() {
-                    ReservedTurnAcceptanceOutcome::LeaseLost
-                } else {
-                    ReservedTurnAcceptanceOutcome::Outcome(Box::new(
-                        AcceptTurnOutcome::IdentityConflict,
-                    ))
-                });
-            }
-            state => {
-                transaction.rollback().await.map_err(store_err)?;
-                return Err(AgentError::Store(format!(
-                    "turn admission {id} has invalid state {state}"
-                )));
-            }
-        }
-    } else if reservation.is_some() {
-        transaction.rollback().await.map_err(store_err)?;
-        return Ok(ReservedTurnAcceptanceOutcome::LeaseLost);
-    }
+    let _ = reservation;
 
-    if let Some(existing) = entities::turn_run::Entity::find_by_id(id.0)
+    if let Some(existing) = entities::code_turn::Entity::find_by_id(id.0)
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -328,40 +346,6 @@ async fn accept_turn_inner(
     }
 
     let now = super::agent_run::database_now(&transaction).await?;
-    if let Some(lease) = reservation {
-        if !admission::transition_pending_on(&transaction, lease, admission::STATE_ACCEPTED).await?
-        {
-            transaction.rollback().await.map_err(store_err)?;
-            return Ok(ReservedTurnAcceptanceOutcome::LeaseLost);
-        }
-    } else if admission_row.is_none() {
-        let inserted =
-            entities::turn_admission::Entity::insert(entities::turn_admission::ActiveModel {
-                id: Set(id.0),
-                chat_id: Set(chat_id.0),
-                fingerprint: Set(request.fingerprint().to_vec()),
-                state: Set(admission::STATE_ACCEPTED.into()),
-                lease_token: Set(None),
-                lease_expires_at: Set(None),
-                created_at: Set(now),
-                updated_at: Set(now),
-            })
-            .on_conflict_do_nothing()
-            .exec_without_returning(&transaction)
-            .await
-            .map_err(store_err)?;
-        if !matches!(inserted, TryInsertResult::Inserted(1)) {
-            transaction.rollback().await.map_err(store_err)?;
-            return Ok(ReservedTurnAcceptanceOutcome::Outcome(Box::new(
-                AcceptTurnOutcome::IdentityConflict,
-            )));
-        }
-    } else {
-        transaction.rollback().await.map_err(store_err)?;
-        return Ok(ReservedTurnAcceptanceOutcome::Outcome(Box::new(
-            AcceptTurnOutcome::IdentityConflict,
-        )));
-    }
     let inserted = match insert_accepted_turn_on(
         &transaction,
         id,
@@ -380,7 +364,7 @@ async fn accept_turn_inner(
         Ok(inserted) => inserted,
         Err(error) => {
             transaction.rollback().await.map_err(store_err)?;
-            if let Some(existing) = entities::turn_run::Entity::find_by_id(id.0)
+            if let Some(existing) = entities::code_turn::Entity::find_by_id(id.0)
                 .one(&store.conn)
                 .await
                 .map_err(store_err)?
@@ -432,7 +416,7 @@ pub(super) async fn insert_accepted_turn_on<C>(
     invoked_skills: &[String],
     voice_input_used: bool,
     now: chrono::DateTime<Utc>,
-) -> Result<entities::turn_run::Model>
+) -> Result<entities::code_turn::Model>
 where
     C: ConnectionTrait,
 {
@@ -465,10 +449,89 @@ where
     .insert(conn)
     .await
     .map_err(store_err)?;
-    message_attachment_ops::insert_on(conn, chat_id, input_message_id, images, now).await?;
-    let document_context =
-        message_document_attachment_ops::insert_on(conn, chat_id, input_message_id, documents, now)
-            .await?;
+
+    let fingerprint = crate::model::TurnAdmissionRequest {
+        id,
+        chat_id,
+        content: content.into(),
+        attachments: images.iter().map(|image| image.blob_id).collect(),
+        file_attachments: documents.to_vec(),
+        invoked_skills: invoked_skills.to_vec(),
+        voice_input_used,
+    }
+    .fingerprint()
+    .to_vec();
+    let session = entities::code_session::Entity::find_by_id(chat_id.0)
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .ok_or_else(|| AgentError::Store(format!("session {chat_id} does not exist")))?;
+    let last = entities::code_turn::Entity::find()
+        .filter(entities::code_turn::Column::SessionId.eq(chat_id.0))
+        .order_by_desc(entities::code_turn::Column::Ordinal)
+        .one(conn)
+        .await
+        .map_err(store_err)?;
+    let ordinal = last
+        .map_or(Some(1), |row| row.ordinal.checked_add(1))
+        .ok_or_else(|| {
+            AgentError::Store(format!("turn ordinal exhausted for session {chat_id}"))
+        })?;
+    let _ = foreground_id;
+    entities::code_turn::ActiveModel {
+        id: Set(id.0),
+        owner: Set(session.owner),
+        session_id: Set(chat_id.0),
+        ordinal: Set(ordinal),
+        status: Set(TurnRunStatus::Queued.as_str().into()),
+        model: Set(Some(model.into())),
+        fast_mode: Set(false),
+        user_input: Set(content.into()),
+        user_input_blob_id: Set(None),
+        checkpoint_ref: Set(None),
+        diffstat: Set(None),
+        usage: Set(None),
+        narrative: Set(None),
+        rewrite: Set(None),
+        started_at: Set(now),
+        ended_at: Set(None),
+        park_ref: Set(None),
+        park_wait: Set(None),
+        attempt_count: Set(0),
+        max_attempts: Set(TurnRun::DEFAULT_MAX_ATTEMPTS),
+        claim_count: Set(0),
+        model_steps: Set(0),
+        input_tokens: Set(0),
+        output_tokens: Set(0),
+        cache_read_input_tokens: Set(0),
+        cache_creation_input_tokens: Set(0),
+        available_at: Set(Some(now)),
+        lease_token: Set(None),
+        lease_expires_at: Set(None),
+        last_error_code: Set(None),
+        last_error_detail: Set(None),
+        steer_revision: Set(0),
+        last_steer_applied_at: Set(None),
+        invoked_skills: Set(serde_json::json!(invoked_skills)),
+        voice_input_used: Set(voice_input_used),
+        input_message_id: Set(Some(input_message_id.0)),
+        output_message_id: Set(None),
+        updated_at: Set(Some(now)),
+        fingerprint: Set(Some(fingerprint)),
+    }
+    .insert(conn)
+    .await
+    .map_err(store_err)?;
+    message_attachment_ops::insert_on(conn, chat_id, id, input_message_id, images, now).await?;
+    let document_context = message_document_attachment_ops::insert_on(
+        conn,
+        chat_id,
+        id,
+        input_message_id,
+        documents,
+        now,
+    )
+    .await?;
     let llm_content = user_message_llm_content(
         content,
         images,
@@ -486,44 +549,14 @@ where
         .await
         .map_err(store_err)?;
     }
-
-    entities::turn_run::ActiveModel {
-        id: Set(id.0),
-        chat_id: Set(chat_id.0),
-        agent_run_id: Set(foreground_id.0),
-        agent_run_depth: Set(0),
-        input_message_id: Set(input_message_id.0),
-        output_message_id: Set(None),
-        model: Set(model.into()),
-        invoked_skills: Set(serde_json::json!(invoked_skills)),
-        voice_input_used: Set(voice_input_used),
-        status: Set(TurnRunStatus::Queued.as_str().into()),
-        attempt_count: Set(0),
-        max_attempts: Set(TurnRun::DEFAULT_MAX_ATTEMPTS),
-        claim_count: Set(0),
-        model_steps: Set(0),
-        input_tokens: Set(0),
-        output_tokens: Set(0),
-        cache_read_input_tokens: Set(0),
-        cache_creation_input_tokens: Set(0),
-        available_at: Set(now),
-        lease_token: Set(None),
-        lease_expires_at: Set(None),
-        started_at: Set(None),
-        finished_at: Set(None),
-        last_error_code: Set(None),
-        last_error_detail: Set(None),
-        steer_revision: Set(0),
-        last_steer_applied_at: Set(None),
-        created_at: Set(now),
-        updated_at: Set(now),
-    }
-    .insert(conn)
-    .await
-    .map_err(store_err)
+    Ok(entities::code_turn::Entity::find_by_id(id.0)
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .ok_or_else(|| AgentError::Store(format!("turn {id} vanished after insert")))?)
 }
 
-pub(in crate::db) async fn claim_turn_run(
+pub(in crate::db) async fn claim_turn(
     store: &DbStore,
     lease_token: uuid::Uuid,
     now: chrono::DateTime<Utc>,
@@ -568,12 +601,12 @@ pub(in crate::db) async fn claim_turn_run(
                 terminal_event: Some(terminal_event),
             });
         }
-        if let Some(receipt) = entities::turn_claim::Entity::find_by_id(lease_token)
+        if let Some(receipt) = entities::code_turn_claim::Entity::find_by_id(lease_token)
             .one(&transaction)
             .await
             .map_err(store_err)?
         {
-            let existing = entities::turn_run::Entity::find_by_id(receipt.turn_id)
+            let existing = entities::code_turn::Entity::find_by_id(receipt.turn_id)
                 .one(&transaction)
                 .await
                 .map_err(store_err)?
@@ -594,19 +627,19 @@ pub(in crate::db) async fn claim_turn_run(
                 terminal_event: None,
             });
         }
-        let due = entities::turn_run::Entity::find()
+        let due = entities::code_turn::Entity::find()
             .filter(due_turn_candidate_condition(now))
-            .order_by_asc(entities::turn_run::Column::AvailableAt)
-            .order_by_asc(entities::turn_run::Column::CreatedAt)
-            .order_by_asc(entities::turn_run::Column::Id)
+            .order_by_asc(entities::code_turn::Column::AvailableAt)
+            .order_by_asc(entities::code_turn::Column::StartedAt)
+            .order_by_asc(entities::code_turn::Column::Id)
             .one(&transaction)
             .await
             .map_err(store_err)?;
-        let expired = entities::turn_run::Entity::find()
+        let expired = entities::code_turn::Entity::find()
             .filter(expired_turn_candidate_condition(now))
-            .order_by_asc(entities::turn_run::Column::LeaseExpiresAt)
-            .order_by_asc(entities::turn_run::Column::CreatedAt)
-            .order_by_asc(entities::turn_run::Column::Id)
+            .order_by_asc(entities::code_turn::Column::LeaseExpiresAt)
+            .order_by_asc(entities::code_turn::Column::StartedAt)
+            .order_by_asc(entities::code_turn::Column::Id)
             .one(&transaction)
             .await
             .map_err(store_err)?;
@@ -630,42 +663,42 @@ pub(in crate::db) async fn claim_turn_run(
         };
 
         if candidate.status == TurnRunStatus::Cancelling.as_str() {
-            let chat_id = ChatId(candidate.chat_id);
+            let chat_id = ChatId(candidate.session_id);
             if !acquire_chat_write_lock(&transaction, chat_id).await? {
                 return Err(AgentError::Store(format!(
                     "turn {} references missing chat {chat_id}",
                     TurnId(candidate.id)
                 )));
             }
-            let cancelled = entities::turn_run::Entity::update_many()
+            let cancelled = entities::code_turn::Entity::update_many()
                 .col_expr(
-                    entities::turn_run::Column::Status,
+                    entities::code_turn::Column::Status,
                     sea_orm::sea_query::Expr::value(TurnRunStatus::Cancelled.as_str()),
                 )
                 .col_expr(
-                    entities::turn_run::Column::LeaseToken,
+                    entities::code_turn::Column::LeaseToken,
                     sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
                 )
                 .col_expr(
-                    entities::turn_run::Column::LeaseExpiresAt,
+                    entities::code_turn::Column::LeaseExpiresAt,
                     sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
                 )
                 .col_expr(
-                    entities::turn_run::Column::FinishedAt,
+                    entities::code_turn::Column::EndedAt,
                     sea_orm::sea_query::Expr::value(Some(now)),
                 )
                 .col_expr(
-                    entities::turn_run::Column::UpdatedAt,
+                    entities::code_turn::Column::UpdatedAt,
                     sea_orm::sea_query::Expr::value(now),
                 )
-                .filter(entities::turn_run::Column::Id.eq(candidate.id))
-                .filter(entities::turn_run::Column::Status.eq(TurnRunStatus::Cancelling.as_str()))
-                .filter(entities::turn_run::Column::AttemptCount.eq(candidate.attempt_count))
-                .filter(entities::turn_run::Column::LeaseToken.eq(candidate.lease_token))
-                .filter(entities::turn_run::Column::LeaseExpiresAt.eq(candidate.lease_expires_at))
-                .filter(entities::turn_run::Column::LeaseExpiresAt.lte(now))
-                .filter(entities::turn_run::Column::UpdatedAt.eq(candidate.updated_at))
-                .filter(entities::turn_run::Column::UpdatedAt.lte(now))
+                .filter(entities::code_turn::Column::Id.eq(candidate.id))
+                .filter(entities::code_turn::Column::Status.eq(TurnRunStatus::Cancelling.as_str()))
+                .filter(entities::code_turn::Column::AttemptCount.eq(candidate.attempt_count))
+                .filter(entities::code_turn::Column::LeaseToken.eq(candidate.lease_token))
+                .filter(entities::code_turn::Column::LeaseExpiresAt.eq(candidate.lease_expires_at))
+                .filter(entities::code_turn::Column::LeaseExpiresAt.lte(now))
+                .filter(entities::code_turn::Column::UpdatedAt.eq(candidate.updated_at))
+                .filter(entities::code_turn::Column::UpdatedAt.lte(now))
                 .exec(&transaction)
                 .await
                 .map_err(store_err)?;
@@ -698,7 +731,7 @@ pub(in crate::db) async fn claim_turn_run(
 
         let reclaiming = candidate.status == TurnRunStatus::Running.as_str();
         if reclaiming && candidate.attempt_count >= candidate.max_attempts {
-            let chat_id = ChatId(candidate.chat_id);
+            let chat_id = ChatId(candidate.session_id);
             // Final lease exhaustion shares the terminal lock order with
             // explicit completion and failure: sandbox scheduler, chat, turn.
             super::agent_run::acquire_agent_run_claim_lock(&transaction).await?;
@@ -712,7 +745,7 @@ pub(in crate::db) async fn claim_turn_run(
                 transaction.rollback().await.map_err(store_err)?;
                 continue;
             }
-            let Some(locked_candidate) = entities::turn_run::Entity::find_by_id(candidate.id)
+            let Some(locked_candidate) = entities::code_turn::Entity::find_by_id(candidate.id)
                 .one(&transaction)
                 .await
                 .map_err(store_err)?
@@ -721,8 +754,7 @@ pub(in crate::db) async fn claim_turn_run(
                 continue;
             };
             if locked_candidate.status != TurnRunStatus::Running.as_str()
-                || locked_candidate.chat_id != candidate.chat_id
-                || locked_candidate.agent_run_id != candidate.agent_run_id
+                || locked_candidate.session_id != candidate.session_id
                 || locked_candidate.attempt_count != candidate.attempt_count
                 || locked_candidate.max_attempts != candidate.max_attempts
                 || locked_candidate.claim_count != candidate.claim_count
@@ -739,7 +771,9 @@ pub(in crate::db) async fn claim_turn_run(
             if candidate
                 .lease_expires_at
                 .is_none_or(|expires_at| expires_at > terminal_now)
-                || candidate.updated_at > terminal_now
+                || candidate
+                    .updated_at
+                    .is_some_and(|updated_at| updated_at > terminal_now)
             {
                 transaction.rollback().await.map_err(store_err)?;
                 continue;
@@ -755,41 +789,41 @@ pub(in crate::db) async fn claim_turn_run(
                 transaction.rollback().await.map_err(store_err)?;
                 continue;
             }
-            let failed = entities::turn_run::Entity::update_many()
+            let failed = entities::code_turn::Entity::update_many()
                 .col_expr(
-                    entities::turn_run::Column::Status,
+                    entities::code_turn::Column::Status,
                     sea_orm::sea_query::Expr::value(TurnRunStatus::Failed.as_str()),
                 )
                 .col_expr(
-                    entities::turn_run::Column::LeaseToken,
+                    entities::code_turn::Column::LeaseToken,
                     sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
                 )
                 .col_expr(
-                    entities::turn_run::Column::LeaseExpiresAt,
+                    entities::code_turn::Column::LeaseExpiresAt,
                     sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
                 )
                 .col_expr(
-                    entities::turn_run::Column::FinishedAt,
+                    entities::code_turn::Column::EndedAt,
                     sea_orm::sea_query::Expr::value(Some(terminal_now)),
                 )
                 .col_expr(
-                    entities::turn_run::Column::LastErrorCode,
+                    entities::code_turn::Column::LastErrorCode,
                     sea_orm::sea_query::Expr::value(Some("lease_expired".to_owned())),
                 )
                 .col_expr(
-                    entities::turn_run::Column::LastErrorDetail,
+                    entities::code_turn::Column::LastErrorDetail,
                     sea_orm::sea_query::Expr::value(Some("final worker lease expired".to_owned())),
                 )
                 .col_expr(
-                    entities::turn_run::Column::UpdatedAt,
+                    entities::code_turn::Column::UpdatedAt,
                     sea_orm::sea_query::Expr::value(terminal_now),
                 )
-                .filter(entities::turn_run::Column::Id.eq(candidate.id))
-                .filter(entities::turn_run::Column::Status.eq(TurnRunStatus::Running.as_str()))
-                .filter(entities::turn_run::Column::AttemptCount.eq(candidate.attempt_count))
-                .filter(entities::turn_run::Column::LeaseToken.eq(candidate.lease_token))
-                .filter(entities::turn_run::Column::LeaseExpiresAt.eq(candidate.lease_expires_at))
-                .filter(entities::turn_run::Column::UpdatedAt.eq(candidate.updated_at))
+                .filter(entities::code_turn::Column::Id.eq(candidate.id))
+                .filter(entities::code_turn::Column::Status.eq(TurnRunStatus::Running.as_str()))
+                .filter(entities::code_turn::Column::AttemptCount.eq(candidate.attempt_count))
+                .filter(entities::code_turn::Column::LeaseToken.eq(candidate.lease_token))
+                .filter(entities::code_turn::Column::LeaseExpiresAt.eq(candidate.lease_expires_at))
+                .filter(entities::code_turn::Column::UpdatedAt.eq(candidate.updated_at))
                 .exec(&transaction)
                 .await
                 .map_err(store_err)?;
@@ -811,9 +845,10 @@ pub(in crate::db) async fn claim_turn_run(
                     TurnId(candidate.id)
                 ))
             })?;
-            entities::turn_failure::ActiveModel {
+            entities::code_turn_failure::ActiveModel {
                 lease_token: Set(claim_token),
                 turn_id: Set(candidate.id),
+                owner: Set(candidate.owner.clone()),
                 attempt_count: Set(candidate.attempt_count),
                 model_steps: Set(candidate.model_steps),
                 input_tokens: Set(candidate.input_tokens),
@@ -859,26 +894,28 @@ pub(in crate::db) async fn claim_turn_run(
         let next_claim = candidate.claim_count.checked_add(1).ok_or_else(|| {
             AgentError::Store(format!("turn {} claim overflow", TurnId(candidate.id)))
         })?;
-        let receipt = entities::turn_claim::Entity::insert(entities::turn_claim::ActiveModel {
-            token: Set(lease_token),
-            turn_id: Set(candidate.id),
-            attempt_count: Set(next_attempt),
-            claim_count: Set(next_claim),
-            claimed_at: Set(now),
-            lease_expires_at: Set(lease_expires_at),
-        })
-        .on_conflict(
-            sea_orm::sea_query::OnConflict::new()
-                .do_nothing()
-                .to_owned(),
-        )
-        .try_insert()
-        .exec_without_returning(&transaction)
-        .await
-        .map_err(store_err)?;
+        let receipt =
+            entities::code_turn_claim::Entity::insert(entities::code_turn_claim::ActiveModel {
+                token: Set(lease_token),
+                turn_id: Set(candidate.id),
+                owner: Set(candidate.owner.clone()),
+                attempt_count: Set(next_attempt),
+                claim_count: Set(next_claim),
+                claimed_at: Set(now),
+                lease_expires_at: Set(lease_expires_at),
+            })
+            .on_conflict(
+                sea_orm::sea_query::OnConflict::new()
+                    .do_nothing()
+                    .to_owned(),
+            )
+            .try_insert()
+            .exec_without_returning(&transaction)
+            .await
+            .map_err(store_err)?;
         if !matches!(receipt, TryInsertResult::Inserted(1)) {
             transaction.rollback().await.map_err(store_err)?;
-            if entities::turn_claim::Entity::find_by_id(lease_token)
+            if entities::code_turn_claim::Entity::find_by_id(lease_token)
                 .one(&store.conn)
                 .await
                 .map_err(store_err)?
@@ -886,13 +923,13 @@ pub(in crate::db) async fn claim_turn_run(
             {
                 continue;
             }
-            let conflicting_claim = entities::turn_claim::Entity::find()
-                .filter(entities::turn_claim::Column::TurnId.eq(candidate.id))
-                .filter(entities::turn_claim::Column::ClaimCount.eq(next_claim))
+            let conflicting_claim = entities::code_turn_claim::Entity::find()
+                .filter(entities::code_turn_claim::Column::TurnId.eq(candidate.id))
+                .filter(entities::code_turn_claim::Column::ClaimCount.eq(next_claim))
                 .one(&store.conn)
                 .await
                 .map_err(store_err)?;
-            let current = entities::turn_run::Entity::find_by_id(candidate.id)
+            let current = entities::code_turn::Entity::find_by_id(candidate.id)
                 .one(&store.conn)
                 .await
                 .map_err(store_err)?;
@@ -908,54 +945,60 @@ pub(in crate::db) async fn claim_turn_run(
                 TurnId(candidate.id)
             )));
         }
-        let claim = entities::turn_run::Entity::update_many()
+        let claim = entities::code_turn::Entity::update_many()
             .col_expr(
-                entities::turn_run::Column::Status,
+                entities::code_turn::Column::Status,
                 sea_orm::sea_query::Expr::value(TurnRunStatus::Running.as_str()),
             )
             .col_expr(
-                entities::turn_run::Column::AttemptCount,
+                entities::code_turn::Column::AttemptCount,
                 sea_orm::sea_query::Expr::value(next_attempt),
             )
             .col_expr(
-                entities::turn_run::Column::ClaimCount,
+                entities::code_turn::Column::ClaimCount,
                 sea_orm::sea_query::Expr::value(next_claim),
             )
             .col_expr(
-                entities::turn_run::Column::LeaseToken,
+                entities::code_turn::Column::LeaseToken,
                 sea_orm::sea_query::Expr::value(Some(lease_token)),
             )
             .col_expr(
-                entities::turn_run::Column::LeaseExpiresAt,
+                entities::code_turn::Column::LeaseExpiresAt,
                 sea_orm::sea_query::Expr::value(Some(lease_expires_at)),
             )
             .col_expr(
-                entities::turn_run::Column::StartedAt,
-                sea_orm::sea_query::Expr::value(Some(candidate.started_at.unwrap_or(now))),
+                entities::code_turn::Column::StartedAt,
+                sea_orm::sea_query::Expr::value(
+                    if candidate.status == TurnRunStatus::Queued.as_str() {
+                        now
+                    } else {
+                        candidate.started_at
+                    },
+                ),
             )
             .col_expr(
-                entities::turn_run::Column::LastErrorCode,
+                entities::code_turn::Column::LastErrorCode,
                 sea_orm::sea_query::Expr::value(Option::<String>::None),
             )
             .col_expr(
-                entities::turn_run::Column::LastErrorDetail,
+                entities::code_turn::Column::LastErrorDetail,
                 sea_orm::sea_query::Expr::value(Option::<String>::None),
             )
             .col_expr(
-                entities::turn_run::Column::UpdatedAt,
+                entities::code_turn::Column::UpdatedAt,
                 sea_orm::sea_query::Expr::value(now),
             )
-            .filter(entities::turn_run::Column::Id.eq(candidate.id))
-            .filter(entities::turn_run::Column::Status.eq(&candidate.status))
-            .filter(entities::turn_run::Column::AttemptCount.eq(candidate.attempt_count))
-            .filter(entities::turn_run::Column::ClaimCount.eq(candidate.claim_count))
-            .filter(entities::turn_run::Column::UpdatedAt.eq(candidate.updated_at));
+            .filter(entities::code_turn::Column::Id.eq(candidate.id))
+            .filter(entities::code_turn::Column::Status.eq(&candidate.status))
+            .filter(entities::code_turn::Column::AttemptCount.eq(candidate.attempt_count))
+            .filter(entities::code_turn::Column::ClaimCount.eq(candidate.claim_count))
+            .filter(entities::code_turn::Column::UpdatedAt.eq(candidate.updated_at));
         let claim = if reclaiming {
             claim
-                .filter(entities::turn_run::Column::LeaseToken.eq(candidate.lease_token))
-                .filter(entities::turn_run::Column::LeaseExpiresAt.eq(candidate.lease_expires_at))
+                .filter(entities::code_turn::Column::LeaseToken.eq(candidate.lease_token))
+                .filter(entities::code_turn::Column::LeaseExpiresAt.eq(candidate.lease_expires_at))
         } else {
-            claim.filter(entities::turn_run::Column::AvailableAt.lte(now))
+            claim.filter(entities::code_turn::Column::AvailableAt.lte(now))
         };
         let claimed = claim.exec(&transaction).await.map_err(store_err)?;
         if claimed.rows_affected != 1 {
@@ -963,7 +1006,7 @@ pub(in crate::db) async fn claim_turn_run(
             continue;
         }
 
-        let claimed = entities::turn_run::Entity::find_by_id(candidate.id)
+        let claimed = entities::code_turn::Entity::find_by_id(candidate.id)
             .one(&transaction)
             .await
             .map_err(store_err)?
@@ -983,33 +1026,35 @@ fn due_turn_candidate_condition(now: chrono::DateTime<Utc>) -> sea_orm::Conditio
     sea_orm::Condition::all()
         .add(
             sea_orm::Condition::any()
-                .add(entities::turn_run::Column::Status.eq(TurnRunStatus::Resuming.as_str()))
+                .add(entities::code_turn::Column::Status.eq(TurnRunStatus::Resuming.as_str()))
                 .add(
                     sea_orm::Condition::all()
-                        .add(entities::turn_run::Column::Status.is_in([
+                        .add(entities::code_turn::Column::Status.is_in([
                             TurnRunStatus::Queued.as_str(),
                             TurnRunStatus::RetryWait.as_str(),
                         ]))
                         .add(
-                            sea_orm::sea_query::Expr::col(entities::turn_run::Column::AttemptCount)
-                                .lt(sea_orm::sea_query::Expr::col(
-                                    entities::turn_run::Column::MaxAttempts,
-                                )),
+                            sea_orm::sea_query::Expr::col(
+                                entities::code_turn::Column::AttemptCount,
+                            )
+                            .lt(sea_orm::sea_query::Expr::col(
+                                entities::code_turn::Column::MaxAttempts,
+                            )),
                         ),
                 ),
         )
-        .add(entities::turn_run::Column::AvailableAt.lte(now))
-        .add(entities::turn_run::Column::UpdatedAt.lte(now))
+        .add(entities::code_turn::Column::AvailableAt.lte(now))
+        .add(entities::code_turn::Column::UpdatedAt.lte(now))
 }
 
 fn expired_turn_candidate_condition(now: chrono::DateTime<Utc>) -> sea_orm::Condition {
     sea_orm::Condition::all()
-        .add(entities::turn_run::Column::Status.is_in([
+        .add(entities::code_turn::Column::Status.is_in([
             TurnRunStatus::Running.as_str(),
             TurnRunStatus::Cancelling.as_str(),
         ]))
-        .add(entities::turn_run::Column::LeaseExpiresAt.lte(now))
-        .add(entities::turn_run::Column::UpdatedAt.lte(now))
+        .add(entities::code_turn::Column::LeaseExpiresAt.lte(now))
+        .add(entities::code_turn::Column::UpdatedAt.lte(now))
 }
 
 async fn any_turn_claim_work_on<C>(
@@ -1026,7 +1071,7 @@ where
         .await
         .map_err(store_err)?
         .is_some()
-        || entities::turn_claim::Entity::find_by_id(lease_token)
+        || entities::code_turn_claim::Entity::find_by_id(lease_token)
             .one(conn)
             .await
             .map_err(store_err)?
@@ -1035,7 +1080,7 @@ where
         return Ok(true);
     }
 
-    Ok(entities::turn_run::Entity::find()
+    Ok(entities::code_turn::Entity::find()
         .filter(
             sea_orm::Condition::any()
                 .add(due_turn_candidate_condition(now))
@@ -1047,7 +1092,7 @@ where
         .is_some())
 }
 
-pub(in crate::db) async fn heartbeat_turn_run(
+pub(in crate::db) async fn heartbeat_turn(
     store: &DbStore,
     id: TurnId,
     lease_token: uuid::Uuid,
@@ -1061,50 +1106,50 @@ pub(in crate::db) async fn heartbeat_turn_run(
             "turn lease expiry must be after heartbeat time".into(),
         ));
     }
-    let heartbeat = entities::turn_run::Entity::update_many()
+    let heartbeat = entities::code_turn::Entity::update_many()
         .col_expr(
-            entities::turn_run::Column::LeaseExpiresAt,
+            entities::code_turn::Column::LeaseExpiresAt,
             sea_orm::sea_query::Expr::value(Some(lease_expires_at)),
         )
         .col_expr(
-            entities::turn_run::Column::UpdatedAt,
+            entities::code_turn::Column::UpdatedAt,
             sea_orm::sea_query::Expr::value(now),
         )
-        .filter(entities::turn_run::Column::Id.eq(id.0))
-        .filter(entities::turn_run::Column::Status.eq(TurnRunStatus::Running.as_str()))
-        .filter(entities::turn_run::Column::LeaseToken.eq(lease_token))
-        .filter(entities::turn_run::Column::LeaseExpiresAt.gt(now))
-        .filter(entities::turn_run::Column::LeaseExpiresAt.lt(lease_expires_at))
-        .filter(entities::turn_run::Column::UpdatedAt.lte(now))
+        .filter(entities::code_turn::Column::Id.eq(id.0))
+        .filter(entities::code_turn::Column::Status.eq(TurnRunStatus::Running.as_str()))
+        .filter(entities::code_turn::Column::LeaseToken.eq(lease_token))
+        .filter(entities::code_turn::Column::LeaseExpiresAt.gt(now))
+        .filter(entities::code_turn::Column::LeaseExpiresAt.lt(lease_expires_at))
+        .filter(entities::code_turn::Column::UpdatedAt.lte(now))
         .exec(&store.conn)
         .await
         .map_err(store_err)?;
     Ok(heartbeat.rows_affected == 1)
 }
 
-pub(in crate::db) async fn expire_turn_run_lease(
+pub(in crate::db) async fn expire_turn_lease(
     store: &DbStore,
     id: TurnId,
     lease_token: uuid::Uuid,
     now: chrono::DateTime<Utc>,
 ) -> Result<bool> {
     let now = canonical_db_timestamp(now)?;
-    let expired = entities::turn_run::Entity::update_many()
+    let expired = entities::code_turn::Entity::update_many()
         .col_expr(
-            entities::turn_run::Column::LeaseExpiresAt,
+            entities::code_turn::Column::LeaseExpiresAt,
             sea_orm::sea_query::Expr::value(Some(now)),
         )
         .col_expr(
-            entities::turn_run::Column::UpdatedAt,
+            entities::code_turn::Column::UpdatedAt,
             sea_orm::sea_query::Expr::value(now),
         )
-        .filter(entities::turn_run::Column::Id.eq(id.0))
-        .filter(entities::turn_run::Column::Status.is_in([
+        .filter(entities::code_turn::Column::Id.eq(id.0))
+        .filter(entities::code_turn::Column::Status.is_in([
             TurnRunStatus::Running.as_str(),
             TurnRunStatus::Cancelling.as_str(),
         ]))
-        .filter(entities::turn_run::Column::LeaseToken.eq(lease_token))
-        .filter(entities::turn_run::Column::LeaseExpiresAt.gt(now))
+        .filter(entities::code_turn::Column::LeaseToken.eq(lease_token))
+        .filter(entities::code_turn::Column::LeaseExpiresAt.gt(now))
         .exec(&store.conn)
         .await
         .map_err(store_err)?;
@@ -1146,7 +1191,7 @@ where
     // The claim receipt binds this token to the exact attempt and claim segment
     // it was issued for. Matching it against the turn's live counters rejects a
     // token that once owned an earlier segment of the same turn.
-    let Some(claim) = entities::turn_claim::Entity::find_by_id(lease_token)
+    let Some(claim) = entities::code_turn_claim::Entity::find_by_id(lease_token)
         .one(conn)
         .await
         .map_err(store_err)?
@@ -1154,7 +1199,7 @@ where
     else {
         return Ok(TurnLeaseFence::Stale);
     };
-    let Some(turn) = entities::turn_run::Entity::find_by_id(id.0)
+    let Some(turn) = entities::code_turn::Entity::find_by_id(id.0)
         .one(conn)
         .await
         .map_err(store_err)?
@@ -1192,7 +1237,7 @@ where
 
 async fn append_claim_scan_terminal_event_on<C>(
     conn: &C,
-    candidate: &entities::turn_run::Model,
+    candidate: &entities::code_turn::Model,
     chat_id: ChatId,
     scan_token: uuid::Uuid,
     event: &AgentEvent,
@@ -1247,21 +1292,23 @@ fn claim_scan_terminal_event_from_model(
 }
 
 fn turn_run_due_order(
-    left: &entities::turn_run::Model,
-    right: &entities::turn_run::Model,
+    left: &entities::code_turn::Model,
+    right: &entities::code_turn::Model,
 ) -> std::cmp::Ordering {
-    let due_at = |run: &entities::turn_run::Model| {
+    let due_at = |run: &entities::code_turn::Model| {
         if run.status == TurnRunStatus::Running.as_str()
             || run.status == TurnRunStatus::Cancelling.as_str()
         {
-            run.lease_expires_at.unwrap_or(run.available_at)
+            run.lease_expires_at
+                .or(run.available_at)
+                .unwrap_or(run.started_at)
         } else {
-            run.available_at
+            run.available_at.unwrap_or(run.started_at)
         }
     };
     due_at(left)
         .cmp(&due_at(right))
-        .then_with(|| left.created_at.cmp(&right.created_at))
+        .then_with(|| left.started_at.cmp(&right.started_at))
         .then_with(|| left.id.cmp(&right.id))
 }
 
@@ -1318,13 +1365,13 @@ pub(in crate::db) fn validate_invoked_skills(invoked_skills: &[String]) -> Resul
 pub(super) async fn find_active_turn_on<C>(
     conn: &C,
     chat_id: ChatId,
-) -> Result<Option<entities::turn_run::Model>>
+) -> Result<Option<entities::code_turn::Model>>
 where
     C: ConnectionTrait,
 {
-    entities::turn_run::Entity::find()
-        .filter(entities::turn_run::Column::ChatId.eq(chat_id.0))
-        .filter(entities::turn_run::Column::Status.is_in([
+    entities::code_turn::Entity::find()
+        .filter(entities::code_turn::Column::SessionId.eq(chat_id.0))
+        .filter(entities::code_turn::Column::Status.is_in([
             TurnRunStatus::Queued.as_str(),
             TurnRunStatus::Running.as_str(),
             TurnRunStatus::Cancelling.as_str(),
@@ -1342,7 +1389,7 @@ where
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn exact_accepted_turn_on<C>(
     conn: &C,
-    existing: entities::turn_run::Model,
+    existing: entities::code_turn::Model,
     chat_id: ChatId,
     agent_run_id: AgentRunId,
     model: &str,
@@ -1355,7 +1402,13 @@ pub(super) async fn exact_accepted_turn_on<C>(
 where
     C: ConnectionTrait,
 {
-    let message = entities::message::Entity::find_by_id(existing.input_message_id)
+    let input_message_id = existing.input_message_id.ok_or_else(|| {
+        AgentError::Store(format!(
+            "turn {} is missing its input message",
+            TurnId(existing.id)
+        ))
+    })?;
+    let message = entities::message::Entity::find_by_id(input_message_id)
         .one(conn)
         .await
         .map_err(store_err)?
@@ -1365,7 +1418,7 @@ where
                 TurnId(existing.id)
             ))
         })?;
-    if message.chat_id != existing.chat_id
+    if message.chat_id != existing.session_id
         || message.turn_id != existing.id
         || message.role != "user"
     {
@@ -1383,10 +1436,9 @@ where
     let accepted_documents =
         message_document_attachment_ops::list_ids_for_message_on(conn, MessageId(message.id))
             .await?;
-    let exact = existing.chat_id == chat_id.0
-        && existing.agent_run_id == agent_run_id.0
-        && existing.agent_run_depth == 0
-        && existing.model == model
+    let _ = agent_run_id;
+    let exact = existing.session_id == chat_id.0
+        && existing.model.as_deref() == Some(model)
         && message.content == content
         && accepted_images == images
         && accepted_documents == documents
@@ -1399,16 +1451,24 @@ where
     })
 }
 
-pub(in crate::db) fn turn_run_from_model(model: entities::turn_run::Model) -> Result<TurnRun> {
+pub(in crate::db) fn turn_run_from_model(model: entities::code_turn::Model) -> Result<TurnRun> {
     let usage = usage_from_turn_model(&model)?;
     let invoked_skills = invoked_skills_from_model(&model)?;
+    let input_message_id = model.input_message_id.ok_or_else(|| {
+        AgentError::Store(format!(
+            "turn {} is missing its input message",
+            TurnId(model.id)
+        ))
+    })?;
+    let available_at = model.available_at.unwrap_or(model.started_at);
+    let updated_at = model.updated_at.unwrap_or(model.started_at);
     Ok(TurnRun {
         id: TurnId(model.id),
-        chat_id: ChatId(model.chat_id),
-        agent_run_id: AgentRunId(model.agent_run_id),
-        input_message_id: MessageId(model.input_message_id),
+        chat_id: ChatId(model.session_id),
+        agent_run_id: AgentRunId::foreground_for_chat(ChatId(model.session_id)),
+        input_message_id: MessageId(input_message_id),
         output_message_id: model.output_message_id.map(MessageId),
-        model: model.model,
+        model: model.model.unwrap_or_default(),
         invoked_skills,
         voice_input_used: model.voice_input_used,
         status: turn_run_status_from_db(&model.status)?,
@@ -1417,17 +1477,17 @@ pub(in crate::db) fn turn_run_from_model(model: entities::turn_run::Model) -> Re
         claim_count: model.claim_count,
         model_steps: model.model_steps,
         usage,
-        available_at: model.available_at,
+        available_at,
         lease_token: model.lease_token,
         lease_expires_at: model.lease_expires_at,
-        started_at: model.started_at,
-        finished_at: model.finished_at,
+        started_at: Some(model.started_at),
+        finished_at: model.ended_at,
         last_error_code: model.last_error_code,
         last_error_detail: model.last_error_detail,
         steer_revision: model.steer_revision,
         last_steer_applied_at: model.last_steer_applied_at,
-        created_at: model.created_at,
-        updated_at: model.updated_at,
+        created_at: model.started_at,
+        updated_at,
     })
 }
 
@@ -1437,7 +1497,7 @@ pub(in crate::db) fn turn_run_from_model(model: entities::turn_run::Model) -> Re
 /// unusual: the turn's accepted input can no longer be described honestly, so
 /// this fails instead of degrading to "no skills were invoked".
 pub(in crate::db) fn invoked_skills_from_model(
-    model: &entities::turn_run::Model,
+    model: &entities::code_turn::Model,
 ) -> Result<Vec<String>> {
     serde_json::from_value(model.invoked_skills.clone()).map_err(|error| {
         AgentError::Store(format!(
@@ -1447,7 +1507,7 @@ pub(in crate::db) fn invoked_skills_from_model(
     })
 }
 
-pub(in crate::db) fn usage_from_turn_model(model: &entities::turn_run::Model) -> Result<Usage> {
+pub(in crate::db) fn usage_from_turn_model(model: &entities::code_turn::Model) -> Result<Usage> {
     fn token_count(value: i64, field: &str) -> Result<u32> {
         u32::try_from(value).map_err(|_| {
             AgentError::Store(format!(
@@ -1479,7 +1539,7 @@ fn turn_run_status_from_db(text: &str) -> Result<TurnRunStatus> {
         "retry_wait" => Ok(TurnRunStatus::RetryWait),
         "completed" => Ok(TurnRunStatus::Completed),
         "failed" => Ok(TurnRunStatus::Failed),
-        "cancelled" => Ok(TurnRunStatus::Cancelled),
+        "cancelled" | "interrupted" => Ok(TurnRunStatus::Cancelled),
         other => Err(AgentError::Store(format!(
             "unknown durable turn status: {other}"
         ))),

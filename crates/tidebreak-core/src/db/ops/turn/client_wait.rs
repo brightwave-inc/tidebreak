@@ -32,14 +32,14 @@ pub(in crate::db) async fn park_turn_for_client_tool_call(
 ) -> Result<Option<ParkTurnForClientCallOutcome>> {
     validate_request(turn_id, lease_token, progress, call)?;
     let now = canonical_db_timestamp(now)?;
-    let Some(scope) = entities::turn_run::Entity::find_by_id(turn_id.0)
+    let Some(scope) = entities::code_turn::Entity::find_by_id(turn_id.0)
         .one(&store.conn)
         .await
         .map_err(store_err)?
     else {
         return Ok(None);
     };
-    if scope.chat_id != call.chat_id.0 {
+    if scope.session_id != call.chat_id.0 {
         return Ok(None);
     }
     let transaction = store.conn.begin().await.map_err(store_err)?;
@@ -64,13 +64,13 @@ pub(in crate::db) async fn park_turn_for_client_tool_call(
             .ok_or_else(|| {
                 AgentError::Store(format!("client wait {} is missing its tool call", call.id))
             })?;
-        let turn = entities::turn_run::Entity::find_by_id(turn_id.0)
+        let turn = entities::code_turn::Entity::find_by_id(turn_id.0)
             .one(&transaction)
             .await
             .map_err(store_err)?
             .ok_or_else(|| AgentError::Store(format!("parked turn {turn_id} disappeared")))?;
         let exact = wait.turn_id == turn_id.0
-            && wait.chat_id == call.chat_id.0
+            && wait.session_id == call.chat_id.0
             && wait.park_lease_token == lease_token
             && progress_from_wait_model(&wait)? == progress
             && exact_call_request(&existing_call, call);
@@ -94,25 +94,25 @@ pub(in crate::db) async fn park_turn_for_client_tool_call(
         return Ok(Some(outcome));
     }
 
-    let turn = entities::turn_run::Entity::find_by_id(turn_id.0)
+    let turn = entities::code_turn::Entity::find_by_id(turn_id.0)
         .one(&transaction)
         .await
         .map_err(store_err)?
         .expect("locked turn exists");
-    if turn.chat_id != call.chat_id.0
+    if turn.session_id != call.chat_id.0
         || turn.status != TurnRunStatus::Running.as_str()
         || turn.lease_token != Some(lease_token)
         || turn
             .lease_expires_at
             .is_none_or(|lease_expires_at| lease_expires_at <= now)
-        || turn.updated_at > now
+        || turn.updated_at.is_some_and(|updated_at| updated_at > now)
     {
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     }
-    let steer_pending = entities::turn_steer::Entity::find()
-        .filter(entities::turn_steer::Column::TurnId.eq(turn_id.0))
-        .filter(entities::turn_steer::Column::Status.eq(TurnSteerStatus::Pending.as_str()))
+    let steer_pending = entities::code_turn_steer::Entity::find()
+        .filter(entities::code_turn_steer::Column::TurnId.eq(turn_id.0))
+        .filter(entities::code_turn_steer::Column::Status.eq(TurnSteerStatus::Pending.as_str()))
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -179,7 +179,7 @@ pub(in crate::db) async fn park_turn_for_client_tool_call(
     let wait = entities::turn_client_wait::ActiveModel {
         call_id: Set(call.id.0),
         turn_id: Set(turn_id.0),
-        chat_id: Set(call.chat_id.0),
+        session_id: Set(call.chat_id.0),
         park_lease_token: Set(lease_token),
         attempt_count: Set(turn.attempt_count),
         claim_count: Set(turn.claim_count),
@@ -195,53 +195,53 @@ pub(in crate::db) async fn park_turn_for_client_tool_call(
     .insert(&transaction)
     .await
     .map_err(store_err)?;
-    let parked = entities::turn_run::Entity::update_many()
+    let parked = entities::code_turn::Entity::update_many()
         .col_expr(
-            entities::turn_run::Column::Status,
+            entities::code_turn::Column::Status,
             sea_orm::sea_query::Expr::value(TurnRunStatus::WaitingForClient.as_str()),
         )
         .col_expr(
-            entities::turn_run::Column::LeaseToken,
+            entities::code_turn::Column::LeaseToken,
             sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
         )
         .col_expr(
-            entities::turn_run::Column::LeaseExpiresAt,
+            entities::code_turn::Column::LeaseExpiresAt,
             sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
         )
         .col_expr(
-            entities::turn_run::Column::ModelSteps,
+            entities::code_turn::Column::ModelSteps,
             sea_orm::sea_query::Expr::value(totals.model_steps),
         )
         .col_expr(
-            entities::turn_run::Column::InputTokens,
+            entities::code_turn::Column::InputTokens,
             sea_orm::sea_query::Expr::value(totals.input_tokens),
         )
         .col_expr(
-            entities::turn_run::Column::OutputTokens,
+            entities::code_turn::Column::OutputTokens,
             sea_orm::sea_query::Expr::value(totals.output_tokens),
         )
         .col_expr(
-            entities::turn_run::Column::CacheReadInputTokens,
+            entities::code_turn::Column::CacheReadInputTokens,
             sea_orm::sea_query::Expr::value(totals.cache_read_input_tokens),
         )
         .col_expr(
-            entities::turn_run::Column::CacheCreationInputTokens,
+            entities::code_turn::Column::CacheCreationInputTokens,
             sea_orm::sea_query::Expr::value(totals.cache_creation_input_tokens),
         )
         .col_expr(
-            entities::turn_run::Column::UpdatedAt,
+            entities::code_turn::Column::UpdatedAt,
             sea_orm::sea_query::Expr::value(now),
         )
-        .filter(entities::turn_run::Column::Id.eq(turn_id.0))
-        .filter(entities::turn_run::Column::Status.eq(TurnRunStatus::Running.as_str()))
-        .filter(entities::turn_run::Column::AttemptCount.eq(turn.attempt_count))
-        .filter(entities::turn_run::Column::ClaimCount.eq(turn.claim_count))
-        .filter(entities::turn_run::Column::LeaseToken.eq(lease_token))
-        .filter(entities::turn_run::Column::LeaseExpiresAt.eq(turn.lease_expires_at))
-        .filter(entities::turn_run::Column::LeaseExpiresAt.gt(now))
-        .filter(entities::turn_run::Column::SteerRevision.eq(expected_steer_revision))
-        .filter(entities::turn_run::Column::UpdatedAt.eq(turn.updated_at))
-        .filter(entities::turn_run::Column::UpdatedAt.lte(now))
+        .filter(entities::code_turn::Column::Id.eq(turn_id.0))
+        .filter(entities::code_turn::Column::Status.eq(TurnRunStatus::Running.as_str()))
+        .filter(entities::code_turn::Column::AttemptCount.eq(turn.attempt_count))
+        .filter(entities::code_turn::Column::ClaimCount.eq(turn.claim_count))
+        .filter(entities::code_turn::Column::LeaseToken.eq(lease_token))
+        .filter(entities::code_turn::Column::LeaseExpiresAt.eq(turn.lease_expires_at))
+        .filter(entities::code_turn::Column::LeaseExpiresAt.gt(now))
+        .filter(entities::code_turn::Column::SteerRevision.eq(expected_steer_revision))
+        .filter(entities::code_turn::Column::UpdatedAt.eq(turn.updated_at))
+        .filter(entities::code_turn::Column::UpdatedAt.lte(now))
         .exec(&transaction)
         .await
         .map_err(store_err)?;
@@ -249,7 +249,7 @@ pub(in crate::db) async fn park_turn_for_client_tool_call(
         transaction.rollback().await.map_err(store_err)?;
         return Ok(None);
     }
-    let parked_turn = entities::turn_run::Entity::find_by_id(turn_id.0)
+    let parked_turn = entities::code_turn::Entity::find_by_id(turn_id.0)
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -331,7 +331,7 @@ pub(super) fn wait_from_model(model: entities::turn_client_wait::Model) -> Resul
     Ok(TurnClientWait {
         call_id: crate::CallId(model.call_id),
         turn_id: crate::TurnId(model.turn_id),
-        chat_id: crate::ChatId(model.chat_id),
+        chat_id: crate::ChatId(model.session_id),
         park_lease_token: model.park_lease_token,
         attempt_count: model.attempt_count,
         claim_count: model.claim_count,
@@ -396,7 +396,7 @@ struct CheckpointTotals {
 }
 
 fn checked_checkpoint_totals(
-    turn: &entities::turn_run::Model,
+    turn: &entities::code_turn::Model,
     progress: TurnCheckpointProgress,
 ) -> Result<CheckpointTotals> {
     let model_steps = turn
@@ -455,7 +455,7 @@ where
     if wait.status != TurnClientWaitStatus::Waiting.as_str() {
         return recover_turn_after_client_resolution_on(conn, call).await;
     }
-    if wait.chat_id != call.chat_id || wait.turn_id != call.turn_id {
+    if wait.session_id != call.chat_id || wait.turn_id != call.turn_id {
         return Err(AgentError::Store(format!(
             "client wait {} is scoped differently from its tool call",
             crate::CallId(call.id)
@@ -468,12 +468,12 @@ where
             crate::CallId(call.id)
         )));
     }
-    let turn = entities::turn_run::Entity::find_by_id(wait.turn_id)
+    let turn = entities::code_turn::Entity::find_by_id(wait.turn_id)
         .one(conn)
         .await
         .map_err(store_err)?
         .expect("locked client-wait turn exists");
-    if turn.chat_id != wait.chat_id
+    if turn.session_id != wait.session_id
         || !matches!(
             turn.status.as_str(),
             "waiting_for_client" | "cancelling_client"
@@ -483,7 +483,9 @@ where
         || turn.lease_token.is_some()
         || turn.lease_expires_at.is_some()
         || resolved_at < wait.parked_at
-        || resolved_at < turn.updated_at
+        || turn
+            .updated_at
+            .is_some_and(|updated_at| resolved_at < updated_at)
     {
         return Err(AgentError::Store(format!(
             "client wait {} does not match its blocking turn state",
@@ -524,27 +526,27 @@ where
     } else {
         TurnRunStatus::Resuming
     };
-    let mut update = entities::turn_run::Entity::update_many()
+    let mut update = entities::code_turn::Entity::update_many()
         .col_expr(
-            entities::turn_run::Column::Status,
+            entities::code_turn::Column::Status,
             sea_orm::sea_query::Expr::value(next_status.as_str()),
         )
         .col_expr(
-            entities::turn_run::Column::AvailableAt,
+            entities::code_turn::Column::AvailableAt,
             sea_orm::sea_query::Expr::value(resolved_at),
         )
         .col_expr(
-            entities::turn_run::Column::UpdatedAt,
+            entities::code_turn::Column::UpdatedAt,
             sea_orm::sea_query::Expr::value(resolved_at),
         )
-        .filter(entities::turn_run::Column::Id.eq(turn.id))
-        .filter(entities::turn_run::Column::Status.eq(&turn.status))
-        .filter(entities::turn_run::Column::AttemptCount.eq(turn.attempt_count))
-        .filter(entities::turn_run::Column::ClaimCount.eq(turn.claim_count))
-        .filter(entities::turn_run::Column::UpdatedAt.eq(turn.updated_at));
+        .filter(entities::code_turn::Column::Id.eq(turn.id))
+        .filter(entities::code_turn::Column::Status.eq(&turn.status))
+        .filter(entities::code_turn::Column::AttemptCount.eq(turn.attempt_count))
+        .filter(entities::code_turn::Column::ClaimCount.eq(turn.claim_count))
+        .filter(entities::code_turn::Column::UpdatedAt.eq(turn.updated_at));
     if cancelling {
         update = update.col_expr(
-            entities::turn_run::Column::FinishedAt,
+            entities::code_turn::Column::EndedAt,
             sea_orm::sea_query::Expr::value(Some(resolved_at)),
         );
     }
@@ -563,7 +565,7 @@ where
         super::resolution::append_terminal_event_on(
             conn,
             turn_id,
-            ChatId(turn.chat_id),
+            ChatId(turn.session_id),
             None,
             Some(&event),
         )
@@ -571,7 +573,7 @@ where
     } else {
         None
     };
-    let updated = entities::turn_run::Entity::find_by_id(turn.id)
+    let updated = entities::code_turn::Entity::find_by_id(turn.id)
         .one(conn)
         .await
         .map_err(store_err)?
@@ -598,7 +600,7 @@ where
     else {
         return Ok(None);
     };
-    if wait.chat_id != call.chat_id || wait.turn_id != call.turn_id {
+    if wait.session_id != call.chat_id || wait.turn_id != call.turn_id {
         return Err(AgentError::Store(format!(
             "client wait {} is scoped differently from its tool call",
             crate::CallId(call.id)
@@ -611,7 +613,7 @@ where
         )));
     }
     let turn_id = TurnId(wait.turn_id);
-    let turn = entities::turn_run::Entity::find_by_id(wait.turn_id)
+    let turn = entities::code_turn::Entity::find_by_id(wait.turn_id)
         .one(conn)
         .await
         .map_err(store_err)?
@@ -621,7 +623,7 @@ where
                 crate::CallId(call.id)
             ))
         })?;
-    if turn.chat_id != wait.chat_id {
+    if turn.session_id != wait.session_id {
         return Err(AgentError::Store(format!(
             "closed client wait {} no longer matches its turn scope",
             crate::CallId(call.id)

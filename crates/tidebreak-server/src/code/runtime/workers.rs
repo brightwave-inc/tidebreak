@@ -47,7 +47,7 @@ impl CodeRuntime {
         stopped
     }
 
-    pub(super) async fn attach_and_spawn_worker(
+    pub(crate) async fn attach_and_spawn_worker(
         &self,
         session: CodeSession,
     ) -> Result<CodeSession, ServerError> {

@@ -220,7 +220,7 @@ pub(in crate::db) async fn list_pending(
             .await
             .map_err(store_err)?
             .ok_or_else(|| AgentError::Store("pending plan wait is missing".into()))?;
-        let turn = entities::turn_run::Entity::find_by_id(row.turn_id)
+        let turn = entities::code_turn::Entity::find_by_id(row.turn_id)
             .one(&transaction)
             .await
             .map_err(store_err)?
@@ -231,10 +231,10 @@ pub(in crate::db) async fn list_pending(
             || call.execution != ToolCallExecution::Orchestration.as_str()
             || call.status != ToolCallStatus::Pending.as_str()
             || call.client_executor_id.is_some()
-            || wait.chat_id != row.session_id
+            || wait.session_id != row.session_id
             || wait.turn_id != row.turn_id
             || wait.status != crate::TurnClientWaitStatus::Waiting.as_str()
-            || turn.chat_id != row.session_id
+            || turn.session_id != row.session_id
             || turn.status != TurnRunStatus::WaitingForClient.as_str()
             || turn.attempt_count != wait.attempt_count
             || turn.claim_count != wait.claim_count
@@ -349,12 +349,12 @@ pub(in crate::db) async fn decide(
         transaction.commit().await.map_err(store_err)?;
         return Ok(DecidePlanOutcome::Unavailable);
     }
-    let turn = entities::turn_run::Entity::find_by_id(call.turn_id)
+    let turn = entities::code_turn::Entity::find_by_id(call.turn_id)
         .one(&transaction)
         .await
         .map_err(store_err)?
         .expect("locked plan turn exists");
-    if turn.chat_id != request.chat_id.0
+    if turn.session_id != request.chat_id.0
         || turn.status != TurnRunStatus::WaitingForClient.as_str()
         || row.turn_id != turn.id
     {
@@ -366,7 +366,7 @@ pub(in crate::db) async fn decide(
         .max(database_now)
         .max(row.requested_at)
         .max(call.created_at)
-        .max(turn.updated_at);
+        .max(turn.updated_at.unwrap_or(database_now));
 
     // Accepting is the one place a permission mode changes as a side effect:
     // the chat leaves plan mode inside the same transaction that completes

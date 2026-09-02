@@ -1350,6 +1350,7 @@ mod encode_tests {
     #[test]
     fn text_rides_one_stream_json_user_line() {
         let encoded = encode_turn_stdin(&TurnInput {
+            turn_id: None,
             text: "hello".into(),
             model: None,
             reasoning_effort: None,
@@ -1369,6 +1370,7 @@ mod encode_tests {
     #[test]
     fn images_ride_stream_json_user_content() {
         let encoded = encode_turn_stdin(&TurnInput {
+            turn_id: None,
             text: "look".into(),
             model: None,
             reasoning_effort: None,
@@ -1486,6 +1488,7 @@ mod tests {
 
     fn turn(text: &str) -> TurnInput {
         TurnInput {
+            turn_id: None,
             text: text.into(),
             model: None,
             reasoning_effort: None,
@@ -1600,6 +1603,7 @@ done
     fn ultra_appends_the_ultracode_keyword_and_nothing_else_does() {
         let with = |text: &str, level: Option<ReasoningEffort>| {
             turn_text(&TurnInput {
+                turn_id: None,
                 text: text.into(),
                 model: None,
                 reasoning_effort: level,

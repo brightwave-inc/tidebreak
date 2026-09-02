@@ -29,7 +29,7 @@ async fn running_turn(
     let lease = uuid::Uuid::new_v4();
     let now = Utc::now();
     let turn = store
-        .claim_turn_run(lease, now, now + Duration::minutes(5))
+        .claim_turn(lease, now, now + Duration::minutes(5))
         .await
         .unwrap()
         .turn
@@ -287,7 +287,7 @@ async fn spawn_completion_requires_a_preceding_event_in_the_exact_claim() {
     let lease = uuid::Uuid::new_v4();
     let now = Utc::now();
     let turn = store
-        .claim_turn_run(lease, now, now + Duration::minutes(5))
+        .claim_turn(lease, now, now + Duration::minutes(5))
         .await
         .unwrap()
         .turn
@@ -365,7 +365,7 @@ async fn nonblocking_spawn_commits_one_atomic_yield_and_exact_retry_survives_rec
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     let future = Utc::now();
     let reclaimed = store
-        .claim_turn_run(resumed_lease, future, future + Duration::minutes(5))
+        .claim_turn(resumed_lease, future, future + Duration::minutes(5))
         .await
         .unwrap()
         .turn
@@ -384,7 +384,7 @@ async fn nonblocking_spawn_commits_one_atomic_yield_and_exact_retry_survives_rec
             if existing == child && receipt == checkpoint
     ));
     assert_eq!(
-        store.get_turn_run(running.id).await.unwrap(),
+        store.get_turn(running.id).await.unwrap(),
         Some(reclaimed),
         "an old exact retry must neither leak nor clear the new claim"
     );
@@ -574,7 +574,7 @@ async fn unattached_file_delegation_rejects_without_partial_writes() {
     assert!(store.list_tool_calls(chat.id).await.unwrap().is_empty());
     assert_eq!(store.list_events(chat.id, 0).await.unwrap().len(), 1);
     assert_eq!(
-        store.get_turn_run(turn.id).await.unwrap().unwrap().status,
+        store.get_turn(turn.id).await.unwrap().unwrap().status,
         TurnRunStatus::Running
     );
 }
@@ -859,12 +859,12 @@ async fn accounting_overflow_and_event_ordinal_collision_roll_back_every_write()
     assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 0);
     assert!(store.list_tool_calls(chat.id).await.unwrap().is_empty());
 
-    crate::db::entities::turn_run::Entity::update_many()
+    crate::db::entities::code_turn::Entity::update_many()
         .col_expr(
-            crate::db::entities::turn_run::Column::ModelSteps,
+            crate::db::entities::code_turn::Column::ModelSteps,
             sea_orm::sea_query::Expr::value(i32::MAX),
         )
-        .filter(crate::db::entities::turn_run::Column::Id.eq(turn.id.0))
+        .filter(crate::db::entities::code_turn::Column::Id.eq(turn.id.0))
         .exec(&store.conn)
         .await
         .unwrap();
@@ -876,16 +876,16 @@ async fn accounting_overflow_and_event_ordinal_collision_roll_back_every_write()
     assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 0);
     assert!(store.list_tool_calls(chat.id).await.unwrap().is_empty());
 
-    crate::db::entities::turn_run::Entity::update_many()
+    crate::db::entities::code_turn::Entity::update_many()
         .col_expr(
-            crate::db::entities::turn_run::Column::ModelSteps,
+            crate::db::entities::code_turn::Column::ModelSteps,
             sea_orm::sea_query::Expr::value(0),
         )
         .col_expr(
-            crate::db::entities::turn_run::Column::InputTokens,
+            crate::db::entities::code_turn::Column::InputTokens,
             sea_orm::sea_query::Expr::value(i64::from(u32::MAX)),
         )
-        .filter(crate::db::entities::turn_run::Column::Id.eq(turn.id.0))
+        .filter(crate::db::entities::code_turn::Column::Id.eq(turn.id.0))
         .exec(&store.conn)
         .await
         .unwrap();
@@ -990,7 +990,7 @@ async fn orchestration_calls_are_not_generic_work_and_rebuild_once_in_spawn_orde
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     let future = Utc::now();
     let second_turn = store
-        .claim_turn_run(second_lease, future, future + Duration::minutes(5))
+        .claim_turn(second_lease, future, future + Duration::minutes(5))
         .await
         .unwrap()
         .turn

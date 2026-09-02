@@ -91,7 +91,7 @@ pub(in crate::db) async fn checkpoint_sandbox_spawn(
     }
     validate_request(request)?;
 
-    let Some(scope) = entities::turn_run::Entity::find_by_id(request.origin_turn_id.0)
+    let Some(scope) = entities::code_turn::Entity::find_by_id(request.origin_turn_id.0)
         .one(&store.conn)
         .await
         .map_err(store_err)?
@@ -103,7 +103,7 @@ pub(in crate::db) async fn checkpoint_sandbox_spawn(
     // turn. The exact checkpoint recovery above intentionally remains before
     // these mutable locks.
     acquire_agent_run_claim_lock(&transaction).await?;
-    if !acquire_chat_write_lock(&transaction, ChatId(scope.chat_id)).await?
+    if !acquire_chat_write_lock(&transaction, ChatId(scope.session_id)).await?
         || !super::super::acquire_turn_write_lock(&transaction, request.origin_turn_id).await?
     {
         transaction.commit().await.map_err(store_err)?;
@@ -114,7 +114,7 @@ pub(in crate::db) async fn checkpoint_sandbox_spawn(
         return Ok(Some(outcome));
     }
 
-    let turn = entities::turn_run::Entity::find_by_id(request.origin_turn_id.0)
+    let turn = entities::code_turn::Entity::find_by_id(request.origin_turn_id.0)
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -143,14 +143,14 @@ pub(in crate::db) async fn checkpoint_sandbox_spawn(
 
 async fn checkpoint_on<C>(
     conn: &C,
-    turn: &entities::turn_run::Model,
+    turn: &entities::code_turn::Model,
     request: &SandboxSpawnCheckpointRequest,
     now: chrono::DateTime<Utc>,
 ) -> Result<CheckpointSandboxSpawnOutcome>
 where
     C: ConnectionTrait,
 {
-    let Some(claim) = entities::turn_claim::Entity::find_by_id(request.lease_token)
+    let Some(claim) = entities::code_turn_claim::Entity::find_by_id(request.lease_token)
         .one(conn)
         .await
         .map_err(store_err)?
@@ -165,13 +165,13 @@ where
         || turn
             .lease_expires_at
             .is_none_or(|lease_expires_at| lease_expires_at <= now)
-        || turn.updated_at > now
+        || turn.updated_at.is_some_and(|updated_at| updated_at > now)
     {
         return Ok(CheckpointSandboxSpawnOutcome::LeaseLost);
     }
-    let steer_pending = entities::turn_steer::Entity::find()
-        .filter(entities::turn_steer::Column::TurnId.eq(turn.id))
-        .filter(entities::turn_steer::Column::Status.eq(TurnSteerStatus::Pending.as_str()))
+    let steer_pending = entities::code_turn_steer::Entity::find()
+        .filter(entities::code_turn_steer::Column::TurnId.eq(turn.id))
+        .filter(entities::code_turn_steer::Column::Status.eq(TurnSteerStatus::Pending.as_str()))
         .one(conn)
         .await
         .map_err(store_err)?
@@ -268,7 +268,7 @@ where
         // accepted; moving it now would reorder the transcript around a card
         // the reader has already answered.
         Some(existing) => existing.history_order,
-        None => next_tool_history_order_on(conn, ChatId(turn.chat_id)).await?,
+        None => next_tool_history_order_on(conn, ChatId(turn.session_id)).await?,
     };
     let call_model = match existing_call {
         Some(existing) => {
@@ -284,7 +284,7 @@ where
         }
         None => entities::tool_call::ActiveModel {
             id: Set(request.call_id.0),
-            chat_id: Set(turn.chat_id),
+            chat_id: Set(turn.session_id),
             turn_id: Set(turn.id),
             provider_id: Set(request.provider_id.clone()),
             history_order: Set(history_order),
@@ -319,7 +319,7 @@ where
     };
     let event_seq = append_event_on(
         conn,
-        ChatId(turn.chat_id),
+        ChatId(turn.session_id),
         Some(request.origin_turn_id),
         Some(request.lease_token),
         Some(request.event_ordinal),
@@ -331,9 +331,11 @@ where
     let checkpoint_model = entities::sandbox_spawn_checkpoint::ActiveModel {
         call_id: Set(request.call_id.0),
         child_run_id: Set(child.id.0),
-        parent_run_id: Set(turn.agent_run_id),
+        parent_run_id: Set(
+            crate::id::AgentRunId::foreground_for_chat(crate::id::ChatId(turn.session_id)).0,
+        ),
         origin_turn_id: Set(turn.id),
-        chat_id: Set(turn.chat_id),
+        session_id: Set(turn.session_id),
         lease_token: Set(request.lease_token),
         attempt_count: Set(turn.attempt_count),
         claim_count: Set(turn.claim_count),
@@ -358,56 +360,56 @@ where
     .await
     .map_err(store_err)?;
 
-    let resumed = entities::turn_run::Entity::update_many()
+    let resumed = entities::code_turn::Entity::update_many()
         .col_expr(
-            entities::turn_run::Column::Status,
+            entities::code_turn::Column::Status,
             sea_orm::sea_query::Expr::value(TurnRunStatus::Resuming.as_str()),
         )
         .col_expr(
-            entities::turn_run::Column::AvailableAt,
+            entities::code_turn::Column::AvailableAt,
             sea_orm::sea_query::Expr::value(created_at),
         )
         .col_expr(
-            entities::turn_run::Column::LeaseToken,
+            entities::code_turn::Column::LeaseToken,
             sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
         )
         .col_expr(
-            entities::turn_run::Column::LeaseExpiresAt,
+            entities::code_turn::Column::LeaseExpiresAt,
             sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
         )
         .col_expr(
-            entities::turn_run::Column::ModelSteps,
+            entities::code_turn::Column::ModelSteps,
             sea_orm::sea_query::Expr::value(totals.model_steps),
         )
         .col_expr(
-            entities::turn_run::Column::InputTokens,
+            entities::code_turn::Column::InputTokens,
             sea_orm::sea_query::Expr::value(totals.input_tokens),
         )
         .col_expr(
-            entities::turn_run::Column::OutputTokens,
+            entities::code_turn::Column::OutputTokens,
             sea_orm::sea_query::Expr::value(totals.output_tokens),
         )
         .col_expr(
-            entities::turn_run::Column::CacheReadInputTokens,
+            entities::code_turn::Column::CacheReadInputTokens,
             sea_orm::sea_query::Expr::value(totals.cache_read_input_tokens),
         )
         .col_expr(
-            entities::turn_run::Column::CacheCreationInputTokens,
+            entities::code_turn::Column::CacheCreationInputTokens,
             sea_orm::sea_query::Expr::value(totals.cache_creation_input_tokens),
         )
         .col_expr(
-            entities::turn_run::Column::UpdatedAt,
+            entities::code_turn::Column::UpdatedAt,
             sea_orm::sea_query::Expr::value(created_at),
         )
-        .filter(entities::turn_run::Column::Id.eq(turn.id))
-        .filter(entities::turn_run::Column::Status.eq(TurnRunStatus::Running.as_str()))
-        .filter(entities::turn_run::Column::AttemptCount.eq(turn.attempt_count))
-        .filter(entities::turn_run::Column::ClaimCount.eq(turn.claim_count))
-        .filter(entities::turn_run::Column::LeaseToken.eq(request.lease_token))
-        .filter(entities::turn_run::Column::LeaseExpiresAt.eq(turn.lease_expires_at))
-        .filter(entities::turn_run::Column::LeaseExpiresAt.gt(now))
-        .filter(entities::turn_run::Column::SteerRevision.eq(request.expected_steer_revision))
-        .filter(entities::turn_run::Column::UpdatedAt.eq(turn.updated_at))
+        .filter(entities::code_turn::Column::Id.eq(turn.id))
+        .filter(entities::code_turn::Column::Status.eq(TurnRunStatus::Running.as_str()))
+        .filter(entities::code_turn::Column::AttemptCount.eq(turn.attempt_count))
+        .filter(entities::code_turn::Column::ClaimCount.eq(turn.claim_count))
+        .filter(entities::code_turn::Column::LeaseToken.eq(request.lease_token))
+        .filter(entities::code_turn::Column::LeaseExpiresAt.eq(turn.lease_expires_at))
+        .filter(entities::code_turn::Column::LeaseExpiresAt.gt(now))
+        .filter(entities::code_turn::Column::SteerRevision.eq(request.expected_steer_revision))
+        .filter(entities::code_turn::Column::UpdatedAt.eq(turn.updated_at))
         .exec(conn)
         .await
         .map_err(store_err)?;
@@ -416,7 +418,7 @@ where
             "sandbox spawn checkpoint lost its exact foreground claim".into(),
         ));
     }
-    let turn = entities::turn_run::Entity::find_by_id(turn.id)
+    let turn = entities::code_turn::Entity::find_by_id(turn.id)
         .one(conn)
         .await
         .map_err(store_err)?
@@ -558,10 +560,10 @@ where
 /// tool, or turn differ describes a different question than the one answered.
 fn gated_call_is_admissible(
     call: &entities::tool_call::Model,
-    turn: &entities::turn_run::Model,
+    turn: &entities::code_turn::Model,
     request: &SandboxSpawnCheckpointRequest,
 ) -> bool {
-    call.chat_id == turn.chat_id
+    call.chat_id == turn.session_id
         && call.turn_id == turn.id
         && call.provider_id == request.provider_id
         && call.name == SPAWN_SANDBOX_AGENT_TOOL
@@ -677,7 +679,7 @@ struct CheckpointTotals {
 }
 
 fn checked_totals(
-    turn: &entities::turn_run::Model,
+    turn: &entities::code_turn::Model,
     progress: TurnCheckpointProgress,
 ) -> Result<CheckpointTotals> {
     let model_steps = turn
@@ -738,7 +740,7 @@ fn checkpoint_from_model(
         child_run_id: AgentRunId(model.child_run_id),
         parent_run_id: AgentRunId(model.parent_run_id),
         origin_turn_id: crate::TurnId(model.origin_turn_id),
-        chat_id: ChatId(model.chat_id),
+        chat_id: ChatId(model.session_id),
         lease_token: model.lease_token,
         attempt_count: model.attempt_count,
         claim_count: model.claim_count,

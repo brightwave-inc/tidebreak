@@ -36,12 +36,12 @@ async fn claimed_sensitive_call_with(
         AcceptTurnOutcome::Accepted(turn) => turn,
         outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
     };
-    entities::turn_run::Entity::update_many()
+    entities::code_turn::Entity::update_many()
         .col_expr(
-            entities::turn_run::Column::MaxAttempts,
+            entities::code_turn::Column::MaxAttempts,
             sea_orm::sea_query::Expr::value(2),
         )
-        .filter(entities::turn_run::Column::Id.eq(turn_id.0))
+        .filter(entities::code_turn::Column::Id.eq(turn_id.0))
         .exec(&store.conn)
         .await
         .unwrap();
@@ -52,7 +52,7 @@ async fn claimed_sensitive_call_with(
     let lease_token = uuid::Uuid::new_v4();
     let expiry = claimed_at + chrono::Duration::minutes(5);
     let claimed = store
-        .claim_turn_run(lease_token, claimed_at, expiry)
+        .claim_turn(lease_token, claimed_at, expiry)
         .await
         .unwrap()
         .turn
@@ -274,17 +274,10 @@ async fn approval_registration_journals_once_and_decision_is_exact() {
     let failure_at = super::ops::agent_run::database_now(&store.conn)
         .await
         .unwrap()
-        .max(
-            store
-                .get_turn_run(turn_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .updated_at,
-        );
+        .max(store.get_turn(turn_id).await.unwrap().unwrap().updated_at);
     let retry_at = failure_at + chrono::Duration::seconds(1);
     assert!(store
-        .record_turn_run_failure(
+        .record_turn_failure(
             turn_id,
             lease_token,
             failure_at,
@@ -314,7 +307,7 @@ async fn approval_registration_journals_once_and_decision_is_exact() {
     );
     let resumed_lease = uuid::Uuid::new_v4();
     let resumed_claim = store
-        .claim_turn_run(
+        .claim_turn(
             resumed_lease,
             retry_at,
             retry_at + chrono::Duration::minutes(5),
@@ -430,14 +423,7 @@ async fn delete_chat_erases_a_terminal_approval_receipt_before_its_event() {
     let cancel_at = super::ops::agent_run::database_now(&store.conn)
         .await
         .unwrap()
-        .max(
-            store
-                .get_turn_run(turn_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .updated_at,
-        );
+        .max(store.get_turn(turn_id).await.unwrap().unwrap().updated_at);
     assert!(store
         .request_turn_cancellation(turn_id, cancel_at)
         .await
@@ -446,14 +432,7 @@ async fn delete_chat_erases_a_terminal_approval_receipt_before_its_event() {
     let finish_at = super::ops::agent_run::database_now(&store.conn)
         .await
         .unwrap()
-        .max(
-            store
-                .get_turn_run(turn_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .updated_at,
-        );
+        .max(store.get_turn(turn_id).await.unwrap().unwrap().updated_at);
     assert!(store
         .finish_turn_cancellation(turn_id, lease_token, finish_at)
         .await
@@ -494,14 +473,7 @@ async fn cancellation_closes_pending_approval_and_tool_atomically() {
     let cancel_at = super::ops::agent_run::database_now(&store.conn)
         .await
         .unwrap()
-        .max(
-            store
-                .get_turn_run(turn_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .updated_at,
-        );
+        .max(store.get_turn(turn_id).await.unwrap().unwrap().updated_at);
     assert!(store
         .request_turn_cancellation(turn_id, cancel_at)
         .await
@@ -522,14 +494,7 @@ async fn cancellation_closes_pending_approval_and_tool_atomically() {
     let finish_at = super::ops::agent_run::database_now(&store.conn)
         .await
         .unwrap()
-        .max(
-            store
-                .get_turn_run(turn_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .updated_at,
-        );
+        .max(store.get_turn(turn_id).await.unwrap().unwrap().updated_at);
     assert!(store
         .finish_turn_cancellation(turn_id, lease_token, finish_at)
         .await
@@ -582,16 +547,9 @@ async fn retry_wait_cancellation_terminalizes_pending_call_and_approval() {
     let failure_at = super::ops::agent_run::database_now(&store.conn)
         .await
         .unwrap()
-        .max(
-            store
-                .get_turn_run(turn_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .updated_at,
-        );
+        .max(store.get_turn(turn_id).await.unwrap().unwrap().updated_at);
     assert!(store
-        .record_turn_run_failure(
+        .record_turn_failure(
             turn_id,
             lease_token,
             failure_at,
@@ -605,21 +563,14 @@ async fn retry_wait_cancellation_terminalizes_pending_call_and_approval() {
         .unwrap()
         .is_some());
     assert_eq!(
-        store.get_turn_run(turn_id).await.unwrap().unwrap().status,
+        store.get_turn(turn_id).await.unwrap().unwrap().status,
         TurnRunStatus::RetryWait
     );
 
     let cancel_at = super::ops::agent_run::database_now(&store.conn)
         .await
         .unwrap()
-        .max(
-            store
-                .get_turn_run(turn_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .updated_at,
-        );
+        .max(store.get_turn(turn_id).await.unwrap().unwrap().updated_at);
     assert!(matches!(
         store
             .request_turn_cancellation(turn_id, cancel_at)
@@ -676,14 +627,7 @@ async fn cancellation_and_approval_decision_serialize_without_pending_state() {
     let cancel_at = super::ops::agent_run::database_now(&store.conn)
         .await
         .unwrap()
-        .max(
-            store
-                .get_turn_run(turn_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .updated_at,
-        );
+        .max(store.get_turn(turn_id).await.unwrap().unwrap().updated_at);
     let chat_id = chat.id;
     let call_id = call.id;
     let cancelling = store.clone();

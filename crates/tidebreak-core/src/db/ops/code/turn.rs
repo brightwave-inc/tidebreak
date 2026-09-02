@@ -73,6 +73,27 @@ where
             Some(wait) => Some(serde_json::to_value(wait)?),
             None => None,
         }),
+        attempt_count: Set(0),
+        max_attempts: Set(crate::model::TurnRun::DEFAULT_MAX_ATTEMPTS),
+        claim_count: Set(0),
+        model_steps: Set(0),
+        input_tokens: Set(0),
+        output_tokens: Set(0),
+        cache_read_input_tokens: Set(0),
+        cache_creation_input_tokens: Set(0),
+        available_at: Set(Some(turn.started_at)),
+        lease_token: Set(None),
+        lease_expires_at: Set(None),
+        last_error_code: Set(None),
+        last_error_detail: Set(None),
+        steer_revision: Set(0),
+        last_steer_applied_at: Set(None),
+        invoked_skills: Set(serde_json::json!([])),
+        voice_input_used: Set(false),
+        input_message_id: Set(None),
+        output_message_id: Set(None),
+        updated_at: Set(Some(turn.started_at)),
+        fingerprint: Set(None),
     }
     .insert(conn)
     .await
@@ -136,6 +157,7 @@ where
                 width: Set(i32::try_from(attachment.width).unwrap_or(i32::MAX)),
                 height: Set(i32::try_from(attachment.height).unwrap_or(i32::MAX)),
                 byte_len: Set(byte_len),
+                message_id: Set(None),
             })
         })
         .collect::<Result<Vec<_>>>()?;

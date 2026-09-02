@@ -175,6 +175,29 @@ impl DbStore {
     pub async fn close(self) -> Result<()> {
         self.conn.close().await.map_err(store_err)
     }
+
+    /// Claim one already-inserted turn under a fresh lease so a session
+    /// worker can drive the leg.
+    pub async fn take_lease_on_turn(
+        &self,
+        id: TurnId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<Utc>,
+        lease_expires_at: chrono::DateTime<Utc>,
+    ) -> Result<Option<crate::model::TurnRun>> {
+        ops::turn::take_lease_on_turn(self, id, lease_token, now, lease_expires_at).await
+    }
+
+    /// Extend one exact live turn lease. Returns whether the write landed.
+    pub async fn heartbeat_turn_lease(
+        &self,
+        id: TurnId,
+        lease_token: uuid::Uuid,
+        now: chrono::DateTime<Utc>,
+        lease_expires_at: chrono::DateTime<Utc>,
+    ) -> Result<bool> {
+        ops::turn::heartbeat_turn(self, id, lease_token, now, lease_expires_at).await
+    }
 }
 
 impl DbStore {
@@ -1679,12 +1702,12 @@ impl Store for DbStore {
         ops::turn::list_ready_agent_run_wait_set_candidates(self, limit).await
     }
 
-    async fn get_turn_run(&self, id: TurnId) -> Result<Option<TurnRun>> {
-        ops::turn::get_turn_run(self, id).await
+    async fn get_turn(&self, id: TurnId) -> Result<Option<TurnRun>> {
+        ops::turn::get_turn(self, id).await
     }
 
-    async fn list_turn_runs(&self, chat_id: ChatId) -> Result<Vec<TurnRun>> {
-        ops::turn::list_turn_runs(self, chat_id).await
+    async fn list_turns(&self, chat_id: ChatId) -> Result<Vec<TurnRun>> {
+        ops::turn::list_turns(self, chat_id).await
     }
 
     async fn begin_turn_admission(
@@ -1788,32 +1811,32 @@ impl Store for DbStore {
         .await
     }
 
-    async fn claim_turn_run(
+    async fn claim_turn(
         &self,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<Utc>,
         lease_expires_at: chrono::DateTime<Utc>,
     ) -> Result<ClaimTurnRunOutcome> {
-        ops::turn::claim_turn_run(self, lease_token, now, lease_expires_at).await
+        ops::turn::claim_turn(self, lease_token, now, lease_expires_at).await
     }
 
-    async fn heartbeat_turn_run(
+    async fn heartbeat_turn(
         &self,
         id: TurnId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<Utc>,
         lease_expires_at: chrono::DateTime<Utc>,
     ) -> Result<bool> {
-        ops::turn::heartbeat_turn_run(self, id, lease_token, now, lease_expires_at).await
+        ops::turn::heartbeat_turn(self, id, lease_token, now, lease_expires_at).await
     }
 
-    async fn expire_turn_run_lease(
+    async fn expire_turn_lease(
         &self,
         id: TurnId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<Utc>,
     ) -> Result<bool> {
-        ops::turn::expire_turn_run_lease(self, id, lease_token, now).await
+        ops::turn::expire_turn_lease(self, id, lease_token, now).await
     }
 
     async fn fence_turn_lease(
@@ -1940,7 +1963,7 @@ impl Store for DbStore {
         .await
     }
 
-    async fn complete_turn_run(
+    async fn complete_turn(
         &self,
         id: TurnId,
         lease_token: uuid::Uuid,
@@ -1948,11 +1971,10 @@ impl Store for DbStore {
         now: chrono::DateTime<Utc>,
         output: &Message,
     ) -> Result<Option<CompleteTurnRunOutcome>> {
-        ops::turn::complete_turn_run(self, id, lease_token, expected_steer_revision, now, output)
-            .await
+        ops::turn::complete_turn(self, id, lease_token, expected_steer_revision, now, output).await
     }
 
-    async fn complete_turn_run_and_append_event(
+    async fn complete_turn_and_append_event(
         &self,
         id: TurnId,
         lease_token: uuid::Uuid,
@@ -1963,7 +1985,7 @@ impl Store for DbStore {
         usage: Usage,
         stop_reason: StopReason,
     ) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
-        ops::turn::complete_turn_run_and_append_event(
+        ops::turn::complete_turn_and_append_event(
             self,
             id,
             lease_token,
@@ -1977,7 +1999,7 @@ impl Store for DbStore {
         .await
     }
 
-    async fn complete_turn_run_with_citations_and_append_event(
+    async fn complete_turn_with_citations_and_append_event(
         &self,
         id: TurnId,
         lease_token: uuid::Uuid,
@@ -1989,7 +2011,7 @@ impl Store for DbStore {
         usage: Usage,
         stop_reason: StopReason,
     ) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
-        ops::turn::complete_turn_run_with_citations_and_append_event(
+        ops::turn::complete_turn_with_citations_and_append_event(
             self,
             id,
             lease_token,
@@ -2004,7 +2026,7 @@ impl Store for DbStore {
         .await
     }
 
-    async fn complete_refused_turn_run_with_citations_and_append_event(
+    async fn complete_refused_turn_with_citations_and_append_event(
         &self,
         id: TurnId,
         lease_token: uuid::Uuid,
@@ -2016,7 +2038,7 @@ impl Store for DbStore {
         usage: Usage,
         refusal: crate::RefusalOutcome,
     ) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
-        ops::turn::complete_refused_turn_run_with_citations_and_append_event(
+        ops::turn::complete_refused_turn_with_citations_and_append_event(
             self,
             id,
             lease_token,
@@ -2031,7 +2053,7 @@ impl Store for DbStore {
         .await
     }
 
-    async fn record_turn_run_failure(
+    async fn record_turn_failure(
         &self,
         id: TurnId,
         lease_token: uuid::Uuid,
@@ -2042,7 +2064,7 @@ impl Store for DbStore {
         error_code: &str,
         error_detail: Option<&str>,
     ) -> Result<Option<RecordTurnFailureOutcome>> {
-        ops::turn::record_turn_run_failure(
+        ops::turn::record_turn_failure(
             self,
             id,
             lease_token,
@@ -2056,7 +2078,7 @@ impl Store for DbStore {
         .await
     }
 
-    async fn record_turn_run_failure_and_append_event(
+    async fn record_turn_failure_and_append_event(
         &self,
         id: TurnId,
         lease_token: uuid::Uuid,
@@ -2067,7 +2089,7 @@ impl Store for DbStore {
         error_code: &str,
         error_detail: Option<&str>,
     ) -> Result<Option<JournaledTurnOutcome<RecordTurnFailureOutcome>>> {
-        ops::turn::record_turn_run_failure_and_append_event(
+        ops::turn::record_turn_failure_and_append_event(
             self,
             id,
             lease_token,

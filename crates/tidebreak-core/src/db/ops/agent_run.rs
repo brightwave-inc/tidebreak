@@ -368,7 +368,7 @@ async fn admit_sandbox_agent_run_at(
     // Validate the caller timestamp at the boundary, but never use a value
     // captured before lock acquisition to fence a live lease.
     canonical_db_timestamp(now)?;
-    let Some(scope) = entities::turn_run::Entity::find_by_id(origin_turn_id.0)
+    let Some(scope) = entities::code_turn::Entity::find_by_id(origin_turn_id.0)
         .one(&store.conn)
         .await
         .map_err(store_err)?
@@ -380,13 +380,13 @@ async fn admit_sandbox_agent_run_at(
     // chat and turn ownership. This gives the unsettled-child classifier one
     // stable snapshot and preserves the global scheduler -> chat -> turn order.
     acquire_agent_run_claim_lock(&transaction).await?;
-    if !acquire_chat_write_lock(&transaction, ChatId(scope.chat_id)).await?
+    if !acquire_chat_write_lock(&transaction, ChatId(scope.session_id)).await?
         || !acquire_turn_write_lock(&transaction, origin_turn_id).await?
     {
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     }
-    let turn = entities::turn_run::Entity::find_by_id(origin_turn_id.0)
+    let turn = entities::code_turn::Entity::find_by_id(origin_turn_id.0)
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -418,8 +418,11 @@ async fn admit_sandbox_agent_run_at(
             if let Some(outcome) = resolve_existing_sandbox_admission_on(
                 &store.conn,
                 origin_turn_id,
-                ChatId(turn.chat_id),
-                AgentRunId(turn.agent_run_id),
+                ChatId(turn.session_id),
+                AgentRunId(
+                    crate::id::AgentRunId::foreground_for_chat(crate::id::ChatId(turn.session_id))
+                        .0,
+                ),
                 spawn_call_id,
                 input,
                 None,
@@ -449,7 +452,7 @@ pub(in crate::db) async fn get_sandbox_agent_admission(
 #[allow(clippy::too_many_arguments)]
 pub(in crate::db) async fn admit_sandbox_agent_run_on<C>(
     conn: &C,
-    turn: &entities::turn_run::Model,
+    turn: &entities::code_turn::Model,
     spawn_call_id: CallId,
     input: &str,
     resource: Option<&SandboxAgentFileResource>,
@@ -463,8 +466,10 @@ where
     C: sea_orm::ConnectionTrait,
 {
     let origin_turn_id = TurnId(turn.id);
-    let chat_id = ChatId(turn.chat_id);
-    let parent_id = AgentRunId(turn.agent_run_id);
+    let chat_id = ChatId(turn.session_id);
+    let parent_id = AgentRunId(
+        crate::id::AgentRunId::foreground_for_chat(crate::id::ChatId(turn.session_id)).0,
+    );
     let child_run_id = AgentRunId::sandbox_for_spawn_call(spawn_call_id);
 
     if let Some(outcome) = resolve_existing_sandbox_admission_on(
@@ -492,13 +497,13 @@ where
         || turn
             .lease_expires_at
             .is_none_or(|lease_expires_at| lease_expires_at <= now)
-        || turn.updated_at > now
+        || turn.updated_at.is_some_and(|updated_at| updated_at > now)
     {
         return Ok(AdmitSandboxAgentRunOutcome::LeaseLost);
     }
-    let steer_pending = entities::turn_steer::Entity::find()
-        .filter(entities::turn_steer::Column::TurnId.eq(origin_turn_id.0))
-        .filter(entities::turn_steer::Column::Status.eq(TurnSteerStatus::Pending.as_str()))
+    let steer_pending = entities::code_turn_steer::Entity::find()
+        .filter(entities::code_turn_steer::Column::TurnId.eq(origin_turn_id.0))
+        .filter(entities::code_turn_steer::Column::Status.eq(TurnSteerStatus::Pending.as_str()))
         .one(conn)
         .await
         .map_err(store_err)?
@@ -568,7 +573,7 @@ where
         // transaction that admits the child. A sandbox executor can then run
         // the conversation's model without re-resolving mutable settings, and
         // the row records what it ran against.
-        model: Set(Some(turn.model.clone())),
+        model: Set(turn.model.clone()),
         attempt_count: Set(0),
         // A sandbox-resident (container) run has exactly one execution attempt:
         // an external effect (model spend) cannot be proven unexecuted after a

@@ -135,7 +135,7 @@ async fn assert_sensitive_restart_recovery(
     let lease_token = uuid::Uuid::new_v4();
     let claimed_at = Utc::now().max(accepted.available_at);
     store
-        .claim_turn_run(
+        .claim_turn(
             lease_token,
             claimed_at,
             claimed_at + chrono::Duration::minutes(5),
@@ -323,7 +323,7 @@ async fn pending_workspace_restart(
     let lease_token = uuid::Uuid::new_v4();
     let claimed_at = Utc::now().max(accepted.available_at);
     assert!(store
-        .claim_turn_run(
+        .claim_turn(
             lease_token,
             claimed_at,
             claimed_at + chrono::Duration::minutes(5),

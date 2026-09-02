@@ -177,25 +177,38 @@ describe the current schema, not the frozen baseline.
   `attachment_revision`.
 
   A chat is a session (decision 48 step 5): the row is the conversation row,
-  and every chat-side table (`message`, `turn_run`, `tool_call`, and the
-  rest) hangs off it by `chat_id`. A chat has no `workspace_id`,
-  runs the `internal` harness, and keeps the code-owned columns at rest
-  until a session worker attaches. The chat routes read only those rows;
-  the code routes and the runtime's boot recovery and sweeps read only rows
-  with a workspace or a worker that has attached at least once
-  (`spawn_epoch > 0`, or a lifecycle other than `idle`), so a conversation
-  only the chat routes have touched is never enumerated as a code session.
-  Chat attention stays derived from `turn_run` and the inbox projection;
-  the stored `attention_state` on such a row is the idle placeholder.
+  and every chat-side table (`message`, `tool_call`, and the rest) hangs
+  off it by `chat_id`. Turns live on `code_turn`. A chat has no
+  `workspace_id`, runs the `internal` harness, and keeps the code-owned
+  columns at rest until a session worker attaches. The chat routes read
+  only those rows; the code routes and the runtime's boot recovery and
+  sweeps read only rows with a workspace or a worker that has attached at
+  least once (`spawn_epoch > 0`, or a lifecycle other than `idle`), so a
+  conversation only the chat routes have touched is never enumerated as a
+  code session. Chat attention stays derived from `code_turn` and the
+  inbox projection; the stored `attention_state` on such a row is the idle
+  placeholder.
 
   `reasoning_effort` is null when the engine's own default is in force, which
   no level on the ladder is equivalent to. `fast_mode` buys output speed at a
   higher price per token, so it is a spend decision rather than a quality one.
 - **`code_turn`** — `id`, `session_id`, `ordinal`, `status`
-  (`Running | Completed | Failed | Interrupted`), `user_input` (inline or
-  blob reference when large), `checkpoint_ref`, `diffstat` (JSON), `usage`
+  (`queued | running | waiting | cancelling | waiting_for_client |
+  waiting_for_agent_run | cancelling_client | resuming | retry_wait |
+  completed | failed | interrupted`), `user_input` (inline or blob
+  reference when large), `checkpoint_ref`, `diffstat` (JSON), `usage`
   (JSON, as reported by the harness), `narrative` (nullable; filled
-  asynchronously, never blocks lifecycle), `started_at`, `ended_at`.
+  asynchronously, never blocks lifecycle), `started_at`, `ended_at`, plus
+  the lane columns: `attempt_count`, `max_attempts`, `claim_count`,
+  `model_steps`, token counters, `available_at`, `lease_token`,
+  `lease_expires_at`, `fingerprint`, `input_message_id`,
+  `output_message_id`, `invoked_skills`, `voice_input_used`,
+  `steer_revision`.
+- **`code_turn_claim`** — one claim token per attempt; the fencing token
+  every journal write and heartbeat carries. Renamed from `turn_claim`
+  rather than folded into `code_turn`, so the seven composite foreign keys
+  that make append idempotence and heartbeat fencing a property of the
+  schema stay referential.
 - **`code_event`** — `(session_id, seq)` primary key, `owner`, `event`
   (JSON), `created_at`, and the chat turn lane's recovery receipts
   `turn_id`, `lease_token`, `attempt_event_ordinal`, `scan_token`, and
@@ -205,7 +218,8 @@ describe the current schema, not the frozen baseline.
   corrupt the stream — and the chat lane's appends are lease-fenced by the
   receipt columns instead: `(lease_token, attempt_event_ordinal)` makes a
   retried append idempotent, `terminal` marks the one row that resolves a
-  turn, and `scan_token` marks a terminal row the claim scanner wrote. Both
+  turn, and `scan_token` marks a terminal row the claim scanner wrote. The
+  receipt FKs name `code_turn` and `code_turn_claim`. Both
   writers take the same session row lock, so their sequences interleave.
   The chat routes read the same rows through `tidebreak_core::chat_journal`,
   the projection that gives each row its chat reading; rows only an external

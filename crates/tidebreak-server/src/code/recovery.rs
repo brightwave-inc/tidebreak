@@ -286,6 +286,12 @@ async fn recover_one(
     durable_parks: CapLevel,
 ) -> Result<Option<RecoveryAction>, tidebreak_core::AgentError> {
     let Some(pid) = session.child_pid else {
+        // Internal-engine sessions have no child pid ever. Their adapter
+        // declares `mid_turn_resume`, so boot recovery leaves the open turn
+        // for the claim scan instead of closing it as Interrupted.
+        if session.harness_kind == tidebreak_core::HarnessKind::Internal {
+            return Ok(None);
+        }
         // No recorded pid: treat as dead. Never invent a pid to probe.
         return dead_worker_action(store, bus, &session, durable_parks).await;
     };
@@ -489,7 +495,7 @@ mod tests {
     };
     use tidebreak_core::{
         ApprovalDecisionKind, Attention, CodeApproval, CodeApprovalId, CodeApprovalKind,
-        CodeApprovalState, CodeEvent, CodeRepo, CodeSessionId, CodeSessionKind,
+        CodeApprovalState, CodeEvent, CodeRepo, CodeSession, CodeSessionId, CodeSessionKind,
         CodeSubagentSummary, CodeTurn, CodeTurnId, CodeTurnStatus, CodeWorkspace,
         CodeWorkspaceStatus, HarnessKind, PermissionMode, RepoId, TurnParkWait, WorkspaceId,
     };
@@ -1293,6 +1299,89 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(session.lifecycle, CodeSessionLifecycle::Fenced);
+    }
+
+    #[tokio::test]
+    async fn a_restart_does_not_interrupt_a_resumable_internal_turn() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            directory.path().join("t.db").display()
+        ))
+        .await
+        .unwrap();
+        let owner = tidebreak_core::OwnerId::local();
+        let session_id = CodeSessionId::new();
+        insert_session(
+            &store,
+            &CodeSession {
+                id: session_id,
+                owner: owner.clone(),
+                workspace_id: None,
+                kind: CodeSessionKind::Interactive,
+                harness_kind: HarnessKind::Internal,
+                harness_version: Some("internal".into()),
+                harness_resume_ref: None,
+                permission_mode: PermissionMode::Ask,
+                model: Some("test".into()),
+                reasoning_effort: None,
+                fast_mode: false,
+                lifecycle: CodeSessionLifecycle::Running,
+                fence_reason: None,
+                child_pid: None,
+                child_process_identity: None,
+                spawn_epoch: 1,
+                attention: Attention::working(AttentionSource::Lifecycle),
+                unrecognized_event_count: 0,
+                subagents: Vec::new(),
+                created_at: now(),
+            },
+        )
+        .await
+        .unwrap();
+        let turn_id = CodeTurnId::new();
+        insert_turn(
+            &store,
+            &owner,
+            &CodeTurn {
+                id: turn_id,
+                session_id,
+                ordinal: 1,
+                status: CodeTurnStatus::Running,
+                model: Some("test".into()),
+                fast_mode: false,
+                user_input: "hello".into(),
+                user_input_blob_id: None,
+                attachments: Vec::new(),
+                checkpoint_ref: None,
+                diffstat: None,
+                usage: None,
+                narrative: None,
+                rewrite: None,
+                started_at: now(),
+                ended_at: None,
+                park_ref: None,
+                park_wait: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let bus = CodeEventBus::default();
+        let actions = recover_running_sessions_with(&store, &bus, |_, _| PidLiveness::Dead)
+            .await
+            .unwrap();
+        assert!(
+            actions.is_empty(),
+            "a resumable internal turn must not be interrupted on restart"
+        );
+        let session = get_session(&store, &owner, session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(session.lifecycle, CodeSessionLifecycle::Running);
+        let turn = get_turn(&store, &owner, turn_id).await.unwrap().unwrap();
+        assert_eq!(turn.status, CodeTurnStatus::Running);
     }
 
     #[test]

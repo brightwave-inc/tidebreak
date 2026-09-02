@@ -208,7 +208,7 @@ impl Default for AgentConfig {
 ///
 /// A completed output is returned to the worker instead of being persisted by
 /// the agent loop. The worker can then commit the message and terminal turn
-/// transition together through [`Store::complete_turn_run`].
+/// transition together through [`Store::complete_turn`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentTurnOutcome {
     /// The final assistant message prepared for atomic completion.

@@ -20,7 +20,7 @@ pub(super) fn exact_wait_call_request(
     request: &AgentRunWaitSetCheckpointRequest,
 ) -> bool {
     call.id == wait.id
-        && call.chat_id == wait.chat_id
+        && call.chat_id == wait.session_id
         && call.turn_id == wait.turn_id
         && call.provider_id == request.provider_id
         && call.name == WAIT_FOR_AGENTS_TOOL
@@ -92,7 +92,7 @@ where
     let Some(event_seq) = wait.event_seq else {
         return Ok(false);
     };
-    let Some(event) = entities::code_event::Entity::find_by_id((wait.chat_id, event_seq))
+    let Some(event) = entities::code_event::Entity::find_by_id((wait.session_id, event_seq))
         .one(conn)
         .await
         .map_err(store_err)?
@@ -121,7 +121,7 @@ pub(super) fn exact_pending_wait_call_model(
     wait: &entities::turn_agent_run_wait_set::Model,
 ) -> bool {
     call.id == wait.id
-        && call.chat_id == wait.chat_id
+        && call.chat_id == wait.session_id
         && call.turn_id == wait.turn_id
         && call.name == WAIT_FOR_AGENTS_TOOL
         && call.execution == ToolCallExecution::Orchestration.as_str()
@@ -141,7 +141,7 @@ pub(super) fn exact_terminal_wait_call(
     result: &str,
 ) -> bool {
     call.id == wait.id
-        && call.chat_id == wait.chat_id
+        && call.chat_id == wait.session_id
         && call.turn_id == wait.turn_id
         && call.name == WAIT_FOR_AGENTS_TOOL
         && call.execution == ToolCallExecution::Orchestration.as_str()

@@ -303,8 +303,10 @@ export function markCodeSessionHydrated(
 }
 
 /** Whether a turn is still open: live, or parked waiting on a decision. */
-function turnIsOpen(status: CodeTurnStatus): status is "running" | "waiting" {
-  return status === "running" || status === "waiting";
+function turnIsOpen(status: CodeTurnStatus): boolean {
+  return (
+    status !== "completed" && status !== "failed" && status !== "interrupted"
+  );
 }
 
 /** Record a turn that a live submit received before its journal start. */

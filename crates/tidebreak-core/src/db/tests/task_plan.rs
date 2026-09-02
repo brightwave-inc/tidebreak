@@ -203,7 +203,7 @@ async fn task_plan_writes_are_fenced_on_the_turn_lease_and_recorded_once() {
     let claim_at = accepted.available_at;
     let stale_lease = uuid::Uuid::new_v4();
     store
-        .claim_turn_run(
+        .claim_turn(
             stale_lease,
             claim_at,
             claim_at + chrono::Duration::seconds(1),
@@ -282,7 +282,7 @@ async fn task_plan_writes_are_fenced_on_the_turn_lease_and_recorded_once() {
     // running somewhere with an admitted call in hand.
     let retry_at = claim_at + chrono::Duration::seconds(2);
     store
-        .claim_turn_run(
+        .claim_turn(
             uuid::Uuid::new_v4(),
             retry_at,
             retry_at + chrono::Duration::minutes(1),

@@ -333,6 +333,7 @@ pub mod operation_log {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+#[allow(dead_code)]
 pub mod message_attachment {
     use sea_orm::entity::prelude::*;
 
@@ -454,6 +455,7 @@ pub mod exec_file_change {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+#[allow(dead_code)]
 pub mod message_document_attachment {
     use sea_orm::entity::prelude::*;
 
@@ -556,64 +558,6 @@ pub mod agent_run {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
-pub mod turn_admission {
-    use sea_orm::entity::prelude::*;
-
-    /// Global owner and immutable request fingerprint for one client turn id.
-    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-    #[sea_orm(table_name = "turn_admission")]
-    pub struct Model {
-        #[sea_orm(primary_key, auto_increment = false)]
-        pub id: Uuid,
-        pub chat_id: Uuid,
-        pub fingerprint: Vec<u8>,
-        /// `pending` | `queued` | `accepted`.
-        pub state: String,
-        pub lease_token: Option<Uuid>,
-        pub lease_expires_at: Option<DateTimeUtc>,
-        pub created_at: DateTimeUtc,
-        pub updated_at: DateTimeUtc,
-    }
-
-    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-    pub enum Relation {}
-
-    impl ActiveModelBehavior for ActiveModel {}
-}
-
-pub mod queued_turn {
-    use sea_orm::entity::prelude::*;
-
-    /// One message accepted while its chat had a live turn, waiting to become
-    /// a real turn when the chat is free. The row id is the client-generated
-    /// turn id the promotion will accept under, so an ambiguous promotion
-    /// retry lands on `AcceptTurnOutcome::Existing` instead of a duplicate.
-    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-    #[sea_orm(table_name = "queued_turn")]
-    pub struct Model {
-        #[sea_orm(primary_key, auto_increment = false)]
-        pub id: Uuid,
-        pub chat_id: Uuid,
-        pub content: String,
-        /// Image-attachment ids, JSON array of UUID strings.
-        pub attachments_json: String,
-        /// Chat-owned document ids, JSON array of UUID strings.
-        pub file_attachments_json: String,
-        /// Invoked skill names, JSON array of strings.
-        pub invoked_skills_json: String,
-        pub voice_input_used: bool,
-        /// FIFO order within the chat; reorder rewrites positions.
-        pub position: i32,
-        pub created_at: DateTimeUtc,
-        pub updated_at: DateTimeUtc,
-    }
-
-    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-    pub enum Relation {}
-
-    impl ActiveModelBehavior for ActiveModel {}
-}
-
 pub mod sandbox_spawn_checkpoint {
     use sea_orm::entity::prelude::*;
 
@@ -625,7 +569,7 @@ pub mod sandbox_spawn_checkpoint {
         pub child_run_id: Uuid,
         pub parent_run_id: Uuid,
         pub origin_turn_id: Uuid,
-        pub chat_id: Uuid,
+        pub session_id: Uuid,
         pub lease_token: Uuid,
         pub attempt_count: i32,
         pub claim_count: i32,
@@ -836,7 +780,7 @@ pub mod turn_agent_run_wait_set {
         pub id: Uuid,
         pub parent_run_id: Uuid,
         pub turn_id: Uuid,
-        pub chat_id: Uuid,
+        pub session_id: Uuid,
         pub condition: String,
         pub park_lease_token: Uuid,
         pub expected_steer_revision: i64,
@@ -884,60 +828,16 @@ pub mod turn_agent_run_wait_member {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
-pub mod turn_run {
+pub mod code_turn_claim {
     use sea_orm::entity::prelude::*;
 
     #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-    #[sea_orm(table_name = "turn_run")]
-    pub struct Model {
-        #[sea_orm(primary_key, auto_increment = false)]
-        pub id: Uuid,
-        pub chat_id: Uuid,
-        pub agent_run_id: Uuid,
-        pub agent_run_depth: i16,
-        pub input_message_id: Uuid,
-        pub output_message_id: Option<Uuid>,
-        pub model: String,
-        #[sea_orm(column_type = "JsonBinary")]
-        pub invoked_skills: Json,
-        pub voice_input_used: bool,
-        pub status: String,
-        pub attempt_count: i32,
-        pub max_attempts: i32,
-        pub claim_count: i32,
-        pub model_steps: i32,
-        pub input_tokens: i64,
-        pub output_tokens: i64,
-        pub cache_read_input_tokens: i64,
-        pub cache_creation_input_tokens: i64,
-        pub available_at: DateTimeUtc,
-        pub lease_token: Option<Uuid>,
-        pub lease_expires_at: Option<DateTimeUtc>,
-        pub started_at: Option<DateTimeUtc>,
-        pub finished_at: Option<DateTimeUtc>,
-        pub last_error_code: Option<String>,
-        pub last_error_detail: Option<String>,
-        pub steer_revision: i64,
-        pub last_steer_applied_at: Option<DateTimeUtc>,
-        pub created_at: DateTimeUtc,
-        pub updated_at: DateTimeUtc,
-    }
-
-    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-    pub enum Relation {}
-
-    impl ActiveModelBehavior for ActiveModel {}
-}
-
-pub mod turn_claim {
-    use sea_orm::entity::prelude::*;
-
-    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-    #[sea_orm(table_name = "turn_claim")]
+    #[sea_orm(table_name = "code_turn_claim")]
     pub struct Model {
         #[sea_orm(primary_key, auto_increment = false)]
         pub token: Uuid,
         pub turn_id: Uuid,
+        pub owner: String,
         pub attempt_count: i32,
         pub claim_count: i32,
         pub claimed_at: DateTimeUtc,
@@ -959,7 +859,7 @@ pub mod turn_client_wait {
         #[sea_orm(primary_key, auto_increment = false)]
         pub call_id: Uuid,
         pub turn_id: Uuid,
-        pub chat_id: Uuid,
+        pub session_id: Uuid,
         pub park_lease_token: Uuid,
         pub attempt_count: i32,
         pub claim_count: i32,
@@ -1040,16 +940,17 @@ pub mod message_identity {
 }
 
 #[allow(dead_code)]
-pub mod turn_steer {
+pub mod code_turn_steer {
     use sea_orm::entity::prelude::*;
 
     #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-    #[sea_orm(table_name = "turn_steer")]
+    #[sea_orm(table_name = "code_turn_steer")]
     pub struct Model {
         #[sea_orm(primary_key, auto_increment = false)]
         pub id: Uuid,
         pub turn_id: Uuid,
-        pub chat_id: Uuid,
+        pub session_id: Uuid,
+        pub owner: String,
         pub content: String,
         pub invoked_skills: Json,
         pub voice_input_used: bool,
@@ -1068,15 +969,16 @@ pub mod turn_steer {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
-pub mod turn_failure {
+pub mod code_turn_failure {
     use sea_orm::entity::prelude::*;
 
     #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-    #[sea_orm(table_name = "turn_failure")]
+    #[sea_orm(table_name = "code_turn_failure")]
     pub struct Model {
         #[sea_orm(primary_key, auto_increment = false)]
         pub lease_token: Uuid,
         pub turn_id: Uuid,
+        pub owner: String,
         pub attempt_count: i32,
         pub model_steps: i32,
         pub input_tokens: i64,
@@ -1726,6 +1628,28 @@ pub mod code_turn {
         pub park_ref: Option<String>,
         #[sea_orm(column_type = "JsonBinary", nullable)]
         pub park_wait: Option<Json>,
+        pub attempt_count: i32,
+        pub max_attempts: i32,
+        pub claim_count: i32,
+        pub model_steps: i32,
+        pub input_tokens: i64,
+        pub output_tokens: i64,
+        pub cache_read_input_tokens: i64,
+        pub cache_creation_input_tokens: i64,
+        pub available_at: Option<DateTimeUtc>,
+        pub lease_token: Option<Uuid>,
+        pub lease_expires_at: Option<DateTimeUtc>,
+        pub last_error_code: Option<String>,
+        pub last_error_detail: Option<String>,
+        pub steer_revision: i64,
+        pub last_steer_applied_at: Option<DateTimeUtc>,
+        #[sea_orm(column_type = "JsonBinary")]
+        pub invoked_skills: Json,
+        pub voice_input_used: bool,
+        pub input_message_id: Option<Uuid>,
+        pub output_message_id: Option<Uuid>,
+        pub updated_at: Option<DateTimeUtc>,
+        pub fingerprint: Option<Vec<u8>>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -1750,6 +1674,29 @@ pub mod code_turn_attachment {
         pub width: i32,
         pub height: i32,
         pub byte_len: i64,
+        pub message_id: Option<Uuid>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod code_turn_document_attachment {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "code_turn_document_attachment")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub turn_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub ordinal: i32,
+        pub owner: String,
+        pub message_id: Option<Uuid>,
+        pub document_id: Uuid,
+        pub created_at: DateTimeUtc,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -1771,6 +1718,10 @@ pub mod code_queued_turn {
         #[sea_orm(column_type = "Text")]
         pub message: String,
         pub attachments_json: String,
+        pub file_attachments_json: String,
+        pub invoked_skills_json: String,
+        pub voice_input_used: bool,
+        pub fingerprint: Option<Vec<u8>>,
         pub position: i32,
         pub created_at: DateTimeUtc,
         pub updated_at: DateTimeUtc,

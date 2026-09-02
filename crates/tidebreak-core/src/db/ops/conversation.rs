@@ -681,9 +681,9 @@ pub(in crate::db) async fn delete_chat(
         return Ok(DeleteChatOutcome::RootAttachmentStateUnresolved);
     }
 
-    let active_turn = entities::turn_run::Entity::find()
-        .filter(entities::turn_run::Column::ChatId.eq(chat_id.0))
-        .filter(entities::turn_run::Column::Status.is_not_in([
+    let active_turn = entities::code_turn::Entity::find()
+        .filter(entities::code_turn::Column::SessionId.eq(chat_id.0))
+        .filter(entities::code_turn::Column::Status.is_not_in([
             TurnRunStatus::Completed.as_str(),
             TurnRunStatus::Failed.as_str(),
             TurnRunStatus::Cancelled.as_str(),
@@ -766,7 +766,7 @@ pub(in crate::db) async fn delete_chat(
     // machine mistakes visible; conversation deletion is the explicit terminal
     // owner that can erase their complete, quiesced graph in one transaction.
     entities::turn_client_wait::Entity::delete_many()
-        .filter(entities::turn_client_wait::Column::ChatId.eq(chat_id.0))
+        .filter(entities::turn_client_wait::Column::SessionId.eq(chat_id.0))
         .exec(&transaction)
         .await
         .map_err(store_err)?;
@@ -776,17 +776,17 @@ pub(in crate::db) async fn delete_chat(
         .await
         .map_err(store_err)?;
     entities::turn_agent_run_wait_set::Entity::delete_many()
-        .filter(entities::turn_agent_run_wait_set::Column::ChatId.eq(chat_id.0))
+        .filter(entities::turn_agent_run_wait_set::Column::SessionId.eq(chat_id.0))
         .exec(&transaction)
         .await
         .map_err(store_err)?;
-    entities::turn_steer::Entity::delete_many()
-        .filter(entities::turn_steer::Column::ChatId.eq(chat_id.0))
+    entities::code_turn_steer::Entity::delete_many()
+        .filter(entities::code_turn_steer::Column::SessionId.eq(chat_id.0))
         .exec(&transaction)
         .await
         .map_err(store_err)?;
     entities::sandbox_spawn_checkpoint::Entity::delete_many()
-        .filter(entities::sandbox_spawn_checkpoint::Column::ChatId.eq(chat_id.0))
+        .filter(entities::sandbox_spawn_checkpoint::Column::SessionId.eq(chat_id.0))
         .exec(&transaction)
         .await
         .map_err(store_err)?;
@@ -863,34 +863,34 @@ pub(in crate::db) async fn delete_chat(
         .exec(&transaction)
         .await
         .map_err(store_err)?;
-    entities::turn_failure::Entity::delete_many()
+    entities::code_turn_failure::Entity::delete_many()
         .filter(
-            entities::turn_failure::Column::TurnId.in_subquery(
-                entities::turn_run::Entity::find()
+            entities::code_turn_failure::Column::TurnId.in_subquery(
+                entities::code_turn::Entity::find()
                     .select_only()
-                    .column(entities::turn_run::Column::Id)
-                    .filter(entities::turn_run::Column::ChatId.eq(chat_id.0))
+                    .column(entities::code_turn::Column::Id)
+                    .filter(entities::code_turn::Column::SessionId.eq(chat_id.0))
                     .into_query(),
             ),
         )
         .exec(&transaction)
         .await
         .map_err(store_err)?;
-    entities::turn_claim::Entity::delete_many()
+    entities::code_turn_claim::Entity::delete_many()
         .filter(
-            entities::turn_claim::Column::TurnId.in_subquery(
-                entities::turn_run::Entity::find()
+            entities::code_turn_claim::Column::TurnId.in_subquery(
+                entities::code_turn::Entity::find()
                     .select_only()
-                    .column(entities::turn_run::Column::Id)
-                    .filter(entities::turn_run::Column::ChatId.eq(chat_id.0))
+                    .column(entities::code_turn::Column::Id)
+                    .filter(entities::code_turn::Column::SessionId.eq(chat_id.0))
                     .into_query(),
             ),
         )
         .exec(&transaction)
         .await
         .map_err(store_err)?;
-    entities::turn_run::Entity::delete_many()
-        .filter(entities::turn_run::Column::ChatId.eq(chat_id.0))
+    entities::code_turn::Entity::delete_many()
+        .filter(entities::code_turn::Column::SessionId.eq(chat_id.0))
         .exec(&transaction)
         .await
         .map_err(store_err)?;
@@ -1019,8 +1019,8 @@ async fn list_message_invoked_skills_on<C>(
 where
     C: ConnectionTrait,
 {
-    let turns = entities::turn_run::Entity::find()
-        .filter(entities::turn_run::Column::ChatId.eq(chat_id.0))
+    let turns = entities::code_turn::Entity::find()
+        .filter(entities::code_turn::Column::SessionId.eq(chat_id.0))
         .all(conn)
         .await
         .map_err(store_err)?;
@@ -1029,14 +1029,16 @@ where
         let skills = super::turn::invoked_skills_from_model(turn)?;
         if !skills.is_empty() {
             invoked.push(MessageInvokedSkills {
-                message_id: MessageId(turn.input_message_id),
+                message_id: MessageId(turn.input_message_id.ok_or_else(|| {
+                    AgentError::Store(format!("turn {} is missing its input message", turn.id))
+                })?),
                 skills,
             });
         }
     }
-    let steers = entities::turn_steer::Entity::find()
-        .filter(entities::turn_steer::Column::ChatId.eq(chat_id.0))
-        .filter(entities::turn_steer::Column::MessageId.is_not_null())
+    let steers = entities::code_turn_steer::Entity::find()
+        .filter(entities::code_turn_steer::Column::SessionId.eq(chat_id.0))
+        .filter(entities::code_turn_steer::Column::MessageId.is_not_null())
         .all(conn)
         .await
         .map_err(store_err)?;
@@ -1073,15 +1075,15 @@ async fn list_terminal_turns_on<C>(
 where
     C: ConnectionTrait,
 {
-    let turns = entities::turn_run::Entity::find()
-        .filter(entities::turn_run::Column::ChatId.eq(chat_id.0))
-        .filter(entities::turn_run::Column::Status.is_in([
+    let turns = entities::code_turn::Entity::find()
+        .filter(entities::code_turn::Column::SessionId.eq(chat_id.0))
+        .filter(entities::code_turn::Column::Status.is_in([
             TurnRunStatus::Completed.as_str(),
             TurnRunStatus::Failed.as_str(),
             TurnRunStatus::Cancelled.as_str(),
         ]))
-        .order_by_asc(entities::turn_run::Column::FinishedAt)
-        .order_by_asc(entities::turn_run::Column::Id)
+        .order_by_asc(entities::code_turn::Column::EndedAt)
+        .order_by_asc(entities::code_turn::Column::Id)
         .all(conn)
         .await
         .map_err(store_err)?;
@@ -1099,7 +1101,7 @@ where
     let mut snapshots = Vec::with_capacity(turns.len());
     let mut index_of = HashMap::with_capacity(turns.len());
     for turn in turns {
-        let Some(finished_at) = turn.finished_at else {
+        let Some(finished_at) = turn.ended_at else {
             // Terminal rows are constrained to have a finish time. If legacy
             // corruption violates that, it cannot be placed honestly.
             continue;
@@ -1135,7 +1137,7 @@ where
             refusal: None,
             failure_kind: turn.last_error_code,
             failure_detail: turn.last_error_detail,
-            model: turn.model,
+            model: turn.model.clone().unwrap_or_default(),
             invoked_skills,
             usage,
             voice_input_used: turn.voice_input_used,
@@ -1207,9 +1209,9 @@ async fn list_terminal_tool_activity_on<C>(
 where
     C: ConnectionTrait,
 {
-    let terminal_turn_ids: HashSet<_> = entities::turn_run::Entity::find()
-        .filter(entities::turn_run::Column::ChatId.eq(chat_id.0))
-        .filter(entities::turn_run::Column::Status.is_in([
+    let terminal_turn_ids: HashSet<_> = entities::code_turn::Entity::find()
+        .filter(entities::code_turn::Column::SessionId.eq(chat_id.0))
+        .filter(entities::code_turn::Column::Status.is_in([
             TurnRunStatus::Completed.as_str(),
             TurnRunStatus::Failed.as_str(),
             TurnRunStatus::Cancelled.as_str(),
@@ -1374,10 +1376,10 @@ pub(in crate::db) async fn list_cancelled_output_message_ids(
     store: &DbStore,
     chat_id: ChatId,
 ) -> Result<Vec<MessageId>> {
-    let turns = entities::turn_run::Entity::find()
-        .filter(entities::turn_run::Column::ChatId.eq(chat_id.0))
-        .filter(entities::turn_run::Column::Status.eq(TurnRunStatus::Cancelled.as_str()))
-        .filter(entities::turn_run::Column::OutputMessageId.is_not_null())
+    let turns = entities::code_turn::Entity::find()
+        .filter(entities::code_turn::Column::SessionId.eq(chat_id.0))
+        .filter(entities::code_turn::Column::Status.eq(TurnRunStatus::Cancelled.as_str()))
+        .filter(entities::code_turn::Column::OutputMessageId.is_not_null())
         .all(&store.conn)
         .await
         .map_err(store_err)?;
@@ -1429,8 +1431,8 @@ pub(in crate::db) async fn append_event(
     if !acquire_chat_write_lock(&transaction, chat_id).await? {
         return Err(AgentError::Store(format!("chat {chat_id} does not exist")));
     }
-    if entities::turn_run::Entity::find()
-        .filter(entities::turn_run::Column::ChatId.eq(chat_id.0))
+    if entities::code_turn::Entity::find()
+        .filter(entities::code_turn::Column::SessionId.eq(chat_id.0))
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -1610,7 +1612,7 @@ pub(in crate::db) async fn append_turn_events(
         return Ok(Some(seqs));
     }
 
-    let Some(claim) = entities::turn_claim::Entity::find_by_id(lease_token)
+    let Some(claim) = entities::code_turn_claim::Entity::find_by_id(lease_token)
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -1619,7 +1621,7 @@ pub(in crate::db) async fn append_turn_events(
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     };
-    let Some(turn) = entities::turn_run::Entity::find_by_id(turn_id.0)
+    let Some(turn) = entities::code_turn::Entity::find_by_id(turn_id.0)
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -1627,7 +1629,7 @@ pub(in crate::db) async fn append_turn_events(
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     };
-    if turn.chat_id != chat_id.0 {
+    if turn.session_id != chat_id.0 {
         return Err(AgentError::Store(format!(
             "turn {turn_id} does not belong to chat {chat_id}"
         )));
@@ -1639,7 +1641,7 @@ pub(in crate::db) async fn append_turn_events(
         || turn
             .lease_expires_at
             .is_none_or(|lease_expires_at| lease_expires_at <= now)
-        || turn.updated_at > now
+        || turn.updated_at.is_some_and(|updated_at| updated_at > now)
     {
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);

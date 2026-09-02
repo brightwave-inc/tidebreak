@@ -200,7 +200,7 @@ async fn set_postgres_turn_max_attempts(url: &str, turn_id: TurnId, max_attempts
     let connection = Database::connect(url).await.unwrap();
     let updated = connection
         .execute_unprepared(&format!(
-            "UPDATE turn_run SET max_attempts = {max_attempts} WHERE id = '{}'",
+            "UPDATE code_turn SET max_attempts = {max_attempts} WHERE id = '{}'",
             turn_id.0
         ))
         .await
@@ -221,7 +221,7 @@ async fn park_wait_set_for_test<S: Store + ?Sized>(
     now: chrono::DateTime<Utc>,
 ) -> tidebreak_core::Result<Option<ParkTurnForAgentRunWaitSetOutcome>> {
     let turn = store
-        .get_turn_run(turn_id)
+        .get_turn(turn_id)
         .await?
         .ok_or_else(|| tidebreak_core::AgentError::Store("test turn disappeared".into()))?;
     store
@@ -309,7 +309,7 @@ async fn postgres_completion_persists_authoritative_totals_with_and_without_chec
         let claimed_at = utc_now_at_postgres_precision().max(accepted.available_at);
         let lease_token = uuid::Uuid::new_v4();
         store
-            .claim_turn_run(lease_token, claimed_at, claimed_at + Duration::minutes(1))
+            .claim_turn(lease_token, claimed_at, claimed_at + Duration::minutes(1))
             .await
             .unwrap()
             .turn
@@ -320,7 +320,7 @@ async fn postgres_completion_persists_authoritative_totals_with_and_without_chec
             let updated = connection
                 .execute_raw(Statement::from_sql_and_values(
                     DatabaseBackend::Postgres,
-                    "UPDATE turn_run SET model_steps = $1, input_tokens = $2, output_tokens = $3, cache_read_input_tokens = $4, cache_creation_input_tokens = $5 WHERE id = $6 AND status = 'running'",
+                    "UPDATE code_turn SET model_steps = $1, input_tokens = $2, output_tokens = $3, cache_read_input_tokens = $4, cache_creation_input_tokens = $5 WHERE id = $6 AND status = 'running'",
                     [
                         model_steps.into(),
                         i64::from(usage.input_tokens).into(),
@@ -347,7 +347,7 @@ async fn postgres_completion_persists_authoritative_totals_with_and_without_chec
             created_at: completed_at,
         };
         let completed = store
-            .complete_turn_run_and_append_event(
+            .complete_turn_and_append_event(
                 turn_id,
                 lease_token,
                 0,
@@ -365,7 +365,7 @@ async fn postgres_completion_persists_authoritative_totals_with_and_without_chec
             CompleteTurnRunOutcome::Completed(ref turn)
                 if turn.model_steps == total_steps && turn.usage == total_usage
         ));
-        let stored = store.get_turn_run(turn_id).await.unwrap().unwrap();
+        let stored = store.get_turn(turn_id).await.unwrap().unwrap();
         assert_eq!(
             (stored.model_steps, stored.usage),
             (total_steps, total_usage)
@@ -417,7 +417,7 @@ async fn postgres_terminal_citations_are_atomic_and_exactly_recoverable() {
     let claimed_at = utc_now_at_postgres_precision();
     let lease = uuid::Uuid::new_v4();
     store
-        .claim_turn_run(lease, claimed_at, claimed_at + Duration::minutes(1))
+        .claim_turn(lease, claimed_at, claimed_at + Duration::minutes(1))
         .await
         .unwrap();
     let document_id = DocumentId::new();
@@ -451,7 +451,7 @@ async fn postgres_terminal_citations_are_atomic_and_exactly_recoverable() {
     };
     assert!(matches!(
         store
-            .complete_turn_run_with_citations_and_append_event(
+            .complete_turn_with_citations_and_append_event(
                 turn_id,
                 lease,
                 0,
@@ -470,7 +470,7 @@ async fn postgres_terminal_citations_are_atomic_and_exactly_recoverable() {
     ));
     assert!(matches!(
         store
-            .complete_turn_run_with_citations_and_append_event(
+            .complete_turn_with_citations_and_append_event(
                 turn_id,
                 lease,
                 0,
@@ -488,7 +488,7 @@ async fn postgres_terminal_citations_are_atomic_and_exactly_recoverable() {
         CompleteTurnRunOutcome::Existing(_)
     ));
     assert!(store
-        .complete_turn_run_with_citations_and_append_event(
+        .complete_turn_with_citations_and_append_event(
             turn_id,
             lease,
             0,
@@ -538,7 +538,7 @@ async fn postgres_cancellation_retry_requires_exact_partial_output() {
     let claimed_at = utc_now_at_postgres_precision().max(accepted.available_at);
     let lease = uuid::Uuid::new_v4();
     store
-        .claim_turn_run(lease, claimed_at, claimed_at + Duration::minutes(1))
+        .claim_turn(lease, claimed_at, claimed_at + Duration::minutes(1))
         .await
         .unwrap()
         .turn
@@ -722,7 +722,7 @@ async fn postgres_claim_exact_turn(
         let claim_at = now + Duration::milliseconds(offset);
         let lease = uuid::Uuid::new_v4();
         let outcome = store
-            .claim_turn_run(lease, claim_at, claim_at + Duration::hours(1))
+            .claim_turn(lease, claim_at, claim_at + Duration::hours(1))
             .await
             .unwrap();
         let Some(turn) = outcome.turn else {
@@ -757,7 +757,7 @@ async fn postgres_live_turn(
     chat_id: ChatId,
 ) -> (tidebreak_core::TurnRun, uuid::Uuid) {
     if let Some(turn) = store
-        .list_turn_runs(chat_id)
+        .list_turns(chat_id)
         .await
         .unwrap()
         .into_iter()
@@ -781,7 +781,7 @@ async fn postgres_live_turn(
     let lease = uuid::Uuid::new_v4();
     let now = utc_now_at_postgres_precision();
     let turn = store
-        .claim_turn_run(lease, now, now + Duration::hours(1))
+        .claim_turn(lease, now, now + Duration::hours(1))
         .await
         .unwrap()
         .turn
@@ -858,14 +858,14 @@ async fn cleanup_postgres_sandbox_chat(store: &DbStore, chat_id: ChatId) {
         }
     }
 
-    for turn in store.list_turn_runs(chat_id).await.unwrap() {
+    for turn in store.list_turns(chat_id).await.unwrap() {
         let lease_token = turn.lease_token;
         let cancel_at = utc_now_at_postgres_precision().max(turn.updated_at);
         store
             .request_turn_cancellation(turn.id, cancel_at)
             .await
             .unwrap();
-        let current = store.get_turn_run(turn.id).await.unwrap().unwrap();
+        let current = store.get_turn(turn.id).await.unwrap().unwrap();
         if current.status == TurnRunStatus::Cancelling {
             let finish_at = utc_now_at_postgres_precision().max(current.updated_at);
             store
@@ -1117,7 +1117,7 @@ async fn postgres_nonblocking_spawn_and_parent_cancellation_are_one_ordered_tran
     };
     let checkpoint = checkpoint_task.await.unwrap();
     let cancellation = cancellation_task.await.unwrap();
-    let parent = store.get_turn_run(turn.id).await.unwrap().unwrap();
+    let parent = store.get_turn(turn.id).await.unwrap().unwrap();
     let children = store
         .list_agent_runs(chat.id)
         .await
@@ -1248,7 +1248,7 @@ async fn postgres_parent_cancellation_and_first_child_claim_converge_without_ide
             reason: AgentRunCancellationReason::ParentTurnCancelled
         }
     ));
-    let parent = store.get_turn_run(origin.id).await.unwrap().unwrap();
+    let parent = store.get_turn(origin.id).await.unwrap().unwrap();
     if parent.status == TurnRunStatus::Cancelling {
         store
             .finish_turn_cancellation(
@@ -1324,7 +1324,7 @@ async fn postgres_parent_cancellation_and_first_child_claim_converge_without_ide
             .unwrap(),
         Some(RequestAgentRunCancellationOutcome::Existing(_))
     ));
-    let parent = store.get_turn_run(origin.id).await.unwrap().unwrap();
+    let parent = store.get_turn(origin.id).await.unwrap().unwrap();
     if parent.status == TurnRunStatus::Cancelling {
         store
             .finish_turn_cancellation(
@@ -1391,7 +1391,7 @@ async fn postgres_parent_completion_and_child_admission_form_one_terminal_bounda
         tokio::spawn(async move {
             barrier.wait().await;
             store
-                .complete_turn_run(
+                .complete_turn(
                     turn.id,
                     lease,
                     turn.steer_revision,
@@ -1405,7 +1405,7 @@ async fn postgres_parent_completion_and_child_admission_form_one_terminal_bounda
     };
     let admission = admission.await.unwrap();
     let completion = completion.await.unwrap();
-    let parent = store.get_turn_run(turn.id).await.unwrap().unwrap();
+    let parent = store.get_turn(turn.id).await.unwrap().unwrap();
     let children = store
         .list_agent_runs(chat.id)
         .await
@@ -1486,7 +1486,7 @@ async fn postgres_permanent_parent_failure_and_child_result_cannot_orphan_delive
         tokio::spawn(async move {
             barrier.wait().await;
             store
-                .record_turn_run_failure(
+                .record_turn_failure(
                     turn.id,
                     turn_lease,
                     utc_now_at_postgres_precision(),
@@ -1506,7 +1506,7 @@ async fn postgres_permanent_parent_failure_and_child_result_cannot_orphan_delive
         failure.await.unwrap(),
         RecordTurnFailureOutcome::Recorded(_)
     ));
-    let parent = store.get_turn_run(turn.id).await.unwrap().unwrap();
+    let parent = store.get_turn(turn.id).await.unwrap().unwrap();
     let child = store.get_agent_run(child.id).await.unwrap().unwrap();
     assert_eq!(parent.status, TurnRunStatus::Failed);
     match child.status {
@@ -1612,7 +1612,7 @@ async fn postgres_parent_cancellation_uses_time_after_admission_and_heartbeat_lo
     let child = store.get_agent_run(child_id).await.unwrap().unwrap();
     assert_eq!(child.status, AgentRunStatus::Cancelled);
     assert!(child.updated_at >= child.created_at);
-    let parent = store.get_turn_run(origin.id).await.unwrap().unwrap();
+    let parent = store.get_turn(origin.id).await.unwrap().unwrap();
     store
         .finish_turn_cancellation(
             origin.id,
@@ -1698,7 +1698,7 @@ async fn postgres_parent_cancellation_uses_time_after_admission_and_heartbeat_lo
         .await
         .unwrap()
         .unwrap();
-    let parent = store.get_turn_run(origin.id).await.unwrap().unwrap();
+    let parent = store.get_turn(origin.id).await.unwrap().unwrap();
     store
         .finish_turn_cancellation(
             origin.id,
@@ -1948,7 +1948,7 @@ async fn postgres_sandbox_admission_checks_lease_time_after_lock_wait() {
         .execute_raw(Statement::from_string(
             DatabaseBackend::Postgres,
             format!(
-                "UPDATE turn_run SET lease_expires_at = clock_timestamp() + interval '200 milliseconds' WHERE id = '{}'",
+                "UPDATE code_turn SET lease_expires_at = clock_timestamp() + interval '200 milliseconds' WHERE id = '{}'",
                 turn.id.0
             ),
         ))
@@ -2769,9 +2769,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
             barrier.wait().await;
             (
                 token,
-                store
-                    .claim_turn_run(token, claim_at, lease_expires_at)
-                    .await,
+                store.claim_turn(token, claim_at, lease_expires_at).await,
             )
         }));
     }
@@ -2794,7 +2792,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
     assert_eq!(claimed.lease_token, Some(token));
     assert_eq!(
         store
-            .claim_turn_run(token, claim_at, lease_expires_at)
+            .claim_turn(token, claim_at, lease_expires_at)
             .await
             .unwrap()
             .turn,
@@ -2802,7 +2800,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
     );
 
     let expired = store
-        .claim_turn_run(
+        .claim_turn(
             uuid::Uuid::new_v4(),
             lease_expires_at,
             lease_expires_at + Duration::minutes(1),
@@ -2826,7 +2824,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
         vec![terminal.event]
     );
     assert_eq!(
-        store.get_turn_run(turn_id).await.unwrap().unwrap().status,
+        store.get_turn(turn_id).await.unwrap().unwrap().status,
         TurnRunStatus::Failed
     );
 
@@ -2843,7 +2841,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
     let delayed_retry_at = next.available_at + Duration::seconds(1);
     assert_eq!(
         store
-            .claim_turn_run(
+            .claim_turn(
                 token,
                 delayed_retry_at,
                 delayed_retry_at + Duration::minutes(1),
@@ -2854,14 +2852,14 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
         None
     );
     assert_eq!(
-        store.get_turn_run(next.id).await.unwrap().unwrap().status,
+        store.get_turn(next.id).await.unwrap().unwrap().status,
         TurnRunStatus::Queued
     );
 
     let completion_token = uuid::Uuid::new_v4();
     let completion_expiry = delayed_retry_at + Duration::minutes(1);
     store
-        .claim_turn_run(completion_token, delayed_retry_at, completion_expiry)
+        .claim_turn(completion_token, delayed_retry_at, completion_expiry)
         .await
         .unwrap()
         .turn
@@ -2885,7 +2883,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
         completions.push(tokio::spawn(async move {
             barrier.wait().await;
             store
-                .complete_turn_run_and_append_event(
+                .complete_turn_and_append_event(
                     next.id,
                     completion_token,
                     0,
@@ -2933,7 +2931,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
     let failure_at = failure_claimed_at + Duration::seconds(1);
     let requested_retry_at = failure_at + Duration::minutes(1);
     store
-        .claim_turn_run(
+        .claim_turn(
             failure_token,
             failure_claimed_at,
             failure_claimed_at + Duration::minutes(2),
@@ -2950,7 +2948,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
         failures.push(tokio::spawn(async move {
             barrier.wait().await;
             store
-                .record_turn_run_failure_and_append_event(
+                .record_turn_failure_and_append_event(
                     failure_turn.id,
                     failure_token,
                     failure_at,
@@ -2989,7 +2987,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
     assert_eq!(failure_events[0].seq, 1);
     assert_eq!(
         store
-            .get_turn_run(failure_turn.id)
+            .get_turn(failure_turn.id)
             .await
             .unwrap()
             .unwrap()
@@ -3017,7 +3015,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
     let cancellation_expiry = cancellation_claimed_at + Duration::minutes(1);
     let cancellation_requested_at = cancellation_claimed_at + Duration::seconds(1);
     store
-        .claim_turn_run(
+        .claim_turn(
             cancellation_token,
             cancellation_claimed_at,
             cancellation_expiry,
@@ -3151,7 +3149,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
     let event_claimed_at = turn_event.available_at + Duration::seconds(1);
     let event_lease_token = uuid::Uuid::new_v4();
     store
-        .claim_turn_run(
+        .claim_turn(
             event_lease_token,
             event_claimed_at,
             event_claimed_at + Duration::minutes(1),
@@ -3188,7 +3186,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
         created_at: event_claimed_at + Duration::seconds(1),
     };
     store
-        .complete_turn_run(
+        .complete_turn(
             turn_event.id,
             event_lease_token,
             0,
@@ -3304,7 +3302,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
     let steer_lease = uuid::Uuid::new_v4();
     let steer_claimed_at = Utc::now();
     store
-        .claim_turn_run(
+        .claim_turn(
             steer_lease,
             steer_claimed_at,
             steer_claimed_at + Duration::minutes(1),
@@ -3387,7 +3385,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
     let steer_completed_at = Utc::now();
     assert!(matches!(
         store
-            .complete_turn_run(
+            .complete_turn(
                 steer_turn.id,
                 steer_lease,
                 0,
@@ -3426,7 +3424,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
     };
     let fresh_completed_at = second_steer.resolved_at.unwrap() + chrono::Duration::microseconds(1);
     store
-        .complete_turn_run(
+        .complete_turn(
             steer_turn.id,
             steer_lease,
             1,
@@ -3578,7 +3576,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
     let client_wait_claimed_at = client_wait_turn.available_at + Duration::seconds(1);
     let client_wait_turn_token = uuid::Uuid::new_v4();
     let client_wait_claim = store
-        .claim_turn_run(
+        .claim_turn(
             client_wait_turn_token,
             client_wait_claimed_at,
             client_wait_claimed_at + Duration::minutes(1),
@@ -3660,7 +3658,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
     );
     assert_eq!(
         store
-            .get_turn_run(client_wait_turn.id)
+            .get_turn(client_wait_turn.id)
             .await
             .unwrap()
             .unwrap()
@@ -3669,7 +3667,7 @@ async fn postgres_turn_acceptance_claims_and_receipts_are_atomic() {
     );
     let resumed_token = uuid::Uuid::new_v4();
     let resumed = store
-        .claim_turn_run(
+        .claim_turn(
             resumed_token,
             client_resolved_at,
             client_resolved_at + Duration::minutes(1),
@@ -4148,7 +4146,7 @@ async fn postgres_user_questions_resume_exactly_and_serialize_with_cancellation(
     let claim_task = tokio::spawn(async move {
         barrier.wait().await;
         claim_store
-            .claim_turn_run(
+            .claim_turn(
                 first_resume_lease,
                 resume_scan_at,
                 resume_scan_at + Duration::hours(1),
@@ -4251,12 +4249,7 @@ async fn postgres_user_questions_resume_exactly_and_serialize_with_cancellation(
         RequestTurnCancellationOutcome::Cancelled(_) | RequestTurnCancellationOutcome::Existing(_)
     ));
     assert_eq!(
-        store
-            .get_turn_run(race_turn_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .status,
+        store.get_turn(race_turn_id).await.unwrap().unwrap().status,
         TurnRunStatus::Cancelled
     );
     assert!(store

@@ -150,7 +150,7 @@ pub(in crate::db) async fn list_pending(
             .await
             .map_err(store_err)?
             .ok_or_else(|| AgentError::Store("pending question wait is missing".into()))?;
-        let turn = entities::turn_run::Entity::find_by_id(row.turn_id)
+        let turn = entities::code_turn::Entity::find_by_id(row.turn_id)
             .one(&transaction)
             .await
             .map_err(store_err)?
@@ -161,10 +161,10 @@ pub(in crate::db) async fn list_pending(
             || call.execution != ToolCallExecution::Orchestration.as_str()
             || call.status != ToolCallStatus::Pending.as_str()
             || call.client_executor_id.is_some()
-            || wait.chat_id != row.session_id
+            || wait.session_id != row.session_id
             || wait.turn_id != row.turn_id
             || wait.status != crate::TurnClientWaitStatus::Waiting.as_str()
-            || turn.chat_id != row.session_id
+            || turn.session_id != row.session_id
             || turn.status != TurnRunStatus::WaitingForClient.as_str()
             || turn.attempt_count != wait.attempt_count
             || turn.claim_count != wait.claim_count
@@ -272,12 +272,12 @@ pub(in crate::db) async fn answer(
         transaction.commit().await.map_err(store_err)?;
         return Ok(AnswerUserQuestionsOutcome::Unavailable);
     }
-    let turn = entities::turn_run::Entity::find_by_id(call.turn_id)
+    let turn = entities::code_turn::Entity::find_by_id(call.turn_id)
         .one(&transaction)
         .await
         .map_err(store_err)?
         .expect("locked question turn exists");
-    if turn.chat_id != request.chat_id.0
+    if turn.session_id != request.chat_id.0
         || turn.status != TurnRunStatus::WaitingForClient.as_str()
         || row.turn_id != turn.id
     {
@@ -289,7 +289,7 @@ pub(in crate::db) async fn answer(
         .max(database_now)
         .max(row.requested_at)
         .max(call.created_at)
-        .max(turn.updated_at);
+        .max(turn.updated_at.unwrap_or(database_now));
 
     // The row settles first, in the same transaction as the call: the
     // decision route and this one both land here, so the card is decided

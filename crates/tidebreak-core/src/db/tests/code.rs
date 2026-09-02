@@ -2269,6 +2269,10 @@ fn chat_and_code_entities_do_not_cross_reference() {
                 && !line.contains("CodeTurnId")
                 && !line.contains("code_turn_attachment")
                 && !line.contains("code_approval")
+                && !line.contains("code_turn_document_attachment")
+                && !line.contains("code_turn_claim")
+                && !line.contains("code_turn_steer")
+                && !line.contains("code_turn_failure")
             {
                 panic!("{} references chat TurnId: {line}", path.display());
             }

@@ -499,7 +499,7 @@ mod tests {
         let turn_lease = uuid::Uuid::new_v4();
         let now = Utc::now();
         let turn = store
-            .claim_turn_run(turn_lease, now, now + chrono::Duration::hours(1))
+            .claim_turn(turn_lease, now, now + chrono::Duration::hours(1))
             .await
             .unwrap()
             .turn
@@ -596,7 +596,7 @@ mod tests {
         let turn_lease = uuid::Uuid::new_v4();
         let now = Utc::now();
         let turn = store
-            .claim_turn_run(turn_lease, now, now + chrono::Duration::hours(1))
+            .claim_turn(turn_lease, now, now + chrono::Duration::hours(1))
             .await
             .unwrap()
             .turn

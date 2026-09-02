@@ -696,7 +696,7 @@ pub async fn post_cancel(
     // Distinguish "unknown chat" (404) from "known chat, nothing running" (409).
     store.require_chat(id).await?;
     if !store
-        .get_turn_run(body.turn_id)
+        .get_turn(body.turn_id)
         .await?
         .is_some_and(|turn| turn.chat_id == id)
     {
@@ -716,7 +716,7 @@ pub async fn post_cancel(
         // operational timestamp. Retry the same empty command with fresh time;
         // the store serializes it against the heartbeat and terminal decisions.
         if !store
-            .get_turn_run(body.turn_id)
+            .get_turn(body.turn_id)
             .await?
             .is_some_and(|turn| turn.chat_id == id)
         {
@@ -761,6 +761,27 @@ pub async fn post_cancel(
 /// Storage rechecks beneath the chat lock and commits ownership, turn creation,
 /// and queue removal atomically, so stale snapshots are harmless.
 pub(crate) async fn promote_queued_turns(state: &AppState) -> Result<(), ServerError> {
+    if let Some(runtime) = state.code.as_ref() {
+        let queued =
+            tidebreak_core::db::code::sessions_with_queued_turns_all_owners(&runtime.db).await?;
+        for (owner, session_id) in queued {
+            if runtime.has_worker(session_id) {
+                continue;
+            }
+            let Some(session) =
+                tidebreak_core::db::code::get_session(&runtime.db, &owner, session_id).await?
+            else {
+                continue;
+            };
+            if let Err(error) = runtime.attach_and_spawn_worker(session).await {
+                tracing::warn!(
+                    session = %session_id,
+                    error = ?error,
+                    "attach sweep could not start a worker for a queued turn"
+                );
+            }
+        }
+    }
     for chat_id in state.store.chats_with_queued_turns().await? {
         if read_queue_paused(&*state.store, chat_id).await? {
             continue;
@@ -787,7 +808,7 @@ pub(crate) async fn promote_queued_turns(state: &AppState) -> Result<(), ServerE
         // replay against the accepted turn's immutable execution selector.
         // Re-resolving here could turn a catalog change into an identity
         // conflict and strand or drop input that already committed.
-        let model = match state.store.get_turn_run(next.id).await? {
+        let model = match state.store.get_turn(next.id).await? {
             Some(existing) if existing.chat_id == chat_id => existing.model,
             Some(_) => {
                 dropped("its turn id was already accepted by another chat");

@@ -1147,7 +1147,7 @@ async fn admit_container_run(store: &Arc<dyn Store>, chat_id: ChatId, task: &str
     // just-written `updated_at` look like it is still in the future (LeaseLost).
     let now = chrono::Utc::now() + chrono::Duration::milliseconds(1);
     let turn = store
-        .claim_turn_run(lease, now, now + chrono::Duration::hours(1))
+        .claim_turn(lease, now, now + chrono::Duration::hours(1))
         .await
         .unwrap()
         .turn

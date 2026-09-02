@@ -842,7 +842,7 @@ impl PauseTerminalStore {
     async fn terminalize_expired_turn(&self, id: TurnId) -> Result<()> {
         let turn = self
             .inner
-            .get_turn_run(id)
+            .get_turn(id)
             .await?
             .ok_or_else(|| AgentError::Store("injected scan could not find turn".into()))?;
         let now = turn
@@ -853,7 +853,7 @@ impl PauseTerminalStore {
         loop {
             let outcome = self
                 .inner
-                .claim_turn_run(
+                .claim_turn(
                     uuid::Uuid::new_v4(),
                     scan_at,
                     scan_at + chrono::Duration::seconds(1),
@@ -1027,11 +1027,11 @@ impl Store for PauseTerminalStore {
             )
             .await
     }
-    async fn get_turn_run(&self, id: TurnId) -> Result<Option<tidebreak_core::TurnRun>> {
-        self.inner.get_turn_run(id).await
+    async fn get_turn(&self, id: TurnId) -> Result<Option<tidebreak_core::TurnRun>> {
+        self.inner.get_turn(id).await
     }
-    async fn list_turn_runs(&self, chat_id: ChatId) -> Result<Vec<tidebreak_core::TurnRun>> {
-        self.inner.list_turn_runs(chat_id).await
+    async fn list_turns(&self, chat_id: ChatId) -> Result<Vec<tidebreak_core::TurnRun>> {
+        self.inner.list_turns(chat_id).await
     }
     async fn begin_turn_admission(
         &self,
@@ -1141,7 +1141,7 @@ impl Store for PauseTerminalStore {
         if self.advance_before_steer_read.swap(false, Ordering::SeqCst) {
             let turn = self
                 .inner
-                .get_turn_run(turn_id)
+                .get_turn(turn_id)
                 .await?
                 .ok_or_else(|| AgentError::Store("injected steer read lost turn".into()))?;
             let lease_expires_at = turn
@@ -1151,7 +1151,7 @@ impl Store for PauseTerminalStore {
             let advanced = now + chrono::Duration::milliseconds(1);
             if !self
                 .inner
-                .heartbeat_turn_run(turn_id, lease_token, advanced, lease_expires_at)
+                .heartbeat_turn(turn_id, lease_token, advanced, lease_expires_at)
                 .await?
             {
                 return Err(AgentError::Store(
@@ -1224,7 +1224,7 @@ impl Store for PauseTerminalStore {
         }
         Ok(applied)
     }
-    async fn claim_turn_run(
+    async fn claim_turn(
         &self,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
@@ -1232,7 +1232,7 @@ impl Store for PauseTerminalStore {
     ) -> Result<tidebreak_core::ClaimTurnRunOutcome> {
         let outcome = self
             .inner
-            .claim_turn_run(lease_token, now, lease_expires_at)
+            .claim_turn(lease_token, now, lease_expires_at)
             .await?;
         if outcome.turn.is_some() && self.pause_after_claim_commit.swap(false, Ordering::SeqCst) {
             self.entered.notify_one();
@@ -1248,7 +1248,7 @@ impl Store for PauseTerminalStore {
         }
         Ok(outcome)
     }
-    async fn heartbeat_turn_run(
+    async fn heartbeat_turn(
         &self,
         id: TurnId,
         lease_token: uuid::Uuid,
@@ -1257,7 +1257,7 @@ impl Store for PauseTerminalStore {
     ) -> Result<bool> {
         let heartbeat = self
             .inner
-            .heartbeat_turn_run(id, lease_token, now, lease_expires_at)
+            .heartbeat_turn(id, lease_token, now, lease_expires_at)
             .await?;
         if heartbeat
             && self
@@ -1278,15 +1278,15 @@ impl Store for PauseTerminalStore {
     ) -> Result<tidebreak_core::TurnLeaseFence> {
         self.inner.fence_turn_lease(id, lease_token, now).await
     }
-    async fn expire_turn_run_lease(
+    async fn expire_turn_lease(
         &self,
         id: TurnId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<bool> {
-        self.inner.expire_turn_run_lease(id, lease_token, now).await
+        self.inner.expire_turn_lease(id, lease_token, now).await
     }
-    async fn complete_turn_run_and_append_event(
+    async fn complete_turn_and_append_event(
         &self,
         id: TurnId,
         lease_token: uuid::Uuid,
@@ -1309,7 +1309,7 @@ impl Store for PauseTerminalStore {
         }
         let outcome = self
             .inner
-            .complete_turn_run_and_append_event(
+            .complete_turn_and_append_event(
                 id,
                 lease_token,
                 expected_steer_revision,
@@ -1375,7 +1375,7 @@ impl Store for PauseTerminalStore {
             .resumed_sandbox_spawn_batch(turn_id, attempt_count, claim_count)
             .await
     }
-    async fn record_turn_run_failure_and_append_event(
+    async fn record_turn_failure_and_append_event(
         &self,
         id: TurnId,
         lease_token: uuid::Uuid,
@@ -1395,7 +1395,7 @@ impl Store for PauseTerminalStore {
             self.terminalize_expired_turn(id).await?;
         }
         self.inner
-            .record_turn_run_failure_and_append_event(
+            .record_turn_failure_and_append_event(
                 id,
                 lease_token,
                 now,
@@ -1936,7 +1936,7 @@ async fn admit_sandbox_for_test(
     let turn_lease = uuid::Uuid::new_v4();
     let now = chrono::Utc::now();
     let turn = store
-        .claim_turn_run(turn_lease, now, now + chrono::Duration::hours(1))
+        .claim_turn(turn_lease, now, now + chrono::Duration::hours(1))
         .await
         .unwrap()
         .turn

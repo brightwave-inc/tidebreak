@@ -151,6 +151,8 @@ fn caps() -> HarnessCaps {
         durable_parks: CapLevel::Unknown,
         user_questions: CapLevel::Supported,
         standing_grants: CapLevel::Supported,
+        mid_turn_resume: CapLevel::Unsupported,
+        transcript: CapLevel::Unsupported,
     }
 }
 

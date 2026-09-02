@@ -32,7 +32,7 @@ async fn output_writeback_fixture() -> (tempfile::TempDir, Arc<dyn Store>, Chat,
     let lease_token = uuid::Uuid::new_v4();
     let claimed_at = Utc::now();
     store
-        .claim_turn_run(
+        .claim_turn(
             lease_token,
             claimed_at,
             claimed_at + chrono::Duration::minutes(1),

@@ -88,18 +88,6 @@ where
     if by_code_publication {
         return Ok(true);
     }
-    let by_attachment = entities::message_attachment::Entity::find()
-        .select_only()
-        .column(entities::message_attachment::Column::MessageId)
-        .filter(entities::message_attachment::Column::BlobId.eq(blob_id))
-        .into_tuple::<uuid::Uuid>()
-        .one(conn)
-        .await
-        .map_err(store_err)?
-        .is_some();
-    if by_attachment {
-        return Ok(true);
-    }
     let by_code_turn = entities::code_turn_attachment::Entity::find()
         .select_only()
         .column(entities::code_turn_attachment::Column::TurnId)
