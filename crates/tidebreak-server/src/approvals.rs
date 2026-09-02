@@ -5,7 +5,7 @@
 //! transitions, and a waiter recreated after process loss recovers the same
 //! pending or terminal state.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -14,8 +14,8 @@ use tokio::sync::Notify;
 use tidebreak_core::{
     ApprovalDecision, ApprovalFuture, ApprovalGate, ApprovalJournalIdentity, ApprovalRegistration,
     ApprovalRegistrationFuture, ApprovalRequest, ApprovalRequiredPublication, CallId, ChatId,
-    DecideToolApprovalOutcome, GrantLevel, GrantScope, RequestToolApprovalOutcome, Result,
-    StandingGrant, StandingGrants, Store,
+    DecideToolApprovalOutcome, GrantLevel, GrantScope, JudgeVerdictOutcome,
+    RequestToolApprovalOutcome, Result, SequencedCodeEvent, StandingGrant, StandingGrants, Store,
 };
 
 /// Coordinates durable approval state with local low-latency waiters.
@@ -26,6 +26,10 @@ pub struct ApprovalBroker {
     /// reads the durable store inside registration, never this process-local
     /// cache.
     standing_grants: Arc<StandingGrants>,
+    /// The chat's live channel, for the decision row a settlement journals.
+    /// Absent in tests that assemble a broker without a bus, where nothing
+    /// follows the channel; replay serves the row either way.
+    events: OnceLock<Arc<crate::bus::EventBus>>,
 }
 
 impl ApprovalBroker {
@@ -35,6 +39,21 @@ impl ApprovalBroker {
             store,
             wake: Arc::new(Notify::new()),
             standing_grants: Arc::new(StandingGrants::new()),
+            events: OnceLock::new(),
+        }
+    }
+
+    /// Publish every decision row a settlement journals onto the chat's live
+    /// channel. Called once, when the application state is assembled.
+    pub fn publish_into(&self, events: Arc<crate::bus::EventBus>) {
+        let _ = self.events.set(events);
+    }
+
+    /// Deliver a journaled decision live. The durable write already
+    /// happened; a chat nobody is watching streams to no one.
+    fn publish(&self, chat_id: ChatId, resolution: SequencedCodeEvent) {
+        if let Some(events) = self.events.get() {
+            let _ = events.sender(chat_id).send_row(resolution);
         }
     }
 
@@ -132,7 +151,15 @@ impl ApprovalBroker {
             }
         };
         match outcome {
-            DecideToolApprovalOutcome::Decided(_) | DecideToolApprovalOutcome::Existing(_) => {
+            DecideToolApprovalOutcome::Decided { resolution, .. } => {
+                if let Some(grant) = grant {
+                    self.standing_grants.record(grant);
+                }
+                self.publish(chat_id, *resolution);
+                self.wake.notify_waiters();
+                Ok(ResolveApprovalOutcome::Resolved)
+            }
+            DecideToolApprovalOutcome::Existing(_) => {
                 if let Some(grant) = grant {
                     self.standing_grants.record(grant);
                 }
@@ -196,7 +223,13 @@ impl ApprovalBroker {
             )
             .await?;
         match outcome {
-            DecideToolApprovalOutcome::Decided(_) | DecideToolApprovalOutcome::Existing(_) => {
+            DecideToolApprovalOutcome::Decided { resolution, .. } => {
+                self.standing_grants.record(grant);
+                self.publish(chat_id, *resolution);
+                self.wake.notify_waiters();
+                Ok(ResolveApprovalOutcome::Resolved)
+            }
+            DecideToolApprovalOutcome::Existing(_) => {
                 self.standing_grants.record(grant);
                 self.wake.notify_waiters();
                 Ok(ResolveApprovalOutcome::Resolved)
@@ -217,14 +250,19 @@ impl ApprovalBroker {
         call_id: CallId,
         approved: bool,
     ) -> Result<bool> {
-        let landed = self
+        match self
             .store
             .resolve_tool_call_approval_from_judge(chat_id, call_id, approved)
-            .await?;
-        if landed && approved {
-            self.wake.notify_waiters();
+            .await?
+        {
+            JudgeVerdictOutcome::Approved(resolution) => {
+                self.publish(chat_id, *resolution);
+                self.wake.notify_waiters();
+                Ok(true)
+            }
+            JudgeVerdictOutcome::Declined => Ok(true),
+            JudgeVerdictOutcome::NotOwned => Ok(false),
         }
-        Ok(landed)
     }
 }
 
@@ -1714,7 +1752,7 @@ mod tests {
                 )
                 .await
                 .unwrap(),
-            DecideToolApprovalOutcome::Decided(_)
+            DecideToolApprovalOutcome::Decided { .. }
         ));
 
         let registration = ApprovalBroker::new(store)

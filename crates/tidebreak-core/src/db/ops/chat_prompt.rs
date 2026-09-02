@@ -89,17 +89,29 @@ pub(in crate::db) async fn list_pending_chat_prompts(
 pub(in crate::db) async fn list_pending_prompt_rows(
     store: &DbStore,
 ) -> Result<Vec<PendingPromptRow>> {
-    let question_requests = entities::user_question_request::Entity::find()
+    // Every pending park is an approval row; its kind says which card it is
+    // (decision 0048 step 5). Consent cards carry the engine's tool request
+    // instead and belong to the inbox's approval projection.
+    let parks = entities::code_approval::Entity::find()
         .filter(
-            entities::user_question_request::Column::Status
-                .eq(crate::UserQuestionRequestStatus::Pending.as_str()),
+            entities::code_approval::Column::State
+                .eq(crate::code::CodeApprovalState::Pending.as_str()),
         )
-        .order_by_asc(entities::user_question_request::Column::ChatId)
-        .order_by_asc(entities::user_question_request::Column::AskedAt)
-        .order_by_asc(entities::user_question_request::Column::CallId)
+        .order_by_asc(entities::code_approval::Column::SessionId)
+        .order_by_asc(entities::code_approval::Column::RequestedAt)
+        .order_by_asc(entities::code_approval::Column::Id)
         .all(&store.conn)
         .await
         .map_err(store_err)?;
+    let mut question_requests = Vec::new();
+    let mut plan_requests = Vec::new();
+    for row in parks {
+        match serde_json::from_value::<crate::code::CodeApprovalKind>(row.kind.clone()) {
+            Ok(crate::code::CodeApprovalKind::Questions { .. }) => question_requests.push(row),
+            Ok(crate::code::CodeApprovalKind::Plan { .. }) => plan_requests.push(row),
+            _ => {}
+        }
+    }
 
     // A question request is an auxiliary renderer projection. Keep the same
     // live-continuation checks as its detailed recovery path so an incomplete
@@ -137,45 +149,35 @@ pub(in crate::db) async fn list_pending_prompt_rows(
 
     let mut rows = Vec::<PendingPromptRow>::new();
     for request in question_requests {
-        let Some(call) = question_calls.get(&request.call_id) else {
+        let Some(call) = question_calls.get(&request.id) else {
             continue;
         };
-        let Some(wait) = waits.get(&request.call_id) else {
+        let Some(wait) = waits.get(&request.id) else {
             continue;
         };
         let Some(turn) = turns.get(&request.turn_id) else {
             continue;
         };
-        if call.chat_id != request.chat_id
+        if call.chat_id != request.session_id
             || call.turn_id != request.turn_id
             || call.client_executor_id.is_some()
-            || wait.chat_id != request.chat_id
+            || wait.chat_id != request.session_id
             || wait.turn_id != request.turn_id
-            || turn.chat_id != request.chat_id
+            || turn.chat_id != request.session_id
             || turn.attempt_count != wait.attempt_count
             || turn.claim_count != wait.claim_count
         {
             continue;
         }
         rows.push(PendingPromptRow {
-            chat_id: ChatId(request.chat_id),
+            chat_id: ChatId(request.session_id),
             turn_id: TurnId(request.turn_id),
-            call_id: CallId(request.call_id),
+            call_id: CallId(request.id),
             kind: InboxItemKind::Question,
-            requested_at: request.asked_at,
+            requested_at: request.requested_at,
         });
     }
 
-    let plan_requests = entities::plan_request::Entity::find()
-        .filter(
-            entities::plan_request::Column::Status.eq(crate::PlanRequestStatus::Pending.as_str()),
-        )
-        .order_by_asc(entities::plan_request::Column::ChatId)
-        .order_by_asc(entities::plan_request::Column::ProposedAt)
-        .order_by_asc(entities::plan_request::Column::CallId)
-        .all(&store.conn)
-        .await
-        .map_err(store_err)?;
     let plan_calls = entities::tool_call::Entity::find()
         .filter(entities::tool_call::Column::Name.eq(EXIT_PLAN_MODE_TOOL))
         .filter(
@@ -189,32 +191,32 @@ pub(in crate::db) async fn list_pending_prompt_rows(
         .map(|call| (call.id, call))
         .collect::<HashMap<_, _>>();
     for request in plan_requests {
-        let Some(call) = plan_calls.get(&request.call_id) else {
+        let Some(call) = plan_calls.get(&request.id) else {
             continue;
         };
-        let Some(wait) = waits.get(&request.call_id) else {
+        let Some(wait) = waits.get(&request.id) else {
             continue;
         };
         let Some(turn) = turns.get(&request.turn_id) else {
             continue;
         };
-        if call.chat_id != request.chat_id
+        if call.chat_id != request.session_id
             || call.turn_id != request.turn_id
             || call.client_executor_id.is_some()
-            || wait.chat_id != request.chat_id
+            || wait.chat_id != request.session_id
             || wait.turn_id != request.turn_id
-            || turn.chat_id != request.chat_id
+            || turn.chat_id != request.session_id
             || turn.attempt_count != wait.attempt_count
             || turn.claim_count != wait.claim_count
         {
             continue;
         }
         rows.push(PendingPromptRow {
-            chat_id: ChatId(request.chat_id),
+            chat_id: ChatId(request.session_id),
             turn_id: TurnId(request.turn_id),
-            call_id: CallId(request.call_id),
+            call_id: CallId(request.id),
             kind: InboxItemKind::PlanReview,
-            requested_at: request.proposed_at,
+            requested_at: request.requested_at,
         });
     }
 

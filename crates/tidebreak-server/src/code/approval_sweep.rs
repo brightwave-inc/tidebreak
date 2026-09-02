@@ -90,6 +90,10 @@ pub(crate) async fn abandon_for_settled_turns(
 
 /// Abandon every pending approval on the session, whatever its turn says.
 /// The session-end sweep: no later decision can reach a stopped engine.
+///
+/// An engine with durable parks keeps its cards: the internal engine's turn
+/// lane holds its consent cards and parks in the store, not in a process,
+/// so a stopped worker leaves them decidable from the chat routes.
 pub(crate) async fn abandon_for_ended_session(
     db: &DbStore,
     bus: &CodeEventBus,
@@ -97,11 +101,16 @@ pub(crate) async fn abandon_for_ended_session(
     session_id: CodeSessionId,
     spawn_epoch: i64,
 ) {
+    if parks_are_durable(db, owner, session_id).await {
+        return;
+    }
     let doomed = pending(db, owner, session_id).await;
     abandon(db, bus, owner, session_id, spawn_epoch, doomed).await;
 }
 
 /// Settle every approval whose native waiter disappeared with the process.
+/// A session whose engine parks durably keeps them (see
+/// [`abandon_for_ended_session`]).
 pub(crate) async fn abandon_for_restart(
     db: &DbStore,
     bus: &CodeEventBus,
@@ -109,6 +118,9 @@ pub(crate) async fn abandon_for_restart(
     session_id: CodeSessionId,
     spawn_epoch: i64,
 ) {
+    if parks_are_durable(db, owner, session_id).await {
+        return;
+    }
     let now = chrono::Utc::now();
     let abandoned =
         abandon_pending_approvals_for_stopped_session(db, owner, session_id, spawn_epoch, now)
@@ -118,6 +130,15 @@ pub(crate) async fn abandon_for_restart(
         bus.publish(session_id, settlement.event);
     }
     refresh_attention_if_clear(db, bus, owner, session_id).await;
+}
+
+/// Whether the session's engine holds its pending cards in the store rather
+/// than in a live process (decision 0048 step 5: `durable_parks`).
+async fn parks_are_durable(db: &DbStore, owner: &OwnerId, session_id: CodeSessionId) -> bool {
+    matches!(
+        get_session(db, owner, session_id).await,
+        Ok(Some(session)) if session.harness_kind == tidebreak_core::HarnessKind::Internal
+    )
 }
 
 async fn pending(db: &DbStore, owner: &OwnerId, session_id: CodeSessionId) -> Vec<CodeApproval> {

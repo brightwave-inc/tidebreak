@@ -97,6 +97,33 @@ impl ChatEventSender {
         }
         self.sender.send(event).unwrap_or(0)
     }
+
+    /// Publish a journal row stored in the code vocabulary: the row itself
+    /// goes onto the session's channel, and its chat reading — when it has
+    /// one — to the chat's subscribers. An approval settlement carries more
+    /// than its chat reading (a grant scope, denial feedback), so it is
+    /// mirrored as stored rather than re-derived.
+    pub fn send_row(&self, row: SequencedCodeEvent) -> usize {
+        let chat_event = chat_journal::chat_event(row.event.clone())
+            .ok()
+            .flatten()
+            .map(|event| SequencedEvent {
+                seq: row.seq,
+                event,
+            });
+        if let Some(mirror) = &self.mirror {
+            mirror.publish(CodeSessionId(self.chat.0), row);
+        }
+        chat_event
+            .map(|event| self.sender.send(event).unwrap_or(0))
+            .unwrap_or(0)
+    }
+
+    /// Publish to the chat's subscribers only, for a row the session
+    /// channel already carried.
+    pub fn send_unmirrored(&self, event: SequencedEvent) -> usize {
+        self.sender.send(event).unwrap_or(0)
+    }
 }
 
 impl EventBus {

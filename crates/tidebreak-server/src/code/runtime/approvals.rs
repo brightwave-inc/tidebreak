@@ -441,6 +441,20 @@ impl CodeRuntime {
         )
         .await?
         else {
+            // An engine with durable parks settles a parked continuation
+            // in the store operation that resumes it — answers and a plan
+            // decision complete the call atomically with the row — and
+            // publishes the row itself. Its claim is spent; the row says
+            // so. Anything else is a lost claim.
+            let current = self.get_approval(owner, id).await?;
+            if adapter.capabilities(&probe).durable_parks == CapLevel::Supported
+                && !current.state.is_pending()
+                && current.decision_claim.is_none()
+            {
+                self.refresh_approval_attention(owner, approval.session_id)
+                    .await;
+                return Ok(current);
+            }
             return Err(ServerError::internal(format!(
                 "approval {id} lost its durable decision claim after native acknowledgement"
             )));

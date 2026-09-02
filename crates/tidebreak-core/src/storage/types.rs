@@ -910,16 +910,46 @@ pub struct JournaledToolApprovalOutcome {
 }
 
 /// Result of deciding one exact durable approval request.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum DecideToolApprovalOutcome {
     /// This request transitioned from pending to the supplied decision.
-    Decided(ToolApproval),
+    Decided {
+        /// The decided card.
+        approval: ToolApproval,
+        /// The decision's journal row, committed with it, for live delivery
+        /// on both surfaces.
+        resolution: Box<crate::code::SequencedCodeEvent>,
+    },
     /// An exact retry recovered the same decision bytes.
     Existing(ToolApproval),
     /// The request was already decided differently.
     DecisionConflict,
     /// No pending or decided approval exists under this chat and call identity.
     Unavailable,
+}
+
+/// Result of landing the Auto-mode judge's verdict on one parked call.
+#[derive(Debug, Clone, PartialEq)]
+pub enum JudgeVerdictOutcome {
+    /// The judge approved; the card is decided and its journal row committed.
+    Approved(Box<crate::code::SequencedCodeEvent>),
+    /// The judge declined; the card stays pending for the human.
+    Declined,
+    /// The judge no longer owned the call: a human got there first, or it
+    /// resolved.
+    NotOwned,
+}
+
+/// Result of minting the standing grant an approve-with-grant decision
+/// names on a card that is still pending.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MintStandingGrantOutcome {
+    /// The grant exists, written now or by an identical earlier mint.
+    Minted(crate::approval::StandingGrant),
+    /// The card is not pending under this chat and call.
+    NotPending,
+    /// The scope does not describe this call, or the kind cannot be granted.
+    GrantNotAvailable,
 }
 
 /// A client claim and its secret per-claim fencing receipt.
@@ -978,6 +1008,8 @@ pub enum DecidePlanOutcome {
         /// The call's journaled completion, committed with the decision so a
         /// live renderer settles the card now rather than at the turn's end.
         completion_event: Box<SequencedEvent>,
+        /// The approval row's own decision, journaled before the completion.
+        resolution: Box<crate::code::SequencedCodeEvent>,
     },
     /// An ambiguous retry recovered the same committed decision.
     Existing(TurnRun),
@@ -999,6 +1031,8 @@ pub enum AnswerUserQuestionsOutcome {
         /// The call's journaled completion, committed with the answer so a
         /// live renderer settles the card now rather than at the turn's end.
         completion_event: Box<SequencedEvent>,
+        /// The approval row's own decision, journaled before the completion.
+        resolution: Box<crate::code::SequencedCodeEvent>,
     },
     /// An ambiguous retry recovered the same committed answers.
     Existing(TurnRun),

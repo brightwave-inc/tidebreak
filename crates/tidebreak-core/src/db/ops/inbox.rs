@@ -4,7 +4,8 @@ use std::collections::{HashMap, HashSet};
 
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 
-use crate::approval::ToolApprovalStatus;
+use crate::approval::InternalToolApprovalRequest;
+use crate::code::CodeApprovalState;
 use crate::error::Result;
 use crate::model::OwnerId;
 use crate::storage::{InboxItem, InboxItemKind};
@@ -47,34 +48,32 @@ pub(in crate::db) async fn list_inbox_items(
     // reader is actually being asked, so it claims the call.
     let mut approval_call_ids = HashSet::new();
 
-    let approvals = entities::tool_call::Entity::find()
-        .filter(
-            entities::tool_call::Column::ApprovalStatus.eq(ToolApprovalStatus::Pending.as_str()),
-        )
-        .order_by_asc(entities::tool_call::Column::ApprovalRequestedAt)
-        .order_by_asc(entities::tool_call::Column::Id)
+    // Consent cards are the approval rows that carry the engine's own tool
+    // request; a park (questions, a plan) is projected below from the same
+    // table by its kind.
+    let approvals = entities::code_approval::Entity::find()
+        .filter(entities::code_approval::Column::State.eq(CodeApprovalState::Pending.as_str()))
+        .order_by_asc(entities::code_approval::Column::RequestedAt)
+        .order_by_asc(entities::code_approval::Column::Id)
         .all(&store.conn)
         .await
         .map_err(store_err)?;
-    for call in approvals {
-        let Some(title) = chats.get(&call.chat_id) else {
+    for row in approvals {
+        let Some(title) = chats.get(&row.session_id) else {
             continue;
         };
-        // A pending approval without a request timestamp is a row mid-write or
-        // one written by an older build; it has no place in a time-ordered
-        // list, and the chat's own approval route still recovers it.
-        let Some(requested_at) = call.approval_requested_at else {
+        let Some(request) = InternalToolApprovalRequest::from_raw(&row.harness_raw) else {
             continue;
         };
-        approval_call_ids.insert(call.id);
+        approval_call_ids.insert(row.id);
         items.push(InboxItem {
-            chat_id: ChatId(call.chat_id),
+            chat_id: ChatId(row.session_id),
             chat_title: title.clone(),
-            turn_id: TurnId(call.turn_id),
-            call_id: CallId(call.id),
+            turn_id: TurnId(row.turn_id),
+            call_id: CallId(row.id),
             kind: InboxItemKind::ToolApproval,
-            tool_name: Some(call.name),
-            requested_at,
+            tool_name: Some(request.tool_name),
+            requested_at: row.requested_at,
         });
     }
 

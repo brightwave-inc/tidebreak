@@ -1063,58 +1063,55 @@
   },
   {
     "kind": "event_frame",
-    "name": "event: tool_approval_required (internal engine)",
+    "name": "event: approval_requested (internal engine consent card)",
     "value": {
       "event": {
-        "call_id": "call_01",
-        "class": "workspace",
-        "grant_scopes": [
-          {
-            "command": "cargo",
-            "scope": "any_args_for"
-          }
-        ],
-        "kind": "exec_may_run_networked_command",
-        "tool_name": "exec",
-        "type": "tool_approval_required"
+        "approval_id": "00000000-0000-0000-0000-000000000005",
+        "request": {
+          "approval": "exec_may_run_networked_command",
+          "class": "workspace",
+          "grant_scopes": [
+            {
+              "command": "cargo",
+              "scope": "any_args_for"
+            }
+          ],
+          "kind": "tool_use",
+          "tool_name": "exec"
+        },
+        "type": "approval_requested"
       },
       "seq": 58
     }
   },
   {
     "kind": "event_frame",
-    "name": "event: tool_approval_decided (internal engine)",
+    "name": "event: approval_requested (internal engine questions park)",
     "value": {
       "event": {
-        "approved": true,
-        "call_id": "call_01",
-        "type": "tool_approval_decided"
+        "approval_id": "00000000-0000-0000-0000-000000000005",
+        "request": {
+          "kind": "questions",
+          "turn_id": "00000000-0000-0000-0000-000000000004"
+        },
+        "type": "approval_requested"
       },
       "seq": 59
     }
   },
   {
     "kind": "event_frame",
-    "name": "event: questions_asked (internal engine)",
+    "name": "event: approval_requested (internal engine plan park)",
     "value": {
       "event": {
-        "call_id": "call_02",
-        "turn_id": "00000000-0000-0000-0000-000000000004",
-        "type": "questions_asked"
+        "approval_id": "00000000-0000-0000-0000-000000000005",
+        "request": {
+          "kind": "plan",
+          "turn_id": "00000000-0000-0000-0000-000000000004"
+        },
+        "type": "approval_requested"
       },
       "seq": 60
-    }
-  },
-  {
-    "kind": "event_frame",
-    "name": "event: plan_proposed (internal engine)",
-    "value": {
-      "event": {
-        "call_id": "call_03",
-        "turn_id": "00000000-0000-0000-0000-000000000004",
-        "type": "plan_proposed"
-      },
-      "seq": 61
     }
   },
   {

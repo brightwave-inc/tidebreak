@@ -70,10 +70,14 @@ pub async fn answer_user_questions(
         AnswerUserQuestionsOutcome::Answered {
             turn,
             completion_event,
+            resolution,
         } => {
-            // Live delivery of the journaled completion; replay covers anyone
-            // not connected, so a missed send is not a correctness gap.
-            let _ = state.events.sender(chat_id).send(*completion_event);
+            // Live delivery of the journaled decision and completion; replay
+            // covers anyone not connected, so a missed send is not a
+            // correctness gap.
+            let sender = state.events.sender(chat_id);
+            let _ = sender.send_row(*resolution);
+            let _ = sender.send(*completion_event);
             (AnswerDisposition::Answered, turn)
         }
         AnswerUserQuestionsOutcome::Existing(turn) => (AnswerDisposition::Existing, turn),

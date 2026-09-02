@@ -1170,7 +1170,7 @@ async fn run_turn(
                 &mut streamed_text,
             );
         }
-        if let CodeEvent::ApprovalRequested { approval_id } = &decoded.event {
+        if let CodeEvent::ApprovalRequested { approval_id, .. } = &decoded.event {
             print_approval_prompt(*approval_id);
             if on_approval == OnApproval::Fail {
                 break Ok(EXIT_APPROVAL_PARKED);

@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::approval::{ApprovalDecision, ApprovalRequest, StandingGrant, ToolApproval};
+use crate::approval::{ApprovalDecision, ApprovalRequest, GrantScope, StandingGrant, ToolApproval};
 use crate::connected_app::{ConnectedApp, ConnectedAppKind};
 use crate::deliverable::{CreateOutput, NewOutputRevision, OutputRecord, OutputRevision};
 use crate::error::{AgentError, Result};
@@ -2670,16 +2670,32 @@ pub trait Store: Send + Sync {
         ))
     }
 
-    /// Land the Auto-mode judge's verdict on one parked call. `false` means
-    /// the judge no longer owns it (a human got there first, or it resolved).
+    /// Land the Auto-mode judge's verdict on one parked call. An approval
+    /// decides the card and journals its decision; a decline hands the card
+    /// to the human; `NotOwned` means the judge no longer owned it (a human
+    /// got there first, or it resolved).
     async fn resolve_tool_call_approval_from_judge(
         &self,
         _chat_id: ChatId,
         _call_id: CallId,
         _approved: bool,
-    ) -> Result<bool> {
+    ) -> Result<JudgeVerdictOutcome> {
         Err(AgentError::Store(
             "durable tool approval storage is not implemented by this Store".into(),
+        ))
+    }
+
+    /// Mint the standing grant an approve-with-grant decision names while
+    /// the card is still pending, without deciding the card: the internal
+    /// engine's part of a decision the session route delivers and settles.
+    async fn mint_standing_grant_for_pending_approval(
+        &self,
+        _chat_id: ChatId,
+        _call_id: CallId,
+        _scope: &GrantScope,
+    ) -> Result<MintStandingGrantOutcome> {
+        Err(AgentError::Store(
+            "durable standing-grant storage is not implemented by this Store".into(),
         ))
     }
 

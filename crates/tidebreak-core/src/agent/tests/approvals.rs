@@ -50,9 +50,11 @@ async fn sensitive_tool_parks_until_approved() {
     assert!(events
         .iter()
         .any(|e| matches!(e, AgentEvent::ApprovalRequired { .. })));
-    assert!(events
+    // The decision is the approval row's, journaled where the row settles
+    // (decision 0048 step 5); the loop reports only that the tool ran.
+    assert!(!events
         .iter()
-        .any(|e| matches!(e, AgentEvent::ApprovalDecided { approved: true, .. })));
+        .any(|e| matches!(e, AgentEvent::ApprovalDecided { .. })));
     assert_eq!(ran.load(Ordering::SeqCst), 1);
     assert!(events.iter().any(|e| matches!(
         e,
@@ -1262,13 +1264,6 @@ async fn sensitive_tool_is_refused_without_a_gate() {
     let events: Vec<AgentEvent> = rx.collect().await;
 
     assert_eq!(ran.load(Ordering::SeqCst), 0);
-    assert!(events.iter().any(|e| matches!(
-        e,
-        AgentEvent::ApprovalDecided {
-            approved: false,
-            ..
-        }
-    )));
     assert!(events.iter().any(|e| matches!(
         e,
         AgentEvent::ToolCallCompleted { output, .. } if output.is_error

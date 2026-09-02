@@ -554,6 +554,7 @@ impl LiveSink {
             feedback: None,
             requested_at: Utc::now(),
             decided_at: None,
+            auto_judge_status: None,
         };
         let Some(event) = insert_approval_for_worker(&self.db, &self.owner, &approval)
             .await

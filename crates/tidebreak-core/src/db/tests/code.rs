@@ -856,6 +856,7 @@ async fn entity_graph_round_trips() {
             feedback: None,
             requested_at: now(),
             decided_at: None,
+            auto_judge_status: None,
         },
     )
     .await
@@ -899,6 +900,7 @@ async fn approval_claim_and_abandonment_have_one_winner() {
             feedback: None,
             requested_at: now(),
             decided_at: None,
+            auto_judge_status: None,
         },
     )
     .await
@@ -997,6 +999,7 @@ async fn approval_request_rolls_back_when_its_journal_event_fails() {
         feedback: None,
         requested_at: now(),
         decided_at: None,
+        auto_judge_status: None,
     };
     store
         .conn
@@ -1048,6 +1051,7 @@ async fn approval_settlement_rolls_back_when_its_journal_event_fails() {
             feedback: None,
             requested_at: now(),
             decided_at: None,
+            auto_judge_status: None,
         },
     )
     .await
@@ -1134,6 +1138,7 @@ async fn a_replaced_worker_cannot_insert_a_late_approval() {
         feedback: None,
         requested_at: now(),
         decided_at: None,
+        auto_judge_status: None,
     };
 
     assert!(insert_approval_for_worker(&store, &owner, &approval)
@@ -1178,6 +1183,7 @@ async fn restart_abandons_claimed_and_unclaimed_approvals_for_the_stopped_worker
             feedback: None,
             requested_at: now(),
             decided_at: None,
+            auto_judge_status: None,
         },
     )
     .await
@@ -1218,6 +1224,7 @@ async fn restart_abandons_claimed_and_unclaimed_approvals_for_the_stopped_worker
             feedback: None,
             requested_at: now(),
             decided_at: None,
+            auto_judge_status: None,
         },
     )
     .await
@@ -1245,6 +1252,7 @@ async fn restart_abandons_claimed_and_unclaimed_approvals_for_the_stopped_worker
             feedback: None,
             requested_at: now(),
             decided_at: None,
+            auto_judge_status: None,
         },
     )
     .await
@@ -1360,6 +1368,7 @@ async fn interrupted_recovery_rolls_back_every_row_when_the_journal_fails() {
             feedback: None,
             requested_at: now(),
             decided_at: None,
+            auto_judge_status: None,
         },
     )
     .await
@@ -2278,6 +2287,7 @@ async fn owner_scoped_code_queries_partition_every_table() {
             feedback: None,
             requested_at: now(),
             decided_at: None,
+            auto_judge_status: None,
         },
     )
     .await

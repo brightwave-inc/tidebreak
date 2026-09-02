@@ -212,9 +212,20 @@ describe the current schema, not the frozen baseline.
   engine writes have none and are skipped. The chat journal fixture
   (`fixtures/journal-events.json`) pins that projection.
 - **`code_approval`** — `id`, `session_id`, `turn_id`, `kind` (JSON,
-  normalized classification), `harness_raw` (JSON, size-capped), `state`
-  (`Pending | Approved | Denied`), `feedback`, `requested_at`,
-  `decided_at`.
+  normalized classification), `harness_raw` (JSON, size-capped),
+  `native_call_id`, `worker_epoch`, the decision claim, `state`
+  (`Pending | Approved | Denied | Abandoned`), `feedback`, `requested_at`,
+  `decided_at`, and `auto_judge_status` (the internal engine's judge
+  marker). The one approval surface: a consent card, a questions card, and
+  a plan proposal are each one row on every engine, with one
+  `ApprovalRequested` and one `ApprovalResolved` journal row. On the
+  internal engine the row's id is the tool call id, `kind` is the exact
+  preview and grant ladder (`ToolUse`), the questions (`Questions`), or the
+  mode a plan proposes (`Plan`, with the plan body on `harness_raw`), and
+  `harness_raw` on a consent card is the engine's own request — tool name,
+  consent kind, and the standing grant that authorized it when one did.
+  `turn_id` names whichever lane parked the row; it is not a foreign key
+  until slice D4 merges the turn lane.
 - **`code_watch`** — `id`, `workspace_id`, `session_id` (the watch's
   dedicated `kind = watch` session), `pr_number`, `state`
   (`Watching | Fixing | Blocked | Done | Stopped | Failed`), `detail`,
@@ -353,26 +364,48 @@ rows — the one journal — and publishes each row on the session bus, so the
 engine translates nothing. `run_turn` admits the message to the lane and
 follows the journal for the turn; the session worker's sink applies the
 side effects of what it reports (the turn row closes with the usage the
-lane recorded) and writes no row a second time. `decide` resolves a tool
-approval on the chat approval broker, answers a questions card, or decides
-a plan. A questions card or a plan proposal ends the leg as
-`TurnOutcome::Parked` on an approval the worker minted, and the answer or
-plan decision resumes it through `resume_turn`. An accepted plan re-postures
-the session: the worker calls `set_permission_mode` with the mode the
-approval proposed before it resumes the turn.
+lane recorded) and writes no row a second time.
 
-Until the approvals merge (slice D3), a consent card on an internal session
-is two rows: the lane's `ToolApprovalRequired` and the worker's
-`ApprovalRequested` for the approval row it minted; likewise the decision.
-The parks (`QuestionsAsked`, `PlanProposed`) are hints beside the
-`ApprovalRequested` the park mints. Each row states a different fact, and
-D3 folds them into one.
+Approvals are one surface. When the lane parks a tool call for consent it
+inserts the `code_approval` row itself — id the call id, `native_call_id`
+the same, `worker_epoch` the session's current epoch — and journals one
+`ApprovalRequested` whose `request` carries the card's facts (tool name,
+class, consent kind, grant ladder, action preview) so the chat surface
+replays the card from the row. A questions card or a plan proposal parks
+the same way (`Questions`, `Plan`), and the engine ends the leg as
+`TurnOutcome::Parked` on the row the lane minted; the answer or plan
+decision resumes it through `resume_turn`. An accepted plan re-postures the
+session: the worker calls `set_permission_mode` with the mode the approval
+proposed before it resumes the turn. A call a standing grant covers mints
+its row already approved, naming the grant, and journals nothing: the
+reader was never asked.
+
+Every decision settles the row through the one settle operation in
+`db/ops/code/approval.rs` and journals one `ApprovalResolved` there: the
+chat routes (`POST /chats/{id}/approvals/{call}`, `/questions/{call}/answers`,
+`/plans/{call}/decision`), the session route (`POST
+/code/approvals/{id}/decision`, which claims the row, delivers the decision
+to `decide`, and settles on acknowledgement), the internal engine's
+Auto-mode judge, and the turn lane's cancellation and terminal sweeps. The
+agent loop journals no decision of its own; it reads the settled row and
+continues. The chat routes for questions and plans are therefore aliases
+over the approval decision path, and the pending-questions, pending-plan,
+and pending-approvals reads are reads of pending rows by kind.
 
 The capability vector is what carries the difference from an external
 engine: `durable_parks`, `user_questions`, and `standing_grants` are
 `Supported`, so the decision route offers answers, plan decisions, and the
-grant ladder only here. Routes and workers speak only sessions, turns, the
-journal, and approvals to it; nothing reaches the loop another way.
+grant ladder only here. Standing grants are the internal engine's own
+ladder, kept on `standing_tool_grant` keyed by the session (its `chat_id`
+column) or the project: the chat route's approve-and-remember and the
+session route's `approve_with_grant` mint into the same table, `GET /grants`
+and `DELETE /grants/{call}` read and revoke the same rows, and a session
+whose worker stops keeps its cards — `durable_parks` means the recovery
+sweep that abandons an external engine's orphaned requests leaves them
+decidable. External engines keep decision 33's posture: verbatim
+`harness_raw`, a server-guessed kind, no standing grants. Routes and workers
+speak only sessions, turns, the journal, and approvals to it; nothing
+reaches the loop another way.
 
 ## The event vocabulary
 
@@ -388,8 +421,8 @@ bounded):
 | `ToolStarted` | call id, name, `ToolDetail` (`Command {cmd, cwd}` \| `FileEdit {path}` \| `FileRead {path}` \| `Search {query}` \| `Other {summary}`) |
 | `ToolCompleted` | call id, outcome, bounded preview, optional corrected `ToolDetail`; internal engine adds the whole `output` and the action and result previews |
 | `FileChanged` | path, change kind, diffstat |
-| `ApprovalRequested` | approval id (hint; body loads from the approvals route) |
-| `ApprovalResolved` | approval id, decision |
+| `ApprovalRequested` | approval id (hint; body loads from the approvals route); internal engine adds `request` — the consent card's tool name, class, kind, grant ladder and preview, or the turn a questions or plan park resumes |
+| `ApprovalResolved` | approval id, decision (`approve`, `deny`, `approved_with_grant`, `answered`, `plan_decided`, `abandoned`) |
 | `UserSteered` | the user's mid-turn message; internal engine adds the message row's id |
 | `TurnCompleted` | usage, checkpoint info; internal engine adds the stop reason |
 | `TurnFailed` | bounded error; internal engine adds the error's kind |
@@ -405,9 +438,7 @@ The internal engine's own rows, which no external adapter writes:
 | `TurnRefused` | usage, the model's refusal outcome |
 | `StreamInterrupted` | — (discard partial deltas since the last boundary) |
 | `ToolArgsDelta` | call id, a fragment of the call's JSON arguments |
-| `ToolApprovalRequired` | call id, tool name, approval class and kind, grant ladder, action preview |
-| `ToolApprovalDecided` | call id, approved |
-| `QuestionsAsked` / `PlanProposed` / `TaskPlanUpdated` | call id, turn id (hints; bodies load from their routes) |
+| `TaskPlanUpdated` | call id, turn id (a hint; the steps load from the task-plan route) |
 | `ContextTruncated` | tokens before and after fitting the context window |
 | `CompactionStarted` / `CompactionFinished` | — / whether a checkpoint was stored |
 

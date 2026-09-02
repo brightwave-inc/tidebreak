@@ -115,17 +115,22 @@ async fn workspace_approval_folds_storage_but_recovers_class_and_kind() {
         .await
         .unwrap();
 
-    // The stored row keeps the legacy spellings the column constraints allow…
-    let row = entities::tool_call::Entity::find_by_id(call.id.0)
+    // The card is one approval row whose id is the call id, carrying the
+    // engine's own request; the read model recovers the class from the
+    // kind, so a workspace card parked across a restart stays approvable.
+    let row = entities::code_approval::Entity::find_by_id(call.id.0)
         .one(&store.conn)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(row.approval_class.as_deref(), Some("sensitive"));
-    assert_eq!(row.approval_kind.as_deref(), Some("unsupported"));
+    assert_eq!(row.session_id, chat.id.0);
+    assert_eq!(
+        crate::InternalToolApprovalRequest::from_raw(&row.harness_raw)
+            .unwrap()
+            .kind,
+        crate::ToolApprovalKind::WorkspaceMayModifyFiles
+    );
 
-    // …and the read model recovers the real class and kind from the tool
-    // name, so a workspace card parked across a restart stays approvable.
     let approval = store
         .get_tool_call_approval(call.id)
         .await
@@ -341,7 +346,7 @@ async fn approval_registration_journals_once_and_decision_is_exact() {
         .await
         .unwrap();
     let approved = match decided {
-        DecideToolApprovalOutcome::Decided(approval) => approval,
+        DecideToolApprovalOutcome::Decided { approval, .. } => approval,
         outcome => panic!("unexpected approval decision outcome: {outcome:?}"),
     };
     assert_eq!(approved.status, ToolApprovalStatus::Approved);
@@ -399,7 +404,14 @@ async fn approval_registration_journals_once_and_decision_is_exact() {
         RequestToolApprovalOutcome::Existing(existing) if existing == approved
     ));
     assert!(terminal_retry.required_event.is_none());
-    assert_eq!(store.list_events(chat.id, 0).await.unwrap().len(), 1);
+    // One row for the request, one for the decision, whichever surface made
+    // it; a retry of either adds nothing.
+    let journal = store.list_events(chat.id, 0).await.unwrap();
+    assert_eq!(journal.len(), 2);
+    assert!(matches!(
+        journal[1].event,
+        AgentEvent::ApprovalDecided { call_id, approved: true } if call_id == request.call_id
+    ));
 }
 
 #[tokio::test]
@@ -691,7 +703,7 @@ async fn cancellation_and_approval_decision_serialize_without_pending_state() {
     assert!(cancelled.unwrap().is_some());
     assert!(matches!(
         decided.unwrap(),
-        DecideToolApprovalOutcome::Decided(_) | DecideToolApprovalOutcome::DecisionConflict
+        DecideToolApprovalOutcome::Decided { .. } | DecideToolApprovalOutcome::DecisionConflict
     ));
     assert!(store
         .list_pending_tool_call_approvals(chat_id, 100)
@@ -748,7 +760,7 @@ async fn failed_tool_resolution_and_approval_decision_serialize_to_one_terminal_
     ));
     assert!(matches!(
         decided.unwrap(),
-        DecideToolApprovalOutcome::Decided(_) | DecideToolApprovalOutcome::DecisionConflict
+        DecideToolApprovalOutcome::Decided { .. } | DecideToolApprovalOutcome::DecisionConflict
     ));
     let approval = store
         .get_tool_call_approval(call_id)

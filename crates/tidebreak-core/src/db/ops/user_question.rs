@@ -1,26 +1,37 @@
+//! The questions card as an approval row (decision 0048 step 5).
+//!
+//! `ask_user_questions` parks its turn on a `code_approval` row whose kind is
+//! [`CodeApprovalKind::Questions`] and whose id is the call id. The answers
+//! settle the row as [`ApprovalDecisionKind::Answered`] and complete the
+//! call, so the chat's answer route and the session decision route land on
+//! the same row and the same journal rows.
+
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
-use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, Set,
-    TransactionTrait,
-};
+use sea_orm::{ActiveModelTrait, ConnectionTrait, EntityTrait, Set, TransactionTrait};
 
+use crate::code::{
+    ApprovalDecisionKind, CodeApproval, CodeApprovalId, CodeApprovalKind, CodeApprovalState,
+    CodeSessionId, CodeTurnId,
+};
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
-use crate::model::{ToolCallExecution, ToolCallStatus, TurnRunStatus};
+use crate::model::{OwnerId, ToolCallExecution, ToolCallStatus, TurnRunStatus};
 use crate::storage::AnswerUserQuestionsOutcome;
 use crate::{
     AnswerUserQuestionsRequest, AskUserQuestionsArgs, CallId, ChatId, PendingUserQuestions, TurnId,
-    UserQuestion, UserQuestionRequestStatus, ASK_USER_QUESTIONS_TOOL,
+    UserQuestion, ASK_USER_QUESTIONS_TOOL,
 };
 
 use super::super::{entities, store_err, DbStore};
+use super::approval::{claim_of, session_row, settle_row_on};
+use super::code::approval::{find_approval_row_on, insert_approval_on};
 use super::turn::{canonical_db_timestamp, recover_turn_after_client_resolution_on};
 use super::{acquire_chat_write_lock, acquire_tool_call_write_lock, acquire_turn_write_lock};
 
-/// Commit the bounded renderer projection and its journal refresh hint inside
-/// the caller's already-fenced client-wait transaction.
+/// Commit the park's approval row and its journal row inside the caller's
+/// already-fenced client-wait transaction.
 pub(in crate::db) async fn checkpoint_on<C>(
     conn: &C,
     call: &crate::ClientToolCallRequest,
@@ -40,43 +51,39 @@ where
     let seq =
         super::conversation::append_event_on(conn, call.chat_id, None, None, None, None, &event)
             .await?;
-    entities::user_question_request::ActiveModel {
-        call_id: Set(call.id.0),
-        turn_id: Set(call.turn_id.0),
-        chat_id: Set(call.chat_id.0),
-        status: Set(UserQuestionRequestStatus::Pending.as_str().into()),
-        event_seq: Set(seq),
-        asked_at: Set(asked_at),
-        resolved_at: Set(None),
-        additional_user_context: Set(None),
-    }
-    .insert(conn)
-    .await
-    .map_err(store_err)?;
-    for (position, question) in arguments.questions.into_iter().enumerate() {
-        entities::user_question::ActiveModel {
-            call_id: Set(call.id.0),
-            question_id: Set(question.id),
-            position: Set(i32::try_from(position)
-                .map_err(|_| AgentError::Store("question position overflowed".into()))?),
-            header: Set(question.header),
-            prompt: Set(question.question),
-            options: Set(serde_json::to_value(question.options)?),
-            question_type: Set(question.question_type.as_str().into()),
-            allow_free_form: Set(question.allow_free_form),
-            answer_selected_option_ids: Set(None),
-            answer_custom_answer: Set(None),
-            response_recorded_at: Set(None),
-        }
-        .insert(conn)
-        .await
-        .map_err(store_err)?;
-    }
+    let session = session_row(conn, call.chat_id).await?;
+    let owner = OwnerId::new(&session.owner)?;
+    insert_approval_on(
+        conn,
+        &owner,
+        &CodeApproval {
+            id: CodeApprovalId(call.id.0),
+            session_id: CodeSessionId(call.chat_id.0),
+            turn_id: CodeTurnId(call.turn_id.0),
+            kind: CodeApprovalKind::Questions {
+                questions: arguments.questions,
+            },
+            harness_raw: serde_json::Value::Null,
+            native_call_id: Some(call.id.to_string()),
+            server_capability: None,
+            request_sha256: None,
+            worker_epoch: Some(session.spawn_epoch),
+            decision_claim: None,
+            claimed_at: None,
+            state: CodeApprovalState::Pending,
+            feedback: None,
+            requested_at: asked_at,
+            decided_at: None,
+            auto_judge_status: None,
+        },
+    )
+    .await?;
     Ok(Some(SequencedEvent { seq, event }))
 }
 
-/// Recover and validate the exact committed renderer hint for an ambiguous
-/// checkpoint retry.
+/// Recover and validate the exact committed park for an ambiguous checkpoint
+/// retry: the row must carry the same questions, and the journal row that
+/// announced it is returned when the row is still pending.
 pub(in crate::db) async fn recover_checkpoint_on<C>(
     conn: &C,
     call: &crate::ClientToolCallRequest,
@@ -88,59 +95,34 @@ where
         return Ok(None);
     }
     let expected = parse_arguments(&call.arguments)?;
-    let request = entities::user_question_request::Entity::find_by_id(call.id.0)
-        .one(conn)
-        .await
-        .map_err(store_err)?
+    let row = find_approval_row_on(conn, CodeApprovalId(call.id.0))
+        .await?
         .ok_or_else(|| {
             AgentError::Store(format!(
-                "question checkpoint {} is missing its renderer receipt",
+                "question checkpoint {} is missing its approval row",
                 call.id
             ))
         })?;
-    if request.chat_id != call.chat_id.0 || request.turn_id != call.turn_id.0 {
+    if row.session_id != call.chat_id.0 || row.turn_id != call.turn_id.0 {
         return Err(AgentError::Store(format!(
             "question checkpoint {} has mismatched scope",
             call.id
         )));
     }
-    if request.status != UserQuestionRequestStatus::Pending.as_str() {
-        if request.status == UserQuestionRequestStatus::Answered.as_str()
-            || request.status == UserQuestionRequestStatus::Cancelled.as_str()
-        {
-            return Ok(None);
-        }
-        return Err(AgentError::Store(format!(
-            "question checkpoint {} has unknown status {}",
-            call.id, request.status
-        )));
-    }
-    let questions = question_models(conn, call.id).await?;
-    if questions_from_models(&questions)? != expected.questions {
+    if questions_of(&row)? != expected.questions {
         return Err(AgentError::Store(format!(
             "question checkpoint {} has mismatched presentation data",
             call.id
         )));
     }
-    let stored = entities::code_event::Entity::find_by_id((call.chat_id.0, request.event_seq))
-        .one(conn)
-        .await
-        .map_err(store_err)?
-        .ok_or_else(|| AgentError::Store("question renderer event is missing".into()))?;
-    let event = crate::chat_journal::decode_chat_event_required(stored.event)?;
+    if row.state != CodeApprovalState::Pending.as_str() {
+        return Ok(None);
+    }
     let expected_event = AgentEvent::UserQuestionsAsked {
         call_id: call.id,
         turn_id: call.turn_id,
     };
-    if stored.turn_id.is_some() || stored.terminal || event != expected_event {
-        return Err(AgentError::Store(
-            "question renderer event does not match its checkpoint".into(),
-        ));
-    }
-    Ok(Some(SequencedEvent {
-        seq: request.event_seq,
-        event,
-    }))
+    super::plan::park_request_receipt_on(conn, call.chat_id, &expected_event).await
 }
 
 pub(in crate::db) async fn list_pending(
@@ -152,44 +134,37 @@ pub(in crate::db) async fn list_pending(
         transaction.commit().await.map_err(store_err)?;
         return Ok(Vec::new());
     }
-    let requests = entities::user_question_request::Entity::find()
-        .filter(entities::user_question_request::Column::ChatId.eq(chat_id.0))
-        .filter(
-            entities::user_question_request::Column::Status
-                .eq(UserQuestionRequestStatus::Pending.as_str()),
-        )
-        .order_by_asc(entities::user_question_request::Column::AskedAt)
-        .order_by_asc(entities::user_question_request::Column::CallId)
-        .all(&transaction)
-        .await
-        .map_err(store_err)?;
-    let mut pending = Vec::with_capacity(requests.len());
-    for request in requests {
-        let call = entities::tool_call::Entity::find_by_id(request.call_id)
+    let rows = super::plan::pending_park_rows_on(&transaction, chat_id).await?;
+    let mut pending = Vec::with_capacity(rows.len());
+    for row in rows {
+        let Ok(questions) = questions_of(&row) else {
+            continue;
+        };
+        let call = entities::tool_call::Entity::find_by_id(row.id)
             .one(&transaction)
             .await
             .map_err(store_err)?
             .ok_or_else(|| AgentError::Store("pending question call is missing".into()))?;
-        let wait = entities::turn_client_wait::Entity::find_by_id(request.call_id)
+        let wait = entities::turn_client_wait::Entity::find_by_id(row.id)
             .one(&transaction)
             .await
             .map_err(store_err)?
             .ok_or_else(|| AgentError::Store("pending question wait is missing".into()))?;
-        let turn = entities::turn_run::Entity::find_by_id(request.turn_id)
+        let turn = entities::turn_run::Entity::find_by_id(row.turn_id)
             .one(&transaction)
             .await
             .map_err(store_err)?
             .ok_or_else(|| AgentError::Store("pending question turn is missing".into()))?;
-        if call.chat_id != request.chat_id
-            || call.turn_id != request.turn_id
+        if call.chat_id != row.session_id
+            || call.turn_id != row.turn_id
             || call.name != ASK_USER_QUESTIONS_TOOL
             || call.execution != ToolCallExecution::Orchestration.as_str()
             || call.status != ToolCallStatus::Pending.as_str()
             || call.client_executor_id.is_some()
-            || wait.chat_id != request.chat_id
-            || wait.turn_id != request.turn_id
+            || wait.chat_id != row.session_id
+            || wait.turn_id != row.turn_id
             || wait.status != crate::TurnClientWaitStatus::Waiting.as_str()
-            || turn.chat_id != request.chat_id
+            || turn.chat_id != row.session_id
             || turn.status != TurnRunStatus::WaitingForClient.as_str()
             || turn.attempt_count != wait.attempt_count
             || turn.claim_count != wait.claim_count
@@ -198,13 +173,11 @@ pub(in crate::db) async fn list_pending(
                 "pending question projection does not match its live continuation".into(),
             ));
         }
-        let questions =
-            questions_from_models(&question_models(&transaction, CallId(request.call_id)).await?)?;
         pending.push(PendingUserQuestions {
-            call_id: CallId(request.call_id),
-            turn_id: TurnId(request.turn_id),
+            call_id: CallId(row.id),
+            turn_id: TurnId(row.turn_id),
             questions,
-            asked_at: request.asked_at,
+            asked_at: row.requested_at,
         });
     }
     transaction.commit().await.map_err(store_err)?;
@@ -223,14 +196,11 @@ pub(in crate::db) async fn answer(
         return Ok(AnswerUserQuestionsOutcome::InvalidAnswer);
     }
     let requested_at = canonical_db_timestamp(answered_at)?;
-    let Some(scope) = entities::user_question_request::Entity::find_by_id(request.call_id.0)
-        .one(&store.conn)
-        .await
-        .map_err(store_err)?
+    let Some(scope) = find_approval_row_on(&store.conn, CodeApprovalId(request.call_id.0)).await?
     else {
         return Ok(AnswerUserQuestionsOutcome::Unavailable);
     };
-    if scope.chat_id != request.chat_id.0 {
+    if scope.session_id != request.chat_id.0 {
         return Ok(AnswerUserQuestionsOutcome::Unavailable);
     }
     let transaction = store.conn.begin().await.map_err(store_err)?;
@@ -253,43 +223,31 @@ pub(in crate::db) async fn answer(
         transaction.commit().await.map_err(store_err)?;
         return Ok(AnswerUserQuestionsOutcome::Unavailable);
     }
-    let question_request = entities::user_question_request::Entity::find_by_id(request.call_id.0)
-        .one(&transaction)
-        .await
-        .map_err(store_err)?
+    let row = find_approval_row_on(&transaction, CodeApprovalId(request.call_id.0))
+        .await?
         .ok_or_else(|| {
             AgentError::Store(format!(
-                "question call {} is missing its request",
+                "question call {} is missing its approval row",
                 request.call_id
             ))
         })?;
-    if question_request.chat_id != request.chat_id.0 || question_request.turn_id != call.turn_id {
+    if row.session_id != request.chat_id.0 || row.turn_id != call.turn_id {
         transaction.commit().await.map_err(store_err)?;
         return Ok(AnswerUserQuestionsOutcome::Unavailable);
     }
-    let questions = question_models(&transaction, request.call_id).await?;
+    let Ok(questions) = questions_of(&row) else {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(AnswerUserQuestionsOutcome::Unavailable);
+    };
     let Some(canonical) = canonical_answers(&questions, &request.answers)? else {
         transaction.commit().await.map_err(store_err)?;
         return Ok(AnswerUserQuestionsOutcome::InvalidAnswer);
     };
     let result = serde_json::to_string(&canonical)?;
 
-    if question_request.status == UserQuestionRequestStatus::Answered.as_str() {
-        let result_matches = if questions
-            .iter()
-            .all(|question| question.response_recorded_at.is_some())
-        {
-            call.result.as_deref() == Some(result.as_str())
-        } else {
-            // Before the extension, the result used scalar `option_id` /
-            // `free_form` fields. The compatibility columns below still prove
-            // the semantic answer exactly; requiring byte-identical new JSON
-            // would turn an equivalent retry after upgrade into a conflict.
-            call.result.is_some()
-        };
-        let exact = stored_answers_match(&question_request, &questions, &canonical)?
-            && call.status == ToolCallStatus::Completed.as_str()
-            && result_matches;
+    if row.state == CodeApprovalState::Approved.as_str() {
+        let exact = call.status == ToolCallStatus::Completed.as_str()
+            && call.result.as_deref() == Some(result.as_str());
         if !exact {
             transaction.commit().await.map_err(store_err)?;
             return Ok(AnswerUserQuestionsOutcome::AnswerConflict);
@@ -305,7 +263,7 @@ pub(in crate::db) async fn answer(
         transaction.commit().await.map_err(store_err)?;
         return Ok(AnswerUserQuestionsOutcome::Existing(transition.turn));
     }
-    if question_request.status != UserQuestionRequestStatus::Pending.as_str()
+    if row.state != CodeApprovalState::Pending.as_str()
         || call.status != ToolCallStatus::Pending.as_str()
         || call.client_executor_id.is_some()
         || call.client_lease_token.is_some()
@@ -321,7 +279,7 @@ pub(in crate::db) async fn answer(
         .expect("locked question turn exists");
     if turn.chat_id != request.chat_id.0
         || turn.status != TurnRunStatus::WaitingForClient.as_str()
-        || question_request.turn_id != turn.id
+        || row.turn_id != turn.id
     {
         transaction.commit().await.map_err(store_err)?;
         return Ok(AnswerUserQuestionsOutcome::Unavailable);
@@ -329,35 +287,26 @@ pub(in crate::db) async fn answer(
     let database_now = super::agent_run::database_now(&transaction).await?;
     let answered_at = requested_at
         .max(database_now)
-        .max(question_request.asked_at)
+        .max(row.requested_at)
         .max(call.created_at)
         .max(turn.updated_at);
 
-    let answers_by_id: HashMap<_, _> = canonical
-        .answers
-        .iter()
-        .map(|answer| (answer.question_id.as_str(), answer))
-        .collect();
-    for model in &questions {
-        let answer = answers_by_id.get(model.question_id.as_str());
-        let mut active: entities::user_question::ActiveModel = model.clone().into();
-        active.answer_selected_option_ids = Set(Some(serde_json::to_value(
-            answer
-                .map(|answer| answer.selected_option_ids.as_slice())
-                .unwrap_or_default(),
-        )?));
-        active.answer_custom_answer = Set(answer.and_then(|answer| answer.custom_answer.clone()));
-        active.response_recorded_at = Set(Some(answered_at));
-        active.update(&transaction).await.map_err(store_err)?;
-    }
-    let mut active_request: entities::user_question_request::ActiveModel = question_request.into();
-    active_request.status = Set(UserQuestionRequestStatus::Answered.as_str().into());
-    active_request.resolved_at = Set(Some(answered_at));
-    active_request.additional_user_context = Set(canonical.additional_user_context.clone());
-    active_request
-        .update(&transaction)
-        .await
-        .map_err(store_err)?;
+    // The row settles first, in the same transaction as the call: the
+    // decision route and this one both land here, so the card is decided
+    // exactly once whichever surface answered it.
+    let settlement = settle_row_on(
+        &transaction,
+        &row,
+        claim_of(&row),
+        ApprovalDecisionKind::Answered {
+            answers: canonical.answers.clone(),
+        },
+        answered_at,
+    )
+    .await?
+    .ok_or_else(|| {
+        AgentError::Store(format!("question {} could not be settled", request.call_id))
+    })?;
 
     let mut active_call: entities::tool_call::ActiveModel = call.into();
     active_call.status = Set(ToolCallStatus::Completed.as_str().into());
@@ -365,7 +314,7 @@ pub(in crate::db) async fn answer(
     // The recap card reads this column on history rehydration, the same way
     // every other settled card does. Without it, reopening the chat showed the
     // answered question as a bare rail line.
-    let preview = answers_preview(&questions, &canonical)?;
+    let preview = answers_preview(&questions, &canonical);
     active_call.result_preview = Set(Some(serde_json::to_value(&preview)?));
     active_call.error_code = Set(None);
     active_call.error_detail = Set(None);
@@ -374,15 +323,9 @@ pub(in crate::db) async fn answer(
     // The question call resolves outside the agent loop, so nothing else ever
     // announces that it finished: the resumed worker reads the committed
     // result straight into the model transcript and never revisits the call.
-    // Without this event the renderer showed the card waiting from
-    // `ToolCallStarted` until the turn's terminal hydration finally settled
-    // it — the answer looked lost exactly when it had committed.
-    //
     // Journaled here, in the transaction that makes the row terminal, so the
-    // event cannot disagree with the row it describes. An exact retry returns
-    // above as `Existing` without reaching this, so the call announces itself
-    // once. Chat-scoped like its `UserQuestionsAsked`: the turn is parked
-    // with no lease, so no attempt owns this event.
+    // event cannot disagree with the row it describes. Chat-scoped like its
+    // request: the turn is parked with no lease, so no attempt owns it.
     let completion_event = AgentEvent::ToolCallCompleted {
         call_id: request.call_id,
         output: crate::ToolOutput::text(resolved.result.clone().ok_or_else(|| {
@@ -420,62 +363,8 @@ pub(in crate::db) async fn answer(
             seq,
             event: completion_event,
         }),
+        resolution: Box::new(settlement.event),
     })
-}
-
-/// Close presentation state when cancellation terminalizes the unclaimed
-/// question call through the shared client-wait state machine.
-pub(in crate::db) async fn cancel_for_call_on<C>(
-    conn: &C,
-    call_id: CallId,
-    cancelled_at: DateTime<Utc>,
-) -> Result<()>
-where
-    C: ConnectionTrait,
-{
-    let Some(request) = entities::user_question_request::Entity::find_by_id(call_id.0)
-        .one(conn)
-        .await
-        .map_err(store_err)?
-    else {
-        return Ok(());
-    };
-    if request.status != UserQuestionRequestStatus::Pending.as_str() {
-        return Ok(());
-    }
-    let mut active: entities::user_question_request::ActiveModel = request.into();
-    active.status = Set(UserQuestionRequestStatus::Cancelled.as_str().into());
-    active.resolved_at = Set(Some(cancelled_at));
-    active.update(conn).await.map_err(store_err)?;
-    Ok(())
-}
-
-pub(in crate::db) async fn close_pending_for_terminal_turn_on<C>(
-    conn: &C,
-    turn_id: TurnId,
-    terminal_at: DateTime<Utc>,
-) -> Result<()>
-where
-    C: ConnectionTrait,
-{
-    let requests = entities::user_question_request::Entity::find()
-        .filter(entities::user_question_request::Column::TurnId.eq(turn_id.0))
-        .filter(
-            entities::user_question_request::Column::Status
-                .eq(UserQuestionRequestStatus::Pending.as_str()),
-        )
-        .order_by_asc(entities::user_question_request::Column::CallId)
-        .all(conn)
-        .await
-        .map_err(store_err)?;
-    for request in requests {
-        let resolved_at = terminal_at.max(request.asked_at);
-        let mut active: entities::user_question_request::ActiveModel = request.into();
-        active.status = Set(UserQuestionRequestStatus::Cancelled.as_str().into());
-        active.resolved_at = Set(Some(resolved_at));
-        active.update(conn).await.map_err(store_err)?;
-    }
-    Ok(())
 }
 
 fn parse_arguments(value: &serde_json::Value) -> Result<AskUserQuestionsArgs> {
@@ -488,67 +377,29 @@ fn parse_arguments(value: &serde_json::Value) -> Result<AskUserQuestionsArgs> {
     Ok(arguments)
 }
 
-async fn question_models<C>(
-    conn: &C,
-    call_id: CallId,
-) -> Result<Vec<entities::user_question::Model>>
-where
-    C: ConnectionTrait,
-{
-    entities::user_question::Entity::find()
-        .filter(entities::user_question::Column::CallId.eq(call_id.0))
-        .order_by_asc(entities::user_question::Column::Position)
-        .all(conn)
-        .await
-        .map_err(store_err)
-}
-
-fn questions_from_models(models: &[entities::user_question::Model]) -> Result<Vec<UserQuestion>> {
-    if models.is_empty() || models.len() > crate::MAX_USER_QUESTIONS {
-        return Err(AgentError::Store(
-            "durable question request has an invalid question count".into(),
-        ));
-    }
-    models
-        .iter()
-        .enumerate()
-        .map(|(position, model)| {
-            if model.position
-                != i32::try_from(position)
-                    .map_err(|_| AgentError::Store("question position overflowed".into()))?
+/// The questions a row carries, or an error for a row of another kind.
+fn questions_of(row: &entities::code_approval::Model) -> Result<Vec<UserQuestion>> {
+    match serde_json::from_value::<CodeApprovalKind>(row.kind.clone())? {
+        CodeApprovalKind::Questions { questions } => {
+            if questions.is_empty()
+                || questions.len() > crate::MAX_USER_QUESTIONS
+                || !questions.iter().all(UserQuestion::is_well_formed)
             {
                 return Err(AgentError::Store(
-                    "durable question request has non-canonical ordering".into(),
+                    "durable question request is malformed".into(),
                 ));
             }
-            let question = UserQuestion {
-                id: model.question_id.clone(),
-                header: model.header.clone(),
-                question: model.prompt.clone(),
-                options: serde_json::from_value(model.options.clone())?,
-                question_type: match model.question_type.as_str() {
-                    "single_select" => crate::UserQuestionType::SingleSelect,
-                    "multi_select" => crate::UserQuestionType::MultiSelect,
-                    _ => {
-                        return Err(AgentError::Store(
-                            "durable question has an unknown question type".into(),
-                        ));
-                    }
-                },
-                allow_free_form: model.allow_free_form,
-            };
-            if !question.is_well_formed() {
-                return Err(AgentError::Store(
-                    "durable question presentation is malformed".into(),
-                ));
-            }
-            Ok(question)
-        })
-        .collect()
+            Ok(questions)
+        }
+        _ => Err(AgentError::Store(format!(
+            "approval {} is not a questions card",
+            row.id
+        ))),
+    }
 }
 
 fn canonical_answers(
-    questions: &[entities::user_question::Model],
+    questions: &[UserQuestion],
     supplied: &crate::AnswerUserQuestions,
 ) -> Result<Option<crate::AnswerUserQuestions>> {
     let by_id: HashMap<_, _> = supplied
@@ -558,23 +409,22 @@ fn canonical_answers(
         .collect();
     let mut answers = Vec::with_capacity(supplied.answers.len());
     for question in questions {
-        let Some(answer) = by_id.get(question.question_id.as_str()) else {
+        let Some(answer) = by_id.get(question.id.as_str()) else {
             continue;
         };
-        let options: Vec<crate::UserQuestionOption> =
-            serde_json::from_value(question.options.clone())?;
-        let selections_are_valid = answer
-            .selected_option_ids
-            .iter()
-            .all(|option_id| options.iter().any(|option| option.id == *option_id));
+        let selections_are_valid = answer.selected_option_ids.iter().all(|option_id| {
+            question
+                .options
+                .iter()
+                .any(|option| option.id == *option_id)
+        });
         let custom_is_valid = answer.custom_answer.is_none() || question.allow_free_form;
-        let selection_shape_is_valid = match question.question_type.as_str() {
-            "single_select" => {
+        let selection_shape_is_valid = match question.question_type {
+            crate::UserQuestionType::SingleSelect => {
                 (answer.selected_option_ids.len() == 1 && answer.custom_answer.is_none())
                     || (answer.selected_option_ids.is_empty() && answer.custom_answer.is_some())
             }
-            "multi_select" => true,
-            _ => false,
+            crate::UserQuestionType::MultiSelect => true,
         };
         if !selections_are_valid || !custom_is_valid || !selection_shape_is_valid {
             return Ok(None);
@@ -597,75 +447,35 @@ fn canonical_answers(
 /// so the card can say which ones were skipped rather than quietly omitting
 /// them.
 fn answers_preview(
-    questions: &[entities::user_question::Model],
+    questions: &[UserQuestion],
     canonical: &crate::AnswerUserQuestions,
-) -> Result<crate::ToolResultPreview> {
+) -> crate::ToolResultPreview {
     let by_id: HashMap<_, _> = canonical
         .answers
         .iter()
         .map(|answer| (answer.question_id.as_str(), answer))
         .collect();
-    let mut answers = Vec::with_capacity(questions.len());
-    for question in questions {
-        let answer = by_id.get(question.question_id.as_str());
-        let options: Vec<crate::UserQuestionOption> =
-            serde_json::from_value(question.options.clone())?;
-        let selected = options
-            .into_iter()
-            .filter(|option| {
-                answer.is_some_and(|answer| answer.selected_option_ids.contains(&option.id))
-            })
-            .map(|option| option.label)
-            .collect();
-        answers.push(crate::AnsweredUserQuestion {
-            question: question.prompt.clone(),
-            selected,
-            custom_answer: answer.and_then(|answer| answer.custom_answer.clone()),
-        });
-    }
-    Ok(crate::ToolResultPreview::UserQuestions {
+    let answers = questions
+        .iter()
+        .map(|question| {
+            let answer = by_id.get(question.id.as_str());
+            let selected = question
+                .options
+                .iter()
+                .filter(|option| {
+                    answer.is_some_and(|answer| answer.selected_option_ids.contains(&option.id))
+                })
+                .map(|option| option.label.clone())
+                .collect();
+            crate::AnsweredUserQuestion {
+                question: question.question.clone(),
+                selected,
+                custom_answer: answer.and_then(|answer| answer.custom_answer.clone()),
+            }
+        })
+        .collect();
+    crate::ToolResultPreview::UserQuestions {
         answers,
         additional_context: canonical.additional_user_context.clone(),
-    })
-}
-
-fn stored_answers_match(
-    request: &entities::user_question_request::Model,
-    questions: &[entities::user_question::Model],
-    expected: &crate::AnswerUserQuestions,
-) -> Result<bool> {
-    if request.additional_user_context != expected.additional_user_context {
-        return Ok(false);
     }
-    let expected_by_id: HashMap<_, _> = expected
-        .answers
-        .iter()
-        .map(|answer| (answer.question_id.as_str(), answer))
-        .collect();
-    for question in questions {
-        let expected_answer = expected_by_id.get(question.question_id.as_str());
-        if question.response_recorded_at.is_some() {
-            let stored_option_ids: Vec<String> = question
-                .answer_selected_option_ids
-                .clone()
-                .map(serde_json::from_value)
-                .transpose()?
-                .unwrap_or_default();
-            if stored_option_ids
-                != expected_answer
-                    .map(|answer| answer.selected_option_ids.clone())
-                    .unwrap_or_default()
-                || question.answer_custom_answer
-                    != expected_answer.and_then(|answer| answer.custom_answer.clone())
-            {
-                return Ok(false);
-            }
-            continue;
-        }
-
-        // Answering stamps every question row, so an unstamped row means this
-        // request is not the one already recorded.
-        return Ok(false);
-    }
-    Ok(true)
 }

@@ -767,6 +767,7 @@ async fn user_questions_survive_reconnect_and_answer_exactly_once() {
     let crate::AnswerUserQuestionsOutcome::Answered {
         turn,
         completion_event,
+        ..
     } = answered
     else {
         panic!("unexpected answer outcome: {answered:?}");

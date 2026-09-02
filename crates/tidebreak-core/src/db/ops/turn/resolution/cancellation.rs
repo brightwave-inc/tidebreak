@@ -209,14 +209,6 @@ async fn request_turn_cancellation_inner(
                 now,
             )
             .await?;
-            super::super::super::user_question::close_pending_for_terminal_turn_on(
-                &transaction,
-                id,
-                now,
-            )
-            .await?;
-            super::super::super::plan::close_pending_for_terminal_turn_on(&transaction, id, now)
-                .await?;
         }
         _ => {}
     }
@@ -271,14 +263,13 @@ async fn request_turn_cancellation_inner(
             transaction.rollback().await.map_err(store_err)?;
             return Ok(None);
         }
-        super::super::super::user_question::cancel_for_call_on(
+        // The park's approval row closes with the call it waited on.
+        super::super::super::approval::abandon_pending_for_call_on(
             &transaction,
             crate::CallId(call.id),
             now,
         )
         .await?;
-        super::super::super::plan::cancel_for_call_on(&transaction, crate::CallId(call.id), now)
-            .await?;
     }
     let update = entities::turn_run::Entity::update_many()
         .col_expr(
@@ -504,9 +495,6 @@ async fn finish_turn_cancellation_inner(
 
     super::super::super::approval::close_pending_for_terminal_turn_on(&transaction, id, now)
         .await?;
-    super::super::super::user_question::close_pending_for_terminal_turn_on(&transaction, id, now)
-        .await?;
-    super::super::super::plan::close_pending_for_terminal_turn_on(&transaction, id, now).await?;
 
     // Commit the partial output under the cancelled turn before the status
     // flip so the message row and the terminal transition land atomically —

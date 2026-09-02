@@ -503,26 +503,45 @@ async fn a_conversation_without_a_workspace_runs_on_the_code_wire() {
     );
 
     // The journal is the one the code wire serves, in the code vocabulary,
-    // and the lane wrote it: the parks and the consent card sit beside the
-    // approval rows the worker minted for them, and the lane's own rows are
+    // and the lane wrote it: each park and the consent card is one approval
+    // row with one request and one resolution, and the lane's own rows are
     // there once each.
     let events = super::code::journaled_events(&runtime.db, session_id).await;
     let types = event_types(&events);
     let started = position(&types, "turn_started", 0);
-    let plan_proposed = position(&types, "plan_proposed", started);
-    let plan_requested = position(&types, "approval_requested", plan_proposed);
+    let plan_requested = position(&types, "approval_requested", started);
     let plan_resolved = position(&types, "approval_resolved", plan_requested);
-    let questions_asked = position(&types, "questions_asked", plan_resolved);
-    let questions_requested = position(&types, "approval_requested", questions_asked);
+    let questions_requested = position(&types, "approval_requested", plan_resolved);
     let questions_resolved = position(&types, "approval_resolved", questions_requested);
-    let tool_required = position(&types, "tool_approval_required", questions_resolved);
-    let tool_requested = position(&types, "approval_requested", tool_required);
+    let tool_requested = position(&types, "approval_requested", questions_resolved);
     let tool_resolved = position(&types, "approval_resolved", tool_requested);
-    let tool_decided = position(&types, "tool_approval_decided", tool_required);
-    let tool_completed = position(&types, "tool_completed", tool_decided);
-    let steered = position(&types, "user_steered", tool_required);
+    let tool_completed = position(&types, "tool_completed", tool_resolved);
+    let steered = position(&types, "user_steered", tool_requested);
     let completed = position(&types, "turn_completed", tool_completed);
-    assert!(tool_resolved < tool_completed, "{types:?}");
+    for (index, kind) in [
+        (plan_requested, "plan"),
+        (questions_requested, "questions"),
+        (tool_requested, "tool_use"),
+    ] {
+        let request = serde_json::to_value(&events[index].event).unwrap();
+        assert_eq!(request["request"]["kind"], kind, "{request}");
+    }
+    assert_eq!(
+        types
+            .iter()
+            .filter(|kind| kind.as_str() == "approval_requested")
+            .count(),
+        3,
+        "one request per card: {types:?}"
+    );
+    assert_eq!(
+        types
+            .iter()
+            .filter(|kind| kind.as_str() == "approval_resolved")
+            .count(),
+        3,
+        "one resolution per card: {types:?}"
+    );
     assert_eq!(
         types
             .iter()
@@ -591,9 +610,11 @@ async fn assert_chat_replay_is_the_journal(
             .iter()
             .find(|row| row.seq == event.seq)
             .unwrap_or_else(|| panic!("chat seq {} has no journal row", event.seq));
+        // The row can say more than its chat reading (a grant scope, denial
+        // feedback); the reading is what the chat surface gets from it.
         assert_eq!(
-            tidebreak_core::chat_journal::journal_row(&event.event),
-            row.event,
+            tidebreak_core::chat_journal::chat_event(row.event.clone()).unwrap(),
+            Some(event.event.clone()),
             "chat seq {} replays a different row",
             event.seq
         );

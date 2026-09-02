@@ -155,14 +155,7 @@ pub(super) fn exact_terminal_wait_call(
 }
 
 fn orchestration_call_has_no_auxiliary_state(call: &entities::tool_call::Model) -> bool {
-    call.approval_status.is_none()
-        && call.approval_class.is_none()
-        && call.approval_kind.is_none()
-        && call.approval_reason.is_none()
-        && call.approval_requested_at.is_none()
-        && call.approval_decided_at.is_none()
-        && call.approval_event_seq.is_none()
-        && call.client_executor_id.is_none()
+    call.client_executor_id.is_none()
         && call.client_lease_token.is_none()
         && call.client_lease_expires_at.is_none()
 }

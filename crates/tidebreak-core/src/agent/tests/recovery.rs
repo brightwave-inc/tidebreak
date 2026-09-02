@@ -251,25 +251,24 @@ async fn assert_sensitive_restart_recovery(
             .status,
         ToolCallStatus::Failed
     );
-    let approval_decided = events
-        .iter()
-        .position(|event| {
-            matches!(
-                event,
-                AgentEvent::ApprovalDecided { call_id, .. } if *call_id == call.id
-            )
-        })
-        .expect("recovery must close its durable approval card");
-    let tool_completed = events
-        .iter()
-        .position(|event| {
-            matches!(
-                event,
-                AgentEvent::ToolCallCompleted { call_id, .. } if *call_id == call.id
-            )
-        })
-        .expect("recovery must publish its failed completion");
-    assert!(approval_decided < tool_completed);
+    // The card closes on its approval row, not on the loop's channel: the
+    // row is decided and the completion follows it.
+    assert_ne!(
+        store
+            .get_tool_call_approval(call.id)
+            .await
+            .unwrap()
+            .expect("recovery must keep its durable approval card")
+            .status,
+        crate::ToolApprovalStatus::Pending,
+        "recovery must close its durable approval card"
+    );
+    assert!(events.iter().any(|event| {
+        matches!(
+            event,
+            AgentEvent::ToolCallCompleted { call_id, .. } if *call_id == call.id
+        )
+    }));
 }
 
 #[tokio::test]
@@ -416,25 +415,19 @@ async fn cancelled_reclaim_resolves_pending_write_without_touching_scratch() {
     let events = emitted_events(rx.collect().await);
     assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
     assert!(!scratch.path().join("cancelled.txt").exists());
-    let approval_decided = events
-        .iter()
-        .position(|event| {
-            matches!(
-                event,
-                AgentEvent::ApprovalDecided {
-                    call_id,
-                    approved: false,
-                } if *call_id == call.id
-            )
-        })
-        .expect("cancelled recovery must close its durable approval card");
-    let tool_completed = events
-            .iter()
-            .position(|event| {
-                matches!(event, AgentEvent::ToolCallCompleted { call_id, .. } if *call_id == call.id)
-            })
-            .expect("cancelled recovery must publish failed tool completion");
-    assert!(approval_decided < tool_completed);
+    assert_ne!(
+        store
+            .get_tool_call_approval(call.id)
+            .await
+            .unwrap()
+            .expect("cancelled recovery must keep its durable approval card")
+            .status,
+        crate::ToolApprovalStatus::Pending,
+        "cancelled recovery must close its durable approval card"
+    );
+    assert!(events.iter().any(|event| {
+        matches!(event, AgentEvent::ToolCallCompleted { call_id, .. } if *call_id == call.id)
+    }));
     assert_eq!(
         store
             .list_tool_calls(chat.id)

@@ -414,6 +414,9 @@ impl AppState {
         let resolver: Arc<dyn ProviderResolver> = Arc::new(
             crate::diagnostics::DiagnosticProviderResolver::new(resolver, diagnostics.clone()),
         );
+        let events = Arc::new(EventBus::default());
+        let approvals = ApprovalBroker::new(store.clone());
+        approvals.publish_into(events.clone());
         Ok(Self {
             config: Arc::new(config),
             diagnostics,
@@ -450,8 +453,8 @@ impl AppState {
             active_turns: Arc::new(TurnGuard::default()),
             sandbox_attempts: Arc::new(SandboxAttemptGuard::default()),
             sandbox_steering: Arc::new(SandboxSteerGuard::default()),
-            events: Arc::new(EventBus::default()),
-            approvals: Arc::new(ApprovalBroker::new(store)),
+            events: events.clone(),
+            approvals: Arc::new(approvals),
             local_voice: Arc::new(UnavailableLocalVoiceRunner),
             code_execution: None,
             host_folders: None,

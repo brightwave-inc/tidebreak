@@ -979,31 +979,6 @@ pub mod turn_client_wait {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
-pub mod plan_request {
-    use sea_orm::entity::prelude::*;
-
-    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-    #[sea_orm(table_name = "plan_request")]
-    pub struct Model {
-        #[sea_orm(primary_key, auto_increment = false)]
-        pub call_id: Uuid,
-        pub turn_id: Uuid,
-        pub chat_id: Uuid,
-        pub status: String,
-        pub event_seq: i64,
-        pub title: String,
-        pub plan: String,
-        pub feedback: Option<String>,
-        pub proposed_at: DateTimeUtc,
-        pub resolved_at: Option<DateTimeUtc>,
-    }
-
-    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-    pub enum Relation {}
-
-    impl ActiveModelBehavior for ActiveModel {}
-}
-
 pub mod task_plan {
     use sea_orm::entity::prelude::*;
 
@@ -1037,58 +1012,6 @@ pub mod agent_run_task_plan {
         pub steps: String,
         pub created_at: DateTimeUtc,
         pub updated_at: DateTimeUtc,
-    }
-
-    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-    pub enum Relation {}
-
-    impl ActiveModelBehavior for ActiveModel {}
-}
-
-pub mod user_question_request {
-    use sea_orm::entity::prelude::*;
-
-    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-    #[sea_orm(table_name = "user_question_request")]
-    pub struct Model {
-        #[sea_orm(primary_key, auto_increment = false)]
-        pub call_id: Uuid,
-        pub turn_id: Uuid,
-        pub chat_id: Uuid,
-        pub status: String,
-        pub event_seq: i64,
-        pub asked_at: DateTimeUtc,
-        pub resolved_at: Option<DateTimeUtc>,
-        pub additional_user_context: Option<String>,
-    }
-
-    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-    pub enum Relation {}
-
-    impl ActiveModelBehavior for ActiveModel {}
-}
-
-pub mod user_question {
-    use sea_orm::entity::prelude::*;
-
-    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-    #[sea_orm(table_name = "user_question")]
-    pub struct Model {
-        #[sea_orm(primary_key, auto_increment = false)]
-        pub call_id: Uuid,
-        #[sea_orm(primary_key, auto_increment = false)]
-        pub question_id: String,
-        pub position: i32,
-        pub header: String,
-        pub prompt: String,
-        #[sea_orm(column_type = "JsonBinary")]
-        pub options: Json,
-        pub question_type: String,
-        pub allow_free_form: bool,
-        #[sea_orm(column_type = "JsonBinary")]
-        pub answer_selected_option_ids: Option<Json>,
-        pub answer_custom_answer: Option<String>,
-        pub response_recorded_at: Option<DateTimeUtc>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -1204,15 +1127,6 @@ pub mod tool_call {
         pub provider_replay: Option<Json>,
         pub error_code: Option<String>,
         pub error_detail: Option<String>,
-        pub approval_status: Option<String>,
-        pub approval_class: Option<String>,
-        pub approval_kind: Option<String>,
-        pub approval_reason: Option<String>,
-        pub approval_requested_at: Option<DateTimeUtc>,
-        pub approval_decided_at: Option<DateTimeUtc>,
-        pub approval_event_seq: Option<i64>,
-        pub approval_grant_source_call_id: Option<Uuid>,
-        pub auto_judge_status: Option<String>,
         pub client_executor_id: Option<Uuid>,
         pub client_lease_token: Option<Uuid>,
         pub client_lease_expires_at: Option<DateTimeUtc>,
@@ -2108,6 +2022,10 @@ pub mod code_approval {
         pub feedback: Option<String>,
         pub requested_at: DateTimeUtc,
         pub decided_at: Option<DateTimeUtc>,
+        /// Where the internal engine's Auto-mode judge stands on this card,
+        /// when one was engaged (decision 0048 step 5: the judge is a
+        /// capability of the internal engine, on the one approval row).
+        pub auto_judge_status: Option<String>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

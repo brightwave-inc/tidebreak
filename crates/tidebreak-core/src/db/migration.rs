@@ -25,6 +25,7 @@
 
 mod baseline;
 mod idens;
+mod one_approval_surface;
 mod one_journal;
 
 #[cfg(test)]
@@ -71,6 +72,7 @@ impl MigratorTrait for Migrator {
             Box::new(InternalEngineSessions),
             Box::new(ConversationsAreSessions),
             Box::new(one_journal::OneJournal),
+            Box::new(one_approval_surface::OneApprovalSurface),
         ]
     }
 }
@@ -3938,11 +3940,6 @@ async fn rebuild_sqlite_table(
     .map(|row| row.try_get::<String, _>("name"))
     .collect::<Result<_, _>>()
     .map_err(|error| DbErr::Custom(format!("read SQLite {table} column names: {error}")))?;
-    let column_list = columns
-        .iter()
-        .map(|name| format!("\"{name}\""))
-        .collect::<Vec<_>>()
-        .join(", ");
 
     sea_orm::sqlx::query("PRAGMA foreign_keys = OFF")
         .execute(&mut *connection)
@@ -3953,9 +3950,28 @@ async fn rebuild_sqlite_table(
         .await
         .map_err(|error| DbErr::Custom(format!("begin SQLite {table} rebuild: {error}")))?;
     let rebuild = async {
+        for statement in [format!("DROP TABLE IF EXISTS \"{rebuild_table}\""), create] {
+            sea_orm::sqlx::query(sea_orm::sqlx::AssertSqlSafe(statement))
+                .execute(&mut *transaction)
+                .await?;
+        }
+        // Copy the columns both definitions have: a rewrite may retire a
+        // column, and a retired column has nothing to copy into.
+        let rebuilt_columns: Vec<String> = sea_orm::sqlx::query(sea_orm::sqlx::AssertSqlSafe(
+            format!("PRAGMA table_info(\"{rebuild_table}\")"),
+        ))
+        .fetch_all(&mut *transaction)
+        .await?
+        .into_iter()
+        .map(|row| row.try_get::<String, _>("name"))
+        .collect::<Result<_, _>>()?;
+        let column_list = columns
+            .iter()
+            .filter(|name| rebuilt_columns.contains(name))
+            .map(|name| format!("\"{name}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
         let mut statements = vec![
-            format!("DROP TABLE IF EXISTS \"{rebuild_table}\""),
-            create,
             format!(
                 "INSERT INTO \"{rebuild_table}\" ({column_list}) \
                  SELECT {column_list} FROM \"{table}\""
@@ -4108,6 +4124,7 @@ mod tests {
                 "m20260901_000002_internal_engine_sessions",
                 "m20260902_000001_conversations_are_sessions",
                 "m20260902_000002_one_journal",
+                "m20260902_000003_one_approval_surface",
             ]
         );
         assert!(db
@@ -4847,6 +4864,389 @@ INSERT INTO code_event (owner, session_id, seq, event, created_at) VALUES (
         Migrator::up(&db, None).await.unwrap();
 
         assert_one_journal(&db).await;
+    }
+
+    /// A conversation as the journal move left it, one migration before the
+    /// cards merge: a pending consent card the judge owns and a call a
+    /// standing grant approved (both on `tool_call`), an answered questions
+    /// card, a rejected plan, the journal rows that named each, and the
+    /// bridge worker's copy of the consent card beside them (#3010).
+    async fn seed_pre_approval_surface_conversation(db: &sea_orm::DatabaseConnection) {
+        let required = serde_json::json!({
+            "type": "tool_approval_required",
+            "call_id": "00000000-0000-0000-0000-00000000e010",
+            "tool_name": "exec",
+            "class": "sensitive",
+            "kind": "exec_may_run_networked_command",
+            "grant_scopes": [{"scope": "whole_tool"}],
+        });
+        let asked = serde_json::json!({
+            "type": "questions_asked",
+            "call_id": "00000000-0000-0000-0000-00000000e011",
+            "turn_id": "00000000-0000-0000-0000-00000000e004",
+        });
+        let proposed = serde_json::json!({
+            "type": "plan_proposed",
+            "call_id": "00000000-0000-0000-0000-00000000e012",
+            "turn_id": "00000000-0000-0000-0000-00000000e004",
+        });
+        let decided = serde_json::json!({
+            "type": "tool_approval_decided",
+            "call_id": "00000000-0000-0000-0000-00000000e013",
+            "approved": true,
+        });
+        let bridge_hint = serde_json::json!({
+            "type": "approval_requested",
+            "approval_id": "00000000-0000-0000-0000-00000000e030",
+        });
+        db.execute_unprepared(&format!(
+            r#"
+INSERT INTO code_session (
+    id, owner, workspace_id, kind, harness_kind, permission_mode, lifecycle,
+    spawn_epoch, attention_state, attention_source, created_at, title
+) VALUES (
+    X'0000000000000000000000000000e001', 'local', NULL, 'interactive',
+    'internal', 'ask', 'idle', 2, '{{"type":"idle"}}', 'lifecycle',
+    '2026-09-01T00:00:00Z', 'cards'
+);
+INSERT INTO agent_run (
+    id, chat_id, tier, execution_location, depth, status, attempt_count,
+    max_attempts, claim_count, available_at, created_at, updated_at
+) VALUES (
+    X'0000000000000000000000000000e005', X'0000000000000000000000000000e001',
+    'foreground', 'in_process', 0, 'active', 0, 0, 0, '2026-09-01T00:00:00Z',
+    '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z'
+);
+INSERT INTO message (id, chat_id, turn_id, seq, role, content, created_at) VALUES (
+    X'0000000000000000000000000000e002', X'0000000000000000000000000000e001',
+    X'0000000000000000000000000000e004', 1, 'user', 'hi', '2026-09-01T00:00:00Z'
+);
+INSERT INTO turn_run (
+    id, chat_id, agent_run_id, input_message_id, model, invoked_skills, status,
+    attempt_count, max_attempts, claim_count, available_at, started_at,
+    finished_at, created_at, updated_at
+) VALUES (
+    X'0000000000000000000000000000e004', X'0000000000000000000000000000e001',
+    X'0000000000000000000000000000e005', X'0000000000000000000000000000e002',
+    'scripted', '[]', 'cancelled', 1, 5, 1, '2026-09-01T00:00:00Z',
+    '2026-09-01T00:00:00Z', '2026-09-01T00:00:20Z', '2026-09-01T00:00:00Z',
+    '2026-09-01T00:00:20Z'
+);
+INSERT INTO code_turn (id, owner, session_id, ordinal, status, user_input, started_at)
+VALUES (
+    X'0000000000000000000000000000e020', 'local', X'0000000000000000000000000000e001',
+    1, 'running', 'hi', '2026-09-01T00:00:00Z'
+);
+INSERT INTO code_event (owner, session_id, seq, event, created_at) VALUES
+    ('local', X'0000000000000000000000000000e001', 1,
+     '{{"type":"turn_started","turn_id":"00000000-0000-0000-0000-00000000e004"}}',
+     '2026-09-01T00:00:00Z'),
+    ('local', X'0000000000000000000000000000e001', 2, '{required}', '2026-09-01T00:00:01Z'),
+    ('local', X'0000000000000000000000000000e001', 3, '{asked}', '2026-09-01T00:00:02Z'),
+    ('local', X'0000000000000000000000000000e001', 4, '{proposed}', '2026-09-01T00:00:03Z'),
+    ('local', X'0000000000000000000000000000e001', 5, '{decided}', '2026-09-01T00:00:04Z'),
+    ('local', X'0000000000000000000000000000e001', 6, '{bridge_hint}', '2026-09-01T00:00:05Z');
+INSERT INTO tool_call (
+    id, chat_id, turn_id, provider_id, history_order, name, arguments, execution,
+    status, approval_status, approval_class, approval_kind, approval_requested_at,
+    approval_event_seq, auto_judge_status, created_at
+) VALUES (
+    X'0000000000000000000000000000e010', X'0000000000000000000000000000e001',
+    X'0000000000000000000000000000e004', 'call-exec', 1, 'exec',
+    '{{"command":"cargo","args":["test"],"cwd":"."}}', 'server', 'pending',
+    'pending', 'sensitive', 'exec_may_run_networked_command',
+    '2026-09-01T00:00:01Z', 2, 'judging', '2026-09-01T00:00:01Z'
+);
+INSERT INTO tool_call (
+    id, chat_id, turn_id, provider_id, history_order, name, arguments, execution,
+    status, result, created_at, resolved_at
+) VALUES (
+    X'0000000000000000000000000000e011', X'0000000000000000000000000000e001',
+    X'0000000000000000000000000000e004', 'call-ask', 2, 'ask_user_questions',
+    '{{"questions":[]}}', 'orchestration', 'completed',
+    '{{"answers":[{{"question_id":"greeting","selected_option_ids":["hi"]}}]}}',
+    '2026-09-01T00:00:02Z', '2026-09-01T00:00:12Z'
+);
+INSERT INTO tool_call (
+    id, chat_id, turn_id, provider_id, history_order, name, arguments, execution,
+    status, result, created_at, resolved_at
+) VALUES (
+    X'0000000000000000000000000000e012', X'0000000000000000000000000000e001',
+    X'0000000000000000000000000000e004', 'call-plan', 3, 'exit_plan_mode',
+    '{{"title":"Ship","plan":"1. do it"}}', 'orchestration', 'completed',
+    '{{"decision":"rejected"}}', '2026-09-01T00:00:03Z', '2026-09-01T00:00:13Z'
+);
+INSERT INTO tool_call (
+    id, chat_id, turn_id, provider_id, history_order, name, arguments, execution,
+    status, result, approval_status, approval_class, approval_kind,
+    approval_requested_at, approval_decided_at, approval_grant_source_call_id,
+    created_at, resolved_at
+) VALUES (
+    X'0000000000000000000000000000e013', X'0000000000000000000000000000e001',
+    X'0000000000000000000000000000e004', 'call-search', 4, 'web_search',
+    '{{"query":"tides"}}', 'server', 'completed', 'ok', 'approved', 'sensitive',
+    'search_may_share_query_and_excerpts', '2026-09-01T00:00:04Z',
+    '2026-09-01T00:00:04Z', X'0000000000000000000000000000e010',
+    '2026-09-01T00:00:04Z', '2026-09-01T00:00:14Z'
+);
+INSERT INTO user_question_request (
+    call_id, turn_id, chat_id, status, event_seq, asked_at, resolved_at
+) VALUES (
+    X'0000000000000000000000000000e011', X'0000000000000000000000000000e004',
+    X'0000000000000000000000000000e001', 'answered', 3, '2026-09-01T00:00:02Z',
+    '2026-09-01T00:00:12Z'
+);
+INSERT INTO user_question (
+    call_id, question_id, position, header, prompt, options, allow_free_form,
+    question_type, answer_selected_option_ids, response_recorded_at
+) VALUES (
+    X'0000000000000000000000000000e011', 'greeting', 0, 'Greeting', 'Which greeting?',
+    '[{{"id":"hi","label":"hi","description":"short"}}]', FALSE, 'single_select',
+    '["hi"]', '2026-09-01T00:00:12Z'
+);
+INSERT INTO plan_request (
+    call_id, turn_id, chat_id, status, event_seq, title, plan, feedback,
+    proposed_at, resolved_at
+) VALUES (
+    X'0000000000000000000000000000e012', X'0000000000000000000000000000e004',
+    X'0000000000000000000000000000e001', 'rejected', 4, 'Ship', '1. do it',
+    'not yet', '2026-09-01T00:00:03Z', '2026-09-01T00:00:13Z'
+);
+INSERT INTO code_approval (
+    id, owner, session_id, turn_id, kind, harness_raw, native_call_id,
+    worker_epoch, state, requested_at
+) VALUES (
+    X'0000000000000000000000000000e030', 'local', X'0000000000000000000000000000e001',
+    X'0000000000000000000000000000e020', '{{"type":"other","summary":"exec"}}', 'null',
+    '00000000-0000-0000-0000-00000000e010', 2, 'pending', '2026-09-01T00:00:01Z'
+)"#
+        ))
+        .await
+        .unwrap();
+    }
+
+    /// What the merge leaves behind: the retired tables and columns gone,
+    /// every foreign key satisfied, each seeded card one approval row whose
+    /// id is its call id and the bridge's copy gone, the chat reads and the
+    /// session read serving the same rows, the journal rows rewritten in
+    /// place, and the schema equal to a fresh database's.
+    async fn assert_one_approval_surface(db: &sea_orm::DatabaseConnection) {
+        use crate::storage::Store as _;
+        assert!(db
+            .query_all_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "PRAGMA foreign_key_check".to_owned(),
+            ))
+            .await
+            .unwrap()
+            .is_empty());
+        for table in super::one_approval_surface::RETIRED_TABLES {
+            assert_eq!(
+                count(
+                    db,
+                    &format!("sqlite_master WHERE type = 'table' AND name = '{table}'")
+                )
+                .await,
+                0,
+                "{table} is dropped"
+            );
+        }
+        let tool_call_columns = db
+            .query_all_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "PRAGMA table_info(\"tool_call\")".to_owned(),
+            ))
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.try_get::<String>("", "name").unwrap())
+            .collect::<Vec<_>>();
+        for column in super::one_approval_surface::RETIRED_TOOL_CALL_COLUMNS {
+            assert!(
+                !tool_call_columns.iter().any(|name| name == column),
+                "tool_call keeps {column}"
+            );
+        }
+        let chat_id = crate::ChatId(uuid::Uuid::from_u128(0xe001));
+        let store = crate::db::DbStore { conn: db.clone() };
+        let owner = crate::OwnerId::local();
+
+        let mut rows = crate::db::code::list_approvals(
+            &store,
+            &owner,
+            None,
+            Some(crate::CodeSessionId(chat_id.0)),
+        )
+        .await
+        .unwrap();
+        rows.sort_by_key(|row| row.id.0);
+        assert_eq!(
+            rows.iter().map(|row| row.id.0).collect::<Vec<_>>(),
+            [0xe010, 0xe011, 0xe012, 0xe013]
+                .map(uuid::Uuid::from_u128)
+                .to_vec(),
+            "one row per card, keyed by the call, and the bridge's copy gone"
+        );
+        let [card, questions, plan, granted] = rows.as_slice() else {
+            unreachable!()
+        };
+        assert_eq!(card.state, crate::CodeApprovalState::Pending);
+        assert!(
+            matches!(&card.kind, crate::CodeApprovalKind::ToolUse { offered_grants, .. } if !offered_grants.is_empty())
+        );
+        assert_eq!(card.worker_epoch, Some(2));
+        assert_eq!(
+            card.native_call_id.as_deref(),
+            Some("00000000-0000-0000-0000-00000000e010")
+        );
+        assert_eq!(
+            card.auto_judge_status,
+            Some(crate::AutoJudgeStatus::Judging)
+        );
+        assert_eq!(questions.state, crate::CodeApprovalState::Approved);
+        assert!(
+            matches!(&questions.kind, crate::CodeApprovalKind::Questions { questions } if questions.len() == 1 && questions[0].id == "greeting")
+        );
+        assert_eq!(plan.state, crate::CodeApprovalState::Denied);
+        assert_eq!(plan.feedback.as_deref(), Some("not yet"));
+        assert_eq!(
+            crate::PlanProposalBody::from_raw(&plan.harness_raw).unwrap(),
+            crate::PlanProposalBody {
+                title: "Ship".into(),
+                plan: "1. do it".into()
+            }
+        );
+        assert_eq!(granted.state, crate::CodeApprovalState::Approved);
+
+        let pending = store
+            .list_pending_tool_call_approvals(chat_id, 100)
+            .await
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].call_id.0, uuid::Uuid::from_u128(0xe010));
+        assert_eq!(
+            pending[0].kind,
+            crate::ToolApprovalKind::ExecMayRunNetworkedCommand
+        );
+        assert_eq!(
+            pending[0].auto_judge_status,
+            Some(crate::AutoJudgeStatus::Judging)
+        );
+        let by_grant = store
+            .get_tool_call_approval(crate::CallId(uuid::Uuid::from_u128(0xe013)))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(by_grant.approved_by_standing_grant);
+        assert_eq!(by_grant.status, crate::ToolApprovalStatus::Approved);
+
+        let replay = store.list_events(chat_id, 0).await.unwrap();
+        let replayed = replay
+            .iter()
+            .map(|event| (event.seq, event.event.clone()))
+            .collect::<Vec<_>>();
+        assert!(
+            matches!(
+                &replayed[1],
+                (2, crate::AgentEvent::ApprovalRequired { call_id, kind: crate::ToolApprovalKind::ExecMayRunNetworkedCommand, grant_scopes, .. })
+                    if call_id.0 == uuid::Uuid::from_u128(0xe010) && grant_scopes.len() == 1
+            ),
+            "{replayed:?}"
+        );
+        assert!(
+            matches!(
+                &replayed[2],
+                (3, crate::AgentEvent::UserQuestionsAsked { call_id, turn_id })
+                    if call_id.0 == uuid::Uuid::from_u128(0xe011) && turn_id.0 == uuid::Uuid::from_u128(0xe004)
+            ),
+            "{replayed:?}"
+        );
+        assert!(
+            matches!(
+                &replayed[3],
+                (4, crate::AgentEvent::PlanProposed { call_id, .. })
+                    if call_id.0 == uuid::Uuid::from_u128(0xe012)
+            ),
+            "{replayed:?}"
+        );
+        assert!(
+            matches!(
+                &replayed[4],
+                (5, crate::AgentEvent::ApprovalDecided { call_id, approved: true })
+                    if call_id.0 == uuid::Uuid::from_u128(0xe013)
+            ),
+            "{replayed:?}"
+        );
+        assert_eq!(replayed.len(), 5, "the bridge's hint is gone: {replayed:?}");
+
+        let fresh = Database::connect("sqlite::memory:").await.unwrap();
+        Migrator::up(&fresh, None).await.unwrap();
+        assert_eq!(schema_of(db).await, schema_of(&fresh).await);
+    }
+
+    /// A merged SQLite profile keeps every card as one approval row, and a
+    /// second pass changes nothing.
+    #[tokio::test]
+    async fn a_pre_approval_surface_database_keeps_its_cards_as_approval_rows() {
+        use sea_orm_migration::MigrationTrait as _;
+
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        Migrator::up(
+            &db,
+            Some(steps_before("m20260902_000003_one_approval_surface")),
+        )
+        .await
+        .unwrap();
+        seed_pre_approval_surface_conversation(&db).await;
+
+        Migrator::up(&db, None).await.unwrap();
+
+        assert_one_approval_surface(&db).await;
+        let manager = SchemaManager::new(&db);
+        super::one_approval_surface::OneApprovalSurface
+            .up(&manager)
+            .await
+            .unwrap();
+        assert_one_approval_surface(&db).await;
+    }
+
+    /// The SQLite branch runs autocommit steps. An attempt that rebuilt
+    /// `code_approval` and minted the rows before dying must finish on the
+    /// next start: the rebuilt table comes back unchanged, the rows it
+    /// minted are kept rather than minted twice, and the rest lands.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn an_interrupted_one_approval_surface_migration_finishes_on_retry() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        Migrator::up(
+            &db,
+            Some(steps_before("m20260902_000003_one_approval_surface")),
+        )
+        .await
+        .unwrap();
+        seed_pre_approval_surface_conversation(&db).await;
+        let manager = SchemaManager::new(&db);
+        super::rebuild_sqlite_table(
+            &manager,
+            "code_approval",
+            super::one_approval_surface::one_approval_row,
+        )
+        .await
+        .unwrap();
+        assert!(manager
+            .has_column("code_approval", "auto_judge_status")
+            .await
+            .unwrap());
+        let transaction = manager.begin().await.unwrap();
+        super::one_approval_surface::backfill(transaction.get_connection())
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+        assert!(manager.has_table("plan_request").await.unwrap());
+
+        Migrator::up(&db, None).await.unwrap();
+
+        assert_one_approval_surface(&db).await;
     }
 
     /// The SQLite branch of the internal engine migration runs two

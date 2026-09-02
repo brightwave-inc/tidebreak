@@ -819,36 +819,29 @@ impl Agent {
             }
             let pending = registration.decision;
             // Race the decision against cancellation so a turn parked on approval
-            // can still be stopped. On cancel we close the approval card
-            // (`ApprovalDecided { approved: false }`) and return an error result;
-            // the loop's post-tool check then ends the turn as cancelled.
+            // can still be stopped. On cancel the card is already closed: the
+            // cancellation revoked it on the approval row, which journaled the
+            // decision. This returns an error result and the loop's post-tool
+            // check ends the turn as cancelled.
             //
             // `future::select` polls the left arm first, so when both are ready
             // (approve lands in the same tick as cancel) the decision would win
             // and a Sensitive tool would still run. Prefer cancel whenever the
-            // token is already tripped (same idea as the post-stream\n            // `is_cancelled()` re-check after `select`).
+            // token is already tripped (same idea as the post-stream
+            // `is_cancelled()` re-check after `select`).
             let decision = match future::select(pending, self.cancel.cancelled()).await {
                 Either::Left((decision, _)) if !self.cancel.is_cancelled() => decision,
                 Either::Left(_) | Either::Right(((), _)) => {
-                    if !authorized_by_standing_grant {
-                        events.send(AgentEvent::ApprovalDecided {
-                            call_id: call.call_id,
-                            approved: false,
-                        });
-                    }
                     return ToolOutput::failed(
                         ToolErrorCategory::UserCancelled,
                         "turn cancelled while awaiting approval",
                     );
                 }
             };
-            let approved = matches!(decision, ApprovalDecision::Approve);
-            if !authorized_by_standing_grant {
-                events.send(AgentEvent::ApprovalDecided {
-                    call_id: call.call_id,
-                    approved,
-                });
-            }
+            // The decision is journaled by whatever settled the approval row
+            // (decision 0048 step 5: one row, one resolution row), never a
+            // second time here.
+            let _ = authorized_by_standing_grant;
             if let ApprovalDecision::Reject { reason } = decision {
                 return ToolOutput::failed(ToolErrorCategory::UserDeclined, reason);
             }
@@ -1093,25 +1086,14 @@ impl Agent {
         let decision = match future::select(registration.decision, self.cancel.cancelled()).await {
             Either::Left((decision, _)) if !self.cancel.is_cancelled() => decision,
             Either::Left(_) | Either::Right(((), _)) => {
-                if !authorized_by_standing_grant {
-                    events.send(AgentEvent::ApprovalDecided {
-                        call_id: request.call_id,
-                        approved: false,
-                    });
-                }
                 refuse!(ToolOutput::failed(
                     ToolErrorCategory::UserCancelled,
                     "turn cancelled while awaiting delegation approval",
                 ));
             }
         };
-        let approved = matches!(decision, ApprovalDecision::Approve);
-        if !authorized_by_standing_grant {
-            events.send(AgentEvent::ApprovalDecided {
-                call_id: request.call_id,
-                approved,
-            });
-        }
+        // The decision row is journaled where the approval row settles.
+        let _ = authorized_by_standing_grant;
         if let ApprovalDecision::Reject { reason } = decision {
             refuse!(ToolOutput::failed(ToolErrorCategory::UserDeclined, reason));
         }
@@ -1263,17 +1245,6 @@ impl Agent {
                         "inherited tool call {} could not be abandoned: {outcome:?}",
                         call.call_id
                     )));
-                }
-                if durable_approval.is_some() {
-                    if let Some(approval) = self.store.get_tool_call_approval(call.call_id).await? {
-                        events.send(AgentEvent::ApprovalDecided {
-                            call_id: call.call_id,
-                            approved: matches!(
-                                approval.status,
-                                crate::approval::ToolApprovalStatus::Approved
-                            ),
-                        });
-                    }
                 }
                 events.send(AgentEvent::ToolCallCompleted {
                     call_id: call.call_id,

@@ -670,13 +670,6 @@ async fn cancel_unblocks_a_turn_parked_on_approval() {
     assert!(events
         .iter()
         .any(|e| matches!(e, AgentEvent::ApprovalRequired { .. })));
-    assert!(events.iter().any(|e| matches!(
-        e,
-        AgentEvent::ApprovalDecided {
-            approved: false,
-            ..
-        }
-    )));
     assert!(matches!(
         events.last(),
         Some(AgentEvent::TurnCancelled { .. })
