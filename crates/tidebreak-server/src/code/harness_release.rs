@@ -313,7 +313,14 @@ pub(in crate::code) mod test_support {
     ) -> PathBuf {
         let pin = tidebreak_harness::pin_for(kind).unwrap();
         let dir = tidebreak_harness::pin::install_dir_for(data_dir, pin, version);
-        let binary = dir.join("node_modules").join(".bin").join(pin.bin);
+        // npm lays down a `.cmd` shim on Windows, and that is the file the
+        // lookup checks for there.
+        let name = if cfg!(windows) {
+            format!("{}.cmd", pin.bin)
+        } else {
+            pin.bin.to_owned()
+        };
+        let binary = dir.join("node_modules").join(".bin").join(name);
         std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
         std::fs::write(&binary, b"#!/bin/sh\n").unwrap();
         #[cfg(unix)]
