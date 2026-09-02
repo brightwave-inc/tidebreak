@@ -73,13 +73,23 @@ jobs:
       }}
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-      pull-requests: read
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      # The built-in GITHUB_TOKEN shares one 1,000-request-per-hour budget with
+      # every workflow run in the repository, and a merge burst drains it. The
+      # tidebreak-release-bot app has its own budget, so the release API calls
+      # below use a token minted for it. Only this job may use the app token:
+      # events an app causes trigger workflows, unlike GITHUB_TOKEN, and the
+      # label job listens on the label events it emits.
+      - id: app_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
       - name: Require a published release baseline
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
         run: |
           attempt=1
           max_attempts=5
@@ -116,9 +126,11 @@ jobs:
           done
       - id: release_drafter
         uses: release-drafter/release-drafter@34d80673e067bdc0c24568d3af899c216adcfaa9 # v7
+        env:
+          GITHUB_TOKEN: ${{ steps.app_token.outputs.token }}
       - name: Keep exactly one native release draft
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
           RELEASE_ID: ${{ steps.release_drafter.outputs.id }}
           RESOLVED_VERSION: ${{ steps.release_drafter.outputs.resolved_version }}
         run: |
@@ -164,7 +176,7 @@ jobs:
           done
       - name: Group release notes by Conventional Commit scope
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
           RELEASE_BODY: ${{ steps.release_drafter.outputs.body }}
           RELEASE_ID: ${{ steps.release_drafter.outputs.id }}
           RELEASE_TAG: v${{ steps.release_drafter.outputs.resolved_version }}
