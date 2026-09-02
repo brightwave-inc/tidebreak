@@ -180,7 +180,9 @@ function McpAppEntry({
         )}
       </div>
       {!detailInAdvanced && unhealthy && entry.diagnostic !== null && (
-        <p className="text-xs text-muted-foreground">{entry.diagnostic}</p>
+        <p className="text-xs text-muted-foreground break-words">
+          {entry.diagnostic}
+        </p>
       )}
       {entry.tools.length > 0 && (
         <>

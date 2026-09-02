@@ -202,12 +202,14 @@ pub(super) fn validate_environment_name(server_name: &str, name: &str) -> Result
 
 /// The user-facing reason a server failed to connect.
 ///
-/// Every returned string is fixed or interpolates a configured *name* only —
-/// never URL, token, or upstream error text. For gateway mounts the split
-/// follows where the failure happened: sign-in state, then resolution/token
-/// exchange (these fail as [`AgentError::Config`] inside the connectors and
-/// gateway runtime, before any wire I/O), then the wire itself (tidebreak-mcp
-/// failures arrive as non-`Config` classes).
+/// Gateway mounts keep the sign-in / entitlement / reachability split: those
+/// failures happen before or beside the wire, and the messages must not name
+/// a resolved URL. Manual stdio and HTTP servers classify the transport
+/// failure (DNS, TLS, HTTP status, protocol, timeout, missing environment,
+/// process launch) and include the concrete detail. Messages interpolate
+/// configured *names*, a DNS host, an HTTP status line, a TLS reason, a
+/// bounded first-bytes quote, or a first stderr line — never a URL, token,
+/// or unbounded upstream body.
 pub(super) fn connection_diagnostic(
     definition: &McpServerDefinition,
     error: &AgentError,
@@ -231,13 +233,60 @@ pub(super) fn connection_diagnostic(
         .chain(&definition.bearer_token_env)
         .find(|name| std::env::var_os(name).is_none())
     {
-        return format!("Required parent environment variable {name:?} is not set.");
+        return missing_environment_diagnostic(
+            name,
+            definition.bearer_token_env.as_deref() == Some(name.as_str()),
+        );
+    }
+    let detail = classified_transport_detail(error);
+    if let Some(detail) = detail {
+        return detail;
     }
     if definition.url.is_some() {
         return "Could not connect to this server. Check its URL and credentials.".to_string();
     }
     "Could not initialize this server. Check its executable, arguments, and working directory."
         .to_string()
+}
+
+fn missing_environment_diagnostic(name: &str, bearer: bool) -> String {
+    if bearer {
+        format!(
+            "Bearer-token environment variable {name:?} is not set in the environment \
+             Tidebreak reads. Export it in the shell you start Tidebreak from, then \
+             restart Tidebreak. Tidebreak does not read a .env file or this form for \
+             the token value."
+        )
+    } else {
+        format!(
+            "Parent environment variable {name:?} is not set in the environment \
+             Tidebreak reads. Export it in the shell you start Tidebreak from, then \
+             restart Tidebreak."
+        )
+    }
+}
+
+fn classified_transport_detail(error: &AgentError) -> Option<String> {
+    let raw = match error {
+        AgentError::Config(message) | AgentError::Message(message) => message.as_str(),
+        _ => return None,
+    };
+    let raw = raw.strip_prefix("MCP client error: ").unwrap_or(raw);
+    const PREFIXES: &[&str] = &[
+        "DNS resolution failed",
+        "TLS handshake failed",
+        "Authentication failed",
+        "Wrong path",
+        "Server error",
+        "HTTP status",
+        "Protocol negotiation failed",
+        "Timed out after",
+        "Process failed to launch",
+    ];
+    PREFIXES
+        .iter()
+        .any(|prefix| raw.starts_with(prefix))
+        .then(|| raw.to_string())
 }
 
 pub(super) fn server_error(name: &str, message: impl std::fmt::Display) -> AgentError {

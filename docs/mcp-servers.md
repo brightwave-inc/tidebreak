@@ -47,9 +47,15 @@ fields. The two channels that do carry a value are:
   never stored at all.
 
 A missing selected name produces a server-specific error containing the name,
-not a value. Child stderr is discarded so a server cannot copy a forwarded
-credential into Tidebreak's host logs, and HTTP diagnostics are fixed strings
-that never echo the URL, a token, or a response body.
+not a value, and tells you to export it in the shell you start Tidebreak from
+and then restart Tidebreak. Save and verify classifies the failure: DNS
+resolution (the host), TLS handshake (the reason), HTTP status (401/403 as
+authentication, 404 as wrong path, 5xx as server error, with the status line),
+protocol negotiation (quotes the first bytes when the endpoint answered but
+not with MCP JSON-RPC), timeout (after N ms), or a stdio launch failure
+(command not found, exit code, first stderr line). Diagnostics never echo a
+URL or a token. Child stderr is not copied into host logs; a failed launch may
+quote its first line in Settings.
 
 Definitions saved before the values moved into the credential store held them
 in cleartext in the connected-app record. They are migrated on first load: the
@@ -75,9 +81,11 @@ claim covers and how a server earns an entry.
 ## Health and refresh
 
 Settings reports `initializing`, `healthy`, `degraded`, `reconnecting`, or
-`disabled` plus a bounded diagnostic and tool count. The runtime periodically
-pings enabled servers with a fixed health deadline and retries unavailable
-sessions with capped exponential backoff. Health checks and reconnects run
+`disabled` plus a bounded diagnostic and tool count. A healthy verify names
+how many tools were discovered and that the server is available to new turns.
+A disabled server stays configured and is not available to new turns. The
+runtime periodically pings enabled servers with a fixed health deadline and
+retries unavailable sessions with capped exponential backoff. Health checks and reconnects run
 independently across servers, while duplicate reconnects for one server share a
 single attempt. A server busy with a tool call is skipped for that health cycle,
 not treated as degraded. **Reconnect and refresh tools** explicitly starts a
@@ -131,6 +139,47 @@ point on record: once local apps and gateway promotion have shipped, if the
 gateway's inline console remains the only `ui://` producer in practice and a
 promoted app covers its use case, deprecating this surface is the recorded
 default — it would remove a special case, not a subsystem.
+
+## Known-good setups
+
+Fill the Connected apps form exactly as below, then **Save and verify**. A
+healthy row reports the discovered tool count and that the server is available
+to new turns.
+
+### Stdio: Tidebreak workspace tools
+
+Tidebreak's own read-only workspace server. The executable is the `tidebreak`
+binary on your `PATH`, or its absolute path.
+
+- **Namespace:** `workspace` (ASCII letters, numbers, `_`, or `-`)
+- **Transport:** Process on this computer (stdio)
+- **Executable:** `tidebreak`
+- **Arguments:** `mcp`, then the absolute workspace path (`/absolute/path/to/workspace`)
+- **Working directory:** leave blank
+- **Environment / Forward environment names:** none
+- **Bearer token variable:** not used
+- **Request timeout:** `60000`
+- **Enabled:** on
+
+### Remote HTTP: loopback Streamable HTTP
+
+A server that speaks MCP Streamable HTTP on loopback. Use `http://` only for a
+literal loopback address; remote URLs that send a bearer token must use
+`https://`.
+
+- **Namespace:** `docs`
+- **Transport:** Remote endpoint (HTTP)
+- **Server URL:** `http://127.0.0.1:8080/mcp` (the path your server actually serves)
+- **Bearer token variable:** leave blank on loopback with no auth
+- **Request timeout:** `60000`
+- **Enabled:** on
+
+For a remote HTTPS server that expects a bearer token, set **Server URL** to
+the `https://` MCP path and **Bearer token variable** to the *name* of the
+variable (for example `GATEWAY_TOKEN`). Export that variable in the shell you
+start Tidebreak from, then restart Tidebreak. Tidebreak reads its process
+environment; it does not read a `.env` file or the token from this form. A
+Dock or Finder launch does not see variables you set only in another terminal.
 
 ## Headless bootstrap
 

@@ -392,6 +392,8 @@ impl McpServerDefinition {
         gateway: &Arc<dyn GatewayEndpoints>,
         env: &BTreeMap<String, String>,
     ) -> Result<McpClient> {
+        let request_timeout = Duration::from_millis(self.request_timeout_ms);
+        let initialization_timeout = request_timeout.min(INITIALIZATION_TIMEOUT);
         if let Some(slug) = &self.gateway_endpoint {
             // Resolved per connection: a reconnect always presents a token
             // that is fresh at that moment, so expiry is survived by the
@@ -401,8 +403,8 @@ impl McpServerDefinition {
                 self.name.clone(),
                 &access.url,
                 Some(&access.bearer_token),
-                INITIALIZATION_TIMEOUT,
-                Duration::from_millis(self.request_timeout_ms),
+                initialization_timeout,
+                request_timeout,
             )
             .await
             .map(|client| {
@@ -428,16 +430,16 @@ impl McpServerDefinition {
                 url,
                 bearer_token.as_deref(),
                 &headers,
-                INITIALIZATION_TIMEOUT,
-                Duration::from_millis(self.request_timeout_ms),
+                initialization_timeout,
+                request_timeout,
             )
             .await;
         }
         McpClient::spawn_with_timeouts(
             self.name.clone(),
             self.build_command(env)?,
-            INITIALIZATION_TIMEOUT,
-            Duration::from_millis(self.request_timeout_ms),
+            initialization_timeout,
+            request_timeout,
         )
         .await
     }
