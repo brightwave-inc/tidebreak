@@ -5031,6 +5031,32 @@ instructions: string, };
 export type SkillOrigin = "builtin" | "user";
 
 /**
+ * One well-known location that returned a document.
+ */
+export type SpecDiscoveryCandidate = { url: string,
+/**
+ * Selectable operations when the document enumerates as OpenAPI 3 JSON.
+ */
+operation_count: number | null,
+/**
+ * Why the document cannot be used, when it cannot.
+ */
+unsupported_reason: string | null, };
+
+/**
+ * What probing one origin found.
+ */
+export type SpecDiscoveryInfo = {
+/**
+ * Candidate documents that answered, usable or not.
+ */
+candidates: Array<SpecDiscoveryCandidate>,
+/**
+ * Every location that was considered, in probe order.
+ */
+tried: Array<string>, };
+
+/**
  * What a document declares, for the configuration form's operation picker.
  * Renderer-safe: ids, methods, paths, and truncated summaries only.
  */

@@ -57,6 +57,7 @@ type SettingsClientMethods = Pick<
   | "listConnectedApps"
   | "putRestConnectedApp"
   | "previewRestSpec"
+  | "discoverRestSpec"
   | "deleteRestConnectedApp"
   | "listMcpServers"
   | "putMcpServers"
@@ -548,6 +549,14 @@ function createSettingsStoryClient(
         operations: [],
         unlistable: 0,
         truncated: false,
+      }),
+    discoverRestSpec: () =>
+      write({
+        candidates: [],
+        tried: [
+          "https://api.example.com/openapi.json",
+          "https://api.example.com/swagger.json",
+        ],
       }),
     deleteRestConnectedApp: () => write(undefined),
     listMcpServers: () => read({ servers: state === "empty" ? [] : servers }),

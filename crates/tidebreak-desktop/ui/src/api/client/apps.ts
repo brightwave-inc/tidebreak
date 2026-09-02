@@ -22,6 +22,7 @@ import {
   type PromptBody,
   type RestCredentialUpdate,
   type SkillInstructions,
+  type SpecDiscoveryInfo,
   type SpecPreviewInfo,
 } from "../types";
 import { attachedRemotely } from "../../host";
@@ -71,6 +72,15 @@ export function withAppsApi<TBase extends Constructor<HttpCore>>(Base: TBase) {
         method: "POST",
         headers: this.headers(true),
         body: JSON.stringify({ source }),
+      });
+    }
+
+    /** Probe well-known OpenAPI locations for one https origin or base URL. */
+    discoverRestSpec(origin: string): Promise<SpecDiscoveryInfo> {
+      return this.json("/connected-apps/rest/spec-discovery", {
+        method: "POST",
+        headers: this.headers(true),
+        body: JSON.stringify({ origin }),
       });
     }
 

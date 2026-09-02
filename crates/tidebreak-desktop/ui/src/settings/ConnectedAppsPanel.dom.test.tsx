@@ -384,6 +384,102 @@ describe("ConnectedAppsPanel", () => {
     );
   });
 
+  it("discovery fills the document URL from a candidate and fetches operations", async () => {
+    const preview = {
+      document_sha256: "cd".repeat(32),
+      operations: [
+        {
+          operation_id: "listOrganizations",
+          method: "get",
+          path: "/api/organizations/",
+          summary: null,
+        },
+      ],
+      unlistable: 0,
+      truncated: false,
+    };
+    const client = api({
+      discoverRestSpec: vi.fn().mockResolvedValue({
+        candidates: [
+          {
+            url: "https://api.example.com/openapi.json",
+            operation_count: 1,
+            unsupported_reason: null,
+          },
+        ],
+        tried: [
+          "https://api.example.com/openapi.json",
+          "https://api.example.com/swagger.json",
+        ],
+      }),
+      previewRestSpec: vi.fn().mockResolvedValue(preview),
+    });
+    const user = userEvent.setup();
+    render(<ConnectedAppsPanel client={client} managed={false} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: /Add REST API/ }),
+    );
+    await user.type(
+      screen.getByLabelText(/Base URL/),
+      "https://api.example.com",
+    );
+    await user.click(
+      screen.getByRole("button", { name: /Find the OpenAPI document/ }),
+    );
+    await user.click(
+      await screen.findByRole("button", { name: /Use this document/ }),
+    );
+
+    await waitFor(() =>
+      expect(client.previewRestSpec).toHaveBeenCalledWith({
+        url: "https://api.example.com/openapi.json",
+      }),
+    );
+    expect(screen.getByLabelText(/Document URL/)).toHaveValue(
+      "https://api.example.com/openapi.json",
+    );
+    expect(
+      await screen.findByRole("list", { name: "Operations" }),
+    ).toBeInTheDocument();
+  });
+
+  it("discovery with no candidates lists the locations tried", async () => {
+    const client = api({
+      discoverRestSpec: vi.fn().mockResolvedValue({
+        candidates: [],
+        tried: [
+          "https://api.example.com/openapi.json",
+          "https://api.example.com/swagger.json",
+        ],
+      }),
+    });
+    const user = userEvent.setup();
+    render(<ConnectedAppsPanel client={client} managed={false} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: /Add REST API/ }),
+    );
+    await user.type(
+      screen.getByLabelText(/Base URL/),
+      "https://api.example.com",
+    );
+    await user.click(
+      screen.getByRole("button", { name: /Find the OpenAPI document/ }),
+    );
+
+    expect(
+      await screen.findByText(/No OpenAPI document turned up/),
+    ).toBeInTheDocument();
+    await user.click(screen.getByText("Locations tried"));
+    expect(
+      screen.getByText("https://api.example.com/openapi.json"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Paste this example/ }),
+    ).toBeInTheDocument();
+  });
+
   it("an edit with an untouched value keeps the stored credential", async () => {
     const client = api();
     const user = userEvent.setup();
