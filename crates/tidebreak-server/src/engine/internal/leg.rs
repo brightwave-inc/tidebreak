@@ -3683,8 +3683,10 @@ mod committed_event_drain_tests {
         let off = freeze(None);
         assert!(!off.agent_config.memory_tool);
         let prompt = off.agent_config.system_prompt.as_deref().unwrap();
+        // The baseline prompt talks about "shared memory" in its rules, so
+        // look for the verb's own backticked guidance, not the bare word.
         assert!(
-            !prompt.contains(tidebreak_core::MEMORY_TOOL),
+            !prompt.contains("`memory`"),
             "a digest-less turn still described the memory verb: {prompt}"
         );
         assert!(prompt.contains("exec"), "the rest of the surface stays");
