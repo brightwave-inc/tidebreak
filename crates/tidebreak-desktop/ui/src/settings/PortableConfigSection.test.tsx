@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
   WorkspaceConfigDocument,
+  WorkspaceConfigApplyRequest,
   WorkspaceConfigPreview,
 } from "@/api/types";
 import { PortableConfigSection } from "./PortableConfigSection";
@@ -44,10 +45,12 @@ describe("PortableConfigSection", () => {
       ],
     };
     const previewWorkspaceConfig = vi.fn(async () => preview);
-    const applyWorkspaceConfig = vi.fn(async () => ({
-      applied: 1,
-      skipped: 0,
-    }));
+    const applyWorkspaceConfig = vi.fn(
+      async (_request: WorkspaceConfigApplyRequest) => ({
+        applied: 1,
+        skipped: 0,
+      }),
+    );
     const user = userEvent.setup();
     render(
       <PortableConfigSection
