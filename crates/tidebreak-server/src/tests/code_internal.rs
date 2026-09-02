@@ -630,11 +630,11 @@ async fn a_plain_internal_turn_is_journaled_once() {
         .unwrap();
     assert_eq!(created.status(), reqwest::StatusCode::CREATED);
     let session: serde_json::Value = created.json().await.unwrap();
-    let session_id: CodeSessionId = session["id"].as_str().unwrap().parse().unwrap();
+    let hosted: CodeSessionId = session["id"].as_str().unwrap().parse().unwrap();
 
     let response = tokio::time::timeout(Duration::from_secs(20), async {
         client
-            .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+            .post(format!("http://{addr}/code/sessions/{hosted}/turns"))
             .bearer_auth(&token)
             .json(&serde_json::json!({ "message": "say it" }))
             .send()
@@ -645,18 +645,18 @@ async fn a_plain_internal_turn_is_journaled_once() {
     .expect("the turn completes");
     assert!(response.status().is_success(), "{}", response.status());
     assert_eq!(
-        turn_statuses(&client, addr, &token, session_id).await,
+        turn_statuses(&client, addr, &token, hosted).await,
         vec!["completed"]
     );
 
-    let events = super::code::journaled_events(&runtime.db, session_id).await;
+    let events = super::code::journaled_events(&runtime.db, hosted).await;
     assert_journaled_once(&events, 1);
     assert_eq!(streamed_text(&events), "just the answer");
     let types = event_types(&events);
     let started = position(&types, "turn_started", 0);
     let completed = position(&types, "turn_completed", started);
     assert_eq!(completed + 1, types.len(), "{types:?}");
-    assert_chat_replay_is_the_journal(&runtime.db, session_id, &events).await;
+    assert_chat_replay_is_the_journal(&runtime.db, hosted, &events).await;
 }
 
 /// The workspace-bound create path never selects the in-process engine,
