@@ -187,7 +187,7 @@ function mcpUrlHint(draft: Draft): boolean {
   );
 }
 
-function mcpHintForPreview(draft: Draft, err: unknown): string | null {
+function mcpHintForPreview(draft: Draft): string | null {
   if (mcpUrlHint(draft)) {
     return "This looks like an MCP HTTP endpoint, not an OpenAPI document. Add it under Settings → MCP servers as a remote HTTP server.";
   }
@@ -580,7 +580,7 @@ export function ConnectedAppsPanel({
         `Found ${preview.operations.length} operation${preview.operations.length === 1 ? "" : "s"}`,
       );
     } catch (err) {
-      const message = mcpHintForPreview(draft, err) ?? errorMessage(err);
+      const message = mcpHintForPreview(draft) ?? errorMessage(err);
       setFormError(message);
       toast.error(message);
     } finally {
