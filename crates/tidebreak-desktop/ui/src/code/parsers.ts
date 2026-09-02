@@ -3432,6 +3432,7 @@ function parseHarnessCaps(value: unknown): HarnessCaps | null {
       "durable_parks",
       "user_questions",
       "standing_grants",
+      "memory_loopback",
     ]) ||
     !isMember(value.resume, CAP_LEVELS) ||
     !isMember(value.streaming_deltas, CAP_LEVELS) ||
@@ -3447,7 +3448,8 @@ function parseHarnessCaps(value: unknown): HarnessCaps | null {
     !isMember(value.slash_commands, CAP_LEVELS) ||
     !isMember(value.durable_parks, CAP_LEVELS) ||
     !isMember(value.user_questions, CAP_LEVELS) ||
-    !isMember(value.standing_grants, CAP_LEVELS)
+    !isMember(value.standing_grants, CAP_LEVELS) ||
+    !isMember(value.memory_loopback, CAP_LEVELS)
   ) {
     return null;
   }
@@ -3467,6 +3469,7 @@ function parseHarnessCaps(value: unknown): HarnessCaps | null {
     durable_parks: value.durable_parks,
     user_questions: value.user_questions,
     standing_grants: value.standing_grants,
+    memory_loopback: value.memory_loopback,
   };
 }
 
