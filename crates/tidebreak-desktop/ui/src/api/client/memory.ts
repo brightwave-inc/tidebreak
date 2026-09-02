@@ -4,6 +4,7 @@ import {
   parseMemoryRecord,
   parseMemoryRevision,
   parseMemorySearchHit,
+  parseMemorySweepStatus,
 } from "../parsers";
 import type {
   MemoryAuthor,
@@ -19,6 +20,7 @@ import type {
   MemoryScope,
   MemorySearchHit,
   MemoryStatus,
+  MemorySweepStatus,
 } from "../types";
 import { type Constructor, HttpCore, parseList, requireParsed } from "./http";
 
@@ -184,6 +186,15 @@ export function withMemoryApi<TBase extends Constructor<HttpCore>>(
           }),
         ),
         "memory digest",
+      );
+    }
+
+    async getMemorySweepStatus(): Promise<MemorySweepStatus> {
+      return requireParsed(
+        parseMemorySweepStatus(
+          await this.json("/memory/sweep", { headers: this.headers() }),
+        ),
+        "memory sweep status",
       );
     }
 

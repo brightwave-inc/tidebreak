@@ -33,6 +33,8 @@ import {
   type MemoryRecord as WireMemoryRecord,
   type MemoryRevision as WireMemoryRevision,
   type MemorySearchHit as WireMemorySearchHit,
+  type MemorySweepRun as WireMemorySweepRun,
+  type MemorySweepStatus as WireMemorySweepStatus,
   type TaskPlan as WireTaskPlan,
   type TaskPlanStep as WireTaskPlanStep,
   type TaskPlanStepStatus,
@@ -70,6 +72,9 @@ import {
   type MemoryScope,
   type MemorySearchHit,
   type MemoryStatus,
+  type MemorySweepOutcome,
+  type MemorySweepRun,
+  type MemorySweepStatus,
   type PendingChatPrompt,
   type PendingFolderAccessRequest,
   type PendingOutputWritebackRequest,
@@ -336,7 +341,13 @@ export function parseMemoryRecord(value: unknown): MemoryRecord | null {
   ) {
     return null;
   }
-  if (provenance.author === "model" && provenance.evidence.length === 0) {
+  if (
+    provenance.author === "model" &&
+    provenance.evidence.length === 0 &&
+    !links.some(
+      (link) => link.relation === "supersedes" || link.relation === "updates",
+    )
+  ) {
     return null;
   }
   return {
@@ -424,6 +435,71 @@ export function parseMemoryDigest(value: unknown): MemoryDigest | null {
     byte_cap: value.byte_cap,
     record_count: value.record_count,
   };
+}
+
+const MEMORY_SWEEP_OUTCOMES: ReadonlySet<MemorySweepOutcome> = new Set([
+  "proposed",
+  "declined",
+  "parked",
+  "unchanged",
+  "owner_busy",
+  "no_model",
+  "rate_limited",
+]);
+
+/** Validate one completed maintenance pass. */
+function parseMemorySweepRun(value: unknown): MemorySweepRun | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireMemorySweepRun>(value, [
+      "ran_at",
+      "scope",
+      "outcome",
+      "expired",
+      "proposed",
+    ]) ||
+    !nonEmptyBounded(value.ran_at, 64) ||
+    typeof value.outcome !== "string" ||
+    !MEMORY_SWEEP_OUTCOMES.has(value.outcome as MemorySweepOutcome) ||
+    typeof value.expired !== "number" ||
+    !Number.isSafeInteger(value.expired) ||
+    value.expired < 0 ||
+    typeof value.proposed !== "number" ||
+    !Number.isSafeInteger(value.proposed) ||
+    value.proposed < 0
+  ) {
+    return null;
+  }
+  let scope = null;
+  if (value.scope !== null && value.scope !== undefined) {
+    scope = parseMemoryScope(value.scope);
+    if (!scope) return null;
+  }
+  return {
+    ran_at: value.ran_at,
+    scope,
+    outcome: value.outcome as MemorySweepOutcome,
+    expired: value.expired,
+    proposed: value.proposed,
+  };
+}
+
+/** Validate the maintenance sweep's last-run answer. */
+export function parseMemorySweepStatus(
+  value: unknown,
+): MemorySweepStatus | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireMemorySweepStatus>(value, ["last_run"])
+  ) {
+    return null;
+  }
+  if (value.last_run === null || value.last_run === undefined) {
+    return { last_run: null };
+  }
+  const lastRun = parseMemorySweepRun(value.last_run);
+  if (!lastRun) return null;
+  return { last_run: lastRun };
 }
 
 /** Validate one immutable revision snapshot. */

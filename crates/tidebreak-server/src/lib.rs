@@ -58,6 +58,7 @@ mod mcp_curated;
 /// Trusted decision about what imported bytes actually are, made from the
 /// bytes rather than from whoever named them.
 pub mod media_type;
+mod memory_sweep;
 mod model_registry;
 mod model_roles;
 mod obo_gateway;
@@ -687,6 +688,7 @@ pub fn app(state: AppState) -> Router {
         .route("/memory/records/{id}/revisions", get(routes::revisions))
         .route("/memory/search", get(routes::search))
         .route("/memory/digest", get(routes::digest))
+        .route("/memory/sweep", get(routes::sweep_status))
         .route(
             "/memory/ingest",
             post(routes::ingest).layer(DefaultBodyLimit::max(routes::MAX_MEMORY_BODY_BYTES)),
@@ -1335,6 +1337,7 @@ pub struct Server {
     _blob_retirement_worker: AbortTask,
     _blob_orphan_auditor: AbortTask,
     _approval_judge_worker: AbortTask,
+    _memory_sweep: AbortTask,
     _mcp_supervisor: AbortTask,
     _gateway_model_sync: AbortTask,
     _store_ownership: store_ownership::StoreOwnership,
@@ -1502,6 +1505,7 @@ impl Server {
         self._blob_retirement_worker.abort();
         self._blob_orphan_auditor.abort();
         self._approval_judge_worker.abort();
+        self._memory_sweep.abort();
         self._mcp_supervisor.abort();
         self._gateway_model_sync.abort();
 
@@ -1519,6 +1523,7 @@ impl Server {
         self._blob_retirement_worker.wait().await;
         self._blob_orphan_auditor.wait().await;
         self._approval_judge_worker.wait().await;
+        self._memory_sweep.wait().await;
         self._mcp_supervisor.wait().await;
         self._gateway_model_sync.wait().await;
     }
@@ -2236,7 +2241,7 @@ async fn bind_inner(
     }
     state.host_folders = host_folders;
     let runtime = code::CodeRuntime::new(
-        db,
+        db.clone(),
         state.config.data_dir.clone(),
         state.config.code_worktree_root_default.clone(),
         code_host_tool_broker,
@@ -2342,6 +2347,19 @@ async fn bind_inner(
         state.provisioned_policy.clone(),
         state.os_policy.clone(),
         state.approvals.clone(),
+    )
+    .with_on_behalf_of_gateway(state.on_behalf_of_gateway.clone());
+    // Memory maintenance: a durable try-based sweep over the owner's memory
+    // records (decision 68). Expiry is mechanical; the consolidation step
+    // resolves the utility role per pass, which is why the sweep is built
+    // from app state like the judge rather than owned by the code runtime.
+    let memory_sweep_worker = memory_sweep::MemorySweep::new(
+        db.clone(),
+        state.store.clone(),
+        state.resolver.clone(),
+        state.secrets.clone(),
+        state.provisioned_policy.clone(),
+        state.os_policy.clone(),
     )
     .with_on_behalf_of_gateway(state.on_behalf_of_gateway.clone());
     // Installed rather than constructed with the runtime: a recap runs on the
@@ -2536,6 +2554,7 @@ async fn bind_inner(
     let blob_retirement_worker = tokio::spawn(blob_retirement_worker.run());
     let blob_orphan_auditor = tokio::spawn(blob_orphan_auditor.run());
     let approval_judge_worker = tokio::spawn(approval_judge_worker.run());
+    let memory_sweep_worker = tokio::spawn(memory_sweep_worker.run());
     let mcp_supervisor = tokio::spawn(mcp_runtime.clone().supervise());
     let gateway_model_sync = tokio::spawn(
         gateway_runtime
@@ -2566,6 +2585,7 @@ async fn bind_inner(
         _blob_retirement_worker: AbortTask(blob_retirement_worker),
         _blob_orphan_auditor: AbortTask(blob_orphan_auditor),
         _approval_judge_worker: AbortTask(approval_judge_worker),
+        _memory_sweep: AbortTask(memory_sweep_worker),
         _mcp_supervisor: AbortTask(mcp_supervisor),
         _gateway_model_sync: AbortTask(gateway_model_sync),
         _store_ownership: store_ownership,

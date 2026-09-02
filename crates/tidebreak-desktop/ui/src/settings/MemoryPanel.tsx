@@ -10,6 +10,7 @@ import type {
   MemoryRevision,
   MemoryScope,
   MemoryStatus,
+  MemorySweepStatus,
 } from "../api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -46,6 +47,7 @@ export function MemoryPanel({ client }: { client: ApiClient }) {
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [revisions, setRevisions] = useState<MemoryRevision[] | null>(null);
+  const [sweep, setSweep] = useState<MemorySweepStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -55,14 +57,17 @@ export function MemoryPanel({ client }: { client: ApiClient }) {
     setLoading(true);
     setError(null);
     try {
-      const [nextSettings, nextRecords, nextDigest] = await Promise.all([
-        client.getSettings(),
-        client.listMemoryRecords(),
-        client.getMemoryDigest(scope),
-      ]);
+      const [nextSettings, nextRecords, nextDigest, nextSweep] =
+        await Promise.all([
+          client.getSettings(),
+          client.listMemoryRecords(),
+          client.getMemoryDigest(scope),
+          client.getMemorySweepStatus(),
+        ]);
       setSettings(nextSettings.memory);
       setRecords(nextRecords);
       setDigest(nextDigest);
+      setSweep(nextSweep);
       setSelectedId((current) => {
         const exists =
           current != null &&
@@ -199,6 +204,9 @@ export function MemoryPanel({ client }: { client: ApiClient }) {
               description="Personal memory is injected as dated claims; the current conversation always overrides it."
             />
           )}
+          <p className="text-sm text-muted-foreground" role="status">
+            {sweepSummary(sweep)}
+          </p>
 
           <SettingsSection
             title="Memory settings"
@@ -557,4 +565,41 @@ function statusVariant(
 function formatDay(timestamp: string): string {
   const date = new Date(timestamp);
   return Number.isNaN(date.getTime()) ? timestamp : date.toLocaleDateString();
+}
+
+/** One sentence describing the maintenance sweep's last completed pass. */
+function sweepSummary(status: MemorySweepStatus | null): string {
+  const run = status?.last_run;
+  if (!run) return "Maintenance has not run yet.";
+  const parts: string[] = [];
+  if (run.expired > 0) {
+    parts.push(
+      `archived ${run.expired} expired record${run.expired === 1 ? "" : "s"}`,
+    );
+  }
+  if (run.outcome === "proposed") {
+    parts.push(
+      `proposed ${run.proposed === 1 ? "a merge" : `${run.proposed} merges`} for review`,
+    );
+  } else if (run.outcome === "declined") {
+    parts.push("found nothing to merge");
+  } else if (run.outcome === "parked") {
+    parts.push("parked until records change");
+  } else if (run.outcome === "owner_busy") {
+    parts.push("waited while you were working");
+  } else if (run.outcome === "no_model") {
+    parts.push("skipped consolidation because no utility model is configured");
+  } else if (run.outcome === "rate_limited") {
+    parts.push("held consolidation for a later pass");
+  } else if (parts.length === 0) {
+    parts.push("found no changes");
+  }
+  return `Maintenance last ran ${formatTime(run.ran_at)} and ${parts.join(", ")}.`;
+}
+
+/** A local date and time, falling back to the raw string. */
+function formatTime(timestamp: string): string {
+  const parsed = new Date(timestamp);
+  if (Number.isNaN(parsed.getTime())) return timestamp;
+  return parsed.toLocaleString();
 }

@@ -372,9 +372,17 @@ impl MemoryRecord {
                 "memory record exceeds {MAX_MEMORY_EVIDENCE} evidence references"
             )));
         }
-        if self.provenance.author == MemoryAuthor::Model && self.provenance.evidence.is_empty() {
+        if self.provenance.author == MemoryAuthor::Model
+            && self.provenance.evidence.is_empty()
+            && !self.links.iter().any(|link| {
+                matches!(
+                    link.relation,
+                    MemoryLinkRelation::Updates | MemoryLinkRelation::Supersedes
+                )
+            })
+        {
             return Err(MemoryError::InvalidRecord(
-                "model-authored memory requires resolvable evidence".to_owned(),
+                "model-authored memory requires resolvable evidence or source links".to_owned(),
             ));
         }
         if self.links.len() > MAX_MEMORY_LINKS {
@@ -682,6 +690,98 @@ pub enum MemoryError {
 /// Result returned by a memory backend.
 pub type MemoryResult<T> = std::result::Result<T, MemoryError>;
 
+/// Why one maintenance pass ended the way it did for an owner.
+///
+/// Mechanical expiry runs on every pass; the outcome names what happened to
+/// the bounded consolidation step, which is the part that can wait, park, or
+/// need a model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum MemorySweepOutcome {
+    /// The utility model proposed a merge for review.
+    Proposed,
+    /// The utility model looked at a changed scope and found nothing to merge.
+    Declined,
+    /// The last proposal was dismissed and the record set has not changed.
+    Parked,
+    /// No scope's active record set changed since its last completed try.
+    Unchanged,
+    /// The owner had an active turn, so the model step waited.
+    OwnerBusy,
+    /// No utility model resolves; expiry still ran.
+    NoModel,
+    /// The per-owner rate bound held the model step for a later pass.
+    RateLimited,
+}
+
+impl MemorySweepOutcome {
+    /// Stable database token.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Proposed => "proposed",
+            Self::Declined => "declined",
+            Self::Parked => "parked",
+            Self::Unchanged => "unchanged",
+            Self::OwnerBusy => "owner_busy",
+            Self::NoModel => "no_model",
+            Self::RateLimited => "rate_limited",
+        }
+    }
+
+    /// Parse one stable database token.
+    pub fn parse(token: &str) -> MemoryResult<Self> {
+        match token {
+            "proposed" => Ok(Self::Proposed),
+            "declined" => Ok(Self::Declined),
+            "parked" => Ok(Self::Parked),
+            "unchanged" => Ok(Self::Unchanged),
+            "owner_busy" => Ok(Self::OwnerBusy),
+            "no_model" => Ok(Self::NoModel),
+            "rate_limited" => Ok(Self::RateLimited),
+            other => Err(MemoryError::Backend(format!(
+                "invalid memory sweep outcome {other:?}"
+            ))),
+        }
+    }
+}
+
+/// The maintenance sweep's last completed pass for one owner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct MemorySweepRun {
+    /// When the pass completed.
+    pub ran_at: DateTime<Utc>,
+    /// The scope the consolidation step considered, when one was picked.
+    pub scope: Option<MemoryScope>,
+    /// What happened to the consolidation step.
+    pub outcome: MemorySweepOutcome,
+    /// Records mechanically archived by this pass.
+    pub expired: u32,
+    /// Merge proposals this pass stored for review.
+    pub proposed: u32,
+}
+
+/// Answer of `GET /memory/sweep`: the last run, or `None` before the first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct MemorySweepStatus {
+    /// The most recent completed pass for the caller.
+    pub last_run: Option<MemorySweepRun>,
+}
+
+/// Durable per-scope sweep state: the standing-condition fingerprint and the
+/// proposal the last completed try produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemorySweepScopeState {
+    /// Scope this row fingerprints.
+    pub scope: MemoryScope,
+    /// Fingerprint of the active record set at the last completed try.
+    pub fingerprint: String,
+    /// Merge proposal the last completed try stored, if it stored one.
+    pub proposal_id: Option<MemoryRecordId>,
+    /// When the last utility-model step ran for this scope.
+    pub last_model_step_at: Option<DateTime<Utc>>,
+}
+
 /// Storage, retrieval, review, and context assembly for durable memory.
 #[async_trait]
 pub trait MemoryBackend: Send + Sync {
@@ -794,7 +894,7 @@ mod tests {
         assert_eq!(
             record.validate(),
             Err(MemoryError::InvalidRecord(
-                "model-authored memory requires resolvable evidence".to_owned()
+                "model-authored memory requires resolvable evidence or source links".to_owned()
             ))
         );
     }

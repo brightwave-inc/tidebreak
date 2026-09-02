@@ -74,6 +74,7 @@ impl MigratorTrait for Migrator {
             Box::new(one_journal::OneJournal),
             Box::new(one_approval_surface::OneApprovalSurface),
             Box::new(MemoryRecords),
+            Box::new(MemorySweepState),
         ]
     }
 }
@@ -4298,6 +4299,123 @@ impl MigrationTrait for MemoryRecords {
     }
 }
 
+/// Durable state for the memory maintenance sweep: one fingerprint row per
+/// swept scope and one last-run row per owner.
+struct MemorySweepState;
+
+impl MigrationName for MemorySweepState {
+    fn name(&self) -> &str {
+        "m20260902_000005_memory_sweep_state"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for MemorySweepState {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .create_table(
+                Table::create()
+                    .table(idens::MemorySweepScope::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(idens::MemorySweepScope::Owner)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::MemorySweepScope::ScopeKind)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::MemorySweepScope::ScopeRef)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::MemorySweepScope::Fingerprint)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(idens::MemorySweepScope::ProposalId).uuid())
+                    .col(
+                        ColumnDef::new(idens::MemorySweepScope::LastModelStepAt)
+                            .timestamp_with_time_zone(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::MemorySweepScope::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::MemorySweepScope::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .primary_key(
+                        Index::create()
+                            .col(idens::MemorySweepScope::Owner)
+                            .col(idens::MemorySweepScope::ScopeKind)
+                            .col(idens::MemorySweepScope::ScopeRef),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_table(
+                Table::create()
+                    .table(idens::MemorySweepRun::Table)
+                    .if_not_exists()
+                    .col(
+                        ColumnDef::new(idens::MemorySweepRun::Owner)
+                            .text()
+                            .not_null()
+                            .primary_key(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::MemorySweepRun::RanAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(ColumnDef::new(idens::MemorySweepRun::ScopeKind).text())
+                    .col(ColumnDef::new(idens::MemorySweepRun::ScopeRef).text())
+                    .col(
+                        ColumnDef::new(idens::MemorySweepRun::Outcome)
+                            .text()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::MemorySweepRun::Expired)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::MemorySweepRun::Proposed)
+                            .big_integer()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::MemorySweepRun::CreatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .col(
+                        ColumnDef::new(idens::MemorySweepRun::UpdatedAt)
+                            .timestamp_with_time_zone()
+                            .not_null(),
+                    )
+                    .to_owned(),
+            )
+            .await
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // Sweep state rebuilds itself from the record rows; a rollback keeps
+        // the tables and `if_not_exists` re-adopts them on the next upgrade.
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
@@ -4381,6 +4499,7 @@ mod tests {
                 "m20260902_000002_one_journal",
                 "m20260902_000003_one_approval_surface",
                 "m20260902_000004_memory_records",
+                "m20260902_000005_memory_sweep_state",
             ]
         );
         assert!(db
