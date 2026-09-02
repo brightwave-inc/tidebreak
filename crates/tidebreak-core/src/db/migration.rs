@@ -3427,7 +3427,9 @@ ALTER TABLE "code_turn" ADD COLUMN "park_wait" jsonb;
                     .await?;
                 transaction.commit().await
             }
-            DbBackend::Sqlite => rebuild_sqlite_code_turn_for_parks(manager).await,
+            DbBackend::Sqlite => {
+                rebuild_sqlite_table(manager, "code_turn", rewrite_code_turn_for_parks).await
+            }
             backend => Err(DbErr::Custom(format!(
                 "unsupported database backend for turn park migration: {backend:?}"
             ))),
@@ -3441,133 +3443,27 @@ ALTER TABLE "code_turn" ADD COLUMN "park_wait" jsonb;
     }
 }
 
-#[cfg(feature = "sqlite")]
-async fn rebuild_sqlite_code_turn_for_parks(manager: &SchemaManager<'_>) -> Result<(), DbErr> {
-    use sea_orm::sqlx::Acquire as _;
-    use sea_orm::DatabaseExecutor;
+/// Widen the stored `code_turn` definition for parks: the status check admits
+/// `waiting`, and the two park columns join the column list ahead of the
+/// table constraints, where SQLite itself places an added column.
+fn rewrite_code_turn_for_parks(create: &str) -> Result<String, DbErr> {
+    const NARROW_CHECK: &str =
+        r#"CHECK ("status" IN ('running', 'completed', 'failed', 'interrupted'))"#;
+    const WIDE_CHECK: &str =
+        r#"CHECK ("status" IN ('running', 'waiting', 'completed', 'failed', 'interrupted'))"#;
+    const SESSION_KEY: &str = r#"FOREIGN KEY ("session_id") REFERENCES "code_session" ("id")"#;
+    const PARK_COLUMNS: &str = r#""park_ref" text, "park_wait" jsonb_text, "#;
 
-    let DatabaseExecutor::Connection(database) = manager.get_connection() else {
+    if create.matches(NARROW_CHECK).count() != 1 || create.matches(SESSION_KEY).count() != 1 {
         return Err(DbErr::Custom(
-            "SQLite turn park rebuild requires the migration connection".to_owned(),
+            "SQLite code_turn definition does not declare the status check and session key as expected"
+                .to_owned(),
         ));
-    };
-    let mut connection = database
-        .get_sqlite_connection_pool()
-        .acquire()
-        .await
-        .map_err(|error| DbErr::Custom(format!("acquire SQLite migration connection: {error}")))?;
-    sea_orm::sqlx::query("PRAGMA foreign_keys = OFF")
-        .execute(&mut *connection)
-        .await
-        .map_err(|error| DbErr::Custom(format!("disable SQLite foreign keys: {error}")))?;
-
-    let mut transaction = connection
-        .begin()
-        .await
-        .map_err(|error| DbErr::Custom(format!("begin SQLite turn park rebuild: {error}")))?;
-    let rebuild = async {
-        for statement in [
-            r#"DROP TABLE IF EXISTS "code_turn_park""#,
-            r#"
-CREATE TABLE "code_turn_park" (
-    "id" uuid_text NOT NULL PRIMARY KEY,
-    "owner" text NOT NULL DEFAULT 'local',
-    "session_id" uuid_text NOT NULL,
-    "ordinal" integer NOT NULL,
-    "status" text NOT NULL,
-    "user_input" text NOT NULL,
-    "user_input_blob_id" uuid_text,
-    "checkpoint_ref" text,
-    "diffstat" jsonb_text,
-    "usage" jsonb_text,
-    "narrative" text,
-    "started_at" timestamp_with_timezone_text NOT NULL,
-    "ended_at" timestamp_with_timezone_text,
-    "model" text,
-    "fast_mode" boolean NOT NULL DEFAULT FALSE,
-    "rewrite" text,
-    "park_ref" text,
-    "park_wait" jsonb_text,
-    FOREIGN KEY ("session_id") REFERENCES "code_session" ("id"),
-    CHECK ("status" IN ('running', 'waiting', 'completed', 'failed', 'interrupted')),
-    CHECK ("ordinal" >= 1)
-)"#,
-            r#"
-INSERT INTO "code_turn_park" (
-    "id", "owner", "session_id", "ordinal", "status", "user_input",
-    "user_input_blob_id", "checkpoint_ref", "diffstat", "usage", "narrative",
-    "started_at", "ended_at", "model", "fast_mode", "rewrite"
-)
-SELECT
-    "id", "owner", "session_id", "ordinal", "status", "user_input",
-    "user_input_blob_id", "checkpoint_ref", "diffstat", "usage", "narrative",
-    "started_at", "ended_at", "model", "fast_mode", "rewrite"
-FROM "code_turn""#,
-            r#"DROP TABLE "code_turn""#,
-            r#"ALTER TABLE "code_turn_park" RENAME TO "code_turn""#,
-            r#"CREATE UNIQUE INDEX "idx_code_turn_session_ordinal"
-                ON "code_turn" ("session_id", "ordinal")"#,
-        ] {
-            sea_orm::sqlx::query(statement)
-                .execute(&mut *transaction)
-                .await?;
-        }
-        Ok::<(), sea_orm::sqlx::Error>(())
     }
-    .await;
-
-    let rebuild = match rebuild {
-        Ok(()) => transaction
-            .commit()
-            .await
-            .map_err(|error| DbErr::Custom(format!("commit SQLite turn park rebuild: {error}"))),
-        Err(error) => {
-            let rollback = transaction.rollback().await;
-            match rollback {
-                Ok(()) => Err(DbErr::Custom(format!(
-                    "rebuild SQLite turn table for parks: {error}"
-                ))),
-                Err(rollback) => Err(DbErr::Custom(format!(
-                    "rebuild SQLite turn table for parks: {error}; rollback failed: {rollback}"
-                ))),
-            }
-        }
-    };
-
-    let enable = match sea_orm::sqlx::query("PRAGMA foreign_keys = ON")
-        .execute(&mut *connection)
-        .await
-    {
-        Ok(_) => {
-            sea_orm::sqlx::query_scalar::<_, i64>("PRAGMA foreign_keys")
-                .fetch_one(&mut *connection)
-                .await
-        }
-        Err(error) => Err(error),
-    }
-    .map_err(|error| DbErr::Custom(format!("restore SQLite foreign keys: {error}")))
-    .and_then(|enabled| {
-        if enabled == 1 {
-            Ok(())
-        } else {
-            Err(DbErr::Custom(
-                "restore SQLite foreign keys: PRAGMA remained disabled".to_owned(),
-            ))
-        }
-    });
-    match (rebuild, enable) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
-        (Err(rebuild), Err(enable)) => {
-            Err(DbErr::Custom(format!("{rebuild}; additionally, {enable}")))
-        }
-    }
-}
-
-#[cfg(not(feature = "sqlite"))]
-async fn rebuild_sqlite_code_turn_for_parks(_manager: &SchemaManager<'_>) -> Result<(), DbErr> {
-    Err(DbErr::Custom(
-        "SQLite turn park migration support is not compiled".to_owned(),
+    Ok(create.replacen(NARROW_CHECK, WIDE_CHECK, 1).replacen(
+        SESSION_KEY,
+        &format!("{PARK_COLUMNS}{SESSION_KEY}"),
+        1,
     ))
 }
 
@@ -3637,25 +3533,67 @@ ALTER TABLE "chat" ADD COLUMN "engine_private" boolean NOT NULL DEFAULT FALSE;
     }
 }
 
-/// SQLite cannot drop `NOT NULL` in place. Rebuild `code_session` from its
-/// own stored definition with that one constraint removed, so every column a
-/// prior migration appended survives verbatim, then restore its indexes.
-#[cfg(feature = "sqlite")]
+/// SQLite cannot drop `NOT NULL` in place. Rebuild `code_session` with that
+/// one constraint relaxed on `workspace_id`.
 async fn rebuild_sqlite_code_session_without_workspace(
     manager: &SchemaManager<'_>,
+) -> Result<(), DbErr> {
+    rebuild_sqlite_table(manager, "code_session", relax_code_session_workspace).await
+}
+
+/// Relax `workspace_id` and leave the rest of the stored definition alone,
+/// so every column a prior migration appended survives verbatim.
+fn relax_code_session_workspace(create: &str) -> Result<String, DbErr> {
+    const CONSTRAINED: &str = r#""workspace_id" uuid_text NOT NULL"#;
+    const RELAXED: &str = r#""workspace_id" uuid_text"#;
+
+    if !create.contains(CONSTRAINED) {
+        // An earlier attempt rebuilt the table and was interrupted before
+        // the marker column landed; there is nothing left to relax, and an
+        // unchanged definition tells the rebuild to leave the table alone.
+        if create.contains(&format!("{RELAXED},")) || create.contains(&format!("{RELAXED}\n")) {
+            return Ok(create.to_owned());
+        }
+        return Err(DbErr::Custom(
+            "SQLite code_session definition does not declare workspace_id NOT NULL as expected"
+                .to_owned(),
+        ));
+    }
+    Ok(create.replacen(CONSTRAINED, RELAXED, 1))
+}
+
+/// Rebuild a SQLite table from its own stored definition with `rewrite`
+/// applied to the `CREATE TABLE` text, then restore its indexes.
+///
+/// SQLite alters a table's constraints and foreign keys only by rebuilding
+/// it: create the rewritten table under `<table>_rebuild`, copy every column
+/// the old table has, drop the old table, and rename. The copy names its
+/// columns from `PRAGMA table_info`, so a column the rewrite adds starts at
+/// its default and a column a prior migration appended survives verbatim.
+/// A rewrite that returns the definition unchanged asks for no rebuild at
+/// all, which is how a migration retried after an interruption skips a
+/// table an earlier attempt already rebuilt.
+///
+/// The whole rebuild runs in one manually managed transaction with foreign
+/// keys disabled, because dropping the old table would otherwise cascade or
+/// fail against the rows that reference it. The pragma is restored and
+/// verified afterwards whether or not the rebuild committed.
+#[cfg(feature = "sqlite")]
+async fn rebuild_sqlite_table(
+    manager: &SchemaManager<'_>,
+    table: &str,
+    rewrite: impl FnOnce(&str) -> Result<String, DbErr>,
 ) -> Result<(), DbErr> {
     use sea_orm::sqlx::Acquire as _;
     use sea_orm::sqlx::Row as _;
     use sea_orm::DatabaseExecutor;
 
-    const TABLE: &str = "code_session";
-    const REBUILD: &str = "code_session_rebuild";
-    const COLUMN: &str = "workspace_id";
+    let rebuild_table = format!("{table}_rebuild");
 
     let DatabaseExecutor::Connection(database) = manager.get_connection() else {
-        return Err(DbErr::Custom(
-            "SQLite session rebuild requires the migration connection".to_owned(),
-        ));
+        return Err(DbErr::Custom(format!(
+            "SQLite {table} rebuild requires the migration connection"
+        )));
     };
     let mut connection = database
         .get_sqlite_connection_pool()
@@ -3663,53 +3601,45 @@ async fn rebuild_sqlite_code_session_without_workspace(
         .await
         .map_err(|error| DbErr::Custom(format!("acquire SQLite migration connection: {error}")))?;
 
-    let create: String = sea_orm::sqlx::query_scalar(
+    let stored: String = sea_orm::sqlx::query_scalar(
         "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
     )
-    .bind(TABLE)
+    .bind(table)
     .fetch_one(&mut *connection)
     .await
-    .map_err(|error| DbErr::Custom(format!("read SQLite {TABLE} definition: {error}")))?;
-    let constrained = format!("\"{COLUMN}\" uuid_text NOT NULL");
-    let relaxed = format!("\"{COLUMN}\" uuid_text");
-    if !create.contains(&constrained) {
-        // An earlier attempt rebuilt the table and was interrupted before
-        // the marker column landed; there is nothing left to relax.
-        if create.contains(&format!("{relaxed},")) || create.contains(&format!("{relaxed}\n")) {
-            return Ok(());
-        }
-        return Err(DbErr::Custom(format!(
-            "SQLite {TABLE} definition does not declare {COLUMN} NOT NULL as expected"
-        )));
+    .map_err(|error| DbErr::Custom(format!("read SQLite {table} definition: {error}")))?;
+    let rewritten = rewrite(&stored)?;
+    if rewritten == stored {
+        return Ok(());
     }
-    let create = create.replacen(&constrained, &relaxed, 1).replacen(
-        &format!("CREATE TABLE \"{TABLE}\""),
-        &format!("CREATE TABLE \"{REBUILD}\""),
+    let create = rewritten.replacen(
+        &format!("CREATE TABLE \"{table}\""),
+        &format!("CREATE TABLE \"{rebuild_table}\""),
         1,
     );
-    if !create.starts_with(&format!("CREATE TABLE \"{REBUILD}\"")) {
+    if !create.starts_with(&format!("CREATE TABLE \"{rebuild_table}\"")) {
         return Err(DbErr::Custom(format!(
-            "SQLite {TABLE} definition has an unexpected shape"
+            "SQLite {table} definition has an unexpected shape"
         )));
     }
     let indexes: Vec<String> = sea_orm::sqlx::query_scalar(
         "SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = ? \
          AND sql IS NOT NULL ORDER BY name",
     )
-    .bind(TABLE)
+    .bind(table)
     .fetch_all(&mut *connection)
     .await
-    .map_err(|error| DbErr::Custom(format!("read SQLite {TABLE} indexes: {error}")))?;
+    .map_err(|error| DbErr::Custom(format!("read SQLite {table} indexes: {error}")))?;
     let columns: Vec<String> = sea_orm::sqlx::query(sea_orm::sqlx::AssertSqlSafe(format!(
-        "PRAGMA table_info(\"{TABLE}\")"
+        "PRAGMA table_info(\"{table}\")"
     )))
     .fetch_all(&mut *connection)
     .await
-    .map_err(|error| DbErr::Custom(format!("read SQLite {TABLE} columns: {error}")))?
+    .map_err(|error| DbErr::Custom(format!("read SQLite {table} columns: {error}")))?
     .into_iter()
     .map(|row| row.try_get::<String, _>("name"))
     .collect::<Result<_, _>>()
-    .map_err(|error| DbErr::Custom(format!("read SQLite {TABLE} column names: {error}")))?;
+    .map_err(|error| DbErr::Custom(format!("read SQLite {table} column names: {error}")))?;
     let column_list = columns
         .iter()
         .map(|name| format!("\"{name}\""))
@@ -3723,16 +3653,17 @@ async fn rebuild_sqlite_code_session_without_workspace(
     let mut transaction = connection
         .begin()
         .await
-        .map_err(|error| DbErr::Custom(format!("begin SQLite session rebuild: {error}")))?;
+        .map_err(|error| DbErr::Custom(format!("begin SQLite {table} rebuild: {error}")))?;
     let rebuild = async {
         let mut statements = vec![
-            format!("DROP TABLE IF EXISTS \"{REBUILD}\""),
+            format!("DROP TABLE IF EXISTS \"{rebuild_table}\""),
             create,
             format!(
-                "INSERT INTO \"{REBUILD}\" ({column_list}) SELECT {column_list} FROM \"{TABLE}\""
+                "INSERT INTO \"{rebuild_table}\" ({column_list}) \
+                 SELECT {column_list} FROM \"{table}\""
             ),
-            format!("DROP TABLE \"{TABLE}\""),
-            format!("ALTER TABLE \"{REBUILD}\" RENAME TO \"{TABLE}\""),
+            format!("DROP TABLE \"{table}\""),
+            format!("ALTER TABLE \"{rebuild_table}\" RENAME TO \"{table}\""),
         ];
         statements.extend(indexes);
         for statement in statements {
@@ -3747,13 +3678,13 @@ async fn rebuild_sqlite_code_session_without_workspace(
         Ok(()) => transaction
             .commit()
             .await
-            .map_err(|error| DbErr::Custom(format!("commit SQLite session rebuild: {error}"))),
+            .map_err(|error| DbErr::Custom(format!("commit SQLite {table} rebuild: {error}"))),
         Err(error) => match transaction.rollback().await {
             Ok(()) => Err(DbErr::Custom(format!(
-                "rebuild SQLite session table without a workspace: {error}"
+                "rebuild SQLite {table} table: {error}"
             ))),
             Err(rollback) => Err(DbErr::Custom(format!(
-                "rebuild SQLite session table without a workspace: {error}; rollback failed: {rollback}"
+                "rebuild SQLite {table} table: {error}; rollback failed: {rollback}"
             ))),
         },
     };
@@ -3788,12 +3719,14 @@ async fn rebuild_sqlite_code_session_without_workspace(
 }
 
 #[cfg(not(feature = "sqlite"))]
-async fn rebuild_sqlite_code_session_without_workspace(
+async fn rebuild_sqlite_table(
     _manager: &SchemaManager<'_>,
+    table: &str,
+    _rewrite: impl FnOnce(&str) -> Result<String, DbErr>,
 ) -> Result<(), DbErr> {
-    Err(DbErr::Custom(
-        "SQLite internal engine session migration support is not compiled".to_owned(),
-    ))
+    Err(DbErr::Custom(format!(
+        "SQLite {table} rebuild support is not compiled"
+    )))
 }
 
 #[cfg(test)]
