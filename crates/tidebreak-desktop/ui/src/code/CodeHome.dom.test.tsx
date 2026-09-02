@@ -63,6 +63,7 @@ const READY_DOCTOR: HarnessDoctorReport = {
       stderr: "",
       unrecognized_event_count: 0,
       relaunch_composes_permission_mode: true,
+      update_available: false,
     } as HarnessDoctorEntry,
   ],
 };

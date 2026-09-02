@@ -492,6 +492,10 @@ pub struct CodeSessionDebug {
 #[serde(deny_unknown_fields)]
 pub struct HarnessDoctorReport {
     pub harnesses: Vec<HarnessDoctorEntry>,
+    /// Which release of each engine this machine drives: its pin, or the
+    /// newest the registry publishes. One channel for every engine.
+    #[serde(default)]
+    pub update_channel: tidebreak_core::HarnessUpdateChannel,
 }
 
 /// How a session of one engine authenticates on this machine.
@@ -555,6 +559,26 @@ pub struct HarnessDoctorEntry {
     /// it started. False for engines that fix the mode on session create
     /// (opencode); true where a relaunch rebuilds the launch plan.
     pub relaunch_composes_permission_mode: bool,
+    /// The version this build pins for the engine (decision 41), when it
+    /// ships one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pinned_version: Option<String>,
+    /// The managed install the update channel drives, when one is on disk.
+    /// The pin on `pinned`; on `latest`, the newest installed release.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub managed_version: Option<String>,
+    /// The newest release the registry answered with, from the last Check
+    /// for updates or deliberate install this process ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub latest_version: Option<String>,
+    /// Whether the channel is `latest`, the registry named a release, and the
+    /// driven install is older than it. Pressing Install on such a row moves
+    /// to it.
+    #[serde(default)]
+    pub update_available: bool,
 }
 
 /// One model row offered for a harness session.
@@ -641,7 +665,8 @@ pub struct CodeCloneJobSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 pub struct CodeHarnessInstallSnapshot {
     pub kind: HarnessKind,
-    /// The pinned version being installed.
+    /// The version being installed: the pin, or the release the `latest`
+    /// update channel resolved. Absent until a `latest` lookup answers.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub version: Option<String>,

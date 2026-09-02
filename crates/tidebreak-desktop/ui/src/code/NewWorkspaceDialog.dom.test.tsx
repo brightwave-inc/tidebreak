@@ -119,6 +119,7 @@ function harness(kind: HarnessKind): HarnessDoctorEntry {
     stderr: "",
     unrecognized_event_count: 0,
     relaunch_composes_permission_mode: kind !== "opencode",
+    update_available: false,
   } as HarnessDoctorEntry;
 }
 

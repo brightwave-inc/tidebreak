@@ -1,6 +1,6 @@
-//! Warm installs of pinned harness binaries, off the session-create path.
+//! Warm installs of harness binaries, off the session-create path.
 //!
-//! A cold pin is an `npm install` of 37-297MB. Paying for it inside
+//! A cold engine is an `npm install` of 37-297MB. Paying for it inside
 //! `POST /code/workspaces/{id}/sessions` turns create into a minutes-long
 //! stall with nothing on screen, so the surface that knows which engine is
 //! about to be used starts the install ahead of need and watches it the way
@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use tidebreak_core::{HarnessKind, OwnerId};
+use tidebreak_core::{HarnessKind, HarnessUpdateChannel, OwnerId};
 
 use super::bus::{CodeLiveUpdate, HarnessInstallProgress};
 use super::runtime::CodeRuntime;
@@ -94,17 +94,20 @@ impl HarnessInstallJob {
 }
 
 impl CodeRuntime {
-    /// Start — or report — the install of `kind`'s pin.
+    /// Start — or report — the install of the release the channel drives for
+    /// `kind`.
     ///
-    /// Answers immediately in every case: the pin is already installed, an
-    /// install this process started is still running, or a fresh one is now
-    /// detached. Two callers never produce two installs.
+    /// Answers immediately in every case: the release is already installed,
+    /// an install this process started is still running, or a fresh one is
+    /// now detached. Two callers never produce two installs.
     ///
-    /// `deliberate` separates the two callers. A picker warms the pin because
-    /// a surface opened, so a failed managed-Node install stays failed rather
-    /// than restarting every time someone opens a dialog. The doctor's
-    /// Install button is a person asking, so it retries Node first.
-    pub(crate) fn start_harness_install(
+    /// `deliberate` separates the two callers. A picker warms the engine
+    /// because a surface opened, so a failed managed-Node install stays
+    /// failed rather than restarting every time someone opens a dialog, and
+    /// on the `latest` channel whatever is installed is good enough. The
+    /// doctor's Download or Update button is a person asking, so it retries
+    /// Node first and, on `latest`, asks the registry for the newest release.
+    pub(crate) async fn start_harness_install(
         self: &Arc<Self>,
         owner: &OwnerId,
         kind: HarnessKind,
@@ -116,11 +119,33 @@ impl CodeRuntime {
                 format!("{kind} has no pinned version to install"),
             )
         })?;
-        let version = Some(pin.version.to_owned());
-        if tidebreak_harness::managed_binary(&self.data_dir, kind).is_some() {
+        let channel = self.harness_update_channel().await;
+        let installed = self.selected_harness(kind).await;
+        // The version this install will produce, when it is known before the
+        // registry answers: the pin, or the registry's last answer. A
+        // deliberate `latest` install with no answer yet resolves it in the
+        // detached task and reports it when done.
+        let target = match channel {
+            HarnessUpdateChannel::Pinned => Some(pin.version.to_owned()),
+            HarnessUpdateChannel::Latest => self
+                .known_latest_version(kind)
+                .filter(|latest| tidebreak_harness::compare_versions(latest, pin.version).is_ge())
+                .or_else(|| {
+                    (!deliberate)
+                        .then(|| installed.as_ref().map(|found| found.version.clone()))
+                        .flatten()
+                }),
+        };
+        let already = match &target {
+            Some(version) => {
+                tidebreak_harness::managed_binary_version(&self.data_dir, kind, version).is_some()
+            }
+            None => false,
+        };
+        if already {
             let job = HarnessInstallJob {
                 kind,
-                version,
+                version: target,
                 phase: PHASE_READY,
                 done: true,
                 error: None,
@@ -130,7 +155,7 @@ impl CodeRuntime {
         }
         let job = HarnessInstallJob {
             kind,
-            version,
+            version: target,
             phase: PHASE_INSTALLING,
             done: false,
             error: None,
@@ -152,19 +177,19 @@ impl CodeRuntime {
         self: Arc<Self>,
         owner: &OwnerId,
         kind: HarnessKind,
-        retry_node: bool,
+        deliberate: bool,
     ) {
-        match self.ensure_pinned_harness(kind, retry_node).await {
-            Ok(binary) => {
+        match self.ensure_harness(kind, deliberate, deliberate).await {
+            Ok(installed) => {
                 self.record_pin_install(kind, Ok(()));
                 // The doctor's memoized probe was taken before this install
                 // and says the engine is missing. Drop it and take the cold
                 // probe here, so create pays for neither.
-                self.invalidate_moved_probe(kind, &binary);
+                self.invalidate_moved_probe(kind, &installed.binary);
                 if let Ok(adapter) = self.adapter(kind) {
                     self.probe(adapter.as_ref()).await;
                 }
-                self.finish_harness_install(owner, kind, Ok(()));
+                self.finish_harness_install(owner, kind, Ok(installed.version));
             }
             Err(error) => {
                 self.record_pin_install(kind, Err(error.clone()));
@@ -177,12 +202,15 @@ impl CodeRuntime {
         &self,
         owner: &OwnerId,
         kind: HarnessKind,
-        result: Result<(), String>,
+        result: Result<String, String>,
     ) {
         let previous = self.harness_installs.get(kind);
         let job = HarnessInstallJob {
             kind,
-            version: previous.and_then(|job| job.version),
+            version: match &result {
+                Ok(version) => Some(version.clone()),
+                Err(_) => previous.and_then(|job| job.version),
+            },
             phase: if result.is_ok() {
                 PHASE_READY
             } else {

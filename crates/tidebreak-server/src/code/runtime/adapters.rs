@@ -78,7 +78,14 @@ impl CodeRuntime {
             .get(&kind)
             .cloned();
         if let Some(probe) = cached {
-            return probe;
+            // The update channel can move the driven install under a cached
+            // probe — an update landed, or the reader went back to the pin.
+            // That is a marker read, not a login shell, so it is cheap
+            // enough to ask on every hit.
+            if self.probe_is_current(kind, &probe).await {
+                return probe;
+            }
+            self.probes.lock().expect("harness probes").remove(&kind);
         }
         self.probe_uncached(adapter).await
     }
@@ -116,6 +123,7 @@ impl CodeRuntime {
     pub(super) async fn probe_uncached(&self, adapter: &dyn HarnessAdapter) -> HarnessProbe {
         let kind = adapter.kind();
         let mut host = self.host.clone();
+        host.harness_versions = self.selected_harness_versions().await;
         host.managed_node_root = match self.host_tool_broker.as_deref() {
             Some(broker) => {
                 broker
@@ -173,7 +181,7 @@ impl CodeRuntime {
     }
 
     #[cfg_attr(test, allow(dead_code))]
-    pub(super) async fn managed_node_root(&self, retry: bool) -> Result<PathBuf, String> {
+    pub(in crate::code) async fn managed_node_root(&self, retry: bool) -> Result<PathBuf, String> {
         match self.host_tool_broker.as_deref() {
             Some(broker) => {
                 wait_for_managed_node(
@@ -190,16 +198,6 @@ impl CodeRuntime {
                         .to_owned()
                 }),
         }
-    }
-
-    #[cfg_attr(test, allow(dead_code))]
-    pub(in crate::code) async fn ensure_pinned_harness(
-        &self,
-        kind: HarnessKind,
-        retry_node: bool,
-    ) -> Result<PathBuf, String> {
-        let node_root = self.managed_node_root(retry_node).await?;
-        tidebreak_harness::ensure_installed(&self.data_dir, kind, Some(&node_root)).await
     }
 
     pub(crate) fn adapter(
@@ -450,9 +448,10 @@ mod managed_node_wait_tests {
         );
         assert_eq!(
             runtime
-                .ensure_pinned_harness(harness, false)
+                .ensure_harness(harness, false, false)
                 .await
-                .expect("existing harness"),
+                .expect("existing harness")
+                .binary,
             harness_binary
         );
     }

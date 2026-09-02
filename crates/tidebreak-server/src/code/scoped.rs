@@ -979,13 +979,33 @@ impl ScopedCode {
     /// Progress reaches this principal's `/code/updates` socket; the binary it
     /// writes belongs to the machine, which is why the route sits on the
     /// deployment plane beside the doctor's refresh.
-    pub(crate) fn start_harness_install(
+    pub(crate) async fn start_harness_install(
         &self,
         kind: HarnessKind,
         deliberate: bool,
     ) -> Result<CodeHarnessInstallSnapshot, ServerError> {
         self.runtime
             .start_harness_install(&self.owner, kind, deliberate)
+            .await
+    }
+
+    /// Ask the registry for every engine's newest release. See
+    /// [`CodeRuntime::check_harness_updates`].
+    pub(crate) async fn check_harness_updates(&self) -> Result<(), String> {
+        self.runtime.check_harness_updates().await
+    }
+
+    /// The update channel this machine is on.
+    pub(crate) async fn harness_update_channel(&self) -> tidebreak_core::HarnessUpdateChannel {
+        self.runtime.harness_update_channel().await
+    }
+
+    /// Where one engine stands against its pin and the registry.
+    pub(crate) async fn harness_release_status(
+        &self,
+        kind: HarnessKind,
+    ) -> super::harness_release::HarnessReleaseStatus {
+        self.runtime.harness_release_status(kind).await
     }
 }
 

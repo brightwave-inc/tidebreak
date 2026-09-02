@@ -290,6 +290,23 @@ export function withCodeReposApi<TBase extends Constructor<HttpCore>>(
       );
     }
 
+    /**
+     * Ask the registry which release each engine publishes as latest, and
+     * read the doctor back with those answers on its rows. The one doctor
+     * call that reaches the network; a person presses Check for updates.
+     */
+    async checkHarnessUpdates(): Promise<HarnessDoctorReport> {
+      return requireParsed(
+        parseHarnessDoctorReport(
+          await this.json("/code/harnesses/check-updates", {
+            method: "POST",
+            headers: this.headers(),
+          }),
+        ),
+        "harness doctor",
+      );
+    }
+
     async refreshHarnessDoctor(): Promise<HarnessDoctorReport> {
       return requireParsed(
         parseHarnessDoctorReport(

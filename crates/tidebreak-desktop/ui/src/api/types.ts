@@ -237,6 +237,7 @@ import {
   type HarnessKind as WireHarnessKind,
   type HarnessNoticeLevel as WireHarnessNoticeLevel,
   type HarnessTier as WireHarnessTier,
+  type HarnessUpdateChannel as WireHarnessUpdateChannel,
   type RepoId as WireRepoId,
   type SequencedCodeEventFrame as WireSequencedCodeEventFrame,
   type ToolDetail as WireToolDetail,
@@ -1366,7 +1367,16 @@ export type ToolOutcome = WireToolOutcome;
 export type HarnessNoticeLevel = WireHarnessNoticeLevel;
 
 /** Doctor report for every registered engine. */
-export type HarnessDoctorReport = WireHarnessDoctorReport;
+/**
+ * The doctor report. The channel is always on the wire; it is optional here
+ * so a surface that builds a report of rows alone — tests, the empty catalog
+ * — reads as the pinned default rather than repeating it.
+ */
+export type HarnessDoctorReport = Omit<
+  WireHarnessDoctorReport,
+  "update_channel"
+> & { update_channel?: WireHarnessUpdateChannel };
+export type HarnessUpdateChannel = WireHarnessUpdateChannel;
 export type HarnessDoctorEntry = WireHarnessDoctorEntry;
 export type HarnessAuthMode = WireHarnessAuthMode;
 export type HarnessKind = WireHarnessKind;

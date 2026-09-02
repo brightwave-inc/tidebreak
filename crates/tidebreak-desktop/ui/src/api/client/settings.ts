@@ -5,6 +5,7 @@ import type {
   ExecConfigInfo,
   ExecCredentialReadiness,
   ExecProviderKind,
+  HarnessUpdateChannel,
   LocalVoiceInfo,
   ModelCatalog,
   ModelRole,
@@ -165,6 +166,7 @@ export function withSettingsApi<TBase extends Constructor<HttpCore>>(
       computer_use_enabled?: boolean;
       code_turn_recaps_enabled?: boolean;
       rewrite_closing_messages?: boolean;
+      harness_update_channel?: HarnessUpdateChannel;
       git_source_control?: {
         auto_rename_branches?: boolean;
         branch_prefix_mode?: "account" | "custom" | "none";

@@ -61,7 +61,7 @@ pub(crate) use grants::{
     list_grants, revoke_grant, revoke_workspace_grants,
 };
 pub(crate) use harnesses::{
-    install_harness, list_harness_models, list_harnesses, refresh_harnesses,
+    check_harness_updates, install_harness, list_harness_models, list_harnesses, refresh_harnesses,
 };
 pub(crate) use llm::{
     harness_llm_anthropic_messages, harness_llm_openai_models, harness_llm_openai_responses,

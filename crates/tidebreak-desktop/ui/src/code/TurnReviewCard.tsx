@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { useRouter } from "@tanstack/react-router";
 import {
   Check,
   CircleSlash,
@@ -53,6 +54,24 @@ export function isCodexRevokedRefreshTokenError(error: string | null): boolean {
   return normalized.includes(CODEX_REVOKED_REFRESH_TOKEN_FINGERPRINT);
 }
 
+/**
+ * The engine release an error says is too old, when it says so.
+ *
+ * Claude Code refuses a model its build predates with "version 2.1.251 or
+ * newer is required". Only the version phrase is matched, so any engine
+ * that words a floor the same way lands on the same recovery, and the
+ * product-specific prose around it can change without dropping the match.
+ */
+export function harnessVersionRequirement(error: string | null): string | null {
+  if (!error) return null;
+  const normalized = error.replace(/\s+/g, " ");
+  const match =
+    /\bversion\s+(\d+\.\d+(?:\.\d+)?(?:[-+][\w.]+)?)\s+or\s+newer\s+is\s+required\b/i.exec(
+      normalized,
+    );
+  return match?.[1] ?? null;
+}
+
 export function TurnReviewCard({
   turn,
   narrative,
@@ -92,6 +111,7 @@ export function TurnReviewCard({
 
   if (turn.status === "failed") {
     const codexNeedsLogin = isCodexRevokedRefreshTokenError(turn.error);
+    const requiredVersion = harnessVersionRequirement(turn.error);
     return (
       <div
         role="alert"
@@ -106,6 +126,8 @@ export function TurnReviewCard({
         </p>
         {codexNeedsLogin ? (
           <CodexLoginRecovery />
+        ) : requiredVersion ? (
+          <HarnessVersionRecovery required={requiredVersion} />
         ) : (
           <p>{turn.error ?? "The engine stopped without saying why."}</p>
         )}
@@ -184,10 +206,58 @@ function CodexLoginRecovery() {
         </ol>
       </div>
       <p>
-        Then open Settings → Coding harnesses and select{" "}
-        <strong>Re-check</strong>.
+        Then open{" "}
+        <CodingHarnessesLink>Settings → Coding harnesses</CodingHarnessesLink>{" "}
+        and select <strong>Re-check</strong>.
       </p>
     </div>
+  );
+}
+
+/**
+ * The engine is older than the model needs. The fix lives in Settings, not
+ * in a terminal: the update channel there moves the engine past its pin.
+ */
+function HarnessVersionRecovery({ required }: { required: string }) {
+  return (
+    <div className="flex flex-col gap-2">
+      <p>
+        The engine is too old for this model. Version {required} or newer is
+        required.
+      </p>
+      <p>
+        Open{" "}
+        <CodingHarnessesLink>Settings → Coding harnesses</CodingHarnessesLink>,
+        set <strong>Engine versions</strong> to <strong>Latest</strong>, select{" "}
+        <strong>Check for updates</strong>, then <strong>Update</strong> the
+        engine.
+      </p>
+    </div>
+  );
+}
+
+/**
+ * The one door out of a failure card: the settings page that owns engine
+ * setup. The card also renders in stories and tests with no router around
+ * it, so a missing router leaves the words in place and the press inert
+ * rather than throwing.
+ */
+function CodingHarnessesLink({ children }: { children: ReactNode }) {
+  const router = useRouter({ warn: false }) as
+    | ReturnType<typeof useRouter>
+    | undefined;
+  const harnessesPath: string = "/settings/coding-harnesses";
+  return (
+    <button
+      type="button"
+      className={cn(
+        "cursor-pointer rounded-sm font-medium underline underline-offset-2",
+        FOCUS_RING_TIGHT,
+      )}
+      onClick={() => void router?.navigate({ to: harnessesPath })}
+    >
+      {children}
+    </button>
   );
 }
 

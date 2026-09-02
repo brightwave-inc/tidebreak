@@ -1,19 +1,21 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { useLayoutEffect } from "react";
+import { useLayoutEffect, useMemo } from "react";
 
 import { CodingHarnessesPanel } from "@/settings/CodingHarnessesPanel";
 import { useCodeUpdatesStore } from "@/code/CodeUpdatesStore";
-import type { HarnessDoctorReport } from "@/api";
+import type { HarnessDoctorReport, HarnessUpdateChannel } from "@/api";
 import {
   harnessDoctor,
   harnessDoctorCold,
   harnessDoctorDegraded,
   harnessDoctorMixed,
+  harnessDoctorUpdates,
   harnessInstallsInFlight,
 } from "./fixtures";
 import {
   SettingsStoryHarness,
   type SettingsStoryState,
+  storySettings,
 } from "./SettingsStoryHarness";
 
 /**
@@ -29,23 +31,35 @@ type Variant = {
   report?: HarnessDoctorReport;
   installs?: typeof harnessInstallsInFlight;
   state?: SettingsStoryState;
+  /** The stored update channel. Defaults to the pinned default. */
+  channel?: HarnessUpdateChannel;
+  /** What Check for updates answers with. Defaults to `report`. */
+  checked?: HarnessDoctorReport;
 };
 
 function HarnessesShowcase({
   report,
   installs,
   state = "configured",
+  channel = "pinned",
+  checked,
 }: Variant) {
   useLayoutEffect(() => {
     useCodeUpdatesStore.setState({ harnessInstalls: installs ?? {} });
   }, [installs]);
+  const settings = useMemo(
+    () => ({ ...storySettings, harness_update_channel: channel }),
+    [channel],
+  );
+  const resting = report ?? harnessDoctor;
   return (
-    <SettingsStoryHarness state={state}>
+    <SettingsStoryHarness state={state} settings={settings}>
       {(client) => (
         <CodingHarnessesPanel
           client={Object.assign(client, {
-            getHarnessDoctor: async () => report ?? harnessDoctor,
-            refreshHarnessDoctor: async () => report ?? harnessDoctor,
+            getHarnessDoctor: async () => resting,
+            refreshHarnessDoctor: async () => resting,
+            checkHarnessUpdates: async () => checked ?? resting,
           })}
         />
       )}
@@ -78,6 +92,27 @@ export const Downloading: Story = {
 
 /** States no download fixes: one unverified engine and one signed-out engine. */
 export const NeedsYou: Story = { args: { report: harnessDoctorDegraded } };
+
+/**
+ * The `latest` channel before anyone has asked the registry: the rows are
+ * the pins, and Check for updates is the only new control.
+ */
+export const LatestChannel: Story = {
+  args: {
+    report: { ...harnessDoctor, update_channel: "latest" },
+    channel: "latest",
+    checked: harnessDoctorUpdates,
+  },
+};
+
+/**
+ * After Check for updates: one engine behind the registry with Update on
+ * its row, one already moved past its pin, and the newest release in each
+ * row's details.
+ */
+export const UpdateAvailable: Story = {
+  args: { report: harnessDoctorUpdates, channel: "latest" },
+};
 
 /** The first read has not landed. */
 export const Loading: Story = { args: { state: "loading" } };

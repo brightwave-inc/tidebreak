@@ -170,7 +170,7 @@ pub(crate) struct CodeRuntime {
     /// either is `None`, `browser` stays `None` and no browser tools are
     /// advertised or injected.
     browser_bridge_command: Option<PathBuf>,
-    host: HostEnv,
+    pub(in crate::code) host: HostEnv,
     host_tool_broker: Option<Arc<dyn tidebreak_code_execution::HostToolBroker>>,
     /// Per-caller git-forge lending on a gateway-authenticated hosted
     /// machine (decision 63). `None` everywhere else: a machine with its own
@@ -227,6 +227,8 @@ pub(crate) struct CodeRuntime {
     pub(crate) clone_jobs: CloneJobs,
     /// Warm harness installs started ahead of a session create.
     pub(super) harness_installs: HarnessInstallJobs,
+    /// The registry's last answer per engine, for the doctor's update rows.
+    pub(super) harness_releases: super::harness_release::KnownReleases,
     #[cfg(test)]
     pub(crate) gh_search_path: Mutex<Option<String>>,
     /// Forge REST base override, so tests point decision 65's reads at a
@@ -441,6 +443,7 @@ impl CodeRuntime {
             delivery_cache: DeliveryCache::default(),
             clone_jobs: CloneJobs::default(),
             harness_installs: HarnessInstallJobs::default(),
+            harness_releases: super::harness_release::KnownReleases::default(),
             #[cfg(test)]
             gh_search_path: Mutex::new(None),
             #[cfg(test)]
@@ -598,6 +601,7 @@ impl CodeRuntime {
             delivery_cache: DeliveryCache::default(),
             clone_jobs: CloneJobs::default(),
             harness_installs: HarnessInstallJobs::default(),
+            harness_releases: super::harness_release::KnownReleases::default(),
             #[cfg(test)]
             gh_search_path: Mutex::new(None),
             #[cfg(test)]

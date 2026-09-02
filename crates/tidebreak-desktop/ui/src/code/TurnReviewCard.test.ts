@@ -3,8 +3,27 @@ import { describe, expect, it } from "vitest";
 import {
   formatElapsedDuration,
   formatTurnDuration,
+  harnessVersionRequirement,
   isCodexRevokedRefreshTokenError,
 } from "./TurnReviewCard";
+
+describe("harnessVersionRequirement", () => {
+  it("reads the floor out of Claude Code's model refusal, across line wraps", () => {
+    expect(
+      harnessVersionRequirement(
+        "API Error: 400 Claude Code 2.1.234 does not support this model; version\n 2.1.251 or newer is required. Run 'claude update', or update the Claude desktop app, then try again.",
+      ),
+    ).toBe("2.1.251");
+  });
+
+  it("ignores versions that are not stated as a floor", () => {
+    expect(harnessVersionRequirement(null)).toBeNull();
+    expect(harnessVersionRequirement("claude exited with status 1")).toBeNull();
+    expect(
+      harnessVersionRequirement("Claude Code 2.1.234 could not reach the API"),
+    ).toBeNull();
+  });
+});
 
 describe("isCodexRevokedRefreshTokenError", () => {
   it("recognizes the Codex CLI diagnostic through prefixes and line wrapping", () => {

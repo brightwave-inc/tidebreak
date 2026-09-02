@@ -48,7 +48,29 @@ pub async fn install_harness(
     Path(kind): Path<HarnessKind>,
     Query(query): Query<InstallHarnessQuery>,
 ) -> Result<Json<CodeHarnessInstallSnapshot>, ServerError> {
-    Ok(Json(code.start_harness_install(kind, query.deliberate)?))
+    Ok(Json(
+        code.start_harness_install(kind, query.deliberate).await?,
+    ))
+}
+
+/// Ask the registry which release each engine publishes as latest, then
+/// report the doctor with those answers on its rows.
+///
+/// The one place a listing-shaped route reaches the network, and only
+/// because a person pressed Check for updates. On the `pinned` channel the
+/// answers are informational; on `latest` a row whose driven install is
+/// older gains an Update button. A registry nobody could reach is an error
+/// rather than a report that says "no updates".
+pub async fn check_harness_updates(
+    code: ScopedCode,
+) -> Result<Json<HarnessDoctorReport>, ServerError> {
+    code.check_harness_updates().await.map_err(|err| {
+        ServerError::unprocessable_kind(
+            "registry_unreachable",
+            format!("could not check the npm registry: {err}"),
+        )
+    })?;
+    Ok(Json(doctor(&code).await?))
 }
 
 /// Models this harness currently lists. Not on the doctor path.
@@ -215,6 +237,7 @@ async fn doctor(code: &ScopedCode) -> Result<HarnessDoctorReport, ServerError> {
     // question: nobody can open a terminal there, and a signed-out engine is
     // a ready one. Everywhere else the probe decides, exactly as before.
     let hosted = code.harness_llm_relay_active();
+    let update_channel = code.harness_update_channel().await;
     // Probe the kinds concurrently. A cold probe is a login shell plus a
     // version and an authentication subprocess, so a serial walk over the
     // harnesses is most of what this route costs on a cache miss.
@@ -230,10 +253,11 @@ async fn doctor(code: &ScopedCode) -> Result<HarnessDoctorReport, ServerError> {
                 .sum();
             let install_error = code.pin_install_error(*kind);
             let installable = tidebreak_harness::pin_for(*kind).is_some();
+            let release = code.harness_release_status(*kind).await;
             let label = harness_label(*kind);
             let auth_mode = resolve_auth_mode(hosted, *kind, &probe);
             let remediation = if let Some(err) = install_error {
-                format!("could not download the pinned {kind} binary: {err}")
+                format!("could not download the {kind} binary: {err}")
             } else if auth_mode == HarnessAuthMode::HostedUnavailable {
                 format!("{label} is not available on hosted machines yet.")
             } else if !probe.found && !installable {
@@ -278,11 +302,18 @@ async fn doctor(code: &ScopedCode) -> Result<HarnessDoctorReport, ServerError> {
                 unrecognized_event_count,
                 relaunch_composes_permission_mode: adapter
                     .relaunch_composes_permission_mode(),
+                pinned_version: release.pinned_version,
+                managed_version: release.managed_version,
+                latest_version: release.latest_version,
+                update_available: release.update_available,
             }
         })
     }))
     .await;
-    Ok(HarnessDoctorReport { harnesses })
+    Ok(HarnessDoctorReport {
+        harnesses,
+        update_channel,
+    })
 }
 
 /// How a session of this engine authenticates on this machine.

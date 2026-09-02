@@ -153,6 +153,7 @@ import type {
   HarnessDoctorEntry as WireHarnessDoctorEntry,
   HarnessDoctorReport as WireHarnessDoctorReport,
   HarnessModelSource as WireHarnessModelSource,
+  HarnessUpdateChannel as WireHarnessUpdateChannel,
   QuickAction as WireQuickAction,
   SequencedCodeEventFrame as WireSequencedCodeEventFrame,
   ToolDetail as WireToolDetail,
@@ -309,6 +310,10 @@ const HARNESS_AUTH_MODES = new Set<HarnessAuthMode>([
   "gateway_managed",
   "gateway_relay",
   "hosted_unavailable",
+]);
+const HARNESS_UPDATE_CHANNELS = new Set<WireHarnessUpdateChannel>([
+  "pinned",
+  "latest",
 ]);
 const HARNESS_MODEL_SOURCES = new Set<WireHarnessModelSource>([
   "harness",
@@ -3279,8 +3284,13 @@ export function parseHarnessDoctorReport(
 ): HarnessDoctorReport | null {
   if (
     !isRecord(value) ||
-    !onlyKeys<WireHarnessDoctorReport>(value, ["harnesses"]) ||
-    !Array.isArray(value.harnesses)
+    !onlyKeys<WireHarnessDoctorReport>(value, [
+      "harnesses",
+      "update_channel",
+    ]) ||
+    !Array.isArray(value.harnesses) ||
+    (value.update_channel !== undefined &&
+      !isMember(value.update_channel, HARNESS_UPDATE_CHANNELS))
   ) {
     return null;
   }
@@ -3290,7 +3300,8 @@ export function parseHarnessDoctorReport(
     if (!parsed) return null;
     harnesses.push(parsed);
   }
-  return { harnesses };
+  // A server that predates the channel drives its pins and nothing else.
+  return { harnesses, update_channel: value.update_channel ?? "pinned" };
 }
 
 export function parseHarnessDoctorEntry(
@@ -3313,11 +3324,20 @@ export function parseHarnessDoctorEntry(
       "stderr",
       "unrecognized_event_count",
       "relaunch_composes_permission_mode",
+      "pinned_version",
+      "managed_version",
+      "latest_version",
+      "update_available",
     ]) ||
     !isMember(value.kind, HARNESS_KINDS) ||
     typeof value.found !== "boolean" ||
     !optionalLine(value.path) ||
     !optionalLine(value.version) ||
+    !optionalLine(value.pinned_version) ||
+    !optionalLine(value.managed_version) ||
+    !optionalLine(value.latest_version) ||
+    (value.update_available !== undefined &&
+      typeof value.update_available !== "boolean") ||
     !isMember(value.tier, HARNESS_TIERS) ||
     (value.authenticated !== undefined &&
       typeof value.authenticated !== "boolean") ||
@@ -3354,8 +3374,19 @@ export function parseHarnessDoctorEntry(
     stderr: value.stderr,
     unrecognized_event_count: value.unrecognized_event_count,
     commands,
+    // A server that predates the update channel never has one to offer.
+    update_available: value.update_available === true,
     ...(value.path !== undefined ? { path: value.path } : {}),
     ...(value.version !== undefined ? { version: value.version } : {}),
+    ...(value.pinned_version !== undefined
+      ? { pinned_version: value.pinned_version }
+      : {}),
+    ...(value.managed_version !== undefined
+      ? { managed_version: value.managed_version }
+      : {}),
+    ...(value.latest_version !== undefined
+      ? { latest_version: value.latest_version }
+      : {}),
     ...(value.authenticated !== undefined
       ? { authenticated: value.authenticated }
       : {}),

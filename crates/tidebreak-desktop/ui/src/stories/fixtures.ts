@@ -498,6 +498,7 @@ function doctorEntry(
     stderr: "",
     unrecognized_event_count: 0,
     relaunch_composes_permission_mode: true,
+    update_available: false,
     ...overrides,
   };
 }
@@ -544,6 +545,36 @@ export const harnessDoctor: HarnessDoctorReport = {
       },
     }),
   ],
+};
+
+/**
+ * The `latest` channel after Check for updates: one engine behind the
+ * registry, one already on the newest release, and one the registry has
+ * not been asked about since this process started.
+ */
+export const harnessDoctorUpdates: HarnessDoctorReport = {
+  update_channel: "latest",
+  harnesses: harnessDoctor.harnesses.map((entry) => {
+    if (entry.kind === "claude_code") {
+      return {
+        ...entry,
+        pinned_version: "2.1.234",
+        managed_version: "2.1.234",
+        latest_version: "2.1.258",
+        update_available: true,
+      };
+    }
+    if (entry.kind === "codex") {
+      return {
+        ...entry,
+        version: "codex-cli 0.152.0",
+        pinned_version: "0.147.0",
+        managed_version: "0.152.0",
+        latest_version: "0.152.0",
+      };
+    }
+    return { ...entry, pinned_version: entry.version };
+  }),
 };
 
 /** A machine with work to do before a session can start. */

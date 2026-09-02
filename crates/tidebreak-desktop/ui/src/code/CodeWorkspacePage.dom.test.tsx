@@ -248,6 +248,7 @@ const START_HARNESS: HarnessDoctorEntry = {
   stderr: "",
   unrecognized_event_count: 0,
   relaunch_composes_permission_mode: true,
+  update_available: false,
 };
 
 function enableStartHarness(client: ReturnType<typeof makeClient>) {
@@ -1308,6 +1309,7 @@ describe("CodeWorkspacePage", () => {
       ...START_HARNESS,
       kind: "opencode" as const,
       relaunch_composes_permission_mode: false,
+      update_available: false,
     };
     useCodeCatalogStore.setState({
       doctor: { harnesses: [opencodeDoctor] },

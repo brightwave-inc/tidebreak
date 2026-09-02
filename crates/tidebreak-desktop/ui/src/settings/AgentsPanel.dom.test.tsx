@@ -44,6 +44,7 @@ describe("AgentsPanel", () => {
       computer_use_enabled: true,
       code_turn_recaps_enabled: true,
       rewrite_closing_messages: false,
+      harness_update_channel: "pinned",
       git_source_control: {
         auto_rename_branches: true,
         branch_prefix_mode: "account",
@@ -111,6 +112,7 @@ describe("AgentsPanel", () => {
       computer_use_enabled: true,
       code_turn_recaps_enabled: true,
       rewrite_closing_messages: false,
+      harness_update_channel: "pinned",
       git_source_control: {
         auto_rename_branches: true,
         branch_prefix_mode: "account",

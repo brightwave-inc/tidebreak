@@ -108,6 +108,7 @@ describe("DoctorList", () => {
           stderr: "",
           unrecognized_event_count: 6,
           relaunch_composes_permission_mode: true,
+          update_available: false,
         },
       ],
     };
@@ -248,6 +249,52 @@ describe("DoctorList", () => {
     expect(screen.getByText("Downloading")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Download/ })).toBeNull();
   });
+
+  it("offers Update and Check for updates only on the latest channel", async () => {
+    const onInstall = vi.fn();
+    const onCheckUpdates = vi.fn();
+    const behind: HarnessDoctorEntry = {
+      ...notDownloaded,
+      kind: "claude_code",
+      found: true,
+      authenticated: true,
+      pinned_version: "2.1.234",
+      latest_version: "2.1.258",
+      update_available: true,
+    };
+
+    const { unmount } = render(
+      <DoctorList
+        report={{ harnesses: [behind], update_channel: "pinned" }}
+        onInstall={onInstall}
+        onCheckUpdates={onCheckUpdates}
+      />,
+    );
+    // A server on the pinned channel never reports an update, but a stale
+    // row must still not grow a control the channel cannot honor.
+    expect(
+      screen.queryByRole("button", { name: /Check for updates/ }),
+    ).toBeNull();
+    unmount();
+
+    render(
+      <DoctorList
+        report={{ harnesses: [behind], update_channel: "latest" }}
+        onInstall={onInstall}
+        onCheckUpdates={onCheckUpdates}
+      />,
+    );
+    expect(screen.getByText("Update available")).toBeInTheDocument();
+    expect(
+      screen.getByText("Version 2.1.258 is available."),
+    ).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /Update/ }));
+    expect(onInstall).toHaveBeenCalledWith("claude_code");
+    await userEvent.click(
+      screen.getByRole("button", { name: /Check for updates/ }),
+    );
+    expect(onCheckUpdates).toHaveBeenCalledTimes(1);
+  });
 });
 
 const notDownloaded: HarnessDoctorEntry = {
@@ -278,4 +325,5 @@ const notDownloaded: HarnessDoctorEntry = {
   stderr: "",
   unrecognized_event_count: 0,
   relaunch_composes_permission_mode: false,
+  update_available: false,
 };
