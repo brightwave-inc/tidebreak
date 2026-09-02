@@ -4084,6 +4084,7 @@ export function parseCodeSessionDigest(
       "activity_detail",
       "pr_state",
       "pr_count",
+      "memory_proposal_count",
       "watch_state",
       "watch_detail",
       "watch_cycles",
@@ -4103,6 +4104,8 @@ export function parseCodeSessionDigest(
       !isMember(value.activity, SESSION_ACTIVITIES)) ||
     !optionalLine(value.activity_detail) ||
     (value.pr_count !== undefined && !isFiniteNumber(value.pr_count)) ||
+    (value.memory_proposal_count !== undefined &&
+      !isFiniteNumber(value.memory_proposal_count)) ||
     (value.watch_state !== undefined &&
       !isMember(value.watch_state, WATCH_STATES)) ||
     !optionalBlock(value.watch_detail) ||
@@ -4139,6 +4142,9 @@ export function parseCodeSessionDigest(
       : {}),
     ...(pr_state ? { pr_state } : {}),
     ...(value.pr_count !== undefined ? { pr_count: value.pr_count } : {}),
+    ...(value.memory_proposal_count !== undefined
+      ? { memory_proposal_count: value.memory_proposal_count }
+      : {}),
     ...(value.watch_state !== undefined
       ? { watch_state: value.watch_state }
       : {}),
@@ -4191,6 +4197,7 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
           "activity_detail",
           "pr_state",
           "pr_count",
+          "memory_proposal_count",
           "watch_state",
           "watch_detail",
           "watch_cycles",
@@ -4210,6 +4217,8 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
           !isMember(value.activity, SESSION_ACTIVITIES)) ||
         !optionalLine(value.activity_detail) ||
         (value.pr_count !== undefined && !isFiniteNumber(value.pr_count)) ||
+        (value.memory_proposal_count !== undefined &&
+          !isFiniteNumber(value.memory_proposal_count)) ||
         (value.watch_state !== undefined &&
           !isMember(value.watch_state, WATCH_STATES)) ||
         !optionalBlock(value.watch_detail) ||
@@ -4250,6 +4259,9 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
           : {}),
         ...(pr_state ? { pr_state } : {}),
         ...(value.pr_count !== undefined ? { pr_count: value.pr_count } : {}),
+        ...(value.memory_proposal_count !== undefined
+          ? { memory_proposal_count: value.memory_proposal_count }
+          : {}),
         ...(value.watch_state !== undefined
           ? { watch_state: value.watch_state }
           : {}),
