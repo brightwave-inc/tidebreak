@@ -9,6 +9,7 @@ import {
 
 import type { Diffstat } from "../api/types";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -57,6 +58,7 @@ export function TurnReviewCard({
   narrative,
   onOpenTurnDiff,
   onForkFromTurn,
+  onFileIssue,
 }: {
   turn: TurnBoundary;
   /**
@@ -73,6 +75,8 @@ export function TurnReviewCard({
   onOpenTurnDiff?: (turnId: string) => void;
   /** Hand everything up to this turn to a fresh agent, in a new tab. */
   onForkFromTurn?: (turnId: string) => void;
+  /** Turn a failure into a Tidebreak issue or fix, from the failure itself. */
+  onFileIssue?: () => void;
 }) {
   const duration = formatTurnDuration(turn.durationMs);
   const diffstat = turn.diffstat && hasFileChanges(turn.diffstat) && (
@@ -106,10 +110,11 @@ export function TurnReviewCard({
           <p>{turn.error ?? "The engine stopped without saying why."}</p>
         )}
         {narrative}
-        {(diffstat || actions) && (
+        {(diffstat || actions || onFileIssue) && (
           <div className="flex items-center gap-2">
             {diffstat}
             {actions}
+            {onFileIssue && <FileIssueButton onClick={onFileIssue} />}
           </div>
         )}
       </div>
@@ -142,6 +147,24 @@ export function TurnReviewCard({
 }
 
 /** Recovery for the revoked credential that belongs to Codex CLI. */
+/**
+ * The way out of a failure the reader cannot fix: hand the session to Uneff
+ * me, which asks what happened and files an issue or a fix.
+ */
+export function FileIssueButton({ onClick }: { onClick: () => void }) {
+  return (
+    <Button
+      type="button"
+      size="sm"
+      variant="outline"
+      className="ml-auto"
+      onClick={onClick}
+    >
+      File an issue
+    </Button>
+  );
+}
+
 function CodexLoginRecovery() {
   return (
     <div className="flex flex-col gap-2">

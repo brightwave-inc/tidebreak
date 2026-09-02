@@ -35,7 +35,6 @@ import {
   workspaceBulkCommands,
   workspaceCommands,
 } from "./workspaceActions";
-import { tidebreakProductRepo } from "./uneffMe";
 import { WorkspaceCard, WorkspaceStatusMark } from "./WorkspaceCard";
 import {
   arrangeWorkspaces,
@@ -314,7 +313,6 @@ export function CodeSidebar() {
                                 sessions[workspace.id]?.attention
                               )?.state.type === "manual",
                             canOpenWorktree,
-                            canUneff: Boolean(tidebreakProductRepo(repos)),
                             setupFailed: workspace.status === "setup_failed",
                           })
                   }

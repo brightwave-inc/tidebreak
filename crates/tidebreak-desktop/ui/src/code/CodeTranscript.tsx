@@ -44,6 +44,7 @@ import {
   formatElapsedDuration,
   formatTurnDuration,
   isCodexRevokedRefreshTokenError,
+  FileIssueButton,
   TurnReviewCard,
 } from "./TurnReviewCard";
 
@@ -70,6 +71,7 @@ export function CodeTranscript({
   animateStreaming = true,
   onOpenTurnDiff,
   onForkFromTurn,
+  onFileIssue,
   emptyState,
   sessionId,
   onReveal,
@@ -99,6 +101,8 @@ export function CodeTranscript({
   onOpenTurnDiff?: (turnId: string) => void;
   /** Fork the conversation at the end of one turn, from its seam row. */
   onForkFromTurn?: (turnId: string) => void;
+  /** Turn a failed turn or an engine error into a Tidebreak issue or fix. */
+  onFileIssue?: () => void;
   /** Copy for a filtered/read-only transcript with no captured rows. */
   emptyState?: { title: string; description: string };
   sessionId?: string;
@@ -216,6 +220,7 @@ export function CodeTranscript({
                   onDecide={onDecide}
                   onOpenTurnDiff={onOpenTurnDiff}
                   onForkFromTurn={onForkFromTurn}
+                  onFileIssue={onFileIssue}
                   sessionId={sessionId}
                   onReveal={onReveal}
                   recap={row.item.id === newestBoundaryId ? recap : undefined}
@@ -538,6 +543,7 @@ const TranscriptItem = memo(function TranscriptItem({
   onDecide,
   onOpenTurnDiff,
   onForkFromTurn,
+  onFileIssue,
   sessionId,
   onReveal,
   recap,
@@ -558,6 +564,7 @@ const TranscriptItem = memo(function TranscriptItem({
   ) => void;
   onOpenTurnDiff?: (turnId: string) => void;
   onForkFromTurn?: (turnId: string) => void;
+  onFileIssue?: () => void;
   sessionId?: string;
   onReveal?: () => void;
   /**
@@ -631,7 +638,13 @@ const TranscriptItem = memo(function TranscriptItem({
         />
       );
     case "notice":
-      return <HarnessNotice level={item.level} message={item.message} />;
+      return (
+        <HarnessNotice
+          level={item.level}
+          message={item.message}
+          onFileIssue={onFileIssue}
+        />
+      );
     case "approval": {
       const card = !approval ? (
         <p className="text-muted-foreground text-sm" role="status">
@@ -671,6 +684,7 @@ const TranscriptItem = memo(function TranscriptItem({
           turn={item}
           onOpenTurnDiff={onOpenTurnDiff}
           onForkFromTurn={onForkFromTurn}
+          onFileIssue={onFileIssue}
           narrative={
             recap ? (
               <span className="text-muted-foreground">{recap}</span>
@@ -941,9 +955,12 @@ export function CodeToolCard({
 export function HarnessNotice({
   level,
   message,
+  onFileIssue,
 }: {
   level: "info" | "warning" | "error";
   message: string;
+  /** An error is a reason to ask Tidebreak for help; only errors offer it. */
+  onFileIssue?: () => void;
 }) {
   const tone =
     level === "error" ? "critical" : level === "warning" ? "warning" : "info";
@@ -962,7 +979,16 @@ export function HarnessNotice({
           "border-info-border bg-info-background text-info-foreground",
       )}
     >
-      {message}
+      {level === "error" && onFileIssue ? (
+        <div className="flex flex-col gap-1.5">
+          <p>{message}</p>
+          <div className="flex items-center">
+            <FileIssueButton onClick={onFileIssue} />
+          </div>
+        </div>
+      ) : (
+        message
+      )}
     </div>
   );
 }

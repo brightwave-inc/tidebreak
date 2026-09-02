@@ -341,6 +341,69 @@ describe("CodeTranscript", () => {
     expect(screen.getByTestId("code-turn-announcer")).toHaveTextContent("");
   });
 
+  it("offers File an issue on a failed turn and an engine error, not on a warning", async () => {
+    const onFileIssue = vi.fn();
+    const failed: CodeTranscriptItem[] = [
+      items[0],
+      {
+        kind: "notice",
+        id: "n-warn",
+        level: "warning",
+        message: "The engine is slow to answer.",
+      },
+      {
+        kind: "notice",
+        id: "n-err",
+        level: "error",
+        message: "The engine could not reach the model gateway.",
+      },
+      {
+        kind: "turn_boundary",
+        id: "b3",
+        turnId: "t1",
+        status: "failed",
+        durationMs: 4_000,
+        usage: null,
+        error: "claude exited with status 1",
+        diffstat: null,
+      },
+    ];
+    render(<CodeTranscript items={failed} onFileIssue={onFileIssue} />);
+    const buttons = screen.getAllByRole("button", { name: "File an issue" });
+    expect(buttons).toHaveLength(2);
+    expect(
+      within(screen.getByText("The engine is slow to answer.")).queryByRole(
+        "button",
+      ),
+    ).toBeNull();
+    await userEvent.click(buttons[1] as HTMLElement);
+    expect(onFileIssue).toHaveBeenCalledTimes(1);
+
+    // Without a handler the failure reads as it always did.
+    cleanup();
+    render(<CodeTranscript items={failed} />);
+    expect(screen.queryByRole("button", { name: "File an issue" })).toBeNull();
+  });
+
+  it("folds a long paste in a sent message behind its chip", async () => {
+    const pasted: CodeTranscriptItem[] = [
+      {
+        kind: "user",
+        id: "u-paste",
+        turnId: "t1",
+        text: 'Look at this\n\n<pasted_text>\n{\n  "session": "sess-1"\n}\n</pasted_text>',
+        createdAt: "2026-08-15T00:00:00.000Z",
+      },
+    ];
+    render(<CodeTranscript items={pasted} />);
+    expect(screen.getByText("Look at this")).toBeInTheDocument();
+    const toggle = screen.getByRole("button", { name: /Pasted text/ });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText(/"session": "sess-1"/)).toBeNull();
+    await userEvent.click(toggle);
+    expect(screen.getByText(/"session": "sess-1"/)).toBeInTheDocument();
+  });
+
   it("renders the prompt as markdown with a timestamped footer", () => {
     render(<CodeTranscript items={items} />);
     const prompt = screen.getByRole("article", { name: "You" });

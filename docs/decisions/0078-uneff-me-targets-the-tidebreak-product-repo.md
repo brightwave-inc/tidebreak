@@ -1,6 +1,6 @@
 # 78. Uneff me targets the Tidebreak product repo
 
-- Status: Proposed
+- Status: Superseded by [`0081-uneff-me-works-without-a-tidebreak-checkout.md`](0081-uneff-me-works-without-a-tidebreak-checkout.md)
 - Date: 2026-08-27
 - Owners: code mode
 - Related: [`0030-code-mode-separate-surface.md`](0030-code-mode-separate-surface.md),

@@ -150,7 +150,6 @@ function HeaderState({
             hasSession: true,
             attentionPinned: false,
             canFork: true,
-            canUneff: true,
             canOpenWorktree,
             canOpenInEditor,
             quickActions: [],

@@ -481,6 +481,11 @@ function makeClient() {
       gh_found: false,
       gh_remediation: "gh is not installed.",
     })),
+    startCodeClone: vi.fn(async () => ({
+      id: "job-1",
+      phase: "starting",
+      done: false,
+    })),
     openCodeUpdates: vi.fn(
       () =>
         ({
@@ -2087,8 +2092,9 @@ describe("CodeWorkspacePage", () => {
     expect(client.archiveCodeWorkspace).toHaveBeenCalledWith("ws-1", true);
   });
 
-  it("starts a Tidebreak fix workspace from Uneff me", async () => {
+  it("starts a Tidebreak session from Uneff me, showing the handoff meanwhile", async () => {
     const client = makeClient();
+    enableStartHarness(client);
     const created = {
       ...WORKSPACE,
       id: "ws-uneff",
@@ -2111,6 +2117,9 @@ describe("CodeWorkspacePage", () => {
     client.getCodeWorkspace.mockImplementation(async (id: string) =>
       id === created.id ? created : WORKSPACE,
     );
+    const debug =
+      deferred<Awaited<ReturnType<typeof client.getCodeSessionDebug>>>();
+    client.getCodeSessionDebug.mockReturnValueOnce(debug.promise);
     useCodeCatalogStore.setState({
       repos: [REPO, tidebreakRepo],
     });
@@ -2121,6 +2130,15 @@ describe("CodeWorkspacePage", () => {
     await user.click(screen.getByRole("button", { name: "Workspace actions" }));
     await user.click(await screen.findByRole("menuitem", { name: "Uneff me" }));
 
+    // The source workspace carries the handoff while the report is collected.
+    const status = await screen.findByRole("status", {
+      name: "Starting session",
+    });
+    expect(status).toHaveTextContent("Getting Tidebreak ready to help");
+    expect(status).toHaveTextContent("Collecting the debug report");
+    expect(client.createCodeWorkspace).not.toHaveBeenCalled();
+    debug.resolve({ session: { id: "sess-1" }, turns: [], events: [] });
+
     await waitFor(() =>
       expect(client.createCodeWorkspace).toHaveBeenCalledWith({
         repo_id: "repo-tb",
@@ -2128,17 +2146,65 @@ describe("CodeWorkspacePage", () => {
       }),
     );
     expect(client.getCodeSessionDebug).toHaveBeenCalledWith("sess-1");
+    // A connected checkout means no clone.
+    expect(client.startCodeClone).not.toHaveBeenCalled();
     await waitFor(() =>
       expect(router.state.location.pathname).toBe(`/code/w/${created.id}`),
     );
-    await waitFor(() => {
-      const pending = useCodeUiStore.getState().pendingComposerPrompt;
-      const composer = screen.queryByRole("textbox", {
-        name: "Message",
-      }) as HTMLTextAreaElement | null;
-      const text = pending?.text ?? composer?.value ?? "";
-      expect(text).toContain("Open a pull request against main");
-    });
+    // The first turn is posted, not left in the composer.
+    await waitFor(() =>
+      expect(client.createCodeSession).toHaveBeenCalledWith(created.id, {
+        harness: "claude_code",
+        permission_mode: "allow",
+        model: undefined,
+      }),
+    );
+    await waitFor(() =>
+      expect(client.submitCodeTurn).toHaveBeenCalledWith(
+        CREATED_SESSION.id,
+        expect.stringContaining("Start by asking the user what went wrong"),
+      ),
+    );
+    expect(useCodeUiStore.getState().pendingComposerPrompt).toBeNull();
+    await waitFor(() =>
+      expect(useCodeUiStore.getState().workspaceStartups).toEqual({}),
+    );
+  });
+
+  it("starts Uneff me as a new agent here when no Tidebreak checkout is connected", async () => {
+    const client = makeClient();
+    enableStartHarness(client);
+    client.listCodeWorkspaceSessions.mockResolvedValue([SESSION]);
+    const { router } = await mountWorkspace(client);
+    const user = userEvent.setup();
+
+    await screen.findByRole("heading", { name: /Fix login/ });
+    await user.click(screen.getByRole("button", { name: "Workspace actions" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Uneff me" }));
+
+    // Nothing is created or cloned on the reader's behalf.
+    await waitFor(() =>
+      expect(client.createCodeSession).toHaveBeenCalledWith(WORKSPACE.id, {
+        harness: "claude_code",
+        permission_mode: "allow",
+        model: undefined,
+      }),
+    );
+    expect(client.createCodeWorkspace).not.toHaveBeenCalled();
+    expect(client.startCodeClone).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(client.submitCodeTurn).toHaveBeenCalledWith(
+        CREATED_SESSION.id,
+        expect.stringContaining("not a Tidebreak checkout"),
+      ),
+    );
+    // The new agent is the one shown.
+    await waitFor(() =>
+      expect(router.state.location.search).toMatchObject({
+        task: CREATED_SESSION.id,
+      }),
+    );
+    expect(router.state.location.pathname).toBe(`/code/w/${WORKSPACE.id}`);
   });
 
   it("keeps git and comments in the review sidebar, and opens the terminal as a tab", async () => {

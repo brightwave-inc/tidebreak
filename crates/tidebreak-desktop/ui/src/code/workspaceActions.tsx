@@ -41,11 +41,21 @@ import {
   openInEditor,
 } from "./codeWorktreeHost";
 import { openInEditorLabel } from "./editorPreference";
-import { useCodeCatalogStore } from "./CodeCatalogStore";
-import { useCodeUiStore } from "./CodeUiStore";
+import { useManagedPolicy } from "../managedPolicy";
+import {
+  OPTIMISTIC_WORKSPACE_ID_PREFIX,
+  useCodeCatalogStore,
+} from "./CodeCatalogStore";
+import { useCodeUiStore, type WorkspaceStartupStep } from "./CodeUiStore";
 import { nextWorkspaceAfterLeaving, railWorkspaceIds } from "./railNavigation";
 import { codeWorkspaceIdFromPath } from "./routes";
-import { startUneffMeWorkspace } from "./uneffMe";
+import { startFirstSession } from "./startWorkspaceSession";
+import {
+  UNEFF_STARTUP_HEADING,
+  prepareUneffMe,
+  uneffPreparationSteps,
+  uneffSessionSettings,
+} from "./uneffMe";
 
 /**
  * Workspace commands shared by the card context menu and the workspace
@@ -107,8 +117,6 @@ export function workspaceCommands(input: {
   canOpenWorktree?: boolean;
   /** This window can start an editor on the machine holding the worktree. */
   canOpenInEditor?: boolean;
-  /** Tidebreak's own checkout is connected, so a debug dump can become a fix. */
-  canUneff?: boolean;
   /** The setup script failed, so the workspace has a worktree but no session. */
   setupFailed?: boolean;
 }): WorkspaceCommand[] {
@@ -149,9 +157,7 @@ export function workspaceCommands(input: {
         : { id: "pin-attention", label: "Pin attention" },
     );
     items.push({ id: "copy-debug-json", label: "Copy debug JSON" });
-    if (input.canUneff) {
-      items.push({ id: "uneff-me", label: "Uneff me" });
-    }
+    items.push({ id: "uneff-me", label: "Uneff me" });
   }
   items.push({
     id: "archive",
@@ -196,7 +202,6 @@ export function workspaceHeaderCommands(input: {
   canOpenInEditor?: boolean;
   /** The shown agent has a transcript worth handing to a sibling. */
   canFork?: boolean;
-  canUneff?: boolean;
   /** The setup script failed, so the workspace has a worktree but no session. */
   setupFailed?: boolean;
 }): WorkspaceCommand[] {
@@ -226,9 +231,7 @@ export function workspaceHeaderCommands(input: {
       items.push({ id: "fork-agent", label: "Fork this agent" });
     }
     items.push({ id: "copy-debug-json", label: "Copy debug JSON" });
-    if (input.canUneff) {
-      items.push({ id: "uneff-me", label: "Uneff me" });
-    }
+    items.push({ id: "uneff-me", label: "Uneff me" });
   }
   if (!input.archived) {
     for (const action of input.quickActions) {
@@ -413,13 +416,18 @@ export function useWorkspaceCardCommands(): {
   ) => void;
   dialogs: ReactElement;
 } {
-  const { client } = useApp();
+  const { client, models, defaultModelKey } = useApp();
   const navigate = useNavigate();
   const { confirm, dialog } = useConfirm();
+  const permissionCeiling = useManagedPolicy().permission_mode_ceiling;
   const pathname = useRouterState({
     select: (state) => state.location.pathname,
   });
   const upsertWorkspace = useCodeCatalogStore((state) => state.upsertWorkspace);
+  const replaceWorkspace = useCodeCatalogStore(
+    (state) => state.replaceWorkspace,
+  );
+  const removeWorkspace = useCodeCatalogStore((state) => state.removeWorkspace);
   const rememberSession = useCodeCatalogStore((state) => state.rememberSession);
   const forgetWorkspaceSession = useCodeCatalogStore(
     (state) => state.forgetWorkspaceSession,
@@ -608,41 +616,146 @@ export function useWorkspaceCardCommands(): {
     }
   }
 
+  /**
+   * Turn this session's debug report into a Tidebreak session that files an
+   * issue or opens a fix.
+   *
+   * The source workspace carries the startup handoff while the report is
+   * collected. With a Tidebreak checkout connected, a fix workspace is
+   * created on it and takes the handoff over as soon as it exists, the same
+   * way a workspace created from the dialog does. Without one, the session
+   * starts as a new agent right here, and nothing is cloned for the reader.
+   * Either way the first turn is posted for them: the agent's opening move is
+   * to ask what happened.
+   */
   async function runUneffMe(context: WorkspaceCommandContext) {
     const sessionId = contextSessionId(context);
     if (!sessionId) return;
-    if (useCodeUiStore.getState().composerActionScope !== null) {
-      toast.error("Another agent action is already running");
+    const sourceId = context.workspace.id;
+    if (useCodeUiStore.getState().workspaceStartups[sourceId]) {
+      toast.error("Uneff me is already running");
+      return;
+    }
+    const catalog = useCodeCatalogStore.getState();
+    let doctor = catalog.doctor;
+    if (!doctor) {
+      try {
+        doctor = await client.getHarnessDoctor();
+      } catch {
+        doctor = null;
+      }
+    }
+    const settings = uneffSessionSettings({
+      doctor,
+      sourceHarness: context.session?.harness_kind,
+      lastCreate: useCodeUiStore.getState().lastCreate,
+      ceiling: permissionCeiling,
+    });
+    if (!settings) {
+      toast.error(
+        "No coding engine can start right now. Install or sign in to one, then try again.",
+      );
       return;
     }
     const sourceRepo =
-      useCodeCatalogStore
-        .getState()
-        .repos.find((repo) => repo.id === context.workspace.repo_id)
+      catalog.repos.find((repo) => repo.id === context.workspace.repo_id)
         ?.display_name ?? context.workspace.repo_id;
+    const setWorkspaceStartup = useCodeUiStore.getState().setWorkspaceStartup;
+    const startup = {
+      harness: settings.harness,
+      heading: UNEFF_STARTUP_HEADING,
+    };
+    const showPreparation = (preparation: WorkspaceStartupStep[]) =>
+      setWorkspaceStartup(sourceId, {
+        ...startup,
+        hasFirstMessage: true,
+        phase: "preparing",
+        preparation,
+      });
+    showPreparation(uneffPreparationSteps({ step: "debug" }));
+    // The handoff draws on the source workspace, so the reader has to be on it.
+    if (pathname !== `/code/w/${sourceId}`) {
+      void navigate({
+        to: "/code/w/$workspaceId",
+        params: { workspaceId: sourceId },
+      });
+    }
+    let pendingId: string | null = null;
+    let prepared: Awaited<ReturnType<typeof prepareUneffMe>>;
     try {
-      const { workspace, prompt } = await startUneffMeWorkspace({
-        repos: useCodeCatalogStore.getState().repos,
+      prepared = await prepareUneffMe({
+        repos: catalog.repos,
         sessionId,
         sourceTitle: context.title,
         sourceBranch: context.workspace.branch_name,
         sourceRepo,
         getDebug: (id) => client.getCodeSessionDebug(id),
-        createWorkspace: (body) => client.createCodeWorkspace(body),
-      });
-      upsertWorkspace(workspace);
-      if (!useCodeUiStore.getState().runComposerPrompt(workspace.id, prompt)) {
-        useCodeUiStore.getState().offerComposerPrompt(workspace.id, prompt);
-      }
-      await navigate({
-        to: "/code/w/$workspaceId",
-        params: { workspaceId: workspace.id },
+        createWorkspace: async (body) => {
+          // The rail shows the same optimistic card a dialog create shows.
+          pendingId = `${OPTIMISTIC_WORKSPACE_ID_PREFIX}${crypto.randomUUID()}`;
+          upsertWorkspace({
+            id: pendingId,
+            repo_id: body.repo_id,
+            title: body.title ?? "Uneff",
+            worktree_path: "",
+            branch_name: "",
+            base_ref: "",
+            status: "creating",
+            created_at: new Date().toISOString(),
+          });
+          return client.createCodeWorkspace(body);
+        },
+        onProgress: (progress) =>
+          showPreparation(uneffPreparationSteps(progress)),
       });
     } catch (error) {
-      toast.error(
-        friendlyErrorMessage(error, "Could not start a Tidebreak fix"),
-      );
+      if (pendingId) removeWorkspace(pendingId);
+      setWorkspaceStartup(sourceId, null);
+      toast.error(friendlyErrorMessage(error, "Could not start Uneff me"));
+      return;
     }
+    const { workspace, prompt } = prepared;
+    const preparation = uneffPreparationSteps({ step: "create" });
+    setWorkspaceStartup(sourceId, null);
+    if (workspace) {
+      if (pendingId) replaceWorkspace(pendingId, workspace);
+      else upsertWorkspace(workspace);
+      await startFirstSession({
+        client,
+        workspace,
+        settings,
+        prompt,
+        models,
+        defaultModelKey,
+        startup: { heading: UNEFF_STARTUP_HEADING, preparation },
+        reveal: () =>
+          navigate({
+            to: "/code/w/$workspaceId",
+            params: { workspaceId: workspace.id },
+          }),
+      });
+      return;
+    }
+    // No checkout: a new agent in this workspace, shown once it exists.
+    await startFirstSession({
+      client,
+      workspace: context.workspace,
+      settings,
+      prompt,
+      models,
+      defaultModelKey,
+      startup: { heading: UNEFF_STARTUP_HEADING, preparation },
+      onSessionCreated: (session) =>
+        void navigate({
+          to: "/code/w/$workspaceId",
+          params: { workspaceId: sourceId },
+          search: (current: Record<string, unknown>) => ({
+            ...current,
+            task: session.id,
+            subagent: undefined,
+          }),
+        }),
+    });
   }
 
   /**

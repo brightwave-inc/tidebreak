@@ -26,6 +26,7 @@ import type {
 import { useCodeCatalogStore } from "@/code/CodeCatalogStore";
 import { resetCodeSessionRegistry } from "@/code/CodeSessionRegistry";
 import { useCodeUiStore } from "@/code/CodeUiStore";
+import { UNEFF_STARTUP_HEADING, uneffPreparationSteps } from "@/code/uneffMe";
 import {
   disconnectCodeUpdates,
   useCodeUpdatesStore,
@@ -70,6 +71,7 @@ type WorkspaceScenario =
   | "start"
   | "workspace-starting"
   | "workspace-sending-message"
+  | "uneff-preparing"
   | "session-create-failure"
   | "first-turn-failure"
   | "fork-first-turn-failure"
@@ -985,6 +987,15 @@ function WorkspacePageStory({
             : "sending_message",
       });
     }
+    if (scenario === "uneff-preparing") {
+      useCodeUiStore.getState().setWorkspaceStartup(workspace.id, {
+        harness: "claude_code",
+        hasFirstMessage: true,
+        phase: "preparing",
+        heading: UNEFF_STARTUP_HEADING,
+        preparation: uneffPreparationSteps({ step: "debug" }),
+      });
+    }
     const client = storyClient(scenario);
     return { client, router: storyRouter(client, initialUrl) };
   });
@@ -1503,6 +1514,23 @@ export const StartingSession: Story = {
     });
     await expect(status).toHaveTextContent("Starting Claude Code");
     await expect(status).toHaveTextContent("Your first message is queued.");
+  },
+};
+
+/**
+ * Uneff me borrows the same surface before its session exists: the source
+ * workspace shows the debug report being collected ahead of the usual steps.
+ */
+export const UneffMePreparing: Story = {
+  args: { scenario: "uneff-preparing", reviewOpen: false },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const status = await canvas.findByRole("status", {
+      name: "Starting session",
+    });
+    await expect(status).toHaveTextContent("Getting Tidebreak ready to help");
+    await expect(status).toHaveTextContent("Collecting the debug report");
+    await expect(status).toHaveTextContent("Workspace ready");
   },
 };
 

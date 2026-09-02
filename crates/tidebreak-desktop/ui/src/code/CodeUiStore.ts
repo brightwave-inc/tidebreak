@@ -114,11 +114,28 @@ export type PendingComposerImages = {
   files: readonly File[];
 };
 
-/** The new-workspace dialog is still preparing this workspace's first agent. */
+/** One line of the startup handoff's step list. */
+export type WorkspaceStartupStep = {
+  label: string;
+  state: "complete" | "active" | "pending";
+};
+
+/**
+ * A workspace is still getting its first agent.
+ *
+ * The new-workspace dialog keys this by the workspace it created. Uneff me
+ * keys it by the workspace it starts from while it collects the debug report
+ * and, when needed, clones Tidebreak — that is `preparing`, with the work so
+ * far in `preparation` — and moves it to the new workspace once that exists.
+ */
 export type WorkspaceStartup = {
   harness: HarnessKind;
   hasFirstMessage: boolean;
-  phase: "starting_session" | "sending_message";
+  phase: "preparing" | "starting_session" | "sending_message";
+  /** Heading over the steps. Omitted, the handoff reads as a plain create. */
+  heading?: string;
+  /** Steps that ran before the workspace existed, in order. */
+  preparation?: readonly WorkspaceStartupStep[];
 };
 
 function readStoredCreateDefaults(): CodeCreateDefaults | null {

@@ -6,6 +6,7 @@ import {
   pastedTextLineCount,
   pastedTextPreview,
   shouldAttachPastedText,
+  splitPastedText,
 } from "./PastedText";
 
 describe("PastedText", () => {
@@ -31,5 +32,20 @@ describe("PastedText", () => {
     expect(pastedTextPreview("\n  First useful line  \nSecond")).toBe(
       "First useful line",
     );
+  });
+
+  it("splits held paste back out of a sent message", () => {
+    const sent = messageWithPastedText("Summarize this", [
+      { id: "paste-1", text: "First line\nSecond line" },
+      { id: "paste-2", text: '{\n  "a": 1\n}' },
+    ]);
+    expect(splitPastedText(sent)).toEqual({
+      prose: "Summarize this",
+      pasted: ["First line\nSecond line", '{\n  "a": 1\n}'],
+    });
+    expect(splitPastedText("plain message")).toEqual({
+      prose: "plain message",
+      pasted: [],
+    });
   });
 });
