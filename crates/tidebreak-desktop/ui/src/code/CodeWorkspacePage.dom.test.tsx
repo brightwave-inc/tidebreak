@@ -107,6 +107,7 @@ vi.mock("@xterm/xterm", () => ({
     }
     loadAddon() {}
     open() {}
+    focus() {}
     dispose() {}
     onData() {
       return { dispose() {} };
