@@ -2902,14 +2902,13 @@ async fn drive_turn_inner(
             if turn.status.is_open()
                 && !matches!(
                     turn.status,
-                    CodeTurnStatus::WaitingForClient
-                        | CodeTurnStatus::WaitingForAgentRun
-                        | CodeTurnStatus::Waiting
+                    CodeTurnStatus::WaitingForClient | CodeTurnStatus::WaitingForAgentRun
                 )
             {
                 // The stream ended without closing the turn. Only the worker
-                // knows whether that was asked for. Client waits keep the
-                // lease-release shape until D4b.
+                // knows whether that was asked for. Client and agent-run
+                // waits keep the lease-release shape until D4b. An approval
+                // park stays on the worker, so an interrupt must close it.
                 let (status, event) = if interrupted {
                     (
                         CodeTurnStatus::Interrupted,
