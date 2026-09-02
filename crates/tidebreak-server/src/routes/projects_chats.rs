@@ -799,7 +799,7 @@ pub async fn list_chat_messages(
         &*state.store,
         &*state.blobs,
         id,
-        Some(&crate::turn_worker::private_chat_scratch_path(
+        Some(&crate::engine::internal::leg::private_chat_scratch_path(
             &state.config.data_dir.join("scratch"),
             id,
         )),

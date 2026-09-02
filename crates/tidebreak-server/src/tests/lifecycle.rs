@@ -99,9 +99,9 @@ async fn cancellation_drains_buffered_preassigned_event_ordinals() {
     let token = state.token.clone();
     spawn_turn_worker_with_config(
         &state,
-        turn_worker::TurnWorkerConfig {
+        engine::internal::leg::LegDriverConfig {
             max_concurrency: 1,
-            ..turn_worker::TurnWorkerConfig::default()
+            ..engine::internal::leg::LegDriverConfig::default()
         },
     );
     let router = app(state);
@@ -873,7 +873,7 @@ async fn committed_steer_event_recovers_when_cancellation_wins_ambiguous_respons
     let token = state.token.clone();
     spawn_turn_worker_with_config(
         &state,
-        turn_worker::TurnWorkerConfig {
+        engine::internal::leg::LegDriverConfig {
             lease: Duration::from_millis(500),
             heartbeat: Duration::from_millis(20),
             steer_poll: Duration::from_millis(5),

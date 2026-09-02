@@ -1248,9 +1248,9 @@ async fn sandbox_container_routing_preserves_in_process_task_and_deadline_shape(
     let token = state.token.clone();
     spawn_turn_worker_with_config(
         &state,
-        turn_worker::TurnWorkerConfig {
+        engine::internal::leg::LegDriverConfig {
             sandbox_spawn_execution_location: tidebreak_core::AgentRunExecutionLocation::Container,
-            ..turn_worker::TurnWorkerConfig::default()
+            ..engine::internal::leg::LegDriverConfig::default()
         },
     );
     let router = app(state);
@@ -1369,7 +1369,7 @@ async fn worker_recovers_ambiguous_claim_and_completion_with_exact_receipts() {
         Arc::new(FakeProvider),
         store,
         dir,
-        turn_worker::TurnWorkerConfig {
+        engine::internal::leg::LegDriverConfig {
             // Keep this failure-injection test inside the committed claim's
             // lease even when a loaded test host delays the retry task.
             lease: Duration::from_secs(5 * 60),
@@ -1377,7 +1377,7 @@ async fn worker_recovers_ambiguous_claim_and_completion_with_exact_receipts() {
             failure_delay_cap: Duration::from_millis(40),
             retry: fast_retry_schedule(),
             max_concurrency: 1,
-            ..turn_worker::TurnWorkerConfig::default()
+            ..engine::internal::leg::LegDriverConfig::default()
         },
     );
     let bearer = format!("Bearer {token}");
@@ -1760,7 +1760,7 @@ async fn worker_renews_a_near_expiry_ambiguous_claim_before_execution() {
             ..AgentConfig::default()
         },
     );
-    let worker = turn_worker::TurnWorker::new(
+    let worker = engine::internal::leg::LegDriver::new(
         state.store.clone(),
         state.resolver.clone(),
         state.secrets.clone(),
@@ -1775,7 +1775,7 @@ async fn worker_renews_a_near_expiry_ambiguous_claim_before_execution() {
         state.queued_turn_wake.clone(),
         state.agent_config.clone(),
         None,
-        turn_worker::TurnWorkerConfig {
+        engine::internal::leg::LegDriverConfig {
             lease: Duration::from_millis(600),
             heartbeat: Duration::from_millis(200),
             steer_poll: Duration::from_millis(10),
@@ -1857,7 +1857,7 @@ async fn worker_heartbeats_while_event_journaling_is_blocked() {
             ..AgentConfig::default()
         },
     );
-    let worker = turn_worker::TurnWorker::new(
+    let worker = engine::internal::leg::LegDriver::new(
         state.store.clone(),
         state.resolver.clone(),
         state.secrets.clone(),
@@ -1872,7 +1872,7 @@ async fn worker_heartbeats_while_event_journaling_is_blocked() {
         state.queued_turn_wake.clone(),
         state.agent_config.clone(),
         None,
-        turn_worker::TurnWorkerConfig {
+        engine::internal::leg::LegDriverConfig {
             lease: Duration::from_millis(250),
             heartbeat: Duration::from_millis(50),
             steer_poll: Duration::from_millis(10),
@@ -2176,7 +2176,7 @@ async fn cancellation_after_drive_result_persists_the_completed_model_step() {
     );
     let drive_returned = Arc::new(Notify::new());
     let release_outcome = Arc::new(Notify::new());
-    let worker = turn_worker::TurnWorker::new(
+    let worker = engine::internal::leg::LegDriver::new(
         state.store.clone(),
         state.resolver.clone(),
         state.secrets.clone(),
@@ -2191,7 +2191,7 @@ async fn cancellation_after_drive_result_persists_the_completed_model_step() {
         state.queued_turn_wake.clone(),
         state.agent_config.clone(),
         None,
-        turn_worker::TurnWorkerConfig::default(),
+        engine::internal::leg::LegDriverConfig::default(),
     )
     .with_post_drive_pause(drive_returned.clone(), release_outcome.clone());
     let token = state.token.clone();

@@ -105,7 +105,6 @@ mod source_tools;
 mod state;
 mod store_ownership;
 mod task_plan_tool;
-mod turn_worker;
 mod update_quiesce;
 mod vault_secrets;
 mod view_frames;
@@ -2361,7 +2360,7 @@ async fn bind_inner(
         blob_orphan_auditor::BlobOrphanAuditorConfig::default(),
     );
     let (chat_quiesce_worker, chat_quiesce_control) = update_quiesce::chat_quiesce_pair();
-    let turn_worker = turn_worker::TurnWorker::new(
+    let turn_worker = engine::internal::leg::LegDriver::new(
         state.store.clone(),
         state.resolver.clone(),
         state.secrets.clone(),
@@ -2376,9 +2375,9 @@ async fn bind_inner(
         state.queued_turn_wake.clone(),
         state.agent_config.clone(),
         Some(state.config.data_dir.join("scratch")),
-        turn_worker::TurnWorkerConfig {
+        engine::internal::leg::LegDriverConfig {
             sandbox_spawn_execution_location,
-            ..turn_worker::TurnWorkerConfig::default()
+            ..engine::internal::leg::LegDriverConfig::default()
         },
     )
     .with_on_behalf_of_gateway(state.on_behalf_of_gateway.clone())

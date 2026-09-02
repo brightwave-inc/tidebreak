@@ -1758,7 +1758,7 @@ async fn test_app_with(
 ///
 /// A test that drives a turn by hand — accepting it and then claiming its
 /// lease straight from the store — has to be that turn's only claimant. A live
-/// `TurnWorker` scans the same queue every few hundred milliseconds, so under
+/// `LegDriver` scans the same queue every few hundred milliseconds, so under
 /// load it can take the queued turn between the accept and the claim, and the
 /// test's claim then finds nothing due. Routes that never run a turn should
 /// use this instead of `test_app`.
@@ -1789,7 +1789,7 @@ fn test_app_from_parts(
         provider,
         store,
         dir,
-        turn_worker::TurnWorkerConfig::default(),
+        engine::internal::leg::LegDriverConfig::default(),
     )
 }
 
@@ -1797,7 +1797,7 @@ fn test_app_from_parts_with_worker_config(
     provider: Arc<dyn ModelProvider>,
     store: Arc<dyn Store>,
     dir: tempfile::TempDir,
-    worker_config: turn_worker::TurnWorkerConfig,
+    worker_config: engine::internal::leg::LegDriverConfig,
 ) -> (Router, Arc<str>, Arc<dyn Store>, tempfile::TempDir) {
     let state = AppState::new(
         Config::desktop(dir.path()),
@@ -1843,9 +1843,9 @@ async fn test_app_with_scanner_resolution_race(
     let token = state.token.clone();
     spawn_turn_worker_with_config(
         &state,
-        turn_worker::TurnWorkerConfig {
+        engine::internal::leg::LegDriverConfig {
             max_concurrency: 1,
-            ..turn_worker::TurnWorkerConfig::default()
+            ..engine::internal::leg::LegDriverConfig::default()
         },
     );
     (app(state), token, store, dir)
@@ -1862,11 +1862,11 @@ fn fast_retry_schedule() -> crate::retry::RetrySchedule {
 }
 
 fn spawn_turn_worker(state: &AppState) {
-    spawn_turn_worker_with_config(state, turn_worker::TurnWorkerConfig::default());
+    spawn_turn_worker_with_config(state, engine::internal::leg::LegDriverConfig::default());
 }
 
-fn spawn_turn_worker_with_config(state: &AppState, config: turn_worker::TurnWorkerConfig) {
-    let worker = turn_worker::TurnWorker::new(
+fn spawn_turn_worker_with_config(state: &AppState, config: engine::internal::leg::LegDriverConfig) {
+    let worker = engine::internal::leg::LegDriver::new(
         state.store.clone(),
         state.resolver.clone(),
         state.secrets.clone(),

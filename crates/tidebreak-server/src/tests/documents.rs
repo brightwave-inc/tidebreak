@@ -1628,7 +1628,7 @@ async fn agent_deps_registers_computer_use_tools_only_when_enabled() {
             "{name} must not register when computer use is disabled"
         );
     }
-    let surface = crate::turn_worker::freeze_foreground_turn_surface(Arc::new(tools), &{
+    let surface = crate::engine::internal::leg::freeze_foreground_turn_surface(Arc::new(tools), &{
         AgentConfig::default()
     });
     let prompt = surface.agent_config.system_prompt.as_deref().unwrap();
@@ -1722,7 +1722,7 @@ async fn agent_deps_registers_computer_use_tools_only_when_enabled() {
 
     // The operating prompt teaches the consent posture only when the tools
     // exist on the surface.
-    let surface = crate::turn_worker::freeze_foreground_turn_surface(
+    let surface = crate::engine::internal::leg::freeze_foreground_turn_surface(
         Arc::new(tools),
         &AgentConfig::default(),
     );
@@ -1758,7 +1758,8 @@ async fn agent_deps_registers_server_tools_and_closed_foreground_capabilities() 
         },
         tidebreak_core::ApprovalClass::Sensitive,
     );
-    let surface = crate::turn_worker::freeze_foreground_turn_surface(Arc::new(tools), &config);
+    let surface =
+        crate::engine::internal::leg::freeze_foreground_turn_surface(Arc::new(tools), &config);
     let system_prompt = surface
         .agent_config
         .system_prompt
@@ -2071,7 +2072,7 @@ async fn foreground_browser_tools_absent_by_default() {
             "{name} must not execute when foreground_browser is false"
         );
     }
-    let surface = crate::turn_worker::freeze_foreground_turn_surface(Arc::new(tools), &{
+    let surface = crate::engine::internal::leg::freeze_foreground_turn_surface(Arc::new(tools), &{
         AgentConfig::default()
     });
     let prompt = surface.agent_config.system_prompt.as_deref().unwrap();
