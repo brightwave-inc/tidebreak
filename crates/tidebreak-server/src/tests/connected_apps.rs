@@ -583,6 +583,37 @@ async fn selection_and_hash_pin_govern_the_upsert() {
     assert_eq!(entry["document_sha256"], json!(pin));
 }
 
+/// Pasted-document preview: JSON that is not an object reports the type,
+/// not the collapsed "not a JSON object" message the Sentry paste hit.
+#[tokio::test]
+async fn pasted_document_preview_reports_a_non_object_root() {
+    let (router, bearer, _state, _dir) = connected_apps_test_app().await;
+    let preview = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/connected-apps/rest/spec-preview")
+                .header("authorization", &bearer)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({ "source": { "document": "[1, 2]" } }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(preview.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = serde_json::from_str(&raw_body(preview).await).unwrap();
+    assert_eq!(body["kind"], json!("openapi_ingest"));
+    let message = body["message"].as_str().unwrap();
+    assert!(message.contains("array"), "{message}");
+    assert!(
+        !message.contains("the document is not a JSON object"),
+        "{message}"
+    );
+}
+
 /// The managed posture: `rest_api` upserts are refused wholesale with the
 /// stable `managed_profile` kind — local credential entry is what the
 /// lockdown closes — while DELETE stays available, because removing a local

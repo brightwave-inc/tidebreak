@@ -9,6 +9,7 @@ import {
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ApiClient, ConnectedAppsInfo, McpServerInfo } from "../api";
+import { HttpError } from "../api";
 import { ConnectedAppsPanel } from "./ConnectedAppsPanel";
 
 const SECRET = "sk-rest-value-hunter2";
@@ -402,5 +403,34 @@ describe("ConnectedAppsPanel", () => {
         expect.objectContaining({ credential: "keep" }),
       ),
     );
+  });
+
+  it("shows the server ingest message under the paste textarea, without a bare 400", async () => {
+    const client = api({
+      previewRestSpec: vi
+        .fn()
+        .mockRejectedValue(
+          new HttpError(
+            400,
+            "400: JSON invalid JSON syntax at line 2, column 5. Check line 2, column 5",
+            "openapi_ingest",
+          ),
+        ),
+    });
+    const user = userEvent.setup();
+    render(<ConnectedAppsPanel client={client} managed={false} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: /Add REST API/ }),
+    );
+    await user.click(screen.getByRole("radio", { name: /Paste document/ }));
+    await user.type(screen.getByLabelText(/OpenAPI document/), '{{"openapi":');
+    await user.click(screen.getByRole("button", { name: /Select operations/ }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(
+      "JSON invalid JSON syntax at line 2, column 5. Check line 2, column 5",
+    );
+    expect(alert).not.toHaveTextContent(/^400:/);
   });
 });
