@@ -277,6 +277,7 @@ pub fn chat_event(event: CodeEvent) -> Result<Option<AgentEvent>> {
         // chat lane never produces (a completion with no stop reason, a
         // steer with no message row, a failure with no kind).
         CodeEvent::SessionStarted { .. }
+        | CodeEvent::TurnResumed { .. }
         | CodeEvent::AssistantMessage { .. }
         | CodeEvent::ToolCompleted { output: None, .. }
         | CodeEvent::FileChanged { .. }
@@ -457,6 +458,9 @@ mod tests {
                 stop_reason: None,
             },
             CodeEvent::TurnInterrupted { usage: None },
+            CodeEvent::TurnResumed {
+                turn_id: CodeTurnId::new(),
+            },
             CodeEvent::UserSteered {
                 text: "go".into(),
                 message_id: None,

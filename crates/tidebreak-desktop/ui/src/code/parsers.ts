@@ -3523,6 +3523,17 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
         return null;
       }
       return { type: "turn_started", turn_id: value.turn_id };
+    case "turn_resumed":
+      if (
+        !onlyKeys<Extract<WireCodeEvent, { type: "turn_resumed" }>>(value, [
+          "type",
+          "turn_id",
+        ]) ||
+        !wireId(value.turn_id)
+      ) {
+        return null;
+      }
+      return { type: "turn_resumed", turn_id: value.turn_id };
     case "assistant_delta":
     case "reasoning_delta":
       if (!onlyKeys(value, ["type", "text"]) || !blockText(value.text)) {

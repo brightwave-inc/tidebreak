@@ -416,6 +416,7 @@ bounded):
 |---|---|
 | `SessionStarted` | harness kind, version, resume ref |
 | `TurnStarted` | turn id |
+| `TurnResumed` | turn id — a parked turn continued after a worker restart |
 | `AssistantDelta` / `AssistantMessage` | streamed or whole assistant text |
 | `ReasoningDelta` | streamed thinking text where the harness reports it |
 | `ToolStarted` | call id, name, `ToolDetail` (`Command {cmd, cwd}` \| `FileEdit {path}` \| `FileRead {path}` \| `Search {query}` \| `Other {summary}`) |

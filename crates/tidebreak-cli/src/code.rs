@@ -1311,6 +1311,11 @@ fn render_event(
             eprintln!("tidebreak: turn interrupted");
             return false;
         }
+        CodeEvent::TurnResumed { .. } => {
+            finish_line(dangling);
+            eprintln!("tidebreak: turn resumed");
+            return false;
+        }
         CodeEvent::TurnRefused { refusal, .. } => {
             streamed_text.clear();
             finish_line(dangling);

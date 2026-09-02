@@ -1092,6 +1092,15 @@ describe("parseCodeEvent", () => {
     });
     expect(
       parseCodeEvent({
+        type: "turn_resumed",
+        turn_id: "11111111-1111-4111-8111-111111111111",
+      }),
+    ).toEqual({
+      type: "turn_resumed",
+      turn_id: "11111111-1111-4111-8111-111111111111",
+    });
+    expect(
+      parseCodeEvent({
         type: "user_steered",
         text: "and say thanks",
         message_id: "11111111-1111-4111-8111-111111111111",

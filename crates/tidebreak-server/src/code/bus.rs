@@ -400,6 +400,7 @@ fn ends_assistant_text(event: &CodeEvent) -> bool {
             parent_call_id: None,
             ..
         } | CodeEvent::TurnStarted { .. }
+            | CodeEvent::TurnResumed { .. }
             | CodeEvent::TurnCompleted { .. }
             | CodeEvent::TurnRefused { .. }
             | CodeEvent::TurnFailed { .. }
