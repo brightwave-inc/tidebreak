@@ -7,8 +7,12 @@
 //! single-page app without a timer and without any page-side script.
 //!
 //! The observer object lives on the main thread and is retained here, keyed by
-//! webview label, until [`stop_observing_browser_url`] removes it. Remove it
-//! before the view closes so no observer outlives the view it watches.
+//! webview label, until [`stop_observing_browser_url`] removes it. The
+//! observer holds the view it watches, so the view cannot be deallocated
+//! while an observation is registered: a view that goes away outside the
+//! close path (the window tearing down, the host dropping it) stays alive
+//! until its observer is detached, and never trips KVO's deallocation check.
+//! [`detach_all_browser_url_observers`] runs at exit so nothing lingers.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -16,7 +20,7 @@ use std::ffi::c_void;
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
-use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
+use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly, Message};
 use objc2_foundation::{
     NSKeyValueObservingOptions, NSObjectNSKeyValueObserverRegistration, NSString,
 };
@@ -32,6 +36,8 @@ const URL_KEY_PATH: &str = "URL";
 
 struct Ivars {
     handler: BrowserUrlChangeHandler,
+    /// The observed view. Held strongly so it outlives the observation.
+    view: Retained<WKWebView>,
 }
 
 define_class!(
@@ -51,19 +57,14 @@ define_class!(
         fn observe_value(
             &self,
             key_path: Option<&NSString>,
-            object: Option<&AnyObject>,
+            _object: Option<&AnyObject>,
             _change: Option<&AnyObject>,
             _context: *mut c_void,
         ) {
             if !key_path.is_some_and(|key_path| key_path.to_string() == URL_KEY_PATH) {
                 return;
             }
-            let Some(object) = object else {
-                return;
-            };
-            // SAFETY: the observer is only ever registered on a `WKWebView`,
-            // and KVO hands back the observed object.
-            let view: &WKWebView = unsafe { &*(object as *const AnyObject).cast() };
+            let view = &self.ivars().view;
             let url = unsafe { view.URL() }
                 .and_then(|url| url.absoluteString())
                 .map(|url| url.to_string());
@@ -77,10 +78,44 @@ define_class!(
 );
 
 impl BrowserUrlObserver {
-    fn new(mtm: MainThreadMarker, handler: BrowserUrlChangeHandler) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(Ivars { handler });
+    fn new(
+        mtm: MainThreadMarker,
+        view: Retained<WKWebView>,
+        handler: BrowserUrlChangeHandler,
+    ) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(Ivars { handler, view });
         // SAFETY: `NSObject::init` on a freshly allocated instance.
         unsafe { msg_send![super(this), init] }
+    }
+
+    /// Register on the held view's `URL` key path.
+    fn attach(&self) {
+        let key_path = NSString::from_str(URL_KEY_PATH);
+        // SAFETY: the observer implements
+        // `observeValueForKeyPath:ofObject:change:context:` and holds the
+        // view, so both sides stay alive until `detach` runs.
+        unsafe {
+            self.ivars().view.addObserver_forKeyPath_options_context(
+                self,
+                &key_path,
+                NSKeyValueObservingOptions::New,
+                std::ptr::null_mut(),
+            );
+        }
+    }
+
+    /// Remove the registration made by `attach`. Dropping the observer
+    /// afterwards releases the view.
+    fn detach(&self) {
+        let key_path = NSString::from_str(URL_KEY_PATH);
+        // SAFETY: `attach` registered this observer on this key path.
+        unsafe {
+            self.ivars().view.removeObserver_forKeyPath_context(
+                self,
+                &key_path,
+                std::ptr::null_mut(),
+            );
+        }
     }
 }
 
@@ -104,53 +139,46 @@ pub(crate) fn observe_browser_url(
             // SAFETY: tauri hands the native `WKWebView` pointer to this
             // closure on the main thread.
             let view: &WKWebView = unsafe { &*platform.inner().cast() };
-            let observer = BrowserUrlObserver::new(mtm, handler);
-            let key_path = NSString::from_str(URL_KEY_PATH);
-            let previous = URL_OBSERVERS
-                .with(|observers| observers.borrow_mut().insert(label, observer.clone()));
+            let observer = BrowserUrlObserver::new(mtm, view.retain(), handler);
+            observer.attach();
+            let previous =
+                URL_OBSERVERS.with(|observers| observers.borrow_mut().insert(label, observer));
             if let Some(previous) = previous {
-                // SAFETY: `previous` was registered on this key path below.
-                unsafe {
-                    view.removeObserver_forKeyPath_context(
-                        &previous,
-                        &key_path,
-                        std::ptr::null_mut(),
-                    );
-                }
-            }
-            // SAFETY: the observer implements
-            // `observeValueForKeyPath:ofObject:change:context:` and stays
-            // retained in `URL_OBSERVERS` until it is removed.
-            unsafe {
-                view.addObserver_forKeyPath_options_context(
-                    &observer,
-                    &key_path,
-                    NSKeyValueObservingOptions::New,
-                    std::ptr::null_mut(),
-                );
+                previous.detach();
             }
         })
         .map_err(|error| format!("browser host: {error}"))
 }
 
 /// Remove the URL observer registered for this webview, if any. Call before
-/// closing the view.
+/// closing the view so the observer releases it.
 pub(crate) fn stop_observing_browser_url(webview: &Webview) -> Result<(), String> {
     let label = webview.label().to_owned();
     webview
-        .with_webview(move |platform| {
-            let Some(observer) =
+        .with_webview(move |_platform| {
+            if let Some(observer) =
                 URL_OBSERVERS.with(|observers| observers.borrow_mut().remove(&label))
-            else {
-                return;
-            };
-            // SAFETY: tauri hands the native `WKWebView` pointer to this
-            // closure on the main thread, and `observer` was registered on it.
-            let view: &WKWebView = unsafe { &*platform.inner().cast() };
-            let key_path = NSString::from_str(URL_KEY_PATH);
-            unsafe {
-                view.removeObserver_forKeyPath_context(&observer, &key_path, std::ptr::null_mut());
+            {
+                observer.detach();
             }
         })
         .map_err(|error| format!("browser host: {error}"))
+}
+
+/// Detach every registered observer and release the views they held. Runs on
+/// the main thread at exit, after which the host may drop the views freely.
+pub(crate) fn detach_all_browser_url_observers() {
+    if MainThreadMarker::new().is_none() {
+        return;
+    }
+    let observers: Vec<_> = URL_OBSERVERS.with(|observers| {
+        observers
+            .borrow_mut()
+            .drain()
+            .map(|(_, observer)| observer)
+            .collect()
+    });
+    for observer in observers {
+        observer.detach();
+    }
 }

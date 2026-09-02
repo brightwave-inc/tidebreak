@@ -958,6 +958,12 @@ pub fn run() {
         tauri::RunEvent::WindowEvent { label, event, .. } => {
             documents::handle_window_drag_drop(app, &label, &event);
         }
+        tauri::RunEvent::ExitRequested { .. } => {
+            // Browser views are torn down with the windows after this; let
+            // go of them before that happens.
+            #[cfg(target_os = "macos")]
+            browser_url_observer::detach_all_browser_url_observers();
+        }
         tauri::RunEvent::Exit => {
             tauri::async_runtime::block_on(app.state::<host_access::HostAccess>().shutdown());
         }
