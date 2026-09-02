@@ -113,7 +113,8 @@ pub struct CodeConnectPage {
 }
 
 /// A registered local git repository.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
 pub struct CodeRepoSnapshot {
     pub id: RepoId,
     pub root_path: String,
@@ -147,7 +148,8 @@ impl From<CodeRepo> for CodeRepoSnapshot {
 }
 
 /// One isolated workspace (worktree + branch) on a repo.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
 pub struct CodeWorkspaceSnapshot {
     pub id: WorkspaceId,
     pub repo_id: RepoId,
@@ -199,7 +201,8 @@ impl From<CodeWorkspace> for CodeWorkspaceSnapshot {
 
 /// Where an externally created session came from. The desktop renders it
 /// as the provenance banner; a session the desktop created carries none.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
 pub struct CodeSessionExternalOrigin {
     /// The channel family, for example `slack`.
     pub channel_kind: String,
@@ -210,7 +213,8 @@ pub struct CodeSessionExternalOrigin {
 }
 
 /// One durable conversation with an external agent engine.
-#[derive(Debug, Clone, PartialEq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
 pub struct CodeSessionSnapshot {
     pub id: tidebreak_core::CodeSessionId,
     /// `None` for a session that binds no workspace: the in-process
@@ -274,7 +278,8 @@ impl From<CodeSession> for CodeSessionSnapshot {
 }
 
 /// One user→engine turn.
-#[derive(Debug, Clone, PartialEq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
 pub struct CodeTurnSnapshot {
     pub id: tidebreak_core::CodeTurnId,
     pub session_id: tidebreak_core::CodeSessionId,
@@ -443,7 +448,8 @@ pub struct CodeAnalyticsSnapshot {
 }
 
 /// One event on the per-session WebSocket.
-#[derive(Debug, Clone, PartialEq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
 pub struct SequencedCodeEventFrame {
     /// Journal position. On a `transient` frame this is the cursor the event
     /// streamed behind, not a position the frame occupies — resume from it
@@ -482,13 +488,14 @@ pub struct CodeSessionDebug {
 }
 
 /// Doctor report for every registered engine adapter.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
 pub struct HarnessDoctorReport {
     pub harnesses: Vec<HarnessDoctorEntry>,
 }
 
 /// How a session of one engine authenticates on this machine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum HarnessAuthMode {
     /// The engine's own local sign-in — the probe result decides readiness.
@@ -510,7 +517,8 @@ pub enum HarnessAuthMode {
 }
 
 /// One engine's probe, capabilities, and remediation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
 pub struct HarnessDoctorEntry {
     pub kind: HarnessKind,
     pub found: bool,
@@ -873,7 +881,8 @@ pub struct CreatePullRequestBody {
 }
 
 /// Result of staging and committing the workspace worktree.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
 pub struct CodeCommitSnapshot {
     pub sha: String,
     pub message: String,
@@ -881,14 +890,16 @@ pub struct CodeCommitSnapshot {
 }
 
 /// Result of pushing the workspace branch.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
 pub struct CodePushSnapshot {
     pub branch: String,
     pub remote: String,
 }
 
 /// PR + checks digest plus the local git facts the PR card needs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
 pub struct CodeWorkspacePrSnapshot {
     pub dirty: bool,
     pub unpushed: bool,
@@ -963,7 +974,8 @@ pub struct CodeWorkspacePullRequests {
 }
 
 /// One durable watch task on a workspace's pull request.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
 pub struct CodeWatchSnapshot {
     pub id: CodeWatchId,
     pub workspace_id: WorkspaceId,
@@ -1693,7 +1705,8 @@ pub struct CodeDeliveryRunActionBody {
 }
 
 /// Bounded output of one named quick action. Never journaled.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
 pub struct CodeActionSnapshot {
     pub name: String,
     pub success: bool,
@@ -1809,7 +1822,8 @@ pub struct SteerBody {
 /// `id` names the row for edits and retraction, and is the turn id the
 /// promoted turn is inserted under. `position` is 0-based and dense within
 /// the session.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
 pub struct QueuedCodeTurn {
     pub id: tidebreak_core::CodeTurnId,
     pub session_id: tidebreak_core::CodeSessionId,
@@ -1833,7 +1847,8 @@ impl From<tidebreak_core::CodeQueuedTurn> for QueuedCodeTurn {
 }
 
 /// Response of `GET /code/sessions/{id}/queued`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QueuedCodeTurnsSnapshot {
     pub queued: Vec<QueuedCodeTurn>,
     pub paused: bool,
@@ -1967,7 +1982,8 @@ pub struct WorkspaceDiffQuery {
 }
 
 /// One changed path in a workspace or turn file list.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
 pub struct CodeFileChange {
     pub path: String,
     pub kind: FileChangeKind,
@@ -1979,7 +1995,8 @@ pub struct CodeFileChange {
 }
 
 /// Bounded changed-file list for `GET /code/workspaces/{id}/files`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
 pub struct CodeWorkspaceFiles {
     pub files: Vec<CodeFileChange>,
     pub truncated: bool,
@@ -1990,7 +2007,8 @@ pub struct CodeWorkspaceFiles {
 }
 
 /// Bounded unified diff for `GET /code/workspaces/{id}/diff`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
 pub struct CodeWorkspaceDiff {
     pub diff: String,
     pub truncated: bool,
@@ -2004,7 +2022,8 @@ pub struct CodeWorkspaceDiff {
 }
 
 /// One parked or decided engine approval.
-#[derive(Debug, Clone, PartialEq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
 pub struct CodeApprovalSnapshot {
     pub id: CodeApprovalId,
     pub session_id: tidebreak_core::CodeSessionId,
@@ -2135,7 +2154,8 @@ pub struct CodeTerminalActivityNotice {
 }
 
 /// Cheap per-session digest on `/code/updates`.
-#[derive(Debug, Clone, PartialEq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
 pub struct CodeSessionDigest {
     /// `None` for a session that binds no workspace.
     pub workspace: Option<WorkspaceId>,
@@ -2219,8 +2239,8 @@ impl From<crate::code::bus::SessionDigest> for CodeSessionDigest {
 /// One unsequenced notice on `WS /code/updates`.
 ///
 /// A connect is restated as [`Self::Snapshot`]; later notices are live only.
-#[derive(Debug, Clone, PartialEq, Serialize, TS)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CodeUpdateNotice {
     /// Full current digest of every non-ended session.
     Snapshot {
@@ -2328,7 +2348,7 @@ pub enum CodeUpdateNotice {
 }
 
 /// Where one closing-message rewrite stands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum CodeTurnRewriteState {
     Rewriting,

@@ -1,329 +1,49 @@
-//! Code-mode wire types and the HTTP+WebSocket client methods that speak them.
+//! Code mode as the CLI drives it: the server's wire types, and the HTTP and
+//! WebSocket client methods that speak them.
 //!
-//! These types mirror the renderer-facing snapshots in
-//! `tidebreak-server::routes::code::types`. They are decoded loosely on purpose:
-//! a field the CLI does not render is dropped, and an unrecognized event kind
-//! still advances the journal cursor.
+//! The snapshot, frame, and notice types are the server's own, re-exported
+//! from [`tidebreak_server::wire`]. The CLI used to keep a hand-written mirror
+//! here, and it drifted: a field the server renamed or made optional compiled
+//! on both sides and failed when the CLI next read it. Importing the server's
+//! types makes a rename a compile error, and brings the renderer's strictness
+//! with it (see the `wire` module doc): unknown keys fail a snapshot, an
+//! unknown notice tag fails the notice, and an unknown event type fails its
+//! frame. A reader drops a failed frame or notice and keeps the socket open.
+//!
+//! One tolerance stays, and it is the server's, not this crate's: the event
+//! union inside a frame is `tidebreak_core::CodeEvent`, which the server also
+//! reads back from its own journal, so a variant accepts keys it does not
+//! declare. The frame around it does not.
+//!
+//! `crates/tidebreak-server/fixtures/code-frames.json` holds one real value of
+//! every snapshot, notice, and event; the test at the bottom decodes each one.
 
 use serde::{Deserialize, Serialize};
 use tidebreak_core::{
-    AgentError, Attention, CapLevel, CodeApprovalId, CodeApprovalKind, CodeApprovalState,
-    CodeEvent, CodeSessionId, CodeSessionLifecycle, CodeTurnId, CodeTurnStatus, CodeUsage,
-    CodeWorkspaceStatus, Diffstat, FenceReason, FileChangeKind, HarnessCaps, HarnessKind,
-    HarnessTier, PermissionMode, PullRequestDigest, QuickAction, RepoId, Result, WorkspaceId,
+    AgentError, CapLevel, CodeApprovalId, CodeEvent, CodeSessionId, CodeTurnId, HarnessCaps,
+    HarnessKind, PermissionMode, RepoId, Result, WorkspaceId,
+};
+
+pub use tidebreak_server::wire::{
+    CodeActionSnapshot, CodeApprovalSnapshot, CodeCommitSnapshot, CodePushSnapshot,
+    CodeRepoSnapshot, CodeSessionDigest, CodeSessionSnapshot, CodeTurnSnapshot, CodeUpdateNotice,
+    CodeWorkspaceDiff, CodeWorkspaceFiles, CodeWorkspacePrSnapshot, CodeWorkspaceSnapshot,
+    HarnessAuthMode, HarnessDoctorReport, QueuedCodeTurn, QueuedCodeTurnsSnapshot,
+    SequencedCodeEventFrame,
 };
 
 use super::client::{Client, EventSocket};
 
-/// A registered local git repository.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CodeRepoSnapshot {
-    pub id: RepoId,
-    pub root_path: String,
-    pub display_name: String,
-    pub default_base_ref: String,
-    pub branch_prefix: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub setup_script: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub archive_script: Option<String>,
-    #[serde(default)]
-    pub quick_actions: Vec<QuickAction>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-}
-
-/// One isolated workspace (worktree + branch) on a repo.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CodeWorkspaceSnapshot {
-    pub id: WorkspaceId,
-    pub repo_id: RepoId,
-    pub title: String,
-    pub worktree_path: String,
-    pub branch_name: String,
-    pub base_ref: String,
-    pub status: CodeWorkspaceStatus,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pr: Option<PullRequestDigest>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub archived_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-/// One durable conversation with an external agent engine.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CodeSessionSnapshot {
-    pub id: CodeSessionId,
-    pub workspace_id: WorkspaceId,
-    /// Defaults to interactive so older servers without the field still parse.
-    #[serde(default = "default_session_kind")]
-    pub kind: tidebreak_core::CodeSessionKind,
-    pub harness_kind: HarnessKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub harness_version: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub harness_resume_ref: Option<String>,
-    pub permission_mode: PermissionMode,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    pub lifecycle: CodeSessionLifecycle,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fence_reason: Option<FenceReason>,
-    pub attention: Attention,
-    #[serde(default)]
-    pub unrecognized_event_count: i64,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-}
-
-fn default_session_kind() -> tidebreak_core::CodeSessionKind {
-    tidebreak_core::CodeSessionKind::Interactive
-}
-
-/// One user→engine turn.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CodeTurnSnapshot {
-    pub id: CodeTurnId,
-    pub session_id: CodeSessionId,
-    pub ordinal: i64,
-    pub status: CodeTurnStatus,
-    pub user_input: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub usage: Option<CodeUsage>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub checkpoint_ref: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub diffstat: Option<Diffstat>,
-    pub started_at: chrono::DateTime<chrono::Utc>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-/// A follow-up parked while the session is already running a turn.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct QueuedCodeTurn {
-    /// Row id, and the turn id the promoted turn is inserted under.
-    pub id: CodeTurnId,
-    pub session_id: CodeSessionId,
-    pub message: String,
-    pub position: i64,
-}
-
-/// Result of `POST /code/sessions/{id}/turns`.
+/// Result of `POST /code/sessions/{id}/turns`: the turn that ran on `200`, or
+/// the follow-up the server parked on `202`. The server answers with one of
+/// two snapshots rather than a tagged union, so this is the one code-mode
+/// shape the client composes itself. Both arms reject unknown keys, so a
+/// snapshot that matches neither fails rather than folding into the other.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum SubmitTurnResponse {
     Ran(CodeTurnSnapshot),
     Queued(QueuedCodeTurn),
-}
-
-/// Result of `GET /code/sessions/{id}/queued`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct QueuedCodeTurnsSnapshot {
-    pub queued: Vec<QueuedCodeTurn>,
-    #[serde(default)]
-    pub paused: bool,
-}
-
-/// One event on the per-session WebSocket.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SequencedCodeEventFrame {
-    /// Journal position, or — on a `transient` frame — the cursor the event
-    /// streamed behind. Resuming from it is correct either way.
-    pub seq: i64,
-    pub event: CodeEvent,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub replayed: Option<bool>,
-    /// Set on a live-only event no journal row holds: assistant deltas, and
-    /// the catch-up delta a mid-turn reader gets on connect. Render it without
-    /// advancing the cursor. A reconnect may receive the complete current
-    /// tail with `replacement` set.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub transient: Option<bool>,
-    /// Set on a transient assistant delta that contains the complete live
-    /// tail. Replace buffered text instead of appending it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub replacement: Option<bool>,
-    /// Set on the first replayed frame of a capped window: history older than
-    /// this frame was dropped and is not coming.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub truncated: Option<bool>,
-}
-
-/// Doctor report for every registered engine adapter.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HarnessDoctorReport {
-    pub harnesses: Vec<HarnessDoctorEntry>,
-}
-
-/// One engine's probe, capabilities, and remediation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HarnessDoctorEntry {
-    pub kind: HarnessKind,
-    pub found: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub version: Option<String>,
-    pub tier: HarnessTier,
-    pub caps: HarnessCaps,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub authenticated: Option<bool>,
-    /// How a session of this engine authenticates on the server's machine.
-    /// A server that predates the field knows only the local sign-in probe.
-    #[serde(default)]
-    pub auth_mode: HarnessAuthMode,
-    #[serde(default)]
-    pub remediation: String,
-    #[serde(default)]
-    pub stderr: String,
-    #[serde(default)]
-    pub unrecognized_event_count: i64,
-}
-
-/// How a session of one engine authenticates on the server's machine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HarnessAuthMode {
-    /// The engine's own local sign-in.
-    #[default]
-    LocalSignIn,
-    /// A credential or endpoint override authenticates the engine without a
-    /// vendor login.
-    GatewayManaged,
-    /// The on-behalf-of relay carries turns as the caller.
-    GatewayRelay,
-    /// The relay does not cover this engine on a hosted machine.
-    HostedUnavailable,
-}
-
-/// Bounded changed-file list for `GET /code/workspaces/{id}/files`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CodeWorkspaceFiles {
-    pub files: Vec<CodeFileChange>,
-    pub truncated: bool,
-    pub stat: Diffstat,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub turn_id: Option<CodeTurnId>,
-}
-
-/// One changed path in a workspace or turn file list.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CodeFileChange {
-    pub path: String,
-    pub kind: FileChangeKind,
-    pub insertions: u32,
-    pub deletions: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub previous_path: Option<String>,
-}
-
-/// Bounded unified diff for `GET /code/workspaces/{id}/diff`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CodeWorkspaceDiff {
-    pub diff: String,
-    pub truncated: bool,
-    pub stat: Diffstat,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub turn_id: Option<CodeTurnId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub file: Option<String>,
-}
-
-/// One parked or decided engine approval.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CodeApprovalSnapshot {
-    pub id: CodeApprovalId,
-    pub session_id: CodeSessionId,
-    pub turn_id: CodeTurnId,
-    pub kind: CodeApprovalKind,
-    pub harness_raw_json: String,
-    pub state: CodeApprovalState,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub feedback: Option<String>,
-    pub requested_at: chrono::DateTime<chrono::Utc>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub decided_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-/// Result of staging and committing the workspace worktree.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CodeCommitSnapshot {
-    pub sha: String,
-    pub message: String,
-    pub stat: Diffstat,
-}
-
-/// Result of pushing the workspace branch.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CodePushSnapshot {
-    pub branch: String,
-    pub remote: String,
-}
-
-/// PR + checks digest plus the local git facts the PR card needs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CodeWorkspacePrSnapshot {
-    pub dirty: bool,
-    pub unpushed: bool,
-    pub ahead: u64,
-    pub has_upstream: bool,
-    pub suggested_commit_message: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pr: Option<PullRequestDigest>,
-    pub gh_found: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gh_authenticated: Option<bool>,
-    #[serde(default)]
-    pub remediation: String,
-}
-
-/// Bounded output of one named quick action.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CodeActionSnapshot {
-    pub name: String,
-    pub success: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub exit_code: Option<i32>,
-    pub stdout: String,
-    pub stderr: String,
-    pub timed_out: bool,
-}
-
-/// Cheap per-session digest on `/code/updates`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CodeSessionDigest {
-    pub workspace: WorkspaceId,
-    pub session: CodeSessionId,
-    pub lifecycle: CodeSessionLifecycle,
-    pub attention: Attention,
-    pub title: String,
-    pub turn_count: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pr_state: Option<PullRequestDigest>,
-}
-
-/// One unsequenced notice on `WS /code/updates`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum CodeUpdateNotice {
-    Snapshot {
-        sessions: Vec<CodeSessionDigest>,
-    },
-    Digest {
-        workspace: WorkspaceId,
-        session: CodeSessionId,
-        lifecycle: CodeSessionLifecycle,
-        attention: Attention,
-        title: String,
-        turn_count: i64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pr_state: Option<Box<PullRequestDigest>>,
-    },
-    TerminalActivity {
-        workspace_id: WorkspaceId,
-        terminal_id: String,
-    },
-    #[serde(other)]
-    Unknown,
 }
 
 impl Client {
@@ -738,7 +458,7 @@ pub fn decode_update_notice(text: &str) -> Result<CodeUpdateNotice> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tidebreak_core::{AttentionSource, AttentionState};
+    use tidebreak_core::{AttentionSource, AttentionState, CodeSessionLifecycle};
 
     #[test]
     fn a_sequenced_frame_round_trips_the_fields_agents_script_against() {
@@ -816,6 +536,7 @@ mod tests {
                 "type": "digest",
                 "workspace": "00000000-0000-0000-0000-000000000001",
                 "session": "00000000-0000-0000-0000-000000000002",
+                "kind": "interactive",
                 "lifecycle": "running",
                 "attention": {
                     "state": { "type": "working" },
@@ -845,9 +566,138 @@ mod tests {
         }
     }
 
+    /// An unknown notice tag fails the notice; the watch loop drops it and
+    /// keeps reading. The old mirror folded it to an `Unknown` variant, which
+    /// is the same outcome with a shape the server never declared.
     #[test]
-    fn an_unknown_update_tag_does_not_kill_the_stream() {
-        let notice = decode_update_notice(r#"{"type":"future_kind","extra":true}"#).unwrap();
-        assert!(matches!(notice, CodeUpdateNotice::Unknown));
+    fn an_unknown_update_tag_fails_the_notice() {
+        assert!(decode_update_notice(r#"{"type":"future_kind","extra":true}"#).is_err());
+    }
+
+    /// A key the server does not declare fails the snapshot, as it does in
+    /// the renderer.
+    #[test]
+    fn snapshots_reject_unknown_keys() {
+        let queued = serde_json::json!({
+            "id": "00000000-0000-0000-0000-000000000006",
+            "session_id": "00000000-0000-0000-0000-000000000003",
+            "message": "then the tests",
+            "position": 0,
+            "created_at": "2026-09-01T04:56:10Z",
+            "updated_at": "2026-09-01T04:56:10Z",
+        });
+        assert!(serde_json::from_value::<SubmitTurnResponse>(queued.clone()).is_ok());
+        let mut extra = queued;
+        extra["extra"] = serde_json::Value::Bool(true);
+        assert!(serde_json::from_value::<SubmitTurnResponse>(extra).is_err());
+    }
+
+    /// Path of the server's code-mode fixtures, relative to this crate.
+    const CODE_FRAMES: &str = "../tidebreak-server/fixtures/code-frames.json";
+
+    fn code_frame_fixtures() -> Vec<(String, String, serde_json::Value)> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(CODE_FRAMES);
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        let entries: Vec<serde_json::Value> =
+            serde_json::from_str(&text).expect("the fixture file is a JSON array");
+        entries
+            .into_iter()
+            .map(|entry| {
+                let name = entry["name"].as_str().expect("every fixture is named");
+                let kind = entry["kind"].as_str().expect("every fixture has a kind");
+                (name.to_owned(), kind.to_owned(), entry["value"].clone())
+            })
+            .collect()
+    }
+
+    fn round_trip<T: serde::de::DeserializeOwned + Serialize>(
+        name: &str,
+        value: &serde_json::Value,
+    ) {
+        let decoded: T = serde_json::from_value(value.clone())
+            .unwrap_or_else(|error| panic!("fixture {name} does not decode: {error}"));
+        let again = serde_json::to_value(&decoded).expect("a decoded value serializes");
+        assert_eq!(
+            &again, value,
+            "fixture {name} changed across the round trip"
+        );
+    }
+
+    /// Every snapshot, notice, and event the server serializes decodes here,
+    /// byte for byte. The fixtures come from the server's own types, and the
+    /// renderer's tests read the same file, so the three decoders cannot
+    /// drift apart without one of them failing.
+    #[test]
+    fn every_server_code_frame_decodes() {
+        let fixtures = code_frame_fixtures();
+        assert!(fixtures.len() > 40, "the fixture list looks truncated");
+        for (name, kind, value) in &fixtures {
+            match kind.as_str() {
+                "repo" => round_trip::<CodeRepoSnapshot>(name, value),
+                "workspace" => round_trip::<CodeWorkspaceSnapshot>(name, value),
+                "session" => round_trip::<CodeSessionSnapshot>(name, value),
+                "turn" => round_trip::<SubmitTurnResponse>(name, value),
+                "queued_turn" => round_trip::<SubmitTurnResponse>(name, value),
+                "queued_turns" => round_trip::<QueuedCodeTurnsSnapshot>(name, value),
+                "harness_doctor" => round_trip::<HarnessDoctorReport>(name, value),
+                "workspace_files" => round_trip::<CodeWorkspaceFiles>(name, value),
+                "workspace_diff" => round_trip::<CodeWorkspaceDiff>(name, value),
+                "approval" => round_trip::<CodeApprovalSnapshot>(name, value),
+                "commit" => round_trip::<CodeCommitSnapshot>(name, value),
+                "push" => round_trip::<CodePushSnapshot>(name, value),
+                "workspace_pr" => round_trip::<CodeWorkspacePrSnapshot>(name, value),
+                "action" => round_trip::<CodeActionSnapshot>(name, value),
+                "session_digest" => round_trip::<CodeSessionDigest>(name, value),
+                "update_notice" => {
+                    let notice = decode_update_notice(&value.to_string())
+                        .unwrap_or_else(|error| panic!("fixture {name}: {error}"));
+                    assert_eq!(&serde_json::to_value(&notice).unwrap(), value, "{name}");
+                }
+                "event_frame" => {
+                    let frame = decode_event_frame(&value.to_string())
+                        .unwrap_or_else(|error| panic!("fixture {name}: {error}"));
+                    assert_eq!(&serde_json::to_value(&frame).unwrap(), value, "{name}");
+                    assert_eq!(
+                        turn_exit_code(&frame.event).is_some(),
+                        is_turn_terminal(&frame.event)
+                    );
+                }
+                other => panic!("fixture {name} has no decoder for kind {other}"),
+            }
+        }
+    }
+
+    /// The submit response tells the two server answers apart by shape.
+    #[test]
+    fn submit_response_arms_follow_the_fixtures() {
+        let mut ran = 0;
+        let mut queued = 0;
+        for (name, kind, value) in code_frame_fixtures() {
+            match kind.as_str() {
+                "turn" => {
+                    assert!(
+                        matches!(
+                            serde_json::from_value(value).unwrap(),
+                            SubmitTurnResponse::Ran(_)
+                        ),
+                        "{name}"
+                    );
+                    ran += 1;
+                }
+                "queued_turn" => {
+                    assert!(
+                        matches!(
+                            serde_json::from_value(value).unwrap(),
+                            SubmitTurnResponse::Queued(_)
+                        ),
+                        "{name}"
+                    );
+                    queued += 1;
+                }
+                _ => {}
+            }
+        }
+        assert!(ran > 0 && queued > 0);
     }
 }

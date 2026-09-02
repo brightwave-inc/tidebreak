@@ -131,7 +131,7 @@ in the renderer. The module documents the strictness that comes with it:
 closed vocabularies, unknown keys rejected (`deny_unknown_fields`, matching the
 renderer's `onlyKeys` guards), and an unknown event type failing its frame.
 
-Two more things are shared through it:
+Four more things are shared through it:
 
 - **Guard limits.** `tidebreak_server::wire::limits` holds the id, timestamp,
   and cursor ceilings. They are generated into `wire.ts` as constants, and
@@ -158,6 +158,17 @@ Two more things are shared through it:
   round-trips every entry and the CLI decodes every entry. The renderer does
   not read this file: its REST validators are exercised against
   `generated/fixtures.ts` and the generated types.
+- **Code-mode fixtures.** The repo, workspace, session, turn, approval, and
+  delivery snapshots, the sequenced event frame, and the `/code/updates`
+  notices are re-exported from `tidebreak_server::wire` too, reject unknown
+  keys, and are written to `crates/tidebreak-server/fixtures/code-frames.json`
+  by `wire_code_fixtures` (a `CodeEvent` or `CodeUpdateNotice` variant without
+  a fixture fails `the_code_frame_fixtures_cover_every_event`). The server
+  round-trips every entry, the CLI's `api::code` tests decode every entry, and
+  the renderer's `code/parsers.test.ts` runs every entry through the matching
+  parser. The event union inside a frame is `tidebreak_core::CodeEvent`, which
+  the server also reads back from its journal, so a variant tolerates keys it
+  does not declare; the frame around it does not.
 
 ## Scope today
 
