@@ -22,6 +22,7 @@ mod delegated_file_read;
 mod document;
 mod event_journal;
 mod file_change_journal;
+mod memory;
 mod message_attachment;
 mod multi_agent_wait;
 mod notification;

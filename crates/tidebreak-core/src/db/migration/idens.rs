@@ -1209,3 +1209,48 @@ pub(crate) enum CodeConnectHandshake {
     ApprovedAt,
     CompletedAt,
 }
+
+#[derive(DeriveIden)]
+pub(crate) enum MemoryScopeState {
+    Table,
+    Owner,
+    ScopeKind,
+    ScopeRef,
+    AutoCommit,
+    ActiveRecordCap,
+    DigestByteCap,
+    CreatedAt,
+    UpdatedAt,
+}
+
+#[derive(DeriveIden)]
+pub(crate) enum MemoryRecord {
+    Table,
+    Id,
+    Owner,
+    ScopeKind,
+    RepoId,
+    Kind,
+    Status,
+    Title,
+    Body,
+    Provenance,
+    Links,
+    ExpiresAt,
+    SupersededBy,
+    ObservationCount,
+    Revision,
+    CreatedAt,
+    UpdatedAt,
+}
+
+#[derive(DeriveIden)]
+pub(crate) enum MemoryRevision {
+    Table,
+    Id,
+    RecordId,
+    Owner,
+    Ordinal,
+    Snapshot,
+    CreatedAt,
+}

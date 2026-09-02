@@ -2224,3 +2224,108 @@ pub mod code_workflow_run_fetch {
 
     impl ActiveModelBehavior for ActiveModel {}
 }
+
+pub mod memory_record {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "memory_record")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub owner: String,
+        pub scope_kind: String,
+        pub repo_id: Option<Uuid>,
+        pub kind: String,
+        pub status: String,
+        pub title: String,
+        #[sea_orm(column_type = "Text")]
+        pub body: String,
+        #[sea_orm(column_type = "JsonBinary")]
+        pub provenance: Json,
+        #[sea_orm(column_type = "JsonBinary")]
+        pub links: Json,
+        pub expires_at: Option<DateTimeUtc>,
+        pub superseded_by: Option<Uuid>,
+        pub observation_count: i64,
+        pub revision: i64,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {
+        #[sea_orm(has_many = "super::memory_revision::Entity")]
+        Revision,
+    }
+
+    impl Related<super::memory_revision::Entity> for Entity {
+        fn to() -> RelationDef {
+            Relation::Revision.def()
+        }
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod memory_scope_state {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "memory_scope_state")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub owner: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub scope_kind: String,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub scope_ref: String,
+        pub auto_commit: bool,
+        pub active_record_cap: i64,
+        pub digest_byte_cap: i64,
+        pub created_at: DateTimeUtc,
+        pub updated_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod memory_revision {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "memory_revision")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub record_id: Uuid,
+        pub owner: String,
+        pub ordinal: i64,
+        #[sea_orm(column_type = "JsonBinary")]
+        pub snapshot: Json,
+        pub created_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {
+        #[sea_orm(
+            belongs_to = "super::memory_record::Entity",
+            from = "Column::RecordId",
+            to = "super::memory_record::Column::Id",
+            on_update = "NoAction",
+            on_delete = "Cascade"
+        )]
+        Record,
+    }
+
+    impl Related<super::memory_record::Entity> for Entity {
+        fn to() -> RelationDef {
+            Relation::Record.def()
+        }
+    }
+
+    impl ActiveModelBehavior for ActiveModel {}
+}

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Weak};
 
 use tidebreak_core::{
-    AgentConfig, AgentError, AgentRunId, BlobStore, CallId, CancelToken, ChatId, Config,
+    AgentConfig, AgentError, AgentRunId, BlobStore, CallId, CancelToken, ChatId, Config, DbStore,
     FsBlobStore, Profile, Result, SecretProvider, SteerInbox, Store, ToolRegistry, TurnId,
 };
 use tokio::sync::{mpsc, Notify, Semaphore};
@@ -118,6 +118,10 @@ pub struct AppState {
     pub(crate) diagnostics: Arc<crate::diagnostics::Diagnostics>,
     /// Durable metadata, conversation state, and the event journal.
     pub store: Arc<dyn Store>,
+    /// The same database as [`Self::store`], where memory routes need the
+    /// backend trait. `None` keeps the public constructor compatible with
+    /// test adapters; production binds through [`Self::new_with_db_store`].
+    pub(crate) memory: Option<Arc<DbStore>>,
     /// Durable raw bytes and generated artifacts under the configured data directory.
     pub blobs: Arc<dyn BlobStore>,
     /// Builds the model provider for each turn from the configured credentials.
@@ -341,6 +345,32 @@ impl AppState {
         )
     }
 
+    /// Assemble state around the concrete database, enabling memory routes.
+    ///
+    /// Production binds this way. Tests that construct state from
+    /// [`Self::new`] keep their existing fixture shape; their memory routes
+    /// answer "not configured" instead of bypassing the database.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_db_store(
+        config: Config,
+        store: Arc<DbStore>,
+        resolver: Arc<dyn ProviderResolver>,
+        secrets: Arc<dyn SecretProvider>,
+        tools: Arc<ToolRegistry>,
+        agent_config: AgentConfig,
+    ) -> Result<Self> {
+        let mut state = Self::new(
+            config,
+            store.clone(),
+            resolver,
+            secrets,
+            tools,
+            agent_config,
+        );
+        state.memory = Some(store);
+        Ok(state)
+    }
+
     /// Assemble state around the one process-wide gateway runtime and the OS
     /// policy source it was built from.
     ///
@@ -421,6 +451,7 @@ impl AppState {
             config: Arc::new(config),
             diagnostics,
             store: store.clone(),
+            memory: None,
             blobs,
             resolver,
             secrets,

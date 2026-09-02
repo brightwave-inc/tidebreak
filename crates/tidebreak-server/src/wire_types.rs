@@ -391,6 +391,18 @@ mod tests {
         generate::collect_from::<tidebreak_core::QueuedTurn>(&cfg, &mut out);
         generate::collect_from::<crate::routes::ModelInfo>(&cfg, &mut out);
         generate::collect_from::<crate::routes::ModelRoleInfo>(&cfg, &mut out);
+        // Memory: backend capabilities, records, search, context, revisions,
+        // and the request bodies the manager UI sends.
+        generate::collect_from::<tidebreak_core::MemoryCaps>(&cfg, &mut out);
+        generate::collect_from::<tidebreak_core::MemoryRecord>(&cfg, &mut out);
+        generate::collect_from::<tidebreak_core::MemorySearchHit>(&cfg, &mut out);
+        generate::collect_from::<tidebreak_core::MemoryDigest>(&cfg, &mut out);
+        generate::collect_from::<tidebreak_core::MemoryRevision>(&cfg, &mut out);
+        generate::collect_from::<tidebreak_core::MemoryIngestReceipt>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::CreateMemoryRecordBody>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::UpdateMemoryRecordBody>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::MemoryStatusBody>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::MemoryIngestBody>(&cfg, &mut out);
         generate::collect_from::<crate::routes::ChatTranscript>(&cfg, &mut out);
         generate::collect_from::<crate::providers::ProviderInfo>(&cfg, &mut out);
         generate::collect_from::<crate::providers::ProviderAuthMode>(&cfg, &mut out);

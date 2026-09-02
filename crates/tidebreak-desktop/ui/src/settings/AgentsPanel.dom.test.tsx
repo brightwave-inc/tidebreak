@@ -49,6 +49,7 @@ describe("AgentsPanel", () => {
         branch_prefix_mode: "account",
         effective_branch_prefix: "tidebreak/",
       },
+      memory: { enabled: true, capture_enabled: false, capture_ready: false },
     };
     const putSettings = vi.fn().mockResolvedValue({
       ...settings,
@@ -115,6 +116,7 @@ describe("AgentsPanel", () => {
         branch_prefix_mode: "account",
         effective_branch_prefix: "tidebreak/",
       },
+      memory: { enabled: true, capture_enabled: false, capture_ready: false },
     };
     const putSettings = vi.fn().mockResolvedValue({
       ...settings,

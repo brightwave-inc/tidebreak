@@ -159,6 +159,10 @@ pub struct Settings {
     pub rewrite_closing_messages: bool,
     /// How new code repositories name workspace branches for this user.
     pub git_source_control: GitSourceControlSettings,
+    /// Durable memory settings, including whether the utility role can run
+    /// post-turn capture.
+    #[serde(default)]
+    pub memory: MemorySettings,
 }
 
 /// The reader's last explicit per-chat choices — what an unspecified field of
@@ -220,6 +224,10 @@ pub struct SettingsUpdate {
     /// Update branch naming defaults. Absent fields stay unchanged.
     #[serde(default)]
     pub git_source_control: Option<GitSourceControlSettingsUpdate>,
+    /// Set the memory master and capture switches. Absent fields stay
+    /// unchanged.
+    #[serde(default)]
+    pub memory: Option<MemorySettingsUpdate>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -244,6 +252,28 @@ pub struct CompactionSettingsUpdate {
     pub min_threshold_tokens: Option<u32>,
     #[serde(default)]
     pub protect_recent_messages: Option<u32>,
+}
+
+/// Durable memory settings a client can read.
+#[derive(Debug, Default, Serialize, Deserialize, ts_rs::TS)]
+pub struct MemorySettings {
+    /// Whether memory records and digests are available.
+    pub enabled: bool,
+    /// Whether post-turn capture is enabled.
+    pub capture_enabled: bool,
+    /// Whether capture can run now. This is false when the capture switch is
+    /// on but no utility model resolves.
+    pub capture_ready: bool,
+}
+
+/// Partial update for [`MemorySettings`]. Absent fields leave the current
+/// value unchanged.
+#[derive(Debug, Default, Deserialize)]
+pub struct MemorySettingsUpdate {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub capture_enabled: Option<bool>,
 }
 
 /// Deserialize a present field (including JSON `null`) as `Some(..)`; `#[serde(default)]`
@@ -436,6 +466,26 @@ pub async fn put_settings(
                 .await?;
         }
     }
+    if let Some(memory) = body.memory {
+        if let Some(enabled) = memory.enabled {
+            state
+                .store
+                .set_setting(
+                    crate::routes::MEMORY_ENABLED_SETTING,
+                    &serde_json::json!(enabled),
+                )
+                .await?;
+        }
+        if let Some(enabled) = memory.capture_enabled {
+            state
+                .store
+                .set_setting(
+                    crate::routes::MEMORY_CAPTURE_ENABLED_SETTING,
+                    &serde_json::json!(enabled),
+                )
+                .await?;
+        }
+    }
     Ok(Json(
         read_settings(&state, &auth.principal.owner_id()).await?,
     ))
@@ -459,6 +509,37 @@ async fn read_settings(state: &AppState, owner: &OwnerId) -> Result<Settings, Se
         rewrite_closing_messages: crate::code::rewrite::rewrite_closing_enabled(&*state.store)
             .await?,
         git_source_control: read_git_source_control_settings(state, owner).await?,
+        memory: read_memory_settings(state).await?,
+    })
+}
+
+/// Read the stored memory switches and report capture readiness.
+async fn read_memory_settings(state: &AppState) -> Result<MemorySettings, ServerError> {
+    let enabled = state
+        .store
+        .get_setting(crate::routes::MEMORY_ENABLED_SETTING)
+        .await?
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true);
+    let capture_enabled = state
+        .store
+        .get_setting(crate::routes::MEMORY_CAPTURE_ENABLED_SETTING)
+        .await?
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let utility_model = crate::model_roles::resolve_utility_model(
+        &*state.store,
+        &*state.secrets,
+        &*state.provisioned_policy,
+        &*state.os_policy,
+        None,
+    )
+    .await?
+    .is_some();
+    Ok(MemorySettings {
+        enabled,
+        capture_enabled,
+        capture_ready: enabled && capture_enabled && utility_model,
     })
 }
 

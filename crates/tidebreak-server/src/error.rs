@@ -213,6 +213,36 @@ impl From<AgentError> for ServerError {
     }
 }
 
+/// Memory errors carry product meaning at the route boundary.
+impl From<tidebreak_core::MemoryError> for ServerError {
+    fn from(error: tidebreak_core::MemoryError) -> Self {
+        use tidebreak_core::{MemoryCapability, MemoryError};
+
+        match &error {
+            MemoryError::Unsupported(MemoryCapability::Extraction) => {
+                Self::not_implemented(error.to_string())
+            }
+            MemoryError::Unsupported(_) => Self::not_implemented(error.to_string()),
+            MemoryError::InvalidRecord(_)
+            | MemoryError::EvidenceNotFound(_)
+            | MemoryError::ScopeNotFound => Self::bad_request(error.to_string()),
+            MemoryError::NotFound => Self::not_found("memory record not found"),
+            MemoryError::AlreadyExists => Self::conflict("memory record already exists"),
+            MemoryError::RevisionConflict { .. } => {
+                Self::conflict_kind("memory_revision_conflict", error.to_string())
+            }
+            MemoryError::InvalidStatusTransition { .. } => {
+                Self::conflict_kind("memory_status_conflict", error.to_string())
+            }
+            MemoryError::ActiveRecordCapExceeded { .. } | MemoryError::DigestCapExceeded { .. } => {
+                Self::conflict_kind("memory_cap_exceeded", error.to_string())
+            }
+            MemoryError::Backend(_) => Self::internal("memory storage failed"),
+            _ => Self::internal("memory storage failed"),
+        }
+    }
+}
+
 impl IntoResponse for ServerError {
     fn into_response(self) -> Response {
         (self.status, Json(self.info)).into_response()

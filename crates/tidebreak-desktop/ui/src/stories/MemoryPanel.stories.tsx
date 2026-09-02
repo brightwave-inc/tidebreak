@@ -1,0 +1,188 @@
+import type { Meta, StoryObj } from "@storybook/react-vite";
+
+import type {
+  ApiClient,
+  MemoryRecord,
+  MemoryRevision,
+  MemorySettings,
+} from "@/api";
+import { MemoryPanel } from "@/settings/MemoryPanel";
+
+function origin() {
+  return {
+    chat_id: "9d5d84a0-6ba6-4c73-9e10-000000000001",
+    turn_id: null,
+    code_session_id: null,
+    code_turn_id: null,
+    workspace_id: null,
+  };
+}
+
+const proposal: MemoryRecord = {
+  id: "3f19d0d5-8f46-4f57-a35a-000000000001",
+  scope: { kind: "personal" },
+  kind: "lesson",
+  status: "proposed",
+  title: "When changing database migrations",
+  body: "Run the migration chain test before publishing.",
+  provenance: {
+    author: "model",
+    origin: origin(),
+    evidence: [
+      { kind: "message", message_id: "c6a0d000-0000-4000-8000-000000000001" },
+    ],
+  },
+  links: [],
+  expires_at: null,
+  superseded_by: null,
+  observation_count: 0,
+  revision: 1,
+  created_at: "2026-09-01T09:00:00Z",
+  updated_at: "2026-09-01T09:00:00Z",
+};
+
+const active: MemoryRecord = {
+  ...proposal,
+  id: "3f19d0d5-8f46-4f57-a35a-000000000002",
+  status: "active",
+  title: "When preparing a release",
+  body: "Run the release smoke test before publishing.",
+  revision: 2,
+  updated_at: "2026-08-30T14:00:00Z",
+};
+
+const hypothesis: MemoryRecord = {
+  ...proposal,
+  id: "3f19d0d5-8f46-4f57-a35a-000000000003",
+  status: "tracking",
+  title: "When reviewing pull requests",
+  body: "The reader prefers concrete migration checks over general praise.",
+  provenance: {
+    author: "model",
+    origin: origin(),
+    evidence: [
+      { kind: "message", message_id: "c6a0d000-0000-4000-8000-000000000002" },
+    ],
+  },
+  observation_count: 2,
+};
+
+const revisions: MemoryRevision[] = [
+  {
+    id: "7f586e60-0000-4000-8000-000000000001",
+    record_id: proposal.id,
+    ordinal: 1,
+    snapshot: proposal,
+    created_at: proposal.created_at,
+  },
+];
+
+function digestFor(records: MemoryRecord[], byteCap = 8192) {
+  const markdown = records
+    .map((record) => `- ${record.updated_at.slice(0, 10)} — ${record.title}`)
+    .join("\n");
+  return {
+    scope: { kind: "personal" },
+    markdown,
+    byte_len: new TextEncoder().encode(markdown).length,
+    byte_cap: byteCap,
+    record_count: records.length,
+  };
+}
+
+const settingsWith = (memory: MemorySettings) =>
+  ({ memory }) as unknown as Awaited<ReturnType<ApiClient["getSettings"]>>;
+
+function stubClient(
+  records: MemoryRecord[],
+  options?: {
+    fail?: boolean;
+    revisions?: MemoryRevision[];
+    memory?: MemorySettings;
+  },
+): ApiClient {
+  let memory: MemorySettings = options?.memory ?? {
+    enabled: true,
+    capture_enabled: false,
+    capture_ready: false,
+  };
+  return {
+    getSettings: async () => {
+      if (options?.fail) throw new Error("The memory backend is unavailable.");
+      return settingsWith(memory);
+    },
+    putSettings: async (body: { memory?: Partial<MemorySettings> }) => {
+      memory = { ...memory, ...body.memory };
+      return settingsWith(memory);
+    },
+    setMemoryRecordStatus: async () => records[0],
+    deleteMemoryRecord: async () => undefined,
+    listMemoryRecords: async () => {
+      if (options?.fail) throw new Error("The memory backend is unavailable.");
+      return records;
+    },
+    getMemoryDigest: async () => {
+      if (options?.fail) throw new Error("The memory backend is unavailable.");
+      return digestFor(records.filter((record) => record.status === "active"));
+    },
+    getMemoryRevisions: async () => options?.revisions ?? [],
+  } as unknown as ApiClient;
+}
+
+const meta = {
+  title: "Settings/Memory",
+  component: MemoryPanel,
+  parameters: { layout: "fullscreen" },
+  args: { client: stubClient([proposal, active, hypothesis], { revisions }) },
+} satisfies Meta<typeof MemoryPanel>;
+
+export default meta;
+type Story = StoryObj<typeof meta>;
+
+/** One model proposal waiting for review beside active and tracked records. */
+export const ReviewQueue: Story = {};
+
+/** A first-run install: no records and no digest. */
+export const Empty: Story = {
+  args: { client: stubClient([], { revisions: [] }) },
+};
+
+/** An active record with its provenance and revision history. */
+export const ActiveRecord: Story = {
+  args: {
+    client: stubClient([active, proposal], {
+      revisions: [
+        {
+          id: "7f586e60-0000-4000-8000-000000000002",
+          record_id: active.id,
+          ordinal: 2,
+          snapshot: active,
+          created_at: active.updated_at,
+        },
+      ],
+    }),
+  },
+};
+
+/** The backend read failed; retry is the only action. */
+export const LoadFailed: Story = {
+  args: { client: stubClient([], { fail: true, revisions: [] }) },
+};
+
+/** A digest near its byte budget, so the meter reads as a real limit. */
+export const DigestNearCap: Story = {
+  args: {
+    client: {
+      getSettings: async () =>
+        settingsWith({
+          enabled: true,
+          capture_enabled: true,
+          capture_ready: true,
+        }),
+      listMemoryRecords: async () => [active, proposal],
+      getMemoryDigest: async () =>
+        digestFor([active], Math.max(1, digestFor([active]).byte_len - 1)),
+      getMemoryRevisions: async () => revisions,
+    } as unknown as ApiClient,
+  },
+};

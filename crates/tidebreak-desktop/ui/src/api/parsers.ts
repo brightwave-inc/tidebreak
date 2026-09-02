@@ -25,6 +25,14 @@ import {
   type PendingPlanApproval as WirePendingPlanApproval,
   type PendingUserQuestions as WirePendingUserQuestions,
   type AgentRunTaskPlan as WireAgentRunTaskPlan,
+  type MemoryCaps as WireMemoryCaps,
+  type MemoryDigest as WireMemoryDigest,
+  type MemoryLink as WireMemoryLink,
+  type MemoryOrigin as WireMemoryOrigin,
+  type MemoryProvenance as WireMemoryProvenance,
+  type MemoryRecord as WireMemoryRecord,
+  type MemoryRevision as WireMemoryRevision,
+  type MemorySearchHit as WireMemorySearchHit,
   type TaskPlan as WireTaskPlan,
   type TaskPlanStep as WireTaskPlanStep,
   type TaskPlanStepStatus,
@@ -49,6 +57,19 @@ import {
   type AgentNotificationPage,
   type NotificationKind,
   type NetworkPolicy,
+  type MemoryCaps,
+  type MemoryDigest,
+  type MemoryEvidence,
+  type MemoryKind,
+  type MemoryLink,
+  type MemoryLinkRelation,
+  type MemoryOrigin,
+  type MemoryProvenance,
+  type MemoryRecord,
+  type MemoryRevision,
+  type MemoryScope,
+  type MemorySearchHit,
+  type MemoryStatus,
   type PendingChatPrompt,
   type PendingFolderAccessRequest,
   type PendingOutputWritebackRequest,
@@ -70,6 +91,371 @@ import {
   type UserQuestion,
   type UserQuestionOption,
 } from "./types";
+
+const MEMORY_KINDS: ReadonlySet<MemoryKind> = new Set([
+  "fact",
+  "preference",
+  "lesson",
+  "reference",
+]);
+
+const MEMORY_STATUSES: ReadonlySet<MemoryStatus> = new Set([
+  "tracking",
+  "proposed",
+  "active",
+  "archived",
+  "rejected",
+]);
+
+const MEMORY_LINK_RELATIONS: ReadonlySet<MemoryLinkRelation> = new Set([
+  "related",
+  "updates",
+  "supersedes",
+]);
+
+const MEMORY_CAP_LEVELS = new Set(["supported", "unsupported", "unknown"]);
+
+/** Validate the backend capability vector without trusting a wire cast. */
+export function parseMemoryCaps(value: unknown): MemoryCaps | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireMemoryCaps>(value, [
+      "extraction",
+      "lexical_search",
+      "semantic_search",
+      "consolidation",
+      "context_assembly",
+      "revision_history",
+      "verified_delete",
+      "asynchronous_writes",
+      "agent_editable_surfaces",
+    ])
+  ) {
+    return null;
+  }
+  const caps = Object.values(value);
+  if (
+    caps.length !== 9 ||
+    caps.some(
+      (level) => typeof level !== "string" || !MEMORY_CAP_LEVELS.has(level),
+    )
+  ) {
+    return null;
+  }
+  return value as unknown as MemoryCaps;
+}
+
+function parseMemoryScope(value: unknown): MemoryScope | null {
+  if (!isRecord(value) || typeof value.kind !== "string") return null;
+  if (value.kind === "personal") {
+    return onlyKeys<{ kind: string }>(value, ["kind"])
+      ? { kind: "personal" }
+      : null;
+  }
+  if (value.kind === "repo") {
+    return onlyKeys<{ kind: string; repo_id: string }>(value, [
+      "kind",
+      "repo_id",
+    ]) && nonEmptyBounded(value.repo_id, 128)
+      ? { kind: "repo", repo_id: value.repo_id }
+      : null;
+  }
+  return null;
+}
+
+function parseMemoryEvidence(value: unknown): MemoryEvidence | null {
+  if (!isRecord(value)) return null;
+  if (value.kind === "message") {
+    return onlyKeys<{ kind: string; message_id: string }>(value, [
+      "kind",
+      "message_id",
+    ]) && nonEmptyBounded(value.message_id, 128)
+      ? { kind: "message", message_id: value.message_id }
+      : null;
+  }
+  if (value.kind === "code_event") {
+    return onlyKeys<{
+      kind: string;
+      session_id: string;
+      seq: number;
+    }>(value, ["kind", "session_id", "seq"]) &&
+      nonEmptyBounded(value.session_id, 128) &&
+      typeof value.seq === "number" &&
+      Number.isSafeInteger(value.seq) &&
+      value.seq > 0
+      ? { kind: "code_event", session_id: value.session_id, seq: value.seq }
+      : null;
+  }
+  return null;
+}
+
+function parseMemoryOrigin(value: unknown): MemoryOrigin | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireMemoryOrigin>(value, [
+      "chat_id",
+      "turn_id",
+      "code_session_id",
+      "code_turn_id",
+      "workspace_id",
+    ])
+  ) {
+    return null;
+  }
+  for (const id of [
+    value.chat_id,
+    value.turn_id,
+    value.code_session_id,
+    value.code_turn_id,
+    value.workspace_id,
+  ] as unknown[]) {
+    if (!(id === undefined || id === null || nonEmptyBounded(id, 128))) {
+      return null;
+    }
+  }
+  return {
+    chat_id: typeof value.chat_id === "string" ? value.chat_id : null,
+    turn_id: typeof value.turn_id === "string" ? value.turn_id : null,
+    code_session_id:
+      typeof value.code_session_id === "string" ? value.code_session_id : null,
+    code_turn_id:
+      typeof value.code_turn_id === "string" ? value.code_turn_id : null,
+    workspace_id:
+      typeof value.workspace_id === "string" ? value.workspace_id : null,
+  };
+}
+
+function parseMemoryProvenance(value: unknown): MemoryProvenance | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireMemoryProvenance>(value, ["author", "origin", "evidence"]) ||
+    typeof value.author !== "string" ||
+    !["user", "model", "import"].includes(value.author) ||
+    !Array.isArray(value.evidence)
+  ) {
+    return null;
+  }
+  const origin = parseMemoryOrigin(value.origin);
+  if (!origin) return null;
+  const evidence: MemoryEvidence[] = [];
+  for (const entry of value.evidence) {
+    const parsed = parseMemoryEvidence(entry);
+    if (!parsed) return null;
+    evidence.push(parsed);
+  }
+  return {
+    author: value.author as MemoryProvenance["author"],
+    origin,
+    evidence,
+  };
+}
+
+function parseMemoryLink(value: unknown): MemoryLink | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireMemoryLink>(value, ["record_id", "relation"]) ||
+    !nonEmptyBounded(value.record_id, 128) ||
+    typeof value.relation !== "string" ||
+    !MEMORY_LINK_RELATIONS.has(value.relation as MemoryLinkRelation)
+  ) {
+    return null;
+  }
+  return {
+    record_id: value.record_id,
+    relation: value.relation as MemoryLinkRelation,
+  };
+}
+
+/** Validate one durable record before it reaches review state. */
+export function parseMemoryRecord(value: unknown): MemoryRecord | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireMemoryRecord>(value, [
+      "id",
+      "scope",
+      "kind",
+      "status",
+      "title",
+      "body",
+      "provenance",
+      "links",
+      "expires_at",
+      "superseded_by",
+      "observation_count",
+      "revision",
+      "created_at",
+      "updated_at",
+    ]) ||
+    !nonEmptyBounded(value.id, 128) ||
+    typeof value.kind !== "string" ||
+    !MEMORY_KINDS.has(value.kind as MemoryKind) ||
+    typeof value.status !== "string" ||
+    !MEMORY_STATUSES.has(value.status as MemoryStatus) ||
+    !nonEmptyBounded(value.title, 160) ||
+    typeof value.body !== "string" ||
+    value.body.trim().length === 0 ||
+    !Array.isArray(value.links) ||
+    typeof value.observation_count !== "number" ||
+    !Number.isSafeInteger(value.observation_count) ||
+    value.observation_count < 0 ||
+    typeof value.revision !== "number" ||
+    !Number.isSafeInteger(value.revision) ||
+    value.revision < 1 ||
+    !nonEmptyBounded(value.created_at, 64) ||
+    !nonEmptyBounded(value.updated_at, 64)
+  ) {
+    return null;
+  }
+  const scope = parseMemoryScope(value.scope);
+  const provenance = parseMemoryProvenance(value.provenance);
+  if (!scope || !provenance) return null;
+  const links: MemoryLink[] = [];
+  for (const link of value.links) {
+    const parsed = parseMemoryLink(link);
+    if (!parsed || parsed.record_id === value.id) return null;
+    if (links.some((existing) => existing.record_id === parsed.record_id)) {
+      return null;
+    }
+    links.push(parsed);
+  }
+  if (
+    !(value.expires_at === undefined || value.expires_at === null) &&
+    !nonEmptyBounded(value.expires_at, 64)
+  ) {
+    return null;
+  }
+  if (
+    !(value.superseded_by === undefined || value.superseded_by === null) &&
+    !nonEmptyBounded(value.superseded_by, 128)
+  ) {
+    return null;
+  }
+  if (
+    value.status === "tracking" &&
+    (value.observation_count === 0 || provenance.evidence.length === 0)
+  ) {
+    return null;
+  }
+  if (provenance.author === "model" && provenance.evidence.length === 0) {
+    return null;
+  }
+  return {
+    id: value.id,
+    scope,
+    kind: value.kind as MemoryKind,
+    status: value.status as MemoryStatus,
+    title: value.title,
+    body: value.body,
+    provenance,
+    links,
+    expires_at: value.expires_at ?? null,
+    superseded_by: value.superseded_by ?? null,
+    observation_count: value.observation_count,
+    revision: value.revision,
+    created_at: value.created_at,
+    updated_at: value.updated_at,
+  };
+}
+
+/** Validate one search hit before it reaches the manager's index. */
+export function parseMemorySearchHit(value: unknown): MemorySearchHit | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireMemorySearchHit>(value, [
+      "record_id",
+      "title",
+      "updated_at",
+      "matching_line",
+      "score",
+    ]) ||
+    !nonEmptyBounded(value.record_id, 128) ||
+    !nonEmptyBounded(value.title, 160) ||
+    !nonEmptyBounded(value.updated_at, 64) ||
+    typeof value.matching_line !== "string" ||
+    typeof value.score !== "number" ||
+    !Number.isSafeInteger(value.score) ||
+    value.score < 0
+  ) {
+    return null;
+  }
+  return {
+    record_id: value.record_id,
+    title: value.title,
+    updated_at: value.updated_at,
+    matching_line: value.matching_line,
+    score: value.score,
+  };
+}
+
+/** Validate the derived scope digest the manager previews. */
+export function parseMemoryDigest(value: unknown): MemoryDigest | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireMemoryDigest>(value, [
+      "scope",
+      "markdown",
+      "byte_len",
+      "byte_cap",
+      "record_count",
+    ]) ||
+    typeof value.markdown !== "string" ||
+    typeof value.byte_len !== "number" ||
+    typeof value.byte_cap !== "number" ||
+    typeof value.record_count !== "number" ||
+    !Number.isSafeInteger(value.byte_len) ||
+    !Number.isSafeInteger(value.byte_cap) ||
+    !Number.isSafeInteger(value.record_count) ||
+    value.byte_len < 0 ||
+    value.byte_cap < 1 ||
+    value.record_count < 0 ||
+    value.byte_len > value.byte_cap
+  ) {
+    return null;
+  }
+  const scope = parseMemoryScope(value.scope);
+  if (!scope) return null;
+  if (new TextEncoder().encode(value.markdown).length !== value.byte_len) {
+    return null;
+  }
+  return {
+    scope,
+    markdown: value.markdown,
+    byte_len: value.byte_len,
+    byte_cap: value.byte_cap,
+    record_count: value.record_count,
+  };
+}
+
+/** Validate one immutable revision snapshot. */
+export function parseMemoryRevision(value: unknown): MemoryRevision | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<WireMemoryRevision>(value, [
+      "id",
+      "record_id",
+      "ordinal",
+      "snapshot",
+      "created_at",
+    ]) ||
+    !nonEmptyBounded(value.id, 128) ||
+    !nonEmptyBounded(value.record_id, 128) ||
+    typeof value.ordinal !== "number" ||
+    !Number.isSafeInteger(value.ordinal) ||
+    value.ordinal < 1 ||
+    !nonEmptyBounded(value.created_at, 64)
+  ) {
+    return null;
+  }
+  const snapshot = parseMemoryRecord(value.snapshot);
+  if (!snapshot || snapshot.id !== value.record_id) return null;
+  return {
+    id: value.id,
+    record_id: value.record_id,
+    ordinal: value.ordinal,
+    snapshot,
+    created_at: value.created_at,
+  };
+}
 
 export function parseFolderAccessRequest(
   value: unknown,

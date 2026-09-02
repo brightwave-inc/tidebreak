@@ -2331,6 +2331,11 @@ export type ConsentVerb = { "kind": "tool", action: RendererToolName, approval: 
 export type CreateCodeTriggerBody = { condition: CodeTriggerCondition, action: CodeTriggerAction, };
 
 /**
+ * Body of `POST /memory/records`.
+ */
+export type CreateMemoryRecordBody = { id: MemoryRecordId, kind: MemoryKind, status: MemoryStatus, title: string, body: string, author: MemoryAuthor, origin: MemoryOrigin, evidence: Array<MemoryEvidence>, links: Array<MemoryLink>, expires_at: string | null, observation_count: number, };
+
+/**
  * Where the resolved credential value is placed on the request.
  *
  * Externally tagged and closed: `"bearer"` or `{"header": "X-Api-Key"}`; an
@@ -3354,6 +3359,315 @@ export type McpServersInfo = { servers: Array<McpServerInfo>, };
  * Where the sandboxed iframe should load one view from, valid once.
  */
 export type McpViewSession = { frame_path: string, };
+
+/**
+ * Who authored a memory record.
+ */
+export type MemoryAuthor = "user" | "model" | "import";
+
+/**
+ * Whether a backend supports one declared operation.
+ */
+export type MemoryCapLevel = "supported" | "unsupported" | "unknown";
+
+/**
+ * Complete capability vector for one memory backend.
+ *
+ * This type has no `Default`. Adding a flag breaks every backend until the
+ * backend states a value.
+ */
+export type MemoryCaps = { extraction: MemoryCapLevel, lexical_search: MemoryCapLevel, semantic_search: MemoryCapLevel, consolidation: MemoryCapLevel, context_assembly: MemoryCapLevel, revision_history: MemoryCapLevel, verified_delete: MemoryCapLevel, asynchronous_writes: MemoryCapLevel, agent_editable_surfaces: MemoryCapLevel, };
+
+/**
+ * One deterministic active-record digest for a scope.
+ */
+export type MemoryDigest = {
+/**
+ * Scope represented by this render.
+ */
+scope: MemoryScope,
+/**
+ * Rendered markdown.
+ */
+markdown: string,
+/**
+ * UTF-8 byte length of `markdown`.
+ */
+byte_len: number,
+/**
+ * Maximum accepted render size.
+ */
+byte_cap: number,
+/**
+ * Number of active records represented.
+ */
+record_count: number, };
+
+/**
+ * One exact source that justifies a model-authored record.
+ */
+export type MemoryEvidence = { "kind": "message",
+/**
+ * Exact message identity.
+ */
+message_id: MessageId, } | { "kind": "code_event",
+/**
+ * Session that owns the event sequence.
+ */
+session_id: CodeSessionId,
+/**
+ * One-based event sequence.
+ */
+seq: number, };
+
+/**
+ * Body of `POST /memory/ingest`.
+ */
+export type MemoryIngestBody = { scope: MemoryScope, origin: MemoryOrigin, content: string, };
+
+/**
+ * Accepted extraction work.
+ */
+export type MemoryIngestReceipt = {
+/**
+ * Durability guarantee at the backend boundary.
+ */
+state: MemoryWriteState,
+/**
+ * Records written synchronously, if any.
+ */
+records: Array<MemoryRecord>, };
+
+/**
+ * What kind of durable knowledge a record carries.
+ */
+export type MemoryKind = "fact" | "preference" | "lesson" | "reference";
+
+/**
+ * One typed link to another memory record.
+ */
+export type MemoryLink = {
+/**
+ * Linked record identity.
+ */
+record_id: MemoryRecordId,
+/**
+ * Why this record links to it.
+ */
+relation: MemoryLinkRelation, };
+
+/**
+ * Meaning of one link to another memory record.
+ */
+export type MemoryLinkRelation = "related" | "updates" | "supersedes";
+
+/**
+ * The product surface that produced a record, where known.
+ */
+export type MemoryOrigin = {
+/**
+ * Originating work-mode conversation.
+ */
+chat_id?: ChatId | null,
+/**
+ * Originating work-mode turn.
+ */
+turn_id?: TurnId | null,
+/**
+ * Originating code session.
+ */
+code_session_id?: CodeSessionId | null,
+/**
+ * Originating code turn.
+ */
+code_turn_id?: CodeTurnId | null,
+/**
+ * Workspace attached to the originating code session.
+ */
+workspace_id?: WorkspaceId | null, };
+
+/**
+ * Authorship and source evidence for one record.
+ */
+export type MemoryProvenance = {
+/**
+ * Who authored the record.
+ */
+author: MemoryAuthor,
+/**
+ * Product origin, where known.
+ */
+origin: MemoryOrigin,
+/**
+ * Exact sources that justify the record.
+ */
+evidence: Array<MemoryEvidence>, };
+
+/**
+ * One durable markdown memory with its typed envelope.
+ */
+export type MemoryRecord = {
+/**
+ * Stable record identity.
+ */
+id: MemoryRecordId,
+/**
+ * Personal or repository scope.
+ */
+scope: MemoryScope,
+/**
+ * Knowledge category.
+ */
+kind: MemoryKind,
+/**
+ * Review and authority state.
+ */
+status: MemoryStatus,
+/**
+ * One-line retrieval hook that says when the record matters.
+ */
+title: string,
+/**
+ * Markdown body, stored verbatim.
+ */
+body: string,
+/**
+ * Authorship, origin, and exact evidence.
+ */
+provenance: MemoryProvenance,
+/**
+ * Typed relationships to other records.
+ */
+links: Array<MemoryLink>,
+/**
+ * Mechanical expiry, when configured.
+ */
+expires_at?: string | null,
+/**
+ * Active replacement for an archived record.
+ */
+superseded_by?: MemoryRecordId | null,
+/**
+ * Distinct supporting observations for a tracked hypothesis.
+ */
+observation_count: number,
+/**
+ * Compare-and-swap revision. The first stored version is 1.
+ */
+revision: number,
+/**
+ * Original creation time.
+ */
+created_at: string,
+/**
+ * Time of the latest committed mutation.
+ */
+updated_at: string, };
+
+/**
+ * Identifies one durable memory record.
+ */
+export type MemoryRecordId = string;
+
+/**
+ * One immutable historical snapshot.
+ */
+export type MemoryRevision = {
+/**
+ * Stable revision-row identity.
+ */
+id: MemoryRevisionId,
+/**
+ * Record that owns the revision.
+ */
+record_id: MemoryRecordId,
+/**
+ * Monotonic per-record ordinal.
+ */
+ordinal: number,
+/**
+ * Full record snapshot after the mutation committed.
+ */
+snapshot: MemoryRecord,
+/**
+ * Time the snapshot committed.
+ */
+created_at: string, };
+
+/**
+ * Identifies one immutable record revision.
+ */
+export type MemoryRevisionId = string;
+
+/**
+ * One durable memory scope.
+ *
+ * The enum is non-exhaustive because wider scopes may arrive later. A
+ * repository scope binds to the registered repository, never a workspace.
+ */
+export type MemoryScope = { "kind": "personal" } | { "kind": "repo",
+/**
+ * Stable registered-repository identity.
+ */
+repo_id: RepoId, };
+
+/**
+ * One injectable lexical-search result.
+ */
+export type MemorySearchHit = {
+/**
+ * Matching record.
+ */
+record_id: MemoryRecordId,
+/**
+ * Retrieval-hook title.
+ */
+title: string,
+/**
+ * Date of the latest committed mutation.
+ */
+updated_at: string,
+/**
+ * First matching markdown line, kept verbatim.
+ */
+matching_line: string,
+/**
+ * Deterministic lexical score. Larger values sort first.
+ */
+score: number, };
+
+/**
+ * Durable memory settings a client can read.
+ */
+export type MemorySettings = {
+/**
+ * Whether memory records and digests are available.
+ */
+enabled: boolean,
+/**
+ * Whether post-turn capture is enabled.
+ */
+capture_enabled: boolean,
+/**
+ * Whether capture can run now. This is false when the capture switch is
+ * on but no utility model resolves.
+ */
+capture_ready: boolean, };
+
+/**
+ * Lifecycle state for one memory record.
+ */
+export type MemoryStatus = "tracking" | "proposed" | "active" | "archived" | "rejected";
+
+/**
+ * Body of `PUT /memory/records/{id}/status`.
+ */
+export type MemoryStatusBody = { expected_revision: number, status: MemoryStatus, };
+
+/**
+ * Whether a backend guarantees that a returned write is durable now.
+ */
+export type MemoryWriteState = "committed" | "pending";
 
 /**
  * Body of `POST /code/workspaces/{id}/pr/merge`.
@@ -4564,7 +4878,12 @@ rewrite_closing_messages: boolean,
 /**
  * How new code repositories name workspace branches for this user.
  */
-git_source_control: GitSourceControlSettings, };
+git_source_control: GitSourceControlSettings,
+/**
+ * Durable memory settings, including whether the utility role can run
+ * post-turn capture.
+ */
+memory: MemorySettings, };
 
 /**
  * Renderer-safe progress of the current sign-in attempt.
@@ -5061,6 +5380,11 @@ export type TurnId = string;
  * does not have to be rebuilt to turn a rule back on.
  */
 export type UpdateCodeTriggerBody = { enabled: boolean, };
+
+/**
+ * Body of `PATCH /memory/records/{id}`.
+ */
+export type UpdateMemoryRecordBody = { expected_revision: number, kind: MemoryKind, title: string, body: string, author: MemoryAuthor, origin: MemoryOrigin, evidence: Array<MemoryEvidence>, links: Array<MemoryLink>, expires_at: string | null, observation_count: number, };
 
 /**
  * One bounded question shown to the user.
