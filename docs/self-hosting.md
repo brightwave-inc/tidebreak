@@ -380,9 +380,13 @@ bundle — so the API contract does not change.
 A tab signs in the way the desktop does: with a short-lived Gateway bearer
 bound to this machine. The page holds that bearer in memory for the tab's
 life and never in a cookie or in storage. It arrives once, from the Model
-Gateway console's Manage action, and lasts its hour; a tab that opens the
-address directly, or outlives its bearer, shows a sign-in screen that sends
-the reader back through the console. A machine on static tokens
+Gateway console's Manage action: the console sends the browser to the
+machine's `/auth/handoff` route with a one-time code, the machine exchanges
+the code with the gateway server to server, and the page receives the bearer
+in the URL fragment, which no server or access log sees. The bearer lasts
+its hour; a tab that opens the address directly, outlives its bearer, or
+arrives with a code that has already been used, shows a sign-in screen that
+sends the reader back through the console. A machine on static tokens
 (`TIDEBREAK_AUTH_TOKENS_FILE`) has no browser sign-in: the page says so, and
 the desktop app remains the client for it.
 

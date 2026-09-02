@@ -47,3 +47,20 @@ export const SessionEnded: Story = {
 export const NoBrowserSignIn: Story = {
   args: { gatewayUrl: null },
 };
+
+/**
+ * The console's link was followed too late, or twice. The route lands the
+ * page anyway, and the page says what a link is good for before sending the
+ * reader back for another.
+ */
+export const HandoffExpired: Story = {
+  args: { reason: "handoff_failed", failure: "expired" },
+};
+
+/**
+ * The machine could not reach the gateway to exchange the code. Nothing
+ * about the reader's account is in question, and the copy says so.
+ */
+export const HandoffUnavailable: Story = {
+  args: { reason: "handoff_failed", failure: "unavailable" },
+};

@@ -1212,8 +1212,12 @@ pub fn app(state: AppState) -> Router {
         .merge(harness_llm_api)
         .merge(external_adapter_api);
     let frame_state = state.clone();
+    // Public like discovery, and for the same reason: a page has to reach
+    // both before it holds a bearer. The handoff route answers only on a
+    // gateway-authenticated machine.
     let auth_discovery = Router::new()
         .route("/auth/discovery", get(auth::discovery))
+        .route("/auth/handoff", get(auth::handoff))
         .with_state(state.clone());
 
     // Loopback-only + bearer token is the real gate. CORS names the origins

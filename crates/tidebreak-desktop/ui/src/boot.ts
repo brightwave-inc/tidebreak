@@ -1,7 +1,9 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { RemoteMachineState, ServerInfo } from "./api";
 import {
+  type HandoffFailure,
   handoffBearer,
+  handoffFailure,
   hostedSession,
   markHostedSession,
 } from "./hostedSession";
@@ -66,7 +68,12 @@ export async function remoteMachineState(): Promise<RemoteMachineState> {
  * is missing. The shell shows the sign-in screen instead of the failure one.
  */
 export class HostedSignInRequired extends Error {
-  constructor(readonly gatewayUrl: string | null) {
+  constructor(
+    readonly gatewayUrl: string | null,
+    /** Set when the page came from the landing route and it could not
+     * hand over a bearer; the sign-in screen words the reason. */
+    readonly failure: HandoffFailure | null = null,
+  ) {
     super("This machine needs a session from your Model Gateway console.");
     this.name = "HostedSignInRequired";
   }
@@ -95,11 +102,13 @@ export async function hostedServerInfo({
   dev = import.meta.env.DEV,
   fetch = globalThis.fetch,
   bearer = handoffBearer(),
+  failure = handoffFailure(),
 }: {
   origin?: string;
   dev?: boolean;
   fetch?: typeof globalThis.fetch;
   bearer?: string | null;
+  failure?: HandoffFailure | null;
 } = {}): Promise<ServerInfo | null> {
   // The dev server answers every path with the page, so discovery there
   // would parse the bundle's own HTML. Dev tabs have `listen.json`.
@@ -111,7 +120,7 @@ export async function hostedServerInfo({
       ? discovery.gateway_url.replace(/\/$/, "")
       : null;
   markHostedSession({ baseUrl: origin, gatewayUrl });
-  if (!bearer) throw new HostedSignInRequired(gatewayUrl);
+  if (!bearer) throw new HostedSignInRequired(gatewayUrl, failure);
   return {
     baseUrl: origin,
     token: bearer,

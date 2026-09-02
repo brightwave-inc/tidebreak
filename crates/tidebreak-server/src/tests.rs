@@ -2815,3 +2815,148 @@ fn a_ui_bundle_without_an_index_page_is_refused_at_bind() {
     std::fs::write(dist.path().join("index.html"), "<!doctype html>").unwrap();
     ui_bundle::verify(dist.path()).unwrap();
 }
+
+/// A gateway-authenticated self-host router whose gateway is `gateway_url`.
+async fn handoff_app(gateway_url: &str) -> (Router, tempfile::TempDir) {
+    let (dir, store) = temp_db_store("t.db").await;
+    let store: Arc<dyn Store> = Arc::new(store);
+    let mut config = Config::desktop(dir.path());
+    config.profile = Profile::SelfHost;
+    config.auth_gateway_url = Some(gateway_url.to_owned());
+    config.public_url = Some("https://machine.example.com/tidebreak/".to_owned());
+    let state = AppState::new(
+        config,
+        store,
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    (app(state), dir)
+}
+
+fn handoff_request(query: &str) -> Request<Body> {
+    Request::builder()
+        .uri(format!("/auth/handoff{query}"))
+        .body(Body::empty())
+        .unwrap()
+}
+
+/// The landing route relays a one-time code to the gateway and hands the
+/// bearer to the page in the fragment — the one carrier that reaches no
+/// server and no log. Every failure still lands on the page with a reason,
+/// the code never reaches the gateway unless it looks like one, and a
+/// machine without a gateway has no such route.
+#[tokio::test]
+async fn the_handoff_route_lands_the_page_with_the_bearer_in_the_fragment() {
+    use axum::routing::post as axum_post;
+
+    let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let fake_gateway = {
+        let seen = seen.clone();
+        move |body: String| {
+            let seen = seen.clone();
+            async move {
+                let request: serde_json::Value = serde_json::from_str(&body).unwrap();
+                let code = request["code"].as_str().unwrap_or_default().to_owned();
+                seen.lock().unwrap().push(code.clone());
+                match code.as_str() {
+                    "mg_ho_good" => (
+                        StatusCode::OK,
+                        [("content-type", "application/json")],
+                        r#"{"access_token":"mg_at_minted","expires_in":3600}"#.to_owned(),
+                    ),
+                    "mg_ho_odd" => (
+                        StatusCode::OK,
+                        [("content-type", "application/json")],
+                        r#"{"access_token":"not a bearer"}"#.to_owned(),
+                    ),
+                    "mg_ho_down" => (
+                        StatusCode::BAD_GATEWAY,
+                        [("content-type", "application/json")],
+                        "{}".to_owned(),
+                    ),
+                    _ => (
+                        StatusCode::BAD_REQUEST,
+                        [("content-type", "application/json")],
+                        r#"{"error":"invalid_grant"}"#.to_owned(),
+                    ),
+                }
+            }
+        }
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gateway_url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new().route("/oauth/handoff/token", axum_post(fake_gateway)),
+        )
+        .await
+        .unwrap();
+    });
+
+    let (router, _dir) = handoff_app(&gateway_url).await;
+    let landed = |query: &str| {
+        let router = router.clone();
+        let query = query.to_owned();
+        async move {
+            let response = router.oneshot(handoff_request(&query)).await.unwrap();
+            assert_eq!(response.status(), StatusCode::FOUND, "{query}");
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            response.headers()[header::LOCATION]
+                .to_str()
+                .unwrap()
+                .to_owned()
+        }
+    };
+
+    // The public URL's path prefix is kept, so the page lands where it is
+    // served from; the trailing slash is normalized away first.
+    assert_eq!(
+        landed("?code=mg_ho_good").await,
+        "https://machine.example.com/tidebreak/#handoff=mg_at_minted"
+    );
+    assert_eq!(
+        landed("?code=mg_ho_stale").await,
+        "https://machine.example.com/tidebreak/#handoff-failed=expired"
+    );
+    assert_eq!(
+        landed("?code=mg_ho_down").await,
+        "https://machine.example.com/tidebreak/#handoff-failed=unavailable"
+    );
+    // A grant that is not a bearer this machine would accept is treated as
+    // the gateway being unusable, never handed to the page.
+    assert_eq!(
+        landed("?code=mg_ho_odd").await,
+        "https://machine.example.com/tidebreak/#handoff-failed=unavailable"
+    );
+    // Not a code: refused here, without a round trip.
+    assert_eq!(
+        landed("").await,
+        "https://machine.example.com/tidebreak/#handoff-failed=invalid"
+    );
+    assert_eq!(
+        landed("?code=mg_at_a_bearer").await,
+        "https://machine.example.com/tidebreak/#handoff-failed=invalid"
+    );
+    assert_eq!(
+        landed("?code=mg_ho_%3Cscript%3E").await,
+        "https://machine.example.com/tidebreak/#handoff-failed=invalid"
+    );
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec!["mg_ho_good", "mg_ho_stale", "mg_ho_down", "mg_ho_odd"]
+    );
+
+    // No gateway, no route.
+    let (desktop, _bearer, _dir) = ui_bundle_app(None).await;
+    let missing = desktop
+        .oneshot(handoff_request("?code=mg_ho_good"))
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+}
