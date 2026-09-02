@@ -39,6 +39,7 @@ vi.mock("@xterm/xterm", () => ({
     }
     loadAddon() {}
     open() {}
+    focus() {}
     dispose() {
       this.disposed = true;
     }
@@ -228,6 +229,24 @@ describe("TerminalPane", () => {
     );
   });
 
+  it("resizes the PTY to the renderer once the shell is attached", async () => {
+    const client = clientWith();
+    render(
+      <TerminalPane client={client} workspaceId="ws-1" terminalId="term-1" />,
+    );
+    await expectReady();
+    expect(client.resizeCodeTerminal).toHaveBeenCalledTimes(1);
+    expect(client.resizeCodeTerminal).toHaveBeenCalledWith(
+      "ws-1",
+      "term-1",
+      80,
+      24,
+    );
+
+    fireEvent(window, new Event("resize"));
+    expect(client.resizeCodeTerminal).toHaveBeenCalledTimes(1);
+  });
+
   it("serializes writes while an earlier request is delayed", async () => {
     const first = deferred<void>();
     const writeCodeTerminal = vi
@@ -280,7 +299,6 @@ describe("TerminalPane", () => {
       "aria-disabled",
       "true",
     );
-    expect(terminals.at(-1)?.options.disableStdin).toBe(true);
 
     emitData("ignored");
     expect(writeCodeTerminal).toHaveBeenCalledTimes(1);

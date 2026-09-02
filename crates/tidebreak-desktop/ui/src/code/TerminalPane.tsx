@@ -263,6 +263,7 @@ export function TerminalPane({
   const rafRef = useRef<number | null>(null);
   const lastFlushRef = useRef(Date.now());
   const inputPausedRef = useRef(true);
+  const sentSizeRef = useRef<{ cols: number; rows: number } | null>(null);
   const stalledRef = useRef(false);
   const [generation, setGeneration] = useState(0);
   const [ended, setEnded] = useState(false);
@@ -287,7 +288,6 @@ export function TerminalPane({
       convertEol: true,
       fontSize: 13,
       cursorBlink: true,
-      disableStdin: true,
       theme: readXtermTheme(),
     });
     const fit = new FitAddon();
@@ -335,11 +335,7 @@ export function TerminalPane({
       const active = activeTerminalRef.current;
       const tid =
         active?.epoch === identityEpoch ? active.writer.terminalId : null;
-      const dims =
-        term.cols && term.rows ? { cols: term.cols, rows: term.rows } : null;
-      if (tid && dims) {
-        void client.resizeCodeTerminal(workspaceId, tid, dims.cols, dims.rows);
-      }
+      if (tid) syncPtySize(tid);
     };
     window.addEventListener("resize", onResize);
     const observer =
@@ -387,6 +383,7 @@ export function TerminalPane({
     pendingRef.current = "";
     cursorRef.current = 0;
     tidRef.current = null;
+    sentSizeRef.current = null;
     activeTerminalRef.current = null;
 
     async function pull(): Promise<boolean> {
@@ -467,6 +464,10 @@ export function TerminalPane({
         cursorRef.current = 0;
         const writer = writerFor(snap.id);
         activeTerminalRef.current = { epoch: identityEpoch, writer };
+        // Fit often reports before this id exists, and a tab that re-attaches
+        // to a live shell never goes through create. Push the renderer size
+        // now so the PTY and xterm agree on columns.
+        syncPtySize(snap.id);
         if (writer.failed) {
           surfaceWriteFailure(writer);
         } else {
@@ -671,11 +672,30 @@ export function TerminalPane({
     });
   }
 
+  function syncPtySize(terminalId: string) {
+    const term = termRef.current;
+    const cols = term?.cols;
+    const rows = term?.rows;
+    if (!cols || !rows) return;
+    const sent = sentSizeRef.current;
+    if (sent && sent.cols === cols && sent.rows === rows) return;
+    sentSizeRef.current = { cols, rows };
+    void client.resizeCodeTerminal(workspaceId, terminalId, cols, rows);
+  }
+
   function setInputPausedForCurrent(paused: boolean) {
+    const wasPaused = inputPausedRef.current;
     inputPausedRef.current = paused;
     setInputPaused(paused);
-    const term = termRef.current;
-    if (term?.options) term.options.disableStdin = paused;
+    // Do not toggle xterm `disableStdin`. That sets the helper textarea
+    // `readOnly`, and WKWebView then drops keys on the still-focused field.
+    // onData already ignores input while paused.
+    if (wasPaused && !paused) {
+      const host = hostRef.current;
+      if (host && host.contains(document.activeElement)) {
+        termRef.current?.focus();
+      }
+    }
   }
 
   function retryTerminal() {
@@ -859,7 +879,7 @@ export function TerminalPane({
       <div className="relative min-h-0 flex-1">
         <div
           ref={hostRef}
-          className="h-full"
+          className="terminal-host h-full overflow-hidden"
           data-testid="terminal-host"
           // xterm builds its own tree inside this host; the host itself is a
           // plain div, so it needs a role that takes a name before the label
