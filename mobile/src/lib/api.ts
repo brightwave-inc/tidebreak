@@ -167,7 +167,9 @@ function parseHarnessCaps(value: unknown): HarnessCaps | null {
     !capLevel(caps.slash_commands) ||
     !capLevel(caps.durable_parks) ||
     !capLevel(caps.user_questions) ||
-    !capLevel(caps.standing_grants)
+    !capLevel(caps.standing_grants) ||
+    !capLevel(caps.mid_turn_resume) ||
+    !capLevel(caps.transcript)
   ) {
     return null;
   }
