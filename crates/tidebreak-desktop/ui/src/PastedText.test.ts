@@ -48,4 +48,27 @@ describe("PastedText", () => {
       pasted: [],
     });
   });
+
+  it("keeps a block whole when its body carries its own paste wrappers", () => {
+    // Uneff me pastes a debug report whose turns may hold earlier pastes.
+    const inner = messageWithPastedText("Summarize this", [
+      { id: "paste-1", text: "inner body" },
+    ]);
+    const report = JSON.stringify({ turns: [{ user_input: inner }] }, null, 2);
+    const sent = messageWithPastedText("The report follows.", [
+      { id: "report", text: report },
+    ]);
+    expect(splitPastedText(sent)).toEqual({
+      prose: "The report follows.",
+      pasted: [report],
+    });
+
+    // An opener that never balances runs to the end, not into the prose.
+    const unbalanced =
+      "Look\n\n<pasted_text>\n<pasted_text>\nstray\n</pasted_text>";
+    expect(splitPastedText(unbalanced)).toEqual({
+      prose: "Look",
+      pasted: ["<pasted_text>\nstray\n</pasted_text>"],
+    });
+  });
 });

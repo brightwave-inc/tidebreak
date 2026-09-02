@@ -42,20 +42,56 @@ export type SplitPastedText = {
   pasted: string[];
 };
 
-const PASTED_TEXT_BLOCK = /<pasted_text>\n?([\s\S]*?)\n?<\/pasted_text>/g;
+const OPEN_TAG = "<pasted_text>";
+const CLOSE_TAG = "</pasted_text>";
 
 /**
  * Take the paste blocks `messageWithPastedText` added back out of a message,
  * so a transcript can fold them the way the composer chip did.
+ *
+ * Blocks nest: a debug report pasted by Uneff me carries the source session's
+ * own turns, and those may hold wrappers from earlier pastes. A block ends at
+ * the closer that balances its opener, not at the first closer in sight, and
+ * an opener that never balances runs to the end of the message rather than
+ * spilling the rest of the paste into the prose.
  */
 export function splitPastedText(message: string): SplitPastedText {
   const pasted: string[] = [];
-  const prose = message
-    .replace(PASTED_TEXT_BLOCK, (_match, body: string) => {
-      pasted.push(body);
-      return "";
-    })
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-  return { prose, pasted };
+  let prose = "";
+  let cursor = 0;
+  while (cursor < message.length) {
+    const open = message.indexOf(OPEN_TAG, cursor);
+    if (open === -1) {
+      prose += message.slice(cursor);
+      break;
+    }
+    prose += message.slice(cursor, open);
+    let depth = 1;
+    let scan = open + OPEN_TAG.length;
+    let close = -1;
+    while (depth > 0) {
+      const nextOpen = message.indexOf(OPEN_TAG, scan);
+      const nextClose = message.indexOf(CLOSE_TAG, scan);
+      if (nextClose === -1) break;
+      if (nextOpen !== -1 && nextOpen < nextClose) {
+        depth += 1;
+        scan = nextOpen + OPEN_TAG.length;
+        continue;
+      }
+      depth -= 1;
+      scan = nextClose + CLOSE_TAG.length;
+      if (depth === 0) close = nextClose;
+    }
+    const bodyEnd = close === -1 ? message.length : close;
+    pasted.push(
+      trimBlockNewlines(message.slice(open + OPEN_TAG.length, bodyEnd)),
+    );
+    cursor = close === -1 ? message.length : close + CLOSE_TAG.length;
+  }
+  return { prose: prose.replace(/\n{3,}/g, "\n\n").trim(), pasted };
+}
+
+/** The wrapper adds one newline on each side of the body; take only those. */
+function trimBlockNewlines(body: string): string {
+  return body.replace(/^\n/, "").replace(/\n$/, "");
 }
