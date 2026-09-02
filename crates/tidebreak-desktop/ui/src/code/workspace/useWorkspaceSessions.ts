@@ -139,15 +139,32 @@ export function useWorkspaceSessions({
   const [error, setError] = useState<string | null>(null);
   const [reloadToken, setReloadToken] = useState(0);
   const [starting, setStarting] = useState(false);
-  const conversations = useMemo(() => liveCodeSessions(sessions), [sessions]);
-  const session = useMemo(
-    () => sessions.find((entry) => entry.id === activeSessionId) ?? null,
-    [activeSessionId, sessions],
-  );
-  const conversationDigests = useConversationDigests(workspaceId);
   const rememberedSession = useCodeCatalogStore(
     (state) => state.sessionsByWorkspace[workspaceId] ?? null,
   );
+  // A create remembers the session before this page's list returns, and
+  // before the merge effect below runs. Fold it in during render so dropping
+  // the startup overlay does not flash the empty start prompt for a frame.
+  const listedSessions = useMemo(() => {
+    if (!rememberedSession) return sessions;
+    if (sessions.some((entry) => entry.id === rememberedSession.id)) {
+      return sessions;
+    }
+    return [rememberedSession, ...sessions];
+  }, [rememberedSession, sessions]);
+  const conversations = useMemo(
+    () => liveCodeSessions(listedSessions),
+    [listedSessions],
+  );
+  const session = useMemo(() => {
+    const selected = listedSessions.find(
+      (entry) => entry.id === activeSessionId,
+    );
+    if (selected) return selected;
+    if (draftAgent || activeSessionId) return null;
+    return conversations[0] ?? null;
+  }, [activeSessionId, conversations, draftAgent, listedSessions]);
+  const conversationDigests = useConversationDigests(workspaceId);
 
   useEffect(() => {
     startRequestRef.current += 1;
