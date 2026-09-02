@@ -742,6 +742,7 @@ test("production secrets remain isolated to the release workflow", () => {
   const allowedSecretConsumers = new Set([
     "publish-e2b-template.yml",
     "publish-whisper-helper.yml",
+    "release-draft.yml",
     "release.yml",
     "staging-publish.yml",
   ]);
@@ -749,6 +750,27 @@ test("production secrets remain isolated to the release workflow", () => {
     assert.ok(
       allowedSecretConsumers.has(name),
       `unexpected secret consumer: ${name}`,
+    );
+  }
+
+  // The release draft may read exactly one secret: the private key of the
+  // GitHub App whose token replaces GITHUB_TOKEN for the draft job, so the
+  // release API calls stop sharing the repository's Actions rate budget. The
+  // key stays out of the label and backfill jobs: the label job runs on
+  // pull_request_target events, and neither job needs more than GITHUB_TOKEN.
+  const releaseDraftSource = workflows["release-draft.yml"];
+  for (const secret of releaseDraftSource.match(/secrets\.[A-Za-z0-9_]+/g) ?? []) {
+    assert.equal(
+      secret,
+      "secrets.RELEASE_APP_PRIVATE_KEY",
+      `release-draft.yml may read only the app private key, found ${secret}`,
+    );
+  }
+  for (const job of ["label", "backfill"]) {
+    assert.doesNotMatch(
+      workflowJob(releaseDraftSource, job),
+      /secrets\./,
+      `the ${job} job must stay on GITHUB_TOKEN`,
     );
   }
   assert.ok(secretConsumers.includes("publish-e2b-template.yml"));
