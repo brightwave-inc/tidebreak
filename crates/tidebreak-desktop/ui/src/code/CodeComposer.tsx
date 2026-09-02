@@ -899,9 +899,12 @@ export function CodeComposer({
 
   useEffect(() => {
     if (!pendingPrompt || pendingPrompt.scope !== composerPromptScope) return;
+    if (pendingPrompt.sessionId && pendingPrompt.sessionId !== sessionId) {
+      return;
+    }
     const request = useCodeUiStore
       .getState()
-      .takeComposerPrompt(composerPromptScope);
+      .takeComposerPrompt(composerPromptScope, sessionId);
     if (!request) return;
     if (request.submit) {
       void submitOfferedPrompt(request.text);

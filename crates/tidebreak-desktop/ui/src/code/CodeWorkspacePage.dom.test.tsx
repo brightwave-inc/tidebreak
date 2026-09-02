@@ -2242,6 +2242,39 @@ describe("CodeWorkspacePage", () => {
     ).toBeNull();
   });
 
+  it("holds the Uneff me prompt in the new agent's composer when only the first turn fails", async () => {
+    const client = makeClient();
+    enableStartHarness(client);
+    client.listCodeWorkspaceSessions.mockResolvedValue([SESSION]);
+    client.submitCodeTurn.mockRejectedValueOnce(new Error("engine hiccup"));
+    const { router } = await mountWorkspace(client);
+    const user = userEvent.setup();
+
+    await screen.findByRole("heading", { name: /Fix login/ });
+    await user.click(screen.getByRole("button", { name: "Workspace actions" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Uneff me" }));
+
+    await waitFor(() =>
+      expect(useCodeUiStore.getState().workspaceStartups).toEqual({}),
+    );
+    expect(client.createCodeSession).toHaveBeenCalledTimes(1);
+    expect(client.submitCodeTurn).toHaveBeenCalledTimes(1);
+    // The new session is selected, and its empty composer gets the prompt.
+    await waitFor(() =>
+      expect(router.state.location.search).toMatchObject({
+        task: CREATED_SESSION.id,
+      }),
+    );
+    await waitFor(() => {
+      const pending = useCodeUiStore.getState().pendingComposerPrompt;
+      const composer = screen.queryByRole("textbox", {
+        name: "Message",
+      }) as HTMLTextAreaElement | null;
+      const text = pending?.text ?? composer?.value ?? "";
+      expect(text).toContain("not a Tidebreak checkout");
+    });
+  });
+
   it("keeps git and comments in the review sidebar, and opens the terminal as a tab", async () => {
     const client = makeClient();
     const { router } = await mountWorkspace(client);

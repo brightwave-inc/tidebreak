@@ -85,11 +85,13 @@ export async function startFirstSession(input: {
   /** Heading, preparation steps, and target the handoff keeps showing. */
   startup?: Pick<WorkspaceStartup, "heading" | "preparation" | "target">;
   /**
-   * Keep the prompt in the workspace composer when the start fails. True for
-   * words the reader typed. False for a generated prompt landing in a
-   * workspace whose composer already belongs to another conversation.
+   * Keep the prompt in the workspace composer when no session could start.
+   * True for words the reader typed. False for a generated prompt that would
+   * land in a composer still belonging to another conversation. Once a
+   * session exists its composer is the empty one the reader now sees, so a
+   * failed first turn always holds the prompt there.
    */
-  holdPromptOnFailure?: boolean;
+  holdPromptWithoutSession?: boolean;
   /** Open the workspace before its session starts. */
   reveal?: () => Promise<void>;
   onSessionCreated?: (
@@ -105,12 +107,14 @@ export async function startFirstSession(input: {
     harness: settings.harness,
   };
   const setWorkspaceStartup = useCodeUiStore.getState().setWorkspaceStartup;
-  const hold = input.holdPromptOnFailure ?? true;
-  const holdPrompt = () => {
-    if (prompt && hold) {
+  const holdWithoutSession = input.holdPromptWithoutSession ?? true;
+  // Addressed to the session when there is one: the workspace's panes share
+  // a prompt scope, and the pane on screen may still be the old agent's.
+  const holdPrompt = (sessionId?: string) => {
+    if (prompt) {
       useCodeUiStore
         .getState()
-        .offerComposerPrompt(workspace.id, prompt, images);
+        .offerComposerPrompt(workspace.id, prompt, images, sessionId);
     }
   };
   // The copy has to match what the reader just watched happen.
@@ -120,9 +124,6 @@ export async function startFirstSession(input: {
     : "The session could not start.";
   const turnFailed =
     "Session started, but the first message could not be sent.";
-  const retry = hold
-    ? "Send it from the workspace composer."
-    : "Try again from the workspace menu.";
   setWorkspaceStartup(workspace.id, {
     ...base,
     hasFirstMessage: Boolean(prompt),
@@ -175,17 +176,19 @@ export async function startFirstSession(input: {
       } catch (error) {
         // Never drop typed words or pasted images: the workspace composer
         // holds them.
-        holdPrompt();
-        toast.error(`${turnFailed} ${friendlyErrorMessage(error, retry)}`);
+        holdPrompt(session.id);
+        toast.error(
+          `${turnFailed} ${friendlyErrorMessage(error, "Send it from the workspace composer.")}`,
+        );
       }
     }
     return session;
   } catch (error) {
     // No session to send to; the workspace composer holds the text, images,
     // and start-session on the workspace page picks them up.
-    holdPrompt();
+    if (holdWithoutSession) holdPrompt();
     toast.error(
-      `${sessionFailed} ${friendlyErrorMessage(error, hold ? "Try again from the workspace." : retry)}`,
+      `${sessionFailed} ${friendlyErrorMessage(error, holdWithoutSession ? "Try again from the workspace." : "Try again from the workspace menu.")}`,
     );
     return null;
   } finally {

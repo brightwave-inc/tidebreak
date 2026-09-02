@@ -742,8 +742,9 @@ export function useWorkspaceCardCommands(): {
       return;
     }
     // No checkout: a new agent in this workspace, shown once it exists. The
-    // prompt is generated, so a failed start does not leave a hundred
-    // kilobytes of JSON in a composer that belongs to another conversation.
+    // prompt is generated, so when no session starts it does not land in a
+    // composer that still belongs to the original conversation. Once the
+    // session exists its own empty composer is the right place for it.
     await startFirstSession({
       client,
       workspace: context.workspace,
@@ -752,7 +753,7 @@ export function useWorkspaceCardCommands(): {
       models,
       defaultModelKey,
       startup: { heading: UNEFF_STARTUP_HEADING, preparation, target },
-      holdPromptOnFailure: false,
+      holdPromptWithoutSession: false,
       onSessionCreated: (session) =>
         void navigate({
           to: "/code/w/$workspaceId",

@@ -1094,6 +1094,7 @@ describe("NewWorkspaceDialog", () => {
       scope: "ws-held-image",
       text: "Review this screenshot",
       submit: false,
+      sessionId: expect.any(String),
       images: [image],
     });
   });
@@ -1199,6 +1200,7 @@ describe("NewWorkspaceDialog", () => {
       scope: "ws-held",
       text: "list the files",
       submit: false,
+      sessionId: expect.any(String),
     });
     expect(toastError).toHaveBeenCalledWith(
       "Session started, but the first message could not be sent. engine crashed on spawn",

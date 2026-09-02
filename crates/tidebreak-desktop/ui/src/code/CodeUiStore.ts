@@ -107,6 +107,12 @@ export type PendingComposerPrompt = {
   submit: boolean;
   /** Files to attach once a session exists to publish them. */
   images?: readonly File[];
+  /**
+   * The one session whose composer may take this. Panes in a workspace share
+   * a scope, so a prompt meant for an agent that is still being selected
+   * waits for that agent's composer rather than landing in the one on screen.
+   */
+  sessionId?: string;
 };
 
 export type PendingComposerImages = {
@@ -377,9 +383,14 @@ export type CodeUiStore = {
     scope: string,
     prompt: string,
     images?: readonly File[],
+    sessionId?: string,
   ) => void;
   runComposerPrompt: (scope: string, prompt: string) => boolean;
-  takeComposerPrompt: (scope: string) => PendingComposerPrompt | null;
+  /** `sessionId` is the taker's; a prompt addressed to another session stays. */
+  takeComposerPrompt: (
+    scope: string,
+    sessionId?: string,
+  ) => PendingComposerPrompt | null;
   takeComposerImages: (scope: string) => readonly File[] | null;
   finishComposerAction: (scope: string) => void;
   /**
@@ -564,13 +575,14 @@ export const useCodeUiStore = create<CodeUiStore>()((set, get) => ({
     set({ openFilePending: null });
     return pending;
   },
-  offerComposerPrompt: (scope, prompt, images) =>
+  offerComposerPrompt: (scope, prompt, images, sessionId) =>
     set({
       pendingComposerPrompt: {
         scope,
         text: prompt,
         submit: false,
         ...(images && images.length > 0 ? { images } : {}),
+        ...(sessionId ? { sessionId } : {}),
       },
       pendingComposerImages:
         images && images.length > 0
@@ -587,9 +599,10 @@ export const useCodeUiStore = create<CodeUiStore>()((set, get) => ({
     });
     return true;
   },
-  takeComposerPrompt: (scope): PendingComposerPrompt | null => {
+  takeComposerPrompt: (scope, sessionId): PendingComposerPrompt | null => {
     const prompt = get().pendingComposerPrompt;
     if (!prompt || prompt.scope !== scope) return null;
+    if (prompt.sessionId && prompt.sessionId !== sessionId) return null;
     set({ pendingComposerPrompt: null });
     return prompt;
   },
