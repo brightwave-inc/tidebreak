@@ -52,6 +52,7 @@ function machineStub(
     attachWithGateway: vi.fn().mockResolvedValue(state),
     attachWithToken: vi.fn().mockResolvedValue(state),
     detach: vi.fn().mockResolvedValue(local),
+    detachable: true,
     reattach: vi.fn(),
   };
 }

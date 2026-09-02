@@ -4,7 +4,9 @@
 # tidebreak-server's `postgres` feature, which is what `Profile::SelfHost`
 # needs to open the store named by `TIDEBREAK_DATABASE_URL`. The desktop crate
 # is never built: `-p tidebreak-cli` selects only that binary's dependency
-# closure.
+# closure. The desktop's renderer is: the image carries the built UI bundle
+# and the server serves it, so a browser can land on the machine
+# (decision record 82).
 #
 # Build context is the WORKSPACE ROOT, so the whole Cargo workspace and the
 # committed Cargo.lock are visible to a `--locked` build:
@@ -18,6 +20,28 @@
 # and its PostgreSQL database run inside the operator's own network, and TLS
 # termination plus network exposure belong to the operator's fronting
 # infrastructure. Nothing here terminates TLS. See docs/self-hosting.md.
+
+# ---- renderer stage --------------------------------------------------------
+# The same `pnpm build` the desktop packages as `frontendDist`, so a browser
+# tab and the desktop app run one renderer against one API. Node 22 and pnpm
+# 10 match the desktop UI lane in .github/workflows/ci.yml. Digest-pinned
+# like the stages below: this is node:22-bookworm as of 2026-09-02.
+FROM node:22-bookworm@sha256:8a34c4ab3ea2c5cd194f07e317b2a8f09461d3c8b05c4e34c8ccd56d56024c4d AS renderer
+WORKDIR /src/crates/tidebreak-desktop/ui
+
+# Manifests first, so the dependency layer survives a source-only change.
+COPY crates/tidebreak-desktop/ui/package.json \
+     crates/tidebreak-desktop/ui/pnpm-lock.yaml \
+     crates/tidebreak-desktop/ui/pnpm-workspace.yaml ./
+# `--ignore-scripts`: the lockfile's only native build (canvas) serves the
+# test environment, and a production bundle never loads it. Skipping every
+# install script also keeps the image build off the dependency tree's
+# lifecycle hooks, which is where a supply-chain compromise runs first.
+RUN npm install -g pnpm@10.34.5 \
+    && pnpm install --frozen-lockfile --ignore-scripts
+
+COPY crates/tidebreak-desktop/ui/ ./
+RUN pnpm build
 
 # ---- build stage -----------------------------------------------------------
 # The workspace toolchain channel (stable) via the bookworm image; the
@@ -147,6 +171,7 @@ RUN set -eu; \
     npm --version
 
 COPY --from=build /src/target/release/tidebreak /usr/local/bin/tidebreak
+COPY --from=renderer /src/crates/tidebreak-desktop/ui/dist /opt/tidebreak/ui
 COPY deploy/self-host/entrypoint.sh /usr/local/bin/tidebreak-entrypoint
 
 # The server runs unprivileged. The uid is fixed rather than assigned by
@@ -175,6 +200,10 @@ ENV TIDEBREAK_DATA_DIR=/var/lib/tidebreak
 # front of it. Plain HTTP by design; nothing here terminates TLS.
 ENV TIDEBREAK_LISTEN_ADDR=0.0.0.0:8080
 EXPOSE 8080
+# The renderer bundle the server serves to browsers: a page navigation to any
+# path the API does not own answers with it, and an unknown route fetched as
+# JSON stays a 404. The server refuses to start if this names no bundle.
+ENV TIDEBREAK_UI_DIST=/opt/tidebreak/ui
 
 USER tidebreak:tidebreak
 

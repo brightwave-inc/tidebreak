@@ -31,12 +31,16 @@ function stubClient(status: GatewayStatus, offered?: string): ApiClient {
  * and go no further — a story that could reattach the window would take the
  * canvas with it.
  */
-function stubMachine(state: RemoteMachineState): MachineControls {
+function stubMachine(
+  state: RemoteMachineState,
+  { detachable = true }: { detachable?: boolean } = {},
+): MachineControls {
   return {
     read: async () => state,
     attachWithGateway: fn(async () => state),
     attachWithToken: fn(async () => state),
     detach: fn(async () => machineLocal),
+    detachable,
     reattach: fn(),
   };
 }
@@ -148,5 +152,22 @@ export const HostedMachine: Story = {
     gatewayUrl: null,
     hostedGatewayUrl: "https://gateway.example.com/",
     machine: stubMachine(machineAttached),
+  },
+};
+
+/**
+ * The same hosted machine, opened in a browser tab the machine served.
+ *
+ * There is no server inside a browser tab to return to, so the disconnect
+ * control is replaced by the one thing the reader can do: close the tab, or
+ * attach from the desktop app.
+ */
+export const HostedMachineInBrowser: Story = {
+  args: {
+    client: stubClient(gatewaySignedOut),
+    managed: false,
+    gatewayUrl: null,
+    hostedGatewayUrl: "https://gateway.example.com/",
+    machine: stubMachine(machineAttached, { detachable: false }),
   },
 };

@@ -41,7 +41,7 @@ sea-orm = { workspace = true }
 # `rt-multi-thread` backs the durable operation log's synchronous `OperationStore`
 # bridge (`tokio::task::block_in_place`); the host runs on a multi-thread runtime.
 tokio = { workspace = true, features = ["net", "process", "rt", "rt-multi-thread", "sync", "macros", "time"] }
-tower-http = { version = "=0.7.0", features = ["cors", "limit"] }
+tower-http = { version = "=0.7.0", features = ["cors", "fs", "limit"] }
 futures = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }

@@ -3,9 +3,11 @@ import { ExternalLink, Laptop, RefreshCw } from "lucide-react";
 
 import type { ApiClient, GatewayStatus, ManagedPolicy } from "./api";
 import { Button } from "@/components/ui/button";
+import { HostedSignIn } from "./HostedSignIn";
 import { Logomark } from "./Logomark";
 import { ManagedPolicyContext } from "./managedPolicy";
-import { onPairingChanged } from "./host";
+import { hasNativeHost, onPairingChanged } from "./host";
+import { hostedSession } from "./hostedSession";
 import { openInBrowser } from "./openInBrowser";
 import { disconnectRemoteMachine, remoteMachineState } from "./remoteMachine";
 import { useVisibilityGatedPoll } from "./useVisibilityGatedPoll";
@@ -29,8 +31,10 @@ type PolicyState =
   | { kind: "resolved"; policy: ManagedPolicy }
   /** The server answered, and the answer was an error: the policy exists but
    * cannot be read. A profile that claims to be managed must never quietly
-   * revert to the open experience, so this blocks instead of failing open. */
-  | { kind: "blocked" };
+   * revert to the open experience, so this blocks instead of failing open.
+   * The status is kept because one answer means something specific to a
+   * hosted browser tab: a refused bearer is a session that ended. */
+  | { kind: "blocked"; status: number };
 
 /** ApiClient throws `Error("<status>: <detail>")` for an HTTP error response;
  * everything else — a rejected fetch, the timeout — is transport-level. */
@@ -192,7 +196,7 @@ export function ManagedGate({
           return;
         }
         if (httpStatus !== null) {
-          setPolicyState({ kind: "blocked" });
+          setPolicyState({ kind: "blocked", status: httpStatus });
           return;
         }
         timer = window.setTimeout(() => {
@@ -229,8 +233,9 @@ export function ManagedGate({
         // An error *response* means the server says the policy is
         // unreadable, which fails closed exactly as it does on first read.
         // A transport failure says nothing, so the last answer stands.
-        if (httpStatusOf(err) !== null && httpStatusOf(err) !== 404) {
-          setPolicyState({ kind: "blocked" });
+        const httpStatus = httpStatusOf(err);
+        if (httpStatus !== null && httpStatus !== 404) {
+          setPolicyState({ kind: "blocked", status: httpStatus });
         }
       });
   }, [client]);
@@ -328,6 +333,24 @@ export function ManagedGate({
       (policy.managed && !policy.gateway_url));
 
   if (policyState.kind === "blocked" || policyMisconfigured) {
+    // A hosted browser tab whose bearer the machine stopped accepting. There
+    // is no shell to mint another and no local server to fall back to; the
+    // way back in is the console that signed the reader in the first time.
+    const hosted = hostedSession();
+    if (
+      hosted !== null &&
+      !hasNativeHost() &&
+      policyState.kind === "blocked" &&
+      (policyState.status === 401 || policyState.status === 403)
+    ) {
+      return (
+        <HostedSignIn
+          reason="session_ended"
+          machineUrl={hosted.baseUrl}
+          gatewayUrl={hosted.gatewayUrl}
+        />
+      );
+    }
     // Attached to a machine, and it will not answer. Naming the managed
     // policy here would be a lie — the policy on this computer is fine, and
     // the reader cannot act on the machine's copy anyway. What they can
@@ -357,29 +380,31 @@ export function ManagedGate({
             </p>
           </div>
           <div className="flex items-center gap-2">
-            <Button
-              type="button"
-              disabled={working}
-              onClick={() =>
-                void (async () => {
-                  setWorking(true);
-                  setActionError(null);
-                  try {
-                    await disconnectRemoteMachine();
-                    // Same reason the settings panel reloads: the API client
-                    // and the event stream were built against the machine
-                    // this window opened on.
-                    window.location.reload();
-                  } catch (err) {
-                    setActionError(String(err));
-                    setWorking(false);
-                  }
-                })()
-              }
-            >
-              <Laptop size={14} />
-              Work on this computer
-            </Button>
+            {hasNativeHost() && (
+              <Button
+                type="button"
+                disabled={working}
+                onClick={() =>
+                  void (async () => {
+                    setWorking(true);
+                    setActionError(null);
+                    try {
+                      await disconnectRemoteMachine();
+                      // Same reason the settings panel reloads: the API
+                      // client and the event stream were built against the
+                      // machine this window opened on.
+                      window.location.reload();
+                    } catch (err) {
+                      setActionError(String(err));
+                      setWorking(false);
+                    }
+                  })()
+                }
+              >
+                <Laptop size={14} />
+                Work on this computer
+              </Button>
+            )}
             <Button
               type="button"
               variant="ghost"

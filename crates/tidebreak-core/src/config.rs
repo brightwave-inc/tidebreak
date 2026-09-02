@@ -269,6 +269,16 @@ pub struct Config {
     /// way the stored setting wins once an operator sets one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code_worktree_root_default: Option<PathBuf>,
+    /// A built renderer bundle to serve to browsers, so the machine has a
+    /// page of its own to land on.
+    ///
+    /// The directory is the desktop UI's `dist` output — the same bundle the
+    /// packaged app loads from its own protocol — and its `index.html` is the
+    /// answer for any page navigation the API does not own. The self-host
+    /// image sets `TIDEBREAK_UI_DIST` to the copy it carries; absent, the
+    /// server serves no pages at all and an unknown path stays a `404`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_dist: Option<PathBuf>,
 }
 
 /// The bind every profile uses when no address is configured: loopback, and
@@ -365,6 +375,7 @@ impl Config {
             runtime_session_spend_ceiling_microusd: default_runtime_session_spend_ceiling_microusd(
             ),
             code_worktree_root_default: None,
+            ui_dist: None,
         }
     }
 
@@ -388,7 +399,8 @@ impl Config {
     /// `TIDEBREAK_RUNTIME_PROFILE` together to enable remote sessions. Remote
     /// deployments can also set `TIDEBREAK_RUNTIME_CONCURRENCY_CAP`,
     /// `TIDEBREAK_RUNTIME_SPAWN_SPEND_CEILING_MICROUSD`, and
-    /// `TIDEBREAK_RUNTIME_SESSION_SPEND_CEILING_MICROUSD`.
+    /// `TIDEBREAK_RUNTIME_SESSION_SPEND_CEILING_MICROUSD`. Optional
+    /// `TIDEBREAK_UI_DIST` names a built renderer bundle to serve to browsers.
     pub fn from_env() -> Result<Self> {
         let vault_secrets = VaultSecretConfig::from_vars(
             std::env::var("TIDEBREAK_VAULT_ADDR").ok(),
@@ -417,6 +429,18 @@ impl Config {
             std::env::var("TIDEBREAK_RUNTIME_SPAWN_SPEND_CEILING_MICROUSD").ok(),
             std::env::var("TIDEBREAK_RUNTIME_SESSION_SPEND_CEILING_MICROUSD").ok(),
         )
+        .map(|config| config.with_ui_dist_var(std::env::var_os("TIDEBREAK_UI_DIST")))
+    }
+
+    /// Apply `TIDEBREAK_UI_DIST`. Split from [`Config::from_env`] like the
+    /// runtime limits, so the empty-means-unset rule is testable without
+    /// touching the process environment. Whether the directory actually holds
+    /// a bundle is checked where the server binds, so the refusal names the
+    /// path and happens before anything listens.
+    #[must_use]
+    pub fn with_ui_dist_var(mut self, ui_dist: Option<OsString>) -> Self {
+        self.ui_dist = ui_dist.filter(|value| !value.is_empty()).map(PathBuf::from);
+        self
     }
 
     /// Resolve a config from raw variable values. Split out from [`from_env`] so
@@ -530,6 +554,7 @@ impl Config {
             runtime_session_spend_ceiling_microusd: default_runtime_session_spend_ceiling_microusd(
             ),
             code_worktree_root_default: None,
+            ui_dist: None,
         })
     }
 
@@ -732,6 +757,26 @@ mod tests {
         let expected = std::env::current_dir().unwrap().join(".tidebreak");
         assert_eq!(config.data_dir, expected);
         assert_eq!(config.profile, Profile::Desktop);
+    }
+
+    #[test]
+    fn an_empty_ui_dist_var_means_no_bundle() {
+        let config = Config::desktop("/data");
+        assert_eq!(
+            config
+                .clone()
+                .with_ui_dist_var(Some(OsString::new()))
+                .ui_dist,
+            None
+        );
+        assert_eq!(config.clone().with_ui_dist_var(None).ui_dist, None);
+        assert_eq!(
+            config
+                .with_ui_dist_var(Some(OsString::from("/opt/tidebreak/ui")))
+                .ui_dist
+                .as_deref(),
+            Some(std::path::Path::new("/opt/tidebreak/ui"))
+        );
     }
 
     #[test]

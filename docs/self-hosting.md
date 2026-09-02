@@ -282,6 +282,7 @@ aspirational.
 | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `GEMINI_API_KEY`, `FIREWORKS_API_KEY`, `TOGETHER_API_KEY` | no | unset | Fallback provider credentials, consulted when Vault holds no credential for that provider or Vault custody is not configured. |
 | `ANTHROPIC_BASE_URL`, `OPENAI_BASE_URL`, `OPENAI_COMPATIBLE_BASE_URL`, `OLLAMA_BASE_URL` | no | unset | Fallback provider endpoints, consulted when no base URL is stored for that provider. Point a provider at a compatible endpoint from your chart or compose file instead of setting it after first boot. Use HTTPS; Ollama also accepts HTTP on a loopback address. An unusable value is ignored, and the provider keeps its built-in endpoint. |
 | `TIDEBREAK_LISTEN_ADDR` | no | loopback, ephemeral port | Self-host only: the address and port the API binds, e.g. `0.0.0.0:8080`. The desktop profile refuses to boot with it set — that profile's loopback binding is what its per-launch token assumes. The image sets it to `0.0.0.0:8080` so the container is reachable at a known port. |
+| `TIDEBREAK_UI_DIST` | no | unset | A built desktop renderer bundle to serve to browsers; see [Opening the machine in a browser](#opening-the-machine-in-a-browser). The image sets it to the bundle it carries. Unset, the server serves no pages and an unknown path answers `404`. The server refuses to start if the directory holds no `index.html`. |
 
 ## Compose quickstart
 
@@ -366,6 +367,30 @@ Two things the image deliberately does not decide for you:
 
 The image ships no SSH client and no known-hosts file, so clone over HTTPS.
 An SSH clone URL fails.
+
+## Opening the machine in a browser
+
+The image carries the Tidebreak desktop app's renderer, and the server serves
+it at the machine's own address: a browser tab at `TIDEBREAK_PUBLIC_URL`
+lands on the same app the desktop runs, attached to this machine. Pages are
+served for navigations only — a request for an unknown route with a JSON
+`Accept` still answers `404`, and every API route is matched ahead of the
+bundle — so the API contract does not change.
+
+A tab signs in the way the desktop does: with a short-lived Gateway bearer
+bound to this machine. The page holds that bearer in memory for the tab's
+life and never in a cookie or in storage. It arrives once, from the Model
+Gateway console's Manage action, and lasts its hour; a tab that opens the
+address directly, or outlives its bearer, shows a sign-in screen that sends
+the reader back through the console. A machine on static tokens
+(`TIDEBREAK_AUTH_TOKENS_FILE`) has no browser sign-in: the page says so, and
+the desktop app remains the client for it.
+
+Everything that reaches the reader's own computer — connected folders, tool
+calls on the local machine, saving files locally, computer use — is
+unavailable in a browser tab, as it is for any remote attachment.
+
+To run the image without pages, unset `TIDEBREAK_UI_DIST`.
 
 ## Putting it behind a reverse proxy
 
