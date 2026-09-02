@@ -67,7 +67,9 @@ describe("PortableConfigSection", () => {
       file,
     );
 
-    expect(await screen.findByText("Conflicts with an existing record.")).toBeVisible();
+    expect(
+      await screen.findByText("Conflicts with an existing record."),
+    ).toBeVisible();
     expect(screen.getByText(/Differing: command/)).toBeVisible();
     expect(screen.getByLabelText("Remap command for docs")).toBeVisible();
 

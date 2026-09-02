@@ -21,7 +21,11 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { friendlyErrorMessage } from "@/lib/utils";
-import { hasNativeHost, pickWorkspaceConfig, saveWorkspaceConfig } from "@/host";
+import {
+  hasNativeHost,
+  pickWorkspaceConfig,
+  saveWorkspaceConfig,
+} from "@/host";
 import { SettingsError, SettingsSection } from "./primitives";
 
 type ConfigClient = Pick<
@@ -216,7 +220,10 @@ export function PortableConfigSection({ client }: { client: ConfigClient }) {
             </DialogDescription>
           </DialogHeader>
           {preview && (
-            <ul className="flex max-h-80 flex-col gap-3 overflow-auto" aria-label="Import preview">
+            <ul
+              className="flex max-h-80 flex-col gap-3 overflow-auto"
+              aria-label="Import preview"
+            >
               {preview.entries.map((entry) => (
                 <PreviewRow
                   key={entryKey(entry)}
@@ -286,9 +293,9 @@ function PreviewRow({
       <p className="text-sm font-medium">{entry.key}</p>
       <p className="text-xs text-muted-foreground">
         {statusCopy(entry)}
-        {entry.differing_fields && entry.differing_fields.length > 0
-          ? ` Differing: ${entry.differing_fields.join(", ")}.`
-          : ""}
+        {entry.differing_fields && entry.differing_fields.length > 0 ? (
+          <span> Differing: {entry.differing_fields.join(", ")}.</span>
+        ) : null}
       </p>
       <div className="mt-2 flex flex-wrap gap-2">
         {(["skip", "add", "replace"] as const).map((choice) => (

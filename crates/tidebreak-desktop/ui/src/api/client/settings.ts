@@ -281,9 +281,7 @@ export function withSettingsApi<TBase extends Constructor<HttpCore>>(
       return this.json("/workspace-config", { headers: this.headers() });
     }
 
-    previewWorkspaceConfig(
-      document: unknown,
-    ): Promise<WorkspaceConfigPreview> {
+    previewWorkspaceConfig(document: unknown): Promise<WorkspaceConfigPreview> {
       return this.json("/workspace-config/preview", {
         method: "POST",
         headers: this.headers(true),
