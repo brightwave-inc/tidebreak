@@ -1938,7 +1938,7 @@ async fn continue_parked_turn(
     .await
     .map_err(|err| WorkerError::Failed(err.to_string()))?;
 
-    let mut next_resume: Option<(String, tidebreak_harness::ResumeInput)> = None;
+    let mut next_resume: Option<(String, tidebreak_harness::ResumeInput)>;
     let mut pid_changes = engine.child_pid_changes();
     let mut controls: FuturesUnordered<BoxFuture<'_, ControlFlow>> = FuturesUnordered::new();
     let mut interrupted = false;
@@ -1947,6 +1947,9 @@ async fn continue_parked_turn(
         Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     match await_park_resolution(
         engine,
+        db,
+        bus,
+        session,
         commands,
         &mut controls,
         &mut interrupted,
@@ -1957,8 +1960,13 @@ async fn continue_parked_turn(
     )
     .await
     {
-        Some(input) => {
-            apply_accepted_plan_mode(db, bus, session, engine, &input).await;
+        Some(ParkResolution {
+            input,
+            delivered_here,
+        }) => {
+            if delivered_here {
+                apply_accepted_plan_mode(db, bus, session, engine, &input).await;
+            }
             turn.status = CodeTurnStatus::Running;
             turn.park_ref = None;
             turn.park_wait = None;
@@ -2037,6 +2045,9 @@ async fn continue_parked_turn(
         };
         match await_park_resolution(
             engine,
+            db,
+            bus,
+            session,
             commands,
             &mut controls,
             &mut interrupted,
@@ -2047,8 +2058,13 @@ async fn continue_parked_turn(
         )
         .await
         {
-            Some(input) => {
-                apply_accepted_plan_mode(db, bus, session, engine, &input).await;
+            Some(ParkResolution {
+                input,
+                delivered_here,
+            }) => {
+                if delivered_here {
+                    apply_accepted_plan_mode(db, bus, session, engine, &input).await;
+                }
                 turn.status = CodeTurnStatus::Running;
                 turn.park_ref = None;
                 turn.park_wait = None;

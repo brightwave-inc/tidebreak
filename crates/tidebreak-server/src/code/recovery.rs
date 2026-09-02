@@ -365,11 +365,11 @@ async fn dead_worker_action(
         match tidebreak_core::db::code::get_open_turn(store, &session.owner, session.id).await? {
             Some(turn) if turn.status == tidebreak_core::CodeTurnStatus::Waiting => {
                 RecoveryAction::ReattachedPark {
-                    session: recovered.session.id.to_string(),
+                    session: recovered.id.to_string(),
                 }
             }
             _ => RecoveryAction::Interrupted {
-                session: recovered.session.id.to_string(),
+                session: recovered.id.to_string(),
             },
         };
     Ok(Some(action))
@@ -1304,7 +1304,7 @@ mod tests {
         assert_eq!(probe_recorded_pid(0), PidLiveness::Dead);
     }
 
-    async fn park_waiting_turn(store: &DbStore, session_id: CodeSessionId, turn_id: CodeTurnId) {
+    async fn park_waiting_turn(store: &DbStore, turn_id: CodeTurnId) {
         let owner = tidebreak_core::OwnerId::local();
         let mut turn = get_turn(store, &owner, turn_id).await.unwrap().unwrap();
         turn.status = CodeTurnStatus::Waiting;
@@ -1318,7 +1318,7 @@ mod tests {
     #[tokio::test]
     async fn recovery_interrupts_a_waiting_turn_without_durable_parks() {
         let (_dir, store, session_id, turn_id) = seeded_running(None).await;
-        park_waiting_turn(&store, session_id, turn_id).await;
+        park_waiting_turn(&store, turn_id).await;
         let bus = crate::code::bus::CodeEventBus::default();
         let actions = recover_running_sessions_with(&store, &bus, |_, _| PidLiveness::Dead)
             .await
@@ -1351,7 +1351,7 @@ mod tests {
     #[tokio::test]
     async fn recovery_resumes_a_parked_turn_after_a_worker_restart() {
         let (directory, store, session_id, turn_id) = seeded_running(None).await;
-        park_waiting_turn(&store, session_id, turn_id).await;
+        park_waiting_turn(&store, turn_id).await;
         let approval_id = seed_pending_approval(&store, session_id, turn_id).await;
         let bus = crate::code::bus::CodeEventBus::default();
         let actions = recover_running_sessions_with_caps(

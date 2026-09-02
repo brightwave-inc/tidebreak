@@ -1470,6 +1470,7 @@ async fn durable_park_recovery_leaves_a_waiting_turn_open() {
             feedback: None,
             requested_at: now(),
             decided_at: None,
+            auto_judge_status: None,
         },
     )
     .await

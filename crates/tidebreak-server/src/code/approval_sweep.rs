@@ -18,9 +18,7 @@ use tidebreak_core::db::code::{
     abandon_pending_approval, abandon_pending_approvals_for_stopped_session, get_session,
     list_approvals, list_turns,
 };
-use tidebreak_core::{
-    CodeApproval, CodeApprovalState, CodeSessionId, CodeTurnStatus, DbStore, OwnerId,
-};
+use tidebreak_core::{CodeApproval, CodeApprovalState, CodeSessionId, DbStore, OwnerId};
 
 use super::bus::CodeEventBus;
 
