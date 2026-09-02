@@ -191,17 +191,6 @@ function mcpHintForPreview(draft: Draft, err: unknown): string | null {
   if (mcpUrlHint(draft)) {
     return "This looks like an MCP HTTP endpoint, not an OpenAPI document. Add it under Settings → MCP servers as a remote HTTP server.";
   }
-  if (!(err instanceof HttpError) || err.kind !== "openapi_ingest") {
-    return null;
-  }
-  const text = err.message.toLowerCase();
-  if (
-    text.includes("openapi") ||
-    text.includes("not a json object") ||
-    text.includes("json")
-  ) {
-    return "The fetched document is not an OpenAPI spec. If this URL is an MCP HTTP endpoint, add it under Settings → MCP servers as a remote HTTP server.";
-  }
   return null;
 }
 

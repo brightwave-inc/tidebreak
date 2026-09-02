@@ -1097,11 +1097,7 @@ pub(crate) async fn fetch_spec_document(
     url: &str,
     allow_loopback_http: bool,
 ) -> Result<Vec<u8>, SpecFetchError> {
-    fetch_spec_document_detailed(
-        url,
-        SpecRedirectPolicy::FollowAdmitted,
-        allow_loopback_http,
-    )
+    fetch_spec_document_detailed(url, SpecRedirectPolicy::FollowAdmitted, allow_loopback_http)
         .await
         .map(|fetched| fetched.body)
 }
