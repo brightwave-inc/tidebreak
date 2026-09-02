@@ -334,7 +334,6 @@ async fn memory_sweep_status_serves_the_recorded_last_run() {
     assert_eq!(after["last_run"]["scope"]["kind"], json!("personal"));
 }
 
-
 // ---------------------------------------------------------------------------
 // Work-mode injection, the explicit tool, and post-turn capture (#2554).
 // ---------------------------------------------------------------------------
