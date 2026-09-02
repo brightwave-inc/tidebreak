@@ -26,6 +26,9 @@ use crate::mcp_curated::McpCuration;
 use crate::openapi_catalog::{
     enumerate_openapi_operations, ingest_openapi_document, sha256_hex, MAX_OPENAPI_DOCUMENT_BYTES,
 };
+use crate::openapi_discovery::{
+    discover_openapi_documents, SpecDiscoveryError, SpecDiscoveryInfo, SpecDiscoveryRequest,
+};
 use crate::principal::AuthContext;
 use crate::providers::managed_profile_refusal;
 use crate::rest_executor::{
@@ -485,6 +488,34 @@ pub async fn post_rest_spec_preview(
         unlistable: inventory.unlistable,
         truncated: inventory.truncated,
     }))
+}
+
+/// `POST /connected-apps/rest/spec-discovery` — probe well-known OpenAPI
+/// document locations relative to one https origin or base URL.
+///
+/// Refused on managed profiles like the preview: this surface exists only to
+/// configure local REST records, and it performs egress.
+pub async fn post_rest_spec_discovery(
+    State(state): State<AppState>,
+    Json(body): Json<SpecDiscoveryRequest>,
+) -> Result<Json<SpecDiscoveryInfo>, ServerError> {
+    let policy = state.managed_policy()?;
+    if policy.managed {
+        return Err(managed_profile_refusal(
+            "REST connected apps are managed by your organization's gateway",
+        ));
+    }
+    discover_openapi_documents(&body.origin)
+        .await
+        .map(Json)
+        .map_err(|error| match error {
+            SpecDiscoveryError::DeniedAddress => {
+                ServerError::bad_request_kind("spec_fetch", error.to_string())
+            }
+            SpecDiscoveryError::InadmissibleUrl { .. } => {
+                ServerError::bad_request_kind("spec_fetch", error.to_string())
+            }
+        })
 }
 
 /// Every stored `rest_api` record, in storage order.

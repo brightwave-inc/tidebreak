@@ -28,6 +28,8 @@ import {
   type RestCredentialStatus as WireRestCredentialStatus,
   type SpecPreviewInfo as WireSpecPreviewInfo,
   type SpecPreviewOperation as WireSpecPreviewOperation,
+  type SpecDiscoveryInfo as WireSpecDiscoveryInfo,
+  type SpecDiscoveryCandidate as WireSpecDiscoveryCandidate,
   type ExecCredentialReadiness as WireExecCredentialReadiness,
   type ExecProviderKind as WireExecProviderKind,
   type CodeDeliveryActionResult as WireCodeDeliveryActionResult,
@@ -552,6 +554,8 @@ export type ConnectedAppInfo = WireConnectedAppInfo;
 export type RestCredentialStatus = WireRestCredentialStatus;
 export type SpecPreviewInfo = WireSpecPreviewInfo;
 export type SpecPreviewOperation = WireSpecPreviewOperation;
+export type SpecDiscoveryInfo = WireSpecDiscoveryInfo;
+export type SpecDiscoveryCandidate = WireSpecDiscoveryCandidate;
 /** Where a stored REST credential is injected: `"bearer"` or a named header. */
 export type CredentialPlacement = WireCredentialPlacement;
 

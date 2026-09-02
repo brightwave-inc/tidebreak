@@ -428,6 +428,7 @@ mod tests {
         // The spec-preview response: what a document declares, for the REST
         // form's operation picker.
         generate::collect_from::<crate::routes::SpecPreviewInfo>(&cfg, &mut out);
+        generate::collect_from::<crate::openapi_discovery::SpecDiscoveryInfo>(&cfg, &mut out);
         // Named separately because `serde(flatten)` inlines it into
         // `McpServerInfo` rather than referencing it, so the walk never reaches
         // it — and the renderer uses it on its own as the PUT body shape.

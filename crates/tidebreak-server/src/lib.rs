@@ -65,6 +65,8 @@ mod obo_gateway;
 /// OpenAPI ingest into the bounded operation catalog a `rest_api` connected
 /// app stores and the governed REST executor validates against.
 pub mod openapi_catalog;
+/// Probe well-known OpenAPI document locations for a REST origin.
+pub(crate) mod openapi_discovery;
 /// Reading a conversation output's immutable revision bytes out of private
 /// scratch — shared by the HTTP routes and the desktop's native save dialog.
 pub mod output_files;
@@ -491,6 +493,10 @@ pub fn app(state: AppState) -> Router {
             post(routes::post_rest_spec_preview).layer(DefaultBodyLimit::max(
                 routes::MAX_REST_CONNECTED_APP_BODY_BYTES,
             )),
+        )
+        .route(
+            "/connected-apps/rest/spec-discovery",
+            post(routes::post_rest_spec_discovery),
         )
         .route("/gateway/sign-in", post(routes::post_gateway_sign_in))
         .route("/gateway/sign-out", post(routes::post_gateway_sign_out))

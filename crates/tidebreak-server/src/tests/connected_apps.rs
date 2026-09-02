@@ -655,6 +655,117 @@ async fn managed_profiles_refuse_rest_upserts_but_allow_delete() {
     assert!(state.store.list_connected_apps().await.unwrap().is_empty());
 }
 
+async fn post_discovery(router: &Router, bearer: &str, origin: &str) -> axum::response::Response {
+    router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/connected-apps/rest/spec-discovery")
+                .header("authorization", bearer)
+                .header("content-type", "application/json")
+                .body(Body::from(json!({ "origin": origin }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+/// Local mock origin: 200 at `ok_path`, 404 elsewhere. Hits still go through
+/// `fetch_spec_document_detailed` admission; the body is served in-process
+/// because this environment cannot accept loopback TCP.
+async fn discovery_mock_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await
+}
+
+fn install_mock_origin(ok_path: &'static str, body: Vec<u8>, content_type: &'static str) {
+    crate::rest_executor::spec_fetch_mock::install(std::sync::Arc::new(move |url: &str| {
+        let path = reqwest::Url::parse(url)
+            .ok()
+            .map(|parsed| parsed.path().to_owned())
+            .unwrap_or_default();
+        if path == ok_path {
+            Ok(crate::rest_executor::FetchedSpecDocument {
+                body: body.clone(),
+                content_type: Some(content_type.to_owned()),
+            })
+        } else {
+            Err(crate::rest_executor::SpecFetchError::HttpStatus { status: 404 })
+        }
+    }));
+}
+
+#[tokio::test]
+async fn spec_discovery_finds_a_well_known_document() {
+    let _guard = discovery_mock_lock().await;
+    let spec = issues_spec();
+    install_mock_origin("/openapi.json", spec.into_bytes(), "application/json");
+    let origin = "https://api.example.com";
+    let (router, bearer, _state, _dir) = connected_apps_test_app().await;
+    let response = post_discovery(&router, &bearer, origin).await;
+    crate::rest_executor::spec_fetch_mock::clear();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_str(&raw_body(response).await).unwrap();
+    let tried = body["tried"].as_array().expect("tried list");
+    assert!(
+        tried
+            .iter()
+            .any(|url| url.as_str().unwrap().ends_with("/openapi.json")),
+        "{tried:?}"
+    );
+    assert!(tried.len() >= crate::openapi_discovery::WELL_KNOWN_OPENAPI_PATHS.len());
+    let candidates = body["candidates"].as_array().expect("candidates");
+    let hit = candidates
+        .iter()
+        .find(|c| c["url"].as_str().unwrap().ends_with("/openapi.json"))
+        .expect("openapi.json candidate");
+    assert_eq!(hit["operation_count"], json!(2));
+    assert!(hit["unsupported_reason"].is_null());
+}
+
+#[tokio::test]
+async fn spec_discovery_reports_yaml_as_unsupported() {
+    let _guard = discovery_mock_lock().await;
+    let yaml = "openapi: 3.0.3\ninfo:\n  title: Issues\n  version: '1'\npaths: {}\n";
+    install_mock_origin(
+        "/openapi.yaml",
+        yaml.to_string().into_bytes(),
+        "application/yaml",
+    );
+    let (router, bearer, _state, _dir) = connected_apps_test_app().await;
+    let response = post_discovery(&router, &bearer, "https://api.example.com").await;
+    crate::rest_executor::spec_fetch_mock::clear();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_str(&raw_body(response).await).unwrap();
+    let hit = body["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["url"].as_str().unwrap().ends_with("/openapi.yaml"))
+        .expect("yaml candidate");
+    assert!(hit["operation_count"].is_null());
+    assert!(
+        hit["unsupported_reason"].as_str().unwrap().contains("YAML"),
+        "{hit}"
+    );
+}
+
+#[tokio::test]
+async fn spec_discovery_refuses_a_denied_address() {
+    let (router, bearer, _state, _dir) = connected_apps_test_app().await;
+    let response = post_discovery(&router, &bearer, "https://127.0.0.1").await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = serde_json::from_str(&raw_body(response).await).unwrap();
+    assert_eq!(body["kind"], json!("spec_fetch"));
+    assert!(
+        body["message"].as_str().unwrap().contains("denied"),
+        "{body}"
+    );
+}
+
 /// A local app with one `rest_api` binding, created straight through the
 /// store so grant tests don't route through the authoring surface.
 fn bound_app(name: &str, connected: ConnectedAppId) -> CreateApp {

@@ -31,6 +31,29 @@ Two kinds initially:
   leaves the secret store except inside the executor at request time.
   Credential-less entries (public APIs) are allowed and still governed.
 
+## Finding the OpenAPI document
+
+The REST setup form does not assume you already have the document URL.
+Enter the API's https base URL and use **Find the OpenAPI document**. The
+server probes a fixed list of well-known paths on that origin (`/openapi.json`,
+`/swagger.json`, `/v3/api-docs`, and similar), with the same https, SSRF,
+size, and time bounds as a document fetch. Choose a candidate to fill the
+document URL and list operations.
+
+If nothing turns up:
+
+1. Check the vendor's developer portal for an OpenAPI, Swagger, or API
+   reference download link, and paste that URL.
+2. If they publish no document, author a minimal OpenAPI 3 JSON listing
+   only the operations you need (one GET with a path parameter is enough
+   to ingest) and paste it.
+3. If they offer an MCP server instead, add it under Settings → MCP
+   servers.
+
+YAML, Swagger 2.0, and HTML documentation pages are reported as found but
+unusable; convert to OpenAPI 3 JSON. Discovery does not search the web or
+ask a model.
+
 The vocabulary matches the model gateway's (`connected_apps` with an
 `app_kind` including both REST and MCP kinds) deliberately: a managed
 profile's gateway-served apps and an unmanaged profile's local ones read as

@@ -572,17 +572,20 @@ pub(crate) fn admit_base_url(base_url: &str) -> Result<Url, RestExecuteError> {
 /// configuration that cannot mean anything; a document URL legitimately needs
 /// one (`?format=json`, versioned exports).
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum UrlQueryPolicy {
+pub(crate) enum UrlQueryPolicy {
     Refuse,
     Allow,
 }
 
-enum UrlAdmissionRefusal {
+pub(crate) enum UrlAdmissionRefusal {
     Reason(&'static str),
     DeniedAddress,
 }
 
-fn admit_https_url(url: &str, query: UrlQueryPolicy) -> Result<Url, UrlAdmissionRefusal> {
+pub(crate) fn admit_https_url(
+    url: &str,
+    query: UrlQueryPolicy,
+) -> Result<Url, UrlAdmissionRefusal> {
     let refuse = |reason| Err(UrlAdmissionRefusal::Reason(reason));
     if url.len() > MAX_REST_BASE_URL_BYTES {
         return refuse("URL exceeds the byte limit");
@@ -992,6 +995,25 @@ pub enum SpecFetchError {
     Timeout,
     #[error("fetch transport failed: {0}")]
     Transport(String),
+    #[error("a redirect left the original origin")]
+    CrossOriginRedirect,
+}
+
+/// Body and declared media type of a fetched OpenAPI document.
+#[derive(Debug)]
+pub(crate) struct FetchedSpecDocument {
+    pub body: Vec<u8>,
+    pub content_type: Option<String>,
+}
+
+/// Whether a spec fetch may follow a redirect onto another origin.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SpecRedirectPolicy {
+    /// Follow admitted hops, including a new origin (preview / upsert).
+    FollowAdmitted,
+    /// Stay on the original origin. Discovery uses this so a well-known
+    /// path cannot be turned into a cross-origin fetch.
+    SameOrigin,
 }
 
 /// Fetch an OpenAPI document from an operator-supplied URL, at configuration
@@ -1004,14 +1026,65 @@ pub enum SpecFetchError {
 /// time, so every `Location` gets the same vetting as the original URL and no
 /// credential is ever attached to any hop.
 pub(crate) async fn fetch_spec_document(url: &str) -> Result<Vec<u8>, SpecFetchError> {
+    fetch_spec_document_detailed(url, SpecRedirectPolicy::FollowAdmitted)
+        .await
+        .map(|fetched| fetched.body)
+}
+
+/// Fetch a document the way [`fetch_spec_document`] does, keeping the
+/// declared content type so discovery can tell JSON from HTML or YAML.
+#[cfg(test)]
+pub(crate) mod spec_fetch_mock {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    type MockFn = Arc<dyn Fn(&str) -> Result<FetchedSpecDocument, SpecFetchError> + Send + Sync>;
+
+    static MOCK: OnceLock<Mutex<Option<MockFn>>> = OnceLock::new();
+
+    fn slot() -> &'static Mutex<Option<MockFn>> {
+        MOCK.get_or_init(|| Mutex::new(None))
+    }
+
+    pub(crate) fn install(mock: MockFn) {
+        *slot().lock().expect("spec fetch mock") = Some(mock);
+    }
+
+    pub(crate) fn clear() {
+        *slot().lock().expect("spec fetch mock") = None;
+    }
+
+    pub(crate) fn try_fetch(url: &str) -> Option<Result<FetchedSpecDocument, SpecFetchError>> {
+        slot()
+            .lock()
+            .expect("spec fetch mock")
+            .as_ref()
+            .map(|mock| mock(url))
+    }
+}
+
+pub(crate) async fn fetch_spec_document_detailed(
+    url: &str,
+    redirects: SpecRedirectPolicy,
+) -> Result<FetchedSpecDocument, SpecFetchError> {
     let started = std::time::Instant::now();
     let mut current = url.to_string();
+    let origin = admit_spec_fetch_url(&current)?;
+    #[cfg(test)]
+    if let Some(mocked) = spec_fetch_mock::try_fetch(&current) {
+        let _ = redirects;
+        let _ = origin;
+        return mocked;
+    }
     for _ in 0..=MAX_SPEC_FETCH_REDIRECTS {
-        let admitted =
-            admit_https_url(&current, UrlQueryPolicy::Allow).map_err(|refusal| match refusal {
-                UrlAdmissionRefusal::Reason(reason) => SpecFetchError::InadmissibleUrl { reason },
-                UrlAdmissionRefusal::DeniedAddress => SpecFetchError::DeniedAddress,
-            })?;
+        let admitted = admit_spec_fetch_url(&current)?;
+        if redirects == SpecRedirectPolicy::SameOrigin
+            && (admitted.scheme() != origin.scheme()
+                || admitted.host() != origin.host()
+                || admitted.port_or_known_default() != origin.port_or_known_default())
+        {
+            return Err(SpecFetchError::CrossOriginRedirect);
+        }
         let remaining = SPEC_FETCH_TIMEOUT
             .checked_sub(started.elapsed())
             .ok_or(SpecFetchError::Timeout)?;
@@ -1040,17 +1113,22 @@ pub(crate) async fn fetch_spec_document(url: &str) -> Result<Vec<u8>, SpecFetchE
             None => Vec::new(),
         };
 
+        let https_only = admitted.scheme() != "http";
         let mut builder = reqwest::Client::builder()
             // Load-bearing for the same reason as the operation transport: a
             // discovered proxy would dial the proxy, not the vetted address.
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
-            .https_only(true)
+            .https_only(https_only)
+            .http1_only()
             .user_agent(REST_EXECUTOR_USER_AGENT)
             .connect_timeout(remaining.min(Duration::from_secs(10)))
             .timeout(remaining);
         if let Some(domain) = admitted.domain() {
-            let port = admitted.port_or_known_default().unwrap_or(443);
+            let port =
+                admitted
+                    .port_or_known_default()
+                    .unwrap_or(if https_only { 443 } else { 80 });
             let pinned: Vec<std::net::SocketAddr> = addresses
                 .iter()
                 .map(|address| std::net::SocketAddr::new(*address, port))
@@ -1060,7 +1138,10 @@ pub(crate) async fn fetch_spec_document(url: &str) -> Result<Vec<u8>, SpecFetchE
         let client = builder.build().map_err(spec_transport_failure)?;
         let response = client
             .get(admitted.clone())
-            .header(reqwest::header::ACCEPT, "application/json")
+            .header(
+                reqwest::header::ACCEPT,
+                "application/json, application/yaml, text/yaml;q=0.8",
+            )
             .send()
             .await
             .map_err(spec_transport_failure)?;
@@ -1073,6 +1154,13 @@ pub(crate) async fn fetch_spec_document(url: &str) -> Result<Vec<u8>, SpecFetchE
                 .and_then(|value| value.to_str().ok())
                 .and_then(|location| admitted.join(location).ok())
                 .ok_or(SpecFetchError::MalformedRedirect)?;
+            if redirects == SpecRedirectPolicy::SameOrigin
+                && (location.scheme() != origin.scheme()
+                    || location.host() != origin.host()
+                    || location.port_or_known_default() != origin.port_or_known_default())
+            {
+                return Err(SpecFetchError::CrossOriginRedirect);
+            }
             current = location.to_string();
             continue;
         }
@@ -1081,6 +1169,12 @@ pub(crate) async fn fetch_spec_document(url: &str) -> Result<Vec<u8>, SpecFetchE
                 status: status.as_u16(),
             });
         }
+
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
 
         let cap = crate::openapi_catalog::MAX_OPENAPI_DOCUMENT_BYTES;
         if response
@@ -1099,9 +1193,27 @@ pub(crate) async fn fetch_spec_document(url: &str) -> Result<Vec<u8>, SpecFetchE
             }
             body.extend_from_slice(&chunk);
         }
-        return Ok(body);
+        return Ok(FetchedSpecDocument { body, content_type });
     }
     Err(SpecFetchError::TooManyRedirects)
+}
+
+/// Admit a document URL. Tests may fetch `http://127.0.0.1` so a local mock
+/// server can stand in for a vendor origin; production still requires https
+/// and the denied-network list.
+fn admit_spec_fetch_url(url: &str) -> Result<Url, SpecFetchError> {
+    if cfg!(test) {
+        if let Ok(parsed) = Url::parse(url) {
+            let loopback = matches!(parsed.host_str(), Some("127.0.0.1") | Some("[::1]"));
+            if parsed.scheme() == "http" && loopback {
+                return Ok(parsed);
+            }
+        }
+    }
+    admit_https_url(url, UrlQueryPolicy::Allow).map_err(|refusal| match refusal {
+        UrlAdmissionRefusal::Reason(reason) => SpecFetchError::InadmissibleUrl { reason },
+        UrlAdmissionRefusal::DeniedAddress => SpecFetchError::DeniedAddress,
+    })
 }
 
 /// Map a spec-fetch transport failure, URL-stripped, timeout told apart.

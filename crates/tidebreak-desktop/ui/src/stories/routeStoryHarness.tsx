@@ -569,6 +569,7 @@ type RouteClientMethods = Pick<
   | "listConnectedApps"
   | "putRestConnectedApp"
   | "previewRestSpec"
+  | "discoverRestSpec"
   | "deleteRestConnectedApp"
   | "listMcpServers"
   | "putMcpServers"
@@ -716,6 +717,13 @@ export function storyClient(
       operations: [],
       unlistable: 0,
       truncated: false,
+    }),
+    discoverRestSpec: async () => ({
+      candidates: [],
+      tried: [
+        "https://api.example.com/openapi.json",
+        "https://api.example.com/swagger.json",
+      ],
     }),
     deleteRestConnectedApp: async () => {},
     listMcpServers: async () => ({ servers: [routeMcpServer] }),

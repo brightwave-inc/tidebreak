@@ -15,8 +15,15 @@ import {
   type ConnectedAppInfo,
   type CredentialPlacement,
   type RestCredentialUpdate,
+  type SpecDiscoveryInfo,
   type SpecPreviewInfo,
 } from "../api";
+import {
+  DiscoveryResults,
+  ingestErrorGuidance,
+  MINIMAL_OPENAPI_EXAMPLE,
+  NoPublicDocumentGuidance,
+} from "./OpenApiDiscovery";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -57,6 +64,7 @@ type Draft = {
    * whenever the source it came from changes, so a stale selection can never
    * outlive the document it was made against. */
   preview: SpecPreviewInfo | null;
+  discovery: SpecDiscoveryInfo | null;
   /** Selected operationIds; the saved catalog is exactly this set. */
   selected: string[];
   mode: CredentialMode;
@@ -78,6 +86,7 @@ function draftFor(existing: RestEntry | null): Draft {
     documentUrl: "",
     document: "",
     preview: null,
+    discovery: null,
     selected: [],
     mode:
       placement === null
@@ -125,13 +134,14 @@ function credentialLabel(entry: RestEntry): string {
 }
 
 function errorMessage(err: unknown): string {
+  let raw = err instanceof Error ? err.message : String(err);
   if (err instanceof HttpError) {
     const prefix = `${err.status}: `;
-    if (err.message.startsWith(prefix)) {
-      return err.message.slice(prefix.length);
+    if (raw.startsWith(prefix)) {
+      raw = raw.slice(prefix.length);
     }
   }
-  return err instanceof Error ? err.message : String(err);
+  return ingestErrorGuidance(raw);
 }
 
 /** The name an app entry leads with. A gateway-backed record shows the
@@ -408,6 +418,7 @@ export function ConnectedAppsPanel({
   const [formError, setFormError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [previewing, setPreviewing] = useState(false);
+  const [discovering, setDiscovering] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [reconnecting, setReconnecting] = useState<string | null>(null);
 
@@ -435,6 +446,62 @@ export function ConnectedAppsPanel({
     setDraft((current) =>
       current === null ? null : { ...current, ...change },
     );
+  }
+
+  async function findOpenApiDocument() {
+    if (draft === null) return;
+    const origin = draft.baseUrl.trim();
+    if (origin === "") {
+      setFormError("Enter the base URL first, then find the OpenAPI document.");
+      return;
+    }
+    setDiscovering(true);
+    setFormError(null);
+    try {
+      const discovery = await client.discoverRestSpec(origin);
+      update({ discovery });
+      const usable = discovery.candidates.find(
+        (candidate) => candidate.operation_count != null,
+      );
+      if (usable) {
+        toast.success("Found an OpenAPI document.");
+      } else {
+        toast.message("No OpenAPI document at the usual locations.");
+      }
+    } catch (err) {
+      setFormError(errorMessage(err));
+      toast.error(errorMessage(err));
+    } finally {
+      setDiscovering(false);
+    }
+  }
+
+  async function chooseDiscovered(url: string) {
+    update({
+      source: "url",
+      documentUrl: url,
+      preview: null,
+      selected: [],
+    });
+    setPreviewing(true);
+    setFormError(null);
+    try {
+      const preview = await client.previewRestSpec({ url });
+      update({
+        source: "url",
+        documentUrl: url,
+        preview,
+        selected: defaultSelection(preview),
+      });
+      toast.success(
+        `Found ${preview.operations.length} operation${preview.operations.length === 1 ? "" : "s"}`,
+      );
+    } catch (err) {
+      setFormError(errorMessage(err));
+      toast.error(errorMessage(err));
+    } finally {
+      setPreviewing(false);
+    }
   }
 
   /** Enumerate the draft's document (URL or pasted) into the picker. */
@@ -666,15 +733,43 @@ export function ConnectedAppsPanel({
         label="Base URL"
         hint="https only; operation paths from the document append to it."
       >
-        <Input
-          value={draft.baseUrl}
-          disabled={saving}
-          autoComplete="off"
-          spellCheck={false}
-          placeholder="https://api.example.com/v2"
-          onChange={(event) => update({ baseUrl: event.target.value })}
-        />
+        <div className="flex gap-2">
+          <Input
+            value={draft.baseUrl}
+            disabled={saving || discovering}
+            autoComplete="off"
+            spellCheck={false}
+            placeholder="https://api.example.com/v2"
+            onChange={(event) =>
+              update({ baseUrl: event.target.value, discovery: null })
+            }
+          />
+          <Button
+            type="button"
+            variant="outline"
+            disabled={saving || discovering || previewing}
+            onClick={() => void findOpenApiDocument()}
+          >
+            {discovering && <Loader2 size={14} className="animate-spin" />}
+            {discovering ? "Searching…" : "Find the OpenAPI document"}
+          </Button>
+        </div>
       </SettingsField>
+      <DiscoveryResults
+        discovery={draft.discovery}
+        discovering={discovering}
+        onChoose={(url) => void chooseDiscovered(url)}
+      />
+      <NoPublicDocumentGuidance
+        onPasteExample={() =>
+          update({
+            source: "paste",
+            document: MINIMAL_OPENAPI_EXAMPLE,
+            preview: null,
+            selected: [],
+          })
+        }
+      />
       <div className="flex flex-col gap-1.5">
         <p className="font-bold">OpenAPI document</p>
         <p className="text-sm text-muted-foreground">
@@ -693,6 +788,7 @@ export function ConnectedAppsPanel({
             update({
               source: source as DocumentSource,
               preview: null,
+              discovery: source === "url" ? draft.discovery : null,
               selected: [],
             })
           }
