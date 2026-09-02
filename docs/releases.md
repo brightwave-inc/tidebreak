@@ -57,29 +57,30 @@ User-facing PRs also receive a managed release-note label derived from the same
 validated title. These labels make the native release notes easier to scan
 without asking authors to classify a PR twice:
 
-| Title type | Release-notes section       |
-| ---------- | --------------------------- |
-| `feat`     | New Features                |
-| `fix`      | Bug Fixes                   |
-| `perf`     | Performance Improvements    |
-| `deps`     | Dependency Updates          |
-| `revert`   | Reverted Changes            |
-| Any `!`    | Breaking Changes            |
+| Title type | Release-notes section          |
+| ---------- | ------------------------------ |
+| `feat`     | ✨ New Features                |
+| `fix`      | 🐛 Bug Fixes                   |
+| `perf`     | ⚡ Performance Improvements    |
+| `deps`     | 📦 Dependency Updates          |
+| `revert`   | ⏪ Reverted Changes            |
+| Any `!`    | 💥 Breaking Changes            |
 
 Documentation and other maintenance-only types carry no `release-note:*` label
-and appear in a trailing **Maintenance** section instead — listed, not dropped,
+and appear in a trailing **🧰 Maintenance** section instead — listed, not dropped,
 because a maintenance change can still matter to someone updating (a schema
 baseline rebuild, a toolchain requirement). Every merged PR is accounted for in
-the notes. The rendered notes open with a short thank-you. A large **What's
-Changed** heading introduces level-two release sections, and repeated scopes
-use level-three headings. The section heading supplies the type, so the draft
-formatter removes the redundant Conventional Commit prefix from each PR title.
-Maintenance entries
+the notes. The rendered notes open with a thank-you. Category headings carry a
+leading emoji so the sections scan quickly, and the draft does not wrap them in
+a page-level heading; the release title is the tag. First-time contributors get
+their own section, and the notes end with a compare link to the previous tag.
+The section heading supplies the type, so the draft formatter removes the
+redundant Conventional Commit prefix from each PR title. Maintenance entries
 keep their full prefixes: that section mixes types, so the prefix is the
 information. When a category has
 multiple user-facing changes with the same scope, the formatter groups them
 under a third-level heading: for example, multiple `feat(desktop)` changes are
-rendered under **New Features**, then **Desktop**. A singleton scope is kept
+rendered under **✨ New Features**, then **Desktop**. A singleton scope is kept
 compact as an inline prefix, and unscoped changes appear in the flat tail of the
 section.
 

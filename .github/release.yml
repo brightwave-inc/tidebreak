@@ -2,30 +2,30 @@
 # Keep these categories aligned with release-drafter.yml.
 changelog:
   categories:
-    - title: "Breaking Changes"
+    - title: "💥 Breaking Changes"
       labels:
         - "semver:breaking"
-    - title: "New Features"
+    - title: "✨ New Features"
       labels:
         - "release-note:feature"
-    - title: "Bug Fixes"
+    - title: "🐛 Bug Fixes"
       labels:
         - "release-note:fix"
-    - title: "Performance Improvements"
+    - title: "⚡ Performance Improvements"
       labels:
         - "release-note:performance"
-    - title: "Dependency Updates"
+    - title: "📦 Dependency Updates"
       labels:
         - "release-note:dependencies"
-    - title: "Reverted Changes"
+    - title: "⏪ Reverted Changes"
       labels:
         - "release-note:revert"
     # Maintenance changes are listed, not dropped: a refactor can rebuild the
     # local database or change build requirements, and a reader of the notes
     # must be able to account for every merged PR.
-    - title: "Maintenance"
+    - title: "🧰 Maintenance"
       labels:
         - "semver:none"
-    - title: "Other Changes"
+    - title: "📝 Other Changes"
       labels:
         - "*"

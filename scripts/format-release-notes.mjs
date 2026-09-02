@@ -4,27 +4,61 @@ import { pathToFileURL } from "node:url";
 
 import { parsePrTitle } from "./check-pr-title.mjs";
 
-const THANK_YOU = "Thanks for using Tidebreak ❤️";
+const THANK_YOU = `> ❤️ **Thanks for using Tidebreak.**
+>
+> If you filed an issue, reviewed a pull request, or shipped a change, you are in these notes.`;
 
-const CATEGORY_TITLES = new Set([
-  "Breaking Changes",
-  "New Features",
-  "Bug Fixes",
-  "Performance Improvements",
-  "Dependency Updates",
-  "Reverted Changes",
-  "Maintenance",
-  "Other Changes",
-]);
+const LEGACY_THANK_YOU = "Thanks for using Tidebreak ❤️";
 
-const SCOPED_CATEGORY_TITLES = new Set([
-  "Breaking Changes",
-  "New Features",
-  "Bug Fixes",
-  "Performance Improvements",
-  "Dependency Updates",
-  "Reverted Changes",
-]);
+const CATEGORIES = [
+  {
+    key: "Breaking Changes",
+    title: "💥 Breaking Changes",
+    scoped: true,
+  },
+  {
+    key: "New Features",
+    title: "✨ New Features",
+    scoped: true,
+  },
+  {
+    key: "Bug Fixes",
+    title: "🐛 Bug Fixes",
+    scoped: true,
+  },
+  {
+    key: "Performance Improvements",
+    title: "⚡ Performance Improvements",
+    scoped: true,
+  },
+  {
+    key: "Dependency Updates",
+    title: "📦 Dependency Updates",
+    scoped: true,
+  },
+  {
+    key: "Reverted Changes",
+    title: "⏪ Reverted Changes",
+    scoped: true,
+  },
+  {
+    key: "Maintenance",
+    title: "🧰 Maintenance",
+    scoped: false,
+  },
+  {
+    key: "Other Changes",
+    title: "📝 Other Changes",
+    scoped: false,
+  },
+];
+
+const CATEGORY_BY_KEY = new Map(
+  CATEGORIES.flatMap((category) => [
+    [category.key, category],
+    [category.title, category],
+  ]),
+);
 
 const CHANGE_LINE_PATTERN = /^- (.*?) \(\[#\d+\]\([^)]*\)\) by @\S+$/;
 
@@ -36,6 +70,18 @@ const SCOPE_ACRONYMS = new Map([
   ["ui", "UI"],
   ["ux", "UX"],
 ]);
+
+const NEW_CONTRIBUTORS_KEY = "New Contributors";
+const NEW_CONTRIBUTORS_TITLE = "🙌 New Contributors";
+const EMPTY_NEW_CONTRIBUTOR_LINES = new Set([
+  "",
+  "- No new contributors",
+  "* No new contributors",
+]);
+
+function headingKey(title) {
+  return title.replace(/^[^\p{L}\p{N}]+/u, "").trim();
+}
 
 function scopeHeading(scope) {
   return scope
@@ -120,51 +166,94 @@ function formatCategory(lines) {
   return [...formatted, ...trailingLines];
 }
 
+function stripLeadingThankYou(lines) {
+  if (lines[0] === LEGACY_THANK_YOU) {
+    lines = lines.slice(1);
+    if (lines[0] === "") lines = lines.slice(1);
+    return lines;
+  }
+
+  const thankYouLines = THANK_YOU.split("\n");
+  if (
+    thankYouLines.every((line, index) => lines[index] === line)
+  ) {
+    lines = lines.slice(thankYouLines.length);
+    if (lines[0] === "") lines = lines.slice(1);
+  }
+  return lines;
+}
+
+function dropEmptyNewContributors(lines) {
+  const headingIndex = lines.findIndex((line) => {
+    const heading = /^## (.+)$/.exec(line);
+    return heading && headingKey(heading[1]) === NEW_CONTRIBUTORS_KEY;
+  });
+  if (headingIndex === -1) return lines;
+
+  let end = headingIndex + 1;
+  while (end < lines.length && !/^## /.test(lines[end]) && !/^\*\*/.test(lines[end])) {
+    end += 1;
+  }
+  const content = lines.slice(headingIndex + 1, end);
+  if (content.every((line) => EMPTY_NEW_CONTRIBUTOR_LINES.has(line))) {
+    const before = lines.slice(0, headingIndex);
+    const after = lines.slice(end);
+    while (before.at(-1) === "") before.pop();
+    if (after[0] !== "" && after.length > 0 && before.length > 0) {
+      return [...before, "", ...after];
+    }
+    return [...before, ...after];
+  }
+
+  lines[headingIndex] = `## ${NEW_CONTRIBUTORS_TITLE}`;
+  return lines;
+}
+
 export function formatReleaseNotes(body) {
   if (typeof body !== "string") {
     throw new Error("release notes must be a string");
   }
 
-  const lines = body.split("\n");
-  if (lines[0] === THANK_YOU) {
-    lines.shift();
-    if (lines[0] === "") lines.shift();
-  }
-
+  let lines = stripLeadingThankYou(body.split("\n"));
   const formatted = [];
   for (let index = 0; index < lines.length; ) {
     if (/^#{1,2} What's Changed$/.test(lines[index])) {
-      formatted.push("# What's Changed");
       index += 1;
+      if (lines[index] === "") index += 1;
       continue;
     }
 
     const heading = /^#{2,3} (.+)$/.exec(lines[index]);
-    if (!heading || !CATEGORY_TITLES.has(heading[1])) {
+    const key = heading ? headingKey(heading[1]) : null;
+    const category = key ? CATEGORY_BY_KEY.get(key) : null;
+    if (!category) {
       formatted.push(lines[index]);
       index += 1;
       continue;
     }
 
-    formatted.push(`## ${heading[1]}`);
+    formatted.push(`## ${category.title}`);
     const categoryStart = index + 1;
     index = categoryStart;
     while (index < lines.length) {
       const nextHeading = /^#{2,3} (.+)$/.exec(lines[index]);
-      if (nextHeading && CATEGORY_TITLES.has(nextHeading[1])) break;
+      const nextKey = nextHeading ? headingKey(nextHeading[1]) : null;
+      if (nextKey && CATEGORY_BY_KEY.has(nextKey)) break;
+      if (nextKey === NEW_CONTRIBUTORS_KEY) break;
       index += 1;
     }
 
     const categoryLines = lines.slice(categoryStart, index);
     formatted.push(
-      ...(SCOPED_CATEGORY_TITLES.has(heading[1]) &&
-      !categoryLines.some((line) => /^### /.test(line))
+      ...(category.scoped && !categoryLines.some((line) => /^### /.test(line))
         ? formatCategory(categoryLines)
         : categoryLines),
     );
   }
 
-  return `${THANK_YOU}\n\n${formatted.join("\n")}`;
+  const bodyLines = dropEmptyNewContributors(formatted);
+  while (bodyLines[0] === "") bodyLines.shift();
+  return `${THANK_YOU}\n\n${bodyLines.join("\n")}`;
 }
 
 async function main() {

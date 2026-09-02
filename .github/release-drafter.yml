@@ -1,29 +1,29 @@
-name-template: "Tidebreak v$RESOLVED_VERSION"
+name-template: "v$RESOLVED_VERSION"
 tag-template: "v$RESOLVED_VERSION"
 tag-prefix: "v"
 include-pre-releases: true
 categories:
-  - title: "Breaking Changes"
+  - title: "💥 Breaking Changes"
     exclusive: true
     when:
       label: "semver:breaking"
-  - title: "New Features"
+  - title: "✨ New Features"
     exclusive: true
     when:
       label: "release-note:feature"
-  - title: "Bug Fixes"
+  - title: "🐛 Bug Fixes"
     exclusive: true
     when:
       label: "release-note:fix"
-  - title: "Performance Improvements"
+  - title: "⚡ Performance Improvements"
     exclusive: true
     when:
       label: "release-note:performance"
-  - title: "Dependency Updates"
+  - title: "📦 Dependency Updates"
     exclusive: true
     when:
       label: "release-note:dependencies"
-  - title: "Reverted Changes"
+  - title: "⏪ Reverted Changes"
     exclusive: true
     when:
       label: "release-note:revert"
@@ -31,13 +31,13 @@ categories:
   # invisible: a refactor can rebuild the local database or change build
   # requirements. Every merged PR is accounted for in the notes — nothing is
   # pre-excluded — with maintenance listed after the user-facing sections.
-  - title: "Maintenance"
+  - title: "🧰 Maintenance"
     exclusive: true
     when:
       label: "semver:none"
   # Historical PRs merged before managed labels existed remain visible here in
   # the first draft.
-  - title: "Other Changes"
+  - title: "📝 Other Changes"
   - type: version-resolver
     semver-increment: minor
     when:
@@ -58,9 +58,20 @@ category-template: "## $TITLE"
 change-template: "- $TITLE ([#$NUMBER]($URL)) by @$AUTHOR"
 change-title-escapes: '\<*_&'
 no-changes-template: "- No user-facing changes."
+exclude-contributors:
+  - "dependabot[bot]"
+  - "github-actions[bot]"
+new-contributor-template: "- $AUTHOR_MENTION made their first contribution in [#$NUMBER]($URL)"
+no-new-contributor-template: ""
 template: |
-  Thanks for using Tidebreak ❤️
-
-  # What's Changed
+  > ❤️ **Thanks for using Tidebreak.**
+  >
+  > If you filed an issue, reviewed a pull request, or shipped a change, you are in these notes.
 
   $CHANGES
+
+  ## 🙌 New Contributors
+
+  $NEW_CONTRIBUTORS
+
+  **Full Changelog**: https://github.com/$OWNER/$REPOSITORY/compare/$PREVIOUS_TAG...v$RESOLVED_VERSION
