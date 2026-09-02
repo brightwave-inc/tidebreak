@@ -23,7 +23,6 @@ import {
 import { codeWorkspaceIdFromPath, shellShortcutMode } from "./code/routes";
 import { arrangeWorkspaces } from "./code/workspaceCards";
 import { useWorkspaceCardCommands } from "./code/workspaceActions";
-import { tidebreakProductRepo } from "./code/uneffMe";
 import {
   chatNavigationPaletteRows,
   chatPaletteRows,
@@ -155,7 +154,6 @@ export function CommandPaletteDialog() {
             hasSession: Boolean(digest) || Boolean(sessions[workspace.id]),
             attentionPinned: digest?.attention.state.type === "manual",
             quickActions: repo?.quick_actions ?? [],
-            canUneff: Boolean(tidebreakProductRepo(repos)),
             onCommand: (command) =>
               workspaceRunner.run(command.id, {
                 workspace,

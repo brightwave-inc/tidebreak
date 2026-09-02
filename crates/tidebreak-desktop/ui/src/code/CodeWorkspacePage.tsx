@@ -91,7 +91,6 @@ import { findEditorPanel, offersSplitDrop } from "./editorDrag";
 import { fenceReasonText } from "./labels";
 import { forkTranscriptFile } from "./fork";
 import { isPutAway, sessionActivityLabel } from "./workspaceCards";
-import { tidebreakProductRepo } from "./uneffMe";
 import { toast } from "sonner";
 import { useApp } from "@/AppContext";
 import { useCodeCatalogStore } from "./CodeCatalogStore";
@@ -310,7 +309,6 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
         // A watch child is the harness's own run, not a conversation to
         // continue, so only an interactive agent offers a fork.
         canFork: session?.kind === "interactive",
-        canUneff: Boolean(tidebreakProductRepo(catalog.repos)),
         quickActions: repo?.quick_actions ?? [],
         setupFailed: workspace.status === "setup_failed",
       })
@@ -633,6 +631,16 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                     (entry) => entry.call_id === subagentParam,
                   )}
                   onBackFromSubagent={() => openWorkspaceSubagent(undefined)}
+                  onFileIssue={
+                    workspace
+                      ? () =>
+                          run("uneff-me", {
+                            workspace,
+                            title: title ?? workspace.title,
+                            session,
+                          })
+                      : undefined
+                  }
                   composerOverride={
                     session.kind === "watch" ? (
                       <WatchTaskBar

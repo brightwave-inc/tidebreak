@@ -76,6 +76,7 @@ export function CodeSessionPane({
   disabled,
   onOpenTurnDiff,
   onForkFromTurn,
+  onFileIssue,
   subagentCallId,
   subagentSummary,
   onBackFromSubagent,
@@ -91,6 +92,8 @@ export function CodeSessionPane({
   onOpenTurnDiff?: (turnId: string) => void;
   /** Fork this conversation at the end of one turn, from its seam row. */
   onForkFromTurn?: (turnId: string) => void;
+  /** Turn a failed turn or engine error into a Tidebreak issue or fix. */
+  onFileIssue?: () => void;
   /** The spanning Task call to inspect inside this still-mounted session. */
   subagentCallId?: string;
   /** Current bounded rail summary, when the Task is still in the digest. */
@@ -565,6 +568,7 @@ export function CodeSessionPane({
           approvalError={approvalError}
           onOpenTurnDiff={onOpenTurnDiff}
           onForkFromTurn={subagentCallId ? undefined : onForkFromTurn}
+          onFileIssue={subagentCallId ? undefined : onFileIssue}
           onReveal={follow.pauseFollow}
           scrollRef={follow.scrollRef}
           contentRef={follow.contentRef}

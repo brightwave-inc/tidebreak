@@ -2,6 +2,8 @@ import type { ReactNode } from "react";
 
 import { MessageMarkdown } from "./MessageMarkdown";
 import { MessageFooter } from "./MessageFooter";
+import { splitPastedText } from "./PastedText";
+import { PastedTextBlock } from "./PastedTextBlock";
 
 type UserMessageProps = {
   /** What the reader sent, rendered as Markdown like the rest of the turn. */
@@ -32,6 +34,8 @@ export function UserMessage({
   leading,
   trailing,
 }: UserMessageProps) {
+  // A long paste went out folded behind a chip; it comes back folded too.
+  const { prose, pasted } = splitPastedText(text);
   return (
     <div className="message-user-frame">
       <article
@@ -40,7 +44,10 @@ export function UserMessage({
         data-transcript-anchor={anchorId}
       >
         {leading}
-        <MessageMarkdown>{text}</MessageMarkdown>
+        {prose && <MessageMarkdown>{prose}</MessageMarkdown>}
+        {pasted.map((block, index) => (
+          <PastedTextBlock key={`${index}:${block.length}`} text={block} />
+        ))}
         {trailing}
       </article>
       <MessageFooter role="user" text={text} createdAt={createdAt} />

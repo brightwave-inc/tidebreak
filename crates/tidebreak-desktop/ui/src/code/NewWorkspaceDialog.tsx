@@ -29,16 +29,13 @@ import type {
 import { HttpError } from "../api/client";
 import { useApp } from "@/AppContext";
 import { ImageAttachmentList, shouldSubmitComposerKey } from "../Composer";
-import { publishCodeImage } from "../attachments";
 import {
   imageAttachmentName,
   imageAttachmentRejection,
   imageFilesFrom,
   queuedImageAttachment,
-  uploadImageAttachment,
   type ImageAttachment,
 } from "../ImageAttachments";
-import { hasLocalHostAuthority } from "../host";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import {
@@ -75,6 +72,7 @@ import {
 } from "./CodeComposer";
 import { HarnessInstallNote } from "./HarnessInstallNote";
 import { useWarmHarnessInstall } from "./useHarnessInstall";
+import { startFirstSession } from "./startWorkspaceSession";
 import { HARNESS_ICONS } from "./HarnessPicker";
 import {
   createPermissionModes,
@@ -85,7 +83,6 @@ import {
   harnessUnusableReason,
   PERMISSION_MODE_POLICY_BLOCKED,
   preferredCodeModels,
-  requiresHarnessModelIds,
   CREATE_PERMISSION_MODE_FIXED,
   HARNESS_LABELS,
   type CodeModelOption,
@@ -223,7 +220,6 @@ export function NewWorkspaceDialog({
     (state) => state.replaceWorkspace,
   );
   const removeWorkspace = useCodeCatalogStore((state) => state.removeWorkspace);
-  const rememberSession = useCodeCatalogStore((state) => state.rememberSession);
   const ensureHarnessModels = useCodeCatalogStore(
     (state) => state.ensureHarnessModels,
   );
@@ -768,121 +764,34 @@ export function NewWorkspaceDialog({
       return;
     }
     replaceWorkspace(pending.id, workspace);
-    const prompt = attempt.startingPrompt.trim();
-    const setWorkspaceStartup = useCodeUiStore.getState().setWorkspaceStartup;
-    setWorkspaceStartup(workspace.id, {
-      harness: attempt.harness,
-      hasFirstMessage: Boolean(prompt),
-      phase: "starting_session",
-    });
-    try {
-      await revealCreatedWorkspace(workspace, attempt);
-      const gateway = gatewayCodeModels(
-        models,
-        attempt.harness,
-        defaultModelKey,
-      );
-      const native =
-        requiresHarnessModelIds(attempt.harness) || gateway.length === 0
-          ? await ensureHarnessModels(client, attempt.harness)
-          : [];
-      const listed = preferredCodeModels(attempt.harness, native, gateway);
-      const posted =
-        attempt.model ??
-        listed.find((option) => option.default)?.id ??
-        listed[0]?.id;
-      const session = await client.createCodeSession(workspace.id, {
+    await startFirstSession({
+      client,
+      workspace,
+      settings: {
         harness: attempt.harness,
-        permission_mode: attempt.permissionMode,
-        model: posted,
-        ...(attempt.reasoningEffort
-          ? { reasoning_effort: attempt.reasoningEffort }
-          : {}),
-        ...(attempt.fastMode ? { fast_mode: true } : {}),
-      });
-      rememberSession(session);
-      if (prompt) {
-        setWorkspaceStartup(workspace.id, {
-          harness: attempt.harness,
-          hasFirstMessage: true,
-          phase: "sending_message",
-        });
-      }
-      rememberCreate({
-        repoId: attempt.repoId,
-        harness: attempt.harness,
-        model: posted,
-        modelsByHarness: attempt.modelsByHarness,
         permissionMode: attempt.permissionMode,
+        model: attempt.model,
         reasoningEffort: attempt.reasoningEffort,
-        reasoningEffortByHarness: attempt.reasoningEffortByHarness,
         fastMode: attempt.fastMode,
-        fastModeByHarness: attempt.fastModeByHarness,
-      });
-      if (prompt) {
-        try {
-          const attachments = await publishFirstTurnImages(
-            session.id,
-            attempt.images,
-          );
-          if (attachments.length > 0) {
-            await client.submitCodeTurn(
-              session.id,
-              prompt,
-              undefined,
-              attachments,
-            );
-          } else {
-            await client.submitCodeTurn(session.id, prompt);
-          }
-        } catch (error) {
-          // Never drop typed words or pasted images: the workspace composer
-          // holds them.
-          useCodeUiStore
-            .getState()
-            .offerComposerPrompt(workspace.id, prompt, attempt.images);
-          toast.error(
-            `Session started, but the first message could not be sent. ${friendlyErrorMessage(error, "Send it from the workspace composer.")}`,
-          );
-        }
-      }
-    } catch (error) {
-      // No session to send to; the workspace composer holds the text, images,
-      // and start-session on the workspace page picks them up.
-      if (prompt) {
-        useCodeUiStore
-          .getState()
-          .offerComposerPrompt(workspace.id, prompt, attempt.images);
-      }
-      toast.error(
-        `Workspace created, but the session could not start. ${friendlyErrorMessage(error, "Try again from the workspace.")}`,
-      );
-    } finally {
-      setWorkspaceStartup(workspace.id, null);
-    }
-  }
-
-  async function publishFirstTurnImages(
-    sessionId: string,
-    files: readonly File[],
-  ): Promise<readonly { blob_id: string; media_type: string }[]> {
-    const published = await Promise.all(
-      files.map(async (file) => {
-        if (hasLocalHostAuthority()) {
-          return publishCodeImage(sessionId, file);
-        }
-        return uploadImageAttachment(client, sessionId, file, {
-          onProgress: () => undefined,
-          signal: new AbortController().signal,
-          path: (id) =>
-            `/code/sessions/${encodeURIComponent(id)}/attachments/images`,
-        });
-      }),
-    );
-    return published.map((image) => ({
-      blob_id: image.attachmentId,
-      media_type: image.mediaType,
-    }));
+      },
+      prompt: attempt.startingPrompt,
+      images: attempt.images,
+      models,
+      defaultModelKey,
+      reveal: () => revealCreatedWorkspace(workspace, attempt),
+      onSessionCreated: (_session, posted) =>
+        rememberCreate({
+          repoId: attempt.repoId,
+          harness: attempt.harness,
+          model: posted,
+          modelsByHarness: attempt.modelsByHarness,
+          permissionMode: attempt.permissionMode,
+          reasoningEffort: attempt.reasoningEffort,
+          reasoningEffortByHarness: attempt.reasoningEffortByHarness,
+          fastMode: attempt.fastMode,
+          fastModeByHarness: attempt.fastModeByHarness,
+        }),
+    });
   }
 
   async function revealCreatedWorkspace(

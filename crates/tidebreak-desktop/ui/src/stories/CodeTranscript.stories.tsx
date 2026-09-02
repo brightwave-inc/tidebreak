@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, within } from "storybook/test";
+import { expect, fn, userEvent, within } from "storybook/test";
 
 import { CodeTranscript } from "@/code/CodeTranscript";
 import type { CodeTranscriptItem } from "@/code/CodeSessionReducer";
@@ -155,5 +155,121 @@ export const RewriteFailed: Story = {
         ? { ...item, rewriteState: "failed" }
         : item,
     ),
+  },
+};
+
+const failedTurn: CodeTranscriptItem[] = [
+  items[0],
+  {
+    kind: "assistant",
+    id: "assistant-failed",
+    turnId: "turn-1",
+    parentCallId: null,
+    text: "Loading the registry now.",
+    streaming: false,
+  },
+  {
+    kind: "turn_boundary",
+    id: "boundary-failed",
+    turnId: "turn-1",
+    status: "failed",
+    durationMs: 4_000,
+    usage: null,
+    error:
+      "claude exited with status 1: ENOENT: no such file or directory, open 'crates/tidebreak-desktop/ui/src/code/CodeSessionRegistry.ts'",
+    diffstat: null,
+  },
+];
+
+/**
+ * A failed turn is the one outcome that must never be silent, and the way
+ * out of it sits on the failure: File an issue hands the session to Uneff me.
+ */
+export const FailedTurnFilesIssue: Story = {
+  args: { items: failedTurn, onFileIssue: fn() },
+  play: async ({ args, canvasElement }) => {
+    const canvas = within(canvasElement);
+    const alert = await canvas.findByRole("alert");
+    await expect(alert).toHaveTextContent("Turn failed");
+    await userEvent.click(
+      within(alert).getByRole("button", { name: "File an issue" }),
+    );
+    await expect(args.onFileIssue).toHaveBeenCalledTimes(1);
+  },
+};
+
+const engineError: CodeTranscriptItem[] = [
+  items[0],
+  {
+    kind: "notice",
+    id: "notice-error",
+    level: "error",
+    message:
+      "The engine could not reach the model gateway: 502 Bad Gateway after 3 retries.",
+  },
+];
+
+/** An engine error carries the same way out. Warnings and asides do not. */
+export const EngineErrorFilesIssue: Story = {
+  args: { items: engineError, onFileIssue: fn() },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const alert = await canvas.findByRole("alert");
+    await expect(
+      within(alert).getByRole("button", { name: "File an issue" }),
+    ).toBeVisible();
+  },
+};
+
+const pastedReport = JSON.stringify(
+  {
+    session: { id: "sess-1", harness_kind: "claude_code" },
+    turns: Array.from({ length: 6 }, (_, index) => ({
+      id: `turn-${index + 1}`,
+      status: index === 5 ? "failed" : "completed",
+    })),
+    events: Array.from({ length: 40 }, (_, index) => ({
+      seq: index,
+      type: index % 2 ? "tool_started" : "tool_finished",
+    })),
+  },
+  null,
+  2,
+);
+
+const pastedTurn: CodeTranscriptItem[] = [
+  {
+    kind: "user",
+    id: "user-uneff",
+    turnId: "turn-uneff",
+    text: `The user hit a problem in Tidebreak Code and asked for help.\n\nStart by asking the user what went wrong and what they want.\n\nThe debug report follows as pasted text.\n\n<pasted_text>\n${pastedReport}\n</pasted_text>`,
+    createdAt: "2026-09-02T15:10:00.000Z",
+  },
+  {
+    kind: "assistant",
+    id: "assistant-uneff",
+    turnId: "turn-uneff",
+    parentCallId: null,
+    text: "Before I dig in: what went wrong, and would you like an issue filed or a fix opened as a pull request?",
+    streaming: false,
+  },
+];
+
+/**
+ * A long paste goes out folded behind a chip, and comes back folded: the
+ * Uneff me first turn carries its whole debug report without showing it.
+ */
+export const PastedTextFolded: Story = {
+  args: { items: pastedTurn },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const toggle = await canvas.findByRole("button", {
+      name: /Pasted text/,
+    });
+    await expect(toggle).toHaveAttribute("aria-expanded", "false");
+    await expect(canvas.queryByText(/"harness_kind"/)).toBeNull();
+    await userEvent.click(toggle);
+    await expect(toggle).toHaveAttribute("aria-expanded", "true");
+    await expect(canvas.getByText(/"harness_kind"/)).toBeVisible();
   },
 };

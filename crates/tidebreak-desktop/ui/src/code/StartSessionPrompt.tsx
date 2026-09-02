@@ -42,7 +42,13 @@ const NO_ENGINE_EFFORTS: ReasoningEffort[] = [];
 
 const NO_CATALOG_MODELS: ModelInfo[] = [];
 
-/** The page-level handoff while a newly created workspace gets its first agent. */
+/**
+ * The page-level handoff while a workspace gets its first agent.
+ *
+ * A plain create starts at "Workspace ready". Uneff me arrives with
+ * preparation steps ahead of that and a heading of its own, and the same
+ * surface carries both through to the first message.
+ */
 export function WorkspaceSessionStartingState({
   startup,
 }: {
@@ -50,7 +56,14 @@ export function WorkspaceSessionStartingState({
 }) {
   const label = HARNESS_LABELS[startup.harness];
   const HarnessIcon = HARNESS_ICONS[startup.harness];
+  const preparing = startup.phase === "preparing";
   const sending = startup.phase === "sending_message";
+  const preparation = startup.preparation ?? [];
+  const here = startup.target === "this_workspace";
+  const creating =
+    preparing &&
+    !here &&
+    preparation.every((step) => step.state === "complete");
 
   return (
     <section
@@ -64,18 +77,36 @@ export function WorkspaceSessionStartingState({
           <div className="flex items-start gap-3">
             <Spinner className="mt-1 size-4 text-live" aria-hidden />
             <div className="min-w-0">
-              <h2 className="text-lg font-semibold">Starting your session</h2>
+              <h2 className="text-lg font-semibold">
+                {startup.heading ?? "Starting your session"}
+              </h2>
               <p className="mt-1 text-sm text-muted-foreground">
-                Tidebreak is preparing {label} in this workspace.
+                {preparing && !here
+                  ? `Tidebreak is getting a workspace ready for ${label}.`
+                  : `Tidebreak is preparing ${label} in this workspace.`}
               </p>
             </div>
           </div>
 
           <div className="mt-6 ml-2 border-l border-border-subtle pl-5">
-            <StartupStep label="Workspace ready" state="complete" />
+            {preparation.map((step) => (
+              <StartupStep
+                key={step.label}
+                label={step.label}
+                state={step.state}
+              />
+            ))}
+            {!here && (
+              <StartupStep
+                label={creating ? "Creating workspace" : "Workspace ready"}
+                state={
+                  !preparing ? "complete" : creating ? "active" : "pending"
+                }
+              />
+            )}
             <StartupStep
               label={sending ? `${label} ready` : `Starting ${label}`}
-              state={sending ? "complete" : "active"}
+              state={sending ? "complete" : preparing ? "pending" : "active"}
             />
             <StartupStep
               label={
@@ -89,7 +120,11 @@ export function WorkspaceSessionStartingState({
           </div>
 
           <p className="mt-6 text-sm text-muted-foreground">
-            Your conversation appears here as soon as the session is ready.
+            {preparing && !here
+              ? "You move to the new workspace as soon as it exists."
+              : here
+                ? "The new agent takes over here as soon as it starts."
+                : "Your conversation appears here as soon as the session is ready."}
           </p>
         </div>
       </div>

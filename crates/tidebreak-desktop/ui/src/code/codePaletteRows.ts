@@ -170,7 +170,6 @@ export function workspaceActionPaletteRows(input: {
   hasSession: boolean;
   attentionPinned: boolean;
   quickActions: readonly { name: string }[];
-  canUneff?: boolean;
   /** This window can start an editor on the machine holding the worktree. */
   canOpenInEditor?: boolean;
   onCommand: (command: WorkspaceCommand) => void;
@@ -181,7 +180,6 @@ export function workspaceActionPaletteRows(input: {
     archived,
     hasSession: input.hasSession,
     attentionPinned: input.attentionPinned,
-    canUneff: input.canUneff,
     canOpenInEditor: input.canOpenInEditor,
     setupFailed: input.workspace.status === "setup_failed",
   });

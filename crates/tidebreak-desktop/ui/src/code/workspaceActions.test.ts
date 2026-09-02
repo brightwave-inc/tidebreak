@@ -86,12 +86,11 @@ describe("workspace worktree actions", () => {
     ).toEqual({ id: "copy-worktree", label: "Copy worktree path" });
   });
 
-  it("offers Uneff me next to Copy debug JSON when Tidebreak is connected", () => {
+  it("offers Uneff me next to Copy debug JSON on every session", () => {
     const commands = workspaceCommands({
       hasPr: false,
       archived: false,
       hasSession: true,
-      canUneff: true,
     });
     const copy = commands.findIndex(
       (command) => command.id === "copy-debug-json",
@@ -101,11 +100,12 @@ describe("workspace worktree actions", () => {
     expect(commands[uneff]?.label).toBe("Uneff me");
     expect(uneff).toBe(copy + 1);
 
+    // Without a session there is no debug report to hand over.
     expect(
       workspaceCommands({
         hasPr: false,
         archived: false,
-        hasSession: true,
+        hasSession: false,
       }).some((command) => command.id === "uneff-me"),
     ).toBe(false);
 
@@ -114,7 +114,6 @@ describe("workspace worktree actions", () => {
       hasSession: true,
       attentionPinned: false,
       quickActions: [],
-      canUneff: true,
     });
     const headerCopy = header.findIndex(
       (command) => command.id === "copy-debug-json",
