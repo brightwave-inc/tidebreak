@@ -308,3 +308,29 @@ async fn memory_ingest_answers_not_implemented_for_the_default_backend() {
     let error: serde_json::Value = json_body(response).await;
     assert_eq!(error["kind"], json!("not_implemented"));
 }
+
+#[tokio::test]
+async fn memory_sweep_status_serves_the_recorded_last_run() {
+    let (router, token, store, _dir) = memory_app().await;
+    let bearer = format!("Bearer {token}");
+
+    let before =
+        assert_ok(request(&router, &bearer, "GET", "/memory/sweep".into()).await).await;
+    assert_eq!(before["last_run"], json!(null));
+
+    let run = tidebreak_core::MemorySweepRun {
+        ran_at: chrono::Utc::now(),
+        scope: Some(MemoryScope::Personal),
+        outcome: tidebreak_core::MemorySweepOutcome::NoModel,
+        expired: 2,
+        proposed: 0,
+    };
+    tidebreak_core::db::memory_sweep::record_sweep_run(&store, &OwnerId::local(), &run)
+        .await
+        .unwrap();
+
+    let after = assert_ok(request(&router, &bearer, "GET", "/memory/sweep".into()).await).await;
+    assert_eq!(after["last_run"]["outcome"], json!("no_model"));
+    assert_eq!(after["last_run"]["expired"], json!(2));
+    assert_eq!(after["last_run"]["scope"]["kind"], json!("personal"));
+}
