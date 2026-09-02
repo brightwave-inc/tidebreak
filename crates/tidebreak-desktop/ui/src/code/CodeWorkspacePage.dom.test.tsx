@@ -241,6 +241,8 @@ const START_HARNESS: HarnessDoctorEntry = {
     durable_parks: "unsupported",
     user_questions: "unsupported",
     standing_grants: "unsupported",
+    mid_turn_resume: "unsupported",
+    transcript: "unsupported",
   },
   commands: [],
   auth_mode: "local_sign_in",

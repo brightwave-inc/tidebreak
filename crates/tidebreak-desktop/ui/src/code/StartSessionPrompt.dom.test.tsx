@@ -82,6 +82,8 @@ const CAPS = {
   durable_parks: "unsupported",
   user_questions: "unsupported",
   standing_grants: "unsupported",
+  mid_turn_resume: "unsupported",
+  transcript: "unsupported",
 } as const;
 
 function entry(
