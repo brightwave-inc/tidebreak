@@ -659,7 +659,8 @@ pub async fn abandon_pending_approvals_for_stopped_session(
 /// Recovery leaves those rows pending so the park can still resolve. The
 /// attach bumps `spawn_epoch`, and decide checks that the approval's worker
 /// epoch matches the live session, so you rewrite the rows onto the new
-/// epoch before the worker waits on the park.
+/// epoch before the worker waits on the park. You also drop any in-flight
+/// claim: the native waiter that held it died with the old worker.
 pub async fn rebind_pending_approvals_to_worker(
     store: &DbStore,
     owner: &OwnerId,
@@ -671,6 +672,14 @@ pub async fn rebind_pending_approvals_to_worker(
         .col_expr(
             entities::code_approval::Column::WorkerEpoch,
             sea_orm::sea_query::Expr::value(Some(to_epoch)),
+        )
+        .col_expr(
+            entities::code_approval::Column::DecisionClaim,
+            sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
+        )
+        .col_expr(
+            entities::code_approval::Column::ClaimedAt,
+            sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<chrono::Utc>>::None),
         )
         .filter(entities::code_approval::Column::Owner.eq(owner.as_str()))
         .filter(entities::code_approval::Column::SessionId.eq(session_id.0))

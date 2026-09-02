@@ -193,7 +193,28 @@ async fn settle_interrupted_session(
     };
 
     if let Some(turn) = running_turns.first() {
-        if !resume_park {
+        if resume_park {
+            // The native waiter died with the worker. Drop any in-flight
+            // claim so you can decide the park again on the new worker.
+            entities::code_approval::Entity::update_many()
+                .col_expr(
+                    entities::code_approval::Column::DecisionClaim,
+                    sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
+                )
+                .col_expr(
+                    entities::code_approval::Column::ClaimedAt,
+                    sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<chrono::Utc>>::None),
+                )
+                .filter(entities::code_approval::Column::Owner.eq(owner.as_str()))
+                .filter(entities::code_approval::Column::SessionId.eq(session_id.0))
+                .filter(entities::code_approval::Column::TurnId.eq(turn.id))
+                .filter(
+                    entities::code_approval::Column::State.eq(CodeApprovalState::Pending.as_str()),
+                )
+                .exec(&transaction)
+                .await
+                .map_err(store_err)?;
+        } else {
             let updated = entities::code_turn::Entity::update_many()
                 .col_expr(
                     entities::code_turn::Column::Status,

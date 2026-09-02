@@ -153,9 +153,23 @@ impl InternalSession {
         if turn.status != CodeTurnStatus::Waiting || turn.park_ref.is_none() {
             return Ok(());
         }
+        // `active` is the chat-lane turn id from `submit`, not the code
+        // turn row. Look up the live `turn_run` so interrupt and steer
+        // still address the parked lane turn after a restart.
+        let Some(run) = self
+            .state
+            .store
+            .list_turn_runs(self.chat_id)
+            .await
+            .map_err(store_error)?
+            .into_iter()
+            .find(|run| run.status.is_live())
+        else {
+            return Ok(());
+        };
         let last_seq = self.journal_tail().await?;
         *self.active.lock().expect("active turn") = Some(ActiveTurn {
-            turn_id: TurnId(turn.id.0),
+            turn_id: run.id,
             last_seq,
             started: true,
         });

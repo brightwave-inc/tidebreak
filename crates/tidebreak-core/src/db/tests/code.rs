@@ -1464,8 +1464,8 @@ async fn durable_park_recovery_leaves_a_waiting_turn_open() {
             server_capability: None,
             request_sha256: None,
             worker_epoch: Some(0),
-            decision_claim: None,
-            claimed_at: None,
+            decision_claim: Some(uuid::Uuid::new_v4()),
+            claimed_at: Some(now()),
             state: CodeApprovalState::Pending,
             feedback: None,
             requested_at: now(),
@@ -1490,13 +1490,14 @@ async fn durable_park_recovery_leaves_a_waiting_turn_open() {
             call_id: "call-1".into()
         })
     );
-    assert_eq!(
-        get_approval(&store, &owner, approval_id)
-            .await
-            .unwrap()
-            .unwrap()
-            .state,
-        CodeApprovalState::Pending
+    let approval = get_approval(&store, &owner, approval_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(approval.state, CodeApprovalState::Pending);
+    assert!(
+        approval.decision_claim.is_none(),
+        "a dead worker's claim cannot block the next decide"
     );
 }
 
