@@ -74,22 +74,11 @@ export function harnessVersionRequirement(error: string | null): string | null {
 
 export function TurnReviewCard({
   turn,
-  narrative,
   onOpenTurnDiff,
   onForkFromTurn,
   onFileIssue,
 }: {
   turn: TurnBoundary;
-  /**
-   * Where the session stands, on the newest boundary only.
-   *
-   * Not the engine's own account of the turn — no engine event carries one,
-   * and that stays a documented gap. This is Tidebreak's recap, derived on the
-   * utility model after the turn completes and written for a reader who left
-   * and came back, which is why it sits at the bottom of the transcript rather
-   * than against every turn.
-   */
-  narrative?: ReactNode;
   /** Scope the review sidebar to this turn's changes. */
   onOpenTurnDiff?: (turnId: string) => void;
   /** Hand everything up to this turn to a fresh agent, in a new tab. */
@@ -131,7 +120,6 @@ export function TurnReviewCard({
         ) : (
           <p>{turn.error ?? "The engine stopped without saying why."}</p>
         )}
-        {narrative}
         {(diffstat || actions || onFileIssue) && (
           <div className="flex items-center gap-2">
             {diffstat}
@@ -149,7 +137,6 @@ export function TurnReviewCard({
         <CircleSlash size={13} aria-hidden="true" />
         <span>Turn interrupted</span>
         {duration && <span className="tabular-nums">· {duration}</span>}
-        {narrative}
         {diffstat}
         {actions}
       </SeamRow>
@@ -161,7 +148,6 @@ export function TurnReviewCard({
       <Check size={13} aria-hidden="true" />
       <span>Turn finished</span>
       {duration && <span className="tabular-nums">· {duration}</span>}
-      {narrative}
       {diffstat}
       {actions}
     </SeamRow>
