@@ -196,6 +196,9 @@ pub(crate) struct CodeRuntime {
     /// Last pin-install failure per kind. Cleared on a successful install.
     pin_install_errors: Mutex<HashMap<HarnessKind, String>>,
     workers: Mutex<HashMap<CodeSessionId, WorkerHandle>>,
+    /// Sessions whose worker must move to the selected engine binary once
+    /// their turn in flight ends. See `resync_workers_to_selected_binaries`.
+    deferred_resyncs: Mutex<HashSet<CodeSessionId>>,
     /// Flips true while the process quiesces for a restart-to-update. Every
     /// session worker subscribes: the flag holds queue drains, refuses new
     /// turn starts at the worktree boundary, and parks idle engine children
@@ -433,6 +436,7 @@ impl CodeRuntime {
             probes: Mutex::new(HashMap::new()),
             pin_install_errors: Mutex::new(HashMap::new()),
             workers: Mutex::new(HashMap::new()),
+            deferred_resyncs: Mutex::new(HashSet::new()),
             update_quiesce: watch::channel(false).0,
             workspace_lifecycles: Mutex::new(HashMap::new()),
             worktree_turns: Mutex::new(HashMap::new()),
@@ -591,6 +595,7 @@ impl CodeRuntime {
             probes: Mutex::new(HashMap::new()),
             pin_install_errors: Mutex::new(HashMap::new()),
             workers: Mutex::new(HashMap::new()),
+            deferred_resyncs: Mutex::new(HashSet::new()),
             update_quiesce: watch::channel(false).0,
             workspace_lifecycles: Mutex::new(HashMap::new()),
             worktree_turns: Mutex::new(HashMap::new()),

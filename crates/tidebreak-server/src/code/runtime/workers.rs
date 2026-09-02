@@ -2,6 +2,12 @@
 
 use super::*;
 
+/// How often a deferred worker resync re-reads a running session.
+const DEFERRED_RESYNC_POLL: Duration = Duration::from_secs(2);
+/// How long a deferred worker resync waits for a turn to end before it
+/// gives up and lets the next fault surface the old binary.
+const DEFERRED_RESYNC_DEADLINE: Duration = Duration::from_secs(2 * 60 * 60);
+
 impl CodeRuntime {
     pub(super) fn wake_all_workers(&self) {
         for handle in self.workers.lock().expect("code workers").values() {
@@ -317,12 +323,14 @@ impl CodeRuntime {
     /// retry of the turn that failed on a version floor hits it again. Each
     /// idle worker still on another file is stopped and respawned through
     /// the fresh probe, the same swap a settings change makes. A worker with
-    /// a turn in flight is left alone: it moves when its turn ends and the
-    /// next one attaches, and stopping it now would abandon the work.
+    /// a turn in flight is not stopped — that would abandon the work — but
+    /// it is not forgotten either: a deferred pass watches the session and
+    /// makes the same swap once the turn ends, before the next prompt is
+    /// dispatched through the old file.
     ///
-    /// Returns the sessions whose worker moved.
+    /// Returns the sessions whose worker moved on this pass.
     pub(crate) async fn resync_workers_to_selected_binaries(
-        &self,
+        self: &Arc<Self>,
         kinds: &[HarnessKind],
     ) -> Vec<CodeSessionId> {
         let mut moved = Vec::new();
@@ -359,11 +367,7 @@ impl CodeRuntime {
                     continue;
                 }
                 if session.lifecycle == CodeSessionLifecycle::Running {
-                    tracing::info!(
-                        session = %id,
-                        %kind,
-                        "a turn is in flight; the session moves to the selected engine binary when it ends"
-                    );
+                    self.defer_worker_resync(*kind, id, owner);
                     continue;
                 }
                 let Some(handle) = self.take_worker_for_epoch(id, spawn_epoch) else {
@@ -387,6 +391,61 @@ impl CodeRuntime {
             }
         }
         moved
+    }
+
+    /// Finish a worker swap once the session's turn in flight ends.
+    ///
+    /// Turn completion only marks the row idle; the next prompt reuses the
+    /// worker as it stands. So a session that was running when the selected
+    /// binary moved is watched here, and re-checked through the same resync
+    /// the moment it is no longer running. One watcher per session: a second
+    /// install or channel flip while one is pending changes what the resync
+    /// will select, not whether it runs.
+    fn defer_worker_resync(self: &Arc<Self>, kind: HarnessKind, id: CodeSessionId, owner: OwnerId) {
+        if !self
+            .deferred_resyncs
+            .lock()
+            .expect("deferred resyncs")
+            .insert(id)
+        {
+            return;
+        }
+        tracing::info!(
+            session = %id,
+            %kind,
+            "a turn is in flight; the session moves to the selected engine binary when it ends"
+        );
+        let runtime = Arc::clone(self);
+        tokio::spawn(async move {
+            let deadline = TokioInstant::now() + DEFERRED_RESYNC_DEADLINE;
+            let outcome = loop {
+                tokio::time::sleep(DEFERRED_RESYNC_POLL).await;
+                match runtime.get_session(&owner, id).await {
+                    Ok(session) if session.lifecycle != CodeSessionLifecycle::Running => {
+                        break Ok(());
+                    }
+                    Ok(_) if TokioInstant::now() < deadline => continue,
+                    Ok(_) => break Err("the turn did not end before the deadline"),
+                    Err(_) => break Err("the session could not be read"),
+                }
+            };
+            runtime
+                .deferred_resyncs
+                .lock()
+                .expect("deferred resyncs")
+                .remove(&id);
+            match outcome {
+                Ok(()) => {
+                    runtime.resync_workers_to_selected_binaries(&[kind]).await;
+                }
+                Err(reason) => tracing::warn!(
+                    session = %id,
+                    %kind,
+                    reason,
+                    "gave up moving the session to the selected engine binary"
+                ),
+            }
+        });
     }
 
     pub(super) fn require_worker(&self, id: CodeSessionId) -> Result<WorkerHandle, ServerError> {
@@ -461,14 +520,15 @@ mod tests {
     }
 
     /// A worker still on another file than the channel selects is respawned
-    /// when it is idle, and left to finish when a turn is in flight.
+    /// when it is idle, left to finish when a turn is in flight, and moved
+    /// once that turn ends.
     #[tokio::test]
     async fn a_stale_idle_worker_is_respawned_and_a_running_one_is_left_alone() {
         let tmp = tempfile::tempdir().unwrap();
         let kind = HarnessKind::ClaudeCode;
         let pin = tidebreak_harness::pin_for(kind).unwrap();
         write_install(tmp.path(), kind, pin.version);
-        let runtime = scripted_runtime(tmp.path()).await;
+        let runtime = Arc::new(scripted_runtime(tmp.path()).await);
         let owner = OwnerId::new("alice").unwrap();
         let session = workspaceless_session(&owner, kind);
         insert_session(&runtime.db, &session).await.unwrap();
@@ -501,6 +561,26 @@ mod tests {
                 .spawn_epoch,
             session.spawn_epoch
         );
+
+        // Once the turn ends, the deferred pass makes the swap on its own.
+        let mut idle = running.clone();
+        idle.lifecycle = CodeSessionLifecycle::Idle;
+        crate::code::attention::persist_session(&runtime.db, &runtime.bus, &idle)
+            .await
+            .unwrap();
+        let moved_epoch = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let now = runtime.get_session(&owner, attached.id).await.unwrap();
+                if now.spawn_epoch > session.spawn_epoch {
+                    break now.spawn_epoch;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the deferred resync moves the worker after the turn ends");
+        assert!(moved_epoch > session.spawn_epoch);
+        assert!(runtime.require_worker(attached.id).is_ok());
 
         // Another engine's install never touches this worker.
         assert!(runtime
