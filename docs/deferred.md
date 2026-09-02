@@ -257,9 +257,12 @@ purpose:
 - **Chat–code convergence.** The plan of record is
   [decision 48](decisions/0048-one-interaction-model.md): five independently
   useful steps, with code-mode structures as the merge survivor and chat
-  contributing the content model. The work is no longer parked as a future
-  record; what remains deferred is the implementation, and whether the
-  internal engine later becomes an external harness process.
+  contributing the content model. Steps 1 through 4 and the internal engine
+  behind the adapter are in; the entity merge is under way. What stays
+  deferred: the collapse of the chat and code pages into one surface
+  (the record's 2026-09-01 amendment keeps two surfaces over one model),
+  and whether the internal engine later becomes an external harness
+  process.
 - **A per-repo worktree-location override.** Worktrees live under one root per
   install — `~/Tidebreak/workspaces` on the desktop, the Tidebreak data
   directory for a headless deployment — and an operator can move that root
