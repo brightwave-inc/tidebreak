@@ -586,13 +586,13 @@ async fn deleting_a_hosted_session_through_the_chat_route_removes_it_from_both_s
         .unwrap();
     assert_eq!(created.status(), reqwest::StatusCode::CREATED);
     let session: serde_json::Value = created.json().await.unwrap();
-    let session_id = session["id"].as_str().unwrap().to_owned();
+    let id: CodeSessionId = session["id"].as_str().unwrap().parse().unwrap();
 
     // Creating the session attached the engine, which journaled
     // `SessionStarted` under this id; without the code-side cascade the
     // delete below fails on that row's foreign key.
     let deleted = client
-        .delete(format!("http://{addr}/chats/{session_id}"))
+        .delete(format!("http://{addr}/chats/{id}"))
         .bearer_auth(&token)
         .send()
         .await
@@ -600,12 +600,16 @@ async fn deleting_a_hosted_session_through_the_chat_route_removes_it_from_both_s
     let status = deleted.status();
     let body = deleted.text().await.unwrap();
     assert_eq!(status, reqwest::StatusCode::NO_CONTENT, "{body}");
-    for route in [
-        format!("http://{addr}/chats/{session_id}"),
-        format!("http://{addr}/code/sessions/{session_id}"),
+    for (surface, route) in [
+        ("chat", format!("http://{addr}/chats/{id}")),
+        ("code", format!("http://{addr}/code/sessions/{id}")),
     ] {
-        let missing = client.get(&route).bearer_auth(&token).send().await.unwrap();
-        assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND, "{route}");
+        let missing = client.get(route).bearer_auth(&token).send().await.unwrap();
+        assert_eq!(
+            missing.status(),
+            reqwest::StatusCode::NOT_FOUND,
+            "the {surface} route still resolves the deleted conversation"
+        );
     }
 }
 
