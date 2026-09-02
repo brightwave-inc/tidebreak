@@ -326,7 +326,8 @@ async fn a_conversation_without_a_workspace_runs_on_the_code_wire() {
     assert!(session["workspace_id"].is_null(), "{session}");
     let session_id: CodeSessionId = session["id"].as_str().unwrap().parse().unwrap();
 
-    // The conversation is the engine's, not the owner's: no chat route sees it.
+    // The session row is the conversation row: the chat routes read the
+    // same row by the same id.
     let listed = client
         .get(format!("http://{addr}/chats"))
         .bearer_auth(&token)
@@ -337,14 +338,17 @@ async fn a_conversation_without_a_workspace_runs_on_the_code_wire() {
     let body = listed.text().await.unwrap();
     assert_eq!(status, reqwest::StatusCode::OK, "{body}");
     let chats: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
-    assert!(chats.is_empty(), "engine-private chat listed: {chats:?}");
+    assert_eq!(chats.len(), 1, "the session is the one chat: {chats:?}");
+    assert_eq!(chats[0]["id"], session["id"]);
     let by_id = client
         .get(format!("http://{addr}/chats/{session_id}"))
         .bearer_auth(&token)
         .send()
         .await
         .unwrap();
-    assert_eq!(by_id.status(), reqwest::StatusCode::NOT_FOUND);
+    assert_eq!(by_id.status(), reqwest::StatusCode::OK);
+    let chat: serde_json::Value = by_id.json().await.unwrap();
+    assert_eq!(chat["permission_mode"], "plan");
 
     let turn = tokio::spawn({
         let client = client.clone();
@@ -507,6 +511,108 @@ async fn a_conversation_without_a_workspace_runs_on_the_code_wire() {
 
 /// The workspace-bound create path never selects the in-process engine,
 /// and the engine's own create path needs no engine binary.
+/// A chat the code runtime has never driven is a session row, but not one
+/// of the runtime's: the session list does not show it, and boot recovery
+/// does not attach a worker to it. Attaching would show, because the list
+/// includes every session a worker has ever attached to.
+#[tokio::test]
+async fn a_chat_is_not_a_runtime_session_until_the_runtime_drives_it() {
+    let (addr, token, runtime, _ran, _dir) = internal_engine_app(Vec::new()).await;
+    let client = reqwest::Client::new();
+
+    let created = client
+        .post(format!("http://{addr}/chats"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "title": "plain chat" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let chat: serde_json::Value = created.json().await.unwrap();
+    let chat_id = chat["id"].as_str().unwrap().to_owned();
+
+    let sessions = || async {
+        client
+            .get(format!("http://{addr}/code/sessions"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap()
+            .json::<Vec<serde_json::Value>>()
+            .await
+            .unwrap()
+    };
+    assert!(
+        sessions().await.is_empty(),
+        "a chat listed as a code session"
+    );
+
+    let actions = runtime.recover().await.unwrap();
+    assert!(
+        actions.is_empty(),
+        "boot recovery acted on a chat: {actions:?}"
+    );
+    assert!(
+        sessions().await.is_empty(),
+        "boot recovery attached a worker to a chat"
+    );
+
+    // The same id still resolves on the session route: one id, one row.
+    let by_id = client
+        .get(format!("http://{addr}/code/sessions/{chat_id}"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(by_id.status(), reqwest::StatusCode::OK);
+    let session: serde_json::Value = by_id.json().await.unwrap();
+    assert_eq!(session["harness_kind"], "internal");
+    assert!(session["workspace_id"].is_null(), "{session}");
+}
+
+/// A session the runtime created and attached carries the engine's
+/// `SessionStarted` in the code journal. The chat route deletes the
+/// conversation and the code-side rows with it, and both routes then miss.
+#[tokio::test]
+async fn deleting_a_hosted_session_through_the_chat_route_removes_it_from_both_surfaces() {
+    let (addr, token, _runtime, _ran, _dir) = internal_engine_app(Vec::new()).await;
+    let client = reqwest::Client::new();
+    let created = client
+        .post(format!("http://{addr}/code/sessions"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "permission_mode": "plan" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let session: serde_json::Value = created.json().await.unwrap();
+    let id: CodeSessionId = session["id"].as_str().unwrap().parse().unwrap();
+
+    // Creating the session attached the engine, which journaled
+    // `SessionStarted` under this id; without the code-side cascade the
+    // delete below fails on that row's foreign key.
+    let deleted = client
+        .delete(format!("http://{addr}/chats/{id}"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    let status = deleted.status();
+    let body = deleted.text().await.unwrap();
+    assert_eq!(status, reqwest::StatusCode::NO_CONTENT, "{body}");
+    for (surface, route) in [
+        ("chat", format!("http://{addr}/chats/{id}")),
+        ("code", format!("http://{addr}/code/sessions/{id}")),
+    ] {
+        let missing = client.get(route).bearer_auth(&token).send().await.unwrap();
+        assert_eq!(
+            missing.status(),
+            reqwest::StatusCode::NOT_FOUND,
+            "the {surface} route still resolves the deleted conversation"
+        );
+    }
+}
+
 #[tokio::test]
 async fn the_internal_engine_is_only_reachable_without_a_workspace() {
     let (addr, token, _runtime, _ran, dir) = internal_engine_app(Vec::new()).await;

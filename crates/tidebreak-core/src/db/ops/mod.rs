@@ -103,12 +103,12 @@ pub(in crate::db) async fn acquire_chat_write_lock<C>(conn: &C, chat_id: ChatId)
 where
     C: ConnectionTrait,
 {
-    let locked = entities::chat::Entity::update_many()
+    let locked = entities::code_session::Entity::update_many()
         .col_expr(
-            entities::chat::Column::Title,
-            sea_orm::sea_query::Expr::col(entities::chat::Column::Title),
+            entities::code_session::Column::Title,
+            sea_orm::sea_query::Expr::col(entities::code_session::Column::Title),
         )
-        .filter(entities::chat::Column::Id.eq(chat_id.0))
+        .filter(entities::code_session::Column::Id.eq(chat_id.0))
         .exec(conn)
         .await
         .map_err(store_err)?;

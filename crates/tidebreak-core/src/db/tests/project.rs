@@ -139,12 +139,12 @@ async fn corrupted_root_projection_rows_fail_closed_on_read() {
     let (_dir, store) = temp_store().await;
     let standalone = sample_chat();
     store.create_chat(&standalone).await.unwrap();
-    entities::chat::Entity::update_many()
+    entities::code_session::Entity::update_many()
         .col_expr(
-            entities::chat::Column::AttachmentRevision,
+            entities::code_session::Column::AttachmentRevision,
             sea_orm::sea_query::Expr::value(1_i64),
         )
-        .filter(entities::chat::Column::Id.eq(standalone.id.0))
+        .filter(entities::code_session::Column::Id.eq(standalone.id.0))
         .exec(&store.conn)
         .await
         .unwrap();
@@ -161,12 +161,12 @@ async fn corrupted_root_projection_rows_fail_closed_on_read() {
 
     let gapped = sample_chat();
     store.create_chat(&gapped).await.unwrap();
-    entities::chat::Entity::update_many()
+    entities::code_session::Entity::update_many()
         .col_expr(
-            entities::chat::Column::AttachmentRevision,
+            entities::code_session::Column::AttachmentRevision,
             sea_orm::sea_query::Expr::value(1_i64),
         )
-        .filter(entities::chat::Column::Id.eq(gapped.id.0))
+        .filter(entities::code_session::Column::Id.eq(gapped.id.0))
         .exec(&store.conn)
         .await
         .unwrap();
@@ -186,12 +186,12 @@ async fn corrupted_root_projection_rows_fail_closed_on_read() {
     let mut mixed = sample_chat();
     mixed.project_id = Some(project.id);
     store.create_chat(&mixed).await.unwrap();
-    entities::chat::Entity::update_many()
+    entities::code_session::Entity::update_many()
         .col_expr(
-            entities::chat::Column::AttachmentRevision,
+            entities::code_session::Column::AttachmentRevision,
             sea_orm::sea_query::Expr::value(2_i64),
         )
-        .filter(entities::chat::Column::Id.eq(mixed.id.0))
+        .filter(entities::code_session::Column::Id.eq(mixed.id.0))
         .exec(&store.conn)
         .await
         .unwrap();
@@ -231,20 +231,24 @@ async fn corrupted_root_projection_rows_fail_closed_on_read() {
 #[tokio::test]
 async fn project_membership_fk_and_attachment_insertions_are_atomic() {
     let (_dir, store) = temp_store().await;
-    let orphan = entities::chat::ActiveModel {
-        id: Set(uuid::Uuid::new_v4()),
-        project_id: Set(Some(uuid::Uuid::new_v4())),
-        title: Set(None),
-        model: Set(None),
-        reasoning_effort: Set(None),
-        permission_mode: Set(None),
-        network_policy: Set(r#"{"mode":"off"}"#.into()),
-        attachment_revision: Set(0),
-        created_at: Set(Utc::now()),
-        owner: sea_orm::ActiveValue::NotSet,
-        engine_private: Set(false),
-    };
-    assert!(orphan.insert(&store.conn).await.is_err());
+    let orphan = store
+        .conn
+        .execute_unprepared(&format!(
+            "INSERT INTO code_session (
+                id, project_id, harness_kind, permission_mode, lifecycle,
+                attention_state, attention_source, created_at
+             ) VALUES (
+                '{}', '{}', 'internal', 'ask', 'idle', '{{\"type\":\"idle\"}}',
+                'lifecycle', '2026-09-01T00:00:00Z'
+             )",
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4()
+        ))
+        .await;
+    assert!(
+        orphan.is_err(),
+        "a session cannot name a project that does not exist"
+    );
 
     let project = sample_project();
     store.create_project(&project).await.unwrap();

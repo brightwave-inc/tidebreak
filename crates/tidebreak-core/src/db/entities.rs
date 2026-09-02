@@ -84,52 +84,6 @@ pub mod project {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
-pub mod chat {
-    use sea_orm::entity::prelude::*;
-
-    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-    #[sea_orm(table_name = "chat")]
-    pub struct Model {
-        #[sea_orm(primary_key, auto_increment = false)]
-        pub id: Uuid,
-        pub project_id: Option<Uuid>,
-        pub title: Option<String>,
-        pub model: Option<String>,
-        pub reasoning_effort: Option<String>,
-        pub permission_mode: Option<String>,
-        pub network_policy: String,
-        pub attachment_revision: i64,
-        pub created_at: DateTimeUtc,
-        pub owner: String,
-        /// True when the in-process engine owns this row as the durable
-        /// state behind a code session. Owner-scoped reads never see it:
-        /// the conversation is reachable only through its session.
-        pub engine_private: bool,
-    }
-
-    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-    pub enum Relation {
-        #[sea_orm(has_many = "super::chat_root_attachment::Entity")]
-        RootAttachment,
-        #[sea_orm(has_many = "super::root_attachment_change::Entity")]
-        RootAttachmentChange,
-    }
-
-    impl Related<super::chat_root_attachment::Entity> for Entity {
-        fn to() -> RelationDef {
-            Relation::RootAttachment.def()
-        }
-    }
-
-    impl Related<super::root_attachment_change::Entity> for Entity {
-        fn to() -> RelationDef {
-            Relation::RootAttachmentChange.def()
-        }
-    }
-
-    impl ActiveModelBehavior for ActiveModel {}
-}
-
 pub mod project_root_attachment {
     use sea_orm::entity::prelude::*;
 
@@ -181,16 +135,16 @@ pub mod chat_root_attachment {
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
     pub enum Relation {
         #[sea_orm(
-            belongs_to = "super::chat::Entity",
+            belongs_to = "super::code_session::Entity",
             from = "Column::ChatId",
-            to = "super::chat::Column::Id",
+            to = "super::code_session::Column::Id",
             on_update = "NoAction",
             on_delete = "Cascade"
         )]
         Chat,
     }
 
-    impl Related<super::chat::Entity> for Entity {
+    impl Related<super::code_session::Entity> for Entity {
         fn to() -> RelationDef {
             Relation::Chat.def()
         }
@@ -234,16 +188,16 @@ pub mod root_attachment_change {
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
     pub enum Relation {
         #[sea_orm(
-            belongs_to = "super::chat::Entity",
+            belongs_to = "super::code_session::Entity",
             from = "Column::ChatId",
-            to = "super::chat::Column::Id",
+            to = "super::code_session::Column::Id",
             on_update = "NoAction",
             on_delete = "Restrict"
         )]
         Chat,
     }
 
-    impl Related<super::chat::Entity> for Entity {
+    impl Related<super::code_session::Entity> for Entity {
         fn to() -> RelationDef {
             Relation::Chat.def()
         }
@@ -439,16 +393,16 @@ pub mod chat_image_publication {
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
     pub enum Relation {
         #[sea_orm(
-            belongs_to = "super::chat::Entity",
+            belongs_to = "super::code_session::Entity",
             from = "Column::ChatId",
-            to = "super::chat::Column::Id",
+            to = "super::code_session::Column::Id",
             on_update = "NoAction",
             on_delete = "Restrict"
         )]
         Chat,
     }
 
-    impl Related<super::chat::Entity> for Entity {
+    impl Related<super::code_session::Entity> for Entity {
         fn to() -> RelationDef {
             Relation::Chat.def()
         }
@@ -482,16 +436,16 @@ pub mod exec_file_change {
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
     pub enum Relation {
         #[sea_orm(
-            belongs_to = "super::chat::Entity",
+            belongs_to = "super::code_session::Entity",
             from = "Column::ChatId",
-            to = "super::chat::Column::Id",
+            to = "super::code_session::Column::Id",
             on_update = "NoAction",
             on_delete = "Restrict"
         )]
         Chat,
     }
 
-    impl Related<super::chat::Entity> for Entity {
+    impl Related<super::code_session::Entity> for Entity {
         fn to() -> RelationDef {
             Relation::Chat.def()
         }
@@ -1801,7 +1755,10 @@ pub mod code_session {
         pub harness_kind: String,
         pub harness_version: Option<String>,
         pub harness_resume_ref: Option<String>,
-        pub permission_mode: String,
+        /// `None` on a conversation no worker has driven: chat's "follow the
+        /// default at turn time". The runtime and the engine's launch always
+        /// write a value.
+        pub permission_mode: Option<String>,
         pub permission_mode_revision: i64,
         pub permission_mode_intent: Option<String>,
         pub permission_mode_intent_revision: Option<i64>,
@@ -1823,10 +1780,34 @@ pub mod code_session {
         #[sea_orm(column_type = "JsonBinary", nullable)]
         pub subagents: Option<Json>,
         pub created_at: DateTimeUtc,
+        /// The conversation columns (decision 0048 step 5): a session is
+        /// the conversation, so the project it belongs to, its title, its
+        /// network policy, and its host-root revision live on the same row.
+        pub project_id: Option<Uuid>,
+        pub title: Option<String>,
+        pub network_policy: String,
+        pub attachment_revision: i64,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-    pub enum Relation {}
+    pub enum Relation {
+        #[sea_orm(has_many = "super::chat_root_attachment::Entity")]
+        RootAttachment,
+        #[sea_orm(has_many = "super::root_attachment_change::Entity")]
+        RootAttachmentChange,
+    }
+
+    impl Related<super::chat_root_attachment::Entity> for Entity {
+        fn to() -> RelationDef {
+            Relation::RootAttachment.def()
+        }
+    }
+
+    impl Related<super::root_attachment_change::Entity> for Entity {
+        fn to() -> RelationDef {
+            Relation::RootAttachmentChange.def()
+        }
+    }
 
     impl ActiveModelBehavior for ActiveModel {}
 }

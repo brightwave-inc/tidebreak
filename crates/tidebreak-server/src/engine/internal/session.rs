@@ -14,9 +14,9 @@ use tidebreak_core::storage::DecidePlanOutcome;
 use tidebreak_core::{
     AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentEvent, AnswerUserQuestions,
     AnswerUserQuestionsOutcome, AnswerUserQuestionsRequest, BeginTurnAdmissionOutcome, CallId,
-    Chat, ChatId, CodeApprovalKind, DecidePlanRequest, NetworkPolicy, PermissionMode, PlanDecision,
-    PlanDecisionChoice, ReservedTurnAcceptanceOutcome, SequencedEvent, TurnAdmissionRequest,
-    TurnId, TurnSteerId, DEFAULT_ACCEPTED_PLAN_MODE,
+    ChatId, CodeApprovalKind, DecidePlanRequest, PermissionMode, PlanDecision, PlanDecisionChoice,
+    ReservedTurnAcceptanceOutcome, SequencedEvent, TurnAdmissionRequest, TurnId, TurnSteerId,
+    DEFAULT_ACCEPTED_PLAN_MODE,
 };
 use tidebreak_harness::{
     ApprovalDecision, HarnessApprovalRef, HarnessError, HarnessEvent, HarnessEventSink,
@@ -64,50 +64,46 @@ fn store_error(error: tidebreak_core::AgentError) -> HarnessError {
 
 impl InternalSession {
     pub(super) async fn launch(state: AppState, spec: SessionSpec) -> Result<Self, HarnessError> {
+        // The session row is the conversation row (decision 0048 step 5):
+        // the runtime created it, and the engine follows the spec's posture
+        // and model on every launch.
         let chat_id = ChatId(spec.session_id.0);
-        let existing = state.store.get_chat(chat_id).await.map_err(store_error)?;
-        match (existing, spec.resume_ref.as_deref()) {
-            (Some(_), _) => {
-                // Relaunch: the session's posture and model are the spec's,
-                // and the conversation follows them.
-                state
-                    .store
-                    .update_chat_metadata(
-                        chat_id,
-                        None,
-                        Some(spec.model.clone()),
-                        Some(spec.reasoning_effort),
-                        Some(Some(spec.permission_mode)),
-                        None,
-                    )
-                    .await
-                    .map_err(store_error)?;
-            }
-            (None, Some(resume)) => {
-                return Err(HarnessError::ResumeLost(format!(
-                    "conversation {resume} no longer exists"
-                )));
-            }
-            (None, None) => {
-                let chat = Chat {
-                    id: chat_id,
-                    project_id: None,
-                    title: None,
-                    model: spec.model.clone(),
-                    reasoning_effort: spec.reasoning_effort,
-                    permission_mode: Some(spec.permission_mode),
-                    network_policy: NetworkPolicy::default(),
-                    attachment_revision: 0,
-                    root_attachments: Vec::new(),
-                    created_at: Utc::now(),
-                };
-                state
-                    .store
-                    .create_engine_private_chat(&spec.owner, &chat)
-                    .await
-                    .map_err(store_error)?;
-            }
+        if state
+            .store
+            .get_chat(chat_id)
+            .await
+            .map_err(store_error)?
+            .is_none()
+        {
+            return Err(match spec.resume_ref.as_deref() {
+                Some(resume) => {
+                    HarnessError::ResumeLost(format!("conversation {resume} no longer exists"))
+                }
+                None => HarnessError::Other(format!(
+                    "session {} has no conversation row",
+                    spec.session_id
+                )),
+            });
         }
+        state
+            .store
+            .update_chat_metadata(
+                chat_id,
+                None,
+                Some(spec.model.clone()),
+                Some(spec.reasoning_effort),
+                Some(Some(spec.permission_mode)),
+                None,
+            )
+            .await
+            .map_err(store_error)?;
+        // A session the code runtime created has no coordinator run yet;
+        // the turn lane admits nothing without one.
+        state
+            .store
+            .ensure_foreground_agent_run(chat_id)
+            .await
+            .map_err(store_error)?;
         Ok(Self {
             state,
             chat_id,

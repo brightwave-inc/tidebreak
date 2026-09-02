@@ -298,8 +298,8 @@ impl DbStore {
             }
         }
 
-        let has_chats = entities::chat::Entity::find()
-            .filter(entities::chat::Column::ProjectId.eq(id.0))
+        let has_chats = entities::code_session::Entity::find()
+            .filter(entities::code_session::Column::ProjectId.eq(id.0))
             .one(&transaction)
             .await
             .map_err(store_err)?
@@ -694,12 +694,12 @@ impl Store for DbStore {
         ops::conversation::create_chat(self, chat, None).await
     }
 
-    async fn create_chat_scoped(&self, owner: &OwnerId, chat: &Chat) -> Result<()> {
-        ops::conversation::create_chat(self, chat, Some(owner)).await
+    async fn ensure_foreground_agent_run(&self, chat_id: ChatId) -> Result<()> {
+        ops::agent_run::ensure_foreground_agent_run(self, chat_id).await
     }
 
-    async fn create_engine_private_chat(&self, owner: &OwnerId, chat: &Chat) -> Result<()> {
-        ops::conversation::create_engine_private_chat(self, chat, owner).await
+    async fn create_chat_scoped(&self, owner: &OwnerId, chat: &Chat) -> Result<()> {
+        ops::conversation::create_chat(self, chat, Some(owner)).await
     }
 
     async fn create_chat_with_project_defaults(&self, chat: &Chat) -> Result<Chat> {
@@ -2894,7 +2894,7 @@ where
     C: ConnectionTrait,
 {
     if let Some(chat_id) = chat_id {
-        let chat = entities::chat::Entity::find_by_id(chat_id.0)
+        let chat = entities::code_session::Entity::find_by_id(chat_id.0)
             .one(conn)
             .await
             .map_err(store_err)?

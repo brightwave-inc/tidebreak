@@ -1,6 +1,6 @@
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, Condition, ConnectionTrait, EntityTrait, QueryFilter,
-    QueryOrder, Set, TransactionTrait,
+    QueryOrder, QuerySelect, Set, TransactionTrait,
 };
 
 use crate::attention::{Attention, AttentionSource, AttentionState, FenceReason};
@@ -76,7 +76,7 @@ where
         harness_kind: Set(session.harness_kind.as_str().to_owned()),
         harness_version: Set(session.harness_version.clone()),
         harness_resume_ref: Set(session.harness_resume_ref.clone()),
-        permission_mode: Set(session.permission_mode.as_str().to_owned()),
+        permission_mode: Set(Some(session.permission_mode.as_str().to_owned())),
         permission_mode_revision: Set(0),
         permission_mode_intent: Set(None),
         permission_mode_intent_revision: Set(None),
@@ -104,11 +104,151 @@ where
             Some(serde_json::to_value(&session.subagents)?)
         }),
         created_at: Set(session.created_at),
+        // The conversation columns start at their creation defaults; the
+        // chat routes fill them in once the session is read as a chat.
+        project_id: Set(None),
+        title: Set(None),
+        network_policy: Set(serde_json::to_string(&crate::NetworkPolicy::default())?),
+        attachment_revision: Set(0),
     }
     .insert(connection)
     .await
     .map_err(store_err)?;
     Ok(())
+}
+
+/// Remove every code-side row that hangs off one session, ahead of the
+/// session row itself, and hand back the image blob ids those rows reserved
+/// so the caller can enqueue them for retirement.
+///
+/// The chat cascade (`ops::conversation::delete_chat`) is the one deleter of
+/// a conversation row, and a conversation the internal engine has hosted
+/// carries code-side rows too: attaching journals `SessionStarted` into
+/// `code_event`, and a turn adds `code_turn`, its attachments, approvals,
+/// queued turns, and image reservations. Every one of those keys the session
+/// with a foreign key that does not cascade, so they go here, leaves first.
+pub(in crate::db) async fn delete_session_dependents_on<C>(
+    connection: &C,
+    id: CodeSessionId,
+) -> Result<Vec<uuid::Uuid>>
+where
+    C: ConnectionTrait,
+{
+    let turn_ids = entities::code_turn::Entity::find()
+        .select_only()
+        .column(entities::code_turn::Column::Id)
+        .filter(entities::code_turn::Column::SessionId.eq(id.0))
+        .into_tuple::<uuid::Uuid>()
+        .all(connection)
+        .await
+        .map_err(store_err)?;
+    let mut blob_ids = entities::code_turn_attachment::Entity::find()
+        .select_only()
+        .column(entities::code_turn_attachment::Column::BlobId)
+        .filter(entities::code_turn_attachment::Column::TurnId.is_in(turn_ids.clone()))
+        .into_tuple::<uuid::Uuid>()
+        .all(connection)
+        .await
+        .map_err(store_err)?;
+    blob_ids.extend(
+        entities::code_session_image::Entity::find()
+            .select_only()
+            .column(entities::code_session_image::Column::BlobId)
+            .filter(entities::code_session_image::Column::SessionId.eq(id.0))
+            .into_tuple::<uuid::Uuid>()
+            .all(connection)
+            .await
+            .map_err(store_err)?,
+    );
+
+    entities::code_approval::Entity::delete_many()
+        .filter(entities::code_approval::Column::SessionId.eq(id.0))
+        .exec(connection)
+        .await
+        .map_err(store_err)?;
+    entities::code_turn_attachment::Entity::delete_many()
+        .filter(entities::code_turn_attachment::Column::TurnId.is_in(turn_ids))
+        .exec(connection)
+        .await
+        .map_err(store_err)?;
+    entities::code_turn::Entity::delete_many()
+        .filter(entities::code_turn::Column::SessionId.eq(id.0))
+        .exec(connection)
+        .await
+        .map_err(store_err)?;
+    entities::code_event::Entity::delete_many()
+        .filter(entities::code_event::Column::SessionId.eq(id.0))
+        .exec(connection)
+        .await
+        .map_err(store_err)?;
+    entities::code_queued_turn::Entity::delete_many()
+        .filter(entities::code_queued_turn::Column::SessionId.eq(id.0))
+        .exec(connection)
+        .await
+        .map_err(store_err)?;
+    entities::code_session_image::Entity::delete_many()
+        .filter(entities::code_session_image::Column::SessionId.eq(id.0))
+        .exec(connection)
+        .await
+        .map_err(store_err)?;
+    entities::code_external_event::Entity::delete_many()
+        .filter(entities::code_external_event::Column::SessionId.eq(id.0))
+        .exec(connection)
+        .await
+        .map_err(store_err)?;
+    entities::code_external_binding::Entity::delete_many()
+        .filter(entities::code_external_binding::Column::SessionId.eq(id.0))
+        .exec(connection)
+        .await
+        .map_err(store_err)?;
+    entities::code_session_incarnation::Entity::delete_many()
+        .filter(entities::code_session_incarnation::Column::SessionId.eq(id.0))
+        .exec(connection)
+        .await
+        .map_err(store_err)?;
+    entities::code_watch::Entity::delete_many()
+        .filter(entities::code_watch::Column::SessionId.eq(id.0))
+        .exec(connection)
+        .await
+        .map_err(store_err)?;
+
+    blob_ids.sort_unstable();
+    blob_ids.dedup();
+    Ok(blob_ids)
+}
+
+/// The session's permission mode as the code side reads it.
+///
+/// A conversation no worker has driven stores `NULL`: chat's "follow the
+/// default at turn time" (decision 0048 step 5). The runtime and the engine's
+/// launch always write a value before a worker acts, so the default stands in
+/// only for a row the code side reads before that.
+fn stored_permission_mode(row: &entities::code_session::Model) -> Result<PermissionMode> {
+    match row.permission_mode.as_deref() {
+        None => Ok(PermissionMode::DEFAULT),
+        Some(stored) => PermissionMode::from_str(stored).ok_or_else(|| {
+            AgentError::Store(format!(
+                "code_session {} has unknown permission_mode {stored}",
+                row.id
+            ))
+        }),
+    }
+}
+
+/// The session rows the code runtime drives (decision 0048 step 5).
+///
+/// A chat is a session too: a row with no workspace, the internal harness,
+/// and the code-owned columns at rest. It becomes the runtime's the moment a
+/// worker attaches (`spawn_epoch` bumps, `lifecycle` leaves `idle`), and a
+/// session created with a workspace is the runtime's from the start. Every
+/// listing the runtime or the code routes take applies this, so boot
+/// recovery, the sweeps, and `GET /code/sessions` never enumerate a
+/// conversation that only the chat routes have touched.
+pub(in crate::db) fn code_runtime_sessions() -> sea_orm::Condition {
+    sea_orm::Condition::any()
+        .add(entities::code_session::Column::WorkspaceId.is_not_null())
+        .add(entities::code_session::Column::SpawnEpoch.gt(0))
+        .add(entities::code_session::Column::Lifecycle.ne(CodeSessionLifecycle::Idle.as_str()))
 }
 
 /// Load one of the owner's sessions by id.
@@ -254,7 +394,7 @@ pub async fn begin_permission_mode_change(
     };
     let matches = row.lifecycle == expected.lifecycle.as_str()
         && row.spawn_epoch == expected.spawn_epoch
-        && row.permission_mode == expected.permission_mode.as_str()
+        && row.permission_mode.as_deref() == Some(expected.permission_mode.as_str())
         && row.permission_mode_intent.is_none()
         && row.permission_mode_intent_revision.is_none()
         && row.permission_mode_intent_epoch.is_none()
@@ -614,12 +754,7 @@ fn permission_mode_intent_from_row(
             row.id, requested
         ))
     })?;
-    let previous_mode = PermissionMode::from_str(&row.permission_mode).ok_or_else(|| {
-        AgentError::Store(format!(
-            "code session {} has unknown permission_mode {}",
-            row.id, row.permission_mode
-        ))
-    })?;
+    let previous_mode = stored_permission_mode(row)?;
     let lifecycle_token = row
         .permission_mode_intent_lifecycle
         .as_deref()
@@ -718,6 +853,7 @@ pub async fn bump_spawn_epoch(
 pub async fn list_sessions(store: &DbStore, owner: &OwnerId) -> Result<Vec<CodeSession>> {
     entities::code_session::Entity::find()
         .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+        .filter(code_runtime_sessions())
         .order_by_desc(entities::code_session::Column::CreatedAt)
         .all(&store.conn)
         .await
@@ -752,6 +888,7 @@ pub async fn list_sessions_for_workspace(
 /// route may call it.
 pub async fn list_sessions_all_owners(store: &DbStore) -> Result<Vec<CodeSession>> {
     entities::code_session::Entity::find()
+        .filter(code_runtime_sessions())
         .order_by_desc(entities::code_session::Column::CreatedAt)
         .all(&store.conn)
         .await
@@ -773,6 +910,7 @@ pub async fn list_sessions_by_lifecycle_all_owners(
 ) -> Result<Vec<CodeSession>> {
     entities::code_session::Entity::find()
         .filter(entities::code_session::Column::Lifecycle.eq(lifecycle.as_str().to_owned()))
+        .filter(code_runtime_sessions())
         .all(&store.conn)
         .await
         .map_err(store_err)?
@@ -1024,12 +1162,7 @@ pub(super) fn session_from_row(row: entities::code_session::Model) -> Result<Cod
             row.id, row.harness_kind
         ))
     })?;
-    let permission_mode = PermissionMode::from_str(&row.permission_mode).ok_or_else(|| {
-        AgentError::Store(format!(
-            "code_session {} has unknown permission_mode {}",
-            row.id, row.permission_mode
-        ))
-    })?;
+    let permission_mode = stored_permission_mode(&row)?;
     let kind = CodeSessionKind::from_str(&row.kind).ok_or_else(|| {
         AgentError::Store(format!(
             "code_session {} has unknown kind {}",
