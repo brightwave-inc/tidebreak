@@ -757,9 +757,9 @@ async fn postgres_v060_upgrade_merges_conversations_into_sessions() {
         [
             ("agent_run".to_owned(), 1),
             ("code_event".to_owned(), 1),
+            ("code_turn".to_owned(), 1),
             ("message".to_owned(), 2),
             ("tool_call".to_owned(), 1),
-            ("turn_run".to_owned(), 1),
         ]
     );
     assert_eq!(
@@ -779,17 +779,12 @@ async fn postgres_v060_upgrade_merges_conversations_into_sessions() {
             ("context_checkpoint".to_owned(), "c".to_owned()),
             ("exec_file_change".to_owned(), "r".to_owned()),
             ("message".to_owned(), "a".to_owned()),
-            ("message_attachment".to_owned(), "r".to_owned()),
-            ("message_document_attachment".to_owned(), "c".to_owned()),
             ("message_identity".to_owned(), "a".to_owned()),
             ("output".to_owned(), "c".to_owned()),
-            ("queued_turn".to_owned(), "c".to_owned()),
             ("root_attachment_change".to_owned(), "r".to_owned()),
             ("standing_tool_grant".to_owned(), "c".to_owned()),
             ("task_plan".to_owned(), "r".to_owned()),
             ("tool_call".to_owned(), "a".to_owned()),
-            ("turn_admission".to_owned(), "c".to_owned()),
-            ("turn_run".to_owned(), "c".to_owned()),
         ]
     );
     assert!(
@@ -935,11 +930,11 @@ async fn exercise_conversation_merge(url: &str) -> Result<ConversationMergeSnaps
     for table in [
         "agent_run",
         "code_event",
+        "code_turn",
         "message",
         "tool_call",
-        "turn_run",
     ] {
-        let column = if table == "code_event" {
+        let column = if table == "code_event" || table == "code_turn" {
             "session_id"
         } else {
             "chat_id"
