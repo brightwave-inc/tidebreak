@@ -758,7 +758,7 @@ async fn capture_candidates_land_under_the_review_thresholds() {
             &owner,
             other_chat.id,
             other_turn,
-            other_evidence,
+            other_evidence.clone(),
             candidate("When naming branches", true),
         )
         .await
@@ -767,6 +767,19 @@ async fn capture_candidates_land_under_the_review_thresholds() {
     let graduated = db.get(&owner, tracked_id).await.unwrap().unwrap();
     assert_eq!(graduated.status, MemoryStatus::Proposed);
     assert_eq!(graduated.observation_count, 3);
+    // The proposal is announced on the graduating conversation, so that is
+    // where its origin points and where the transcript attaches it.
+    assert_eq!(graduated.provenance.origin.chat_id, Some(other_chat.id));
+    assert_eq!(graduated.provenance.origin.turn_id, Some(other_turn));
+    assert!(
+        graduated.provenance.evidence.contains(&other_evidence),
+        "the graduating turn joins the evidence"
+    );
+    assert_eq!(
+        graduated.provenance.evidence.len(),
+        2,
+        "the first sighting stays"
+    );
 
     // A dismissed proposal suppresses re-capture for its retention horizon.
     let rejected = db.get(&owner, proposed_id).await.unwrap().unwrap();

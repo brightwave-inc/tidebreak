@@ -343,7 +343,9 @@ impl MemoryCapture {
         if let Some(tracked) = stored.iter().find(|record| {
             record.status == MemoryStatus::Tracking && titles_match(&record.title, title)
         }) {
-            return self.observe_hypothesis(owner, chat_id, tracked).await;
+            return self
+                .observe_hypothesis(owner, chat_id, turn_id, evidence, tracked)
+                .await;
         }
         let now = chrono::Utc::now();
         let (status, observation_count) = if candidate.hypothesis {
@@ -394,8 +396,22 @@ impl MemoryCapture {
         &self,
         owner: &OwnerId,
         chat_id: ChatId,
+        turn_id: TurnId,
+        evidence: MemoryEvidence,
         tracked: &MemoryRecord,
     ) -> Result<Outcome> {
+        let repeats_across_chats = tracked.provenance.origin.chat_id != Some(chat_id);
+        let mut provenance = tracked.provenance.clone();
+        if repeats_across_chats {
+            // The graduating turn becomes the record's origin, so the
+            // transcript that announces the proposal is the one that
+            // attaches it; the first sighting stays in the evidence.
+            provenance.origin.chat_id = Some(chat_id);
+            provenance.origin.turn_id = Some(turn_id);
+            if !provenance.evidence.contains(&evidence) {
+                provenance.evidence.push(evidence);
+            }
+        }
         let updated = self
             .memory
             .update(
@@ -406,7 +422,7 @@ impl MemoryCapture {
                     kind: tracked.kind,
                     title: tracked.title.clone(),
                     body: tracked.body.clone(),
-                    provenance: tracked.provenance.clone(),
+                    provenance,
                     links: tracked.links.clone(),
                     expires_at: tracked.expires_at,
                     observation_count: tracked.observation_count.saturating_add(1),
@@ -414,7 +430,6 @@ impl MemoryCapture {
             )
             .await
             .map_err(capture_store_error)?;
-        let repeats_across_chats = tracked.provenance.origin.chat_id != Some(chat_id);
         if !repeats_across_chats {
             return Ok(Outcome::Tracked(tracked.id));
         }
