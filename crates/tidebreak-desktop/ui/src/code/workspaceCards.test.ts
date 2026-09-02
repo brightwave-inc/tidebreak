@@ -16,6 +16,7 @@ import {
   sessionActivityLabel,
   sessionActivityLineLabel,
   sessionRowLabel,
+  readyToMergeNotice,
   workspaceCardLabel,
   workspaceCardStatus,
   workspacePrChipSummary,
@@ -367,6 +368,114 @@ describe("workspaceStatusRank", () => {
       "idle",
     );
   });
+
+  it("ranks a ready-to-merge notice with the open pull request, not needs-you", () => {
+    expect(
+      workspaceStatusRank(
+        workspace("ws-a", "app"),
+        digest("ws-a", {
+          attention: {
+            state: {
+              type: "needs_you",
+              prompt: "#3081 is ready to merge",
+              source: "structured",
+            },
+            source: "structured",
+          },
+          pr_state: { number: 3081, state: "open" },
+        }),
+      ),
+    ).toBe("pr_open");
+  });
+
+  it("does not keep a ready-to-merge notice after the pull request merges", () => {
+    expect(
+      workspaceStatusRank(
+        workspace("ws-a", "app"),
+        digest("ws-a", {
+          attention: {
+            state: {
+              type: "needs_you",
+              prompt: "#3081 is ready to merge",
+              source: "structured",
+            },
+            source: "structured",
+          },
+          pr_state: { number: 3081, state: "merged", merged: true },
+          turn_count: 4,
+        }),
+      ),
+    ).toBe("done_unreviewed");
+  });
+
+  it("still ranks a real blocker as needs-you when a pull request is open", () => {
+    expect(
+      workspaceStatusRank(
+        workspace("ws-a", "app"),
+        digest("ws-a", {
+          attention: {
+            state: {
+              type: "needs_you",
+              prompt: "an approval is waiting",
+              source: "structured",
+            },
+            source: "structured",
+          },
+          pr_state: { number: 12, state: "open" },
+        }),
+      ),
+    ).toBe("needs_you");
+  });
+});
+
+describe("readyToMergeNotice", () => {
+  const ready = {
+    state: {
+      type: "needs_you" as const,
+      prompt: "#3081 is ready to merge",
+      source: "structured" as const,
+    },
+    source: "structured" as const,
+  };
+
+  it("treats the watch and notify prompts as ready while the pull request is open", () => {
+    expect(readyToMergeNotice(ready, { state: "open" })).toBe("ready");
+    expect(
+      readyToMergeNotice(
+        {
+          ...ready,
+          state: {
+            ...ready.state,
+            prompt: "the pull request is ready to merge",
+          },
+        },
+        { state: "open" },
+      ),
+    ).toBe("ready");
+  });
+
+  it("is stale once the pull request has merged or closed", () => {
+    expect(readyToMergeNotice(ready, { state: "merged", merged: true })).toBe(
+      "stale",
+    );
+    expect(readyToMergeNotice(ready, { state: "closed" })).toBe("stale");
+  });
+
+  it("ignores other needs-you prompts", () => {
+    expect(
+      readyToMergeNotice(
+        {
+          state: {
+            type: "needs_you",
+            prompt: "an approval is waiting",
+            source: "structured",
+          },
+          source: "structured",
+        },
+        { state: "open" },
+      ),
+    ).toBeNull();
+  });
 });
 
 describe("workspaceCardStatus", () => {
@@ -501,6 +610,45 @@ describe("sessionActivityLineLabel", () => {
       "Done",
     );
   });
+
+  it("keeps a ready-to-merge notice while the pull request is open", () => {
+    expect(
+      sessionActivityLineLabel(
+        digest("ws-a", {
+          attention: {
+            state: {
+              type: "needs_you",
+              prompt: "#3081 is ready to merge",
+              source: "structured",
+            },
+            source: "structured",
+          },
+          pr_state: { number: 3081, state: "open" },
+          turn_count: 4,
+        }),
+      ),
+    ).toBe("#3081 is ready to merge");
+  });
+
+  it("drops a ready-to-merge notice after the pull request merges", () => {
+    expect(
+      sessionActivityLineLabel(
+        digest("ws-a", {
+          attention: {
+            state: {
+              type: "needs_you",
+              prompt: "#3081 is ready to merge",
+              source: "structured",
+            },
+            source: "structured",
+          },
+          pr_state: { number: 3081, state: "merged", merged: true },
+          recap: "Opened the page as soon as the session existed.",
+          turn_count: 4,
+        }),
+      ),
+    ).toBe("Opened the page as soon as the session existed.");
+  });
 });
 
 describe("sessionActivityLabel", () => {
@@ -628,6 +776,25 @@ describe("workspaceCardLabel", () => {
         pr: { number: 12, state: "open", in_merge_queue: true },
       }),
     ).toContain("Pull request #12 In merge queue");
+  });
+
+  it("does not announce ready-to-merge after the pull request has merged", () => {
+    expect(
+      workspaceCardLabel({
+        title: "Fix login",
+        repoName: "app",
+        branchName: "tidebreak/fix-login",
+        attention: {
+          state: {
+            type: "needs_you",
+            prompt: "#12 is ready to merge",
+            source: "structured",
+          },
+          source: "structured",
+        },
+        pr: { number: 12, state: "merged", merged: true },
+      }),
+    ).toBe("Fix login · Pull request #12 Merged · app · tidebreak/fix-login");
   });
 });
 

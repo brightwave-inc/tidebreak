@@ -78,6 +78,7 @@ import {
   isSessionRowWorthy,
   isPutAway,
   middleTruncate,
+  readyToMergeNotice,
   repoAccentClass,
   sessionActivityLineLabel,
   watchRowLabel,
@@ -553,7 +554,7 @@ function WorkspaceDetailPanel({
   onCommand: (command: WorkspaceCommand["id"]) => void;
   onWorkflowAction?: (action: WorkspaceWorkflowAction) => void;
 }) {
-  const activity = workspaceActivitySummary(digest, session, terminalOpen);
+  const activity = workspaceActivitySummary(digest, session, terminalOpen, pr);
   const matchingSession =
     !digest || session?.id === digest.session ? session : undefined;
   const stamp = archived
@@ -855,7 +856,12 @@ function WorkspaceActivityLine({
   const railDigest = digest && isSessionRowWorthy(digest) ? digest : undefined;
   if (!railDigest) return null;
 
-  const activity = workspaceActivitySummary(railDigest, session, false);
+  const activity = workspaceActivitySummary(
+    railDigest,
+    session,
+    false,
+    workspace.pr,
+  );
   const matchingSession =
     session?.id === railDigest.session ? session : undefined;
   const harnessKind = railDigest.harness_kind ?? matchingSession?.harness_kind;
@@ -871,13 +877,14 @@ function WorkspaceActivityLine({
       {activity.terminalOnly ? (
         <SquareTerminal className="size-3 shrink-0" aria-hidden />
       ) : (
-        <SessionStateGlyph digest={railDigest} />
+        <SessionStateGlyph digest={railDigest} pr={workspace.pr} />
       )}
       <span
         className={cn(
           "min-w-0 flex-1 truncate",
           activity.needsYou && STATUS_TEXT.critical,
           running && STATUS_TEXT.running,
+          activity.tone === "ready" && STATUS_TEXT.ready,
         )}
         title={activity.label}
       >
@@ -909,10 +916,29 @@ function WorkspaceActivityLine({
  * that is alive but parked on something else: a bot for subagents and a
  * radar for a monitor, both in the live tone with the live pulse.
  */
-function SessionStateGlyph({ digest }: { digest: CodeSessionDigest }) {
+function SessionStateGlyph({
+  digest,
+  pr,
+}: {
+  digest: CodeSessionDigest;
+  pr?: PullRequestDigest;
+}) {
   const className = "size-3 shrink-0";
   const attention = digest.attention.state.type;
-  if (attention === "needs_you") {
+  const mergeNotice = readyToMergeNotice(
+    digest.attention,
+    digest.pr_state ?? pr,
+  );
+  if (attention === "needs_you" && mergeNotice !== "stale") {
+    if (mergeNotice === "ready") {
+      return (
+        <CircleCheck
+          className={cn(className, STATUS_MARK.ready)}
+          data-state-glyph="ready_to_merge"
+          aria-hidden
+        />
+      );
+    }
     return (
       <CircleAlert
         className={cn(className, STATUS_MARK.critical)}
@@ -1033,19 +1059,26 @@ function workspaceActivitySummary(
   digest: CodeSessionDigest | undefined,
   session: CodeSessionSnapshot | undefined,
   terminalOpen: boolean,
+  pr?: PullRequestDigest,
 ): {
   label: string;
   tone: StatusTone;
   needsYou: boolean;
   terminalOnly: boolean;
 } | null {
-  const needsYou =
-    digest?.attention.state.type === "needs_you"
-      ? digest.attention.state.prompt || "Needs you"
-      : null;
-  if (needsYou) {
+  const pullRequest = digest?.pr_state ?? pr;
+  const mergeNotice = readyToMergeNotice(digest?.attention, pullRequest);
+  if (digest?.attention.state.type === "needs_you" && mergeNotice !== "stale") {
+    if (mergeNotice === "ready") {
+      return {
+        label: digest.attention.state.prompt || "Ready to merge",
+        tone: "ready",
+        needsYou: false,
+        terminalOnly: false,
+      };
+    }
     return {
-      label: needsYou,
+      label: digest.attention.state.prompt || "Needs you",
       tone: "critical",
       needsYou: true,
       terminalOnly: false,
@@ -1055,7 +1088,7 @@ function workspaceActivitySummary(
   const worthyDigest =
     digest && isSessionRowWorthy(digest) ? digest : undefined;
   const statusLabel = worthyDigest
-    ? sessionActivityLineLabel(worthyDigest)
+    ? sessionActivityLineLabel(worthyDigest, pullRequest)
     : digest
       ? LIFECYCLE_LABELS[digest.lifecycle]
       : session
@@ -1066,7 +1099,7 @@ function workspaceActivitySummary(
 
   return {
     label: statusLabel || "Terminal open",
-    tone: digestStatusTone(digest),
+    tone: mergeNotice === "stale" ? "neutral" : digestStatusTone(digest),
     needsYou: false,
     terminalOnly,
   };
