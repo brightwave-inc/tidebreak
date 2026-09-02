@@ -24,14 +24,14 @@ use tidebreak_core::{
     chat_journal, AcceptTurnOutcome, AcceptTurnSteerOutcome, AnswerUserQuestions,
     AnswerUserQuestionsOutcome, AnswerUserQuestionsRequest, ApprovalDecisionKind, Attention,
     AttentionSource, BeginTurnAdmissionOutcome, CallId, ChatId, CodeApprovalKind, CodeEvent,
-    CodeSessionId, DecidePlanRequest, GrantLevel, GrantScope, InternalApprovalRequest, OwnerId,
-    PermissionMode, PlanDecision, PlanDecisionChoice, ReservedTurnAcceptanceOutcome,
+    CodeSessionId, DecidePlanRequest, GrantLevel, GrantScope, ImageRef, InternalApprovalRequest,
+    OwnerId, PermissionMode, PlanDecision, PlanDecisionChoice, ReservedTurnAcceptanceOutcome,
     SequencedCodeEvent, SequencedEvent, StandingGrant, ToolApprovalStatus, TurnAdmissionRequest,
     TurnId, TurnSteerId, DEFAULT_ACCEPTED_PLAN_MODE,
 };
 use tidebreak_harness::{
     ApprovalDecision, HarnessApprovalRef, HarnessError, HarnessEvent, HarnessEventSink,
-    HarnessSession, ParkWait, ResumeInput, SessionSpec, TurnInput, TurnOutcome,
+    HarnessSession, ParkWait, ResumeInput, SessionSpec, TurnImage, TurnInput, TurnOutcome,
 };
 
 use crate::code::bus::{CodeEventBus, CodeLiveEvent};
@@ -166,9 +166,48 @@ impl InternalSession {
         )
     }
 
+    /// Publish turn images through chat's attachment model: sniff and bound
+    /// them the way chat ingest does, put the bytes, and reserve the chat's
+    /// authority to attach each id.
+    async fn publish_turn_images(
+        &self,
+        images: Vec<TurnImage>,
+    ) -> Result<Vec<ImageRef>, HarnessError> {
+        let mut published = Vec::with_capacity(images.len());
+        for image in images {
+            let inspected = crate::routes::image_attachment::inspect_image_bytes(&image.bytes)
+                .map_err(|error| HarnessError::Other(error.message().to_owned()))?;
+            let _blob_write = self
+                .state
+                .blob_writes
+                .acquire(inspected.blob_id)
+                .await
+                .map_err(store_error)?;
+            self.state
+                .blobs
+                .put(inspected.blob_id, image.bytes)
+                .await
+                .map_err(store_error)?;
+            if !self
+                .state
+                .store
+                .publish_chat_image_scoped(&self.owner, self.chat_id, &inspected)
+                .await
+                .map_err(store_error)?
+            {
+                return Err(HarnessError::ResumeLost(format!(
+                    "conversation {} no longer exists",
+                    self.chat_id
+                )));
+            }
+            published.push(inspected);
+        }
+        Ok(published)
+    }
+
     /// Submit the user's message to the chat turn lane and return the turn
     /// it admitted.
-    async fn submit(&self, text: &str) -> Result<TurnId, HarnessError> {
+    async fn submit(&self, text: &str, images: Vec<TurnImage>) -> Result<TurnId, HarnessError> {
         let chat = self
             .state
             .store
@@ -182,12 +221,13 @@ impl InternalSession {
             crate::routes::providers_models::resolve_executable_chat_model(&self.state, &chat)
                 .await
                 .map_err(|error| HarnessError::Other(error.message().to_owned()))?;
+        let attachments = self.publish_turn_images(images).await?;
         let turn_id = TurnId::new();
         let request = TurnAdmissionRequest {
             id: turn_id,
             chat_id: self.chat_id,
             content: text.to_owned(),
-            attachments: Vec::new(),
+            attachments: attachments.iter().map(|image| image.blob_id).collect(),
             file_attachments: Vec::new(),
             invoked_skills: Vec::new(),
             voice_input_used: false,
@@ -224,7 +264,7 @@ impl InternalSession {
                     self.chat_id,
                     &model,
                     text,
-                    &[],
+                    &attachments,
                     &[],
                     &[],
                     false,
@@ -684,11 +724,6 @@ impl InternalSession {
 #[async_trait]
 impl HarnessSession for InternalSession {
     async fn run_turn(&self, input: TurnInput) -> Result<TurnOutcome, HarnessError> {
-        if !input.images.is_empty() {
-            return Err(HarnessError::Other(
-                "image input is not available on the internal engine yet".into(),
-            ));
-        }
         if self.active_turn().is_some() {
             return Err(HarnessError::Other(
                 "the internal engine is already running a turn".into(),
@@ -712,7 +747,7 @@ impl HarnessSession for InternalSession {
         // between the two.
         let (mut live, _tail) = self.bus.attach(self.session_id);
         let after = self.journal_tail().await?;
-        let turn_id = self.submit(&input.text).await?;
+        let turn_id = self.submit(&input.text, input.images).await?;
         *self.active.lock().expect("active turn") = Some(ActiveTurn {
             turn_id,
             last_seq: after,

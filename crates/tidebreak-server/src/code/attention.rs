@@ -16,9 +16,10 @@ use tidebreak_core::db::code::{
     list_sessions_for_workspace, list_turns, replace_session_attention, save_session,
 };
 use tidebreak_core::{
-    Attention, AttentionSource, AttentionState, CodeApprovalState, CodeEvent, CodeSession,
-    CodeSessionActivity, CodeSessionId, CodeSessionKind, CodeSessionLifecycle, CodeSubagentStatus,
-    CodeTurnStatus, DbStore, OwnerId, ToolDetail, WorkspaceId,
+    preview_formatting_character, Attention, AttentionSource, AttentionState, CodeApprovalState,
+    CodeEvent, CodeSession, CodeSessionActivity, CodeSessionId, CodeSessionKind,
+    CodeSessionLifecycle, CodeSubagentStatus, CodeTurnStatus, DbStore, OwnerId, ToolDetail,
+    WorkspaceId,
 };
 
 use super::bus::{CodeEventBus, CodeLiveUpdate, SessionDigest};
@@ -31,6 +32,10 @@ pub(crate) const STALL_IDLE_SECS: u32 = 90;
 /// How often the stall sweep walks running sessions.
 pub(crate) const STALL_SWEEP_INTERVAL: Duration = Duration::from_secs(15);
 const ACTIVITY_EVENT_WINDOW: u64 = 256;
+
+/// Most characters of a tool subject a digest carries. A rail row shows one
+/// line; anything longer is a script, not a label.
+pub(crate) const ACTIVITY_DETAIL_MAX_CHARS: usize = 120;
 
 /// The only function that may write attention onto a session value.
 ///
@@ -183,7 +188,7 @@ pub(crate) async fn compute_attention(
     if session.lifecycle == CodeSessionLifecycle::Running {
         let last = last_activity_at(db, bus, session).await?;
         let idle = opts.now.signed_duration_since(last).num_seconds().max(0) as u32;
-        if idle >= opts.stall_idle_secs {
+        if idle >= opts.stall_idle_secs && !parked_on_background(db, session).await? {
             return Ok(Attention::new(
                 AttentionState::Stalled { idle_secs: idle },
                 AttentionSource::Heuristic,
@@ -291,6 +296,12 @@ pub(crate) async fn sweep_stalled(
         let last = last_activity_at(db, bus, &session).await?;
         let idle = now.signed_duration_since(last).num_seconds().max(0) as u32;
         if idle < idle_secs {
+            continue;
+        }
+        // A monitor or a subagent is silent by design: the engine is
+        // waiting, not stuck. Calling that stalled would contradict the
+        // "Monitoring" the same row says beside it.
+        if parked_on_background(db, &session).await? {
             continue;
         }
         let next = Attention::new(
@@ -417,12 +428,13 @@ async fn build_digest(
     } else {
         None
     };
-    let activity = if session.lifecycle == CodeSessionLifecycle::Running {
+    let (activity, activity_detail) = if session.lifecycle == CodeSessionLifecycle::Running {
         let events =
             list_recent_events(db, &session.owner, session.id, ACTIVITY_EVENT_WINDOW).await?;
-        Some(session_activity(session, &events))
+        let (activity, detail) = session_activity(session, &events);
+        (Some(activity), detail)
     } else {
-        None
+        (None, None)
     };
     // One indexed count (decision 77). Zero stays absent so clients that
     // predate the field and workspaces that never shipped read the same.
@@ -458,6 +470,7 @@ async fn build_digest(
         turn_count,
         trigger_target_at,
         activity,
+        activity_detail,
         pr_state,
         pr_count: (pr_count > 0).then_some(pr_count),
         watch_state: watch.as_ref().map(|watch| watch.state),
@@ -472,16 +485,31 @@ async fn build_digest(
     })
 }
 
+/// Whether a running session is parked on work that is silent by design: a
+/// monitor tool, or one or more harness subagents.
+async fn parked_on_background(
+    db: &DbStore,
+    session: &CodeSession,
+) -> Result<bool, tidebreak_core::AgentError> {
+    let events = list_recent_events(db, &session.owner, session.id, ACTIVITY_EVENT_WINDOW).await?;
+    Ok(matches!(
+        session_activity(session, &events).0,
+        CodeSessionActivity::Monitor | CodeSessionActivity::Subagents
+    ))
+}
+
+/// What the live turn is occupied with, and the subject of the tool it is
+/// waiting on when that tool named one.
 fn session_activity(
     session: &CodeSession,
     events: &[tidebreak_core::SequencedCodeEvent],
-) -> CodeSessionActivity {
+) -> (CodeSessionActivity, Option<String>) {
     if session
         .subagents
         .iter()
         .any(|entry| entry.status == CodeSubagentStatus::Running)
     {
-        return CodeSessionActivity::Subagents;
+        return (CodeSessionActivity::Subagents, None);
     }
 
     let mut completed = HashSet::new();
@@ -500,7 +528,7 @@ fn session_activity(
                 detail,
                 parent_call_id: None,
             } if !completed.contains(call_id.as_str()) => {
-                return classify_activity(name, detail);
+                return (classify_activity(name, detail), activity_detail(detail));
             }
             CodeEvent::TurnStarted { .. }
             | CodeEvent::TurnCompleted { .. }
@@ -510,7 +538,37 @@ fn session_activity(
             _ => {}
         }
     }
-    CodeSessionActivity::Agent
+    (CodeSessionActivity::Agent, None)
+}
+
+/// One line naming what the tool is doing, or nothing when the detail has no
+/// subject yet (an engine can open a call before its arguments stream in).
+///
+/// The subject is harness text, so this clamps it the way every other
+/// one-line projection does: the first line, minus any character that could
+/// redraw or reorder it, and nothing at all when that leaves nothing. The
+/// desktop rejects a digest whose detail carries such a character, and a
+/// rejected digest blanks the whole rail.
+fn activity_detail(detail: &ToolDetail) -> Option<String> {
+    let subject = detail.subject().trim();
+    let first_line: String = subject
+        .lines()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .filter(|character| !preview_formatting_character(*character))
+        .collect();
+    let first_line = first_line.trim();
+    if first_line.is_empty() {
+        return None;
+    }
+    let mut chars = first_line.chars();
+    let bounded: String = chars.by_ref().take(ACTIVITY_DETAIL_MAX_CHARS).collect();
+    Some(if chars.next().is_some() {
+        format!("{bounded}\u{2026}")
+    } else {
+        bounded
+    })
 }
 
 fn classify_activity(name: &str, detail: &ToolDetail) -> CodeSessionActivity {
@@ -733,7 +791,48 @@ mod tests {
 
         assert_eq!(
             session_activity(&session, &events),
-            CodeSessionActivity::Shell
+            (CodeSessionActivity::Shell, Some("cargo test".to_owned()))
+        );
+    }
+
+    #[test]
+    fn activity_detail_keeps_one_bounded_line() {
+        let script = format!("{}\nrm -rf target", "x".repeat(200));
+        let detail = activity_detail(&ToolDetail::Command {
+            cmd: script,
+            cwd: "/workspace".into(),
+        })
+        .expect("a command names its subject");
+        assert_eq!(detail.chars().count(), ACTIVITY_DETAIL_MAX_CHARS + 1);
+        assert!(detail.ends_with('\u{2026}'));
+        assert!(!detail.contains("rm -rf"));
+
+        assert_eq!(
+            activity_detail(&ToolDetail::Other {
+                summary: "   ".into()
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn activity_detail_strips_what_a_line_cannot_carry() {
+        // A tab, an escape, and a bidi override: the desktop rejects a digest
+        // carrying any of them, so the clamp removes them before the wire.
+        let detail = activity_detail(&ToolDetail::Command {
+            cmd: "printf\t'\u{1b}[31m'\u{202e}&& cargo test".into(),
+            cwd: "/workspace".into(),
+        })
+        .expect("the command still names its subject");
+        assert_eq!(detail, "printf'[31m'&& cargo test");
+        assert!(!detail.chars().any(preview_formatting_character));
+
+        assert_eq!(
+            activity_detail(&ToolDetail::Other {
+                summary: "\u{202e}\t\u{7f}".into()
+            }),
+            None,
+            "a subject that clamps away to nothing is omitted, not sent empty"
         );
     }
 
@@ -752,7 +851,10 @@ mod tests {
 
         assert_eq!(
             session_activity(&session, &events),
-            CodeSessionActivity::Monitor
+            (
+                CodeSessionActivity::Monitor,
+                Some("waiting for a background command".to_owned())
+            )
         );
     }
 
@@ -767,7 +869,7 @@ mod tests {
 
         assert_eq!(
             session_activity(&session, &[]),
-            CodeSessionActivity::Subagents
+            (CodeSessionActivity::Subagents, None)
         );
     }
 
@@ -802,7 +904,7 @@ mod tests {
 
         assert_eq!(
             session_activity(&session, &events),
-            CodeSessionActivity::Agent
+            (CodeSessionActivity::Agent, None)
         );
     }
 }

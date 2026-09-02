@@ -2181,6 +2181,12 @@ pub struct CodeSessionDigest {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub activity: Option<tidebreak_core::CodeSessionActivity>,
+    /// The subject of the tool the live turn is waiting on: the command,
+    /// path, query, or task description. Present only while `activity`
+    /// names a tool, and bounded to one line.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub activity_detail: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub pr_state: Option<PullRequestDigest>,
@@ -2225,6 +2231,7 @@ impl From<crate::code::bus::SessionDigest> for CodeSessionDigest {
             turn_count: digest.turn_count,
             trigger_target_at: Some(digest.trigger_target_at),
             activity: digest.activity,
+            activity_detail: digest.activity_detail,
             pr_state: digest.pr_state,
             pr_count: digest.pr_count,
             watch_state: digest.watch_state,
@@ -2268,6 +2275,11 @@ pub enum CodeUpdateNotice {
         #[serde(skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         activity: Option<tidebreak_core::CodeSessionActivity>,
+        /// The subject of the tool the live turn is waiting on, while
+        /// `activity` names one.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        activity_detail: Option<String>,
         /// Boxed to keep the notice enum's variants near one size; the wire
         /// shape is unchanged.
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -2391,6 +2403,7 @@ impl CodeUpdateNotice {
             turn_count: wire.turn_count,
             trigger_target_at: wire.trigger_target_at,
             activity: wire.activity,
+            activity_detail: wire.activity_detail,
             pr_state: wire.pr_state.map(Box::new),
             pr_count: wire.pr_count,
             watch_state: wire.watch_state,

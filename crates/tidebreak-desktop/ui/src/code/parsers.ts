@@ -4036,6 +4036,7 @@ export function parseCodeSessionDigest(
       "turn_count",
       "trigger_target_at",
       "activity",
+      "activity_detail",
       "pr_state",
       "pr_count",
       "watch_state",
@@ -4055,6 +4056,7 @@ export function parseCodeSessionDigest(
     !optionalTimestamp(value.trigger_target_at) ||
     (value.activity !== undefined &&
       !isMember(value.activity, SESSION_ACTIVITIES)) ||
+    !optionalLine(value.activity_detail) ||
     (value.pr_count !== undefined && !isFiniteNumber(value.pr_count)) ||
     (value.watch_state !== undefined &&
       !isMember(value.watch_state, WATCH_STATES)) ||
@@ -4087,6 +4089,9 @@ export function parseCodeSessionDigest(
       ? { trigger_target_at: value.trigger_target_at }
       : {}),
     ...(value.activity !== undefined ? { activity: value.activity } : {}),
+    ...(value.activity_detail !== undefined
+      ? { activity_detail: value.activity_detail }
+      : {}),
     ...(pr_state ? { pr_state } : {}),
     ...(value.pr_count !== undefined ? { pr_count: value.pr_count } : {}),
     ...(value.watch_state !== undefined
@@ -4138,6 +4143,7 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
           "turn_count",
           "trigger_target_at",
           "activity",
+          "activity_detail",
           "pr_state",
           "pr_count",
           "watch_state",
@@ -4157,6 +4163,7 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
         !optionalTimestamp(value.trigger_target_at) ||
         (value.activity !== undefined &&
           !isMember(value.activity, SESSION_ACTIVITIES)) ||
+        !optionalLine(value.activity_detail) ||
         (value.pr_count !== undefined && !isFiniteNumber(value.pr_count)) ||
         (value.watch_state !== undefined &&
           !isMember(value.watch_state, WATCH_STATES)) ||
@@ -4193,6 +4200,9 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
           ? { trigger_target_at: value.trigger_target_at }
           : {}),
         ...(value.activity !== undefined ? { activity: value.activity } : {}),
+        ...(value.activity_detail !== undefined
+          ? { activity_detail: value.activity_detail }
+          : {}),
         ...(pr_state ? { pr_state } : {}),
         ...(value.pr_count !== undefined ? { pr_count: value.pr_count } : {}),
         ...(value.watch_state !== undefined

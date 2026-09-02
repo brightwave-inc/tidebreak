@@ -12,9 +12,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use axum::body::Body;
+use axum::http::{header, Request, StatusCode};
+use tower::ServiceExt;
+
 use tidebreak_core::{
-    ApprovalClass, ChatRequest, CodeSessionId, DbStore, ModelProvider, ProviderEvent, ProviderId,
-    StopReason, Tool, ToolCtx, ToolOutput, ToolRegistry, ToolSpec,
+    ApprovalClass, ChatRequest, CodeSessionId, ContentBlock, DbStore, ModelProvider, ProviderEvent,
+    ProviderId, StopReason, Tool, ToolCtx, ToolOutput, ToolRegistry, ToolSpec,
 };
 use tidebreak_harness::AdapterRegistry;
 
@@ -34,6 +38,7 @@ enum Step {
 struct ScriptedProvider {
     steps: Mutex<Vec<Step>>,
     calls: AtomicUsize,
+    requests: Mutex<Vec<ChatRequest>>,
 }
 
 #[async_trait]
@@ -44,8 +49,9 @@ impl ModelProvider for ScriptedProvider {
 
     async fn stream(
         &self,
-        _request: ChatRequest,
+        request: ChatRequest,
     ) -> tidebreak_core::Result<BoxStream<'static, ProviderEvent>> {
+        self.requests.lock().unwrap().push(request);
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         let step = {
             let mut steps = self.steps.lock().unwrap();
@@ -132,6 +138,21 @@ async fn internal_engine_app(
     Arc<AtomicUsize>,
     tempfile::TempDir,
 ) {
+    let (router, token, runtime, ran, dir, _provider) = internal_engine_app_capturing(steps).await;
+    let addr = super::code::serve(router).await;
+    (addr, token, runtime, ran, dir)
+}
+
+async fn internal_engine_app_capturing(
+    steps: Vec<Step>,
+) -> (
+    axum::Router,
+    Arc<str>,
+    Arc<CodeRuntime>,
+    Arc<AtomicUsize>,
+    tempfile::TempDir,
+    Arc<ScriptedProvider>,
+) {
     let (dir, store) = temp_db_store("internal.db").await;
     let db = Arc::new(store);
     let store_trait: Arc<dyn Store> = db.clone();
@@ -152,11 +173,12 @@ async fn internal_engine_app(
     let provider = Arc::new(ScriptedProvider {
         steps: Mutex::new(steps),
         calls: AtomicUsize::new(0),
+        requests: Mutex::new(Vec::new()),
     });
     let mut state = AppState::new(
         Config::desktop(dir.path()),
         store_trait,
-        Arc::new(FixedResolver(provider)),
+        Arc::new(FixedResolver(provider.clone())),
         Arc::new(MemSecrets::default()),
         Arc::new(tools),
         AgentConfig {
@@ -164,7 +186,7 @@ async fn internal_engine_app(
             ..AgentConfig::default()
         },
     );
-    spawn_turn_worker(&state);
+    spawn_turn_worker_with_blobs(&state);
     let mut runtime =
         CodeRuntime::with_registry(db, dir.path().to_path_buf(), AdapterRegistry::new());
     // As in `lib.rs`: the engine follows the session's journal on the
@@ -178,8 +200,29 @@ async fn internal_engine_app(
     let runtime = Arc::new(runtime);
     state.code = Some(runtime.clone());
     let token = state.token.clone();
-    let addr = super::code::serve(app(state)).await;
-    (addr, token, runtime, ran, dir)
+    (app(state), token, runtime, ran, dir, provider)
+}
+
+fn spawn_turn_worker_with_blobs(state: &AppState) {
+    let worker = crate::engine::internal::leg::LegDriver::new(
+        state.store.clone(),
+        state.resolver.clone(),
+        state.secrets.clone(),
+        state.provisioned_policy.clone(),
+        state.os_policy.clone(),
+        state.tools.clone(),
+        state.approvals.clone(),
+        state.events.clone(),
+        state.active_turns.clone(),
+        state.turn_job_wake.clone(),
+        state.agent_run_wake.clone(),
+        state.queued_turn_wake.clone(),
+        state.agent_config.clone(),
+        None,
+        crate::engine::internal::leg::LegDriverConfig::default(),
+    )
+    .with_blobs(state.blobs.clone());
+    tokio::spawn(worker.run());
 }
 
 async fn pending_approval_of_kind(
@@ -1007,6 +1050,112 @@ async fn the_internal_engine_is_only_reachable_without_a_workspace() {
     assert_eq!(internal["found"], true);
     assert!(internal["path"].is_null());
     assert_eq!(internal["caps"]["durable_parks"], "supported");
+    assert_eq!(internal["caps"]["image_input"], "supported");
+}
+
+/// A turn with an image attachment on the internal engine reaches the
+/// model request with the image bytes: the worker hydrates them onto
+/// the turn input, the engine publishes them through chat's attachment
+/// model, and the lane's existing resolution puts them on the request.
+#[tokio::test]
+async fn an_internal_turn_with_an_image_reaches_the_model_with_the_bytes() {
+    let (router, token, _runtime, _ran, _dir, provider) =
+        internal_engine_app_capturing(vec![Step::Text("i see it")]).await;
+    let bearer = format!("Bearer {token}");
+    let created = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/code/sessions")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "permission_mode": "ask" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let session: serde_json::Value = super::json_body(created).await;
+    let session_id = session["id"].as_str().unwrap().to_owned();
+    let pixels = crate::routes::image_attachment::png_header(4, 4);
+
+    let published = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/code/sessions/{session_id}/attachments/images"))
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "image/png")
+                .body(Body::from(pixels.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(published.status(), StatusCode::CREATED);
+    let attachment: serde_json::Value = super::json_body(published).await;
+    let blob_id: uuid::Uuid = attachment["attachment_id"]
+        .as_str()
+        .expect("the publication names the blob")
+        .parse()
+        .unwrap();
+
+    let response = tokio::time::timeout(Duration::from_secs(20), async {
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/code/sessions/{session_id}/turns"))
+                    .header(header::AUTHORIZATION, &bearer)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "message": "what is in this",
+                            "attachments": [{
+                                "blob_id": blob_id,
+                                "media_type": "image/png",
+                            }],
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    })
+    .await
+    .expect("the turn completes");
+    assert!(
+        response.status().is_success(),
+        "turn was not accepted: {}",
+        response.status()
+    );
+
+    let request = provider
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|request| request.images.get(blob_id).is_some())
+        .cloned()
+        .expect("the model received a request that carries the image");
+    assert!(
+        request.messages.iter().any(|message| {
+            message.content.iter().any(
+                |block| matches!(block, ContentBlock::Image { image } if image.blob_id == blob_id),
+            )
+        }),
+        "the admitted user message must carry the image block"
+    );
+    let data = request
+        .images
+        .get(blob_id)
+        .expect("the model request must carry the image bytes");
+    assert_eq!(data.bytes(), pixels.as_slice());
 }
 
 #[allow(dead_code)]

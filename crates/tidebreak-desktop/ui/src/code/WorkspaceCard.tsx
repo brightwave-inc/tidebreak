@@ -1,23 +1,26 @@
 import { useEffect, useState, type ReactNode } from "react";
 import {
   Archive,
+  Ban,
   Bot,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   Circle,
   CircleAlert,
+  CircleCheck,
+  Clock,
   Copy,
   CornerDownRight,
   ExternalLink,
   Eye,
-  FileCode2,
   FolderOpen,
   GitBranch,
   GitPullRequest,
+  Pin,
   Radar,
   RotateCcw,
-  Search,
   SquareTerminal,
-  Wrench,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -41,6 +44,7 @@ import type {
   CodeSessionDigest,
   CodeSessionSnapshot,
   CodeSubagentStatus,
+  CodeSubagentSummary,
   CodeWorkspaceSnapshot,
   PullRequestDigest,
 } from "../api/types";
@@ -401,17 +405,13 @@ export function WorkspaceCard({
                 onClick={() => onOpenChildSession?.(child.session)}
               />
             ))}
-            {(digest?.subagents ?? []).map((subagent) => (
-              <WorkspaceChildRow
-                key={subagent.call_id}
-                label={subagent.name}
-                status={SUBAGENT_STATUS_LABELS[subagent.status]}
-                statusTone={SUBAGENT_STATUS_TONES[subagent.status]}
-                ariaLabel={`Subagent for ${title}: ${subagent.name}, ${SUBAGENT_STATUS_LABELS[subagent.status]}`}
-                icon={<Bot />}
-                onClick={() => onOpenSubagent?.(subagent.call_id)}
+            {(digest?.subagents?.length ?? 0) > 0 && (
+              <WorkspaceSubagentRows
+                title={title}
+                subagents={digest?.subagents ?? []}
+                onOpenSubagent={onOpenSubagent}
               />
-            ))}
+            )}
           </div>
         )}
     </article>
@@ -455,6 +455,76 @@ const SUBAGENT_STATUS_TONES: Record<CodeSubagentStatus, StatusTone> = {
   done: "neutral",
   failed: "critical",
 };
+
+/**
+ * The harness subagents under a card, behind one toggle row.
+ *
+ * Open while any subagent is still running — that is when the names matter —
+ * and folded once they have all settled, so a card whose work is done does
+ * not keep three rows of history under it. The reader can flip either way.
+ */
+function WorkspaceSubagentRows({
+  title,
+  subagents,
+  onOpenSubagent,
+}: {
+  title: string;
+  subagents: readonly CodeSubagentSummary[];
+  onOpenSubagent?: (callId: string) => void;
+}) {
+  const running = subagents.filter((entry) => entry.status === "running");
+  const [expanded, setExpanded] = useState(running.length > 0);
+  // A count, not a state: the session line above already says how many are
+  // working, and the rows below say which.
+  const summary =
+    subagents.length === 1 ? "1 subagent" : `${subagents.length} subagents`;
+  const Chevron = expanded ? ChevronDown : ChevronRight;
+  return (
+    <>
+      <button
+        type="button"
+        aria-expanded={expanded}
+        aria-label={`${summary} for ${title}; ${expanded ? "hide" : "show"} them`}
+        className={cn(
+          "flex w-full cursor-pointer items-center gap-1.5 rounded-lg px-1.5 py-1 text-left text-xs text-muted-foreground hover:bg-muted hover:text-foreground",
+          FOCUS_RING_INSET,
+          HOVER_TINT,
+        )}
+        onClick={() => setExpanded((open) => !open)}
+      >
+        <Chevron className="size-3 shrink-0 opacity-60" aria-hidden />
+        <Bot
+          className={cn(
+            "size-3 shrink-0",
+            running.length > 0 && [STATUS_MARK.running, STATUS_MOTION.running],
+          )}
+          aria-hidden
+        />
+        <span className="min-w-0 flex-1 truncate">{summary}</span>
+      </button>
+      {expanded &&
+        subagents.map((subagent) => (
+          <WorkspaceChildRow
+            key={subagent.call_id}
+            label={subagent.name}
+            status={SUBAGENT_STATUS_LABELS[subagent.status]}
+            statusTone={SUBAGENT_STATUS_TONES[subagent.status]}
+            ariaLabel={`Subagent for ${title}: ${subagent.name}, ${SUBAGENT_STATUS_LABELS[subagent.status]}`}
+            icon={
+              subagent.status === "running" ? (
+                <Spinner className={STATUS_MARK.running} />
+              ) : subagent.status === "failed" ? (
+                <CircleAlert className={STATUS_MARK.critical} />
+              ) : (
+                <CircleCheck />
+              )
+            }
+            onClick={() => onOpenSubagent?.(subagent.call_id)}
+          />
+        ))}
+    </>
+  );
+}
 
 function WorkspaceDetailPanel({
   workspace,
@@ -794,42 +864,32 @@ function WorkspaceActivityLine({
   const age = formatCompactAge(stamp);
 
   if (!activity) return null;
-  const ActivityIcon = sessionActivityIcon(railDigest);
   const running = activity.tone === "running";
 
   return (
     <div className="flex min-w-0 items-center gap-1.5 px-2.5 pb-2 pl-7 text-xs text-muted-foreground">
-      {activity.needsYou ? (
-        <CircleAlert
-          className={cn("size-3 shrink-0", STATUS_TEXT.critical)}
-          aria-hidden
-        />
-      ) : harnessKind && HarnessIcon ? (
-        // A brand mark, so it keeps its own identity: the running tone goes
-        // on the label beside it, never on the engine's logo.
-        <span title={HARNESS_LABELS[harnessKind]}>
-          <HarnessIcon className="size-3 shrink-0" aria-hidden />
-        </span>
-      ) : activity.terminalOnly ? (
+      {activity.terminalOnly ? (
         <SquareTerminal className="size-3 shrink-0" aria-hidden />
-      ) : ActivityIcon ? (
-        <ActivityIcon
-          className={cn(
-            "size-3 shrink-0",
-            running && [STATUS_TEXT.running, STATUS_MOTION.running],
-          )}
-          aria-hidden
-        />
-      ) : null}
+      ) : (
+        <SessionStateGlyph digest={railDigest} />
+      )}
       <span
         className={cn(
           "min-w-0 flex-1 truncate",
           activity.needsYou && STATUS_TEXT.critical,
           running && STATUS_TEXT.running,
         )}
+        title={activity.label}
       >
         {activity.label}
       </span>
+      {harnessKind && HarnessIcon && (
+        // A brand mark, so it keeps its own identity and its own slot: the
+        // state lives in the leading glyph, never on the engine's logo.
+        <span title={HARNESS_LABELS[harnessKind]} className="shrink-0">
+          <HarnessIcon className="size-3 opacity-70" aria-hidden />
+        </span>
+      )}
       {age && (
         <span className="shrink-0 tabular-nums">
           {age === "now" ? "now" : age}
@@ -839,7 +899,117 @@ function WorkspaceActivityLine({
   );
 }
 
-/** A quiet, optimistic handoff while the server creates the worktree. */
+/**
+ * One glyph, one meaning, on the rail row.
+ *
+ * The same shapes the compact attention mark draws, so the row and the badge
+ * never disagree: a spinner is work in motion, a circle-alert wants the
+ * reader, a clock went quiet, a ban is fenced, a check is finished and
+ * unread, a pin was set by hand. Two shapes are the row's own, for a turn
+ * that is alive but parked on something else: a bot for subagents and a
+ * radar for a monitor, both in the live tone with the live pulse.
+ */
+function SessionStateGlyph({ digest }: { digest: CodeSessionDigest }) {
+  const className = "size-3 shrink-0";
+  const attention = digest.attention.state.type;
+  if (attention === "needs_you") {
+    return (
+      <CircleAlert
+        className={cn(className, STATUS_MARK.critical)}
+        data-state-glyph="needs_you"
+        aria-hidden
+      />
+    );
+  }
+  if (digest.lifecycle === "running") {
+    const parkedOn = runningParkedOn(digest);
+    if (parkedOn === "subagents") {
+      return (
+        <Bot
+          className={cn(className, STATUS_MARK.running, STATUS_MOTION.running)}
+          data-state-glyph="subagents"
+          aria-hidden
+        />
+      );
+    }
+    if (parkedOn === "monitor") {
+      return (
+        <Radar
+          className={cn(className, STATUS_MARK.running, STATUS_MOTION.running)}
+          data-state-glyph="monitor"
+          aria-hidden
+        />
+      );
+    }
+    if (attention === "stalled") {
+      return (
+        <Clock
+          className={cn(className, STATUS_MARK.warning)}
+          data-state-glyph="stalled"
+          aria-hidden
+        />
+      );
+    }
+    return (
+      <Spinner
+        className={cn(className, STATUS_MARK.running)}
+        data-state-glyph="working"
+        aria-hidden
+      />
+    );
+  }
+  switch (attention) {
+    case "stalled":
+      return (
+        <Clock
+          className={cn(className, STATUS_MARK.warning)}
+          data-state-glyph="stalled"
+          aria-hidden
+        />
+      );
+    case "fenced":
+      return (
+        <Ban
+          className={cn(className, STATUS_MARK.warning)}
+          data-state-glyph="fenced"
+          aria-hidden
+        />
+      );
+    case "manual":
+      return (
+        <Pin
+          className={cn(className, STATUS_MARK.pending)}
+          data-state-glyph="manual"
+          aria-hidden
+        />
+      );
+    default:
+      // A parked turn with work behind it is finished and unread until the
+      // reader opens it; one with none is an empty seat.
+      return digest.turn_count > 0 ? (
+        <CircleCheck
+          className={cn(className, STATUS_MARK.ready)}
+          data-state-glyph="done"
+          aria-hidden
+        />
+      ) : (
+        <Circle className={className} data-state-glyph="idle" aria-hidden />
+      );
+  }
+}
+
+/** What a running turn is parked on, when it is parked at all. */
+function runningParkedOn(
+  digest: CodeSessionDigest,
+): "subagents" | "monitor" | null {
+  const runningSubagents = digest.subagents?.some(
+    (entry) => entry.status === "running",
+  );
+  if (runningSubagents || digest.activity === "subagents") return "subagents";
+  if (digest.activity === "monitor") return "monitor";
+  return null;
+}
+
 function WorkspaceCreationProgress() {
   return (
     <div
@@ -900,28 +1070,6 @@ function workspaceActivitySummary(
     needsYou: false,
     terminalOnly,
   };
-}
-
-function sessionActivityIcon(digest: CodeSessionDigest) {
-  const runningSubagents = digest.subagents?.some(
-    (entry) => entry.status === "running",
-  );
-  if (runningSubagents || digest.activity === "subagents") return Bot;
-  switch (digest.activity) {
-    case "shell":
-      return SquareTerminal;
-    case "monitor":
-      return Radar;
-    case "file":
-      return FileCode2;
-    case "search":
-      return Search;
-    case "tool":
-      return Wrench;
-    case "agent":
-    case undefined:
-      return Bot;
-  }
 }
 
 function WorkspaceChildRow({

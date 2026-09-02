@@ -734,12 +734,14 @@ export const runningDigest: CodeSessionDigest = codeDigest({
 export const shellDigest: CodeSessionDigest = codeDigest({
   turn_count: 3,
   activity: "shell",
+  activity_detail: "cargo test -p tidebreak-server code_parser",
 });
 
 /** The session is only observing a background task. */
 export const monitorDigest: CodeSessionDigest = codeDigest({
   turn_count: 3,
   activity: "monitor",
+  activity_detail: "CI on pull request #3040",
 });
 
 /** Digest for a structured question the harness is waiting on. */
@@ -793,6 +795,31 @@ export const watchDigest: CodeSessionDigest = codeDigest({
   kind: "watch",
   lifecycle: "running",
   turn_count: 2,
+});
+
+/** Every subagent settled: the card folds them behind one summary row. */
+export const settledSubagentsDigest: CodeSessionDigest = codeDigest({
+  lifecycle: "idle",
+  attention: attentionDoneUnreviewed,
+  turn_count: 3,
+  recap: "Audited the migration plan and found the parser; the suite is flaky.",
+  subagents: [
+    {
+      call_id: "toolu_task_done_a",
+      name: "Audit the migration plan (general-purpose)",
+      status: "done",
+    },
+    {
+      call_id: "toolu_task_done",
+      name: "Find the config parser",
+      status: "done",
+    },
+    {
+      call_id: "toolu_task_failed",
+      name: "Run the flaky suite",
+      status: "failed",
+    },
+  ],
 });
 
 /**

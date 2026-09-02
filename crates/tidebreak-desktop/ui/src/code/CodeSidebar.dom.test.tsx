@@ -323,7 +323,7 @@ describe("CodeSidebar", () => {
 
     expect(await screen.findByTitle("Claude Code")).toBeInTheDocument();
     expect(screen.queryByTitle("Codex")).not.toBeInTheDocument();
-    expect(screen.getByText("Agent working · 1 turn")).toBeInTheDocument();
+    expect(screen.getByText("Agent working")).toBeInTheDocument();
   });
 
   it("opens a harness subagent through the filtered workspace address", async () => {

@@ -456,7 +456,7 @@ describe("sessionActivityLineLabel", () => {
     ).toBe("Folded the backoff into refresh.");
   });
 
-  it("keeps live activity and the turn count together", () => {
+  it("names the activity category with no tool subject and no tally", () => {
     expect(
       sessionActivityLineLabel(
         digest("ws-a", {
@@ -465,12 +465,40 @@ describe("sessionActivityLineLabel", () => {
           turn_count: 3,
         }),
       ),
-    ).toBe("Shell running · 3 turns");
+    ).toBe("Shell running");
   });
 
-  it("falls back to Done and the turn count without a recap", () => {
+  it("shows the tool's own subject while the turn waits on it", () => {
+    expect(
+      sessionActivityLineLabel(
+        digest("ws-a", {
+          lifecycle: "running",
+          activity: "shell",
+          activity_detail: "cargo test -p tidebreak-server",
+          turn_count: 3,
+        }),
+      ),
+    ).toBe("cargo test -p tidebreak-server");
+  });
+
+  it("keeps the subagent count over a stale tool subject", () => {
+    expect(
+      sessionActivityLineLabel(
+        digest("ws-a", {
+          lifecycle: "running",
+          activity: "subagents",
+          activity_detail: "Explore the parser",
+          subagents: [
+            { call_id: "t1", name: "Explore the parser", status: "running" },
+          ],
+        }),
+      ),
+    ).toBe("1 subagent working");
+  });
+
+  it("falls back to Done without a recap", () => {
     expect(sessionActivityLineLabel(digest("ws-a", { turn_count: 2 }))).toBe(
-      "Done · 2 turns",
+      "Done",
     );
   });
 });

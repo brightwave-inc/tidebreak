@@ -424,6 +424,9 @@ export function noticeToAction(
           ? { trigger_target_at: notice.trigger_target_at }
           : {}),
         ...(notice.activity !== undefined ? { activity: notice.activity } : {}),
+        ...(notice.activity_detail !== undefined
+          ? { activity_detail: notice.activity_detail }
+          : {}),
         ...(notice.pr_state !== undefined ? { pr_state: notice.pr_state } : {}),
         ...(notice.pr_count !== undefined ? { pr_count: notice.pr_count } : {}),
         ...(notice.watch_state !== undefined

@@ -57,6 +57,10 @@ pub(crate) struct SessionDigest {
     /// What the live turn is occupied with. Set only while lifecycle is
     /// running; older clients safely fall back to a generic running label.
     pub activity: Option<CodeSessionActivity>,
+    /// The subject of the tool the live turn is waiting on: the command,
+    /// path, query, or task description. Set only while `activity` names a
+    /// tool; bounded so a digest never carries a whole script.
+    pub activity_detail: Option<String>,
     pub pr_state: Option<PullRequestDigest>,
     /// How many pull requests hold a durable attribution to this workspace
     /// (decision 77). Absent when none do; a change is the client's cheap
