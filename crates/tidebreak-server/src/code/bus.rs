@@ -397,8 +397,9 @@ fn ends_assistant_text(event: &CodeEvent) -> bool {
             ..
         } | CodeEvent::TurnStarted { .. }
             | CodeEvent::TurnCompleted { .. }
+            | CodeEvent::TurnRefused { .. }
             | CodeEvent::TurnFailed { .. }
-            | CodeEvent::TurnInterrupted
+            | CodeEvent::TurnInterrupted { .. }
     )
 }
 

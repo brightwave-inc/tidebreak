@@ -521,18 +521,21 @@ async fn turn_failure_rolls_back_receipt_and_state_when_terminal_event_fails() {
         .unwrap()
         .turn
         .unwrap();
-    entities::event::ActiveModel {
-        chat_id: Set(chat.id.0),
+    entities::code_event::ActiveModel {
+        session_id: Set(chat.id.0),
+        owner: Set("local".to_owned()),
         seq: Set(1),
         turn_id: Set(Some(turn_id.0)),
         lease_token: Set(Some(token)),
         attempt_event_ordinal: Set(Some(i32::MAX)),
         scan_token: Set(None),
         terminal: Set(true),
-        payload: Set(serde_json::to_value(AgentEvent::TurnCompleted {
-            usage: Usage::default(),
-            stop_reason: StopReason::EndTurn,
-        })
+        event: Set(serde_json::to_value(crate::chat_journal::journal_row(
+            &AgentEvent::TurnCompleted {
+                usage: Usage::default(),
+                stop_reason: StopReason::EndTurn,
+            },
+        ))
         .unwrap()),
         created_at: Set(Utc::now()),
     }
@@ -1149,20 +1152,23 @@ async fn turn_completion_rolls_back_state_and_output_when_terminal_event_fails()
         .unwrap()
         .turn
         .unwrap();
-    entities::event::ActiveModel {
-        chat_id: Set(chat.id.0),
+    entities::code_event::ActiveModel {
+        session_id: Set(chat.id.0),
+        owner: Set("local".to_owned()),
         seq: Set(1),
         turn_id: Set(Some(turn_id.0)),
         lease_token: Set(Some(token)),
         attempt_event_ordinal: Set(Some(i32::MAX)),
         scan_token: Set(None),
         terminal: Set(true),
-        payload: Set(serde_json::to_value(AgentEvent::TurnFailed {
-            error: AgentErrorInfo {
-                kind: "forced".into(),
-                message: "occupy terminal slot".into(),
+        event: Set(serde_json::to_value(crate::chat_journal::journal_row(
+            &AgentEvent::TurnFailed {
+                error: AgentErrorInfo {
+                    kind: "forced".into(),
+                    message: "occupy terminal slot".into(),
+                },
             },
-        })
+        ))
         .unwrap()),
         created_at: Set(Utc::now()),
     }

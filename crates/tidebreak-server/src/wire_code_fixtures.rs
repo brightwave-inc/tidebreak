@@ -20,14 +20,15 @@ use crate::wire::{
 };
 use crate::wire_types::generate;
 use tidebreak_core::{
-    ApprovalDecisionKind, Attention, AttentionSource, AttentionState, BoundedError, CapLevel,
-    CheckpointHint, CodeApprovalId, CodeApprovalKind, CodeApprovalState, CodeEvent,
+    ApprovalClass, ApprovalDecisionKind, Attention, AttentionSource, AttentionState, BoundedError,
+    CapLevel, CheckpointHint, CodeApprovalId, CodeApprovalKind, CodeApprovalState, CodeEvent,
     CodeSessionActivity, CodeSessionId, CodeSessionKind, CodeSessionLifecycle, CodeSubagentStatus,
     CodeSubagentSummary, CodeTerminalId, CodeTurnId, CodeTurnStatus, CodeUsage, CodeWatchId,
-    CodeWatchState, CodeWorkspaceStatus, Diffstat, FenceReason, FileChangeKind, HarnessCaps,
-    HarnessCommand, HarnessKind, HarnessNoticeLevel, HarnessTier, ImageMediaType, ImageRef,
-    PermissionMode, PullRequestCheckCounts, PullRequestDigest, QuickAction, ReasoningEffort,
-    RepoId, ToolDetail, ToolOutcome, WorkspaceId,
+    CodeWatchState, CodeWorkspaceStatus, Diffstat, FenceReason, FileChangeKind, GrantScope,
+    HarnessCaps, HarnessCommand, HarnessKind, HarnessNoticeLevel, HarnessTier, ImageMediaType,
+    ImageRef, PermissionMode, PullRequestCheckCounts, PullRequestDigest, QuickAction,
+    ReasoningEffort, RefusalDetails, RefusalOutcome, RepoId, ToolApprovalKind, ToolDetail,
+    ToolOutcome, WorkspaceId,
 };
 
 /// Path of the shared code-mode fixtures, relative to this crate.
@@ -737,6 +738,9 @@ fn event_frames() -> Vec<Fixture> {
                     call_id: "call-2".to_owned(),
                     outcome: ToolOutcome::Succeeded,
                     preview: "1 file changed".to_owned(),
+                    output: None,
+                    action: None,
+                    result: None,
                     detail: Some(ToolDetail::FileEdit {
                         path: "crates/tidebreak-cli/src/api/code.rs".to_owned(),
                     }),
@@ -782,6 +786,7 @@ fn event_frames() -> Vec<Fixture> {
                 49,
                 CodeEvent::UserSteered {
                     text: "Keep the raw tier for diffs.".to_owned(),
+                    message_id: None,
                 },
             ),
         ),
@@ -795,6 +800,7 @@ fn event_frames() -> Vec<Fixture> {
                         checkpoint_ref: Some("refs/tidebreak/checkpoints/3".to_owned()),
                         diffstat: Some(diffstat()),
                     }),
+                    stop_reason: None,
                 },
             ),
         ),
@@ -806,12 +812,13 @@ fn event_frames() -> Vec<Fixture> {
                     error: BoundedError {
                         message: "the engine exited with status 1".to_owned(),
                     },
+                    detail: None,
                 },
             ),
         ),
         (
             "event: turn_interrupted",
-            frame(52, CodeEvent::TurnInterrupted),
+            frame(52, CodeEvent::TurnInterrupted { usage: None }),
         ),
         (
             "event: checkpoint_recorded",
@@ -845,6 +852,116 @@ fn event_frames() -> Vec<Fixture> {
                     source: AttentionSource::Structured,
                 },
             ),
+        ),
+        // The internal engine's own rows: what the chat lane journals when a
+        // session with no workspace runs.
+        (
+            "event: turn_refused (internal engine)",
+            frame(
+                56,
+                CodeEvent::TurnRefused {
+                    usage: usage(),
+                    refusal: RefusalOutcome::new(
+                        RefusalDetails::from_category(Some("safety")),
+                        true,
+                    ),
+                },
+            ),
+        ),
+        (
+            "event: stream_interrupted (internal engine)",
+            SequencedCodeEventFrame {
+                transient: Some(true),
+                ..frame(57, CodeEvent::StreamInterrupted)
+            },
+        ),
+        (
+            "event: tool_args_delta (internal engine, transient)",
+            SequencedCodeEventFrame {
+                transient: Some(true),
+                ..frame(
+                    57,
+                    CodeEvent::ToolArgsDelta {
+                        call_id: "call_01".to_owned(),
+                        fragment: "{\"command\":\"cargo\",".to_owned(),
+                    },
+                )
+            },
+        ),
+        (
+            "event: tool_approval_required (internal engine)",
+            frame(
+                58,
+                CodeEvent::ToolApprovalRequired {
+                    auto_judging: false,
+                    call_id: "call_01".to_owned(),
+                    tool_name: "exec".to_owned(),
+                    class: ApprovalClass::Workspace,
+                    kind: ToolApprovalKind::ExecMayRunNetworkedCommand,
+                    grant_scopes: vec![GrantScope::AnyArgsFor {
+                        command: "cargo".to_owned(),
+                    }],
+                    preview: None,
+                },
+            ),
+        ),
+        (
+            "event: tool_approval_decided (internal engine)",
+            frame(
+                59,
+                CodeEvent::ToolApprovalDecided {
+                    call_id: "call_01".to_owned(),
+                    approved: true,
+                },
+            ),
+        ),
+        (
+            "event: questions_asked (internal engine)",
+            frame(
+                60,
+                CodeEvent::QuestionsAsked {
+                    call_id: "call_02".to_owned(),
+                    turn_id: turn_id(),
+                },
+            ),
+        ),
+        (
+            "event: plan_proposed (internal engine)",
+            frame(
+                61,
+                CodeEvent::PlanProposed {
+                    call_id: "call_03".to_owned(),
+                    turn_id: turn_id(),
+                },
+            ),
+        ),
+        (
+            "event: task_plan_updated (internal engine)",
+            frame(
+                62,
+                CodeEvent::TaskPlanUpdated {
+                    call_id: "call_04".to_owned(),
+                    turn_id: turn_id(),
+                },
+            ),
+        ),
+        (
+            "event: context_truncated (internal engine)",
+            frame(
+                63,
+                CodeEvent::ContextTruncated {
+                    original_tokens: 210_000,
+                    fitted_tokens: 180_000,
+                },
+            ),
+        ),
+        (
+            "event: compaction_started (internal engine)",
+            frame(64, CodeEvent::CompactionStarted),
+        ),
+        (
+            "event: compaction_finished (internal engine)",
+            frame(65, CodeEvent::CompactionFinished { compacted: true }),
         ),
     ];
     frames

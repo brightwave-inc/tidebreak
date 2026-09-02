@@ -801,7 +801,10 @@ mod tests {
         .await
         .unwrap()
         .events;
-        assert!(matches!(&events[0].event, CodeEvent::TurnInterrupted));
+        assert!(matches!(
+            &events[0].event,
+            CodeEvent::TurnInterrupted { .. }
+        ));
         assert!(matches!(
             &events[1].event,
             CodeEvent::ApprovalResolved {

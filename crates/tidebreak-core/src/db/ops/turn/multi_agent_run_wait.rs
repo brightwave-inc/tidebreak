@@ -330,9 +330,9 @@ pub(in crate::db) async fn park_turn_for_agent_run_wait_set(
         }
     }
 
-    let last_attempt_event = entities::event::Entity::find()
-        .filter(entities::event::Column::LeaseToken.eq(lease_token))
-        .order_by_desc(entities::event::Column::AttemptEventOrdinal)
+    let last_attempt_event = entities::code_event::Entity::find()
+        .filter(entities::code_event::Column::LeaseToken.eq(lease_token))
+        .order_by_desc(entities::code_event::Column::AttemptEventOrdinal)
         .one(&transaction)
         .await
         .map_err(store_err)?;
@@ -576,7 +576,7 @@ pub(in crate::db) async fn resume_turn_for_agent_run_wait_set(
                 "resumed wait {wait_id} has an inconsistent tool receipt"
             )));
         }
-        let event_model = entities::event::Entity::find_by_id((
+        let event_model = entities::code_event::Entity::find_by_id((
             stored.chat_id,
             stored.event_seq.ok_or_else(|| {
                 AgentError::Store(format!("resumed wait {wait_id} lost its event receipt"))
@@ -592,7 +592,7 @@ pub(in crate::db) async fn resume_turn_for_agent_run_wait_set(
             action: None,
             result: None,
         };
-        let stored_event: AgentEvent = serde_json::from_value(event_model.payload)?;
+        let stored_event = crate::chat_journal::decode_chat_event_required(event_model.event)?;
         if event_model.turn_id != Some(stored.turn_id)
             || event_model.lease_token != Some(stored.park_lease_token)
             || event_model.attempt_event_ordinal != Some(stored.event_ordinal)

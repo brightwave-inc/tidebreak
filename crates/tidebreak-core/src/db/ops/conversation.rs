@@ -830,8 +830,8 @@ pub(in crate::db) async fn delete_chat(
         .map_err(store_err)?;
     // Approval-bearing tool calls own immutable receipts in the event journal.
     // Remove those references before deleting their journal rows.
-    entities::event::Entity::delete_many()
-        .filter(entities::event::Column::ChatId.eq(chat_id.0))
+    entities::code_event::Entity::delete_many()
+        .filter(entities::code_event::Column::SessionId.eq(chat_id.0))
         .exec(&transaction)
         .await
         .map_err(store_err)?;
@@ -1179,16 +1179,16 @@ where
     // caller input.
     let tag_matches = match conn.get_database_backend() {
         DatabaseBackend::Postgres => format!(
-            "payload ->> 'type' IN ('{TEXT_DELTA_TAG}', '{REASONING_DELTA_TAG}', '{TURN_REFUSED_TAG}')"
+            "event ->> 'type' IN ('{TEXT_DELTA_TAG}', '{REASONING_DELTA_TAG}', '{TURN_REFUSED_TAG}')"
         ),
         _ => format!(
-            "json_extract(payload, '$.type') IN ('{TEXT_DELTA_TAG}', '{REASONING_DELTA_TAG}', '{TURN_REFUSED_TAG}')"
+            "json_extract(event, '$.type') IN ('{TEXT_DELTA_TAG}', '{REASONING_DELTA_TAG}', '{TURN_REFUSED_TAG}')"
         ),
     };
-    let events = entities::event::Entity::find()
-        .filter(entities::event::Column::ChatId.eq(chat_id.0))
+    let events = entities::code_event::Entity::find()
+        .filter(entities::code_event::Column::SessionId.eq(chat_id.0))
         .filter(sea_orm::sea_query::Expr::cust(tag_matches))
-        .order_by_asc(entities::event::Column::Seq)
+        .order_by_asc(entities::code_event::Column::Seq)
         .all(conn)
         .await
         .map_err(store_err)?;
@@ -1200,7 +1200,7 @@ where
         let Some(index) = index_of.get(&turn_id).copied() else {
             continue;
         };
-        match serde_json::from_value::<AgentEvent>(event.payload)? {
+        match crate::chat_journal::decode_chat_event_required(event.event)? {
             AgentEvent::TextDelta { text } if snapshots[index].message_id.is_none() => {
                 snapshots[index].partial_content.push_str(&text);
             }
@@ -1212,14 +1212,15 @@ where
     Ok(snapshots)
 }
 
-/// Serialized `AgentEvent` tags used to rebuild terminal turn presentation.
+/// Serialized `CodeEvent` tags of the chat rows that rebuild terminal turn
+/// presentation and tool-call bodies (`crate::chat_journal`).
 /// Journaled bytes are a persisted shape, so the transcript test pins them
 /// rather than trusting the enum names to stay in step by inspection.
-const TEXT_DELTA_TAG: &str = "text_delta";
+const TEXT_DELTA_TAG: &str = "assistant_delta";
 const REASONING_DELTA_TAG: &str = "reasoning_delta";
 const TURN_REFUSED_TAG: &str = "turn_refused";
-const TOOL_CALL_ARGS_DELTA_TAG: &str = "tool_call_args_delta";
-const TOOL_CALL_COMPLETED_TAG: &str = "tool_call_completed";
+const TOOL_CALL_ARGS_DELTA_TAG: &str = "tool_args_delta";
+const TOOL_CALL_COMPLETED_TAG: &str = "tool_completed";
 
 /// Read only tool calls whose owning foreground turn has reached a terminal
 /// state. A live call is reconstructed from the event journal instead: showing
@@ -1334,10 +1335,10 @@ async fn terminal_event_cursor_on<C>(conn: &C, chat_id: ChatId) -> Result<i64>
 where
     C: ConnectionTrait,
 {
-    entities::event::Entity::find()
-        .filter(entities::event::Column::ChatId.eq(chat_id.0))
-        .filter(entities::event::Column::Terminal.eq(true))
-        .order_by_desc(entities::event::Column::Seq)
+    entities::code_event::Entity::find()
+        .filter(entities::code_event::Column::SessionId.eq(chat_id.0))
+        .filter(entities::code_event::Column::Terminal.eq(true))
+        .order_by_desc(entities::code_event::Column::Seq)
         .one(conn)
         .await
         .map_err(store_err)?
@@ -1593,10 +1594,10 @@ pub(in crate::db) async fn append_turn_events(
         return Ok(None);
     }
 
-    let existing = entities::event::Entity::find()
-        .filter(entities::event::Column::LeaseToken.eq(lease_token))
+    let existing = entities::code_event::Entity::find()
+        .filter(entities::code_event::Column::LeaseToken.eq(lease_token))
         .filter(
-            entities::event::Column::AttemptEventOrdinal
+            entities::code_event::Column::AttemptEventOrdinal
                 .is_in(events.iter().map(|entry| entry.attempt_event_ordinal)),
         )
         .all(&transaction)
@@ -1613,8 +1614,8 @@ pub(in crate::db) async fn append_turn_events(
         else {
             continue;
         };
-        let payload = serde_json::from_value::<AgentEvent>(row.payload.clone())?;
-        if row.chat_id != chat_id.0
+        let payload = crate::chat_journal::decode_chat_event_required(row.event.clone())?;
+        if row.session_id != chat_id.0
             || row.turn_id != Some(turn_id.0)
             || row.lease_token != Some(lease_token)
             || row.terminal
@@ -1730,9 +1731,9 @@ async fn next_event_seq<C>(conn: &C, chat_id: ChatId) -> Result<i64>
 where
     C: ConnectionTrait,
 {
-    let last = entities::event::Entity::find()
-        .filter(entities::event::Column::ChatId.eq(chat_id.0))
-        .order_by_desc(entities::event::Column::Seq)
+    let last = entities::code_event::Entity::find()
+        .filter(entities::code_event::Column::SessionId.eq(chat_id.0))
+        .order_by_desc(entities::code_event::Column::Seq)
         .one(conn)
         .await
         .map_err(store_err)?;
@@ -1740,6 +1741,12 @@ where
         .ok_or_else(|| AgentError::Store(format!("event sequence exhausted for chat {chat_id}")))
 }
 
+/// Write one chat event as a row of the session's journal.
+///
+/// The chat lane and the code session worker append to the same table under
+/// the same session row lock, so their sequences interleave without gaps or
+/// collisions. The row carries the code vocabulary (`crate::chat_journal`)
+/// and the lane's recovery receipts beside it.
 #[allow(clippy::too_many_arguments)]
 async fn insert_event_row<C>(
     conn: &C,
@@ -1754,16 +1761,27 @@ async fn insert_event_row<C>(
 where
     C: ConnectionTrait,
 {
-    entities::event::ActiveModel {
-        chat_id: Set(chat_id.0),
+    let owner = entities::code_session::Entity::find_by_id(chat_id.0)
+        .select_only()
+        .column(entities::code_session::Column::Owner)
+        .into_tuple::<String>()
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .ok_or_else(|| AgentError::Store(format!("chat {chat_id} does not exist")))?;
+    entities::code_event::ActiveModel {
+        session_id: Set(chat_id.0),
         seq: Set(seq),
+        owner: Set(owner),
+        event: Set(serde_json::to_value(crate::chat_journal::journal_row(
+            event,
+        ))?),
+        created_at: Set(Utc::now()),
         turn_id: Set(turn_id.map(|id| id.0)),
         lease_token: Set(lease_token),
         attempt_event_ordinal: Set(attempt_event_ordinal),
         scan_token: Set(scan_token),
         terminal: Set(turn_id.is_some() && is_terminal_event(event)),
-        payload: Set(serde_json::to_value(event)?),
-        created_at: Set(Utc::now()),
     }
     .insert(conn)
     .await
@@ -1787,10 +1805,10 @@ pub(in crate::db) async fn list_events(
     after: i64,
 ) -> Result<Vec<SequencedEvent>> {
     decode_sequenced_events(
-        entities::event::Entity::find()
-            .filter(entities::event::Column::ChatId.eq(chat_id.0))
-            .filter(entities::event::Column::Seq.gt(after))
-            .order_by_asc(entities::event::Column::Seq)
+        entities::code_event::Entity::find()
+            .filter(entities::code_event::Column::SessionId.eq(chat_id.0))
+            .filter(entities::code_event::Column::Seq.gt(after))
+            .order_by_asc(entities::code_event::Column::Seq)
             .all(&store.conn)
             .await
             .map_err(store_err)?,
@@ -1812,32 +1830,39 @@ pub(in crate::db) async fn list_events_for_call(
     let call_id = call_id.0;
     let matches = match store.conn.get_database_backend() {
         DatabaseBackend::Postgres => format!(
-            "payload ->> 'type' IN ('{TOOL_CALL_ARGS_DELTA_TAG}', '{TOOL_CALL_COMPLETED_TAG}') \
-             AND payload ->> 'call_id' = '{call_id}'"
+            "event ->> 'type' IN ('{TOOL_CALL_ARGS_DELTA_TAG}', '{TOOL_CALL_COMPLETED_TAG}') \
+             AND event ->> 'call_id' = '{call_id}'"
         ),
         _ => format!(
-            "json_extract(payload, '$.type') IN ('{TOOL_CALL_ARGS_DELTA_TAG}', '{TOOL_CALL_COMPLETED_TAG}') \
-             AND json_extract(payload, '$.call_id') = '{call_id}'"
+            "json_extract(event, '$.type') IN ('{TOOL_CALL_ARGS_DELTA_TAG}', '{TOOL_CALL_COMPLETED_TAG}') \
+             AND json_extract(event, '$.call_id') = '{call_id}'"
         ),
     };
     decode_sequenced_events(
-        entities::event::Entity::find()
-            .filter(entities::event::Column::ChatId.eq(chat_id.0))
+        entities::code_event::Entity::find()
+            .filter(entities::code_event::Column::SessionId.eq(chat_id.0))
             .filter(sea_orm::sea_query::Expr::cust(matches))
-            .order_by_asc(entities::event::Column::Seq)
+            .order_by_asc(entities::code_event::Column::Seq)
             .all(&store.conn)
             .await
             .map_err(store_err)?,
     )
 }
 
-fn decode_sequenced_events(rows: Vec<entities::event::Model>) -> Result<Vec<SequencedEvent>> {
+/// The chat reading of journal rows. Rows only an external engine writes
+/// have none and are skipped, so a chat replay may show gaps in `seq`; the
+/// cursor contract only needs the numbers to ascend.
+fn decode_sequenced_events(rows: Vec<entities::code_event::Model>) -> Result<Vec<SequencedEvent>> {
     rows.into_iter()
-        .map(|model| {
-            Ok(SequencedEvent {
-                seq: model.seq,
-                event: serde_json::from_value(model.payload)?,
-            })
+        .filter_map(|model| {
+            crate::chat_journal::decode_chat_event(model.event)
+                .transpose()
+                .map(|event| {
+                    Ok(SequencedEvent {
+                        seq: model.seq,
+                        event: event?,
+                    })
+                })
         })
         .collect()
 }

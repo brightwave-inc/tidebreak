@@ -1,14 +1,23 @@
-//! Normalized event vocabulary for an external agent-engine session.
+//! Normalized event vocabulary for one agent-engine session — external
+//! harnesses and the internal engine alike (decision 0048 step 5).
 //!
-//! Follows the chat journal's conventions: internally tagged serde,
-//! `#[non_exhaustive]`, bounded payloads. Large bodies (diffs, raw engine
-//! payloads) never ride these events — they carry hints.
+//! Internally tagged serde, `#[non_exhaustive]`, bounded payloads. Large
+//! bodies (diffs, raw engine payloads) never ride these events — they carry
+//! hints. Variants and fields marked *internal engine* are written only by
+//! the in-process engine's turn lane, which the server controls: they carry
+//! the structured facts the chat surface replays (the alias layer the
+//! decision's amendment permits), and external adapters never produce them.
 
 use crate::attention::{AttentionSource, AttentionState};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use super::{CodeApprovalId, CodeTurnId, HarnessKind};
+use crate::approval::{GrantScope, ToolApprovalKind};
+use crate::error::AgentErrorInfo;
+use crate::preview::{ToolActionPreview, ToolResultPreview};
+use crate::provider::{RefusalOutcome, StopReason};
+use crate::tool::{ApprovalClass, ToolOutput};
 
 /// Longest assistant / reasoning / steer text stored on one event.
 pub const MAX_EVENT_TEXT_CHARS: usize = 8_192;
@@ -327,6 +336,22 @@ pub enum CodeEvent {
         outcome: ToolOutcome,
         /// Bounded preview of the result.
         preview: String,
+        /// The call's whole output, already cut to what the model was shown.
+        ///
+        /// Internal engine: its tools run in this process, so the server
+        /// holds the result and the chat surface replays it. External
+        /// adapters leave it unset; their results ride `preview`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        output: Option<Box<ToolOutput>>,
+        /// Closed projection of what the call did. Internal engine.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        action: Option<ToolActionPreview>,
+        /// Closed projection of what the call produced. Internal engine.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        result: Option<ToolResultPreview>,
         /// Classification rebuilt from the call's complete arguments.
         ///
         /// Engines open a tool call before its arguments finish streaming, so
@@ -368,6 +393,12 @@ pub enum CodeEvent {
     UserSteered {
         /// The steered user text, already bounded.
         text: String,
+        /// Stable id of the persisted user message, so a reconnecting
+        /// renderer reconciles the event with the transcript row without
+        /// content matching. Internal engine.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        message_id: Option<uuid::Uuid>,
     },
     /// The turn finished successfully.
     TurnCompleted {
@@ -377,14 +408,37 @@ pub enum CodeEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         checkpoint: Option<CheckpointHint>,
+        /// Why the final model call stopped. Internal engine.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        stop_reason: Option<StopReason>,
     },
     /// The turn failed and was abandoned.
     TurnFailed {
         /// Bounded error.
         error: BoundedError,
+        /// The failure's machine-readable kind beside its message, so the
+        /// renderer can categorize it. Internal engine.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        detail: Option<AgentErrorInfo>,
     },
     /// The turn was interrupted (user or recovery).
-    TurnInterrupted,
+    TurnInterrupted {
+        /// Token accounting up to the interruption, when the engine reports
+        /// it. Internal engine.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        usage: Option<CodeUsage>,
+    },
+    /// The turn completed with a model refusal rather than a complete
+    /// answer. Internal engine.
+    TurnRefused {
+        /// Token accounting up to the refusal.
+        usage: CodeUsage,
+        /// Category detail and whether visible output is incomplete.
+        refusal: RefusalOutcome,
+    },
     /// A per-turn checkpoint was recorded.
     CheckpointRecorded {
         /// The turn that ended at this checkpoint.
@@ -406,6 +460,98 @@ pub enum CodeEvent {
         /// Who or what set it.
         source: AttentionSource,
     },
+    /// The provider stream was preempted; clients discard the assistant and
+    /// tool deltas streamed since the last stable boundary. Internal engine.
+    StreamInterrupted,
+    /// A fragment of a tool call's JSON arguments. Internal engine: external
+    /// adapters open a call only once its arguments are complete.
+    ToolArgsDelta {
+        /// The call these args belong to.
+        call_id: String,
+        /// Partial JSON to concatenate.
+        fragment: String,
+    },
+    /// A tool call needs the user's consent before it runs, in the internal
+    /// engine's own terms: the class that triggered the prompt, the approval
+    /// kind, the standing-grant ladder this exact call cleared, and the
+    /// closed preview of what the call will do. The durable card is the
+    /// engine's own approval row; this is the journaled fact the chat
+    /// surface replays. Internal engine.
+    ToolApprovalRequired {
+        /// Whether the Auto-mode judge owns this card right now.
+        #[serde(default, skip_serializing_if = "is_false")]
+        auto_judging: bool,
+        /// The call awaiting a decision.
+        call_id: String,
+        /// Canonical registered tool identity.
+        tool_name: String,
+        /// The approval class that triggered the prompt.
+        class: ApprovalClass,
+        /// What kind of consent the call asks for.
+        kind: ToolApprovalKind,
+        /// Every standing-grant rung the call cleared; empty means approving
+        /// once is the only affirmative choice.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        grant_scopes: Vec<GrantScope>,
+        /// Closed projection of what the call will do, when its tool has one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        preview: Option<ToolActionPreview>,
+    },
+    /// The user decided a parked tool call on the internal engine's own
+    /// consent channel. Internal engine.
+    ToolApprovalDecided {
+        /// The call that was decided.
+        call_id: String,
+        /// `true` if approved, `false` if rejected.
+        approved: bool,
+    },
+    /// A questions card parked the turn. A bounded refresh hint: the card
+    /// body loads from the pending-questions route. Internal engine.
+    QuestionsAsked {
+        /// Exact tool call awaiting answers.
+        call_id: String,
+        /// Turn that resumes after the answer commits.
+        turn_id: CodeTurnId,
+    },
+    /// A plan proposal parked the turn. A bounded refresh hint: the plan
+    /// loads from the pending-plan route. Internal engine.
+    PlanProposed {
+        /// Exact tool call awaiting the reader's decision.
+        call_id: String,
+        /// Turn that resumes after the decision commits.
+        turn_id: CodeTurnId,
+    },
+    /// The engine replaced the session's task plan. A bounded refresh hint:
+    /// the steps load from the task-plan route, so a plan rewritten twenty
+    /// times does not journal twenty copies. Internal engine.
+    TaskPlanUpdated {
+        /// The tool call that committed the replacement.
+        call_id: String,
+        /// Turn that made the call.
+        turn_id: CodeTurnId,
+    },
+    /// The transcript was cut to fit the model's context window before a
+    /// model call; the turn continues with reduced context. Internal engine.
+    ContextTruncated {
+        /// Estimated tokens of the full transcript before reduction.
+        original_tokens: u32,
+        /// Estimated tokens after fitting to the budget.
+        fitted_tokens: u32,
+    },
+    /// Semantic compaction is about to run. Internal engine.
+    CompactionStarted,
+    /// Semantic compaction finished for this attempt. Internal engine.
+    CompactionFinished {
+        /// Whether a new (or confirmed) checkpoint was stored.
+        compacted: bool,
+    },
+}
+
+/// Whether to omit a defaulted `false` flag from a journal row.
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// A [`CodeEvent`] paired with its per-session sequence number.
@@ -481,10 +627,21 @@ mod tests {
             CodeEvent::UserSteered { .. } => 10,
             CodeEvent::TurnCompleted { .. } => 11,
             CodeEvent::TurnFailed { .. } => 12,
-            CodeEvent::TurnInterrupted => 13,
+            CodeEvent::TurnInterrupted { .. } => 13,
             CodeEvent::CheckpointRecorded { .. } => 14,
             CodeEvent::HarnessNotice { .. } => 15,
             CodeEvent::AttentionChanged { .. } => 16,
+            CodeEvent::TurnRefused { .. } => 17,
+            CodeEvent::StreamInterrupted => 18,
+            CodeEvent::ToolArgsDelta { .. } => 19,
+            CodeEvent::ToolApprovalRequired { .. } => 20,
+            CodeEvent::ToolApprovalDecided { .. } => 21,
+            CodeEvent::QuestionsAsked { .. } => 22,
+            CodeEvent::PlanProposed { .. } => 23,
+            CodeEvent::TaskPlanUpdated { .. } => 24,
+            CodeEvent::ContextTruncated { .. } => 25,
+            CodeEvent::CompactionStarted => 26,
+            CodeEvent::CompactionFinished { .. } => 27,
         }
     }
 
@@ -520,6 +677,9 @@ mod tests {
                 call_id: "toolu_1".into(),
                 outcome: ToolOutcome::Succeeded,
                 preview: "demo".into(),
+                output: None,
+                action: None,
+                result: None,
                 detail: Some(ToolDetail::FileRead {
                     path: "README.md".into(),
                 }),
@@ -546,6 +706,7 @@ mod tests {
             },
             CodeEvent::UserSteered {
                 text: "try the other file".into(),
+                message_id: None,
             },
             CodeEvent::TurnCompleted {
                 usage: CodeUsage {
@@ -565,13 +726,15 @@ mod tests {
                         truncated: false,
                     }),
                 }),
+                stop_reason: None,
             },
             CodeEvent::TurnFailed {
                 error: BoundedError {
                     message: "engine exited 1".into(),
                 },
+                detail: None,
             },
-            CodeEvent::TurnInterrupted,
+            CodeEvent::TurnInterrupted { usage: None },
             CodeEvent::CheckpointRecorded {
                 turn_id: CodeTurnId(id(1)),
                 diffstat: Diffstat {
@@ -591,6 +754,59 @@ mod tests {
                 },
                 source: AttentionSource::Lifecycle,
             },
+            // The internal engine's rows. Their optional fields are pinned
+            // on the chat journal fixture, which round-trips through these
+            // variants; the samples here pin the tags and required fields.
+            CodeEvent::TurnRefused {
+                usage: CodeUsage {
+                    input_tokens: 12,
+                    output_tokens: 3,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                    context_tokens: 0,
+                    first_call_context_tokens: None,
+                },
+                refusal: RefusalOutcome::new(
+                    crate::provider::RefusalDetails::from_category(Some("cyber")),
+                    true,
+                ),
+            },
+            CodeEvent::StreamInterrupted,
+            CodeEvent::ToolArgsDelta {
+                call_id: id(3).to_string(),
+                fragment: "{\"command\":".into(),
+            },
+            CodeEvent::ToolApprovalRequired {
+                auto_judging: false,
+                call_id: id(3).to_string(),
+                tool_name: "exec".into(),
+                class: ApprovalClass::Sensitive,
+                kind: ToolApprovalKind::ExecMayRunNetworkedCommand,
+                grant_scopes: Vec::new(),
+                preview: None,
+            },
+            CodeEvent::ToolApprovalDecided {
+                call_id: id(3).to_string(),
+                approved: true,
+            },
+            CodeEvent::QuestionsAsked {
+                call_id: id(4).to_string(),
+                turn_id: CodeTurnId(id(1)),
+            },
+            CodeEvent::PlanProposed {
+                call_id: id(5).to_string(),
+                turn_id: CodeTurnId(id(1)),
+            },
+            CodeEvent::TaskPlanUpdated {
+                call_id: id(6).to_string(),
+                turn_id: CodeTurnId(id(1)),
+            },
+            CodeEvent::ContextTruncated {
+                original_tokens: 100_000,
+                fitted_tokens: 60_000,
+            },
+            CodeEvent::CompactionStarted,
+            CodeEvent::CompactionFinished { compacted: true },
         ]
     }
 

@@ -389,12 +389,12 @@ async fn exact_required_event<C>(
 where
     C: sea_orm::ConnectionTrait,
 {
-    let stored = entities::event::Entity::find_by_id((request.chat_id.0, seq))
+    let stored = entities::code_event::Entity::find_by_id((request.chat_id.0, seq))
         .one(conn)
         .await
         .map_err(store_err)?
         .ok_or_else(|| AgentError::Store("approval event receipt is missing".into()))?;
-    let payload = serde_json::from_value::<AgentEvent>(stored.payload)?;
+    let payload = crate::chat_journal::decode_chat_event_required(stored.event)?;
     if stored.turn_id != Some(request.turn_id.0) || stored.terminal || payload != *expected {
         return Err(AgentError::Store(
             "approval event receipt does not match its request".into(),

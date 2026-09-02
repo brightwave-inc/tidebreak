@@ -744,9 +744,9 @@ async fn exact_applied_event_on<C>(
 where
     C: ConnectionTrait,
 {
-    let event = entities::event::Entity::find()
-        .filter(entities::event::Column::LeaseToken.eq(lease_token))
-        .filter(entities::event::Column::AttemptEventOrdinal.eq(attempt_event_ordinal))
+    let event = entities::code_event::Entity::find()
+        .filter(entities::code_event::Column::LeaseToken.eq(lease_token))
+        .filter(entities::code_event::Column::AttemptEventOrdinal.eq(attempt_event_ordinal))
         .one(conn)
         .await
         .map_err(store_err)?
@@ -756,12 +756,12 @@ where
                 TurnSteerId(steer.id)
             ))
         })?;
-    let payload = serde_json::from_value::<AgentEvent>(event.payload.clone())?;
+    let payload = crate::chat_journal::decode_chat_event_required(event.event.clone())?;
     let expected = AgentEvent::UserSteered {
         message_id: MessageId(steer.id),
         content: steer.content.clone(),
     };
-    if event.chat_id != steer.chat_id
+    if event.session_id != steer.chat_id
         || event.turn_id != Some(steer.turn_id)
         || event.lease_token != Some(lease_token)
         || event.attempt_event_ordinal != Some(attempt_event_ordinal)

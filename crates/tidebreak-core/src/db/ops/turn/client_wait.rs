@@ -666,9 +666,9 @@ async fn existing_client_cancellation_event_on<C>(
 where
     C: ConnectionTrait,
 {
-    let stored = entities::event::Entity::find()
-        .filter(entities::event::Column::TurnId.eq(turn_id.0))
-        .filter(entities::event::Column::Terminal.eq(true))
+    let stored = entities::code_event::Entity::find()
+        .filter(entities::code_event::Column::TurnId.eq(turn_id.0))
+        .filter(entities::code_event::Column::Terminal.eq(true))
         .one(conn)
         .await
         .map_err(store_err)?
@@ -677,7 +677,7 @@ where
                 "client-cancelled turn {turn_id} is missing its terminal event"
             ))
         })?;
-    let event = serde_json::from_value::<AgentEvent>(stored.payload)?;
+    let event = crate::chat_journal::decode_chat_event_required(stored.event)?;
     if !matches!(event, AgentEvent::TurnCancelled { .. }) {
         return Err(AgentError::Store(format!(
             "client-cancelled turn {turn_id} has a different terminal event"

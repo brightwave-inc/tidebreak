@@ -3525,17 +3525,32 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
       return { type: "turn_started", turn_id: value.turn_id };
     case "assistant_delta":
     case "reasoning_delta":
-    case "user_steered":
-      // Model text is a block; a steer is the user's own words, kept verbatim.
-      if (
-        !onlyKeys(value, ["type", "text"]) ||
-        !(value.type === "user_steered"
-          ? rawText(value.text)
-          : blockText(value.text))
-      ) {
+      if (!onlyKeys(value, ["type", "text"]) || !blockText(value.text)) {
         return null;
       }
       return { type: value.type, text: value.text } as CodeEvent;
+    case "user_steered":
+      // A steer is the user's own words, kept verbatim. The internal engine
+      // names the transcript row the steer became; the chat surface uses
+      // it, this one only carries it.
+      if (
+        !onlyKeys<Extract<WireCodeEvent, { type: "user_steered" }>>(value, [
+          "type",
+          "text",
+          "message_id",
+        ]) ||
+        !rawText(value.text) ||
+        (value.message_id !== undefined && !wireId(value.message_id))
+      ) {
+        return null;
+      }
+      return {
+        type: "user_steered",
+        text: value.text,
+        ...(value.message_id !== undefined
+          ? { message_id: value.message_id }
+          : {}),
+      };
     case "assistant_message":
       // A subagent's message names its spanning `Task` call (ADR 0052).
       if (
@@ -3580,6 +3595,10 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
       };
     }
     case "tool_completed": {
+      // The internal engine also journals the call's whole `output` and its
+      // action and result previews. The chat surface renders those through
+      // its own wire; this parser keeps the code view's fields and leaves
+      // the rest on the row.
       if (
         !onlyKeys<Extract<WireCodeEvent, { type: "tool_completed" }>>(value, [
           "type",
@@ -3588,6 +3607,9 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
           "preview",
           "detail",
           "parent_call_id",
+          "output",
+          "action",
+          "result",
         ]) ||
         !wireId(value.call_id) ||
         !isMember(value.outcome, TOOL_OUTCOMES) ||
@@ -3617,11 +3639,14 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
       };
     }
     case "turn_completed": {
+      // `stop_reason` is the internal engine's; the code view reads the turn
+      // as completed either way.
       if (
         !onlyKeys<Extract<WireCodeEvent, { type: "turn_completed" }>>(value, [
           "type",
           "usage",
           "checkpoint",
+          "stop_reason",
         ])
       ) {
         return null;
@@ -3642,10 +3667,13 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
       };
     }
     case "turn_failed":
+      // `detail` is the internal engine's machine-readable kind beside the
+      // message; the code view shows the message.
       if (
         !onlyKeys<Extract<WireCodeEvent, { type: "turn_failed" }>>(value, [
           "type",
           "error",
+          "detail",
         ]) ||
         !isRecord(value.error) ||
         !blockText(value.error.message)
@@ -3653,6 +3681,36 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
         return null;
       }
       return { type: "turn_failed", error: { message: value.error.message } };
+    case "turn_refused": {
+      // The internal engine's terminal for a model refusal: the turn is
+      // over, the way a completion ends it.
+      if (
+        !onlyKeys<Extract<WireCodeEvent, { type: "turn_refused" }>>(value, [
+          "type",
+          "usage",
+          "refusal",
+        ]) ||
+        !isRecord(value.refusal) ||
+        !isRecord(value.refusal.details) ||
+        typeof value.refusal.partial_output !== "boolean" ||
+        !(
+          value.refusal.details.category === null ||
+          typeof value.refusal.details.category === "string"
+        )
+      ) {
+        return null;
+      }
+      const usage = parseUsage(value.usage);
+      if (!usage) return null;
+      return {
+        type: "turn_refused",
+        usage,
+        refusal: {
+          details: { category: value.refusal.details.category },
+          partial_output: value.refusal.partial_output,
+        },
+      };
+    }
     case "checkpoint_recorded": {
       if (
         !onlyKeys<Extract<WireCodeEvent, { type: "checkpoint_recorded" }>>(
@@ -3671,8 +3729,21 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
         diffstat,
       };
     }
-    case "turn_interrupted":
-      return { type: "turn_interrupted" };
+    case "turn_interrupted": {
+      // The internal engine reports the usage up to the interruption.
+      if (
+        !onlyKeys<Extract<WireCodeEvent, { type: "turn_interrupted" }>>(value, [
+          "type",
+          "usage",
+        ])
+      ) {
+        return null;
+      }
+      if (value.usage === undefined) return { type: "turn_interrupted" };
+      const usage = parseUsage(value.usage);
+      if (!usage) return null;
+      return { type: "turn_interrupted", usage };
+    }
     case "harness_notice":
       if (
         !onlyKeys<Extract<WireCodeEvent, { type: "harness_notice" }>>(value, [

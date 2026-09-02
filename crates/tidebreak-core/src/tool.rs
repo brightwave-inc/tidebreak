@@ -409,7 +409,7 @@ fn accepting_null(mut property: Value) -> Option<Value> {
 /// failures of the tool, of the model, or of the product, and recording them
 /// the same way as a crash makes every later question about reliability
 /// unanswerable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ToolErrorCategory {
@@ -461,12 +461,14 @@ impl ToolErrorCategory {
 }
 
 /// an `Err` so the model sees the failure and can adapt.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 pub struct ToolOutput {
     /// Result text fed back to the model.
     pub content: String,
     /// Optional structured payload for richer client rendering.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    // A JSON value, stated as one for the wire: the shape is the tool's own.
+    #[ts(type = "object | string | number | boolean | null")]
     pub data: Option<Value>,
     /// Whether the tool reported a failure.
     #[serde(default)]
@@ -498,7 +500,7 @@ pub struct ToolOutput {
 /// in Settings), and `resource_uri` passed the discovery-time validation in
 /// `tidebreak-mcp` (bounded, `ui://`-schemed, no control characters). Remote
 /// tool names and descriptions still never cross the renderer boundary.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct ToolUiView {
     /// The configured MCP server namespace that can serve the document.
     pub server: String,

@@ -427,11 +427,15 @@ fn urlencode(value: &str) -> String {
 }
 
 /// Exit status a `tidebreak code run` turn maps to. Completed is zero;
-/// everything else is a failure of the work, not of the command itself.
+/// everything else — a failure, an interruption, a model refusal — is a
+/// failure of the work, not of the command itself, as `tidebreak chat`
+/// already reads them.
 pub fn turn_exit_code(event: &CodeEvent) -> Option<i32> {
     match event {
         CodeEvent::TurnCompleted { .. } => Some(0),
-        CodeEvent::TurnFailed { .. } | CodeEvent::TurnInterrupted => Some(1),
+        CodeEvent::TurnFailed { .. }
+        | CodeEvent::TurnInterrupted { .. }
+        | CodeEvent::TurnRefused { .. } => Some(1),
         _ => None,
     }
 }

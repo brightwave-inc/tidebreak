@@ -170,18 +170,21 @@ async fn immediate_cancellation_rolls_back_when_terminal_event_fails() {
         AcceptTurnOutcome::Accepted(turn) => turn,
         outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
     };
-    entities::event::ActiveModel {
-        chat_id: Set(chat.id.0),
+    entities::code_event::ActiveModel {
+        session_id: Set(chat.id.0),
+        owner: Set("local".to_owned()),
         seq: Set(1),
         turn_id: Set(Some(turn.id.0)),
         lease_token: Set(None),
         attempt_event_ordinal: Set(None),
         scan_token: Set(None),
         terminal: Set(true),
-        payload: Set(serde_json::to_value(AgentEvent::TurnCompleted {
-            usage: Usage::default(),
-            stop_reason: StopReason::EndTurn,
-        })
+        event: Set(serde_json::to_value(crate::chat_journal::journal_row(
+            &AgentEvent::TurnCompleted {
+                usage: Usage::default(),
+                stop_reason: StopReason::EndTurn,
+            },
+        ))
         .unwrap()),
         created_at: Set(Utc::now()),
     }

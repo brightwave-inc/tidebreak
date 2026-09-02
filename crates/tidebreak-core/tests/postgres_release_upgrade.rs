@@ -696,6 +696,23 @@ struct ConversationMergeSnapshot {
     rows: Vec<(String, i64)>,
     foreign_keys: Vec<(String, String)>,
     orphan_rejected: bool,
+    /// What the chat replay read serves for the seeded conversation after
+    /// the journal moved into `code_event`.
+    replayed: Vec<tidebreak_core::SequencedEvent>,
+}
+
+/// The one journal row the v0.60 conversation carries: its turn's terminal
+/// event, in the shape the release wrote it.
+fn seeded_terminal_event() -> tidebreak_core::AgentEvent {
+    tidebreak_core::AgentEvent::TurnCompleted {
+        usage: tidebreak_core::Usage {
+            input_tokens: 3,
+            output_tokens: 4,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+        },
+        stop_reason: tidebreak_core::StopReason::EndTurn,
+    }
 }
 
 #[tokio::test]
@@ -739,11 +756,19 @@ async fn postgres_v060_upgrade_merges_conversations_into_sessions() {
         snapshot.rows,
         [
             ("agent_run".to_owned(), 1),
-            ("event".to_owned(), 1),
+            ("code_event".to_owned(), 1),
             ("message".to_owned(), 2),
             ("tool_call".to_owned(), 1),
             ("turn_run".to_owned(), 1),
         ]
+    );
+    assert_eq!(
+        snapshot.replayed,
+        [tidebreak_core::SequencedEvent {
+            seq: 1,
+            event: seeded_terminal_event(),
+        }],
+        "the chat replay serves the journal from code_event"
     );
     assert_eq!(
         snapshot.foreign_keys,
@@ -752,7 +777,6 @@ async fn postgres_v060_upgrade_merges_conversations_into_sessions() {
             ("chat_image_publication".to_owned(), "r".to_owned()),
             ("chat_root_attachment".to_owned(), "c".to_owned()),
             ("context_checkpoint".to_owned(), "c".to_owned()),
-            ("event".to_owned(), "a".to_owned()),
             ("exec_file_change".to_owned(), "r".to_owned()),
             ("message".to_owned(), "a".to_owned()),
             ("message_attachment".to_owned(), "r".to_owned()),
@@ -785,7 +809,7 @@ async fn exercise_conversation_merge(url: &str) -> Result<ConversationMergeSnaps
         .await
         .map_err(|error| error.to_string())?;
     setup
-        .execute_unprepared(
+        .execute_unprepared(&format!(
             "CREATE TABLE seaql_migrations (
                 version varchar NOT NULL PRIMARY KEY,
                 applied_at bigint NOT NULL
@@ -797,7 +821,7 @@ async fn exercise_conversation_merge(url: &str) -> Result<ConversationMergeSnaps
                 network_policy, owner
              ) VALUES (
                 '00000000-0000-0000-0000-00000000a001', 'kept',
-                '2026-09-01T00:00:00Z', NULL, 'aggressive', '{\"mode\":\"open\"}',
+                '2026-09-01T00:00:00Z', NULL, 'aggressive', '{{\"mode\":\"open\"}}',
                 'local'
              );
              INSERT INTO message (id, chat_id, turn_id, seq, role, content, created_at)
@@ -841,7 +865,7 @@ async fn exercise_conversation_merge(url: &str) -> Result<ConversationMergeSnaps
              VALUES (
                 '00000000-0000-0000-0000-00000000a001', 1,
                 '00000000-0000-0000-0000-00000000a004', TRUE,
-                '{\"type\":\"turn_completed\"}', '2026-09-01T00:00:02Z'
+                '{terminal_event}', '2026-09-01T00:00:02Z'
              );
              INSERT INTO tool_call (
                 id, chat_id, turn_id, provider_id, history_order, name, arguments,
@@ -850,10 +874,11 @@ async fn exercise_conversation_merge(url: &str) -> Result<ConversationMergeSnaps
                 '00000000-0000-0000-0000-00000000a006',
                 '00000000-0000-0000-0000-00000000a001',
                 '00000000-0000-0000-0000-00000000a004', 'scripted', 1, 'exec',
-                '{}', 'server', 'completed', 'ok', '2026-09-01T00:00:01Z',
+                '{{}}', 'server', 'completed', 'ok', '2026-09-01T00:00:01Z',
                 '2026-09-01T00:00:01Z'
              )",
-        )
+            terminal_event = serde_json::to_string(&seeded_terminal_event()).unwrap(),
+        ))
         .await
         .map_err(|error| error.to_string())?;
     setup.close().await.map_err(|error| error.to_string())?;
@@ -909,13 +934,24 @@ async fn exercise_conversation_merge(url: &str) -> Result<ConversationMergeSnaps
         })
         .collect::<Result<Vec<_>, String>>()?;
     let mut rows = Vec::new();
-    for table in ["agent_run", "event", "message", "tool_call", "turn_run"] {
+    for table in [
+        "agent_run",
+        "code_event",
+        "message",
+        "tool_call",
+        "turn_run",
+    ] {
+        let column = if table == "code_event" {
+            "session_id"
+        } else {
+            "chat_id"
+        };
         let count: i64 = verifier
             .query_one_raw(Statement::from_string(
                 DatabaseBackend::Postgres,
                 format!(
                     "SELECT count(*)::bigint AS n FROM {table}
-                     WHERE chat_id = '00000000-0000-0000-0000-00000000a001'"
+                     WHERE {column} = '00000000-0000-0000-0000-00000000a001'"
                 ),
             ))
             .await
@@ -960,12 +996,20 @@ async fn exercise_conversation_merge(url: &str) -> Result<ConversationMergeSnaps
         .await
         .is_err();
 
+    let replayed = {
+        use tidebreak_core::Store as _;
+        store
+            .list_events(tidebreak_core::ChatId(uuid::Uuid::from_u128(0xa001)), 0)
+            .await
+            .map_err(|error| error.to_string())?
+    };
     let snapshot = ConversationMergeSnapshot {
         chat_table_present,
         session_columns,
         rows,
         foreign_keys,
         orphan_rejected,
+        replayed,
     };
     verifier.close().await.map_err(|error| error.to_string())?;
     store.close().await.map_err(|error| error.to_string())?;

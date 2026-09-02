@@ -289,7 +289,7 @@ impl ProviderErrorInfo {
 /// errors like [`serde_json::Error`]), but the `AgentEvent` stream that clients
 /// consume must serialize. `AgentErrorInfo` is that serializable projection: a
 /// stable `kind` plus a human-readable `message`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 pub struct AgentErrorInfo {
     /// Machine-readable category (see [`AgentError::kind`]).
     pub kind: String,

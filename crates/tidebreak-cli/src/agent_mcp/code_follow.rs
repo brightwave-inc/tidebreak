@@ -307,7 +307,7 @@ async fn apply_ours(
         event if is_turn_terminal(event) => {
             let status = match event {
                 CodeEvent::TurnCompleted { .. } => TurnStatus::Completed,
-                CodeEvent::TurnInterrupted => TurnStatus::Cancelled,
+                CodeEvent::TurnInterrupted { .. } => TurnStatus::Cancelled,
                 _ => TurnStatus::Failed,
             };
             Ok(Some(CodeTurnResult {
@@ -534,7 +534,7 @@ async fn handle_frame(
     frame: Result<CodeStreamNext>,
 ) -> Result<Option<CodeTurnResult>> {
     let frame = match frame {
-        Ok(CodeStreamNext::Frame(frame)) => frame,
+        Ok(CodeStreamNext::Frame(frame)) => *frame,
         Ok(CodeStreamNext::Ignore) => return Ok(None),
         Err(error) => {
             return Ok(Some(

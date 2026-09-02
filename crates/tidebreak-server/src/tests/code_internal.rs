@@ -165,13 +165,17 @@ async fn internal_engine_app(
         },
     );
     spawn_turn_worker(&state);
-    let mut registry = AdapterRegistry::new();
-    registry.register(Arc::new(InternalAdapter::new(state.clone())));
-    let runtime = Arc::new(CodeRuntime::with_registry(
-        db,
-        dir.path().to_path_buf(),
-        registry,
-    ));
+    let mut runtime =
+        CodeRuntime::with_registry(db, dir.path().to_path_buf(), AdapterRegistry::new());
+    // As in `lib.rs`: the engine follows the session's journal on the
+    // runtime's store and bus, and the chat bus mirrors onto that bus.
+    runtime.adapters.register(Arc::new(InternalAdapter::new(
+        state.clone(),
+        runtime.db.clone(),
+        runtime.bus.clone(),
+    )));
+    state.events.mirror_into(runtime.bus.clone());
+    let runtime = Arc::new(runtime);
     state.code = Some(runtime.clone());
     let token = state.token.clone();
     let addr = super::code::serve(app(state)).await;
@@ -498,20 +502,27 @@ async fn a_conversation_without_a_workspace_runs_on_the_code_wire() {
         vec!["completed"]
     );
 
-    // The journal is the one the code wire serves, in the code vocabulary.
+    // The journal is the one the code wire serves, in the code vocabulary,
+    // and the lane wrote it: the parks and the consent card sit beside the
+    // approval rows the worker minted for them, and the lane's own rows are
+    // there once each.
     let events = super::code::journaled_events(&runtime.db, session_id).await;
     let types = event_types(&events);
     let started = position(&types, "turn_started", 0);
-    let plan_requested = position(&types, "approval_requested", started);
+    let plan_proposed = position(&types, "plan_proposed", started);
+    let plan_requested = position(&types, "approval_requested", plan_proposed);
     let plan_resolved = position(&types, "approval_resolved", plan_requested);
-    let questions_requested = position(&types, "approval_requested", plan_resolved);
+    let questions_asked = position(&types, "questions_asked", plan_resolved);
+    let questions_requested = position(&types, "approval_requested", questions_asked);
     let questions_resolved = position(&types, "approval_resolved", questions_requested);
-    let tool_requested = position(&types, "approval_requested", questions_resolved);
+    let tool_required = position(&types, "tool_approval_required", questions_resolved);
+    let tool_requested = position(&types, "approval_requested", tool_required);
     let tool_resolved = position(&types, "approval_resolved", tool_requested);
-    let tool_completed = position(&types, "tool_completed", tool_resolved);
-    let steered = position(&types, "user_steered", tool_requested);
-    let message = position(&types, "assistant_message", tool_completed);
-    let completed = position(&types, "turn_completed", message);
+    let tool_decided = position(&types, "tool_approval_decided", tool_required);
+    let tool_completed = position(&types, "tool_completed", tool_decided);
+    let steered = position(&types, "user_steered", tool_required);
+    let completed = position(&types, "turn_completed", tool_completed);
+    assert!(tool_resolved < tool_completed, "{types:?}");
     assert_eq!(
         types
             .iter()
@@ -522,12 +533,130 @@ async fn a_conversation_without_a_workspace_runs_on_the_code_wire() {
     );
     assert_eq!(completed + 1, types.len(), "{types:?}");
     assert!(steered < completed);
+    // Three legs: the opening run, then one resume per park.
+    assert_journaled_once(&events, 3);
     let plan_decision = serde_json::to_value(&events[plan_resolved].event).unwrap();
     assert_eq!(plan_decision["decision"]["type"], "plan_decided");
     let grant_decision = serde_json::to_value(&events[tool_resolved].event).unwrap();
     assert_eq!(grant_decision["decision"]["type"], "approved_with_grant");
-    let text = serde_json::to_value(&events[message].event).unwrap();
-    assert_eq!(text["text"], "all done");
+    assert_eq!(streamed_text(&events), "all done");
+    assert_chat_replay_is_the_journal(&runtime.db, session_id, &events).await;
+}
+
+/// Every fact the lane journals once: one `TurnStarted` per leg the lane
+/// ran (a resumed park starts the stream again, and the chat surface has
+/// always replayed that), one terminal row, and no `AssistantMessage`
+/// beside the deltas that carry the answer (the whole message lives on the
+/// transcript row, not a second journal row).
+fn assert_journaled_once(events: &[tidebreak_core::SequencedCodeEvent], legs: usize) {
+    let types = event_types(events);
+    let count = |kind: &str| types.iter().filter(|entry| entry.as_str() == kind).count();
+    assert_eq!(count("turn_started"), legs, "{types:?}");
+    assert_eq!(count("turn_completed"), 1, "{types:?}");
+    assert_eq!(
+        count("turn_failed") + count("turn_interrupted"),
+        0,
+        "{types:?}"
+    );
+    assert_eq!(count("assistant_message"), 0, "{types:?}");
+}
+
+/// The assistant text a journal streams, concatenated.
+fn streamed_text(events: &[tidebreak_core::SequencedCodeEvent]) -> String {
+    events
+        .iter()
+        .filter_map(|event| match &event.event {
+            tidebreak_core::CodeEvent::AssistantDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The chat replay read is a projection of the same rows: every event it
+/// serves sits at its own sequence in the code journal and is the chat
+/// reading of exactly that row.
+async fn assert_chat_replay_is_the_journal(
+    db: &DbStore,
+    session_id: CodeSessionId,
+    journal: &[tidebreak_core::SequencedCodeEvent],
+) {
+    use tidebreak_core::Store as _;
+    let replay = db
+        .list_events(tidebreak_core::ChatId(session_id.0), 0)
+        .await
+        .unwrap();
+    assert!(!replay.is_empty());
+    for event in &replay {
+        let row = journal
+            .iter()
+            .find(|row| row.seq == event.seq)
+            .unwrap_or_else(|| panic!("chat seq {} has no journal row", event.seq));
+        assert_eq!(
+            tidebreak_core::chat_journal::journal_row(&event.event),
+            row.event,
+            "chat seq {} replays a different row",
+            event.seq
+        );
+    }
+    let projected = journal
+        .iter()
+        .filter(|row| {
+            tidebreak_core::chat_journal::chat_event(row.event.clone())
+                .unwrap()
+                .is_some()
+        })
+        .count();
+    assert_eq!(
+        replay.len(),
+        projected,
+        "the chat replay skips only code-only rows"
+    );
+}
+
+/// The plainest turn on the internal engine — one answer, no tools — is in
+/// the journal once: the lane's rows, and nothing the worker wrote beside
+/// them.
+#[tokio::test]
+async fn a_plain_internal_turn_is_journaled_once() {
+    let (addr, token, runtime, _ran, _dir) =
+        internal_engine_app(vec![Step::Text("just the answer")]).await;
+    let client = reqwest::Client::new();
+    let created = client
+        .post(format!("http://{addr}/code/sessions"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "permission_mode": "ask" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let session: serde_json::Value = created.json().await.unwrap();
+    let hosted: CodeSessionId = session["id"].as_str().unwrap().parse().unwrap();
+
+    let response = tokio::time::timeout(Duration::from_secs(20), async {
+        client
+            .post(format!("http://{addr}/code/sessions/{hosted}/turns"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({ "message": "say it" }))
+            .send()
+            .await
+            .unwrap()
+    })
+    .await
+    .expect("the turn completes");
+    assert!(response.status().is_success(), "{}", response.status());
+    assert_eq!(
+        turn_statuses(&client, addr, &token, hosted).await,
+        vec!["completed"]
+    );
+
+    let events = super::code::journaled_events(&runtime.db, hosted).await;
+    assert_journaled_once(&events, 1);
+    assert_eq!(streamed_text(&events), "just the answer");
+    let types = event_types(&events);
+    let started = position(&types, "turn_started", 0);
+    let completed = position(&types, "turn_completed", started);
+    assert_eq!(completed + 1, types.len(), "{types:?}");
+    assert_chat_replay_is_the_journal(&runtime.db, hosted, &events).await;
 }
 
 /// The workspace-bound create path never selects the in-process engine,

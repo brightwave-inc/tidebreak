@@ -288,7 +288,7 @@ fn event_search_text(event: &CodeEvent) -> Vec<&str> {
         CodeEvent::AssistantDelta { text }
         | CodeEvent::AssistantMessage { text, .. }
         | CodeEvent::ReasoningDelta { text }
-        | CodeEvent::UserSteered { text } => vec![text],
+        | CodeEvent::UserSteered { text, .. } => vec![text],
         CodeEvent::ToolStarted { name, detail, .. } => {
             let mut text = vec![name.as_str()];
             text.extend(tool_detail_text(detail));
@@ -311,7 +311,7 @@ fn event_search_text(event: &CodeEvent) -> Vec<&str> {
                 },
             ..
         } => vec![text],
-        CodeEvent::TurnFailed { error } => vec![&error.message],
+        CodeEvent::TurnFailed { error, .. } => vec![&error.message],
         CodeEvent::HarnessNotice { message, .. } => vec![message],
         _ => Vec::new(),
     }

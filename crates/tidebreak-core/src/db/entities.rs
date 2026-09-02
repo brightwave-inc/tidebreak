@@ -1579,35 +1579,6 @@ pub mod app_gateway_draft {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
-pub mod event {
-    use sea_orm::entity::prelude::*;
-
-    // Composite primary key `(chat_id, seq)`: `seq` is monotonic *per
-    // chat*, and the pair both enforces uniqueness and indexes the
-    // "this chat's events after a cursor" replay query.
-    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-    #[sea_orm(table_name = "event")]
-    pub struct Model {
-        #[sea_orm(primary_key, auto_increment = false)]
-        pub chat_id: Uuid,
-        #[sea_orm(primary_key, auto_increment = false)]
-        pub seq: i64,
-        pub turn_id: Option<Uuid>,
-        pub lease_token: Option<Uuid>,
-        pub attempt_event_ordinal: Option<i32>,
-        pub scan_token: Option<Uuid>,
-        pub terminal: bool,
-        #[sea_orm(column_type = "JsonBinary")]
-        pub payload: Json,
-        pub created_at: DateTimeUtc,
-    }
-
-    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-    pub enum Relation {}
-
-    impl ActiveModelBehavior for ActiveModel {}
-}
-
 pub mod code_repo {
     use sea_orm::entity::prelude::*;
 
@@ -2079,6 +2050,15 @@ pub mod code_event {
     // Composite primary key `(session_id, seq)`: `seq` is monotonic *per
     // session*, and the pair both enforces uniqueness and indexes the
     // "this session's events after a cursor" replay query.
+    //
+    // The one journal (decision 48 step 5): every engine's rows live here.
+    // The five columns after `created_at` are the chat turn lane's
+    // recovery receipts, which moved with the chat journal: `turn_id`
+    // names the turn a row belongs to, `(lease_token, attempt_event_ordinal)`
+    // is an attempt's idempotency identity for a retried append,
+    // `scan_token` marks a terminal row the claim scanner wrote, and
+    // `terminal` marks the one row that resolves a turn. External engines
+    // fence with the spawn epoch instead and leave all five at rest.
     #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
     #[sea_orm(table_name = "code_event")]
     pub struct Model {
@@ -2090,6 +2070,11 @@ pub mod code_event {
         #[sea_orm(column_type = "JsonBinary")]
         pub event: Json,
         pub created_at: DateTimeUtc,
+        pub turn_id: Option<Uuid>,
+        pub lease_token: Option<Uuid>,
+        pub attempt_event_ordinal: Option<i32>,
+        pub scan_token: Option<Uuid>,
+        pub terminal: bool,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

@@ -75,6 +75,29 @@ describe("reduceTranscript", () => {
     expect(state.activeTurnId).toBeNull();
   });
 
+  it("ends the turn on the internal engine's refusal", () => {
+    let state = reduceTranscript(initialTranscript(), {
+      seq: 1,
+      event: { type: "turn_started", turn_id: "t1" },
+    });
+    state = reduceTranscript(state, {
+      seq: 2,
+      event: {
+        type: "turn_refused",
+        usage: {
+          input_tokens: 1,
+          output_tokens: 1,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 0,
+          context_tokens: 0,
+        },
+        refusal: { details: { category: null }, partial_output: false },
+      },
+    });
+    expect(state.activeTurnId).toBeNull();
+    expect(state.items.at(-1)).toMatchObject({ kind: "status" });
+  });
+
   it("marks durable approval changes for an authoritative list refresh", () => {
     let state = reduceTranscript(initialTranscript(), {
       seq: 7,

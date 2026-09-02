@@ -188,7 +188,7 @@ async fn postgres_code_queries_partition_by_owner() {
         &alice,
         alice_session,
         0,
-        &CodeEvent::TurnInterrupted,
+        &CodeEvent::TurnInterrupted { usage: None },
     )
     .await
     .unwrap();

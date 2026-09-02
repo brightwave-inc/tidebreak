@@ -1112,15 +1112,21 @@ export function reduceCodeSessionEvent(
     }
 
     case "turn_completed":
+    case "turn_refused":
     case "turn_failed":
     case "turn_interrupted": {
+      // A refusal is a completed turn whose answer was to decline: the
+      // engine's turn row says so, and the code view ends the turn on it.
       const status =
-        event.type === "turn_completed"
+        event.type === "turn_completed" || event.type === "turn_refused"
           ? "completed"
           : event.type === "turn_failed"
             ? "failed"
             : "interrupted";
-      const usage = event.type === "turn_completed" ? event.usage : null;
+      const usage =
+        event.type === "turn_completed" || event.type === "turn_refused"
+          ? event.usage
+          : null;
       const error = event.type === "turn_failed" ? event.error.message : null;
       const diffstat =
         event.type === "turn_completed"

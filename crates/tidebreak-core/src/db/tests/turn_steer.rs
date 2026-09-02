@@ -1403,7 +1403,7 @@ async fn failed_steer_event_insert_rolls_back_message_receipt_and_revision() {
     store
         .conn
         .execute_unprepared(
-            "CREATE TRIGGER fail_steer_event BEFORE INSERT ON event
+            "CREATE TRIGGER fail_steer_event BEFORE INSERT ON code_event
              BEGIN SELECT RAISE(FAIL, 'injected steer event failure'); END",
         )
         .await

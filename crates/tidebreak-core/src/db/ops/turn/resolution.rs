@@ -1088,14 +1088,14 @@ where
     let Some(expected) = expected else {
         return Ok(None);
     };
-    let stored = entities::event::Entity::find()
-        .filter(entities::event::Column::TurnId.eq(id.0))
-        .filter(entities::event::Column::Terminal.eq(true))
+    let stored = entities::code_event::Entity::find()
+        .filter(entities::code_event::Column::TurnId.eq(id.0))
+        .filter(entities::code_event::Column::Terminal.eq(true))
         .one(conn)
         .await
         .map_err(store_err)?
         .ok_or_else(|| AgentError::Store(format!("terminal turn {id} is missing its event")))?;
-    let event = serde_json::from_value::<AgentEvent>(stored.payload)?;
+    let event = crate::chat_journal::decode_chat_event_required(stored.event)?;
     if stored.lease_token != lease_token
         || stored.attempt_event_ordinal != lease_token.map(|_| i32::MAX)
         || event != *expected
@@ -1114,7 +1114,7 @@ where
     if let Some(kind) = notification_kind {
         super::super::notification::record_work_turn_notification_on(
             conn,
-            ChatId(stored.chat_id),
+            ChatId(stored.session_id),
             id,
             kind,
         )

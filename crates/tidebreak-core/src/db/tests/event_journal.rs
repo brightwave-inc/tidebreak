@@ -192,7 +192,7 @@ async fn durable_turn_events_are_bound_and_reserve_one_terminal_slot() {
         Some(1),
         "an exact ambiguous retry recovers its original sequence"
     );
-    let stored = entities::event::Entity::find_by_id((chat.id.0, 1))
+    let stored = entities::code_event::Entity::find_by_id((chat.id.0, 1))
         .one(&store.conn)
         .await
         .unwrap()
@@ -202,7 +202,7 @@ async fn durable_turn_events_are_bound_and_reserve_one_terminal_slot() {
     assert_eq!(stored.attempt_event_ordinal, Some(1));
     assert!(!stored.terminal);
     assert_eq!(
-        serde_json::from_value::<AgentEvent>(stored.payload).unwrap(),
+        crate::chat_journal::decode_chat_event_required(stored.event).unwrap(),
         started
     );
 
@@ -261,57 +261,61 @@ async fn durable_turn_events_are_bound_and_reserve_one_terminal_slot() {
     );
     assert!(store.append_event(chat.id, &started).await.is_err());
 
-    entities::event::ActiveModel {
-        chat_id: Set(chat.id.0),
+    entities::code_event::ActiveModel {
+        session_id: Set(chat.id.0),
+        owner: Set("local".to_owned()),
         seq: Set(2),
         turn_id: Set(Some(turn.id.0)),
         lease_token: Set(Some(lease_token)),
         attempt_event_ordinal: Set(Some(2)),
         scan_token: Set(None),
         terminal: Set(true),
-        payload: Set(serde_json::to_value(&terminal).unwrap()),
+        event: Set(serde_json::to_value(crate::chat_journal::journal_row(&terminal)).unwrap()),
         created_at: Set(Utc::now()),
     }
     .insert(&store.conn)
     .await
     .unwrap();
-    assert!(entities::event::ActiveModel {
-        chat_id: Set(chat.id.0),
+    assert!(entities::code_event::ActiveModel {
+        session_id: Set(chat.id.0),
+        owner: Set("local".to_owned()),
         seq: Set(3),
         turn_id: Set(Some(turn.id.0)),
         lease_token: Set(Some(lease_token)),
         attempt_event_ordinal: Set(Some(3)),
         scan_token: Set(None),
         terminal: Set(true),
-        payload: Set(serde_json::to_value(&terminal).unwrap()),
+        event: Set(serde_json::to_value(crate::chat_journal::journal_row(&terminal)).unwrap()),
         created_at: Set(Utc::now()),
     }
     .insert(&store.conn)
     .await
     .is_err());
-    assert!(entities::event::ActiveModel {
-        chat_id: Set(chat.id.0),
+    assert!(entities::code_event::ActiveModel {
+        session_id: Set(chat.id.0),
+        owner: Set("local".to_owned()),
         seq: Set(4),
         turn_id: Set(None),
         lease_token: Set(None),
         attempt_event_ordinal: Set(None),
         scan_token: Set(None),
         terminal: Set(true),
-        payload: Set(serde_json::to_value(&terminal).unwrap()),
+        event: Set(serde_json::to_value(crate::chat_journal::journal_row(&terminal)).unwrap()),
         created_at: Set(Utc::now()),
     }
     .insert(&store.conn)
     .await
     .is_err());
-    assert!(entities::event::ActiveModel {
-        chat_id: Set(chat.id.0),
+    assert!(entities::code_event::ActiveModel {
+        session_id: Set(chat.id.0),
+        owner: Set("local".to_owned()),
         seq: Set(5),
         turn_id: Set(Some(turn.id.0)),
         lease_token: Set(None),
         attempt_event_ordinal: Set(None),
         scan_token: Set(None),
         terminal: Set(false),
-        payload: Set(serde_json::to_value(&started).unwrap()),
+        event: Set(serde_json::to_value(crate::chat_journal::journal_row(&started)).unwrap()),
         created_at: Set(Utc::now()),
     }
     .insert(&store.conn)

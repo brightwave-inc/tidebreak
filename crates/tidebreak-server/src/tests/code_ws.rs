@@ -856,7 +856,7 @@ async fn superseded_worker_cannot_append_to_the_journal() {
         &tidebreak_core::OwnerId::local(),
         session_id,
         bumped - 1,
-        &tidebreak_core::CodeEvent::TurnInterrupted,
+        &tidebreak_core::CodeEvent::TurnInterrupted { usage: None },
     )
     .await
     .unwrap_err();

@@ -202,9 +202,9 @@ async fn park_foreground_turn_on_child(
     };
     let now = Utc::now();
     // The wait-set checkpoint requires the claim's first journal event.
-    if crate::db::entities::event::Entity::find()
-        .filter(crate::db::entities::event::Column::LeaseToken.eq(lease_token))
-        .filter(crate::db::entities::event::Column::AttemptEventOrdinal.eq(1))
+    if crate::db::entities::code_event::Entity::find()
+        .filter(crate::db::entities::code_event::Column::LeaseToken.eq(lease_token))
+        .filter(crate::db::entities::code_event::Column::AttemptEventOrdinal.eq(1))
         .one(&store.conn)
         .await
         .unwrap()

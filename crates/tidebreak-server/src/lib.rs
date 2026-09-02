@@ -2222,12 +2222,18 @@ async fn bind_inner(
     };
     // The in-process engine drives the chat turn lane, so it needs the app
     // state that lane runs on. Registered here, after the state exists and
-    // before the runtime is shared; the copy it keeps has no code runtime.
+    // before the runtime is shared; the copy it keeps has no code runtime,
+    // only the journal store and the session bus the lane's rows land on.
     runtime
         .adapters
         .register(Arc::new(engine::internal::InternalAdapter::new(
             state.clone(),
+            runtime.db.clone(),
+            runtime.bus.clone(),
         )));
+    // A chat is a session on the one journal: every event the lane
+    // publishes reaches the session's channel too.
+    state.events.mirror_into(runtime.bus.clone());
     #[cfg(feature = "scripted-harness")]
     scripted_harness::install_from_env(&mut runtime.adapters)?;
     // Remote sessions need both halves: the configured runtime endpoint and

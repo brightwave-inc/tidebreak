@@ -1299,16 +1299,25 @@ fn render_event(
             eprintln!("tidebreak: file {} {path}", kind.as_str_display());
             return false;
         }
-        CodeEvent::TurnFailed { error } => {
+        CodeEvent::TurnFailed { error, .. } => {
             streamed_text.clear();
             finish_line(dangling);
             eprintln!("tidebreak: turn failed: {}", error.message);
             return false;
         }
-        CodeEvent::TurnInterrupted => {
+        CodeEvent::TurnInterrupted { .. } => {
             streamed_text.clear();
             finish_line(dangling);
             eprintln!("tidebreak: turn interrupted");
+            return false;
+        }
+        CodeEvent::TurnRefused { refusal, .. } => {
+            streamed_text.clear();
+            finish_line(dangling);
+            eprintln!(
+                "tidebreak: turn refused ({})",
+                refusal.category().unwrap_or("unspecified")
+            );
             return false;
         }
         // `code run` already told the user to decide this one. Say when the
@@ -2871,6 +2880,7 @@ mod tests {
         CodeEvent::TurnCompleted {
             usage: Default::default(),
             checkpoint: None,
+            stop_reason: None,
         }
     }
 

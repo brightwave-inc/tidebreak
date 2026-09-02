@@ -166,6 +166,12 @@ function applyEvent(
         `int:${state.lastSeq}`,
         "Turn interrupted",
       );
+    case "turn_refused":
+      return appendStatus(
+        { ...state, activeTurnId: null },
+        `refused:${state.lastSeq}`,
+        "Turn completed: the model declined to continue",
+      );
     case "approval_requested":
       return appendStatus(
         { ...state, approvalRevision: state.lastSeq },

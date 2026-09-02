@@ -710,20 +710,23 @@ async fn claim_scan_rolls_back_terminal_state_when_event_append_fails() {
         .unwrap()
         .turn
         .unwrap();
-    entities::event::ActiveModel {
-        chat_id: Set(chat.id.0),
+    entities::code_event::ActiveModel {
+        session_id: Set(chat.id.0),
+        owner: Set("local".to_owned()),
         seq: Set(1),
         turn_id: Set(Some(turn.id.0)),
         lease_token: Set(Some(token)),
         attempt_event_ordinal: Set(Some(i32::MAX)),
         scan_token: Set(None),
         terminal: Set(true),
-        payload: Set(serde_json::to_value(AgentEvent::TurnFailed {
-            error: crate::error::AgentErrorInfo {
-                kind: "forced".into(),
-                message: "occupy terminal slot".into(),
+        event: Set(serde_json::to_value(crate::chat_journal::journal_row(
+            &AgentEvent::TurnFailed {
+                error: crate::error::AgentErrorInfo {
+                    kind: "forced".into(),
+                    message: "occupy terminal slot".into(),
+                },
             },
-        })
+        ))
         .unwrap()),
         created_at: Set(Utc::now()),
     }
