@@ -59,7 +59,9 @@ export const StdioResolvedCommand: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     await expect(
-      await canvas.findByText(/Resolved\s+npx\s+to\s+\/opt\/homebrew\/bin\/npx/),
+      await canvas.findByText(
+        /Resolved\s+npx\s+to\s+\/opt\/homebrew\/bin\/npx/,
+      ),
     ).toBeVisible();
   },
 };

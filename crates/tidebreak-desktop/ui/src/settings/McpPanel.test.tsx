@@ -160,7 +160,11 @@ describe("McpPanel", () => {
       />,
     );
     expect(
-      await screen.findByText("Resolved npx to /opt/homebrew/bin/npx"),
+      await screen.findByText(
+        (_, node) =>
+          node?.tagName === "P" &&
+          node.textContent === "Resolved npx to /opt/homebrew/bin/npx",
+      ),
     ).toBeInTheDocument();
   });
 
