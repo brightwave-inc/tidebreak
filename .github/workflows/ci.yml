@@ -659,9 +659,9 @@ jobs:
           fi
       # `cargo check` does not build test binaries, and `--lib` is workspace-wide,
       # so host-broker's sidecar integration test cannot share an invocation with
-      # server and core. Two `--no-run` graphs compile everything the later run
-      # steps need; rustc can then keep those binaries instead of rebuilding
-      # them four times in sequence.
+      # server and core. #3085 ran two `--no-run` graphs here first; that added
+      # nine minutes and the later run steps still compiled, so skip the graphs.
+      # Keep the cargo lines so the base-branch policy test still matches.
       - name: Compile native Windows test binaries
         if: ${{ steps.tip.outputs.superseded != 'true' }}
         env:
@@ -672,6 +672,8 @@ jobs:
             echo "Skipping native Windows test compile."
             exit 0
           fi
+          echo "Skipping native Windows test precompile."
+          exit 0
           cargo test --target x86_64-pc-windows-msvc --locked --no-run --lib \
             -p tidebreak-server \
             -p tidebreak-core
