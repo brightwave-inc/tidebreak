@@ -272,6 +272,7 @@ where
             })?,
         ),
         attachment_revision: Set(chat.attachment_revision),
+        memory_incognito: Set(chat.memory_incognito),
     }
     .insert(conn)
     .await
@@ -543,6 +544,32 @@ pub(in crate::db) async fn update_chat_metadata(
         );
     }
     let mut update = update.filter(entities::code_session::Column::Id.eq(id.0));
+    if let Some(owner) = owner {
+        update = update
+            .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+            .filter(internal_sessions());
+    }
+    let result = update.exec(&store.conn).await.map_err(store_err)?;
+    Ok(result.rows_affected == 1)
+}
+
+/// Flip one conversation's memory-incognito switch.
+///
+/// A targeted column write rather than another `update_chat_metadata`
+/// parameter: the switch has no tri-state and no sticky default, and keeping
+/// it out of that signature spares every caller a positional `None`.
+pub(in crate::db) async fn set_chat_memory_incognito(
+    store: &DbStore,
+    id: ChatId,
+    memory_incognito: bool,
+    owner: Option<&OwnerId>,
+) -> Result<bool> {
+    let mut update = entities::code_session::Entity::update_many()
+        .col_expr(
+            entities::code_session::Column::MemoryIncognito,
+            sea_orm::sea_query::Expr::value(memory_incognito),
+        )
+        .filter(entities::code_session::Column::Id.eq(id.0));
     if let Some(owner) = owner {
         update = update
             .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
@@ -1890,6 +1917,7 @@ fn chat_from_models(
         })?,
         attachment_revision: model.attachment_revision,
         root_attachments,
+        memory_incognito: model.memory_incognito,
         created_at: model.created_at,
     };
     validate_chat_root_projection(&chat).map_err(|message| AgentError::Store(message.into()))?;

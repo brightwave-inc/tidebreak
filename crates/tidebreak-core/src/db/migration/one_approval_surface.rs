@@ -290,11 +290,18 @@ impl Sessions {
     where
         C: ConnectionTrait,
     {
-        use sea_orm::EntityTrait;
+        use sea_orm::{EntityTrait, QuerySelect};
         if let Some(found) = self.by_id.get(&chat_id) {
             return Ok(found.clone());
         }
-        let session = entities::code_session::Entity::find_by_id(chat_id)
+        // Name the columns rather than reading the live entity: this
+        // migration is historical, and the entity's model grows with the
+        // schema of the chain's end, which does not exist yet here.
+        let found = entities::code_session::Entity::find_by_id(chat_id)
+            .select_only()
+            .column(entities::code_session::Column::Owner)
+            .column(entities::code_session::Column::SpawnEpoch)
+            .into_tuple::<(String, i64)>()
             .one(conn)
             .await?
             .ok_or_else(|| {
@@ -302,7 +309,6 @@ impl Sessions {
                     "{what} names conversation {chat_id}, which does not exist"
                 ))
             })?;
-        let found = (session.owner, session.spawn_epoch);
         self.by_id.insert(chat_id, found.clone());
         Ok(found)
     }
@@ -334,14 +340,15 @@ where
 {
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 
+    // Columns by name, not the live entity, for the same reason as above.
     let internal = entities::code_session::Entity::find()
+        .select_only()
+        .column(entities::code_session::Column::Id)
         .filter(entities::code_session::Column::WorkspaceId.is_null())
         .filter(entities::code_session::Column::HarnessKind.eq("internal"))
+        .into_tuple::<uuid::Uuid>()
         .all(conn)
-        .await?
-        .into_iter()
-        .map(|session| session.id)
-        .collect::<Vec<_>>();
+        .await?;
     if internal.is_empty() {
         return Ok(());
     }

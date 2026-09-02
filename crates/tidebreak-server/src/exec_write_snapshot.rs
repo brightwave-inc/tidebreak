@@ -1097,6 +1097,7 @@ mod tests {
             network_policy: Default::default(),
             attachment_revision: 0,
             root_attachments: Vec::new(),
+            memory_incognito: false,
             created_at: Utc::now(),
         };
         store.create_chat(&chat).await.unwrap();
@@ -1237,6 +1238,7 @@ mod tests {
             network_policy: Default::default(),
             attachment_revision: 0,
             root_attachments: Vec::new(),
+            memory_incognito: false,
             created_at: Utc::now(),
         };
         store.create_chat(&chat).await.unwrap();
@@ -1340,6 +1342,7 @@ mod tests {
             network_policy: Default::default(),
             attachment_revision: 0,
             root_attachments: Vec::new(),
+            memory_incognito: false,
             created_at: Utc::now(),
         };
         store.create_chat(&chat).await.unwrap();

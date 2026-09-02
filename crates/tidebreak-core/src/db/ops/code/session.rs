@@ -110,6 +110,7 @@ where
         title: Set(None),
         network_policy: Set(serde_json::to_string(&crate::NetworkPolicy::default())?),
         attachment_revision: Set(0),
+        memory_incognito: Set(false),
     }
     .insert(connection)
     .await

@@ -735,6 +735,7 @@ async fn delegated_file_routes_are_native_only_and_expose_only_exact_broker_auth
             root_id,
             origin: RootAttachmentOrigin::Conversation,
         }],
+        memory_incognito: false,
         created_at: chrono::Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();

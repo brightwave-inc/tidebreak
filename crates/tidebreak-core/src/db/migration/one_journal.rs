@@ -274,12 +274,20 @@ where
             .filter(|chat_id| !owners.contains_key(chat_id))
             .collect::<Vec<_>>();
         if !missing.is_empty() {
-            for session in entities::code_session::Entity::find()
+            // Name the columns rather than reading the live entity: this
+            // migration is historical, and the entity's model grows with the
+            // schema of the chain's end, which does not exist yet here.
+            use sea_orm::QuerySelect;
+            for (id, owner) in entities::code_session::Entity::find()
+                .select_only()
+                .column(entities::code_session::Column::Id)
+                .column(entities::code_session::Column::Owner)
                 .filter(entities::code_session::Column::Id.is_in(missing))
+                .into_tuple::<(uuid::Uuid, String)>()
                 .all(conn)
                 .await?
             {
-                owners.insert(session.id, session.owner);
+                owners.insert(id, owner);
             }
         }
         let page = rows.len();

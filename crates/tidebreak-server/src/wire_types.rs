@@ -1283,6 +1283,12 @@ mod tests {
                 }),
             ),
             (
+                "metadata_memory_proposals_recorded",
+                RendererChatFrame::Metadata(RendererChatMetadata::MemoryProposalsRecorded {
+                    turn_id: turn,
+                }),
+            ),
+            (
                 "metadata_sandbox_preparing",
                 RendererChatFrame::Metadata(RendererChatMetadata::SandboxPreparing {
                     preparing: true,

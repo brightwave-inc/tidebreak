@@ -19,6 +19,7 @@ fn mem_attachment_chat(
         network_policy: Default::default(),
         attachment_revision,
         root_attachments: roots,
+        memory_incognito: false,
         created_at: chrono::DateTime::<chrono::Utc>::from_timestamp(10, 0).unwrap(),
     }
 }

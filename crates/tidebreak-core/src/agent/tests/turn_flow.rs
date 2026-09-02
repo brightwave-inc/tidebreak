@@ -235,6 +235,7 @@ async fn a_rejected_mixed_control_step_does_not_replay_its_thinking_on_the_retry
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();
@@ -326,6 +327,7 @@ async fn turn_runs_a_tool_call_then_finishes() {
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();
@@ -413,6 +415,7 @@ async fn claimed_turn_defers_terminal_publication_to_durable_worker() {
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();
@@ -827,6 +830,7 @@ async fn tool_context_inherits_the_chats_project_scope() {
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();
@@ -886,6 +890,7 @@ async fn a_turn_at_the_step_ceiling_concludes_with_an_answer() {
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();
@@ -968,6 +973,7 @@ async fn a_chat_only_wrap_up_sends_no_tool_choice_and_still_answers() {
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();
@@ -1043,6 +1049,7 @@ async fn a_wrap_up_a_provider_answers_with_a_tool_call_retries_without_tools() {
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();
@@ -1116,6 +1123,7 @@ async fn a_chat_only_model_never_receives_tool_schemas() {
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();
@@ -1175,6 +1183,7 @@ async fn tool_only_provider_replay_survives_the_turn_that_produced_it() {
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();
@@ -1369,6 +1378,7 @@ async fn run_claimed_refusal(events: Vec<ProviderEvent>) -> (AgentTurnOutcome, V
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();
@@ -1567,6 +1577,7 @@ async fn an_empty_model_response_does_not_complete_an_in_process_turn() {
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();
@@ -1647,6 +1658,7 @@ async fn a_mid_stream_failure_reaches_the_client_with_its_classification() {
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();
@@ -1835,6 +1847,7 @@ async fn a_stolen_lease_fences_intermediate_tool_effects() {
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();
@@ -1914,6 +1927,7 @@ async fn retry_abandons_an_inherited_pending_tool_without_replaying_it() {
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();

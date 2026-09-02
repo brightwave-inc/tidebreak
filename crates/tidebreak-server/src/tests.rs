@@ -1027,6 +1027,11 @@ impl Store for PauseTerminalStore {
             )
             .await
     }
+    async fn set_chat_memory_incognito(&self, id: ChatId, memory_incognito: bool) -> Result<bool> {
+        self.inner
+            .set_chat_memory_incognito(id, memory_incognito)
+            .await
+    }
     async fn get_turn_run(&self, id: TurnId) -> Result<Option<tidebreak_core::TurnRun>> {
         self.inner.get_turn_run(id).await
     }

@@ -541,6 +541,14 @@ impl Store for MemStore {
         }
         Ok(true)
     }
+    async fn set_chat_memory_incognito(&self, id: ChatId, memory_incognito: bool) -> Result<bool> {
+        let mut chats = self.chats.lock().unwrap();
+        let Some(chat) = chats.get_mut(&id) else {
+            return Ok(false);
+        };
+        chat.memory_incognito = memory_incognito;
+        Ok(true)
+    }
     async fn begin_root_attachment_change(
         &self,
         request: &BeginRootAttachmentChange,
@@ -1162,6 +1170,7 @@ fn store_is_object_safe_and_roundtrips() {
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).unwrap(),
     };
     block_on(store.create_chat(&chat)).unwrap();
@@ -1208,6 +1217,7 @@ fn custom_store_atomic_chat_default_fails_closed() {
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).unwrap(),
     };
     let owner = crate::model::OwnerId::local();

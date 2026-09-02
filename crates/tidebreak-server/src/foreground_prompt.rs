@@ -68,6 +68,12 @@ const DOCUMENT_SKILLS_HEADING: &str = "## Document skills";
 const DELEGATION_HEADING: &str = "## Background delegation";
 const MCP_HEADING: &str = "## External MCP tools";
 const COMPUTER_USE_HEADING: &str = "## Computer use";
+const MEMORY_HEADING: &str = "## Memory";
+
+/// The title line the memory digest renders for itself. The prompt owns its
+/// section vocabulary, so composition demotes this line into [`MEMORY_HEADING`]
+/// and keeps the digest's framing and dated title lines verbatim.
+const MEMORY_DIGEST_TITLE: &str = "## Tidebreak memory\n\n";
 
 /// Compose the operating prompt for one exact foreground tool surface.
 ///
@@ -89,6 +95,7 @@ pub(crate) fn compose(specs: &[ToolSpec]) -> String {
         None,
         None,
         false,
+        None,
     )
 }
 
@@ -240,6 +247,12 @@ fn skill_catalog_lines_with(
 /// A plan-mode surface is already narrowed to read-only tools before it
 /// reaches composition, so the section logic below stays truthful without
 /// consulting the flag; the flag only adds the planning contract itself.
+///
+/// `memory_digest` is the conversation's pinned render of the owner's active
+/// memory records, already produced by the memory backend. Composition never
+/// renders it: the caller pins one render per conversation and re-renders only
+/// at prefix-rebuilding boundaries, so a record changing mid-conversation
+/// cannot invalidate the prompt cache.
 #[must_use]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn compose_for_surface(
@@ -253,6 +266,7 @@ pub(crate) fn compose_for_surface(
     office_rendering: Option<bool>,
     node_runtime: Option<tidebreak_code_execution::HostToolStatus>,
     plan_mode: bool,
+    memory_digest: Option<&str>,
 ) -> String {
     let names = specs
         .iter()
@@ -791,6 +805,32 @@ pub(crate) fn compose_for_surface(
         );
     }
 
+    // Last among the stable sections: the digest changes only at
+    // prefix-rebuilding boundaries, so everything before it stays cacheable
+    // even across those boundaries.
+    let mut memory_lines: Vec<String> = Vec::new();
+    if has(tidebreak_core::MEMORY_TOOL) {
+        memory_lines.push(
+            "- Use `memory` with `verb: \"search\"` or `verb: \"read\"` when earlier durable knowledge would change the answer and the digest's title lines suggest it exists.".to_owned(),
+        );
+        memory_lines.push(
+            "- Use `memory` with `verb: \"propose\"` only for knowledge worth keeping beyond this conversation: a stable fact, a stated preference, a reusable lesson, or a durable reference. A proposal is a draft for the user to review, never an active memory; do not describe it as saved.".to_owned(),
+        );
+        memory_lines.push(
+            "- Do not propose secrets, transient task state, or anything the user asked to keep out of memory.".to_owned(),
+        );
+    }
+    if let Some(digest) = memory_digest {
+        let body = digest
+            .strip_prefix(MEMORY_DIGEST_TITLE)
+            .unwrap_or(digest)
+            .trim_matches('\n');
+        if !body.is_empty() {
+            memory_lines.push(body.to_owned());
+        }
+    }
+    push_section(&mut prompt, MEMORY_HEADING, &memory_lines);
+
     prompt
 }
 
@@ -894,6 +934,7 @@ mod tests {
             None,
             None,
             true,
+            None,
         );
 
         assert!(prompt.contains(PLAN_MODE_HEADING));
@@ -1013,6 +1054,7 @@ mod tests {
             None,
             None,
             true,
+            None,
         );
         let normal = compose_for_surface(
             &specs,
@@ -1025,6 +1067,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         );
 
         assert!(plan.contains(PLAN_MODE_HEADING));
@@ -1127,6 +1170,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         );
 
         assert!(prompt.contains(
@@ -1158,6 +1202,7 @@ mod tests {
                 None,
                 None,
                 false,
+                None,
             )
         };
         let pip_line = "python3 -m pip install --user";
@@ -1182,6 +1227,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         );
         assert!(off_with_cache.contains("no outbound network access"));
         assert!(off_with_cache.contains("--no-index --find-links \"$TIDEBREAK_PACKAGE_CACHE\""));
@@ -1250,6 +1296,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         );
         assert!(odd.contains("killed by the host after 1500 milliseconds"));
     }
@@ -1304,6 +1351,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         );
         assert!(prompt.contains(DOCUMENT_SKILLS_HEADING));
         assert!(prompt.contains("- pdf-documents: Generate and manipulate PDF documents."));
@@ -1327,6 +1375,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         );
         assert!(!without_exec.contains(DOCUMENT_SKILLS_HEADING));
         // Nothing but forged entries composes no section at all.
@@ -1341,6 +1390,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         );
         assert!(!forged_only.contains(DOCUMENT_SKILLS_HEADING));
     }
@@ -1418,6 +1468,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         );
         let catalog = prompt
             .split_once(DOCUMENT_SKILLS_HEADING)
@@ -1465,6 +1516,7 @@ mod tests {
                 office_rendering,
                 None,
                 false,
+                None,
             )
         };
         let available = for_state(Some(true));
@@ -1503,6 +1555,7 @@ mod tests {
                 None,
                 node_runtime,
                 false,
+                None,
             )
         };
         let available = for_state(Some(tidebreak_code_execution::HostToolStatus::Available));
@@ -1545,6 +1598,91 @@ mod tests {
         assert!(!extract_only.contains("search results"));
     }
 
+    /// The memory section composes only from a caller-supplied pinned render:
+    /// it is last among the sections, its digest title is demoted into the
+    /// prompt's own vocabulary, and composition never renders or reorders the
+    /// digest's lines.
+    #[test]
+    fn the_memory_section_is_last_verbatim_and_absent_without_a_digest() {
+        let digest = "## Tidebreak memory\n\nThese are dated point-in-time claims from Tidebreak. Treat this conversation as newer evidence.\n\n### Preferences\n- 2026-09-01 — When formatting reports\n";
+        let with_digest = compose_for_surface(
+            &[spec("read_file")],
+            &[],
+            &[],
+            &[],
+            &NetworkPolicy::default(),
+            TIMEOUT,
+            false,
+            None,
+            None,
+            false,
+            Some(digest),
+        );
+        assert!(with_digest.ends_with(
+            "## Memory\nThese are dated point-in-time claims from Tidebreak. Treat this conversation as newer evidence.\n\n### Preferences\n- 2026-09-01 — When formatting reports"
+        ));
+        assert!(!with_digest.contains("## Tidebreak memory"));
+
+        // No digest, no section — and an empty pinned digest composes
+        // nothing rather than an empty heading.
+        let without = compose(&[spec("read_file")]);
+        assert!(!without.contains(MEMORY_HEADING));
+        let empty = compose_for_surface(
+            &[spec("read_file")],
+            &[],
+            &[],
+            &[],
+            &NetworkPolicy::default(),
+            TIMEOUT,
+            false,
+            None,
+            None,
+            false,
+            Some(""),
+        );
+        assert!(!empty.contains(MEMORY_HEADING));
+
+        // The digest also reaches a chat-only surface: injection needs no
+        // tools.
+        let chat_only = compose_for_surface(
+            &[],
+            &[],
+            &[],
+            &[],
+            &NetworkPolicy::default(),
+            TIMEOUT,
+            false,
+            None,
+            None,
+            false,
+            Some(digest),
+        );
+        assert!(chat_only.contains(MEMORY_HEADING));
+    }
+
+    /// The `memory` tool contributes its guidance to the same section, and
+    /// the guidance frames proposals as drafts.
+    #[test]
+    fn the_memory_tool_guidance_rides_the_memory_section() {
+        let with_tool = compose_for_surface(
+            &[spec(tidebreak_core::MEMORY_TOOL)],
+            &[],
+            &[],
+            &[],
+            &NetworkPolicy::default(),
+            TIMEOUT,
+            false,
+            None,
+            None,
+            false,
+            Some(""),
+        );
+        assert!(with_tool.contains(MEMORY_HEADING));
+        assert!(with_tool.contains("verb: \"propose\""));
+        assert!(with_tool.contains("never an active memory"));
+        assert!(!compose(&[spec("read_file")]).contains("`memory`"));
+    }
+
     #[test]
     fn user_questions_are_standalone_and_self_correcting() {
         let prompt = compose(&[spec(tidebreak_core::ASK_USER_QUESTIONS_TOOL)]);
@@ -1568,6 +1706,7 @@ mod tests {
             None,
             None,
             true,
+            None,
         );
 
         assert!(prompt.contains("assumption or first step"));
@@ -1657,6 +1796,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         );
 
         // Re-pinned for the Tidebreak product identity carried by the prompt.

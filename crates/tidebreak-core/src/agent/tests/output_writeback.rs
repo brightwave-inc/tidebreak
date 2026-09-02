@@ -21,6 +21,7 @@ async fn output_writeback_fixture() -> (tempfile::TempDir, Arc<dyn Store>, Chat,
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();

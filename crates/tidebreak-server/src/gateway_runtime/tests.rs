@@ -1125,6 +1125,7 @@ async fn sync_never_rewrites_durable_model_selections() {
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: chrono::Utc::now(),
     };
     store.create_chat(&pinned).await.unwrap();
@@ -2927,6 +2928,7 @@ async fn a_schema_epoch_reset_keeps_the_policy_and_its_session() {
             network_policy: Default::default(),
             attachment_revision: 0,
             root_attachments: Vec::new(),
+            memory_incognito: false,
             created_at: chrono::Utc::now(),
         })
         .await
