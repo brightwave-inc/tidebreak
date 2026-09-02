@@ -92,7 +92,7 @@ where
     let Some(event_seq) = wait.event_seq else {
         return Ok(false);
     };
-    let Some(event) = entities::event::Entity::find_by_id((wait.chat_id, event_seq))
+    let Some(event) = entities::code_event::Entity::find_by_id((wait.chat_id, event_seq))
         .one(conn)
         .await
         .map_err(store_err)?
@@ -113,7 +113,7 @@ where
         && event.lease_token == Some(wait.park_lease_token)
         && event.attempt_event_ordinal == Some(wait.event_ordinal)
         && !event.terminal
-        && serde_json::from_value::<AgentEvent>(event.payload)? == expected)
+        && crate::chat_journal::decode_chat_event_required(event.event)? == expected)
 }
 
 pub(super) fn exact_pending_wait_call_model(

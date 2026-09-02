@@ -185,9 +185,9 @@ where
         });
     }
 
-    let last_attempt_event = entities::event::Entity::find()
-        .filter(entities::event::Column::LeaseToken.eq(request.lease_token))
-        .order_by_desc(entities::event::Column::AttemptEventOrdinal)
+    let last_attempt_event = entities::code_event::Entity::find()
+        .filter(entities::code_event::Column::LeaseToken.eq(request.lease_token))
+        .order_by_desc(entities::code_event::Column::AttemptEventOrdinal)
         .one(conn)
         .await
         .map_err(store_err)?;
@@ -469,18 +469,19 @@ where
         .await
         .map_err(store_err)?
         .ok_or_else(|| AgentError::Store("sandbox spawn receipt lost its tool call".into()))?;
-    let event = entities::event::Entity::find_by_id((checkpoint.chat_id.0, checkpoint.event_seq))
-        .one(conn)
-        .await
-        .map_err(store_err)?
-        .ok_or_else(|| AgentError::Store("sandbox spawn receipt lost its event".into()))?;
+    let event =
+        entities::code_event::Entity::find_by_id((checkpoint.chat_id.0, checkpoint.event_seq))
+            .one(conn)
+            .await
+            .map_err(store_err)?
+            .ok_or_else(|| AgentError::Store("sandbox spawn receipt lost its event".into()))?;
     let expected_event = AgentEvent::ToolCallCompleted {
         call_id: checkpoint.call_id,
         output: ToolOutput::text(checkpoint.result.clone()),
         action: None,
         result: None,
     };
-    let stored_event: AgentEvent = serde_json::from_value(event.payload)?;
+    let stored_event = crate::chat_journal::decode_chat_event_required(event.event)?;
     let arguments = canonical_arguments(request)?;
     // A gated spawn's row carries the approval that admitted it; an ungated
     // one must carry no approval at all.

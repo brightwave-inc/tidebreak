@@ -88,9 +88,9 @@ pub(in crate::db) async fn recover_exact_terminal_event(
     lease_token: uuid::Uuid,
     expected: &AgentEvent,
 ) -> Result<Option<SequencedEvent>> {
-    let Some(stored) = entities::event::Entity::find()
-        .filter(entities::event::Column::TurnId.eq(turn_id.0))
-        .filter(entities::event::Column::Terminal.eq(true))
+    let Some(stored) = entities::code_event::Entity::find()
+        .filter(entities::code_event::Column::TurnId.eq(turn_id.0))
+        .filter(entities::code_event::Column::Terminal.eq(true))
         .one(&store.conn)
         .await
         .map_err(store_err)?
@@ -100,7 +100,7 @@ pub(in crate::db) async fn recover_exact_terminal_event(
     if stored.lease_token != Some(lease_token) || stored.attempt_event_ordinal != Some(i32::MAX) {
         return Ok(None);
     }
-    let Ok(event) = serde_json::from_value::<AgentEvent>(stored.payload) else {
+    let Ok(event) = crate::chat_journal::decode_chat_event_required(stored.event) else {
         return Ok(None);
     };
     if event != *expected {
@@ -555,8 +555,8 @@ pub(in crate::db) async fn claim_turn_run(
     loop {
         let transaction = store.conn.begin().await.map_err(store_err)?;
         acquire_turn_claim_write_lock(&transaction).await?;
-        if let Some(existing) = entities::event::Entity::find()
-            .filter(entities::event::Column::ScanToken.eq(lease_token))
+        if let Some(existing) = entities::code_event::Entity::find()
+            .filter(entities::code_event::Column::ScanToken.eq(lease_token))
             .one(&transaction)
             .await
             .map_err(store_err)?
@@ -1020,8 +1020,8 @@ async fn any_turn_claim_work_on<C>(
 where
     C: ConnectionTrait,
 {
-    if entities::event::Entity::find()
-        .filter(entities::event::Column::ScanToken.eq(lease_token))
+    if entities::code_event::Entity::find()
+        .filter(entities::code_event::Column::ScanToken.eq(lease_token))
         .one(conn)
         .await
         .map_err(store_err)?
@@ -1223,7 +1223,7 @@ where
 }
 
 fn claim_scan_terminal_event_from_model(
-    model: entities::event::Model,
+    model: entities::code_event::Model,
     scan_token: uuid::Uuid,
 ) -> Result<ClaimScanTerminalEvent> {
     if model.scan_token != Some(scan_token) || !model.terminal {
@@ -1237,11 +1237,11 @@ fn claim_scan_terminal_event_from_model(
         ))
     })?;
     Ok(ClaimScanTerminalEvent {
-        chat_id: ChatId(model.chat_id),
+        chat_id: ChatId(model.session_id),
         turn_id,
         event: SequencedEvent {
             seq: model.seq,
-            event: serde_json::from_value(model.payload)?,
+            event: crate::chat_journal::decode_chat_event_required(model.event)?,
         },
     })
 }

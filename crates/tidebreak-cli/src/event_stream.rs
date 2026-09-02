@@ -142,7 +142,7 @@ pub(crate) struct CodeEventStream {
 }
 
 pub(crate) enum CodeStreamNext {
-    Frame(SequencedCodeEventFrame),
+    Frame(Box<SequencedCodeEventFrame>),
     Ignore,
 }
 
@@ -178,7 +178,7 @@ impl CodeEventStream {
             Some(Ok(Message::Text(text))) => match decode_event_frame(&text) {
                 Ok(frame) => {
                     self.last_seq = frame.seq;
-                    Ok(CodeStreamNext::Frame(frame))
+                    Ok(CodeStreamNext::Frame(Box::new(frame)))
                 }
                 Err(_) => Ok(CodeStreamNext::Ignore),
             },

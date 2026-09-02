@@ -112,6 +112,7 @@ pub(crate) async fn sweep_turn_for_pull_request_acts(
                 preview,
                 detail,
                 parent_call_id,
+                ..
             } => {
                 previews
                     .entry(call_id.clone())

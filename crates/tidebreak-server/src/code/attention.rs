@@ -505,7 +505,7 @@ fn session_activity(
             CodeEvent::TurnStarted { .. }
             | CodeEvent::TurnCompleted { .. }
             | CodeEvent::TurnFailed { .. }
-            | CodeEvent::TurnInterrupted => break,
+            | CodeEvent::TurnInterrupted { .. } => break,
             _ => {}
         }
     }
@@ -780,6 +780,9 @@ mod tests {
                     call_id: "tool-1".into(),
                     outcome: ToolOutcome::Succeeded,
                     preview: "done".into(),
+                    output: None,
+                    action: None,
+                    result: None,
                     detail: None,
                     parent_call_id: None,
                 },

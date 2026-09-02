@@ -463,16 +463,20 @@ mod tests {
         );
     }
 
-    /// `AgentEvent` is written into `event.payload` and read back, so its field
-    /// names are a storage format, not only a wire format — and nothing else
-    /// pins them.
+    /// The chat journal is an alias over the code journal (decision 48):
+    /// a chat event is stored as a `CodeEvent` row through
+    /// `crate::chat_journal::journal_row` and replayed through
+    /// `crate::chat_journal::chat_event`. This fixture pins what the replay
+    /// serves, so it is the tripwire decision 48 asks for: a row that comes
+    /// back different from what the lane wrote — a field the code row has no
+    /// home for, a projection that drops or renames one — fails here before
+    /// a client sees it.
     ///
-    /// Rows written by an older binary now survive, so this is a compatibility
-    /// contract again, not only a change detector. Nothing deletes the local
-    /// database for a format change any more, and the failure is not graceful:
-    /// `list_events` collects into `Result<Vec<_>>`, so one unreadable row
-    /// fails a whole chat's history rather than one message, silently until
-    /// someone opens an old chat.
+    /// The shape is also a compatibility contract for the rows the
+    /// one-journal migration backfilled from the old `event` table, and the
+    /// failure is not graceful: `list_events` collects into
+    /// `Result<Vec<_>>`, so one unreadable row fails a whole chat's history
+    /// rather than one message, silently until someone opens an old chat.
     ///
     /// So a diff here is a question, not a chore. Either the change is
     /// backward-compatible — a `#[serde(alias)]`, an added optional field —
@@ -482,9 +486,20 @@ mod tests {
     /// `docs/decisions/0061-schema-changes-are-migrations.md`.
     #[test]
     fn the_journal_event_shape_is_pinned() {
+        let replayed = journal_samples()
+            .iter()
+            .map(|event| {
+                let row = crate::chat_journal::journal_row(event);
+                let stored = serde_json::to_value(&row).expect("the row serializes");
+                crate::chat_journal::decode_chat_event(stored)
+                    .expect("the row reads back")
+                    .expect("a chat event replays as one")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(replayed, journal_samples(), "the replay changed a sample");
         let rendered = format!(
             "{}\n",
-            serde_json::to_string_pretty(&journal_samples()).expect("events serialize")
+            serde_json::to_string_pretty(&replayed).expect("events serialize")
         );
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(JOURNAL_FIXTURE);
         if std::env::var_os("UPDATE_JOURNAL_FIXTURE").is_some() {

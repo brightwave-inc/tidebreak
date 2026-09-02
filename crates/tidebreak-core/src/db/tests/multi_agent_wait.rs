@@ -26,14 +26,14 @@ async fn park_wait_set_for_test(
         .get_turn_run(turn_id)
         .await?
         .ok_or_else(|| crate::AgentError::Store("test turn disappeared".into()))?;
-    let existing = crate::db::entities::event::Entity::find()
-        .filter(crate::db::entities::event::Column::LeaseToken.eq(lease_token))
-        .filter(crate::db::entities::event::Column::AttemptEventOrdinal.eq(1))
+    let existing = crate::db::entities::code_event::Entity::find()
+        .filter(crate::db::entities::code_event::Column::LeaseToken.eq(lease_token))
+        .filter(crate::db::entities::code_event::Column::AttemptEventOrdinal.eq(1))
         .one(&store.conn)
         .await
         .map_err(crate::db::store_err)?;
     if let Some(existing) = existing {
-        let event: AgentEvent = serde_json::from_value(existing.payload)?;
+        let event = crate::chat_journal::decode_chat_event_required(existing.event)?;
         if existing.turn_id != Some(turn_id.0) || event != (AgentEvent::TurnStarted { turn_id }) {
             return Err(crate::AgentError::Store(
                 "test lease has a different first event".into(),
@@ -99,12 +99,12 @@ async fn assert_cancelled_wait_shape(
         .unwrap();
     assert_eq!(call.status, ToolCallStatus::Cancelled);
     assert_eq!(call.result.as_deref(), Some(expected_result));
-    let event = crate::db::entities::event::Entity::find_by_id((wait.chat_id, event_seq))
+    let event = crate::db::entities::code_event::Entity::find_by_id((wait.chat_id, event_seq))
         .one(&store.conn)
         .await
         .unwrap()
         .unwrap();
-    let event: AgentEvent = serde_json::from_value(event.payload).unwrap();
+    let event = crate::chat_journal::decode_chat_event_required(event.event).unwrap();
     assert_eq!(
         event,
         AgentEvent::ToolCallCompleted {

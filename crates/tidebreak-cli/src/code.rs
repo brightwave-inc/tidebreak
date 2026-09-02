@@ -1299,13 +1299,13 @@ fn render_event(
             eprintln!("tidebreak: file {} {path}", kind.as_str_display());
             return false;
         }
-        CodeEvent::TurnFailed { error } => {
+        CodeEvent::TurnFailed { error, .. } => {
             streamed_text.clear();
             finish_line(dangling);
             eprintln!("tidebreak: turn failed: {}", error.message);
             return false;
         }
-        CodeEvent::TurnInterrupted => {
+        CodeEvent::TurnInterrupted { .. } => {
             streamed_text.clear();
             finish_line(dangling);
             eprintln!("tidebreak: turn interrupted");
@@ -2871,6 +2871,7 @@ mod tests {
         CodeEvent::TurnCompleted {
             usage: Default::default(),
             checkpoint: None,
+            stop_reason: None,
         }
     }
 

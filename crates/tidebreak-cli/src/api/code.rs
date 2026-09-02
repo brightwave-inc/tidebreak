@@ -431,7 +431,7 @@ fn urlencode(value: &str) -> String {
 pub fn turn_exit_code(event: &CodeEvent) -> Option<i32> {
     match event {
         CodeEvent::TurnCompleted { .. } => Some(0),
-        CodeEvent::TurnFailed { .. } | CodeEvent::TurnInterrupted => Some(1),
+        CodeEvent::TurnFailed { .. } | CodeEvent::TurnInterrupted { .. } => Some(1),
         _ => None,
     }
 }

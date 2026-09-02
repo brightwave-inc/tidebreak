@@ -737,6 +737,9 @@ fn event_frames() -> Vec<Fixture> {
                     call_id: "call-2".to_owned(),
                     outcome: ToolOutcome::Succeeded,
                     preview: "1 file changed".to_owned(),
+                    output: None,
+                    action: None,
+                    result: None,
                     detail: Some(ToolDetail::FileEdit {
                         path: "crates/tidebreak-cli/src/api/code.rs".to_owned(),
                     }),
@@ -782,6 +785,7 @@ fn event_frames() -> Vec<Fixture> {
                 49,
                 CodeEvent::UserSteered {
                     text: "Keep the raw tier for diffs.".to_owned(),
+                    message_id: None,
                 },
             ),
         ),
@@ -795,6 +799,7 @@ fn event_frames() -> Vec<Fixture> {
                         checkpoint_ref: Some("refs/tidebreak/checkpoints/3".to_owned()),
                         diffstat: Some(diffstat()),
                     }),
+                    stop_reason: None,
                 },
             ),
         ),
@@ -806,12 +811,13 @@ fn event_frames() -> Vec<Fixture> {
                     error: BoundedError {
                         message: "the engine exited with status 1".to_owned(),
                     },
+                    detail: None,
                 },
             ),
         ),
         (
             "event: turn_interrupted",
-            frame(52, CodeEvent::TurnInterrupted),
+            frame(52, CodeEvent::TurnInterrupted { usage: None }),
         ),
         (
             "event: checkpoint_recorded",

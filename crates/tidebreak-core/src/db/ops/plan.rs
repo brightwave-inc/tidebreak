@@ -107,12 +107,12 @@ where
             call.id
         )));
     }
-    let stored = entities::event::Entity::find_by_id((call.chat_id.0, request.event_seq))
+    let stored = entities::code_event::Entity::find_by_id((call.chat_id.0, request.event_seq))
         .one(conn)
         .await
         .map_err(store_err)?
         .ok_or_else(|| AgentError::Store("plan renderer event is missing".into()))?;
-    let event = serde_json::from_value::<AgentEvent>(stored.payload)?;
+    let event = crate::chat_journal::decode_chat_event_required(stored.event)?;
     let expected_event = AgentEvent::PlanProposed {
         call_id: call.id,
         turn_id: call.turn_id,

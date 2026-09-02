@@ -654,7 +654,7 @@ impl Usage {
 }
 
 /// Why a completion stopped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum StopReason {
@@ -678,7 +678,7 @@ pub enum StopReason {
 /// becoming an enum. The constructor admits only a short identifier suitable
 /// for durable events and renderer projection; prose belongs to renderer-owned
 /// copy.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, ts_rs::TS)]
 pub struct RefusalDetails {
     category: Option<String>,
 }
@@ -727,7 +727,7 @@ impl<'de> Deserialize<'de> for RefusalDetails {
 }
 
 /// Durable outcome metadata for a refused completion.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 pub struct RefusalOutcome {
     details: RefusalDetails,
     partial_output: bool,

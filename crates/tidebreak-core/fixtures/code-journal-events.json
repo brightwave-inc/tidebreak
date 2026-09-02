@@ -120,5 +120,68 @@
       }
     },
     "source": "lifecycle"
+  },
+  {
+    "type": "turn_refused",
+    "usage": {
+      "input_tokens": 12,
+      "output_tokens": 3,
+      "cache_read_input_tokens": 0,
+      "cache_creation_input_tokens": 0,
+      "context_tokens": 0
+    },
+    "refusal": {
+      "details": {
+        "category": "cyber"
+      },
+      "partial_output": true
+    }
+  },
+  {
+    "type": "stream_interrupted"
+  },
+  {
+    "type": "tool_args_delta",
+    "call_id": "00000000-0000-0000-0000-000000000003",
+    "fragment": "{\"command\":"
+  },
+  {
+    "type": "tool_approval_required",
+    "call_id": "00000000-0000-0000-0000-000000000003",
+    "tool_name": "exec",
+    "class": "sensitive",
+    "kind": "exec_may_run_networked_command"
+  },
+  {
+    "type": "tool_approval_decided",
+    "call_id": "00000000-0000-0000-0000-000000000003",
+    "approved": true
+  },
+  {
+    "type": "questions_asked",
+    "call_id": "00000000-0000-0000-0000-000000000004",
+    "turn_id": "00000000-0000-0000-0000-000000000001"
+  },
+  {
+    "type": "plan_proposed",
+    "call_id": "00000000-0000-0000-0000-000000000005",
+    "turn_id": "00000000-0000-0000-0000-000000000001"
+  },
+  {
+    "type": "task_plan_updated",
+    "call_id": "00000000-0000-0000-0000-000000000006",
+    "turn_id": "00000000-0000-0000-0000-000000000001"
+  },
+  {
+    "type": "context_truncated",
+    "original_tokens": 100000,
+    "fitted_tokens": 60000
+  },
+  {
+    "type": "compaction_started"
+  },
+  {
+    "type": "compaction_finished",
+    "compacted": true
   }
 ]

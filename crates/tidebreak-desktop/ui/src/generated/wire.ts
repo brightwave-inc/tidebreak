@@ -88,6 +88,24 @@ export type AgentActivitySnapshot = { kind: AgentActivityKind, status: AgentActi
 export type AgentActivityStatus = "waiting" | "running";
 
 /**
+ * The wire-facing representation of an error.
+ *
+ * [`AgentError`] itself is not `Serialize` (it wraps non-serializable source
+ * errors like [`serde_json::Error`]), but the `AgentEvent` stream that clients
+ * consume must serialize. `AgentErrorInfo` is that serializable projection: a
+ * stable `kind` plus a human-readable `message`.
+ */
+export type AgentErrorInfo = {
+/**
+ * Machine-readable category (see [`AgentError::kind`]).
+ */
+kind: string,
+/**
+ * Human-readable description.
+ */
+message: string, };
+
+/**
  * Closed renderer-safe acknowledgement for sandbox cancellation.
  */
 export type AgentRunCancellationSnapshot = { id: AgentRunId, status: AgentRunCancellationStatus, };
@@ -1318,6 +1336,22 @@ outcome: ToolOutcome,
  */
 preview: string,
 /**
+ * The call's whole output, already cut to what the model was shown.
+ *
+ * Internal engine: its tools run in this process, so the server
+ * holds the result and the chat surface replays it. External
+ * adapters leave it unset; their results ride `preview`.
+ */
+output?: ToolOutput,
+/**
+ * Closed projection of what the call did. Internal engine.
+ */
+action?: ToolActionPreview,
+/**
+ * Closed projection of what the call produced. Internal engine.
+ */
+result?: ToolResultPreview,
+/**
  * Classification rebuilt from the call's complete arguments.
  *
  * Engines open a tool call before its arguments finish streaming, so
@@ -1359,7 +1393,13 @@ decision: ApprovalDecisionKind, } | { "type": "user_steered",
 /**
  * The steered user text, already bounded.
  */
-text: string, } | { "type": "turn_completed",
+text: string,
+/**
+ * Stable id of the persisted user message, so a reconnecting
+ * renderer reconciles the event with the transcript row without
+ * content matching. Internal engine.
+ */
+message_id?: string, } | { "type": "turn_completed",
 /**
  * Token accounting as reported by the engine.
  */
@@ -1367,11 +1407,33 @@ usage: CodeUsage,
 /**
  * Checkpoint recorded at turn end, when any.
  */
-checkpoint?: CheckpointHint, } | { "type": "turn_failed",
+checkpoint?: CheckpointHint,
+/**
+ * Why the final model call stopped. Internal engine.
+ */
+stop_reason?: StopReason, } | { "type": "turn_failed",
 /**
  * Bounded error.
  */
-error: BoundedError, } | { "type": "turn_interrupted" } | { "type": "checkpoint_recorded",
+error: BoundedError,
+/**
+ * The failure's machine-readable kind beside its message, so the
+ * renderer can categorize it. Internal engine.
+ */
+detail?: AgentErrorInfo, } | { "type": "turn_interrupted",
+/**
+ * Token accounting up to the interruption, when the engine reports
+ * it. Internal engine.
+ */
+usage?: CodeUsage, } | { "type": "turn_refused",
+/**
+ * Token accounting up to the refusal.
+ */
+usage: CodeUsage,
+/**
+ * Category detail and whether visible output is incomplete.
+ */
+refusal: RefusalOutcome, } | { "type": "checkpoint_recorded",
 /**
  * The turn that ended at this checkpoint.
  */
@@ -1395,7 +1457,88 @@ state: AttentionState,
 /**
  * Who or what set it.
  */
-source: AttentionSource, };
+source: AttentionSource, } | { "type": "stream_interrupted" } | { "type": "tool_args_delta",
+/**
+ * The call these args belong to.
+ */
+call_id: string,
+/**
+ * Partial JSON to concatenate.
+ */
+fragment: string, } | { "type": "tool_approval_required",
+/**
+ * Whether the Auto-mode judge owns this card right now.
+ */
+auto_judging?: boolean,
+/**
+ * The call awaiting a decision.
+ */
+call_id: string,
+/**
+ * Canonical registered tool identity.
+ */
+tool_name: string,
+/**
+ * The approval class that triggered the prompt.
+ */
+class: ApprovalClass,
+/**
+ * What kind of consent the call asks for.
+ */
+kind: ToolApprovalKind,
+/**
+ * Every standing-grant rung the call cleared; empty means approving
+ * once is the only affirmative choice.
+ */
+grant_scopes?: Array<GrantScope>,
+/**
+ * Closed projection of what the call will do, when its tool has one.
+ */
+preview?: ToolActionPreview, } | { "type": "tool_approval_decided",
+/**
+ * The call that was decided.
+ */
+call_id: string,
+/**
+ * `true` if approved, `false` if rejected.
+ */
+approved: boolean, } | { "type": "questions_asked",
+/**
+ * Exact tool call awaiting answers.
+ */
+call_id: string,
+/**
+ * Turn that resumes after the answer commits.
+ */
+turn_id: CodeTurnId, } | { "type": "plan_proposed",
+/**
+ * Exact tool call awaiting the reader's decision.
+ */
+call_id: string,
+/**
+ * Turn that resumes after the decision commits.
+ */
+turn_id: CodeTurnId, } | { "type": "task_plan_updated",
+/**
+ * The tool call that committed the replacement.
+ */
+call_id: string,
+/**
+ * Turn that made the call.
+ */
+turn_id: CodeTurnId, } | { "type": "context_truncated",
+/**
+ * Estimated tokens of the full transcript before reduction.
+ */
+original_tokens: number,
+/**
+ * Estimated tokens after fitting to the budget.
+ */
+fitted_tokens: number, } | { "type": "compaction_started" } | { "type": "compaction_finished",
+/**
+ * Whether a new (or confirmed) checkpoint was stored.
+ */
+compacted: boolean, };
 
 /**
  * One changed path in a workspace or turn file list.
@@ -4021,6 +4164,21 @@ auto_run_on_create: boolean, };
  */
 export type ReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
 
+/**
+ * Bounded provider-neutral detail for a model refusal.
+ *
+ * Providers may add categories over time, so the value stays open rather than
+ * becoming an enum. The constructor admits only a short identifier suitable
+ * for durable events and renderer projection; prose belongs to renderer-owned
+ * copy.
+ */
+export type RefusalDetails = { category: string | null, };
+
+/**
+ * Durable outcome metadata for a refused completion.
+ */
+export type RefusalOutcome = { details: RefusalDetails, partial_output: boolean, };
+
 export type RendererAgentEvent = { "type": "turn_started", turn_id: TurnId, } | { "type": "text_delta", text: string, } | { "type": "reasoning_delta", text: string, } | { "type": "stream_interrupted" } | { "type": "tool_call_started", call_id: CallId, name: RendererToolName, } | { "type": "tool_call_args_delta", call_id: CallId, } | { "type": "user_questions_asked", call_id: CallId, turn_id: TurnId, } | { "type": "plan_proposed", call_id: CallId, turn_id: TurnId, } | { "type": "task_plan_updated", call_id: CallId, turn_id: TurnId, } | { "type": "approval_required", call_id: CallId, action: RendererToolName, approval: ToolApprovalKind, class: ApprovalClass,
 /**
  * Whether the Auto-mode judge owns this card right now. The card
@@ -4497,6 +4655,11 @@ level_title: string | null, action: RendererToolName, approval: ToolApprovalKind
 export type StickyChatDefaults = { model: string | null, reasoning_effort: ReasoningEffort | null, permission_mode: PermissionMode | null, network_policy: NetworkPolicy | null, };
 
 /**
+ * Why a completion stopped.
+ */
+export type StopReason = "end_turn" | "max_tokens" | "tool_use" | "stop_sequence" | "refusal" | "cancelled";
+
+/**
  * One file a background run submitted, as the renderer sees it.
  */
 export type SubmittedOutputSnapshot = { output_id: OutputId,
@@ -4674,9 +4837,60 @@ query: string, } | { "kind": "other",
 summary: string, };
 
 /**
+ * The result of executing a tool.
+ *
+ * `content` is the model-readable result folded back into the conversation;
+ * `data` is an optional structured payload for clients that can render it
+ * (e.g. a tool-call card). A failing tool returns `is_error = true` rather than
+ * Why a tool call failed.
+ *
+ * A boolean says something went wrong; a category says whether anything *is*
+ * wrong. A call the reader cancelled and a call the reader declined are not
+ * failures of the tool, of the model, or of the product, and recording them
+ * the same way as a crash makes every later question about reliability
+ * unanswerable.
+ */
+export type ToolErrorCategory = "user_cancelled" | "user_declined" | "not_found" | "invalid_arguments" | "configuration_required" | "transport_failed" | "tool_failed";
+
+/**
  * How a tool call finished.
  */
 export type ToolOutcome = "succeeded" | "failed" | "denied";
+
+/**
+ * an `Err` so the model sees the failure and can adapt.
+ */
+export type ToolOutput = {
+/**
+ * Result text fed back to the model.
+ */
+content: string,
+/**
+ * Optional structured payload for richer client rendering.
+ */
+data?: object | string | number | boolean | null,
+/**
+ * Whether the tool reported a failure.
+ */
+is_error: boolean,
+/**
+ * Why it failed, when it did. `None` on success.
+ */
+error_category?: ToolErrorCategory | null,
+/**
+ * The validated MCP Apps view declared for the tool that produced this
+ * output, when there is one. Journal-durable so a replayed completion can
+ * still surface its view; never part of the model-facing content.
+ */
+ui_view?: ToolUiView | null,
+/**
+ * Durable references to images produced by this tool.
+ *
+ * Pixel bytes ride beside these references only until the agent publishes
+ * them to blob storage. Journals, tool-call rows, and renderer events see
+ * identity and geometry, never media bytes.
+ */
+images?: Array<ImageRef>, };
 
 /**
  * What a call produced, in a form a human can read.
@@ -4761,6 +4975,25 @@ image: ImageRef,
  * card can say "capture with N controls" without the model's text.
  */
 mark_count: number, };
+
+/**
+ * A tool's declared MCP Apps view: which configured server can serve it and
+ * the validated `ui://` document it declared at discovery.
+ *
+ * `server` is the locally configured namespace (user-authored, already shown
+ * in Settings), and `resource_uri` passed the discovery-time validation in
+ * `tidebreak-mcp` (bounded, `ui://`-schemed, no control characters). Remote
+ * tool names and descriptions still never cross the renderer boundary.
+ */
+export type ToolUiView = {
+/**
+ * The configured MCP server namespace that can serve the document.
+ */
+server: string,
+/**
+ * The validated `ui://` document URI.
+ */
+resource_uri: string, };
 
 /**
  * One renderer-safe source document attached to a historical user message.

@@ -1,61 +1,80 @@
 //! One live internal-engine session: a conversation the chat turn lane runs,
 //! watched and steered through the adapter contract.
+//!
+//! The lane journals its turn straight into the session's code journal
+//! (decision 0048 step 5), so the engine has nothing to translate. It follows
+//! that journal for the turn it admitted and hands the session worker the
+//! few facts the journal does not carry on its own: the approval rows a
+//! consent card or a parked continuation needs, and the terminal outcome
+//! that closes the worker's turn row.
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::Utc;
 use tokio::sync::broadcast;
-use tracing::{debug, warn};
+use tracing::debug;
 
+use tidebreak_core::db::DbStore;
 use tidebreak_core::storage::DecidePlanOutcome;
 use tidebreak_core::{
-    AcceptTurnOutcome, AcceptTurnSteerOutcome, AgentEvent, AnswerUserQuestions,
-    AnswerUserQuestionsOutcome, AnswerUserQuestionsRequest, BeginTurnAdmissionOutcome, CallId,
-    ChatId, CodeApprovalKind, DecidePlanRequest, PermissionMode, PlanDecision, PlanDecisionChoice,
-    ReservedTurnAcceptanceOutcome, SequencedEvent, TurnAdmissionRequest, TurnId, TurnSteerId,
-    DEFAULT_ACCEPTED_PLAN_MODE,
+    chat_journal, AcceptTurnOutcome, AcceptTurnSteerOutcome, AnswerUserQuestions,
+    AnswerUserQuestionsOutcome, AnswerUserQuestionsRequest, ApprovalDecision as ChatDecision,
+    BeginTurnAdmissionOutcome, CallId, ChatId, CodeApprovalKind, CodeEvent, CodeSessionId,
+    DecidePlanRequest, GrantScope, OwnerId, PermissionMode, PlanDecision, PlanDecisionChoice,
+    ReservedTurnAcceptanceOutcome, SequencedCodeEvent, ToolActionPreview, TurnAdmissionRequest,
+    TurnId, TurnSteerId, DEFAULT_ACCEPTED_PLAN_MODE, MAX_TOOL_SUMMARY_CHARS,
 };
 use tidebreak_harness::{
     ApprovalDecision, HarnessApprovalRef, HarnessError, HarnessEvent, HarnessEventSink,
     HarnessSession, ParkWait, ResumeInput, SessionSpec, TurnInput, TurnOutcome,
 };
 
-use super::translate::{self, Lookup, Translated};
 use crate::approvals::ResolveApprovalOutcome;
+use crate::code::bus::{CodeEventBus, CodeLiveEvent};
 use crate::state::AppState;
 
 /// How long one admission reservation may sit before the engine gives up.
 const ADMISSION_LEASE: chrono::Duration = chrono::Duration::seconds(30);
 
-/// The turn the engine is driving right now, and how far along the chat
-/// journal it has translated.
+/// How many journal rows one catch-up read takes at a time.
+const CATCH_UP_PAGE: u64 = 512;
+
+/// The turn the engine is driving right now, and how far along the journal
+/// it has read.
 struct ActiveTurn {
     turn_id: TurnId,
-    /// Last chat journal sequence translated, so a resume or a lagged bus
+    /// Last journal sequence handled, so a resume or a lagged bus
     /// subscription picks up exactly after it.
     last_seq: i64,
     /// Whether this turn's own `TurnStarted` has been seen; events before it
     /// belong to an earlier turn's tail.
     started: bool,
-    /// Assistant prose streamed since the last message boundary.
-    prose: String,
+}
+
+/// A parked continuation the engine answers with a store read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Lookup {
+    /// `ask_user_questions` parked the turn; the questions live in the store.
+    Questions { call_id: CallId },
+    /// `exit_plan_mode` parked the turn; the plan body lives in the store.
+    Plan { call_id: CallId },
 }
 
 pub(super) struct InternalSession {
     state: AppState,
+    db: Arc<DbStore>,
+    bus: Arc<CodeEventBus>,
+    owner: OwnerId,
+    session_id: CodeSessionId,
     chat_id: ChatId,
     sink: Arc<dyn HarnessEventSink>,
     active: Mutex<Option<ActiveTurn>>,
     /// Tool approvals decided through [`HarnessSession::decide`], so the
-    /// matching `ApprovalDecided` on the chat journal is not re-reported as
-    /// an engine-observed decision.
+    /// matching decision row on the journal is not re-reported as an
+    /// engine-observed decision.
     decided: Mutex<HashSet<CallId>>,
-    /// `UserSteered` emissions owed to [`HarnessSession::steer`]; the chat
-    /// journal's own echo of each is swallowed.
-    steers_emitted: AtomicUsize,
 }
 
 fn store_error(error: tidebreak_core::AgentError) -> HarnessError {
@@ -63,7 +82,12 @@ fn store_error(error: tidebreak_core::AgentError) -> HarnessError {
 }
 
 impl InternalSession {
-    pub(super) async fn launch(state: AppState, spec: SessionSpec) -> Result<Self, HarnessError> {
+    pub(super) async fn launch(
+        state: AppState,
+        db: Arc<DbStore>,
+        bus: Arc<CodeEventBus>,
+        spec: SessionSpec,
+    ) -> Result<Self, HarnessError> {
         // The session row is the conversation row (decision 0048 step 5):
         // the runtime created it, and the engine follows the spec's posture
         // and model on every launch.
@@ -106,11 +130,14 @@ impl InternalSession {
             .map_err(store_error)?;
         Ok(Self {
             state,
+            db,
+            bus,
+            owner: spec.owner,
+            session_id: spec.session_id,
             chat_id,
             sink: spec.sink,
             active: Mutex::new(None),
             decided: Mutex::new(HashSet::new()),
-            steers_emitted: AtomicUsize::new(0),
         })
     }
 
@@ -134,22 +161,16 @@ impl InternalSession {
         self.sink.emit(event).await;
     }
 
-    /// Flush streamed prose as one assistant message at a boundary.
-    async fn flush_prose(&self) {
-        let prose = {
-            let mut active = self.active.lock().expect("active turn");
-            match active.as_mut() {
-                Some(active) if !active.prose.trim().is_empty() => {
-                    std::mem::take(&mut active.prose)
-                }
-                Some(active) => {
-                    active.prose.clear();
-                    return;
-                }
-                None => return,
-            }
-        };
-        self.emit(translate::assistant_message(&prose)).await;
+    /// The newest journal sequence, so a turn admitted next is read from
+    /// its first row.
+    async fn journal_tail(&self) -> Result<i64, HarnessError> {
+        Ok(
+            tidebreak_core::db::code::list_recent_events(&self.db, &self.owner, self.session_id, 1)
+                .await
+                .map_err(store_error)?
+                .first()
+                .map_or(0, |event| event.seq),
+        )
     }
 
     /// Submit the user's message to the chat turn lane and return the turn
@@ -242,40 +263,58 @@ impl InternalSession {
         }
     }
 
-    /// Follow the chat journal for `turn_id` until it reaches a terminal
-    /// event or a durable park, translating as it goes.
+    /// Follow the session's journal for `turn_id` until it reaches a
+    /// terminal event or a durable park.
     ///
     /// The live subscription is the wake-up; the durable journal is the
-    /// truth. A lagged subscription re-reads from the last translated
+    /// truth. A lagged subscription re-reads from the last handled
     /// sequence, so nothing the lane journaled is skipped.
     async fn watch(
         &self,
         turn_id: TurnId,
-        live: &mut broadcast::Receiver<SequencedEvent>,
+        live: &mut broadcast::Receiver<CodeLiveEvent>,
     ) -> Result<TurnOutcome, HarnessError> {
         loop {
-            let after = self.last_seq();
-            let missed = self
-                .state
-                .store
-                .list_events(self.chat_id, after)
+            loop {
+                let after = self.last_seq();
+                let missed = tidebreak_core::db::code::list_events_from(
+                    &self.db,
+                    &self.owner,
+                    self.session_id,
+                    after,
+                    CATCH_UP_PAGE,
+                )
                 .await
                 .map_err(store_error)?;
-            for event in missed {
-                if let Some(outcome) = self.handle(turn_id, event).await? {
-                    return Ok(outcome);
+                let page = missed.len() as u64;
+                for event in missed {
+                    if let Some(outcome) = self.handle(turn_id, event).await? {
+                        return Ok(outcome);
+                    }
+                }
+                if page < CATCH_UP_PAGE {
+                    break;
                 }
             }
             loop {
                 match live.recv().await {
-                    Ok(event) => {
-                        if let Some(outcome) = self.handle(turn_id, event).await? {
+                    Ok(CodeLiveEvent {
+                        seq: Some(seq),
+                        event,
+                        ..
+                    }) => {
+                        if let Some(outcome) = self
+                            .handle(turn_id, SequencedCodeEvent { seq, event })
+                            .await?
+                        {
                             return Ok(outcome);
                         }
                     }
+                    // Live-only frames hold no row; the journal is the truth.
+                    Ok(CodeLiveEvent { seq: None, .. }) => {}
                     Err(broadcast::error::RecvError::Lagged(dropped)) => {
                         debug!(
-                            chat_id = %self.chat_id,
+                            session = %self.session_id,
                             dropped,
                             "internal engine re-reads the journal after a lagged subscription"
                         );
@@ -283,7 +322,7 @@ impl InternalSession {
                     }
                     Err(broadcast::error::RecvError::Closed) => {
                         return Err(HarnessError::Other(
-                            "the chat event bus closed under a running turn".into(),
+                            "the session event bus closed under a running turn".into(),
                         ));
                     }
                 }
@@ -291,13 +330,13 @@ impl InternalSession {
         }
     }
 
-    /// Translate one journaled event. `Some` closes the leg.
+    /// Act on one journaled row. `Some` closes the leg.
     async fn handle(
         &self,
         turn_id: TurnId,
-        sequenced: SequencedEvent,
+        sequenced: SequencedCodeEvent,
     ) -> Result<Option<TurnOutcome>, HarnessError> {
-        let SequencedEvent { seq, event } = sequenced;
+        let SequencedCodeEvent { seq, event } = sequenced;
         {
             let mut active = self.active.lock().expect("active turn");
             let Some(active) = active.as_mut() else {
@@ -308,160 +347,74 @@ impl InternalSession {
             }
             active.last_seq = seq;
             match &event {
-                AgentEvent::TurnStarted { turn_id: started } if *started == turn_id => {
+                CodeEvent::TurnStarted { turn_id: started } if started.0 == turn_id.0 => {
                     active.started = true;
                 }
                 _ if !active.started => return Ok(None),
-                AgentEvent::TextDelta { text } => active.prose.push_str(text),
                 _ => {}
             }
         }
-        match self.translate(&event).await? {
-            Translated::Emit(events) => {
-                for event in events {
-                    self.emit(event).await;
-                }
-            }
-            Translated::Lookup(lookup) => {
-                let park = self.park(lookup).await?;
-                return Ok(Some(park));
-            }
-        }
-        Ok(match event {
-            AgentEvent::TurnCompleted { .. }
-            | AgentEvent::TurnRefused { .. }
-            | AgentEvent::TurnFailed { .. }
-            | AgentEvent::TurnCancelled { .. } => {
-                *self.active.lock().expect("active turn") = None;
-                Some(TurnOutcome::Clean)
-            }
-            _ => None,
-        })
-    }
-
-    async fn translate(&self, event: &AgentEvent) -> Result<Translated, HarnessError> {
-        let emit = |events: Vec<HarnessEvent>| Ok(Translated::Emit(events));
-        match event {
-            AgentEvent::TurnStarted { .. } => emit(vec![HarnessEvent::TurnStarted]),
-            AgentEvent::TextDelta { text } => {
-                emit(vec![HarnessEvent::AssistantDelta { text: text.clone() }])
-            }
-            AgentEvent::ReasoningDelta { text } => {
-                emit(vec![HarnessEvent::ReasoningDelta { text: text.clone() }])
-            }
-            // The lane discards the deltas it showed; the prose it kept is
-            // already its own message, so the boundary lands here.
-            AgentEvent::StreamInterrupted => {
-                self.flush_prose().await;
-                emit(Vec::new())
-            }
-            AgentEvent::ToolCallStarted { call_id, name } => {
-                self.flush_prose().await;
-                emit(vec![translate::tool_started(call_id, name)])
-            }
-            AgentEvent::ToolCallArgsDelta { .. } | AgentEvent::TaskPlanUpdated { .. } => {
-                emit(Vec::new())
-            }
-            AgentEvent::ToolCallCompleted {
-                call_id,
-                output,
-                action,
-                ..
-            } => emit(vec![translate::tool_completed(
-                call_id,
-                output,
-                action.as_ref(),
-            )]),
-            AgentEvent::ApprovalRequired {
+        let closed = match event {
+            CodeEvent::ToolApprovalRequired {
                 call_id,
                 tool_name,
                 grant_scopes,
                 preview,
                 ..
             } => {
-                self.flush_prose().await;
-                emit(vec![translate::approval_requested(
-                    call_id,
+                self.emit(approval_requested(
+                    &Self::parse_call_id(&call_id)?,
                     serde_json::Value::Null,
-                    translate::tool_use_kind(tool_name, preview.clone(), grant_scopes.clone()),
-                )])
+                    tool_use_kind(&tool_name, preview, grant_scopes),
+                ))
+                .await;
+                false
             }
-            AgentEvent::ApprovalDecided { call_id, approved } => {
-                let delivered = self.decided.lock().expect("decided").remove(call_id);
-                if delivered {
-                    emit(Vec::new())
-                } else {
+            CodeEvent::ToolApprovalDecided { call_id, approved } => {
+                let call_id = Self::parse_call_id(&call_id)?;
+                let delivered = self.decided.lock().expect("decided").remove(&call_id);
+                if !delivered {
                     // Decided on the engine's own channel — a standing grant
                     // or the auto-approval judge — so the row the worker
                     // minted settles from this report.
-                    emit(vec![translate::approval_resolved(
-                        call_id,
-                        translate::observed_decision(*approved),
-                    )])
+                    self.emit(approval_resolved(&call_id, observed_decision(approved)))
+                        .await;
                 }
+                false
             }
-            AgentEvent::UserQuestionsAsked { call_id, .. } => {
-                self.flush_prose().await;
-                Ok(Translated::Lookup(Lookup::Questions { call_id: *call_id }))
+            CodeEvent::QuestionsAsked { call_id, .. } => {
+                let lookup = Lookup::Questions {
+                    call_id: Self::parse_call_id(&call_id)?,
+                };
+                return Ok(Some(self.park(lookup).await?));
             }
-            AgentEvent::PlanProposed { call_id, .. } => {
-                self.flush_prose().await;
-                Ok(Translated::Lookup(Lookup::Plan { call_id: *call_id }))
+            CodeEvent::PlanProposed { call_id, .. } => {
+                let lookup = Lookup::Plan {
+                    call_id: Self::parse_call_id(&call_id)?,
+                };
+                return Ok(Some(self.park(lookup).await?));
             }
-            AgentEvent::UserSteered { content, .. } => {
-                self.flush_prose().await;
-                let owed = self.steers_emitted.load(Ordering::SeqCst);
-                if owed > 0 {
-                    self.steers_emitted.fetch_sub(1, Ordering::SeqCst);
-                    emit(Vec::new())
-                } else {
-                    emit(vec![HarnessEvent::UserSteered {
-                        text: content.clone(),
-                    }])
-                }
+            // The terminal rows are already journaled; the worker still
+            // needs to hear them to close its turn row with the usage.
+            CodeEvent::TurnCompleted { usage, .. } | CodeEvent::TurnRefused { usage, .. } => {
+                self.emit(HarnessEvent::TurnCompleted { usage }).await;
+                true
             }
-            AgentEvent::TurnCompleted { usage, .. } => {
-                self.flush_prose().await;
-                emit(vec![HarnessEvent::TurnCompleted {
-                    usage: translate::code_usage(*usage),
-                }])
+            CodeEvent::TurnFailed { error, .. } => {
+                self.emit(HarnessEvent::TurnFailed { error }).await;
+                true
             }
-            AgentEvent::TurnRefused { usage, refusal } => {
-                self.flush_prose().await;
-                emit(vec![
-                    translate::refusal_notice(refusal),
-                    HarnessEvent::TurnCompleted {
-                        usage: translate::code_usage(*usage),
-                    },
-                ])
+            CodeEvent::TurnInterrupted { usage: Some(_) } => {
+                self.emit(HarnessEvent::TurnInterrupted).await;
+                true
             }
-            AgentEvent::TurnFailed { error } => {
-                self.flush_prose().await;
-                emit(vec![translate::failure(error)])
-            }
-            AgentEvent::TurnCancelled { .. } => {
-                self.flush_prose().await;
-                emit(vec![HarnessEvent::TurnInterrupted])
-            }
-            AgentEvent::ContextTruncated {
-                original_tokens,
-                fitted_tokens,
-            } => emit(vec![translate::notice(&format!(
-                "Context was trimmed from {original_tokens} to {fitted_tokens} tokens."
-            ))]),
-            AgentEvent::CompactionStarted => emit(vec![translate::notice(
-                "Compacting the conversation to stay within the context window.",
-            )]),
-            AgentEvent::CompactionFinished { compacted } => emit(if *compacted {
-                vec![translate::notice("Conversation compacted.")]
-            } else {
-                Vec::new()
-            }),
-            _ => {
-                warn!(chat_id = %self.chat_id, "internal engine met an unmapped chat event");
-                emit(Vec::new())
-            }
+            _ => false,
+        };
+        if closed {
+            *self.active.lock().expect("active turn") = None;
+            return Ok(Some(TurnOutcome::Clean));
         }
+        Ok(None)
     }
 
     /// Publish the parked continuation as an approval and end the leg.
@@ -512,8 +465,7 @@ impl InternalSession {
                 )
             }
         };
-        self.emit(translate::approval_requested(&call_id, raw, kind))
-            .await;
+        self.emit(approval_requested(&call_id, raw, kind)).await;
         Ok(TurnOutcome::Parked {
             park_ref: call_id.to_string(),
             waiting_on: ParkWait::Approval {
@@ -633,7 +585,7 @@ impl InternalSession {
         call_id: CallId,
         decision: &ApprovalDecision,
     ) -> Result<(), HarnessError> {
-        let Some(chat_decision) = translate::chat_decision(decision) else {
+        let Some(chat_decision) = chat_decision(decision) else {
             return Err(HarnessError::DecisionUnsupported(
                 "a tool approval takes approve, deny, or approve with a grant".into(),
             ));
@@ -713,23 +665,15 @@ impl HarnessSession for InternalSession {
                 .await
                 .map_err(store_error)?;
         }
-        // Subscribe before admission so the turn's first event cannot slip
+        // Subscribe before admission so the turn's first row cannot slip
         // between the two.
-        let mut live = self.state.events.subscribe(self.chat_id);
-        let after = self
-            .state
-            .store
-            .list_events(self.chat_id, 0)
-            .await
-            .map_err(store_error)?
-            .last()
-            .map_or(0, |event| event.seq);
+        let (mut live, _tail) = self.bus.attach(self.session_id);
+        let after = self.journal_tail().await?;
         let turn_id = self.submit(&input.text).await?;
         *self.active.lock().expect("active turn") = Some(ActiveTurn {
             turn_id,
             last_seq: after,
             started: false,
-            prose: String::new(),
         });
         let outcome = self.watch(turn_id, &mut live).await;
         if !matches!(outcome, Ok(TurnOutcome::Parked { .. })) {
@@ -761,7 +705,7 @@ impl HarnessSession for InternalSession {
                 "park {park_ref} did not wait on {decided}"
             )));
         }
-        let mut live = self.state.events.subscribe(self.chat_id);
+        let (mut live, _tail) = self.bus.attach(self.session_id);
         self.settle_park(call_id, &decision).await?;
         let outcome = self.watch(turn_id, &mut live).await;
         if !matches!(outcome, Ok(TurnOutcome::Parked { .. })) {
@@ -841,6 +785,8 @@ impl HarnessSession for InternalSession {
         Ok(())
     }
 
+    /// Hand the lane a mid-turn message. The lane journals the steer itself,
+    /// so nothing is emitted here.
     async fn steer(&self, text: String) -> Result<(), HarnessError> {
         let Some(turn_id) = self.active_turn() else {
             return Err(HarnessError::SteeringRejected("no turn is running".into()));
@@ -864,8 +810,6 @@ impl HarnessSession for InternalSession {
                 self.state
                     .active_turns
                     .signal_steer(self.chat_id, turn_id, false);
-                self.steers_emitted.fetch_add(1, Ordering::SeqCst);
-                self.emit(HarnessEvent::UserSteered { text }).await;
                 Ok(())
             }
             AcceptTurnSteerOutcome::TurnUnavailable => Err(HarnessError::SteeringRejected(
@@ -887,5 +831,113 @@ impl HarnessSession for InternalSession {
 
     async fn shutdown(self: Box<Self>) -> Result<(), HarnessError> {
         Ok(())
+    }
+}
+
+/// A tool approval as the adapter states it: the exact server-built preview
+/// and the grant ladder the engine offers, or a plain summary when the call
+/// could not be described (no ladder is offered without a description).
+fn tool_use_kind(
+    tool_name: &str,
+    preview: Option<ToolActionPreview>,
+    grant_scopes: Vec<GrantScope>,
+) -> CodeApprovalKind {
+    match preview {
+        // The model's own narration never reaches a consent card (decision
+        // 0018): the card renders the literal action, and a call that could
+        // describe itself to a decision could describe itself favourably.
+        Some(preview) => CodeApprovalKind::ToolUse {
+            preview: preview.without_summary(),
+            offered_grants: grant_scopes,
+        },
+        None => CodeApprovalKind::Other {
+            summary: chat_journal::bounded(tool_name, MAX_TOOL_SUMMARY_CHARS),
+        },
+    }
+}
+
+/// The decision the engine observed on its own channel, in adapter terms.
+fn observed_decision(approved: bool) -> ApprovalDecision {
+    if approved {
+        ApprovalDecision::Approve
+    } else {
+        ApprovalDecision::Deny { feedback: None }
+    }
+}
+
+/// The chat-side decision for an adapter decision on a tool approval.
+///
+/// Answers and plan decisions never reach here: they settle a parked
+/// continuation through its own store operation.
+fn chat_decision(decision: &ApprovalDecision) -> Option<ChatDecision> {
+    match decision {
+        ApprovalDecision::Approve | ApprovalDecision::ApproveWithGrant { .. } => {
+            Some(ChatDecision::Approve)
+        }
+        ApprovalDecision::Deny { feedback } => Some(ChatDecision::Reject {
+            reason: feedback
+                .as_deref()
+                .filter(|feedback| !feedback.trim().is_empty())
+                .map_or_else(
+                    || tidebreak_core::ToolApproval::DEFAULT_REJECT_REASON.to_owned(),
+                    |feedback| {
+                        chat_journal::bounded(
+                            feedback,
+                            tidebreak_core::ToolApproval::MAX_REASON_BYTES,
+                        )
+                    },
+                ),
+        }),
+        ApprovalDecision::Answers { .. } | ApprovalDecision::PlanDecision { .. } => None,
+    }
+}
+
+fn approval_requested(
+    call_id: &CallId,
+    raw: serde_json::Value,
+    kind: CodeApprovalKind,
+) -> HarnessEvent {
+    HarnessEvent::ApprovalRequested {
+        harness_ref: HarnessApprovalRef::engine(call_id.to_string()),
+        raw,
+        kind: Some(kind),
+    }
+}
+
+fn approval_resolved(call_id: &CallId, decision: ApprovalDecision) -> HarnessEvent {
+    HarnessEvent::ApprovalResolved {
+        harness_ref: HarnessApprovalRef::engine(call_id.to_string()),
+        decision,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_undescribed_call_offers_no_grant_ladder() {
+        let kind = tool_use_kind("mystery", None, vec![GrantScope::WholeTool]);
+        assert_eq!(
+            kind,
+            CodeApprovalKind::Other {
+                summary: "mystery".into()
+            }
+        );
+    }
+
+    #[test]
+    fn a_deny_without_feedback_carries_the_default_reason() {
+        let ChatDecision::Reject { reason } =
+            chat_decision(&ApprovalDecision::Deny { feedback: None }).unwrap()
+        else {
+            panic!("deny maps to reject");
+        };
+        assert_eq!(reason, tidebreak_core::ToolApproval::DEFAULT_REJECT_REASON);
+        assert!(chat_decision(&ApprovalDecision::PlanDecision {
+            approve: true,
+            feedback: None
+        })
+        .is_none());
     }
 }

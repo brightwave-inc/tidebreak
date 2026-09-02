@@ -1452,7 +1452,7 @@ async fn a_superseded_worker_cannot_regress_the_session_row() {
         &OwnerId::local(),
         session_id,
         1,
-        &CodeEvent::TurnInterrupted,
+        &CodeEvent::TurnInterrupted { usage: None },
     )
     .await
     .unwrap();
@@ -1465,6 +1465,7 @@ async fn a_terminal_code_event_mints_one_notification_in_its_transaction() {
     let event = CodeEvent::TurnCompleted {
         usage: Default::default(),
         checkpoint: None,
+        stop_reason: None,
     };
 
     append_event_with_notification(&store, &owner, session_id, 0, turn_id, &event)
@@ -1745,7 +1746,7 @@ async fn a_turn_attachment_stays_live_after_its_session_ends() {
 #[tokio::test]
 async fn journal_rejects_stale_spawn_epoch() {
     let (_dir, store, session_id, _) = seeded_session().await;
-    let event = CodeEvent::TurnInterrupted;
+    let event = CodeEvent::TurnInterrupted { usage: None };
     append_event(&store, &OwnerId::local(), session_id, 0, &event)
         .await
         .unwrap();
@@ -2234,7 +2235,7 @@ async fn owner_scoped_code_queries_partition_every_table() {
         &alice,
         alice_session,
         0,
-        &CodeEvent::TurnInterrupted,
+        &CodeEvent::TurnInterrupted { usage: None },
     )
     .await
     .unwrap();
@@ -5241,7 +5242,7 @@ async fn ingest_journals_once_per_sandbox_event_and_resumes_from_the_cursor() {
         .is_none());
     }
 
-    let second = CodeEvent::TurnInterrupted;
+    let second = CodeEvent::TurnInterrupted { usage: None };
     crate::db::code::ingest_incarnation_event(
         &store,
         &owner,

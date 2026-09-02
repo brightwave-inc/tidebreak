@@ -298,7 +298,7 @@ async fn settle_interrupted_session(
     let turn_event_count = if running_turns.is_empty() { 0 } else { 1 };
     let mut events = Vec::with_capacity(turn_event_count + approvals.len());
     if !running_turns.is_empty() {
-        let event = CodeEvent::TurnInterrupted;
+        let event = CodeEvent::TurnInterrupted { usage: None };
         let seq = append_event_on_locked(&transaction, owner, session_id, &event).await?;
         events.push(SequencedCodeEvent { seq, event });
     }

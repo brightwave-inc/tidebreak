@@ -795,7 +795,7 @@ fn turn_lines(turn_id: CodeTurnId, events: &[SequencedCodeEvent]) -> Vec<String>
                     lines.push(text.trim().to_owned());
                 }
             }
-            CodeEvent::UserSteered { text } => {
+            CodeEvent::UserSteered { text, .. } => {
                 if !text.trim().is_empty() {
                     lines.push(format!("**You, mid-turn:** {}", text.trim()));
                 }
@@ -835,10 +835,12 @@ fn turn_lines(turn_id: CodeTurnId, events: &[SequencedCodeEvent]) -> Vec<String>
                     outcome_suffix(outcome)
                 );
             }
-            CodeEvent::TurnFailed { error } => {
+            CodeEvent::TurnFailed { error, .. } => {
                 lines.push(format!("**The turn failed:** {}", error.message.trim()));
             }
-            CodeEvent::TurnInterrupted => lines.push("**The turn was interrupted.**".to_owned()),
+            CodeEvent::TurnInterrupted { .. } => {
+                lines.push("**The turn was interrupted.**".to_owned())
+            }
             _ => {}
         }
     }
@@ -1009,7 +1011,7 @@ fn record_blocks(turn_id: CodeTurnId, events: &[SequencedCodeEvent]) -> Vec<Stri
                     ));
                 }
             }
-            CodeEvent::UserSteered { text } => {
+            CodeEvent::UserSteered { text, .. } => {
                 if !text.trim().is_empty() {
                     blocks.push(format!("**You, mid-turn:** {}", text.trim()));
                 }
@@ -1064,10 +1066,10 @@ fn record_blocks(turn_id: CodeTurnId, events: &[SequencedCodeEvent]) -> Vec<Stri
                     message.trim()
                 ));
             }
-            CodeEvent::TurnFailed { error } => {
+            CodeEvent::TurnFailed { error, .. } => {
                 blocks.push(format!("**The turn failed:** {}", error.message.trim()));
             }
-            CodeEvent::TurnInterrupted => {
+            CodeEvent::TurnInterrupted { .. } => {
                 blocks.push("**The turn was interrupted.**".to_owned());
             }
             _ => {}
@@ -1284,6 +1286,9 @@ mod tests {
                 call_id: "call-1".to_owned(),
                 outcome: ToolOutcome::Failed,
                 preview: "1 failed".to_owned(),
+                output: None,
+                action: None,
+                result: None,
                 detail: Some(ToolDetail::Command {
                     cmd: "cargo test -p auth".to_owned(),
                     cwd: String::new(),
@@ -1339,6 +1344,9 @@ mod tests {
                 call_id: "task-1".to_owned(),
                 outcome: ToolOutcome::Succeeded,
                 preview: "done".to_owned(),
+                output: None,
+                action: None,
+                result: None,
                 detail: None,
                 parent_call_id: None,
             },
@@ -1361,6 +1369,7 @@ mod tests {
                 error: BoundedError {
                     message: "the engine exited".to_owned(),
                 },
+                detail: None,
             },
         ]);
 
@@ -1686,6 +1695,9 @@ mod tests {
                 call_id: "sub-1".to_owned(),
                 outcome: ToolOutcome::Succeeded,
                 preview: "tidebreak-core v0.1.0".to_owned(),
+                output: None,
+                action: None,
+                result: None,
                 detail: None,
                 parent_call_id: Some("task-1".to_owned()),
             },
@@ -1697,11 +1709,15 @@ mod tests {
                 call_id: "task-1".to_owned(),
                 outcome: ToolOutcome::Succeeded,
                 preview: "audit done".to_owned(),
+                output: None,
+                action: None,
+                result: None,
                 detail: None,
                 parent_call_id: None,
             },
             CodeEvent::UserSteered {
                 text: "skip the benches".to_owned(),
+                message_id: None,
             },
         ]);
 
@@ -1745,6 +1761,9 @@ mod tests {
                 call_id: "call-1".to_owned(),
                 outcome: ToolOutcome::Succeeded,
                 preview: "````\nfour ticks\n````".to_owned(),
+                output: None,
+                action: None,
+                result: None,
                 detail: None,
                 parent_call_id: None,
             },

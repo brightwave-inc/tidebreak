@@ -190,7 +190,7 @@ async fn supported_steer_reaches_the_active_turn_once_without_creating_a_follow_
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let event = events.recv().await.unwrap().event;
-            if let CodeEvent::UserSteered { text } = &event {
+            if let CodeEvent::UserSteered { text, .. } = &event {
                 steer_events.push(text.clone());
             }
             if matches!(event, CodeEvent::TurnCompleted { .. }) {

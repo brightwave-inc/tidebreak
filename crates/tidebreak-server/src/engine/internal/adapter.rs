@@ -1,6 +1,9 @@
 //! The adapter half: probe, capabilities, launch.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
+use tidebreak_core::db::DbStore;
 use tidebreak_core::{CapLevel, HarnessCaps, HarnessKind, ReasoningEffort};
 use tidebreak_harness::{
     HarnessAdapter, HarnessError, HarnessProbe, HarnessSession, HostEnv, ListedHarnessModel,
@@ -8,6 +11,7 @@ use tidebreak_harness::{
 };
 
 use super::session::InternalSession;
+use crate::code::bus::CodeEventBus;
 use crate::state::AppState;
 
 /// The in-process engine, registered under [`HarnessKind::Internal`].
@@ -16,14 +20,18 @@ use crate::state::AppState;
 /// chat event bus, the approval broker, and the turn wake handles. It is
 /// installed after the state exists, like the recap and rewrite hooks, and
 /// the copy it keeps carries no code runtime, so nothing here can reach back
-/// into the runtime that owns it.
+/// into the runtime that owns it. What it does keep from the runtime is the
+/// journal store and the session bus, because the lane journals straight
+/// into the session's code journal and the engine follows it there.
 pub(crate) struct InternalAdapter {
     state: AppState,
+    db: Arc<DbStore>,
+    bus: Arc<CodeEventBus>,
 }
 
 impl InternalAdapter {
-    pub(crate) fn new(state: AppState) -> Self {
-        Self { state }
+    pub(crate) fn new(state: AppState, db: Arc<DbStore>, bus: Arc<CodeEventBus>) -> Self {
+        Self { state, db, bus }
     }
 }
 
@@ -82,7 +90,9 @@ impl HarnessAdapter for InternalAdapter {
     }
 
     async fn launch(&self, spec: SessionSpec) -> Result<Box<dyn HarnessSession>, HarnessError> {
-        let session = InternalSession::launch(self.state.clone(), spec).await?;
+        let session =
+            InternalSession::launch(self.state.clone(), self.db.clone(), self.bus.clone(), spec)
+                .await?;
         Ok(Box::new(session))
     }
 }

@@ -54,6 +54,7 @@ pub mod approval;
 pub mod blob;
 pub mod browser;
 pub mod cancel;
+pub mod chat_journal;
 pub mod citation;
 pub mod client_tools;
 pub mod code;

@@ -25,6 +25,7 @@
 
 mod baseline;
 mod idens;
+mod one_journal;
 
 #[cfg(test)]
 pub(crate) use baseline::tables_for_test;
@@ -69,6 +70,7 @@ impl MigratorTrait for Migrator {
             Box::new(CodeTurnPark),
             Box::new(InternalEngineSessions),
             Box::new(ConversationsAreSessions),
+            Box::new(one_journal::OneJournal),
         ]
     }
 }
@@ -4105,6 +4107,7 @@ mod tests {
                 "m20260901_000001_code_turn_park",
                 "m20260901_000002_internal_engine_sessions",
                 "m20260902_000001_conversations_are_sessions",
+                "m20260902_000002_one_journal",
             ]
         );
         assert!(db
@@ -4132,9 +4135,17 @@ mod tests {
             .unwrap()
             .is_some());
 
-        // Four steps: the turn park, internal engine session, and
-        // conversation merge migrations sit above the handshake one.
-        Migrator::down(&db, Some(4)).await.unwrap();
+        // Every migration above the handshake one, then the handshake one.
+        let above = Migrator::migrations().len()
+            - Migrator::migrations()
+                .iter()
+                .position(|migration| {
+                    migration.name() == "m20260828_000028_code_connect_handshakes"
+                })
+                .expect("the handshake migration is in the chain");
+        Migrator::down(&db, Some(u32::try_from(above).unwrap()))
+            .await
+            .unwrap();
         assert!(db
             .query_one_raw(Statement::from_string(
                 DbBackend::Sqlite,
@@ -4265,44 +4276,135 @@ mod tests {
     /// messages, a completed turn, its coordinator run, a terminal journal
     /// row, and a tool call, plus the engine-private pair slice C kept for
     /// one internal session.
+    /// The chat journal a seeded conversation carries: the shapes the
+    /// backfill has to carry across, ending on the turn's terminal row.
+    fn seeded_chat_events() -> Vec<crate::AgentEvent> {
+        use crate::AgentEvent;
+        vec![
+            AgentEvent::TurnStarted {
+                turn_id: crate::TurnId(uuid::Uuid::from_u128(0xa004)),
+            },
+            AgentEvent::TextDelta { text: "hel".into() },
+            AgentEvent::TextDelta { text: "lo".into() },
+            AgentEvent::ToolCallCompleted {
+                call_id: crate::CallId(uuid::Uuid::from_u128(0xa006)),
+                output: crate::ToolOutput::text("ok"),
+                action: Some(crate::ToolActionPreview::Exec {
+                    command: "echo".into(),
+                    args: vec!["hi".into()],
+                    cwd: ".".into(),
+                    files: Vec::new(),
+                    summary: None,
+                }),
+                result: None,
+            },
+            AgentEvent::TurnCompleted {
+                usage: crate::Usage {
+                    input_tokens: 3,
+                    output_tokens: 4,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                },
+                stop_reason: crate::StopReason::EndTurn,
+            },
+        ]
+    }
+
+    /// `INSERT` statements for [`seeded_chat_events`] into the old `event`
+    /// table. Ids arrive as SQL literals, in the blob form the live store
+    /// binds. With a turn, the terminal row names it as the turn's receipt;
+    /// without one, every row is chat-scoped, the shape a journal has before
+    /// any turn table exists to name.
+    fn seeded_event_inserts(chat_id: &str, turn_id: Option<&str>) -> String {
+        seeded_chat_events()
+            .iter()
+            .enumerate()
+            .map(|(index, event)| {
+                let seq = index + 1;
+                let terminal =
+                    matches!(event, crate::AgentEvent::TurnCompleted { .. }) && turn_id.is_some();
+                let turn = match turn_id {
+                    Some(turn_id) if terminal => turn_id.to_owned(),
+                    _ => "NULL".to_owned(),
+                };
+                let terminal = if terminal { "TRUE" } else { "FALSE" };
+                let payload = serde_json::to_string(event).unwrap().replace('\'', "''");
+                format!(
+                    "INSERT INTO event (chat_id, seq, turn_id, terminal, payload, created_at) \
+                     VALUES ({chat_id}, {seq}, {turn}, {terminal}, '{payload}', \
+                     '2026-09-01T00:00:0{seq}Z');"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The chat replay read serves the seeded journal back: every event, in
+    /// order, with the same content, from the one journal.
+    async fn assert_chat_replay(db: &sea_orm::DatabaseConnection, chat_id: uuid::Uuid) {
+        use crate::storage::Store as _;
+        let store = crate::db::DbStore { conn: db.clone() };
+        let replayed = store
+            .list_events(crate::ChatId(chat_id), 0)
+            .await
+            .expect("the chat replay reads the one journal");
+        assert_eq!(
+            replayed.iter().map(|event| event.seq).collect::<Vec<_>>(),
+            (1..=seeded_chat_events().len() as i64).collect::<Vec<_>>(),
+            "the backfill keeps every sequence number"
+        );
+        assert_eq!(
+            replayed
+                .into_iter()
+                .map(|event| event.event)
+                .collect::<Vec<_>>(),
+            seeded_chat_events(),
+            "the backfill keeps every event's content"
+        );
+    }
+
     async fn seed_pre_merge_conversations(db: &sea_orm::DatabaseConnection) {
-        db.execute_unprepared(
+        let events = seeded_event_inserts(
+            "X'0000000000000000000000000000a001'",
+            Some("X'0000000000000000000000000000a004'"),
+        );
+        db.execute_unprepared(&format!(
             r#"
 INSERT INTO chat (
     id, title, created_at, permission_mode, reasoning_effort, network_policy,
     owner, engine_private
 ) VALUES (
-    '00000000-0000-0000-0000-00000000a001', 'kept', '2026-09-01T00:00:00Z',
-    NULL, 'aggressive', '{"mode":"open"}', 'local', FALSE
+    X'0000000000000000000000000000a001', 'kept', '2026-09-01T00:00:00Z',
+    NULL, 'aggressive', '{{"mode":"open"}}', 'local', FALSE
 );
 INSERT INTO chat (
     id, title, created_at, permission_mode, network_policy, owner, engine_private
 ) VALUES (
-    '00000000-0000-0000-0000-00000000b001', 'private', '2026-09-01T00:00:00Z',
-    'plan', '{"mode":"open"}', 'local', TRUE
+    X'0000000000000000000000000000b001', 'private', '2026-09-01T00:00:00Z',
+    'plan', '{{"mode":"open"}}', 'local', TRUE
 );
 INSERT INTO code_session (
     id, owner, workspace_id, kind, harness_kind, permission_mode, lifecycle,
     spawn_epoch, attention_state, attention_source, created_at
 ) VALUES (
-    '00000000-0000-0000-0000-00000000b001', 'local', NULL, 'interactive',
-    'internal', 'plan', 'idle', 1, '{"type":"idle"}', 'lifecycle',
+    X'0000000000000000000000000000b001', 'local', NULL, 'interactive',
+    'internal', 'plan', 'idle', 1, '{{"type":"idle"}}', 'lifecycle',
     '2026-09-01T00:00:00Z'
 );
 INSERT INTO message (id, chat_id, turn_id, seq, role, content, created_at) VALUES (
-    '00000000-0000-0000-0000-00000000a002', '00000000-0000-0000-0000-00000000a001',
-    '00000000-0000-0000-0000-00000000a004', 1, 'user', 'hi', '2026-09-01T00:00:00Z'
+    X'0000000000000000000000000000a002', X'0000000000000000000000000000a001',
+    X'0000000000000000000000000000a004', 1, 'user', 'hi', '2026-09-01T00:00:00Z'
 );
 INSERT INTO message (id, chat_id, turn_id, seq, role, content, created_at) VALUES (
-    '00000000-0000-0000-0000-00000000a003', '00000000-0000-0000-0000-00000000a001',
-    '00000000-0000-0000-0000-00000000a004', 2, 'assistant', 'hello',
+    X'0000000000000000000000000000a003', X'0000000000000000000000000000a001',
+    X'0000000000000000000000000000a004', 2, 'assistant', 'hello',
     '2026-09-01T00:00:01Z'
 );
 INSERT INTO agent_run (
     id, chat_id, tier, execution_location, depth, status, attempt_count,
     max_attempts, claim_count, available_at, created_at, updated_at
 ) VALUES (
-    '00000000-0000-0000-0000-00000000a005', '00000000-0000-0000-0000-00000000a001',
+    X'0000000000000000000000000000a005', X'0000000000000000000000000000a001',
     'foreground', 'in_process', 0, 'active', 0, 0, 0, '2026-09-01T00:00:00Z',
     '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z'
 );
@@ -4311,25 +4413,22 @@ INSERT INTO turn_run (
     invoked_skills, status, attempt_count, max_attempts, claim_count,
     available_at, started_at, finished_at, created_at, updated_at
 ) VALUES (
-    '00000000-0000-0000-0000-00000000a004', '00000000-0000-0000-0000-00000000a001',
-    '00000000-0000-0000-0000-00000000a005', '00000000-0000-0000-0000-00000000a002',
-    '00000000-0000-0000-0000-00000000a003', 'scripted', '[]', 'completed', 1, 5, 1,
+    X'0000000000000000000000000000a004', X'0000000000000000000000000000a001',
+    X'0000000000000000000000000000a005', X'0000000000000000000000000000a002',
+    X'0000000000000000000000000000a003', 'scripted', '[]', 'completed', 1, 5, 1,
     '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z', '2026-09-01T00:00:02Z',
     '2026-09-01T00:00:00Z', '2026-09-01T00:00:02Z'
 );
-INSERT INTO event (chat_id, seq, turn_id, terminal, payload, created_at) VALUES (
-    '00000000-0000-0000-0000-00000000a001', 1, '00000000-0000-0000-0000-00000000a004',
-    TRUE, '{"type":"turn_completed"}', '2026-09-01T00:00:02Z'
-);
+{events}
 INSERT INTO tool_call (
     id, chat_id, turn_id, provider_id, history_order, name, arguments, execution,
     status, result, created_at, resolved_at
 ) VALUES (
-    '00000000-0000-0000-0000-00000000a006', '00000000-0000-0000-0000-00000000a001',
-    '00000000-0000-0000-0000-00000000a004', 'scripted', 1, 'exec', '{}', 'server',
+    X'0000000000000000000000000000a006', X'0000000000000000000000000000a001',
+    X'0000000000000000000000000000a004', 'scripted', 1, 'exec', '{{}}', 'server',
     'completed', 'ok', '2026-09-01T00:00:01Z', '2026-09-01T00:00:01Z'
-)"#,
-        )
+)"#
+        ))
         .await
         .unwrap();
     }
@@ -4365,17 +4464,26 @@ INSERT INTO tool_call (
             0
         );
         assert_eq!(count(db, "code_session").await, 2);
+        assert_eq!(
+            count(
+                db,
+                "code_event WHERE session_id = X'0000000000000000000000000000a001'"
+            )
+            .await,
+            seeded_chat_events().len() as i64,
+            "the journal moved into code_event"
+        );
+        assert_chat_replay(db, uuid::Uuid::from_u128(0xa001)).await;
         for (table, expected) in [
             ("message", 2),
             ("agent_run", 1),
             ("turn_run", 1),
-            ("event", 1),
             ("tool_call", 1),
         ] {
             assert_eq!(
                 count(
                     db,
-                    &format!("{table} WHERE chat_id = '00000000-0000-0000-0000-00000000a001'")
+                    &format!("{table} WHERE chat_id = X'0000000000000000000000000000a001'")
                 )
                 .await,
                 expected,
@@ -4388,7 +4496,7 @@ INSERT INTO tool_call (
                 "SELECT workspace_id, harness_kind, kind, lifecycle, spawn_epoch, \
                  permission_mode, reasoning_effort, attention_state, attention_source, \
                  title, network_policy, attachment_revision \
-                 FROM code_session WHERE id = '00000000-0000-0000-0000-00000000a001'"
+                 FROM code_session WHERE id = X'0000000000000000000000000000a001'"
                     .to_owned(),
             ))
             .await
@@ -4437,7 +4545,7 @@ INSERT INTO tool_call (
             .query_one_raw(Statement::from_string(
                 DbBackend::Sqlite,
                 "SELECT spawn_epoch, permission_mode, title \
-                 FROM code_session WHERE id = '00000000-0000-0000-0000-00000000b001'"
+                 FROM code_session WHERE id = X'0000000000000000000000000000b001'"
                     .to_owned(),
             ))
             .await
@@ -4461,18 +4569,21 @@ INSERT INTO tool_call (
         use sea_orm_migration::MigrationTrait as _;
 
         let db = Database::connect("sqlite::memory:").await.unwrap();
-        let steps = Migrator::migrations().len();
-        Migrator::up(&db, Some(u32::try_from(steps - 1).unwrap()))
-            .await
-            .unwrap();
+        Migrator::up(
+            &db,
+            Some(steps_before("m20260902_000001_conversations_are_sessions")),
+        )
+        .await
+        .unwrap();
         seed_pre_merge_conversations(&db).await;
 
         Migrator::up(&db, None).await.unwrap();
 
         assert_conversations_merged(&db).await;
-        // A second pass finds the marker and changes nothing.
+        // A second pass finds the markers and changes nothing.
         let manager = SchemaManager::new(&db);
         super::ConversationsAreSessions.up(&manager).await.unwrap();
+        super::one_journal::OneJournal.up(&manager).await.unwrap();
         assert_conversations_merged(&db).await;
     }
 
@@ -4484,10 +4595,12 @@ INSERT INTO tool_call (
     #[tokio::test]
     async fn an_interrupted_conversation_merge_finishes_on_retry() {
         let db = Database::connect("sqlite::memory:").await.unwrap();
-        let steps = Migrator::migrations().len();
-        Migrator::up(&db, Some(u32::try_from(steps - 1).unwrap()))
-            .await
-            .unwrap();
+        Migrator::up(
+            &db,
+            Some(steps_before("m20260902_000001_conversations_are_sessions")),
+        )
+        .await
+        .unwrap();
         seed_pre_merge_conversations(&db).await;
         let manager = SchemaManager::new(&db);
         let (column, definition) = super::SQLITE_CONVERSATION_COLUMNS[0];
@@ -4505,6 +4618,193 @@ INSERT INTO tool_call (
         Migrator::up(&db, None).await.unwrap();
 
         assert_conversations_merged(&db).await;
+    }
+
+    /// How many migrations run before the named one.
+    fn steps_before(name: &str) -> u32 {
+        let position = Migrator::migrations()
+            .iter()
+            .position(|migration| migration.name() == name)
+            .unwrap_or_else(|| panic!("{name} is in the chain"));
+        u32::try_from(position).unwrap()
+    }
+
+    /// A conversation as the merge left it, one migration before the
+    /// journal moves: a session row, its turn, its `event` rows, and the
+    /// bridge's translated copy of the same history already in
+    /// `code_event` (#3010).
+    async fn seed_pre_journal_conversation(db: &sea_orm::DatabaseConnection) {
+        let events = seeded_event_inserts(
+            "X'0000000000000000000000000000c001'",
+            Some("X'0000000000000000000000000000c004'"),
+        );
+        db.execute_unprepared(&format!(
+            r#"
+INSERT INTO code_session (
+    id, owner, workspace_id, kind, harness_kind, permission_mode, lifecycle,
+    spawn_epoch, attention_state, attention_source, created_at, title
+) VALUES (
+    X'0000000000000000000000000000c001', 'local', NULL, 'interactive',
+    'internal', 'ask', 'idle', 1, '{{"type":"idle"}}', 'lifecycle',
+    '2026-09-01T00:00:00Z', 'bridged'
+);
+INSERT INTO agent_run (
+    id, chat_id, tier, execution_location, depth, status, attempt_count,
+    max_attempts, claim_count, available_at, created_at, updated_at
+) VALUES (
+    X'0000000000000000000000000000c005', X'0000000000000000000000000000c001',
+    'foreground', 'in_process', 0, 'active', 0, 0, 0, '2026-09-01T00:00:00Z',
+    '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z'
+);
+INSERT INTO message (id, chat_id, turn_id, seq, role, content, created_at) VALUES (
+    X'0000000000000000000000000000c002', X'0000000000000000000000000000c001',
+    X'0000000000000000000000000000c004', 1, 'user', 'hi', '2026-09-01T00:00:00Z'
+);
+INSERT INTO message (id, chat_id, turn_id, seq, role, content, created_at) VALUES (
+    X'0000000000000000000000000000c003', X'0000000000000000000000000000c001',
+    X'0000000000000000000000000000c004', 2, 'assistant', 'hello',
+    '2026-09-01T00:00:01Z'
+);
+INSERT INTO turn_run (
+    id, chat_id, agent_run_id, input_message_id, output_message_id, model,
+    invoked_skills, status, attempt_count, max_attempts, claim_count,
+    available_at, started_at, finished_at, created_at, updated_at
+) VALUES (
+    X'0000000000000000000000000000c004', X'0000000000000000000000000000c001',
+    X'0000000000000000000000000000c005', X'0000000000000000000000000000c002',
+    X'0000000000000000000000000000c003', 'scripted', '[]', 'completed', 1, 5, 1,
+    '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z', '2026-09-01T00:00:02Z',
+    '2026-09-01T00:00:00Z', '2026-09-01T00:00:02Z'
+);
+INSERT INTO code_event (owner, session_id, seq, event, created_at) VALUES (
+    'local', X'0000000000000000000000000000c001', 1,
+    '{{"type":"session_started","harness_kind":"internal","harness_version":"0"}}',
+    '2026-09-01T00:00:00Z'
+);
+INSERT INTO code_event (owner, session_id, seq, event, created_at) VALUES (
+    'local', X'0000000000000000000000000000c001', 2,
+    '{{"type":"assistant_message","text":"hello"}}', '2026-09-01T00:00:01Z'
+);
+{events}"#
+        ))
+        .await
+        .unwrap();
+    }
+
+    /// What the journal move leaves behind: no `event` table, the receipts
+    /// and their unique indexes on `code_event`, every foreign key satisfied,
+    /// the bridge's copies replaced by the backfill, and the chat replay
+    /// serving the seeded journal in order.
+    async fn assert_one_journal(db: &sea_orm::DatabaseConnection) {
+        assert!(db
+            .query_all_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "PRAGMA foreign_key_check".to_owned(),
+            ))
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            count(db, "sqlite_master WHERE type = 'table' AND name = 'event'").await,
+            0
+        );
+        for index in [
+            "idx_code_event_attempt_ordinal",
+            "idx_code_event_scan_token",
+            "idx_code_event_one_terminal_per_turn",
+        ] {
+            assert_eq!(
+                count(
+                    db,
+                    &format!("sqlite_master WHERE type = 'index' AND name = '{index}'")
+                )
+                .await,
+                1,
+                "{index} exists"
+            );
+        }
+        assert_eq!(
+            count(
+                db,
+                "code_event WHERE session_id = X'0000000000000000000000000000c001'"
+            )
+            .await,
+            seeded_chat_events().len() as i64,
+            "the bridge's copies are replaced by the backfill"
+        );
+        let terminal = db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT seq, turn_id, terminal FROM code_event \
+                 WHERE session_id = X'0000000000000000000000000000c001' AND terminal"
+                    .to_owned(),
+            ))
+            .await
+            .unwrap()
+            .expect("the terminal receipt moved");
+        assert_eq!(
+            terminal.try_get::<i64>("", "seq").unwrap(),
+            seeded_chat_events().len() as i64
+        );
+        assert_eq!(
+            terminal.try_get::<Vec<u8>>("", "turn_id").unwrap(),
+            uuid::Uuid::from_u128(0xc004).as_bytes().to_vec()
+        );
+        assert_chat_replay(db, uuid::Uuid::from_u128(0xc001)).await;
+        let fresh = Database::connect("sqlite::memory:").await.unwrap();
+        Migrator::up(&fresh, None).await.unwrap();
+        assert_eq!(schema_of(db).await, schema_of(&fresh).await);
+    }
+
+    /// A merged SQLite profile keeps its chat journal while the rows move
+    /// into `code_event`, and a second pass changes nothing.
+    #[tokio::test]
+    async fn a_pre_journal_database_replays_its_chat_events_from_the_one_journal() {
+        use sea_orm_migration::MigrationTrait as _;
+
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        Migrator::up(&db, Some(steps_before("m20260902_000002_one_journal")))
+            .await
+            .unwrap();
+        seed_pre_journal_conversation(&db).await;
+
+        Migrator::up(&db, None).await.unwrap();
+
+        assert_one_journal(&db).await;
+        let manager = SchemaManager::new(&db);
+        super::one_journal::OneJournal.up(&manager).await.unwrap();
+        assert_one_journal(&db).await;
+    }
+
+    /// The SQLite branch runs autocommit steps. An attempt that rebuilt
+    /// `code_event` and copied the rows before dying must finish on the
+    /// next start: the rebuilt table comes back unchanged, the copy is
+    /// redone as one copy, and the rest lands.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn an_interrupted_one_journal_migration_finishes_on_retry() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        Migrator::up(&db, Some(steps_before("m20260902_000002_one_journal")))
+            .await
+            .unwrap();
+        seed_pre_journal_conversation(&db).await;
+        let manager = SchemaManager::new(&db);
+        super::rebuild_sqlite_table(
+            &manager,
+            "code_event",
+            super::one_journal::add_receipt_columns,
+        )
+        .await
+        .unwrap();
+        assert!(manager
+            .has_column("code_event", "lease_token")
+            .await
+            .unwrap());
+        assert!(manager.has_table("event").await.unwrap());
+
+        Migrator::up(&db, None).await.unwrap();
+
+        assert_one_journal(&db).await;
     }
 
     /// The SQLite branch of the internal engine migration runs two
@@ -4866,12 +5166,27 @@ INSERT INTO tool_call (
              ) VALUES (
                 'local', '00000000-0000-0000-0000-000000000104', 0,
                 '00000000-0000-0000-0000-000000000105', 'image/png', 8
+             );
+             INSERT INTO chat (id, title, created_at, network_policy, owner) VALUES (
+                X'0000000000000000000000000000d001', 'release chat',
+                '2026-08-20T12:00:00Z', '{\"mode\":\"off\"}', 'local'
              )",
         )
         .await
         .unwrap();
+        // The v0.60 journal rows name no turn: the release schema's turn
+        // tables are not what this test is about, and a row without a turn
+        // is the shape a chat-scoped event has.
+        db.execute_unprepared(&seeded_event_inserts(
+            "X'0000000000000000000000000000d001'",
+            None,
+        ))
+        .await
+        .unwrap();
 
         Migrator::up(&db, None).await.unwrap();
+
+        assert_chat_replay(&db, uuid::Uuid::from_u128(0xd001)).await;
 
         let attachment = db
             .query_one_raw(Statement::from_string(

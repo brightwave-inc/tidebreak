@@ -245,6 +245,18 @@ pub(crate) struct LiveSink {
     spawn_epoch: i64,
     /// Which engine this session runs, for copy that names it.
     harness: HarnessKind,
+    /// Whether the engine writes the session's journal itself.
+    ///
+    /// The internal engine runs the chat turn lane, and that lane appends
+    /// its rows — turn start, deltas, tool calls, steers, the terminal
+    /// event — straight into the session's journal and publishes them on
+    /// the session bus (decision 0048 step 5). What the engine then reports
+    /// through this sink is already on disk, so the sink applies the side
+    /// effects a report carries (closing the turn row with its usage,
+    /// sweeping approvals) and writes nothing a second time. The approval
+    /// rows an engine report mints are the exception: those are the
+    /// worker's own facts, and they journal as they always did.
+    native_journal: bool,
     /// Whether this session's inference rides the on-behalf-of relay
     /// (decision 71). The relay's refusals are already legible and name the
     /// gateway, so [`LiveSink::legible_turn_error`] leaves them untouched.
@@ -421,7 +433,7 @@ impl LiveSink {
                 settle_running_subagents(&mut subagents, CodeSubagentStatus::Done)
                     .then(|| subagents.clone())
             }
-            CodeEvent::TurnFailed { .. } | CodeEvent::TurnInterrupted => {
+            CodeEvent::TurnFailed { .. } | CodeEvent::TurnInterrupted { .. } => {
                 let mut subagents = self.subagents.lock().expect("code sink subagents");
                 settle_running_subagents(&mut subagents, CodeSubagentStatus::Failed)
                     .then(|| subagents.clone())
@@ -662,8 +674,9 @@ impl HarnessEventSink for LiveSink {
         // straight through. Swap it for the legible sentence before the
         // journal keeps it.
         let code_event = match code_event {
-            CodeEvent::TurnFailed { error } => CodeEvent::TurnFailed {
+            CodeEvent::TurnFailed { error, .. } => CodeEvent::TurnFailed {
                 error: self.legible_turn_error(error.message),
+                detail: None,
             },
             other => other,
         };
@@ -671,6 +684,9 @@ impl HarnessEventSink for LiveSink {
         // closes the run repeats them exactly, so a row here would store the
         // same words a second time (record 57).
         if matches!(code_event, CodeEvent::AssistantDelta { .. }) {
+            if self.native_journal {
+                return;
+            }
             self.bus.publish_transient(self.session_id, code_event);
             let _ =
                 super::attention::note_activity(&self.db, &self.bus, &self.owner, self.session_id)
@@ -707,6 +723,7 @@ impl HarnessEventSink for LiveSink {
                 self.spawn_epoch,
                 turn_id,
                 code_event,
+                self.native_journal,
             )
             .await
         } else {
@@ -717,11 +734,12 @@ impl HarnessEventSink for LiveSink {
                 self.session_id,
                 self.spawn_epoch,
                 code_event,
+                self.native_journal,
             )
             .await
         };
         let journaled = match write {
-            Ok(()) => true,
+            Ok(()) => !self.native_journal,
             Err(CodeJournalError::StaleSpawnEpoch { .. }) => {
                 warn!(
                     session = %self.session_id,
@@ -1327,6 +1345,7 @@ async fn apply_accepted_plan_mode(
                         mode.as_str()
                     ),
                 },
+                false,
             )
             .await;
         }
@@ -1345,6 +1364,7 @@ async fn apply_accepted_plan_mode(
                         session.permission_mode.as_str()
                     ),
                 },
+                false,
             )
             .await;
         }
@@ -1664,6 +1684,7 @@ async fn drain_queued(
                         level: HarnessNoticeLevel::Error,
                         message: format!("The queued turn could not start: {detail}"),
                     },
+                    false,
                 )
                 .await;
                 if session.lifecycle != CodeSessionLifecycle::Fenced {
@@ -1970,6 +1991,7 @@ async fn drive_turn_inner(
         session.id,
         session.spawn_epoch,
         CodeEvent::TurnStarted { turn_id: turn.id },
+        sink.native_journal,
     )
     .await
     .map_err(|err| WorkerError::Failed(err.to_string()))?;
@@ -2188,6 +2210,7 @@ async fn drive_turn_inner(
                         level: HarnessNoticeLevel::Error,
                         message: detail.clone(),
                     },
+                    false,
                 )
                 .await;
             }
@@ -2195,12 +2218,16 @@ async fn drive_turn_inner(
                 // The stream ended without closing the turn. Only the worker
                 // knows whether that was asked for.
                 let (status, event) = if interrupted {
-                    (CodeTurnStatus::Interrupted, CodeEvent::TurnInterrupted)
+                    (
+                        CodeTurnStatus::Interrupted,
+                        CodeEvent::TurnInterrupted { usage: None },
+                    )
                 } else if let Some(detail) = detail {
                     (
                         CodeTurnStatus::Failed,
                         CodeEvent::TurnFailed {
                             error: sink.legible_turn_error(detail),
+                            detail: None,
                         },
                     )
                 } else {
@@ -2209,6 +2236,7 @@ async fn drive_turn_inner(
                         CodeEvent::TurnCompleted {
                             usage: turn.usage.clone().unwrap_or_default(),
                             checkpoint: None,
+                            stop_reason: None,
                         },
                     )
                 };
@@ -2216,7 +2244,7 @@ async fn drive_turn_inner(
                 turn.ended_at = Some(Utc::now());
                 let _ = save_turn(db, &session.owner, &turn).await;
                 sink.note_subagent_boundary(&event).await;
-                let write = if matches!(event, CodeEvent::TurnInterrupted) {
+                let write = if matches!(event, CodeEvent::TurnInterrupted { .. }) {
                     persist_and_publish(
                         db,
                         bus,
@@ -2224,6 +2252,7 @@ async fn drive_turn_inner(
                         session.id,
                         session.spawn_epoch,
                         event,
+                        sink.native_journal,
                     )
                     .await
                 } else {
@@ -2235,6 +2264,7 @@ async fn drive_turn_inner(
                         session.spawn_epoch,
                         turn.id,
                         event,
+                        sink.native_journal,
                     )
                     .await
                 };
@@ -2248,6 +2278,7 @@ async fn drive_turn_inner(
                 let _ = save_turn(db, &session.owner, &turn).await;
                 let event = CodeEvent::TurnFailed {
                     error: sink.legible_turn_error(err.to_string()),
+                    detail: None,
                 };
                 sink.note_subagent_boundary(&event).await;
                 let _ = persist_turn_and_publish(
@@ -2258,6 +2289,7 @@ async fn drive_turn_inner(
                     session.spawn_epoch,
                     turn.id,
                     event,
+                    sink.native_journal,
                 )
                 .await;
             }
@@ -2586,7 +2618,7 @@ async fn last_failure_detail(db: &DbStore, session: &CodeSession) -> Option<Stri
         .await
         .ok()?;
     events.into_iter().find_map(|item| match item.event {
-        CodeEvent::TurnFailed { error } => Some(error.message),
+        CodeEvent::TurnFailed { error, .. } => Some(error.message),
         _ => None,
     })
 }
@@ -2651,6 +2683,7 @@ pub(crate) async fn attach_engine(
                     .unwrap_or_else(|| "unknown".into()),
                 resume_ref: session.harness_resume_ref.clone(),
             },
+            false,
         )
         .await
         .map_err(|err| WorkerError::Failed(err.to_string()))?;
@@ -2702,6 +2735,7 @@ pub(crate) fn sink_for(
         owner,
         session_id,
         spawn_epoch,
+        native_journal: harness == HarnessKind::Internal,
         harness,
         relay_wired,
         turn_id: std::sync::Mutex::new(turn_id),
@@ -2723,9 +2757,13 @@ pub(crate) async fn journal_event(
     spawn_epoch: i64,
     event: CodeEvent,
 ) -> Result<(), CodeJournalError> {
-    persist_and_publish(db, bus, owner, session_id, spawn_epoch, event).await
+    persist_and_publish(db, bus, owner, session_id, spawn_epoch, event, false).await
 }
 
+/// Journal one event for the session, or — when `native_journal` says the
+/// engine already wrote it — apply only what the row's arrival means for
+/// the worker's own state. See [`LiveSink::native_journal`].
+#[allow(clippy::too_many_arguments)]
 async fn persist_and_publish(
     db: &DbStore,
     bus: &CodeEventBus,
@@ -2733,10 +2771,22 @@ async fn persist_and_publish(
     session_id: CodeSessionId,
     spawn_epoch: i64,
     event: CodeEvent,
+    native_journal: bool,
 ) -> Result<(), CodeJournalError> {
-    persist_and_publish_inner(db, bus, owner, session_id, spawn_epoch, None, event).await
+    persist_and_publish_inner(
+        db,
+        bus,
+        owner,
+        session_id,
+        spawn_epoch,
+        None,
+        event,
+        native_journal,
+    )
+    .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn persist_turn_and_publish(
     db: &DbStore,
     bus: &CodeEventBus,
@@ -2745,6 +2795,7 @@ async fn persist_turn_and_publish(
     spawn_epoch: i64,
     turn_id: CodeTurnId,
     event: CodeEvent,
+    native_journal: bool,
 ) -> Result<(), CodeJournalError> {
     persist_and_publish_inner(
         db,
@@ -2754,10 +2805,12 @@ async fn persist_turn_and_publish(
         spawn_epoch,
         Some(turn_id),
         event,
+        native_journal,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn persist_and_publish_inner(
     db: &DbStore,
     bus: &CodeEventBus,
@@ -2766,7 +2819,30 @@ async fn persist_and_publish_inner(
     spawn_epoch: i64,
     notification_turn_id: Option<CodeTurnId>,
     event: CodeEvent,
+    native_journal: bool,
 ) -> Result<(), CodeJournalError> {
+    if native_journal {
+        // The row is already in the journal and on the bus; only the
+        // worker's bookkeeping is left: the turn row closes with the usage
+        // the engine reported, and a settled turn sweeps its approvals.
+        apply_side_effects(db, owner, session_id, spawn_epoch, &event).await?;
+        if matches!(
+            &event,
+            CodeEvent::TurnCompleted { .. }
+                | CodeEvent::TurnFailed { .. }
+                | CodeEvent::TurnInterrupted { .. }
+        ) {
+            super::approval_sweep::abandon_for_settled_turns(
+                db,
+                bus,
+                owner,
+                session_id,
+                spawn_epoch,
+            )
+            .await;
+        }
+        return Ok(());
+    }
     settle_streamed_text(db, bus, owner, session_id, spawn_epoch, &event).await;
     let activity_boundary = matches!(
         &event,
@@ -2795,7 +2871,9 @@ async fn persist_and_publish_inner(
     // journals keeps its later sequence number on the live stream too.
     let closes_turn = matches!(
         &event,
-        CodeEvent::TurnCompleted { .. } | CodeEvent::TurnFailed { .. } | CodeEvent::TurnInterrupted
+        CodeEvent::TurnCompleted { .. }
+            | CodeEvent::TurnFailed { .. }
+            | CodeEvent::TurnInterrupted { .. }
     );
     bus.publish(
         session_id,
@@ -2839,7 +2917,9 @@ async fn settle_streamed_text(
 ) {
     if !matches!(
         event,
-        CodeEvent::TurnCompleted { .. } | CodeEvent::TurnFailed { .. } | CodeEvent::TurnInterrupted
+        CodeEvent::TurnCompleted { .. }
+            | CodeEvent::TurnFailed { .. }
+            | CodeEvent::TurnInterrupted { .. }
     ) {
         return;
     }
@@ -2888,7 +2968,9 @@ async fn apply_side_effects(
     event: &CodeEvent,
 ) -> Result<(), CodeJournalError> {
     match event {
-        CodeEvent::TurnCompleted { usage, checkpoint } => {
+        CodeEvent::TurnCompleted {
+            usage, checkpoint, ..
+        } => {
             if let Ok(Some(mut turn)) = get_open_turn(db, owner, session_id).await {
                 turn.status = CodeTurnStatus::Completed;
                 turn.ended_at = Some(Utc::now());
@@ -2907,7 +2989,7 @@ async fn apply_side_effects(
                 let _ = save_turn(db, owner, &turn).await;
             }
         }
-        CodeEvent::TurnInterrupted => {
+        CodeEvent::TurnInterrupted { .. } => {
             if let Ok(Some(mut turn)) = get_open_turn(db, owner, session_id).await {
                 turn.status = CodeTurnStatus::Interrupted;
                 turn.ended_at = Some(Utc::now());
@@ -3117,6 +3199,9 @@ fn map_event(event: HarnessEvent, turn_id: Option<CodeTurnId>) -> Option<CodeEve
             call_id,
             outcome,
             preview,
+            output: None,
+            action: None,
+            result: None,
             detail,
             parent_call_id,
         },
@@ -3136,13 +3221,20 @@ fn map_event(event: HarnessEvent, turn_id: Option<CodeTurnId>) -> Option<CodeEve
             approval_id: CodeApprovalId::new(),
             decision: decision.into(),
         },
-        HarnessEvent::UserSteered { text } => CodeEvent::UserSteered { text },
+        HarnessEvent::UserSteered { text } => CodeEvent::UserSteered {
+            text,
+            message_id: None,
+        },
         HarnessEvent::TurnCompleted { usage } => CodeEvent::TurnCompleted {
             usage,
             checkpoint: None,
+            stop_reason: None,
         },
-        HarnessEvent::TurnFailed { error } => CodeEvent::TurnFailed { error },
-        HarnessEvent::TurnInterrupted => CodeEvent::TurnInterrupted,
+        HarnessEvent::TurnFailed { error } => CodeEvent::TurnFailed {
+            error,
+            detail: None,
+        },
+        HarnessEvent::TurnInterrupted => CodeEvent::TurnInterrupted { usage: None },
         HarnessEvent::HarnessNotice { level, message } => {
             CodeEvent::HarnessNotice { level, message }
         }

@@ -5,13 +5,23 @@
 //! journal and republishes it here with its assigned `seq`, so a connected
 //! WebSocket sees it immediately. A client that isn't connected misses nothing —
 //! it replays from the journal when it connects.
+//!
+//! The journal is the one code journal (decision 48 step 5), and a chat is a
+//! session on it, so every event published here is mirrored onto the
+//! session's channel of the [`CodeEventBus`] in the row's own vocabulary.
+//! The internal engine follows that channel, and so does a code-wire reader
+//! of the same session; the chat channel stays what the chat routes serve.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use tokio::sync::broadcast;
 
-use tidebreak_core::{ChatId, SequencedEvent, TurnId};
+use tidebreak_core::{
+    chat_journal, ChatId, CodeSessionId, SequencedCodeEvent, SequencedEvent, TurnId,
+};
+
+use crate::code::bus::CodeEventBus;
 
 /// How many live events a slow subscriber may fall behind before it's dropped
 /// (`Lagged`). A lagging client is expected to reconnect and replay from the
@@ -55,12 +65,59 @@ pub enum ChatMetadataNotice {
 pub struct EventBus {
     channels: Mutex<HashMap<ChatId, broadcast::Sender<SequencedEvent>>>,
     metadata: Mutex<HashMap<ChatId, broadcast::Sender<ChatMetadataNotice>>>,
+    /// The session-keyed bus every journaled chat event is mirrored onto.
+    /// Installed once the code runtime exists; absent in tests that assemble
+    /// state without one, where nothing follows the session channel.
+    mirror: OnceLock<Arc<CodeEventBus>>,
+}
+
+/// The publishing half of one chat's live channel.
+///
+/// Sends the journaled event to the chat's subscribers and mirrors it, as the
+/// code journal row it was stored as, onto the session's channel.
+pub struct ChatEventSender {
+    chat: ChatId,
+    sender: broadcast::Sender<SequencedEvent>,
+    mirror: Option<Arc<CodeEventBus>>,
+}
+
+impl ChatEventSender {
+    /// Publish one journaled event and say how many chat subscribers took
+    /// it. Zero is not an error: the durable write already happened, and a
+    /// chat nobody is watching streams to no one.
+    pub fn send(&self, event: SequencedEvent) -> usize {
+        if let Some(mirror) = &self.mirror {
+            mirror.publish(
+                CodeSessionId(self.chat.0),
+                SequencedCodeEvent {
+                    seq: event.seq,
+                    event: chat_journal::journal_row(&event.event),
+                },
+            );
+        }
+        self.sender.send(event).unwrap_or(0)
+    }
 }
 
 impl EventBus {
-    /// The broadcast sender for a chat, created on first use. Kept in the map so
-    /// the channel outlives any individual turn or subscriber.
-    pub fn sender(&self, chat: ChatId) -> broadcast::Sender<SequencedEvent> {
+    /// Mirror every journaled chat event onto the session bus. Called once,
+    /// when the code runtime that owns the bus is assembled.
+    pub(crate) fn mirror_into(&self, bus: Arc<CodeEventBus>) {
+        let _ = self.mirror.set(bus);
+    }
+
+    /// The publisher for a chat's live channel, created on first use. The
+    /// channel is kept in the map so it outlives any individual turn or
+    /// subscriber.
+    pub fn sender(&self, chat: ChatId) -> ChatEventSender {
+        ChatEventSender {
+            chat,
+            sender: self.channel(chat),
+            mirror: self.mirror.get().cloned(),
+        }
+    }
+
+    fn channel(&self, chat: ChatId) -> broadcast::Sender<SequencedEvent> {
         self.channels
             .lock()
             .unwrap()
@@ -72,7 +129,7 @@ impl EventBus {
     /// Subscribe to a chat's live events. Events published after this call are
     /// delivered; a client pairs this with a journal replay to cover the past.
     pub fn subscribe(&self, chat: ChatId) -> broadcast::Receiver<SequencedEvent> {
-        self.sender(chat).subscribe()
+        self.channel(chat).subscribe()
     }
 
     /// Subscribe to a chat's metadata notices.

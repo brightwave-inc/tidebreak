@@ -162,6 +162,13 @@ where
         seq: Set(seq),
         event: Set(serde_json::to_value(event).map_err(AgentError::from)?),
         created_at: Set(Utc::now()),
+        // The chat lane's recovery receipts; an engine fenced by its spawn
+        // epoch writes none.
+        turn_id: Set(None),
+        lease_token: Set(None),
+        attempt_event_ordinal: Set(None),
+        scan_token: Set(None),
+        terminal: Set(false),
     }
     .insert(conn)
     .await
@@ -260,6 +267,40 @@ pub async fn list_events(
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(CodeEventPage { events, truncated })
+}
+
+/// The oldest events for one of the owner's sessions with `seq > after`, in
+/// order, at most `limit` of them.
+///
+/// The forward-reading companion to [`list_events`]: a follower that must
+/// not skip a row — the internal engine catching up after a lagged
+/// subscription — pages through the journal from its cursor with this,
+/// where the replay window would hand it the newest rows and drop the ones
+/// in between.
+pub async fn list_events_from(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+    after: i64,
+    limit: u64,
+) -> Result<Vec<SequencedCodeEvent>> {
+    entities::code_event::Entity::find()
+        .filter(entities::code_event::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_event::Column::SessionId.eq(session_id.0))
+        .filter(entities::code_event::Column::Seq.gt(after))
+        .order_by_asc(entities::code_event::Column::Seq)
+        .limit(limit)
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .map(|model| {
+            Ok(SequencedCodeEvent {
+                seq: model.seq,
+                event: serde_json::from_value(model.event)?,
+            })
+        })
+        .collect()
 }
 
 /// Complete reconstructable turn events through `through_turn`, newest first
@@ -455,7 +496,7 @@ fn terminal_status(event: &CodeEvent) -> Option<CodeTurnStatus> {
     match event {
         CodeEvent::TurnCompleted { .. } => Some(CodeTurnStatus::Completed),
         CodeEvent::TurnFailed { .. } => Some(CodeTurnStatus::Failed),
-        CodeEvent::TurnInterrupted => Some(CodeTurnStatus::Interrupted),
+        CodeEvent::TurnInterrupted { .. } => Some(CodeTurnStatus::Interrupted),
         _ => None,
     }
 }
@@ -565,6 +606,7 @@ mod fork_replay_tests {
         events.push(CodeEvent::TurnCompleted {
             usage: Default::default(),
             checkpoint: None,
+            stop_reason: None,
         });
         events
     }
@@ -627,6 +669,9 @@ mod fork_replay_tests {
                     call_id: "read-1".to_owned(),
                     outcome: ToolOutcome::Succeeded,
                     preview: "contents".to_owned(),
+                    output: None,
+                    action: None,
+                    result: None,
                     detail: None,
                     parent_call_id: Some("task-1".to_owned()),
                 },
@@ -634,6 +679,9 @@ mod fork_replay_tests {
                     call_id: "task-1".to_owned(),
                     outcome: ToolOutcome::Succeeded,
                     preview: "done".to_owned(),
+                    output: None,
+                    action: None,
+                    result: None,
                     detail: None,
                     parent_call_id: None,
                 },

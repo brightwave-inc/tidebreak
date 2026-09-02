@@ -678,14 +678,14 @@ where
     if !expected {
         return Ok(None);
     }
-    let stored = entities::event::Entity::find()
-        .filter(entities::event::Column::TurnId.eq(id.0))
-        .filter(entities::event::Column::Terminal.eq(true))
+    let stored = entities::code_event::Entity::find()
+        .filter(entities::code_event::Column::TurnId.eq(id.0))
+        .filter(entities::code_event::Column::Terminal.eq(true))
         .one(conn)
         .await
         .map_err(store_err)?
         .ok_or_else(|| AgentError::Store(format!("cancelled turn {id} is missing its event")))?;
-    let event = serde_json::from_value::<AgentEvent>(stored.payload)?;
+    let event = crate::chat_journal::decode_chat_event_required(stored.event)?;
     if !matches!(event, AgentEvent::TurnCancelled { .. }) {
         return Err(AgentError::Store(format!(
             "cancelled turn {id} has a different terminal event"

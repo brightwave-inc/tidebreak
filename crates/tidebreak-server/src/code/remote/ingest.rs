@@ -147,6 +147,7 @@ pub(crate) fn project_event(binding: &IngestBinding, kind: &str, payload: &Value
                 out.journal.push(CodeEvent::TurnCompleted {
                     usage: CodeUsage::default(),
                     checkpoint: None,
+                    stop_reason: None,
                 });
                 out.attention = Some(Attention::new(
                     AttentionState::DoneUnreviewed,
@@ -157,6 +158,7 @@ pub(crate) fn project_event(binding: &IngestBinding, kind: &str, payload: &Value
                     error: BoundedError {
                         message: "the engine turn failed".to_owned(),
                     },
+                    detail: None,
                 });
                 out.attention = Some(Attention::needs_you(
                     "the engine turn failed",
@@ -165,7 +167,7 @@ pub(crate) fn project_event(binding: &IngestBinding, kind: &str, payload: &Value
             }
         }
         "turn_interrupted" => {
-            out.journal.push(CodeEvent::TurnInterrupted);
+            out.journal.push(CodeEvent::TurnInterrupted { usage: None });
             out.attention = Some(Attention::needs_you(
                 "the turn was interrupted",
                 AttentionSource::Lifecycle,

@@ -177,8 +177,8 @@ describe the current schema, not the frozen baseline.
   `attachment_revision`.
 
   A chat is a session (decision 48 step 5): the row is the conversation row,
-  and every chat-side table (`message`, `turn_run`, `event`, `tool_call`,
-  and the rest) hangs off it by `chat_id`. A chat has no `workspace_id`,
+  and every chat-side table (`message`, `turn_run`, `tool_call`, and the
+  rest) hangs off it by `chat_id`. A chat has no `workspace_id`,
   runs the `internal` harness, and keeps the code-owned columns at rest
   until a session worker attaches. The chat routes read only those rows;
   the code routes and the runtime's boot recovery and sweeps read only rows
@@ -196,10 +196,21 @@ describe the current schema, not the frozen baseline.
   blob reference when large), `checkpoint_ref`, `diffstat` (JSON), `usage`
   (JSON, as reported by the harness), `narrative` (nullable; filled
   asynchronously, never blocks lifecycle), `started_at`, `ended_at`.
-- **`code_event`** — `(session_id, seq)` primary key, `event` (JSON),
-  `created_at`. The journal. Appends are epoch-fenced: a write carrying a
-  stale `spawn_epoch` is rejected, so a superseded worker cannot corrupt the
-  stream (the `db/ops/turn/` claim discipline applied here).
+- **`code_event`** — `(session_id, seq)` primary key, `owner`, `event`
+  (JSON), `created_at`, and the chat turn lane's recovery receipts
+  `turn_id`, `lease_token`, `attempt_event_ordinal`, `scan_token`, and
+  `terminal`. The one journal: every engine's rows, in the `CodeEvent`
+  vocabulary. A session worker's appends are epoch-fenced — a write
+  carrying a stale `spawn_epoch` is rejected, so a superseded worker cannot
+  corrupt the stream — and the chat lane's appends are lease-fenced by the
+  receipt columns instead: `(lease_token, attempt_event_ordinal)` makes a
+  retried append idempotent, `terminal` marks the one row that resolves a
+  turn, and `scan_token` marks a terminal row the claim scanner wrote. Both
+  writers take the same session row lock, so their sequences interleave.
+  The chat routes read the same rows through `tidebreak_core::chat_journal`,
+  the projection that gives each row its chat reading; rows only an external
+  engine writes have none and are skipped. The chat journal fixture
+  (`fixtures/journal-events.json`) pins that projection.
 - **`code_approval`** — `id`, `session_id`, `turn_id`, `kind` (JSON,
   normalized classification), `harness_raw` (JSON, size-capped), `state`
   (`Pending | Approved | Denied`), `feedback`, `requested_at`,
@@ -337,15 +348,25 @@ and takes its inference from the server's own provider resolution.
 Its durable state is the session row itself: a session with no workspace is
 a chat, readable through `/chats/{id}` by the same id, and the engine gives
 it the foreground coordinator run its turn lane admits against on first
-launch. `run_turn`
-admits the message to the chat turn lane, follows the chat journal, and
-translates each event into a `HarnessEvent`; `decide` resolves a tool
+launch. The lane journals the turn straight into the session's `code_event`
+rows — the one journal — and publishes each row on the session bus, so the
+engine translates nothing. `run_turn` admits the message to the lane and
+follows the journal for the turn; the session worker's sink applies the
+side effects of what it reports (the turn row closes with the usage the
+lane recorded) and writes no row a second time. `decide` resolves a tool
 approval on the chat approval broker, answers a questions card, or decides
 a plan. A questions card or a plan proposal ends the leg as
 `TurnOutcome::Parked` on an approval the worker minted, and the answer or
 plan decision resumes it through `resume_turn`. An accepted plan re-postures
 the session: the worker calls `set_permission_mode` with the mode the
 approval proposed before it resumes the turn.
+
+Until the approvals merge (slice D3), a consent card on an internal session
+is two rows: the lane's `ToolApprovalRequired` and the worker's
+`ApprovalRequested` for the approval row it minted; likewise the decision.
+The parks (`QuestionsAsked`, `PlanProposed`) are hints beside the
+`ApprovalRequested` the park mints. Each row states a different fact, and
+D3 folds them into one.
 
 The capability vector is what carries the difference from an external
 engine: `durable_parks`, `user_questions`, and `standing_grants` are
@@ -365,17 +386,30 @@ bounded):
 | `AssistantDelta` / `AssistantMessage` | streamed or whole assistant text |
 | `ReasoningDelta` | streamed thinking text where the harness reports it |
 | `ToolStarted` | call id, name, `ToolDetail` (`Command {cmd, cwd}` \| `FileEdit {path}` \| `FileRead {path}` \| `Search {query}` \| `Other {summary}`) |
-| `ToolCompleted` | call id, outcome, bounded preview, optional corrected `ToolDetail` |
+| `ToolCompleted` | call id, outcome, bounded preview, optional corrected `ToolDetail`; internal engine adds the whole `output` and the action and result previews |
 | `FileChanged` | path, change kind, diffstat |
 | `ApprovalRequested` | approval id (hint; body loads from the approvals route) |
 | `ApprovalResolved` | approval id, decision |
-| `UserSteered` | the user's mid-turn message |
-| `TurnCompleted` | usage, checkpoint info |
-| `TurnFailed` | bounded error |
-| `TurnInterrupted` | — |
+| `UserSteered` | the user's mid-turn message; internal engine adds the message row's id |
+| `TurnCompleted` | usage, checkpoint info; internal engine adds the stop reason |
+| `TurnFailed` | bounded error; internal engine adds the error's kind |
+| `TurnInterrupted` | usage up to the interruption, when the engine reports it |
 | `CheckpointRecorded` | turn id, diffstat |
 | `HarnessNotice` | level, message — the visible-degradation channel |
 | `AttentionChanged` | state, source |
+
+The internal engine's own rows, which no external adapter writes:
+
+| Variant | Carries |
+|---|---|
+| `TurnRefused` | usage, the model's refusal outcome |
+| `StreamInterrupted` | — (discard partial deltas since the last boundary) |
+| `ToolArgsDelta` | call id, a fragment of the call's JSON arguments |
+| `ToolApprovalRequired` | call id, tool name, approval class and kind, grant ladder, action preview |
+| `ToolApprovalDecided` | call id, approved |
+| `QuestionsAsked` / `PlanProposed` / `TaskPlanUpdated` | call id, turn id (hints; bodies load from their routes) |
+| `ContextTruncated` | tokens before and after fitting the context window |
+| `CompactionStarted` / `CompactionFinished` | — / whether a checkpoint was stored |
 
 Engines open a tool call before its arguments finish streaming. A supervisor
 reads the call while it runs, so an adapter waits for the first view that
@@ -454,9 +488,10 @@ GET             /code/workspaces/{id}/terminals/{tid}/read?cursor=
 POST            /code/workspaces/{id}/terminals/{tid}/write | /resize
 ```
 
-The session worker is the only journal writer for its session, under a
-lease and the spawn epoch; routes submit work and read state, they never
-write the journal directly.
+The session worker is the only journal writer for an external engine's
+session, under a lease and the spawn epoch; for the internal engine the
+chat turn lane writes the journal under its own lease. Routes submit work
+and read state, they never write the journal directly.
 
 ### Where worktrees live
 
