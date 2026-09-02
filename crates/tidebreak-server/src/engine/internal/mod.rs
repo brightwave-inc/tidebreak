@@ -2,7 +2,7 @@
 //!
 //! The engine drives [`tidebreak_core::agent::Agent`] through the chat turn
 //! lane that already runs it — the durable `turn_run` queue and the
-//! [`crate::turn_worker::TurnWorker`]. The lane journals the turn straight
+//! [`crate::engine::internal::leg::LegDriver`]. The lane journals the turn straight
 //! into the session's code journal (decision 0048 step 5), the one journal
 //! every engine writes, so the engine has nothing to translate: it admits
 //! the turn, follows that journal, and hands the session worker only the
@@ -15,6 +15,7 @@
 //! decision resumes it through [`tidebreak_harness::HarnessSession::resume_turn`].
 
 mod adapter;
+pub(crate) mod leg;
 mod session;
 
 pub(crate) use adapter::InternalAdapter;

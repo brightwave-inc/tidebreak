@@ -867,7 +867,7 @@ token is no longer printed at startup, because it authenticates nobody there.
 | Operational database | `crates/tidebreak-core/src/db/` | Schema plus transactional SQLite/Postgres state transitions |
 | Model providers | `crates/tidebreak-router/src/` | Anthropic/OpenAI adapters and model-to-provider routing |
 | Local API | `crates/tidebreak-server/src/lib.rs`, `routes.rs`, `routes/client_execution.rs` | Authentication, API assembly, chat, turn, and leased client-execution routes |
-| Turn execution | `crates/tidebreak-server/src/turn_worker.rs` | Claiming, heartbeats, event journaling, terminal resolution |
+| Turn execution | `crates/tidebreak-server/src/engine/internal/leg.rs` | Claiming, heartbeats, event journaling, terminal resolution |
 | Documents | `crates/tidebreak-server/src/routes/document.rs` | Synchronous upload, canonical decoding, and source-file access |
 | Document decoding | `crates/tidebreak-server/src/document_decode.rs` | Media-type-routed UTF-8 decoding with a binary fallback |
 | Desktop | `crates/tidebreak-desktop/src/`, `crates/tidebreak-desktop/ui/src/` | Tauri host and current React shell |

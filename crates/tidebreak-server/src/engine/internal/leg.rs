@@ -47,7 +47,7 @@ use crate::retry::{LaneBackoff, RetryAttempt, RetrySchedule};
 use crate::state::{BlobWriteGuard, TurnGuard};
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct TurnWorkerConfig {
+pub(crate) struct LegDriverConfig {
     pub(crate) lease: Duration,
     pub(crate) heartbeat: Duration,
     pub(crate) steer_poll: Duration,
@@ -64,7 +64,7 @@ pub(crate) struct TurnWorkerConfig {
     pub(crate) sandbox_spawn_execution_location: AgentRunExecutionLocation,
 }
 
-impl Default for TurnWorkerConfig {
+impl Default for LegDriverConfig {
     fn default() -> Self {
         Self {
             lease: Duration::from_secs(60),
@@ -89,7 +89,7 @@ impl Default for TurnWorkerConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TurnWorkerOutcome {
+pub(crate) enum LegDriverOutcome {
     Completed(TurnId),
     WaitingForClient(TurnId),
     WaitingForAgentRun(TurnId),
@@ -100,7 +100,7 @@ pub(crate) enum TurnWorkerOutcome {
 }
 
 #[derive(Clone)]
-pub(crate) struct TurnWorker {
+pub(crate) struct LegDriver {
     /// Per-caller gateway capabilities on a hosted machine (decisions 51 and
     /// 62): the turn's model resolution and utility role read the owner's
     /// own entitlement snapshot through this. `None` everywhere else.
@@ -132,7 +132,7 @@ pub(crate) struct TurnWorker {
     exec_folder_context: Option<Arc<crate::code_execution::ConfiguredExecProvider>>,
     private_scratch_root: Option<PathBuf>,
     diagnostics: Arc<crate::diagnostics::Diagnostics>,
-    config: TurnWorkerConfig,
+    config: LegDriverConfig,
     /// Update-quiesce channel pair, when this worker serves a process that
     /// can restart to update. `None` in tests that install none.
     quiesce: Option<crate::update_quiesce::ChatQuiesceWorker>,
@@ -574,7 +574,7 @@ impl<T> AbortOnDrop<T> {
     }
 }
 
-impl TurnWorker {
+impl LegDriver {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         store: Arc<dyn Store>,
@@ -591,7 +591,7 @@ impl TurnWorker {
         queued_turn_wake: Arc<Notify>,
         agent_config: AgentConfig,
         private_scratch_root: Option<PathBuf>,
-        config: TurnWorkerConfig,
+        config: LegDriverConfig,
     ) -> Self {
         assert!(!config.lease.is_zero());
         assert!(!config.heartbeat.is_zero());
@@ -867,7 +867,7 @@ impl TurnWorker {
     /// transcript and re-runs only the model call that was in flight — so the
     /// drain never refuses; the grace only saves re-running that call for
     /// turns that were about to finish anyway.
-    async fn drain_for_update(&self, turns: &mut tokio::task::JoinSet<Result<TurnWorkerOutcome>>) {
+    async fn drain_for_update(&self, turns: &mut tokio::task::JoinSet<Result<LegDriverOutcome>>) {
         let grace = tokio::time::sleep(CHAT_QUIESCE_TURN_GRACE);
         tokio::pin!(grace);
         while !turns.is_empty() {
@@ -934,7 +934,7 @@ impl TurnWorker {
     /// end of the turn is the only place that can apply them. Every way the run
     /// below returns has to pass through here, which is why the run itself is a
     /// separate function rather than an early return in this one.
-    async fn process(&self, turn: TurnRun, lease_token: uuid::Uuid) -> Result<TurnWorkerOutcome> {
+    async fn process(&self, turn: TurnRun, lease_token: uuid::Uuid) -> Result<LegDriverOutcome> {
         let chat_id = turn.chat_id;
         let turn_id = turn.id;
         let attempt_count = turn.attempt_count;
@@ -992,9 +992,9 @@ impl TurnWorker {
         });
         if matches!(
             outcome,
-            Ok(TurnWorkerOutcome::Completed(_)
-                | TurnWorkerOutcome::Cancelled(_)
-                | TurnWorkerOutcome::Failed(_))
+            Ok(LegDriverOutcome::Completed(_)
+                | LegDriverOutcome::Cancelled(_)
+                | LegDriverOutcome::Failed(_))
         ) {
             // The chat's live slot is free; its oldest queued message may now
             // be promotable. Errored and lease-lost segments terminalize later
@@ -1004,7 +1004,7 @@ impl TurnWorker {
         outcome
     }
 
-    async fn run_turn(&self, turn: TurnRun, lease_token: uuid::Uuid) -> Result<TurnWorkerOutcome> {
+    async fn run_turn(&self, turn: TurnRun, lease_token: uuid::Uuid) -> Result<LegDriverOutcome> {
         if turn.status != TurnRunStatus::Running || turn.lease_token != Some(lease_token) {
             return Err(AgentError::msg(format!(
                 "claimed turn {} has an invalid execution identity",
@@ -1289,7 +1289,7 @@ impl TurnWorker {
                                 .await;
                         }
                         LeaseState::Lost => {
-                            return Ok(TurnWorkerOutcome::LeaseLost(turn.id));
+                            return Ok(LegDriverOutcome::LeaseLost(turn.id));
                         }
                     }
                 }
@@ -1304,7 +1304,7 @@ impl TurnWorker {
                     .acknowledge_cancellation(&turn, lease_token, total_model_steps, total_usage)
                     .await;
             }
-            LeaseState::Lost => return Ok(TurnWorkerOutcome::LeaseLost(turn.id)),
+            LeaseState::Lost => return Ok(LegDriverOutcome::LeaseLost(turn.id)),
         }
         let started = AgentEvent::TurnStarted { turn_id: turn.id };
         match self.append_event(&turn, lease_token, 1, &started).await? {
@@ -1315,7 +1315,7 @@ impl TurnWorker {
                     .acknowledge_cancellation(&turn, lease_token, total_model_steps, total_usage)
                     .await;
             }
-            EventAppend::LeaseLost => return Ok(TurnWorkerOutcome::LeaseLost(turn.id)),
+            EventAppend::LeaseLost => return Ok(LegDriverOutcome::LeaseLost(turn.id)),
         }
 
         let mut ordinal = 2_i32;
@@ -1431,7 +1431,7 @@ impl TurnWorker {
                                             &mut events_rx,
                                         )
                                         .await;
-                                        return Ok(TurnWorkerOutcome::LeaseLost(turn.id));
+                                        return Ok(LegDriverOutcome::LeaseLost(turn.id));
                                     }
                                 }
                             }
@@ -1478,7 +1478,7 @@ impl TurnWorker {
                                     &mut events_rx,
                                 )
                                 .await;
-                                return Ok(TurnWorkerOutcome::LeaseLost(turn.id));
+                                return Ok(LegDriverOutcome::LeaseLost(turn.id));
                             }
                         }
                     }
@@ -1562,7 +1562,7 @@ impl TurnWorker {
                         )
                         .await;
                 }
-                LeaseState::Lost => return Ok(TurnWorkerOutcome::LeaseLost(turn.id)),
+                LeaseState::Lost => return Ok(LegDriverOutcome::LeaseLost(turn.id)),
             }
 
             match drive_result {
@@ -1750,7 +1750,7 @@ impl TurnWorker {
                                         total_usage.cache_read_input_tokens,
                                         total_usage.cache_creation_input_tokens,
                                     );
-                                    return Ok(TurnWorkerOutcome::Completed(turn.id));
+                                    return Ok(LegDriverOutcome::Completed(turn.id));
                                 }
                                 CompleteTurnRunOutcome::SteerPending(_)
                                 | CompleteTurnRunOutcome::OutputSuperseded(_) => {
@@ -1780,7 +1780,7 @@ impl TurnWorker {
                                     LiveTurnState::Running => tokio::task::yield_now().await,
                                     LiveTurnState::Cancelling => break false,
                                     LiveTurnState::Lost => {
-                                        return Ok(TurnWorkerOutcome::LeaseLost(turn.id));
+                                        return Ok(LegDriverOutcome::LeaseLost(turn.id));
                                     }
                                 }
                             }
@@ -1801,11 +1801,11 @@ impl TurnWorker {
                                     ResolutionState::Retry => {}
                                     ResolutionState::Resolved(event) => {
                                         self.publish(turn.chat_id, *event);
-                                        return Ok(TurnWorkerOutcome::Completed(turn.id));
+                                        return Ok(LegDriverOutcome::Completed(turn.id));
                                     }
                                     ResolutionState::Cancelling => break false,
                                     ResolutionState::Lost => {
-                                        return Ok(TurnWorkerOutcome::LeaseLost(turn.id));
+                                        return Ok(LegDriverOutcome::LeaseLost(turn.id));
                                     }
                                 }
                             }
@@ -1864,7 +1864,7 @@ impl TurnWorker {
                                     .await;
                             }
                             EventAppend::LeaseLost => {
-                                return Ok(TurnWorkerOutcome::LeaseLost(turn.id));
+                                return Ok(LegDriverOutcome::LeaseLost(turn.id));
                             }
                         }
                         continuation_heartbeat.abort_and_wait().await;
@@ -1989,7 +1989,7 @@ impl TurnWorker {
                                             .await;
                                     }
                                     Ok(HeartbeatOutcome::LeaseLost) | Err(_) => {
-                                        return Ok(TurnWorkerOutcome::LeaseLost(turn.id));
+                                        return Ok(LegDriverOutcome::LeaseLost(turn.id));
                                     }
                                 }
                             }
@@ -2007,7 +2007,7 @@ impl TurnWorker {
                                     self.publish(turn.chat_id, event);
                                 }
                                 checkpoint_heartbeat.abort_and_wait().await;
-                                return Ok(TurnWorkerOutcome::WaitingForClient(turn.id));
+                                return Ok(LegDriverOutcome::WaitingForClient(turn.id));
                             }
                             Ok(Some(ParkTurnForClientCallOutcome::SteerPending(_)))
                             | Ok(Some(ParkTurnForClientCallOutcome::OutputSuperseded(_))) => {
@@ -2043,7 +2043,7 @@ impl TurnWorker {
                                     }
                                     LiveTurnState::Lost => {
                                         checkpoint_heartbeat.abort_and_wait().await;
-                                        return Ok(TurnWorkerOutcome::LeaseLost(turn.id));
+                                        return Ok(LegDriverOutcome::LeaseLost(turn.id));
                                     }
                                 }
                             }
@@ -2092,7 +2092,7 @@ impl TurnWorker {
                                 .await;
                         }
                         EventAppend::LeaseLost => {
-                            return Ok(TurnWorkerOutcome::LeaseLost(turn.id));
+                            return Ok(LegDriverOutcome::LeaseLost(turn.id));
                         }
                     }
                     continuation_heartbeat.abort_and_wait().await;
@@ -2216,7 +2216,7 @@ impl TurnWorker {
                                             .await;
                                     }
                                     Ok(HeartbeatOutcome::LeaseLost) | Err(_) => {
-                                        return Ok(TurnWorkerOutcome::LeaseLost(turn.id));
+                                        return Ok(LegDriverOutcome::LeaseLost(turn.id));
                                     }
                                 }
                             }
@@ -2229,7 +2229,7 @@ impl TurnWorker {
                                 self.publish(turn.chat_id, event);
                                 self.sandbox_agent_wake.notify_one();
                                 self.wake.notify_one();
-                                return Ok(TurnWorkerOutcome::Resuming(turn.id));
+                                return Ok(LegDriverOutcome::Resuming(turn.id));
                             }
                             Ok(Some(CheckpointSandboxSpawnOutcome::Existing { event, .. })) => {
                                 checkpoint_heartbeat.abort_and_wait().await;
@@ -2240,7 +2240,7 @@ impl TurnWorker {
                                 self.publish(turn.chat_id, event);
                                 self.sandbox_agent_wake.notify_one();
                                 self.wake.notify_one();
-                                return Ok(TurnWorkerOutcome::Resuming(turn.id));
+                                return Ok(LegDriverOutcome::Resuming(turn.id));
                             }
                             Ok(Some(CheckpointSandboxSpawnOutcome::SteerPending(_)))
                             | Ok(Some(CheckpointSandboxSpawnOutcome::OutputSuperseded(_))) => {
@@ -2306,7 +2306,7 @@ impl TurnWorker {
                                     }
                                     LiveTurnState::Lost => {
                                         checkpoint_heartbeat.abort_and_wait().await;
-                                        return Ok(TurnWorkerOutcome::LeaseLost(turn.id));
+                                        return Ok(LegDriverOutcome::LeaseLost(turn.id));
                                     }
                                 }
                             }
@@ -2327,7 +2327,7 @@ impl TurnWorker {
                                     }
                                     LiveTurnState::Lost => {
                                         checkpoint_heartbeat.abort_and_wait().await;
-                                        return Ok(TurnWorkerOutcome::LeaseLost(turn.id));
+                                        return Ok(LegDriverOutcome::LeaseLost(turn.id));
                                     }
                                 }
                             }
@@ -2377,7 +2377,7 @@ impl TurnWorker {
                                 .await;
                         }
                         EventAppend::LeaseLost => {
-                            return Ok(TurnWorkerOutcome::LeaseLost(turn.id));
+                            return Ok(LegDriverOutcome::LeaseLost(turn.id));
                         }
                     }
                     continuation_heartbeat.abort_and_wait().await;
@@ -2492,7 +2492,7 @@ impl TurnWorker {
                                             .await;
                                     }
                                     Ok(HeartbeatOutcome::LeaseLost) | Err(_) => {
-                                        return Ok(TurnWorkerOutcome::LeaseLost(turn.id));
+                                        return Ok(LegDriverOutcome::LeaseLost(turn.id));
                                     }
                                 }
                             }
@@ -2504,7 +2504,7 @@ impl TurnWorker {
                                 // This also drives the durable ready-set scan
                                 // when every child completed before the park.
                                 self.sandbox_agent_wake.notify_one();
-                                return Ok(TurnWorkerOutcome::WaitingForAgentRun(turn.id));
+                                return Ok(LegDriverOutcome::WaitingForAgentRun(turn.id));
                             }
                             Ok(Some(ParkTurnForAgentRunWaitSetOutcome::SteerPending(_)))
                             | Ok(Some(ParkTurnForAgentRunWaitSetOutcome::OutputSuperseded(_))) => {
@@ -2534,7 +2534,7 @@ impl TurnWorker {
                                     }
                                     LiveTurnState::Lost => {
                                         checkpoint_heartbeat.abort_and_wait().await;
-                                        return Ok(TurnWorkerOutcome::LeaseLost(turn.id));
+                                        return Ok(LegDriverOutcome::LeaseLost(turn.id));
                                     }
                                 }
                             }
@@ -2575,7 +2575,7 @@ impl TurnWorker {
                                 .await;
                         }
                         EventAppend::LeaseLost => {
-                            return Ok(TurnWorkerOutcome::LeaseLost(turn.id));
+                            return Ok(LegDriverOutcome::LeaseLost(turn.id));
                         }
                     }
                     continuation_heartbeat.abort_and_wait().await;
@@ -2927,7 +2927,7 @@ impl TurnWorker {
         lease_token: uuid::Uuid,
         model_steps: i32,
         usage: tidebreak_core::Usage,
-    ) -> Result<TurnWorkerOutcome> {
+    ) -> Result<LegDriverOutcome> {
         self.acknowledge_cancellation_with_output(turn, lease_token, model_steps, usage, None)
             .await
     }
@@ -2944,7 +2944,7 @@ impl TurnWorker {
             tidebreak_core::Message,
             Vec<tidebreak_core::AssistantCitationInput>,
         )>,
-    ) -> Result<TurnWorkerOutcome> {
+    ) -> Result<LegDriverOutcome> {
         let terminal_event = AgentEvent::TurnCancelled { usage };
         loop {
             match self
@@ -2967,9 +2967,9 @@ impl TurnWorker {
                     if let Some(event) = resolution.terminal_event {
                         self.publish(turn.chat_id, event);
                     }
-                    return Ok(TurnWorkerOutcome::Cancelled(turn.id));
+                    return Ok(LegDriverOutcome::Cancelled(turn.id));
                 }
-                Ok(None) => return Ok(TurnWorkerOutcome::LeaseLost(turn.id)),
+                Ok(None) => return Ok(LegDriverOutcome::LeaseLost(turn.id)),
                 Err(error) => {
                     self.retry_after("cancellation acknowledgement", turn.id, &error)
                         .await;
@@ -2986,10 +2986,10 @@ impl TurnWorker {
                         ResolutionState::Retry | ResolutionState::Cancelling => {}
                         ResolutionState::Resolved(event) => {
                             self.publish(turn.chat_id, *event);
-                            return Ok(TurnWorkerOutcome::Cancelled(turn.id));
+                            return Ok(LegDriverOutcome::Cancelled(turn.id));
                         }
                         ResolutionState::Lost => {
-                            return Ok(TurnWorkerOutcome::LeaseLost(turn.id));
+                            return Ok(LegDriverOutcome::LeaseLost(turn.id));
                         }
                     }
                 }
@@ -3005,7 +3005,7 @@ impl TurnWorker {
         usage: tidebreak_core::Usage,
         code: &str,
         detail: &str,
-    ) -> Result<TurnWorkerOutcome> {
+    ) -> Result<LegDriverOutcome> {
         self.record_failure_with_retry(
             turn,
             lease_token,
@@ -3028,7 +3028,7 @@ impl TurnWorker {
         code: &str,
         detail: &str,
         retry_after: Option<Duration>,
-    ) -> Result<TurnWorkerOutcome> {
+    ) -> Result<LegDriverOutcome> {
         let retry = crate::event_projection::TurnFailureCategory::from_kind(code)
             .retries_may_succeed()
             .then(|| {
@@ -3052,7 +3052,7 @@ impl TurnWorker {
         code: &str,
         detail: &str,
         retry: TurnFailureRetry,
-    ) -> Result<TurnWorkerOutcome> {
+    ) -> Result<LegDriverOutcome> {
         let mut detail: String = detail
             .chars()
             .map(|character| {
@@ -3095,7 +3095,7 @@ impl TurnWorker {
                     return Ok(match resolution.outcome {
                         RecordTurnFailureOutcome::Recorded(_)
                         | RecordTurnFailureOutcome::Existing(_) => {
-                            TurnWorkerOutcome::Failed(turn.id)
+                            LegDriverOutcome::Failed(turn.id)
                         }
                     });
                 }
@@ -3106,7 +3106,7 @@ impl TurnWorker {
                             .acknowledge_cancellation(turn, lease_token, model_steps, usage)
                             .await;
                     }
-                    LiveTurnState::Lost => return Ok(TurnWorkerOutcome::LeaseLost(turn.id)),
+                    LiveTurnState::Lost => return Ok(LegDriverOutcome::LeaseLost(turn.id)),
                 },
                 Err(error) => {
                     self.retry_after("failure resolution", turn.id, &error)
@@ -3132,7 +3132,7 @@ impl TurnWorker {
                         ResolutionState::Retry => {}
                         ResolutionState::Resolved(event) => {
                             self.publish(turn.chat_id, *event);
-                            return Ok(TurnWorkerOutcome::Failed(turn.id));
+                            return Ok(LegDriverOutcome::Failed(turn.id));
                         }
                         ResolutionState::Cancelling => {
                             return self
@@ -3140,7 +3140,7 @@ impl TurnWorker {
                                 .await;
                         }
                         ResolutionState::Lost => {
-                            return Ok(TurnWorkerOutcome::LeaseLost(turn.id));
+                            return Ok(LegDriverOutcome::LeaseLost(turn.id));
                         }
                     }
                 }
@@ -3326,7 +3326,7 @@ fn chrono_duration(duration: Duration) -> Result<chrono::Duration> {
         .map_err(|error| AgentError::msg(format!("invalid turn-worker duration: {error}")))
 }
 
-fn log_turn_result(result: std::result::Result<Result<TurnWorkerOutcome>, tokio::task::JoinError>) {
+fn log_turn_result(result: std::result::Result<Result<LegDriverOutcome>, tokio::task::JoinError>) {
     match result {
         Ok(Ok(_)) => {}
         Ok(Err(error)) => tracing::error!("tidebreak: turn worker execution failed: {error}"),
@@ -3334,21 +3334,21 @@ fn log_turn_result(result: std::result::Result<Result<TurnWorkerOutcome>, tokio:
     }
 }
 
-fn turn_worker_outcome_label(outcome: &Result<TurnWorkerOutcome>) -> &'static str {
+fn turn_worker_outcome_label(outcome: &Result<LegDriverOutcome>) -> &'static str {
     match outcome {
-        Ok(TurnWorkerOutcome::Completed(_)) => "completed",
-        Ok(TurnWorkerOutcome::WaitingForClient(_)) => "waiting_for_client",
-        Ok(TurnWorkerOutcome::WaitingForAgentRun(_)) => "waiting_for_agent_run",
-        Ok(TurnWorkerOutcome::Resuming(_)) => "resuming",
-        Ok(TurnWorkerOutcome::Cancelled(_)) => "cancelled",
-        Ok(TurnWorkerOutcome::Failed(_)) => "failed",
-        Ok(TurnWorkerOutcome::LeaseLost(_)) => "lease_lost",
+        Ok(LegDriverOutcome::Completed(_)) => "completed",
+        Ok(LegDriverOutcome::WaitingForClient(_)) => "waiting_for_client",
+        Ok(LegDriverOutcome::WaitingForAgentRun(_)) => "waiting_for_agent_run",
+        Ok(LegDriverOutcome::Resuming(_)) => "resuming",
+        Ok(LegDriverOutcome::Cancelled(_)) => "cancelled",
+        Ok(LegDriverOutcome::Failed(_)) => "failed",
+        Ok(LegDriverOutcome::LeaseLost(_)) => "lease_lost",
         Err(_) => "error",
     }
 }
 
-fn turn_worker_outcome_is_error(outcome: &Result<TurnWorkerOutcome>) -> bool {
-    matches!(outcome, Ok(TurnWorkerOutcome::Failed(_)) | Err(_))
+fn turn_worker_outcome_is_error(outcome: &Result<LegDriverOutcome>) -> bool {
+    matches!(outcome, Ok(LegDriverOutcome::Failed(_)) | Err(_))
 }
 
 #[cfg(test)]
