@@ -59,7 +59,7 @@ pub(crate) async fn materialize_session_memory(
     if let Some(repo_id) = repo_id {
         records.extend(list_active(backend, owner, MemoryScope::Repo { repo_id }).await?);
     }
-    records.sort_by(|left, right| left.id.0.cmp(&right.id.0));
+    records.sort_by_key(|record| record.id.0);
     for record in records {
         files.push((
             record_file_name(&record),
@@ -67,7 +67,7 @@ pub(crate) async fn materialize_session_memory(
         ));
     }
 
-    files.sort_by(|left, right| left.0.cmp(&right.0));
+    files.sort_by_key(|(name, _)| name.clone());
     for (name, body) in files {
         dir.publish(OsStr::new(&name), body.as_bytes()).await?;
     }

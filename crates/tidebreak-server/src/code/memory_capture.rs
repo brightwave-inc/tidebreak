@@ -230,10 +230,10 @@ async fn context_file_hint(
     for sequenced in &events {
         match &sequenced.event {
             CodeEvent::TurnStarted { turn_id: started } if *started == turn_id => break,
-            CodeEvent::FileChanged { path, .. } if is_agent_context_file(path) => {
-                if !paths.contains(path) {
-                    paths.push(path.clone());
-                }
+            CodeEvent::FileChanged { path, .. }
+                if is_agent_context_file(path) && !paths.contains(path) =>
+            {
+                paths.push(path.clone());
             }
             _ => {}
         }
