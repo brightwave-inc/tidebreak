@@ -14,7 +14,9 @@ use tidebreak_core::{
     AgentError, ApprovalClass, DocumentBlob, ImageData, ImageMediaType, ImageRef, Result, Tool,
     ToolCtx, ToolOutput, ToolRegistry, ToolSpec, ToolUiView,
 };
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{
+    AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader,
+};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
@@ -1269,11 +1271,24 @@ fn collect_first_stderr_line(
     };
     tokio::spawn(async move {
         let mut reader = BufReader::new(stderr);
-        let mut line = String::new();
-        let first = match reader.read_line(&mut line).await {
-            Ok(0) => None,
-            Ok(_) => Some(sanitize_stderr_line(&line)),
-            Err(_) => None,
+        let mut buf = Vec::new();
+        let mut byte = [0u8; 1];
+        let first = loop {
+            if buf.len() >= MAX_STDERR_LINE_BYTES {
+                break Some(sanitize_stderr_line(&String::from_utf8_lossy(&buf)));
+            }
+            match reader.read(&mut byte).await {
+                Ok(0) if buf.is_empty() => break None,
+                Ok(0) => break Some(sanitize_stderr_line(&String::from_utf8_lossy(&buf))),
+                Ok(_) if byte[0] == b'\n' => {
+                    if buf.last() == Some(&b'\r') {
+                        buf.pop();
+                    }
+                    break Some(sanitize_stderr_line(&String::from_utf8_lossy(&buf)));
+                }
+                Ok(_) => buf.push(byte[0]),
+                Err(_) => break None,
+            }
         };
         let _ = sender.send(first);
         let mut sink = tokio::io::sink();
@@ -1282,8 +1297,10 @@ fn collect_first_stderr_line(
     receiver
 }
 
+const MAX_STDERR_LINE_BYTES: usize = 200;
+
 fn sanitize_stderr_line(line: &str) -> String {
-    const MAX: usize = 200;
+    const MAX: usize = MAX_STDERR_LINE_BYTES;
     let cleaned: String = line
         .trim()
         .chars()

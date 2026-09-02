@@ -328,9 +328,9 @@ impl HttpWire {
             return Ok(());
         }
         let port = self.url.port_or_known_default().unwrap_or(80);
-        match std::net::ToSocketAddrs::to_socket_addrs(&(host, port)) {
-            Ok(addresses) => {
-                if addresses.into_iter().next().is_some() {
+        match tokio::net::lookup_host((host, port)).await {
+            Ok(mut addresses) => {
+                if addresses.next().is_some() {
                     Ok(())
                 } else {
                     Err(mcp_message(format!("DNS resolution failed ({host}).")))
