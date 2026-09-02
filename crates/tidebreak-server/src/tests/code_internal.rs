@@ -211,6 +211,28 @@ async fn pending_approval_of_kind(
     .unwrap_or_else(|_| panic!("a pending {kind} approval appears"))
 }
 
+/// Poll until the session's turns read exactly `expected`, or fail.
+async fn wait_for_turn_statuses(
+    client: &reqwest::Client,
+    addr: std::net::SocketAddr,
+    token: &str,
+    session_id: CodeSessionId,
+    expected: &[&str],
+) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let statuses = turn_statuses(client, addr, token, session_id).await;
+        if statuses == expected {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "turn statuses stayed {statuses:?}, expected {expected:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
 async fn turn_statuses(
     client: &reqwest::Client,
     addr: std::net::SocketAddr,
@@ -370,10 +392,9 @@ async fn a_conversation_without_a_workspace_runs_on_the_code_wire() {
     let raw: serde_json::Value =
         serde_json::from_str(plan["harness_raw_json"].as_str().unwrap()).unwrap();
     assert_eq!(raw["title"], "Ship the greeting");
-    assert_eq!(
-        turn_statuses(&client, addr, &token, session_id).await,
-        vec!["waiting"]
-    );
+    // The approval is published before the worker persists the park, so
+    // the row can still read `running` for a moment.
+    wait_for_turn_statuses(&client, addr, &token, session_id, &["waiting"]).await;
     decide(
         &client,
         addr,
