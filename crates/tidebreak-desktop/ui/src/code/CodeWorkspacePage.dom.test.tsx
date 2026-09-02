@@ -36,6 +36,7 @@ import { resetCodeSessionRegistry } from "./CodeSessionRegistry";
 import { useCodeUiStore } from "./CodeUiStore";
 import { resetWorkflowPromptStore } from "./workflowPrompts";
 import { disconnectCodeUpdates, useCodeUpdatesStore } from "./CodeUpdatesStore";
+import { useComposerDrafts } from "../ComposerDrafts";
 import { CodeWorkspacePage } from "./CodeWorkspacePage";
 import { MIN_INSPECTOR_PANE_WIDTH_PX } from "./inspectorLayout";
 import {
@@ -735,6 +736,8 @@ afterEach(() => {
     quickOpenPending: false,
   });
   resetWorkflowPromptStore();
+  useComposerDrafts.setState({ drafts: {}, attachments: {} });
+  window.sessionStorage.clear();
   browserMocks.close.mockClear();
   persistMocks.seed.mockClear();
   window.localStorage.clear();

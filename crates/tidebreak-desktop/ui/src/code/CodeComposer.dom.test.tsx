@@ -74,7 +74,8 @@ afterEach(() => {
     pendingComposerImages: null,
     composerActionScope: null,
   });
-  useComposerDrafts.setState({ attachments: {} });
+  useComposerDrafts.setState({ drafts: {}, attachments: {} });
+  window.sessionStorage.clear();
 });
 
 const QUEUED = {
@@ -1069,6 +1070,78 @@ describe("CodeComposer", () => {
         { blob_id: attachmentId, media_type: "image/png" },
       ]),
     );
+  });
+
+  it("keeps the session draft across unmount and remount", async () => {
+    const user = userEvent.setup();
+    const first = renderComposer(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        sessionId="sess-1"
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+      />,
+    );
+
+    await user.type(
+      screen.getByRole("textbox", { name: "Message" }),
+      "unsent code thought",
+    );
+    first.unmount();
+
+    const restored = renderComposer(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        sessionId="sess-1"
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue(
+      "unsent code thought",
+    );
+    restored.unmount();
+
+    renderComposer(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        sessionId="sess-2"
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("");
+    cleanup();
+
+    const sending = renderComposer(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        sessionId="sess-1"
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue(
+      "unsent code thought",
+    );
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("");
+    sending.unmount();
+
+    renderComposer(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        sessionId="sess-1"
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("");
   });
 });
 

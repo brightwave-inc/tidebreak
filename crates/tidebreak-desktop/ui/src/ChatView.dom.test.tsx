@@ -1,6 +1,23 @@
 // @vitest-environment jsdom
-import { act, cleanup, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import {
+  createMemoryHistory,
+  createRootRoute,
+  createRoute,
+  createRouter,
+  RouterProvider,
+  useNavigate,
+  useParams,
+  useRouter,
+} from "@tanstack/react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApiClient, Chat } from "./api";
 import { ChatView, type ChatViewProps } from "./ChatView";
@@ -109,9 +126,17 @@ async function renderChatView(overrides: Partial<ChatViewProps> = {}) {
   return props;
 }
 
+const otherChat = {
+  id: "chat-2",
+  title: "Other work",
+  project_id: null,
+} as unknown as Chat;
+
 beforeEach(() => {
   useChatSessionStore.getState().reset();
   useComposerDrafts.getState().clearDraft(chat.id);
+  useComposerDrafts.getState().clearDraft(otherChat.id);
+  window.sessionStorage.clear();
   usePendingPrompts.setState({
     chatId: null,
     userQuestions: [],
@@ -435,4 +460,178 @@ describe("ChatView", () => {
       expect(screen.queryByText(/steer rejected/)).not.toBeInTheDocument(),
     );
   });
+
+  it("keeps the composer draft across a Settings round trip", async () => {
+    const user = userEvent.setup();
+    const { router } = await mountConversationShell();
+
+    await user.type(
+      screen.getByRole("textbox", { name: "Message" }),
+      "unsent thought",
+    );
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue(
+      "unsent thought",
+    );
+
+    await user.click(screen.getByRole("button", { name: "Settings" }));
+    expect(await screen.findByTestId("settings")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("textbox", { name: "Message" }),
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Back to app" }));
+    expect(await screen.findByRole("textbox", { name: "Message" })).toHaveValue(
+      "unsent thought",
+    );
+    expect(router.state.location.pathname).toBe("/c/chat-1");
+  });
+
+  it("keeps drafts scoped to their conversation and forgets them on send", async () => {
+    const user = userEvent.setup();
+    const { router } = await mountConversationShell();
+
+    await user.type(
+      screen.getByRole("textbox", { name: "Message" }),
+      "only for roadmap",
+    );
+
+    await user.click(screen.getByRole("button", { name: "Other work" }));
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/c/chat-2"),
+    );
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("");
+
+    await user.type(
+      screen.getByRole("textbox", { name: "Message" }),
+      "only for other",
+    );
+
+    await user.click(screen.getByRole("button", { name: "Roadmap" }));
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/c/chat-1"),
+    );
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue(
+      "only for roadmap",
+    );
+
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("");
+
+    await user.click(screen.getByRole("button", { name: "Settings" }));
+    await screen.findByTestId("settings");
+    await user.click(screen.getByRole("button", { name: "Back to app" }));
+
+    expect(await screen.findByRole("textbox", { name: "Message" })).toHaveValue(
+      "",
+    );
+    expect(useComposerDrafts.getState().drafts[chat.id]).toBeFalsy();
+
+    await user.click(screen.getByRole("button", { name: "Other work" }));
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/c/chat-2"),
+    );
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue(
+      "only for other",
+    );
+
+    useComposerDrafts.getState().clearDraft(otherChat.id);
+    await user.click(screen.getByRole("button", { name: "Settings" }));
+    await screen.findByTestId("settings");
+    await user.click(screen.getByRole("button", { name: "Back to app" }));
+    expect(await screen.findByRole("textbox", { name: "Message" })).toHaveValue(
+      "",
+    );
+  });
 });
+
+function ConversationChatPage() {
+  const navigate = useNavigate();
+  const { chatId } = useParams({ strict: false }) as { chatId: string };
+  const openChat = chatId === otherChat.id ? otherChat : chat;
+
+  return (
+    <>
+      <button type="button" onClick={() => void navigate({ to: "/settings" })}>
+        Settings
+      </button>
+      <button
+        type="button"
+        onClick={() =>
+          void navigate({ to: "/c/$chatId", params: { chatId: chat.id } })
+        }
+      >
+        Roadmap
+      </button>
+      <button
+        type="button"
+        onClick={() =>
+          void navigate({
+            to: "/c/$chatId",
+            params: { chatId: otherChat.id },
+          })
+        }
+      >
+        Other work
+      </button>
+      <ChatView
+        client={client}
+        chat={openChat}
+        hydrated
+        nativeHost={false}
+        deletingChat={false}
+        composerModelMenu={null}
+        composerPermissionMenu={null}
+        composerImages={noImages()}
+        files={noFiles()}
+        voiceInputUsed={false}
+        onVoiceInputAccepted={vi.fn()}
+        attachError={null}
+        onDraftChange={(value) =>
+          useComposerDrafts.getState().setDraft(openChat.id, value)
+        }
+        onSelectPrompt={vi.fn()}
+        onSend={async () => {
+          useComposerDrafts.getState().setDraft(openChat.id, "");
+        }}
+      />
+    </>
+  );
+}
+
+function SettingsPage() {
+  const router = useRouter();
+  return (
+    <>
+      <div data-testid="settings">settings</div>
+      <button
+        type="button"
+        onClick={() => {
+          if (router.history.canGoBack()) router.history.back();
+        }}
+      >
+        Back to app
+      </button>
+    </>
+  );
+}
+
+async function mountConversationShell() {
+  const rootRoute = createRootRoute();
+  const chatRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/c/$chatId",
+    component: ConversationChatPage,
+  });
+  const settingsRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: "/settings",
+    component: SettingsPage,
+  });
+  const router = createRouter({
+    routeTree: rootRoute.addChildren([chatRoute, settingsRoute]),
+    history: createMemoryHistory({ initialEntries: ["/c/chat-1"] }),
+  });
+  await router.load();
+  const result = render(<RouterProvider router={router as never} />);
+  return { ...result, router };
+}
