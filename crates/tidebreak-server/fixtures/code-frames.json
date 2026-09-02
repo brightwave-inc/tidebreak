@@ -1012,5 +1012,154 @@
       },
       "seq": 55
     }
+  },
+  {
+    "kind": "event_frame",
+    "name": "event: turn_refused (internal engine)",
+    "value": {
+      "event": {
+        "refusal": {
+          "details": {
+            "category": "safety"
+          },
+          "partial_output": true
+        },
+        "type": "turn_refused",
+        "usage": {
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 900,
+          "context_tokens": 2440,
+          "first_call_context_tokens": 2100,
+          "input_tokens": 1200,
+          "output_tokens": 340
+        }
+      },
+      "seq": 56
+    }
+  },
+  {
+    "kind": "event_frame",
+    "name": "event: stream_interrupted (internal engine)",
+    "value": {
+      "event": {
+        "type": "stream_interrupted"
+      },
+      "seq": 57,
+      "transient": true
+    }
+  },
+  {
+    "kind": "event_frame",
+    "name": "event: tool_args_delta (internal engine, transient)",
+    "value": {
+      "event": {
+        "call_id": "call_01",
+        "fragment": "{\"command\":\"cargo\",",
+        "type": "tool_args_delta"
+      },
+      "seq": 57,
+      "transient": true
+    }
+  },
+  {
+    "kind": "event_frame",
+    "name": "event: tool_approval_required (internal engine)",
+    "value": {
+      "event": {
+        "call_id": "call_01",
+        "class": "workspace",
+        "grant_scopes": [
+          {
+            "command": "cargo",
+            "scope": "any_args_for"
+          }
+        ],
+        "kind": "exec_may_run_networked_command",
+        "tool_name": "exec",
+        "type": "tool_approval_required"
+      },
+      "seq": 58
+    }
+  },
+  {
+    "kind": "event_frame",
+    "name": "event: tool_approval_decided (internal engine)",
+    "value": {
+      "event": {
+        "approved": true,
+        "call_id": "call_01",
+        "type": "tool_approval_decided"
+      },
+      "seq": 59
+    }
+  },
+  {
+    "kind": "event_frame",
+    "name": "event: questions_asked (internal engine)",
+    "value": {
+      "event": {
+        "call_id": "call_02",
+        "turn_id": "00000000-0000-0000-0000-000000000004",
+        "type": "questions_asked"
+      },
+      "seq": 60
+    }
+  },
+  {
+    "kind": "event_frame",
+    "name": "event: plan_proposed (internal engine)",
+    "value": {
+      "event": {
+        "call_id": "call_03",
+        "turn_id": "00000000-0000-0000-0000-000000000004",
+        "type": "plan_proposed"
+      },
+      "seq": 61
+    }
+  },
+  {
+    "kind": "event_frame",
+    "name": "event: task_plan_updated (internal engine)",
+    "value": {
+      "event": {
+        "call_id": "call_04",
+        "turn_id": "00000000-0000-0000-0000-000000000004",
+        "type": "task_plan_updated"
+      },
+      "seq": 62
+    }
+  },
+  {
+    "kind": "event_frame",
+    "name": "event: context_truncated (internal engine)",
+    "value": {
+      "event": {
+        "fitted_tokens": 180000,
+        "original_tokens": 210000,
+        "type": "context_truncated"
+      },
+      "seq": 63
+    }
+  },
+  {
+    "kind": "event_frame",
+    "name": "event: compaction_started (internal engine)",
+    "value": {
+      "event": {
+        "type": "compaction_started"
+      },
+      "seq": 64
+    }
+  },
+  {
+    "kind": "event_frame",
+    "name": "event: compaction_finished (internal engine)",
+    "value": {
+      "event": {
+        "compacted": true,
+        "type": "compaction_finished"
+      },
+      "seq": 65
+    }
   }
 ]
