@@ -40,6 +40,12 @@ pub struct HostEnv {
     /// Host-verified managed Node root. Pinned npm harnesses need its runtime
     /// directory first on `PATH`; their entrypoints resolve `node`/`node.exe`.
     pub managed_node_root: Option<PathBuf>,
+    /// The managed install to drive per engine when it is not the pin: the
+    /// exact version a reader on the `latest` update channel moved to. An
+    /// engine with no entry resolves to its pin. Nothing here is discovery —
+    /// the version must already be installed under `data_dir` with a marker
+    /// that names it, or the engine probes as not found.
+    pub harness_versions: Vec<(tidebreak_core::HarnessKind, String)>,
     /// Binaries the embedding environment provides and vouches for. A
     /// declared entry wins over both the pinned install and the login-shell
     /// PATH; the declared version is authoritative, so probe never runs
@@ -49,6 +55,18 @@ pub struct HostEnv {
     /// set, probes never run the login shell: commands resolve against this
     /// environment's `PATH`, and environment captures return it verbatim.
     pub declared_env: Option<Vec<(OsString, OsString)>>,
+}
+
+impl HostEnv {
+    /// The managed install version selected for `kind`, when it is not the
+    /// pin.
+    #[must_use]
+    pub fn harness_version(&self, kind: tidebreak_core::HarnessKind) -> Option<&str> {
+        self.harness_versions
+            .iter()
+            .find(|(candidate, _)| *candidate == kind)
+            .map(|(_, version)| version.as_str())
+    }
 }
 
 /// A harness binary the embedding environment installed itself.
@@ -86,6 +104,7 @@ impl HostEnv {
             clear_env: false,
             data_dir: None,
             managed_node_root: None,
+            harness_versions: Vec::new(),
             declared_binaries: Vec::new(),
             declared_env: None,
         }
@@ -190,7 +209,11 @@ pub async fn probe_shell(host: &HostEnv, name: &str) -> Result<ProbeCapture, Pro
     }
     if let Some(data_dir) = &host.data_dir {
         if let Some(kind) = kind_for_command(name) {
-            if let Some(binary) = crate::managed_binary(data_dir, kind) {
+            let binary = match host.harness_version(kind) {
+                Some(version) => crate::managed_binary_version(data_dir, kind, version),
+                None => crate::managed_binary(data_dir, kind),
+            };
+            if let Some(binary) = binary {
                 let node = host
                     .managed_node_root
                     .as_deref()
@@ -1292,6 +1315,7 @@ eval "$cmd"
             clear_env: true,
             data_dir: None,
             managed_node_root: None,
+            harness_versions: Vec::new(),
             declared_binaries: Vec::new(),
             declared_env: None,
         }
@@ -1377,6 +1401,7 @@ printf '\n%s\n' "TIDEBREAK_PROBE_END_${end_tok}"
             clear_env: true,
             data_dir: None,
             managed_node_root: None,
+            harness_versions: Vec::new(),
             declared_binaries: Vec::new(),
             declared_env: None,
         };
@@ -1403,6 +1428,7 @@ printf '\n%s\n' "TIDEBREAK_PROBE_END_${end_tok}"
             clear_env: true,
             data_dir: None,
             managed_node_root: None,
+            harness_versions: Vec::new(),
             declared_binaries: Vec::new(),
             declared_env: None,
         };
@@ -1457,6 +1483,7 @@ eval "$cmd"
             clear_env: true,
             data_dir: None,
             managed_node_root: None,
+            harness_versions: Vec::new(),
             declared_binaries: Vec::new(),
             declared_env: None,
         };
@@ -1522,6 +1549,7 @@ eval "$cmd"
             clear_env: true,
             data_dir: None,
             managed_node_root: None,
+            harness_versions: Vec::new(),
             declared_binaries: Vec::new(),
             declared_env: None,
         };
@@ -1557,6 +1585,7 @@ eval "$cmd"
             clear_env: true,
             data_dir: None,
             managed_node_root: Some(node_root),
+            harness_versions: Vec::new(),
             declared_binaries: Vec::new(),
             declared_env: None,
         };
@@ -1590,6 +1619,7 @@ eval "$cmd"
             clear_env: true,
             data_dir: None,
             managed_node_root: None,
+            harness_versions: Vec::new(),
             declared_binaries: Vec::new(),
             declared_env: None,
         }
@@ -1661,6 +1691,7 @@ eval "$cmd"
             clear_env: true,
             data_dir: Some(data_dir.path().to_path_buf()),
             managed_node_root: None,
+            harness_versions: Vec::new(),
             declared_binaries: Vec::new(),
             declared_env: None,
         }
@@ -1715,6 +1746,7 @@ eval "$cmd"
             clear_env: true,
             data_dir: None,
             managed_node_root: None,
+            harness_versions: Vec::new(),
             declared_binaries: Vec::new(),
             declared_env: None,
         }
@@ -1740,6 +1772,7 @@ eval "$cmd"
             clear_env: true,
             data_dir: None,
             managed_node_root: None,
+            harness_versions: Vec::new(),
             declared_binaries: Vec::new(),
             declared_env: None,
         }
@@ -1770,6 +1803,7 @@ eval "$cmd"
             clear_env: true,
             data_dir: Some(data_dir.path().to_path_buf()),
             managed_node_root: None,
+            harness_versions: Vec::new(),
             declared_binaries: Vec::new(),
             declared_env: None,
         };
@@ -2098,6 +2132,7 @@ mod windows_tests {
             clear_env: true,
             data_dir: None,
             managed_node_root: None,
+            harness_versions: Vec::new(),
             declared_binaries: Vec::new(),
             declared_env: None,
         };

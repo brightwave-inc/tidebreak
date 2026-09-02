@@ -195,11 +195,11 @@ pub use code::{
     CodeWatch, CodeWatchId, CodeWatchState, CodeWorkflowRunFact, CodeWorkflowRunId, CodeWorkspace,
     CodeWorkspaceStatus, Diffstat, ExternalMessageRecord, ExternalSessionResolution,
     FileChangeKind, GrantRotation, HarnessCaps, HarnessCommand, HarnessKind, HarnessNoticeLevel,
-    HarnessTier, IncarnationAdmission, IncarnationState, InternalApprovalRequest, PullRequestCheck,
-    PullRequestCheckBucket, PullRequestCheckCounts, PullRequestComment, PullRequestCommentKind,
-    PullRequestDigest, QuickAction, RepoId, SequencedCodeEvent, ToolDetail, ToolOutcome,
-    TurnParkWait, WorkspaceId, MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS,
-    MAX_SESSION_SUBAGENTS, MAX_TOOL_SUMMARY_CHARS,
+    HarnessTier, HarnessUpdateChannel, IncarnationAdmission, IncarnationState,
+    InternalApprovalRequest, PullRequestCheck, PullRequestCheckBucket, PullRequestCheckCounts,
+    PullRequestComment, PullRequestCommentKind, PullRequestDigest, QuickAction, RepoId,
+    SequencedCodeEvent, ToolDetail, ToolOutcome, TurnParkWait, WorkspaceId, MAX_EVENT_TEXT_CHARS,
+    MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS, MAX_SESSION_SUBAGENTS, MAX_TOOL_SUMMARY_CHARS,
 };
 pub use compaction::{
     CompactionPolicy, CompactionSelection, CompactionSourceBoundary, CompactionTokenBounds,

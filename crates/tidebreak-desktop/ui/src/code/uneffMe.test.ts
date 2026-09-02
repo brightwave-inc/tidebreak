@@ -76,6 +76,7 @@ const CLAUDE: HarnessDoctorEntry = {
   stderr: "",
   unrecognized_event_count: 0,
   relaunch_composes_permission_mode: true,
+  update_available: false,
 };
 
 const CODEX: HarnessDoctorEntry = { ...CLAUDE, kind: "codex" };

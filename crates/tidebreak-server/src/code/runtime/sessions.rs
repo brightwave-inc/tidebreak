@@ -93,10 +93,10 @@ impl CodeRuntime {
                 }
             };
             if !skip_pin && !harness.is_in_process() {
-                match self.ensure_pinned_harness(harness, false).await {
-                    Ok(binary) => {
+                match self.ensure_harness(harness, false, false).await {
+                    Ok(installed) => {
                         self.record_pin_install(harness, Ok(()));
-                        self.invalidate_moved_probe(harness, &binary);
+                        self.invalidate_moved_probe(harness, &installed.binary);
                     }
                     Err(err) => {
                         self.record_pin_install(harness, Err(err.clone()));

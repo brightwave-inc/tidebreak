@@ -219,6 +219,7 @@ mod tests {
             clear_env: true,
             data_dir: None,
             managed_node_root: None,
+            harness_versions: Vec::new(),
             declared_binaries: Vec::new(),
             declared_env: None,
         }

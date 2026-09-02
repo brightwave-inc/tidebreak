@@ -540,6 +540,40 @@ describe("CodeTranscript", () => {
     expect(alert).not.toHaveTextContent("Your access token could not");
   });
 
+  it("folds an engine version floor into one card that points at Settings", () => {
+    const error =
+      "API Error: 400 Claude Code 2.1.234 does not support this model; version 2.1.251 or newer is required. Run 'claude update', or update the Claude desktop app, then try again.";
+    render(
+      <CodeTranscript
+        items={[
+          {
+            kind: "notice",
+            id: "notice-version",
+            level: "error",
+            message: error,
+          },
+          {
+            kind: "turn_boundary",
+            id: "b-version",
+            turnId: "t-version",
+            status: "failed",
+            durationMs: 4_000,
+            usage: null,
+            error,
+            diffstat: null,
+          },
+        ]}
+      />,
+    );
+
+    const alerts = screen.getAllByRole("alert");
+    expect(alerts).toHaveLength(1);
+    const alert = alerts[0]!;
+    expect(alert).toHaveTextContent("Version 2.1.251 or newer is required.");
+    expect(alert).toHaveTextContent("Open Settings → Coding harnesses");
+    expect(alert).not.toHaveTextContent("Run 'claude update'");
+  });
+
   it("keeps a revoked-token notice when the next turn failed for another reason", () => {
     render(
       <CodeTranscript

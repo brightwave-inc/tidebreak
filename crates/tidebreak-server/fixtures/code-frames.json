@@ -239,12 +239,16 @@
           "found": true,
           "installable": true,
           "kind": "claude_code",
+          "latest_version": "2.1.251",
+          "managed_version": "2.1.234",
           "path": "/opt/homebrew/bin/claude",
+          "pinned_version": "2.1.234",
           "relaunch_composes_permission_mode": true,
           "remediation": "",
           "stderr": "",
           "tier": "reference",
           "unrecognized_event_count": 0,
+          "update_available": true,
           "version": "2.0.14"
         },
         {
@@ -274,9 +278,11 @@
           "remediation": "Install grok-build and sign in.",
           "stderr": "grok: command not found",
           "tier": "best_effort",
-          "unrecognized_event_count": 2
+          "unrecognized_event_count": 2,
+          "update_available": false
         }
-      ]
+      ],
+      "update_channel": "latest"
     }
   },
   {

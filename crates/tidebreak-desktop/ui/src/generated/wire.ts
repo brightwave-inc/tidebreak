@@ -1624,7 +1624,8 @@ revoked_reason?: string, };
  */
 export type CodeHarnessInstallSnapshot = { kind: HarnessKind,
 /**
- * The pinned version being installed.
+ * The version being installed: the pin, or the release the `latest`
+ * update channel resolved. Absent until a `latest` lookup answers.
  */
 version?: string, phase: string, done: boolean, error?: string, };
 
@@ -2940,12 +2941,38 @@ auth_mode: HarnessAuthMode, remediation: string, stderr: string, unrecognized_ev
  * it started. False for engines that fix the mode on session create
  * (opencode); true where a relaunch rebuilds the launch plan.
  */
-relaunch_composes_permission_mode: boolean, };
+relaunch_composes_permission_mode: boolean,
+/**
+ * The version this build pins for the engine (decision 41), when it
+ * ships one.
+ */
+pinned_version?: string,
+/**
+ * The managed install the update channel drives, when one is on disk.
+ * The pin on `pinned`; on `latest`, the newest installed release.
+ */
+managed_version?: string,
+/**
+ * The newest release the registry answered with, from the last Check
+ * for updates or deliberate install this process ran.
+ */
+latest_version?: string,
+/**
+ * Whether the channel is `latest`, the registry named a release, and the
+ * driven install is older than it. Pressing Install on such a row moves
+ * to it.
+ */
+update_available: boolean, };
 
 /**
  * Doctor report for every registered engine adapter.
  */
-export type HarnessDoctorReport = { harnesses: Array<HarnessDoctorEntry>, };
+export type HarnessDoctorReport = { harnesses: Array<HarnessDoctorEntry>,
+/**
+ * Which release of each engine this machine drives: its pin, or the
+ * newest the registry publishes. One channel for every engine.
+ */
+update_channel: HarnessUpdateChannel, };
 
 /**
  * Which external agent engine a session is bound to.
@@ -2998,6 +3025,16 @@ export type HarnessNoticeLevel = "info" | "warning" | "error";
  * Adapter maturity, independent of any one capability flag.
  */
 export type HarnessTier = "reference" | "secondary" | "tertiary" | "best_effort";
+
+/**
+ * Which release of an external engine Tidebreak installs and drives.
+ *
+ * `Pinned` is the exact version this build was captured against (decision
+ * 41). `Latest` lets the reader move every engine to the newest published
+ * package on demand; capability flags degrade honestly off the captured
+ * line, and the pin stays the fallback when the registry cannot be reached.
+ */
+export type HarnessUpdateChannel = "pinned" | "latest";
 
 /**
  * Renderer-safe mirror of the host broker's capability vocabulary.
@@ -4890,6 +4927,12 @@ code_turn_recaps_enabled: boolean,
  * prose. Default off.
  */
 rewrite_closing_messages: boolean,
+/**
+ * Which release of each coding engine this machine drives: the version
+ * this build pins, or the newest the registry publishes, fetched when a
+ * reader asks. Default `pinned`.
+ */
+harness_update_channel: HarnessUpdateChannel,
 /**
  * How new code repositories name workspace branches for this user.
  */

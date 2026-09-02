@@ -537,6 +537,10 @@ pub fn app(state: AppState) -> Router {
             post(routes::code::install_harness),
         )
         .route(
+            "/code/harnesses/check-updates",
+            post(routes::code::check_harness_updates),
+        )
+        .route(
             "/code/repos/clone-defaults",
             get(routes::code::clone_defaults),
         )

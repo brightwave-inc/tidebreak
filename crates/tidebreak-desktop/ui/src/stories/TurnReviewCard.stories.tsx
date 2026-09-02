@@ -144,6 +144,32 @@ export const CodexRevokedRefreshTokenCompact: Story = {
 };
 
 /**
+ * The engine refused a model its build predates. The card names the floor
+ * and sends the reader to the update channel in Settings instead of
+ * repeating the engine's own "run claude update", which a managed install
+ * cannot follow.
+ */
+export const EngineTooOld: Story = {
+  args: {
+    turn: boundary({
+      status: "failed",
+      error:
+        "API Error: 400 Claude Code 2.1.234 does not support this model; version 2.1.251 or newer is required. Run 'claude update', or update the Claude desktop app, then try again.",
+      diffstat: null,
+    }),
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByRole("alert")).toHaveTextContent(
+      "Version 2.1.251 or newer is required.",
+    );
+    await expect(
+      canvas.getByRole("button", { name: "Settings → Coding harnesses" }),
+    ).toBeInTheDocument();
+  },
+};
+
+/**
  * A failed turn is a prime fork point — retry the ask in a fresh context —
  * so the actions menu rides the failure card too.
  */

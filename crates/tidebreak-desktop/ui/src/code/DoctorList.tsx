@@ -1,5 +1,11 @@
 import { useState, type ReactNode } from "react";
-import { ChevronDown, Download, Loader2, RotateCw } from "lucide-react";
+import {
+  ArrowUpCircle,
+  ChevronDown,
+  Download,
+  Loader2,
+  RotateCw,
+} from "lucide-react";
 
 import type {
   CodeHarnessInstallSnapshot,
@@ -29,6 +35,10 @@ import {
  * Version, path, and probe stderr are diagnostics rather than answers, so
  * they sit behind each row's disclosure with the capability list. Nothing on
  * the resting surface is a `Label: value` pair.
+ *
+ * On the `latest` update channel the header gains Check for updates, and a
+ * row whose driven install is behind the registry gains Update. On `pinned`
+ * neither appears: the pin is the answer, and there is nothing to move to.
  */
 
 export function DoctorList({
@@ -38,6 +48,8 @@ export function DoctorList({
   refreshing,
   onInstall,
   installs,
+  onCheckUpdates,
+  checkingUpdates,
 }: {
   report: HarnessDoctorReport;
   /** Section heading, where the surface has not written its own above this. */
@@ -48,9 +60,16 @@ export function DoctorList({
   onInstall?: (kind: HarnessKind) => void;
   /** Live install progress, keyed by engine. */
   installs?: Partial<Record<HarnessKind, CodeHarnessInstallSnapshot>>;
+  /**
+   * Ask the registry for each engine's newest release. Shown only on the
+   * `latest` channel; omitted where no client can reach the registry.
+   */
+  onCheckUpdates?: () => void;
+  checkingUpdates?: boolean;
 }) {
   const ready = report.harnesses.filter(isHarnessReady).length;
   const total = report.harnesses.length;
+  const onLatest = report.update_channel === "latest";
   return (
     <section className="flex flex-col gap-3">
       <div className="flex items-end justify-between gap-4">
@@ -68,22 +87,38 @@ export function DoctorList({
             </p>
           )}
         </div>
-        {onRefresh && (
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="ml-auto shrink-0"
-            onClick={onRefresh}
-            disabled={refreshing}
-          >
-            <RotateCw
-              className={cn("size-3.5", refreshing && "animate-spin")}
-              aria-hidden="true"
-            />
-            {refreshing ? "Checking…" : "Re-check"}
-          </Button>
-        )}
+        <div className="ml-auto flex shrink-0 items-center gap-2">
+          {onLatest && onCheckUpdates && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={onCheckUpdates}
+              disabled={checkingUpdates || refreshing}
+            >
+              <ArrowUpCircle
+                className={cn("size-3.5", checkingUpdates && "animate-pulse")}
+                aria-hidden="true"
+              />
+              {checkingUpdates ? "Asking npm…" : "Check for updates"}
+            </Button>
+          )}
+          {onRefresh && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={onRefresh}
+              disabled={refreshing || checkingUpdates}
+            >
+              <RotateCw
+                className={cn("size-3.5", refreshing && "animate-spin")}
+                aria-hidden="true"
+              />
+              {refreshing ? "Checking…" : "Re-check"}
+            </Button>
+          )}
+        </div>
       </div>
       <div className="divide-subtle overflow-hidden rounded-lg border divide-y">
         {report.harnesses.map((entry) => (
@@ -127,6 +162,11 @@ function statusBadge(
     return { label: "Downloading", variant: "info" };
   }
   if (install?.error) return { label: "Download failed", variant: "critical" };
+  // Usable today, and a newer release is one press away. The subtitle names
+  // the version; the badge only says a choice exists.
+  if (entry.update_available && isHarnessReady(entry)) {
+    return { label: "Update available", variant: "info" };
+  }
   // Ready, and worth naming why: nobody signed in here, and nobody has to.
   if (entry.auth_mode === "gateway_managed" && entry.found) {
     return { label: "Gateway-managed", variant: "success" };
@@ -159,10 +199,15 @@ function subtitle(
   install: CodeHarnessInstallSnapshot | undefined,
 ): string {
   if (install && !install.done && !install.error) {
-    return "Downloading the pinned version. This takes a few minutes.";
+    return install.version
+      ? `Downloading version ${install.version}. This takes a few minutes.`
+      : "Downloading the newest release. This takes a few minutes.";
   }
   if (install?.error) return install.error;
   if (entry.remediation) return entry.remediation;
+  if (entry.update_available && entry.latest_version) {
+    return `Version ${entry.latest_version} is available.`;
+  }
   // Neither a relay-covered engine on a hosted machine nor a gateway-managed
   // one needs a sign-in, so the fallback below must not demand one; say what
   // carries its turns instead.
@@ -216,6 +261,10 @@ function DoctorRow({
     // Downloading an engine the relay cannot carry would hand the reader a
     // binary that still cannot run here.
     entry.auth_mode !== "hosted_unavailable";
+  // The same install path, pointed at the registry's newest release. Only
+  // the server on the `latest` channel ever reports one.
+  const canUpdate =
+    Boolean(onInstall) && entry.found && entry.update_available && !downloading;
   const detailId = `harness-detail-${entry.kind}`;
 
   return (
@@ -266,6 +315,18 @@ function DoctorRow({
             {failed ? "Retry" : "Download"}
           </Button>
         )}
+        {canUpdate && onInstall && (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="shrink-0"
+            onClick={() => onInstall(entry.kind)}
+          >
+            <ArrowUpCircle className="size-3.5" aria-hidden="true" />
+            {failed ? "Retry" : "Update"}
+          </Button>
+        )}
         <Button
           type="button"
           variant="ghost"
@@ -302,6 +363,16 @@ function DoctorRow({
           {entry.path && (
             <Detail label="Path">
               <span className="font-mono break-all">{entry.path}</span>
+            </Detail>
+          )}
+          {entry.pinned_version && (
+            <Detail label="Pinned">
+              <span className="font-mono">{entry.pinned_version}</span>
+            </Detail>
+          )}
+          {entry.latest_version && (
+            <Detail label="Newest published">
+              <span className="font-mono">{entry.latest_version}</span>
             </Detail>
           )}
           <Detail label="Supports">{capsSummary(entry)}</Detail>

@@ -6,6 +6,7 @@ import type {
   CodeWorktreeRoot,
   HarnessDoctorReport,
   HarnessKind,
+  HarnessUpdateChannel,
 } from "../api/types";
 import { DoctorList } from "@/code/DoctorList";
 import { useCodeUpdatesStore } from "@/code/CodeUpdatesStore";
@@ -20,6 +21,13 @@ import {
 } from "./primitives";
 import { ExternalEditorSection } from "./ExternalEditorSection";
 import { WorktreeRootSection } from "./WorktreeRootSection";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 
 /**
@@ -31,8 +39,13 @@ import { Switch } from "@/components/ui/switch";
  * starting one here and then opening the New Workspace dialog shows the same
  * progress in both places.
  *
- * The workspace folder sits below the engines: a reader who came here came for
- * an engine, and the folder only matters once one runs. The external editor
+ * The update channel sits right under the engines. On `pinned`, every engine
+ * is the version this build was captured against. On `latest`, Check for
+ * updates asks npm for each engine's newest release and Update moves to it;
+ * the pin stays the floor and the fallback when the registry is unreachable.
+ *
+ * The workspace folder sits below that: a reader who came here came for an
+ * engine, and the folder only matters once one runs. The external editor
  * follows it for the same reason — it is where the files a workspace produces
  * go next.
  */
@@ -49,6 +62,9 @@ export function CodingHarnessesPanel({ client }: { client: ApiClient }) {
   const [savingRoot, setSavingRoot] = useState(false);
   const [rewriteClosing, setRewriteClosing] = useState(false);
   const [savingRewrite, setSavingRewrite] = useState(false);
+  const [channel, setChannel] = useState<HarnessUpdateChannel>("pinned");
+  const [savingChannel, setSavingChannel] = useState(false);
+  const [checkingUpdates, setCheckingUpdates] = useState(false);
 
   async function load(refresh: boolean) {
     if (refresh) setRefreshing(true);
@@ -94,10 +110,13 @@ export function CodingHarnessesPanel({ client }: { client: ApiClient }) {
     void client
       .getSettings()
       .then((settings) => {
-        if (!cancelled) setRewriteClosing(settings.rewrite_closing_messages);
+        if (cancelled) return;
+        setRewriteClosing(settings.rewrite_closing_messages);
+        setChannel(settings.harness_update_channel);
       })
       .catch(() => {
-        // The toggle stays off until a later load succeeds.
+        // The toggle stays off, and the channel reads as pinned, until a
+        // later load succeeds.
       });
     return () => {
       cancelled = true;
@@ -140,6 +159,46 @@ export function CodingHarnessesPanel({ client }: { client: ApiClient }) {
       .catch(() => {});
   }, [client, installs]);
 
+  // Flipping the channel changes which install each row describes, so the
+  // doctor is read again once the setting lands. The read is the memoized
+  // one: the server already knows a probe of the other install is stale.
+  async function saveChannel(next: HarnessUpdateChannel) {
+    const previous = channel;
+    setChannel(next);
+    setSavingChannel(true);
+    try {
+      const settings = await client.putSettings({
+        harness_update_channel: next,
+      });
+      setChannel(settings.harness_update_channel);
+      setReport(await client.getHarnessDoctor());
+    } catch (err) {
+      setChannel(previous);
+      toast.error(friendlyErrorMessage(err, "Could not save that setting."));
+    } finally {
+      setSavingChannel(false);
+    }
+  }
+
+  async function checkUpdates() {
+    setCheckingUpdates(true);
+    setError(null);
+    try {
+      const next = await client.checkHarnessUpdates();
+      setReport(next);
+      const behind = next.harnesses.filter((entry) => entry.update_available);
+      toast.success(
+        behind.length === 0
+          ? "Every engine is on its newest release."
+          : `${behind.length} ${behind.length === 1 ? "engine has" : "engines have"} a newer release.`,
+      );
+    } catch (err) {
+      setError(friendlyErrorMessage(err, "Could not reach the npm registry"));
+    } finally {
+      setCheckingUpdates(false);
+    }
+  }
+
   async function saveRoot(root: string | null) {
     setSavingRoot(true);
     setError(null);
@@ -174,8 +233,39 @@ export function CodingHarnessesPanel({ client }: { client: ApiClient }) {
           refreshing={refreshing}
           onInstall={(kind) => void install(kind)}
           installs={installs}
+          onCheckUpdates={() => void checkUpdates()}
+          checkingUpdates={checkingUpdates}
         />
       )}
+      <SettingsSection
+        title="Updates"
+        description="Pinned runs the engine versions this build was tested against. Latest lets you move each engine to its newest npm release without waiting for a Tidebreak update."
+      >
+        <SettingsField
+          label="Engine versions"
+          hint={
+            channel === "latest"
+              ? "Press Check for updates above, then Update on any engine that has a newer release. Features Tidebreak has not tested against a release read as unknown."
+              : "Every engine stays on the version this build pins."
+          }
+        >
+          <Select
+            value={channel}
+            disabled={savingChannel}
+            onValueChange={(value) =>
+              void saveChannel(value as HarnessUpdateChannel)
+            }
+          >
+            <SelectTrigger aria-label="Engine versions">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="pinned">Pinned</SelectItem>
+              <SelectItem value="latest">Latest</SelectItem>
+            </SelectContent>
+          </Select>
+        </SettingsField>
+      </SettingsSection>
       {worktreeRoot && (
         <WorktreeRootSection
           value={rootDraft}

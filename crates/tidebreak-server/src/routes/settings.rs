@@ -157,6 +157,11 @@ pub struct Settings {
     /// prose. Default off.
     #[serde(default)]
     pub rewrite_closing_messages: bool,
+    /// Which release of each coding engine this machine drives: the version
+    /// this build pins, or the newest the registry publishes, fetched when a
+    /// reader asks. Default `pinned`.
+    #[serde(default)]
+    pub harness_update_channel: tidebreak_core::HarnessUpdateChannel,
     /// How new code repositories name workspace branches for this user.
     pub git_source_control: GitSourceControlSettings,
     /// Durable memory settings, including whether the utility role can run
@@ -217,6 +222,11 @@ pub struct SettingsUpdate {
     /// Set the code-turn recap switch. Absent leaves it unchanged. Default on.
     #[serde(default)]
     pub code_turn_recaps_enabled: Option<bool>,
+    /// Set the coding-engine update channel. Absent leaves it unchanged.
+    /// Default `pinned`. Takes effect on the next doctor read or session
+    /// create; no restart.
+    #[serde(default)]
+    pub harness_update_channel: Option<tidebreak_core::HarnessUpdateChannel>,
     /// Set the closing-message rewrite switch. Absent leaves it unchanged.
     /// Default off.
     #[serde(default)]
@@ -432,6 +442,21 @@ pub async fn put_settings(
             )
             .await?;
     }
+    if let Some(channel) = body.harness_update_channel {
+        state
+            .store
+            .set_setting(
+                crate::code::harness_release::HARNESS_UPDATE_CHANNEL_SETTING,
+                &serde_json::json!(channel),
+            )
+            .await?;
+        // The channel decides which install each engine drives, so a live
+        // worker on the other one moves now rather than on its next fault.
+        if let Some(code) = state.code.as_ref() {
+            code.resync_workers_to_selected_binaries(tidebreak_core::HarnessKind::ALL)
+                .await;
+        }
+    }
     if let Some(update) = body.git_source_control {
         let custom_was_present = update.custom_branch_prefix.is_some();
         let owner = auth.principal.owner_id();
@@ -507,6 +532,8 @@ async fn read_settings(state: &AppState, owner: &OwnerId) -> Result<Settings, Se
         computer_use_enabled: read_computer_use_enabled(&*state.store).await?,
         code_turn_recaps_enabled: crate::code::recap::turn_recaps_enabled(&*state.store).await?,
         rewrite_closing_messages: crate::code::rewrite::rewrite_closing_enabled(&*state.store)
+            .await?,
+        harness_update_channel: crate::code::harness_release::read_update_channel(&*state.store)
             .await?,
         git_source_control: read_git_source_control_settings(state, owner).await?,
         memory: read_memory_settings(state).await?,

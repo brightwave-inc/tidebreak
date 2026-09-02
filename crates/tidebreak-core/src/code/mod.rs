@@ -135,6 +135,33 @@ code_id_type!(
     CodeWorkflowRunId
 );
 
+/// Which release of an external engine Tidebreak installs and drives.
+///
+/// `Pinned` is the exact version this build was captured against (decision
+/// 41). `Latest` lets the reader move every engine to the newest published
+/// package on demand; capability flags degrade honestly off the captured
+/// line, and the pin stays the fallback when the registry cannot be reached.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessUpdateChannel {
+    /// The version this build was captured against.
+    #[default]
+    Pinned,
+    /// The newest package the registry publishes, fetched when asked.
+    Latest,
+}
+
+impl HarnessUpdateChannel {
+    /// Stable wire token.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pinned => "pinned",
+            Self::Latest => "latest",
+        }
+    }
+}
+
 /// Which external agent engine a session is bound to.
 ///
 /// Named after the shipped adapters. The traits those adapters implement

@@ -108,3 +108,28 @@ Two clauses gain a scoped exception:
 The exception is a declaration API, not discovery: nothing scans for
 preinstalled engines, and a declared path that is relative or not executable
 is a probe error, not a fall-through.
+
+## Amendment (2026-09-02): the `latest` update channel
+
+The exclusion "treating `latest` as a floating tag at runtime" made every
+engine bump a Tidebreak release. That cost surfaced as a hard stop: a model
+that needs Claude Code 2.1.251 fails on the 2.1.234 pin until someone bumps
+the pin, ships, and the reader updates.
+
+One clause gains a user-controlled exception:
+
+- **"The pin is whatever was current when it was written; bump it
+  deliberately."** A reader may set the engine update channel to `latest`
+  in Settings → Coding harnesses. On that channel, Check for updates asks
+  the npm registry for each engine's newest version, and Update installs
+  that exact version into its own `{version}/` directory with its own
+  marker. The pin stays the floor: a registry that cannot be reached, or
+  that names something older than the pin, leaves the pinned install
+  driving. `latest` is resolved to an exact version at install time; it is
+  never a floating tag the launcher reads.
+
+The other clauses stand. Capability flags still describe the captured line:
+a release on the same minor keeps the captured flags, and one past it reads
+the untested capabilities as unknown rather than supported. The default
+channel is `pinned`, so an existing machine changes nothing until its
+reader asks.

@@ -43,6 +43,7 @@ import { MiddleTruncate } from "./MiddleTruncate";
 import {
   formatElapsedDuration,
   formatTurnDuration,
+  harnessVersionRequirement,
   isCodexRevokedRefreshTokenError,
   FileIssueButton,
   TurnReviewCard,
@@ -250,7 +251,7 @@ export function codeTranscriptPresentationItems(
     if (
       item.kind !== "notice" ||
       item.level !== "error" ||
-      !isCodexRevokedRefreshTokenError(item.message)
+      !hasTurnRecovery(item.message)
     ) {
       return true;
     }
@@ -259,13 +260,19 @@ export function codeTranscriptPresentationItems(
       const next = items[nextIndex];
       if (!next || next.kind === "user") return true;
       if (next.kind !== "turn_boundary") continue;
-      return !(
-        next.status === "failed" && isCodexRevokedRefreshTokenError(next.error)
-      );
+      return !(next.status === "failed" && hasTurnRecovery(next.error));
     }
 
     return true;
   });
+}
+
+/** Whether the failed-turn card answers this message with recovery steps. */
+function hasTurnRecovery(message: string | null): boolean {
+  return (
+    isCodexRevokedRefreshTokenError(message) ||
+    harnessVersionRequirement(message) !== null
+  );
 }
 
 /**

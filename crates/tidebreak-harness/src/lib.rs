@@ -43,7 +43,10 @@ pub use child::{
 pub use launch::{
     validate_launch_plan, validate_launch_plan_with, BypassFlagError, BypassPolicy, LaunchPlan,
 };
-pub use pin::{ensure_installed, managed_binary, pin_for, HarnessPin, PINS};
+pub use pin::{
+    compare_versions, ensure_installed, ensure_installed_version, installed_versions,
+    latest_published_version, managed_binary, managed_binary_version, pin_for, HarnessPin, PINS,
+};
 pub use probe::{
     display_model_label, filter_child_env, filter_engine_child_env, infer_listed_default,
     list_cli_models, observe_version, prefer_gateway_models, probe_shell, resolve_binary,
