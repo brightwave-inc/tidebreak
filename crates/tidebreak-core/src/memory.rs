@@ -121,16 +121,17 @@ impl MemoryScope {
 }
 
 /// What kind of durable knowledge a record carries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+// The variants stay undocumented so the `schemars` derive generates a plain
+// `enum` list rather than `oneOf` + `const`, which the strict schema subset
+// providers enforce cannot express.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema, TS,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryKind {
-    /// A dated claim about the owner or repository.
     Fact,
-    /// A stated choice or working preference.
     Preference,
-    /// A reusable lesson learned from completed work.
     Lesson,
-    /// A durable pointer or lookup hint.
     Reference,
 }
 

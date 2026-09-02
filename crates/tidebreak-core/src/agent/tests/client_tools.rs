@@ -21,6 +21,7 @@ async fn claimed_agent_returns_a_client_tool_checkpoint_without_executing_it() {
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();
@@ -197,6 +198,7 @@ async fn user_questions_are_advertised_and_executable_only_in_the_foreground() {
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();
@@ -246,6 +248,7 @@ async fn claimed_foreground_agent_returns_exact_ordered_wait_checkpoint() {
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();
@@ -338,6 +341,7 @@ async fn a_mixed_batch_runs_the_server_call_then_checkpoints_the_client_one() {
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();
@@ -450,6 +454,7 @@ async fn a_client_call_with_unparseable_arguments_is_answered_not_discarded() {
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();
@@ -553,6 +558,7 @@ async fn client_call_with_prose_checkpoints_and_keeps_the_preamble() {
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();

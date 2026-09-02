@@ -183,6 +183,11 @@ pub struct CreateChat {
     /// Omitted seeds the sticky default, else open public-internet access.
     #[serde(default)]
     pub network_policy: Option<tidebreak_core::NetworkPolicy>,
+    /// Keep durable memory out of this conversation: no digest injection and
+    /// no post-turn capture. Defaults off, and is deliberately never a
+    /// sticky default — incognito is a per-conversation decision.
+    #[serde(default)]
+    pub memory_incognito: bool,
 }
 
 /// `POST /chats` — create a chat and return it (`201 Created`).
@@ -308,6 +313,7 @@ pub async fn create_chat(
         network_policy,
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: body.memory_incognito,
         created_at: Utc::now(),
     };
     let chat = store
@@ -344,6 +350,13 @@ pub struct ChatUpdate {
     /// the next one should be created.
     #[serde(default, deserialize_with = "double_option")]
     pub project_id: Option<Option<ProjectId>>,
+    /// Flip whether this conversation keeps durable memory out (no digest
+    /// injection, no post-turn capture). Omitted leaves it unchanged; like
+    /// the project move it is never a sticky default. The switch binds at
+    /// the next turn: the current conversation's already-composed prompts
+    /// are not rewritten.
+    #[serde(default)]
+    pub memory_incognito: Option<bool>,
 }
 
 /// `PATCH /chats/{id}` — update the human-facing title and/or model selection.
@@ -414,6 +427,14 @@ pub async fn patch_chat(
     {
         return Err(ServerError::not_found(format!("chat {id} not found")));
     }
+    if let Some(memory_incognito) = body.memory_incognito {
+        if !store
+            .set_chat_memory_incognito(id, memory_incognito)
+            .await?
+        {
+            return Err(ServerError::not_found(format!("chat {id} not found")));
+        }
+    }
     // Each explicit choice here becomes the sticky default a new chat seeds
     // from; an explicit clear (`null`) clears the sticky default the same way,
     // back to the hard default. Recorded server-side so every client benefits.
@@ -461,6 +482,9 @@ pub async fn patch_chat(
     }
     if let Some(network_policy) = body.network_policy {
         chat.network_policy = network_policy;
+    }
+    if let Some(memory_incognito) = body.memory_incognito {
+        chat.memory_incognito = memory_incognito;
     }
     Ok(Json(chat))
 }
@@ -563,6 +587,11 @@ pub struct ChatTerminalTurnSnapshot {
     #[ts(optional)]
     pub failure_model: Option<crate::event_projection::RendererModelIdentity>,
     pub file_changes: Vec<ExecFileChangeSummary>,
+    /// Model-authored memory records this turn produced, whatever their
+    /// review state now, so the transcript can show the proposal chip and
+    /// its decisions after a reload. Tracked hypotheses stay out: they are
+    /// manager-only until they graduate (decision 0067).
+    pub memory_proposals: Vec<tidebreak_core::MemoryRecord>,
     /// Skills the user explicitly invoked for this turn, in submitted order.
     /// Absent for the ordinary turn that invoked none.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -614,6 +643,7 @@ impl From<tidebreak_core::ChatTerminalTurnSnapshot> for ChatTerminalTurnSnapshot
             failure_detail,
             failure_model,
             file_changes: Vec::new(),
+            memory_proposals: Vec::new(),
             invoked_skills: (!snapshot.invoked_skills.is_empty())
                 .then_some(snapshot.invoked_skills),
             usage: snapshot.usage.into(),
@@ -706,6 +736,7 @@ impl ChatMessageSnapshot {
 /// an empty conversation.
 pub async fn list_chat_messages(
     State(state): State<AppState>,
+    auth: AuthContext,
     store: ScopedStore,
     Path(id): Path<ChatId>,
 ) -> Result<Json<ChatTranscript>, ServerError> {
@@ -816,6 +847,45 @@ pub async fn list_chat_messages(
             std::collections::HashMap::new()
         }
     };
+    // The chip's durable source: model-authored records attributed to this
+    // conversation's turns, read fresh so a decision made in the manager
+    // shows on the transcript too. Enrichment, never a gate — a memory
+    // failure costs the chips, not the transcript.
+    let mut memory_proposals_by_turn: std::collections::HashMap<
+        TurnId,
+        Vec<tidebreak_core::MemoryRecord>,
+    > = std::collections::HashMap::new();
+    if let Some(memory) = state.memory.clone() {
+        let backend: std::sync::Arc<dyn tidebreak_core::MemoryBackend> = memory;
+        match backend
+            .list(
+                &auth.principal.owner_id(),
+                tidebreak_core::MemoryListFilter::default(),
+            )
+            .await
+        {
+            Ok(records) => {
+                for record in records {
+                    if record.provenance.author != tidebreak_core::MemoryAuthor::Model
+                        || record.status == tidebreak_core::MemoryStatus::Tracking
+                        || record.provenance.origin.chat_id != Some(id)
+                    {
+                        continue;
+                    }
+                    let Some(turn_id) = record.provenance.origin.turn_id else {
+                        continue;
+                    };
+                    memory_proposals_by_turn
+                        .entry(turn_id)
+                        .or_default()
+                        .push(record);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(chat = %id, %error, "could not load memory proposals");
+            }
+        }
+    }
     Ok(Json(ChatTranscript {
         messages,
         tool_activity: transcript.tool_activity,
@@ -825,6 +895,9 @@ pub async fn list_chat_messages(
             .map(|turn| {
                 let mut snapshot = ChatTerminalTurnSnapshot::from(turn);
                 snapshot.file_changes = file_changes_by_turn
+                    .remove(&snapshot.turn_id)
+                    .unwrap_or_default();
+                snapshot.memory_proposals = memory_proposals_by_turn
                     .remove(&snapshot.turn_id)
                     .unwrap_or_default();
                 snapshot

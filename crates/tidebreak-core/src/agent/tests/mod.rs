@@ -291,6 +291,7 @@ async fn search_grant_chat(store: &Arc<dyn Store>) -> Chat {
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();
@@ -333,6 +334,7 @@ async fn cancel_test_chat() -> (Arc<dyn Store>, Chat, tempfile::TempDir) {
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();

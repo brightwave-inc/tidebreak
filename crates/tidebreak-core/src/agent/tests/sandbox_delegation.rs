@@ -115,6 +115,7 @@ async fn claimed_foreground_agent_returns_one_bounded_sandbox_checkpoint() {
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();
@@ -274,6 +275,7 @@ async fn sibling_sandbox_spawns_are_rejected_before_any_checkpoint() {
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();
@@ -351,6 +353,7 @@ async fn report_blocked_returns_a_persisted_refused_outcome_with_the_explanation
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();
@@ -500,6 +503,7 @@ async fn drive_gated_delegation(
         network_policy: crate::NetworkPolicy::Open,
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();

@@ -672,6 +672,11 @@ attachment_revision: number,
  */
 root_attachments: Array<ChatRootAttachment>,
 /**
+ * Whether this chat keeps durable memory out entirely: no digest is
+ * injected into its prompts and no post-turn capture runs for it.
+ */
+memory_incognito: boolean,
+/**
  * When the chat was created.
  */
 created_at: string, };
@@ -727,6 +732,13 @@ origin: RootAttachmentOrigin, };
  * carrying the partial prose and reasoning the reader already saw live.
  */
 export type ChatTerminalTurnSnapshot = { turn_id: TurnId, message_id?: MessageId, status: ChatTerminalTurnStatus, partial_content: string, reasoning?: string, refusal?: RendererRefusal, failure_category?: TurnFailureCategory, failure_detail?: string, failure_model?: RendererModelIdentity, file_changes: Array<ExecFileChangeSummary>,
+/**
+ * Model-authored memory records this turn produced, whatever their
+ * review state now, so the transcript can show the proposal chip and
+ * its decisions after a reload. Tracked hypotheses stay out: they are
+ * manager-only until they graduate (decision 0067).
+ */
+memory_proposals: Array<MemoryRecord>,
 /**
  * Skills the user explicitly invoked for this turn, in submitted order.
  * Absent for the ordinary turn that invoked none.
@@ -4679,7 +4691,7 @@ export type RendererChatFrame = RendererSequencedEvent | RendererChatMetadata;
 /**
  * Chat metadata pushed to an open client, outside the turn journal.
  */
-export type RendererChatMetadata = { "metadata": "titled", title: string, } | { "metadata": "file_changes_recorded", turn_id: TurnId, } | { "metadata": "sandbox_preparing", preparing: boolean, };
+export type RendererChatMetadata = { "metadata": "titled", title: string, } | { "metadata": "file_changes_recorded", turn_id: TurnId, } | { "metadata": "memory_proposals_recorded", turn_id: TurnId, } | { "metadata": "sandbox_preparing", preparing: boolean, };
 
 /**
  * Exact model route involved in a provider failure, with no diagnostics.
@@ -4706,7 +4718,7 @@ export type RendererToolFailureReason = "lease_expired";
  * are all generated from this enum, so a variant added here cannot leave one of
  * them behind — see `docs/wire-types.md`.
  */
-export type RendererToolName = "search" | "list_documents" | "read_document" | "read_tool_result" | "web_search" | "web_extract" | "read_delegated_file" | "read_file" | "list_dir" | "write_file" | "request_folder_access" | "connect_folder" | "list_connected_folders" | "list_folder" | "read_connected_file" | "import_connected_file" | "write_output_to_connected_folder" | "spawn_sandbox_agent" | "wait_for_agents" | "ask_user_questions" | "exit_plan_mode" | "update_task_plan" | "browser_list" | "browser_navigate" | "browser_snapshot" | "browser_wait" | "browser_screenshot" | "browser_act" | "exec" | "create_app" | "other";
+export type RendererToolName = "search" | "list_documents" | "read_document" | "read_tool_result" | "web_search" | "web_extract" | "read_delegated_file" | "read_file" | "list_dir" | "write_file" | "request_folder_access" | "connect_folder" | "list_connected_folders" | "list_folder" | "read_connected_file" | "import_connected_file" | "write_output_to_connected_folder" | "spawn_sandbox_agent" | "wait_for_agents" | "ask_user_questions" | "exit_plan_mode" | "update_task_plan" | "browser_list" | "browser_navigate" | "browser_snapshot" | "browser_wait" | "browser_screenshot" | "browser_act" | "exec" | "create_app" | "memory" | "other";
 
 export type RendererToolStatus = "completed" | "failed";
 
@@ -5691,6 +5703,7 @@ export const RENDERER_TOOL_NAMES = [
   "browser_act",
   "exec",
   "create_app",
+  "memory",
   "other",
 ] as const;
 

@@ -28,6 +28,7 @@ function chat(id: string, projectId: string | null): Chat {
     permission_mode: null,
     network_policy: { mode: "off" },
     attachment_revision: 0,
+    memory_incognito: false,
     root_attachments: [],
     created_at: "2026-07-21T12:00:00Z",
   };

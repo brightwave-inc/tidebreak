@@ -816,6 +816,13 @@ export function ChatRoute({ chatId }: { chatId: string }) {
     );
   }
 
+  async function onMemoryIncognitoChange(memoryIncognito: boolean) {
+    if (deletingChatId !== null) return;
+    chatListActions.replaceChat(
+      await client.patchChatMemoryIncognito(chatId, memoryIncognito),
+    );
+  }
+
   // Shown while the list fetch or the redirect above settles — a blank frame
   // still needs a name so it is not silent to a screen reader.
   if (!chat) {
@@ -963,6 +970,11 @@ export function ChatRoute({ chatId }: { chatId: string }) {
             value: chat!.network_policy,
             disabled: deletingChatId !== null,
             onChange: onNetworkPolicyChange,
+          }}
+          composerMemoryIncognito={{
+            value: chat!.memory_incognito,
+            disabled: deletingChatId !== null,
+            onChange: onMemoryIncognitoChange,
           }}
           onDraftChange={(next) => {
             setComposerDraft(next);

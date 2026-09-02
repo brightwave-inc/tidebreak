@@ -75,6 +75,7 @@ impl MigratorTrait for Migrator {
             Box::new(one_approval_surface::OneApprovalSurface),
             Box::new(MemoryRecords),
             Box::new(MemorySweepState),
+            Box::new(ChatMemoryIncognito),
         ]
     }
 }
@@ -4416,6 +4417,54 @@ impl MigrationTrait for MemorySweepState {
     }
 }
 
+struct ChatMemoryIncognito;
+
+impl MigrationName for ChatMemoryIncognito {
+    fn name(&self) -> &str {
+        "m20260902_000006_chat_memory_incognito"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for ChatMemoryIncognito {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        if !manager.has_table("code_session").await? {
+            return Ok(());
+        }
+        if manager
+            .has_column("code_session", "memory_incognito")
+            .await?
+        {
+            return Ok(());
+        }
+        // NOT NULL with a false default, like `fast_mode` above: incognito is
+        // a per-conversation opt-out of memory injection and capture, and a
+        // conversation that predates the switch was not in it.
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(Alias::new("code_session"))
+                    .add_column(
+                        ColumnDef::new(idens::CodeSession::MemoryIncognito)
+                            .boolean()
+                            .not_null()
+                            .default(false),
+                    )
+                    .to_owned(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // Nothing to reverse: the column belongs to `code_session`, and
+        // `Baseline::down` drops that table outright. The frozen baseline
+        // does not declare this column, so a rolled-back database gets it
+        // again from this migration's `up` on the way back.
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
@@ -4500,6 +4549,7 @@ mod tests {
                 "m20260902_000003_one_approval_surface",
                 "m20260902_000004_memory_records",
                 "m20260902_000005_memory_sweep_state",
+                "m20260902_000006_chat_memory_incognito",
             ]
         );
         assert!(db

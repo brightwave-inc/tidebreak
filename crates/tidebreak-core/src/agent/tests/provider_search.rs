@@ -79,6 +79,7 @@ async fn drive_provider_search_with_standalone_control(
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();
@@ -533,6 +534,7 @@ async fn a_provider_executed_search_replaces_the_host_tool_and_is_kept_like_one(
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();
@@ -634,6 +636,7 @@ async fn foreground_vendor_search_budget_is_offered_to_only_one_model_request() 
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();
@@ -690,6 +693,7 @@ async fn interleaved_host_calls_and_provider_search_keep_one_order_everywhere() 
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();
@@ -803,6 +807,7 @@ async fn malformed_provider_browsing_actions_are_never_persisted_as_host_searche
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();
@@ -869,6 +874,7 @@ async fn assert_provider_receipt_is_excluded_on_route(
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();

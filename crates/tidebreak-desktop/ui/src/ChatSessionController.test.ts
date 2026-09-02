@@ -213,10 +213,15 @@ describe("frame validation", () => {
       metadata: "file_changes_recorded",
       turn_id: "turn-1",
     });
+    h.latest().emit({
+      metadata: "memory_proposals_recorded",
+      turn_id: "turn-1",
+    });
 
     expect(h.metadata).toEqual([
       { metadata: "titled", title: "Q3 revenue reconciliation" },
       { metadata: "file_changes_recorded", turn_id: "turn-1" },
+      { metadata: "memory_proposals_recorded", turn_id: "turn-1" },
     ]);
     expect(h.events).toEqual([]);
   });

@@ -8,65 +8,11 @@ import type {
   MemorySweepStatus,
 } from "@/api";
 import { MemoryPanel } from "@/settings/MemoryPanel";
-
-function origin() {
-  return {
-    chat_id: "9d5d84a0-6ba6-4c73-9e10-000000000001",
-    turn_id: null,
-    code_session_id: null,
-    code_turn_id: null,
-    workspace_id: null,
-  };
-}
-
-const proposal: MemoryRecord = {
-  id: "3f19d0d5-8f46-4f57-a35a-000000000001",
-  scope: { kind: "personal" },
-  kind: "lesson",
-  status: "proposed",
-  title: "When changing database migrations",
-  body: "Run the migration chain test before publishing.",
-  provenance: {
-    author: "model",
-    origin: origin(),
-    evidence: [
-      { kind: "message", message_id: "c6a0d000-0000-4000-8000-000000000001" },
-    ],
-  },
-  links: [],
-  expires_at: null,
-  superseded_by: null,
-  observation_count: 0,
-  revision: 1,
-  created_at: "2026-09-01T09:00:00Z",
-  updated_at: "2026-09-01T09:00:00Z",
-};
-
-const active: MemoryRecord = {
-  ...proposal,
-  id: "3f19d0d5-8f46-4f57-a35a-000000000002",
-  status: "active",
-  title: "When preparing a release",
-  body: "Run the release smoke test before publishing.",
-  revision: 2,
-  updated_at: "2026-08-30T14:00:00Z",
-};
-
-const hypothesis: MemoryRecord = {
-  ...proposal,
-  id: "3f19d0d5-8f46-4f57-a35a-000000000003",
-  status: "tracking",
-  title: "When reviewing pull requests",
-  body: "The reader prefers concrete migration checks over general praise.",
-  provenance: {
-    author: "model",
-    origin: origin(),
-    evidence: [
-      { kind: "message", message_id: "c6a0d000-0000-4000-8000-000000000002" },
-    ],
-  },
-  observation_count: 2,
-};
+import {
+  memoryActive as active,
+  memoryProposal as proposal,
+  memoryTracking as hypothesis,
+} from "./fixtures";
 
 const revisions: MemoryRevision[] = [
   {

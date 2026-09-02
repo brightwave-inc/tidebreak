@@ -1356,6 +1356,7 @@ mod tests {
                 reasoning_effort: None,
                 permission_mode: Some(PermissionMode::Auto),
                 network_policy: NetworkPolicy::Off,
+                memory_incognito: false,
                 attachment_revision: 0,
                 root_attachments: Vec::new(),
                 created_at: at(0),

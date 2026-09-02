@@ -196,6 +196,7 @@ async fn folder_resolution_is_fenced_to_the_chat_projection() {
             root_id: granted,
             origin: RootAttachmentOrigin::Conversation,
         }],
+        memory_incognito: false,
         created_at: Utc::now(),
     };
 
@@ -282,6 +283,7 @@ async fn output_files_publish_as_turn_attributed_outputs() {
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();
@@ -402,6 +404,7 @@ async fn attached_documents_backfill_lazily_with_collision_and_size_limits() {
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();

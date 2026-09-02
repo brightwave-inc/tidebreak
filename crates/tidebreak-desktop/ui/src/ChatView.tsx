@@ -27,7 +27,11 @@ import {
 import type { SlashCommandName } from "./ComposerCommands";
 import { ComposerPrompt } from "./ComposerPrompt";
 import { ChatUsageDialog } from "./ChatUsageDialog";
-import type { ComposerNetwork, ComposerReasoning } from "./ComposerToolsMenu";
+import type {
+  ComposerMemoryIncognito,
+  ComposerNetwork,
+  ComposerReasoning,
+} from "./ComposerToolsMenu";
 import { MessageList, type RetryableTurn } from "./MessageList";
 import type { StarterPromptOptions } from "./WelcomeState";
 import { revealPendingCall } from "./TranscriptFocus";
@@ -70,6 +74,7 @@ export type ChatViewProps = {
   contextUsage?: ContextUsageReading | null;
   composerNetwork?: ComposerNetwork;
   composerReasoning?: ComposerReasoning;
+  composerMemoryIncognito?: ComposerMemoryIncognito;
   composerImages: ComposerImages;
   files: ComposerFiles;
   folders?: ComposerFolders;
@@ -110,6 +115,7 @@ export function ChatView({
   contextUsage,
   composerNetwork,
   composerReasoning,
+  composerMemoryIncognito,
   composerImages,
   files,
   folders,
@@ -574,6 +580,7 @@ export function ChatView({
           imageClient={client}
           executionConfigClient={client}
           changeClient={client}
+          memoryClient={client}
         />
         <TranscriptNavigation
           entries={navigationEntries}
@@ -640,6 +647,7 @@ export function ChatView({
               contextUsage={contextUsage}
               network={composerNetwork}
               reasoning={composerReasoning}
+              memoryIncognito={composerMemoryIncognito}
               plugins={composerPlugins.plugins}
               slash={{
                 options: composerPlugins.slashOptions,

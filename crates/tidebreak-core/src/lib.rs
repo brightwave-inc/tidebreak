@@ -82,6 +82,7 @@ pub mod image;
 pub mod keychain;
 pub mod local_app;
 pub mod memory;
+pub mod memory_tool;
 pub mod model;
 pub mod permission;
 pub use permission::PermissionMode;
@@ -266,6 +267,10 @@ pub use memory::{
     MemoryWriteReceipt, MemoryWriteState, DEFAULT_MEMORY_ACTIVE_RECORD_CAP,
     DEFAULT_MEMORY_DIGEST_BYTES, MAX_MEMORY_BODY_BYTES, MAX_MEMORY_EVIDENCE, MAX_MEMORY_LINKS,
     MAX_MEMORY_SEARCH_RESULTS, MAX_MEMORY_TITLE_CHARS,
+};
+pub use memory_tool::{
+    memory_tool_spec, parse_memory_tool_arguments, MemoryToolArgs, MemoryToolVerb, MEMORY_TOOL,
+    MEMORY_TOOL_SEARCH_LIMIT,
 };
 pub use model::{
     exec_attachment_file_name, AgentRun, AgentRunCancellationReason, AgentRunCancellationSignal,

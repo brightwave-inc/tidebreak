@@ -387,5 +387,21 @@ export function withChatApi<TBase extends Constructor<HttpCore>>(Base: TBase) {
         body: JSON.stringify({ network_policy: networkPolicy }),
       });
     }
+
+    /**
+     * Keep this chat out of memory, or let it back in with `false`.
+     *
+     * An incognito chat neither receives the digest nor feeds capture.
+     */
+    patchChatMemoryIncognito(
+      chatId: string,
+      memoryIncognito: boolean,
+    ): Promise<Chat> {
+      return this.json(`/chats/${chatId}`, {
+        method: "PATCH",
+        headers: this.headers(true),
+        body: JSON.stringify({ memory_incognito: memoryIncognito }),
+      });
+    }
   };
 }

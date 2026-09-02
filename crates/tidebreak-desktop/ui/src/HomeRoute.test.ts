@@ -12,6 +12,7 @@ const pendingChat = {
   project_id: null,
   created_at: "2026-08-10T00:00:00Z",
   attachment_revision: 0,
+  memory_incognito: false,
   root_attachments: [],
 };
 

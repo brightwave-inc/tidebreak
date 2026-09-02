@@ -525,6 +525,11 @@ impl Store for TerminalFaultStore {
             )
             .await
     }
+    async fn set_chat_memory_incognito(&self, id: ChatId, memory_incognito: bool) -> Result<bool> {
+        self.inner
+            .set_chat_memory_incognito(id, memory_incognito)
+            .await
+    }
 
     async fn resumed_sandbox_spawn_batch(
         &self,
@@ -1124,6 +1129,7 @@ async fn store_with_pool(
         reasoning_effort: None,
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: chrono::Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();

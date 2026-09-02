@@ -135,6 +135,7 @@ fn sample_chat() -> Chat {
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap(),
     }
 }
