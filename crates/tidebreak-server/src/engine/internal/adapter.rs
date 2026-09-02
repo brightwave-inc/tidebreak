@@ -76,6 +76,7 @@ impl HarnessAdapter for InternalAdapter {
             durable_parks: CapLevel::Supported,
             user_questions: CapLevel::Supported,
             standing_grants: CapLevel::Supported,
+            memory_loopback: CapLevel::Unsupported,
         }
     }
 

@@ -297,6 +297,8 @@ pub(crate) struct LiveSink {
     /// Derives a lucid rewrite of the closing message once the turn
     /// completes. `None` in headless deployments and tests that install none.
     rewrite: Option<Arc<dyn super::rewrite::TurnRewrite>>,
+    /// Derives memory proposals once the turn completes.
+    memory_capture: Option<Arc<dyn super::memory_capture::TurnMemoryCapture>>,
     /// The runtime's hot pull-request tier (decision 66). A turn whose fact
     /// detector confirms a push or a create marks this workspace, so the
     /// next hot pass reads the head the turn just moved (issue 2799).
@@ -786,6 +788,11 @@ impl HarnessEventSink for LiveSink {
             (journaled, completed_turn, self.rewrite.as_ref())
         {
             rewrite.spawn(self.owner.clone(), self.session_id, turn_id);
+        }
+        if let (true, Some(turn_id), Some(capture)) =
+            (journaled, completed_turn, self.memory_capture.as_ref())
+        {
+            capture.spawn(self.owner.clone(), self.session_id, turn_id);
         }
     }
 }
@@ -2614,6 +2621,38 @@ async fn drive_turn_inner(
     .await
     .map_err(|err| WorkerError::Failed(err.to_string()))?;
 
+    let repo_id = match session.workspace_id {
+        Some(workspace_id) => get_workspace(db, &session.owner, workspace_id)
+            .await
+            .map_err(|err| WorkerError::Failed(err.to_string()))?
+            .map(|workspace| workspace.repo_id),
+        None => None,
+    };
+    let memory_dir = super::memory::materialize_session_memory(
+        db.as_ref(),
+        &session.owner,
+        repo_id,
+        &store.private_root,
+    )
+    .await
+    .map_err(|err| WorkerError::Failed(format!("materialize memory: {err}")))?;
+    if ordinal == 1 && !super::memory::memory_loopback_supported(session.harness_kind) {
+        persist_and_publish(
+            db,
+            bus,
+            &session.owner,
+            session.id,
+            session.spawn_epoch,
+            CodeEvent::HarnessNotice {
+                level: HarnessNoticeLevel::Info,
+                message: super::memory::memory_verb_unsupported_notice(session.harness_kind),
+            },
+            sink.native_journal,
+        )
+        .await
+        .map_err(|err| WorkerError::Failed(err.to_string()))?;
+    }
+
     // What the engine is handed is not always what the person wrote: an engine
     // that cannot take images over its own protocol is given paths instead, and
     // `turn.user_input` above keeps the message as typed.
@@ -2627,6 +2666,14 @@ async fn drive_turn_inner(
             message_naming_attachments(&message, &staged.paths),
             Vec::new(),
         )
+    };
+    let engine_text = if ordinal == 1 {
+        format!(
+            "{engine_text}\n\n{}",
+            super::memory::first_turn_memory_line(&memory_dir)
+        )
+    } else {
+        engine_text
     };
     let mut next_input = Some(TurnInput {
         text: engine_text,
@@ -3354,6 +3401,7 @@ pub(crate) fn sink_for(
     gh_search_path: Option<String>,
     recap: Option<Arc<dyn super::recap::TurnRecap>>,
     rewrite: Option<Arc<dyn super::rewrite::TurnRewrite>>,
+    memory_capture: Option<Arc<dyn super::memory_capture::TurnMemoryCapture>>,
     hot_prs: super::pr_refresh::HotPullRequests,
 ) -> Arc<LiveSink> {
     Arc::new(LiveSink {
@@ -3372,6 +3420,7 @@ pub(crate) fn sink_for(
         subagents: std::sync::Mutex::new(subagents),
         recap,
         rewrite,
+        memory_capture,
         hot_prs,
     })
 }
@@ -4084,6 +4133,7 @@ mod tests {
             false,
             None,
             Vec::new(),
+            None,
             None,
             None,
             None,
@@ -4874,6 +4924,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             crate::code::pr_refresh::HotPullRequests::default(),
         );
         sink.emit(HarnessEvent::SessionStarted {
@@ -5333,6 +5384,7 @@ mod tests {
             true,
             None,
             Vec::new(),
+            None,
             None,
             None,
             None,

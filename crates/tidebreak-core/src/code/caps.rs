@@ -113,6 +113,9 @@ pub struct HarnessCaps {
     /// not a separate subsystem. The internal engine's grant ladders
     /// declare it `Supported`.
     pub standing_grants: CapLevel,
+    /// The engine mounts Tidebreak's loopback MCP server, so it can call
+    /// the memory verb (propose, search, read) on that bridge.
+    pub memory_loopback: CapLevel,
 }
 
 /// One engine-owned slash command, captured from the engine's own listing.
@@ -147,6 +150,7 @@ mod tests {
             durable_parks: CapLevel::Unsupported,
             user_questions: CapLevel::Unsupported,
             standing_grants: CapLevel::Unsupported,
+            memory_loopback: CapLevel::Unsupported,
         };
         assert_eq!(caps.resume, CapLevel::Supported);
         assert_eq!(caps.structured_approvals, CapLevel::Unknown);

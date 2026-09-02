@@ -237,6 +237,7 @@ impl HarnessAdapter for ClaudeCodeAdapter {
             durable_parks: CapLevel::Unsupported,
             user_questions: CapLevel::Unsupported,
             standing_grants: CapLevel::Unsupported,
+            memory_loopback: CapLevel::Supported,
         };
         // Off the captured 2.1 line — a declared newer engine, say — the
         // stream contract and permission flags are stable documented

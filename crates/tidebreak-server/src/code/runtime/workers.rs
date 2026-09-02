@@ -121,6 +121,7 @@ impl CodeRuntime {
             self.gh_search_path_owned(),
             self.recap_hook(),
             self.rewrite_hook(),
+            self.memory_capture_hook(),
             self.hot_pull_requests(),
         );
         // An in-process engine parks its approvals on the adapter's own

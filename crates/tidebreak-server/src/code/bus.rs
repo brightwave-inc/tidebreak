@@ -78,6 +78,8 @@ pub(crate) struct SessionDigest {
     /// carries one (`super::recap`). Absent until a turn has been recapped,
     /// and on machines with no utility model to derive one.
     pub recap: Option<String>,
+    /// Pending memory proposals that originated in this session.
+    pub memory_proposal_count: Option<u64>,
 }
 
 /// Progress of one in-flight `git clone` job.

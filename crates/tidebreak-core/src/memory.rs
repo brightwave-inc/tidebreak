@@ -508,6 +508,19 @@ pub struct MemorySearchHit {
     pub score: u32,
 }
 
+/// Markdown body for one materialized record file.
+#[must_use]
+pub fn render_memory_record_markdown(record: &MemoryRecord) -> String {
+    format!(
+        "# {}\n\nUpdated: {}\nKind: {}\nId: {}\n\n{}\n",
+        record.title,
+        record.updated_at.format("%Y-%m-%d"),
+        record.kind.as_str(),
+        record.id,
+        record.body.trim_end()
+    )
+}
+
 /// One deterministic active-record digest for a scope.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct MemoryDigest {

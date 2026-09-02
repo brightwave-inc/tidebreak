@@ -482,7 +482,28 @@ async fn build_digest(
             Some(session.subagents.clone())
         },
         recap,
+        memory_proposal_count: memory_proposal_count(db, session).await,
     })
+}
+
+async fn memory_proposal_count(db: &DbStore, session: &CodeSession) -> Option<u64> {
+    use tidebreak_core::{MemoryBackend, MemoryListFilter, MemoryStatus};
+    let records = db
+        .list(
+            &session.owner,
+            MemoryListFilter {
+                scope: None,
+                statuses: vec![MemoryStatus::Proposed],
+                kinds: Vec::new(),
+            },
+        )
+        .await
+        .ok()?;
+    let count = records
+        .into_iter()
+        .filter(|record| record.provenance.origin.code_session_id == Some(session.id))
+        .count() as u64;
+    (count > 0).then_some(count)
 }
 
 /// Whether a running session is parked on work that is silent by design: a

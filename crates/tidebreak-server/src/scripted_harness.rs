@@ -491,6 +491,7 @@ impl HarnessAdapter for ScriptedAdapter {
             durable_parks: self.durable_parks,
             user_questions: self.user_questions,
             standing_grants: self.standing_grants,
+            memory_loopback: CapLevel::Unsupported,
         }
     }
 

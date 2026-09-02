@@ -1757,7 +1757,11 @@ subagents?: Array<CodeSubagentSummary>,
  * that carries one. Absent until a turn has been recapped, and on
  * machines with no utility model to derive one.
  */
-recap?: string, };
+recap?: string,
+/**
+ * Pending memory proposals that originated in this session.
+ */
+memory_proposal_count?: number, };
 
 /**
  * Where an externally created session came from. The desktop renders it
@@ -1965,7 +1969,11 @@ subagents?: Array<CodeSubagentSummary>,
  * Where this session stands, in a sentence, derived from the newest
  * turn that carries one.
  */
-recap?: string, } | { "type": "terminal_activity", workspace_id: WorkspaceId, terminal_id: CodeTerminalId, } | { "type": "clone_progress", job: string, phase: string, percent?: number, done: boolean, error?: string, repo_id?: RepoId, } | { "type": "harness_install", kind: HarnessKind, version?: string, phase: string, done: boolean, error?: string, } | { "type": "delivery" } | { "type": "turn_rewrite", session: CodeSessionId, turn_id: CodeTurnId, state: CodeTurnRewriteState, rewrite?: string, };
+recap?: string,
+/**
+ * Pending memory proposals that originated in this session.
+ */
+memory_proposal_count?: number, } | { "type": "terminal_activity", workspace_id: WorkspaceId, terminal_id: CodeTerminalId, } | { "type": "clone_progress", job: string, phase: string, percent?: number, done: boolean, error?: string, repo_id?: RepoId, } | { "type": "harness_install", kind: HarnessKind, version?: string, phase: string, done: boolean, error?: string, } | { "type": "delivery" } | { "type": "turn_rewrite", session: CodeSessionId, turn_id: CodeTurnId, state: CodeTurnRewriteState, rewrite?: string, };
 
 /**
  * Token accounting for one turn.
@@ -2899,7 +2907,12 @@ user_questions: CapLevel,
  * not a separate subsystem. The internal engine's grant ladders
  * declare it `Supported`.
  */
-standing_grants: CapLevel, };
+standing_grants: CapLevel,
+/**
+ * The engine mounts Tidebreak's loopback MCP server, so it can call
+ * the memory verb (propose, search, read) on that bridge.
+ */
+memory_loopback: CapLevel, };
 
 /**
  * One engine-owned slash command, captured from the engine's own listing.

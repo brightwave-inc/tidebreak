@@ -161,14 +161,14 @@ pub(crate) trait TurnRecap: Send + Sync {
 pub(crate) struct TurnRecapper {
     /// Per-caller gateway capabilities on a hosted machine (decisions 51 and
     /// 62): a recap runs as the owner of the session it describes.
-    on_behalf_of: Option<Arc<crate::obo_gateway::OboGateway>>,
-    db: Arc<DbStore>,
+    pub(crate) on_behalf_of: Option<Arc<crate::obo_gateway::OboGateway>>,
+    pub(crate) db: Arc<DbStore>,
     bus: Arc<CodeEventBus>,
-    store: Arc<dyn tidebreak_core::Store>,
-    resolver: Arc<dyn ProviderResolver>,
-    secrets: Arc<dyn tidebreak_core::SecretProvider>,
-    provisioned_policy: Arc<dyn crate::managed_policy::ProvisionedPolicySource>,
-    os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
+    pub(crate) store: Arc<dyn tidebreak_core::Store>,
+    pub(crate) resolver: Arc<dyn ProviderResolver>,
+    pub(crate) secrets: Arc<dyn tidebreak_core::SecretProvider>,
+    pub(crate) provisioned_policy: Arc<dyn crate::managed_policy::ProvisionedPolicySource>,
+    pub(crate) os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
     /// Sessions with a recap call in flight, and at most one turn queued by a
     /// completion that landed while that call was running.
     ///
@@ -302,6 +302,15 @@ impl TurnRecapper {
     /// what this turn was asked for, and what the turn actually did. The goal
     /// is what keeps a recap of the fifth turn from reading as though the work
     /// began there.
+    pub(crate) async fn turn_material(
+        &self,
+        owner: &OwnerId,
+        session_id: CodeSessionId,
+        turn: &tidebreak_core::CodeTurn,
+    ) -> Result<String> {
+        self.material(owner, session_id, turn).await
+    }
+
     async fn material(
         &self,
         owner: &OwnerId,

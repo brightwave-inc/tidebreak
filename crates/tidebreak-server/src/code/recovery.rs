@@ -1142,6 +1142,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             crate::code::pr_refresh::HotPullRequests::default(),
         );
         let private_root = _dir.path().join("private");
@@ -1405,6 +1406,7 @@ mod tests {
             false,
             None,
             session.subagents.clone(),
+            None,
             None,
             None,
             None,

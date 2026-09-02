@@ -151,6 +151,7 @@ fn caps() -> HarnessCaps {
         durable_parks: CapLevel::Unknown,
         user_questions: CapLevel::Supported,
         standing_grants: CapLevel::Supported,
+        memory_loopback: CapLevel::Unsupported,
     }
 }
 
@@ -238,6 +239,7 @@ fn digest() -> CodeSessionDigest {
             status: CodeSubagentStatus::Running,
         }]),
         recap: Some("The parser bounds every field; the tests are next.".to_owned()),
+        memory_proposal_count: None,
     }
 }
 
@@ -279,6 +281,7 @@ fn digest_notice(d: CodeSessionDigest) -> CodeUpdateNotice {
         watch_cycles: d.watch_cycles,
         subagents: d.subagents,
         recap: d.recap,
+        memory_proposal_count: d.memory_proposal_count,
     }
 }
 
