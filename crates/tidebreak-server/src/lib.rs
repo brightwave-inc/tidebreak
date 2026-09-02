@@ -2173,11 +2173,23 @@ async fn bind_inner(
     // instance (two instances over the same keychain entry can race a stale
     // refresh token into the gateway's reuse detection, a spurious full
     // sign-out).
-    let mut state =
-        AppState::new_with_db_store(config, db.clone(), resolver, secrets, tools, agent_config)?
-            .with_on_behalf_of_gateway(on_behalf_of_gateway);
-    state.client_executor_id = client_executor_id.unwrap_or_else(Uuid::new_v4);
-    state.root_attachment_routes_enabled = client_executor_id.is_some();
+    let mut state = AppState::with_gateway_runtime(
+        config,
+        store,
+        resolver,
+        secrets,
+        tools,
+        agent_config,
+        client_executor_id.unwrap_or_else(Uuid::new_v4),
+        gateway,
+        chatgpt,
+        provisioned_policy,
+        os_policy,
+    )?
+    .with_on_behalf_of_gateway(on_behalf_of_gateway);
+    // Memory routes need the backend trait the concrete database implements;
+    // the same connection `store` wraps, not a second one.
+    state.memory = Some(db.clone());
     state.adapter_bootstrap_tokens = auth::AdapterBootstrapTokens::from_env()?.map(Arc::new);
     state.agent_run_wake = agent_run_wake;
     state.sandbox_attempts = sandbox_attempts;

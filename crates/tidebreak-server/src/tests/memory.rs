@@ -14,6 +14,25 @@ use tidebreak_core::memory::{
 };
 use tidebreak_core::OwnerId;
 
+/// State over one database, with memory routes bound to that same database
+/// the way production boot binds them.
+fn state_with_memory(
+    config: Config,
+    db: Arc<tidebreak_core::DbStore>,
+    agent_config: AgentConfig,
+) -> AppState {
+    let mut state = AppState::new(
+        config,
+        db.clone(),
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        agent_config,
+    );
+    state.memory = Some(db);
+    state
+}
+
 async fn memory_app() -> (
     Router,
     Arc<str>,
@@ -22,18 +41,14 @@ async fn memory_app() -> (
 ) {
     let (dir, store) = temp_db_store("memory-routes.db").await;
     let db = Arc::new(store);
-    let state = AppState::new_with_db_store(
+    let state = state_with_memory(
         Config::desktop(dir.path()),
         db.clone(),
-        Arc::new(FixedResolver(Arc::new(FakeProvider))),
-        Arc::new(MemSecrets::default()),
-        Arc::new(ToolRegistry::new()),
         AgentConfig {
             model: "fake".into(),
             ..AgentConfig::default()
         },
-    )
-    .unwrap();
+    );
     let token = state.token.clone();
     (app(state), token, db, dir)
 }
@@ -119,20 +134,14 @@ async fn memory_routes_isolate_records_by_owner() {
             "/memory/records/{id}",
             get(crate::routes::get_record).delete(crate::routes::delete_record),
         )
-        .with_state(
-            AppState::new_with_db_store(
-                Config::desktop(Path::new("/tmp/tidebreak-memory-test")),
-                tidebreak_core::DbStore::connect("sqlite::memory:")
-                    .await
-                    .unwrap()
-                    .into(),
-                Arc::new(FixedResolver(Arc::new(FakeProvider))),
-                Arc::new(MemSecrets::default()),
-                Arc::new(ToolRegistry::new()),
-                AgentConfig::default(),
-            )
-            .unwrap(),
-        )
+        .with_state(state_with_memory(
+            Config::desktop(Path::new("/tmp/tidebreak-memory-test")),
+            tidebreak_core::DbStore::connect("sqlite::memory:")
+                .await
+                .unwrap()
+                .into(),
+            AgentConfig::default(),
+        ))
         .layer(axum::middleware::from_fn(
             |mut request: Request<Body>, next: axum::middleware::Next| async move {
                 request.extensions_mut().insert(AuthContext {

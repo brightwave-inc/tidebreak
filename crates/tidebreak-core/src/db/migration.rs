@@ -4049,7 +4049,7 @@ struct MemoryRecords;
 
 impl MigrationName for MemoryRecords {
     fn name(&self) -> &str {
-        "m20260901_000029_memory_records"
+        "m20260902_000004_memory_records"
     }
 }
 
@@ -4380,6 +4380,7 @@ mod tests {
                 "m20260902_000001_conversations_are_sessions",
                 "m20260902_000002_one_journal",
                 "m20260902_000003_one_approval_surface",
+                "m20260902_000004_memory_records",
             ]
         );
         assert!(db
