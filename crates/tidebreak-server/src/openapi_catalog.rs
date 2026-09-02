@@ -28,6 +28,9 @@ use thiserror::Error;
 /// configuration upload, because the record never stores the document — only
 /// the bounded catalog, whose own limits below are what keep it small.
 pub const MAX_OPENAPI_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
+/// serde_json's default nesting limit. Raising it needs the `unbounded_depth`
+/// feature plus a stack guard; this ingest keeps the limit and reports it.
+pub const JSON_NESTING_LIMIT: usize = 128;
 /// Most operations one catalog may hold. Prevents a spec from minting an
 /// unbounded binding/consent surface.
 pub const MAX_CATALOG_OPERATIONS: usize = 256;
@@ -172,10 +175,30 @@ pub struct OperationCatalog {
 /// bound, and identifiers that failed those bounds are described, not quoted.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum OpenApiIngestError {
-    #[error("OpenAPI document exceeds {} bytes", MAX_OPENAPI_DOCUMENT_BYTES)]
-    DocumentTooLarge,
-    #[error("only JSON OpenAPI documents are supported; the document is not a JSON object")]
-    NotJson,
+    #[error("OpenAPI document is {actual} bytes; the limit is {limit} bytes")]
+    DocumentTooLarge { actual: usize, limit: usize },
+    #[error(
+        "JSON {detail} at line {line}, column {column}. Check line {line}, column {column}"
+    )]
+    JsonSyntax {
+        line: usize,
+        column: usize,
+        detail: &'static str,
+    },
+    #[error(
+        "JSON nested deeper than {limit} levels at line {line}, column {column}. Check line {line}, column {column}"
+    )]
+    JsonTooDeep {
+        line: usize,
+        column: usize,
+        limit: usize,
+    },
+    #[error("only JSON OpenAPI documents are supported; the document is a JSON {found}, not an object")]
+    NotAnObject { found: &'static str },
+    #[error(
+        "only JSON OpenAPI documents are supported; the first non-whitespace byte is not '{{' or '[' (YAML and other formats are not accepted)"
+    )]
+    NotJsonDocument,
     #[error("Swagger 2.0 documents are not supported; provide OpenAPI 3.x")]
     SwaggerNotSupported,
     #[error("document does not declare an OpenAPI 3.x version")]
@@ -450,21 +473,28 @@ pub fn enumerate_openapi_operations(document: &[u8]) -> Result<SpecInventory, Op
 /// JSON object, not Swagger 2.0, declares OpenAPI 3.x.
 fn parse_openapi_root(document: &[u8]) -> Result<Value, OpenApiIngestError> {
     if document.len() > MAX_OPENAPI_DOCUMENT_BYTES {
-        return Err(OpenApiIngestError::DocumentTooLarge);
+        return Err(OpenApiIngestError::DocumentTooLarge {
+            actual: document.len(),
+            limit: MAX_OPENAPI_DOCUMENT_BYTES,
+        });
     }
-    // Leading-bytes heuristic: a JSON OpenAPI document is always a JSON
-    // object, so anything not opening with `{` (a YAML spec, most obviously)
-    // gets the JSON-only refusal without attempting a parse.
-    let opens_as_object = document
+    // BOM is not JSON; browsers and editors still prepend it when copying.
+    // Strip it only for parsing — callers hash the original bytes.
+    let without_bom = strip_utf8_bom(document);
+    let first = without_bom
         .iter()
-        .find(|byte| !byte.is_ascii_whitespace())
-        .is_some_and(|byte| *byte == b'{');
-    if !opens_as_object {
-        return Err(OpenApiIngestError::NotJson);
+        .copied()
+        .find(|byte| !byte.is_ascii_whitespace());
+    match first {
+        Some(b'{') => {}
+        Some(byte) => return Err(leading_byte_refusal(byte)),
+        None => return Err(OpenApiIngestError::NotJsonDocument),
     }
-    let root: Value = serde_json::from_slice(document).map_err(|_| OpenApiIngestError::NotJson)?;
+    let root: Value = serde_json::from_slice(without_bom).map_err(json_parse_error)?;
     let Value::Object(ref root_object) = root else {
-        return Err(OpenApiIngestError::NotJson);
+        return Err(OpenApiIngestError::NotAnObject {
+            found: json_value_kind(&root),
+        });
     };
 
     if root_object.contains_key("swagger") {
@@ -478,6 +508,77 @@ fn parse_openapi_root(document: &[u8]) -> Result<Value, OpenApiIngestError> {
         return Err(OpenApiIngestError::NotOpenApi3);
     }
     Ok(root)
+}
+
+fn strip_utf8_bom(bytes: &[u8]) -> &[u8] {
+    match bytes {
+        [0xEF, 0xBB, 0xBF, rest @ ..] => rest,
+        _ => bytes,
+    }
+}
+
+fn leading_byte_refusal(byte: u8) -> OpenApiIngestError {
+    let found = match byte {
+        b'[' => "array",
+        b'"' => "string",
+        b't' | b'f' => "boolean",
+        b'n' => "null",
+        b'-' | b'0'..=b'9' => "number",
+        _ => {
+            return OpenApiIngestError::NotJsonDocument;
+        }
+    };
+    OpenApiIngestError::NotAnObject { found }
+}
+
+fn json_value_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+fn json_parse_error(err: serde_json::Error) -> OpenApiIngestError {
+    let line = err.line();
+    let column = err.column();
+    let display = err.to_string();
+    if display.starts_with("recursion limit exceeded") {
+        return OpenApiIngestError::JsonTooDeep {
+            line,
+            column,
+            limit: JSON_NESTING_LIMIT,
+        };
+    }
+    OpenApiIngestError::JsonSyntax {
+        line,
+        column,
+        detail: json_error_detail(&err, &display),
+    }
+}
+
+fn json_error_detail(err: &serde_json::Error, display: &str) -> &'static str {
+    if display.contains("lone leading surrogate")
+        || display.contains("lone trailing surrogate")
+        || display.contains("invalid unicode")
+        || display.contains("hex escape")
+        || display.contains("escape")
+    {
+        "invalid unicode escape"
+    } else if display.contains("trailing characters") {
+        "trailing characters after the JSON value"
+    } else if display.contains("number out of range") {
+        "number out of range"
+    } else if err.is_eof() {
+        "unexpected end of input"
+    } else if err.is_data() {
+        "invalid JSON value"
+    } else {
+        "invalid JSON syntax"
+    }
 }
 
 /// The document's `paths` object, or a refusal if it declares a non-object.
@@ -1026,17 +1127,20 @@ mod tests {
             (
                 "over the byte bound",
                 vec![b' '; MAX_OPENAPI_DOCUMENT_BYTES + 1],
-                OpenApiIngestError::DocumentTooLarge,
+                OpenApiIngestError::DocumentTooLarge {
+                    actual: MAX_OPENAPI_DOCUMENT_BYTES + 1,
+                    limit: MAX_OPENAPI_DOCUMENT_BYTES,
+                },
             ),
             (
                 "YAML gets the JSON-only refusal",
                 b"openapi: \"3.1.0\"\npaths: {}\n".to_vec(),
-                OpenApiIngestError::NotJson,
+                OpenApiIngestError::NotJsonDocument,
             ),
             (
                 "JSON but not an object",
                 b"[1, 2]".to_vec(),
-                OpenApiIngestError::NotJson,
+                OpenApiIngestError::NotAnObject { found: "array" },
             ),
             (
                 "Swagger 2.0 refused distinctly",
@@ -1235,6 +1339,87 @@ mod tests {
                 "{case}"
             );
         }
+    }
+
+    #[test]
+    fn a_bom_and_surrounding_whitespace_still_ingest() {
+        let mut bytes = b"\xEF\xBB\xBF\n  ".to_vec();
+        bytes.extend(document(json!({
+            "/a": { "get": { "operationId": "a.get" } }
+        })));
+        bytes.extend(b"\n\t");
+        let catalog = ingest_openapi_document(&bytes, None).unwrap();
+        assert!(catalog.operations.contains_key("a.get"));
+    }
+
+    #[test]
+    fn an_array_root_reports_array_not_a_generic_json_refusal() {
+        assert_eq!(
+            parse_openapi_root(b"[1, 2]").unwrap_err(),
+            OpenApiIngestError::NotAnObject { found: "array" }
+        );
+        assert!(parse_openapi_root(b"[1, 2]")
+            .unwrap_err()
+            .to_string()
+            .contains("array"));
+    }
+
+    #[test]
+    fn a_syntax_error_reports_line_and_column() {
+        let document = b"{\n  \"openapi\":\n";
+        let err = parse_openapi_root(document).unwrap_err();
+        match err {
+            OpenApiIngestError::JsonSyntax {
+                line,
+                column,
+                detail,
+            } => {
+                assert_eq!(line, 3);
+                assert!(column <= 1, "column={column}");
+                assert_eq!(detail, "unexpected end of input");
+            }
+            other => panic!("expected JsonSyntax, got {other:?}"),
+        }
+        let text = err.to_string();
+        assert!(text.contains("line 3"), "{text}");
+        assert!(text.contains("column 0") || text.contains("column 1"), "{text}");
+        assert!(!text.contains("openapi"), "{text}");
+    }
+
+    #[test]
+    fn a_lone_surrogate_escape_is_a_syntax_error_not_not_an_object() {
+        let document =
+            br#"{"openapi":"3.0.3","info":{"title":"t","description":"\ud83d"},"paths":{}}"#;
+        let err = parse_openapi_root(document).unwrap_err();
+        match err {
+            OpenApiIngestError::JsonSyntax { detail, .. } => {
+                assert_eq!(detail, "invalid unicode escape");
+            }
+            other => panic!("expected JsonSyntax, got {other:?}"),
+        }
+        assert!(!err.to_string().contains("not an object"), "{err}");
+    }
+
+    #[test]
+    fn over_deep_nesting_reports_the_limit_instead_of_raising_it() {
+        let mut nested = String::from("{");
+        for index in 0..JSON_NESTING_LIMIT {
+            nested.push_str(&format!("\"k{index}\":{{"));
+        }
+        nested.push_str("\"x\":1");
+        for _ in 0..=JSON_NESTING_LIMIT {
+            nested.push('}');
+        }
+        let err = parse_openapi_root(nested.as_bytes()).unwrap_err();
+        match err {
+            OpenApiIngestError::JsonTooDeep { limit, .. } => {
+                assert_eq!(limit, JSON_NESTING_LIMIT);
+            }
+            other => panic!("expected JsonTooDeep, got {other:?}"),
+        }
+        let text = err.to_string();
+        assert!(text.contains(&JSON_NESTING_LIMIT.to_string()), "{text}");
+        assert!(!text.contains("not an object"), "{text}");
     }
 
     #[test]

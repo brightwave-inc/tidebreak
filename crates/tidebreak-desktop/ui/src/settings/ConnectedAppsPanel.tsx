@@ -9,12 +9,13 @@ import {
   RefreshCw,
   Trash2,
 } from "lucide-react";
-import type {
-  ApiClient,
-  ConnectedAppInfo,
-  CredentialPlacement,
-  RestCredentialUpdate,
-  SpecPreviewInfo,
+import {
+  HttpError,
+  type ApiClient,
+  type ConnectedAppInfo,
+  type CredentialPlacement,
+  type RestCredentialUpdate,
+  type SpecPreviewInfo,
 } from "../api";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -124,6 +125,12 @@ function credentialLabel(entry: RestEntry): string {
 }
 
 function errorMessage(err: unknown): string {
+  if (err instanceof HttpError) {
+    const prefix = `${err.status}: `;
+    if (err.message.startsWith(prefix)) {
+      return err.message.slice(prefix.length);
+    }
+  }
   return err instanceof Error ? err.message : String(err);
 }
 
@@ -764,6 +771,7 @@ export function ConnectedAppsPanel({
             {previewing && <Loader2 size={14} className="animate-spin" />}
             {previewing ? "Loading…" : "Select operations…"}
           </Button>
+          {formError && <SettingsError>{formError}</SettingsError>}
         </div>
       )}
       {draft.preview !== null && (
@@ -831,7 +839,9 @@ export function ConnectedAppsPanel({
           />
         </SettingsField>
       )}
-      {formError && <SettingsError>{formError}</SettingsError>}
+      {formError && draft.source !== "paste" && (
+        <SettingsError>{formError}</SettingsError>
+      )}
       <div className="flex gap-2">
         <Button disabled={saving} onClick={() => void save()}>
           {saving && <Loader2 size={14} className="animate-spin" />}
