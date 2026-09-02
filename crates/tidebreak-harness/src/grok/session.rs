@@ -1243,20 +1243,39 @@ mod tests {
             .unwrap()
             .argv
         };
+        // A flag appears at most once and its value is the very next argv
+        // entry; `None` means the flag is absent.
+        let value_after = |argv: &[String], flag: &str| -> Option<String> {
+            let hits: Vec<usize> = argv
+                .iter()
+                .enumerate()
+                .filter(|(_, arg)| arg.as_str() == flag)
+                .map(|(index, _)| index)
+                .collect();
+            assert!(hits.len() <= 1, "{flag} repeated in {argv:?}");
+            let index = *hits.first()?;
+            Some(
+                argv.get(index + 1)
+                    .unwrap_or_else(|| panic!("{flag} has no value in {argv:?}"))
+                    .clone(),
+            )
+        };
+
         let fresh = launch(None, Some("11111111-2222-4333-8444-555555555555"));
-        assert!(fresh
-            .windows(2)
-            .any(|pair| pair == ["--session-id", "11111111-2222-4333-8444-555555555555"]));
-        assert!(!fresh.iter().any(|arg| arg == "--resume"), "{fresh:?}");
+        assert_eq!(
+            value_after(&fresh, "--session-id").as_deref(),
+            Some("11111111-2222-4333-8444-555555555555"),
+            "{fresh:?}"
+        );
+        assert_eq!(value_after(&fresh, "--resume"), None, "{fresh:?}");
 
         let resumed = launch(Some("sess-1"), Some("ignored"));
-        assert!(resumed
-            .windows(2)
-            .any(|pair| pair == ["--resume", "sess-1"]));
-        assert!(
-            !resumed.iter().any(|arg| arg == "--session-id"),
+        assert_eq!(
+            value_after(&resumed, "--resume").as_deref(),
+            Some("sess-1"),
             "{resumed:?}"
         );
+        assert_eq!(value_after(&resumed, "--session-id"), None, "{resumed:?}");
     }
 
     /// The stand-in engine is a shell script, so these run where `sh` does.
