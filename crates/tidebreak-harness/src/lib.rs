@@ -45,9 +45,10 @@ pub use launch::{
 };
 pub use pin::{ensure_installed, managed_binary, pin_for, HarnessPin, PINS};
 pub use probe::{
-    display_model_label, filter_child_env, filter_engine_child_env, infer_listed_default,
-    list_cli_models, observe_version, prefer_gateway_models, probe_shell, resolve_binary,
-    with_reasoning_efforts, DeclaredBinary, HostEnv, ListedHarnessModel, ProbeCapture, ProbeError,
+    capture_login_env, display_model_label, env_value, filter_child_env, filter_engine_child_env,
+    infer_listed_default, list_cli_models, observe_version, prefer_gateway_models, probe_shell,
+    resolve_binary, resolve_command_on_path, with_reasoning_efforts, DeclaredBinary, HostEnv,
+    ListedHarnessModel, ProbeCapture, ProbeError,
 };
 
 /// Whether some auth mode besides the vendor login a probe observes could

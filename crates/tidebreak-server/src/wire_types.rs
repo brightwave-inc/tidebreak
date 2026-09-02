@@ -1559,6 +1559,7 @@ mod tests {
                     health: McpHealth::Healthy,
                     tool_count: 11,
                     diagnostic: None,
+                    resolved_command: Some("/usr/local/bin/npx".into()),
                     curated: Some(McpCuration {
                         display_name: "Filesystem".into(),
                         tested_on: "2026-08-01".into(),
@@ -1570,6 +1571,7 @@ mod tests {
                     health: McpHealth::Disabled,
                     tool_count: 0,
                     diagnostic: Some("turned off".into()),
+                    resolved_command: None,
                     curated: None,
                 },
             ],

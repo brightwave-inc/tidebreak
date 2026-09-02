@@ -3318,6 +3318,12 @@ plugin: string | null, };
  */
 export type McpServerInfo = { health: McpHealth, tool_count: number, diagnostic: string | null,
 /**
+ * Absolute path the stdio command resolved to at the last verify or
+ * launch. Absent for HTTP/gateway servers and when resolution failed.
+ * The stored definition still holds what the user typed.
+ */
+resolved_command?: string,
+/**
  * The curated-list entry this definition matches, when Tidebreak has
  * exercised the server end to end. `null` means community: mounted and
  * usable, just not something we have driven ourselves. Derived from the

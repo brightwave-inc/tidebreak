@@ -338,7 +338,7 @@ impl McpServerDefinition {
     /// directory is re-checked for containment here rather than trusted from
     /// the textual rule the importer applied, because only a check at launch
     /// sees symlinks and edits made since.
-    pub(super) fn build_command(&self, env: &BTreeMap<String, String>) -> Result<Command> {
+    pub(super) async fn build_command(&self, env: &BTreeMap<String, String>) -> Result<Command> {
         let Some(program) = &self.command else {
             return Err(AgentError::config(
                 "MCP server definition has no command to spawn",
@@ -346,11 +346,13 @@ impl McpServerDefinition {
         };
         // A plugin's command must be `./`-relative and is resolved against
         // the package root before the child is built. User-configured servers
-        // keep the platform resolution they already had; a plugin never does.
+        // resolve a bare name through the host PATH (process PATH extended
+        // with the login-shell PATH the harness probe captures) without
+        // invoking a shell.
         let program = match &self.launch {
             Some(launch) => crate::plugin_mcp::resolve_command(program, &launch.root)
                 .map_err(AgentError::config)?,
-            None => PathBuf::from(program),
+            None => super::stdio::resolve_stdio_command(program).await?,
         };
         let mut command = Command::new(program);
         command.args(&self.args);
@@ -437,7 +439,7 @@ impl McpServerDefinition {
         }
         McpClient::spawn_with_timeouts(
             self.name.clone(),
-            self.build_command(env)?,
+            self.build_command(env).await?,
             initialization_timeout,
             request_timeout,
         )
@@ -756,6 +758,12 @@ pub struct McpServerInfo {
     pub health: McpHealth,
     pub tool_count: usize,
     pub diagnostic: Option<String>,
+    /// Absolute path the stdio command resolved to at the last verify or
+    /// launch. Absent for HTTP/gateway servers and when resolution failed.
+    /// The stored definition still holds what the user typed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub resolved_command: Option<String>,
     /// The curated-list entry this definition matches, when Tidebreak has
     /// exercised the server end to end. `null` means community: mounted and
     /// usable, just not something we have driven ourselves. Derived from the
