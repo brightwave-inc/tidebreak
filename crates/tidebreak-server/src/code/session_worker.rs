@@ -2646,7 +2646,10 @@ async fn drive_turn_inner(
                 "tidebreak: could not materialize memory for code session {}: {err}",
                 session.id
             );
-            persist_and_publish(
+            // Worker-authored notices are never native journal rows, and a
+            // notice that fails to journal must not fail the turn it
+            // describes.
+            if let Err(err) = persist_and_publish(
                 db,
                 bus,
                 &session.owner,
@@ -2656,15 +2659,20 @@ async fn drive_turn_inner(
                     level: HarnessNoticeLevel::Warning,
                     message: format!("Memory was not materialized for this turn: {err}"),
                 },
-                sink.native_journal,
+                false,
             )
             .await
-            .map_err(|err| WorkerError::Failed(err.to_string()))?;
+            {
+                tracing::warn!(
+                    "tidebreak: could not journal the memory notice for code session {}: {err}",
+                    session.id
+                );
+            }
             None
         }
     };
     if ordinal == 1 && !store.memory_loopback {
-        persist_and_publish(
+        if let Err(err) = persist_and_publish(
             db,
             bus,
             &session.owner,
@@ -2674,10 +2682,15 @@ async fn drive_turn_inner(
                 level: HarnessNoticeLevel::Info,
                 message: super::memory::memory_verb_unsupported_notice(session.harness_kind),
             },
-            sink.native_journal,
+            false,
         )
         .await
-        .map_err(|err| WorkerError::Failed(err.to_string()))?;
+        {
+            tracing::warn!(
+                "tidebreak: could not journal the memory verb notice for code session {}: {err}",
+                session.id
+            );
+        }
     }
 
     // What the engine is handed is not always what the person wrote: an engine

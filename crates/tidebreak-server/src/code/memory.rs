@@ -32,7 +32,6 @@ pub(crate) async fn materialize_session_memory(
     private_root: &ScratchRoot,
 ) -> io::Result<PathBuf> {
     let dir = scratch::scratch_dir(private_root, MEMORY_DIR)?;
-    clear_memory_dir(&dir)?;
 
     let mut files: Vec<(String, String)> = Vec::new();
     let mut digest_parts = Vec::new();
@@ -68,6 +67,10 @@ pub(crate) async fn materialize_session_memory(
     }
 
     files.sort_by_key(|(name, _)| name.clone());
+    // Every store read is done before the old tree goes, so a backend
+    // fault leaves the previous files in place for the path the first
+    // turn already named.
+    clear_memory_dir(&dir)?;
     for (name, body) in files {
         dir.publish(OsStr::new(&name), body.as_bytes()).await?;
     }
@@ -141,6 +144,8 @@ mod tests {
 
     struct FixedBackend {
         records: Vec<MemoryRecord>,
+        /// When set, every read fails, as a store outage would.
+        failing: bool,
     }
 
     #[async_trait::async_trait]
@@ -190,6 +195,11 @@ mod tests {
             _owner: &OwnerId,
             filter: MemoryListFilter,
         ) -> tidebreak_core::MemoryResult<Vec<MemoryRecord>> {
+            if self.failing {
+                return Err(tidebreak_core::MemoryError::Unsupported(
+                    tidebreak_core::MemoryCapability::ContextAssembly,
+                ));
+            }
             Ok(self
                 .records
                 .iter()
@@ -311,6 +321,7 @@ mod tests {
         let root = ScratchRoot::open_for_test(temp.path()).unwrap();
         let backend = FixedBackend {
             records: vec![sample_record()],
+            failing: false,
         };
         let owner = OwnerId::new("user:alice").unwrap();
         let first = materialize_session_memory(&backend, &owner, None, &root)
@@ -333,6 +344,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_failing_store_leaves_the_previous_files_in_place() {
+        let temp = TempDir::new().unwrap();
+        let root = ScratchRoot::open_for_test(temp.path()).unwrap();
+        let owner = OwnerId::new("user:alice").unwrap();
+        let healthy = FixedBackend {
+            records: vec![sample_record()],
+            failing: false,
+        };
+        let dir = materialize_session_memory(&healthy, &owner, None, &root)
+            .await
+            .unwrap();
+        let index = std::fs::read(dir.join(MEMORY_INDEX)).unwrap();
+        let record_file = dir.join("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.md");
+        assert!(record_file.exists());
+
+        let broken = FixedBackend {
+            records: Vec::new(),
+            failing: true,
+        };
+        materialize_session_memory(&broken, &owner, None, &root)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            std::fs::read(dir.join(MEMORY_INDEX)).unwrap(),
+            index,
+            "the index the first turn named survives a store fault"
+        );
+        assert!(record_file.exists(), "the record files survive too");
+    }
+
+    #[tokio::test]
     async fn materialization_stays_outside_the_worktree() {
         let temp = TempDir::new().unwrap();
         let worktree = temp.path().join("repo");
@@ -342,6 +384,7 @@ mod tests {
         let root = ScratchRoot::open_for_test(&private).unwrap();
         let backend = FixedBackend {
             records: vec![sample_record()],
+            failing: false,
         };
         let owner = OwnerId::new("user:alice").unwrap();
         let written = materialize_session_memory(&backend, &owner, None, &root)
