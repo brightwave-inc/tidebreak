@@ -2272,7 +2272,12 @@ placement: CredentialPlacement | null, updated_at: string,
  * a count only, never app names or ids, the renderer-safety posture
  * of this surface. Grants of library-deleted apps do not count.
  */
-used_by_app_count: number, };
+used_by_app_count: number,
+/**
+ * Whether this record opted into loopback HTTP. Surfaced so the
+ * form can re-show consent on edit.
+ */
+allow_loopback_http: boolean, };
 
 /**
  * The renderer's listing of every configured connected app, across kinds.

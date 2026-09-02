@@ -835,8 +835,8 @@ export function ConnectedAppsPanel({
       </SettingsField>
       {mcpUrlHint(draft) && (
         <p className="text-sm text-muted-foreground">
-          This looks like an MCP HTTP endpoint, not a REST/OpenAPI base URL.
-          Add it under Settings → MCP servers as a remote HTTP server.
+          This looks like an MCP HTTP endpoint, not a REST/OpenAPI base URL. Add
+          it under Settings → MCP servers as a remote HTTP server.
         </p>
       )}
       {loopbackHttpHost(draft.baseUrl) !== null && (
@@ -845,9 +845,8 @@ export function ConnectedAppsPanel({
             Allow clear-text HTTP on this computer?
           </p>
           <p className="text-sm text-muted-foreground">
-            This service runs on this computer without TLS. Tidebreak sends
-            the credential in clear text to {loopbackHttpHost(draft.baseUrl)}{" "}
-            only.
+            This service runs on this computer without TLS. Tidebreak sends the
+            credential in clear text to {loopbackHttpHost(draft.baseUrl)} only.
           </p>
           <Label className="flex items-start gap-2 text-sm font-normal">
             <Checkbox
