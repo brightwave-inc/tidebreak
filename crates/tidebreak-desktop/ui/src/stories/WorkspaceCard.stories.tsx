@@ -40,6 +40,7 @@ import {
   runningDigest,
   shellDigest,
   stalledDigest,
+  settledSubagentsDigest,
   subagentsDigest,
   watchDigest,
 } from "./fixtures";
@@ -437,7 +438,7 @@ export const ParkedIdle: Story = {
   },
 };
 
-/** Harness mark, live activity, and turn count on the detailed status line. */
+/** Spinner, activity, and the harness mark on the detailed status line. */
 export const RunningSession: Story = {
   args: {
     digest: runningDigest,
@@ -476,7 +477,7 @@ export const RunningClaudeAfterStoppedCodex: Story = {
   },
 };
 
-/** A live turn waiting on a command says so instead of implying generation. */
+/** A live turn waiting on a command names the command, not a category. */
 export const ShellRunning: Story = {
   args: {
     digest: shellDigest,
@@ -490,7 +491,7 @@ export const ShellRunning: Story = {
   },
 };
 
-/** A passive output/watch tool remains active without reading as an agent. */
+/** A passive output/watch tool: radar glyph, and what it is watching. */
 export const Monitoring: Story = {
   args: {
     digest: monitorDigest,
@@ -521,13 +522,26 @@ export const WithWatchTask: Story = {
 
 /**
  * Harness subagents riding the digest as child rows (ADR 0052): running,
- * done, and failed. Clicking one opens the workspace; the filtered
- * sub-transcript view is a later slice.
+ * done, and failed, unfolded because one is still running. Clicking a row
+ * opens that subagent's filtered transcript.
  */
 export const WithSubagents: Story = {
   args: {
     digest: subagentsDigest,
     session: codeSession,
+    commands: workspaceCommands({
+      hasPr: false,
+      archived: false,
+      hasSession: true,
+    }),
+  },
+};
+
+/** Every subagent settled: one summary row, folded until the reader opens it. */
+export const WithSettledSubagents: Story = {
+  args: {
+    digest: settledSubagentsDigest,
+    session: { ...codeSession, lifecycle: "idle" },
     commands: workspaceCommands({
       hasPr: false,
       archived: false,

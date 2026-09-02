@@ -69,9 +69,9 @@ impl HarnessAdapter for InternalAdapter {
             reasoning_levels: CapLevel::Supported,
             native_file_change_events: CapLevel::Unsupported,
             native_interrupt: CapLevel::Supported,
-            // Chat's attachment model is the image path for the internal
-            // engine; hydrated bytes on the turn input are not wired yet.
-            image_input: CapLevel::Unsupported,
+            // Hydrated bytes on the turn input publish through chat's
+            // attachment model and reach the model request as image blocks.
+            image_input: CapLevel::Supported,
             slash_commands: CapLevel::Unsupported,
             durable_parks: CapLevel::Supported,
             user_questions: CapLevel::Supported,

@@ -476,7 +476,7 @@ describe("WorkspaceCard", () => {
     );
 
     expect(screen.queryByLabelText("Working")).not.toBeInTheDocument();
-    expect(screen.getAllByText("Done · 1 turn").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Done").length).toBeGreaterThan(0);
     expect(
       screen.getByRole("button", {
         name: "Fix login · Done · app · tidebreak/fix-login",
@@ -496,11 +496,18 @@ describe("WorkspaceCard", () => {
   });
 
   it.each([
-    ["shell", "Shell running · 3 turns"],
-    ["monitor", "Monitoring · 3 turns"],
+    ["shell", undefined, "Shell running", "working"],
+    [
+      "shell",
+      "cargo test -p tidebreak-server",
+      "cargo test -p tidebreak-server",
+      "working",
+    ],
+    ["monitor", undefined, "Monitoring", "monitor"],
+    ["monitor", "watching CI on #3040", "watching CI on #3040", "monitor"],
   ] as const)(
-    "renders %s activity as its own workspace state",
-    (activity, label) => {
+    "renders %s activity (%s) as its own workspace state",
+    (activity, activity_detail, label, glyph) => {
       const digest: CodeSessionDigest = {
         workspace: workspace.id,
         session: "sess-1",
@@ -510,6 +517,7 @@ describe("WorkspaceCard", () => {
         title: workspace.title,
         turn_count: 3,
         activity,
+        activity_detail,
       };
       render(
         <WorkspaceCard
@@ -529,10 +537,14 @@ describe("WorkspaceCard", () => {
 
       expect(screen.getByText(label)).toBeInTheDocument();
       expect(screen.queryByText(/Agent working/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/turns?$/)).not.toBeInTheDocument();
+      expect(
+        document.querySelector(`[data-state-glyph="${glyph}"]`),
+      ).toBeInTheDocument();
     },
   );
 
-  it("detailed running cards lead with the harness mark and turn count", () => {
+  it("detailed running cards carry the state glyph and the harness mark", () => {
     const digest: CodeSessionDigest = {
       workspace: workspace.id,
       session: "sess-1",
@@ -576,7 +588,7 @@ describe("WorkspaceCard", () => {
     );
 
     expect(screen.getByTitle("Claude Code")).toBeInTheDocument();
-    expect(screen.getByText("Agent working · 1 turn")).toBeInTheDocument();
+    expect(screen.getByText("Agent working")).toBeInTheDocument();
   });
 
   it("shows the running digest's harness instead of a stopped sibling", () => {
@@ -625,7 +637,7 @@ describe("WorkspaceCard", () => {
 
     expect(screen.getByTitle("Claude Code")).toBeInTheDocument();
     expect(screen.queryByTitle("Codex")).not.toBeInTheDocument();
-    expect(screen.getByText("Agent working · 1 turn")).toBeInTheDocument();
+    expect(screen.getByText("Agent working")).toBeInTheDocument();
   });
 
   it("renders a watch task as its own clickable child row", async () => {
@@ -725,5 +737,55 @@ describe("WorkspaceCard", () => {
     );
     expect(onOpenSubagent).toHaveBeenCalledWith("toolu_task_1");
     expect(onOpen).not.toHaveBeenCalled();
+  });
+
+  it("folds settled subagents behind a summary row until opened", async () => {
+    const user = userEvent.setup();
+    const digest: CodeSessionDigest = {
+      workspace: workspace.id,
+      session: "sess-1",
+      kind: "interactive",
+      lifecycle: "idle",
+      attention: { state: { type: "done_unreviewed" }, source: "lifecycle" },
+      title: workspace.title,
+      turn_count: 3,
+      subagents: [
+        { call_id: "toolu_task_1", name: "Find the parser", status: "done" },
+        { call_id: "toolu_task_2", name: "Run the suite", status: "failed" },
+      ],
+    };
+    render(
+      <WorkspaceCard
+        workspace={workspace}
+        digest={digest}
+        session={undefined}
+        repoName="app"
+        active={false}
+        terminalOpen={false}
+        density="detailed"
+        visibleMeta={{ repoChip: true, branch: false }}
+        commands={workspaceCommands({ hasPr: false, archived: false })}
+        onOpen={vi.fn()}
+        onOpenSubagent={vi.fn()}
+        onCommand={vi.fn()}
+      />,
+    );
+
+    const toggle = screen.getByRole("button", { name: /2 subagents for/ });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(
+      screen.queryByRole("button", { name: /Subagent for Fix login/ }),
+    ).not.toBeInTheDocument();
+    expect(
+      document.querySelector('[data-state-glyph="done"]'),
+    ).toBeInTheDocument();
+
+    await user.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(
+      screen.getByRole("button", {
+        name: "Subagent for Fix login: Run the suite, Failed",
+      }),
+    ).toBeInTheDocument();
   });
 });
