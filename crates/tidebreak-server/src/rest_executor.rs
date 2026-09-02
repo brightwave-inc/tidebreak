@@ -2095,6 +2095,11 @@ mod tests {
         });
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
+            // Drain the request before answering: closing a socket with
+            // unread bytes resets the connection and the client reports a
+            // transport error instead of the 302.
+            let mut buf = [0u8; 2048];
+            let _ = stream.read(&mut buf);
             let body = format!(
                 "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{second_port}/elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
             );
