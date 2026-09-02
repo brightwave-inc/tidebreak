@@ -5,7 +5,7 @@ use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -25,7 +25,8 @@ use crate::{
     HarnessEvent, HarnessSession, ProcessTreeChild, SessionSpec, StreamBudget, StreamLineBuffer,
     TurnInput, TurnOutcome,
 };
-use tidebreak_core::{PermissionMode, ReasoningEffort};
+use tidebreak_core::{HarnessKind, PermissionMode, ReasoningEffort};
+use uuid::Uuid;
 
 const INTERRUPT_GRACE: Duration = Duration::from_secs(2);
 const MAX_STDERR_BYTES: usize = 64 * 1_024;
@@ -45,7 +46,20 @@ pub struct GrokSession {
     /// The session's current permission mode. Each turn is a fresh child, so
     /// a switch is composed into the next launch and needs nothing else.
     permission_mode: Mutex<PermissionMode>,
+    /// The engine session id every turn of this session runs under.
+    ///
+    /// Grok only reports its session id in the closing `end` event, so a
+    /// turn stopped before that point would leave the next launch with
+    /// nothing to resume and the engine would start a conversation that has
+    /// never seen the earlier prompts. The adapter mints the id itself before
+    /// the first child starts, hands it over with `--session-id`, and resumes
+    /// it from then on.
     resume_ref: Mutex<Option<String>>,
+    /// Whether a child has already been launched under `resume_ref`, so the
+    /// engine has written that session and the next launch may `--resume`
+    /// it. A ref the spawn wiring handed over is persisted state and starts
+    /// out resumable.
+    session_launched: AtomicBool,
     version: String,
     prompt_directory: Mutex<Option<PromptDirectory>>,
     child: AsyncMutex<Option<ProcessTreeChild>>,
@@ -63,11 +77,13 @@ pub struct GrokSession {
 impl GrokSession {
     pub(super) fn new(spec: SessionSpec, version: String) -> Self {
         let resume_ref = spec.resume_ref.clone();
+        let session_launched = AtomicBool::new(resume_ref.is_some());
         let permission_mode = spec.permission_mode;
         Self {
             spec,
             permission_mode: Mutex::new(permission_mode),
             resume_ref: Mutex::new(resume_ref),
+            session_launched,
             version,
             prompt_directory: Mutex::new(None),
             relay_auth: Mutex::new(None),
@@ -84,6 +100,13 @@ impl GrokSession {
         turn_effort: Option<ReasoningEffort>,
     ) -> Result<LaunchPlan, HarnessError> {
         let relay_auth = self.relay_auth_file()?;
+        let session_id = self.resume_ref.lock().expect("grok resume").clone();
+        let launched = self.session_launched.load(Ordering::SeqCst);
+        let (resume_ref, new_session_id) = if launched {
+            (session_id.as_deref(), None)
+        } else {
+            (None, session_id.as_deref())
+        };
         compose_print_plan(PrintLaunch {
             binary: self.spec.binary.as_deref().ok_or(HarnessError::NotFound)?,
             extra_argv: &self.spec.extra_argv,
@@ -91,13 +114,42 @@ impl GrokSession {
             extra_env: &self.spec.extra_env,
             relay_auth: relay_auth.as_deref(),
             relay_key_env: self.spec.relay_key_env.as_deref(),
-            resume_ref: self.resume_ref.lock().expect("grok resume").as_deref(),
+            resume_ref,
+            new_session_id,
             prompt_file,
             mode: self.permission_mode(),
             model: turn_model.or(self.spec.model.as_deref()),
             effort: turn_effort.or(self.spec.reasoning_effort),
             effort_ladder: crate::grok::effort_ladder_for_version(Some(&self.version)),
         })
+    }
+
+    /// The engine session id the next child runs under, minted on first use.
+    ///
+    /// Minting happens before the child starts and the id goes out as a
+    /// `SessionStarted` right away, so the server holds a resumable ref even
+    /// when the turn is stopped before the engine's closing `end` event.
+    async fn ensure_session_id(&self) -> String {
+        let minted = {
+            let mut slot = self.resume_ref.lock().expect("grok resume");
+            match slot.as_ref() {
+                Some(id) => return id.clone(),
+                None => {
+                    let id = Uuid::new_v4().to_string();
+                    *slot = Some(id.clone());
+                    id
+                }
+            }
+        };
+        self.spec
+            .sink
+            .emit(HarnessEvent::SessionStarted {
+                harness_kind: HarnessKind::Grok,
+                harness_version: self.version.clone(),
+                resume_ref: Some(minted.clone()),
+            })
+            .await;
+        minted
     }
 
     /// The mode in force right now.
@@ -275,7 +327,11 @@ pub(crate) struct PrintLaunch<'a> {
     /// the key into `relay_auth`, so the variable is stripped from the
     /// child's environment here.
     pub relay_key_env: Option<&'a str>,
+    /// An existing engine session to `--resume`.
     pub resume_ref: Option<&'a str>,
+    /// The id a brand-new engine session starts under (`--session-id`).
+    /// Ignored when `resume_ref` is set.
+    pub new_session_id: Option<&'a str>,
     pub prompt_file: &'a Path,
     pub mode: PermissionMode,
     pub model: Option<&'a str>,
@@ -337,6 +393,9 @@ pub(crate) fn compose_print_plan(launch: PrintLaunch<'_>) -> Result<LaunchPlan, 
     if let Some(resume) = launch.resume_ref {
         argv.push("--resume".into());
         argv.push(resume.to_owned());
+    } else if let Some(session_id) = launch.new_session_id {
+        argv.push("--session-id".into());
+        argv.push(session_id.to_owned());
     }
     argv.extend(launch.extra_argv.iter().cloned());
     let mut env = launch.extra_env.to_vec();
@@ -463,6 +522,7 @@ impl HarnessSession for GrokSession {
             input.text
         };
         let prompt_file = self.write_prompt_file(&prompt_text)?;
+        self.ensure_session_id().await;
         let plan = self.compose_plan(
             prompt_file.path(),
             input.model.as_deref(),
@@ -562,6 +622,9 @@ impl GrokSession {
             self.spec.browser.as_ref(),
         );
         let mut child = spawn_process_tree(&mut command)?;
+        // The engine writes its session directory as it starts, so from here
+        // on the id is something to resume rather than something to create.
+        self.session_launched.store(true, Ordering::SeqCst);
         let stdout = child
             .take_stdout()
             .ok_or_else(|| HarnessError::Other("engine child has no stdout".into()))?;
@@ -634,8 +697,28 @@ impl GrokSession {
             None => self.reaped.lock().expect("grok child exit").take(),
         };
         self.pid.clear();
+        let resumed = plan.argv.iter().any(|arg| arg == "--resume");
+        if resumed && status.is_some_and(|status| !status.success()) {
+            if let Some(detail) = resume_lost_detail(&stderr) {
+                return Err(HarnessError::ResumeLost(detail));
+            }
+        }
         Ok(turn_outcome(status, saw_terminal, &stderr))
     }
+}
+
+/// Grok 1.0.13 answers `--resume` on an id it has no local session for by
+/// trying a remote restore and exiting 1 with these markers on stderr. The
+/// stored ref is dead, not the turn: report it so the session re-attaches
+/// with a fresh engine session instead of failing every later turn the same
+/// way.
+fn resume_lost_detail(stderr: &str) -> Option<String> {
+    const MARKERS: [&str; 2] = ["not found locally", "Failed to restore session"];
+    let line = stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| MARKERS.iter().any(|marker| line.contains(marker)))?;
+    Some(format!("grok has no session to resume: {line}"))
 }
 
 async fn emit_parsed(
@@ -699,6 +782,7 @@ mod tests {
             relay_auth: None,
             relay_key_env: None,
             resume_ref: None,
+            new_session_id: None,
             prompt_file: std::path::Path::new("/tmp/prompt.txt"),
             mode: PermissionMode::Auto,
             model: Some("model-gateway-model-gateway/glm-5.3"),
@@ -734,6 +818,7 @@ mod tests {
             relay_auth: Some(&auth_path),
             relay_key_env: Some("TIDEBREAK_LLM_KEY"),
             resume_ref: None,
+            new_session_id: None,
             prompt_file: &dir.path().join("prompt.txt"),
             mode: PermissionMode::Auto,
             model: None,
@@ -1135,5 +1220,289 @@ mod tests {
         // Create a spec with a non-UTF-8 bridge path.
         let browser = BrowserChannelSpec::new(PathBuf::from("/tmp/tidebreak-browser-cap.json"), p);
         assert!(browser_instructions(&browser).is_err());
+    }
+
+    #[test]
+    fn a_fresh_launch_names_its_session_and_a_resume_never_does() {
+        let launch = |resume_ref: Option<&'static str>, new_session_id: Option<&'static str>| {
+            compose_print_plan(PrintLaunch {
+                binary: std::path::Path::new("/usr/bin/grok"),
+                extra_argv: &[],
+                cwd: std::path::Path::new("/workspace"),
+                extra_env: &[],
+                relay_auth: None,
+                relay_key_env: None,
+                resume_ref,
+                new_session_id,
+                prompt_file: std::path::Path::new("/tmp/prompt.txt"),
+                mode: PermissionMode::Auto,
+                model: None,
+                effort: None,
+                effort_ladder: crate::grok::EFFORT_LADDER_1_0_5,
+            })
+            .unwrap()
+            .argv
+        };
+        // A flag appears at most once and its value is the very next argv
+        // entry; `None` means the flag is absent.
+        let value_after = |argv: &[String], flag: &str| -> Option<String> {
+            let hits: Vec<usize> = argv
+                .iter()
+                .enumerate()
+                .filter(|(_, arg)| arg.as_str() == flag)
+                .map(|(index, _)| index)
+                .collect();
+            assert!(hits.len() <= 1, "{flag} repeated in {argv:?}");
+            let index = *hits.first()?;
+            Some(
+                argv.get(index + 1)
+                    .unwrap_or_else(|| panic!("{flag} has no value in {argv:?}"))
+                    .clone(),
+            )
+        };
+
+        let fresh = launch(None, Some("11111111-2222-4333-8444-555555555555"));
+        assert_eq!(
+            value_after(&fresh, "--session-id").as_deref(),
+            Some("11111111-2222-4333-8444-555555555555"),
+            "{fresh:?}"
+        );
+        assert_eq!(value_after(&fresh, "--resume"), None, "{fresh:?}");
+
+        let resumed = launch(Some("sess-1"), Some("ignored"));
+        assert_eq!(
+            value_after(&resumed, "--resume").as_deref(),
+            Some("sess-1"),
+            "{resumed:?}"
+        );
+        assert_eq!(value_after(&resumed, "--session-id"), None, "{resumed:?}");
+    }
+
+    /// The stand-in engine is a shell script, so these run where `sh` does.
+    #[cfg(unix)]
+    mod launches {
+        use super::*;
+
+        #[derive(Default)]
+        struct Recorder {
+            events: Mutex<Vec<HarnessEvent>>,
+        }
+
+        #[async_trait]
+        impl crate::HarnessEventSink for Recorder {
+            async fn emit(&self, event: HarnessEvent) {
+                self.events.lock().expect("recorded events").push(event);
+            }
+        }
+
+        impl Recorder {
+            fn snapshot(&self) -> Vec<HarnessEvent> {
+                self.events.lock().expect("recorded events").clone()
+            }
+        }
+
+        /// A stand-in engine that logs its argv and answers by the session it
+        /// was given: a brand-new session streams a thought and dies before its
+        /// `end` event, the way a stopped turn does; a resumed one finishes and
+        /// echoes the id the way grok 1.0.13 does; the id `dead` is refused the
+        /// way grok refuses an id it has no session for.
+        fn write_engine(dir: &Path, argv_log: &Path) -> PathBuf {
+            use std::os::unix::fs::PermissionsExt;
+            let binary = dir.join("grok.sh");
+            std::fs::write(
+            &binary,
+            format!(
+                r#"#!/bin/sh
+printf '%s\n' "$*" >> {argv_log}
+prev=""; sid=""; resumed=no
+for arg in "$@"; do
+  case "$prev" in
+    --resume) sid="$arg"; resumed=yes ;;
+    --session-id) sid="$arg" ;;
+  esac
+  prev="$arg"
+done
+if [ "$sid" = "dead" ]; then
+  printf 'Session "dead" not found locally, restoring conversation from remote...\n' >&2
+  printf 'Error: Failed to restore session from remote: no credential\n' >&2
+  exit 1
+fi
+if [ "$sid" = "broken" ]; then
+  printf 'boom\n' >&2
+  exit 1
+fi
+printf '{{"type":"thought","data":"working"}}\n'
+if [ "$resumed" = yes ]; then
+  printf '{{"type":"end","stopReason":"end_turn","sessionId":"%s","usage":{{"input_tokens":1,"output_tokens":1}}}}\n' "$sid"
+fi
+exit 0
+"#,
+                argv_log = argv_log.display()
+            ),
+        )
+        .unwrap();
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+            binary
+        }
+
+        fn session_with(
+            binary: PathBuf,
+            worktree: &Path,
+            sink: std::sync::Arc<dyn crate::HarnessEventSink>,
+            resume_ref: Option<&str>,
+        ) -> GrokSession {
+            GrokSession::new(
+                SessionSpec {
+                    owner: tidebreak_core::OwnerId::local(),
+                    session_id: tidebreak_core::CodeSessionId::new(),
+                    worktree: worktree.to_path_buf(),
+                    allowed_read_roots: Vec::new(),
+                    permission_mode: PermissionMode::Auto,
+                    model: None,
+                    reasoning_effort: None,
+                    fast_mode: false,
+                    resume_ref: resume_ref.map(str::to_owned),
+                    extra_argv: Vec::new(),
+                    extra_env: Vec::new(),
+                    relay_key_env: None,
+                    env: Vec::new(),
+                    approval: None,
+                    binary: Some(binary),
+                    sink,
+                    browser: None,
+                },
+                "1.0.13".into(),
+            )
+        }
+
+        fn turn(text: &str) -> TurnInput {
+            TurnInput {
+                text: text.into(),
+                model: None,
+                reasoning_effort: None,
+                fast_mode: false,
+                images: Vec::new(),
+            }
+        }
+
+        fn read_lines(path: &Path) -> Vec<String> {
+            std::fs::read_to_string(path)
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_owned)
+                .collect()
+        }
+
+        fn flag_value(argv: &str, flag: &str) -> Option<String> {
+            let mut words = argv.split_whitespace();
+            words.find(|word| *word == flag)?;
+            words.next().map(str::to_owned)
+        }
+
+        /// The bug this pins: grok only names its session in the closing `end`
+        /// event, so a first turn stopped before then used to leave the next
+        /// launch with nothing to resume, and the engine started a conversation
+        /// that had never seen the earlier prompt.
+        #[tokio::test]
+        async fn a_turn_cut_off_before_its_end_event_is_still_resumed_by_the_next_one() {
+            let dir = tempfile::tempdir().unwrap();
+            let argv_log = dir.path().join("argv.log");
+            let binary = write_engine(dir.path(), &argv_log);
+            let sink = std::sync::Arc::new(Recorder::default());
+            let session = session_with(binary, dir.path(), sink.clone(), None);
+
+            assert!(matches!(
+                session.run_turn(turn("one")).await.unwrap(),
+                TurnOutcome::Incomplete { .. }
+            ));
+            let launches = read_lines(&argv_log);
+            let minted = flag_value(&launches[0], "--session-id")
+                .unwrap_or_else(|| panic!("the first launch names its session: {launches:?}"));
+            Uuid::parse_str(&minted).expect("grok takes only a UUID");
+            assert!(!launches[0].contains("--resume"), "{}", launches[0]);
+            assert_eq!(
+                session.resume_ref().as_deref(),
+                Some(minted.as_str()),
+                "the ref is known without an end event"
+            );
+            let events = sink.snapshot();
+            let started = events
+                .iter()
+                .position(|event| {
+                    matches!(
+                        event,
+                        HarnessEvent::SessionStarted { resume_ref: Some(id), .. } if *id == minted
+                    )
+                })
+                .expect("the minted id is reported as the session");
+            let first_stream = events
+                .iter()
+                .position(|event| matches!(event, HarnessEvent::ReasoningDelta { .. }))
+                .expect("the stub streams a thought");
+            assert!(
+                started < first_stream,
+                "the id is reported before the engine can be stopped: {events:?}"
+            );
+
+            assert!(matches!(
+                session.run_turn(turn("two")).await.unwrap(),
+                TurnOutcome::Clean
+            ));
+            let launches = read_lines(&argv_log);
+            assert_eq!(launches.len(), 2, "{launches:?}");
+            assert_eq!(
+                flag_value(&launches[1], "--resume").as_deref(),
+                Some(minted.as_str()),
+                "the second launch resumes the minted session: {}",
+                launches[1]
+            );
+            assert!(!launches[1].contains("--session-id"), "{}", launches[1]);
+            assert_eq!(session.resume_ref().as_deref(), Some(minted.as_str()));
+        }
+
+        #[tokio::test]
+        async fn a_ref_handed_over_at_launch_is_resumed_on_the_first_turn() {
+            let dir = tempfile::tempdir().unwrap();
+            let argv_log = dir.path().join("argv.log");
+            let binary = write_engine(dir.path(), &argv_log);
+            let sink = std::sync::Arc::new(Recorder::default());
+            let session = session_with(binary, dir.path(), sink, Some("sess-1"));
+
+            assert!(matches!(
+                session.run_turn(turn("one")).await.unwrap(),
+                TurnOutcome::Clean
+            ));
+            let launches = read_lines(&argv_log);
+            assert_eq!(
+                flag_value(&launches[0], "--resume").as_deref(),
+                Some("sess-1"),
+                "{launches:?}"
+            );
+            assert!(!launches[0].contains("--session-id"), "{}", launches[0]);
+            assert_eq!(session.resume_ref().as_deref(), Some("sess-1"));
+        }
+
+        #[tokio::test]
+        async fn a_resume_the_engine_cannot_find_is_reported_as_resume_lost() {
+            let dir = tempfile::tempdir().unwrap();
+            let argv_log = dir.path().join("argv.log");
+            let binary = write_engine(dir.path(), &argv_log);
+
+            let sink = std::sync::Arc::new(Recorder::default());
+            let session = session_with(binary.clone(), dir.path(), sink, Some("dead"));
+            let err = session.run_turn(turn("one")).await.unwrap_err();
+            assert!(
+                matches!(&err, HarnessError::ResumeLost(detail) if detail.contains("not found locally")),
+                "{err:?}"
+            );
+
+            // Any other failure on a resumed launch is still just a failed turn.
+            let sink = std::sync::Arc::new(Recorder::default());
+            let session = session_with(binary, dir.path(), sink, Some("broken"));
+            assert!(matches!(
+                session.run_turn(turn("one")).await.unwrap(),
+                TurnOutcome::Incomplete { detail } if detail.contains("boom")
+            ));
+        }
     }
 }
