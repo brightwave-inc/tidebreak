@@ -1259,33 +1259,38 @@ mod tests {
         );
     }
 
-    #[derive(Default)]
-    struct Recorder {
-        events: Mutex<Vec<HarnessEvent>>,
-    }
+    /// The stand-in engine is a shell script, so these run where `sh` does.
+    #[cfg(unix)]
+    mod launches {
+        use super::*;
 
-    #[async_trait]
-    impl crate::HarnessEventSink for Recorder {
-        async fn emit(&self, event: HarnessEvent) {
-            self.events.lock().expect("recorded events").push(event);
+        #[derive(Default)]
+        struct Recorder {
+            events: Mutex<Vec<HarnessEvent>>,
         }
-    }
 
-    impl Recorder {
-        fn snapshot(&self) -> Vec<HarnessEvent> {
-            self.events.lock().expect("recorded events").clone()
+        #[async_trait]
+        impl crate::HarnessEventSink for Recorder {
+            async fn emit(&self, event: HarnessEvent) {
+                self.events.lock().expect("recorded events").push(event);
+            }
         }
-    }
 
-    /// A stand-in engine that logs its argv and answers by the session it
-    /// was given: a brand-new session streams a thought and dies before its
-    /// `end` event, the way a stopped turn does; a resumed one finishes and
-    /// echoes the id the way grok 1.0.13 does; the id `dead` is refused the
-    /// way grok refuses an id it has no session for.
-    fn write_engine(dir: &Path, argv_log: &Path) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        let binary = dir.join("grok.sh");
-        std::fs::write(
+        impl Recorder {
+            fn snapshot(&self) -> Vec<HarnessEvent> {
+                self.events.lock().expect("recorded events").clone()
+            }
+        }
+
+        /// A stand-in engine that logs its argv and answers by the session it
+        /// was given: a brand-new session streams a thought and dies before its
+        /// `end` event, the way a stopped turn does; a resumed one finishes and
+        /// echoes the id the way grok 1.0.13 does; the id `dead` is refused the
+        /// way grok refuses an id it has no session for.
+        fn write_engine(dir: &Path, argv_log: &Path) -> PathBuf {
+            use std::os::unix::fs::PermissionsExt;
+            let binary = dir.join("grok.sh");
+            std::fs::write(
             &binary,
             format!(
                 r#"#!/bin/sh
@@ -1317,167 +1322,168 @@ exit 0
             ),
         )
         .unwrap();
-        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
-        binary
-    }
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+            binary
+        }
 
-    fn session_with(
-        binary: PathBuf,
-        worktree: &Path,
-        sink: std::sync::Arc<dyn crate::HarnessEventSink>,
-        resume_ref: Option<&str>,
-    ) -> GrokSession {
-        GrokSession::new(
-            SessionSpec {
-                owner: tidebreak_core::OwnerId::local(),
-                session_id: tidebreak_core::CodeSessionId::new(),
-                worktree: worktree.to_path_buf(),
-                allowed_read_roots: Vec::new(),
-                permission_mode: PermissionMode::Auto,
+        fn session_with(
+            binary: PathBuf,
+            worktree: &Path,
+            sink: std::sync::Arc<dyn crate::HarnessEventSink>,
+            resume_ref: Option<&str>,
+        ) -> GrokSession {
+            GrokSession::new(
+                SessionSpec {
+                    owner: tidebreak_core::OwnerId::local(),
+                    session_id: tidebreak_core::CodeSessionId::new(),
+                    worktree: worktree.to_path_buf(),
+                    allowed_read_roots: Vec::new(),
+                    permission_mode: PermissionMode::Auto,
+                    model: None,
+                    reasoning_effort: None,
+                    fast_mode: false,
+                    resume_ref: resume_ref.map(str::to_owned),
+                    extra_argv: Vec::new(),
+                    extra_env: Vec::new(),
+                    relay_key_env: None,
+                    env: Vec::new(),
+                    approval: None,
+                    binary: Some(binary),
+                    sink,
+                    browser: None,
+                },
+                "1.0.13".into(),
+            )
+        }
+
+        fn turn(text: &str) -> TurnInput {
+            TurnInput {
+                text: text.into(),
                 model: None,
                 reasoning_effort: None,
                 fast_mode: false,
-                resume_ref: resume_ref.map(str::to_owned),
-                extra_argv: Vec::new(),
-                extra_env: Vec::new(),
-                relay_key_env: None,
-                env: Vec::new(),
-                approval: None,
-                binary: Some(binary),
-                sink,
-                browser: None,
-            },
-            "1.0.13".into(),
-        )
-    }
-
-    fn turn(text: &str) -> TurnInput {
-        TurnInput {
-            text: text.into(),
-            model: None,
-            reasoning_effort: None,
-            fast_mode: false,
-            images: Vec::new(),
+                images: Vec::new(),
+            }
         }
-    }
 
-    fn read_lines(path: &Path) -> Vec<String> {
-        std::fs::read_to_string(path)
-            .unwrap_or_default()
-            .lines()
-            .map(str::to_owned)
-            .collect()
-    }
+        fn read_lines(path: &Path) -> Vec<String> {
+            std::fs::read_to_string(path)
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_owned)
+                .collect()
+        }
 
-    fn flag_value(argv: &str, flag: &str) -> Option<String> {
-        let mut words = argv.split_whitespace();
-        words.find(|word| *word == flag)?;
-        words.next().map(str::to_owned)
-    }
+        fn flag_value(argv: &str, flag: &str) -> Option<String> {
+            let mut words = argv.split_whitespace();
+            words.find(|word| *word == flag)?;
+            words.next().map(str::to_owned)
+        }
 
-    /// The bug this pins: grok only names its session in the closing `end`
-    /// event, so a first turn stopped before then used to leave the next
-    /// launch with nothing to resume, and the engine started a conversation
-    /// that had never seen the earlier prompt.
-    #[tokio::test]
-    async fn a_turn_cut_off_before_its_end_event_is_still_resumed_by_the_next_one() {
-        let dir = tempfile::tempdir().unwrap();
-        let argv_log = dir.path().join("argv.log");
-        let binary = write_engine(dir.path(), &argv_log);
-        let sink = std::sync::Arc::new(Recorder::default());
-        let session = session_with(binary, dir.path(), sink.clone(), None);
+        /// The bug this pins: grok only names its session in the closing `end`
+        /// event, so a first turn stopped before then used to leave the next
+        /// launch with nothing to resume, and the engine started a conversation
+        /// that had never seen the earlier prompt.
+        #[tokio::test]
+        async fn a_turn_cut_off_before_its_end_event_is_still_resumed_by_the_next_one() {
+            let dir = tempfile::tempdir().unwrap();
+            let argv_log = dir.path().join("argv.log");
+            let binary = write_engine(dir.path(), &argv_log);
+            let sink = std::sync::Arc::new(Recorder::default());
+            let session = session_with(binary, dir.path(), sink.clone(), None);
 
-        assert!(matches!(
-            session.run_turn(turn("one")).await.unwrap(),
-            TurnOutcome::Incomplete { .. }
-        ));
-        let launches = read_lines(&argv_log);
-        let minted = flag_value(&launches[0], "--session-id")
-            .unwrap_or_else(|| panic!("the first launch names its session: {launches:?}"));
-        Uuid::parse_str(&minted).expect("grok takes only a UUID");
-        assert!(!launches[0].contains("--resume"), "{}", launches[0]);
-        assert_eq!(
-            session.resume_ref().as_deref(),
-            Some(minted.as_str()),
-            "the ref is known without an end event"
-        );
-        let events = sink.snapshot();
-        let started = events
-            .iter()
-            .position(|event| {
-                matches!(
-                    event,
-                    HarnessEvent::SessionStarted { resume_ref: Some(id), .. } if *id == minted
-                )
-            })
-            .expect("the minted id is reported as the session");
-        let first_stream = events
-            .iter()
-            .position(|event| matches!(event, HarnessEvent::ReasoningDelta { .. }))
-            .expect("the stub streams a thought");
-        assert!(
-            started < first_stream,
-            "the id is reported before the engine can be stopped: {events:?}"
-        );
+            assert!(matches!(
+                session.run_turn(turn("one")).await.unwrap(),
+                TurnOutcome::Incomplete { .. }
+            ));
+            let launches = read_lines(&argv_log);
+            let minted = flag_value(&launches[0], "--session-id")
+                .unwrap_or_else(|| panic!("the first launch names its session: {launches:?}"));
+            Uuid::parse_str(&minted).expect("grok takes only a UUID");
+            assert!(!launches[0].contains("--resume"), "{}", launches[0]);
+            assert_eq!(
+                session.resume_ref().as_deref(),
+                Some(minted.as_str()),
+                "the ref is known without an end event"
+            );
+            let events = sink.snapshot();
+            let started = events
+                .iter()
+                .position(|event| {
+                    matches!(
+                        event,
+                        HarnessEvent::SessionStarted { resume_ref: Some(id), .. } if *id == minted
+                    )
+                })
+                .expect("the minted id is reported as the session");
+            let first_stream = events
+                .iter()
+                .position(|event| matches!(event, HarnessEvent::ReasoningDelta { .. }))
+                .expect("the stub streams a thought");
+            assert!(
+                started < first_stream,
+                "the id is reported before the engine can be stopped: {events:?}"
+            );
 
-        assert!(matches!(
-            session.run_turn(turn("two")).await.unwrap(),
-            TurnOutcome::Clean
-        ));
-        let launches = read_lines(&argv_log);
-        assert_eq!(launches.len(), 2, "{launches:?}");
-        assert_eq!(
-            flag_value(&launches[1], "--resume").as_deref(),
-            Some(minted.as_str()),
-            "the second launch resumes the minted session: {}",
-            launches[1]
-        );
-        assert!(!launches[1].contains("--session-id"), "{}", launches[1]);
-        assert_eq!(session.resume_ref().as_deref(), Some(minted.as_str()));
-    }
+            assert!(matches!(
+                session.run_turn(turn("two")).await.unwrap(),
+                TurnOutcome::Clean
+            ));
+            let launches = read_lines(&argv_log);
+            assert_eq!(launches.len(), 2, "{launches:?}");
+            assert_eq!(
+                flag_value(&launches[1], "--resume").as_deref(),
+                Some(minted.as_str()),
+                "the second launch resumes the minted session: {}",
+                launches[1]
+            );
+            assert!(!launches[1].contains("--session-id"), "{}", launches[1]);
+            assert_eq!(session.resume_ref().as_deref(), Some(minted.as_str()));
+        }
 
-    #[tokio::test]
-    async fn a_ref_handed_over_at_launch_is_resumed_on_the_first_turn() {
-        let dir = tempfile::tempdir().unwrap();
-        let argv_log = dir.path().join("argv.log");
-        let binary = write_engine(dir.path(), &argv_log);
-        let sink = std::sync::Arc::new(Recorder::default());
-        let session = session_with(binary, dir.path(), sink, Some("sess-1"));
+        #[tokio::test]
+        async fn a_ref_handed_over_at_launch_is_resumed_on_the_first_turn() {
+            let dir = tempfile::tempdir().unwrap();
+            let argv_log = dir.path().join("argv.log");
+            let binary = write_engine(dir.path(), &argv_log);
+            let sink = std::sync::Arc::new(Recorder::default());
+            let session = session_with(binary, dir.path(), sink, Some("sess-1"));
 
-        assert!(matches!(
-            session.run_turn(turn("one")).await.unwrap(),
-            TurnOutcome::Clean
-        ));
-        let launches = read_lines(&argv_log);
-        assert_eq!(
-            flag_value(&launches[0], "--resume").as_deref(),
-            Some("sess-1"),
-            "{launches:?}"
-        );
-        assert!(!launches[0].contains("--session-id"), "{}", launches[0]);
-        assert_eq!(session.resume_ref().as_deref(), Some("sess-1"));
-    }
+            assert!(matches!(
+                session.run_turn(turn("one")).await.unwrap(),
+                TurnOutcome::Clean
+            ));
+            let launches = read_lines(&argv_log);
+            assert_eq!(
+                flag_value(&launches[0], "--resume").as_deref(),
+                Some("sess-1"),
+                "{launches:?}"
+            );
+            assert!(!launches[0].contains("--session-id"), "{}", launches[0]);
+            assert_eq!(session.resume_ref().as_deref(), Some("sess-1"));
+        }
 
-    #[tokio::test]
-    async fn a_resume_the_engine_cannot_find_is_reported_as_resume_lost() {
-        let dir = tempfile::tempdir().unwrap();
-        let argv_log = dir.path().join("argv.log");
-        let binary = write_engine(dir.path(), &argv_log);
+        #[tokio::test]
+        async fn a_resume_the_engine_cannot_find_is_reported_as_resume_lost() {
+            let dir = tempfile::tempdir().unwrap();
+            let argv_log = dir.path().join("argv.log");
+            let binary = write_engine(dir.path(), &argv_log);
 
-        let sink = std::sync::Arc::new(Recorder::default());
-        let session = session_with(binary.clone(), dir.path(), sink, Some("dead"));
-        let err = session.run_turn(turn("one")).await.unwrap_err();
-        assert!(
-            matches!(&err, HarnessError::ResumeLost(detail) if detail.contains("not found locally")),
-            "{err:?}"
-        );
+            let sink = std::sync::Arc::new(Recorder::default());
+            let session = session_with(binary.clone(), dir.path(), sink, Some("dead"));
+            let err = session.run_turn(turn("one")).await.unwrap_err();
+            assert!(
+                matches!(&err, HarnessError::ResumeLost(detail) if detail.contains("not found locally")),
+                "{err:?}"
+            );
 
-        // Any other failure on a resumed launch is still just a failed turn.
-        let sink = std::sync::Arc::new(Recorder::default());
-        let session = session_with(binary, dir.path(), sink, Some("broken"));
-        assert!(matches!(
-            session.run_turn(turn("one")).await.unwrap(),
-            TurnOutcome::Incomplete { detail } if detail.contains("boom")
-        ));
+            // Any other failure on a resumed launch is still just a failed turn.
+            let sink = std::sync::Arc::new(Recorder::default());
+            let session = session_with(binary, dir.path(), sink, Some("broken"));
+            assert!(matches!(
+                session.run_turn(turn("one")).await.unwrap(),
+                TurnOutcome::Incomplete { detail } if detail.contains("boom")
+            ));
+        }
     }
 }
