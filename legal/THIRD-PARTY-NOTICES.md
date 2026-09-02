@@ -9,8 +9,9 @@ node scripts/generate-third-party-notices.mjs
 
 It covers every package in the resolved Cargo workspace graph that is not
 a Tidebreak crate, and every package in the desktop UI's production
-dependency graph. Development-only dependencies are excluded because they
-are not distributed.
+dependency graph, on every platform either graph can be built for.
+Development-only dependencies are excluded because they are not
+distributed.
 
 Each entry records the license expression the package declares, verbatim.
 A compound expression is reproduced as written rather than resolved to one
@@ -26,7 +27,7 @@ a stale one.
 ## Summary
 
 - Rust crates: 860
-- Desktop UI production packages: 516
+- Desktop UI production packages: 535
 - Distinct license texts: 591
 - Packages with no declared license: 0
 - Packages with a curated license: 28
@@ -6033,7 +6034,121 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/DefinitelyTyped/DefinitelyTyped.git
 - License text: `LICENSE` ([L-d9a1b1e30d63](#l-d9a1b1e30d63))
 
+### @typescript/typescript-aix-ppc64 7.0.2
+
+- License: `Apache-2.0`
+- Repository: https://github.com/microsoft/TypeScript.git
+- License text: `LICENSE` ([L-d446a8c73d7b](#l-d446a8c73d7b)), `NOTICE.txt` ([L-22cfba466591](#l-22cfba466591))
+
+### @typescript/typescript-darwin-arm64 7.0.2
+
+- License: `Apache-2.0`
+- Repository: https://github.com/microsoft/TypeScript.git
+- License text: `LICENSE` ([L-d446a8c73d7b](#l-d446a8c73d7b)), `NOTICE.txt` ([L-22cfba466591](#l-22cfba466591))
+
+### @typescript/typescript-darwin-x64 7.0.2
+
+- License: `Apache-2.0`
+- Repository: https://github.com/microsoft/TypeScript.git
+- License text: `LICENSE` ([L-d446a8c73d7b](#l-d446a8c73d7b)), `NOTICE.txt` ([L-22cfba466591](#l-22cfba466591))
+
+### @typescript/typescript-freebsd-arm64 7.0.2
+
+- License: `Apache-2.0`
+- Repository: https://github.com/microsoft/TypeScript.git
+- License text: `LICENSE` ([L-d446a8c73d7b](#l-d446a8c73d7b)), `NOTICE.txt` ([L-22cfba466591](#l-22cfba466591))
+
+### @typescript/typescript-freebsd-x64 7.0.2
+
+- License: `Apache-2.0`
+- Repository: https://github.com/microsoft/TypeScript.git
+- License text: `LICENSE` ([L-d446a8c73d7b](#l-d446a8c73d7b)), `NOTICE.txt` ([L-22cfba466591](#l-22cfba466591))
+
+### @typescript/typescript-linux-arm 7.0.2
+
+- License: `Apache-2.0`
+- Repository: https://github.com/microsoft/TypeScript.git
+- License text: `LICENSE` ([L-d446a8c73d7b](#l-d446a8c73d7b)), `NOTICE.txt` ([L-22cfba466591](#l-22cfba466591))
+
+### @typescript/typescript-linux-arm64 7.0.2
+
+- License: `Apache-2.0`
+- Repository: https://github.com/microsoft/TypeScript.git
+- License text: `LICENSE` ([L-d446a8c73d7b](#l-d446a8c73d7b)), `NOTICE.txt` ([L-22cfba466591](#l-22cfba466591))
+
+### @typescript/typescript-linux-loong64 7.0.2
+
+- License: `Apache-2.0`
+- Repository: https://github.com/microsoft/TypeScript.git
+- License text: `LICENSE` ([L-d446a8c73d7b](#l-d446a8c73d7b)), `NOTICE.txt` ([L-22cfba466591](#l-22cfba466591))
+
+### @typescript/typescript-linux-mips64el 7.0.2
+
+- License: `Apache-2.0`
+- Repository: https://github.com/microsoft/TypeScript.git
+- License text: `LICENSE` ([L-d446a8c73d7b](#l-d446a8c73d7b)), `NOTICE.txt` ([L-22cfba466591](#l-22cfba466591))
+
+### @typescript/typescript-linux-ppc64 7.0.2
+
+- License: `Apache-2.0`
+- Repository: https://github.com/microsoft/TypeScript.git
+- License text: `LICENSE` ([L-d446a8c73d7b](#l-d446a8c73d7b)), `NOTICE.txt` ([L-22cfba466591](#l-22cfba466591))
+
+### @typescript/typescript-linux-riscv64 7.0.2
+
+- License: `Apache-2.0`
+- Repository: https://github.com/microsoft/TypeScript.git
+- License text: `LICENSE` ([L-d446a8c73d7b](#l-d446a8c73d7b)), `NOTICE.txt` ([L-22cfba466591](#l-22cfba466591))
+
+### @typescript/typescript-linux-s390x 7.0.2
+
+- License: `Apache-2.0`
+- Repository: https://github.com/microsoft/TypeScript.git
+- License text: `LICENSE` ([L-d446a8c73d7b](#l-d446a8c73d7b)), `NOTICE.txt` ([L-22cfba466591](#l-22cfba466591))
+
 ### @typescript/typescript-linux-x64 7.0.2
+
+- License: `Apache-2.0`
+- Repository: https://github.com/microsoft/TypeScript.git
+- License text: `LICENSE` ([L-d446a8c73d7b](#l-d446a8c73d7b)), `NOTICE.txt` ([L-22cfba466591](#l-22cfba466591))
+
+### @typescript/typescript-netbsd-arm64 7.0.2
+
+- License: `Apache-2.0`
+- Repository: https://github.com/microsoft/TypeScript.git
+- License text: `LICENSE` ([L-d446a8c73d7b](#l-d446a8c73d7b)), `NOTICE.txt` ([L-22cfba466591](#l-22cfba466591))
+
+### @typescript/typescript-netbsd-x64 7.0.2
+
+- License: `Apache-2.0`
+- Repository: https://github.com/microsoft/TypeScript.git
+- License text: `LICENSE` ([L-d446a8c73d7b](#l-d446a8c73d7b)), `NOTICE.txt` ([L-22cfba466591](#l-22cfba466591))
+
+### @typescript/typescript-openbsd-arm64 7.0.2
+
+- License: `Apache-2.0`
+- Repository: https://github.com/microsoft/TypeScript.git
+- License text: `LICENSE` ([L-d446a8c73d7b](#l-d446a8c73d7b)), `NOTICE.txt` ([L-22cfba466591](#l-22cfba466591))
+
+### @typescript/typescript-openbsd-x64 7.0.2
+
+- License: `Apache-2.0`
+- Repository: https://github.com/microsoft/TypeScript.git
+- License text: `LICENSE` ([L-d446a8c73d7b](#l-d446a8c73d7b)), `NOTICE.txt` ([L-22cfba466591](#l-22cfba466591))
+
+### @typescript/typescript-sunos-x64 7.0.2
+
+- License: `Apache-2.0`
+- Repository: https://github.com/microsoft/TypeScript.git
+- License text: `LICENSE` ([L-d446a8c73d7b](#l-d446a8c73d7b)), `NOTICE.txt` ([L-22cfba466591](#l-22cfba466591))
+
+### @typescript/typescript-win32-arm64 7.0.2
+
+- License: `Apache-2.0`
+- Repository: https://github.com/microsoft/TypeScript.git
+- License text: `LICENSE` ([L-d446a8c73d7b](#l-d446a8c73d7b)), `NOTICE.txt` ([L-22cfba466591](#l-22cfba466591))
+
+### @typescript/typescript-win32-x64 7.0.2
 
 - License: `Apache-2.0`
 - Repository: https://github.com/microsoft/TypeScript.git
