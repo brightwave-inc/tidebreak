@@ -57,8 +57,8 @@ pub(in crate::db) async fn list_pending_root_attachment_changes(
         .iter()
         .map(|change| change.chat_id.0)
         .collect::<Vec<_>>();
-    let chats = entities::chat::Entity::find()
-        .filter(entities::chat::Column::Id.is_in(chat_ids))
+    let chats = entities::code_session::Entity::find()
+        .filter(entities::code_session::Column::Id.is_in(chat_ids))
         .all(&store.conn)
         .await
         .map_err(store_err)?
@@ -126,7 +126,7 @@ pub(super) async fn validate_change_subject_on<C>(
 where
     C: sea_orm::ConnectionTrait,
 {
-    let chat = entities::chat::Entity::find_by_id(change.chat_id.0)
+    let chat = entities::code_session::Entity::find_by_id(change.chat_id.0)
         .one(conn)
         .await
         .map_err(store_err)?

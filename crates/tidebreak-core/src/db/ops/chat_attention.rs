@@ -30,6 +30,7 @@ use crate::storage::{InboxItem, InboxItemKind};
 use crate::ChatId;
 
 use super::super::{entities, store_err, DbStore};
+use super::conversation::internal_sessions;
 
 /// What the reader is being asked, for a badge that must stay opaque.
 ///
@@ -70,9 +71,9 @@ pub(in crate::db) async fn chat_attention(
         .all(&store.conn)
         .await
         .map_err(store_err)?;
-    let owned = entities::chat::Entity::find()
-        .filter(entities::chat::Column::Owner.eq(owner.as_str()))
-        .filter(entities::chat::Column::EnginePrivate.eq(false))
+    let owned = entities::code_session::Entity::find()
+        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+        .filter(internal_sessions())
         .all(&store.conn)
         .await
         .map_err(store_err)?

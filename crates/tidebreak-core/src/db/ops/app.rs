@@ -663,7 +663,7 @@ where
     match (owner, chat_id) {
         (Some(owner), None) => Ok(owner.clone()),
         (None, Some(chat_id)) => {
-            let chat = entities::chat::Entity::find_by_id(chat_id.0)
+            let chat = entities::code_session::Entity::find_by_id(chat_id.0)
                 .one(conn)
                 .await
                 .map_err(store_err)?

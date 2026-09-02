@@ -172,7 +172,21 @@ describe the current schema, not the frozen baseline.
   (JSON, nullable), `child_pid`, `child_process_identity`, `spawn_epoch`,
   `attention_state` (JSON), `attention_source`, `unrecognized_event_count`,
   `subagents` (bounded, per
-  [`0052`](decisions/0052-harness-subagents-as-child-rows.md)), `created_at`.
+  [`0052`](decisions/0052-harness-subagents-as-child-rows.md)), `created_at`,
+  and the conversation columns `project_id`, `title`, `network_policy`, and
+  `attachment_revision`.
+
+  A chat is a session (decision 48 step 5): the row is the conversation row,
+  and every chat-side table (`message`, `turn_run`, `event`, `tool_call`,
+  and the rest) hangs off it by `chat_id`. A chat has no `workspace_id`,
+  runs the `internal` harness, and keeps the code-owned columns at rest
+  until a session worker attaches. The chat routes read only those rows;
+  the code routes and the runtime's boot recovery and sweeps read only rows
+  with a workspace or a worker that has attached at least once
+  (`spawn_epoch > 0`, or a lifecycle other than `idle`), so a conversation
+  only the chat routes have touched is never enumerated as a code session.
+  Chat attention stays derived from `turn_run` and the inbox projection;
+  the stored `attention_state` on such a row is the idle placeholder.
 
   `reasoning_effort` is null when the engine's own default is in force, which
   no level on the ladder is equivalent to. `fast_mode` buys output speed at a
@@ -320,8 +334,10 @@ no workspace (`POST /code/sessions`) selects it; the workspace-bound create
 path refuses it. The engine probes as found with no binary, needs no pin,
 and takes its inference from the server's own provider resolution.
 
-Its durable state is one engine-private conversation per session, keyed by
-the session id and hidden from every owner-scoped chat read. `run_turn`
+Its durable state is the session row itself: a session with no workspace is
+a chat, readable through `/chats/{id}` by the same id, and the engine gives
+it the foreground coordinator run its turn lane admits against on first
+launch. `run_turn`
 admits the message to the chat turn lane, follows the chat journal, and
 translates each event into a `HarnessEvent`; `decide` resolves a tool
 approval on the chat approval broker, answers a questions card, or decides
