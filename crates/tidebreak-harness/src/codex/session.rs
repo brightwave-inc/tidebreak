@@ -26,6 +26,7 @@ use tidebreak_core::{PermissionMode, ReasoningEffort, MAX_NOTICE_CHARS};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 const THREAD_LOAD_TIMEOUT: Duration = Duration::from_secs(120);
+const THREAD_LOAD_ABSOLUTE_CEILING: Duration = Duration::from_secs(30 * 60);
 #[cfg(not(test))]
 const PROCESS_INTERRUPT_GRACE: Duration = Duration::from_secs(2);
 #[cfg(test)]
@@ -986,15 +987,21 @@ impl CodexSession {
         rpc_id: i64,
         response_timeout: Duration,
     ) -> Result<(), HarnessError> {
-        let deadline = tokio::time::Instant::now() + response_timeout;
+        // Loading a large persisted thread can stream more history than
+        // fits inside one fixed wall-clock deadline. Treat the bound as
+        // an inactivity timeout instead: every batch proves the engine is
+        // still making progress, while a silent or wedged child remains
+        // bounded. The absolute ceiling still caps a restore that never
+        // finishes even though it keeps talking.
+        let absolute = Instant::now() + THREAD_LOAD_ABSOLUTE_CEILING;
         loop {
-            if tokio::time::Instant::now() > deadline {
+            let remaining = absolute.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
                 return Err(HarnessError::Other(format!(
                     "timed out waiting for rpc id {rpc_id}"
                 )));
             }
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            let lines = timeout(remaining, self.read_lines()).await;
+            let lines = timeout(response_timeout.min(remaining), self.read_lines()).await;
             let lines = match lines {
                 Ok(Ok(lines)) => lines,
                 Ok(Err(err)) => return Err(err),
@@ -1707,9 +1714,10 @@ mod tests {
     }
 
     #[test]
-    fn thread_loads_have_time_to_restore_large_sessions() {
+    fn thread_loads_allow_a_longer_inactivity_window_than_initialization() {
         assert!(THREAD_LOAD_TIMEOUT > HANDSHAKE_TIMEOUT);
         assert_eq!(THREAD_LOAD_TIMEOUT, Duration::from_secs(120));
+        assert!(THREAD_LOAD_ABSOLUTE_CEILING > THREAD_LOAD_TIMEOUT);
     }
 
     /// A stand-in `codex app-server --stdio` that speaks just enough of the
@@ -1933,6 +1941,72 @@ done
             sink,
             browser: None,
         })
+    }
+
+    #[cfg(unix)]
+    async fn session_reading_script(script: &str) -> (CodexSession, tokio::process::Child) {
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let session = unit_session(Arc::new(SilentSink));
+        *session.stdout.lock().expect("codex stdout") =
+            Some(Arc::new(AsyncMutex::new(StdoutReader {
+                stdout,
+                lines: StreamLineBuffer::new(),
+            })));
+        (session, child)
+    }
+
+    /// History that keeps arriving past one inactivity window must still
+    /// complete: the old fixed deadline would kill this restore.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_until_rpc_resets_inactivity_timeout_on_each_batch() {
+        let inactivity = Duration::from_millis(200);
+        let (session, mut child) = session_reading_script(
+            r#"
+i=0
+while [ "$i" -lt 4 ]; do
+  printf '{"method":"item/completed","params":{"id":%s}}\n' "$i"
+  sleep 0.12
+  i=$((i + 1))
+done
+printf '{"id":7,"result":{"thread":{"id":"THREAD-1"}}}\n'
+sleep 2
+"#,
+        )
+        .await;
+        session
+            .read_until_rpc(7, inactivity)
+            .await
+            .expect("streaming restore should outlive one inactivity window");
+        let _ = child.kill().await;
+    }
+
+    /// A child that goes silent is still bounded by one inactivity window.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_until_rpc_times_out_when_the_child_goes_silent() {
+        let inactivity = Duration::from_millis(200);
+        let (session, mut child) = session_reading_script("sleep 2").await;
+        let err = session.read_until_rpc(7, inactivity).await.unwrap_err();
+        match err {
+            HarnessError::Other(message) => {
+                assert!(
+                    message.contains("timed out waiting for rpc id 7"),
+                    "unexpected timeout message: {message}"
+                );
+            }
+            other => panic!("expected inactivity timeout, got {other:?}"),
+        }
+        let _ = child.kill().await;
     }
 
     fn register_pending(
