@@ -40,6 +40,15 @@
 //! record, serialized by the generator test in `wire_types.rs`, and the CLI
 //! decodes every entry.
 //!
+//! # Code mode
+//!
+//! The same module carries the code-mode surface the CLI drives: repo,
+//! workspace, session, turn, approval, and delivery snapshots, the sequenced
+//! event frame on `/code/sessions/{id}/events`, and the notices on
+//! `/code/updates`. They follow the strictness above. The one shape a client
+//! composes itself is the response to `POST /code/sessions/{id}/turns`, which
+//! is a [`CodeTurnSnapshot`] on `200` and a [`QueuedCodeTurn`] on `202`.
+//!
 //! # Limits
 //!
 //! [`limits`] holds the guard sizes the renderer applies to opaque strings on
@@ -69,6 +78,20 @@ pub use crate::routes::{
     ExecProviderSnapshot, ModelCatalog, ModelInfo, ModelRoleInfo, OutputRevisionInfo,
     OutputRevisionProducer, OutputRevisionSource, OutputRevisionsCatalog, ProvidersList,
     SubmittedOutputSnapshot,
+};
+
+// Code mode: the snapshots the REST routes return, the per-session event
+// frame, and the notices on `/code/updates`. Same contract as the chat
+// socket above: closed vocabularies, unknown keys rejected, an unknown notice
+// or event type failing its frame. The fixtures in `fixtures/code-frames.json`
+// are serialized from these types (see `wire_code_fixtures`).
+pub use crate::routes::code::types::{
+    CodeActionSnapshot, CodeApprovalSnapshot, CodeCommitSnapshot, CodeFileChange, CodePushSnapshot,
+    CodeRepoSnapshot, CodeSessionDigest, CodeSessionExternalOrigin, CodeSessionSnapshot,
+    CodeTurnRewriteState, CodeTurnSnapshot, CodeUpdateNotice, CodeWatchSnapshot, CodeWorkspaceDiff,
+    CodeWorkspaceFiles, CodeWorkspacePrSnapshot, CodeWorkspaceSnapshot, HarnessAuthMode,
+    HarnessDoctorEntry, HarnessDoctorReport, QueuedCodeTurn, QueuedCodeTurnsSnapshot,
+    SequencedCodeEventFrame,
 };
 
 /// Guard sizes for the opaque strings a client draws from this surface.

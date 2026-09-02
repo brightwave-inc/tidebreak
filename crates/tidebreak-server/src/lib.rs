@@ -112,6 +112,8 @@ pub mod voice_transcription;
 /// Host-owned, inert web-search configuration and provider selection.
 pub mod web_search;
 pub mod wire;
+#[cfg(test)]
+mod wire_code_fixtures;
 mod wire_types;
 
 use std::fs::{OpenOptions, TryLockError};

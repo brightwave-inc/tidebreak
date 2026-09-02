@@ -1,0 +1,1016 @@
+[
+  {
+    "kind": "repo",
+    "name": "repo",
+    "value": {
+      "branch_prefix": "mara/",
+      "created_at": "2025-08-31T00:26:40Z",
+      "default_base_ref": "main",
+      "display_name": "tidebreak",
+      "id": "00000000-0000-0000-0000-000000000001",
+      "quick_actions": [
+        {
+          "auto_run_on_create": false,
+          "command": "cargo test",
+          "name": "test"
+        }
+      ],
+      "root_path": "/Users/mara/code/tidebreak",
+      "setup_script": "pnpm install"
+    }
+  },
+  {
+    "kind": "workspace",
+    "name": "workspace",
+    "value": {
+      "base_ref": "main",
+      "branch_name": "mara/code-parsers-bounded",
+      "created_at": "2025-09-01T01:26:40Z",
+      "id": "00000000-0000-0000-0000-000000000002",
+      "pr": {
+        "auto_merge_enabled": true,
+        "base_branch": "main",
+        "check_counts": {
+          "failing": 0,
+          "passing": 10,
+          "pending": 3,
+          "skipped": 2
+        },
+        "checks_summary": "3 pending",
+        "draft": false,
+        "head_branch": "thet/cli-wire-mirror",
+        "head_sha": "24b451ab7248eb057445718f2ad6304a43915f37",
+        "in_merge_queue": false,
+        "merge_state_status": "BLOCKED",
+        "mergeable": "MERGEABLE",
+        "merged": false,
+        "number": 3006,
+        "review_decision": "APPROVED",
+        "state": "open",
+        "title": "refactor(cli): decode the chat event socket",
+        "url": "https://github.com/brightwave-inc/tidebreak/pull/3006"
+      },
+      "repo_id": "00000000-0000-0000-0000-000000000001",
+      "status": "active",
+      "title": "Bound the code parser",
+      "worktree_path": "/Users/mara/code/tidebreak/.tidebreak/wt-2"
+    }
+  },
+  {
+    "kind": "workspace",
+    "name": "released workspace",
+    "value": {
+      "archived_at": "2025-08-25T05:33:20Z",
+      "base_ref": "main",
+      "branch_name": "mara/old-work",
+      "bundle_bytes": 48213,
+      "created_at": "2025-08-24T01:46:40Z",
+      "id": "00000000-0000-0000-0000-000000000012",
+      "released_at": "2025-08-26T09:20:00Z",
+      "released_tip": "0bace692f4b5a7e3d2c1f0a9b8c7d6e5f4a3b2c1",
+      "repo_id": "00000000-0000-0000-0000-000000000001",
+      "status": "released",
+      "title": "Old work",
+      "worktree_path": "/Users/mara/code/tidebreak/.tidebreak/wt-1"
+    }
+  },
+  {
+    "kind": "session",
+    "name": "session",
+    "value": {
+      "attention": {
+        "source": "lifecycle",
+        "state": {
+          "type": "working"
+        }
+      },
+      "created_at": "2025-09-01T04:13:20Z",
+      "external_origin": {
+        "channel_kind": "slack",
+        "external_key": "T0/C1/1756700000.000100"
+      },
+      "fast_mode": false,
+      "harness_kind": "claude_code",
+      "harness_resume_ref": "9f2c1d4e-resume",
+      "harness_version": "2.0.14",
+      "id": "00000000-0000-0000-0000-000000000003",
+      "kind": "interactive",
+      "lifecycle": "running",
+      "model": "claude-opus-5",
+      "permission_mode": "ask",
+      "reasoning_effort": "high",
+      "unrecognized_event_count": 0,
+      "workspace_id": "00000000-0000-0000-0000-000000000002"
+    }
+  },
+  {
+    "kind": "session",
+    "name": "fenced session",
+    "value": {
+      "attention": {
+        "source": "lifecycle",
+        "state": {
+          "reason": {
+            "detail": "the engine forgot the resume ref",
+            "type": "resume_lost"
+          },
+          "type": "fenced"
+        }
+      },
+      "created_at": "2025-09-01T04:13:20Z",
+      "fast_mode": false,
+      "fence_reason": {
+        "detail": "the engine forgot the resume ref",
+        "type": "resume_lost"
+      },
+      "harness_kind": "internal",
+      "harness_resume_ref": "9f2c1d4e-resume",
+      "harness_version": "2.0.14",
+      "id": "00000000-0000-0000-0000-000000000003",
+      "kind": "interactive",
+      "lifecycle": "fenced",
+      "model": "claude-opus-5",
+      "permission_mode": "ask",
+      "reasoning_effort": "high",
+      "unrecognized_event_count": 0,
+      "workspace_id": null
+    }
+  },
+  {
+    "kind": "turn",
+    "name": "turn",
+    "value": {
+      "attachments": [
+        {
+          "blob_id": "00000000-0000-0000-0000-000000000030",
+          "byte_len": 51200,
+          "height": 480,
+          "media_type": "png",
+          "width": 640
+        }
+      ],
+      "checkpoint_ref": "refs/tidebreak/checkpoints/3",
+      "diffstat": {
+        "deletions": 3,
+        "files": 2,
+        "insertions": 14,
+        "truncated": false
+      },
+      "ended_at": "2025-09-01T04:16:00Z",
+      "fast_mode": false,
+      "id": "00000000-0000-0000-0000-000000000004",
+      "model": "claude-opus-5",
+      "ordinal": 3,
+      "rewrite": "Every code-mode string now has a bound.",
+      "session_id": "00000000-0000-0000-0000-000000000003",
+      "started_at": "2025-09-01T04:15:00Z",
+      "status": "completed",
+      "usage": {
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 900,
+        "context_tokens": 2440,
+        "first_call_context_tokens": 2100,
+        "input_tokens": 1200,
+        "output_tokens": 340
+      },
+      "user_input": "Bound every string the code parser draws."
+    }
+  },
+  {
+    "kind": "queued_turn",
+    "name": "queued turn",
+    "value": {
+      "created_at": "2025-09-01T04:16:10Z",
+      "id": "00000000-0000-0000-0000-000000000006",
+      "message": "Then add the fixture test.",
+      "position": 0,
+      "session_id": "00000000-0000-0000-0000-000000000003",
+      "updated_at": "2025-09-01T04:16:10Z"
+    }
+  },
+  {
+    "kind": "queued_turns",
+    "name": "queued turns",
+    "value": {
+      "paused": true,
+      "queued": [
+        {
+          "created_at": "2025-09-01T04:16:10Z",
+          "id": "00000000-0000-0000-0000-000000000006",
+          "message": "Then add the fixture test.",
+          "position": 0,
+          "session_id": "00000000-0000-0000-0000-000000000003",
+          "updated_at": "2025-09-01T04:16:10Z"
+        }
+      ]
+    }
+  },
+  {
+    "kind": "harness_doctor",
+    "name": "harness doctor",
+    "value": {
+      "harnesses": [
+        {
+          "auth_mode": "local_sign_in",
+          "authenticated": true,
+          "caps": {
+            "allow_mode": "supported",
+            "auto_mode": "supported",
+            "durable_parks": "unknown",
+            "image_input": "supported",
+            "mid_turn_steering": "supported",
+            "native_file_change_events": "unsupported",
+            "native_interrupt": "supported",
+            "plan_mode": "supported",
+            "reasoning_levels": "supported",
+            "resume": "supported",
+            "slash_commands": "supported",
+            "standing_grants": "supported",
+            "streaming_deltas": "supported",
+            "structured_approvals": "supported",
+            "user_questions": "supported"
+          },
+          "commands": [
+            {
+              "description": "Review the pending changes",
+              "name": "review"
+            }
+          ],
+          "found": true,
+          "installable": true,
+          "kind": "claude_code",
+          "path": "/opt/homebrew/bin/claude",
+          "relaunch_composes_permission_mode": true,
+          "remediation": "",
+          "stderr": "",
+          "tier": "reference",
+          "unrecognized_event_count": 0,
+          "version": "2.0.14"
+        },
+        {
+          "auth_mode": "hosted_unavailable",
+          "caps": {
+            "allow_mode": "supported",
+            "auto_mode": "supported",
+            "durable_parks": "unknown",
+            "image_input": "supported",
+            "mid_turn_steering": "supported",
+            "native_file_change_events": "unsupported",
+            "native_interrupt": "supported",
+            "plan_mode": "supported",
+            "reasoning_levels": "supported",
+            "resume": "supported",
+            "slash_commands": "supported",
+            "standing_grants": "supported",
+            "streaming_deltas": "supported",
+            "structured_approvals": "supported",
+            "user_questions": "supported"
+          },
+          "commands": [],
+          "found": false,
+          "installable": false,
+          "kind": "grok",
+          "relaunch_composes_permission_mode": false,
+          "remediation": "Install grok-build and sign in.",
+          "stderr": "grok: command not found",
+          "tier": "best_effort",
+          "unrecognized_event_count": 2
+        }
+      ]
+    }
+  },
+  {
+    "kind": "workspace_files",
+    "name": "workspace files",
+    "value": {
+      "files": [
+        {
+          "deletions": 3,
+          "insertions": 12,
+          "kind": "modified",
+          "path": "crates/tidebreak-cli/src/api/code.rs"
+        },
+        {
+          "deletions": 0,
+          "insertions": 2,
+          "kind": "renamed",
+          "path": "crates/tidebreak-server/fixtures/code-frames.json",
+          "previous_path": "crates/tidebreak-server/fixtures/code.json"
+        }
+      ],
+      "stat": {
+        "deletions": 3,
+        "files": 2,
+        "insertions": 14,
+        "truncated": false
+      },
+      "truncated": false,
+      "turn_id": "00000000-0000-0000-0000-000000000004"
+    }
+  },
+  {
+    "kind": "workspace_diff",
+    "name": "workspace diff",
+    "value": {
+      "diff": "--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-old\n+new\n",
+      "file": "README.md",
+      "stat": {
+        "deletions": 1,
+        "files": 1,
+        "insertions": 1,
+        "truncated": false
+      },
+      "truncated": false
+    }
+  },
+  {
+    "kind": "approval",
+    "name": "pending approval",
+    "value": {
+      "harness_raw_json": "{\"tool\":\"Bash\",\"command\":\"cargo test -p tidebreak-cli\"}",
+      "id": "00000000-0000-0000-0000-000000000005",
+      "kind": {
+        "cmd": "cargo test -p tidebreak-cli",
+        "cwd": "/Users/mara/code/tidebreak",
+        "type": "command"
+      },
+      "requested_at": "2025-09-01T04:15:20Z",
+      "session_id": "00000000-0000-0000-0000-000000000003",
+      "state": "pending",
+      "turn_id": "00000000-0000-0000-0000-000000000004"
+    }
+  },
+  {
+    "kind": "approval",
+    "name": "denied approval",
+    "value": {
+      "decided_at": "2025-09-01T04:15:40Z",
+      "feedback": "Not that file.",
+      "harness_raw_json": "{\"tool\":\"Write\",\"path\":\"/etc/hosts\"}",
+      "id": "00000000-0000-0000-0000-000000000015",
+      "kind": {
+        "paths": [
+          "/etc/hosts"
+        ],
+        "type": "file_write"
+      },
+      "requested_at": "2025-09-01T04:15:30Z",
+      "session_id": "00000000-0000-0000-0000-000000000003",
+      "state": "denied",
+      "turn_id": "00000000-0000-0000-0000-000000000004"
+    }
+  },
+  {
+    "kind": "commit",
+    "name": "commit",
+    "value": {
+      "message": "fix(desktop): bound every code-mode string",
+      "sha": "cec166ffc1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6",
+      "stat": {
+        "deletions": 3,
+        "files": 2,
+        "insertions": 14,
+        "truncated": false
+      }
+    }
+  },
+  {
+    "kind": "push",
+    "name": "push",
+    "value": {
+      "branch": "mara/code-parsers-bounded",
+      "remote": "origin"
+    }
+  },
+  {
+    "kind": "workspace_pr",
+    "name": "workspace pr",
+    "value": {
+      "ahead": 2,
+      "dirty": false,
+      "gh_authenticated": true,
+      "gh_found": true,
+      "has_upstream": true,
+      "pr": {
+        "auto_merge_enabled": true,
+        "base_branch": "main",
+        "check_counts": {
+          "failing": 0,
+          "passing": 10,
+          "pending": 3,
+          "skipped": 2
+        },
+        "checks_summary": "3 pending",
+        "draft": false,
+        "head_branch": "thet/cli-wire-mirror",
+        "head_sha": "24b451ab7248eb057445718f2ad6304a43915f37",
+        "in_merge_queue": false,
+        "merge_state_status": "BLOCKED",
+        "mergeable": "MERGEABLE",
+        "merged": false,
+        "number": 3006,
+        "review_decision": "APPROVED",
+        "state": "open",
+        "title": "refactor(cli): decode the chat event socket",
+        "url": "https://github.com/brightwave-inc/tidebreak/pull/3006"
+      },
+      "pushes_as": "mara",
+      "pushes_as_self": true,
+      "remediation": "",
+      "suggested_commit_message": "fix(desktop): bound every code-mode string",
+      "unpushed": true,
+      "watch": {
+        "created_at": "2025-09-01T04:16:40Z",
+        "cycles": 4,
+        "detail": "waiting on the desktop UI lane",
+        "id": "00000000-0000-0000-0000-000000000020",
+        "pr_number": 3006,
+        "session_id": "00000000-0000-0000-0000-000000000021",
+        "state": "watching",
+        "updated_at": "2025-09-01T04:17:40Z",
+        "workspace_id": "00000000-0000-0000-0000-000000000002"
+      }
+    }
+  },
+  {
+    "kind": "action",
+    "name": "action",
+    "value": {
+      "exit_code": 101,
+      "name": "test",
+      "stderr": "test parsers::bounds ... FAILED\n",
+      "stdout": "running 3 tests\n",
+      "success": false,
+      "timed_out": false
+    }
+  },
+  {
+    "kind": "session_digest",
+    "name": "session digest",
+    "value": {
+      "activity": "shell",
+      "attention": {
+        "source": "lifecycle",
+        "state": {
+          "type": "working"
+        }
+      },
+      "harness_kind": "claude_code",
+      "kind": "interactive",
+      "lifecycle": "running",
+      "pr_count": 1,
+      "pr_state": {
+        "auto_merge_enabled": true,
+        "base_branch": "main",
+        "check_counts": {
+          "failing": 0,
+          "passing": 10,
+          "pending": 3,
+          "skipped": 2
+        },
+        "checks_summary": "3 pending",
+        "draft": false,
+        "head_branch": "thet/cli-wire-mirror",
+        "head_sha": "24b451ab7248eb057445718f2ad6304a43915f37",
+        "in_merge_queue": false,
+        "merge_state_status": "BLOCKED",
+        "mergeable": "MERGEABLE",
+        "merged": false,
+        "number": 3006,
+        "review_decision": "APPROVED",
+        "state": "open",
+        "title": "refactor(cli): decode the chat event socket",
+        "url": "https://github.com/brightwave-inc/tidebreak/pull/3006"
+      },
+      "recap": "The parser bounds every field; the tests are next.",
+      "session": "00000000-0000-0000-0000-000000000003",
+      "subagents": [
+        {
+          "call_id": "call-explore",
+          "name": "Explore",
+          "status": "running"
+        }
+      ],
+      "title": "Bound the code parser",
+      "trigger_target_at": "2025-09-01T04:15:00Z",
+      "turn_count": 3,
+      "workspace": "00000000-0000-0000-0000-000000000002"
+    }
+  },
+  {
+    "kind": "session_digest",
+    "name": "watch digest",
+    "value": {
+      "attention": {
+        "source": "lifecycle",
+        "state": {
+          "type": "working"
+        }
+      },
+      "harness_kind": "claude_code",
+      "kind": "watch",
+      "lifecycle": "running",
+      "pr_state": {
+        "auto_merge_enabled": true,
+        "base_branch": "main",
+        "check_counts": {
+          "failing": 0,
+          "passing": 10,
+          "pending": 3,
+          "skipped": 2
+        },
+        "checks_summary": "3 pending",
+        "draft": false,
+        "head_branch": "thet/cli-wire-mirror",
+        "head_sha": "24b451ab7248eb057445718f2ad6304a43915f37",
+        "in_merge_queue": false,
+        "merge_state_status": "BLOCKED",
+        "mergeable": "MERGEABLE",
+        "merged": false,
+        "number": 3006,
+        "review_decision": "APPROVED",
+        "state": "open",
+        "title": "refactor(cli): decode the chat event socket",
+        "url": "https://github.com/brightwave-inc/tidebreak/pull/3006"
+      },
+      "session": "00000000-0000-0000-0000-000000000021",
+      "title": "Watch #3006",
+      "trigger_target_at": "2025-09-01T04:15:00Z",
+      "turn_count": 3,
+      "watch_cycles": 4,
+      "watch_detail": "addressing the review",
+      "watch_state": "fixing",
+      "workspace": "00000000-0000-0000-0000-000000000002"
+    }
+  },
+  {
+    "kind": "session_digest",
+    "name": "internal session digest",
+    "value": {
+      "activity": "agent",
+      "attention": {
+        "source": "lifecycle",
+        "state": {
+          "type": "working"
+        }
+      },
+      "harness_kind": "internal",
+      "kind": "interactive",
+      "lifecycle": "running",
+      "session": "00000000-0000-0000-0000-000000000022",
+      "title": "Plan the memory substrate",
+      "trigger_target_at": "2025-09-01T04:15:00Z",
+      "turn_count": 1,
+      "workspace": null
+    }
+  },
+  {
+    "kind": "update_notice",
+    "name": "updates: snapshot",
+    "value": {
+      "sessions": [
+        {
+          "activity": "shell",
+          "attention": {
+            "source": "lifecycle",
+            "state": {
+              "type": "working"
+            }
+          },
+          "harness_kind": "claude_code",
+          "kind": "interactive",
+          "lifecycle": "running",
+          "pr_count": 1,
+          "pr_state": {
+            "auto_merge_enabled": true,
+            "base_branch": "main",
+            "check_counts": {
+              "failing": 0,
+              "passing": 10,
+              "pending": 3,
+              "skipped": 2
+            },
+            "checks_summary": "3 pending",
+            "draft": false,
+            "head_branch": "thet/cli-wire-mirror",
+            "head_sha": "24b451ab7248eb057445718f2ad6304a43915f37",
+            "in_merge_queue": false,
+            "merge_state_status": "BLOCKED",
+            "mergeable": "MERGEABLE",
+            "merged": false,
+            "number": 3006,
+            "review_decision": "APPROVED",
+            "state": "open",
+            "title": "refactor(cli): decode the chat event socket",
+            "url": "https://github.com/brightwave-inc/tidebreak/pull/3006"
+          },
+          "recap": "The parser bounds every field; the tests are next.",
+          "session": "00000000-0000-0000-0000-000000000003",
+          "subagents": [
+            {
+              "call_id": "call-explore",
+              "name": "Explore",
+              "status": "running"
+            }
+          ],
+          "title": "Bound the code parser",
+          "trigger_target_at": "2025-09-01T04:15:00Z",
+          "turn_count": 3,
+          "workspace": "00000000-0000-0000-0000-000000000002"
+        },
+        {
+          "activity": "agent",
+          "attention": {
+            "source": "lifecycle",
+            "state": {
+              "type": "working"
+            }
+          },
+          "harness_kind": "internal",
+          "kind": "interactive",
+          "lifecycle": "running",
+          "session": "00000000-0000-0000-0000-000000000022",
+          "title": "Plan the memory substrate",
+          "trigger_target_at": "2025-09-01T04:15:00Z",
+          "turn_count": 1,
+          "workspace": null
+        }
+      ],
+      "type": "snapshot"
+    }
+  },
+  {
+    "kind": "update_notice",
+    "name": "updates: digest",
+    "value": {
+      "activity": "shell",
+      "attention": {
+        "source": "lifecycle",
+        "state": {
+          "type": "working"
+        }
+      },
+      "harness_kind": "claude_code",
+      "kind": "interactive",
+      "lifecycle": "running",
+      "pr_count": 1,
+      "pr_state": {
+        "auto_merge_enabled": true,
+        "base_branch": "main",
+        "check_counts": {
+          "failing": 0,
+          "passing": 10,
+          "pending": 3,
+          "skipped": 2
+        },
+        "checks_summary": "3 pending",
+        "draft": false,
+        "head_branch": "thet/cli-wire-mirror",
+        "head_sha": "24b451ab7248eb057445718f2ad6304a43915f37",
+        "in_merge_queue": false,
+        "merge_state_status": "BLOCKED",
+        "mergeable": "MERGEABLE",
+        "merged": false,
+        "number": 3006,
+        "review_decision": "APPROVED",
+        "state": "open",
+        "title": "refactor(cli): decode the chat event socket",
+        "url": "https://github.com/brightwave-inc/tidebreak/pull/3006"
+      },
+      "recap": "The parser bounds every field; the tests are next.",
+      "session": "00000000-0000-0000-0000-000000000003",
+      "subagents": [
+        {
+          "call_id": "call-explore",
+          "name": "Explore",
+          "status": "running"
+        }
+      ],
+      "title": "Bound the code parser",
+      "trigger_target_at": "2025-09-01T04:15:00Z",
+      "turn_count": 3,
+      "type": "digest",
+      "workspace": "00000000-0000-0000-0000-000000000002"
+    }
+  },
+  {
+    "kind": "update_notice",
+    "name": "updates: internal session digest",
+    "value": {
+      "activity": "agent",
+      "attention": {
+        "source": "lifecycle",
+        "state": {
+          "type": "working"
+        }
+      },
+      "harness_kind": "internal",
+      "kind": "interactive",
+      "lifecycle": "running",
+      "session": "00000000-0000-0000-0000-000000000022",
+      "title": "Plan the memory substrate",
+      "trigger_target_at": "2025-09-01T04:15:00Z",
+      "turn_count": 1,
+      "type": "digest",
+      "workspace": null
+    }
+  },
+  {
+    "kind": "update_notice",
+    "name": "updates: terminal activity",
+    "value": {
+      "terminal_id": "00000000-0000-0000-0000-000000000040",
+      "type": "terminal_activity",
+      "workspace_id": "00000000-0000-0000-0000-000000000002"
+    }
+  },
+  {
+    "kind": "update_notice",
+    "name": "updates: clone progress",
+    "value": {
+      "done": false,
+      "job": "clone-7",
+      "percent": 62,
+      "phase": "receiving objects",
+      "repo_id": "00000000-0000-0000-0000-000000000001",
+      "type": "clone_progress"
+    }
+  },
+  {
+    "kind": "update_notice",
+    "name": "updates: harness install",
+    "value": {
+      "done": true,
+      "error": "checksum mismatch",
+      "kind": "codex",
+      "phase": "failed",
+      "type": "harness_install",
+      "version": "0.42.0"
+    }
+  },
+  {
+    "kind": "update_notice",
+    "name": "updates: delivery",
+    "value": {
+      "type": "delivery"
+    }
+  },
+  {
+    "kind": "update_notice",
+    "name": "updates: turn rewrite",
+    "value": {
+      "rewrite": "Every code-mode string now has a bound.",
+      "session": "00000000-0000-0000-0000-000000000003",
+      "state": "rewritten",
+      "turn_id": "00000000-0000-0000-0000-000000000004",
+      "type": "turn_rewrite"
+    }
+  },
+  {
+    "kind": "event_frame",
+    "name": "event: session_started (replayed, truncated)",
+    "value": {
+      "event": {
+        "harness_kind": "claude_code",
+        "harness_version": "2.0.14",
+        "resume_ref": "9f2c1d4e-resume",
+        "type": "session_started"
+      },
+      "replayed": true,
+      "seq": 40,
+      "truncated": true
+    }
+  },
+  {
+    "kind": "event_frame",
+    "name": "event: turn_started",
+    "value": {
+      "event": {
+        "turn_id": "00000000-0000-0000-0000-000000000004",
+        "type": "turn_started"
+      },
+      "replayed": true,
+      "seq": 41
+    }
+  },
+  {
+    "kind": "event_frame",
+    "name": "event: assistant_delta (transient replacement)",
+    "value": {
+      "event": {
+        "text": "Reading the parser",
+        "type": "assistant_delta"
+      },
+      "replacement": true,
+      "seq": 41,
+      "transient": true
+    }
+  },
+  {
+    "kind": "event_frame",
+    "name": "event: assistant_message",
+    "value": {
+      "event": {
+        "text": "The parser checks presence only.",
+        "type": "assistant_message"
+      },
+      "seq": 42
+    }
+  },
+  {
+    "kind": "event_frame",
+    "name": "event: reasoning_delta",
+    "value": {
+      "event": {
+        "text": "Which fields are drawn on one line?",
+        "type": "reasoning_delta"
+      },
+      "seq": 43
+    }
+  },
+  {
+    "kind": "event_frame",
+    "name": "event: tool_started",
+    "value": {
+      "event": {
+        "call_id": "call-1",
+        "detail": {
+          "cmd": "cargo test -p tidebreak-cli",
+          "cwd": "/Users/mara/code/tidebreak",
+          "kind": "command"
+        },
+        "name": "Bash",
+        "type": "tool_started"
+      },
+      "seq": 44
+    }
+  },
+  {
+    "kind": "event_frame",
+    "name": "event: tool_completed",
+    "value": {
+      "event": {
+        "call_id": "call-2",
+        "detail": {
+          "kind": "file_edit",
+          "path": "crates/tidebreak-cli/src/api/code.rs"
+        },
+        "outcome": "succeeded",
+        "parent_call_id": "call-1",
+        "preview": "1 file changed",
+        "type": "tool_completed"
+      },
+      "seq": 45
+    }
+  },
+  {
+    "kind": "event_frame",
+    "name": "event: file_changed",
+    "value": {
+      "event": {
+        "diffstat": {
+          "deletions": 3,
+          "files": 2,
+          "insertions": 14,
+          "truncated": false
+        },
+        "kind": "modified",
+        "path": "crates/tidebreak-cli/src/api/code.rs",
+        "type": "file_changed"
+      },
+      "seq": 46
+    }
+  },
+  {
+    "kind": "event_frame",
+    "name": "event: approval_requested",
+    "value": {
+      "event": {
+        "approval_id": "00000000-0000-0000-0000-000000000005",
+        "type": "approval_requested"
+      },
+      "seq": 47
+    }
+  },
+  {
+    "kind": "event_frame",
+    "name": "event: approval_resolved",
+    "value": {
+      "event": {
+        "approval_id": "00000000-0000-0000-0000-000000000005",
+        "decision": {
+          "feedback": "Not that file.",
+          "type": "deny"
+        },
+        "type": "approval_resolved"
+      },
+      "seq": 48
+    }
+  },
+  {
+    "kind": "event_frame",
+    "name": "event: user_steered",
+    "value": {
+      "event": {
+        "text": "Keep the raw tier for diffs.",
+        "type": "user_steered"
+      },
+      "seq": 49
+    }
+  },
+  {
+    "kind": "event_frame",
+    "name": "event: turn_completed",
+    "value": {
+      "event": {
+        "checkpoint": {
+          "checkpoint_ref": "refs/tidebreak/checkpoints/3",
+          "diffstat": {
+            "deletions": 3,
+            "files": 2,
+            "insertions": 14,
+            "truncated": false
+          }
+        },
+        "type": "turn_completed",
+        "usage": {
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 900,
+          "context_tokens": 2440,
+          "first_call_context_tokens": 2100,
+          "input_tokens": 1200,
+          "output_tokens": 340
+        }
+      },
+      "seq": 50
+    }
+  },
+  {
+    "kind": "event_frame",
+    "name": "event: turn_failed",
+    "value": {
+      "event": {
+        "error": {
+          "message": "the engine exited with status 1"
+        },
+        "type": "turn_failed"
+      },
+      "seq": 51
+    }
+  },
+  {
+    "kind": "event_frame",
+    "name": "event: turn_interrupted",
+    "value": {
+      "event": {
+        "type": "turn_interrupted"
+      },
+      "seq": 52
+    }
+  },
+  {
+    "kind": "event_frame",
+    "name": "event: checkpoint_recorded",
+    "value": {
+      "event": {
+        "diffstat": {
+          "deletions": 3,
+          "files": 2,
+          "insertions": 14,
+          "truncated": false
+        },
+        "turn_id": "00000000-0000-0000-0000-000000000004",
+        "type": "checkpoint_recorded"
+      },
+      "seq": 53
+    }
+  },
+  {
+    "kind": "event_frame",
+    "name": "event: harness_notice",
+    "value": {
+      "event": {
+        "level": "warning",
+        "message": "context is 80% full",
+        "type": "harness_notice"
+      },
+      "seq": 54
+    }
+  },
+  {
+    "kind": "event_frame",
+    "name": "event: attention_changed",
+    "value": {
+      "event": {
+        "source": "structured",
+        "state": {
+          "prompt": "Approve the write to /etc/hosts?",
+          "source": "structured",
+          "type": "needs_you"
+        },
+        "type": "attention_changed"
+      },
+      "seq": 55
+    }
+  }
+]

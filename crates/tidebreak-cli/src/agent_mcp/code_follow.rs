@@ -255,7 +255,7 @@ async fn reconcile_lost_socket(
             pending: None,
             events_cursor,
             turn_id: Some(turn_id),
-            queue_position: Some(row.position),
+            queue_position: Some(i64::from(row.position)),
         });
     }
     Ok(running(assistant_text, events_cursor, Some(turn_id)))
@@ -363,7 +363,7 @@ pub(crate) async fn run_turn(
                             pending: None,
                             events_cursor: stream.last_seq(),
                             turn_id: Some(row.id),
-                            queue_position: Some(row.position),
+                            queue_position: Some(i64::from(row.position)),
                         });
                     }
                 }

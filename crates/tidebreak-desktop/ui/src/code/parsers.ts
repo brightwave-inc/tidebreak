@@ -3437,19 +3437,37 @@ export function parseSequencedCodeEvent(
       "seq",
       "event",
       "replayed",
+      "transient",
+      "replacement",
+      "truncated",
     ]) ||
     !isFiniteNumber(value.seq) ||
-    (value.replayed !== undefined && typeof value.replayed !== "boolean")
+    !optionalBoolean(value.replayed) ||
+    !optionalBoolean(value.transient) ||
+    !optionalBoolean(value.replacement) ||
+    !optionalBoolean(value.truncated)
   ) {
     return null;
   }
   const event = parseCodeEvent(value.event);
   if (!event) return null;
+  // The reducer reads all four flags: `replayed` and `truncated` decide how
+  // a capped replay lands, `transient` keeps a live delta from advancing the
+  // cursor, and `replacement` swaps the buffered tail instead of appending.
   return {
     seq: value.seq,
     event,
     ...(value.replayed !== undefined ? { replayed: value.replayed } : {}),
+    ...(value.transient !== undefined ? { transient: value.transient } : {}),
+    ...(value.replacement !== undefined
+      ? { replacement: value.replacement }
+      : {}),
+    ...(value.truncated !== undefined ? { truncated: value.truncated } : {}),
   };
+}
+
+function optionalBoolean(value: unknown): value is boolean | undefined {
+  return value === undefined || typeof value === "boolean";
 }
 
 export function parseCodeEvent(value: unknown): CodeEvent | null {
@@ -4191,6 +4209,17 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
         state: value.state,
         ...(value.rewrite !== undefined ? { rewrite: value.rewrite } : {}),
       };
+    }
+    case "delivery": {
+      // No payload: the delivery surface re-reads its query.
+      if (
+        !onlyKeys<Extract<WireCodeUpdateNotice, { type: "delivery" }>>(value, [
+          "type",
+        ])
+      ) {
+        return null;
+      }
+      return { type: "delivery" };
     }
     default:
       return null;

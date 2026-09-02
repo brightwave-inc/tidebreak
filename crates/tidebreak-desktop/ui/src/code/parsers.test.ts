@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -39,6 +41,12 @@ import {
   parseFenceReason,
   parseHarnessModelList,
   parseCodeCheckLogsSnapshot,
+  parseCodeRepo,
+  parseCodeSessionDigest,
+  parseCodeWorkspace,
+  parseHarnessDoctorReport,
+  parseQueuedCodeTurn,
+  parseSequencedCodeEvent,
 } from "./parsers";
 
 const DELIVERY_CAPABILITY = {
@@ -1753,5 +1761,140 @@ describe("string bounds", () => {
       truncated: false,
     };
     expect(parseCodeWorkspaceSearch(search)).toEqual(search);
+  });
+});
+
+/**
+ * One real value of every snapshot, update notice, and event frame the code
+ * surface serializes, written by the server's own types. The CLI's tests and
+ * the server's round trip read the same file, so the three decoders of this
+ * surface cannot drift apart without one of them failing.
+ */
+const CODE_FRAMES: { name: string; kind: string; value: unknown }[] =
+  JSON.parse(
+    readFileSync(
+      fileURLToPath(
+        new URL(
+          "../../../../tidebreak-server/fixtures/code-frames.json",
+          import.meta.url,
+        ),
+      ),
+      "utf8",
+    ),
+  );
+
+const CODE_FRAME_PARSERS: Record<string, (value: unknown) => unknown> = {
+  repo: parseCodeRepo,
+  workspace: parseCodeWorkspace,
+  session: parseCodeSession,
+  turn: parseCodeTurn,
+  queued_turn: parseQueuedCodeTurn,
+  // The queued list has no parser of its own; the rows do.
+  queued_turns: (value) =>
+    isRecord(value) && Array.isArray(value.queued)
+      ? value.queued.map(parseQueuedCodeTurn).every(Boolean) || null
+      : null,
+  harness_doctor: parseHarnessDoctorReport,
+  workspace_files: parseCodeWorkspaceFiles,
+  workspace_diff: parseCodeWorkspaceDiff,
+  approval: parseCodeApproval,
+  commit: parseCodeCommit,
+  push: parseCodePush,
+  workspace_pr: parseCodeWorkspacePr,
+  action: parseCodeAction,
+  session_digest: parseCodeSessionDigest,
+  update_notice: parseCodeUpdateNotice,
+  event_frame: parseSequencedCodeEvent,
+};
+
+/**
+ * Real server values the desktop still rejects. brightwave-inc/tidebreak#3027:
+ * a session that binds no workspace (decision 0048 step 5) serializes
+ * `workspace_id: null` on its snapshot and `workspace: null` on its digest
+ * and digest notice, and the parsers still require an id there.
+ */
+const KNOWN_GAPS = new Set([
+  "fenced session",
+  "internal session digest",
+  "updates: snapshot",
+  "updates: internal session digest",
+]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+describe("code frames against real server output", () => {
+  it("carries every kind this file knows a parser for", () => {
+    expect(CODE_FRAMES.length).toBeGreaterThan(40);
+    const kinds = new Set(CODE_FRAMES.map(({ kind }) => kind));
+    for (const kind of Object.keys(CODE_FRAME_PARSERS)) {
+      expect(kinds.has(kind), kind).toBe(true);
+    }
+    for (const kind of kinds) {
+      expect(CODE_FRAME_PARSERS[kind], `no parser for ${kind}`).toBeDefined();
+    }
+  });
+
+  it("accepts every value the server serializes", () => {
+    // Every other test here builds its own input, which encodes what the
+    // author believed the wire looked like. These values come from the
+    // server, so a field renamed there fails here rather than in the app.
+    //
+    // The fixtures that fail today are listed, not skipped: each one is a
+    // real server value the desktop drops, and the entry has to go when its
+    // parser catches up. The set is compared exactly, so a fix shows up as a
+    // stale entry and a new gap shows up as a new name.
+    const rejected = new Set<string>();
+    for (const { name, kind, value } of CODE_FRAMES) {
+      if (CODE_FRAME_PARSERS[kind]?.(value) === null) rejected.add(name);
+    }
+    expect(rejected).toEqual(KNOWN_GAPS);
+  });
+
+  it("keeps the frame flags the reducer reads", () => {
+    // Before the fixtures, the socket parser dropped every frame that carried
+    // `transient`, `replacement`, or `truncated`, so a live delta and a
+    // capped replay never reached the reducer from this path.
+    const flagged = CODE_FRAMES.filter(
+      ({ kind, value }) =>
+        kind === "event_frame" &&
+        isRecord(value) &&
+        ("transient" in value || "truncated" in value),
+    );
+    expect(flagged.length).toBeGreaterThan(1);
+    for (const { name, value } of flagged) {
+      const frame = parseSequencedCodeEvent(value);
+      expect(frame, name).not.toBeNull();
+      for (const flag of [
+        "replayed",
+        "transient",
+        "replacement",
+        "truncated",
+      ]) {
+        expect(
+          (frame as Record<string, unknown>)[flag],
+          `${name} ${flag}`,
+        ).toBe((value as Record<string, unknown>)[flag]);
+      }
+    }
+    expect(
+      parseSequencedCodeEvent({
+        seq: 1,
+        event: { type: "turn_interrupted" },
+        transient: "yes",
+      }),
+    ).toBeNull();
+  });
+
+  it("submits a turn as ran or queued by the server's two shapes", () => {
+    const outcomes = new Set<string>();
+    for (const { kind, value } of CODE_FRAMES) {
+      if (kind !== "turn" && kind !== "queued_turn") continue;
+      const submission = parseCodeTurnSubmission(value);
+      expect(submission).not.toBeNull();
+      outcomes.add(submission?.kind ?? "null");
+    }
+    expect(outcomes).toEqual(new Set(["ran", "queued"]));
   });
 });

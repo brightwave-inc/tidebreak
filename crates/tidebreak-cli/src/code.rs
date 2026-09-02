@@ -1382,19 +1382,32 @@ fn render_update(notice: &CodeUpdateNotice) {
             title,
             turn_count,
             pr_state,
+            ..
         } => {
             let pr = pr_state
                 .as_deref()
                 .map(|pr| format!("  pr #{} {}", pr.number, pr.state))
                 .unwrap_or_default();
             println!(
-                "{workspace}  {session}  {}  {}  {title}  turns={turn_count}{pr}",
+                "{}  {session}  {}  {}  {title}  turns={turn_count}{pr}",
+                workspace_label(workspace.as_ref()),
                 lifecycle.as_str(),
                 attention_label(attention)
             );
         }
-        CodeUpdateNotice::TerminalActivity { .. } | CodeUpdateNotice::Unknown => {}
+        // Progress, delivery, and rewrite notices drive desktop surfaces the
+        // watch does not render. Terminal activity is coalesced noise here.
+        CodeUpdateNotice::TerminalActivity { .. }
+        | CodeUpdateNotice::CloneProgress { .. }
+        | CodeUpdateNotice::HarnessInstall { .. }
+        | CodeUpdateNotice::Delivery
+        | CodeUpdateNotice::TurnRewrite { .. } => {}
     }
+}
+
+/// A session with no workspace (the in-process engine's) prints a dash.
+fn workspace_label(workspace: Option<&WorkspaceId>) -> String {
+    workspace.map_or_else(|| "-".to_owned(), ToString::to_string)
 }
 
 fn digest_line(digest: &CodeSessionDigest) -> String {
@@ -1405,7 +1418,7 @@ fn digest_line(digest: &CodeSessionDigest) -> String {
         .unwrap_or_default();
     format!(
         "{}  {}  {}  {}  {}  turns={}{pr}",
-        digest.workspace,
+        workspace_label(digest.workspace.as_ref()),
         digest.session,
         digest.lifecycle.as_str(),
         attention_label(&digest.attention),
@@ -1437,7 +1450,10 @@ fn print_workspace(workspace: &CodeWorkspaceSnapshot) {
 
 fn print_session(session: &CodeSessionSnapshot) {
     println!("id                   {}", session.id);
-    println!("workspace            {}", session.workspace_id);
+    println!(
+        "workspace            {}",
+        workspace_label(session.workspace_id.as_ref())
+    );
     println!("harness              {}", session.harness_kind.as_str());
     println!(
         "version              {}",
