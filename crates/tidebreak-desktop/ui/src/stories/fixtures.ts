@@ -911,6 +911,27 @@ export const closedPrDigest: PullRequestDigest = {
   state: "closed",
 };
 
+/** Trigger/watch wrote that the pull request is mergeable. */
+export const readyToMergeDigest: CodeSessionDigest = codeDigest({
+  lifecycle: "idle",
+  attention: {
+    state: {
+      type: "needs_you",
+      prompt: "#184 is ready to merge",
+      source: "structured",
+    },
+    source: "structured",
+  },
+  turn_count: 4,
+  recap: "Opened the page as soon as the session existed.",
+  pr_state: {
+    ...openPrDigest,
+    mergeable: "mergeable",
+    merge_state_status: "clean",
+    review_decision: "approved",
+  },
+});
+
 /** A remote-style put-away workspace: no host worktree, history kept. */
 export const archivedWorkspace: CodeWorkspaceSnapshot = {
   ...codeWorkspace,

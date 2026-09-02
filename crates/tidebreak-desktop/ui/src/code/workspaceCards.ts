@@ -6,7 +6,11 @@ import type {
   CodeWorkspaceStatus,
 } from "../api/types";
 import { attentionLabel, LIFECYCLE_LABELS } from "./labels";
-import { prCompactStatusLabel, pullRequestLifecycle } from "./prState";
+import {
+  prCompactStatusLabel,
+  pullRequestLifecycle,
+  type PrStateInput,
+} from "./prState";
 import type { StatusTone } from "./statusTone";
 
 /**
@@ -147,13 +151,50 @@ export function isWorkspaceStatusRank(
 }
 
 /**
+ * Watch and notify write "ready to merge" as needs-you so it reaches the
+ * rail. The prompt is the only discriminator: merging is optional good news,
+ * not a blocker, and the same string is leftover after the pull request
+ * settles.
+ */
+const READY_TO_MERGE_PROMPT = /^(?:the pull request|#\d+) is ready to merge$/i;
+
+export function isReadyToMergeAttention(
+  attention: Attention | undefined,
+): boolean {
+  return (
+    attention?.state.type === "needs_you" &&
+    READY_TO_MERGE_PROMPT.test(attention.state.prompt)
+  );
+}
+
+/**
+ * How a ready-to-merge notice should read against the current pull request.
+ *
+ * `ready` while the pull request is still open. `stale` once it has merged or
+ * closed, so the card does not keep saying ready next to a merged glyph.
+ */
+export function readyToMergeNotice(
+  attention: Attention | undefined,
+  pr: PrStateInput | undefined,
+): "ready" | "stale" | null {
+  if (!isReadyToMergeAttention(attention)) return null;
+  if (pr) {
+    const lifecycle = pullRequestLifecycle(pr);
+    if (lifecycle === "merged" || lifecycle === "closed") return "stale";
+  }
+  return "ready";
+}
+
+/**
  * Rank a workspace for the by-status rail. Needs-you wins, then a running
  * engine, then an open PR, then done-unreviewed, then a workspace whose setup
  * script failed, then idle. Archived is last. A digest may change the rank;
  * viewing or selecting never does.
  *
  * Stalled and fenced join needs-you so the card mark and the group agree.
- * Idle or ended sessions with turns join Done, matching
+ * Ready-to-merge does not: notify and watch store it as needs-you, but it is
+ * a successful pull-request state, and a merged or closed pull request makes
+ * that prompt stale. Idle or ended sessions with turns join Done, matching
  * `attentionMarkForDigest`. A failed setup ranks below live work because the
  * checkout survives — but above idle, because nothing else on the card says
  * the script never finished.
@@ -164,15 +205,16 @@ export function workspaceStatusRank(
 ): WorkspaceStatusRank {
   if (isPutAway(workspace)) return "archived";
   const attentionType = digest?.attention.state.type;
+  const pr = digest?.pr_state ?? workspace.pr;
   if (
-    attentionType === "needs_you" ||
+    (attentionType === "needs_you" &&
+      !isReadyToMergeAttention(digest?.attention)) ||
     attentionType === "stalled" ||
     attentionType === "fenced"
   ) {
     return "needs_you";
   }
   if (digest?.lifecycle === "running") return "running";
-  const pr = digest?.pr_state ?? workspace.pr;
   if (pr) {
     const lifecycle = pullRequestLifecycle(pr);
     if (lifecycle === "open" || lifecycle === "draft") return "pr_open";
@@ -349,7 +391,13 @@ export function isSessionRowWorthy(
 
 /** Short lifecycle word for the nested session row. */
 export function sessionRowLabel(digest: CodeSessionDigest): string {
-  if (digest.attention.state.type === "needs_you") return "Needs you";
+  if (digest.attention.state.type === "needs_you") {
+    const notice = readyToMergeNotice(digest.attention, digest.pr_state);
+    if (notice === "ready") {
+      return digest.attention.state.prompt || "Ready to merge";
+    }
+    if (notice !== "stale") return "Needs you";
+  }
   if (digest.lifecycle === "running") return sessionActivityLabel(digest);
   switch (digest.attention.state.type) {
     case "stalled":
@@ -381,9 +429,15 @@ export function sessionRowLabel(digest: CodeSessionDigest): string {
  * the agent is still visible. No tallies: how many turns have run is not
  * what a reader scanning the rail wants to know.
  */
-export function sessionActivityLineLabel(digest: CodeSessionDigest): string {
+export function sessionActivityLineLabel(
+  digest: CodeSessionDigest,
+  pr: PrStateInput | undefined = digest.pr_state,
+): string {
   if (digest.attention.state.type === "needs_you") {
-    return digest.attention.state.prompt || "Needs you";
+    const notice = readyToMergeNotice(digest.attention, pr);
+    if (notice !== "stale") {
+      return digest.attention.state.prompt || "Needs you";
+    }
   }
   if (digest.lifecycle === "running") {
     // Subagents keep their count: the child rows name them. Everything else
@@ -480,6 +534,7 @@ export function workspaceCardLabel(input: {
     number: number;
     state: string;
     draft?: boolean;
+    merged?: boolean | null;
     in_merge_queue?: boolean;
   };
   terminalOpen?: boolean;
@@ -488,10 +543,12 @@ export function workspaceCardLabel(input: {
   const parts = [input.title];
   if (input.workspaceStatus === "creating") parts.push("Creating workspace");
   if (input.workspaceStatus === "setup_failed") parts.push("Setup failed");
+  const mergeNotice = readyToMergeNotice(input.attention, input.pr);
   if (
     input.attention &&
     input.attention.state.type !== "working" &&
-    input.attention.state.type !== "idle"
+    input.attention.state.type !== "idle" &&
+    mergeNotice !== "stale"
   ) {
     parts.push(attentionLabel(input.attention));
   }

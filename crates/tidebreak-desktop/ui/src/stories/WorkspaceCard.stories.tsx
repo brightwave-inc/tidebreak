@@ -36,6 +36,7 @@ import {
   monitorDigest,
   needsYouDigest,
   openPrDigest,
+  readyToMergeDigest,
   queuedPrDigest,
   runningDigest,
   shellDigest,
@@ -356,6 +357,58 @@ export const NeedsYouInline: Story = {
   },
 };
 
+/**
+ * Ready to merge is success, not a blocker. The notice stays on the row in
+ * the ready tone, and the card sits with open pull requests rather than
+ * Needs you.
+ */
+export const ReadyToMergeNotice: Story = {
+  args: {
+    workspace: {
+      ...codeWorkspace,
+      pr: readyToMergeDigest.pr_state ?? openPrDigest,
+    },
+    digest: readyToMergeDigest,
+    session: idleSession,
+    commands: workspaceCommands({
+      hasPr: true,
+      archived: false,
+      hasSession: true,
+    }),
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText("#184 is ready to merge")).toBeVisible();
+    await expect(canvas.queryByLabelText("Needs you")).not.toBeInTheDocument();
+    await expect(canvas.getByLabelText("PR open")).toBeVisible();
+  },
+};
+
+/**
+ * After the pull request merges, a leftover ready-to-merge notice must not
+ * keep saying ready next to the merged glyph.
+ */
+export const ReadyToMergeAfterMerge: Story = {
+  args: {
+    workspace: { ...codeWorkspace, pr: mergedPrDigest },
+    digest: { ...readyToMergeDigest, pr_state: mergedPrDigest },
+    session: idleSession,
+    commands: workspaceCommands({
+      hasPr: true,
+      archived: false,
+      hasSession: true,
+    }),
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.queryByText(/ready to merge/i)).not.toBeInTheDocument();
+    await expect(canvas.queryByLabelText("Needs you")).not.toBeInTheDocument();
+    await expect(
+      canvasElement.querySelector('[data-pr-state="merged"]'),
+    ).not.toBeNull();
+  },
+};
+
 /** How the card reads inside a by-repo group: no repo chip, title leads. */
 export const InRepoGroup: Story = {
   args: { visibleMeta: { repoChip: false, branch: false } },
@@ -649,9 +702,10 @@ export const PullRequestTones: Story = {
 /**
  * The status ramp on one screen, which is the only way to catch a tone drawn
  * at the wrong strength. Read down the glyph rail: working moves, needs-you is
- * the one red, stalled joins needs-you, done is quiet, an empty workspace
- * still has an outline circle, and merged is purple rather than a second
- * shade of green. Check this in both themes.
+ * the one red, ready-to-merge is green rather than a second needs-you, stalled
+ * joins needs-you, done is quiet, an empty workspace still has an outline
+ * circle, and merged is purple rather than a second shade of green. Check this
+ * in both themes.
  */
 export const StatusTones: Story = {
   render: (args) => (
@@ -660,6 +714,7 @@ export const StatusTones: Story = {
         [
           ["Working", runningDigest, codeSession, undefined],
           ["Needs you", needsYouDigest, codeSession, undefined],
+          ["Ready to merge", readyToMergeDigest, idleSession, openPrDigest],
           ["Stalled", stalledDigest, codeSession, undefined],
           ["Done, unreviewed", doneDigest, idleSession, undefined],
           ["Parked, complete", idleCompleteDigest, grokIdleSession, undefined],

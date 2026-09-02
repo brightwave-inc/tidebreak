@@ -344,6 +344,108 @@ describe("WorkspaceCard", () => {
     expect(menu).not.toHaveTextContent("New session");
   });
 
+  it("paints a ready-to-merge notice as success, not needs-you", () => {
+    const digest: CodeSessionDigest = {
+      workspace: workspace.id,
+      session: "sess-1",
+      kind: "interactive",
+      lifecycle: "idle",
+      attention: {
+        state: {
+          type: "needs_you",
+          prompt: "#184 is ready to merge",
+          source: "structured",
+        },
+        source: "structured",
+      },
+      title: workspace.title,
+      turn_count: 4,
+      pr_state: pr,
+    };
+    render(
+      <WorkspaceCard
+        workspace={{ ...workspace, pr }}
+        digest={digest}
+        session={undefined}
+        repoName="app"
+        active={false}
+        terminalOpen={false}
+        density="detailed"
+        visibleMeta={{ repoChip: true, branch: false }}
+        commands={workspaceCommands({
+          hasPr: true,
+          archived: false,
+          hasSession: true,
+        })}
+        onOpen={vi.fn()}
+        onCommand={vi.fn()}
+      />,
+    );
+
+    const line = screen.getByText("#184 is ready to merge");
+    expect(line).toHaveClass("text-success-foreground");
+    expect(line).not.toHaveClass("text-critical-foreground");
+    expect(screen.queryByLabelText("Needs you")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("PR open")).toBeInTheDocument();
+    expect(
+      document.querySelector('[data-state-glyph="ready_to_merge"]'),
+    ).toBeInTheDocument();
+  });
+
+  it("does not keep a ready-to-merge notice after the pull request merges", () => {
+    const merged: PullRequestDigest = {
+      ...pr,
+      state: "merged",
+      merged: true,
+    };
+    const digest: CodeSessionDigest = {
+      workspace: workspace.id,
+      session: "sess-1",
+      kind: "interactive",
+      lifecycle: "idle",
+      attention: {
+        state: {
+          type: "needs_you",
+          prompt: "#184 is ready to merge",
+          source: "structured",
+        },
+        source: "structured",
+      },
+      title: workspace.title,
+      turn_count: 4,
+      recap: "Folded the backoff into refresh.",
+      pr_state: merged,
+    };
+    render(
+      <WorkspaceCard
+        workspace={{ ...workspace, pr: merged }}
+        digest={digest}
+        session={undefined}
+        repoName="app"
+        active={false}
+        terminalOpen={false}
+        density="detailed"
+        visibleMeta={{ repoChip: true, branch: false }}
+        commands={workspaceCommands({
+          hasPr: true,
+          archived: false,
+          hasSession: true,
+        })}
+        onOpen={vi.fn()}
+        onCommand={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByText(/ready to merge/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Needs you")).not.toBeInTheDocument();
+    expect(
+      screen.getByText("Folded the backoff into refresh."),
+    ).toBeInTheDocument();
+    expect(
+      document.querySelector('[data-pr-state="merged"]'),
+    ).toBeInTheDocument();
+  });
+
   it("keeps a parked agent visible as a completed turn", () => {
     const digest: CodeSessionDigest = {
       workspace: workspace.id,
