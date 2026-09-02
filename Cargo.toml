@@ -52,7 +52,7 @@ cap-fs-ext = "=4.0.3"
 futures = "=0.3.34"
 futures-timer = "=3.0.4"
 thiserror = "=2.0.20"
-uuid = { version = "=1.25.0", features = ["v4", "serde"] }
+uuid = { version = "=1.26.0", features = ["v4", "serde"] }
 unicode-general-category = "=1.1.0"
 chrono = { version = "=0.4.45", features = ["serde"] }
 # Generates the renderer's TypeScript wire types from these serde definitions.
