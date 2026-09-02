@@ -676,7 +676,9 @@ async fn post_discovery(router: &Router, bearer: &str, origin: &str) -> axum::re
 /// because this environment cannot accept loopback TCP.
 async fn discovery_mock_lock() -> tokio::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| tokio::sync::Mutex::new(())).lock().await
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await
 }
 
 fn install_mock_origin(ok_path: &'static str, body: Vec<u8>, content_type: &'static str) {

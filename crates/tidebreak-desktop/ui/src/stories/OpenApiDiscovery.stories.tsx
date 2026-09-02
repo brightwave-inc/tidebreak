@@ -16,11 +16,7 @@ type Story = StoryObj;
 
 export const Searching: Story = {
   render: () => (
-    <DiscoveryResults
-      discovery={null}
-      discovering
-      onChoose={fn()}
-    />
+    <DiscoveryResults discovery={null} discovering onChoose={fn()} />
   ),
   play: async ({ canvasElement }) => {
     await expect(
@@ -97,9 +93,7 @@ export const NoPublicDocument: Story = {
   render: () => <NoPublicDocumentGuidance onPasteExample={fn()} />,
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await userEvent.click(
-      canvas.getByText("No public OpenAPI document?"),
-    );
+    await userEvent.click(canvas.getByText("No public OpenAPI document?"));
     await expect(
       await canvas.findByRole("button", { name: /Paste this example/ }),
     ).toBeVisible();

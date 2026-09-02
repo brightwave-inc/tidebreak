@@ -165,5 +165,3 @@ function TriedList({ tried }: { tried: string[] }) {
     </details>
   );
 }
-
-
