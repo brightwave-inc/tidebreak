@@ -238,7 +238,6 @@ impl HttpWire {
             &self.url,
             authorization.is_some() || !self.configured.is_empty() || self.session_id.is_some(),
         )?;
-        self.ensure_host_resolves().await?;
         // One map, built configured-first and then overwritten by every
         // client-generated header, so a configured entry can never displace
         // what this transport says about itself — whatever the builder's
@@ -318,26 +317,6 @@ impl HttpWire {
             }
         }
         outcome.ok_or_else(|| mcp_message("external server closed the stream before replying"))
-    }
-
-    async fn ensure_host_resolves(&self) -> Result<()> {
-        let Some(host) = self.url.host_str() else {
-            return Ok(());
-        };
-        if host.parse::<std::net::IpAddr>().is_ok() {
-            return Ok(());
-        }
-        let port = self.url.port_or_known_default().unwrap_or(80);
-        match tokio::net::lookup_host((host, port)).await {
-            Ok(mut addresses) => {
-                if addresses.next().is_some() {
-                    Ok(())
-                } else {
-                    Err(mcp_message(format!("DNS resolution failed ({host}).")))
-                }
-            }
-            Err(_) => Err(mcp_message(format!("DNS resolution failed ({host})."))),
-        }
     }
 
     fn absorb_session_id(&mut self, response: &reqwest::Response) -> Result<()> {
