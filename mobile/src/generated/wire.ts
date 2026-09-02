@@ -1381,7 +1381,12 @@ diffstat: Diffstat, } | { "type": "approval_requested",
 /**
  * Hint id; the row is the source of truth.
  */
-approval_id: CodeApprovalId, } | { "type": "approval_resolved",
+approval_id: CodeApprovalId,
+/**
+ * What the card asks, for the chat surface's replay. Internal
+ * engine; absent on every row an external adapter writes.
+ */
+request?: InternalApprovalRequest, } | { "type": "approval_resolved",
 /**
  * The approval that was decided.
  */
@@ -1465,60 +1470,7 @@ call_id: string,
 /**
  * Partial JSON to concatenate.
  */
-fragment: string, } | { "type": "tool_approval_required",
-/**
- * Whether the Auto-mode judge owns this card right now.
- */
-auto_judging?: boolean,
-/**
- * The call awaiting a decision.
- */
-call_id: string,
-/**
- * Canonical registered tool identity.
- */
-tool_name: string,
-/**
- * The approval class that triggered the prompt.
- */
-class: ApprovalClass,
-/**
- * What kind of consent the call asks for.
- */
-kind: ToolApprovalKind,
-/**
- * Every standing-grant rung the call cleared; empty means approving
- * once is the only affirmative choice.
- */
-grant_scopes?: Array<GrantScope>,
-/**
- * Closed projection of what the call will do, when its tool has one.
- */
-preview?: ToolActionPreview, } | { "type": "tool_approval_decided",
-/**
- * The call that was decided.
- */
-call_id: string,
-/**
- * `true` if approved, `false` if rejected.
- */
-approved: boolean, } | { "type": "questions_asked",
-/**
- * Exact tool call awaiting answers.
- */
-call_id: string,
-/**
- * Turn that resumes after the answer commits.
- */
-turn_id: CodeTurnId, } | { "type": "plan_proposed",
-/**
- * Exact tool call awaiting the reader's decision.
- */
-call_id: string,
-/**
- * Turn that resumes after the decision commits.
- */
-turn_id: CodeTurnId, } | { "type": "task_plan_updated",
+fragment: string, } | { "type": "task_plan_updated",
 /**
  * The tool call that committed the replacement.
  */
@@ -3152,6 +3104,51 @@ action?: RendererToolName, requested_at: string, };
  * serializes exactly as the hand-built list of strings it replaces on the wire.
  */
 export type InputModality = "text" | "image";
+
+/**
+ * What an internal-engine approval row asks, journaled beside its id so
+ * the chat surface replays the card without loading the row. Internal
+ * engine: external adapters carry only the row id, and the row is the
+ * source of truth for every reader.
+ *
+ * The row's id is the engine call id the card is parked on (one approval
+ * surface, decision 0048 step 5), so the chat surface recovers the call
+ * from the approval id alone.
+ */
+export type InternalApprovalRequest = { "kind": "tool_use",
+/**
+ * Whether the Auto-mode judge owns this card right now.
+ */
+auto_judging?: boolean,
+/**
+ * Canonical registered tool identity.
+ */
+tool_name: string,
+/**
+ * The approval class that triggered the prompt.
+ */
+class: ApprovalClass,
+/**
+ * What kind of consent the call asks for.
+ */
+approval: ToolApprovalKind,
+/**
+ * Every standing-grant rung the call cleared; empty means approving
+ * once is the only affirmative choice.
+ */
+grant_scopes?: Array<GrantScope>,
+/**
+ * Closed projection of what the call will do, when its tool has one.
+ */
+preview?: ToolActionPreview, } | { "kind": "questions",
+/**
+ * Turn that resumes after the answer commits.
+ */
+turn_id: CodeTurnId, } | { "kind": "plan",
+/**
+ * Turn that resumes after the decision commits.
+ */
+turn_id: CodeTurnId, };
 
 /**
  * Renderer-safe resolved policy. Carries only what surfaces need to render

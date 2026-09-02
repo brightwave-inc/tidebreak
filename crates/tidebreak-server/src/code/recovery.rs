@@ -485,6 +485,7 @@ mod tests {
                 feedback: None,
                 requested_at: now(),
                 decided_at: None,
+                auto_judge_status: None,
             },
         )
         .await

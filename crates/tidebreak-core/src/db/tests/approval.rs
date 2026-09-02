@@ -115,17 +115,22 @@ async fn workspace_approval_folds_storage_but_recovers_class_and_kind() {
         .await
         .unwrap();
 
-    // The stored row keeps the legacy spellings the column constraints allow…
-    let row = entities::tool_call::Entity::find_by_id(call.id.0)
+    // The card is one approval row whose id is the call id, carrying the
+    // engine's own request; the read model recovers the class from the
+    // kind, so a workspace card parked across a restart stays approvable.
+    let row = entities::code_approval::Entity::find_by_id(call.id.0)
         .one(&store.conn)
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(row.approval_class.as_deref(), Some("sensitive"));
-    assert_eq!(row.approval_kind.as_deref(), Some("unsupported"));
+    assert_eq!(row.session_id, chat.id.0);
+    assert_eq!(
+        crate::InternalToolApprovalRequest::from_raw(&row.harness_raw)
+            .unwrap()
+            .kind,
+        crate::ToolApprovalKind::WorkspaceMayModifyFiles
+    );
 
-    // …and the read model recovers the real class and kind from the tool
-    // name, so a workspace card parked across a restart stays approvable.
     let approval = store
         .get_tool_call_approval(call.id)
         .await
@@ -341,7 +346,7 @@ async fn approval_registration_journals_once_and_decision_is_exact() {
         .await
         .unwrap();
     let approved = match decided {
-        DecideToolApprovalOutcome::Decided(approval) => approval,
+        DecideToolApprovalOutcome::Decided { approval, .. } => approval,
         outcome => panic!("unexpected approval decision outcome: {outcome:?}"),
     };
     assert_eq!(approved.status, ToolApprovalStatus::Approved);
@@ -399,7 +404,14 @@ async fn approval_registration_journals_once_and_decision_is_exact() {
         RequestToolApprovalOutcome::Existing(existing) if existing == approved
     ));
     assert!(terminal_retry.required_event.is_none());
-    assert_eq!(store.list_events(chat.id, 0).await.unwrap().len(), 1);
+    // One row for the request, one for the decision, whichever surface made
+    // it; a retry of either adds nothing.
+    let journal = store.list_events(chat.id, 0).await.unwrap();
+    assert_eq!(journal.len(), 2);
+    assert!(matches!(
+        journal[1].event,
+        AgentEvent::ApprovalDecided { call_id, approved: true } if call_id == request.call_id
+    ));
 }
 
 #[tokio::test]
@@ -691,7 +703,7 @@ async fn cancellation_and_approval_decision_serialize_without_pending_state() {
     assert!(cancelled.unwrap().is_some());
     assert!(matches!(
         decided.unwrap(),
-        DecideToolApprovalOutcome::Decided(_) | DecideToolApprovalOutcome::DecisionConflict
+        DecideToolApprovalOutcome::Decided { .. } | DecideToolApprovalOutcome::DecisionConflict
     ));
     assert!(store
         .list_pending_tool_call_approvals(chat_id, 100)
@@ -748,7 +760,7 @@ async fn failed_tool_resolution_and_approval_decision_serialize_to_one_terminal_
     ));
     assert!(matches!(
         decided.unwrap(),
-        DecideToolApprovalOutcome::Decided(_) | DecideToolApprovalOutcome::DecisionConflict
+        DecideToolApprovalOutcome::Decided { .. } | DecideToolApprovalOutcome::DecisionConflict
     ));
     let approval = store
         .get_tool_call_approval(call_id)
@@ -803,5 +815,90 @@ async fn approval_reject_reason_rejects_controls_before_commit() {
             .unwrap()
             .status,
         ToolApprovalStatus::Pending
+    );
+}
+
+/// A standing grant exists only from the transaction that approves the card
+/// it was chosen on. A card that is claimed and then abandoned leaves none;
+/// a settled approve-with-grant leaves exactly one, keyed by the call.
+#[tokio::test]
+async fn a_standing_grant_is_written_by_the_settlement_alone() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let owner = crate::OwnerId::local();
+    let session_id = crate::CodeSessionId(chat.id.0);
+
+    let (_turn, _lease, granted_call, request) = claimed_sensitive_call(&store, &chat).await;
+    store
+        .request_tool_call_approval(&request, Utc::now())
+        .await
+        .unwrap();
+    assert!(store.list_standing_tool_grants().await.unwrap().is_empty());
+    let settlement = crate::db::code::settle_engine_observed_approval(
+        &store,
+        &owner,
+        session_id,
+        0,
+        &granted_call.id.to_string(),
+        crate::ApprovalDecisionKind::ApprovedWithGrant {
+            scope: crate::GrantScope::WholeTool,
+        },
+        Utc::now(),
+    )
+    .await
+    .unwrap()
+    .expect("the card settles");
+    assert_eq!(
+        settlement.approval.state,
+        crate::CodeApprovalState::Approved
+    );
+    let grants = store.list_standing_tool_grants().await.unwrap();
+    assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0].source_call_id, granted_call.id);
+    assert_eq!(grants[0].grant.scope(), &crate::GrantScope::WholeTool);
+    assert!(
+        store
+            .get_tool_call_approval(granted_call.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status
+            == ToolApprovalStatus::Approved
+    );
+
+    // A second card, on a conversation of its own, abandoned before any
+    // decision landed: nothing was minted for it.
+    let other = sample_chat();
+    store.create_chat(&other).await.unwrap();
+    let (_turn, _lease, doomed_call, request) = claimed_sensitive_call(&store, &other).await;
+    store
+        .request_tool_call_approval(&request, Utc::now())
+        .await
+        .unwrap();
+    let abandoned = crate::db::code::abandon_pending_approval(
+        &store,
+        &owner,
+        crate::CodeApprovalId(doomed_call.id.0),
+        crate::CodeSessionId(other.id.0),
+        0,
+        Utc::now(),
+    )
+    .await
+    .unwrap()
+    .expect("the card abandons");
+    assert_eq!(
+        abandoned.approval.state,
+        crate::CodeApprovalState::Abandoned
+    );
+    assert_eq!(store.list_standing_tool_grants().await.unwrap().len(), 1);
+    assert_eq!(
+        store
+            .get_tool_call_approval(doomed_call.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        ToolApprovalStatus::Rejected
     );
 }

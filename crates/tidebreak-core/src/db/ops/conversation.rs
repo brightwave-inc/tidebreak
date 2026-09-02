@@ -790,32 +790,6 @@ pub(in crate::db) async fn delete_chat(
         .exec(&transaction)
         .await
         .map_err(store_err)?;
-    entities::user_question::Entity::delete_many()
-        .filter(
-            entities::user_question::Column::CallId.in_subquery(
-                entities::user_question_request::Entity::find()
-                    .select_only()
-                    .column(entities::user_question_request::Column::CallId)
-                    .filter(entities::user_question_request::Column::ChatId.eq(chat_id.0))
-                    .into_query(),
-            ),
-        )
-        .exec(&transaction)
-        .await
-        .map_err(store_err)?;
-    entities::user_question_request::Entity::delete_many()
-        .filter(entities::user_question_request::Column::ChatId.eq(chat_id.0))
-        .exec(&transaction)
-        .await
-        .map_err(store_err)?;
-    // A plan request restricts against the chat, its turn, the call that
-    // proposed it, and the journal row carrying its renderer hint, so it goes
-    // before all four.
-    entities::plan_request::Entity::delete_many()
-        .filter(entities::plan_request::Column::ChatId.eq(chat_id.0))
-        .exec(&transaction)
-        .await
-        .map_err(store_err)?;
     // The task plan restricts against the chat, its last-writing turn, and the
     // call that wrote it, so it goes before all three.
     entities::task_plan::Entity::delete_many()

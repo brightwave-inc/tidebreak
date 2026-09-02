@@ -126,8 +126,9 @@ pub use agent_tools::{
 pub use approval::{
     ApprovalDecision, ApprovalFuture, ApprovalGate, ApprovalJournalIdentity, ApprovalRegistration,
     ApprovalRegistrationFuture, ApprovalRequest, ApprovalRequiredPublication, AutoApproveGate,
-    AutoJudgeStatus, GrantLevel, GrantScope, RefuseGate, StandingGrant, StandingGrantRecord,
-    StandingGrants, ToolApproval, ToolApprovalKind, ToolApprovalStatus,
+    AutoJudgeStatus, GrantLevel, GrantScope, InternalToolApprovalRequest, RefuseGate,
+    StandingGrant, StandingGrantRecord, StandingGrants, ToolApproval, ToolApprovalKind,
+    ToolApprovalStatus,
 };
 pub use attention::{
     should_replace, Attention, AttentionSource, AttentionState, FenceReason, MAX_ATTENTION_NOTE,
@@ -193,11 +194,11 @@ pub use code::{
     CodeWatch, CodeWatchId, CodeWatchState, CodeWorkflowRunFact, CodeWorkflowRunId, CodeWorkspace,
     CodeWorkspaceStatus, Diffstat, ExternalMessageRecord, ExternalSessionResolution,
     FileChangeKind, GrantRotation, HarnessCaps, HarnessCommand, HarnessKind, HarnessNoticeLevel,
-    HarnessTier, IncarnationAdmission, IncarnationState, PullRequestCheck, PullRequestCheckBucket,
-    PullRequestCheckCounts, PullRequestComment, PullRequestCommentKind, PullRequestDigest,
-    QuickAction, RepoId, SequencedCodeEvent, ToolDetail, ToolOutcome, TurnParkWait, WorkspaceId,
-    MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS, MAX_SESSION_SUBAGENTS,
-    MAX_TOOL_SUMMARY_CHARS,
+    HarnessTier, IncarnationAdmission, IncarnationState, InternalApprovalRequest, PullRequestCheck,
+    PullRequestCheckBucket, PullRequestCheckCounts, PullRequestComment, PullRequestCommentKind,
+    PullRequestDigest, QuickAction, RepoId, SequencedCodeEvent, ToolDetail, ToolOutcome,
+    TurnParkWait, WorkspaceId, MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS,
+    MAX_SESSION_SUBAGENTS, MAX_TOOL_SUMMARY_CHARS,
 };
 pub use compaction::{
     CompactionPolicy, CompactionSelection, CompactionSourceBoundary, CompactionTokenBounds,
@@ -287,8 +288,8 @@ pub use output_scan::{
 pub use plan_mode::{
     exit_plan_mode_tool_spec, plan_decision_result, validate_exit_plan_mode_arguments,
     DecidePlanRequest, ExitPlanModeArgs, PendingPlanApproval, PlanDecision, PlanDecisionChoice,
-    PlanRequestStatus, DEFAULT_ACCEPTED_PLAN_MODE, EXIT_PLAN_MODE_TOOL, MAX_PLAN_CONTENT_CHARS,
-    MAX_PLAN_FEEDBACK_CHARS, MAX_PLAN_TITLE_CHARS, MIN_PLAN_CONTENT_CHARS,
+    PlanProposalBody, PlanRequestStatus, DEFAULT_ACCEPTED_PLAN_MODE, EXIT_PLAN_MODE_TOOL,
+    MAX_PLAN_CONTENT_CHARS, MAX_PLAN_FEEDBACK_CHARS, MAX_PLAN_TITLE_CHARS, MIN_PLAN_CONTENT_CHARS,
 };
 pub use preview::{
     format_bytes, AgentActivityDetail, AnsweredUserQuestion, ExecDegradation, ResultEntry,
@@ -328,16 +329,17 @@ pub use storage::{
     FailAgentRunOutcome, FinishAgentRunCancellationOutcome, FinishRootAttachmentChangeOutcome,
     FinishTurnCancellationOutcome, HeartbeatClientToolCallOutcome, InboxItem, InboxItemKind,
     JournaledClientToolCallOutcome, JournaledToolApprovalOutcome, JournaledTurnOutcome,
-    JournaledTurnSteerOutcome, MessageInvokedSkills, MoveChatOutcome, Notification,
-    NotificationContext, NotificationKind, NotificationListCursor, OperationClaimOutcome,
-    OperationLogEntry, OperationLogState, OperationLogWrite, ParkSandboxToolCallOutcome,
-    ParkTurnForAgentRunWaitSetOutcome, ParkTurnForClientCallOutcome, PendingChatPrompt,
-    PromoteQueuedTurnOutcome, RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome,
-    RequestToolApprovalOutcome, RequestTurnCancellationOutcome, ReservedQueuedTurnOutcome,
-    ReservedTurnAcceptanceOutcome, ResolveSandboxToolCallOutcome, ResolveToolCallOutcome,
-    ResumeTurnForAgentRunWaitSetOutcome, RetrySandboxToolCallOutcome, SandboxAdmissionMode,
-    SandboxProvision, SandboxProvisionState, SecretProvider, Store, SubmitAgentRunResultOutcome,
-    TurnEventAppend, TurnLeaseFence, MAX_PENDING_ROOT_ATTACHMENT_CHANGES,
+    JournaledTurnSteerOutcome, JudgeVerdictOutcome, MessageInvokedSkills, MoveChatOutcome,
+    Notification, NotificationContext, NotificationKind, NotificationListCursor,
+    OperationClaimOutcome, OperationLogEntry, OperationLogState, OperationLogWrite,
+    ParkSandboxToolCallOutcome, ParkTurnForAgentRunWaitSetOutcome, ParkTurnForClientCallOutcome,
+    PendingChatPrompt, PromoteQueuedTurnOutcome, RecordTurnFailureOutcome,
+    RequestAgentRunCancellationOutcome, RequestToolApprovalOutcome, RequestTurnCancellationOutcome,
+    ReservedQueuedTurnOutcome, ReservedTurnAcceptanceOutcome, ResolveSandboxToolCallOutcome,
+    ResolveToolCallOutcome, ResumeTurnForAgentRunWaitSetOutcome, RetrySandboxToolCallOutcome,
+    SandboxAdmissionMode, SandboxProvision, SandboxProvisionState, SecretProvider, Store,
+    SubmitAgentRunResultOutcome, TurnEventAppend, TurnLeaseFence,
+    MAX_PENDING_ROOT_ATTACHMENT_CHANGES,
 };
 pub use task_plan::{
     open_task_plan_steps, parse_update_task_plan_arguments, sandbox_update_task_plan_tool_spec,

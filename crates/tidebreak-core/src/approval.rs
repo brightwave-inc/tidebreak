@@ -351,6 +351,18 @@ impl AutoJudgeStatus {
             Self::Declined => "declined",
         }
     }
+
+    /// Parse a stored token.
+    #[must_use]
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "judging" => Some(Self::Judging),
+            "approved" => Some(Self::Approved),
+            "declined" => Some(Self::Declined),
+            _ => None,
+        }
+    }
 }
 
 /// Whether an uncovered call may be handed to the Auto-mode judge.
@@ -944,6 +956,42 @@ impl StandingGrant {
             && self.kind == kind
             && kind.is_approvable()
             && self.scope.covers_call(tool_name, arguments)
+    }
+}
+
+/// The internal engine's own request on a consent card's approval row.
+///
+/// Stored as the row's raw payload (decision 0033: the engine's request,
+/// verbatim) so the chat surface recovers the card's tool and consent kind
+/// without a second table. Its presence is what marks a row as a consent
+/// card rather than a parked continuation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct InternalToolApprovalRequest {
+    /// Canonical registered tool identity.
+    pub tool_name: String,
+    /// Closed server-owned consent semantics, frozen at first registration.
+    pub kind: ToolApprovalKind,
+    /// The approval whose standing grant authorized this call, when one
+    /// did. Such a row is minted already decided and journals nothing: the
+    /// reader was never asked, and the row is the audit of why.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub granted_by: Option<CallId>,
+}
+
+impl InternalToolApprovalRequest {
+    /// The row payload.
+    pub fn to_raw(&self) -> crate::error::Result<serde_json::Value> {
+        Ok(serde_json::to_value(self)?)
+    }
+
+    /// The request a row carries, or `None` for a row that is not a consent
+    /// card (a park, or an external engine's request).
+    #[must_use]
+    pub fn from_raw(raw: &serde_json::Value) -> Option<Self> {
+        if !raw.is_object() {
+            return None;
+        }
+        serde_json::from_value(raw.clone()).ok()
     }
 }
 

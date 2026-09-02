@@ -286,7 +286,7 @@ async fn apply_ours(
             assistant_text.clear();
             Ok(None)
         }
-        CodeEvent::ApprovalRequested { approval_id } => {
+        CodeEvent::ApprovalRequested { approval_id, .. } => {
             let pending = match pending_for_turn(client, session, gate.turn_id()).await? {
                 Some(pending) => pending_approval(&pending),
                 None => json!({

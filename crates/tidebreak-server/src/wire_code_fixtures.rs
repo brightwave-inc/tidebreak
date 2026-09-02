@@ -26,9 +26,9 @@ use tidebreak_core::{
     CodeSubagentSummary, CodeTerminalId, CodeTurnId, CodeTurnStatus, CodeUsage, CodeWatchId,
     CodeWatchState, CodeWorkspaceStatus, Diffstat, FenceReason, FileChangeKind, GrantScope,
     HarnessCaps, HarnessCommand, HarnessKind, HarnessNoticeLevel, HarnessTier, ImageMediaType,
-    ImageRef, PermissionMode, PullRequestCheckCounts, PullRequestDigest, QuickAction,
-    ReasoningEffort, RefusalDetails, RefusalOutcome, RepoId, ToolApprovalKind, ToolDetail,
-    ToolOutcome, WorkspaceId,
+    ImageRef, InternalApprovalRequest, PermissionMode, PullRequestCheckCounts, PullRequestDigest,
+    QuickAction, ReasoningEffort, RefusalDetails, RefusalOutcome, RepoId, ToolApprovalKind,
+    ToolDetail, ToolOutcome, WorkspaceId,
 };
 
 /// Path of the shared code-mode fixtures, relative to this crate.
@@ -765,6 +765,7 @@ fn event_frames() -> Vec<Fixture> {
                 47,
                 CodeEvent::ApprovalRequested {
                     approval_id: approval_id(),
+                    request: None,
                 },
             ),
         ),
@@ -889,49 +890,41 @@ fn event_frames() -> Vec<Fixture> {
             },
         ),
         (
-            "event: tool_approval_required (internal engine)",
+            "event: approval_requested (internal engine consent card)",
             frame(
                 58,
-                CodeEvent::ToolApprovalRequired {
-                    auto_judging: false,
-                    call_id: "call_01".to_owned(),
-                    tool_name: "exec".to_owned(),
-                    class: ApprovalClass::Workspace,
-                    kind: ToolApprovalKind::ExecMayRunNetworkedCommand,
-                    grant_scopes: vec![GrantScope::AnyArgsFor {
-                        command: "cargo".to_owned(),
-                    }],
-                    preview: None,
+                CodeEvent::ApprovalRequested {
+                    approval_id: approval_id(),
+                    request: Some(InternalApprovalRequest::ToolUse {
+                        auto_judging: false,
+                        tool_name: "exec".to_owned(),
+                        class: ApprovalClass::Workspace,
+                        approval: ToolApprovalKind::ExecMayRunNetworkedCommand,
+                        grant_scopes: vec![GrantScope::AnyArgsFor {
+                            command: "cargo".to_owned(),
+                        }],
+                        preview: None,
+                    }),
                 },
             ),
         ),
         (
-            "event: tool_approval_decided (internal engine)",
+            "event: approval_requested (internal engine questions park)",
             frame(
                 59,
-                CodeEvent::ToolApprovalDecided {
-                    call_id: "call_01".to_owned(),
-                    approved: true,
+                CodeEvent::ApprovalRequested {
+                    approval_id: approval_id(),
+                    request: Some(InternalApprovalRequest::Questions { turn_id: turn_id() }),
                 },
             ),
         ),
         (
-            "event: questions_asked (internal engine)",
+            "event: approval_requested (internal engine plan park)",
             frame(
                 60,
-                CodeEvent::QuestionsAsked {
-                    call_id: "call_02".to_owned(),
-                    turn_id: turn_id(),
-                },
-            ),
-        ),
-        (
-            "event: plan_proposed (internal engine)",
-            frame(
-                61,
-                CodeEvent::PlanProposed {
-                    call_id: "call_03".to_owned(),
-                    turn_id: turn_id(),
+                CodeEvent::ApprovalRequested {
+                    approval_id: approval_id(),
+                    request: Some(InternalApprovalRequest::Plan { turn_id: turn_id() }),
                 },
             ),
         ),

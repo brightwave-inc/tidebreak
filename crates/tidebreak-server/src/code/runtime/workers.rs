@@ -302,6 +302,11 @@ impl CodeRuntime {
         Ok(attached)
     }
 
+    /// Whether a worker is attached to the session right now.
+    pub(crate) fn has_worker(&self, id: CodeSessionId) -> bool {
+        self.workers.lock().expect("code workers").contains_key(&id)
+    }
+
     pub(super) fn require_worker(&self, id: CodeSessionId) -> Result<WorkerHandle, ServerError> {
         self.workers
             .lock()

@@ -16,8 +16,9 @@
 //! nothing.
 
 use crate::code::{
-    BoundedError, CodeEvent, CodeTurnId, CodeUsage, ToolDetail, ToolOutcome, MAX_NOTICE_CHARS,
-    MAX_PREVIEW_CHARS, MAX_TOOL_SUMMARY_CHARS,
+    ApprovalDecisionKind, BoundedError, CodeApprovalId, CodeEvent, CodeTurnId, CodeUsage,
+    InternalApprovalRequest, ToolDetail, ToolOutcome, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS,
+    MAX_TOOL_SUMMARY_CHARS,
 };
 use crate::error::{AgentError, Result};
 use crate::event::AgentEvent;
@@ -54,9 +55,11 @@ pub fn journal_row(event: &AgentEvent) -> CodeEvent {
             call_id: call_id.to_string(),
             fragment: fragment.clone(),
         },
-        AgentEvent::UserQuestionsAsked { call_id, turn_id } => CodeEvent::QuestionsAsked {
-            call_id: call_id.to_string(),
-            turn_id: CodeTurnId(turn_id.0),
+        AgentEvent::UserQuestionsAsked { call_id, turn_id } => CodeEvent::ApprovalRequested {
+            approval_id: approval_id_of(*call_id),
+            request: Some(InternalApprovalRequest::Questions {
+                turn_id: CodeTurnId(turn_id.0),
+            }),
         },
         AgentEvent::ApprovalRequired {
             auto_judging,
@@ -66,18 +69,24 @@ pub fn journal_row(event: &AgentEvent) -> CodeEvent {
             kind,
             grant_scopes,
             preview,
-        } => CodeEvent::ToolApprovalRequired {
-            auto_judging: *auto_judging,
-            call_id: call_id.to_string(),
-            tool_name: tool_name.clone(),
-            class: *class,
-            kind: *kind,
-            grant_scopes: grant_scopes.clone(),
-            preview: preview.clone(),
+        } => CodeEvent::ApprovalRequested {
+            approval_id: approval_id_of(*call_id),
+            request: Some(InternalApprovalRequest::ToolUse {
+                auto_judging: *auto_judging,
+                tool_name: tool_name.clone(),
+                class: *class,
+                approval: *kind,
+                grant_scopes: grant_scopes.clone(),
+                preview: preview.clone(),
+            }),
         },
-        AgentEvent::ApprovalDecided { call_id, approved } => CodeEvent::ToolApprovalDecided {
-            call_id: call_id.to_string(),
-            approved: *approved,
+        AgentEvent::ApprovalDecided { call_id, approved } => CodeEvent::ApprovalResolved {
+            approval_id: approval_id_of(*call_id),
+            decision: if *approved {
+                ApprovalDecisionKind::Approve
+            } else {
+                ApprovalDecisionKind::Deny { feedback: None }
+            },
         },
         AgentEvent::ToolCallCompleted {
             call_id,
@@ -133,9 +142,11 @@ pub fn journal_row(event: &AgentEvent) -> CodeEvent {
         AgentEvent::CompactionFinished { compacted } => CodeEvent::CompactionFinished {
             compacted: *compacted,
         },
-        AgentEvent::PlanProposed { call_id, turn_id } => CodeEvent::PlanProposed {
-            call_id: call_id.to_string(),
-            turn_id: CodeTurnId(turn_id.0),
+        AgentEvent::PlanProposed { call_id, turn_id } => CodeEvent::ApprovalRequested {
+            approval_id: approval_id_of(*call_id),
+            request: Some(InternalApprovalRequest::Plan {
+                turn_id: CodeTurnId(turn_id.0),
+            }),
         },
         AgentEvent::TaskPlanUpdated { call_id, turn_id } => CodeEvent::TaskPlanUpdated {
             call_id: call_id.to_string(),
@@ -165,30 +176,51 @@ pub fn chat_event(event: CodeEvent) -> Result<Option<AgentEvent>> {
             call_id: call_id_of(&call_id)?,
             fragment,
         },
-        CodeEvent::QuestionsAsked { call_id, turn_id } => AgentEvent::UserQuestionsAsked {
-            call_id: call_id_of(&call_id)?,
-            turn_id: TurnId(turn_id.0),
+        CodeEvent::ApprovalRequested {
+            approval_id,
+            request: Some(request),
+        } => match request {
+            InternalApprovalRequest::ToolUse {
+                auto_judging,
+                tool_name,
+                class,
+                approval,
+                grant_scopes,
+                preview,
+            } => AgentEvent::ApprovalRequired {
+                auto_judging,
+                call_id: CallId(approval_id.0),
+                tool_name,
+                class,
+                kind: approval,
+                grant_scopes,
+                preview,
+            },
+            InternalApprovalRequest::Questions { turn_id } => AgentEvent::UserQuestionsAsked {
+                call_id: CallId(approval_id.0),
+                turn_id: TurnId(turn_id.0),
+            },
+            InternalApprovalRequest::Plan { turn_id } => AgentEvent::PlanProposed {
+                call_id: CallId(approval_id.0),
+                turn_id: TurnId(turn_id.0),
+            },
         },
-        CodeEvent::ToolApprovalRequired {
-            auto_judging,
-            call_id,
-            tool_name,
-            class,
-            kind,
-            grant_scopes,
-            preview,
-        } => AgentEvent::ApprovalRequired {
-            auto_judging,
-            call_id: call_id_of(&call_id)?,
-            tool_name,
-            class,
-            kind,
-            grant_scopes,
-            preview,
-        },
-        CodeEvent::ToolApprovalDecided { call_id, approved } => AgentEvent::ApprovalDecided {
-            call_id: call_id_of(&call_id)?,
-            approved,
+        // A consent card's decision. The structured resolutions — answers,
+        // a plan verdict — settle a parked continuation whose chat fact is
+        // the call's own completion row, journaled with the answer.
+        CodeEvent::ApprovalResolved {
+            approval_id,
+            decision:
+                decision @ (ApprovalDecisionKind::Approve
+                | ApprovalDecisionKind::ApprovedWithGrant { .. }
+                | ApprovalDecisionKind::Deny { .. }
+                | ApprovalDecisionKind::Abandoned),
+        } => AgentEvent::ApprovalDecided {
+            call_id: CallId(approval_id.0),
+            approved: matches!(
+                decision,
+                ApprovalDecisionKind::Approve | ApprovalDecisionKind::ApprovedWithGrant { .. }
+            ),
         },
         CodeEvent::ToolCompleted {
             call_id,
@@ -237,10 +269,6 @@ pub fn chat_event(event: CodeEvent) -> Result<Option<AgentEvent>> {
         },
         CodeEvent::CompactionStarted => AgentEvent::CompactionStarted,
         CodeEvent::CompactionFinished { compacted } => AgentEvent::CompactionFinished { compacted },
-        CodeEvent::PlanProposed { call_id, turn_id } => AgentEvent::PlanProposed {
-            call_id: call_id_of(&call_id)?,
-            turn_id: TurnId(turn_id.0),
-        },
         CodeEvent::TaskPlanUpdated { call_id, turn_id } => AgentEvent::TaskPlanUpdated {
             call_id: call_id_of(&call_id)?,
             turn_id: TurnId(turn_id.0),
@@ -252,8 +280,12 @@ pub fn chat_event(event: CodeEvent) -> Result<Option<AgentEvent>> {
         | CodeEvent::AssistantMessage { .. }
         | CodeEvent::ToolCompleted { output: None, .. }
         | CodeEvent::FileChanged { .. }
-        | CodeEvent::ApprovalRequested { .. }
-        | CodeEvent::ApprovalResolved { .. }
+        | CodeEvent::ApprovalRequested { request: None, .. }
+        | CodeEvent::ApprovalResolved {
+            decision:
+                ApprovalDecisionKind::Answered { .. } | ApprovalDecisionKind::PlanDecided { .. },
+            ..
+        }
         | CodeEvent::TurnCompleted {
             stop_reason: None, ..
         }
@@ -282,6 +314,13 @@ pub fn decode_chat_event(payload: serde_json::Value) -> Result<Option<AgentEvent
 pub fn decode_chat_event_required(payload: serde_json::Value) -> Result<AgentEvent> {
     decode_chat_event(payload)?
         .ok_or_else(|| AgentError::Store("journal receipt is not a chat event".into()))
+}
+
+/// The approval row an internal-engine card is parked on: the row's id is
+/// the call id, so the chat surface recovers one from the other.
+#[must_use]
+pub fn approval_id_of(call_id: CallId) -> CodeApprovalId {
+    CodeApprovalId(call_id.0)
 }
 
 fn call_id_of(raw: &str) -> Result<CallId> {
@@ -425,6 +464,53 @@ mod tests {
         ] {
             assert_eq!(chat_event(event).unwrap(), None);
         }
+    }
+
+    /// The internal engine's consent card and its parks are one approval
+    /// row each; the chat surface reads the card back from the row id and
+    /// the request the row journaled beside it. An external adapter's row
+    /// carries no request and replays as nothing.
+    #[test]
+    fn an_internal_approval_row_replays_as_the_chat_card() {
+        let call_id = CallId::new();
+        let turn_id = TurnId::new();
+        let asked = AgentEvent::UserQuestionsAsked { call_id, turn_id };
+        let row = journal_row(&asked);
+        assert_eq!(
+            row,
+            CodeEvent::ApprovalRequested {
+                approval_id: approval_id_of(call_id),
+                request: Some(InternalApprovalRequest::Questions {
+                    turn_id: CodeTurnId(turn_id.0),
+                }),
+            }
+        );
+        assert_eq!(chat_event(row).unwrap(), Some(asked));
+        let decided = AgentEvent::ApprovalDecided {
+            call_id,
+            approved: false,
+        };
+        assert_eq!(chat_event(journal_row(&decided)).unwrap(), Some(decided));
+        // A structured resolution is the park's own; the chat fact is the
+        // completion the answer journals.
+        assert_eq!(
+            chat_event(CodeEvent::ApprovalResolved {
+                approval_id: approval_id_of(call_id),
+                decision: ApprovalDecisionKind::Answered {
+                    answers: Vec::new()
+                },
+            })
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            chat_event(CodeEvent::ApprovalRequested {
+                approval_id: approval_id_of(call_id),
+                request: None,
+            })
+            .unwrap(),
+            None
+        );
     }
 
     #[test]

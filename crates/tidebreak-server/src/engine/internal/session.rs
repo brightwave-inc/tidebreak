@@ -4,9 +4,11 @@
 //! The lane journals its turn straight into the session's code journal
 //! (decision 0048 step 5), so the engine has nothing to translate. It follows
 //! that journal for the turn it admitted and hands the session worker the
-//! few facts the journal does not carry on its own: the approval rows a
-//! consent card or a parked continuation needs, and the terminal outcome
-//! that closes the worker's turn row.
+//! one fact the journal does not carry on its own: the terminal outcome that
+//! closes the worker's turn row. The lane mints its own approval rows — a
+//! consent card, a questions park, a plan park are each one `code_approval`
+//! row whose id is the call id — so the engine parks on the row it finds and
+//! decides through the same store operations the chat routes use.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -20,18 +22,18 @@ use tidebreak_core::db::DbStore;
 use tidebreak_core::storage::DecidePlanOutcome;
 use tidebreak_core::{
     chat_journal, AcceptTurnOutcome, AcceptTurnSteerOutcome, AnswerUserQuestions,
-    AnswerUserQuestionsOutcome, AnswerUserQuestionsRequest, ApprovalDecision as ChatDecision,
-    BeginTurnAdmissionOutcome, CallId, ChatId, CodeApprovalKind, CodeEvent, CodeSessionId,
-    DecidePlanRequest, GrantScope, OwnerId, PermissionMode, PlanDecision, PlanDecisionChoice,
-    ReservedTurnAcceptanceOutcome, SequencedCodeEvent, ToolActionPreview, TurnAdmissionRequest,
-    TurnId, TurnSteerId, DEFAULT_ACCEPTED_PLAN_MODE, MAX_TOOL_SUMMARY_CHARS,
+    AnswerUserQuestionsOutcome, AnswerUserQuestionsRequest, ApprovalDecisionKind, Attention,
+    AttentionSource, BeginTurnAdmissionOutcome, CallId, ChatId, CodeApprovalKind, CodeEvent,
+    CodeSessionId, DecidePlanRequest, GrantLevel, GrantScope, InternalApprovalRequest, OwnerId,
+    PermissionMode, PlanDecision, PlanDecisionChoice, ReservedTurnAcceptanceOutcome,
+    SequencedCodeEvent, SequencedEvent, StandingGrant, ToolApprovalStatus, TurnAdmissionRequest,
+    TurnId, TurnSteerId, DEFAULT_ACCEPTED_PLAN_MODE,
 };
 use tidebreak_harness::{
     ApprovalDecision, HarnessApprovalRef, HarnessError, HarnessEvent, HarnessEventSink,
     HarnessSession, ParkWait, ResumeInput, SessionSpec, TurnInput, TurnOutcome,
 };
 
-use crate::approvals::ResolveApprovalOutcome;
 use crate::code::bus::{CodeEventBus, CodeLiveEvent};
 use crate::state::AppState;
 
@@ -53,15 +55,6 @@ struct ActiveTurn {
     started: bool,
 }
 
-/// A parked continuation the engine answers with a store read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Lookup {
-    /// `ask_user_questions` parked the turn; the questions live in the store.
-    Questions { call_id: CallId },
-    /// `exit_plan_mode` parked the turn; the plan body lives in the store.
-    Plan { call_id: CallId },
-}
-
 pub(super) struct InternalSession {
     state: AppState,
     db: Arc<DbStore>,
@@ -71,9 +64,9 @@ pub(super) struct InternalSession {
     chat_id: ChatId,
     sink: Arc<dyn HarnessEventSink>,
     active: Mutex<Option<ActiveTurn>>,
-    /// Tool approvals decided through [`HarnessSession::decide`], so the
-    /// matching decision row on the journal is not re-reported as an
-    /// engine-observed decision.
+    /// Tool approvals acknowledged through [`HarnessSession::decide`]. The
+    /// session decision route settles those rows and journals the decision
+    /// on the code bus; the chat's live channel hears it from here.
     decided: Mutex<HashSet<CallId>>,
 }
 
@@ -355,44 +348,60 @@ impl InternalSession {
             }
         }
         let closed = match event {
-            CodeEvent::ToolApprovalRequired {
-                call_id,
-                tool_name,
-                grant_scopes,
-                preview,
+            // The lane minted the row and journaled the request; the engine
+            // only marks the session as waiting on the reader.
+            CodeEvent::ApprovalRequested {
+                request: Some(InternalApprovalRequest::ToolUse { .. }),
                 ..
             } => {
-                self.emit(approval_requested(
-                    &Self::parse_call_id(&call_id)?,
-                    serde_json::Value::Null,
-                    tool_use_kind(&tool_name, preview, grant_scopes),
-                ))
-                .await;
+                self.note_waiting("an approval is waiting").await;
                 false
             }
-            CodeEvent::ToolApprovalDecided { call_id, approved } => {
-                let call_id = Self::parse_call_id(&call_id)?;
+            // A park: the row the lane minted is the one the worker waits
+            // on, keyed by the call id the row's id is.
+            CodeEvent::ApprovalRequested {
+                approval_id,
+                request:
+                    Some(
+                        InternalApprovalRequest::Questions { .. }
+                        | InternalApprovalRequest::Plan { .. },
+                    ),
+            } => {
+                self.note_waiting("the agent is waiting on you").await;
+                let call_id = CallId(approval_id.0).to_string();
+                return Ok(Some(TurnOutcome::Parked {
+                    park_ref: call_id.clone(),
+                    waiting_on: ParkWait::Approval { call_id },
+                }));
+            }
+            CodeEvent::ApprovalRequested { request: None, .. } => false,
+            CodeEvent::ApprovalResolved {
+                approval_id,
+                decision,
+            } => {
+                let call_id = CallId(approval_id.0);
+                // A decision the session route delivered was settled and
+                // journaled by the runtime on the code bus; the chat's live
+                // channel hears it from here. Every other settlement was
+                // published by the chat-side path that made it.
                 let delivered = self.decided.lock().expect("decided").remove(&call_id);
-                if !delivered {
-                    // Decided on the engine's own channel — a standing grant
-                    // or the auto-approval judge — so the row the worker
-                    // minted settles from this report.
-                    self.emit(approval_resolved(&call_id, observed_decision(approved)))
-                        .await;
+                if delivered {
+                    if let ApprovalDecisionKind::ApprovedWithGrant { scope } = &decision {
+                        self.record_settled_grant(call_id, scope.clone()).await;
+                    }
+                    if let Ok(Some(event)) = chat_journal::chat_event(CodeEvent::ApprovalResolved {
+                        approval_id,
+                        decision,
+                    }) {
+                        let _ = self
+                            .state
+                            .events
+                            .sender(self.chat_id)
+                            .send_unmirrored(SequencedEvent { seq, event });
+                    }
                 }
+                self.note_activity().await;
                 false
-            }
-            CodeEvent::QuestionsAsked { call_id, .. } => {
-                let lookup = Lookup::Questions {
-                    call_id: Self::parse_call_id(&call_id)?,
-                };
-                return Ok(Some(self.park(lookup).await?));
-            }
-            CodeEvent::PlanProposed { call_id, .. } => {
-                let lookup = Lookup::Plan {
-                    call_id: Self::parse_call_id(&call_id)?,
-                };
-                return Ok(Some(self.park(lookup).await?));
             }
             // The terminal rows are already journaled; the worker still
             // needs to hear them to close its turn row with the usage.
@@ -417,71 +426,83 @@ impl InternalSession {
         Ok(None)
     }
 
-    /// Publish the parked continuation as an approval and end the leg.
-    async fn park(&self, lookup: Lookup) -> Result<TurnOutcome, HarnessError> {
-        let (call_id, raw, kind) = match lookup {
-            Lookup::Questions { call_id } => {
-                let pending = self
-                    .state
-                    .store
-                    .list_pending_user_questions(self.chat_id)
-                    .await
-                    .map_err(store_error)?
-                    .into_iter()
-                    .find(|pending| pending.call_id == call_id)
-                    .ok_or_else(|| {
-                        HarnessError::Other(format!("questions {call_id} are not pending"))
-                    })?;
-                (
-                    call_id,
-                    serde_json::Value::Null,
-                    CodeApprovalKind::Questions {
-                        questions: pending.questions,
-                    },
-                )
-            }
-            Lookup::Plan { call_id } => {
-                let pending = self
-                    .state
-                    .store
-                    .list_pending_plan_approvals(self.chat_id)
-                    .await
-                    .map_err(store_error)?
-                    .into_iter()
-                    .find(|pending| pending.call_id == call_id)
-                    .ok_or_else(|| HarnessError::Other(format!("plan {call_id} is not pending")))?;
-                // The plan body rides the raw payload: the approvals route
-                // serves it, and the kind stays small enough for the
-                // journal.
-                (
-                    call_id,
-                    serde_json::json!({
-                        "title": pending.title,
-                        "plan": pending.plan,
-                    }),
-                    CodeApprovalKind::Plan {
-                        proposed_mode: DEFAULT_ACCEPTED_PLAN_MODE,
-                    },
-                )
-            }
+    /// Mirror a grant the settlement wrote into the broker's in-memory
+    /// cache, after the fact: the cache follows the store, never leads it.
+    async fn record_settled_grant(&self, call_id: CallId, scope: GrantScope) {
+        let Ok(Some(approval)) = self.state.store.get_tool_call_approval(call_id).await else {
+            return;
         };
-        self.emit(approval_requested(&call_id, raw, kind)).await;
-        Ok(TurnOutcome::Parked {
-            park_ref: call_id.to_string(),
-            waiting_on: ParkWait::Approval {
-                call_id: call_id.to_string(),
-            },
-        })
+        let project_id = self
+            .state
+            .store
+            .get_chat(self.chat_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|chat| chat.project_id);
+        if let Some(grant) = StandingGrant::scoped(
+            GrantLevel::for_chat(self.chat_id, project_id),
+            approval.tool_name,
+            approval.kind,
+            scope,
+            Utc::now(),
+        ) {
+            self.state.approvals.standing_grants().record(grant);
+        }
+    }
+
+    /// Mark the session as waiting on the reader, the way the worker does
+    /// for an approval an external engine raised.
+    async fn note_waiting(&self, prompt: &str) {
+        let _ = crate::code::attention::note_activity(
+            &self.db,
+            &self.bus,
+            &self.owner,
+            self.session_id,
+        )
+        .await;
+        let _ = crate::code::attention::apply_attention(
+            &self.db,
+            &self.bus,
+            &self.owner,
+            self.session_id,
+            Attention::needs_you(prompt, AttentionSource::Structured),
+            false,
+        )
+        .await;
+    }
+
+    async fn note_activity(&self) {
+        let _ = crate::code::attention::note_activity(
+            &self.db,
+            &self.bus,
+            &self.owner,
+            self.session_id,
+        )
+        .await;
     }
 
     /// Settle a parked continuation durably. Idempotent: the decision may
     /// already have landed through [`HarnessSession::decide`] on the leg
-    /// that parked.
+    /// that parked, or through the chat route, whose settlement the worker
+    /// resumed this leg from; a row that is no longer pending is done.
     async fn settle_park(
         &self,
         call_id: CallId,
         decision: &ApprovalDecision,
     ) -> Result<(), HarnessError> {
+        let settled = tidebreak_core::db::code::get_approval(
+            &self.db,
+            &self.owner,
+            chat_journal::approval_id_of(call_id),
+        )
+        .await
+        .map_err(store_error)?
+        .is_some_and(|approval| !approval.state.is_pending());
+        if settled {
+            self.state.turn_job_wake.notify_one();
+            return Ok(());
+        }
         match decision {
             ApprovalDecision::Answers { answers } => {
                 let request = AnswerUserQuestionsRequest {
@@ -500,13 +521,13 @@ impl InternalSession {
                     .map_err(store_error)?
                 {
                     AnswerUserQuestionsOutcome::Answered {
-                        completion_event, ..
+                        completion_event,
+                        resolution,
+                        ..
                     } => {
-                        let _ = self
-                            .state
-                            .events
-                            .sender(self.chat_id)
-                            .send(*completion_event);
+                        let sender = self.state.events.sender(self.chat_id);
+                        let _ = sender.send_row(*resolution);
+                        let _ = sender.send(*completion_event);
                         self.state.turn_job_wake.notify_one();
                         Ok(())
                     }
@@ -549,13 +570,13 @@ impl InternalSession {
                     .map_err(store_error)?
                 {
                     DecidePlanOutcome::Decided {
-                        completion_event, ..
+                        completion_event,
+                        resolution,
+                        ..
                     } => {
-                        let _ = self
-                            .state
-                            .events
-                            .sender(self.chat_id)
-                            .send(*completion_event);
+                        let sender = self.state.events.sender(self.chat_id);
+                        let _ = sender.send_row(*resolution);
+                        let _ = sender.send(*completion_event);
                         self.state.turn_job_wake.notify_one();
                         Ok(())
                     }
@@ -579,56 +600,78 @@ impl InternalSession {
         }
     }
 
-    /// Decide a tool approval on the chat lane's approval broker.
+    /// Acknowledge a tool decision the session decision route delivers.
+    ///
+    /// The route claimed the row and settles it once this returns, through
+    /// the same operation every surface settles with; the settlement is
+    /// what writes the standing grant an approve-with-grant names, in its
+    /// own transaction. The engine's part is to check the card is this
+    /// conversation's, still open, and offers the rung — the internal engine
+    /// declares `standing_grants`, and this is where it honors them. The
+    /// agent loop then reads the settled row and continues.
     async fn decide_tool_call(
         &self,
         call_id: CallId,
         decision: &ApprovalDecision,
     ) -> Result<(), HarnessError> {
-        let Some(chat_decision) = chat_decision(decision) else {
-            return Err(HarnessError::DecisionUnsupported(
-                "a tool approval takes approve, deny, or approve with a grant".into(),
-            ));
-        };
-        self.decided.lock().expect("decided").insert(call_id);
-        let outcome = match decision {
-            ApprovalDecision::ApproveWithGrant { scope } => {
-                self.state
-                    .approvals
-                    .resolve_with_scope(self.chat_id, call_id, scope.clone())
-                    .await
-            }
-            _ => {
-                self.state
-                    .approvals
-                    .resolve(self.chat_id, call_id, chat_decision)
-                    .await
-            }
-        }
-        .map_err(store_error)?;
-        match outcome {
-            ResolveApprovalOutcome::Resolved => Ok(()),
-            ResolveApprovalOutcome::NotPending
-            | ResolveApprovalOutcome::WrongChat
-            | ResolveApprovalOutcome::DecisionConflict => {
-                self.decided.lock().expect("decided").remove(&call_id);
-                Err(HarnessError::ApprovalWaiterMissing(format!(
+        let current = self
+            .state
+            .store
+            .get_tool_call_approval(call_id)
+            .await
+            .map_err(store_error)?
+            .filter(|approval| approval.chat_id == self.chat_id)
+            .ok_or_else(|| {
+                HarnessError::ApprovalWaiterMissing(format!(
                     "tool call {call_id} is not waiting on a decision"
-                )))
-            }
-            ResolveApprovalOutcome::NotApprovable => {
-                self.decided.lock().expect("decided").remove(&call_id);
-                Err(HarnessError::DecisionUnsupported(format!(
-                    "tool call {call_id} cannot be approved"
-                )))
-            }
-            ResolveApprovalOutcome::GrantNotAvailable => {
-                self.decided.lock().expect("decided").remove(&call_id);
-                Err(HarnessError::DecisionUnsupported(
-                    "that grant scope is not available for this call".into(),
                 ))
+            })?;
+        if current.status != ToolApprovalStatus::Pending {
+            return Err(HarnessError::ApprovalWaiterMissing(format!(
+                "tool call {call_id} is not waiting on a decision"
+            )));
+        }
+        match decision {
+            ApprovalDecision::Approve => {
+                if !current.kind.is_approvable() {
+                    return Err(HarnessError::DecisionUnsupported(format!(
+                        "tool call {call_id} cannot be approved"
+                    )));
+                }
+            }
+            ApprovalDecision::Deny { .. } => {}
+            ApprovalDecision::ApproveWithGrant { scope } => {
+                if !current.kind.is_approvable() {
+                    return Err(HarnessError::DecisionUnsupported(format!(
+                        "tool call {call_id} cannot be approved"
+                    )));
+                }
+                let offered = tidebreak_core::db::code::get_approval(
+                    &self.db,
+                    &self.owner,
+                    chat_journal::approval_id_of(call_id),
+                )
+                .await
+                .map_err(store_error)?
+                .map(|approval| match approval.kind {
+                    CodeApprovalKind::ToolUse { offered_grants, .. } => offered_grants,
+                    _ => Vec::new(),
+                })
+                .unwrap_or_default();
+                if !offered.contains(scope) {
+                    return Err(HarnessError::DecisionUnsupported(
+                        "that grant scope is not available for this call".into(),
+                    ));
+                }
+            }
+            ApprovalDecision::Answers { .. } | ApprovalDecision::PlanDecision { .. } => {
+                return Err(HarnessError::DecisionUnsupported(
+                    "a tool approval takes approve, deny, or approve with a grant".into(),
+                ));
             }
         }
+        self.decided.lock().expect("decided").insert(call_id);
+        Ok(())
     }
 
     fn parse_call_id(raw: &str) -> Result<CallId, HarnessError> {
@@ -831,113 +874,5 @@ impl HarnessSession for InternalSession {
 
     async fn shutdown(self: Box<Self>) -> Result<(), HarnessError> {
         Ok(())
-    }
-}
-
-/// A tool approval as the adapter states it: the exact server-built preview
-/// and the grant ladder the engine offers, or a plain summary when the call
-/// could not be described (no ladder is offered without a description).
-fn tool_use_kind(
-    tool_name: &str,
-    preview: Option<ToolActionPreview>,
-    grant_scopes: Vec<GrantScope>,
-) -> CodeApprovalKind {
-    match preview {
-        // The model's own narration never reaches a consent card (decision
-        // 0018): the card renders the literal action, and a call that could
-        // describe itself to a decision could describe itself favourably.
-        Some(preview) => CodeApprovalKind::ToolUse {
-            preview: preview.without_summary(),
-            offered_grants: grant_scopes,
-        },
-        None => CodeApprovalKind::Other {
-            summary: chat_journal::bounded(tool_name, MAX_TOOL_SUMMARY_CHARS),
-        },
-    }
-}
-
-/// The decision the engine observed on its own channel, in adapter terms.
-fn observed_decision(approved: bool) -> ApprovalDecision {
-    if approved {
-        ApprovalDecision::Approve
-    } else {
-        ApprovalDecision::Deny { feedback: None }
-    }
-}
-
-/// The chat-side decision for an adapter decision on a tool approval.
-///
-/// Answers and plan decisions never reach here: they settle a parked
-/// continuation through its own store operation.
-fn chat_decision(decision: &ApprovalDecision) -> Option<ChatDecision> {
-    match decision {
-        ApprovalDecision::Approve | ApprovalDecision::ApproveWithGrant { .. } => {
-            Some(ChatDecision::Approve)
-        }
-        ApprovalDecision::Deny { feedback } => Some(ChatDecision::Reject {
-            reason: feedback
-                .as_deref()
-                .filter(|feedback| !feedback.trim().is_empty())
-                .map_or_else(
-                    || tidebreak_core::ToolApproval::DEFAULT_REJECT_REASON.to_owned(),
-                    |feedback| {
-                        chat_journal::bounded(
-                            feedback,
-                            tidebreak_core::ToolApproval::MAX_REASON_BYTES,
-                        )
-                    },
-                ),
-        }),
-        ApprovalDecision::Answers { .. } | ApprovalDecision::PlanDecision { .. } => None,
-    }
-}
-
-fn approval_requested(
-    call_id: &CallId,
-    raw: serde_json::Value,
-    kind: CodeApprovalKind,
-) -> HarnessEvent {
-    HarnessEvent::ApprovalRequested {
-        harness_ref: HarnessApprovalRef::engine(call_id.to_string()),
-        raw,
-        kind: Some(kind),
-    }
-}
-
-fn approval_resolved(call_id: &CallId, decision: ApprovalDecision) -> HarnessEvent {
-    HarnessEvent::ApprovalResolved {
-        harness_ref: HarnessApprovalRef::engine(call_id.to_string()),
-        decision,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn an_undescribed_call_offers_no_grant_ladder() {
-        let kind = tool_use_kind("mystery", None, vec![GrantScope::WholeTool]);
-        assert_eq!(
-            kind,
-            CodeApprovalKind::Other {
-                summary: "mystery".into()
-            }
-        );
-    }
-
-    #[test]
-    fn a_deny_without_feedback_carries_the_default_reason() {
-        let ChatDecision::Reject { reason } =
-            chat_decision(&ApprovalDecision::Deny { feedback: None }).unwrap()
-        else {
-            panic!("deny maps to reject");
-        };
-        assert_eq!(reason, tidebreak_core::ToolApproval::DEFAULT_REJECT_REASON);
-        assert!(chat_decision(&ApprovalDecision::PlanDecision {
-            approve: true,
-            feedback: None
-        })
-        .is_none());
     }
 }

@@ -5,7 +5,8 @@ use chrono::Utc;
 use serde::Serialize;
 use tidebreak_core::storage::DecidePlanOutcome;
 use tidebreak_core::{
-    CallId, ChatId, DecidePlanRequest, PendingPlanApproval, PlanDecision, TurnRunStatus,
+    CallId, ChatId, CodeApprovalId, CodeSessionId, DecidePlanRequest, PendingPlanApproval,
+    PlanDecision, PlanDecisionChoice, TurnRunStatus, DEFAULT_ACCEPTED_PLAN_MODE,
 };
 
 use crate::error::ServerError;
@@ -43,6 +44,38 @@ pub async fn decide_plan(
     Json(decision): Json<PlanDecision>,
 ) -> Result<Json<DecidedPlan>, ServerError> {
     store.require_chat(chat_id).await?;
+    // A session a worker drives takes its decisions through the session
+    // decision route, so the worker hears the decision and resumes the park
+    // (decision 0048: the chat routes are aliases). The engine contract
+    // carries the mode the approval proposed; a decision naming another
+    // mode settles the row directly, which the worker resumes from as well.
+    if let Some(code) = state.code.as_ref() {
+        let proposed_mode = decision
+            .permission_mode
+            .is_none_or(|mode| mode == DEFAULT_ACCEPTED_PLAN_MODE);
+        if proposed_mode && code.has_worker(CodeSessionId(chat_id.0)) {
+            match code
+                .decide_approval(
+                    &store.owner_id(),
+                    CodeApprovalId(call_id.0),
+                    crate::code::runtime::ApprovalDecisionRequest::PlanDecision {
+                        approve: matches!(decision.decision, PlanDecisionChoice::Accept),
+                        feedback: decision.feedback.clone(),
+                    },
+                )
+                .await
+            {
+                Ok(_) => {
+                    state.turn_job_wake.notify_one();
+                    return Ok(Json(DecidedPlan {
+                        disposition: PlanDecisionDisposition::Decided,
+                    }));
+                }
+                Err(error) if super::user_questions::worker_cannot_take(&error) => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
     let outcome = store
         .decide_plan(
             &DecidePlanRequest {
@@ -57,10 +90,14 @@ pub async fn decide_plan(
         DecidePlanOutcome::Decided {
             turn,
             completion_event,
+            resolution,
         } => {
-            // Live delivery of the journaled completion; replay covers anyone
-            // not connected, so a missed send is not a correctness gap.
-            let _ = state.events.sender(chat_id).send(*completion_event);
+            // Live delivery of the journaled decision and completion; replay
+            // covers anyone not connected, so a missed send is not a
+            // correctness gap.
+            let sender = state.events.sender(chat_id);
+            let _ = sender.send_row(*resolution);
+            let _ = sender.send(*completion_event);
             (PlanDecisionDisposition::Decided, turn)
         }
         DecidePlanOutcome::Existing(turn) => (PlanDecisionDisposition::Existing, turn),

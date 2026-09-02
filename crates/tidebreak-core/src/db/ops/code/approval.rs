@@ -99,6 +99,7 @@ pub async fn insert_approval_for_worker(
         .map_err(store_err)?;
     let event = CodeEvent::ApprovalRequested {
         approval_id: approval.id,
+        request: None,
     };
     let seq = append_event_on_locked(&transaction, owner, approval.session_id, &event).await?;
     transaction.commit().await.map_err(store_err)?;
@@ -126,7 +127,65 @@ fn approval_active_model(
         feedback: Set(approval.feedback.clone()),
         requested_at: Set(approval.requested_at),
         decided_at: Set(approval.decided_at),
+        auto_judge_status: Set(approval
+            .auto_judge_status
+            .map(|status| status.as_str().to_owned())),
     })
+}
+
+/// Insert an approval row inside the caller's transaction, which already
+/// holds the session lock. The internal engine's turn lane mints its consent
+/// cards and parks this way, beside the journal row that announces them.
+pub(in crate::db) async fn insert_approval_on<C>(
+    conn: &C,
+    owner: &OwnerId,
+    approval: &CodeApproval,
+) -> Result<()>
+where
+    C: ConnectionTrait,
+{
+    approval_active_model(owner, approval)?
+        .insert(conn)
+        .await
+        .map_err(store_err)?;
+    Ok(())
+}
+
+/// Load one approval row inside the caller's transaction, whatever its owner.
+pub(in crate::db) async fn find_approval_row_on<C>(
+    conn: &C,
+    id: CodeApprovalId,
+) -> Result<Option<entities::code_approval::Model>>
+where
+    C: ConnectionTrait,
+{
+    entities::code_approval::Entity::find_by_id(id.0)
+        .one(conn)
+        .await
+        .map_err(store_err)
+}
+
+/// Set the internal engine's judge marker on one row, inside the caller's
+/// transaction. The marker is the judge's ownership of a pending card; it
+/// never decides the row by itself.
+pub(in crate::db) async fn set_auto_judge_status_on<C>(
+    conn: &C,
+    id: CodeApprovalId,
+    status: Option<crate::approval::AutoJudgeStatus>,
+) -> Result<()>
+where
+    C: ConnectionTrait,
+{
+    entities::code_approval::Entity::update_many()
+        .col_expr(
+            entities::code_approval::Column::AutoJudgeStatus,
+            sea_orm::sea_query::Expr::value(status.map(|status| status.as_str().to_owned())),
+        )
+        .filter(entities::code_approval::Column::Id.eq(id.0))
+        .exec(conn)
+        .await
+        .map_err(store_err)?;
+    Ok(())
 }
 
 /// Load one of the owner's approvals by id.
@@ -290,9 +349,12 @@ pub async fn abandon_pending_approval(
     .await
 }
 
+/// Which claim a settlement must find on the row.
 #[derive(Clone, Copy)]
-enum ApprovalClaim {
+pub(in crate::db) enum ApprovalClaim {
+    /// No decision route holds the row.
     Unclaimed,
+    /// The exact claim a decision route reserved before native delivery.
     Exact(uuid::Uuid),
 }
 
@@ -339,8 +401,15 @@ async fn settle_approval(
     Ok(settlement)
 }
 
+/// Settle one pending approval row and append its `ApprovalResolved` in the
+/// caller's transaction, which holds the session lock.
+///
+/// The one settlement path for every engine (decision 0048 step 5): the code
+/// decision route, the chat routes, the internal engine's judge, and the turn
+/// lane's cancellation and terminal sweeps all land here, so a card is one
+/// row with one resolution row whichever surface decided it.
 #[allow(clippy::too_many_arguments)]
-async fn settle_approval_on_locked<C>(
+pub(in crate::db) async fn settle_approval_on_locked<C>(
     conn: &C,
     owner: &OwnerId,
     id: CodeApprovalId,
@@ -416,6 +485,12 @@ where
         .await
         .map_err(store_err)?
         .ok_or_else(|| AgentError::Store(format!("settled approval {id} disappeared")))?;
+    // A standing grant exists only from the transaction that approves the
+    // card it was chosen on: minted here, beside the row's terminal state
+    // and its resolution row, never ahead of them.
+    if let ApprovalDecisionKind::ApprovedWithGrant { scope } = &decision {
+        mint_standing_grant_on(conn, &row, scope, decided_at).await?;
+    }
     let event = CodeEvent::ApprovalResolved {
         approval_id: id,
         decision,
@@ -426,6 +501,79 @@ where
         approval,
         event: SequencedCodeEvent { seq, event },
     }))
+}
+
+/// Write the standing grant an approved-with-grant settlement names, in
+/// the settling transaction.
+///
+/// Only a card the internal engine minted carries the request the grant is
+/// keyed on (tool name and consent kind); the level follows where the
+/// conversation lives — its project when it has one, else itself. The scope
+/// must be one the kind can be granted at and must cover the parked call's
+/// own arguments, on the same terms the chat route's approve-and-remember
+/// checks. A grant already written for this call (a retry) is left as is.
+async fn mint_standing_grant_on<C>(
+    conn: &C,
+    row: &entities::code_approval::Model,
+    scope: &crate::GrantScope,
+    granted_at: chrono::DateTime<chrono::Utc>,
+) -> Result<()>
+where
+    C: ConnectionTrait,
+{
+    let request = crate::approval::InternalToolApprovalRequest::from_raw(&row.harness_raw)
+        .ok_or_else(|| {
+            AgentError::Store(format!(
+                "approval {} offers no standing grant: it is not a consent card",
+                row.id
+            ))
+        })?;
+    if entities::standing_tool_grant::Entity::find_by_id(row.id)
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let call = entities::tool_call::Entity::find_by_id(row.id)
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .ok_or_else(|| {
+            AgentError::Store(format!(
+                "approval {} is parked on a call that does not exist",
+                row.id
+            ))
+        })?;
+    if call.name != request.tool_name
+        || !request.kind.is_approvable()
+        || !request.kind.grantable_at(scope)
+        || !scope.covers_call(&call.name, &call.arguments)
+    {
+        return Err(AgentError::Store(format!(
+            "approval {} cannot be granted at that scope",
+            row.id
+        )));
+    }
+    let project_id = entities::code_session::Entity::find_by_id(row.session_id)
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .and_then(|session| session.project_id);
+    entities::standing_tool_grant::ActiveModel {
+        source_call_id: Set(row.id),
+        chat_id: Set(project_id.is_none().then_some(row.session_id)),
+        project_id: Set(project_id),
+        tool_name: Set(call.name),
+        approval_kind: Set(request.kind.standing_grant_key().to_owned()),
+        scope: Set(serde_json::to_value(scope)?),
+        granted_at: Set(granted_at),
+    }
+    .insert(conn)
+    .await
+    .map_err(store_err)?;
+    Ok(())
 }
 
 /// Abandon every pending approval after its exact worker has stopped.
@@ -511,7 +659,9 @@ pub async fn list_approvals(
     rows.into_iter().map(approval_from_row).collect()
 }
 
-pub(super) fn approval_from_row(row: entities::code_approval::Model) -> Result<CodeApproval> {
+pub(in crate::db) fn approval_from_row(
+    row: entities::code_approval::Model,
+) -> Result<CodeApproval> {
     let state = CodeApprovalState::from_str(&row.state).ok_or_else(|| {
         AgentError::Store(format!(
             "code_approval {} has unknown state {}",
@@ -536,5 +686,16 @@ pub(super) fn approval_from_row(row: entities::code_approval::Model) -> Result<C
         feedback: row.feedback,
         requested_at: row.requested_at,
         decided_at: row.decided_at,
+        auto_judge_status: match row.auto_judge_status.as_deref() {
+            None => None,
+            Some(token) => Some(
+                crate::approval::AutoJudgeStatus::from_str(token).ok_or_else(|| {
+                    AgentError::Store(format!(
+                        "code_approval {} has unknown auto-judge status {token}",
+                        row.id
+                    ))
+                })?,
+            ),
+        },
     })
 }

@@ -68,15 +68,6 @@ pub(in crate::db) async fn accept_tool_call(
         provider_replay: Set(serialize_provider_replay(call.provider_replay.as_ref())?),
         error_code: Set(None),
         error_detail: Set(None),
-        approval_status: Set(None),
-        approval_class: Set(None),
-        approval_kind: Set(None),
-        approval_reason: Set(None),
-        approval_requested_at: Set(None),
-        approval_decided_at: Set(None),
-        approval_event_seq: Set(None),
-        approval_grant_source_call_id: Set(None),
-        auto_judge_status: Set(None),
         client_executor_id: Set(None),
         client_lease_token: Set(None),
         client_lease_expires_at: Set(None),
@@ -153,15 +144,6 @@ pub(in crate::db) async fn accept_claimed_tool_call(
         provider_replay: Set(serialize_provider_replay(call.provider_replay.as_ref())?),
         error_code: Set(None),
         error_detail: Set(None),
-        approval_status: Set(None),
-        approval_class: Set(None),
-        approval_kind: Set(None),
-        approval_reason: Set(None),
-        approval_requested_at: Set(None),
-        approval_decided_at: Set(None),
-        approval_event_seq: Set(None),
-        approval_grant_source_call_id: Set(None),
-        auto_judge_status: Set(None),
         client_executor_id: Set(None),
         client_lease_token: Set(None),
         client_lease_expires_at: Set(None),
@@ -648,8 +630,7 @@ async fn resolve_tool_call(
 
     let (error_code, error_detail) = resolution_error(resolution);
     let resolved_name = existing.name.clone();
-    let approval_status = existing.approval_status.clone();
-    let approval_requested_at = existing.approval_requested_at;
+    let resolved_call_id = CallId(existing.id);
     let mut active: entities::tool_call::ActiveModel = existing.into();
     active.status = Set(resolution.status().as_str().into());
     active.result = Set(Some(resolution.result().to_owned()));
@@ -711,14 +692,11 @@ async fn resolve_tool_call(
     active.client_lease_expires_at = Set(None);
     active.resolution_turn_lease_token = Set(authority.turn_lease_token());
     active.resolved_at = Set(Some(resolved_at));
-    if approval_status.as_deref() == Some(crate::ToolApprovalStatus::Pending.as_str()) {
-        let requested_at = approval_requested_at
-            .ok_or_else(|| AgentError::Store("pending approval is missing requested_at".into()))?;
-        active.approval_status = Set(Some(crate::ToolApprovalStatus::Rejected.as_str().into()));
-        active.approval_reason = Set(Some("tool ended before approval".into()));
-        active.approval_decided_at = Set(Some(resolved_at.max(requested_at)));
-    }
     let resolved = active.update(&transaction).await.map_err(store_err)?;
+    // A call that ends while its consent card is still open leaves nothing
+    // for a decision to reach; the card settles as abandoned with the call.
+    super::approval::abandon_pending_for_call_on(&transaction, resolved_call_id, resolved_at)
+        .await?;
     // A client call is executed and resolved outside the agent loop, so nothing
     // else ever announces that it finished: the loop reads the result straight
     // into the model transcript on resume and never revisits the call, and the

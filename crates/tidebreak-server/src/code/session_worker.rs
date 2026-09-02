@@ -43,7 +43,7 @@ use tidebreak_harness::{
     HarnessSession, TurnImage, TurnInput, TurnOutcome,
 };
 
-use super::bus::CodeEventBus;
+use super::bus::{CodeEventBus, CodeLiveEvent};
 
 pub(crate) enum WorkerCommand {
     RunTurn {
@@ -554,6 +554,7 @@ impl LiveSink {
             feedback: None,
             requested_at: Utc::now(),
             decided_at: None,
+            auto_judge_status: None,
         };
         let Some(event) = insert_approval_for_worker(&self.db, &self.owner, &approval)
             .await
@@ -1372,8 +1373,88 @@ async fn apply_accepted_plan_mode(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// How a park's wait was resolved.
+struct ParkResolution {
+    input: tidebreak_harness::ResumeInput,
+    /// The decision reached the engine through this worker's `Decide`, so
+    /// the worker still owes the engine the decision's side effects (an
+    /// accepted plan's posture). A row settled by another surface — the
+    /// chat routes, a sweep — already carried them out.
+    delivered_here: bool,
+}
+
+/// The engine-channel decision a settled row's resolution carries.
+fn resume_decision(decision: tidebreak_core::ApprovalDecisionKind) -> ApprovalDecision {
+    use tidebreak_core::ApprovalDecisionKind as Kind;
+    match decision {
+        Kind::Approve => ApprovalDecision::Approve,
+        Kind::Deny { feedback } => ApprovalDecision::Deny { feedback },
+        Kind::Abandoned => ApprovalDecision::Deny { feedback: None },
+        Kind::ApprovedWithGrant { scope } => ApprovalDecision::ApproveWithGrant { scope },
+        Kind::Answered { answers } => ApprovalDecision::Answers { answers },
+        Kind::PlanDecided { approve, feedback } => {
+            ApprovalDecision::PlanDecision { approve, feedback }
+        }
+    }
+}
+
+/// The resume a row settled by another surface hands the park, when the
+/// row parked on `call_id` is no longer pending.
+///
+/// An engine with durable parks keeps the park on the row, and any surface
+/// may settle it — the chat routes answer a questions card or decide a plan
+/// on the same row the session route would. The decision itself is read
+/// from the row's resolution in the journal; a row settled without one
+/// (recovery, an older build) resumes from its state alone.
+async fn resume_from_settled_row(
+    db: &DbStore,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+    call_id: &str,
+) -> Option<tidebreak_harness::ResumeInput> {
+    let approval = list_approvals(db, owner, None, Some(session_id))
+        .await
+        .ok()?
+        .into_iter()
+        .find(|approval| approval.native_call_id.as_deref() == Some(call_id))?;
+    if approval.state.is_pending() {
+        return None;
+    }
+    let journaled = tidebreak_core::db::code::list_recent_events(db, owner, session_id, 256)
+        .await
+        .ok()?
+        .into_iter()
+        .find_map(|row| match row.event {
+            CodeEvent::ApprovalResolved {
+                approval_id,
+                decision,
+            } if approval_id == approval.id => Some(decision),
+            _ => None,
+        });
+    let decision = match journaled {
+        Some(decision) => decision,
+        None => match approval.state {
+            CodeApprovalState::Approved => tidebreak_core::ApprovalDecisionKind::Approve,
+            CodeApprovalState::Denied => tidebreak_core::ApprovalDecisionKind::Deny {
+                feedback: approval.feedback,
+            },
+            CodeApprovalState::Abandoned | CodeApprovalState::Pending => {
+                tidebreak_core::ApprovalDecisionKind::Abandoned
+            }
+        },
+    };
+    Some(tidebreak_harness::ResumeInput::ApprovalDecided {
+        call_id: call_id.to_owned(),
+        decision: resume_decision(decision),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn await_park_resolution<'a>(
     engine: &'a dyn HarnessSession,
+    db: &DbStore,
+    bus: &CodeEventBus,
+    session: &CodeSession,
     commands: &mut mpsc::Receiver<WorkerCommand>,
     controls: &mut FuturesUnordered<BoxFuture<'a, ControlFlow>>,
     interrupted: &mut bool,
@@ -1381,9 +1462,28 @@ async fn await_park_resolution<'a>(
     wait: &tidebreak_core::TurnParkWait,
     turn_id: CodeTurnId,
     delivered: &DeliveredDecisions,
-) -> Option<tidebreak_harness::ResumeInput> {
+) -> Option<ParkResolution> {
     if let Some(input) = resume_if_already_delivered(wait, delivered) {
-        return Some(input);
+        return Some(ParkResolution {
+            input,
+            delivered_here: true,
+        });
+    }
+    // Subscribe before the read below, so a settlement between the two
+    // cannot slip past both.
+    let (mut live, _tail) = bus.attach(session.id);
+    let waited_call = match wait {
+        tidebreak_core::TurnParkWait::Approval { call_id } => Some(call_id.clone()),
+        _ => None,
+    };
+    if let Some(call_id) = waited_call.as_deref() {
+        if let Some(input) = resume_from_settled_row(db, &session.owner, session.id, call_id).await
+        {
+            return Some(ParkResolution {
+                input,
+                delivered_here: false,
+            });
+        }
     }
     loop {
         tokio::select! {
@@ -1397,7 +1497,38 @@ async fn await_park_resolution<'a>(
                 // decision when the engine parks. That future lives in
                 // `controls`; once it finishes, resume from the record.
                 if let Some(input) = resume_if_already_delivered(wait, delivered) {
-                    return Some(input);
+                    return Some(ParkResolution {
+                        input,
+                        delivered_here: true,
+                    });
+                }
+            }
+            published = live.recv(), if waited_call.is_some() => {
+                let call_id = waited_call.as_deref().unwrap_or_default();
+                let settled = match published {
+                    Ok(CodeLiveEvent {
+                        event: CodeEvent::ApprovalResolved { approval_id, .. },
+                        ..
+                    }) => {
+                        // The row the resolution names must be the one this
+                        // park waits on; another card's decision is not it.
+                        matches!(
+                            tidebreak_core::db::code::get_approval(db, &session.owner, approval_id).await,
+                            Ok(Some(approval)) if approval.native_call_id.as_deref() == Some(call_id)
+                        )
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true,
+                    _ => false,
+                };
+                if settled {
+                    if let Some(input) =
+                        resume_from_settled_row(db, &session.owner, session.id, call_id).await
+                    {
+                        return Some(ParkResolution {
+                            input,
+                            delivered_here: false,
+                        });
+                    }
                 }
             }
             command = commands.recv(), if !*commands_closed => match command {
@@ -1414,9 +1545,12 @@ async fn await_park_resolution<'a>(
                             if *waited == call_id
                     );
                     if delivered && awaited {
-                        return Some(tidebreak_harness::ResumeInput::ApprovalDecided {
-                            call_id,
-                            decision: decided,
+                        return Some(ParkResolution {
+                            input: tidebreak_harness::ResumeInput::ApprovalDecided {
+                                call_id,
+                                decision: decided,
+                            },
+                            delivered_here: true,
                         });
                     }
                 }
@@ -2107,6 +2241,9 @@ async fn drive_turn_inner(
         };
         match await_park_resolution(
             engine,
+            db,
+            bus,
+            session,
             commands,
             &mut controls,
             &mut interrupted,
@@ -2117,11 +2254,17 @@ async fn drive_turn_inner(
         )
         .await
         {
-            Some(input) => {
+            Some(ParkResolution {
+                input,
+                delivered_here,
+            }) => {
                 // An accepted plan re-postures the session before the turn
                 // continues: the decision itself never changes the mode, the
-                // engine's own channel does, and the row must say so too.
-                apply_accepted_plan_mode(db, bus, session, engine, &input).await;
+                // engine's own channel does, and the row must say so too. A
+                // settlement another surface made carried its own posture.
+                if delivered_here {
+                    apply_accepted_plan_mode(db, bus, session, engine, &input).await;
+                }
                 turn.status = CodeTurnStatus::Running;
                 turn.park_ref = None;
                 turn.park_wait = None;

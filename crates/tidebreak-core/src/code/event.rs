@@ -269,6 +269,52 @@ pub enum ApprovalDecisionKind {
     },
 }
 
+/// What an internal-engine approval row asks, journaled beside its id so
+/// the chat surface replays the card without loading the row. Internal
+/// engine: external adapters carry only the row id, and the row is the
+/// source of truth for every reader.
+///
+/// The row's id is the engine call id the card is parked on (one approval
+/// surface, decision 0048 step 5), so the chat surface recovers the call
+/// from the approval id alone.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum InternalApprovalRequest {
+    /// A tool call needs the user's consent before it runs, in the internal
+    /// engine's own terms: the class that triggered the prompt, the approval
+    /// kind, the standing-grant ladder this exact call cleared, and the
+    /// closed preview of what the call will do.
+    ToolUse {
+        /// Whether the Auto-mode judge owns this card right now.
+        #[serde(default, skip_serializing_if = "is_false")]
+        auto_judging: bool,
+        /// Canonical registered tool identity.
+        tool_name: String,
+        /// The approval class that triggered the prompt.
+        class: ApprovalClass,
+        /// What kind of consent the call asks for.
+        approval: ToolApprovalKind,
+        /// Every standing-grant rung the call cleared; empty means approving
+        /// once is the only affirmative choice.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        grant_scopes: Vec<GrantScope>,
+        /// Closed projection of what the call will do, when its tool has one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        preview: Option<ToolActionPreview>,
+    },
+    /// A questions card parked the turn; the questions ride the row's kind.
+    Questions {
+        /// Turn that resumes after the answer commits.
+        turn_id: CodeTurnId,
+    },
+    /// A plan proposal parked the turn; the plan body rides the row.
+    Plan {
+        /// Turn that resumes after the decision commits.
+        turn_id: CodeTurnId,
+    },
+}
+
 /// One event in an external agent-engine session's journal.
 ///
 /// Serialized as an internally-tagged union (a `type` field selects the
@@ -381,6 +427,11 @@ pub enum CodeEvent {
     ApprovalRequested {
         /// Hint id; the row is the source of truth.
         approval_id: CodeApprovalId,
+        /// What the card asks, for the chat surface's replay. Internal
+        /// engine; absent on every row an external adapter writes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        request: Option<InternalApprovalRequest>,
     },
     /// A parked approval was decided.
     ApprovalResolved {
@@ -470,57 +521,6 @@ pub enum CodeEvent {
         call_id: String,
         /// Partial JSON to concatenate.
         fragment: String,
-    },
-    /// A tool call needs the user's consent before it runs, in the internal
-    /// engine's own terms: the class that triggered the prompt, the approval
-    /// kind, the standing-grant ladder this exact call cleared, and the
-    /// closed preview of what the call will do. The durable card is the
-    /// engine's own approval row; this is the journaled fact the chat
-    /// surface replays. Internal engine.
-    ToolApprovalRequired {
-        /// Whether the Auto-mode judge owns this card right now.
-        #[serde(default, skip_serializing_if = "is_false")]
-        auto_judging: bool,
-        /// The call awaiting a decision.
-        call_id: String,
-        /// Canonical registered tool identity.
-        tool_name: String,
-        /// The approval class that triggered the prompt.
-        class: ApprovalClass,
-        /// What kind of consent the call asks for.
-        kind: ToolApprovalKind,
-        /// Every standing-grant rung the call cleared; empty means approving
-        /// once is the only affirmative choice.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        grant_scopes: Vec<GrantScope>,
-        /// Closed projection of what the call will do, when its tool has one.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        #[ts(optional)]
-        preview: Option<ToolActionPreview>,
-    },
-    /// The user decided a parked tool call on the internal engine's own
-    /// consent channel. Internal engine.
-    ToolApprovalDecided {
-        /// The call that was decided.
-        call_id: String,
-        /// `true` if approved, `false` if rejected.
-        approved: bool,
-    },
-    /// A questions card parked the turn. A bounded refresh hint: the card
-    /// body loads from the pending-questions route. Internal engine.
-    QuestionsAsked {
-        /// Exact tool call awaiting answers.
-        call_id: String,
-        /// Turn that resumes after the answer commits.
-        turn_id: CodeTurnId,
-    },
-    /// A plan proposal parked the turn. A bounded refresh hint: the plan
-    /// loads from the pending-plan route. Internal engine.
-    PlanProposed {
-        /// Exact tool call awaiting the reader's decision.
-        call_id: String,
-        /// Turn that resumes after the decision commits.
-        turn_id: CodeTurnId,
     },
     /// The engine replaced the session's task plan. A bounded refresh hint:
     /// the steps load from the task-plan route, so a plan rewritten twenty
@@ -634,14 +634,10 @@ mod tests {
             CodeEvent::TurnRefused { .. } => 17,
             CodeEvent::StreamInterrupted => 18,
             CodeEvent::ToolArgsDelta { .. } => 19,
-            CodeEvent::ToolApprovalRequired { .. } => 20,
-            CodeEvent::ToolApprovalDecided { .. } => 21,
-            CodeEvent::QuestionsAsked { .. } => 22,
-            CodeEvent::PlanProposed { .. } => 23,
-            CodeEvent::TaskPlanUpdated { .. } => 24,
-            CodeEvent::ContextTruncated { .. } => 25,
-            CodeEvent::CompactionStarted => 26,
-            CodeEvent::CompactionFinished { .. } => 27,
+            CodeEvent::TaskPlanUpdated { .. } => 20,
+            CodeEvent::ContextTruncated { .. } => 21,
+            CodeEvent::CompactionStarted => 22,
+            CodeEvent::CompactionFinished { .. } => 23,
         }
     }
 
@@ -697,6 +693,7 @@ mod tests {
             },
             CodeEvent::ApprovalRequested {
                 approval_id: CodeApprovalId(id(2)),
+                request: None,
             },
             CodeEvent::ApprovalResolved {
                 approval_id: CodeApprovalId(id(2)),
@@ -775,27 +772,6 @@ mod tests {
             CodeEvent::ToolArgsDelta {
                 call_id: id(3).to_string(),
                 fragment: "{\"command\":".into(),
-            },
-            CodeEvent::ToolApprovalRequired {
-                auto_judging: false,
-                call_id: id(3).to_string(),
-                tool_name: "exec".into(),
-                class: ApprovalClass::Sensitive,
-                kind: ToolApprovalKind::ExecMayRunNetworkedCommand,
-                grant_scopes: Vec::new(),
-                preview: None,
-            },
-            CodeEvent::ToolApprovalDecided {
-                call_id: id(3).to_string(),
-                approved: true,
-            },
-            CodeEvent::QuestionsAsked {
-                call_id: id(4).to_string(),
-                turn_id: CodeTurnId(id(1)),
-            },
-            CodeEvent::PlanProposed {
-                call_id: id(5).to_string(),
-                turn_id: CodeTurnId(id(1)),
             },
             CodeEvent::TaskPlanUpdated {
                 call_id: id(6).to_string(),

@@ -231,6 +231,7 @@ async fn postgres_code_queries_partition_by_owner() {
             feedback: None,
             requested_at: Utc::now(),
             decided_at: None,
+            auto_judge_status: None,
         },
     )
     .await

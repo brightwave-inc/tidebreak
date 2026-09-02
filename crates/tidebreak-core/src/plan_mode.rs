@@ -108,6 +108,31 @@ impl PlanDecision {
     }
 }
 
+/// The proposed plan as the approval row carries it: its raw payload, since
+/// a plan routinely exceeds what a journal row may hold (the row's kind
+/// names only the mode the conversation moves to on acceptance).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanProposalBody {
+    pub title: String,
+    pub plan: String,
+}
+
+impl PlanProposalBody {
+    /// The row payload.
+    pub fn to_raw(&self) -> crate::error::Result<serde_json::Value> {
+        Ok(serde_json::to_value(self)?)
+    }
+
+    /// The body a row carries, or `None` for a row that is not a plan.
+    #[must_use]
+    pub fn from_raw(raw: &serde_json::Value) -> Option<Self> {
+        if !raw.is_object() {
+            return None;
+        }
+        serde_json::from_value(raw.clone()).ok()
+    }
+}
+
 /// Exact storage command with its conversation scope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecidePlanRequest {

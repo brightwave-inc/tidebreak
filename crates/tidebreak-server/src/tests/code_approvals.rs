@@ -1142,6 +1142,7 @@ async fn a_stale_worker_completion_cannot_abandon_a_reused_call_id() {
                 feedback: None,
                 requested_at: chrono::Utc::now(),
                 decided_at: None,
+                auto_judge_status: None,
             },
         )
         .await

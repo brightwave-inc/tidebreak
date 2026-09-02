@@ -3762,8 +3762,10 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
         message: value.message,
       };
     case "approval_requested":
+      // The internal engine journals the card's request beside the id so
+      // the chat surface replays it; the code surface loads the row.
       if (
-        !onlyKeys(value, ["type", "approval_id"]) ||
+        !onlyKeys(value, ["type", "approval_id", "request"]) ||
         !wireId(value.approval_id)
       ) {
         return null;

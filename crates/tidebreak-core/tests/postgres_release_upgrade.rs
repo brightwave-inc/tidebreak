@@ -783,7 +783,6 @@ async fn postgres_v060_upgrade_merges_conversations_into_sessions() {
             ("message_document_attachment".to_owned(), "c".to_owned()),
             ("message_identity".to_owned(), "a".to_owned()),
             ("output".to_owned(), "c".to_owned()),
-            ("plan_request".to_owned(), "r".to_owned()),
             ("queued_turn".to_owned(), "c".to_owned()),
             ("root_attachment_change".to_owned(), "r".to_owned()),
             ("standing_tool_grant".to_owned(), "c".to_owned()),
@@ -791,7 +790,6 @@ async fn postgres_v060_upgrade_merges_conversations_into_sessions() {
             ("tool_call".to_owned(), "a".to_owned()),
             ("turn_admission".to_owned(), "c".to_owned()),
             ("turn_run".to_owned(), "c".to_owned()),
-            ("user_question_request".to_owned(), "r".to_owned()),
         ]
     );
     assert!(

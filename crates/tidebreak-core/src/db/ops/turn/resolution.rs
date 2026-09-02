@@ -724,9 +724,6 @@ async fn record_turn_run_failure_inner(
             return Ok(None);
         }
         super::super::approval::close_pending_for_terminal_turn_on(&transaction, id, now).await?;
-        super::super::user_question::close_pending_for_terminal_turn_on(&transaction, id, now)
-            .await?;
-        super::super::plan::close_pending_for_terminal_turn_on(&transaction, id, now).await?;
     }
     let receipt = entities::turn_failure::ActiveModel {
         lease_token: Set(lease_token),

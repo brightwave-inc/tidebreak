@@ -13,8 +13,8 @@ mod event;
 pub use caps::{CapLevel, HarnessCaps, HarnessCommand, HarnessTier};
 pub use event::{
     ApprovalDecisionKind, BoundedError, CheckpointHint, CodeEvent, CodeUsage, Diffstat,
-    FileChangeKind, HarnessNoticeLevel, SequencedCodeEvent, ToolDetail, ToolOutcome,
-    MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS, MAX_TOOL_SUMMARY_CHARS,
+    FileChangeKind, HarnessNoticeLevel, InternalApprovalRequest, SequencedCodeEvent, ToolDetail,
+    ToolOutcome, MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS, MAX_TOOL_SUMMARY_CHARS,
 };
 
 use crate::attention::{Attention, FenceReason};
@@ -1831,6 +1831,11 @@ pub struct CodeApproval {
     pub requested_at: chrono::DateTime<chrono::Utc>,
     /// When the user decided.
     pub decided_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Where the internal engine's Auto-mode judge stands on this card, when
+    /// one was engaged. Only the internal engine sets it (decision 0048 step
+    /// 5: the judge is a capability of that engine, on the one approval row).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_judge_status: Option<crate::approval::AutoJudgeStatus>,
 }
 
 /// A pull-request fact a trigger fires on.

@@ -2670,14 +2670,16 @@ pub trait Store: Send + Sync {
         ))
     }
 
-    /// Land the Auto-mode judge's verdict on one parked call. `false` means
-    /// the judge no longer owns it (a human got there first, or it resolved).
+    /// Land the Auto-mode judge's verdict on one parked call. An approval
+    /// decides the card and journals its decision; a decline hands the card
+    /// to the human; `NotOwned` means the judge no longer owned it (a human
+    /// got there first, or it resolved).
     async fn resolve_tool_call_approval_from_judge(
         &self,
         _chat_id: ChatId,
         _call_id: CallId,
         _approved: bool,
-    ) -> Result<bool> {
+    ) -> Result<JudgeVerdictOutcome> {
         Err(AgentError::Store(
             "durable tool approval storage is not implemented by this Store".into(),
         ))

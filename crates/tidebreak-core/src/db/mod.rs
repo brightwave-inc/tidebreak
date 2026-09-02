@@ -56,8 +56,8 @@ use crate::storage::{
     DeleteProjectOutcome, FailAgentRunOutcome, FinishAgentRunCancellationOutcome,
     FinishRootAttachmentChangeOutcome, FinishTurnCancellationOutcome,
     HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome, JournaledToolApprovalOutcome,
-    JournaledTurnOutcome, JournaledTurnSteerOutcome, MoveChatOutcome, OperationClaimOutcome,
-    OperationLogEntry, OperationLogWrite, ParkSandboxToolCallOutcome,
+    JournaledTurnOutcome, JournaledTurnSteerOutcome, JudgeVerdictOutcome, MoveChatOutcome,
+    OperationClaimOutcome, OperationLogEntry, OperationLogWrite, ParkSandboxToolCallOutcome,
     ParkTurnForAgentRunWaitSetOutcome, ParkTurnForClientCallOutcome, PromoteQueuedTurnOutcome,
     RecordAgentRunModelStepOutcome, RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome,
     RequestToolApprovalOutcome, RequestTurnCancellationOutcome, ReservedQueuedTurnOutcome,
@@ -2331,7 +2331,7 @@ impl Store for DbStore {
         chat_id: ChatId,
         call_id: CallId,
         approved: bool,
-    ) -> Result<bool> {
+    ) -> Result<JudgeVerdictOutcome> {
         ops::approval::resolve_from_judge(self, chat_id, call_id, approved).await
     }
 

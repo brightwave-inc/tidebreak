@@ -8,7 +8,8 @@ use crate::agent_tools::{
     parse_canonical_spawn_sandbox_agent_arguments, SpawnSandboxAgentArgs, SpawnSandboxAgentResult,
     SPAWN_SANDBOX_AGENT_TOOL,
 };
-use crate::approval::ToolApprovalStatus;
+use crate::approval::InternalToolApprovalRequest;
+use crate::code::CodeApprovalState;
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::model::{
@@ -16,7 +17,6 @@ use crate::model::{
     ToolCallRecord, ToolCallStatus, TurnCheckpointProgress, TurnRunStatus, TurnSteerStatus,
 };
 use crate::storage::{AdmitSandboxAgentRunOutcome, CheckpointSandboxSpawnOutcome};
-use crate::ApprovalClass;
 use crate::{AgentRunId, ChatId, ToolOutput};
 
 use super::super::super::{entities, store_err, DbStore};
@@ -209,10 +209,13 @@ where
         .one(conn)
         .await
         .map_err(store_err)?;
+    let approved = approval_state_of(conn, request.call_id.0).await?;
     match &existing_call {
         Some(existing)
-            if request.approval_gated && gated_call_is_admissible(existing, turn, request) => {}
-        None if !request.approval_gated => {}
+            if request.approval_gated
+                && approved == Some(CodeApprovalState::Approved)
+                && gated_call_is_admissible(existing, turn, request) => {}
+        None if !request.approval_gated && approved.is_none() => {}
         _ => return Ok(CheckpointSandboxSpawnOutcome::IdentityConflict),
     }
 
@@ -295,15 +298,6 @@ where
             provider_replay: Set(None),
             error_code: Set(None),
             error_detail: Set(None),
-            approval_status: Set(None),
-            approval_class: Set(None),
-            approval_kind: Set(None),
-            approval_reason: Set(None),
-            approval_requested_at: Set(None),
-            approval_decided_at: Set(None),
-            approval_event_seq: Set(None),
-            approval_grant_source_call_id: Set(None),
-            auto_judge_status: Set(None),
             client_executor_id: Set(None),
             client_lease_token: Set(None),
             client_lease_expires_at: Set(None),
@@ -483,22 +477,12 @@ where
     };
     let stored_event = crate::chat_journal::decode_chat_event_required(event.event)?;
     let arguments = canonical_arguments(request)?;
-    // A gated spawn's row carries the approval that admitted it; an ungated
+    // A gated spawn's call carries the approval that admitted it; an ungated
     // one must carry no approval at all.
     let approval_columns_valid = if request.approval_gated {
-        call_model.approval_status.as_deref() == Some(ToolApprovalStatus::Approved.as_str())
-            && call_model.approval_class.as_deref() == Some(ApprovalClass::Sensitive.as_str())
-            && call_model.approval_kind.is_some()
-            && call_model.approval_requested_at.is_some()
-            && call_model.approval_decided_at.is_some()
+        approval_state_of(conn, call_model.id).await? == Some(CodeApprovalState::Approved)
     } else {
-        call_model.approval_status.is_none()
-            && call_model.approval_class.is_none()
-            && call_model.approval_kind.is_none()
-            && call_model.approval_reason.is_none()
-            && call_model.approval_requested_at.is_none()
-            && call_model.approval_decided_at.is_none()
-            && call_model.approval_event_seq.is_none()
+        approval_state_of(conn, call_model.id).await?.is_none()
     };
     let raw_call_valid = call_model.error_code.is_none()
         && call_model.error_detail.is_none()
@@ -588,12 +572,30 @@ fn gated_call_is_admissible(
         && call.result.is_none()
         && call.error_code.is_none()
         && call.error_detail.is_none()
-        && call.approval_status.as_deref() == Some(ToolApprovalStatus::Approved.as_str())
-        && call.approval_class.as_deref() == Some(ApprovalClass::Sensitive.as_str())
-        && call.approval_kind.is_some()
         && call.client_executor_id.is_none()
         && call.client_lease_token.is_none()
         && call.client_lease_expires_at.is_none()
+}
+
+/// The state of the consent card parked on a call, or `None` when the call
+/// never had one.
+async fn approval_state_of<C>(conn: &C, call_id: uuid::Uuid) -> Result<Option<CodeApprovalState>>
+where
+    C: ConnectionTrait,
+{
+    let Some(row) = entities::code_approval::Entity::find_by_id(call_id)
+        .one(conn)
+        .await
+        .map_err(store_err)?
+    else {
+        return Ok(None);
+    };
+    if InternalToolApprovalRequest::from_raw(&row.harness_raw).is_none() {
+        return Ok(None);
+    }
+    CodeApprovalState::from_str(&row.state)
+        .map(Some)
+        .ok_or_else(|| AgentError::Store(format!("approval {} has unknown state", row.id)))
 }
 
 fn validate_request(request: &SandboxSpawnCheckpointRequest) -> Result<()> {

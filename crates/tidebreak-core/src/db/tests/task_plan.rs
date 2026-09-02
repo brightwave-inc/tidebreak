@@ -47,6 +47,7 @@ async fn accepted_plan_resumes_the_turn_and_leaves_plan_mode() {
     let crate::storage::DecidePlanOutcome::Decided {
         turn,
         completion_event,
+        ..
     } = outcome
     else {
         panic!("unexpected plan decision: {outcome:?}");
