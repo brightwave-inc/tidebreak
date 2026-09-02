@@ -722,11 +722,16 @@ async fn handle_memory_tool(
                 updated_at: now,
             };
             match runtime.db.put(&session.owner, record).await {
-                Ok(receipt) => Ok(memory_tool_text(
-                    id,
-                    format!("proposed {}", receipt.record.id),
-                    false,
-                )),
+                Ok(receipt) => {
+                    // The header chip counts pending proposals off the
+                    // digest, so announce the new one now.
+                    crate::code::attention::emit_digest(&runtime.db, &runtime.bus, &session).await;
+                    Ok(memory_tool_text(
+                        id,
+                        format!("proposed {}", receipt.record.id),
+                        false,
+                    ))
+                }
                 Err(err) => Ok(memory_tool_text(id, err.to_string(), true)),
             }
         }

@@ -232,6 +232,8 @@ pub(crate) struct AttachmentStore {
     pub private_root: super::scratch::ScratchRoot,
     /// Whether this engine consumes images over its own protocol.
     pub engine_reads_images: bool,
+    /// Whether this engine mounts Tidebreak's loopback memory verb.
+    pub memory_loopback: bool,
 }
 
 pub(crate) struct QueuedFollowUp {
@@ -2628,15 +2630,40 @@ async fn drive_turn_inner(
             .map(|workspace| workspace.repo_id),
         None => None,
     };
-    let memory_dir = super::memory::materialize_session_memory(
+    // Memory is an aid, not a precondition: a store or filesystem fault
+    // degrades the turn visibly instead of failing it after it started.
+    let memory_dir = match super::memory::materialize_session_memory(
         db.as_ref(),
         &session.owner,
         repo_id,
         &store.private_root,
     )
     .await
-    .map_err(|err| WorkerError::Failed(format!("materialize memory: {err}")))?;
-    if ordinal == 1 && !super::memory::memory_loopback_supported(session.harness_kind) {
+    {
+        Ok(memory_dir) => Some(memory_dir),
+        Err(err) => {
+            tracing::warn!(
+                "tidebreak: could not materialize memory for code session {}: {err}",
+                session.id
+            );
+            persist_and_publish(
+                db,
+                bus,
+                &session.owner,
+                session.id,
+                session.spawn_epoch,
+                CodeEvent::HarnessNotice {
+                    level: HarnessNoticeLevel::Warning,
+                    message: format!("Memory was not materialized for this turn: {err}"),
+                },
+                sink.native_journal,
+            )
+            .await
+            .map_err(|err| WorkerError::Failed(err.to_string()))?;
+            None
+        }
+    };
+    if ordinal == 1 && !store.memory_loopback {
         persist_and_publish(
             db,
             bus,
@@ -2667,13 +2694,12 @@ async fn drive_turn_inner(
             Vec::new(),
         )
     };
-    let engine_text = if ordinal == 1 {
-        format!(
+    let engine_text = match (ordinal, memory_dir.as_deref()) {
+        (1, Some(memory_dir)) => format!(
             "{engine_text}\n\n{}",
-            super::memory::first_turn_memory_line(&memory_dir)
-        )
-    } else {
-        engine_text
+            super::memory::first_turn_memory_line(memory_dir)
+        ),
+        _ => engine_text,
     };
     let mut next_input = Some(TurnInput {
         text: engine_text,
@@ -3440,7 +3466,7 @@ pub(crate) async fn journal_event(
 /// engine already wrote it — apply only what the row's arrival means for
 /// the worker's own state. See [`LiveSink::native_journal`].
 #[allow(clippy::too_many_arguments)]
-async fn persist_and_publish(
+pub(crate) async fn persist_and_publish(
     db: &DbStore,
     bus: &CodeEventBus,
     owner: &OwnerId,
@@ -4214,6 +4240,7 @@ mod tests {
                 blobs: None,
                 private_root,
                 engine_reads_images: false,
+                memory_loopback: false,
             },
             Arc::new(tokio::sync::Mutex::new(())),
             tokio::sync::watch::channel(false).1,
@@ -4331,6 +4358,7 @@ mod tests {
                 blobs: None,
                 private_root,
                 engine_reads_images: false,
+                memory_loopback: false,
             },
             Arc::new(tokio::sync::Mutex::new(())),
             tokio::sync::watch::channel(false).1,
@@ -4480,6 +4508,7 @@ mod tests {
                 blobs: None,
                 private_root,
                 engine_reads_images: false,
+                memory_loopback: false,
             },
             Arc::new(tokio::sync::Mutex::new(())),
             tokio::sync::watch::channel(false).1,
@@ -4600,6 +4629,7 @@ mod tests {
                 blobs: None,
                 private_root,
                 engine_reads_images: false,
+                memory_loopback: false,
             },
             Arc::new(tokio::sync::Mutex::new(())),
             tokio::sync::watch::channel(false).1,
@@ -4700,6 +4730,7 @@ mod tests {
                 blobs: None,
                 private_root,
                 engine_reads_images: false,
+                memory_loopback: false,
             },
             Arc::new(tokio::sync::Mutex::new(())),
             tokio::sync::watch::channel(false).1,
@@ -4832,6 +4863,7 @@ mod tests {
                 blobs: None,
                 private_root,
                 engine_reads_images: false,
+                memory_loopback: false,
             },
             worktree_lock.clone(),
             tokio::sync::watch::channel(false).1,
@@ -5445,6 +5477,7 @@ mod tests {
                 blobs: None,
                 private_root,
                 engine_reads_images: false,
+                memory_loopback: false,
             },
             Arc::new(tokio::sync::Mutex::new(())),
             quiesce_rx,

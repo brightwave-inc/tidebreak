@@ -487,7 +487,7 @@ async fn build_digest(
 }
 
 async fn memory_proposal_count(db: &DbStore, session: &CodeSession) -> Option<u64> {
-    use tidebreak_core::{MemoryBackend, MemoryListFilter, MemoryStatus};
+    use tidebreak_core::{MemoryBackend, MemoryEvidence, MemoryListFilter, MemoryStatus};
     let records = db
         .list(
             &session.owner,
@@ -499,9 +499,20 @@ async fn memory_proposal_count(db: &DbStore, session: &CodeSession) -> Option<u6
         )
         .await
         .ok()?;
+    // Only what this session's own turns produced: the origin names the
+    // session and the evidence cites its journal, so a record that merely
+    // mentions the session id elsewhere does not inflate the chip.
     let count = records
         .into_iter()
-        .filter(|record| record.provenance.origin.code_session_id == Some(session.id))
+        .filter(|record| {
+            record.provenance.origin.code_session_id == Some(session.id)
+                && record.provenance.evidence.iter().any(|evidence| {
+                    matches!(
+                        evidence,
+                        MemoryEvidence::CodeEvent { session_id, .. } if *session_id == session.id
+                    )
+                })
+        })
         .count() as u64;
     (count > 0).then_some(count)
 }

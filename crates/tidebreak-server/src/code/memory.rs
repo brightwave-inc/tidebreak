@@ -119,12 +119,6 @@ pub(crate) fn first_turn_memory_line(memory_dir: &Path) -> String {
     )
 }
 
-/// Whether this engine mounts the loopback memory verb.
-#[must_use]
-pub(crate) fn memory_loopback_supported(kind: tidebreak_core::HarnessKind) -> bool {
-    matches!(kind, tidebreak_core::HarnessKind::ClaudeCode)
-}
-
 /// Visible refusal when the engine cannot mount the memory verb.
 #[must_use]
 pub(crate) fn memory_verb_unsupported_notice(kind: tidebreak_core::HarnessKind) -> String {

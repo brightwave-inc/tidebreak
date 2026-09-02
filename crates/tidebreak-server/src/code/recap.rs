@@ -163,7 +163,7 @@ pub(crate) struct TurnRecapper {
     /// 62): a recap runs as the owner of the session it describes.
     pub(crate) on_behalf_of: Option<Arc<crate::obo_gateway::OboGateway>>,
     pub(crate) db: Arc<DbStore>,
-    bus: Arc<CodeEventBus>,
+    pub(crate) bus: Arc<CodeEventBus>,
     pub(crate) store: Arc<dyn tidebreak_core::Store>,
     pub(crate) resolver: Arc<dyn ProviderResolver>,
     pub(crate) secrets: Arc<dyn tidebreak_core::SecretProvider>,
