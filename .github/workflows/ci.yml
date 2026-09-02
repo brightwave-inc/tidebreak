@@ -560,6 +560,11 @@ jobs:
       SCCACHE_GHA_ENABLED: "true"
       SCCACHE_GHA_RW_MODE: READ_WRITE
       RUSTC_WRAPPER: sccache
+      # link.exe dominates Windows test-binary time on 4 cores. rust-lld ships
+      # with the toolchain and is the MSVC analogue of mold on the Linux lanes.
+      # `cargo check` clears this so a linker mismatch cannot fail the
+      # rust-scoped compile gate.
+      RUSTFLAGS: -C linker=rust-lld
     steps:
       # A newer main commit contains this one, so its own Windows run proves
       # everything this run would. Bailing out with success is what keeps that
@@ -621,6 +626,8 @@ jobs:
           [System.IO.File]::WriteAllBytes($cli, $mz)
       - name: Check Windows-gated crates
         if: ${{ steps.tip.outputs.superseded != 'true' }}
+        env:
+          RUSTFLAGS: ""
         run: >-
           cargo check --target x86_64-pc-windows-msvc
           -p tidebreak-core
@@ -650,6 +657,28 @@ jobs:
           elif [[ "$WINDOWS_CI_GATE" == true ]]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           fi
+      # `cargo check` does not build test binaries, and `--lib` is workspace-wide,
+      # so host-broker's sidecar integration test cannot share an invocation with
+      # server and core. Two `--no-run` graphs compile everything the later run
+      # steps need; rustc can then keep those binaries instead of rebuilding
+      # them four times in sequence.
+      - name: Compile native Windows test binaries
+        if: ${{ steps.tip.outputs.superseded != 'true' }}
+        env:
+          NATIVE_RUN: ${{ steps.native.outputs.run }}
+        shell: bash
+        run: |
+          if [[ "$NATIVE_RUN" != "true" ]]; then
+            echo "Skipping native Windows test compile."
+            exit 0
+          fi
+          cargo test --target x86_64-pc-windows-msvc --locked --no-run --lib \
+            -p tidebreak-server \
+            -p tidebreak-core
+          cargo test --target x86_64-pc-windows-msvc --locked --no-run \
+            -p tidebreak-host-broker \
+            -p tidebreak-code-execution \
+            -p tidebreak-harness
       # The host broker suite covers both real NTFS containment and the stdio
       # sidecar boundary: private state/audit placement, exclusive ownership of
       # the state directory, restart persistence, and exit when the desktop pipe
