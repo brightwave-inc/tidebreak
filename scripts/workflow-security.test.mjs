@@ -683,6 +683,7 @@ test("native Windows CI is scope-triggered, label-overridable, with a main backs
     /uses: mozilla-actions\/sccache-action@[0-9a-f]{40}/,
   );
   assert.match(windows, /Compile native Windows test binaries/);
+  assert.match(windows, /Skipping native Windows test precompile/);
   assert.match(
     windows,
     /cargo test --target x86_64-pc-windows-msvc --locked --no-run --lib/,
