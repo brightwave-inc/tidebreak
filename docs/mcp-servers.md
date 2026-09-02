@@ -31,6 +31,30 @@ Each server has:
 - a request timeout from 1 to 3,600,000 milliseconds; and
 - an enabled switch.
 
+## Portable workspace configuration
+
+**Settings → Git & source control** can export and import a
+`.tidebreak-config.json` file (decision 83). The file is a versioned JSON
+envelope of **code repository registrations** and **MCP server definitions**.
+
+Included:
+
+- Repositories: display name, origin URL (from `git remote get-url origin` or
+  `cloned_from`), default base ref, branch prefix, setup/archive scripts,
+  quick actions, and the device `root_path` as a remap hint.
+- MCP servers: name, command, args, environment *names*, `env_from`, cwd,
+  URL, `bearer_token_env` *name*, gateway endpoint, timeout, enabled.
+
+Excluded: secret values (`env_values`, bearer token values, credentials),
+plugin-sourced servers, connected apps, folders, plugins, providers,
+preferences, transcripts, and worktrees.
+
+On import, Tidebreak previews each entry as new, identical, or conflicting
+(same repo remote or same MCP name with different fields). Device-specific
+`root_path`, `command`, and `cwd` that do not exist here are marked for
+remap. Apply never overwrites a record unless you choose Replace. A newer
+`tidebreak_config` version is refused with a message to upgrade or re-export.
+
 The child environment starts empty, and **no environment value of any kind
 lives in a definition**. Executables, arguments, working directories, and URLs
 are ordinary displayed settings, so do not put credentials in any of those

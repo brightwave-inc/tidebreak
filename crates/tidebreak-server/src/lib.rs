@@ -117,6 +117,7 @@ pub mod wire;
 #[cfg(test)]
 mod wire_code_fixtures;
 mod wire_types;
+mod workspace_config;
 
 use std::fs::{OpenOptions, TryLockError};
 use std::net::SocketAddr;
@@ -652,6 +653,17 @@ pub fn app(state: AppState) -> Router {
 
     let api = Router::new()
         .route("/settings", get(routes::get_settings))
+        .route("/workspace-config", get(routes::export_workspace_config))
+        .route(
+            "/workspace-config/preview",
+            post(routes::preview_workspace_config)
+                .layer(DefaultBodyLimit::max(mcp_config::MAX_CONFIG_BODY_BYTES)),
+        )
+        .route(
+            "/workspace-config/apply",
+            post(routes::apply_workspace_config)
+                .layer(DefaultBodyLimit::max(mcp_config::MAX_CONFIG_BODY_BYTES)),
+        )
         .route(
             "/projects",
             post(routes::create_project)

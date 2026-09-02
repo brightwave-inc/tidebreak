@@ -39,6 +39,9 @@ eventually including Tidebreak's own internal loop, sits behind
 | turn | One user→agent cycle in a session, ending in a checkpoint. |
 | harness | The external coding-agent CLI being driven (never "provider"). |
 
+Repository registrations can be exported with MCP server definitions as a
+portable workspace configuration. See [Portable workspace configuration](mcp-servers.md#portable-workspace-configuration).
+
 ## Crate and module layout
 
 Dependencies flow downward per [`docs/crates.md`](crates.md):

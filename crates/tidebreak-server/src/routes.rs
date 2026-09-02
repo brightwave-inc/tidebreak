@@ -51,6 +51,7 @@ mod settings;
 mod task_plan;
 mod turn_control;
 mod user_questions;
+mod workspace_config;
 
 pub use agent_runs::*;
 pub use app_gateway_page::*;
@@ -79,6 +80,7 @@ pub use settings::*;
 pub use task_plan::*;
 pub use turn_control::*;
 pub use user_questions::*;
+pub use workspace_config::*;
 
 /// The policy every stored-bytes response carries.
 ///

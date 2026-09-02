@@ -2670,6 +2670,16 @@ export type ExecProviderSnapshot = "local" | "e2b" | "daytona" | "docker" | "off
 export type ExecUnavailableReason = "unsupported_platform" | "missing_sandbox_binary" | "missing_credential" | "missing_container_runtime" | "container_runtime_unreachable";
 
 /**
+ * Portable code-repository registration.
+ */
+export type ExportedCodeRepository = { display_name: string, origin_url?: string, root_path: string, default_base_ref: string, branch_prefix: string, setup_script?: string, archive_script?: string, quick_actions: Array<QuickAction>, cloned_from?: string, };
+
+/**
+ * Portable MCP server definition. Environment *names* only.
+ */
+export type ExportedMcpServer = { name: string, command?: string, args: Array<string>, env: Array<string>, env_from: Array<string>, cwd?: string, url?: string, bearer_token_env?: string, gateway_endpoint?: string, request_timeout_ms: number, enabled: boolean, };
+
+/**
  * Why a session is fenced: observed but not controlled, until an explicit
  * user reap resolves it.
  */
@@ -5565,6 +5575,38 @@ export type WebSearchMode = "automatic" | "vendor" | "host" | "off";
  * reference; it is intentionally not a model-controlled argument.
  */
 export type WebSearchProviderKind = "exa" | "tavily" | "brave" | "searxng" | "model_provider";
+
+export type WorkspaceConfigAction = "skip" | "add" | "replace";
+
+export type WorkspaceConfigApplyRequest = { document: WorkspaceConfigDocument, decisions: Array<WorkspaceConfigDecision>, };
+
+export type WorkspaceConfigApplyResult = { applied: number, skipped: number, };
+
+/**
+ * Per-entry decision sent with apply.
+ */
+export type WorkspaceConfigDecision = { section: WorkspaceConfigSectionId, key: string, action: WorkspaceConfigAction, remaps: { [key in string]: string }, };
+
+/**
+ * Exported JSON envelope.
+ */
+export type WorkspaceConfigDocument = { tidebreak_config: number, exported_at: string, sections: WorkspaceConfigSections, };
+
+/**
+ * Preview of one imported entry against this machine.
+ */
+export type WorkspaceConfigPreview = { entries: Array<WorkspaceConfigPreviewEntry>, };
+
+export type WorkspaceConfigPreviewEntry = { section: WorkspaceConfigSectionId, key: string, status: WorkspaceConfigPreviewStatus, differing_fields: Array<string>, remap_fields: Array<string>, };
+
+export type WorkspaceConfigPreviewStatus = "new" | "identical" | "conflict" | "needs_remap";
+
+export type WorkspaceConfigSectionId = "code_repositories" | "mcp_servers";
+
+/**
+ * Named sections. Unknown keys fail closed via `deny_unknown_fields`.
+ */
+export type WorkspaceConfigSections = { code_repositories: Array<ExportedCodeRepository>, mcp_servers: Array<ExportedMcpServer>, };
 
 /**
  * Identifies one isolated workspace (worktree + branch) on a repo.
