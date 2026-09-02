@@ -54,6 +54,8 @@ impl InternalAdapter {
             Some(state.config.data_dir.join("scratch")),
             LegDriverConfig::default(),
         )
+        .with_blobs(state.blobs.clone())
+        .with_blob_write_locks(state.blob_writes.clone())
         .with_mcp_runtime(state.mcp.clone());
         Self {
             state,

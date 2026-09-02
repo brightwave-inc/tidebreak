@@ -39,7 +39,7 @@ mod sandbox_spawn;
 pub(in crate::db) mod steer;
 
 pub(in crate::db) use client_wait::{
-    advance_turn_after_client_resolution_on, park_turn_for_client_tool_call,
+    advance_turn_after_client_resolution_on, approval_park_call_id, park_turn_for_client_tool_call,
     recover_turn_after_client_resolution_on,
 };
 pub(in crate::db) use multi_agent_run_wait::{
@@ -66,6 +66,29 @@ pub(in crate::db) async fn take_lease_on_turn(
     now: chrono::DateTime<Utc>,
     lease_expires_at: chrono::DateTime<Utc>,
 ) -> Result<Option<()>> {
+    take_lease_on_turn_inner(store, id, lease_token, now, lease_expires_at, None).await
+}
+
+/// Claim one inserted turn and add its missing user transcript row atomically.
+pub(in crate::db) async fn take_lease_on_turn_with_input_message(
+    store: &DbStore,
+    id: TurnId,
+    lease_token: uuid::Uuid,
+    now: chrono::DateTime<Utc>,
+    lease_expires_at: chrono::DateTime<Utc>,
+    content: &str,
+) -> Result<Option<()>> {
+    take_lease_on_turn_inner(store, id, lease_token, now, lease_expires_at, Some(content)).await
+}
+
+async fn take_lease_on_turn_inner(
+    store: &DbStore,
+    id: TurnId,
+    lease_token: uuid::Uuid,
+    now: chrono::DateTime<Utc>,
+    lease_expires_at: chrono::DateTime<Utc>,
+    input: Option<&str>,
+) -> Result<Option<()>> {
     let now = canonical_db_timestamp(now)?;
     let lease_expires_at = canonical_db_timestamp(lease_expires_at)?;
     if lease_token.is_nil() || lease_expires_at <= now {
@@ -80,6 +103,23 @@ pub(in crate::db) async fn take_lease_on_turn(
         .map_err(store_err)?
     else {
         transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    };
+    let chat_id = ChatId(existing.session_id);
+    if !acquire_chat_write_lock(&transaction, chat_id).await? {
+        transaction.rollback().await.map_err(store_err)?;
+        return Err(AgentError::Store(format!("chat {chat_id} does not exist")));
+    }
+    if !acquire_turn_write_lock(&transaction, id).await? {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    let Some(existing) = entities::code_turn::Entity::find_by_id(id.0)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+    else {
+        transaction.rollback().await.map_err(store_err)?;
         return Ok(None);
     };
     if existing.lease_token.is_some()
@@ -145,6 +185,18 @@ pub(in crate::db) async fn take_lease_on_turn(
             entities::code_turn::Column::StartedAt,
             sea_orm::sea_query::Expr::value(now),
         )
+        .col_expr(
+            entities::code_turn::Column::EndedAt,
+            sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+        )
+        .col_expr(
+            entities::code_turn::Column::LastErrorCode,
+            sea_orm::sea_query::Expr::value(Option::<String>::None),
+        )
+        .col_expr(
+            entities::code_turn::Column::LastErrorDetail,
+            sea_orm::sea_query::Expr::value(Option::<String>::None),
+        )
         .filter(entities::code_turn::Column::Id.eq(id.0))
         .exec(&transaction)
         .await
@@ -153,43 +205,32 @@ pub(in crate::db) async fn take_lease_on_turn(
         transaction.rollback().await.map_err(store_err)?;
         return Ok(None);
     }
+    if let Some(content) = input {
+        ensure_turn_input_message_on(&transaction, &existing, content).await?;
+    }
     transaction.commit().await.map_err(store_err)?;
     // Harness turns have no transcript message. The caller only needs to
     // know the lease stuck; it already holds the `code_turn` row.
     Ok(Some(()))
 }
 
-/// Write the user transcript row for a turn that was inserted without one.
-///
-/// The session worker's `insert_turn` path has no message. The internal
-/// engine rebuilds the prompt from `message`, so the text has to land
-/// there before `LegDriver::run_turn`.
-pub(in crate::db) async fn ensure_turn_input_message(
-    store: &DbStore,
-    id: TurnId,
+async fn ensure_turn_input_message_on<C>(
+    conn: &C,
+    existing: &entities::code_turn::Model,
     content: &str,
-) -> Result<()> {
-    let transaction = store.conn.begin().await.map_err(store_err)?;
-    let Some(existing) = entities::code_turn::Entity::find_by_id(id.0)
-        .one(&transaction)
-        .await
-        .map_err(store_err)?
-    else {
-        transaction.commit().await.map_err(store_err)?;
-        return Err(AgentError::Store(format!("turn {id} does not exist")));
-    };
+) -> Result<()>
+where
+    C: ConnectionTrait,
+{
     if existing.input_message_id.is_some() {
-        transaction.commit().await.map_err(store_err)?;
         return Ok(());
     }
+    let id = TurnId(existing.id);
     let chat_id = ChatId(existing.session_id);
-    if !acquire_chat_write_lock(&transaction, chat_id).await? {
-        return Err(AgentError::Store(format!("chat {chat_id} does not exist")));
-    }
-    let now = super::agent_run::database_now(&transaction).await?;
+    let now = super::agent_run::database_now(conn).await?;
     let input_message_id = MessageId::new();
     if !reserve_message_identity_on(
-        &transaction,
+        conn,
         input_message_id,
         chat_id,
         id,
@@ -205,7 +246,7 @@ pub(in crate::db) async fn ensure_turn_input_message(
         id: Set(input_message_id.0),
         chat_id: Set(chat_id.0),
         turn_id: Set(id.0),
-        seq: Set(next_message_seq_on(&transaction, chat_id).await?),
+        seq: Set(next_message_seq_on(conn, chat_id).await?),
         role: Set("user".into()),
         content: Set(content.into()),
         llm_content: Set(None),
@@ -213,7 +254,7 @@ pub(in crate::db) async fn ensure_turn_input_message(
         turn_lease_token: Set(None),
         created_at: Set(now),
     }
-    .insert(&transaction)
+    .insert(conn)
     .await
     .map_err(store_err)?;
     let updated = entities::code_turn::Entity::update_many()
@@ -227,16 +268,27 @@ pub(in crate::db) async fn ensure_turn_input_message(
         )
         .filter(entities::code_turn::Column::Id.eq(id.0))
         .filter(entities::code_turn::Column::InputMessageId.is_null())
-        .exec(&transaction)
+        .exec(conn)
         .await
         .map_err(store_err)?;
     if updated.rows_affected != 1 {
-        transaction.rollback().await.map_err(store_err)?;
         return Err(AgentError::Store(format!(
             "turn {id} gained an input message from another writer"
         )));
     }
-    transaction.commit().await.map_err(store_err)?;
+    let images =
+        message_attachment_ops::bind_turn_to_message_on(conn, id, input_message_id).await?;
+    let llm_content = user_message_llm_content(content, &images, &[], &[], false);
+    if llm_content.is_some() {
+        entities::message::ActiveModel {
+            id: Set(input_message_id.0),
+            llm_content: Set(llm_content),
+            ..Default::default()
+        }
+        .update(conn)
+        .await
+        .map_err(store_err)?;
+    }
     Ok(())
 }
 
@@ -672,7 +724,6 @@ pub(in crate::db) async fn claim_turn(
             terminal_event: None,
         });
     }
-
     loop {
         let transaction = store.conn.begin().await.map_err(store_err)?;
         acquire_turn_claim_write_lock(&transaction).await?;
@@ -1133,6 +1184,7 @@ fn due_turn_candidate_condition(now: chrono::DateTime<Utc>) -> sea_orm::Conditio
         )
         .add(entities::code_turn::Column::AvailableAt.lte(now))
         .add(entities::code_turn::Column::UpdatedAt.lte(now))
+        .add(entities::code_turn::Column::SessionId.not_in_subquery(code_runtime_session_ids()))
 }
 
 fn expired_turn_candidate_condition(now: chrono::DateTime<Utc>) -> sea_orm::Condition {
@@ -1143,6 +1195,20 @@ fn expired_turn_candidate_condition(now: chrono::DateTime<Utc>) -> sea_orm::Cond
         ]))
         .add(entities::code_turn::Column::LeaseExpiresAt.lte(now))
         .add(entities::code_turn::Column::UpdatedAt.lte(now))
+        .add(entities::code_turn::Column::SessionId.not_in_subquery(code_runtime_session_ids()))
+}
+
+/// Session ids whose turns only a code session worker may claim.
+///
+/// Plain chats also use the internal harness. They stay on the global chat
+/// lane until a code worker attaches, which is the boundary encoded by
+/// `code_runtime_sessions`.
+fn code_runtime_session_ids() -> sea_orm::sea_query::SelectStatement {
+    sea_orm::sea_query::Query::select()
+        .column(entities::code_session::Column::Id)
+        .from(entities::code_session::Entity)
+        .cond_where(super::code::code_runtime_sessions())
+        .to_owned()
 }
 
 async fn any_turn_claim_work_on<C>(
@@ -1615,7 +1681,7 @@ fn turn_run_status_from_db(text: &str) -> Result<TurnRunStatus> {
         "queued" => Ok(TurnRunStatus::Queued),
         "running" => Ok(TurnRunStatus::Running),
         "cancelling" => Ok(TurnRunStatus::Cancelling),
-        "waiting_for_client" => Ok(TurnRunStatus::WaitingForClient),
+        "waiting_for_client" | "waiting" => Ok(TurnRunStatus::WaitingForClient),
         "waiting_for_agent_run" => Ok(TurnRunStatus::WaitingForAgentRun),
         "cancelling_client" => Ok(TurnRunStatus::CancellingClient),
         "resuming" => Ok(TurnRunStatus::Resuming),

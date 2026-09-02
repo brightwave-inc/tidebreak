@@ -32,6 +32,116 @@ async fn empty_turn_claim_does_not_wait_for_sqlite_writer() {
 }
 
 #[tokio::test]
+async fn chat_claim_scan_skips_turns_owned_by_code_session_workers() {
+    let (_dir, store) = temp_store().await;
+
+    let runtime_chat = sample_chat();
+    store.create_chat(&runtime_chat).await.unwrap();
+    let runtime_turn = match store
+        .accept_turn(TurnId::new(), runtime_chat.id, "gpt-5", "runtime turn")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected runtime acceptance outcome: {outcome:?}"),
+    };
+    assert_eq!(
+        crate::db::code::bump_spawn_epoch(
+            &store,
+            crate::code::CodeSessionId(runtime_chat.id.0),
+            None,
+        )
+        .await
+        .unwrap(),
+        1
+    );
+
+    let plain_chat = sample_chat();
+    store.create_chat(&plain_chat).await.unwrap();
+    let plain_turn = match store
+        .accept_turn(TurnId::new(), plain_chat.id, "gpt-5", "plain turn")
+        .await
+        .unwrap()
+    {
+        AcceptTurnOutcome::Accepted(turn) => turn,
+        outcome => panic!("unexpected plain acceptance outcome: {outcome:?}"),
+    };
+
+    let due_at = Utc::now();
+    entities::code_turn::Entity::update_many()
+        .col_expr(
+            entities::code_turn::Column::Status,
+            sea_orm::sea_query::Expr::value(TurnRunStatus::Resuming.as_str()),
+        )
+        .col_expr(
+            entities::code_turn::Column::AvailableAt,
+            sea_orm::sea_query::Expr::value(due_at - chrono::Duration::seconds(1)),
+        )
+        .col_expr(
+            entities::code_turn::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(due_at - chrono::Duration::seconds(1)),
+        )
+        .col_expr(
+            entities::code_turn::Column::ParkRef,
+            sea_orm::sea_query::Expr::value(Some("approval".to_owned())),
+        )
+        .filter(entities::code_turn::Column::Id.eq(runtime_turn.id.0))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+    entities::code_turn::Entity::update_many()
+        .col_expr(
+            entities::code_turn::Column::AvailableAt,
+            sea_orm::sea_query::Expr::value(due_at),
+        )
+        .col_expr(
+            entities::code_turn::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(due_at),
+        )
+        .filter(entities::code_turn::Column::Id.eq(plain_turn.id.0))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+
+    let claim_at = due_at + chrono::Duration::seconds(1);
+    let claimed = store
+        .claim_turn(
+            uuid::Uuid::new_v4(),
+            claim_at,
+            claim_at + chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+        .turn
+        .expect("the plain chat stays claimable");
+    assert_eq!(claimed.id, plain_turn.id);
+
+    let second = store
+        .claim_turn(
+            uuid::Uuid::new_v4(),
+            claim_at,
+            claim_at + chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap();
+    assert!(second.turn.is_none());
+    assert!(second.terminal_event.is_none());
+
+    assert_eq!(
+        store
+            .take_lease_on_turn(
+                runtime_turn.id,
+                uuid::Uuid::new_v4(),
+                claim_at,
+                claim_at + chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap(),
+        Some(())
+    );
+}
+
+#[tokio::test]
 async fn fence_turn_lease_reports_only_the_exact_live_segment() {
     use crate::TurnLeaseFence;
 

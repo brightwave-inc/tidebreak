@@ -16,13 +16,13 @@ use futures::channel::mpsc::{unbounded, TryRecvError, UnboundedReceiver};
 use futures::StreamExt;
 use tidebreak_core::{
     Agent, AgentConfig, AgentError, AgentEvent, AgentRunExecutionLocation, AgentRunWaitCondition,
-    AgentRunWaitSetCheckpointRequest, AgentTurnOutcome, BlobStore, CheckpointSandboxSpawnOutcome,
-    ClaimedAgentEvent, CompleteTurnRunOutcome, ForegroundAgentWaitRequest, MessageId,
-    ParkTurnForAgentRunWaitSetOutcome, ParkTurnForClientCallOutcome, RecordTurnFailureOutcome,
-    Result, SandboxAgentSpawnRequest, SandboxSpawnCheckpointRequest, SecretProvider,
-    SequencedEvent, Store, ToolRegistry, ToolScratch, TurnCheckpointProgress, TurnEventAppend,
-    TurnFailureRetry, TurnId, TurnRun, TurnRunStatus, SPAWN_SANDBOX_AGENT_TOOL,
-    WAIT_FOR_AGENTS_TOOL,
+    AgentRunWaitSetCheckpointRequest, AgentTurnOutcome, BlobStore, CallId,
+    CheckpointSandboxSpawnOutcome, ClaimedAgentEvent, CompleteTurnRunOutcome,
+    ForegroundAgentWaitRequest, MessageId, ParkTurnForAgentRunWaitSetOutcome,
+    ParkTurnForClientCallOutcome, RecordTurnFailureOutcome, Result, SandboxAgentSpawnRequest,
+    SandboxSpawnCheckpointRequest, SecretProvider, SequencedEvent, Store, ToolRegistry,
+    ToolScratch, TurnCheckpointProgress, TurnEventAppend, TurnFailureRetry, TurnId, TurnRun,
+    TurnRunStatus, SPAWN_SANDBOX_AGENT_TOOL, WAIT_FOR_AGENTS_TOOL,
 };
 use tokio::sync::{watch, Notify};
 
@@ -91,6 +91,7 @@ impl Default for LegDriverConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LegDriverOutcome {
     Completed(TurnId),
+    WaitingForApproval { turn_id: TurnId, call_id: CallId },
     WaitingForClient(TurnId),
     WaitingForAgentRun(TurnId),
     Resuming(TurnId),
@@ -2011,6 +2012,14 @@ impl LegDriver {
                                     self.publish(turn.chat_id, event);
                                 }
                                 checkpoint_heartbeat.abort_and_wait().await;
+                                if request.name == tidebreak_core::ASK_USER_QUESTIONS_TOOL
+                                    || request.name == tidebreak_core::EXIT_PLAN_MODE_TOOL
+                                {
+                                    return Ok(LegDriverOutcome::WaitingForApproval {
+                                        turn_id: turn.id,
+                                        call_id: request.id,
+                                    });
+                                }
                                 return Ok(LegDriverOutcome::WaitingForClient(turn.id));
                             }
                             Ok(Some(ParkTurnForClientCallOutcome::SteerPending(_)))
@@ -3341,6 +3350,7 @@ fn log_turn_result(result: std::result::Result<Result<LegDriverOutcome>, tokio::
 fn turn_worker_outcome_label(outcome: &Result<LegDriverOutcome>) -> &'static str {
     match outcome {
         Ok(LegDriverOutcome::Completed(_)) => "completed",
+        Ok(LegDriverOutcome::WaitingForApproval { .. }) => "waiting_for_approval",
         Ok(LegDriverOutcome::WaitingForClient(_)) => "waiting_for_client",
         Ok(LegDriverOutcome::WaitingForAgentRun(_)) => "waiting_for_agent_run",
         Ok(LegDriverOutcome::Resuming(_)) => "resuming",

@@ -10,7 +10,9 @@ use crate::model::{
     TurnClientWait, TurnClientWaitStatus, TurnRunStatus, TurnSteerStatus,
 };
 use crate::storage::ParkTurnForClientCallOutcome;
-use crate::{AgentEvent, ChatId, SequencedEvent, TurnId, TurnRun};
+use crate::{
+    AgentEvent, CallId, ChatId, CodeTurnStatus, SequencedEvent, TurnId, TurnParkWait, TurnRun,
+};
 
 use super::super::super::{entities, store_err, DbStore};
 use super::super::{acquire_chat_write_lock, acquire_turn_write_lock, next_tool_history_order_on};
@@ -19,6 +21,40 @@ use super::{canonical_db_timestamp, turn_run_from_model};
 pub(in crate::db) struct ClientWaitTurnTransition {
     pub turn: TurnRun,
     pub terminal_event: Option<SequencedEvent>,
+}
+
+/// Return the approval call wrapped by a code-session durable park.
+pub(in crate::db) fn approval_park_call_id(
+    turn: &entities::code_turn::Model,
+) -> Result<Option<CallId>> {
+    if turn.status != CodeTurnStatus::Waiting.as_str() {
+        return Ok(None);
+    }
+    let (Some(park_ref), Some(raw_wait)) = (turn.park_ref.as_deref(), turn.park_wait.as_ref())
+    else {
+        return Ok(None);
+    };
+    let wait = serde_json::from_value::<TurnParkWait>(raw_wait.clone()).map_err(|error| {
+        AgentError::Store(format!(
+            "turn {} has an invalid park wait: {error}",
+            turn.id
+        ))
+    })?;
+    let TurnParkWait::Approval { call_id } = wait else {
+        return Ok(None);
+    };
+    if call_id != park_ref {
+        return Err(AgentError::Store(format!(
+            "turn {} approval park has mismatched call ids",
+            turn.id
+        )));
+    }
+    call_id.parse::<CallId>().map(Some).map_err(|_| {
+        AgentError::Store(format!(
+            "turn {} approval park has an invalid call id",
+            turn.id
+        ))
+    })
 }
 
 pub(in crate::db) async fn park_turn_for_client_tool_call(
@@ -473,11 +509,12 @@ where
         .await
         .map_err(store_err)?
         .expect("locked client-wait turn exists");
+    let adapter_approval_call = approval_park_call_id(&turn)?;
     if turn.session_id != wait.session_id
-        || !matches!(
+        || (!matches!(
             turn.status.as_str(),
             "waiting_for_client" | "cancelling_client"
-        )
+        ) && adapter_approval_call != Some(CallId(call.id)))
         || turn.attempt_count != wait.attempt_count
         || turn.claim_count != wait.claim_count
         || turn.lease_token.is_some()

@@ -155,6 +155,7 @@ pub(in crate::db) async fn list_pending(
             .await
             .map_err(store_err)?
             .ok_or_else(|| AgentError::Store("pending question turn is missing".into()))?;
+        let adapter_approval_call = super::turn::approval_park_call_id(&turn)?;
         if call.chat_id != row.session_id
             || call.turn_id != row.turn_id
             || call.name != ASK_USER_QUESTIONS_TOOL
@@ -165,7 +166,8 @@ pub(in crate::db) async fn list_pending(
             || wait.turn_id != row.turn_id
             || wait.status != crate::TurnClientWaitStatus::Waiting.as_str()
             || turn.session_id != row.session_id
-            || turn.status != TurnRunStatus::WaitingForClient.as_str()
+            || (turn.status != TurnRunStatus::WaitingForClient.as_str()
+                && adapter_approval_call != Some(CallId(row.id)))
             || turn.attempt_count != wait.attempt_count
             || turn.claim_count != wait.claim_count
         {
@@ -277,8 +279,10 @@ pub(in crate::db) async fn answer(
         .await
         .map_err(store_err)?
         .expect("locked question turn exists");
+    let adapter_approval_call = super::turn::approval_park_call_id(&turn)?;
     if turn.session_id != request.chat_id.0
-        || turn.status != TurnRunStatus::WaitingForClient.as_str()
+        || (turn.status != TurnRunStatus::WaitingForClient.as_str()
+            && adapter_approval_call != Some(request.call_id))
         || row.turn_id != turn.id
     {
         transaction.commit().await.map_err(store_err)?;

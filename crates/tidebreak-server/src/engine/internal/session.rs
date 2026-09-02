@@ -21,8 +21,8 @@ use tidebreak_core::{
     ToolApprovalStatus, TurnId, TurnSteerId, DEFAULT_ACCEPTED_PLAN_MODE,
 };
 use tidebreak_harness::{
-    ApprovalDecision, HarnessApprovalRef, HarnessError, HarnessSession, ResumeInput, SessionSpec,
-    TurnInput, TurnOutcome,
+    ApprovalDecision, HarnessApprovalRef, HarnessError, HarnessSession, ParkWait, ResumeInput,
+    SessionSpec, TurnInput, TurnOutcome,
 };
 
 use crate::code::bus::CodeEventBus;
@@ -128,7 +128,12 @@ impl InternalSession {
         else {
             return Ok(());
         };
-        if turn.status != CodeTurnStatus::Waiting || turn.park_ref.is_none() {
+        if turn.park_ref.is_none()
+            || !matches!(
+                turn.status,
+                CodeTurnStatus::Waiting | CodeTurnStatus::Resuming
+            )
+        {
             return Ok(());
         }
         *self.active.lock().expect("active turn") = Some(TurnId(turn.id.0));
@@ -139,9 +144,24 @@ impl InternalSession {
         *self.active.lock().expect("active turn")
     }
 
+    fn map_and_release(&self, turn_id: TurnId, outcome: LegDriverOutcome) -> TurnOutcome {
+        let mapped = Self::map_leg_outcome(turn_id, outcome);
+        if !matches!(mapped, TurnOutcome::Parked { .. }) {
+            *self.active.lock().expect("active turn") = None;
+        }
+        mapped
+    }
+
     fn map_leg_outcome(turn_id: TurnId, outcome: LegDriverOutcome) -> TurnOutcome {
         match outcome {
             LegDriverOutcome::Completed(_) | LegDriverOutcome::Cancelled(_) => TurnOutcome::Clean,
+            LegDriverOutcome::WaitingForApproval { call_id, .. } => {
+                let call_id = call_id.to_string();
+                TurnOutcome::Parked {
+                    park_ref: call_id.clone(),
+                    waiting_on: ParkWait::Approval { call_id },
+                }
+            }
             LegDriverOutcome::WaitingForClient(_) | LegDriverOutcome::WaitingForAgentRun(_) => {
                 // Client waits keep the lease-release shape until D4b: the
                 // leg ends, the lease drops, and the turn returns to the
@@ -404,8 +424,7 @@ impl HarnessSession for InternalSession {
             .run_turn(turn, lease_token)
             .await
             .map_err(|error| HarnessError::Other(error.to_string()))?;
-        *self.active.lock().expect("active turn") = None;
-        Ok(Self::map_leg_outcome(turn_id, outcome))
+        Ok(self.map_and_release(turn_id, outcome))
     }
 
     async fn resume_turn(
@@ -421,10 +440,9 @@ impl HarnessSession for InternalSession {
                 "no parked turn to resume for {park_ref}"
             )));
         };
-        let call_id = Self::parse_call_id(&park_ref)?;
+        let _call_id = Self::parse_call_id(&park_ref)?;
         let ResumeInput::ApprovalDecided {
-            call_id: decided,
-            decision,
+            call_id: decided, ..
         } = input
         else {
             return Err(HarnessError::ParkResumeUnsupported);
@@ -434,28 +452,67 @@ impl HarnessSession for InternalSession {
                 "park {park_ref} did not wait on {decided}"
             )));
         }
-        self.settle_park(call_id, &decision).await?;
-        let Some(turn) = self
-            .state
-            .store
-            .get_turn(turn_id)
-            .await
-            .map_err(store_error)?
-        else {
+        // The chat route or `decide` already settled the row. Client-wait
+        // parks drop the lease; a live running claim is reused. Yield so the
+        // settling request can drop its SQLite write lock before we claim.
+        tokio::task::yield_now().await;
+        let mut lease_token = None;
+        let mut turn = None;
+        for _ in 0..40 {
+            let token = uuid::Uuid::new_v4();
+            let now = Utc::now();
+            let claimed = match self
+                .db
+                .take_lease_on_turn(turn_id, token, now, now + chrono::Duration::seconds(60))
+                .await
+            {
+                Ok(value) => value,
+                Err(error) if error.to_string().contains("database is locked") => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    continue;
+                }
+                Err(error) => return Err(store_error(error)),
+            };
+            let loaded = match self.state.store.get_turn(turn_id).await {
+                Ok(value) => value,
+                Err(error) if error.to_string().contains("database is locked") => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    continue;
+                }
+                Err(error) => return Err(store_error(error)),
+            };
+            let Some(loaded) = loaded else {
+                return Err(HarnessError::Other(format!(
+                    "turn {turn_id} was not claimed before the resume"
+                )));
+            };
+            match (claimed, loaded.lease_token) {
+                (Some(()), _) => {
+                    lease_token = Some(token);
+                    turn = Some(loaded);
+                    break;
+                }
+                (None, Some(existing)) => {
+                    lease_token = Some(existing);
+                    turn = Some(loaded);
+                    break;
+                }
+                (None, None) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            }
+        }
+        let (Some(lease_token), Some(turn)) = (lease_token, turn) else {
             return Err(HarnessError::Other(format!(
-                "turn {turn_id} was not claimed before the resume"
+                "could not claim a lease on turn {turn_id} before resume"
             )));
-        };
-        let Some(lease_token) = turn.lease_token else {
-            return Err(HarnessError::Other(format!("turn {turn_id} has no lease")));
         };
         let outcome = self
             .driver
             .run_turn(turn, lease_token)
             .await
             .map_err(|error| HarnessError::Other(error.to_string()))?;
-        *self.active.lock().expect("active turn") = None;
-        Ok(Self::map_leg_outcome(turn_id, outcome))
+        Ok(self.map_and_release(turn_id, outcome))
     }
 
     async fn decide(

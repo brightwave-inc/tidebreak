@@ -135,7 +135,8 @@ async fn temp_db_store(database_name: &str) -> (tempfile::TempDir, DbStore) {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join(database_name);
     std::fs::copy(&template.database, &database).unwrap();
-    let store = DbStore::connect(&format!("sqlite://{}?mode=rw", database.display()))
+    let url = format!("sqlite://{}?mode=rw", database.display());
+    let store = DbStore::connect_with_options(crate::host_connect_options(&url))
         .await
         .unwrap();
     (directory, store)

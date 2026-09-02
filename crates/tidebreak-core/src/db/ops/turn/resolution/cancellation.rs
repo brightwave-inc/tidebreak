@@ -68,7 +68,12 @@ async fn request_turn_cancellation_inner(
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     };
-    let status = turn_run_status_from_db(&turn.status)?;
+    let adapter_approval_call = super::super::approval_park_call_id(&turn)?;
+    let status = if adapter_approval_call.is_some() {
+        TurnRunStatus::WaitingForClient
+    } else {
+        turn_run_status_from_db(&turn.status)?
+    };
     match status {
         TurnRunStatus::Cancelling | TurnRunStatus::CancellingClient | TurnRunStatus::Cancelled => {
             let sequenced_event = if status == TurnRunStatus::Cancelled {
@@ -140,6 +145,7 @@ async fn request_turn_cancellation_inner(
         if wait.session_id != turn.session_id
             || wait.attempt_count != turn.attempt_count
             || wait.claim_count != turn.claim_count
+            || adapter_approval_call.is_some_and(|call_id| call_id.0 != wait.call_id)
         {
             return Err(AgentError::Store(format!(
                 "waiting turn {id} has a mismatched client receipt"

@@ -96,6 +96,55 @@ where
     Ok(())
 }
 
+/// Bind a code turn's existing image rows to its user transcript message.
+pub(in crate::db) async fn bind_turn_to_message_on<C>(
+    conn: &C,
+    turn_id: TurnId,
+    message_id: MessageId,
+) -> Result<Vec<ImageRef>>
+where
+    C: ConnectionTrait,
+{
+    let rows = entities::code_turn_attachment::Entity::find()
+        .filter(entities::code_turn_attachment::Column::TurnId.eq(turn_id.0))
+        .order_by_asc(entities::code_turn_attachment::Column::Ordinal)
+        .all(conn)
+        .await
+        .map_err(store_err)?;
+    let mut unbound = 0_u64;
+    let mut images = Vec::with_capacity(rows.len());
+    for row in &rows {
+        match row.message_id {
+            None => unbound = unbound.saturating_add(1),
+            Some(bound) if bound == message_id.0 => {}
+            Some(bound) => {
+                return Err(AgentError::Store(format!(
+                    "turn {turn_id} attachment is already bound to message {bound}"
+                )))
+            }
+        }
+        images.push(image_from_model(row)?);
+    }
+    if unbound > 0 {
+        let updated = entities::code_turn_attachment::Entity::update_many()
+            .col_expr(
+                entities::code_turn_attachment::Column::MessageId,
+                sea_orm::sea_query::Expr::value(Some(message_id.0)),
+            )
+            .filter(entities::code_turn_attachment::Column::TurnId.eq(turn_id.0))
+            .filter(entities::code_turn_attachment::Column::MessageId.is_null())
+            .exec(conn)
+            .await
+            .map_err(store_err)?;
+        if updated.rows_affected != unbound {
+            return Err(AgentError::Store(format!(
+                "turn {turn_id} attachments changed while binding the transcript message"
+            )));
+        }
+    }
+    Ok(images)
+}
+
 /// Every attachment in `chat_id`, ordered by message then submission position.
 pub(in crate::db) async fn list_for_chat(
     store: &DbStore,

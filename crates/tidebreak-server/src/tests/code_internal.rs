@@ -748,7 +748,12 @@ async fn a_questions_park_answered_from_the_chat_route_resumes_the_session() {
         .await
         .expect("the turn completes")
         .unwrap();
-    assert!(response.status().is_success(), "{}", response.status());
+    let response_status = response.status();
+    let response_body = response.text().await.unwrap();
+    assert!(
+        response_status.is_success(),
+        "{response_status} {response_body}"
+    );
     assert_eq!(
         turn_statuses(&client, addr, &token, hosted).await,
         vec!["completed"]
@@ -829,7 +834,12 @@ async fn a_plan_accepted_from_the_chat_route_resumes_the_session() {
             .await
             .expect("the turn completes")
             .unwrap();
-        assert!(response.status().is_success(), "{}", response.status());
+        let response_status = response.status();
+        let response_body = response.text().await.unwrap();
+        assert!(
+            response_status.is_success(),
+            "{response_status} {response_body}"
+        );
         assert_eq!(
             turn_statuses(&client, addr, &token, hosted).await,
             vec!["completed"],
