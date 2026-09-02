@@ -191,7 +191,12 @@ const disconnectRemoteMachine = vi.hoisted(() =>
   vi.fn(async () => ({ attachment: "local" as const, baseUrl: null })),
 );
 
-vi.mock("./boot", () => ({ resolveServerInfo }));
+// Partial: boot's hosted branch also exports the error class the shell
+// branches on, and a mock without it would turn that check into a crash.
+vi.mock("./boot", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./boot")>()),
+  resolveServerInfo,
+}));
 
 // Partial: the shell reaches for three of this module's functions and the
 // settings panel for the rest, so replacing the whole module would break

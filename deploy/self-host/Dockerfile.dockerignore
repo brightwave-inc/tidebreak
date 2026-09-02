@@ -21,6 +21,16 @@
 !crates/tidebreak-code-execution/baseline_python_deps.txt
 !crates/tidebreak-sandbox-agent/documents-requirements.txt
 
+# The desktop renderer, which the image builds and the server serves to
+# browsers. The whole package directory, because Vite's inputs are its
+# manifests, `index.html`, `public/`, and `src/` together. The deny rules
+# below still win for what must never reach the daemon: `node_modules`, a
+# stale `dist`, and every hidden file — `.npmrc` and `.storybook` included,
+# neither of which the production build reads.
+!crates/tidebreak-desktop/
+!crates/tidebreak-desktop/ui/
+!crates/tidebreak-desktop/ui/**
+
 # Built-in manifests are source inputs for compile-time contract checks. Admit
 # only the reviewed manifest names, not arbitrary files beside them.
 !skills/

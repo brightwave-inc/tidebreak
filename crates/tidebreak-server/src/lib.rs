@@ -105,6 +105,7 @@ mod source_tools;
 mod state;
 mod store_ownership;
 mod task_plan_tool;
+mod ui_bundle;
 mod update_quiesce;
 mod vault_secrets;
 mod view_frames;
@@ -121,7 +122,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::extract::DefaultBodyLimit;
+use axum::extract::{DefaultBodyLimit, Request};
 use axum::http::{header, Method};
 use axum::routing::{delete, get, patch, post};
 use axum::Router;
@@ -1253,10 +1254,25 @@ pub fn app(state: AppState) -> Router {
         )
         .with_state(frame_state);
 
-    Router::new()
+    let root = Router::new()
         .merge(view_frames)
         .merge(auth_discovery)
-        .merge(api)
+        .merge(api);
+    // The renderer bundle, when this machine carries one, answers what no
+    // route claimed. It sits with the API inside the origin and CORS layers
+    // and outside `require_token`: a page has to load before it can hold a
+    // bearer. Without a bundle the fallback stays axum's own `404`.
+    let root = match state.config.ui_dist.clone() {
+        Some(dist) => {
+            let dist = Arc::new(dist);
+            root.fallback(move |request: Request| {
+                let dist = dist.clone();
+                async move { ui_bundle::serve(dist, request).await }
+            })
+        }
+        None => root,
+    };
+    root
         // Inside CORS, so a foreign preflight is answered by the CORS layer's
         // own rejection rather than by a bare 403.
         .layer(axum::middleware::from_fn_with_state(
@@ -2460,6 +2476,9 @@ async fn bind_inner(
     let data_dir = state.config.data_dir.clone();
     let mcp_runtime = state.mcp.clone();
     let gateway_runtime = state.gateway.clone();
+    if let Some(dist) = state.config.ui_dist.as_deref() {
+        ui_bundle::verify(dist)?;
+    }
     let router = app(state);
 
     let listener = TcpListener::bind(bind_addr)

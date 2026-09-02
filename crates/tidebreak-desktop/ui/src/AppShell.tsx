@@ -21,7 +21,8 @@ import {
 } from "./api";
 import { AppContextProvider, type AppContextValue } from "./AppContext";
 
-import { resolveServerInfo } from "./boot";
+import { HostedSignInRequired, resolveServerInfo } from "./boot";
+import { HostedSignIn } from "./HostedSignIn";
 import {
   BootFailure,
   type BootAttachment,
@@ -239,6 +240,11 @@ export function AppShell() {
   const [bootAttachment, setBootAttachment] = useState<BootAttachment | null>(
     null,
   );
+  // A hosted browser tab that holds no session. Not a failure: the machine
+  // answered, and the page knows which console can sign it in.
+  const [hostedSignIn, setHostedSignIn] = useState<{
+    gatewayUrl: string | null;
+  } | null>(null);
   const [appVersion, setAppVersion] = useState<string | null>(null);
   const [info, setInfo] = useState<ServerInfo | null>(null);
   const [client, setClient] = useState<ApiClient | null>(null);
@@ -506,7 +512,12 @@ export function AppShell() {
         connectOutputs(server.baseUrl, server.token);
         setStatus(`connected ${server.baseUrl}`);
       } catch (err) {
-        if (!cancelled) setBootFailure({ stage: "connect", error: err });
+        if (cancelled) return;
+        if (err instanceof HostedSignInRequired) {
+          setHostedSignIn({ gatewayUrl: err.gatewayUrl });
+          return;
+        }
+        setBootFailure({ stage: "connect", error: err });
       }
     })();
     return () => {
@@ -515,7 +526,11 @@ export function AppShell() {
   }, [bootAttempt]);
 
   useEffect(() => {
-    if (!client || !info?.gatewayAuth) return;
+    // The shell mints a fresh bearer from the gateway session it holds. A
+    // browser tab holds no such session: its bearer arrived once from the
+    // console and lasts its hour, after which the reader re-enters from
+    // there. Nothing here to refresh from, so nothing to schedule.
+    if (!client || !info?.gatewayAuth || !hasNativeHost()) return;
     let cancelled = false;
     const refresh = async () => {
       try {
@@ -952,6 +967,7 @@ export function AppShell() {
    */
   function retryBoot() {
     setBootFailure(null);
+    setHostedSignIn(null);
     setClient(null);
     setInfo(null);
     setStatus("starting…");
@@ -1064,6 +1080,17 @@ export function AppShell() {
       stableActions,
     ],
   );
+
+  if (hostedSignIn) {
+    return (
+      <HostedSignIn
+        reason="no_session"
+        machineUrl={window.location.origin}
+        gatewayUrl={hostedSignIn.gatewayUrl}
+        onRetry={retryBoot}
+      />
+    );
+  }
 
   if (bootFailure) {
     return (

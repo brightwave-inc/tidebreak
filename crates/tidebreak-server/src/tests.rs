@@ -2654,3 +2654,164 @@ pub(crate) fn dispatchable(
         resolution: None,
     }
 }
+
+/// A router over `dist`, or over no bundle at all.
+async fn ui_bundle_app(dist: Option<&std::path::Path>) -> (Router, Arc<str>, tempfile::TempDir) {
+    let (dir, store) = temp_db_store("t.db").await;
+    let store: Arc<dyn Store> = Arc::new(store);
+    let mut config = Config::desktop(dir.path());
+    config.ui_dist = dist.map(std::path::Path::to_path_buf);
+    let state = AppState::new(
+        config,
+        store,
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let token = state.token.clone();
+    (app(state), token, dir)
+}
+
+fn ui_bundle_fixture() -> tempfile::TempDir {
+    let dist = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dist.path().join("index.html"),
+        "<!doctype html><title>Tidebreak</title>",
+    )
+    .unwrap();
+    std::fs::create_dir(dist.path().join("assets")).unwrap();
+    std::fs::write(dist.path().join("assets").join("app-abc123.js"), "boot()").unwrap();
+    dist
+}
+
+async fn text_body(response: axum::response::Response) -> String {
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    String::from_utf8(bytes.to_vec()).unwrap()
+}
+
+/// The hosted machine's page contract: a navigation lands on the bundle for
+/// any path the API does not own, a `fetch` for an unknown route still
+/// learns it is unknown, and the API keeps its own answers ahead of the
+/// bundle. Without a bundle nothing changes — an unknown path is a `404`,
+/// not a `401` and not a page.
+#[tokio::test]
+async fn a_configured_ui_bundle_answers_navigations_and_nothing_else() {
+    let dist = ui_bundle_fixture();
+    let (router, bearer, _dir) = ui_bundle_app(Some(dist.path())).await;
+    let get = |path: &str, accept: &str| {
+        Request::builder()
+            .uri(path)
+            .header(header::ACCEPT, accept)
+            .body(Body::empty())
+            .unwrap()
+    };
+    const NAVIGATION: &str = "text/html,application/xhtml+xml,*/*;q=0.8";
+
+    let root = router.clone().oneshot(get("/", NAVIGATION)).await.unwrap();
+    assert_eq!(root.status(), StatusCode::OK);
+    assert_eq!(root.headers()[header::CACHE_CONTROL], "no-cache");
+    assert!(text_body(root).await.contains("<title>Tidebreak</title>"));
+
+    // A deep link: no such file, but a navigation, so the page answers and
+    // the renderer's own router takes it from there.
+    let deep = router
+        .clone()
+        .oneshot(get("/settings/machine", NAVIGATION))
+        .await
+        .unwrap();
+    assert_eq!(deep.status(), StatusCode::OK);
+    assert!(text_body(deep).await.contains("<title>Tidebreak</title>"));
+
+    // Hashed assets are held forever; they change name when they change.
+    let asset = router
+        .clone()
+        .oneshot(get("/assets/app-abc123.js", "*/*"))
+        .await
+        .unwrap();
+    assert_eq!(asset.status(), StatusCode::OK);
+    assert_eq!(
+        asset.headers()[header::CACHE_CONTROL],
+        "public, max-age=31536000, immutable"
+    );
+    assert_eq!(text_body(asset).await, "boot()");
+
+    // A `fetch` for a route that does not exist is told so.
+    let missing = router
+        .clone()
+        .oneshot(get("/settings/machine", "application/json"))
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    let posted = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/settings/machine")
+                .header(header::ACCEPT, NAVIGATION)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(posted.status(), StatusCode::NOT_FOUND);
+
+    // The API is matched first: a navigation to an API route is the API's
+    // answer, bearer check included, never the page.
+    let api = router
+        .clone()
+        .oneshot(get("/chats", NAVIGATION))
+        .await
+        .unwrap();
+    assert_eq!(api.status(), StatusCode::UNAUTHORIZED);
+    let api = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/chats")
+                .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+                .header(header::ACCEPT, NAVIGATION)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(api.status(), StatusCode::OK);
+
+    // Escaping the bundle directory is refused, navigation or not.
+    let escape = router
+        .clone()
+        .oneshot(get("/../tidebreak.db", "*/*"))
+        .await
+        .unwrap();
+    assert_ne!(escape.status(), StatusCode::OK);
+
+    let (bare, _bearer, _dir) = ui_bundle_app(None).await;
+    let unknown = bare.clone().oneshot(get("/", NAVIGATION)).await.unwrap();
+    assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+    let unknown = bare
+        .oneshot(get("/settings/machine", NAVIGATION))
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+}
+
+/// The bundle is checked before the server listens: an image that forgot to
+/// copy it refuses to boot, naming the path, instead of serving `404`s.
+#[test]
+fn a_ui_bundle_without_an_index_page_is_refused_at_bind() {
+    let dist = tempfile::tempdir().unwrap();
+    let refusal = ui_bundle::verify(dist.path()).unwrap_err().to_string();
+    assert!(refusal.contains("index.html"), "{refusal}");
+    assert!(
+        refusal.contains(&dist.path().display().to_string()),
+        "{refusal}"
+    );
+
+    std::fs::write(dist.path().join("index.html"), "<!doctype html>").unwrap();
+    ui_bundle::verify(dist.path()).unwrap();
+}

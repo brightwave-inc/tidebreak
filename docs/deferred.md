@@ -39,8 +39,12 @@ a remote deployment.
 The first member client is now specified:
 [decision 47](decisions/0047-gateway-linked-hosting.md) is a desktop remote
 connection mode (URL, token, TLS except on loopback) with host authority
-degrading on a remote machine. A hosted web UI remains a later surface on
-that same wire. The supervision-first mobile client is unparked as #2644.
+degrading on a remote machine. The hosted web UI is unparked:
+[decision 82](decisions/0082-the-hosted-machine-serves-the-renderer.md) has
+the machine serve the desktop renderer to browsers, with a session that lasts
+its bearer. Refreshing a browser session without re-entering through the
+gateway console stays parked until someone keeps a tab open past an hour and
+minds. The supervision-first mobile client is unparked as #2644.
 Auth beyond the static token file is sequenced there too:
 roster-provisioned tokens first, a gateway authenticator behind decision 6's
 credential-to-principal seam as the end state.

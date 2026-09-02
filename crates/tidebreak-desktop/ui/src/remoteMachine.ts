@@ -7,6 +7,7 @@ import type {
 } from "./api";
 import type { HostAuthority } from "./host";
 import { attachedRemotely, hostAuthorityRefusal } from "./host";
+import { hostedSession } from "./hostedSession";
 import { friendlyErrorMessage } from "./lib/utils";
 
 /**
@@ -22,9 +23,19 @@ import { friendlyErrorMessage } from "./lib/utils";
  * wording below is the renderer's to change without touching the shell.
  */
 
-/** Which machine this client is attached to. */
+/**
+ * Which machine this client is attached to.
+ *
+ * Outside the native shell the answer is the page's: a tab served by a
+ * machine is attached to that machine, and any other browser tab is local.
+ */
 export async function remoteMachineState(): Promise<RemoteMachineState> {
-  if (!isTauri()) return { attachment: "local", baseUrl: null };
+  if (!isTauri()) {
+    const hosted = hostedSession();
+    return hosted
+      ? { attachment: "remote", baseUrl: hosted.baseUrl }
+      : { attachment: "local", baseUrl: null };
+  }
   return await invoke<RemoteMachineState>("remote_machine_state");
 }
 

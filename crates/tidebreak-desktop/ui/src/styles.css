@@ -2034,6 +2034,10 @@ body {
   .boot {
     height: 100%;
     display: grid;
+    /* One track the width of the screen, never the width of the widest
+       line: a browser tab can be far narrower than any desktop window, and
+       an auto track would size to the copy and push it off the edge. */
+    grid-template-columns: minmax(0, 1fr);
     place-items: center;
     text-align: center;
     padding: 2rem;
@@ -2062,6 +2066,20 @@ body {
   .boot p {
     color: var(--muted-foreground);
     margin: 0;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+  }
+
+  .boot .welcome-copy {
+    max-width: min(34rem, 100%);
+  }
+
+  .boot .welcome-copy h2 {
+    text-wrap: balance;
+  }
+
+  .boot .welcome-copy p {
+    text-wrap: pretty;
   }
 
   .boot .boot-error-detail {

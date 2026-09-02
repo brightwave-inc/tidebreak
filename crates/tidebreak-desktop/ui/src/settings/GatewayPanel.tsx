@@ -33,6 +33,7 @@ import {
   remoteConnectError,
   remoteMachineState,
 } from "@/remoteMachine";
+import { hasNativeHost } from "@/host";
 import { friendlyErrorMessage } from "@/lib/utils";
 import {
   SettingsError,
@@ -58,6 +59,12 @@ export type MachineControls = {
   attachWithToken: (baseUrl: string, token: string) => Promise<unknown>;
   detach: () => Promise<unknown>;
   /**
+   * Whether this window has a server of its own to return to. The desktop
+   * does; a browser tab served by the machine is only ever attached to it,
+   * and offering to disconnect would offer a place that does not exist.
+   */
+  detachable: boolean;
+  /**
    * Rebuild this window against the machine that is now current.
    *
    * A reload rather than a state update: the API client, the event stream,
@@ -72,6 +79,7 @@ const NATIVE_MACHINE: MachineControls = {
   attachWithGateway: connectGatewayRemoteMachine,
   attachWithToken: connectRemoteMachine,
   detach: disconnectRemoteMachine,
+  detachable: hasNativeHost(),
   reattach: () => window.location.reload(),
 };
 
@@ -665,20 +673,30 @@ function MachineSections({
                 <span>{state?.baseUrl}</span>
               </p>
             </SettingsField>
-            <p className="text-sm text-muted-foreground">
-              Disconnecting returns this window to the server inside this app.
-              It changes nothing on the remote machine.
-            </p>
-            <div>
-              <Button
-                variant="outline"
-                onClick={() => void detach()}
-                disabled={busy}
-              >
-                <Laptop size={16} aria-hidden />
-                Work on this computer
-              </Button>
-            </div>
+            {machine.detachable ? (
+              <>
+                <p className="text-sm text-muted-foreground">
+                  Disconnecting returns this window to the server inside this
+                  app. It changes nothing on the remote machine.
+                </p>
+                <div>
+                  <Button
+                    variant="outline"
+                    onClick={() => void detach()}
+                    disabled={busy}
+                  >
+                    <Laptop size={16} aria-hidden />
+                    Work on this computer
+                  </Button>
+                </div>
+              </>
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                You opened this machine in your browser. Closing the tab stops
+                watching; the work here keeps running, and the Tidebreak desktop
+                app can attach to the same machine.
+              </p>
+            )}
           </>
         ) : (
           <>
@@ -761,9 +779,11 @@ function MachineSections({
       <SettingsSection
         title="What stays on this computer"
         description={
-          remote
-            ? "These reach this computer's files, screen, and input. Your conversation is not on this computer, so they are unavailable until you disconnect."
-            : "These reach this computer's files, screen, and input. Attaching to a remote machine makes them unavailable, because your conversation would not be on this computer."
+          remote && !machine.detachable
+            ? "These reach this computer's files, screen, and input. Your conversation is not on this computer, so they are unavailable in this tab."
+            : remote
+              ? "These reach this computer's files, screen, and input. Your conversation is not on this computer, so they are unavailable until you disconnect."
+              : "These reach this computer's files, screen, and input. Attaching to a remote machine makes them unavailable, because your conversation would not be on this computer."
         }
       >
         <ul className="flex flex-col gap-2 text-sm">

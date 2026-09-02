@@ -1072,8 +1072,20 @@ test(
       "crates/tidebreak-sandbox-agent/documents-requirements.txt",
       "skills/demo/SKILL.md",
       "plugins/demo/PLUGIN.md",
+      // The renderer the image builds: manifests, the page, and sources.
+      "crates/tidebreak-desktop/ui/package.json",
+      "crates/tidebreak-desktop/ui/pnpm-lock.yaml",
+      "crates/tidebreak-desktop/ui/index.html",
+      "crates/tidebreak-desktop/ui/public/favicon.svg",
+      "crates/tidebreak-desktop/ui/src/main.tsx",
     ];
     const excluded = [
+      // Never a dependency tree, a stale bundle, or the hidden config
+      // beside the renderer sources.
+      "crates/tidebreak-desktop/ui/node_modules/vite/index.js",
+      "crates/tidebreak-desktop/ui/dist/index.html",
+      "crates/tidebreak-desktop/ui/.npmrc",
+      "crates/tidebreak-desktop/ui/.storybook/main.ts",
       "crates/demo/.npmrc",
       "crates/demo/src/.netrc",
       "crates/demo/src/deep/.pypirc",
