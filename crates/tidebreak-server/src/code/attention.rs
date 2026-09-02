@@ -452,7 +452,13 @@ async fn build_digest(
     // The newest recapped turn speaks for the session: a turn the model
     // declined to recap, or one whose call is still in flight, leaves the
     // previous line standing rather than blanking the row mid-work.
-    let recap = turns.into_iter().rev().find_map(|turn| turn.narrative);
+    // Claude Code supplies its own closing recap. Do not carry an older
+    // Tidebreak fallback forward after a Claude turn finishes.
+    let recap = if session.harness_kind == tidebreak_core::HarnessKind::ClaudeCode {
+        None
+    } else {
+        turns.into_iter().rev().find_map(|turn| turn.narrative)
+    };
     // A session with no workspace is titled by its conversation, which
     // nothing names yet; the client falls back to its own label.
     let (title, pr_state) = match workspace {

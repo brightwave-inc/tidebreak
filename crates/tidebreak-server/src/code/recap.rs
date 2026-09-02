@@ -5,13 +5,10 @@
 //! calls" — it is "where is this, and what happens next". This answers that in
 //! a sentence, derived once per turn and stored on the turn it describes.
 //!
-//! Claude Code has the same feature and calls it `awaySummary`, but we cannot
-//! reuse it: it reaches its reader through the TUI's own Ink hook or through
-//! `notifyMetadataChanged({recap})` on the Remote Control channel, and we drive
-//! engines headlessly over stream-json, which carries neither. `/recap` is a
-//! TUI-local command rather than a turn we can send. Codex, OpenCode, and Grok
-//! have no equivalent at all. Deriving it ourselves is what makes it the same
-//! feature on all four engines instead of a Claude Code detail.
+//! Claude Code already closes a successful turn with a captured assistant
+//! recap. Running this derivation too repeats the same outcome and spends a
+//! second model call. Claude sessions therefore keep the captured recap, while
+//! the other engines use this fallback when the setting is enabled.
 //!
 //! It is not asked of the harness. A recap asked there would be a real turn: it
 //! would append to the engine's own history, land in the transcript, and
@@ -52,7 +49,7 @@ use tidebreak_core::db::code::{
     get_session, get_turn, list_recent_events, list_turns, set_turn_narrative,
 };
 use tidebreak_core::{
-    CodeEvent, CodeSessionId, CodeTurnId, CodeTurnStatus, DbStore, OwnerId, Result,
+    CodeEvent, CodeSessionId, CodeTurnId, CodeTurnStatus, DbStore, HarnessKind, OwnerId, Result,
 };
 
 use crate::chat_titling::{derive_text_with_retries, head, Proposal};
@@ -60,8 +57,8 @@ use crate::resolver::ProviderResolver;
 
 use super::bus::CodeEventBus;
 
-/// Store key. Default on: completed code turns receive a one-line recap unless
-/// the reader turns the feature off in agent settings.
+/// Store key. Default on: completed turns that need a fallback receive a
+/// one-line recap unless the reader turns the feature off in agent settings.
 pub(crate) const TURN_RECAPS_SETTING: &str = "code.turn_recaps";
 
 /// Longest recap stored, and the bound the schema states.
@@ -133,9 +130,9 @@ pub(crate) enum Outcome {
     Recapped(String),
     /// The model declined: the turn is not worth a line.
     Declined,
-    /// Nothing to do — recaps are off, the turn is missing, unfinished,
-    /// already recapped, has nothing to describe, or this machine has no
-    /// utility model.
+    /// Nothing to do — recaps are off, Claude already supplied one, the turn
+    /// is missing, unfinished, already recapped, has nothing to describe, or
+    /// this machine has no utility model.
     NotApplicable,
 }
 
@@ -243,6 +240,12 @@ impl TurnRecapper {
         let Some(session) = get_session(&self.db, owner, session_id).await? else {
             return Ok(Outcome::NotApplicable);
         };
+        // Claude Code's final top-level assistant message is already captured
+        // in the transcript and presented as the turn recap. A second utility
+        // call would restate it in another UI slot.
+        if session.harness_kind == HarnessKind::ClaudeCode {
+            return Ok(Outcome::NotApplicable);
+        }
         let material = self.material(owner, session_id, &turn).await?;
         if material.is_empty() {
             // A turn with no request and no journaled work says nothing worth
