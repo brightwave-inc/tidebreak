@@ -5404,7 +5404,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/embedpdf/embed-pdf-viewer
 - License text: `LICENSE` ([L-f85a60da669c](#l-f85a60da669c))
 
-### @extend-ai/react-docx 0.8.3
+### @extend-ai/react-docx 0.8.4
 
 - License: `MIT`
 - Repository: https://github.com/extend-hq/react-docx.git
@@ -5416,7 +5416,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/extend-hq/react-pptx.git
 - License text: `LICENSE` ([L-89aba894e358](#l-89aba894e358))
 
-### @extend-ai/react-xlsx 0.16.1
+### @extend-ai/react-xlsx 0.16.2
 
 - License: `MIT`
 - Repository: git+https://github.com/extend-hq/react-xlsx.git
@@ -5997,7 +5997,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/DefinitelyTyped/DefinitelyTyped.git
 - License text: `LICENSE` ([L-d9a1b1e30d63](#l-d9a1b1e30d63))
 
-### @types/react-dom 19.2.4
+### @types/react-dom 19.2.5
 
 - License: `MIT`
 - Repository: https://github.com/DefinitelyTyped/DefinitelyTyped.git
@@ -7387,7 +7387,7 @@ License identifiers named across all declared expressions:
 - Repository: wooorm/lowlight
 - License text: `license` ([L-ea559213e0e9](#l-ea559213e0e9))
 
-### lucide-react 1.33.0
+### lucide-react 1.37.0
 
 - License: `ISC`
 - Repository: https://github.com/lucide-icons/lucide.git
@@ -7411,7 +7411,7 @@ License identifiers named across all declared expressions:
 - Repository: git://github.com/markedjs/marked.git
 - License text: `LICENSE.md` ([L-dd923de97698](#l-dd923de97698))
 
-### marked 18.0.10
+### marked 18.0.11
 
 - License: `MIT`
 - Repository: git+https://github.com/markedjs/marked.git
