@@ -493,6 +493,7 @@ impl HarnessAdapter for ScriptedAdapter {
             standing_grants: self.standing_grants,
             mid_turn_resume: CapLevel::Unsupported,
             transcript: CapLevel::Unsupported,
+            memory_loopback: CapLevel::Unsupported,
         }
     }
 

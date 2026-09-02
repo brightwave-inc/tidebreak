@@ -620,6 +620,7 @@ mod tests {
                 standing_grants: CapLevel::Unsupported,
                 mid_turn_resume: CapLevel::Unsupported,
                 transcript: CapLevel::Unsupported,
+                memory_loopback: CapLevel::Unsupported,
             }
         }
 

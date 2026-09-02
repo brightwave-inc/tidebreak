@@ -133,6 +133,7 @@ impl HarnessAdapter for GrokAdapter {
             standing_grants: CapLevel::Unsupported,
             mid_turn_resume: CapLevel::Unsupported,
             transcript: CapLevel::Unsupported,
+            memory_loopback: CapLevel::Unsupported,
         };
         // Off the captured 1.0 line the unprompted-write observation behind
         // Auto no longer holds; a later default posture is unproven
@@ -575,6 +576,7 @@ mod tests {
             relay_auth: None,
             relay_key_env: None,
             resume_ref: None,
+            new_session_id: None,
             prompt_file: Path::new("/tmp/prompt.txt"),
             mode: PermissionMode::Auto,
             model: None,
@@ -610,6 +612,7 @@ mod tests {
             relay_auth: None,
             relay_key_env: None,
             resume_ref: None,
+            new_session_id: None,
             prompt_file: Path::new("/tmp/prompt.txt"),
             mode: PermissionMode::Allow,
             model: None,

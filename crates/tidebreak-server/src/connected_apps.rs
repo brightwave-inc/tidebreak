@@ -47,6 +47,10 @@ pub(crate) struct RestApiDefinition {
     /// Stored credential reference and placement, when the API needs one.
     /// The referenced value never appears in the definition.
     pub credential: Option<RestCredential>,
+    /// Explicit consent to send this record as plain HTTP to a loopback IP
+    /// literal. Default false so existing records keep requiring https.
+    #[serde(default)]
+    pub allow_loopback_http: bool,
 }
 
 impl RestApiDefinition {
@@ -55,6 +59,7 @@ impl RestApiDefinition {
         RestApiTarget {
             base_url: self.base_url.clone(),
             credential: self.credential.clone(),
+            allow_loopback_http: self.allow_loopback_http,
         }
     }
 }
@@ -87,12 +92,13 @@ pub(crate) fn parse_rest_api_definition(
 /// fields in declaration order, and every key is always present):
 ///
 /// ```json
-/// {"v":2,
+/// {"v":3,
 ///  "kind":"rest_api",
 ///  "base_url":string,
 ///  "document_sha256":string,
 ///  "credential_reference":string|null,
-///  "placement":"bearer"|{"header":name}|null}
+///  "placement":"bearer"|{"header":name}|null,
+///  "allow_loopback_http":bool}
 /// ```
 ///
 /// `document_sha256` is the catalog's hash of the raw OpenAPI document bytes,
@@ -103,8 +109,8 @@ pub(crate) fn parse_rest_api_definition(
 /// while repointing the reference does. The value itself never enters the
 /// form, so the fingerprint can never be a value oracle. `kind` roots the
 /// form in the connected-app vocabulary so no two kinds can collide on a
-/// canonical serialization, and `v:2` aligns with the `mcp_server` form's
-/// current version.
+/// canonical serialization. `v:3` adds `allow_loopback_http` to the consent
+/// surface: toggling the flag re-prompts.
 ///
 /// **This canonical form is a compatibility surface.** Persisted grants store
 /// the digest; changing the form (or the meaning of any field in it)
@@ -120,10 +126,11 @@ pub(crate) fn rest_api_fingerprint(definition: &RestApiDefinition) -> [u8; 32] {
         document_sha256: &'a str,
         credential_reference: Option<&'a str>,
         placement: Option<&'a CredentialPlacement>,
+        allow_loopback_http: bool,
     }
 
     let canonical = CanonicalDefinition {
-        v: 2,
+        v: 3,
         kind: "rest_api",
         base_url: &definition.base_url,
         document_sha256: &definition.catalog.document_sha256,
@@ -135,6 +142,7 @@ pub(crate) fn rest_api_fingerprint(definition: &RestApiDefinition) -> [u8; 32] {
             .credential
             .as_ref()
             .map(|credential| &credential.placement),
+        allow_loopback_http: definition.allow_loopback_http,
     };
     let bytes = serde_json::to_vec(&canonical)
         .expect("a canonical definition serializes infallibly to JSON");
@@ -647,6 +655,7 @@ mod tests {
                 operations: BTreeMap::new(),
             },
             credential,
+            allow_loopback_http: false,
         }
     }
 
@@ -711,6 +720,14 @@ mod tests {
         ] {
             assert_ne!(rest_api_fingerprint(&changed), baseline, "{changed:?}");
         }
+
+        let mut loopback = definition(
+            "http://127.0.0.1:23373/v0",
+            "doc-hash-a",
+            Some(credential("sentry-token", CredentialPlacement::Bearer)),
+        );
+        loopback.allow_loopback_http = true;
+        assert_ne!(rest_api_fingerprint(&loopback), baseline);
 
         // Catalog operations enter the form only through the document hash: a
         // catalog carrying extra parsed operations under the same document

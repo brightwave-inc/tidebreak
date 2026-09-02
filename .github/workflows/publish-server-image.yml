@@ -57,6 +57,16 @@ run-name: >-
 # whole point of that lane. Consumers that need an immutable reference pin the
 # digest, which every run prints in its step summary.
 #
+# Every pushed manifest — each per-architecture image and the multi-arch
+# index — carries a GitHub build-provenance attestation (docs/decisions/0084).
+# A consumer verifies a digest offline against the Sigstore trust root and
+# reads the signing identity from the certificate:
+#
+#   https://github.com/<owner>/tidebreak/.github/workflows/publish-server-image.yml@<ref>
+#
+# so this file's path is a public contract; moving it changes the identity of
+# every image published afterwards.
+#
 # Publishing uses the workflow's own GITHUB_TOKEN; no repository secret is
 # consumed. First-time note: a package created by this workflow is private by
 # default — making it publicly pullable (and linking it to the repository) is a
@@ -222,6 +232,10 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # Attestation: the OIDC token signs, and the bundle is stored under
+      # this repository.
+      id-token: write
+      attestations: write
     env:
       BUILD_SHA: ${{ needs.resolve.outputs.build_sha }}
       IMMUTABLE: ${{ needs.resolve.outputs.immutable }}
@@ -286,6 +300,27 @@ jobs:
       - name: Push the per-architecture tag
         run: docker push "$SERVER_REPOSITORY:$VERSION-${{ matrix.arch }}"
 
+      # The digest is read back from the registry rather than from the local
+      # image: the attestation must name exactly the manifest consumers pull.
+      - name: Read the pushed manifest digest
+        id: pushed
+        run: |
+          digest="$(docker buildx imagetools inspect \
+            "$SERVER_REPOSITORY:$VERSION-${{ matrix.arch }}" \
+            --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "unexpected digest for $SERVER_REPOSITORY:$VERSION-${{ matrix.arch }}: $digest" >&2
+            exit 1
+          }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Attest the per-architecture manifest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.SERVER_REPOSITORY }}
+          subject-digest: ${{ steps.pushed.outputs.digest }}
+          push-to-registry: true
+
   manifest:
     # Assembles the user-facing tags only after every architecture has built
     # and pushed.
@@ -296,6 +331,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
     env:
       VERSION: ${{ needs.resolve.outputs.version }}
     steps:
@@ -324,6 +361,7 @@ jobs:
       # The digest is the reference deployments pin, so print it where a human
       # and a copy-paste can both reach it.
       - name: Record the published digest
+        id: published
         env:
           PUBLISH_LATEST: ${{ needs.resolve.outputs.publish_latest }}
         run: |
@@ -334,6 +372,7 @@ jobs:
             echo "unexpected digest for $SERVER_REPOSITORY:$VERSION: $digest" >&2
             exit 1
           }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
           echo "Published $SERVER_REPOSITORY:$VERSION at $digest"
           {
             echo "## Published server image"
@@ -349,3 +388,13 @@ jobs:
             echo "$SERVER_REPOSITORY@$digest"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # The index is what a version tag resolves to, so this is the
+      # attestation a consumer that pins the tag's digest verifies. `latest`
+      # is assembled from the same manifests and resolves to the same index.
+      - name: Attest the multi-arch index
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.SERVER_REPOSITORY }}
+          subject-digest: ${{ steps.published.outputs.digest }}
+          push-to-registry: true

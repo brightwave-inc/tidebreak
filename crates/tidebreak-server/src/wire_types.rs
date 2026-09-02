@@ -428,6 +428,7 @@ mod tests {
         // The spec-preview response: what a document declares, for the REST
         // form's operation picker.
         generate::collect_from::<crate::routes::SpecPreviewInfo>(&cfg, &mut out);
+        generate::collect_from::<crate::openapi_discovery::SpecDiscoveryInfo>(&cfg, &mut out);
         // Named separately because `serde(flatten)` inlines it into
         // `McpServerInfo` rather than referencing it, so the walk never reaches
         // it — and the renderer uses it on its own as the PUT body shape.
@@ -453,6 +454,14 @@ mod tests {
         // Likewise its own endpoint root: the live progress stream is paged by
         // its own route rather than embedded in a snapshot.
         generate::collect_from::<crate::routes::AgentRunProgressPage>(&cfg, &mut out);
+        generate::collect_from::<crate::workspace_config::WorkspaceConfigDocument>(&cfg, &mut out);
+        generate::collect_from::<crate::workspace_config::WorkspaceConfigPreview>(&cfg, &mut out);
+        generate::collect_from::<crate::workspace_config::WorkspaceConfigApplyRequest>(
+            &cfg, &mut out,
+        );
+        generate::collect_from::<crate::workspace_config::WorkspaceConfigApplyResult>(
+            &cfg, &mut out,
+        );
         generate::collect_from::<crate::routes::code::CodeRepoSnapshot>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeWorkspaceSnapshot>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeConnectPage>(&cfg, &mut out);
@@ -1283,6 +1292,12 @@ mod tests {
                 }),
             ),
             (
+                "metadata_memory_proposals_recorded",
+                RendererChatFrame::Metadata(RendererChatMetadata::MemoryProposalsRecorded {
+                    turn_id: turn,
+                }),
+            ),
+            (
                 "metadata_sandbox_preparing",
                 RendererChatFrame::Metadata(RendererChatMetadata::SandboxPreparing {
                     preparing: true,
@@ -1560,6 +1575,7 @@ mod tests {
                     health: McpHealth::Healthy,
                     tool_count: 11,
                     diagnostic: None,
+                    resolved_command: Some("/usr/local/bin/npx".into()),
                     curated: Some(McpCuration {
                         display_name: "Filesystem".into(),
                         tested_on: "2026-08-01".into(),
@@ -1571,6 +1587,7 @@ mod tests {
                     health: McpHealth::Disabled,
                     tool_count: 0,
                     diagnostic: Some("turned off".into()),
+                    resolved_command: None,
                     curated: None,
                 },
             ],

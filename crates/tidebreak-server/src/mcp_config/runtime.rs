@@ -22,6 +22,7 @@ pub(super) struct ManagedServer {
     client: Option<McpClient>,
     health: McpHealth,
     diagnostic: Option<String>,
+    resolved_command: Option<String>,
     reconnect_backoff: Duration,
     pub(super) epoch: u64,
     pub(super) reconnect_lock: Arc<Mutex<()>>,
@@ -465,6 +466,10 @@ impl McpRuntime {
             .clone()
     }
 
+    pub(crate) async fn definitions(&self) -> Vec<McpServerDefinition> {
+        self.state.lock().await.definitions.clone()
+    }
+
     pub(crate) async fn info(&self) -> McpServersInfo {
         let state = self.state.lock().await;
         McpServersInfo {
@@ -486,6 +491,8 @@ impl McpRuntime {
                             .and_then(|server| server.client.as_ref())
                             .map_or(0, |client| client.tools().count()),
                         diagnostic: managed.and_then(|server| server.diagnostic.clone()),
+                        resolved_command: managed
+                            .and_then(|server| server.resolved_command.clone()),
                         curated: curation(definition),
                         definition: definition.clone(),
                     }
@@ -821,6 +828,7 @@ impl McpRuntime {
                             client: None,
                             health: McpHealth::Degraded,
                             diagnostic: Some(connection_diagnostic(definition, &error)),
+                            resolved_command: None,
                             reconnect_backoff: INITIAL_RECONNECT_BACKOFF,
                             epoch: self.fresh_epoch(),
                             reconnect_lock: Arc::new(Mutex::new(())),
@@ -844,6 +852,7 @@ impl McpRuntime {
                         client: None,
                         health: McpHealth::Disabled,
                         diagnostic: disabled_diagnostic(definition, lockdown),
+                        resolved_command: None,
                         reconnect_backoff: INITIAL_RECONNECT_BACKOFF,
                         epoch: self.fresh_epoch(),
                         reconnect_lock: Arc::new(Mutex::new(())),
@@ -858,6 +867,7 @@ impl McpRuntime {
                     client: Some(client),
                     health: McpHealth::Healthy,
                     diagnostic: None,
+                    resolved_command: super::stdio::resolved_display(definition).await,
                     reconnect_backoff: INITIAL_RECONNECT_BACKOFF,
                     epoch: self.fresh_epoch(),
                     reconnect_lock: Arc::new(Mutex::new(())),
@@ -933,6 +943,7 @@ impl McpRuntime {
                     client: None,
                     health: McpHealth::Disabled,
                     diagnostic: disabled_diagnostic(definition, lockdown),
+                    resolved_command: None,
                     reconnect_backoff: INITIAL_RECONNECT_BACKOFF,
                     epoch: self.fresh_epoch(),
                     reconnect_lock: Arc::new(Mutex::new(())),
@@ -942,6 +953,7 @@ impl McpRuntime {
                     client: Some(client),
                     health: McpHealth::Healthy,
                     diagnostic: None,
+                    resolved_command: super::stdio::resolved_display(definition).await,
                     reconnect_backoff: INITIAL_RECONNECT_BACKOFF,
                     epoch: self.fresh_epoch(),
                     reconnect_lock: Arc::new(Mutex::new(())),
@@ -959,6 +971,7 @@ impl McpRuntime {
                         client: None,
                         health: McpHealth::Degraded,
                         diagnostic: Some(connection_diagnostic(definition, &error)),
+                        resolved_command: None,
                         reconnect_backoff: INITIAL_RECONNECT_BACKOFF,
                         epoch: self.fresh_epoch(),
                         reconnect_lock: Arc::new(Mutex::new(())),
@@ -1036,6 +1049,7 @@ impl McpRuntime {
                     client: Some(client),
                     health: McpHealth::Healthy,
                     diagnostic: None,
+                    resolved_command: super::stdio::resolved_display(definition).await,
                     reconnect_backoff: INITIAL_RECONNECT_BACKOFF,
                     epoch: self.fresh_epoch(),
                     reconnect_lock: Arc::new(Mutex::new(())),
@@ -1045,6 +1059,7 @@ impl McpRuntime {
                     client: None,
                     health: McpHealth::Disabled,
                     diagnostic: disabled_diagnostic(definition, lockdown),
+                    resolved_command: None,
                     reconnect_backoff: INITIAL_RECONNECT_BACKOFF,
                     epoch: self.fresh_epoch(),
                     reconnect_lock: Arc::new(Mutex::new(())),
@@ -1060,6 +1075,7 @@ impl McpRuntime {
                         client: None,
                         health: McpHealth::Degraded,
                         diagnostic: Some(connection_diagnostic(definition, &error)),
+                        resolved_command: None,
                         reconnect_backoff: INITIAL_RECONNECT_BACKOFF,
                         epoch: self.fresh_epoch(),
                         reconnect_lock: Arc::new(Mutex::new(())),
@@ -1305,6 +1321,7 @@ impl McpRuntime {
                         client: None,
                         health: McpHealth::Initializing,
                         diagnostic: None,
+                        resolved_command: None,
                         reconnect_backoff: INITIAL_RECONNECT_BACKOFF,
                         epoch: self.fresh_epoch(),
                         reconnect_lock: Arc::new(Mutex::new(())),
@@ -1313,6 +1330,7 @@ impl McpRuntime {
                 server.client = Some(client);
                 server.health = McpHealth::Healthy;
                 server.diagnostic = None;
+                server.resolved_command = super::stdio::resolved_display(&definition).await;
                 server.ui_views = ui_views;
                 server.reconnect_backoff = INITIAL_RECONNECT_BACKOFF;
                 server.epoch = self.fresh_epoch();
@@ -1455,6 +1473,8 @@ impl McpRuntime {
                             .and_then(|server| server.client.as_ref())
                             .map_or(0, |client| client.tools().count()),
                         diagnostic: managed.and_then(|server| server.diagnostic.clone()),
+                        resolved_command: managed
+                            .and_then(|server| server.resolved_command.clone()),
                         curated: curation(definition),
                         definition: definition.clone(),
                     }

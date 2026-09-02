@@ -617,9 +617,15 @@ test("native Windows CI is scope-triggered, label-overridable, with a main backs
   const windows = workflowJob(ci, "windows-check");
   const changes = workflowJob(ci, "changes");
   const nativeTests = windows.match(
-    /- name: Record native Windows test gate[\s\S]*?(?=\n {6}- name: Host broker Windows tests)/,
+    /- name: Record native Windows test gate[\s\S]*?(?=\n {6}- name: Compile native Windows test binaries)/,
   )?.[0];
   assert.ok(nativeTests, "missing native Windows test gate step");
+  const check = windows.match(
+    /- name: Check Windows-gated crates[\s\S]*?(?=\n {6}- name: Record native Windows test gate)/,
+  )?.[0];
+  assert.ok(check, "missing Windows cargo check step");
+  assert.match(check, /RUSTFLAGS: ""/);
+  assert.doesNotMatch(check, /linker=rust-lld/);
   assert.match(
     nativeTests,
     /github\.event_name != 'pull_request' \|\| contains\(github\.event\.pull_request\.labels\.\*\.name, 'windows-ci'\) \|\| needs\.changes\.outputs\.windows == 'true'/,
@@ -671,9 +677,20 @@ test("native Windows CI is scope-triggered, label-overridable, with a main backs
   assert.match(windows, /SCCACHE_GHA_ENABLED: "true"/);
   assert.match(windows, /SCCACHE_GHA_RW_MODE: READ_WRITE/);
   assert.match(windows, /RUSTC_WRAPPER: sccache/);
+  assert.match(windows, /RUSTFLAGS: -C linker=rust-lld/);
   assert.match(
     windows,
     /uses: mozilla-actions\/sccache-action@[0-9a-f]{40}/,
+  );
+  assert.match(windows, /Compile native Windows test binaries/);
+  assert.match(windows, /Skipping native Windows test precompile/);
+  assert.match(
+    windows,
+    /cargo test --target x86_64-pc-windows-msvc --locked --no-run --lib/,
+  );
+  assert.match(
+    windows,
+    /cargo test --target x86_64-pc-windows-msvc --locked --no-run \\\n\s+-p tidebreak-host-broker/,
   );
   assert.match(windows, /\$attempts = 3/);
   assert.match(windows, /tidebreak-server", "--lib", "code::"/);

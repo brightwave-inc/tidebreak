@@ -82,6 +82,7 @@ pub mod image;
 pub mod keychain;
 pub mod local_app;
 pub mod memory;
+pub mod memory_tool;
 pub mod model;
 pub mod permission;
 pub use permission::PermissionMode;
@@ -257,15 +258,19 @@ pub use image::{
 #[cfg(feature = "keychain")]
 pub use keychain::KeychainSecretProvider;
 pub use memory::{
-    MemoryAuthor, MemoryBackend, MemoryCapLevel, MemoryCapability, MemoryCaps, MemoryDigest,
-    MemoryError, MemoryEvidence, MemoryIngestReceipt, MemoryIngestRequest, MemoryKind, MemoryLink,
-    MemoryLinkRelation, MemoryListFilter, MemoryOrigin, MemoryProvenance, MemoryRecord,
-    MemoryRecordId, MemoryRecordUpdate, MemoryResult, MemoryRevision, MemoryRevisionId,
-    MemoryScope, MemorySearchHit, MemorySearchRequest, MemoryStatus, MemoryStatusChange,
-    MemorySweepOutcome, MemorySweepRun, MemorySweepScopeState, MemorySweepStatus,
-    MemoryWriteReceipt, MemoryWriteState, DEFAULT_MEMORY_ACTIVE_RECORD_CAP,
+    render_memory_record_markdown, MemoryAuthor, MemoryBackend, MemoryCapLevel, MemoryCapability,
+    MemoryCaps, MemoryDigest, MemoryError, MemoryEvidence, MemoryIngestReceipt,
+    MemoryIngestRequest, MemoryKind, MemoryLink, MemoryLinkRelation, MemoryListFilter,
+    MemoryOrigin, MemoryProvenance, MemoryRecord, MemoryRecordId, MemoryRecordUpdate, MemoryResult,
+    MemoryRevision, MemoryRevisionId, MemoryScope, MemorySearchHit, MemorySearchRequest,
+    MemoryStatus, MemoryStatusChange, MemorySweepOutcome, MemorySweepRun, MemorySweepScopeState,
+    MemorySweepStatus, MemoryWriteReceipt, MemoryWriteState, DEFAULT_MEMORY_ACTIVE_RECORD_CAP,
     DEFAULT_MEMORY_DIGEST_BYTES, MAX_MEMORY_BODY_BYTES, MAX_MEMORY_EVIDENCE, MAX_MEMORY_LINKS,
     MAX_MEMORY_SEARCH_RESULTS, MAX_MEMORY_TITLE_CHARS,
+};
+pub use memory_tool::{
+    memory_tool_spec, parse_memory_tool_arguments, MemoryToolArgs, MemoryToolVerb, MEMORY_TOOL,
+    MEMORY_TOOL_SEARCH_LIMIT,
 };
 pub use model::{
     exec_attachment_file_name, AgentRun, AgentRunCancellationReason, AgentRunCancellationSignal,

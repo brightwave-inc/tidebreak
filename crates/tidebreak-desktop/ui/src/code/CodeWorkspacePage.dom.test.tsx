@@ -107,6 +107,7 @@ vi.mock("@xterm/xterm", () => ({
     }
     loadAddon() {}
     open() {}
+    focus() {}
     dispose() {}
     onData() {
       return { dispose() {} };
@@ -243,6 +244,7 @@ const START_HARNESS: HarnessDoctorEntry = {
     standing_grants: "unsupported",
     mid_turn_resume: "unsupported",
     transcript: "unsupported",
+    memory_loopback: "unsupported",
   },
   commands: [],
   auth_mode: "local_sign_in",

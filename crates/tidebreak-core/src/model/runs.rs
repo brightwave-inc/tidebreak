@@ -40,6 +40,10 @@ pub struct Chat {
     /// Live broker authorization remains mandatory and may revoke access at any
     /// time, regardless of this projection.
     pub root_attachments: Vec<ChatRootAttachment>,
+    /// Whether this chat keeps durable memory out entirely: no digest is
+    /// injected into its prompts and no post-turn capture runs for it.
+    #[serde(default)]
+    pub memory_incognito: bool,
     /// When the chat was created.
     pub created_at: DateTime<Utc>,
 }

@@ -169,7 +169,8 @@ function parseHarnessCaps(value: unknown): HarnessCaps | null {
     !capLevel(caps.user_questions) ||
     !capLevel(caps.standing_grants) ||
     !capLevel(caps.mid_turn_resume) ||
-    !capLevel(caps.transcript)
+    !capLevel(caps.transcript) ||
+    !capLevel(caps.memory_loopback)
   ) {
     return null;
   }
@@ -191,6 +192,7 @@ function parseHarnessCaps(value: unknown): HarnessCaps | null {
     standing_grants: caps.standing_grants,
     mid_turn_resume: caps.mid_turn_resume,
     transcript: caps.transcript,
+    memory_loopback: caps.memory_loopback,
   };
 }
 

@@ -61,21 +61,6 @@ export const CompletedWithTurnActions: Story = {
   args: { onForkFromTurn: fn() },
 };
 
-/**
- * The newest boundary carries the session recap, so a reader who left and came
- * back reads where the work stands instead of the last twenty tool calls.
- */
-export const CompletedWithRecap: Story = {
-  args: {
-    narrative: (
-      <span className="text-muted-foreground">
-        Auth middleware is wired up and its tests pass. Next: hook the refresh
-        path into the session store.
-      </span>
-    ),
-  },
-};
-
 /** A turn that changed nothing still says it finished, without a zero-stat chip. */
 export const CompletedNoChanges: Story = {
   args: {

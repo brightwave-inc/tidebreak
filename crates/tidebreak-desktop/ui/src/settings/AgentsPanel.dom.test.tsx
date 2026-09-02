@@ -88,7 +88,7 @@ describe("AgentsPanel", () => {
     );
   });
 
-  it("turns off future code turn recaps", async () => {
+  it("turns off future fallback recaps", async () => {
     const settings: RuntimeSettings = {
       model: null,
       has_api_key: false,
@@ -131,7 +131,7 @@ describe("AgentsPanel", () => {
 
     render(<AgentsPanel client={client} />);
     const toggle = await screen.findByRole("switch", {
-      name: "Write turn recaps",
+      name: "Write fallback recaps",
     });
     expect(toggle).toBeChecked();
 

@@ -300,6 +300,7 @@ async fn large_tool_results_are_truncated() {
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();
@@ -677,6 +678,7 @@ async fn arguments_violating_the_advertised_schema_are_refused_before_the_tool_r
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();
@@ -805,6 +807,7 @@ async fn malformed_arguments_go_back_to_the_model_instead_of_running_the_tool() 
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();

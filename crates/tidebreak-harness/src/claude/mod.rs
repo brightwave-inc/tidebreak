@@ -239,6 +239,7 @@ impl HarnessAdapter for ClaudeCodeAdapter {
             standing_grants: CapLevel::Unsupported,
             mid_turn_resume: CapLevel::Unsupported,
             transcript: CapLevel::Unsupported,
+            memory_loopback: CapLevel::Supported,
         };
         // Off the captured 2.1 line — a declared newer engine, say — the
         // stream contract and permission flags are stable documented

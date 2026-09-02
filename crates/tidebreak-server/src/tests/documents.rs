@@ -1601,6 +1601,7 @@ async fn agent_deps_for_test(
         ),
         web_search::foreground_extract_tool(extract_store, Arc::new(MemSecrets::default())),
         store,
+        None,
         dir.join("profile-data"),
         None,
         crate::gateway_runtime::GatewayRuntime::new(

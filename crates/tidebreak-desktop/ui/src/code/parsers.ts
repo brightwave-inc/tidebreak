@@ -3441,6 +3441,7 @@ function parseHarnessCaps(value: unknown): HarnessCaps | null {
       "standing_grants",
       "mid_turn_resume",
       "transcript",
+      "memory_loopback",
     ]) ||
     !isMember(value.resume, CAP_LEVELS) ||
     !isMember(value.streaming_deltas, CAP_LEVELS) ||
@@ -3458,7 +3459,8 @@ function parseHarnessCaps(value: unknown): HarnessCaps | null {
     !isMember(value.user_questions, CAP_LEVELS) ||
     !isMember(value.standing_grants, CAP_LEVELS) ||
     !isMember(value.mid_turn_resume, CAP_LEVELS) ||
-    !isMember(value.transcript, CAP_LEVELS)
+    !isMember(value.transcript, CAP_LEVELS) ||
+    !isMember(value.memory_loopback, CAP_LEVELS)
   ) {
     return null;
   }
@@ -3480,6 +3482,7 @@ function parseHarnessCaps(value: unknown): HarnessCaps | null {
     standing_grants: value.standing_grants,
     mid_turn_resume: value.mid_turn_resume,
     transcript: value.transcript,
+    memory_loopback: value.memory_loopback,
   };
 }
 
@@ -4094,6 +4097,7 @@ export function parseCodeSessionDigest(
       "activity_detail",
       "pr_state",
       "pr_count",
+      "memory_proposal_count",
       "watch_state",
       "watch_detail",
       "watch_cycles",
@@ -4113,6 +4117,8 @@ export function parseCodeSessionDigest(
       !isMember(value.activity, SESSION_ACTIVITIES)) ||
     !optionalLine(value.activity_detail) ||
     (value.pr_count !== undefined && !isFiniteNumber(value.pr_count)) ||
+    (value.memory_proposal_count !== undefined &&
+      !isFiniteNumber(value.memory_proposal_count)) ||
     (value.watch_state !== undefined &&
       !isMember(value.watch_state, WATCH_STATES)) ||
     !optionalBlock(value.watch_detail) ||
@@ -4149,6 +4155,9 @@ export function parseCodeSessionDigest(
       : {}),
     ...(pr_state ? { pr_state } : {}),
     ...(value.pr_count !== undefined ? { pr_count: value.pr_count } : {}),
+    ...(value.memory_proposal_count !== undefined
+      ? { memory_proposal_count: value.memory_proposal_count }
+      : {}),
     ...(value.watch_state !== undefined
       ? { watch_state: value.watch_state }
       : {}),
@@ -4201,6 +4210,7 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
           "activity_detail",
           "pr_state",
           "pr_count",
+          "memory_proposal_count",
           "watch_state",
           "watch_detail",
           "watch_cycles",
@@ -4220,6 +4230,8 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
           !isMember(value.activity, SESSION_ACTIVITIES)) ||
         !optionalLine(value.activity_detail) ||
         (value.pr_count !== undefined && !isFiniteNumber(value.pr_count)) ||
+        (value.memory_proposal_count !== undefined &&
+          !isFiniteNumber(value.memory_proposal_count)) ||
         (value.watch_state !== undefined &&
           !isMember(value.watch_state, WATCH_STATES)) ||
         !optionalBlock(value.watch_detail) ||
@@ -4260,6 +4272,9 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
           : {}),
         ...(pr_state ? { pr_state } : {}),
         ...(value.pr_count !== undefined ? { pr_count: value.pr_count } : {}),
+        ...(value.memory_proposal_count !== undefined
+          ? { memory_proposal_count: value.memory_proposal_count }
+          : {}),
         ...(value.watch_state !== undefined
           ? { watch_state: value.watch_state }
           : {}),

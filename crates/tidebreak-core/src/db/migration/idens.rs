@@ -910,6 +910,7 @@ pub(crate) enum CodeSession {
     Subagents,
     CreatedAt,
     Owner,
+    MemoryIncognito,
 }
 
 #[derive(DeriveIden)]

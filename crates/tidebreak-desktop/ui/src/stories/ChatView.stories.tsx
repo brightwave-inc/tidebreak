@@ -68,6 +68,7 @@ const storyChat = {
   permission_mode: "ask",
   network_policy: { mode: "open" },
   attachment_revision: 1,
+  memory_incognito: false,
   root_attachments: [],
   created_at: "2026-08-24T13:00:00Z",
 } satisfies Chat;

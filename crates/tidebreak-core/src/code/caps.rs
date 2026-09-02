@@ -126,6 +126,9 @@ pub struct HarnessCaps {
     /// can read. `GET /chats/{id}/messages` refuses on a session whose
     /// engine does not declare it, rather than returning an empty list.
     pub transcript: CapLevel,
+    /// The engine mounts Tidebreak's loopback MCP server, so it can call
+    /// the memory verb (propose, search, read) on that bridge.
+    pub memory_loopback: CapLevel,
 }
 
 /// One engine-owned slash command, captured from the engine's own listing.
@@ -162,6 +165,7 @@ mod tests {
             standing_grants: CapLevel::Unsupported,
             mid_turn_resume: CapLevel::Unsupported,
             transcript: CapLevel::Unsupported,
+            memory_loopback: CapLevel::Unsupported,
         };
         assert_eq!(caps.resume, CapLevel::Supported);
         assert_eq!(caps.structured_approvals, CapLevel::Unknown);

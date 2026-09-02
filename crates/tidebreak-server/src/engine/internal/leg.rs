@@ -132,6 +132,22 @@ pub(crate) struct LegDriver {
     agent_config: AgentConfig,
     exec_folder_context: Option<Arc<crate::code_execution::ConfiguredExecProvider>>,
     private_scratch_root: Option<PathBuf>,
+    /// The memory backend, when this deployment has one; owns nothing beyond
+    /// digest reads for injection. `None` composes no memory section.
+    memory: Option<Arc<dyn tidebreak_core::MemoryBackend>>,
+    /// Post-completion capture, spawned fire-and-forget when a turn
+    /// completes. `None` on deployments with no memory backend and in tests
+    /// that install none.
+    memory_capture: Option<crate::memory_capture::MemoryCapture>,
+    /// One pinned digest render per conversation (decision 0068): computed
+    /// when a conversation's prompt prefix is first built and reused verbatim
+    /// until a boundary that already rebuilds the prefix — a new
+    /// conversation, a compaction checkpoint, a model switch. Re-rendering
+    /// per turn would invalidate the conversation's prompt cache on every
+    /// accepted record.
+    pinned_memory_digests: Arc<
+        std::sync::Mutex<std::collections::HashMap<tidebreak_core::ChatId, PinnedMemoryDigest>>,
+    >,
     diagnostics: Arc<crate::diagnostics::Diagnostics>,
     config: LegDriverConfig,
     /// Update-quiesce channel pair, when this worker serves a process that
@@ -153,6 +169,35 @@ enum EventAppend {
     Cancelling,
     LeaseLost,
 }
+
+/// The prefix-rebuilding boundary one pinned memory digest belongs to.
+///
+/// Equality is the pin: while a conversation's turn runs on the same model
+/// against the same compaction checkpoint, the digest that composed its
+/// prompt is reused byte-for-byte, whatever happened to the store since.
+#[derive(Clone, PartialEq, Eq)]
+struct MemoryDigestBoundary {
+    /// The model the turn resolves to; a switch rebuilds the prefix.
+    model: String,
+    /// The chat's current compaction boundary, which advances exactly when a
+    /// new checkpoint commits (and is `None` before the first one).
+    checkpoint: Option<MessageId>,
+}
+
+/// One conversation's pinned digest render.
+struct PinnedMemoryDigest {
+    boundary: MemoryDigestBoundary,
+    markdown: Arc<str>,
+    /// For eviction only: pins of conversations nobody is running are the
+    /// ones a full cache sheds first.
+    last_used: Instant,
+}
+
+/// Most conversations whose digest pin is kept in memory at once. Shedding an
+/// idle pin costs one re-render (and, if records changed meanwhile, one
+/// prompt-cache rebuild) the next time that conversation runs; active
+/// conversations refresh `last_used` every turn and are never the ones shed.
+const PINNED_MEMORY_DIGEST_CAP: usize = 512;
 
 /// Ceiling on how many pending events one journal transaction carries.
 const EVENT_BATCH_MAX: usize = 64;
@@ -339,6 +384,7 @@ pub(crate) fn freeze_foreground_turn_surface(
         None,
         false,
         tidebreak_core::TurnWebSearch::Host,
+        None,
     )
 }
 
@@ -356,6 +402,7 @@ fn freeze_foreground_turn_surface_with_folders(
     node_runtime: Option<tidebreak_code_execution::HostToolStatus>,
     plan_mode: bool,
     web_search: tidebreak_core::TurnWebSearch,
+    memory_digest: Option<&str>,
 ) -> ForegroundTurnSurface {
     let mut agent_config = base_agent_config.clone();
     // A chat-only model gets one genuinely empty capability snapshot. Keeping
@@ -387,7 +434,16 @@ fn freeze_foreground_turn_surface_with_folders(
     if web_search == tidebreak_core::TurnWebSearch::Off {
         specs.retain(|spec| spec.name != tidebreak_core::WEB_SEARCH_TOOL);
     }
+    // The memory section and the memory verb ride together: a turn that
+    // composes no digest — an incognito chat, memory switched off, no
+    // backend, or an owner the store cannot name — must not advertise a verb
+    // whose reads and proposals it is refusing.
+    let memory_tool = memory_digest.is_some() && agent_config.tools_supported;
+    if !memory_tool {
+        specs.retain(|spec| spec.name != tidebreak_core::MEMORY_TOOL);
+    }
     agent_config.web_search = web_search;
+    agent_config.memory_tool = memory_tool;
     agent_config.system_prompt = Some(crate::foreground_prompt::compose_for_surface(
         &specs,
         exec_folders,
@@ -399,6 +455,7 @@ fn freeze_foreground_turn_surface_with_folders(
         office_rendering,
         node_runtime,
         plan_mode,
+        memory_digest,
     ));
     ForegroundTurnSurface {
         tools,
@@ -625,6 +682,11 @@ impl LegDriver {
             agent_config,
             exec_folder_context: None,
             private_scratch_root,
+            memory: None,
+            memory_capture: None,
+            pinned_memory_digests: Arc::new(
+                std::sync::Mutex::new(std::collections::HashMap::new()),
+            ),
             diagnostics: Arc::new(crate::diagnostics::Diagnostics::new()),
             config,
             quiesce: None,
@@ -648,6 +710,18 @@ impl LegDriver {
 
     pub(crate) fn with_blobs(mut self, blobs: Arc<dyn BlobStore>) -> Self {
         self.blobs = Some(blobs);
+        self
+    }
+
+    /// Attach the memory backend: the digest injects into this worker's
+    /// composed prompts, and completed turns spawn post-turn capture.
+    pub(crate) fn with_memory(
+        mut self,
+        memory: Arc<dyn tidebreak_core::MemoryBackend>,
+        capture: crate::memory_capture::MemoryCapture,
+    ) -> Self {
+        self.memory = Some(memory);
+        self.memory_capture = Some(capture);
         self
     }
 
@@ -1002,7 +1076,110 @@ impl LegDriver {
             // through `claim_once`, which wakes the promoter itself.
             self.queued_turn_wake.notify_one();
         }
+        // Work mode's one post-completion hook (decision 0068): capture runs
+        // beside the turn, never in it. Spawned fire-and-forget like the
+        // titler, so a slow or failing utility call cannot touch the outcome
+        // the user already has.
+        if let (Ok(LegDriverOutcome::Completed(completed)), Some(capture)) =
+            (&outcome, self.memory_capture.as_ref())
+        {
+            capture.spawn(chat_id, *completed);
+        }
         outcome
+    }
+
+    /// The memory digest pinned to this conversation's prompt prefix, or
+    /// `None` when no section composes at all — no backend, memory off, an
+    /// incognito chat, or an owner the store cannot name.
+    ///
+    /// An empty digest still pins: `Some("")` means "no records at this
+    /// boundary", and it must keep meaning that for the rest of the
+    /// conversation even after the store gains records, or the first accepted
+    /// record would rewrite the prompt mid-conversation.
+    async fn pinned_memory_digest(
+        &self,
+        chat: &tidebreak_core::Chat,
+        turn: &TurnRun,
+        owner: Option<&tidebreak_core::OwnerId>,
+    ) -> Option<Arc<str>> {
+        let memory = self.memory.as_ref()?;
+        if chat.memory_incognito {
+            return None;
+        }
+        let enabled = self
+            .store
+            .get_setting(crate::routes::MEMORY_ENABLED_SETTING)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true);
+        if !enabled {
+            return None;
+        }
+        // Memory rows are owner-scoped; a chat whose owner the store cannot
+        // name gets no digest rather than someone else's.
+        let owner = owner?;
+        let checkpoint = self
+            .store
+            .get_context_checkpoint(chat.id)
+            .await
+            .ok()
+            .flatten()
+            .map(|checkpoint| checkpoint.source_message_id);
+        let boundary = MemoryDigestBoundary {
+            model: turn.model.clone(),
+            checkpoint,
+        };
+        {
+            let mut pins = self
+                .pinned_memory_digests
+                .lock()
+                .expect("memory digest pins");
+            if let Some(pinned) = pins.get_mut(&chat.id) {
+                if pinned.boundary == boundary {
+                    pinned.last_used = Instant::now();
+                    return Some(pinned.markdown.clone());
+                }
+            }
+        }
+        let markdown: Arc<str> = match memory
+            .assemble_context(owner, tidebreak_core::MemoryScope::Personal)
+            .await
+        {
+            Ok(digest) => digest.markdown.into(),
+            Err(error) => {
+                // Injection is enrichment, never a gate: the turn runs
+                // without a memory section rather than failing on one.
+                tracing::warn!(
+                    "tidebreak: memory digest unavailable for chat {}: {error}",
+                    chat.id
+                );
+                return None;
+            }
+        };
+        let mut pins = self
+            .pinned_memory_digests
+            .lock()
+            .expect("memory digest pins");
+        if pins.len() >= PINNED_MEMORY_DIGEST_CAP && !pins.contains_key(&chat.id) {
+            if let Some(oldest) = pins
+                .iter()
+                .min_by_key(|(_, pinned)| pinned.last_used)
+                .map(|(chat_id, _)| *chat_id)
+            {
+                pins.remove(&oldest);
+            }
+        }
+        pins.insert(
+            chat.id,
+            PinnedMemoryDigest {
+                boundary,
+                markdown: markdown.clone(),
+                last_used: Instant::now(),
+            },
+        );
+        Some(markdown)
     }
 
     pub(crate) async fn run_turn(
@@ -1224,6 +1401,14 @@ impl LegDriver {
         } else {
             tidebreak_core::TurnWebSearch::Off
         };
+        // The pinned render of the owner's memory digest, resolved before the
+        // surface is frozen because the surface's prompt has to carry it. The
+        // pin means this read cannot change the composed prompt mid-
+        // conversation: only a boundary that already rebuilds the prefix
+        // hands back different bytes.
+        let memory_digest = self
+            .pinned_memory_digest(&chat, &turn, owner.as_ref())
+            .await;
         let surface = freeze_foreground_turn_surface_with_folders(
             tools,
             &turn_agent_config,
@@ -1240,6 +1425,7 @@ impl LegDriver {
                 Some(tidebreak_core::PermissionMode::Plan)
             ),
             web_search,
+            memory_digest.as_deref(),
         );
         if let Some(prompt) = surface.agent_config.system_prompt.as_deref() {
             tracing::debug!(
@@ -3452,6 +3638,7 @@ mod committed_event_drain_tests {
             None,
             false,
             tidebreak_core::TurnWebSearch::Off,
+            None,
         );
 
         assert_eq!(
@@ -3467,6 +3654,60 @@ mod committed_event_drain_tests {
             prompt.contains("exec"),
             "off must not empty the rest of the tool surface: {prompt}"
         );
+    }
+
+    #[test]
+    fn a_turn_without_a_memory_digest_withholds_the_memory_verb_from_the_wire() {
+        let mut registry = ToolRegistry::new();
+        registry.register_client(
+            tidebreak_core::memory_tool_spec(),
+            tidebreak_core::ApprovalClass::ReadOnly,
+        );
+        registry.register_client(
+            tidebreak_core::ToolSpec {
+                name: "exec".into(),
+                description: "run a command".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            },
+            tidebreak_core::ApprovalClass::Sensitive,
+        );
+        let registry = Arc::new(registry);
+        let freeze = |memory_digest: Option<&str>| {
+            freeze_foreground_turn_surface_with_folders(
+                registry.clone(),
+                &AgentConfig {
+                    tools_supported: true,
+                    ..AgentConfig::default()
+                },
+                &[],
+                &[],
+                &[],
+                &tidebreak_core::NetworkPolicy::default(),
+                crate::code_execution::DEFAULT_TIMEOUT_MS,
+                false,
+                None,
+                None,
+                false,
+                tidebreak_core::TurnWebSearch::Off,
+                memory_digest,
+            )
+        };
+
+        // No digest: the prompt and the wire list agree that there is no verb.
+        let off = freeze(None);
+        assert!(!off.agent_config.memory_tool);
+        let prompt = off.agent_config.system_prompt.as_deref().unwrap();
+        // The baseline prompt talks about "shared memory" in its rules, so
+        // look for the verb's own backticked guidance, not the bare word.
+        assert!(
+            !prompt.contains("`memory`"),
+            "a digest-less turn still described the memory verb: {prompt}"
+        );
+        assert!(prompt.contains("exec"), "the rest of the surface stays");
+
+        // An empty digest still composes, so the verb rides along.
+        let on = freeze(Some(""));
+        assert!(on.agent_config.memory_tool);
     }
 
     #[test]

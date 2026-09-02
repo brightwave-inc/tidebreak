@@ -130,6 +130,10 @@ pub struct AgentConfig {
     pub prompt_cache_retention: crate::provider::PromptCacheRetention,
     /// How this turn reaches the web.
     pub web_search: TurnWebSearch,
+    /// Whether this turn advertises the `memory` verb. The surface that
+    /// composes the memory digest sets it, so a turn that composes no digest
+    /// (incognito, memory switched off, no backend) never sends the schema.
+    pub memory_tool: bool,
 }
 
 /// Which web search, if any, a turn is allowed to use.
@@ -200,6 +204,7 @@ impl Default for AgentConfig {
             compaction: CompactionPolicy::default(),
             prompt_cache_retention: crate::provider::PromptCacheRetention::default(),
             web_search: TurnWebSearch::Host,
+            memory_tool: false,
         }
     }
 }

@@ -1574,6 +1574,9 @@ pub mod code_session {
         pub title: Option<String>,
         pub network_policy: String,
         pub attachment_revision: i64,
+        /// Whether this conversation keeps durable memory out entirely: no
+        /// digest injection and no post-turn capture.
+        pub memory_incognito: bool,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

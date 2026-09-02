@@ -265,6 +265,7 @@ pub(crate) struct CodeRuntime {
     /// Derives a lucid rewrite of each completed turn's closing message
     /// (`super::rewrite`). Installed the same way as recap.
     rewrite: Mutex<Option<Arc<dyn super::rewrite::TurnRewrite>>>,
+    memory_capture: Mutex<Option<Arc<dyn super::memory_capture::TurnMemoryCapture>>>,
     #[cfg(test)]
     archive_shutdown_timeout: AtomicBool,
     #[cfg(test)]
@@ -467,6 +468,7 @@ impl CodeRuntime {
             titling_in_flight: Mutex::new(std::collections::HashSet::new()),
             recap: Mutex::new(None),
             rewrite: Mutex::new(None),
+            memory_capture: Mutex::new(None),
             #[cfg(test)]
             archive_shutdown_timeout: AtomicBool::new(false),
             #[cfg(test)]
@@ -626,6 +628,7 @@ impl CodeRuntime {
             titling_in_flight: Mutex::new(std::collections::HashSet::new()),
             recap: Mutex::new(None),
             rewrite: Mutex::new(None),
+            memory_capture: Mutex::new(None),
             #[cfg(test)]
             archive_shutdown_timeout: AtomicBool::new(false),
             #[cfg(test)]
@@ -750,6 +753,24 @@ impl CodeRuntime {
 
     fn rewrite_hook(&self) -> Option<Arc<dyn super::rewrite::TurnRewrite>> {
         self.rewrite.lock().expect("code rewrite hook").clone()
+    }
+
+    /// Install the hook that captures memory after each completed turn.
+    pub(crate) fn install_memory_capture(
+        &self,
+        capture: Arc<dyn super::memory_capture::TurnMemoryCapture>,
+    ) {
+        *self
+            .memory_capture
+            .lock()
+            .expect("code memory capture hook") = Some(capture);
+    }
+
+    fn memory_capture_hook(&self) -> Option<Arc<dyn super::memory_capture::TurnMemoryCapture>> {
+        self.memory_capture
+            .lock()
+            .expect("code memory capture hook")
+            .clone()
     }
 }
 

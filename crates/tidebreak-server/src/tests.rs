@@ -84,6 +84,7 @@ mod root_attachment;
 mod sandbox;
 mod websocket;
 mod workers;
+mod workspace_config;
 
 use conversations::patch_chat;
 use lifecycle::{post_json, post_native_json, steer_turn, steer_turn_with_id};
@@ -1026,6 +1027,11 @@ impl Store for PauseTerminalStore {
                 permission_mode,
                 network_policy,
             )
+            .await
+    }
+    async fn set_chat_memory_incognito(&self, id: ChatId, memory_incognito: bool) -> Result<bool> {
+        self.inner
+            .set_chat_memory_incognito(id, memory_incognito)
             .await
     }
     async fn get_turn(&self, id: TurnId) -> Result<Option<tidebreak_core::TurnRun>> {

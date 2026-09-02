@@ -26,6 +26,7 @@ use tidebreak_core::{PermissionMode, ReasoningEffort, MAX_NOTICE_CHARS};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 const THREAD_LOAD_TIMEOUT: Duration = Duration::from_secs(120);
+const THREAD_LOAD_ABSOLUTE_CEILING: Duration = Duration::from_secs(30 * 60);
 #[cfg(not(test))]
 const PROCESS_INTERRUPT_GRACE: Duration = Duration::from_secs(2);
 #[cfg(test)]
@@ -936,7 +937,8 @@ impl CodexSession {
                 }),
             )
             .await?;
-        self.read_until_rpc(init_id, HANDSHAKE_TIMEOUT).await?;
+        self.read_until_rpc(init_id, HANDSHAKE_TIMEOUT, HANDSHAKE_TIMEOUT)
+            .await?;
         self.notify("initialized", None).await?;
 
         // Resume only a thread the engine has actually written. A thread that
@@ -964,7 +966,12 @@ impl CodexSession {
         };
         let resumed = method == "thread/resume";
         let thread_req = self.request(method, params).await?;
-        self.read_until_rpc(thread_req, THREAD_LOAD_TIMEOUT).await?;
+        self.read_until_rpc(
+            thread_req,
+            THREAD_LOAD_TIMEOUT,
+            THREAD_LOAD_ABSOLUTE_CEILING,
+        )
+        .await?;
         if let Some(detail) = self.lost_resume() {
             // The stored thread is gone on the engine side. Every turn on
             // this child would fail identically, so report the lost resume
@@ -981,20 +988,30 @@ impl CodexSession {
         Ok(())
     }
 
+    /// Read stdout until the response for `rpc_id` arrives.
+    ///
+    /// `inactivity` bounds the gap between two line batches and `ceiling`
+    /// bounds the whole wait. Loading a large persisted thread streams
+    /// more history than fits inside one fixed deadline, so the thread
+    /// load passes a short inactivity window with a long ceiling: every
+    /// batch proves the engine is still making progress, while a silent
+    /// or wedged child stays bounded. The handshake passes the same value
+    /// for both, which keeps its fixed deadline.
     async fn read_until_rpc(
         &self,
         rpc_id: i64,
-        response_timeout: Duration,
+        inactivity: Duration,
+        ceiling: Duration,
     ) -> Result<(), HarnessError> {
-        let deadline = tokio::time::Instant::now() + response_timeout;
+        let absolute = Instant::now() + ceiling;
         loop {
-            if tokio::time::Instant::now() > deadline {
+            let remaining = absolute.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
                 return Err(HarnessError::Other(format!(
                     "timed out waiting for rpc id {rpc_id}"
                 )));
             }
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            let lines = timeout(remaining, self.read_lines()).await;
+            let lines = timeout(inactivity.min(remaining), self.read_lines()).await;
             let lines = match lines {
                 Ok(Ok(lines)) => lines,
                 Ok(Err(err)) => return Err(err),
@@ -1004,6 +1021,14 @@ impl CodexSession {
                     )));
                 }
             };
+            // `read_lines` answers an empty batch only at stdout EOF: the
+            // child is gone, so waiting any longer would spin until the
+            // ceiling.
+            if lines.is_empty() {
+                return Err(HarnessError::Other(format!(
+                    "engine exited before answering rpc id {rpc_id}"
+                )));
+            }
             let mut seen = false;
             for line in lines {
                 if line_is_rpc_id(&line, rpc_id) {
@@ -1707,9 +1732,10 @@ mod tests {
     }
 
     #[test]
-    fn thread_loads_have_time_to_restore_large_sessions() {
+    fn thread_loads_allow_a_longer_inactivity_window_than_initialization() {
         assert!(THREAD_LOAD_TIMEOUT > HANDSHAKE_TIMEOUT);
         assert_eq!(THREAD_LOAD_TIMEOUT, Duration::from_secs(120));
+        assert!(THREAD_LOAD_ABSOLUTE_CEILING > THREAD_LOAD_TIMEOUT);
     }
 
     /// A stand-in `codex app-server --stdio` that speaks just enough of the
@@ -1933,6 +1959,105 @@ done
             sink,
             browser: None,
         })
+    }
+
+    #[cfg(unix)]
+    async fn session_reading_script(script: &str) -> (CodexSession, tokio::process::Child) {
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let session = unit_session(Arc::new(SilentSink));
+        *session.stdout.lock().expect("codex stdout") =
+            Some(Arc::new(AsyncMutex::new(StdoutReader {
+                stdout,
+                lines: StreamLineBuffer::new(),
+            })));
+        (session, child)
+    }
+
+    /// History that keeps arriving past one inactivity window must still
+    /// complete: the old fixed deadline would kill this restore.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_until_rpc_resets_inactivity_timeout_on_each_batch() {
+        let inactivity = Duration::from_millis(200);
+        let (session, mut child) = session_reading_script(
+            r#"
+i=0
+while [ "$i" -lt 4 ]; do
+  printf '{"method":"item/completed","params":{"id":%s}}\n' "$i"
+  sleep 0.12
+  i=$((i + 1))
+done
+printf '{"id":7,"result":{"thread":{"id":"THREAD-1"}}}\n'
+sleep 2
+"#,
+        )
+        .await;
+        session
+            .read_until_rpc(7, inactivity, THREAD_LOAD_ABSOLUTE_CEILING)
+            .await
+            .expect("streaming restore should outlive one inactivity window");
+        let _ = child.kill().await;
+    }
+
+    /// A child that goes silent is still bounded by one inactivity window.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_until_rpc_times_out_when_the_child_goes_silent() {
+        let inactivity = Duration::from_millis(200);
+        let (session, mut child) = session_reading_script("sleep 2").await;
+        let err = session
+            .read_until_rpc(7, inactivity, THREAD_LOAD_ABSOLUTE_CEILING)
+            .await
+            .unwrap_err();
+        match err {
+            HarnessError::Other(message) => {
+                assert!(
+                    message.contains("timed out waiting for rpc id 7"),
+                    "unexpected timeout message: {message}"
+                );
+            }
+            other => panic!("expected inactivity timeout, got {other:?}"),
+        }
+        let _ = child.kill().await;
+    }
+
+    /// A child that exits without answering fails at once instead of
+    /// spinning on empty batches until the ceiling.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_until_rpc_fails_promptly_when_the_child_exits() {
+        let inactivity = Duration::from_secs(5);
+        let (session, mut child) =
+            session_reading_script(r#"printf '{"method":"item/completed","params":{"id":0}}\n'"#)
+                .await;
+        let started = Instant::now();
+        let err = session
+            .read_until_rpc(7, inactivity, THREAD_LOAD_ABSOLUTE_CEILING)
+            .await
+            .unwrap_err();
+        assert!(
+            started.elapsed() < inactivity,
+            "EOF should not wait for the inactivity window"
+        );
+        match err {
+            HarnessError::Other(message) => {
+                assert!(
+                    message.contains("exited before answering rpc id 7"),
+                    "unexpected EOF message: {message}"
+                );
+            }
+            other => panic!("expected an EOF error, got {other:?}"),
+        }
+        let _ = child.kill().await;
     }
 
     fn register_pending(

@@ -701,7 +701,8 @@ break on `main` blocks the desktop release. Native Windows tests inside that
 job still wait for the `windows` scope, the `windows-ci` label, or a
 main/scheduled/manual run: those suites need NTFS and the Windows process
 APIs, and they retry a PowerShell startup race that should not gate unrelated
-Rust changes.
+Rust changes. Native test binaries link with `rust-lld`. `cargo check` keeps
+the MSVC linker.
 
 To run that job on an 8-core Windows larger runner (8 vCPU, 32 GB), set the
 repository variable `CI_WINDOWS_RUNNER` to the provisioned x64 label. If you

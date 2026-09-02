@@ -31,6 +31,29 @@ Two kinds initially:
   leaves the secret store except inside the executor at request time.
   Credential-less entries (public APIs) are allowed and still governed.
 
+## Finding the OpenAPI document
+
+The REST setup form does not assume you already have the document URL.
+Enter the API's https base URL and use **Find the OpenAPI document**. The
+server probes a fixed list of well-known paths on that origin (`/openapi.json`,
+`/swagger.json`, `/v3/api-docs`, and similar), with the same https, SSRF,
+size, and time bounds as a document fetch. Choose a candidate to fill the
+document URL and list operations.
+
+If nothing turns up:
+
+1. Check the vendor's developer portal for an OpenAPI, Swagger, or API
+   reference download link, and paste that URL.
+2. If they publish no document, author a minimal OpenAPI 3 JSON listing
+   only the operations you need (one GET with a path parameter is enough
+   to ingest) and paste it.
+3. If they offer an MCP server instead, add it under Settings → MCP
+   servers.
+
+YAML, Swagger 2.0, and HTML documentation pages are reported as found but
+unusable; convert to OpenAPI 3 JSON. Discovery does not search the web or
+ask a model.
+
 The vocabulary matches the model gateway's (`connected_apps` with an
 `app_kind` including both REST and MCP kinds) deliberately: a managed
 profile's gateway-served apps and an unmanaged profile's local ones read as
@@ -49,14 +72,43 @@ app on behalf of a caller. Its guarantees, all server-side and fail-closed:
 - The credential is injected by the executor at request time. It is never
   serialized to the renderer, a frame, a model prompt, or a log.
 - Egress is bounded: DNS resolution pinned per request, private-network
-  and loopback destinations refused, redirects refused, request and
-  response byte counts capped, per-request timeout.
+  destinations refused, redirects refused, request and
+  response byte counts capped, per-request timeout. Loopback HTTP is
+  the single exception, below.
 - Response bounds are sized for interactive UIs, not model context
   windows — deliberately larger than tool-result clamps.
 
 This is the local form of the gateway's governed REST-tool contract, without
 multi-user governance — which is exactly why managed profiles do not get it
 (below).
+
+## Local services on this computer
+
+Plain HTTP is admitted only for a tightly validated loopback destination,
+never for a remote or private-network host.
+
+- The host must be an **IP literal** in `127.0.0.0/8` or exactly `::1`.
+  `localhost` and every other DNS name are refused for `http` (the message
+  tells the operator to use `127.0.0.1` or `[::1]`), so hostname resolution
+  cannot widen the exemption.
+- The record must carry `allow_loopback_http: true`. That flag is persisted
+  on the `rest_api` definition and is part of the consent fingerprint, so
+  toggling it re-prompts. Without the flag, admission names
+  `allow_loopback_http` in the refusal.
+- The exemption applies only to that record's own admitted origin (scheme,
+  host, and port). Every executed request is pinned to it. Redirects are
+  never followed — the same `reqwest` `Policy::none()` used for https — so
+  a 302 to another host or another loopback port is reported, not chased.
+- The OpenAPI document URL may be loopback HTTP under the same flag;
+  otherwise it still requires https. Loopback-http spec fetches do not
+  follow redirects.
+- Remote `http` (including `10.0.0.0/8` and other private ranges) stays
+  refused with the existing "scheme must be https" message. https keeps
+  today's denied-network list, including loopback https.
+- The Settings form shows a consent checkbox when the typed base URL is
+  loopback HTTP and keeps Save disabled until it is checked. A path ending
+  in `/mcp` is treated as an MCP HTTP endpoint and pointed at Settings →
+  MCP servers (remote HTTP server) rather than this REST form.
 
 ## Bindings key off the app
 
@@ -77,8 +129,9 @@ one live kind:
 Grants, the consent sheet, the invoke route's refusal ladder, and live
 fingerprint invalidation carry over unchanged; the `rest_api` fingerprint is
 SHA-256 over base URL + OpenAPI document hash + credential *reference* +
-placement. Rotating the credential value behind the same reference does not
-invalidate consent; repointing the reference does.
+placement + `allow_loopback_http`. Rotating the credential value behind the
+same reference does not invalidate consent; repointing the reference or
+toggling loopback HTTP does.
 
 A manifest may also bind `{ gateway_app, operation_ids[] }` — an app the
 model gateway holds, named by the gateway's own id (record 10). It is not a

@@ -129,6 +129,7 @@
           "name": "filesystem",
           "plugin": null,
           "request_timeout_ms": 30000,
+          "resolved_command": "/usr/local/bin/npx",
           "tool_count": 11,
           "url": null
         },

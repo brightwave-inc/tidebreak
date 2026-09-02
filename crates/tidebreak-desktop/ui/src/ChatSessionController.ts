@@ -73,6 +73,10 @@ export function metadataFrame(frame: ChatFrame): ChatMetadataFrame | null {
     const { turn_id } = frame as { turn_id?: unknown };
     return typeof turn_id === "string" ? { metadata, turn_id } : null;
   }
+  if (metadata === "memory_proposals_recorded") {
+    const { turn_id } = frame as { turn_id?: unknown };
+    return typeof turn_id === "string" ? { metadata, turn_id } : null;
+  }
   return null;
 }
 

@@ -1,5 +1,6 @@
 import { Button } from "@/components/ui/button";
-import { CircleAlert, GitBranch, LoaderCircle, RefreshCw } from "lucide-react";
+import { Spinner } from "@/components/ui/spinner";
+import { CircleAlert, GitBranch, RefreshCw } from "lucide-react";
 import type {
   CodeDeliveryRunSummary,
   CodeDeliverySourceError,
@@ -50,7 +51,7 @@ export function FreshnessBar({
         disabled={loading}
         onClick={onRefresh}
       >
-        {loading ? <LoaderCircle className="animate-spin" /> : <RefreshCw />}
+        {loading ? <Spinner aria-hidden /> : <RefreshCw />}
         Refresh
       </Button>
     </div>

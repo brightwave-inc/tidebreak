@@ -22,6 +22,7 @@ import {
   type PromptBody,
   type RestCredentialUpdate,
   type SkillInstructions,
+  type SpecDiscoveryInfo,
   type SpecPreviewInfo,
 } from "../types";
 import { attachedRemotely } from "../../host";
@@ -54,6 +55,7 @@ export function withAppsApi<TBase extends Constructor<HttpCore>>(Base: TBase) {
          * the document is not judged. */
         operation_ids?: string[];
         credential: RestCredentialUpdate;
+        allow_loopback_http?: boolean;
       },
     ): Promise<ConnectedAppsInfo> {
       return this.json(`/connected-apps/rest/${encodeURIComponent(id)}`, {
@@ -66,11 +68,24 @@ export function withAppsApi<TBase extends Constructor<HttpCore>>(Base: TBase) {
     /** List what an OpenAPI document declares, for the operation picker. */
     previewRestSpec(
       source: { url: string } | { document: string },
+      options?: { allow_loopback_http?: boolean },
     ): Promise<SpecPreviewInfo> {
       return this.json("/connected-apps/rest/spec-preview", {
         method: "POST",
         headers: this.headers(true),
-        body: JSON.stringify({ source }),
+        body: JSON.stringify({
+          source,
+          allow_loopback_http: options?.allow_loopback_http ?? false,
+        }),
+      });
+    }
+
+    /** Probe well-known OpenAPI locations for one https origin or base URL. */
+    discoverRestSpec(origin: string): Promise<SpecDiscoveryInfo> {
+      return this.json("/connected-apps/rest/spec-discovery", {
+        method: "POST",
+        headers: this.headers(true),
+        body: JSON.stringify({ origin }),
       });
     }
 

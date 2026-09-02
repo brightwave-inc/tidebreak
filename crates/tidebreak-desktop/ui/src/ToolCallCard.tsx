@@ -286,6 +286,12 @@ const TOOL_PRESENTATIONS: Record<
     complete: "App created",
     settled: "Created an app",
   },
+  memory: {
+    label: "Memory",
+    active: "Consulting memory",
+    complete: "Consulted memory",
+    settled: "Consulted memory",
+  },
 };
 
 const FALLBACK_TOOL: ToolPresentation = {

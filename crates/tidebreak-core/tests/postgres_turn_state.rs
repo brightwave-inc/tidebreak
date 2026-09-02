@@ -664,6 +664,7 @@ fn sample_chat() -> Chat {
         reasoning_effort: None,
         permission_mode: None,
         network_policy: Default::default(),
+        memory_incognito: false,
         attachment_revision: 0,
         root_attachments: Vec::new(),
         created_at: utc_now_at_postgres_precision(),

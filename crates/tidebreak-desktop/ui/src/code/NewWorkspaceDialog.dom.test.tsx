@@ -105,6 +105,7 @@ const CAPS = {
   standing_grants: "unsupported",
   mid_turn_resume: "unsupported",
   transcript: "unsupported",
+  memory_loopback: "unsupported",
 } as const;
 
 function harness(kind: HarnessKind): HarnessDoctorEntry {
@@ -942,6 +943,57 @@ describe("NewWorkspaceDialog", () => {
     expect(useCodeUiStore.getState().newWorkspaceDraft).toEqual(
       EMPTY_NEW_WORKSPACE_DRAFT,
     );
+  });
+
+  it("drops the handoff once the session exists, before the first turn finishes", async () => {
+    const repos = [repo("repo-new", "tidebreak")];
+    useCodeCatalogStore.setState({
+      repos,
+      doctor: {
+        harnesses: [harness("claude_code")],
+        notices: [],
+      } as never,
+    });
+    const turn = deferred<CodeTurnSubmission>();
+    const submitCodeTurn = vi.fn(() => turn.promise);
+    const { router } = await renderWithRouter(
+      <AppContextProvider
+        value={app({
+          createCodeWorkspace: vi.fn(async () =>
+            workspace("ws-live", "repo-new", "2026-08-20T00:00:00.000Z"),
+          ),
+          createCodeSession: vi.fn(async () =>
+            session("ws-live", "claude_code", "2026-08-20T00:00:00.000Z"),
+          ),
+          submitCodeTurn,
+          listCodeHarnessModels: claudeModels(),
+        })}
+      >
+        <NewWorkspaceDialog open onOpenChange={vi.fn()} repos={repos} />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+
+    fireEvent.change(screen.getByRole("textbox", { name: "First message" }), {
+      target: { value: "list the files" },
+    });
+    fireEvent.keyDown(screen.getByRole("dialog"), {
+      key: "Enter",
+      metaKey: true,
+    });
+
+    await waitFor(() =>
+      expect(router.state.location.pathname).toBe("/code/w/ws-live"),
+    );
+    await waitFor(() => expect(submitCodeTurn).toHaveBeenCalled());
+    expect(
+      useCodeUiStore.getState().workspaceStartups["ws-live"],
+    ).toBeUndefined();
+    expect(
+      useCodeCatalogStore.getState().sessionsByWorkspace["ws-live"]?.id,
+    ).toBe("sess-ws-live");
+    turn.resolve({ kind: "turn" } as unknown as CodeTurnSubmission);
+    await turn.promise;
   });
 
   it("attaches a pasted image instead of inserting its clipboard path", async () => {

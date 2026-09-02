@@ -53,6 +53,19 @@ function offenders(pattern: RegExp, skip?: ReadonlySet<string>): string[] {
   return hits;
 }
 
+/** RefreshCw / RotateCw JSX that also carries animate-spin. */
+const SPINNING_LUCIDE_REFRESH = /<(RefreshCw|RotateCw)\b[^>]*animate-spin/;
+
+function spinningRefreshIcons(): string[] {
+  const hits: string[] = [];
+  for (const file of sourceFiles()) {
+    if (/\.test\.(ts|tsx)$/.test(file)) continue;
+    const text = readFileSync(join(SRC, file), "utf8");
+    if (SPINNING_LUCIDE_REFRESH.test(text)) hits.push(file);
+  }
+  return hits;
+}
+
 describe("styles contract (see DESIGN.md)", () => {
   it("uses the pinned type scale, not arbitrary sizes", () => {
     expect(
@@ -68,6 +81,14 @@ describe("styles contract (see DESIGN.md)", () => {
       "Color state through the status tones (statusTone.ts, Badge) and " +
         "identity through --icon-*. See DESIGN.md; allowlist a genuine " +
         "document-viewer convention here with a reason.",
+    ).toEqual([]);
+  });
+
+  it("does not spin Lucide refresh icons", () => {
+    expect(
+      spinningRefreshIcons(),
+      "Busy refresh controls swap to Spinner from components/ui/spinner.tsx. " +
+        "Lucide RefreshCw and RotateCw orbit under animate-spin. See DESIGN.md.",
     ).toEqual([]);
   });
 });

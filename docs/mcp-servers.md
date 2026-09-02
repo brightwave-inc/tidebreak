@@ -15,10 +15,15 @@ Each server has:
 
 - a stable namespace containing ASCII letters, numbers, `_`, or `-`;
 - exactly one transport:
-  - **stdio** — an executable, zero or more individual arguments, an optional
-    working directory, optional environment variable *names* (`env`) whose
-    values are held in the OS credential store, and optional `env_from` names
-    selected from the Tidebreak host environment; or
+  - **stdio** — an executable (a bare command name or an absolute path), zero
+    or more individual arguments, an optional working directory, optional
+    environment variable *names* (`env`) whose values are held in the OS
+    credential store, and optional `env_from` names selected from the Tidebreak
+    host environment. A bare name is resolved at verify and launch time on the
+    process PATH extended with the login-shell PATH the harness probe already
+    captures (plus `PATHEXT` on Windows). Tidebreak never invokes a shell to
+    run the server. The stored definition keeps what you typed. A relative path
+    that contains separators is refused; or
   - **HTTP** — an `http`/`https` URL and an optional bearer-token variable
     name selected from the Tidebreak host environment; or
   - **gateway** — the slug of a model-gateway MCP endpoint
@@ -30,6 +35,30 @@ Each server has:
     recovers on the next reconnect after sign-in;
 - a request timeout from 1 to 3,600,000 milliseconds; and
 - an enabled switch.
+
+## Portable workspace configuration
+
+**Settings → Git & source control** can export and import a
+`.tidebreak-config.json` file (decision 83). The file is a versioned JSON
+envelope of **code repository registrations** and **MCP server definitions**.
+
+Included:
+
+- Repositories: display name, origin URL (from `git remote get-url origin` or
+  `cloned_from`), default base ref, branch prefix, setup/archive scripts,
+  quick actions, and the device `root_path` as a remap hint.
+- MCP servers: name, command, args, environment *names*, `env_from`, cwd,
+  URL, `bearer_token_env` *name*, gateway endpoint, timeout, enabled.
+
+Excluded: secret values (`env_values`, bearer token values, credentials),
+plugin-sourced servers, connected apps, folders, plugins, providers,
+preferences, transcripts, and worktrees.
+
+On import, Tidebreak previews each entry as new, identical, or conflicting
+(same repo remote or same MCP name with different fields). Device-specific
+`root_path`, `command`, and `cwd` that do not exist here are marked for
+remap. Apply never overwrites a record unless you choose Replace. A newer
+`tidebreak_config` version is refused with a message to upgrade or re-export.
 
 The child environment starts empty, and **no environment value of any kind
 lives in a definition**. Executables, arguments, working directories, and URLs
@@ -52,10 +81,13 @@ and then restart Tidebreak. Save and verify classifies the failure: DNS
 resolution (the host), TLS handshake (the reason), HTTP status (401/403 as
 authentication, 404 as wrong path, 5xx as server error, with the status line),
 protocol negotiation (quotes the first bytes when the endpoint answered but
-not with MCP JSON-RPC), timeout (after N ms), or a stdio launch failure
-(command not found, exit code, first stderr line). Diagnostics never echo a
-URL or a token. Child stderr is not copied into host logs; a failed launch may
-quote its first line in Settings.
+not with MCP JSON-RPC), timeout (after N ms), or a stdio failure: command not
+found (names a bounded list of directories searched), not executable or
+permission denied, launch failure before the MCP handshake (exit status and a
+bounded stderr tail), or MCP protocol failure. A successful stdio verify
+reports the resolved executable path. Diagnostics never echo a URL, token,
+argument value, or environment value. Child stderr is not copied into host
+logs; a failed launch may quote its first line in Settings.
 
 Definitions saved before the values moved into the credential store held them
 in cleartext in the connected-app record. They are migrated on first load: the

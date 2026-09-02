@@ -49,6 +49,9 @@ pub enum ChatMetadataNotice {
     Titled { title: String },
     /// A terminal turn's connected-folder write report is durable and readable.
     FileChangesRecorded { turn_id: TurnId },
+    /// A terminal turn's memory capture wrote at least one proposal, and the
+    /// records are durable and readable.
+    MemoryProposalsRecorded { turn_id: TurnId },
     /// Whether code execution is currently preparing its sandbox image before
     /// it can run anything.
     ///

@@ -176,17 +176,17 @@ export function AgentsPanel({ client }: { client: ApiClient }) {
       </SettingsSection>
       <SettingsSection
         title="Turn recaps"
-        description="After a coding turn finishes, Tidebreak can add a one-line update beside the turn result."
+        description="Tidebreak keeps Claude Code's captured recap. For other engines, it can add a one-line fallback after the turn finishes."
       >
         <SettingsField
-          label="Write turn recaps"
-          hint="Uses the utility model after each completed coding turn. Turning this off affects future turns; existing recaps stay in the transcript."
+          label="Write fallback recaps"
+          hint="Uses the utility model when the engine does not supply a recap. Turning this off stops future fallback recaps; existing recaps stay in the transcript."
         >
           <Switch
             checked={turnRecapsEnabled}
             disabled={loading || savingTurnRecaps}
             onCheckedChange={(enabled) => void saveTurnRecaps(enabled)}
-            aria-label="Write turn recaps"
+            aria-label="Write fallback recaps"
           />
         </SettingsField>
       </SettingsSection>

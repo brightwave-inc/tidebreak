@@ -63,10 +63,46 @@ function searchOf(call: unknown): Record<string, unknown> {
   return { ...args.search({ tabs: "kept" }), replace: args.replace };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 beforeEach(() => useCodeCatalogStore.getState().reset());
 afterEach(cleanup);
 
 describe("useWorkspaceSessions", () => {
+  it("picks up a session remembered after mount, before the list returns", () => {
+    const list = deferred<CodeSessionSnapshot[]>();
+    const client = {
+      getCodeWorkspace: vi.fn(async () => codeWorkspace),
+      listCodeWorkspaceSessions: vi.fn(() => list.promise),
+      getCodeRepo: vi.fn(async () => deliveryCodeRepo),
+    };
+    const { result } = renderHook(() =>
+      useWorkspaceSessions({
+        workspaceId: codeWorkspace.id,
+        client: client as never,
+        models: [],
+        defaultModelKey: null,
+        taskParam: undefined,
+        navigate: vi.fn() as never,
+        focusConversationPane: vi.fn(),
+      }),
+    );
+
+    expect(result.current.session).toBeNull();
+    act(() => {
+      useCodeCatalogStore.getState().rememberSession(main);
+    });
+    expect(result.current.session?.id).toBe("sess-main");
+    expect(result.current.startingNewAgent).toBe(false);
+    list.resolve([main]);
+  });
+
   it("shows the first live agent when nothing is named", async () => {
     const { result } = setup([main, sibling]);
     await waitFor(() => expect(result.current.session?.id).toBe("sess-main"));

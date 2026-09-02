@@ -121,16 +121,17 @@ impl MemoryScope {
 }
 
 /// What kind of durable knowledge a record carries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+// The variants stay undocumented so the `schemars` derive generates a plain
+// `enum` list rather than `oneOf` + `const`, which the strict schema subset
+// providers enforce cannot express.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema, TS,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryKind {
-    /// A dated claim about the owner or repository.
     Fact,
-    /// A stated choice or working preference.
     Preference,
-    /// A reusable lesson learned from completed work.
     Lesson,
-    /// A durable pointer or lookup hint.
     Reference,
 }
 
@@ -506,6 +507,19 @@ pub struct MemorySearchHit {
     pub matching_line: String,
     /// Deterministic lexical score. Larger values sort first.
     pub score: u32,
+}
+
+/// Markdown body for one materialized record file.
+#[must_use]
+pub fn render_memory_record_markdown(record: &MemoryRecord) -> String {
+    format!(
+        "# {}\n\nUpdated: {}\nKind: {}\nId: {}\n\n{}\n",
+        record.title,
+        record.updated_at.format("%Y-%m-%d"),
+        record.kind.as_str(),
+        record.id,
+        record.body.trim_end()
+    )
 }
 
 /// One deterministic active-record digest for a scope.

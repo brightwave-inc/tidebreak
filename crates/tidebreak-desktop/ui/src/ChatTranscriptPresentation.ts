@@ -85,6 +85,17 @@ export function presentChatTranscript(
         } satisfies ChatMessage,
       ];
     }
+    if (entry.kind === "memory_proposals") {
+      return [
+        {
+          id: entry.id,
+          role: "memory_proposals",
+          turnId: entry.turnId,
+          records: entry.records,
+          createdAt: entry.createdAt,
+        } satisfies ChatMessage,
+      ];
+    }
     if (entry.kind === "tool") {
       return [
         {

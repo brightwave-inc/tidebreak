@@ -2130,6 +2130,24 @@ body {
   }
 } /* @layer components */
 
+/* xterm.css is unlayered, so these have to be too. WKWebView does not deliver
+   keys to a helper textarea parked at -9999em, and a fitted pane with a
+   forced viewport scrollbar makes the PTY and renderer disagree on columns. */
+.terminal-host .xterm {
+  width: 100%;
+  height: 100%;
+}
+
+.terminal-host .xterm .xterm-helper-textarea {
+  left: 0;
+  width: 1px;
+  height: 1px;
+}
+
+.terminal-host .xterm .xterm-viewport {
+  overflow-y: auto;
+}
+
 /* Scrollbar styling. The thumb rests dim and brightens on hover; scoping the
    color to scrollable containers keeps it from painting on every element.
    These rules must stay unlayered to override Tailwind v4's unlayered

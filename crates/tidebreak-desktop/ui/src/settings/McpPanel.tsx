@@ -160,6 +160,7 @@ function definition(server: McpServerInfo): McpServerDefinition {
     tool_count: __,
     diagnostic: ___,
     curated: ____,
+    resolved_command: _____,
     ...value
   } = server;
   return value;
@@ -842,7 +843,7 @@ export function McpPanel({
                   <>
                     <SettingsField
                       label="Executable"
-                      hint={`A path or command name on ${hostMachineLabel()}, where the process runs. Tidebreak never invokes a shell.`}
+                      hint={`A command name or absolute path on ${hostMachineLabel()}. A bare name is resolved on the process PATH extended with the login-shell PATH (and PATHEXT on Windows) without invoking a shell. Relative paths with separators are refused.`}
                     >
                       <Input
                         value={server.command ?? ""}
@@ -855,6 +856,17 @@ export function McpPanel({
                         }
                       />
                     </SettingsField>
+                    {server.resolved_command &&
+                    server.command &&
+                    server.resolved_command !== server.command ? (
+                      <p className="text-sm text-muted-foreground">
+                        Resolved{" "}
+                        <span className="font-mono">{server.command}</span> to{" "}
+                        <span className="font-mono">
+                          {server.resolved_command}
+                        </span>
+                      </p>
+                    ) : null}
 
                     <StringListEditor
                       label="Arguments"

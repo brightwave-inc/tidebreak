@@ -229,9 +229,15 @@ async fn an_engine_that_states_image_input_is_still_handed_the_bytes() {
     wait_until(|| !engine.turn_inputs().is_empty()).await;
     let handed = engine.turn_inputs().remove(0);
     assert_eq!(handed.images, 1, "the bytes ride the protocol");
-    assert_eq!(
-        handed.text, "what is in this",
-        "nothing is appended to a prompt that carries the image itself"
+    assert!(
+        handed.text.starts_with("what is in this"),
+        "the prompt keeps the message as typed: {}",
+        handed.text
+    );
+    assert!(
+        !handed.text.contains("attachments"),
+        "no staged path is named for a prompt that carries the image itself: {}",
+        handed.text
     );
     assert!(
         !runtime

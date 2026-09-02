@@ -322,15 +322,15 @@ fn parses_a_bounded_stdio_server_configuration() {
     assert!(server.enabled);
 }
 
-#[test]
-fn defaults_to_an_isolated_environment_and_sixty_second_timeout() {
+#[tokio::test]
+async fn defaults_to_an_isolated_environment_and_sixty_second_timeout() {
     let config = parse(r#"{"servers":[{"name":"docs","command":"/bin/docs"}]}"#).unwrap();
     let server = &config.0[0];
     assert!(server.args.is_empty());
     assert!(server.env.is_empty());
     assert!(server.env_from.is_empty());
     assert_eq!(server.request_timeout_ms, 60_000);
-    let command = server.build_command(&BTreeMap::new()).unwrap();
+    let command = server.build_command(&BTreeMap::new()).await.unwrap();
     assert!(command.as_std().get_envs().next().is_none());
 }
 
@@ -405,8 +405,8 @@ fn rejects_ambiguous_or_invalid_environment_sources() {
         .contains("invalid environment variable name"));
 }
 
-#[test]
-fn forwards_only_explicitly_selected_parent_environment_values() {
+#[tokio::test]
+async fn forwards_only_explicitly_selected_parent_environment_values() {
     let config = parse(
         r#"{"servers":[{
                 "name":"docs",
@@ -415,7 +415,7 @@ fn forwards_only_explicitly_selected_parent_environment_values() {
             }]}"#,
     )
     .unwrap();
-    let command = config.0[0].build_command(&BTreeMap::new()).unwrap();
+    let command = config.0[0].build_command(&BTreeMap::new()).await.unwrap();
     let forwarded_path = command
         .as_std()
         .get_envs()
@@ -468,6 +468,24 @@ fn projected_diagnostics_are_fixed_or_name_only() {
     assert_eq!(
         connection_diagnostic(&generic.0[0], &failure),
         "Could not initialize this server. Check its executable, arguments, and working directory."
+    );
+
+    let not_found = AgentError::config(
+        "Command not found: \"npx\" is not on the host PATH. Searched: /opt/homebrew/bin.",
+    );
+    assert_eq!(
+        connection_diagnostic(&generic.0[0], &not_found),
+        "Command not found: \"npx\" is not on the host PATH. Searched: /opt/homebrew/bin."
+    );
+    let not_exec =
+        AgentError::config("Not executable: /tmp/npx exists but is not executable by this user.");
+    assert!(connection_diagnostic(&generic.0[0], &not_exec).starts_with("Not executable:"));
+    let denied = AgentError::config("Permission denied: cannot execute /tmp/npx.");
+    assert!(connection_diagnostic(&generic.0[0], &denied).starts_with("Permission denied:"));
+    let protocol =
+        AgentError::msg("MCP client error: Protocol negotiation failed (not with MCP JSON-RPC).");
+    assert!(
+        connection_diagnostic(&generic.0[0], &protocol).starts_with("Protocol negotiation failed")
     );
 }
 
@@ -1675,6 +1693,52 @@ async fn verify_classifies_timeout_after_configured_milliseconds() {
     definition.request_timeout_ms = 80;
     let error = verify_fails(definition).await;
     assert!(error.contains("Timed out after 80 ms."), "{error}");
+}
+
+#[test]
+fn stdio_relative_path_is_refused() {
+    let error =
+        super::stdio::resolve_stdio_command_on_path("bin/npx", std::ffi::OsStr::new("/bin"))
+            .expect_err("relative paths with separators must be refused");
+    let diagnostic = error.diagnostic();
+    assert!(
+        diagnostic.contains("Relative executable path"),
+        "{diagnostic}"
+    );
+    assert!(!diagnostic.contains("-y"), "{diagnostic}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn stdio_bare_npx_resolves_on_overridden_host_path() {
+    let directory = tempfile::tempdir().unwrap();
+    let npx = directory.path().join("npx");
+    std::fs::write(&npx, "#!/bin/sh\nexit 0\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&npx, std::fs::Permissions::from_mode(0o755)).unwrap();
+    super::stdio::override_host_path(Some(directory.path().as_os_str().to_os_string()));
+    let _guard = super::stdio::HostPathGuard;
+    let resolved = super::stdio::resolve_stdio_command("npx").await.unwrap();
+    assert_eq!(resolved, npx);
+
+    let definition = parse(r#"{"servers":[{"name":"docs","command":"npx"}]}"#)
+        .unwrap()
+        .0
+        .remove(0);
+    assert_eq!(definition.command.as_deref(), Some("npx"));
+    let command = definition.build_command(&BTreeMap::new()).await.unwrap();
+    assert_eq!(command.as_std().get_program(), npx.as_os_str());
+
+    let missing = super::stdio::resolve_stdio_command("definitely-not-npx-9f3a")
+        .await
+        .expect_err("missing name must fail");
+    let diagnostic = missing.to_string();
+    assert!(diagnostic.contains("Command not found"), "{diagnostic}");
+    assert!(
+        diagnostic.contains(&directory.path().display().to_string()),
+        "{diagnostic}"
+    );
+    assert!(!diagnostic.contains("@beeper"), "{diagnostic}");
 }
 
 #[tokio::test]

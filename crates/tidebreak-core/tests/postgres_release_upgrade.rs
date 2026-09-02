@@ -744,6 +744,7 @@ async fn postgres_v060_upgrade_merges_conversations_into_sessions() {
             ("harness_kind".to_owned(), "internal".to_owned()),
             ("kind".to_owned(), "interactive".to_owned()),
             ("lifecycle".to_owned(), "idle".to_owned()),
+            ("memory_incognito".to_owned(), "false".to_owned()),
             ("network_policy".to_owned(), r#"{"mode":"open"}"#.to_owned()),
             ("permission_mode".to_owned(), "<null>".to_owned()),
             ("reasoning_effort".to_owned(), "<null>".to_owned()),

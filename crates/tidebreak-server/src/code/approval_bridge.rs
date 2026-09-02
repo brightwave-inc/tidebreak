@@ -418,7 +418,8 @@ pub async fn approval_prompt(
         Some("tools/list") => json_rpc_ok(
             request.id,
             json!({
-                "tools": [{
+                "tools": [
+                    {
                     "name": APPROVAL_MCP_TOOL,
                     "description": "Decide whether a tool call is allowed.",
                     "inputSchema": {
@@ -430,7 +431,11 @@ pub async fn approval_prompt(
                         },
                         "required": ["tool_name", "tool_use_id"]
                     }
-                }]
+                    },
+                    memory_tool_schema("memory_propose", "Propose a durable memory record. Writes land as proposed, never active."),
+                    memory_tool_schema("memory_search", "Search the session owner's memory records."),
+                    memory_tool_schema("memory_read", "Read one memory record by id.")
+                ]
             }),
         )
         .into_response(),
@@ -454,7 +459,17 @@ async fn handle_tools_call(
     id: Option<Value>,
     params: Value,
 ) -> Result<Json<JsonRpcResponse>, ServerError> {
-    let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+    let name = params
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+    if matches!(
+        name.as_str(),
+        "memory_propose" | "memory_search" | "memory_read"
+    ) {
+        return handle_memory_tool(runtime, subject, id, &name, params).await;
+    }
     if name != APPROVAL_MCP_TOOL {
         return Ok(json_rpc_ok(
             id,
@@ -535,6 +550,193 @@ async fn handle_tools_call(
     )
     .await;
     Ok(prompt_result(id, &decision))
+}
+
+fn memory_tool_schema(name: &str, description: &str) -> Value {
+    json!({
+        "name": name,
+        "description": description,
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": { "type": "string" },
+                "id": { "type": "string" },
+                "title": { "type": "string" },
+                "body": { "type": "string" },
+                "kind": { "type": "string" }
+            }
+        }
+    })
+}
+
+fn memory_tool_text(id: Option<Value>, text: String, is_error: bool) -> Json<JsonRpcResponse> {
+    json_rpc_ok(
+        id,
+        json!({
+            "content": [{ "type": "text", "text": text }],
+            "isError": is_error
+        }),
+    )
+}
+
+async fn handle_memory_tool(
+    runtime: &crate::code::CodeRuntime,
+    subject: &ApprovalTokenSubject,
+    id: Option<Value>,
+    name: &str,
+    params: Value,
+) -> Result<Json<JsonRpcResponse>, ServerError> {
+    use tidebreak_core::{
+        MemoryAuthor, MemoryBackend, MemoryEvidence, MemoryKind, MemoryOrigin, MemoryProvenance,
+        MemoryRecord, MemoryRecordId, MemorySearchRequest, MemoryStatus, MAX_MEMORY_SEARCH_RESULTS,
+    };
+
+    let session = tidebreak_core::db::code::get_session_all_owners(&runtime.db, subject.session_id)
+        .await?
+        .ok_or_else(|| {
+            ServerError::not_found(format!("session {} not found", subject.session_id))
+        })?;
+    if session.owner != subject.owner {
+        return Err(ServerError::unauthorized("session owner mismatch"));
+    }
+    let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
+    match name {
+        "memory_search" => {
+            let query = arguments
+                .get("query")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_owned();
+            if query.is_empty() {
+                return Ok(memory_tool_text(id, "query is required".into(), true));
+            }
+            let hits = runtime
+                .db
+                .search(
+                    &session.owner,
+                    MemorySearchRequest {
+                        query,
+                        scope: None,
+                        statuses: vec![MemoryStatus::Active, MemoryStatus::Proposed],
+                        limit: MAX_MEMORY_SEARCH_RESULTS.min(20),
+                    },
+                )
+                .await
+                .map_err(|err| ServerError::internal(err.to_string()))?;
+            let text = serde_json::to_string_pretty(&hits).unwrap_or_else(|_| "[]".to_owned());
+            Ok(memory_tool_text(id, text, false))
+        }
+        "memory_read" => {
+            let Some(record_id) = arguments
+                .get("id")
+                .and_then(Value::as_str)
+                .and_then(|value| value.parse::<MemoryRecordId>().ok())
+            else {
+                return Ok(memory_tool_text(id, "id is required".into(), true));
+            };
+            match runtime.db.get(&session.owner, record_id).await {
+                Ok(Some(record)) => Ok(memory_tool_text(
+                    id,
+                    serde_json::to_string_pretty(&record).unwrap_or_default(),
+                    false,
+                )),
+                Ok(None) => Ok(memory_tool_text(id, "memory record not found".into(), true)),
+                Err(err) => Ok(memory_tool_text(id, err.to_string(), true)),
+            }
+        }
+        "memory_propose" => {
+            let title = arguments
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_owned();
+            let body = arguments
+                .get("body")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_owned();
+            if title.is_empty() || body.is_empty() {
+                return Ok(memory_tool_text(
+                    id,
+                    "title and body are required".into(),
+                    true,
+                ));
+            }
+            let kind = match arguments.get("kind").and_then(Value::as_str) {
+                Some("preference") => MemoryKind::Preference,
+                Some("lesson") => MemoryKind::Lesson,
+                Some("reference") => MemoryKind::Reference,
+                _ => MemoryKind::Fact,
+            };
+            let turn = tidebreak_core::db::code::get_open_turn(
+                &runtime.db,
+                &session.owner,
+                subject.session_id,
+            )
+            .await?;
+            let events = tidebreak_core::db::code::list_recent_events(
+                &runtime.db,
+                &session.owner,
+                subject.session_id,
+                8,
+            )
+            .await
+            .unwrap_or_default();
+            let Some(evidence_seq) = events.first().map(|event| event.seq) else {
+                return Ok(memory_tool_text(
+                    id,
+                    "no journal evidence for this session yet".into(),
+                    true,
+                ));
+            };
+            let now = chrono::Utc::now();
+            let record = MemoryRecord {
+                id: MemoryRecordId::new(),
+                scope: tidebreak_core::MemoryScope::Personal,
+                kind,
+                status: MemoryStatus::Proposed,
+                title,
+                body,
+                provenance: MemoryProvenance {
+                    author: MemoryAuthor::Model,
+                    origin: MemoryOrigin {
+                        code_session_id: Some(subject.session_id),
+                        code_turn_id: turn.as_ref().map(|turn| turn.id),
+                        workspace_id: session.workspace_id,
+                        ..Default::default()
+                    },
+                    evidence: vec![MemoryEvidence::CodeEvent {
+                        session_id: subject.session_id,
+                        seq: evidence_seq,
+                    }],
+                },
+                links: Vec::new(),
+                expires_at: None,
+                superseded_by: None,
+                observation_count: 0,
+                revision: 1,
+                created_at: now,
+                updated_at: now,
+            };
+            match runtime.db.put(&session.owner, record).await {
+                Ok(receipt) => {
+                    // The header chip counts pending proposals off the
+                    // digest, so announce the new one now.
+                    crate::code::attention::emit_digest(&runtime.db, &runtime.bus, &session).await;
+                    Ok(memory_tool_text(
+                        id,
+                        format!("proposed {}", receipt.record.id),
+                        false,
+                    ))
+                }
+                Err(err) => Ok(memory_tool_text(id, err.to_string(), true)),
+            }
+        }
+        _ => Ok(memory_tool_text(id, format!("unknown tool {name}"), true)),
+    }
 }
 
 fn bearer_token(headers: &HeaderMap) -> Option<&str> {

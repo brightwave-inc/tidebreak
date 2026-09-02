@@ -558,6 +558,7 @@ fn deployment_plane_routes() -> Vec<(&'static str, &'static str)> {
         ("PUT", "/connected-apps/rest/example"),
         ("DELETE", "/connected-apps/rest/example"),
         ("POST", "/connected-apps/rest/spec-preview"),
+        ("POST", "/connected-apps/rest/spec-discovery"),
         ("POST", "/gateway/sign-in"),
         ("POST", "/gateway/sign-out"),
         ("POST", "/gateway/models/sync"),

@@ -55,6 +55,7 @@ pub enum RendererToolName {
     BrowserAct,
     Exec,
     CreateApp,
+    Memory,
     /// The fold for anything unrecognized, including a tool that has since been
     /// removed and any name a provider invented.
     Other,
@@ -96,6 +97,7 @@ impl RendererToolName {
             Self::BrowserAct => "browser_act",
             Self::Exec => "exec",
             Self::CreateApp => "create_app",
+            Self::Memory => "memory",
             Self::Other => "other",
         }
     }
@@ -139,6 +141,7 @@ impl From<&str> for RendererToolName {
             crate::BROWSER_ACT_TOOL => Self::BrowserAct,
             "exec" => Self::Exec,
             crate::local_app::CREATE_APP_TOOL => Self::CreateApp,
+            crate::MEMORY_TOOL => Self::Memory,
             _ => Self::Other,
         }
     }
@@ -183,6 +186,7 @@ mod tests {
             crate::BROWSER_ACT_TOOL,
             "exec",
             crate::local_app::CREATE_APP_TOOL,
+            crate::MEMORY_TOOL,
             "anything_else",
         ] {
             let folded = RendererToolName::from(name);
@@ -239,6 +243,7 @@ mod tests {
             crate::BROWSER_ACT_TOOL,
             "exec",
             crate::local_app::CREATE_APP_TOOL,
+            crate::MEMORY_TOOL,
         ] {
             let folded = RendererToolName::from(name);
             assert_ne!(

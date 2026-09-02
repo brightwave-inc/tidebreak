@@ -57,6 +57,7 @@ type SettingsClientMethods = Pick<
   | "listConnectedApps"
   | "putRestConnectedApp"
   | "previewRestSpec"
+  | "discoverRestSpec"
   | "deleteRestConnectedApp"
   | "listMcpServers"
   | "putMcpServers"
@@ -389,6 +390,7 @@ const connectedApps: ConnectedAppsInfo = {
       placement: "bearer",
       updated_at: "2026-08-20T12:00:00Z",
       used_by_app_count: 1,
+      allow_loopback_http: false,
     },
   ],
 };
@@ -548,6 +550,14 @@ function createSettingsStoryClient(
         operations: [],
         unlistable: 0,
         truncated: false,
+      }),
+    discoverRestSpec: () =>
+      write({
+        candidates: [],
+        tried: [
+          "https://api.example.com/openapi.json",
+          "https://api.example.com/swagger.json",
+        ],
       }),
     deleteRestConnectedApp: () => write(undefined),
     listMcpServers: () => read({ servers: state === "empty" ? [] : servers }),

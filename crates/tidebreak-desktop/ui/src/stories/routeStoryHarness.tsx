@@ -75,6 +75,7 @@ const baseChats = [
     permission_mode: "ask",
     network_policy: { mode: "package_managers" },
     attachment_revision: 0,
+    memory_incognito: false,
     root_attachments: [],
     created_at: "2026-08-24T13:10:00.000Z",
   },
@@ -87,6 +88,7 @@ const baseChats = [
     permission_mode: "plan",
     network_policy: { mode: "off" },
     attachment_revision: 0,
+    memory_incognito: false,
     root_attachments: [],
     created_at: "2026-08-23T18:30:00.000Z",
   },
@@ -103,6 +105,7 @@ const baseChats = [
       package_managers: false,
     },
     attachment_revision: 0,
+    memory_incognito: false,
     root_attachments: [],
     created_at: "2026-08-22T09:40:00.000Z",
   },
@@ -533,6 +536,7 @@ const routeConnectedApps = {
       placement: "bearer",
       updated_at: "2026-08-20T12:00:00Z",
       used_by_app_count: 1,
+      allow_loopback_http: false,
     },
   ],
 } satisfies ConnectedAppsInfo;
@@ -569,6 +573,7 @@ type RouteClientMethods = Pick<
   | "listConnectedApps"
   | "putRestConnectedApp"
   | "previewRestSpec"
+  | "discoverRestSpec"
   | "deleteRestConnectedApp"
   | "listMcpServers"
   | "putMcpServers"
@@ -716,6 +721,13 @@ export function storyClient(
       operations: [],
       unlistable: 0,
       truncated: false,
+    }),
+    discoverRestSpec: async () => ({
+      candidates: [],
+      tried: [
+        "https://api.example.com/openapi.json",
+        "https://api.example.com/swagger.json",
+      ],
     }),
     deleteRestConnectedApp: async () => {},
     listMcpServers: async () => ({ servers: [routeMcpServer] }),

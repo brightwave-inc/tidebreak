@@ -110,6 +110,7 @@ impl HarnessAdapter for InternalAdapter {
             standing_grants: CapLevel::Supported,
             mid_turn_resume: CapLevel::Supported,
             transcript: CapLevel::Supported,
+            memory_loopback: CapLevel::Unsupported,
         }
     }
 

@@ -393,6 +393,14 @@ pub trait Store: Send + Sync {
         network_policy: Option<NetworkPolicy>,
     ) -> Result<bool>;
 
+    /// Flip one chat's memory-incognito switch: whether the conversation
+    /// keeps durable memory out entirely (no digest injection, no post-turn
+    /// capture). Returns `false` if the chat does not exist.
+    ///
+    /// A dedicated write rather than another [`Store::update_chat_metadata`]
+    /// parameter: the switch has no cleared state and no sticky default.
+    async fn set_chat_memory_incognito(&self, id: ChatId, memory_incognito: bool) -> Result<bool>;
+
     // ------------------------------------------------------------------
     // Owner-scoped root surface (#853).
     //
@@ -525,6 +533,18 @@ pub trait Store: Send + Sync {
             network_policy,
         )
         .await
+    }
+
+    /// [`Store::set_chat_memory_incognito`] restricted to `owner`'s chats;
+    /// someone else's chat reports `false`.
+    async fn set_chat_memory_incognito_scoped(
+        &self,
+        owner: &OwnerId,
+        id: ChatId,
+        memory_incognito: bool,
+    ) -> Result<bool> {
+        let _ = owner;
+        self.set_chat_memory_incognito(id, memory_incognito).await
     }
 
     /// Persist a new project owned by `owner`.

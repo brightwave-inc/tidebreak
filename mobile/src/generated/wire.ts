@@ -672,6 +672,11 @@ attachment_revision: number,
  */
 root_attachments: Array<ChatRootAttachment>,
 /**
+ * Whether this chat keeps durable memory out entirely: no digest is
+ * injected into its prompts and no post-turn capture runs for it.
+ */
+memory_incognito: boolean,
+/**
  * When the chat was created.
  */
 created_at: string, };
@@ -727,6 +732,13 @@ origin: RootAttachmentOrigin, };
  * carrying the partial prose and reasoning the reader already saw live.
  */
 export type ChatTerminalTurnSnapshot = { turn_id: TurnId, message_id?: MessageId, status: ChatTerminalTurnStatus, partial_content: string, reasoning?: string, refusal?: RendererRefusal, failure_category?: TurnFailureCategory, failure_detail?: string, failure_model?: RendererModelIdentity, file_changes: Array<ExecFileChangeSummary>,
+/**
+ * Model-authored memory records this turn produced, whatever their
+ * review state now, so the transcript can show the proposal chip and
+ * its decisions after a reload. Tracked hypotheses stay out: they are
+ * manager-only until they graduate (decision 0067).
+ */
+memory_proposals: Array<MemoryRecord>,
 /**
  * Skills the user explicitly invoked for this turn, in submitted order.
  * Absent for the ordinary turn that invoked none.
@@ -1757,7 +1769,11 @@ subagents?: Array<CodeSubagentSummary>,
  * that carries one. Absent until a turn has been recapped, and on
  * machines with no utility model to derive one.
  */
-recap?: string, };
+recap?: string,
+/**
+ * Pending memory proposals that originated in this session.
+ */
+memory_proposal_count?: number, };
 
 /**
  * Where an externally created session came from. The desktop renders it
@@ -1969,7 +1985,11 @@ subagents?: Array<CodeSubagentSummary>,
  * Where this session stands, in a sentence, derived from the newest
  * turn that carries one.
  */
-recap?: string, } | { "type": "terminal_activity", workspace_id: WorkspaceId, terminal_id: CodeTerminalId, } | { "type": "clone_progress", job: string, phase: string, percent?: number, done: boolean, error?: string, repo_id?: RepoId, } | { "type": "harness_install", kind: HarnessKind, version?: string, phase: string, done: boolean, error?: string, } | { "type": "delivery" } | { "type": "turn_rewrite", session: CodeSessionId, turn_id: CodeTurnId, state: CodeTurnRewriteState, rewrite?: string, };
+recap?: string,
+/**
+ * Pending memory proposals that originated in this session.
+ */
+memory_proposal_count?: number, } | { "type": "terminal_activity", workspace_id: WorkspaceId, terminal_id: CodeTerminalId, } | { "type": "clone_progress", job: string, phase: string, percent?: number, done: boolean, error?: string, repo_id?: RepoId, } | { "type": "harness_install", kind: HarnessKind, version?: string, phase: string, done: boolean, error?: string, } | { "type": "delivery" } | { "type": "turn_rewrite", session: CodeSessionId, turn_id: CodeTurnId, state: CodeTurnRewriteState, rewrite?: string, };
 
 /**
  * Token accounting for one turn.
@@ -2276,7 +2296,12 @@ placement: CredentialPlacement | null, updated_at: string,
  * a count only, never app names or ids, the renderer-safety posture
  * of this surface. Grants of library-deleted apps do not count.
  */
-used_by_app_count: number, };
+used_by_app_count: number,
+/**
+ * Whether this record opted into loopback HTTP. Surfaced so the
+ * form can re-show consent on edit.
+ */
+allow_loopback_http: boolean, };
 
 /**
  * The renderer's listing of every configured connected app, across kinds.
@@ -2674,6 +2699,16 @@ export type ExecProviderSnapshot = "local" | "e2b" | "daytona" | "docker" | "off
 export type ExecUnavailableReason = "unsupported_platform" | "missing_sandbox_binary" | "missing_credential" | "missing_container_runtime" | "container_runtime_unreachable";
 
 /**
+ * Portable code-repository registration.
+ */
+export type ExportedCodeRepository = { display_name: string, origin_url?: string, root_path: string, default_base_ref: string, branch_prefix: string, setup_script?: string, archive_script?: string, quick_actions: Array<QuickAction>, cloned_from?: string, };
+
+/**
+ * Portable MCP server definition. Environment *names* only.
+ */
+export type ExportedMcpServer = { name: string, command?: string, args: Array<string>, env: Array<string>, env_from: Array<string>, cwd?: string, url?: string, bearer_token_env?: string, gateway_endpoint?: string, request_timeout_ms: number, enabled: boolean, };
+
+/**
  * Why a session is fenced: observed but not controlled, until an explicit
  * user reap resolves it.
  */
@@ -2920,7 +2955,12 @@ mid_turn_resume: CapLevel,
  * can read. `GET /chats/{id}/messages` refuses on a session whose
  * engine does not declare it, rather than returning an empty list.
  */
-transcript: CapLevel, };
+transcript: CapLevel,
+/**
+ * The engine mounts Tidebreak's loopback MCP server, so it can call
+ * the memory verb (propose, search, read) on that bridge.
+ */
+memory_loopback: CapLevel, };
 
 /**
  * One engine-owned slash command, captured from the engine's own listing.
@@ -3375,6 +3415,12 @@ plugin: string | null, };
  * process details are intentionally absent.
  */
 export type McpServerInfo = { health: McpHealth, tool_count: number, diagnostic: string | null,
+/**
+ * Absolute path the stdio command resolved to at the last verify or
+ * launch. Absent for HTTP/gateway servers and when resolution failed.
+ * The stored definition still holds what the user typed.
+ */
+resolved_command?: string,
 /**
  * The curated-list entry this definition matches, when Tidebreak has
  * exercised the server end to end. `null` means community: mounted and
@@ -4679,7 +4725,7 @@ export type RendererChatFrame = RendererSequencedEvent | RendererChatMetadata;
 /**
  * Chat metadata pushed to an open client, outside the turn journal.
  */
-export type RendererChatMetadata = { "metadata": "titled", title: string, } | { "metadata": "file_changes_recorded", turn_id: TurnId, } | { "metadata": "sandbox_preparing", preparing: boolean, };
+export type RendererChatMetadata = { "metadata": "titled", title: string, } | { "metadata": "file_changes_recorded", turn_id: TurnId, } | { "metadata": "memory_proposals_recorded", turn_id: TurnId, } | { "metadata": "sandbox_preparing", preparing: boolean, };
 
 /**
  * Exact model route involved in a provider failure, with no diagnostics.
@@ -4706,7 +4752,7 @@ export type RendererToolFailureReason = "lease_expired";
  * are all generated from this enum, so a variant added here cannot leave one of
  * them behind — see `docs/wire-types.md`.
  */
-export type RendererToolName = "search" | "list_documents" | "read_document" | "read_tool_result" | "web_search" | "web_extract" | "read_delegated_file" | "read_file" | "list_dir" | "write_file" | "request_folder_access" | "connect_folder" | "list_connected_folders" | "list_folder" | "read_connected_file" | "import_connected_file" | "write_output_to_connected_folder" | "spawn_sandbox_agent" | "wait_for_agents" | "ask_user_questions" | "exit_plan_mode" | "update_task_plan" | "browser_list" | "browser_navigate" | "browser_snapshot" | "browser_wait" | "browser_screenshot" | "browser_act" | "exec" | "create_app" | "other";
+export type RendererToolName = "search" | "list_documents" | "read_document" | "read_tool_result" | "web_search" | "web_extract" | "read_delegated_file" | "read_file" | "list_dir" | "write_file" | "request_folder_access" | "connect_folder" | "list_connected_folders" | "list_folder" | "read_connected_file" | "import_connected_file" | "write_output_to_connected_folder" | "spawn_sandbox_agent" | "wait_for_agents" | "ask_user_questions" | "exit_plan_mode" | "update_task_plan" | "browser_list" | "browser_navigate" | "browser_snapshot" | "browser_wait" | "browser_screenshot" | "browser_act" | "exec" | "create_app" | "memory" | "other";
 
 export type RendererToolStatus = "completed" | "failed";
 
@@ -5034,6 +5080,32 @@ instructions: string, };
  * attribute user-authored entries.
  */
 export type SkillOrigin = "builtin" | "user";
+
+/**
+ * One well-known location that returned a document.
+ */
+export type SpecDiscoveryCandidate = { url: string,
+/**
+ * Selectable operations when the document enumerates as OpenAPI 3 JSON.
+ */
+operation_count: number | null,
+/**
+ * Why the document cannot be used, when it cannot.
+ */
+unsupported_reason: string | null, };
+
+/**
+ * What probing one origin found.
+ */
+export type SpecDiscoveryInfo = {
+/**
+ * Candidate documents that answered, usable or not.
+ */
+candidates: Array<SpecDiscoveryCandidate>,
+/**
+ * Every location that was considered, in probe order.
+ */
+tried: Array<string>, };
 
 /**
  * What a document declares, for the configuration form's operation picker.
@@ -5587,6 +5659,38 @@ export type WebSearchMode = "automatic" | "vendor" | "host" | "off";
  */
 export type WebSearchProviderKind = "exa" | "tavily" | "brave" | "searxng" | "model_provider";
 
+export type WorkspaceConfigAction = "skip" | "add" | "replace";
+
+export type WorkspaceConfigApplyRequest = { document: WorkspaceConfigDocument, decisions: Array<WorkspaceConfigDecision>, };
+
+export type WorkspaceConfigApplyResult = { applied: number, skipped: number, };
+
+/**
+ * Per-entry decision sent with apply.
+ */
+export type WorkspaceConfigDecision = { section: WorkspaceConfigSectionId, key: string, action: WorkspaceConfigAction, remaps: { [key in string]: string }, };
+
+/**
+ * Exported JSON envelope.
+ */
+export type WorkspaceConfigDocument = { tidebreak_config: number, exported_at: string, sections: WorkspaceConfigSections, };
+
+/**
+ * Preview of one imported entry against this machine.
+ */
+export type WorkspaceConfigPreview = { entries: Array<WorkspaceConfigPreviewEntry>, };
+
+export type WorkspaceConfigPreviewEntry = { section: WorkspaceConfigSectionId, key: string, status: WorkspaceConfigPreviewStatus, differing_fields: Array<string>, remap_fields: Array<string>, };
+
+export type WorkspaceConfigPreviewStatus = "new" | "identical" | "conflict" | "needs_remap";
+
+export type WorkspaceConfigSectionId = "code_repositories" | "mcp_servers";
+
+/**
+ * Named sections. Unknown keys fail closed via `deny_unknown_fields`.
+ */
+export type WorkspaceConfigSections = { code_repositories: Array<ExportedCodeRepository>, mcp_servers: Array<ExportedMcpServer>, };
+
 /**
  * Identifies one isolated workspace (worktree + branch) on a repo.
  */
@@ -5633,6 +5737,7 @@ export const RENDERER_TOOL_NAMES = [
   "browser_act",
   "exec",
   "create_app",
+  "memory",
   "other",
 ] as const;
 

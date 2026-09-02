@@ -583,6 +583,37 @@ async fn selection_and_hash_pin_govern_the_upsert() {
     assert_eq!(entry["document_sha256"], json!(pin));
 }
 
+/// Pasted-document preview: JSON that is not an object reports the type,
+/// not the collapsed "not a JSON object" message the Sentry paste hit.
+#[tokio::test]
+async fn pasted_document_preview_reports_a_non_object_root() {
+    let (router, bearer, _state, _dir) = connected_apps_test_app().await;
+    let preview = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/connected-apps/rest/spec-preview")
+                .header("authorization", &bearer)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({ "source": { "document": "[1, 2]" } }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(preview.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = serde_json::from_str(&raw_body(preview).await).unwrap();
+    assert_eq!(body["kind"], json!("openapi_ingest"));
+    let message = body["message"].as_str().unwrap();
+    assert!(message.contains("array"), "{message}");
+    assert!(
+        !message.contains("the document is not a JSON object"),
+        "{message}"
+    );
+}
+
 /// The managed posture: `rest_api` upserts are refused wholesale with the
 /// stable `managed_profile` kind — local credential entry is what the
 /// lockdown closes — while DELETE stays available, because removing a local
@@ -622,6 +653,117 @@ async fn managed_profiles_refuse_rest_upserts_but_allow_delete() {
         StatusCode::NO_CONTENT
     );
     assert!(state.store.list_connected_apps().await.unwrap().is_empty());
+}
+
+async fn post_discovery(router: &Router, bearer: &str, origin: &str) -> axum::response::Response {
+    router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/connected-apps/rest/spec-discovery")
+                .header("authorization", bearer)
+                .header("content-type", "application/json")
+                .body(Body::from(json!({ "origin": origin }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+/// Local mock origin: 200 at `ok_path`, 404 elsewhere. Hits still go through
+/// `fetch_spec_document_detailed` admission; the body is served in-process
+/// because this environment cannot accept loopback TCP.
+async fn discovery_mock_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await
+}
+
+fn install_mock_origin(ok_path: &'static str, body: Vec<u8>, content_type: &'static str) {
+    crate::rest_executor::spec_fetch_mock::install(std::sync::Arc::new(move |url: &str| {
+        let path = reqwest::Url::parse(url)
+            .ok()
+            .map(|parsed| parsed.path().to_owned())
+            .unwrap_or_default();
+        if path == ok_path {
+            Ok(crate::rest_executor::FetchedSpecDocument {
+                body: body.clone(),
+                content_type: Some(content_type.to_owned()),
+            })
+        } else {
+            Err(crate::rest_executor::SpecFetchError::HttpStatus { status: 404 })
+        }
+    }));
+}
+
+#[tokio::test]
+async fn spec_discovery_finds_a_well_known_document() {
+    let _guard = discovery_mock_lock().await;
+    let spec = issues_spec();
+    install_mock_origin("/openapi.json", spec.into_bytes(), "application/json");
+    let origin = "https://api.example.com";
+    let (router, bearer, _state, _dir) = connected_apps_test_app().await;
+    let response = post_discovery(&router, &bearer, origin).await;
+    crate::rest_executor::spec_fetch_mock::clear();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_str(&raw_body(response).await).unwrap();
+    let tried = body["tried"].as_array().expect("tried list");
+    assert!(
+        tried
+            .iter()
+            .any(|url| url.as_str().unwrap().ends_with("/openapi.json")),
+        "{tried:?}"
+    );
+    assert!(tried.len() >= crate::openapi_discovery::WELL_KNOWN_OPENAPI_PATHS.len());
+    let candidates = body["candidates"].as_array().expect("candidates");
+    let hit = candidates
+        .iter()
+        .find(|c| c["url"].as_str().unwrap().ends_with("/openapi.json"))
+        .expect("openapi.json candidate");
+    assert_eq!(hit["operation_count"], json!(2));
+    assert!(hit["unsupported_reason"].is_null());
+}
+
+#[tokio::test]
+async fn spec_discovery_reports_yaml_as_unsupported() {
+    let _guard = discovery_mock_lock().await;
+    let yaml = "openapi: 3.0.3\ninfo:\n  title: Issues\n  version: '1'\npaths: {}\n";
+    install_mock_origin(
+        "/openapi.yaml",
+        yaml.to_string().into_bytes(),
+        "application/yaml",
+    );
+    let (router, bearer, _state, _dir) = connected_apps_test_app().await;
+    let response = post_discovery(&router, &bearer, "https://api.example.com").await;
+    crate::rest_executor::spec_fetch_mock::clear();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_str(&raw_body(response).await).unwrap();
+    let hit = body["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["url"].as_str().unwrap().ends_with("/openapi.yaml"))
+        .expect("yaml candidate");
+    assert!(hit["operation_count"].is_null());
+    assert!(
+        hit["unsupported_reason"].as_str().unwrap().contains("YAML"),
+        "{hit}"
+    );
+}
+
+#[tokio::test]
+async fn spec_discovery_refuses_a_denied_address() {
+    let (router, bearer, _state, _dir) = connected_apps_test_app().await;
+    let response = post_discovery(&router, &bearer, "https://127.0.0.1").await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = serde_json::from_str(&raw_body(response).await).unwrap();
+    assert_eq!(body["kind"], json!("spec_fetch"));
+    assert!(
+        body["message"].as_str().unwrap().contains("denied"),
+        "{body}"
+    );
 }
 
 /// A local app with one `rest_api` binding, created straight through the
@@ -795,4 +937,38 @@ async fn editing_a_rest_record_invalidates_an_existing_app_grant() {
     assert_eq!(state_after.status(), StatusCode::OK);
     let after: serde_json::Value = json_body(state_after).await;
     assert_eq!(after["granted"], json!(false));
+}
+
+/// Loopback HTTP is stored only with explicit consent; the same URL without
+/// `allow_loopback_http` is refused naming the flag.
+#[tokio::test]
+async fn loopback_http_rest_app_requires_explicit_consent() {
+    let (router, bearer, _state, _dir) = connected_apps_test_app().await;
+    let id = ConnectedAppId::new();
+    let refused = put_rest(
+        &router,
+        &bearer,
+        id,
+        upsert_body("http://127.0.0.1:23373/v0", json!("none")),
+    )
+    .await;
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    let refused_body = raw_body(refused).await;
+    assert!(
+        refused_body.contains("allow_loopback_http"),
+        "refusal must name the flag: {refused_body}"
+    );
+
+    let mut consented = serde_json::from_str::<serde_json::Value>(&upsert_body(
+        "http://127.0.0.1:23373/v0",
+        json!("none"),
+    ))
+    .unwrap();
+    consented["allow_loopback_http"] = json!(true);
+    let saved = put_rest(&router, &bearer, id, consented.to_string()).await;
+    assert_eq!(saved.status(), StatusCode::OK);
+    let listing: serde_json::Value = serde_json::from_str(&raw_body(saved).await).unwrap();
+    let entry = rest_entry(&listing);
+    assert_eq!(entry["base_url"], json!("http://127.0.0.1:23373/v0"));
+    assert_eq!(entry["allow_loopback_http"], json!(true));
 }

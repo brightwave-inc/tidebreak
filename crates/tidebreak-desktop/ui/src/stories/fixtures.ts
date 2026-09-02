@@ -22,6 +22,7 @@ import type {
   PendingUserQuestions,
   GatewayApps,
   GatewayStatus,
+  MemoryRecord,
   RemoteMachineState,
   TaskPlan,
   ToolActionPreview,
@@ -483,6 +484,7 @@ const fullCaps: HarnessCaps = {
   standing_grants: "unsupported",
   mid_turn_resume: "unsupported",
   transcript: "unsupported",
+  memory_loopback: "unsupported",
 };
 
 function doctorEntry(
@@ -910,6 +912,27 @@ export const closedPrDigest: PullRequestDigest = {
   ...openPrDigest,
   state: "closed",
 };
+
+/** Trigger/watch wrote that the pull request is mergeable. */
+export const readyToMergeDigest: CodeSessionDigest = codeDigest({
+  lifecycle: "idle",
+  attention: {
+    state: {
+      type: "needs_you",
+      prompt: "#184 is ready to merge",
+      source: "structured",
+    },
+    source: "structured",
+  },
+  turn_count: 4,
+  recap: "Opened the page as soon as the session existed.",
+  pr_state: {
+    ...openPrDigest,
+    mergeable: "mergeable",
+    merge_state_status: "clean",
+    review_decision: "approved",
+  },
+});
 
 /** A remote-style put-away workspace: no host worktree, history kept. */
 export const archivedWorkspace: CodeWorkspaceSnapshot = {
@@ -2268,4 +2291,65 @@ export const machineLocal: RemoteMachineState = {
 export const machineAttached: RemoteMachineState = {
   attachment: "remote",
   baseUrl: "https://tidebreak.example.com",
+};
+
+/**
+ * A model-authored memory record still waiting for review, with the full
+ * envelope the strict parsers require: provenance, origin, evidence,
+ * revision, and timestamps.
+ */
+export const memoryProposal: MemoryRecord = {
+  id: "3f19d0d5-8f46-4f57-a35a-000000000001",
+  scope: { kind: "personal" },
+  kind: "lesson",
+  status: "proposed",
+  title: "When changing database migrations",
+  body: "Run the migration chain test before publishing.",
+  provenance: {
+    author: "model",
+    origin: {
+      chat_id: "9d5d84a0-6ba6-4c73-9e10-000000000001",
+      turn_id: "turn-storybook-memory",
+      code_session_id: null,
+      code_turn_id: null,
+      workspace_id: null,
+    },
+    evidence: [
+      { kind: "message", message_id: "c6a0d000-0000-4000-8000-000000000001" },
+    ],
+  },
+  links: [],
+  expires_at: null,
+  superseded_by: null,
+  observation_count: 0,
+  revision: 1,
+  created_at: "2026-09-01T09:00:00Z",
+  updated_at: "2026-09-01T09:00:00Z",
+};
+
+/** A reviewed record that already carries authority in the digest. */
+export const memoryActive: MemoryRecord = {
+  ...memoryProposal,
+  id: "3f19d0d5-8f46-4f57-a35a-000000000002",
+  status: "active",
+  title: "When preparing a release",
+  body: "Run the release smoke test before publishing.",
+  revision: 2,
+  updated_at: "2026-08-30T14:00:00Z",
+};
+
+/** A tracked hypothesis gathering observations before it can be proposed. */
+export const memoryTracking: MemoryRecord = {
+  ...memoryProposal,
+  id: "3f19d0d5-8f46-4f57-a35a-000000000003",
+  status: "tracking",
+  title: "When reviewing pull requests",
+  body: "The reader prefers concrete migration checks over general praise.",
+  provenance: {
+    ...memoryProposal.provenance,
+    evidence: [
+      { kind: "message", message_id: "c6a0d000-0000-4000-8000-000000000002" },
+    ],
+  },
+  observation_count: 2,
 };

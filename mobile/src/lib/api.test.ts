@@ -70,6 +70,7 @@ const caps = {
   standing_grants: "unsupported",
   mid_turn_resume: "unsupported",
   transcript: "unsupported",
+  memory_loopback: "unsupported",
 };
 
 const harness = {

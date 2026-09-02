@@ -58,6 +58,7 @@ const READY_DOCTOR: HarnessDoctorReport = {
         standing_grants: "unsupported",
         mid_turn_resume: "unsupported",
         transcript: "unsupported",
+        memory_loopback: "unsupported",
       },
       commands: [],
       auth_mode: "local_sign_in",

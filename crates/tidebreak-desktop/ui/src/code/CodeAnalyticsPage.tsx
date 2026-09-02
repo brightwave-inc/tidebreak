@@ -20,6 +20,7 @@ import type {
   HarnessKind,
 } from "@/api/types";
 import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
 import {
   Empty,
   EmptyDescription,
@@ -150,7 +151,7 @@ export function CodeAnalyticsBody() {
               disabled={refreshing}
               onClick={() => void refresh()}
             >
-              <RefreshCw className={cn(refreshing && "animate-spin")} />
+              {refreshing ? <Spinner aria-hidden /> : <RefreshCw />}
               Refresh
             </Button>
           </div>
@@ -457,9 +458,11 @@ function QuotaCard({
           disabled={quota.refreshing}
           onClick={() => void quota.refresh()}
         >
-          <RefreshCw
-            className={cn("size-3.5", quota.refreshing && "animate-spin")}
-          />
+          {quota.refreshing ? (
+            <Spinner className="size-3.5" aria-hidden />
+          ) : (
+            <RefreshCw className="size-3.5" />
+          )}
         </button>
       </div>
       <div className="p-4">

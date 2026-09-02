@@ -801,6 +801,19 @@ impl Store for DbStore {
         .await
     }
 
+    async fn set_chat_memory_incognito(&self, id: ChatId, memory_incognito: bool) -> Result<bool> {
+        ops::conversation::set_chat_memory_incognito(self, id, memory_incognito, None).await
+    }
+
+    async fn set_chat_memory_incognito_scoped(
+        &self,
+        owner: &OwnerId,
+        id: ChatId,
+        memory_incognito: bool,
+    ) -> Result<bool> {
+        ops::conversation::set_chat_memory_incognito(self, id, memory_incognito, Some(owner)).await
+    }
+
     async fn update_chat_metadata_scoped(
         &self,
         owner: &OwnerId,

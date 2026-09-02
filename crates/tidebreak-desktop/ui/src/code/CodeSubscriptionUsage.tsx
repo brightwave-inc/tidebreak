@@ -6,6 +6,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
+import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 import { ClaudeIcon, OpenAIIcon, XaiIcon } from "@/ProviderIcons";
 import { SidebarButton } from "@/sidebar/primitives";
@@ -91,9 +92,11 @@ export function CodeSubscriptionUsage() {
             disabled={refreshing}
             onClick={() => void refresh()}
           >
-            <RefreshCw
-              className={cn("size-3.5", refreshing && "animate-spin")}
-            />
+            {refreshing ? (
+              <Spinner className="size-3.5" aria-hidden />
+            ) : (
+              <RefreshCw className="size-3.5" />
+            )}
           </button>
         </div>
 

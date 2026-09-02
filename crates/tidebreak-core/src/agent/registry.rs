@@ -541,6 +541,15 @@ impl ToolRegistry {
                     {
                         None
                     }
+                    // The same rule for the memory verb: read-only by consent
+                    // class because a proposal carries no authority, but
+                    // `propose` still commits a review-queue row, and a
+                    // plan-mode turn must not leave rows behind.
+                    RegisteredTool::Server { registered, .. }
+                        if read_only && registered.spec.name == crate::MEMORY_TOOL =>
+                    {
+                        None
+                    }
                     RegisteredTool::Server { registered, .. } => Some(registered.spec.clone()),
                     RegisteredTool::Client { class, .. }
                     | RegisteredTool::ForegroundClient { class, .. }

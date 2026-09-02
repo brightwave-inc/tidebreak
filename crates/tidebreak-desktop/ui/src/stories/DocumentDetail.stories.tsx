@@ -233,6 +233,7 @@ function seedStoryStores(scenario: Scenario) {
     permission_mode: "ask",
     network_policy: { mode: "off" },
     attachment_revision: 0,
+    memory_incognito: false,
     root_attachments: [],
     created_at: "2026-08-21T15:30:00.000Z",
   };

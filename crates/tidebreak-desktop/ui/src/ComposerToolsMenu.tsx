@@ -1,5 +1,6 @@
 import { useState } from "react";
 import {
+  Brain,
   FolderPlus,
   LoaderCircle,
   Package,
@@ -22,6 +23,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Switch } from "@/components/ui/switch";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { useGuidedMenu } from "./FirstTaskWalkthrough";
 
@@ -29,6 +31,12 @@ export type ComposerNetwork = {
   value: NetworkPolicy;
   disabled?: boolean;
   onChange: (policy: NetworkPolicy) => void | Promise<void>;
+};
+
+export type ComposerMemoryIncognito = {
+  value: boolean;
+  disabled?: boolean;
+  onChange: (memoryIncognito: boolean) => void | Promise<void>;
 };
 
 export type ComposerReasoning = {
@@ -55,6 +63,7 @@ export type ComposerToolsMenuProps = {
   attachFolder?: { working: boolean; onAttach: () => void };
   network?: ComposerNetwork;
   reasoning?: ComposerReasoning;
+  memoryIncognito?: ComposerMemoryIncognito;
   plugins?: ComposerPluginsEntry;
 };
 
@@ -78,6 +87,7 @@ export function ComposerToolsMenu({
   attachFolder,
   network,
   reasoning,
+  memoryIncognito,
   plugins,
 }: ComposerToolsMenuProps) {
   // The dialog is a sibling of the menu, not a child: selecting the row closes
@@ -87,7 +97,7 @@ export function ComposerToolsMenu({
   const guided = useGuidedMenu("tools");
 
   const hasAttachments = Boolean(attachFiles || attachFolder);
-  const hasSettings = Boolean(network || reasoning);
+  const hasSettings = Boolean(network || reasoning || memoryIncognito);
   // A catalog that is empty or never loaded simply has no row. The menu is not
   // the place to report that the plugin library could not be read.
   const hasPlugins = Boolean(plugins);
@@ -180,6 +190,34 @@ export function ComposerToolsMenu({
               <span className="text-muted-foreground flex-1 text-right text-xs">
                 {networkPolicyLabel(network.value)}
               </span>
+            </DropdownMenuItem>
+          )}
+          {memoryIncognito && (
+            <DropdownMenuItem
+              disabled={disabled || memoryIncognito.disabled}
+              onSelect={(event) => {
+                // The row toggles in place; closing the menu would hide the
+                // switch state the flip just changed.
+                event.preventDefault();
+                void memoryIncognito.onChange(!memoryIncognito.value);
+              }}
+            >
+              <Brain className="size-4 text-muted-foreground" />
+              <span className="min-w-0 flex-1">
+                <span className="block">Memory incognito</span>
+                <span className="block text-xs text-muted-foreground">
+                  Keep this chat out of memory: nothing is injected and nothing
+                  is captured.
+                </span>
+              </span>
+              <Switch
+                checked={memoryIncognito.value}
+                disabled={disabled || memoryIncognito.disabled}
+                aria-label="Memory incognito"
+                // The menu row owns the click; the switch only shows state.
+                className="pointer-events-none"
+                tabIndex={-1}
+              />
             </DropdownMenuItem>
           )}
 

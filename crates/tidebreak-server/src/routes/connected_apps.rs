@@ -26,6 +26,9 @@ use crate::mcp_curated::McpCuration;
 use crate::openapi_catalog::{
     enumerate_openapi_operations, ingest_openapi_document, sha256_hex, MAX_OPENAPI_DOCUMENT_BYTES,
 };
+use crate::openapi_discovery::{
+    discover_openapi_documents, SpecDiscoveryError, SpecDiscoveryInfo, SpecDiscoveryRequest,
+};
 use crate::principal::AuthContext;
 use crate::providers::managed_profile_refusal;
 use crate::rest_executor::{
@@ -106,6 +109,9 @@ pub enum ConnectedAppInfo {
         /// a count only, never app names or ids, the renderer-safety posture
         /// of this surface. Grants of library-deleted apps do not count.
         used_by_app_count: usize,
+        /// Whether this record opted into loopback HTTP. Surfaced so the
+        /// form can re-show consent on edit.
+        allow_loopback_http: bool,
     },
 }
 
@@ -150,6 +156,11 @@ pub struct RestConnectedAppUpsert {
     #[serde(default)]
     pub operation_ids: Option<Vec<String>>,
     pub credential: RestCredentialUpdate,
+    /// Explicit consent to send this record as plain HTTP to a loopback IP
+    /// literal. Required for `http://127.0.0.1` / `http://[::1]`; ignored
+    /// (and stored) for https.
+    #[serde(default)]
+    pub allow_loopback_http: bool,
 }
 
 /// What the upsert does about the credential. Externally tagged and closed:
@@ -213,7 +224,8 @@ pub async fn put_rest_connected_app(
         ));
     }
 
-    admit_base_url(&body.base_url).map_err(|error| ServerError::bad_request(error.to_string()))?;
+    admit_base_url(&body.base_url, body.allow_loopback_http)
+        .map_err(|error| ServerError::bad_request(error.to_string()))?;
 
     let document = match (&body.openapi_document, &body.openapi_document_url) {
         (Some(_), Some(_)) => {
@@ -233,7 +245,7 @@ pub async fn put_rest_connected_app(
                     "a URL-sourced document requires document_sha256 from the preview",
                 ));
             }
-            fetch_spec_document(url)
+            fetch_spec_document(url, body.allow_loopback_http)
                 .await
                 .map_err(|error| ServerError::bad_request_kind("spec_fetch", error.to_string()))?
         }
@@ -325,6 +337,7 @@ pub async fn put_rest_connected_app(
         base_url: body.base_url,
         catalog,
         credential,
+        allow_loopback_http: body.allow_loopback_http,
     };
     let now = Utc::now();
     let record = ConnectedApp {
@@ -420,6 +433,10 @@ pub enum SpecPreviewSource {
 #[serde(deny_unknown_fields)]
 pub struct SpecPreviewRequest {
     pub source: SpecPreviewSource,
+    /// Same opt-in as the upsert: a loopback-http document URL is admitted
+    /// only when this is true.
+    #[serde(default)]
+    pub allow_loopback_http: bool,
 }
 
 /// What a document declares, for the configuration form's operation picker.
@@ -464,7 +481,7 @@ pub async fn post_rest_spec_preview(
     }
     let document = match &body.source {
         SpecPreviewSource::Document(inline) => inline.as_bytes().to_vec(),
-        SpecPreviewSource::Url(url) => fetch_spec_document(url)
+        SpecPreviewSource::Url(url) => fetch_spec_document(url, body.allow_loopback_http)
             .await
             .map_err(|error| ServerError::bad_request_kind("spec_fetch", error.to_string()))?,
     };
@@ -485,6 +502,34 @@ pub async fn post_rest_spec_preview(
         unlistable: inventory.unlistable,
         truncated: inventory.truncated,
     }))
+}
+
+/// `POST /connected-apps/rest/spec-discovery` — probe well-known OpenAPI
+/// document locations relative to one https origin or base URL.
+///
+/// Refused on managed profiles like the preview: this surface exists only to
+/// configure local REST records, and it performs egress.
+pub async fn post_rest_spec_discovery(
+    State(state): State<AppState>,
+    Json(body): Json<SpecDiscoveryRequest>,
+) -> Result<Json<SpecDiscoveryInfo>, ServerError> {
+    let policy = state.managed_policy()?;
+    if policy.managed {
+        return Err(managed_profile_refusal(
+            "REST connected apps are managed by your organization's gateway",
+        ));
+    }
+    discover_openapi_documents(&body.origin)
+        .await
+        .map(Json)
+        .map_err(|error| match error {
+            SpecDiscoveryError::DeniedAddress => {
+                ServerError::bad_request_kind("spec_fetch", error.to_string())
+            }
+            SpecDiscoveryError::InadmissibleUrl { .. } => {
+                ServerError::bad_request_kind("spec_fetch", error.to_string())
+            }
+        })
 }
 
 /// Every stored `rest_api` record, in storage order.
@@ -606,6 +651,7 @@ async fn connected_apps_info(
             placement: definition.credential.map(|credential| credential.placement),
             updated_at: record.updated_at,
             used_by_app_count: used_by.get(&record.id).copied().unwrap_or(0),
+            allow_loopback_http: definition.allow_loopback_http,
         });
     }
     Ok(ConnectedAppsInfo { apps })

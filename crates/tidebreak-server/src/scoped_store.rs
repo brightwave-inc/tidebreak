@@ -141,6 +141,17 @@ impl ScopedStore {
             .await
     }
 
+    /// Flip the memory-incognito switch on the principal's chat.
+    pub async fn set_chat_memory_incognito(
+        &self,
+        id: ChatId,
+        memory_incognito: bool,
+    ) -> Result<bool> {
+        self.store
+            .set_chat_memory_incognito_scoped(&self.owner, id, memory_incognito)
+            .await
+    }
+
     /// Create a project owned by the principal.
     pub async fn create_project(&self, project: &Project) -> Result<()> {
         self.store.create_project_scoped(&self.owner, project).await

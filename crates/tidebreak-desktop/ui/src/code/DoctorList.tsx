@@ -15,6 +15,7 @@ import type {
 } from "../api/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 import { HARNESS_ICONS } from "./HarnessPicker";
 import {
@@ -111,10 +112,11 @@ export function DoctorList({
               onClick={onRefresh}
               disabled={refreshing || checkingUpdates}
             >
-              <RotateCw
-                className={cn("size-3.5", refreshing && "animate-spin")}
-                aria-hidden="true"
-              />
+              {refreshing ? (
+                <Spinner aria-hidden="true" />
+              ) : (
+                <RotateCw className="size-3.5" aria-hidden="true" />
+              )}
               {refreshing ? "Checking…" : "Re-check"}
             </Button>
           )}

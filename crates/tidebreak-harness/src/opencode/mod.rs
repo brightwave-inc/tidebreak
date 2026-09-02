@@ -107,6 +107,7 @@ impl HarnessAdapter for OpencodeAdapter {
             standing_grants: CapLevel::Unsupported,
             mid_turn_resume: CapLevel::Unsupported,
             transcript: CapLevel::Unsupported,
+            memory_loopback: CapLevel::Unsupported,
         };
         // Off the captured 1.18 line the missing-effort finding no longer
         // applies: a later minor may grow an engine ladder, so the verdict

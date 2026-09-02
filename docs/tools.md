@@ -7,7 +7,7 @@ identity.
 
 ## What exists today
 
-The current foreground agent surface contains eighteen tools:
+The current foreground agent surface contains these tools:
 
 | Tool | Purpose | Execution boundary |
 | --- | --- | --- |
@@ -25,6 +25,7 @@ The current foreground agent surface contains eighteen tools:
 | `list_folder` | List one directory below an attached root | Native client continuation |
 | `read_connected_file` | Read bounded UTF-8 text below an attached root | Native client continuation |
 | `import_connected_file` | Add one file below an attached root to this chat as a source | Native client continuation |
+| `memory` | Search, read, and propose durable memory records; a proposal waits for user review | Server, read-only consent class |
 | `ask_user_questions` | Pause the current turn for one to three bounded user choices | Foreground-only durable user continuation |
 | `spawn_sandbox_agent` | Start one isolated background task and immediately continue | Foreground-only durable checkpoint |
 | `wait_for_agents` | Wait for one to four spawned agents and return their results in request order | Foreground-only durable continuation |

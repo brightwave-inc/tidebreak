@@ -9,6 +9,7 @@ import {
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ApiClient, ConnectedAppsInfo, McpServerInfo } from "../api";
+import { HttpError } from "../api";
 import { ConnectedAppsPanel } from "./ConnectedAppsPanel";
 
 const SECRET = "sk-rest-value-hunter2";
@@ -75,6 +76,7 @@ const listing: ConnectedAppsInfo = {
       placement: "bearer",
       updated_at: "2026-08-03T00:00:00Z",
       used_by_app_count: 1,
+      allow_loopback_http: false,
     },
   ],
 };
@@ -297,6 +299,7 @@ describe("ConnectedAppsPanel", () => {
           base_url: "https://api.example.com/v2",
           openapi_document: '{"openapi": "3.0.3"}',
           credential: { set: { value: SECRET, placement: "bearer" } },
+          allow_loopback_http: false,
         },
       ),
     );
@@ -378,9 +381,106 @@ describe("ConnectedAppsPanel", () => {
           document_sha256: "cd".repeat(32),
           operation_ids: ["listOrganizations"],
           credential: "none",
+          allow_loopback_http: false,
         },
       ),
     );
+  });
+
+  it("discovery fills the document URL from a candidate and fetches operations", async () => {
+    const preview = {
+      document_sha256: "cd".repeat(32),
+      operations: [
+        {
+          operation_id: "listOrganizations",
+          method: "get",
+          path: "/api/organizations/",
+          summary: null,
+        },
+      ],
+      unlistable: 0,
+      truncated: false,
+    };
+    const client = api({
+      discoverRestSpec: vi.fn().mockResolvedValue({
+        candidates: [
+          {
+            url: "https://api.example.com/openapi.json",
+            operation_count: 1,
+            unsupported_reason: null,
+          },
+        ],
+        tried: [
+          "https://api.example.com/openapi.json",
+          "https://api.example.com/swagger.json",
+        ],
+      }),
+      previewRestSpec: vi.fn().mockResolvedValue(preview),
+    });
+    const user = userEvent.setup();
+    render(<ConnectedAppsPanel client={client} managed={false} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: /Add REST API/ }),
+    );
+    await user.type(
+      screen.getByLabelText(/Base URL/),
+      "https://api.example.com",
+    );
+    await user.click(
+      screen.getByRole("button", { name: /Find the OpenAPI document/ }),
+    );
+    await user.click(
+      await screen.findByRole("button", { name: /Use this document/ }),
+    );
+
+    await waitFor(() =>
+      expect(client.previewRestSpec).toHaveBeenCalledWith({
+        url: "https://api.example.com/openapi.json",
+      }),
+    );
+    expect(screen.getByLabelText(/Document URL/)).toHaveValue(
+      "https://api.example.com/openapi.json",
+    );
+    expect(
+      await screen.findByRole("list", { name: "Operations" }),
+    ).toBeInTheDocument();
+  });
+
+  it("discovery with no candidates lists the locations tried", async () => {
+    const client = api({
+      discoverRestSpec: vi.fn().mockResolvedValue({
+        candidates: [],
+        tried: [
+          "https://api.example.com/openapi.json",
+          "https://api.example.com/swagger.json",
+        ],
+      }),
+    });
+    const user = userEvent.setup();
+    render(<ConnectedAppsPanel client={client} managed={false} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: /Add REST API/ }),
+    );
+    await user.type(
+      screen.getByLabelText(/Base URL/),
+      "https://api.example.com",
+    );
+    await user.click(
+      screen.getByRole("button", { name: /Find the OpenAPI document/ }),
+    );
+
+    expect(
+      await screen.findByText(/No OpenAPI document turned up/),
+    ).toBeInTheDocument();
+    await user.click(screen.getByText("Locations tried"));
+    expect(
+      screen.getByText("https://api.example.com/openapi.json"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Paste this example/ }),
+    ).toBeInTheDocument();
   });
 
   it("an edit with an untouched value keeps the stored credential", async () => {
@@ -402,5 +502,63 @@ describe("ConnectedAppsPanel", () => {
         expect.objectContaining({ credential: "keep" }),
       ),
     );
+  });
+
+  it("shows the server ingest message under the paste textarea, without a bare 400", async () => {
+    const client = api({
+      previewRestSpec: vi
+        .fn()
+        .mockRejectedValue(
+          new HttpError(
+            400,
+            "400: JSON invalid JSON syntax at line 2, column 5. Check line 2, column 5",
+            "openapi_ingest",
+          ),
+        ),
+    });
+    const user = userEvent.setup();
+    render(<ConnectedAppsPanel client={client} managed={false} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: /Add REST API/ }),
+    );
+    await user.click(screen.getByRole("radio", { name: /Paste document/ }));
+    await user.type(screen.getByLabelText(/OpenAPI document/), '{{"openapi":');
+    await user.click(screen.getByRole("button", { name: /Select operations/ }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(
+      "JSON invalid JSON syntax at line 2, column 5. Check line 2, column 5",
+    );
+    expect(alert).not.toHaveTextContent(/^400:/);
+  });
+
+  it("requires loopback HTTP consent before save and hints at MCP for /mcp paths", async () => {
+    const client = api();
+    const user = userEvent.setup();
+    render(<ConnectedAppsPanel client={client} managed={false} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: /Add REST API/ }),
+    );
+    await user.type(screen.getByLabelText(/^Name$/), "Local");
+    await user.type(
+      screen.getByLabelText(/Base URL/),
+      "http://127.0.0.1:23373/v0/mcp",
+    );
+    expect(
+      screen.getByText(/Settings → MCP servers as a remote HTTP server/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/sends the credential in clear text to 127.0.0.1 only/),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Save$/ })).toBeDisabled();
+
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: /Send the credential in clear text to this loopback address/,
+      }),
+    );
+    expect(screen.getByRole("button", { name: /^Save$/ })).toBeEnabled();
   });
 });

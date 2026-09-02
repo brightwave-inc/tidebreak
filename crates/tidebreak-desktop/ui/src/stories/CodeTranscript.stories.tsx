@@ -111,6 +111,53 @@ export const ProgressUpdates: Story = {
   },
 };
 
+/** A fallback recap uses the same block as a captured closing recap. */
+export const SessionRecap: Story = {
+  args: {
+    items,
+    recap:
+      "Workspace switching reuses recent transcript stores. Next: verify the reconnect path under rapid workspace changes.",
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText("Recap")).toBeInTheDocument();
+    await expect(
+      canvas.getByRole("group", { name: "Turn finished" }),
+    ).not.toHaveTextContent(
+      "Workspace switching reuses recent transcript stores",
+    );
+  },
+};
+
+/** A turn with no closing message keeps the fallback recap above its boundary. */
+export const SessionRecapWithoutClosingMessage: Story = {
+  args: {
+    items: [
+      items[0],
+      {
+        kind: "turn_boundary",
+        id: "boundary-interrupted",
+        turnId: "turn-1",
+        status: "interrupted",
+        durationMs: 18_000,
+        usage: null,
+        error: null,
+        diffstat: null,
+      },
+    ],
+    recap: "The interrupted turn left the transcript store unchanged.",
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByLabelText("Recap")).toHaveTextContent(
+      "The interrupted turn left the transcript store unchanged.",
+    );
+    await expect(
+      canvas.getByRole("group", { name: "Turn interrupted" }),
+    ).not.toHaveTextContent("transcript store unchanged");
+  },
+};
+
 const rewrittenItems: CodeTranscriptItem[] = items.map((item) =>
   item.kind === "assistant" && item.id === "assistant-final"
     ? {

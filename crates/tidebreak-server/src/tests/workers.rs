@@ -553,6 +553,7 @@ async fn worker_drains_a_turn_queued_before_startup() {
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: chrono::Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();
@@ -627,6 +628,7 @@ async fn worker_rejects_an_already_accepted_plain_gateway_model_before_egress() 
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: chrono::Utc::now(),
     };
     store.create_chat(&chat).await.unwrap();
@@ -1294,6 +1296,7 @@ async fn sandbox_container_routing_preserves_in_process_task_and_deadline_shape(
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),
+        memory_incognito: false,
         created_at: chrono::Utc::now(),
     };
     reference_store.create_chat(&reference_chat).await.unwrap();

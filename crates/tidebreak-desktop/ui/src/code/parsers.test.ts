@@ -1657,6 +1657,31 @@ describe("pull request facts (decision 77)", () => {
     ).toBeNull();
   });
 
+  it("carries memory_proposal_count through a digest notice", () => {
+    const digest = {
+      workspace: "ws-1",
+      session: "sess-1",
+      kind: "interactive",
+      lifecycle: "idle",
+      attention: { state: { type: "working" }, source: "lifecycle" },
+      title: "Fix login",
+      turn_count: 3,
+      memory_proposal_count: 2,
+    };
+    expect(parseCodeUpdateNotice({ type: "digest", ...digest })).toEqual({
+      type: "digest",
+      ...digest,
+    });
+    expect(parseCodeSessionDigest(digest)).toEqual(digest);
+    expect(
+      parseCodeUpdateNotice({
+        type: "digest",
+        ...digest,
+        memory_proposal_count: "2",
+      }),
+    ).toBeNull();
+  });
+
   it("carries a durable relation on a delivery workspace link", () => {
     const page = {
       capability: {

@@ -452,7 +452,13 @@ async fn build_digest(
     // The newest recapped turn speaks for the session: a turn the model
     // declined to recap, or one whose call is still in flight, leaves the
     // previous line standing rather than blanking the row mid-work.
-    let recap = turns.into_iter().rev().find_map(|turn| turn.narrative);
+    // Claude Code supplies its own closing recap. Do not carry an older
+    // Tidebreak fallback forward after a Claude turn finishes.
+    let recap = if session.harness_kind == tidebreak_core::HarnessKind::ClaudeCode {
+        None
+    } else {
+        turns.into_iter().rev().find_map(|turn| turn.narrative)
+    };
     // A session with no workspace is titled by its conversation, which
     // nothing names yet; the client falls back to its own label.
     let (title, pr_state) = match workspace {
@@ -482,7 +488,39 @@ async fn build_digest(
             Some(session.subagents.clone())
         },
         recap,
+        memory_proposal_count: memory_proposal_count(db, session).await,
     })
+}
+
+async fn memory_proposal_count(db: &DbStore, session: &CodeSession) -> Option<u64> {
+    use tidebreak_core::{MemoryBackend, MemoryEvidence, MemoryListFilter, MemoryStatus};
+    let records = db
+        .list(
+            &session.owner,
+            MemoryListFilter {
+                scope: None,
+                statuses: vec![MemoryStatus::Proposed],
+                kinds: Vec::new(),
+            },
+        )
+        .await
+        .ok()?;
+    // Only what this session's own turns produced: the origin names the
+    // session and the evidence cites its journal, so a record that merely
+    // mentions the session id elsewhere does not inflate the chip.
+    let count = records
+        .into_iter()
+        .filter(|record| {
+            record.provenance.origin.code_session_id == Some(session.id)
+                && record.provenance.evidence.iter().any(|evidence| {
+                    matches!(
+                        evidence,
+                        MemoryEvidence::CodeEvent { session_id, .. } if *session_id == session.id
+                    )
+                })
+        })
+        .count() as u64;
+    (count > 0).then_some(count)
 }
 
 /// Whether a running session is parked on work that is silent by design: a

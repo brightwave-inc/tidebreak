@@ -1,5 +1,7 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
+import { RefreshCw } from "lucide-react";
 
+import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
 import { AttentionBadge } from "@/code/AttentionBadge";
 import { HARNESS_ICONS } from "@/code/HarnessPicker";
@@ -29,6 +31,22 @@ export const Sizes: Story = {
       <Spinner className="size-3.5" />
       <Spinner className="size-4" />
       <Spinner className="size-6" />
+    </div>
+  ),
+};
+
+/** A busy refresh control swaps to Spinner. Do not spin RefreshCw. */
+export const OnRefreshButton: Story = {
+  render: () => (
+    <div className="flex items-center gap-3">
+      <Button type="button" size="sm" variant="outline">
+        <RefreshCw />
+        Refresh
+      </Button>
+      <Button type="button" size="sm" variant="outline" disabled>
+        <Spinner aria-hidden />
+        Refresh
+      </Button>
     </div>
   ),
 };

@@ -119,11 +119,11 @@ export function CodeTranscript({
   contentRef?: RefCallback<HTMLDivElement>;
   onScroll?: () => void;
   /**
-   * Where the session stands, shown on the newest turn boundary.
+   * Where the session stands, shown in the newest turn's recap block.
    *
    * Derived after a turn completes rather than streamed with it, so it appears
-   * a moment later than the boundary it lands on — which is the point: it is
-   * written for the reader who left and came back, not the one watching.
+   * a moment later than the closing message it joins. It is written for the
+   * reader who left and came back, not the one watching.
    */
   recap?: string;
 }) {
@@ -166,13 +166,30 @@ export function CodeTranscript({
     );
   }
   const presentationItems = codeTranscriptPresentationItems(items);
-  // The recap belongs to the session, so only its newest boundary carries one.
+  // The recap belongs to the newest settled turn. Put it on that turn's final
+  // assistant row, which is where captured Claude recaps already live.
   let newestBoundaryId: string | undefined;
+  let newestBoundaryTurnId: string | undefined;
   for (let index = presentationItems.length - 1; index >= 0; index -= 1) {
     const item = presentationItems[index];
     if (item?.kind === "turn_boundary") {
       newestBoundaryId = item.id;
+      newestBoundaryTurnId = item.turnId ?? undefined;
       break;
+    }
+  }
+  let recapOwnerId: string | undefined;
+  if (newestBoundaryTurnId) {
+    for (let index = presentationItems.length - 1; index >= 0; index -= 1) {
+      const item = presentationItems[index];
+      if (
+        item?.kind === "assistant" &&
+        item.turnId === newestBoundaryTurnId &&
+        item.parentCallId === null
+      ) {
+        recapOwnerId = item.id;
+        break;
+      }
     }
   }
   const copyOwnerIds = assistantCopyOwnerIds(items, busy);
@@ -224,7 +241,12 @@ export function CodeTranscript({
                   onFileIssue={onFileIssue}
                   sessionId={sessionId}
                   onReveal={onReveal}
-                  recap={row.item.id === newestBoundaryId ? recap : undefined}
+                  recap={
+                    row.item.id === recapOwnerId ||
+                    (!recapOwnerId && row.item.id === newestBoundaryId)
+                      ? recap
+                      : undefined
+                  }
                 />,
               ),
         )}
@@ -575,11 +597,10 @@ const TranscriptItem = memo(function TranscriptItem({
   sessionId?: string;
   onReveal?: () => void;
   /**
-   * Where the session stands, on the newest turn boundary only.
+   * Where the session stands, on the newest turn's recap row only.
    *
-   * Passed to exactly one row: the recap describes the session, not the turn,
-   * so repeating it at every boundary would fill a long transcript with stale
-   * copies of a line that is only true at the bottom.
+   * Passed to exactly one row. The closing assistant message owns the recap
+   * when one exists; the turn boundary owns a standalone fallback otherwise.
    */
   recap?: string;
 }) {
@@ -620,6 +641,7 @@ const TranscriptItem = memo(function TranscriptItem({
           item={item}
           animateStreaming={animateStreaming}
           ownsCopyAction={ownsCopyAction}
+          recap={recap}
         />
       );
     case "reasoning":
@@ -687,17 +709,15 @@ const TranscriptItem = memo(function TranscriptItem({
     }
     case "turn_boundary":
       return (
-        <TurnReviewCard
-          turn={item}
-          onOpenTurnDiff={onOpenTurnDiff}
-          onForkFromTurn={onForkFromTurn}
-          onFileIssue={onFileIssue}
-          narrative={
-            recap ? (
-              <span className="text-muted-foreground">{recap}</span>
-            ) : undefined
-          }
-        />
+        <>
+          {recap && <StandaloneRecap text={recap} />}
+          <TurnReviewCard
+            turn={item}
+            onOpenTurnDiff={onOpenTurnDiff}
+            onForkFromTurn={onForkFromTurn}
+            onFileIssue={onFileIssue}
+          />
+        </>
       );
   }
 });
@@ -706,20 +726,24 @@ function AssistantRewriteMessage({
   item,
   animateStreaming,
   ownsCopyAction,
+  recap,
 }: {
   item: Extract<CodeTranscriptItem, { kind: "assistant" }>;
   animateStreaming: boolean;
   ownsCopyAction?: boolean;
+  /** Fallback recap for engines that do not supply a captured closing recap. */
+  recap?: string;
 }) {
   const rewritten = item.rewriteState === "rewritten" && Boolean(item.rewrite);
+  const displayedRecap = rewritten && item.rewrite ? item.rewrite : recap;
   return (
     <article className="message message-assistant" aria-label="Assistant">
-      {item.rewriteState === "rewriting" && (
+      {item.rewriteState === "rewriting" && !displayedRecap && (
         <p className="text-muted-foreground mb-2 text-xs" role="status">
           Writing a recap…
         </p>
       )}
-      {item.rewriteState === "failed" && (
+      {item.rewriteState === "failed" && !displayedRecap && (
         <p className="text-muted-foreground mb-2 text-xs" role="status">
           Couldn't write a recap. The original stands.
         </p>
@@ -728,14 +752,7 @@ function AssistantRewriteMessage({
         text={item.text}
         streaming={item.streaming && animateStreaming}
       />
-      {rewritten && item.rewrite && (
-        <div className="mt-3 border-t border-border-subtle pt-3">
-          <p className="text-muted-foreground mb-1 text-2xs font-medium tracking-wide uppercase">
-            Recap
-          </p>
-          <AssistantMessageBody text={item.rewrite} streaming={false} />
-        </div>
-      )}
+      {displayedRecap && <RecapBlock text={displayedRecap} separated />}
       <MessageFooter
         role="assistant"
         text={item.text}
@@ -743,6 +760,31 @@ function AssistantRewriteMessage({
         sequenceEnd={ownsCopyAction}
       />
     </article>
+  );
+}
+
+function StandaloneRecap({ text }: { text: string }) {
+  return (
+    <article className="message message-assistant" aria-label="Recap">
+      <RecapBlock text={text} />
+    </article>
+  );
+}
+
+function RecapBlock({
+  text,
+  separated = false,
+}: {
+  text: string;
+  separated?: boolean;
+}) {
+  return (
+    <div className={cn(separated && "mt-3 border-t border-border-subtle pt-3")}>
+      <p className="text-muted-foreground mb-1 text-2xs font-medium tracking-wide uppercase">
+        Recap
+      </p>
+      <AssistantMessageBody text={text} streaming={false} />
+    </div>
   );
 }
 

@@ -1,5 +1,6 @@
 import {
   BookOpenText,
+  Brain,
   Camera,
   CircleHelp,
   Clock,
@@ -73,6 +74,9 @@ const TOOL_ICONS: Record<RendererToolName, LucideIcon> = {
   // The same mark the Apps library carries, so the row and the panel it
   // opens read as one thing.
   create_app: LayoutGrid,
+  // The same glyph the Memory settings panel carries, so the row and the
+  // records it touches read as one capability.
+  memory: Brain,
   // The server folds every unrecognized tool name to `other`, so this is the
   // one entry that is genuinely "some tool ran" rather than a missing icon.
   other: Wrench,
@@ -114,6 +118,7 @@ const TOOL_ICON_TONES: Record<RendererToolName, string> = {
   wait_for_agents: "text-muted-foreground",
   exec: "text-muted-foreground",
   create_app: "text-icon-blue",
+  memory: "text-icon-violet",
   other: "text-muted-foreground",
 };
 

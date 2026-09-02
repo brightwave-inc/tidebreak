@@ -1256,6 +1256,8 @@ fn timed_out(request_timeout: Duration) -> AgentError {
 fn classify_spawn_error(error: std::io::Error) -> AgentError {
     if error.kind() == std::io::ErrorKind::NotFound {
         mcp_message("Process failed to launch: command not found.")
+    } else if error.kind() == std::io::ErrorKind::PermissionDenied {
+        mcp_message("Permission denied: cannot execute the stdio server.")
     } else {
         mcp_message(format!("Process failed to launch: {error}."))
     }

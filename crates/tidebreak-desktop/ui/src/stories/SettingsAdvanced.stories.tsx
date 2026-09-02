@@ -278,6 +278,30 @@ export const ConnectedAppsManagedCompact: Story = {
   globals: { viewport: { value: "compact", isRotated: false } },
 };
 
+export const ConnectedAppsLoopbackHttpConsent: Story = {
+  args: { panel: "connected-apps", state: "empty" },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(
+      await canvas.findByRole("button", { name: /Add REST API/ }),
+    );
+    await userEvent.type(canvas.getByLabelText(/^Name$/), "Local service");
+    await userEvent.type(
+      canvas.getByLabelText(/Base URL/),
+      "http://127.0.0.1:23373/v0/mcp",
+    );
+    await expect(
+      canvas.getByText(
+        /This service runs on this computer without TLS. Tidebreak sends the credential in clear text to 127.0.0.1 only./,
+      ),
+    ).toBeVisible();
+    await expect(canvas.getByRole("button", { name: /^Save$/ })).toBeDisabled();
+    await expect(
+      canvas.getByText(/Settings → MCP servers as a remote HTTP server/),
+    ).toBeVisible();
+  },
+};
+
 export const PermissionsConfigured: Story = {
   args: { panel: "permissions" },
 };

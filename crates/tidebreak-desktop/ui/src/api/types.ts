@@ -28,6 +28,8 @@ import {
   type RestCredentialStatus as WireRestCredentialStatus,
   type SpecPreviewInfo as WireSpecPreviewInfo,
   type SpecPreviewOperation as WireSpecPreviewOperation,
+  type SpecDiscoveryInfo as WireSpecDiscoveryInfo,
+  type SpecDiscoveryCandidate as WireSpecDiscoveryCandidate,
   type ExecCredentialReadiness as WireExecCredentialReadiness,
   type ExecProviderKind as WireExecProviderKind,
   type CodeDeliveryActionResult as WireCodeDeliveryActionResult,
@@ -246,9 +248,25 @@ import {
   type ToolDetail as WireToolDetail,
   type ToolOutcome as WireToolOutcome,
   type WorkspaceId as WireWorkspaceId,
+  type WorkspaceConfigDocument,
+  type WorkspaceConfigPreview,
+  type WorkspaceConfigPreviewEntry,
+  type WorkspaceConfigPreviewStatus,
+  type WorkspaceConfigApplyRequest,
+  type WorkspaceConfigApplyResult,
+  type WorkspaceConfigAction,
+  type WorkspaceConfigSectionId,
 } from "../generated/wire";
 
 export type {
+  WorkspaceConfigDocument,
+  WorkspaceConfigPreview,
+  WorkspaceConfigPreviewEntry,
+  WorkspaceConfigPreviewStatus,
+  WorkspaceConfigApplyRequest,
+  WorkspaceConfigApplyResult,
+  WorkspaceConfigAction,
+  WorkspaceConfigSectionId,
   ApprovalClass,
   ApprovalGrantRung,
   InboxItemKind,
@@ -536,6 +554,8 @@ export type ConnectedAppInfo = WireConnectedAppInfo;
 export type RestCredentialStatus = WireRestCredentialStatus;
 export type SpecPreviewInfo = WireSpecPreviewInfo;
 export type SpecPreviewOperation = WireSpecPreviewOperation;
+export type SpecDiscoveryInfo = WireSpecDiscoveryInfo;
+export type SpecDiscoveryCandidate = WireSpecDiscoveryCandidate;
 /** Where a stored REST credential is injected: `"bearer"` or a named header. */
 export type CredentialPlacement = WireCredentialPlacement;
 

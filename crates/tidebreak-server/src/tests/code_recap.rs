@@ -10,7 +10,7 @@ use super::*;
 use crate::code::CodeRuntime;
 use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
 use axum::Router;
-use tidebreak_harness::AdapterRegistry;
+use tidebreak_harness::{AdapterRegistry, HarnessEvent};
 use tokio::net::TcpListener;
 
 /// The model an OpenAI-only install resolves the `utility` role to.
@@ -52,7 +52,9 @@ async fn answer_as_stub(
 /// An app whose code mode runs the scripted engine, whose only credentialed
 /// provider is the stub endpoint, and whose runtime has the recap hook
 /// installed the way `lib.rs` installs it in a real process.
-async fn code_recap_app() -> (
+async fn code_recap_app(
+    harness_kind: tidebreak_core::HarnessKind,
+) -> (
     Router,
     String,
     Arc<RecapStub>,
@@ -102,8 +104,18 @@ async fn code_recap_app() -> (
     )
     .await
     .unwrap();
+    let mut script = plain_text_script();
+    if let Some(HarnessEvent::SessionStarted {
+        harness_kind: started,
+        ..
+    }) = script.first_mut()
+    {
+        *started = harness_kind;
+    }
     let mut registry = AdapterRegistry::new();
-    registry.register(Arc::new(ScriptedAdapter::new(plain_text_script())));
+    registry.register(Arc::new(
+        ScriptedAdapter::new(script).with_kind(harness_kind),
+    ));
     let runtime = Arc::new(CodeRuntime::with_registry(
         db,
         dir.path().to_path_buf(),
@@ -192,20 +204,17 @@ async fn serve(router: Router) -> std::net::SocketAddr {
     addr
 }
 
-/// The whole feature over the wire: a completed turn is recapped on the
-/// utility model, the line is stored on the turn it describes, and it reaches
-/// every list surface on the digest channel — without the turn waiting for any
-/// of it.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_completed_turn_is_recapped_onto_the_digest() {
-    let (router, token, stub, runtime, dir) = code_recap_app().await;
-    let addr = serve(router).await;
-    let client = reqwest::Client::new();
-    let repo = init_git_repo(dir.path());
-
+async fn start_turn(
+    client: &reqwest::Client,
+    addr: std::net::SocketAddr,
+    token: &str,
+    dir: &std::path::Path,
+    harness_kind: tidebreak_core::HarnessKind,
+) -> tidebreak_core::CodeSessionId {
+    let repo = init_git_repo(dir);
     let registered = client
         .post(format!("http://{addr}/code/repos"))
-        .bearer_auth(&token)
+        .bearer_auth(token)
         .json(&serde_json::json!({ "path": repo }))
         .send()
         .await
@@ -215,26 +224,22 @@ async fn a_completed_turn_is_recapped_onto_the_digest() {
 
     let created = client
         .post(format!("http://{addr}/code/workspaces"))
-        .bearer_auth(&token)
+        .bearer_auth(token)
         .json(&serde_json::json!({ "repo_id": repo_body["id"] }))
         .send()
         .await
         .unwrap();
     assert_eq!(created.status(), reqwest::StatusCode::CREATED);
     let workspace: serde_json::Value = created.json().await.unwrap();
-    let workspace_id = workspace["id"].as_str().unwrap().to_owned();
-
-    let mut updates = runtime
-        .bus
-        .subscribe_updates(&tidebreak_core::OwnerId::local());
 
     let session = client
         .post(format!(
-            "http://{addr}/code/workspaces/{workspace_id}/sessions"
+            "http://{addr}/code/workspaces/{}/sessions",
+            workspace["id"].as_str().unwrap()
         ))
-        .bearer_auth(&token)
+        .bearer_auth(token)
         .json(&serde_json::json!({
-            "harness": "claude_code",
+            "harness": harness_kind.as_str(),
             "permission_mode": "plan",
         }))
         .send()
@@ -242,11 +247,13 @@ async fn a_completed_turn_is_recapped_onto_the_digest() {
         .unwrap();
     assert_eq!(session.status(), reqwest::StatusCode::CREATED);
     let session: serde_json::Value = session.json().await.unwrap();
-    let session_id = session["id"].as_str().unwrap().to_owned();
+    let session_id = tidebreak_core::CodeSessionId(
+        uuid::Uuid::parse_str(session["id"].as_str().unwrap()).unwrap(),
+    );
 
     let turn = client
         .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
-        .bearer_auth(&token)
+        .bearer_auth(token)
         .json(&serde_json::json!({
             "message": "Fix the flaky retry test in the auth crate"
         }))
@@ -254,6 +261,56 @@ async fn a_completed_turn_is_recapped_onto_the_digest() {
         .await
         .unwrap();
     assert_eq!(turn.status(), reqwest::StatusCode::ACCEPTED);
+    session_id
+}
+
+async fn wait_for_completed_turn(
+    runtime: &CodeRuntime,
+    session_id: tidebreak_core::CodeSessionId,
+) -> tidebreak_core::CodeTurn {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let turns = tidebreak_core::db::code::list_turns(
+            &runtime.db,
+            &tidebreak_core::OwnerId::local(),
+            session_id,
+        )
+        .await
+        .unwrap();
+        if let Some(turn) = turns
+            .last()
+            .filter(|turn| turn.status == tidebreak_core::CodeTurnStatus::Completed)
+        {
+            return turn.clone();
+        }
+        tokio::time::timeout_at(deadline, tokio::time::sleep(Duration::from_millis(20)))
+            .await
+            .expect("the scripted turn completes before the deadline");
+    }
+}
+
+/// The whole feature over the wire: a completed turn is recapped on the
+/// utility model, the line is stored on the turn it describes, and it reaches
+/// every list surface on the digest channel — without the turn waiting for any
+/// of it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_completed_turn_is_recapped_onto_the_digest() {
+    let (router, token, stub, runtime, dir) =
+        code_recap_app(tidebreak_core::HarnessKind::Codex).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+
+    let mut updates = runtime
+        .bus
+        .subscribe_updates(&tidebreak_core::OwnerId::local());
+    let session_id = start_turn(
+        &client,
+        addr,
+        &token,
+        dir.path(),
+        tidebreak_core::HarnessKind::Codex,
+    )
+    .await;
 
     // The recap reaches the digest channel every list surface watches, so a
     // rail row can say where the session stands without a refresh.
@@ -274,7 +331,7 @@ async fn a_completed_turn_is_recapped_onto_the_digest() {
     let turns = tidebreak_core::db::code::list_turns(
         &runtime.db,
         &tidebreak_core::OwnerId::local(),
-        tidebreak_core::CodeSessionId(uuid::Uuid::parse_str(&session_id).unwrap()),
+        session_id,
     )
     .await
     .unwrap();
@@ -299,10 +356,62 @@ async fn a_completed_turn_is_recapped_onto_the_digest() {
     );
 }
 
+/// Claude Code already supplies the closing recap that the transcript keeps.
+/// A second utility-model call would duplicate that line and its cost.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_claude_turn_skips_the_fallback_recap() {
+    let (router, token, stub, runtime, dir) =
+        code_recap_app(tidebreak_core::HarnessKind::ClaudeCode).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let session_id = start_turn(
+        &client,
+        addr,
+        &token,
+        dir.path(),
+        tidebreak_core::HarnessKind::ClaudeCode,
+    )
+    .await;
+
+    wait_for_completed_turn(&runtime, session_id).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let turn = wait_for_completed_turn(&runtime, session_id).await;
+
+    assert!(turn.narrative.is_none());
+    let recap_calls = stub
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| request.to_string().contains("session_recap"))
+        .count();
+    assert_eq!(recap_calls, 0);
+
+    // Older builds may have stored a fallback on a Claude turn. The digest
+    // must not carry that text forward and attach it to a newer closing recap.
+    tidebreak_core::db::code::set_turn_narrative(
+        &runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        turn.id,
+        "A stale Tidebreak fallback.",
+    )
+    .await
+    .unwrap();
+    let digest =
+        crate::code::attention::list_digests(&runtime.db, &tidebreak_core::OwnerId::local())
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|digest| digest.session == session_id)
+            .expect("the Claude session stays listed");
+    assert!(digest.recap.is_none());
+}
+
 /// Turning recaps off prevents the utility-model call for later turns.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_disabled_recap_setting_skips_the_model_call() {
-    let (router, token, stub, runtime, dir) = code_recap_app().await;
+    let (router, token, stub, runtime, dir) =
+        code_recap_app(tidebreak_core::HarnessKind::Codex).await;
     runtime
         .db
         .set_setting(
@@ -311,83 +420,18 @@ async fn a_disabled_recap_setting_skips_the_model_call() {
         )
         .await
         .unwrap();
-    let addr = serve(router.clone()).await;
+    let addr = serve(router).await;
     let client = reqwest::Client::new();
-    let repo = init_git_repo(dir.path());
-
-    let registered = client
-        .post(format!("http://{addr}/code/repos"))
-        .bearer_auth(&token)
-        .json(&serde_json::json!({ "path": repo }))
-        .send()
-        .await
-        .unwrap();
-    let repo_body: serde_json::Value = registered.json().await.unwrap();
-    let created = client
-        .post(format!("http://{addr}/code/workspaces"))
-        .bearer_auth(&token)
-        .json(&serde_json::json!({ "repo_id": repo_body["id"] }))
-        .send()
-        .await
-        .unwrap();
-    let workspace: serde_json::Value = created.json().await.unwrap();
-    let session = client
-        .post(format!(
-            "http://{addr}/code/workspaces/{}/sessions",
-            workspace["id"].as_str().unwrap()
-        ))
-        .bearer_auth(&token)
-        .json(&serde_json::json!({
-            "harness": "claude_code",
-            "permission_mode": "plan",
-        }))
-        .send()
-        .await
-        .unwrap();
-    let session: serde_json::Value = session.json().await.unwrap();
-    let session_id = tidebreak_core::CodeSessionId(
-        uuid::Uuid::parse_str(session["id"].as_str().unwrap()).unwrap(),
-    );
-
-    let turn = router
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/code/sessions/{session_id}/turns"))
-                .header("authorization", format!("Bearer {token}"))
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    serde_json::json!({ "message": "Fix the retry test" }).to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(turn.status(), StatusCode::ACCEPTED);
-
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        let turns = tidebreak_core::db::code::list_turns(
-            &runtime.db,
-            &tidebreak_core::OwnerId::local(),
-            session_id,
-        )
-        .await
-        .unwrap();
-        if turns
-            .last()
-            .is_some_and(|turn| turn.status == tidebreak_core::CodeTurnStatus::Completed)
-        {
-            assert!(turns
-                .last()
-                .and_then(|turn| turn.narrative.as_ref())
-                .is_none());
-            break;
-        }
-        tokio::time::timeout_at(deadline, tokio::time::sleep(Duration::from_millis(20)))
-            .await
-            .expect("the scripted turn completes before the deadline");
-    }
+    let session_id = start_turn(
+        &client,
+        addr,
+        &token,
+        dir.path(),
+        tidebreak_core::HarnessKind::Codex,
+    )
+    .await;
+    let turn = wait_for_completed_turn(&runtime, session_id).await;
+    assert!(turn.narrative.is_none());
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let recap_calls = stub

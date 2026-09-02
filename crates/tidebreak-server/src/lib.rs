@@ -58,13 +58,17 @@ mod mcp_curated;
 /// Trusted decision about what imported bytes actually are, made from the
 /// bytes rather than from whoever named them.
 pub mod media_type;
+mod memory_capture;
 mod memory_sweep;
+mod memory_tool;
 mod model_registry;
 mod model_roles;
 mod obo_gateway;
 /// OpenAPI ingest into the bounded operation catalog a `rest_api` connected
 /// app stores and the governed REST executor validates against.
 pub mod openapi_catalog;
+/// Probe well-known OpenAPI document locations for a REST origin.
+pub(crate) mod openapi_discovery;
 /// Reading a conversation output's immutable revision bytes out of private
 /// scratch — shared by the HTTP routes and the desktop's native save dialog.
 pub mod output_files;
@@ -117,6 +121,7 @@ pub mod wire;
 #[cfg(test)]
 mod wire_code_fixtures;
 mod wire_types;
+mod workspace_config;
 
 use std::fs::{OpenOptions, TryLockError};
 use std::net::SocketAddr;
@@ -491,6 +496,10 @@ pub fn app(state: AppState) -> Router {
                 routes::MAX_REST_CONNECTED_APP_BODY_BYTES,
             )),
         )
+        .route(
+            "/connected-apps/rest/spec-discovery",
+            post(routes::post_rest_spec_discovery),
+        )
         .route("/gateway/sign-in", post(routes::post_gateway_sign_in))
         .route("/gateway/sign-out", post(routes::post_gateway_sign_out))
         .route(
@@ -652,6 +661,17 @@ pub fn app(state: AppState) -> Router {
 
     let api = Router::new()
         .route("/settings", get(routes::get_settings))
+        .route("/workspace-config", get(routes::export_workspace_config))
+        .route(
+            "/workspace-config/preview",
+            post(routes::preview_workspace_config)
+                .layer(DefaultBodyLimit::max(mcp_config::MAX_CONFIG_BODY_BYTES)),
+        )
+        .route(
+            "/workspace-config/apply",
+            post(routes::apply_workspace_config)
+                .layer(DefaultBodyLimit::max(mcp_config::MAX_CONFIG_BODY_BYTES)),
+        )
         .route(
             "/projects",
             post(routes::create_project)
@@ -2183,6 +2203,7 @@ async fn bind_inner(
         foreground_web_search,
         web_extract,
         store.clone(),
+        Some(db.clone()),
         config.data_dir.clone(),
         host_folders.clone(),
         gateway.clone(),
@@ -2369,17 +2390,19 @@ async fn bind_inner(
     // Installed rather than constructed with the runtime: a recap runs on the
     // utility role, and the model handles that resolve it belong to the app
     // state the runtime is built before. See `code::recap`.
-    code.install_recap(Arc::new(
-        code::recap::TurnRecapper::new(
-            code.db.clone(),
-            code.bus.clone(),
-            state.store.clone(),
-            state.resolver.clone(),
-            state.secrets.clone(),
-            state.provisioned_policy.clone(),
-            state.os_policy.clone(),
-        )
-        .with_on_behalf_of_gateway(state.on_behalf_of_gateway.clone()),
+    let recapper = code::recap::TurnRecapper::new(
+        code.db.clone(),
+        code.bus.clone(),
+        state.store.clone(),
+        state.resolver.clone(),
+        state.secrets.clone(),
+        state.provisioned_policy.clone(),
+        state.os_policy.clone(),
+    )
+    .with_on_behalf_of_gateway(state.on_behalf_of_gateway.clone());
+    code.install_recap(Arc::new(recapper.clone()));
+    code.install_memory_capture(Arc::new(
+        code::memory_capture::TurnMemoryCapturer::from_recap(recapper),
     ));
     code.install_rewrite(Arc::new(
         code::rewrite::TurnRewriter::new(
@@ -2428,6 +2451,19 @@ async fn bind_inner(
     .with_mcp_runtime(state.mcp.clone())
     .with_exec_folder_context(code_execution.clone())
     .with_diagnostics(state.diagnostics.clone())
+    .with_memory(
+        db.clone(),
+        memory_capture::MemoryCapture::new(
+            state.store.clone(),
+            db.clone(),
+            state.resolver.clone(),
+            state.secrets.clone(),
+            state.provisioned_policy.clone(),
+            state.os_policy.clone(),
+            state.events.clone(),
+        )
+        .with_on_behalf_of_gateway(state.on_behalf_of_gateway.clone()),
+    )
     .with_update_quiesce(chat_quiesce_worker);
     let sandbox_worker_config = sandbox_agent_run_worker::SandboxAgentRunWorkerConfig::default()
         .with_delegated_file_executor(client_executor_id.is_some());
@@ -2636,6 +2672,7 @@ fn agent_deps(
     web_search: Box<dyn Tool>,
     web_extract: Box<dyn Tool>,
     source_store: Arc<dyn Store>,
+    memory: Option<Arc<dyn tidebreak_core::MemoryBackend>>,
     profile_data_dir: std::path::PathBuf,
     host_folders: Option<Arc<dyn host_folders::HostFolders>>,
     gateway: Arc<gateway_runtime::GatewayRuntime>,
@@ -2662,6 +2699,7 @@ fn agent_deps(
         web_search,
         web_extract,
         source_store,
+        memory,
         profile_data_dir,
         host_folders,
         gateway,
@@ -2678,6 +2716,10 @@ fn agent_deps_with_cancellation_acceleration(
     web_search: Box<dyn Tool>,
     web_extract: Box<dyn Tool>,
     source_store: Arc<dyn Store>,
+    // The memory backend, when this deployment has one. `None` keeps the
+    // `memory` tool off every surface rather than advertising a verb that
+    // could only fail.
+    memory: Option<Arc<dyn tidebreak_core::MemoryBackend>>,
     profile_data_dir: std::path::PathBuf,
     host_folders: Option<Arc<dyn host_folders::HostFolders>>,
     gateway: Arc<gateway_runtime::GatewayRuntime>,
@@ -2769,6 +2811,12 @@ fn agent_deps_with_cancellation_acceleration(
         )))
         .with(web_search)
         .with(web_extract);
+    if let Some(memory) = memory {
+        tools.register(Box::new(memory_tool::MemoryTool::new(
+            memory,
+            source_store.clone(),
+        )));
+    }
     tools.register_validated_client(
         request_folder_access_tool_spec(),
         ApprovalClass::ReadOnly,
