@@ -494,7 +494,9 @@ impl ForkEventPageBuilder {
 
 fn terminal_status(event: &CodeEvent) -> Option<CodeTurnStatus> {
     match event {
-        CodeEvent::TurnCompleted { .. } => Some(CodeTurnStatus::Completed),
+        CodeEvent::TurnCompleted { .. } | CodeEvent::TurnRefused { .. } => {
+            Some(CodeTurnStatus::Completed)
+        }
         CodeEvent::TurnFailed { .. } => Some(CodeTurnStatus::Failed),
         CodeEvent::TurnInterrupted { .. } => Some(CodeTurnStatus::Interrupted),
         _ => None,

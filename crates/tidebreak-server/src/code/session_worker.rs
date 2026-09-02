@@ -428,7 +428,7 @@ impl LiveSink {
                     Some(_) | None => None,
                 }
             }
-            CodeEvent::TurnCompleted { .. } => {
+            CodeEvent::TurnCompleted { .. } | CodeEvent::TurnRefused { .. } => {
                 let mut subagents = self.subagents.lock().expect("code sink subagents");
                 settle_running_subagents(&mut subagents, CodeSubagentStatus::Done)
                     .then(|| subagents.clone())
@@ -2829,6 +2829,7 @@ async fn persist_and_publish_inner(
         if matches!(
             &event,
             CodeEvent::TurnCompleted { .. }
+                | CodeEvent::TurnRefused { .. }
                 | CodeEvent::TurnFailed { .. }
                 | CodeEvent::TurnInterrupted { .. }
         ) {
@@ -2872,6 +2873,7 @@ async fn persist_and_publish_inner(
     let closes_turn = matches!(
         &event,
         CodeEvent::TurnCompleted { .. }
+            | CodeEvent::TurnRefused { .. }
             | CodeEvent::TurnFailed { .. }
             | CodeEvent::TurnInterrupted { .. }
     );
@@ -2918,6 +2920,7 @@ async fn settle_streamed_text(
     if !matches!(
         event,
         CodeEvent::TurnCompleted { .. }
+            | CodeEvent::TurnRefused { .. }
             | CodeEvent::TurnFailed { .. }
             | CodeEvent::TurnInterrupted { .. }
     ) {
@@ -2979,6 +2982,16 @@ async fn apply_side_effects(
                     turn.checkpoint_ref = hint.checkpoint_ref.clone();
                     turn.diffstat = hint.diffstat.clone();
                 }
+                let _ = save_turn(db, owner, &turn).await;
+            }
+        }
+        // A refusal ends the turn the way a completion does: the model
+        // answered, and its answer was to decline.
+        CodeEvent::TurnRefused { usage, .. } => {
+            if let Ok(Some(mut turn)) = get_open_turn(db, owner, session_id).await {
+                turn.status = CodeTurnStatus::Completed;
+                turn.ended_at = Some(Utc::now());
+                turn.usage = Some(usage.clone());
                 let _ = save_turn(db, owner, &turn).await;
             }
         }

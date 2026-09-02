@@ -4807,6 +4807,48 @@ INSERT INTO code_event (owner, session_id, seq, event, created_at) VALUES (
         assert_one_journal(&db).await;
     }
 
+    /// The `event` drop is the completion marker, so it has to be the last
+    /// step: an attempt that reached it left the indexes behind it already
+    /// in place, and the next start's early return skips nothing.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn the_one_journal_migration_drops_event_last() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        Migrator::up(&db, Some(steps_before("m20260902_000002_one_journal")))
+            .await
+            .unwrap();
+        seed_pre_journal_conversation(&db).await;
+        let manager = SchemaManager::new(&db);
+        // Every step but the drop: the rebuilds and the indexes, in the
+        // order the migration runs them, with `event` still standing.
+        super::rebuild_sqlite_table(
+            &manager,
+            "code_event",
+            super::one_journal::add_receipt_columns,
+        )
+        .await
+        .unwrap();
+        for table in super::one_journal::EVENT_REFERENCING_TABLES {
+            super::rebuild_sqlite_table(
+                &manager,
+                table,
+                super::one_journal::repoint_event_reference,
+            )
+            .await
+            .unwrap();
+        }
+        for index in super::one_journal::RECEIPT_INDEXES {
+            db.execute_unprepared(index)
+                .await
+                .expect("the receipt indexes create while event still exists");
+        }
+        assert!(manager.has_table("event").await.unwrap());
+
+        Migrator::up(&db, None).await.unwrap();
+
+        assert_one_journal(&db).await;
+    }
+
     /// The SQLite branch of the internal engine migration runs two
     /// autocommit steps. An attempt that rebuilt `code_session` and died
     /// before the marker column must finish on the next start, not report

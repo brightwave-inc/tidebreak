@@ -324,6 +324,24 @@ describe("turn lifecycle", () => {
     });
   });
 
+  it("closes a refused turn as completed with its usage", () => {
+    const { state } = play([
+      { type: "turn_started", turn_id: "t1" },
+      {
+        type: "turn_refused",
+        usage: NO_USAGE,
+        refusal: { details: { category: "cyber" }, partial_output: false },
+      },
+    ]);
+    expect(state.busy).toBe(false);
+    expect(state.items.at(-1)).toMatchObject({
+      kind: "turn_boundary",
+      turnId: "t1",
+      status: "completed",
+      usage: NO_USAGE,
+    });
+  });
+
   it("closes a failed turn with the bounded error", () => {
     const { state } = play([
       { type: "turn_started", turn_id: "t1" },

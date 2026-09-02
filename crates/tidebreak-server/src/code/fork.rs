@@ -841,6 +841,9 @@ fn turn_lines(turn_id: CodeTurnId, events: &[SequencedCodeEvent]) -> Vec<String>
             CodeEvent::TurnInterrupted { .. } => {
                 lines.push("**The turn was interrupted.**".to_owned())
             }
+            CodeEvent::TurnRefused { .. } => {
+                lines.push("**The model declined to continue.**".to_owned())
+            }
             _ => {}
         }
     }
@@ -1071,6 +1074,9 @@ fn record_blocks(turn_id: CodeTurnId, events: &[SequencedCodeEvent]) -> Vec<Stri
             }
             CodeEvent::TurnInterrupted { .. } => {
                 blocks.push("**The turn was interrupted.**".to_owned());
+            }
+            CodeEvent::TurnRefused { .. } => {
+                blocks.push("**The model declined to continue.**".to_owned());
             }
             _ => {}
         }

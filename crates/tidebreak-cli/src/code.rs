@@ -1311,6 +1311,15 @@ fn render_event(
             eprintln!("tidebreak: turn interrupted");
             return false;
         }
+        CodeEvent::TurnRefused { refusal, .. } => {
+            streamed_text.clear();
+            finish_line(dangling);
+            eprintln!(
+                "tidebreak: turn refused ({})",
+                refusal.category().unwrap_or("unspecified")
+            );
+            return false;
+        }
         // `code run` already told the user to decide this one. Say when the
         // window closes, or the prompt is the last thing they ever hear.
         CodeEvent::ApprovalResolved {

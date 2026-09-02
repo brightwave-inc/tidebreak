@@ -24,8 +24,10 @@
 //! for every shape ever written, so an unreadable row is corruption to look
 //! at, not a row to drop.
 //!
-//! Idempotent on the absence of `event`. The SQLite branch runs autocommit
-//! steps, each of which skips work an interrupted attempt already did.
+//! Idempotent on the absence of `event`, which is why `DROP TABLE event` is
+//! the last statement on both backends: the SQLite branch runs autocommit
+//! steps, each of which skips work an interrupted attempt already did, and
+//! nothing may come after the step that flips the marker.
 
 use std::collections::HashMap;
 
@@ -44,7 +46,7 @@ impl MigrationName for OneJournal {
 }
 
 /// The tables whose foreign key named `event`, in the frozen baseline.
-const EVENT_REFERENCING_TABLES: &[&str] = &[
+pub(super) const EVENT_REFERENCING_TABLES: &[&str] = &[
     "plan_request",
     "sandbox_spawn_checkpoint",
     "tool_call",
@@ -56,7 +58,7 @@ const EVENT_REFERENCING_TABLES: &[&str] = &[
 const BACKFILL_PAGE: usize = 1_000;
 
 /// The unique indexes the receipts need, as they were on `event`.
-const RECEIPT_INDEXES: &[&str] = &[
+pub(super) const RECEIPT_INDEXES: &[&str] = &[
     r#"CREATE UNIQUE INDEX IF NOT EXISTS "idx_code_event_attempt_ordinal" ON "code_event" ("lease_token", "attempt_event_ordinal")"#,
     r#"CREATE UNIQUE INDEX IF NOT EXISTS "idx_code_event_scan_token" ON "code_event" ("scan_token")"#,
     r#"CREATE UNIQUE INDEX IF NOT EXISTS "idx_code_event_one_terminal_per_turn" ON "code_event" ("turn_id") WHERE "terminal" = TRUE"#,
@@ -153,13 +155,15 @@ BEGIN
     END LOOP;
 END
 $repoint$;
-DROP TABLE "event";
 "#,
                     )
                     .await?;
                 for index in RECEIPT_INDEXES {
                     connection.execute_unprepared(index).await?;
                 }
+                connection
+                    .execute_unprepared(r#"DROP TABLE "event""#)
+                    .await?;
                 transaction.commit().await
             }
             DbBackend::Sqlite => {
@@ -170,14 +174,17 @@ DROP TABLE "event";
                 for table in EVENT_REFERENCING_TABLES {
                     super::rebuild_sqlite_table(manager, table, repoint_event_reference).await?;
                 }
+                // The drop is the marker, so it goes last: everything an
+                // interrupted attempt could have skipped is in place before
+                // the next start can take the early return above.
                 let connection = manager.get_connection();
-                connection
-                    .execute_unprepared(r#"DROP TABLE "event""#)
-                    .await?;
                 for index in RECEIPT_INDEXES {
                     connection.execute_unprepared(index).await?;
                 }
-                Ok(())
+                connection
+                    .execute_unprepared(r#"DROP TABLE "event""#)
+                    .await
+                    .map(|_| ())
             }
             backend => Err(DbErr::Custom(format!(
                 "unsupported database backend for the one-journal migration: {backend:?}"
@@ -342,7 +349,7 @@ pub(super) fn add_receipt_columns(create: &str) -> Result<String, DbErr> {
 
 /// Point a stored SQLite definition's `event` foreign key at `code_event`.
 /// A definition that no longer names `event` comes back unchanged.
-fn repoint_event_reference(create: &str) -> Result<String, DbErr> {
+pub(super) fn repoint_event_reference(create: &str) -> Result<String, DbErr> {
     const EVENT: &str = r#"REFERENCES "event" ("chat_id", "seq")"#;
     const JOURNAL: &str = r#"REFERENCES "code_event" ("session_id", "seq")"#;
 

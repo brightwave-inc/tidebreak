@@ -995,6 +995,78 @@ describe("parseCodeAction", () => {
 });
 
 describe("parseCodeEvent", () => {
+  it("keeps the internal engine's rows on the code wire", () => {
+    // A chat is a session on the one journal, so its rows carry fields an
+    // external engine never writes. Dropping them would leave every tool
+    // completion and turn terminal of an internal session unread.
+    const usage = {
+      input_tokens: 3,
+      output_tokens: 4,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+      context_tokens: 0,
+    };
+    const completed = {
+      type: "tool_completed",
+      call_id: "toolu_1",
+      outcome: "succeeded",
+      preview: "ok",
+      output: { content: "ok", is_error: false },
+      action: { tool: "exec", command: "echo", args: [], cwd: ".", files: [] },
+      result: null,
+    };
+    expect(parseCodeEvent(completed)).toEqual({
+      type: "tool_completed",
+      call_id: "toolu_1",
+      outcome: "succeeded",
+      preview: "ok",
+    });
+    expect(
+      parseCodeEvent({
+        type: "turn_completed",
+        usage,
+        stop_reason: "end_turn",
+      }),
+    ).toEqual({ type: "turn_completed", usage });
+    expect(
+      parseCodeEvent({
+        type: "turn_failed",
+        error: { message: "config: no provider" },
+        detail: { kind: "config", message: "no provider" },
+      }),
+    ).toEqual({
+      type: "turn_failed",
+      error: { message: "config: no provider" },
+    });
+    expect(parseCodeEvent({ type: "turn_interrupted", usage })).toEqual({
+      type: "turn_interrupted",
+      usage,
+    });
+    expect(
+      parseCodeEvent({
+        type: "user_steered",
+        text: "and say thanks",
+        message_id: "11111111-1111-4111-8111-111111111111",
+      }),
+    ).toEqual({
+      type: "user_steered",
+      text: "and say thanks",
+      message_id: "11111111-1111-4111-8111-111111111111",
+    });
+    const refused = {
+      type: "turn_refused",
+      usage,
+      refusal: { details: { category: "cyber" }, partial_output: true },
+    };
+    expect(parseCodeEvent(refused)).toEqual(refused);
+    expect(
+      parseCodeEvent({
+        ...refused,
+        refusal: { details: {}, partial_output: 1 },
+      }),
+    ).toBeNull();
+  });
+
   it("takes tool_completed with or without the late-argument detail", () => {
     const completed = {
       type: "tool_completed",

@@ -504,6 +504,7 @@ fn session_activity(
             }
             CodeEvent::TurnStarted { .. }
             | CodeEvent::TurnCompleted { .. }
+            | CodeEvent::TurnRefused { .. }
             | CodeEvent::TurnFailed { .. }
             | CodeEvent::TurnInterrupted { .. } => break,
             _ => {}
