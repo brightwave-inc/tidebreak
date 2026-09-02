@@ -9,7 +9,7 @@ use sea_orm::{
 use serde_json::Value;
 
 use crate::attention::{AttentionSource, AttentionState};
-use crate::code::{CodeSessionKind, CodeSessionLifecycle, HarnessKind};
+use crate::code::{CodeSessionId, CodeSessionKind, CodeSessionLifecycle, HarnessKind};
 use crate::error::{AgentError, Result};
 use crate::event::{AgentEvent, SequencedEvent};
 use crate::id::{AgentRunId, CallId, ChatId, HostRootId, MessageId, ProjectId, TurnId};
@@ -29,6 +29,7 @@ use crate::PermissionMode;
 use super::super::{entities, project_from_models, store_err, DbStore};
 use super::blob as blob_ops;
 use super::chat_image_publication as chat_image_publication_ops;
+use super::code::session as code_session_ops;
 use super::exec_file_change as exec_file_change_ops;
 use super::message_attachment as message_attachment_ops;
 use super::turn::canonical_db_timestamp;
@@ -148,9 +149,6 @@ pub(in crate::db) async fn create_chat_with_project_defaults(
     let transaction = store.conn.begin().await.map_err(store_err)?;
     let project_roots = load_chat_project_roots(&transaction, base.project_id, owner).await?;
     let mut chat = base.clone();
-    // The session row stores the mode itself, so the conversation handed back
-    // says what a later read says.
-    chat.permission_mode = Some(chat.permission_mode.unwrap_or(PermissionMode::DEFAULT));
     chat.root_attachments = project_roots
         .into_iter()
         .map(|root_id| ChatRootAttachment {
@@ -236,13 +234,9 @@ where
         harness_kind: Set(HarnessKind::Internal.as_str().to_owned()),
         harness_version: Set(None),
         harness_resume_ref: Set(None),
-        // The session column is not nullable; an unset chat mode has always
-        // meant the default.
-        permission_mode: Set(chat
-            .permission_mode
-            .unwrap_or(PermissionMode::DEFAULT)
-            .as_str()
-            .to_owned()),
+        // `None` is chat's "follow the default at turn time"; the row keeps
+        // the null, and the code side reads it as the default.
+        permission_mode: Set(chat.permission_mode.map(|mode| mode.as_str().to_owned())),
         permission_mode_revision: Set(0),
         permission_mode_intent: Set(None),
         permission_mode_intent_revision: Set(None),
@@ -536,12 +530,7 @@ pub(in crate::db) async fn update_chat_metadata(
     if let Some(permission_mode) = permission_mode {
         update = update.col_expr(
             entities::code_session::Column::PermissionMode,
-            sea_orm::sea_query::Expr::value(
-                permission_mode
-                    .unwrap_or(PermissionMode::DEFAULT)
-                    .as_str()
-                    .to_owned(),
-            ),
+            sea_orm::sea_query::Expr::value(permission_mode.map(|mode| mode.as_str().to_owned())),
         );
     }
     if let Some(network_policy) = network_policy {
@@ -971,6 +960,16 @@ pub(in crate::db) async fn delete_chat(
         .exec(&transaction)
         .await
         .map_err(store_err)?;
+    // A conversation the internal engine has hosted carries code-side rows
+    // under the same id (its journal, turns, approvals, image reservations).
+    // They key the session row, so they go first, and their image blobs join
+    // the retirement candidates on the same terms as the chat-side ones.
+    for blob_id in
+        code_session_ops::delete_session_dependents_on(&transaction, CodeSessionId(chat_id.0))
+            .await?
+    {
+        blob_ops::enqueue_on(&transaction, blob_id).await?;
+    }
     entities::code_session::Entity::delete_by_id(chat_id.0)
         .exec(&transaction)
         .await
@@ -1880,7 +1879,10 @@ fn chat_from_models(
             .reasoning_effort
             .as_deref()
             .and_then(ReasoningEffort::from_str),
-        permission_mode: PermissionMode::from_str(&model.permission_mode),
+        permission_mode: model
+            .permission_mode
+            .as_deref()
+            .and_then(PermissionMode::from_str),
         network_policy: serde_json::from_str(&model.network_policy).map_err(|error| {
             AgentError::Store(format!(
                 "chat {} has an invalid network policy: {error}",

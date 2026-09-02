@@ -6,7 +6,7 @@ use crate::model::{
     MAX_ROOT_ATTACHMENTS,
 };
 use crate::storage::ApplyTurnSteerOutcome;
-use crate::{ApprovalClass, PermissionMode, ToolApprovalStatus};
+use crate::{ApprovalClass, ToolApprovalStatus};
 use chrono::{DateTime, Utc};
 
 mod agent_run;
@@ -130,9 +130,7 @@ fn sample_chat() -> Chat {
         title: Some("hello".into()),
         model: None,
         reasoning_effort: None,
-        // The session row stores the mode itself; an unset one reads back
-        // as the default (see `an_unset_permission_mode_reads_back_as_the_default`).
-        permission_mode: Some(PermissionMode::Ask),
+        permission_mode: None,
         network_policy: Default::default(),
         attachment_revision: 0,
         root_attachments: Vec::new(),

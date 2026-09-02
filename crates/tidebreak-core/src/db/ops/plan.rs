@@ -315,7 +315,7 @@ pub(in crate::db) async fn decide(
             .map_err(store_err)?
             .ok_or_else(|| AgentError::Store("plan chat disappeared".into()))?;
         let mut active_chat: entities::code_session::ActiveModel = chat.into();
-        active_chat.permission_mode = Set(mode.as_str().to_owned());
+        active_chat.permission_mode = Set(Some(mode.as_str().to_owned()));
         active_chat.update(&transaction).await.map_err(store_err)?;
     }
 

@@ -709,10 +709,7 @@ async fn chat_settings_stick_to_the_next_chat() {
     assert_eq!(cleared.status(), StatusCode::OK);
     let third = make_chat(&router, &bearer).await;
     assert_eq!(third.model, None);
-    assert_eq!(
-        third.permission_mode,
-        Some(tidebreak_core::PermissionMode::Ask)
-    );
+    assert_eq!(third.permission_mode, None);
 }
 
 #[tokio::test]
@@ -747,10 +744,7 @@ async fn rejected_chat_creation_does_not_change_sticky_defaults() {
     let next = make_chat(&router, &bearer).await;
     assert_eq!(next.model, None);
     assert_eq!(next.reasoning_effort, None);
-    assert_eq!(
-        next.permission_mode,
-        Some(tidebreak_core::PermissionMode::Ask)
-    );
+    assert_eq!(next.permission_mode, None);
     assert_eq!(next.network_policy, tidebreak_core::NetworkPolicy::Open);
 }
 

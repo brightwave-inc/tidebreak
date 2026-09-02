@@ -1755,7 +1755,10 @@ pub mod code_session {
         pub harness_kind: String,
         pub harness_version: Option<String>,
         pub harness_resume_ref: Option<String>,
-        pub permission_mode: String,
+        /// `None` on a conversation no worker has driven: chat's "follow the
+        /// default at turn time". The runtime and the engine's launch always
+        /// write a value.
+        pub permission_mode: Option<String>,
         pub permission_mode_revision: i64,
         pub permission_mode_intent: Option<String>,
         pub permission_mode_intent_revision: Option<i64>,

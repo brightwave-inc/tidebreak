@@ -728,7 +728,7 @@ async fn postgres_v060_upgrade_merges_conversations_into_sessions() {
             ("kind".to_owned(), "interactive".to_owned()),
             ("lifecycle".to_owned(), "idle".to_owned()),
             ("network_policy".to_owned(), r#"{"mode":"open"}"#.to_owned()),
-            ("permission_mode".to_owned(), "ask".to_owned()),
+            ("permission_mode".to_owned(), "<null>".to_owned()),
             ("reasoning_effort".to_owned(), "<null>".to_owned()),
             ("spawn_epoch".to_owned(), "0".to_owned()),
             ("title".to_owned(), "kept".to_owned()),

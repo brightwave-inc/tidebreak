@@ -3645,7 +3645,7 @@ SELECT
     CASE
         WHEN "chat"."permission_mode" IN ('plan', 'ask', 'auto', 'allow')
         THEN "chat"."permission_mode"
-        ELSE 'ask'
+        ELSE NULL
     END,
     0, "chat"."model",
     CASE
@@ -3710,6 +3710,7 @@ impl MigrationTrait for ConversationsAreSessions {
                     .execute_unprepared(
                         r#"
 ALTER TABLE "code_session"
+    ALTER COLUMN "permission_mode" DROP NOT NULL,
     ADD COLUMN "project_id" uuid,
     ADD COLUMN "title" text,
     ADD COLUMN "network_policy" text NOT NULL DEFAULT '{"mode":"off"}',
@@ -3785,6 +3786,8 @@ DROP TABLE "chat";
                         ))
                         .await?;
                 }
+                rebuild_sqlite_table(manager, "code_session", relax_code_session_permission_mode)
+                    .await?;
                 let [copy, adopt] = conversation_copy_statements(r#"'{"type":"idle"}'"#);
                 let transaction = manager.begin().await?;
                 transaction
@@ -3816,6 +3819,26 @@ DROP TABLE "chat";
         // writes.
         Ok(())
     }
+}
+
+/// SQLite cannot drop `NOT NULL` in place. Relax `permission_mode` so a
+/// conversation keeps chat's null, "follow the default at turn time". A
+/// definition already relaxed by an interrupted earlier attempt comes back
+/// unchanged.
+fn relax_code_session_permission_mode(create: &str) -> Result<String, DbErr> {
+    const CONSTRAINED: &str = r#""permission_mode" text NOT NULL"#;
+    const RELAXED: &str = r#""permission_mode" text"#;
+
+    if !create.contains(CONSTRAINED) {
+        if create.contains(&format!("{RELAXED},")) || create.contains(&format!("{RELAXED}\n")) {
+            return Ok(create.to_owned());
+        }
+        return Err(DbErr::Custom(
+            "SQLite code_session definition does not declare permission_mode NOT NULL as expected"
+                .to_owned(),
+        ));
+    }
+    Ok(create.replacen(CONSTRAINED, RELAXED, 1))
 }
 
 /// Point a stored SQLite definition's chat foreign key at `code_session`.
@@ -4383,8 +4406,11 @@ INSERT INTO tool_call (
         assert_eq!(plain.try_get::<String>("", "lifecycle").unwrap(), "idle");
         assert_eq!(plain.try_get::<i64>("", "spawn_epoch").unwrap(), 0);
         assert_eq!(
-            plain.try_get::<String>("", "permission_mode").unwrap(),
-            "ask"
+            plain
+                .try_get::<Option<String>>("", "permission_mode")
+                .unwrap(),
+            None,
+            "an unset chat mode stays unset"
         );
         assert_eq!(
             plain

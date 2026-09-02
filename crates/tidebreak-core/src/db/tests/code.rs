@@ -1890,6 +1890,76 @@ async fn a_capped_replay_keeps_the_newest_events_and_admits_the_head_is_gone() {
     );
 }
 
+/// A conversation the internal engine has hosted carries code-side rows
+/// under its id: the journal's `SessionStarted`, and after a turn the turn
+/// row too. Deleting the chat removes them with the session row instead of
+/// failing on the foreign keys that key it.
+#[tokio::test]
+async fn deleting_a_chat_removes_the_code_side_rows_under_its_id() {
+    let (_dir, store) = temp_store().await;
+    let owner = OwnerId::local();
+    let chat = super::sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let session_id = CodeSessionId(chat.id.0);
+    append_event(
+        &store,
+        &owner,
+        session_id,
+        0,
+        &CodeEvent::SessionStarted {
+            harness_kind: HarnessKind::Internal,
+            harness_version: "internal".into(),
+            resume_ref: None,
+        },
+    )
+    .await
+    .unwrap();
+    let turn_id = CodeTurnId::new();
+    insert_turn(
+        &store,
+        &owner,
+        &CodeTurn {
+            id: turn_id,
+            session_id,
+            ordinal: 1,
+            status: CodeTurnStatus::Completed,
+            model: None,
+            fast_mode: false,
+            user_input: "hello".into(),
+            user_input_blob_id: None,
+            attachments: Vec::new(),
+            checkpoint_ref: None,
+            diffstat: None,
+            usage: None,
+            narrative: None,
+            rewrite: None,
+            started_at: now(),
+            ended_at: Some(now()),
+            park_ref: None,
+            park_wait: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        store.delete_chat(chat.id).await.unwrap(),
+        crate::storage::DeleteChatOutcome::Deleted { .. }
+    ));
+
+    assert!(get_session(&store, &owner, session_id)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(get_turn(&store, &owner, turn_id).await.unwrap().is_none());
+    assert!(list_events(&store, &owner, session_id, 0, 10)
+        .await
+        .unwrap()
+        .events
+        .is_empty());
+    assert!(store.get_chat(chat.id).await.unwrap().is_none());
+}
+
 /// Decision 0048 step 5: one id resolves in one space. A conversation is a
 /// session row, so the chat store and the session store read the same row
 /// by the same id. A chat the code runtime has never driven is not one of

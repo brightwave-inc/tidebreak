@@ -26,12 +26,12 @@ async fn set_chat_model_updates_then_clears() {
     assert_eq!(store.get_chat(chat.id).await.unwrap().unwrap().model, None);
 }
 
-/// A chat is a session row, and the session column is not nullable: a chat
-/// created or updated with no permission mode stores the default and reads
-/// it back, where the chat table used to keep the null (decision 0048
-/// step 5).
+/// A chat is a session row, and the row keeps chat's null: a chat created
+/// or updated with no permission mode reads back none, "follow the default
+/// at turn time", where the code side reads the same null as the default
+/// (decision 0048 step 5).
 #[tokio::test]
-async fn an_unset_permission_mode_reads_back_as_the_default() {
+async fn an_unset_permission_mode_stays_unset() {
     let (_dir, store) = temp_store().await;
     let mut chat = sample_chat();
     chat.permission_mode = None;
@@ -43,7 +43,7 @@ async fn an_unset_permission_mode_reads_back_as_the_default() {
             .unwrap()
             .unwrap()
             .permission_mode,
-        Some(PermissionMode::DEFAULT)
+        None
     );
 
     store
@@ -77,7 +77,7 @@ async fn an_unset_permission_mode_reads_back_as_the_default() {
             .unwrap()
             .unwrap()
             .permission_mode,
-        Some(PermissionMode::DEFAULT)
+        None
     );
 }
 

@@ -570,6 +570,45 @@ async fn a_chat_is_not_a_runtime_session_until_the_runtime_drives_it() {
     assert!(session["workspace_id"].is_null(), "{session}");
 }
 
+/// A session the runtime created and attached carries the engine's
+/// `SessionStarted` in the code journal. The chat route deletes the
+/// conversation and the code-side rows with it, and both routes then miss.
+#[tokio::test]
+async fn deleting_a_hosted_session_through_the_chat_route_removes_it_from_both_surfaces() {
+    let (addr, token, _runtime, _ran, _dir) = internal_engine_app(Vec::new()).await;
+    let client = reqwest::Client::new();
+    let created = client
+        .post(format!("http://{addr}/code/sessions"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "permission_mode": "plan" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let session: serde_json::Value = created.json().await.unwrap();
+    let session_id = session["id"].as_str().unwrap().to_owned();
+
+    // Creating the session attached the engine, which journaled
+    // `SessionStarted` under this id; without the code-side cascade the
+    // delete below fails on that row's foreign key.
+    let deleted = client
+        .delete(format!("http://{addr}/chats/{session_id}"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    let status = deleted.status();
+    let body = deleted.text().await.unwrap();
+    assert_eq!(status, reqwest::StatusCode::NO_CONTENT, "{body}");
+    for route in [
+        format!("http://{addr}/chats/{session_id}"),
+        format!("http://{addr}/code/sessions/{session_id}"),
+    ] {
+        let missing = client.get(&route).bearer_auth(&token).send().await.unwrap();
+        assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND, "{route}");
+    }
+}
+
 #[tokio::test]
 async fn the_internal_engine_is_only_reachable_without_a_workspace() {
     let (addr, token, _runtime, _ran, dir) = internal_engine_app(Vec::new()).await;
