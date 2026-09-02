@@ -82,7 +82,12 @@ pub(in crate::db) async fn take_lease_on_turn(
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     };
-    if existing.lease_token.is_some() && existing.status == TurnRunStatus::Running.as_str() {
+    if existing.lease_token.is_some()
+        && existing.status == TurnRunStatus::Running.as_str()
+        && existing
+            .lease_expires_at
+            .is_some_and(|expires_at| expires_at > now)
+    {
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     }
@@ -155,17 +160,12 @@ pub(in crate::db) async fn take_lease_on_turn(
 }
 
 pub(in crate::db) async fn get_turn(store: &DbStore, id: TurnId) -> Result<Option<TurnRun>> {
-    let Some(row) = entities::code_turn::Entity::find_by_id(id.0)
+    entities::code_turn::Entity::find_by_id(id.0)
         .one(&store.conn)
         .await
         .map_err(store_err)?
-    else {
-        return Ok(None);
-    };
-    if row.input_message_id.is_none() {
-        return Ok(None);
-    }
-    turn_run_from_model(row).map(Some)
+        .map(turn_run_from_model)
+        .transpose()
 }
 
 pub(in crate::db) async fn list_turns(store: &DbStore, chat_id: ChatId) -> Result<Vec<TurnRun>> {
@@ -1052,7 +1052,6 @@ fn due_turn_candidate_condition(now: chrono::DateTime<Utc>) -> sea_orm::Conditio
         )
         .add(entities::code_turn::Column::AvailableAt.lte(now))
         .add(entities::code_turn::Column::UpdatedAt.lte(now))
-        .add(entities::code_turn::Column::InputMessageId.is_not_null())
 }
 
 fn expired_turn_candidate_condition(now: chrono::DateTime<Utc>) -> sea_orm::Condition {
@@ -1063,7 +1062,6 @@ fn expired_turn_candidate_condition(now: chrono::DateTime<Utc>) -> sea_orm::Cond
         ]))
         .add(entities::code_turn::Column::LeaseExpiresAt.lte(now))
         .add(entities::code_turn::Column::UpdatedAt.lte(now))
-        .add(entities::code_turn::Column::InputMessageId.is_not_null())
 }
 
 async fn any_turn_claim_work_on<C>(
@@ -1463,19 +1461,14 @@ where
 pub(in crate::db) fn turn_run_from_model(model: entities::code_turn::Model) -> Result<TurnRun> {
     let usage = usage_from_turn_model(&model)?;
     let invoked_skills = invoked_skills_from_model(&model)?;
-    let input_message_id = model.input_message_id.ok_or_else(|| {
-        AgentError::Store(format!(
-            "turn {} is missing its input message",
-            TurnId(model.id)
-        ))
-    })?;
+    let input_message_id = MessageId(model.input_message_id.unwrap_or(uuid::Uuid::nil()));
     let available_at = model.available_at.unwrap_or(model.started_at);
     let updated_at = model.updated_at.unwrap_or(model.started_at);
     Ok(TurnRun {
         id: TurnId(model.id),
         chat_id: ChatId(model.session_id),
         agent_run_id: AgentRunId::foreground_for_chat(ChatId(model.session_id)),
-        input_message_id: MessageId(input_message_id),
+        input_message_id,
         output_message_id: model.output_message_id.map(MessageId),
         model: model.model.unwrap_or_default(),
         invoked_skills,

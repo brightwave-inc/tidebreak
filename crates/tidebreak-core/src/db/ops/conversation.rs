@@ -684,9 +684,10 @@ pub(in crate::db) async fn delete_chat(
     let active_turn = entities::code_turn::Entity::find()
         .filter(entities::code_turn::Column::SessionId.eq(chat_id.0))
         .filter(entities::code_turn::Column::Status.is_not_in([
-            TurnRunStatus::Completed.as_str(),
-            TurnRunStatus::Failed.as_str(),
-            TurnRunStatus::Cancelled.as_str(),
+            "completed",
+            "failed",
+            "cancelled",
+            "interrupted",
         ]))
         .one(&transaction)
         .await
@@ -1079,9 +1080,10 @@ where
     let turns = entities::code_turn::Entity::find()
         .filter(entities::code_turn::Column::SessionId.eq(chat_id.0))
         .filter(entities::code_turn::Column::Status.is_in([
-            TurnRunStatus::Completed.as_str(),
-            TurnRunStatus::Failed.as_str(),
-            TurnRunStatus::Cancelled.as_str(),
+            "completed",
+            "failed",
+            "cancelled",
+            "interrupted",
         ]))
         .order_by_asc(entities::code_turn::Column::EndedAt)
         .order_by_asc(entities::code_turn::Column::Id)
@@ -1112,7 +1114,7 @@ where
                 ChatTerminalTurnStatus::Completed
             }
             status if status == TurnRunStatus::Failed.as_str() => ChatTerminalTurnStatus::Failed,
-            status if status == TurnRunStatus::Cancelled.as_str() => {
+            status if TurnRunStatus::CANCELLED.contains(&status) => {
                 ChatTerminalTurnStatus::Cancelled
             }
             _ => continue,
@@ -1213,9 +1215,10 @@ where
     let terminal_turn_ids: HashSet<_> = entities::code_turn::Entity::find()
         .filter(entities::code_turn::Column::SessionId.eq(chat_id.0))
         .filter(entities::code_turn::Column::Status.is_in([
-            TurnRunStatus::Completed.as_str(),
-            TurnRunStatus::Failed.as_str(),
-            TurnRunStatus::Cancelled.as_str(),
+            "completed",
+            "failed",
+            "cancelled",
+            "interrupted",
         ]))
         .all(conn)
         .await
@@ -1379,7 +1382,7 @@ pub(in crate::db) async fn list_cancelled_output_message_ids(
 ) -> Result<Vec<MessageId>> {
     let turns = entities::code_turn::Entity::find()
         .filter(entities::code_turn::Column::SessionId.eq(chat_id.0))
-        .filter(entities::code_turn::Column::Status.eq(TurnRunStatus::Cancelled.as_str()))
+        .filter(entities::code_turn::Column::Status.is_in(["cancelled", "interrupted"]))
         .filter(entities::code_turn::Column::OutputMessageId.is_not_null())
         .all(&store.conn)
         .await

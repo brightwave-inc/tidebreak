@@ -194,6 +194,16 @@ impl TurnRunStatus {
     pub const fn is_terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
     }
+
+    /// Database tokens that mean this turn was cancelled.
+    ///
+    /// Code writes `interrupted`; chat historically wrote `cancelled`. Both
+    /// remain in the merged status check, so readers have to match both.
+    pub const CANCELLED: &'static [&'static str] = &["cancelled", "interrupted"];
+
+    /// Database tokens that mean this turn is finished.
+    pub const TERMINAL: &'static [&'static str] =
+        &["completed", "failed", "cancelled", "interrupted"];
 }
 
 /// Explicit completion policy for a durable multi-child foreground wait.

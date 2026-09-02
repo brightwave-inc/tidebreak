@@ -8,13 +8,15 @@
 #[cfg(unix)]
 use std::io::ErrorKind;
 
+use chrono::Utc;
 use tidebreak_core::db::code::{
-    clear_session_harness_resume_ref, list_sessions_by_lifecycle_all_owners, reap_fenced_session,
-    recover_interrupted_session, replace_session_attention, save_session, set_session_subagents,
+    clear_session_harness_resume_ref, get_open_turn, list_sessions_by_lifecycle_all_owners,
+    reap_fenced_session, recover_interrupted_session, replace_session_attention, save_session,
+    set_session_subagents,
 };
 use tidebreak_core::{
     Attention, AttentionSource, AttentionState, CapLevel, CodeSession, CodeSessionLifecycle,
-    CodeSubagentStatus, DbStore, FenceReason, HarnessKind,
+    CodeSubagentStatus, DbStore, FenceReason, HarnessKind, Store,
 };
 
 use super::attention::{emit_digest, replace_attention};
@@ -288,8 +290,11 @@ async fn recover_one(
     let Some(pid) = session.child_pid else {
         // Internal-engine sessions have no child pid ever. Their adapter
         // declares `mid_turn_resume`, so boot recovery leaves the open turn
-        // for the claim scan instead of closing it as Interrupted.
+        // rather than closing it as Interrupted. Expire a live lease so the
+        // next worker can reclaim it instead of treating the dead claim as
+        // still running.
         if session.harness_kind == tidebreak_core::HarnessKind::Internal {
+            expire_internal_turn_lease(store, &session).await?;
             return Ok(None);
         }
         // No recorded pid: treat as dead. Never invent a pid to probe.
@@ -317,6 +322,25 @@ async fn recover_one(
             }))
         }
     }
+}
+
+async fn expire_internal_turn_lease(
+    store: &DbStore,
+    session: &CodeSession,
+) -> Result<(), tidebreak_core::AgentError> {
+    let Some(open) = get_open_turn(store, &session.owner, session.id).await? else {
+        return Ok(());
+    };
+    let Some(run) = store.get_turn(tidebreak_core::TurnId(open.id.0)).await? else {
+        return Ok(());
+    };
+    let Some(lease_token) = run.lease_token else {
+        return Ok(());
+    };
+    let _ = store
+        .expire_turn_lease(run.id, lease_token, Utc::now())
+        .await?;
+    Ok(())
 }
 
 /// Settle a session whose worker died with a turn still open: interrupt the

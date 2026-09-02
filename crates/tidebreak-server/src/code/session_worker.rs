@@ -879,6 +879,24 @@ async fn run_worker(
                     "could not resume the parked turn after a worker restart"
                 );
             }
+        } else if session.harness_kind == HarnessKind::Internal
+            && open.status == CodeTurnStatus::Running
+        {
+            let input = TurnInput {
+                turn_id: Some(open.id),
+                text: open.user_input.clone(),
+                model: session.model.clone(),
+                reasoning_effort: session.reasoning_effort,
+                fast_mode: session.fast_mode,
+                images: Vec::new(),
+            };
+            if let Err(error) = engine.run_turn(input).await {
+                warn!(
+                    session = %session.id,
+                    error = %error,
+                    "could not resume the running internal turn after a worker restart"
+                );
+            }
         }
     }
 
@@ -2591,24 +2609,29 @@ async fn drive_turn_inner(
     }
     sink.set_turn(turn.id);
 
-    let lease_token = uuid::Uuid::new_v4();
-    let now = Utc::now();
-    let lease_expires_at = now + chrono::Duration::seconds(60);
-    let claimed = db
-        .take_lease_on_turn(
-            tidebreak_core::TurnId(turn.id.0),
-            lease_token,
-            now,
-            lease_expires_at,
-        )
-        .await
-        .map_err(|err| WorkerError::Failed(err.to_string()))?;
-    if claimed.is_none() {
-        return Err(WorkerError::Failed(format!(
-            "could not claim a lease on turn {}",
-            turn.id
-        )));
-    }
+    let lease_token = if session.harness_kind == HarnessKind::Internal {
+        let lease_token = uuid::Uuid::new_v4();
+        let now = Utc::now();
+        let lease_expires_at = now + chrono::Duration::seconds(60);
+        let claimed = db
+            .take_lease_on_turn(
+                tidebreak_core::TurnId(turn.id.0),
+                lease_token,
+                now,
+                lease_expires_at,
+            )
+            .await
+            .map_err(|err| WorkerError::Failed(err.to_string()))?;
+        if claimed.is_none() {
+            return Err(WorkerError::Failed(format!(
+                "could not claim a lease on turn {}",
+                turn.id
+            )));
+        }
+        Some(lease_token)
+    } else {
+        None
+    };
 
     session.lifecycle = CodeSessionLifecycle::Running;
     super::attention::replace_attention(
@@ -2725,15 +2748,17 @@ async fn drive_turn_inner(
                     }
                 }
                 _ = heartbeat.tick() => {
-                    let now = Utc::now();
-                    let _ = db
-                        .heartbeat_turn_lease(
-                            tidebreak_core::TurnId(turn.id.0),
-                            lease_token,
-                            now,
-                            now + chrono::Duration::seconds(60),
-                        )
-                        .await;
+                    if let Some(lease_token) = lease_token {
+                        let now = Utc::now();
+                        let _ = db
+                            .heartbeat_turn_lease(
+                                tidebreak_core::TurnId(turn.id.0),
+                                lease_token,
+                                now,
+                                now + chrono::Duration::seconds(60),
+                            )
+                            .await;
+                    }
                 }
             }
         };
