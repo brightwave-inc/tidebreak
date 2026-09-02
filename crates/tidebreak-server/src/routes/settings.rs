@@ -450,6 +450,12 @@ pub async fn put_settings(
                 &serde_json::json!(channel),
             )
             .await?;
+        // The channel decides which install each engine drives, so a live
+        // worker on the other one moves now rather than on its next fault.
+        if let Some(code) = state.code.as_ref() {
+            code.resync_workers_to_selected_binaries(tidebreak_core::HarnessKind::ALL)
+                .await;
+        }
     }
     if let Some(update) = body.git_source_control {
         let custom_was_present = update.custom_branch_prefix.is_some();

@@ -148,6 +148,11 @@ pub(crate) enum WorkerError {
 
 pub(crate) struct WorkerHandle {
     pub spawn_epoch: i64,
+    /// The engine executable this worker launches, copied from the probe at
+    /// spawn. A managed install or a channel flip that moves the selected
+    /// binary compares against this to find the workers still on the old
+    /// file. `None` for an in-process engine.
+    pub binary: Option<std::path::PathBuf>,
     pub commands: mpsc::Sender<WorkerCommand>,
     pub queue: TurnQueue,
     pub sink: Arc<LiveSink>,
@@ -295,6 +300,11 @@ pub(crate) struct LiveSink {
 }
 
 impl LiveSink {
+    /// The principal the session belongs to.
+    pub(crate) fn owner(&self) -> &OwnerId {
+        &self.owner
+    }
+
     pub(crate) fn set_turn(&self, turn_id: CodeTurnId) {
         *self.turn_id.lock().expect("code sink turn") = Some(turn_id);
     }
@@ -804,6 +814,7 @@ pub(crate) fn spawn_session_worker(
     ));
     WorkerHandle {
         spawn_epoch,
+        binary: None,
         commands: tx,
         queue,
         sink,

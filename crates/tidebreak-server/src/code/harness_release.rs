@@ -13,7 +13,7 @@
 //! network round trip.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tidebreak_core::{HarnessKind, HarnessUpdateChannel, Store};
 
@@ -162,13 +162,32 @@ impl CodeRuntime {
         }
     }
 
+    /// Ask the registry for `kind`'s newest release and remember the answer.
+    /// A registry that cannot be reached is a warning here, not an error: the
+    /// caller has an installed version or the pin to fall back on.
+    async fn lookup_latest(&self, kind: HarnessKind, node_root: &Path) -> Option<String> {
+        match tidebreak_harness::latest_published_version(kind, Some(node_root)).await {
+            Ok(version) => {
+                self.harness_releases.record(kind, version.clone());
+                Some(version)
+            }
+            Err(err) => {
+                tracing::warn!(%kind, error = %err, "registry lookup failed; using what is installed");
+                None
+            }
+        }
+    }
+
     /// Install — or find — the engine binary the channel drives for `kind`.
     ///
-    /// On `pinned`, the pin. On `latest`, the registry's newest when this
-    /// caller asked for a fresh lookup or nothing is installed yet; otherwise
-    /// the newest install already on disk. A registry that cannot be reached
-    /// is not a fault on this path: the newest install stands in, and the
-    /// pin stands in for that.
+    /// On `pinned`, the pin. On `latest`, what is already installed unless
+    /// this caller asked for a fresh lookup: the registry's last answer is
+    /// what Update moves to, and a session create or a picker warm-up that
+    /// installed it unasked would stall on a 37–297MB download and drive a
+    /// binary the doctor row does not describe. Only a machine with nothing
+    /// installed yet takes the newest release on its own. A registry that
+    /// cannot be reached is not a fault on this path: the newest install
+    /// stands in, and the pin stands in for that.
     pub(in crate::code) async fn ensure_harness(
         &self,
         kind: HarnessKind,
@@ -182,28 +201,24 @@ impl CodeRuntime {
         let target = match channel {
             HarnessUpdateChannel::Pinned => pin.version.to_owned(),
             HarnessUpdateChannel::Latest => {
-                let known = self.known_latest_version(kind);
-                let fresh = if refresh || (known.is_none() && installed.is_none()) {
-                    match tidebreak_harness::latest_published_version(kind, Some(&node_root)).await
-                    {
-                        Ok(version) => {
-                            self.harness_releases.record(kind, version.clone());
-                            Some(version)
-                        }
-                        Err(err) => {
-                            tracing::warn!(%kind, error = %err, "registry lookup failed; using what is installed");
-                            None
-                        }
-                    }
-                } else {
-                    known
+                let past_pin = |version: &String| {
+                    tidebreak_harness::compare_versions(version, pin.version).is_ge()
                 };
-                fresh
-                    .filter(|version| {
-                        tidebreak_harness::compare_versions(version, pin.version).is_ge()
-                    })
-                    .or_else(|| installed.as_ref().map(|found| found.version.clone()))
-                    .unwrap_or_else(|| pin.version.to_owned())
+                let installed_version = installed.as_ref().map(|found| found.version.clone());
+                let resolved = if refresh {
+                    self.lookup_latest(kind, &node_root)
+                        .await
+                        .filter(past_pin)
+                        .or(installed_version)
+                } else if let Some(version) = installed_version {
+                    Some(version)
+                } else {
+                    match self.known_latest_version(kind).filter(past_pin) {
+                        Some(known) => Some(known),
+                        None => self.lookup_latest(kind, &node_root).await.filter(past_pin),
+                    }
+                };
+                resolved.unwrap_or_else(|| pin.version.to_owned())
             }
         };
         let binary = tidebreak_harness::ensure_installed_version(
@@ -284,15 +299,18 @@ impl CodeRuntime {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::path::Path;
-    use std::sync::Arc;
+pub(in crate::code) mod test_support {
+    use std::path::{Path, PathBuf};
 
-    use tidebreak_core::db::DbStore;
+    use tidebreak_core::HarnessKind;
 
-    use super::*;
-
-    fn write_install(data_dir: &Path, kind: HarnessKind, version: &str) -> PathBuf {
+    /// Lay down a managed install of `version` for `kind` — an executable
+    /// stub and the marker that names it — and return the binary path.
+    pub(in crate::code) fn write_install(
+        data_dir: &Path,
+        kind: HarnessKind,
+        version: &str,
+    ) -> PathBuf {
         let pin = tidebreak_harness::pin_for(kind).unwrap();
         let dir = tidebreak_harness::pin::install_dir_for(data_dir, pin, version);
         let binary = dir.join("node_modules").join(".bin").join(pin.bin);
@@ -314,6 +332,17 @@ mod tests {
         .unwrap();
         binary
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use tidebreak_core::db::DbStore;
+
+    use super::test_support::write_install;
+    use super::*;
 
     async fn runtime(data_dir: &Path) -> CodeRuntime {
         let db = DbStore::connect(&format!(

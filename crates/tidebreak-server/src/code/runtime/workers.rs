@@ -215,7 +215,7 @@ impl CodeRuntime {
             relay_key_env,
             env: probe.env.clone(),
             approval,
-            binary,
+            binary: binary.clone(),
             sink: sink.clone() as Arc<dyn HarnessEventSink>,
             browser,
         };
@@ -260,7 +260,7 @@ impl CodeRuntime {
             attached.harness_resume_ref = Some(resume);
         }
         crate::code::attention::persist_session(&self.db, &self.bus, &attached).await?;
-        let handle = spawn_session_worker(
+        let mut handle = spawn_session_worker(
             attached.clone(),
             engine,
             sink,
@@ -280,6 +280,7 @@ impl CodeRuntime {
             },
             self.update_quiesce.subscribe(),
         );
+        handle.binary = binary;
         self.workers
             .lock()
             .expect("code workers")
@@ -307,6 +308,87 @@ impl CodeRuntime {
         self.workers.lock().expect("code workers").contains_key(&id)
     }
 
+    /// Move every idle live worker of `kinds` onto the binary the update
+    /// channel now selects.
+    ///
+    /// A worker copies the probe's binary path into its launch plan once, so
+    /// a managed install that lands a newer release, or a channel flip back
+    /// to the pin, leaves an attached session driving the old file — and a
+    /// retry of the turn that failed on a version floor hits it again. Each
+    /// idle worker still on another file is stopped and respawned through
+    /// the fresh probe, the same swap a settings change makes. A worker with
+    /// a turn in flight is left alone: it moves when its turn ends and the
+    /// next one attaches, and stopping it now would abandon the work.
+    ///
+    /// Returns the sessions whose worker moved.
+    pub(crate) async fn resync_workers_to_selected_binaries(
+        &self,
+        kinds: &[HarnessKind],
+    ) -> Vec<CodeSessionId> {
+        let mut moved = Vec::new();
+        for kind in kinds {
+            // A declared binary never moves, and a host with no data
+            // directory selects no managed install.
+            if kind.is_in_process()
+                || self.host.data_dir.is_none()
+                || self.host.declared(*kind).is_some()
+            {
+                continue;
+            }
+            let Some(selected) = self.selected_harness(*kind).await else {
+                continue;
+            };
+            let stale: Vec<(CodeSessionId, i64, OwnerId)> = self
+                .workers
+                .lock()
+                .expect("code workers")
+                .iter()
+                .filter(|(_, handle)| {
+                    handle
+                        .binary
+                        .as_deref()
+                        .is_some_and(|binary| binary != selected.binary)
+                })
+                .map(|(id, handle)| (*id, handle.spawn_epoch, handle.sink.owner().clone()))
+                .collect();
+            for (id, spawn_epoch, owner) in stale {
+                let Ok(session) = self.get_session(&owner, id).await else {
+                    continue;
+                };
+                if session.harness_kind != *kind || session.spawn_epoch != spawn_epoch {
+                    continue;
+                }
+                if session.lifecycle == CodeSessionLifecycle::Running {
+                    tracing::info!(
+                        session = %id,
+                        %kind,
+                        "a turn is in flight; the session moves to the selected engine binary when it ends"
+                    );
+                    continue;
+                }
+                let Some(handle) = self.take_worker_for_epoch(id, spawn_epoch) else {
+                    continue;
+                };
+                self.revoke_worker_channels(id);
+                Self::shut_down_worker(id, handle).await;
+                let respawned = match self.get_session(&owner, id).await {
+                    Ok(session) => self.attach_and_spawn_worker(session).await,
+                    Err(error) => Err(error),
+                };
+                match respawned {
+                    Ok(_) => moved.push(id),
+                    Err(error) => tracing::warn!(
+                        session = %id,
+                        %kind,
+                        error = ?error,
+                        "could not respawn the session on the selected engine binary"
+                    ),
+                }
+            }
+        }
+        moved
+    }
+
     pub(super) fn require_worker(&self, id: CodeSessionId) -> Result<WorkerHandle, ServerError> {
         self.workers
             .lock()
@@ -314,6 +396,7 @@ impl CodeRuntime {
             .get(&id)
             .map(|handle| WorkerHandle {
                 spawn_epoch: handle.spawn_epoch,
+                binary: handle.binary.clone(),
                 commands: handle.commands.clone(),
                 queue: handle.queue.clone(),
                 sink: handle.sink.clone(),
@@ -325,5 +408,104 @@ impl CodeRuntime {
                     "no live worker is attached to this session",
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::code::harness_release::test_support::write_install;
+    use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
+    use tidebreak_core::db::DbStore;
+
+    /// A runtime whose only engine is the scripted adapter, on a host with a
+    /// data directory so the update channel selects managed installs.
+    async fn scripted_runtime(data_dir: &Path) -> CodeRuntime {
+        let db = DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            data_dir.join("code.db").display()
+        ))
+        .await
+        .expect("db");
+        let mut registry = AdapterRegistry::new();
+        registry.register(Arc::new(ScriptedAdapter::new(plain_text_script())));
+        let mut runtime =
+            CodeRuntime::with_registry(Arc::new(db), data_dir.to_path_buf(), registry);
+        runtime.host.data_dir = Some(data_dir.to_path_buf());
+        runtime
+    }
+
+    fn workspaceless_session(owner: &OwnerId, harness: HarnessKind) -> CodeSession {
+        CodeSession {
+            id: CodeSessionId::new(),
+            owner: owner.clone(),
+            workspace_id: None,
+            kind: CodeSessionKind::Interactive,
+            harness_kind: harness,
+            harness_version: None,
+            harness_resume_ref: None,
+            permission_mode: PermissionMode::Plan,
+            model: None,
+            reasoning_effort: None,
+            fast_mode: false,
+            lifecycle: CodeSessionLifecycle::Created,
+            fence_reason: None,
+            child_pid: None,
+            child_process_identity: None,
+            spawn_epoch: 0,
+            attention: Attention::working(AttentionSource::Lifecycle),
+            unrecognized_event_count: 0,
+            subagents: Vec::new(),
+            created_at: Utc::now(),
+        }
+    }
+
+    /// A worker still on another file than the channel selects is respawned
+    /// when it is idle, and left to finish when a turn is in flight.
+    #[tokio::test]
+    async fn a_stale_idle_worker_is_respawned_and_a_running_one_is_left_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kind = HarnessKind::ClaudeCode;
+        let pin = tidebreak_harness::pin_for(kind).unwrap();
+        write_install(tmp.path(), kind, pin.version);
+        let runtime = scripted_runtime(tmp.path()).await;
+        let owner = OwnerId::new("alice").unwrap();
+        let session = workspaceless_session(&owner, kind);
+        insert_session(&runtime.db, &session).await.unwrap();
+        // The scripted probe names `/scripted/engine`, which no channel ever
+        // selects, so this worker is stale from the moment a managed install
+        // is on disk — exactly the shape an Update leaves behind.
+        let attached = runtime.attach_and_spawn_worker(session).await.unwrap();
+        let first_epoch = attached.spawn_epoch;
+
+        let moved = runtime.resync_workers_to_selected_binaries(&[kind]).await;
+        assert_eq!(moved, vec![attached.id]);
+        let session = runtime.get_session(&owner, attached.id).await.unwrap();
+        assert!(session.spawn_epoch > first_epoch, "the worker respawned");
+        assert!(runtime.require_worker(attached.id).is_ok());
+
+        let mut running = session.clone();
+        running.lifecycle = CodeSessionLifecycle::Running;
+        crate::code::attention::persist_session(&runtime.db, &runtime.bus, &running)
+            .await
+            .unwrap();
+        assert!(runtime
+            .resync_workers_to_selected_binaries(&[kind])
+            .await
+            .is_empty());
+        assert_eq!(
+            runtime
+                .get_session(&owner, attached.id)
+                .await
+                .unwrap()
+                .spawn_epoch,
+            session.spawn_epoch
+        );
+
+        // Another engine's install never touches this worker.
+        assert!(runtime
+            .resync_workers_to_selected_binaries(&[HarnessKind::Codex])
+            .await
+            .is_empty());
     }
 }

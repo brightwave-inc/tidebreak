@@ -93,6 +93,32 @@ impl HarnessInstallJob {
     }
 }
 
+/// The version an install will produce, when it is known before the
+/// registry answers. `None` means the detached task resolves it and reports
+/// it when done.
+///
+/// On `pinned`, the pin. On `latest`, a deliberate install — Update — moves
+/// to the registry's last answer; anything else keeps what is installed,
+/// because the doctor row still shows Update and the reader has not opted
+/// in. A cold machine takes the last answer either way: there is nothing
+/// installed for it to keep.
+fn install_target(
+    channel: HarnessUpdateChannel,
+    pin: &str,
+    installed: Option<&str>,
+    known_latest: Option<&str>,
+    deliberate: bool,
+) -> Option<String> {
+    let past_pin = known_latest
+        .filter(|latest| tidebreak_harness::compare_versions(latest, pin).is_ge())
+        .map(str::to_owned);
+    match channel {
+        HarnessUpdateChannel::Pinned => Some(pin.to_owned()),
+        HarnessUpdateChannel::Latest if deliberate => past_pin,
+        HarnessUpdateChannel::Latest => installed.map(str::to_owned).or(past_pin),
+    }
+}
+
 impl CodeRuntime {
     /// Start — or report — the install of the release the channel drives for
     /// `kind`.
@@ -121,21 +147,13 @@ impl CodeRuntime {
         })?;
         let channel = self.harness_update_channel().await;
         let installed = self.selected_harness(kind).await;
-        // The version this install will produce, when it is known before the
-        // registry answers: the pin, or the registry's last answer. A
-        // deliberate `latest` install with no answer yet resolves it in the
-        // detached task and reports it when done.
-        let target = match channel {
-            HarnessUpdateChannel::Pinned => Some(pin.version.to_owned()),
-            HarnessUpdateChannel::Latest => self
-                .known_latest_version(kind)
-                .filter(|latest| tidebreak_harness::compare_versions(latest, pin.version).is_ge())
-                .or_else(|| {
-                    (!deliberate)
-                        .then(|| installed.as_ref().map(|found| found.version.clone()))
-                        .flatten()
-                }),
-        };
+        let target = install_target(
+            channel,
+            pin.version,
+            installed.as_ref().map(|found| found.version.as_str()),
+            self.known_latest_version(kind).as_deref(),
+            deliberate,
+        );
         let already = match &target {
             Some(version) => {
                 tidebreak_harness::managed_binary_version(&self.data_dir, kind, version).is_some()
@@ -189,6 +207,10 @@ impl CodeRuntime {
                 if let Ok(adapter) = self.adapter(kind) {
                     self.probe(adapter.as_ref()).await;
                 }
+                // A session already attached copied the old file into its
+                // worker at spawn; retrying its failed turn would hit the
+                // same version floor. Move every idle one onto this install.
+                self.resync_workers_to_selected_binaries(&[kind]).await;
                 self.finish_harness_install(owner, kind, Ok(installed.version));
             }
             Err(error) => {
@@ -233,6 +255,52 @@ impl CodeRuntime {
                 done: job.done,
                 error: job.error.clone(),
             }),
+        );
+    }
+}
+
+#[cfg(test)]
+mod install_target_tests {
+    use super::*;
+
+    const PIN: &str = "2.1.234";
+
+    /// The registry's last answer moves an install only when a person pressed
+    /// Update. A warm-up keeps what is on disk, and a cold machine takes the
+    /// answer because it has nothing to keep.
+    #[test]
+    fn only_a_deliberate_latest_install_takes_the_registry_answer() {
+        let latest = HarnessUpdateChannel::Latest;
+        assert_eq!(
+            install_target(latest, PIN, Some(PIN), Some("2.1.258"), false).as_deref(),
+            Some(PIN)
+        );
+        assert_eq!(
+            install_target(latest, PIN, Some(PIN), Some("2.1.258"), true).as_deref(),
+            Some("2.1.258")
+        );
+        assert_eq!(
+            install_target(latest, PIN, None, Some("2.1.258"), false).as_deref(),
+            Some("2.1.258")
+        );
+        // No answer yet: the detached task resolves it.
+        assert_eq!(install_target(latest, PIN, Some(PIN), None, true), None);
+        assert_eq!(install_target(latest, PIN, None, None, false), None);
+        // An answer older than the pin is never a target.
+        assert_eq!(
+            install_target(latest, PIN, None, Some("2.1.200"), true),
+            None
+        );
+        assert_eq!(
+            install_target(
+                HarnessUpdateChannel::Pinned,
+                PIN,
+                Some("2.1.258"),
+                Some("2.1.258"),
+                true
+            )
+            .as_deref(),
+            Some(PIN)
         );
     }
 }
