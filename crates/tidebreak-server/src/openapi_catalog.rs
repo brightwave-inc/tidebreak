@@ -177,9 +177,7 @@ pub struct OperationCatalog {
 pub enum OpenApiIngestError {
     #[error("OpenAPI document is {actual} bytes; the limit is {limit} bytes")]
     DocumentTooLarge { actual: usize, limit: usize },
-    #[error(
-        "JSON {detail} at line {line}, column {column}. Check line {line}, column {column}"
-    )]
+    #[error("JSON {detail} at line {line}, column {column}. Check line {line}, column {column}")]
     JsonSyntax {
         line: usize,
         column: usize,
@@ -193,7 +191,9 @@ pub enum OpenApiIngestError {
         column: usize,
         limit: usize,
     },
-    #[error("only JSON OpenAPI documents are supported; the document is a JSON {found}, not an object")]
+    #[error(
+        "only JSON OpenAPI documents are supported; the document is a JSON {found}, not an object"
+    )]
     NotAnObject { found: &'static str },
     #[error(
         "only JSON OpenAPI documents are supported; the first non-whitespace byte is not '{{' or '[' (YAML and other formats are not accepted)"
@@ -1382,7 +1382,10 @@ mod tests {
         }
         let text = err.to_string();
         assert!(text.contains("line 3"), "{text}");
-        assert!(text.contains("column 0") || text.contains("column 1"), "{text}");
+        assert!(
+            text.contains("column 0") || text.contains("column 1"),
+            "{text}"
+        );
         assert!(!text.contains("openapi"), "{text}");
     }
 
