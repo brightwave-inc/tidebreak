@@ -175,11 +175,7 @@ function PluginServerSection({ server }: { server: McpServerInfo }) {
       <SettingsStatus
         tone={healthTone(server.health)}
         label={healthLabel(server.health)}
-        description={
-          server.health === "healthy"
-            ? `${server.tool_count} tool${server.tool_count === 1 ? "" : "s"} available to new turns.`
-            : (server.diagnostic ?? "This server is not connected.")
-        }
+        description={verifyDescription(server)}
       />
       <p className="text-sm leading-relaxed text-muted-foreground">
         Provided by the <code>{server.plugin}</code> plugin. Its configuration
@@ -644,7 +640,7 @@ export function McpPanel({
                     mounted.health !== "initializing" &&
                     mounted.health !== "reconnecting" &&
                     mounted.diagnostic !== null && (
-                      <span className="text-xs text-destructive">
+                      <span className="text-xs text-destructive break-words">
                         {mounted.diagnostic}
                       </span>
                     )}
@@ -729,12 +725,7 @@ export function McpPanel({
                 <SettingsStatus
                   tone={healthTone(server.health)}
                   label={healthLabel(server.health)}
-                  description={
-                    server.health === "healthy"
-                      ? `${server.tool_count} tool${server.tool_count === 1 ? "" : "s"} available to new turns.`
-                      : (server.diagnostic ??
-                        "Save the configuration to verify this server.")
-                  }
+                  description={verifyDescription(server)}
                 />
 
                 <McpTierChip curated={server.curated} />
@@ -873,7 +864,7 @@ export function McpPanel({
 
                     <SettingsField
                       label="Bearer token variable"
-                      hint="Optional. Only the name is saved; the token is read from the host environment when connecting and never displayed."
+                      hint="Optional. Tidebreak reads this variable from the process environment it started with and never displays the value. Export it in the shell you start Tidebreak from, then restart Tidebreak. A Dock or Finder launch does not see variables from your shell profile."
                     >
                       <Input
                         value={server.bearer_token_env ?? ""}
@@ -923,7 +914,7 @@ export function McpPanel({
 
                     <StringListEditor
                       label="Forward environment names"
-                      hint="Only names are saved or displayed. Their values are resolved in the host process and never returned to the app."
+                      hint="Only names are saved or displayed. Tidebreak reads their values from the process environment it started with. Export them in the shell you start Tidebreak from, then restart Tidebreak."
                       values={server.env_from}
                       disabled={working}
                       addLabel="Add variable name"
@@ -1141,6 +1132,21 @@ function mountName(slug: string, taken: ReadonlySet<string>): string {
 }
 
 /** Sentence-shaped status for a mount row; diagnostics already are one. */
+function verifyDescription(server: McpServerInfo): string {
+  if (server.health === "healthy") {
+    return `${server.tool_count} tool${server.tool_count === 1 ? "" : "s"} available to new turns.`;
+  }
+  if (server.health === "disabled") {
+    return (
+      server.diagnostic ??
+      "Disabled. This server is not available to new turns."
+    );
+  }
+  return (
+    server.diagnostic ?? "Save the configuration to verify this server."
+  );
+}
+
 function mountStatus(mounted: McpServerInfo): string {
   if (mounted.health === "healthy") {
     return `${mounted.tool_count} tool${mounted.tool_count === 1 ? "" : "s"} available to new turns.`;

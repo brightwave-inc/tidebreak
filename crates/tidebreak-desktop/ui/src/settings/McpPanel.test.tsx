@@ -136,7 +136,9 @@ describe("McpPanel", () => {
     expect(screen.getByDisplayValue("PRIVATE_DOCS_TOKEN")).toBeInTheDocument();
     expect(screen.queryByLabelText(/API key/i)).not.toBeInTheDocument();
     expect(
-      screen.getByText(/values are resolved in the host process/i),
+      screen.getByText(
+        /Tidebreak reads their values from the process environment/i,
+      ),
     ).toBeInTheDocument();
   });
 
@@ -437,6 +439,26 @@ describe("McpPanel", () => {
     expect(
       screen.getByRole("radio", { name: "Remote endpoint (HTTP)" }),
     ).toBeChecked();
+    expect(
+      screen.getByText(/Export it in the shell you start Tidebreak from/),
+    ).toBeInTheDocument();
+  });
+
+  it("shows the full classified verify failure", async () => {
+    const message =
+      'DNS resolution failed (mcp.example.invalid). Bearer-token environment variable "GATEWAY_TOKEN" is not set in the environment Tidebreak reads. Export it in the shell you start Tidebreak from, then restart Tidebreak.';
+    const client = api(
+      { servers: [] },
+      {
+        putMcpServers: vi.fn().mockRejectedValue(new Error(message)),
+      },
+    );
+    const user = userEvent.setup();
+    render(<McpPanel client={client} />);
+    await screen.findByText(/No MCP servers configured/);
+    await user.click(screen.getByRole("button", { name: "Add server" }));
+    await user.click(screen.getByRole("button", { name: "Save and verify" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(message);
   });
 
   it("surfaces secret-free degraded diagnostics", async () => {

@@ -129,7 +129,7 @@ export function SettingsStatus({
       <Icon className="settings-status-icon" aria-hidden="true" />
       <span className="settings-status-copy">
         <strong>{label}</strong>
-        <span>{description}</span>
+        <span className="break-words">{description}</span>
       </span>
     </div>
   );
@@ -137,7 +137,7 @@ export function SettingsStatus({
 
 export function SettingsError({ children }: { children: ReactNode }) {
   return (
-    <p className="text-sm text-destructive" role="alert">
+    <p className="text-sm text-destructive break-words" role="alert">
       {children}
     </p>
   );

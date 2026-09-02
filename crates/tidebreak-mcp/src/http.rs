@@ -138,15 +138,22 @@ impl HttpWire {
                 "external server bearer token must be a non-empty header-safe value",
             ));
         }
+        let mut builder = reqwest::Client::builder()
+            // A credentialed client must not follow redirects: reqwest
+            // strips Authorization cross-host, but a same-host https→http
+            // downgrade would resend the bearer in cleartext. This is also
+            // what keeps configured static headers — which reqwest knows
+            // nothing about and would carry across a hop — from ever
+            // reaching a different origin.
+            .redirect(reqwest::redirect::Policy::none());
+        // Loopback MCP servers live on this machine. An inherited HTTP proxy
+        // would steal those connections and turn Save and verify into a hang
+        // or a 403 from the proxy.
+        if is_literal_loopback(&url) {
+            builder = builder.no_proxy();
+        }
         Ok(Self {
-            client: reqwest::Client::builder()
-                // A credentialed client must not follow redirects: reqwest
-                // strips Authorization cross-host, but a same-host https→http
-                // downgrade would resend the bearer in cleartext. This is also
-                // what keeps configured static headers — which reqwest knows
-                // nothing about and would carry across a hop — from ever
-                // reaching a different origin.
-                .redirect(reqwest::redirect::Policy::none())
+            client: builder
                 .build()
                 .map_err(|error| mcp_error("could not build HTTP client", error))?,
             url,
@@ -190,19 +197,16 @@ impl HttpWire {
                 .await
         } else if content_type.starts_with("application/json") {
             let body = read_bounded_body(response).await?;
-            let value: Value = serde_json::from_slice(&body)
-                .map_err(|error| mcp_error("external server returned malformed JSON-RPC", error))?;
+            let value: Value =
+                serde_json::from_slice(&body).map_err(|_| protocol_negotiation_failed(&body))?;
             match crate::client::classify_incoming(value, expected_id, tools_list_changed)? {
                 crate::client::Incoming::FinalResult(result) => Ok(result),
                 crate::client::Incoming::ServerRequest { .. }
-                | crate::client::Incoming::Ignored => Err(mcp_message(
-                    "external server JSON response did not answer the request",
-                )),
+                | crate::client::Incoming::Ignored => Err(protocol_negotiation_failed(&body)),
             }
         } else {
-            Err(mcp_message(
-                "external server replied with an unsupported content type",
-            ))
+            let body = read_bounded_body(response).await.unwrap_or_default();
+            Err(protocol_negotiation_failed(&body))
         }
     }
 
@@ -234,6 +238,7 @@ impl HttpWire {
             &self.url,
             authorization.is_some() || !self.configured.is_empty() || self.session_id.is_some(),
         )?;
+        self.ensure_host_resolves().await?;
         // One map, built configured-first and then overwritten by every
         // client-generated header, so a configured entry can never displace
         // what this transport says about itself — whatever the builder's
@@ -268,7 +273,9 @@ impl HttpWire {
             .json(message)
             .send()
             .await
-            .map_err(|error| mcp_error("could not reach external server", without_url(error)))
+            .map_err(|error| {
+                classify_http_transport_error(error, self.url.host_str().unwrap_or("unknown"))
+            })
     }
 
     async fn read_event_stream(
@@ -288,9 +295,8 @@ impl HttpWire {
                 mcp_error("could not read external server stream", without_url(error))
             })?;
             for data in parser.push(&chunk)? {
-                let value: Value = serde_json::from_slice(data.as_bytes()).map_err(|error| {
-                    mcp_error("external server returned malformed JSON-RPC", error)
-                })?;
+                let value: Value = serde_json::from_slice(data.as_bytes())
+                    .map_err(|_| protocol_negotiation_failed(data.as_bytes()))?;
                 match crate::client::classify_incoming(value, expected_id, tools_list_changed)? {
                     crate::client::Incoming::FinalResult(result) => {
                         outcome = Some(result);
@@ -314,6 +320,26 @@ impl HttpWire {
         outcome.ok_or_else(|| mcp_message("external server closed the stream before replying"))
     }
 
+    async fn ensure_host_resolves(&self) -> Result<()> {
+        let Some(host) = self.url.host_str() else {
+            return Ok(());
+        };
+        if host.parse::<std::net::IpAddr>().is_ok() {
+            return Ok(());
+        }
+        let port = self.url.port_or_known_default().unwrap_or(80);
+        match std::net::ToSocketAddrs::to_socket_addrs(&(host, port)) {
+            Ok(addresses) => {
+                if addresses.into_iter().next().is_some() {
+                    Ok(())
+                } else {
+                    Err(mcp_message(format!("DNS resolution failed ({host}).")))
+                }
+            }
+            Err(_) => Err(mcp_message(format!("DNS resolution failed ({host})."))),
+        }
+    }
+
     fn absorb_session_id(&mut self, response: &reqwest::Response) -> Result<()> {
         let Some(session_id) = response.headers().get(SESSION_ID_HEADER) else {
             return Ok(());
@@ -330,18 +356,121 @@ impl HttpWire {
 }
 
 fn check_status(status: reqwest::StatusCode) -> Result<()> {
-    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-        return Err(mcp_message(
-            "external server rejected the configured credentials",
+    if status.is_success() {
+        return Ok(());
+    }
+    Err(mcp_message(http_status_diagnostic(status)))
+}
+
+fn http_status_diagnostic(status: reqwest::StatusCode) -> String {
+    let status_line = status
+        .canonical_reason()
+        .map(|reason| format!("{} {reason}", status.as_u16()))
+        .unwrap_or_else(|| status.as_u16().to_string());
+    match status.as_u16() {
+        401 | 403 => format!("Authentication failed ({status_line})."),
+        404 => format!("Wrong path ({status_line})."),
+        500..=599 => format!("Server error ({status_line})."),
+        _ => format!("HTTP status {status_line}."),
+    }
+}
+
+fn protocol_negotiation_failed(body: &[u8]) -> tidebreak_core::AgentError {
+    mcp_message(format!(
+        "Protocol negotiation failed. The endpoint answered but not with MCP JSON-RPC. First bytes: {}.",
+        quote_first_bytes(body)
+    ))
+}
+
+/// Quote a bounded prefix of an upstream body. Never the URL or a token.
+fn quote_first_bytes(body: &[u8]) -> String {
+    const MAX: usize = 64;
+    let slice = &body[..body.len().min(MAX)];
+    let mut out = String::from("\"");
+    for &byte in slice {
+        match byte {
+            b'\\' => out.push_str("\\\\"),
+            b'"' => out.push_str("\\\""),
+            0x20..=0x7e => out.push(byte as char),
+            _ => out.push_str(&format!("\\x{byte:02x}")),
+        }
+    }
+    out.push('"');
+    if body.len() > MAX {
+        out.push('…');
+    }
+    out
+}
+
+fn classify_http_transport_error(error: reqwest::Error, host: &str) -> tidebreak_core::AgentError {
+    let error = error.without_url();
+    if error.is_timeout() {
+        return mcp_message("Timed out after the HTTP client deadline.");
+    }
+    let chain = error_chain_lower(&error);
+    if is_dns_failure(&chain) {
+        return mcp_message(format!("DNS resolution failed ({host})."));
+    }
+    if is_tls_failure(&chain) {
+        return mcp_message(format!(
+            "TLS handshake failed ({}).",
+            tls_reason(&error.to_string())
         ));
     }
-    if !status.is_success() {
-        return Err(mcp_message(format!(
-            "external server replied with HTTP status {}",
-            status.as_u16()
-        )));
+    mcp_error("could not reach external server", error)
+}
+
+fn error_chain_lower(error: &reqwest::Error) -> String {
+    let mut text = error.to_string();
+    let mut source = std::error::Error::source(error);
+    while let Some(err) = source {
+        text.push('\n');
+        text.push_str(&err.to_string());
+        source = err.source();
     }
-    Ok(())
+    text.to_ascii_lowercase()
+}
+
+fn is_dns_failure(chain: &str) -> bool {
+    chain.contains("dns error")
+        || chain.contains("failed to lookup address information")
+        || chain.contains("no such host")
+        || chain.contains("name or service not known")
+        || chain.contains("nodename nor servname provided")
+}
+
+fn is_tls_failure(chain: &str) -> bool {
+    chain.contains("tls")
+        || chain.contains("certificate")
+        || chain.contains("ssl")
+        || chain.contains("rustls")
+        || chain.contains("webpki")
+        || chain.contains("unknownissuer")
+        || chain.contains("handshake")
+        || chain.contains("close_notify")
+        || chain.contains("corrupt message")
+}
+
+fn tls_reason(display: &str) -> String {
+    let lower = display.to_ascii_lowercase();
+    let start = [
+        "invalid peer certificate",
+        "certificate",
+        "tls handshake",
+        "handshake failure",
+        "tls",
+    ]
+    .iter()
+    .filter_map(|marker| lower.find(marker))
+    .min()
+    .unwrap_or(0);
+    let snippet = display.get(start..).unwrap_or(display).trim();
+    const MAX: usize = 80;
+    if snippet.len() <= MAX {
+        snippet.trim_end_matches('.').to_string()
+    } else {
+        format!("{}…", snippet[..MAX].trim())
+    }
 }
 
 /// Strip the request URL from a reqwest error display chain. The URL is

@@ -460,6 +460,8 @@ fn projected_diagnostics_are_fixed_or_name_only() {
     let failure = AgentError::config("connect failed");
     let missing = connection_diagnostic(&config.0[0], &failure);
     assert!(missing.contains(MISSING));
+    assert!(missing.contains("Parent environment variable"));
+    assert!(missing.contains("shell you start Tidebreak from"));
     assert!(!missing.contains('\n'));
 
     let generic = parse(r#"{"servers":[{"name":"docs","command":"/bin/docs"}]}"#).unwrap();
@@ -906,11 +908,13 @@ async fn missing_selected_bearer_token_fails_by_name_without_a_value() {
 
     let diagnostic = connection_diagnostic(&definition, &error);
     assert!(diagnostic.contains(MISSING));
+    assert!(diagnostic.contains("Bearer-token environment variable"));
+    assert!(diagnostic.contains("shell you start Tidebreak from"));
     assert!(!diagnostic.contains('\n'));
 }
 
 #[test]
-fn http_diagnostics_are_fixed_strings_without_the_url() {
+fn unclassified_http_failures_keep_the_generic_fallback() {
     let definition = http_definition("gateway", "http://127.0.0.1:9/mcp");
     let diagnostic = connection_diagnostic(&definition, &AgentError::config("connect failed"));
     assert_eq!(
@@ -1498,4 +1502,237 @@ async fn managed_policy_locks_plugin_sourced_servers_like_manual_ones() {
     assert_eq!(info.servers[0].tool_count, 0);
     // Nothing about a derived server reaches durable configuration.
     assert!(saved_records(&store).await.is_empty());
+}
+
+async fn verify_fails(definition: McpServerDefinition) -> String {
+    let (runtime, _store, _directory) = test_runtime().await;
+    runtime
+        .replace(McpServersConfig {
+            servers: vec![definition],
+        })
+        .await
+        .expect_err("verification must fail")
+        .to_string()
+}
+
+async fn serve_http_response(
+    status: axum::http::StatusCode,
+    content_type: &'static str,
+    body: &'static [u8],
+) -> std::net::SocketAddr {
+    use axum::body::Body;
+    use axum::routing::post;
+
+    let body = body.to_vec();
+    let app = axum::Router::new().route(
+        "/mcp",
+        post(move || {
+            let body = body.clone();
+            async move {
+                axum::response::Response::builder()
+                    .status(status)
+                    .header(axum::http::header::CONTENT_TYPE, content_type)
+                    .body(Body::from(body))
+                    .unwrap()
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    address
+}
+
+#[tokio::test]
+async fn verify_classifies_dns_resolution_failure() {
+    let error = verify_fails(http_definition(
+        "docs",
+        "http://this-host-does-not-exist.invalid/mcp",
+    ))
+    .await;
+    assert!(
+        error.contains("DNS resolution failed (this-host-does-not-exist.invalid)"),
+        "{error}"
+    );
+    assert!(!error.contains("Could not connect to this server. Check its URL and credentials."));
+}
+
+#[tokio::test]
+async fn verify_classifies_tls_handshake_failure() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let mut buf = [0u8; 512];
+                let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut buf).await;
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            });
+        }
+    });
+    let error = verify_fails(http_definition(
+        "docs",
+        &format!("https://127.0.0.1:{}/mcp", address.port()),
+    ))
+    .await;
+    assert!(error.contains("TLS handshake failed ("), "{error}");
+    assert!(!error.contains("Could not connect to this server. Check its URL and credentials."));
+}
+
+#[tokio::test]
+async fn verify_classifies_http_authentication_failure() {
+    let address =
+        serve_http_response(axum::http::StatusCode::UNAUTHORIZED, "text/plain", b"").await;
+    let error = verify_fails(http_definition("docs", &format!("http://{address}/mcp"))).await;
+    assert!(
+        error.contains("Authentication failed (401 Unauthorized)"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn verify_classifies_http_forbidden_as_authentication() {
+    let address = serve_http_response(axum::http::StatusCode::FORBIDDEN, "text/plain", b"").await;
+    let error = verify_fails(http_definition("docs", &format!("http://{address}/mcp"))).await;
+    assert!(
+        error.contains("Authentication failed (403 Forbidden)"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn verify_classifies_http_404_as_wrong_path() {
+    let address = serve_http_response(axum::http::StatusCode::NOT_FOUND, "text/plain", b"").await;
+    let error = verify_fails(http_definition("docs", &format!("http://{address}/mcp"))).await;
+    assert!(error.contains("Wrong path (404 Not Found)"), "{error}");
+}
+
+#[tokio::test]
+async fn verify_classifies_http_5xx_as_server_error() {
+    let address = serve_http_response(
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        "text/plain",
+        b"",
+    )
+    .await;
+    let error = verify_fails(http_definition("docs", &format!("http://{address}/mcp"))).await;
+    assert!(
+        error.contains("Server error (500 Internal Server Error)"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn verify_classifies_missing_bearer_token_and_says_where_to_set_it() {
+    const MISSING: &str = "TIDEBREAK_TEST_MCP_VERIFY_BEARER_MISSING_C0FFEE";
+    assert!(std::env::var_os(MISSING).is_none());
+    let mut definition = http_definition("docs", "http://127.0.0.1:1/mcp");
+    definition.bearer_token_env = Some(MISSING.to_string());
+    let error = verify_fails(definition).await;
+    assert!(
+        error.contains("Bearer-token environment variable"),
+        "{error}"
+    );
+    assert!(error.contains(MISSING), "{error}");
+    assert!(error.contains("shell you start Tidebreak from"), "{error}");
+    assert!(error.contains("does not read a .env file"), "{error}");
+}
+
+#[tokio::test]
+async fn verify_classifies_protocol_negotiation_and_quotes_first_bytes() {
+    let address = serve_http_response(
+        axum::http::StatusCode::OK,
+        "text/html",
+        b"<html>not-mcp</html>",
+    )
+    .await;
+    let error = verify_fails(http_definition("docs", &format!("http://{address}/mcp"))).await;
+    assert!(error.contains("Protocol negotiation failed"), "{error}");
+    assert!(error.contains("not with MCP JSON-RPC"), "{error}");
+    assert!(error.contains("<html>not-mcp</html>"), "{error}");
+}
+
+#[tokio::test]
+async fn verify_classifies_timeout_after_configured_milliseconds() {
+    let app = axum::Router::new().route(
+        "/mcp",
+        axum::routing::post(|| async {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            axum::http::StatusCode::OK
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let mut definition = http_definition("docs", &format!("http://{address}/mcp"));
+    definition.request_timeout_ms = 80;
+    let error = verify_fails(definition).await;
+    assert!(error.contains("Timed out after 80 ms."), "{error}");
+}
+
+#[tokio::test]
+async fn verify_classifies_stdio_command_not_found() {
+    let mut definition = disabled_definition("docs", "/definitely-not-an-mcp-binary-9f3a");
+    definition.enabled = true;
+    let error = verify_fails(definition).await;
+    assert!(
+        error.contains("Process failed to launch: command not found."),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn verify_classifies_stdio_exit_code_and_first_stderr_line() {
+    let mut definition = disabled_definition("docs", "/bin/sh");
+    definition.enabled = true;
+    definition.args = vec![
+        "-c".to_string(),
+        "printf 'mcp-launch-stderr\\n' >&2; exit 7".to_string(),
+    ];
+    let error = verify_fails(definition).await;
+    assert!(
+        error.contains("Process failed to launch: exit code 7."),
+        "{error}"
+    );
+    assert!(
+        error.contains("First stderr line: mcp-launch-stderr."),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn successful_verify_reports_tool_count_and_enabled_for_new_turns() {
+    let address = serve_fake_http_mcp().await;
+    let (runtime, _store, _directory) = test_runtime().await;
+    let mut definition = http_definition("docs", &format!("http://{address}/mcp"));
+    definition.bearer_token_env = Some("PATH".to_string());
+    let info = runtime
+        .replace(McpServersConfig {
+            servers: vec![definition],
+        })
+        .await
+        .unwrap();
+    assert_eq!(info.servers[0].health, McpHealth::Healthy);
+    assert_eq!(info.servers[0].tool_count, 1);
+    assert!(info.servers[0].definition.enabled);
+    assert_eq!(info.servers[0].diagnostic, None);
+
+    let mut disabled = http_definition("idle", "http://127.0.0.1:1/mcp");
+    disabled.enabled = false;
+    let info = runtime
+        .replace(McpServersConfig {
+            servers: vec![disabled],
+        })
+        .await
+        .unwrap();
+    assert_eq!(info.servers[0].health, McpHealth::Disabled);
+    assert!(!info.servers[0].definition.enabled);
+    assert_eq!(info.servers[0].tool_count, 0);
 }

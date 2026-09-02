@@ -807,11 +807,10 @@ impl McpRuntime {
                 Err(error)
                     if definition.gateway_endpoint.is_some() || definition.plugin.is_some() =>
                 {
-                    // The projected diagnostic is deliberately generic; keep
-                    // the real cause in the log (already URL- and
-                    // secret-free). The desktop installs no tracing
-                    // subscriber yet, so this surfaces under `tidebreak serve`
-                    // until it does.
+                    // The projected diagnostic is classified and URL-/secret-
+                    // free; keep the typed cause in the log. The desktop
+                    // installs no tracing subscriber yet, so this surfaces
+                    // under `tidebreak serve` until it does.
                     tracing::warn!(
                         server = %definition.name,
                         "gateway MCP mount degraded during replacement: {error}"
@@ -949,8 +948,8 @@ impl McpRuntime {
                     ui_views,
                 },
                 Err(error) => {
-                    // As in `replace_strict`: the error chain is already URL-
-                    // and secret-free, and the warn serves `tidebreak serve`
+                    // As in `replace_strict`: the error chain is URL- and
+                    // secret-free, and the warn serves `tidebreak serve`
                     // until the desktop installs a tracing subscriber.
                     tracing::warn!(
                         server = %definition.name,
@@ -1325,7 +1324,7 @@ impl McpRuntime {
                 Ok(self.info_locked(&state))
             }
             Err(error) => {
-                // As in `replace_strict`: the error chain is already URL- and
+                // As in `replace_strict`: the error chain is URL- and
                 // secret-free, and the warn serves `tidebreak serve` until the
                 // desktop installs a tracing subscriber.
                 tracing::warn!(server = %name, "MCP server reconnect failed: {error}");

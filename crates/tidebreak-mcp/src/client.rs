@@ -143,9 +143,9 @@ impl McpClient {
     /// Spawn and connect to an external MCP stdio server.
     ///
     /// Callers configure the executable, arguments, environment, and working
-    /// directory on `command`; this method owns stdin/stdout and discards stderr
-    /// so an untrusted child cannot copy a selected credential into host logs.
-    /// The child is terminated if the client session is dropped.
+    /// directory on `command`; this method owns stdin/stdout. Stderr is drained
+    /// and not copied into host logs; a failed launch may quote its first line
+    /// in the diagnostic. The child is terminated if the client session is dropped.
     pub async fn spawn(server_name: impl Into<String>, command: Command) -> Result<Self> {
         Self::spawn_with_timeout(server_name, command, DEFAULT_REQUEST_TIMEOUT).await
     }
@@ -173,11 +173,10 @@ impl McpClient {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .kill_on_drop(true);
-        let mut child = command
-            .spawn()
-            .map_err(|error| mcp_error("could not spawn external server", error))?;
+        let mut child = command.spawn().map_err(classify_spawn_error)?;
+        let first_stderr = collect_first_stderr_line(child.stderr.take());
         let stdin = child
             .stdin
             .take()
@@ -187,18 +186,29 @@ impl McpClient {
             .take()
             .ok_or_else(|| mcp_message("external server did not provide stdout"))?;
 
-        let client = Self::connect_session(
+        match Self::connect_session(
             server_name,
             Session::stream(
                 Box::new(BufReader::new(stdout)),
                 Box::new(stdin),
-                Some(child),
+                None,
                 initialization_timeout,
             ),
         )
-        .await?;
-        client.session.lock().await.request_timeout = request_timeout;
-        Ok(client)
+        .await
+        {
+            Ok(client) => {
+                {
+                    let mut session = client.session.lock().await;
+                    if let Wire::Stream(stream) = &mut session.wire {
+                        stream._child = Some(child);
+                    }
+                    session.request_timeout = request_timeout;
+                }
+                Ok(client)
+            }
+            Err(error) => Err(stdio_connect_failure(error, &mut child, first_stderr).await),
+        }
     }
 
     /// Connect to an external Streamable HTTP MCP server.
@@ -525,7 +535,7 @@ impl Session {
             Wire::Stream(stream) => {
                 timeout(request_timeout, stream.write_value(&request))
                     .await
-                    .map_err(|_| mcp_message(format!("timed out writing {method} request")))??;
+                    .map_err(|_| timed_out(request_timeout))??;
                 timeout(
                     request_timeout,
                     stream.read_response(id, tools_list_changed),
@@ -556,9 +566,7 @@ impl Session {
                     }
                     Wire::Http(http) => timeout(request_timeout, http.notify(&cancelled)).await,
                 };
-                Err(mcp_message(format!(
-                    "external server timed out handling {method}"
-                )))
+                Err(timed_out(request_timeout))
             }
         }
     }
@@ -573,11 +581,11 @@ impl Session {
             Wire::Stream(stream) => {
                 timeout(self.request_timeout, stream.write_value(&notification))
                     .await
-                    .map_err(|_| mcp_message(format!("timed out writing {method} notification")))?
+                    .map_err(|_| timed_out(self.request_timeout))?
             }
             Wire::Http(http) => timeout(self.request_timeout, http.notify(&notification))
                 .await
-                .map_err(|_| mcp_message(format!("timed out writing {method} notification")))?,
+                .map_err(|_| timed_out(self.request_timeout))?,
         }
     }
 }
@@ -1236,6 +1244,94 @@ pub(crate) fn mcp_error(context: impl AsRef<str>, error: impl std::fmt::Display)
     mcp_message(format!("{}: {error}", context.as_ref()))
 }
 
+fn timed_out(request_timeout: Duration) -> AgentError {
+    mcp_message(format!(
+        "Timed out after {} ms.",
+        request_timeout.as_millis()
+    ))
+}
+
+fn classify_spawn_error(error: std::io::Error) -> AgentError {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        mcp_message("Process failed to launch: command not found.")
+    } else {
+        mcp_message(format!("Process failed to launch: {error}."))
+    }
+}
+
+fn collect_first_stderr_line(
+    stderr: Option<tokio::process::ChildStderr>,
+) -> tokio::sync::oneshot::Receiver<Option<String>> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let Some(stderr) = stderr else {
+        let _ = sender.send(None);
+        return receiver;
+    };
+    tokio::spawn(async move {
+        let mut reader = BufReader::new(stderr);
+        let mut line = String::new();
+        let first = match reader.read_line(&mut line).await {
+            Ok(0) => None,
+            Ok(_) => Some(sanitize_stderr_line(&line)),
+            Err(_) => None,
+        };
+        let _ = sender.send(first);
+        let mut sink = tokio::io::sink();
+        let _ = tokio::io::copy(&mut reader, &mut sink).await;
+    });
+    receiver
+}
+
+fn sanitize_stderr_line(line: &str) -> String {
+    const MAX: usize = 200;
+    let cleaned: String = line
+        .trim()
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect();
+    let cleaned = cleaned.trim();
+    if cleaned.chars().count() <= MAX {
+        cleaned.to_string()
+    } else {
+        format!("{}…", cleaned.chars().take(MAX).collect::<String>())
+    }
+}
+
+async fn stdio_connect_failure(
+    connect_error: AgentError,
+    child: &mut Child,
+    first_stderr: tokio::sync::oneshot::Receiver<Option<String>>,
+) -> AgentError {
+    let exit = match child.try_wait() {
+        Ok(Some(status)) => Some(status),
+        Ok(None) => match timeout(Duration::from_millis(50), child.wait()).await {
+            Ok(Ok(status)) => Some(status),
+            _ => None,
+        },
+        Err(_) => None,
+    };
+    let stderr_line = timeout(Duration::from_millis(100), first_stderr)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .flatten()
+        .filter(|line| !line.is_empty());
+    let _ = child.start_kill();
+    let Some(status) = exit else {
+        return connect_error;
+    };
+    let code = status
+        .code()
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "signaled".to_string());
+    let stderr = stderr_line
+        .map(|line| format!(" First stderr line: {line}."))
+        .unwrap_or_default();
+    mcp_message(format!(
+        "Process failed to launch: exit code {code}.{stderr}"
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -1442,7 +1538,10 @@ mod tests {
                 .await
                 .err()
                 .expect("silent server must time out");
-        assert!(error.to_string().contains("timed out handling initialize"));
+        assert!(
+            error.to_string().contains("Timed out after 10 ms."),
+            "{error}"
+        );
     }
 
     #[tokio::test]
@@ -2255,7 +2354,10 @@ mod tests {
             .err()
             .expect("wrong token must fail");
             let message = error.to_string();
-            assert!(message.contains("rejected the configured credentials"));
+            assert!(
+                message.contains("Authentication failed (401 Unauthorized)"),
+                "{message}"
+            );
             assert!(!message.contains("wrong-token"));
         }
 
@@ -2287,7 +2389,10 @@ mod tests {
             .await
             .err()
             .expect("redirect must fail");
-            assert!(error.to_string().contains("HTTP status 302"), "{error}");
+            assert!(
+                error.to_string().contains("HTTP status 302 Found"),
+                "{error}"
+            );
         }
 
         #[tokio::test]

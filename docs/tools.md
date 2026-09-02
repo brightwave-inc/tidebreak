@@ -174,8 +174,9 @@ variable name — and a bounded request timeout. No shell interprets any field.
 Child environments are always cleared before the selected names and literal
 values are added, so an MCP process cannot inherit provider credentials or
 other desktop secrets by accident. Resolved `env_from` and bearer-token values
-never enter the database or renderer, and child stderr is discarded instead of
-being copied into host logs.
+never enter the database or renderer. Child stderr is not copied into host
+logs; a failed stdio launch may quote its first line in the Settings
+diagnostic.
 
 Saving first validates and connects the complete candidate set, then atomically
 publishes it for later turns. A failure leaves the prior connection set active.
