@@ -3592,8 +3592,11 @@ impl MigrationTrait for InternalEngineSessions {
     }
 
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        // Both changes land together, so the chat column is the marker for
-        // the whole migration.
+        // The chat column is the marker for the whole migration. On
+        // PostgreSQL both changes commit together. On SQLite the rebuild
+        // cannot share a transaction with the ALTER, so it runs first and
+        // tolerates a column already relaxed: a retry after an interrupted
+        // first attempt lands the marker only once both changes hold.
         if manager.has_column("chat", "engine_private").await? {
             return Ok(());
         }
@@ -3612,13 +3615,14 @@ ALTER TABLE "chat" ADD COLUMN "engine_private" boolean NOT NULL DEFAULT FALSE;
                 transaction.commit().await
             }
             DbBackend::Sqlite => {
+                rebuild_sqlite_code_session_without_workspace(manager).await?;
                 manager
                     .get_connection()
                     .execute_unprepared(
                         r#"ALTER TABLE "chat" ADD COLUMN "engine_private" boolean NOT NULL DEFAULT FALSE"#,
                     )
-                    .await?;
-                rebuild_sqlite_code_session_without_workspace(manager).await
+                    .await
+                    .map(|_| ())
             }
             backend => Err(DbErr::Custom(format!(
                 "unsupported database backend for internal engine session migration: {backend:?}"
@@ -3669,6 +3673,11 @@ async fn rebuild_sqlite_code_session_without_workspace(
     let constrained = format!("\"{COLUMN}\" uuid_text NOT NULL");
     let relaxed = format!("\"{COLUMN}\" uuid_text");
     if !create.contains(&constrained) {
+        // An earlier attempt rebuilt the table and was interrupted before
+        // the marker column landed; there is nothing left to relax.
+        if create.contains(&format!("{relaxed},")) || create.contains(&format!("{relaxed}\n")) {
+            return Ok(());
+        }
         return Err(DbErr::Custom(format!(
             "SQLite {TABLE} definition does not declare {COLUMN} NOT NULL as expected"
         )));
@@ -4022,6 +4031,43 @@ mod tests {
     /// This checks the internal ordering contract. The versioned release tests
     /// cover the older schema that users actually upgrade from, including the
     /// backend-specific statements in later migrations.
+    /// The SQLite branch of the internal engine migration runs two
+    /// autocommit steps. An attempt that rebuilt `code_session` and died
+    /// before the marker column must finish on the next start, not report
+    /// success with the NOT NULL still in place.
+    #[tokio::test]
+    async fn an_interrupted_internal_engine_migration_finishes_on_retry() {
+        let db = Database::connect("sqlite::memory:").await.unwrap();
+        let steps = Migrator::migrations().len();
+        Migrator::up(&db, Some(u32::try_from(steps - 1).unwrap()))
+            .await
+            .unwrap();
+        // The first attempt: the rebuild lands, the marker does not.
+        let manager = SchemaManager::new(&db);
+        super::rebuild_sqlite_code_session_without_workspace(&manager)
+            .await
+            .unwrap();
+        assert!(!manager.has_column("chat", "engine_private").await.unwrap());
+
+        Migrator::up(&db, None).await.unwrap();
+
+        assert!(manager.has_column("chat", "engine_private").await.unwrap());
+        let workspace_column = db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                "SELECT \"notnull\" AS not_null FROM pragma_table_info('code_session') \
+                 WHERE name = 'workspace_id'"
+                    .to_owned(),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(workspace_column.try_get::<i32>("", "not_null").unwrap(), 0);
+        let fresh = Database::connect("sqlite::memory:").await.unwrap();
+        Migrator::up(&fresh, None).await.unwrap();
+        assert_eq!(schema_of(&db).await, schema_of(&fresh).await);
+    }
+
     #[tokio::test]
     async fn a_stepwise_upgrade_lands_on_the_fresh_schema() {
         let stepwise = Database::connect("sqlite::memory:").await.unwrap();
