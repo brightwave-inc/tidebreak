@@ -23,7 +23,11 @@ permissions:
 
 concurrency:
   group: release-draft-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
+  # Every run regenerates the draft from scratch, so only the newest push to
+  # main matters. Cancelling superseded runs keeps a merge burst from spending
+  # the repository's shared GITHUB_TOKEN budget several times over. Manual
+  # dispatches still queue so a backfill cannot be cancelled by a merge.
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 jobs:
   label:
