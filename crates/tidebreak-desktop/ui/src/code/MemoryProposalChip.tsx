@@ -15,8 +15,10 @@ export function MemoryProposalChip({
   if (!count) return null;
   const label = count === 1 ? "1 memory proposal" : `${count} memory proposals`;
   return (
+    // The app routes on hash history, so a plain path would leave the
+    // router; the hash form is what the settings links already use.
     <a
-      href="/settings/memory"
+      href="#/settings/memory"
       className={cn("shrink-0", className)}
       aria-label={label}
     >
