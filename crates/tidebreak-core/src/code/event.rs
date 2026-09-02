@@ -340,6 +340,12 @@ pub enum CodeEvent {
         /// The turn being processed.
         turn_id: CodeTurnId,
     },
+    /// You continue a parked turn after a worker restart rather than
+    /// starting over. The engine's durable checkpoint is still the same turn.
+    TurnResumed {
+        /// The turn that continues.
+        turn_id: CodeTurnId,
+    },
     /// A chunk of assistant text.
     AssistantDelta {
         /// The text fragment to append.
@@ -616,28 +622,29 @@ mod tests {
         match event {
             CodeEvent::SessionStarted { .. } => 0,
             CodeEvent::TurnStarted { .. } => 1,
-            CodeEvent::AssistantDelta { .. } => 2,
-            CodeEvent::AssistantMessage { .. } => 3,
-            CodeEvent::ReasoningDelta { .. } => 4,
-            CodeEvent::ToolStarted { .. } => 5,
-            CodeEvent::ToolCompleted { .. } => 6,
-            CodeEvent::FileChanged { .. } => 7,
-            CodeEvent::ApprovalRequested { .. } => 8,
-            CodeEvent::ApprovalResolved { .. } => 9,
-            CodeEvent::UserSteered { .. } => 10,
-            CodeEvent::TurnCompleted { .. } => 11,
-            CodeEvent::TurnFailed { .. } => 12,
-            CodeEvent::TurnInterrupted { .. } => 13,
-            CodeEvent::CheckpointRecorded { .. } => 14,
-            CodeEvent::HarnessNotice { .. } => 15,
-            CodeEvent::AttentionChanged { .. } => 16,
-            CodeEvent::TurnRefused { .. } => 17,
-            CodeEvent::StreamInterrupted => 18,
-            CodeEvent::ToolArgsDelta { .. } => 19,
-            CodeEvent::TaskPlanUpdated { .. } => 20,
-            CodeEvent::ContextTruncated { .. } => 21,
-            CodeEvent::CompactionStarted => 22,
-            CodeEvent::CompactionFinished { .. } => 23,
+            CodeEvent::TurnResumed { .. } => 2,
+            CodeEvent::AssistantDelta { .. } => 3,
+            CodeEvent::AssistantMessage { .. } => 4,
+            CodeEvent::ReasoningDelta { .. } => 5,
+            CodeEvent::ToolStarted { .. } => 6,
+            CodeEvent::ToolCompleted { .. } => 7,
+            CodeEvent::FileChanged { .. } => 8,
+            CodeEvent::ApprovalRequested { .. } => 9,
+            CodeEvent::ApprovalResolved { .. } => 10,
+            CodeEvent::UserSteered { .. } => 11,
+            CodeEvent::TurnCompleted { .. } => 12,
+            CodeEvent::TurnFailed { .. } => 13,
+            CodeEvent::TurnInterrupted { .. } => 14,
+            CodeEvent::CheckpointRecorded { .. } => 15,
+            CodeEvent::HarnessNotice { .. } => 16,
+            CodeEvent::AttentionChanged { .. } => 17,
+            CodeEvent::TurnRefused { .. } => 18,
+            CodeEvent::StreamInterrupted => 19,
+            CodeEvent::ToolArgsDelta { .. } => 20,
+            CodeEvent::TaskPlanUpdated { .. } => 21,
+            CodeEvent::ContextTruncated { .. } => 22,
+            CodeEvent::CompactionStarted => 23,
+            CodeEvent::CompactionFinished { .. } => 24,
         }
     }
 
@@ -649,6 +656,9 @@ mod tests {
                 resume_ref: Some("session-ref".into()),
             },
             CodeEvent::TurnStarted {
+                turn_id: CodeTurnId(id(1)),
+            },
+            CodeEvent::TurnResumed {
                 turn_id: CodeTurnId(id(1)),
             },
             CodeEvent::AssistantDelta {

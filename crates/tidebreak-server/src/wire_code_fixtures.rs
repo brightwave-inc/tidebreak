@@ -684,6 +684,10 @@ fn event_frames() -> Vec<Fixture> {
             },
         ),
         (
+            "event: turn_resumed",
+            frame(42, CodeEvent::TurnResumed { turn_id: turn_id() }),
+        ),
+        (
             "event: assistant_delta (transient replacement)",
             SequencedCodeEventFrame {
                 transient: Some(true),

@@ -1,10 +1,10 @@
 use super::temp_store;
 use crate::attention::{Attention, AttentionSource, FenceReason};
 use crate::code::{
-    CodeApproval, CodeApprovalId, CodeApprovalKind, CodeApprovalState, CodeEvent, CodeQueuedTurn,
-    CodeRepo, CodeSession, CodeSessionId, CodeSessionKind, CodeSessionLifecycle,
+    CapLevel, CodeApproval, CodeApprovalId, CodeApprovalKind, CodeApprovalState, CodeEvent,
+    CodeQueuedTurn, CodeRepo, CodeSession, CodeSessionId, CodeSessionKind, CodeSessionLifecycle,
     CodeSubagentStatus, CodeSubagentSummary, CodeTurn, CodeTurnId, CodeTurnStatus, CodeWorkspace,
-    CodeWorkspaceStatus, HarnessKind, PullRequestDigest, RepoId, WorkspaceId,
+    CodeWorkspaceStatus, HarnessKind, PullRequestDigest, RepoId, TurnParkWait, WorkspaceId,
 };
 use crate::db::code::{
     abandon_pending_approval, abandon_pending_approvals_for_stopped_session, append_event,
@@ -1382,11 +1382,15 @@ async fn interrupted_recovery_rolls_back_every_row_when_the_journal_fails() {
         .await
         .unwrap();
 
-    assert!(
-        recover_interrupted_session(&store, &owner, session_id, session.spawn_epoch,)
-            .await
-            .is_err()
-    );
+    assert!(recover_interrupted_session(
+        &store,
+        &owner,
+        session_id,
+        session.spawn_epoch,
+        CapLevel::Unsupported,
+    )
+    .await
+    .is_err());
     let session = get_session(&store, &owner, session_id)
         .await
         .unwrap()
@@ -1416,6 +1420,105 @@ async fn interrupted_recovery_rolls_back_every_row_when_the_journal_fails() {
             .events
             .is_empty()
     );
+}
+
+async fn park_waiting_turn(
+    store: &crate::db::DbStore,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+    turn_id: CodeTurnId,
+) {
+    let mut session = get_session(store, owner, session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    session.lifecycle = CodeSessionLifecycle::Running;
+    assert!(save_session(store, &session).await.unwrap());
+    let mut turn = get_turn(store, owner, turn_id).await.unwrap().unwrap();
+    turn.status = CodeTurnStatus::Waiting;
+    turn.park_ref = Some("cp-1".into());
+    turn.park_wait = Some(TurnParkWait::Approval {
+        call_id: "call-1".into(),
+    });
+    assert!(save_turn(store, owner, &turn).await.unwrap());
+}
+
+#[tokio::test]
+async fn durable_park_recovery_leaves_a_waiting_turn_open() {
+    let (_dir, store, session_id, turn_id) = seeded_session().await;
+    let owner = OwnerId::local();
+    park_waiting_turn(&store, &owner, session_id, turn_id).await;
+    let approval_id = CodeApprovalId::new();
+    insert_approval(
+        &store,
+        &owner,
+        &CodeApproval {
+            id: approval_id,
+            session_id,
+            turn_id,
+            kind: CodeApprovalKind::Other {
+                summary: "run command".into(),
+            },
+            harness_raw: serde_json::json!({"call_id":"call-1"}),
+            native_call_id: Some("call-1".into()),
+            server_capability: None,
+            request_sha256: None,
+            worker_epoch: Some(0),
+            decision_claim: None,
+            claimed_at: None,
+            state: CodeApprovalState::Pending,
+            feedback: None,
+            requested_at: now(),
+            decided_at: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let recovered = recover_interrupted_session(&store, &owner, session_id, 0, CapLevel::Supported)
+        .await
+        .unwrap()
+        .expect("recovery settles the dead worker");
+    assert_eq!(recovered.session.lifecycle, CodeSessionLifecycle::Idle);
+    assert!(recovered.events.is_empty(), "resume does not interrupt");
+    let turn = get_turn(&store, &owner, turn_id).await.unwrap().unwrap();
+    assert_eq!(turn.status, CodeTurnStatus::Waiting);
+    assert_eq!(turn.park_ref.as_deref(), Some("cp-1"));
+    assert_eq!(
+        turn.park_wait,
+        Some(TurnParkWait::Approval {
+            call_id: "call-1".into()
+        })
+    );
+    assert_eq!(
+        get_approval(&store, &owner, approval_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        CodeApprovalState::Pending
+    );
+}
+
+#[tokio::test]
+async fn non_durable_park_recovery_closes_a_waiting_turn_as_interrupted() {
+    let (_dir, store, session_id, turn_id) = seeded_session().await;
+    let owner = OwnerId::local();
+    park_waiting_turn(&store, &owner, session_id, turn_id).await;
+
+    let recovered =
+        recover_interrupted_session(&store, &owner, session_id, 0, CapLevel::Unsupported)
+            .await
+            .unwrap()
+            .expect("recovery settles the dead worker");
+    assert_eq!(recovered.session.lifecycle, CodeSessionLifecycle::Idle);
+    assert!(matches!(
+        recovered.events[0].event,
+        CodeEvent::TurnInterrupted { .. }
+    ));
+    let turn = get_turn(&store, &owner, turn_id).await.unwrap().unwrap();
+    assert_eq!(turn.status, CodeTurnStatus::Interrupted);
+    assert_eq!(turn.park_ref.as_deref(), Some("cp-1"));
 }
 
 /// A worker that has been superseded still holds a snapshot of the row and

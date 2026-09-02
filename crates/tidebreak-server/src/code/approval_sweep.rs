@@ -78,7 +78,7 @@ pub(crate) async fn abandon_for_settled_turns(
     };
     let settled: Vec<_> = turns
         .iter()
-        .filter(|turn| turn.status != CodeTurnStatus::Running)
+        .filter(|turn| !turn.status.is_open())
         .map(|turn| turn.id)
         .collect();
     let doomed: Vec<CodeApproval> = waiting

@@ -27,9 +27,10 @@ use tidebreak_core::db::code::{
     begin_permission_mode_change, bump_spawn_epoch, cancel_permission_mode_change,
     confirm_permission_mode_change, delete_queued_turn, get_open_turn, get_session,
     get_session_all_owners, get_workspace, insert_approval_for_worker, insert_turn, list_approvals,
-    next_turn_ordinal, promote_queued_turn, queue_paused, queued_turn_head, save_session,
-    save_turn, set_queue_paused, set_session_harness_resume_ref, set_session_subagents,
-    settle_engine_observed_approval, CodeJournalError, CodeSessionExecutionSettings,
+    next_turn_ordinal, promote_queued_turn, queue_paused, queued_turn_head,
+    rebind_pending_approvals_to_worker, save_session, save_turn, set_queue_paused,
+    set_session_harness_resume_ref, set_session_subagents, settle_engine_observed_approval,
+    CodeJournalError, CodeSessionExecutionSettings,
 };
 use tidebreak_core::{
     bound_subagents, Attention, AttentionSource, BlobStore, BoundedError, CodeApproval,
@@ -154,6 +155,9 @@ pub(crate) struct WorkerHandle {
     /// Serializes native approval delivery and durable finalization with
     /// every path that stops or replaces this worker.
     pub approval_decisions: Arc<tokio::sync::Mutex<()>>,
+    /// Abort the worker task. Tests use this to simulate a crash that
+    /// never runs the interrupt close.
+    pub abort: tokio::task::AbortHandle,
 }
 
 /// How a worker gets its next turn, and when it may start one.
@@ -794,7 +798,7 @@ pub(crate) fn spawn_session_worker(
     let spawn_epoch = session.spawn_epoch;
     let queue = TurnQueue::new(worktree_turn, quiesce);
     let approval_decisions = Arc::new(tokio::sync::Mutex::new(()));
-    tokio::spawn(run_worker(
+    let task = tokio::spawn(run_worker(
         session,
         engine,
         sink.clone(),
@@ -808,6 +812,7 @@ pub(crate) fn spawn_session_worker(
         queue,
         sink,
         approval_decisions,
+        abort: task.abort_handle(),
     }
 }
 
@@ -840,6 +845,30 @@ async fn run_worker(
     if engine.child_pid().is_some() {
         record_child_process(&mut session, engine.child_pid());
         let _ = save_session(&sink.db, &session).await;
+    }
+
+    if let Ok(Some(open)) = get_open_turn(&sink.db, &session.owner, session.id).await {
+        if open.status == CodeTurnStatus::Waiting
+            && open.park_ref.is_some()
+            && open.park_wait.is_some()
+        {
+            if let Err(error) = continue_parked_turn(
+                &mut session,
+                engine.as_ref(),
+                &sink,
+                &mut commands,
+                &queue,
+                open,
+            )
+            .await
+            {
+                warn!(
+                    session = %session.id,
+                    error = %error,
+                    "could not resume the parked turn after a worker restart"
+                );
+            }
+        }
     }
 
     let mut quiesce = queue.quiesce.clone();
@@ -1839,6 +1868,434 @@ async fn drain_queued(
             Err(_) => return,
         }
     }
+}
+
+/// Pick a waiting turn back up after a worker restart and drive the same
+/// `resume_turn` path a live park resolution uses.
+async fn continue_parked_turn(
+    session: &mut CodeSession,
+    engine: &dyn HarnessSession,
+    sink: &LiveSink,
+    commands: &mut mpsc::Receiver<WorkerCommand>,
+    queue: &TurnQueue,
+    mut turn: CodeTurn,
+) -> Result<CodeTurn, WorkerError> {
+    let db = &sink.db;
+    let bus = &sink.bus;
+    let Some(park_ref) = turn.park_ref.clone() else {
+        return Err(WorkerError::Failed(
+            "waiting turn is missing its park ref".into(),
+        ));
+    };
+    let Some(wait) = turn.park_wait.clone() else {
+        return Err(WorkerError::Failed(
+            "waiting turn is missing its park wait".into(),
+        ));
+    };
+    let _worktree = match await_worktree_turn(session, engine, &queue.worktree, commands).await {
+        WorktreeWait::Acquired(guard) => guard,
+        WorktreeWait::Stopped => {
+            return Err(WorkerError::QueuedTurnStopped);
+        }
+        WorktreeWait::Shutdown => {
+            return Err(WorkerError::Conflict(
+                "the session worker is shutting down".into(),
+            ));
+        }
+    };
+    if session_was_ended(db, session).await {
+        return Err(WorkerError::Conflict("session has ended".into()));
+    }
+
+    session.lifecycle = CodeSessionLifecycle::Running;
+    super::attention::replace_attention(
+        session,
+        Attention::working(AttentionSource::Lifecycle),
+        false,
+    );
+    record_child_process(session, engine.child_pid());
+    super::attention::persist_session(db, bus, session)
+        .await
+        .map_err(|err| WorkerError::Failed(err.to_string()))?;
+    sink.set_turn(turn.id);
+    let _ = rebind_pending_approvals_to_worker(
+        db,
+        &session.owner,
+        session.id,
+        turn.id,
+        session.spawn_epoch,
+    )
+    .await;
+    persist_and_publish(
+        db,
+        bus,
+        &session.owner,
+        session.id,
+        session.spawn_epoch,
+        CodeEvent::TurnResumed { turn_id: turn.id },
+        false,
+    )
+    .await
+    .map_err(|err| WorkerError::Failed(err.to_string()))?;
+
+    let mut next_resume: Option<(String, tidebreak_harness::ResumeInput)> = None;
+    let mut pid_changes = engine.child_pid_changes();
+    let mut controls: FuturesUnordered<BoxFuture<'_, ControlFlow>> = FuturesUnordered::new();
+    let mut interrupted = false;
+    let mut commands_closed = false;
+    let delivered: DeliveredDecisions =
+        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    match await_park_resolution(
+        engine,
+        commands,
+        &mut controls,
+        &mut interrupted,
+        &mut commands_closed,
+        &wait,
+        turn.id,
+        &delivered,
+    )
+    .await
+    {
+        Some(input) => {
+            apply_accepted_plan_mode(db, bus, session, engine, &input).await;
+            turn.status = CodeTurnStatus::Running;
+            turn.park_ref = None;
+            turn.park_wait = None;
+            let _ = save_turn(db, &session.owner, &turn).await;
+            next_resume = Some((park_ref, input));
+        }
+        None => {
+            while controls.next().await.is_some() {}
+            return close_open_turn(
+                session,
+                engine,
+                sink,
+                turn,
+                Ok(TurnOutcome::Clean),
+                interrupted,
+                None,
+            )
+            .await;
+        }
+    }
+
+    let run = 'legs: loop {
+        let Some((park_ref, input)) = next_resume.take() else {
+            unreachable!("every recovered resume leg starts with a park");
+        };
+        let leg: BoxFuture<'_, Result<TurnOutcome, HarnessError>> =
+            Box::pin(engine.resume_turn(park_ref, input));
+        tokio::pin!(leg);
+        let result = loop {
+            tokio::select! {
+                biased;
+                Some(flow) = controls.next(), if !controls.is_empty() => {
+                    if flow == ControlFlow::Shutdown {
+                        interrupted = true;
+                        controls.push(Box::pin(interrupt_engine(engine)));
+                    }
+                }
+                result = &mut leg => break result,
+                command = commands.recv(), if !commands_closed => match command {
+                    Some(command) => {
+                        interrupted |= matches!(command, WorkerCommand::Interrupt { .. });
+                        controls.push(Box::pin(apply_control(
+                            engine,
+                            command,
+                            Some(turn.id),
+                            Some(delivered.clone()),
+                        )));
+                    }
+                    None => {
+                        commands_closed = true;
+                        interrupted = true;
+                        controls.push(Box::pin(interrupt_engine(engine)));
+                    }
+                },
+                pid = next_child_pid(pid_changes.as_mut()) => {
+                    if session.child_pid != pid {
+                        record_child_process(session, pid);
+                        let _ = save_session(db, session).await;
+                    }
+                }
+            }
+        };
+        let Ok(TurnOutcome::Parked {
+            park_ref,
+            waiting_on,
+        }) = result
+        else {
+            break 'legs result;
+        };
+        if interrupted {
+            break 'legs Ok(TurnOutcome::Clean);
+        }
+        let wait = match persist_turn_park(db, session, &mut turn, &park_ref, &waiting_on).await {
+            Ok(wait) => wait,
+            Err(error) => break 'legs Err(HarnessError::Other(error)),
+        };
+        match await_park_resolution(
+            engine,
+            commands,
+            &mut controls,
+            &mut interrupted,
+            &mut commands_closed,
+            &wait,
+            turn.id,
+            &delivered,
+        )
+        .await
+        {
+            Some(input) => {
+                apply_accepted_plan_mode(db, bus, session, engine, &input).await;
+                turn.status = CodeTurnStatus::Running;
+                turn.park_ref = None;
+                turn.park_wait = None;
+                let _ = save_turn(db, &session.owner, &turn).await;
+                next_resume = Some((park_ref, input));
+            }
+            None => break 'legs Ok(TurnOutcome::Clean),
+        }
+    };
+    while controls.next().await.is_some() {}
+    close_open_turn(session, engine, sink, turn, run, interrupted, None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn close_open_turn(
+    session: &mut CodeSession,
+    engine: &dyn HarnessSession,
+    sink: &LiveSink,
+    mut turn: CodeTurn,
+    run: Result<TurnOutcome, HarnessError>,
+    interrupted: bool,
+    attachment_cleanup_error: Option<String>,
+) -> Result<CodeTurn, WorkerError> {
+    let db = &sink.db;
+    let bus = &sink.bus;
+    record_child_process(session, engine.child_pid());
+    if let Some(resume) = engine.resume_ref() {
+        session.harness_resume_ref = Some(resume);
+    }
+    let dropped = sink.take_unrecognized_delta(engine.unrecognized_events());
+    if dropped > 0 {
+        session.unrecognized_event_count = session
+            .unrecognized_event_count
+            .saturating_add(i64::try_from(dropped).unwrap_or(i64::MAX));
+    }
+    if let Ok(Some(updated)) = get_open_turn(db, &session.owner, session.id).await {
+        turn = updated;
+    } else if let Ok(Some(current)) =
+        tidebreak_core::db::code::get_turn(db, &session.owner, turn.id).await
+    {
+        turn = current;
+    }
+
+    match run {
+        Ok(outcome) => {
+            let detail = match outcome {
+                TurnOutcome::Clean => None,
+                TurnOutcome::Incomplete { detail } => Some(detail),
+                TurnOutcome::Parked { .. } => {
+                    Some("the engine parked a turn the worker was no longer waiting on".into())
+                }
+            };
+            if let (Some(detail), false) = (detail.as_ref(), interrupted) {
+                let _ = persist_and_publish(
+                    db,
+                    bus,
+                    &session.owner,
+                    session.id,
+                    session.spawn_epoch,
+                    CodeEvent::HarnessNotice {
+                        level: HarnessNoticeLevel::Error,
+                        message: detail.clone(),
+                    },
+                    false,
+                )
+                .await;
+            }
+            if turn.status.is_open() {
+                let (status, event) = if interrupted {
+                    (
+                        CodeTurnStatus::Interrupted,
+                        CodeEvent::TurnInterrupted { usage: None },
+                    )
+                } else if let Some(detail) = detail {
+                    (
+                        CodeTurnStatus::Failed,
+                        CodeEvent::TurnFailed {
+                            error: sink.legible_turn_error(detail),
+                            detail: None,
+                        },
+                    )
+                } else {
+                    (
+                        CodeTurnStatus::Completed,
+                        CodeEvent::TurnCompleted {
+                            usage: turn.usage.clone().unwrap_or_default(),
+                            checkpoint: None,
+                            stop_reason: None,
+                        },
+                    )
+                };
+                turn.status = status;
+                turn.ended_at = Some(Utc::now());
+                let _ = save_turn(db, &session.owner, &turn).await;
+                sink.note_subagent_boundary(&event).await;
+                let write = if matches!(event, CodeEvent::TurnInterrupted { .. }) {
+                    persist_and_publish(
+                        db,
+                        bus,
+                        &session.owner,
+                        session.id,
+                        session.spawn_epoch,
+                        event,
+                        sink.native_journal,
+                    )
+                    .await
+                } else {
+                    persist_turn_and_publish(
+                        db,
+                        bus,
+                        &session.owner,
+                        session.id,
+                        session.spawn_epoch,
+                        turn.id,
+                        event,
+                        sink.native_journal,
+                    )
+                    .await
+                };
+                let _ = write;
+            }
+        }
+        Err(err) => {
+            if turn.status.is_open() {
+                turn.status = CodeTurnStatus::Failed;
+                turn.ended_at = Some(Utc::now());
+                let _ = save_turn(db, &session.owner, &turn).await;
+                let event = CodeEvent::TurnFailed {
+                    error: sink.legible_turn_error(err.to_string()),
+                    detail: None,
+                };
+                sink.note_subagent_boundary(&event).await;
+                let _ = persist_turn_and_publish(
+                    db,
+                    bus,
+                    &session.owner,
+                    session.id,
+                    session.spawn_epoch,
+                    turn.id,
+                    event,
+                    sink.native_journal,
+                )
+                .await;
+            }
+            super::checkpoint::after_turn_ended(db, bus, session, &mut turn).await;
+            super::pr_facts::sweep_turn_for_pull_request_acts(
+                db,
+                session,
+                turn.id,
+                sink.gh_search_path.as_deref(),
+                Some(&sink.hot_prs),
+            )
+            .await;
+            if let Some(detail) = attachment_cleanup_error.as_ref() {
+                let _ = super::recovery::fence_session(
+                    db,
+                    bus,
+                    session,
+                    FenceReason::ProbeAmbiguous {
+                        detail: detail.clone(),
+                    },
+                )
+                .await;
+                return Err(WorkerError::Failed(detail.clone()));
+            }
+            if !session_was_ended(db, session).await {
+                if let HarnessError::ResumeLost(detail) = &err {
+                    let _ = super::recovery::fence_session(
+                        db,
+                        bus,
+                        session,
+                        FenceReason::ResumeLost {
+                            detail: detail.clone(),
+                        },
+                    )
+                    .await;
+                    return Err(WorkerError::Failed(err.to_string()));
+                }
+                session.lifecycle = CodeSessionLifecycle::Idle;
+                super::attention::replace_attention(
+                    session,
+                    Attention::needs_you("the engine turn failed", AttentionSource::Lifecycle),
+                    false,
+                );
+                let _ = super::attention::persist_session(db, bus, session).await;
+            }
+            return Err(WorkerError::Failed(err.to_string()));
+        }
+    }
+
+    if let Ok(Some(current)) = tidebreak_core::db::code::get_turn(db, &session.owner, turn.id).await
+    {
+        turn = current;
+    }
+    super::checkpoint::after_turn_ended(db, bus, session, &mut turn).await;
+    super::pr_facts::sweep_turn_for_pull_request_acts(
+        db,
+        session,
+        turn.id,
+        sink.gh_search_path.as_deref(),
+        Some(&sink.hot_prs),
+    )
+    .await;
+    if let Some(detail) = attachment_cleanup_error {
+        let _ = super::recovery::fence_session(
+            db,
+            bus,
+            session,
+            FenceReason::ProbeAmbiguous {
+                detail: detail.clone(),
+            },
+        )
+        .await;
+        return Err(WorkerError::Failed(detail));
+    }
+    if session_was_ended(db, session).await {
+        return Ok(turn);
+    }
+    if turn.status == CodeTurnStatus::Interrupted {
+        super::attention::replace_attention(
+            session,
+            Attention::needs_you("the turn was interrupted", AttentionSource::Lifecycle),
+            false,
+        );
+    } else if turn.status == CodeTurnStatus::Failed {
+        if let Some(reason) = repeated_failure_fence(db, session, &turn).await {
+            let _ = super::recovery::fence_session(db, bus, session, reason).await;
+            return Ok(turn);
+        }
+        super::attention::replace_attention(
+            session,
+            Attention::needs_you("the engine turn failed", AttentionSource::Lifecycle),
+            false,
+        );
+    } else {
+        super::attention::replace_attention(
+            session,
+            Attention::new(
+                tidebreak_core::AttentionState::DoneUnreviewed,
+                AttentionSource::Lifecycle,
+            ),
+            false,
+        );
+    }
+    session.lifecycle = CodeSessionLifecycle::Idle;
+    let _ = super::attention::persist_session(db, bus, session).await;
+    Ok(turn)
 }
 
 async fn drive_turn(

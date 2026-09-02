@@ -2,8 +2,8 @@ use chrono::Utc;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, TransactionTrait};
 
 use crate::code::{
-    ApprovalDecisionKind, CodeApprovalId, CodeApprovalState, CodeEvent, CodeSession, CodeSessionId,
-    CodeSessionLifecycle, CodeSubagentStatus, CodeTurnStatus, SequencedCodeEvent,
+    ApprovalDecisionKind, CapLevel, CodeApprovalId, CodeApprovalState, CodeEvent, CodeSession,
+    CodeSessionId, CodeSessionLifecycle, CodeSubagentStatus, CodeTurnStatus, SequencedCodeEvent,
 };
 use crate::error::{AgentError, Result};
 use crate::{Attention, AttentionSource, AttentionState, OwnerId};
@@ -18,17 +18,37 @@ pub struct InterruptedSessionRecovery {
     pub events: Vec<SequencedCodeEvent>,
 }
 
+/// Return whether you keep this turn waiting so a restarted worker can
+/// call the same `resume_turn` path a live park resolution uses.
+///
+/// Only an engine that declares `durable_parks` checkpoints a turn across a
+/// process restart. Other engines lose the in-memory wait with the worker,
+/// so you still close those turns as interrupted.
+#[must_use]
+pub fn resumes_parked_turn_after_restart(
+    status: CodeTurnStatus,
+    park_ref: Option<&str>,
+    durable_parks: CapLevel,
+) -> bool {
+    durable_parks == CapLevel::Supported && status == CodeTurnStatus::Waiting && park_ref.is_some()
+}
+
 /// Settle a dead running worker without exposing a partial recovery state.
 ///
 /// The turn, pending approvals, matching journal events, subagents, lifecycle,
 /// and attention all commit together under the session-row write lock. A
 /// caller publishes `events` and the resulting session digest only after this
 /// function returns.
+///
+/// Pass the engine's `durable_parks` flag: a waiting turn with a park on an
+/// engine that declares it stays waiting so you can re-attach and resume.
+/// Other engines keep the interrupted close.
 pub async fn recover_interrupted_session(
     store: &DbStore,
     owner: &OwnerId,
     session_id: CodeSessionId,
     expected_spawn_epoch: i64,
+    durable_parks: CapLevel,
 ) -> Result<Option<InterruptedSessionRecovery>> {
     settle_interrupted_session(
         store,
@@ -36,6 +56,7 @@ pub async fn recover_interrupted_session(
         session_id,
         expected_spawn_epoch,
         RecoveryExpectation::Running,
+        durable_parks,
     )
     .await
 }
@@ -63,6 +84,9 @@ pub async fn reap_fenced_session(
             child_pid: expected_child_pid,
             child_process_identity: expected_child_process_identity,
         },
+        // A fenced live process is not a durable-park restart. Close the
+        // open turn the way a reap always has.
+        CapLevel::Unsupported,
     )
     .await
 }
@@ -94,6 +118,7 @@ async fn settle_interrupted_session(
     session_id: CodeSessionId,
     expected_spawn_epoch: i64,
     expectation: RecoveryExpectation<'_>,
+    durable_parks: CapLevel,
 ) -> Result<Option<InterruptedSessionRecovery>> {
     let transaction = store.conn.begin().await.map_err(store_err)?;
     if !acquire_code_session_write_lock(&transaction, session_id).await? {
@@ -127,9 +152,10 @@ async fn settle_interrupted_session(
     let running_turns = entities::code_turn::Entity::find()
         .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
         .filter(entities::code_turn::Column::SessionId.eq(session_id.0))
-        // Waiting counts: a parked turn's engine checkpoint survives, but
-        // its in-memory wait died with the worker, so recovery closes it
-        // the same way until an engine can resume from durable state.
+        // Waiting counts as open. An engine that declares `durable_parks`
+        // keeps a checkpoint you can resume; recovery then leaves that turn
+        // waiting. Other engines lose the in-memory wait with the worker,
+        // so you still close those turns as interrupted.
         .filter(entities::code_turn::Column::Status.is_in([
             CodeTurnStatus::Running.as_str(),
             CodeTurnStatus::Waiting.as_str(),
@@ -145,39 +171,53 @@ async fn settle_interrupted_session(
         )));
     }
 
-    let approvals = entities::code_approval::Entity::find()
-        .filter(entities::code_approval::Column::Owner.eq(owner.as_str()))
-        .filter(entities::code_approval::Column::SessionId.eq(session_id.0))
-        .filter(entities::code_approval::Column::State.eq(CodeApprovalState::Pending.as_str()))
-        .order_by_asc(entities::code_approval::Column::RequestedAt)
-        .all(&transaction)
-        .await
-        .map_err(store_err)?;
+    let resume_park = running_turns.first().is_some_and(|turn| {
+        resumes_parked_turn_after_restart(
+            CodeTurnStatus::from_str(&turn.status).unwrap_or(CodeTurnStatus::Running),
+            turn.park_ref.as_deref(),
+            durable_parks,
+        )
+    });
+
+    let approvals = if resume_park {
+        Vec::new()
+    } else {
+        entities::code_approval::Entity::find()
+            .filter(entities::code_approval::Column::Owner.eq(owner.as_str()))
+            .filter(entities::code_approval::Column::SessionId.eq(session_id.0))
+            .filter(entities::code_approval::Column::State.eq(CodeApprovalState::Pending.as_str()))
+            .order_by_asc(entities::code_approval::Column::RequestedAt)
+            .all(&transaction)
+            .await
+            .map_err(store_err)?
+    };
 
     if let Some(turn) = running_turns.first() {
-        let updated = entities::code_turn::Entity::update_many()
-            .col_expr(
-                entities::code_turn::Column::Status,
-                sea_orm::sea_query::Expr::value(CodeTurnStatus::Interrupted.as_str()),
-            )
-            .col_expr(
-                entities::code_turn::Column::EndedAt,
-                sea_orm::sea_query::Expr::value(Some(now)),
-            )
-            .filter(entities::code_turn::Column::Id.eq(turn.id))
-            .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
-            .filter(entities::code_turn::Column::Status.is_in([
-                CodeTurnStatus::Running.as_str(),
-                CodeTurnStatus::Waiting.as_str(),
-            ]))
-            .exec(&transaction)
-            .await
-            .map_err(store_err)?;
-        if updated.rows_affected != 1 {
-            return Err(AgentError::Store(format!(
-                "running turn {} changed during recovery",
-                turn.id
-            )));
+        if !resume_park {
+            let updated = entities::code_turn::Entity::update_many()
+                .col_expr(
+                    entities::code_turn::Column::Status,
+                    sea_orm::sea_query::Expr::value(CodeTurnStatus::Interrupted.as_str()),
+                )
+                .col_expr(
+                    entities::code_turn::Column::EndedAt,
+                    sea_orm::sea_query::Expr::value(Some(now)),
+                )
+                .filter(entities::code_turn::Column::Id.eq(turn.id))
+                .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
+                .filter(entities::code_turn::Column::Status.is_in([
+                    CodeTurnStatus::Running.as_str(),
+                    CodeTurnStatus::Waiting.as_str(),
+                ]))
+                .exec(&transaction)
+                .await
+                .map_err(store_err)?;
+            if updated.rows_affected != 1 {
+                return Err(AgentError::Store(format!(
+                    "running turn {} changed during recovery",
+                    turn.id
+                )));
+            }
         }
     }
 
@@ -233,13 +273,20 @@ async fn settle_interrupted_session(
             ))
         })?;
     }
-    let recovered_attention = match &expectation {
-        RecoveryExpectation::Running => Attention::needs_you(
-            "session recovered after the engine process exited",
+    let recovered_attention = if resume_park {
+        Attention::needs_you(
+            "the turn is waiting after the worker restarted",
             AttentionSource::Lifecycle,
-        ),
-        RecoveryExpectation::Fenced { .. } => {
-            Attention::new(AttentionState::Idle, AttentionSource::Lifecycle)
+        )
+    } else {
+        match &expectation {
+            RecoveryExpectation::Running => Attention::needs_you(
+                "session recovered after the engine process exited",
+                AttentionSource::Lifecycle,
+            ),
+            RecoveryExpectation::Fenced { .. } => {
+                Attention::new(AttentionState::Idle, AttentionSource::Lifecycle)
+            }
         }
     };
     if crate::attention::should_replace(&session.attention, &recovered_attention) {
@@ -295,9 +342,13 @@ async fn settle_interrupted_session(
         )));
     }
 
-    let turn_event_count = if running_turns.is_empty() { 0 } else { 1 };
+    let turn_event_count = if running_turns.is_empty() || resume_park {
+        0
+    } else {
+        1
+    };
     let mut events = Vec::with_capacity(turn_event_count + approvals.len());
-    if !running_turns.is_empty() {
+    if !running_turns.is_empty() && !resume_park {
         let event = CodeEvent::TurnInterrupted { usage: None };
         let seq = append_event_on_locked(&transaction, owner, session_id, &event).await?;
         events.push(SequencedCodeEvent { seq, event });
@@ -313,4 +364,44 @@ async fn settle_interrupted_session(
 
     transaction.commit().await.map_err(store_err)?;
     Ok(Some(InterruptedSessionRecovery { session, events }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resumes_parked_turn_after_restart_requires_durable_parks() {
+        assert!(resumes_parked_turn_after_restart(
+            CodeTurnStatus::Waiting,
+            Some("cp-1"),
+            CapLevel::Supported,
+        ));
+        assert!(
+            !resumes_parked_turn_after_restart(
+                CodeTurnStatus::Waiting,
+                Some("cp-1"),
+                CapLevel::Unsupported,
+            ),
+            "engines without durable parks still interrupt"
+        );
+        assert!(
+            !resumes_parked_turn_after_restart(
+                CodeTurnStatus::Waiting,
+                Some("cp-1"),
+                CapLevel::Unknown,
+            ),
+            "an unverified flag must not resume"
+        );
+        assert!(!resumes_parked_turn_after_restart(
+            CodeTurnStatus::Running,
+            Some("cp-1"),
+            CapLevel::Supported,
+        ));
+        assert!(!resumes_parked_turn_after_restart(
+            CodeTurnStatus::Waiting,
+            None,
+            CapLevel::Supported,
+        ));
+    }
 }

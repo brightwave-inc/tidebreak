@@ -166,6 +166,12 @@ function applyEvent(
         `int:${state.lastSeq}`,
         "Turn interrupted",
       );
+    case "turn_resumed":
+      return appendStatus(
+        { ...state, activeTurnId: event.turn_id },
+        `resume:${state.lastSeq}`,
+        "Turn resumed",
+      );
     case "turn_refused":
       return appendStatus(
         { ...state, activeTurnId: null },

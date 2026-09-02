@@ -795,6 +795,17 @@
   },
   {
     "kind": "event_frame",
+    "name": "event: turn_resumed",
+    "value": {
+      "event": {
+        "turn_id": "00000000-0000-0000-0000-000000000004",
+        "type": "turn_resumed"
+      },
+      "seq": 42
+    }
+  },
+  {
+    "kind": "event_frame",
     "name": "event: assistant_delta (transient replacement)",
     "value": {
       "event": {
