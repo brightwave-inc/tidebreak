@@ -306,8 +306,11 @@ test("third-party workflow actions use immutable commit SHAs", () => {
 });
 
 test("release-drafter retains a stable draft tag after formatting", () => {
+  assert.match(releaseDrafterConfig, /name-template: "v\$RESOLVED_VERSION"/);
   assert.match(releaseDrafterConfig, /tag-template: "v\$RESOLVED_VERSION"/);
   assert.match(releaseDrafterConfig, /^tag-prefix: "v"$/m);
+  assert.match(releaseDrafterConfig, /\$NEW_CONTRIBUTORS/);
+  assert.match(releaseDrafterConfig, /\*\*Full Changelog\*\*:/);
 
   const draftJob = workflowJob(workflows["release-draft.yml"], "draft");
   const requireBaselineAt = draftJob.indexOf(
