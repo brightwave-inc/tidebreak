@@ -407,13 +407,15 @@ describe("ConnectedAppsPanel", () => {
 
   it("shows the server ingest message under the paste textarea, without a bare 400", async () => {
     const client = api({
-      previewRestSpec: vi.fn().mockRejectedValue(
-        new HttpError(
-          400,
-          "400: JSON invalid JSON syntax at line 2, column 5. Check line 2, column 5",
-          "openapi_ingest",
+      previewRestSpec: vi
+        .fn()
+        .mockRejectedValue(
+          new HttpError(
+            400,
+            "400: JSON invalid JSON syntax at line 2, column 5. Check line 2, column 5",
+            "openapi_ingest",
+          ),
         ),
-      ),
     });
     const user = userEvent.setup();
     render(<ConnectedAppsPanel client={client} managed={false} />);
@@ -422,13 +424,8 @@ describe("ConnectedAppsPanel", () => {
       await screen.findByRole("button", { name: /Add REST API/ }),
     );
     await user.click(screen.getByRole("radio", { name: /Paste document/ }));
-    await user.type(
-      screen.getByLabelText(/OpenAPI document/),
-      '{{"openapi":',
-    );
-    await user.click(
-      screen.getByRole("button", { name: /Select operations/ }),
-    );
+    await user.type(screen.getByLabelText(/OpenAPI document/), '{{"openapi":');
+    await user.click(screen.getByRole("button", { name: /Select operations/ }));
 
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent(
