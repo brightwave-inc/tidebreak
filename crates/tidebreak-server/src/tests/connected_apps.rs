@@ -938,3 +938,37 @@ async fn editing_a_rest_record_invalidates_an_existing_app_grant() {
     let after: serde_json::Value = json_body(state_after).await;
     assert_eq!(after["granted"], json!(false));
 }
+
+/// Loopback HTTP is stored only with explicit consent; the same URL without
+/// `allow_loopback_http` is refused naming the flag.
+#[tokio::test]
+async fn loopback_http_rest_app_requires_explicit_consent() {
+    let (router, bearer, _state, _dir) = connected_apps_test_app().await;
+    let id = ConnectedAppId::new();
+    let refused = put_rest(
+        &router,
+        &bearer,
+        id,
+        upsert_body("http://127.0.0.1:23373/v0", json!("none")),
+    )
+    .await;
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    let refused_body = raw_body(refused).await;
+    assert!(
+        refused_body.contains("allow_loopback_http"),
+        "refusal must name the flag: {refused_body}"
+    );
+
+    let mut consented = serde_json::from_str::<serde_json::Value>(&upsert_body(
+        "http://127.0.0.1:23373/v0",
+        json!("none"),
+    ))
+    .unwrap();
+    consented["allow_loopback_http"] = json!(true);
+    let saved = put_rest(&router, &bearer, id, consented.to_string()).await;
+    assert_eq!(saved.status(), StatusCode::OK);
+    let listing: serde_json::Value = serde_json::from_str(&raw_body(saved).await).unwrap();
+    let entry = rest_entry(&listing);
+    assert_eq!(entry["base_url"], json!("http://127.0.0.1:23373/v0"));
+    assert_eq!(entry["allow_loopback_http"], json!(true));
+}

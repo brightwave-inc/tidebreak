@@ -73,6 +73,8 @@ type Draft = {
    * edit means "keep the stored one", and nothing this panel renders ever
    * reads a value back from the server. */
   value: string;
+  /** Explicit consent to send this record as plain HTTP to a loopback IP. */
+  allowLoopbackHttp: boolean;
 };
 
 function draftFor(existing: RestEntry | null): Draft {
@@ -97,7 +99,41 @@ function draftFor(existing: RestEntry | null): Draft {
     headerName:
       placement !== null && placement !== "bearer" ? placement.header : "",
     value: "",
+    allowLoopbackHttp: existing?.allow_loopback_http ?? false,
   };
+}
+
+/** Host of a typed URL that is plain HTTP to a loopback IP literal, else null. */
+function loopbackHttpHost(urlText: string): string | null {
+  try {
+    const url = new URL(urlText.trim());
+    if (url.protocol !== "http:") return null;
+    const host = url.hostname;
+    if (host === "::1") return "::1";
+    const parts = host.split(".");
+    if (
+      parts.length === 4 &&
+      parts[0] === "127" &&
+      parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255)
+    ) {
+      return host;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** REST form URLs whose path is an MCP HTTP endpoint, not an OpenAPI base. */
+function looksLikeMcpEndpoint(urlText: string): boolean {
+  try {
+    const path = new URL(urlText.trim()).pathname
+      .replace(/\/+$/, "")
+      .toLowerCase();
+    return path === "/mcp" || path.endsWith("/mcp");
+  } catch {
+    return false;
+  }
 }
 
 /** The server refuses a catalog over 256 operations, so a larger preview
@@ -142,6 +178,20 @@ function errorMessage(err: unknown): string {
     }
   }
   return ingestErrorGuidance(raw);
+}
+
+function mcpUrlHint(draft: Draft): boolean {
+  return (
+    looksLikeMcpEndpoint(draft.baseUrl) ||
+    (draft.source === "url" && looksLikeMcpEndpoint(draft.documentUrl))
+  );
+}
+
+function mcpHintForPreview(draft: Draft): string | null {
+  if (mcpUrlHint(draft)) {
+    return "This looks like an MCP HTTP endpoint, not an OpenAPI document. Add it under Settings → MCP servers as a remote HTTP server.";
+  }
+  return null;
 }
 
 /** The name an app entry leads with. A gateway-backed record shows the
@@ -522,14 +572,17 @@ export function ConnectedAppsPanel({
     setPreviewing(true);
     setFormError(null);
     try {
-      const preview = await client.previewRestSpec(source);
+      const preview = await client.previewRestSpec(source, {
+        allow_loopback_http: draft.allowLoopbackHttp,
+      });
       update({ preview, selected: defaultSelection(preview) });
       toast.success(
         `Found ${preview.operations.length} operation${preview.operations.length === 1 ? "" : "s"}`,
       );
     } catch (err) {
-      setFormError(errorMessage(err));
-      toast.error(errorMessage(err));
+      const message = mcpHintForPreview(draft) ?? errorMessage(err);
+      setFormError(message);
+      toast.error(message);
     } finally {
       setPreviewing(false);
     }
@@ -542,6 +595,12 @@ export function ConnectedAppsPanel({
     const document = draft.document.trim();
     if (name === "" || baseUrl === "") {
       setFormError("Name and base URL are required.");
+      return;
+    }
+    if (loopbackHttpHost(baseUrl) !== null && !draft.allowLoopbackHttp) {
+      setFormError(
+        "Confirm that Tidebreak may send this credential in clear text to this computer.",
+      );
       return;
     }
     let documentFields: {
@@ -624,6 +683,7 @@ export function ConnectedAppsPanel({
         base_url: baseUrl,
         ...documentFields,
         credential,
+        allow_loopback_http: draft.allowLoopbackHttp,
       });
       setApps(result.apps);
       setDraft(null);
@@ -731,7 +791,7 @@ export function ConnectedAppsPanel({
       </SettingsField>
       <SettingsField
         label="Base URL"
-        hint="https only; operation paths from the document append to it."
+        hint="https, or http on 127.0.0.1 / [::1] with consent. Operation paths from the document append to it."
       >
         <div className="flex gap-2">
           <Input
@@ -741,7 +801,14 @@ export function ConnectedAppsPanel({
             spellCheck={false}
             placeholder="https://api.example.com/v2"
             onChange={(event) =>
-              update({ baseUrl: event.target.value, discovery: null })
+              update({
+                baseUrl: event.target.value,
+                discovery: null,
+                allowLoopbackHttp:
+                  loopbackHttpHost(event.target.value) === null
+                    ? false
+                    : draft.allowLoopbackHttp,
+              })
             }
           />
           <Button
@@ -755,6 +822,33 @@ export function ConnectedAppsPanel({
           </Button>
         </div>
       </SettingsField>
+      {mcpUrlHint(draft) && (
+        <p className="text-sm text-muted-foreground">
+          This looks like an MCP HTTP endpoint, not a REST/OpenAPI base URL. Add
+          it under Settings → MCP servers as a remote HTTP server.
+        </p>
+      )}
+      {loopbackHttpHost(draft.baseUrl) !== null && (
+        <div className="flex flex-col gap-2 rounded-xl border border-warning-border bg-warning-background px-3 py-2">
+          <p className="text-sm font-medium">
+            Allow clear-text HTTP on this computer?
+          </p>
+          <p className="text-sm text-muted-foreground">
+            This service runs on this computer without TLS. Tidebreak sends the
+            credential in clear text to {loopbackHttpHost(draft.baseUrl)} only.
+          </p>
+          <Label className="flex items-start gap-2 text-sm font-normal">
+            <Checkbox
+              checked={draft.allowLoopbackHttp}
+              disabled={saving}
+              onCheckedChange={(checked) =>
+                update({ allowLoopbackHttp: checked === true })
+              }
+            />
+            Send the credential in clear text to this loopback address
+          </Label>
+        </div>
+      )}
       <DiscoveryResults
         discovery={draft.discovery}
         discovering={discovering}
@@ -812,7 +906,7 @@ export function ConnectedAppsPanel({
       {draft.source === "url" ? (
         <SettingsField
           label="Document URL"
-          hint="https only; JSON OpenAPI 3.x. The server fetches it — the document never rides the form."
+          hint="https, or loopback http with the same consent as the base URL. JSON OpenAPI 3.x. The server fetches it — the document never rides the form."
         >
           <div className="flex gap-2">
             <Input
@@ -939,7 +1033,14 @@ export function ConnectedAppsPanel({
         <SettingsError>{formError}</SettingsError>
       )}
       <div className="flex gap-2">
-        <Button disabled={saving} onClick={() => void save()}>
+        <Button
+          disabled={
+            saving ||
+            (loopbackHttpHost(draft.baseUrl) !== null &&
+              !draft.allowLoopbackHttp)
+          }
+          onClick={() => void save()}
+        >
           {saving && <Loader2 size={14} className="animate-spin" />}
           {saving ? "Saving…" : "Save"}
         </Button>

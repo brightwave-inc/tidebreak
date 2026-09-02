@@ -12,7 +12,8 @@
 //!   request outright. The catalog, not the caller, decides what is
 //!   executable.
 //! - Egress mirrors the native web-search fetcher's posture: the base URL is
-//!   admitted (https only, no userinfo, no fragment), the host's DNS answer is
+//!   admitted (https, or plain HTTP only to an explicit loopback IP literal
+//!   after opt-in), no userinfo, no fragment, the host's DNS answer is
 //!   resolved and vetted per request with the same denied-network list, the
 //!   connection is pinned to exactly the vetted addresses, redirects are never
 //!   followed, and request and response byte counts and wall time are capped.
@@ -87,10 +88,16 @@ pub const REST_EXECUTOR_USER_AGENT: &str =
 #[serde(deny_unknown_fields)]
 pub struct RestApiTarget {
     /// Base URL the operation path appends to. Admitted per request; https
-    /// only, no userinfo, no fragment, explicit ports allowed.
+    /// only unless [`Self::allow_loopback_http`] admits a loopback IP
+    /// literal. No userinfo, no fragment, explicit ports allowed.
     pub base_url: String,
     /// Stored credential reference and placement, when the API needs one.
     pub credential: Option<RestCredential>,
+    /// Explicit consent to send this record's traffic as plain HTTP to a
+    /// loopback IP literal (127.0.0.0/8 or `::1`). DNS names, including
+    /// `localhost`, never qualify.
+    #[serde(default)]
+    pub allow_loopback_http: bool,
 }
 
 /// A credential *reference*: the profile secret-store key and where the value
@@ -327,8 +334,9 @@ impl<T: RestTransport, R: RestHostResolver> RestExecutor<T, R> {
         let rendered = render_parameters(operation, request, placement_header.as_deref())?;
         let body_bytes = serialize_body(operation, request)?;
 
-        let base = admit_base_url(&target.base_url)?;
+        let base = admit_base_url(&target.base_url, target.allow_loopback_http)?;
         let url = assemble_url(&base, &rendered)?;
+        pin_to_admitted_origin(&base, &url)?;
 
         // Vet the destination. A domain host is resolved freshly and every
         // answer must clear the denied-network list — refusing the whole name
@@ -561,11 +569,16 @@ fn serialize_body(
 /// or a query is refused rather than stripped — a base URL is configuration,
 /// and configuration that cannot mean anything should be corrected, not
 /// silently rewritten.
-pub(crate) fn admit_base_url(base_url: &str) -> Result<Url, RestExecuteError> {
-    admit_https_url(base_url, UrlQueryPolicy::Refuse).map_err(|refusal| match refusal {
-        UrlAdmissionRefusal::Reason(reason) => RestExecuteError::InadmissibleBaseUrl { reason },
-        UrlAdmissionRefusal::DeniedAddress => RestExecuteError::DeniedAddress,
-    })
+pub(crate) fn admit_base_url(
+    base_url: &str,
+    allow_loopback_http: bool,
+) -> Result<Url, RestExecuteError> {
+    admit_connected_app_url(base_url, UrlQueryPolicy::Refuse, allow_loopback_http).map_err(
+        |refusal| match refusal {
+            UrlAdmissionRefusal::Reason(reason) => RestExecuteError::InadmissibleBaseUrl { reason },
+            UrlAdmissionRefusal::DeniedAddress => RestExecuteError::DeniedAddress,
+        },
+    )
 }
 
 /// Whether an admitted URL may carry a query. A *base* URL with a query is
@@ -586,6 +599,14 @@ pub(crate) fn admit_https_url(
     url: &str,
     query: UrlQueryPolicy,
 ) -> Result<Url, UrlAdmissionRefusal> {
+    admit_connected_app_url(url, query, false)
+}
+
+fn admit_connected_app_url(
+    url: &str,
+    query: UrlQueryPolicy,
+    allow_loopback_http: bool,
+) -> Result<Url, UrlAdmissionRefusal> {
     let refuse = |reason| Err(UrlAdmissionRefusal::Reason(reason));
     if url.len() > MAX_REST_BASE_URL_BYTES {
         return refuse("URL exceeds the byte limit");
@@ -593,9 +614,11 @@ pub(crate) fn admit_https_url(
     let Ok(parsed) = Url::parse(url) else {
         return refuse("URL is not valid");
     };
-    if parsed.scheme() != "https" {
-        return refuse("scheme must be https");
-    }
+    let http_loopback = match parsed.scheme() {
+        "https" => false,
+        "http" => true,
+        _ => return refuse("scheme must be https"),
+    };
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return refuse("URL must not carry userinfo");
     }
@@ -609,25 +632,67 @@ pub(crate) fn admit_https_url(
         None | Some("") => return refuse("URL has no host"),
         Some(_) => {}
     }
+    if http_loopback {
+        // Hostname resolution must never widen this exemption: `localhost`
+        // and every other DNS name stay refused for http.
+        if parsed.domain().is_some() {
+            return refuse("http is only allowed for loopback IP literals; use 127.0.0.1 or [::1]");
+        }
+        let address = parse_ip_literal_host(&parsed)?;
+        if !is_loopback_http_literal(address) {
+            return refuse("scheme must be https");
+        }
+        if !allow_loopback_http {
+            return refuse("http on a loopback address requires allow_loopback_http");
+        }
+        return Ok(parsed);
+    }
     // An IP-literal host — in any encoding the URL parser dials as an
     // address — is vetted against the denied-network list right here; a
     // DNS-named host is vetted after resolution instead.
     if parsed.domain().is_none() {
-        let literal = parsed
-            .host_str()
-            .unwrap_or_default()
-            .trim_start_matches('[')
-            .trim_end_matches(']');
-        match literal.parse::<IpAddr>() {
-            Ok(address) => {
-                if admit_fetch_address(address).is_err() {
-                    return Err(UrlAdmissionRefusal::DeniedAddress);
-                }
-            }
-            Err(_) => return refuse("URL host is not a name or address"),
+        let address = parse_ip_literal_host(&parsed)?;
+        if admit_fetch_address(address).is_err() {
+            return Err(UrlAdmissionRefusal::DeniedAddress);
         }
     }
     Ok(parsed)
+}
+
+/// Parse an IP-literal URL host. The URL parser has already rejected a
+/// missing host; this only fails on encodings it does not treat as addresses.
+fn parse_ip_literal_host(parsed: &Url) -> Result<IpAddr, UrlAdmissionRefusal> {
+    let literal = parsed
+        .host_str()
+        .unwrap_or_default()
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    literal
+        .parse::<IpAddr>()
+        .map_err(|_| UrlAdmissionRefusal::Reason("URL host is not a name or address"))
+}
+
+/// Loopback HTTP is 127.0.0.0/8 or exactly `::1`. Mapped IPv6 (`::ffff:127.0.0.1`)
+/// is not an exemption — use the v4 literal or `[::1]`.
+fn is_loopback_http_literal(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(v4) => v4.is_loopback(),
+        IpAddr::V6(v6) => v6.is_loopback(),
+    }
+}
+
+/// Every executed request must stay on the admitted base origin (scheme,
+/// host, port). Path and query may change; a redirect or template must not.
+fn pin_to_admitted_origin(base: &Url, url: &Url) -> Result<(), RestExecuteError> {
+    if url.scheme() != base.scheme()
+        || url.host() != base.host()
+        || url.port_or_known_default() != base.port_or_known_default()
+    {
+        return Err(RestExecuteError::InadmissibleBaseUrl {
+            reason: "assembled request left the admitted origin",
+        });
+    }
+    Ok(())
 }
 
 /// Join the admitted base URL's path prefix with the substituted operation
@@ -858,7 +923,7 @@ impl RestTransport for ReqwestRestTransport {
             // removes the address pinning.
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
-            .https_only(true)
+            .https_only(request.url.scheme() != "http")
             .user_agent(REST_EXECUTOR_USER_AGENT)
             .connect_timeout(request.timeout.min(Duration::from_secs(10)))
             .timeout(request.timeout);
@@ -1017,16 +1082,22 @@ pub(crate) enum SpecRedirectPolicy {
 }
 
 /// Fetch an OpenAPI document from an operator-supplied URL, at configuration
-/// time, with the executor's egress hygiene: https-only admission, fresh
-/// per-hop resolution vetted against the denied-network list, a pinned
-/// no-proxy client, and a bounded body.
+/// time, with the executor's egress hygiene: https admission (or loopback
+/// HTTP under the same opt-in as the base URL), fresh per-hop resolution
+/// vetted against the denied-network list, a pinned no-proxy client, and a
+/// bounded body.
 ///
 /// Unlike operation execution, redirects are followed — vendors move and
 /// version their published documents — but explicitly, one admitted hop at a
 /// time, so every `Location` gets the same vetting as the original URL and no
 /// credential is ever attached to any hop.
-pub(crate) async fn fetch_spec_document(url: &str) -> Result<Vec<u8>, SpecFetchError> {
-    fetch_spec_document_detailed(url, SpecRedirectPolicy::FollowAdmitted)
+/// Loopback-http documents (only reachable with `allow_loopback_http`)
+/// never follow redirects: a 302 must not walk the opt-in off that origin.
+pub(crate) async fn fetch_spec_document(
+    url: &str,
+    allow_loopback_http: bool,
+) -> Result<Vec<u8>, SpecFetchError> {
+    fetch_spec_document_detailed(url, SpecRedirectPolicy::FollowAdmitted, allow_loopback_http)
         .await
         .map(|fetched| fetched.body)
 }
@@ -1066,10 +1137,11 @@ pub(crate) mod spec_fetch_mock {
 pub(crate) async fn fetch_spec_document_detailed(
     url: &str,
     redirects: SpecRedirectPolicy,
+    allow_loopback_http: bool,
 ) -> Result<FetchedSpecDocument, SpecFetchError> {
     let started = std::time::Instant::now();
     let mut current = url.to_string();
-    let origin = admit_spec_fetch_url(&current)?;
+    let origin = admit_spec_fetch_url(&current, allow_loopback_http)?;
     #[cfg(test)]
     if let Some(mocked) = spec_fetch_mock::try_fetch(&current) {
         let _ = redirects;
@@ -1077,7 +1149,7 @@ pub(crate) async fn fetch_spec_document_detailed(
         return mocked;
     }
     for _ in 0..=MAX_SPEC_FETCH_REDIRECTS {
-        let admitted = admit_spec_fetch_url(&current)?;
+        let admitted = admit_spec_fetch_url(&current, allow_loopback_http)?;
         if redirects == SpecRedirectPolicy::SameOrigin
             && (admitted.scheme() != origin.scheme()
                 || admitted.host() != origin.host()
@@ -1114,6 +1186,7 @@ pub(crate) async fn fetch_spec_document_detailed(
         };
 
         let https_only = admitted.scheme() != "http";
+        let loopback_http = allow_loopback_http && !https_only;
         let mut builder = reqwest::Client::builder()
             // Load-bearing for the same reason as the operation transport: a
             // discovered proxy would dial the proxy, not the vetted address.
@@ -1148,6 +1221,11 @@ pub(crate) async fn fetch_spec_document_detailed(
 
         let status = response.status();
         if status.is_redirection() {
+            if loopback_http {
+                return Err(SpecFetchError::HttpStatus {
+                    status: status.as_u16(),
+                });
+            }
             let location = response
                 .headers()
                 .get(reqwest::header::LOCATION)
@@ -1201,7 +1279,7 @@ pub(crate) async fn fetch_spec_document_detailed(
 /// Admit a document URL. Tests may fetch `http://127.0.0.1` so a local mock
 /// server can stand in for a vendor origin; production still requires https
 /// and the denied-network list.
-fn admit_spec_fetch_url(url: &str) -> Result<Url, SpecFetchError> {
+fn admit_spec_fetch_url(url: &str, allow_loopback_http: bool) -> Result<Url, SpecFetchError> {
     if cfg!(test) {
         if let Ok(parsed) = Url::parse(url) {
             let loopback = matches!(parsed.host_str(), Some("127.0.0.1") | Some("[::1]"));
@@ -1210,9 +1288,11 @@ fn admit_spec_fetch_url(url: &str) -> Result<Url, SpecFetchError> {
             }
         }
     }
-    admit_https_url(url, UrlQueryPolicy::Allow).map_err(|refusal| match refusal {
-        UrlAdmissionRefusal::Reason(reason) => SpecFetchError::InadmissibleUrl { reason },
-        UrlAdmissionRefusal::DeniedAddress => SpecFetchError::DeniedAddress,
+    admit_connected_app_url(url, UrlQueryPolicy::Allow, allow_loopback_http).map_err(|refusal| {
+        match refusal {
+            UrlAdmissionRefusal::Reason(reason) => SpecFetchError::InadmissibleUrl { reason },
+            UrlAdmissionRefusal::DeniedAddress => SpecFetchError::DeniedAddress,
+        }
     })
 }
 
@@ -1397,6 +1477,7 @@ mod tests {
         RestApiTarget {
             base_url: "https://api.example.com/v2".to_owned(),
             credential,
+            allow_loopback_http: false,
         }
     }
 
@@ -1687,7 +1768,10 @@ mod tests {
     async fn base_url_admission_allows_ports_and_refuses_the_rest() {
         let transport = FakeTransport::ok();
         for (base_url, expected) in [
-            ("http://api.example.com", "scheme must be https"),
+            (
+                "http://api.example.com",
+                "http is only allowed for loopback IP literals; use 127.0.0.1 or [::1]",
+            ),
             ("https://u:p@api.example.com", "URL must not carry userinfo"),
             (
                 "https://api.example.com/#frag",
@@ -1703,6 +1787,7 @@ mod tests {
                 &RestApiTarget {
                     base_url: base_url.to_owned(),
                     credential: None,
+                    allow_loopback_http: false,
                 },
                 &get_issue(full_parameters()),
             )
@@ -1722,6 +1807,7 @@ mod tests {
             &RestApiTarget {
                 base_url: "https://127.0.0.1:8443".to_owned(),
                 credential: None,
+                allow_loopback_http: false,
             },
             &get_issue(full_parameters()),
         )
@@ -1739,6 +1825,7 @@ mod tests {
             &RestApiTarget {
                 base_url: "https://api.example.com:8443/v2".to_owned(),
                 credential: None,
+                allow_loopback_http: false,
             },
             &get_issue(full_parameters()),
         )
@@ -1926,5 +2013,117 @@ mod tests {
         assert_eq!(requests[0].timeout, DEFAULT_REST_TIMEOUT);
         assert_eq!(requests[1].timeout, MIN_REST_TIMEOUT);
         assert_eq!(requests[2].timeout, MAX_REST_TIMEOUT);
+    }
+
+    #[test]
+    fn admit_base_url_loopback_http_requires_flag_and_ip_literal() {
+        assert!(admit_base_url("http://127.0.0.1:23373/v0", true).is_ok());
+        assert!(admit_base_url("http://127.9.9.9:1", true).is_ok());
+        assert!(admit_base_url("http://[::1]:8080/", true).is_ok());
+
+        let localhost = admit_base_url("http://localhost:23373/v0", true).unwrap_err();
+        assert_eq!(
+            localhost,
+            RestExecuteError::InadmissibleBaseUrl {
+                reason: "http is only allowed for loopback IP literals; use 127.0.0.1 or [::1]",
+            }
+        );
+
+        let private = admit_base_url("http://10.0.0.1:80", true).unwrap_err();
+        assert_eq!(
+            private,
+            RestExecuteError::InadmissibleBaseUrl {
+                reason: "scheme must be https",
+            }
+        );
+
+        let no_flag = admit_base_url("http://127.0.0.1:23373/v0", false).unwrap_err();
+        assert_eq!(
+            no_flag,
+            RestExecuteError::InadmissibleBaseUrl {
+                reason: "http on a loopback address requires allow_loopback_http",
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn loopback_http_executor_does_not_follow_redirects() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        {
+            let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+            let probe_addr = probe.local_addr().unwrap();
+            std::thread::spawn(move || {
+                let _ = probe.accept();
+            });
+            if std::net::TcpStream::connect_timeout(
+                &probe_addr,
+                std::time::Duration::from_millis(300),
+            )
+            .is_err()
+            {
+                return;
+            }
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let second = TcpListener::bind("127.0.0.1:0").unwrap();
+        let second_port = second.local_addr().unwrap().port();
+        let second_hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let second_hits_clone = second_hits.clone();
+        std::thread::spawn(move || {
+            second.set_nonblocking(true).unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while std::time::Instant::now() < deadline {
+                if let Ok((mut stream, _)) = second.accept() {
+                    second_hits_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let mut buf = [0u8; 512];
+                    let _ = stream.read(&mut buf);
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                    );
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        });
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            // Drain the request before answering: closing a socket with
+            // unread bytes resets the connection and the client reports a
+            // transport error instead of the 302.
+            let mut buf = [0u8; 2048];
+            let _ = stream.read(&mut buf);
+            let body = format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{second_port}/elsewhere\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            let _ = stream.write_all(body.as_bytes());
+        });
+
+        let response = RestExecutor::new(
+            ReqwestRestTransport,
+            FakeResolver(Vec::new()),
+            FakeSecrets::empty(),
+        )
+        .execute(
+            &RestApiTarget {
+                base_url: format!("http://127.0.0.1:{}", addr.port()),
+                credential: None,
+                allow_loopback_http: true,
+            },
+            &catalog(),
+            &get_issue(full_parameters()),
+            Some(Duration::from_secs(2)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status, 302);
+        assert_eq!(
+            second_hits.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a 302 to another loopback port must not be followed"
+        );
     }
 }

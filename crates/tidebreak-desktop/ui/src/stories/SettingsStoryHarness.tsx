@@ -390,6 +390,7 @@ const connectedApps: ConnectedAppsInfo = {
       placement: "bearer",
       updated_at: "2026-08-20T12:00:00Z",
       used_by_app_count: 1,
+      allow_loopback_http: false,
     },
   ],
 };
