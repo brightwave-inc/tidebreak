@@ -131,6 +131,7 @@ impl HarnessAdapter for GrokAdapter {
             durable_parks: CapLevel::Unsupported,
             user_questions: CapLevel::Unsupported,
             standing_grants: CapLevel::Unsupported,
+            memory_loopback: CapLevel::Unsupported,
         };
         // Off the captured 1.0 line the unprompted-write observation behind
         // Auto no longer holds; a later default posture is unproven

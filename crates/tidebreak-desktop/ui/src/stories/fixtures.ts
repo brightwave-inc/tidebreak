@@ -482,6 +482,7 @@ const fullCaps: HarnessCaps = {
   durable_parks: "unsupported",
   user_questions: "unsupported",
   standing_grants: "unsupported",
+  memory_loopback: "unsupported",
 };
 
 function doctorEntry(

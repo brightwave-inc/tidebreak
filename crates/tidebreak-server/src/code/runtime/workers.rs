@@ -121,6 +121,7 @@ impl CodeRuntime {
             self.gh_search_path_owned(),
             self.recap_hook(),
             self.rewrite_hook(),
+            self.memory_capture_hook(),
             self.hot_pull_requests(),
         );
         // An in-process engine parks its approvals on the adapter's own
@@ -276,6 +277,8 @@ impl CodeRuntime {
                 // Only an engine that states image input takes the bytes on
                 // its own protocol. The rest receive absolute private paths.
                 engine_reads_images: adapter.capabilities(&probe).image_input
+                    == CapLevel::Supported,
+                memory_loopback: adapter.capabilities(&probe).memory_loopback
                     == CapLevel::Supported,
             },
             // A session with no workspace shares its working directory with

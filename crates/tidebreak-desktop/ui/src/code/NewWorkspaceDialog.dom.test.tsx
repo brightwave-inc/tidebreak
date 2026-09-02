@@ -103,6 +103,7 @@ const CAPS = {
   durable_parks: "unsupported",
   user_questions: "unsupported",
   standing_grants: "unsupported",
+  memory_loopback: "unsupported",
 } as const;
 
 function harness(kind: HarnessKind): HarnessDoctorEntry {

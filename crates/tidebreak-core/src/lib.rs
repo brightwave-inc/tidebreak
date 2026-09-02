@@ -258,13 +258,13 @@ pub use image::{
 #[cfg(feature = "keychain")]
 pub use keychain::KeychainSecretProvider;
 pub use memory::{
-    MemoryAuthor, MemoryBackend, MemoryCapLevel, MemoryCapability, MemoryCaps, MemoryDigest,
-    MemoryError, MemoryEvidence, MemoryIngestReceipt, MemoryIngestRequest, MemoryKind, MemoryLink,
-    MemoryLinkRelation, MemoryListFilter, MemoryOrigin, MemoryProvenance, MemoryRecord,
-    MemoryRecordId, MemoryRecordUpdate, MemoryResult, MemoryRevision, MemoryRevisionId,
-    MemoryScope, MemorySearchHit, MemorySearchRequest, MemoryStatus, MemoryStatusChange,
-    MemorySweepOutcome, MemorySweepRun, MemorySweepScopeState, MemorySweepStatus,
-    MemoryWriteReceipt, MemoryWriteState, DEFAULT_MEMORY_ACTIVE_RECORD_CAP,
+    render_memory_record_markdown, MemoryAuthor, MemoryBackend, MemoryCapLevel, MemoryCapability,
+    MemoryCaps, MemoryDigest, MemoryError, MemoryEvidence, MemoryIngestReceipt,
+    MemoryIngestRequest, MemoryKind, MemoryLink, MemoryLinkRelation, MemoryListFilter,
+    MemoryOrigin, MemoryProvenance, MemoryRecord, MemoryRecordId, MemoryRecordUpdate, MemoryResult,
+    MemoryRevision, MemoryRevisionId, MemoryScope, MemorySearchHit, MemorySearchRequest,
+    MemoryStatus, MemoryStatusChange, MemorySweepOutcome, MemorySweepRun, MemorySweepScopeState,
+    MemorySweepStatus, MemoryWriteReceipt, MemoryWriteState, DEFAULT_MEMORY_ACTIVE_RECORD_CAP,
     DEFAULT_MEMORY_DIGEST_BYTES, MAX_MEMORY_BODY_BYTES, MAX_MEMORY_EVIDENCE, MAX_MEMORY_LINKS,
     MAX_MEMORY_SEARCH_RESULTS, MAX_MEMORY_TITLE_CHARS,
 };

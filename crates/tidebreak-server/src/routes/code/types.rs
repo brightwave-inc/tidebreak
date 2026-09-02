@@ -2241,6 +2241,10 @@ pub struct CodeSessionDigest {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub recap: Option<String>,
+    /// Pending memory proposals that originated in this session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub memory_proposal_count: Option<u64>,
 }
 
 impl From<crate::code::bus::SessionDigest> for CodeSessionDigest {
@@ -2264,6 +2268,7 @@ impl From<crate::code::bus::SessionDigest> for CodeSessionDigest {
             watch_cycles: digest.watch_cycles,
             subagents: digest.subagents,
             recap: digest.recap,
+            memory_proposal_count: digest.memory_proposal_count,
         }
     }
 }
@@ -2335,6 +2340,10 @@ pub enum CodeUpdateNotice {
         #[serde(skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         recap: Option<String>,
+        /// Pending memory proposals that originated in this session.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        memory_proposal_count: Option<u64>,
     },
     /// Coalesced terminal activity. Not restated on connect.
     TerminalActivity {
@@ -2436,6 +2445,7 @@ impl CodeUpdateNotice {
             watch_cycles: wire.watch_cycles,
             subagents: wire.subagents,
             recap: wire.recap,
+            memory_proposal_count: wire.memory_proposal_count,
         }
     }
 

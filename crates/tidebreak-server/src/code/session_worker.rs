@@ -232,6 +232,8 @@ pub(crate) struct AttachmentStore {
     pub private_root: super::scratch::ScratchRoot,
     /// Whether this engine consumes images over its own protocol.
     pub engine_reads_images: bool,
+    /// Whether this engine mounts Tidebreak's loopback memory verb.
+    pub memory_loopback: bool,
 }
 
 pub(crate) struct QueuedFollowUp {
@@ -297,6 +299,8 @@ pub(crate) struct LiveSink {
     /// Derives a lucid rewrite of the closing message once the turn
     /// completes. `None` in headless deployments and tests that install none.
     rewrite: Option<Arc<dyn super::rewrite::TurnRewrite>>,
+    /// Derives memory proposals once the turn completes.
+    memory_capture: Option<Arc<dyn super::memory_capture::TurnMemoryCapture>>,
     /// The runtime's hot pull-request tier (decision 66). A turn whose fact
     /// detector confirms a push or a create marks this workspace, so the
     /// next hot pass reads the head the turn just moved (issue 2799).
@@ -786,6 +790,11 @@ impl HarnessEventSink for LiveSink {
             (journaled, completed_turn, self.rewrite.as_ref())
         {
             rewrite.spawn(self.owner.clone(), self.session_id, turn_id);
+        }
+        if let (true, Some(turn_id), Some(capture)) =
+            (journaled, completed_turn, self.memory_capture.as_ref())
+        {
+            capture.spawn(self.owner.clone(), self.session_id, turn_id);
         }
     }
 }
@@ -2614,6 +2623,76 @@ async fn drive_turn_inner(
     .await
     .map_err(|err| WorkerError::Failed(err.to_string()))?;
 
+    let repo_id = match session.workspace_id {
+        Some(workspace_id) => get_workspace(db, &session.owner, workspace_id)
+            .await
+            .map_err(|err| WorkerError::Failed(err.to_string()))?
+            .map(|workspace| workspace.repo_id),
+        None => None,
+    };
+    // Memory is an aid, not a precondition: a store or filesystem fault
+    // degrades the turn visibly instead of failing it after it started.
+    let memory_dir = match super::memory::materialize_session_memory(
+        db.as_ref(),
+        &session.owner,
+        repo_id,
+        &store.private_root,
+    )
+    .await
+    {
+        Ok(memory_dir) => Some(memory_dir),
+        Err(err) => {
+            tracing::warn!(
+                "tidebreak: could not materialize memory for code session {}: {err}",
+                session.id
+            );
+            // Worker-authored notices are never native journal rows, and a
+            // notice that fails to journal must not fail the turn it
+            // describes.
+            if let Err(err) = persist_and_publish(
+                db,
+                bus,
+                &session.owner,
+                session.id,
+                session.spawn_epoch,
+                CodeEvent::HarnessNotice {
+                    level: HarnessNoticeLevel::Warning,
+                    message: format!("Memory was not materialized for this turn: {err}"),
+                },
+                false,
+            )
+            .await
+            {
+                tracing::warn!(
+                    "tidebreak: could not journal the memory notice for code session {}: {err}",
+                    session.id
+                );
+            }
+            None
+        }
+    };
+    if ordinal == 1 && !store.memory_loopback {
+        if let Err(err) = persist_and_publish(
+            db,
+            bus,
+            &session.owner,
+            session.id,
+            session.spawn_epoch,
+            CodeEvent::HarnessNotice {
+                level: HarnessNoticeLevel::Info,
+                message: super::memory::memory_verb_unsupported_notice(session.harness_kind),
+            },
+            false,
+        )
+        .await
+        {
+            tracing::warn!(
+                "tidebreak: could not journal the memory verb notice for code session {}: {err}",
+                session.id
+            );
+        }
+    }
+
     // What the engine is handed is not always what the person wrote: an engine
     // that cannot take images over its own protocol is given paths instead, and
     // `turn.user_input` above keeps the message as typed.
@@ -2627,6 +2706,13 @@ async fn drive_turn_inner(
             message_naming_attachments(&message, &staged.paths),
             Vec::new(),
         )
+    };
+    let engine_text = match (ordinal, memory_dir.as_deref()) {
+        (1, Some(memory_dir)) => format!(
+            "{engine_text}\n\n{}",
+            super::memory::first_turn_memory_line(memory_dir)
+        ),
+        _ => engine_text,
     };
     let mut next_input = Some(TurnInput {
         text: engine_text,
@@ -3354,6 +3440,7 @@ pub(crate) fn sink_for(
     gh_search_path: Option<String>,
     recap: Option<Arc<dyn super::recap::TurnRecap>>,
     rewrite: Option<Arc<dyn super::rewrite::TurnRewrite>>,
+    memory_capture: Option<Arc<dyn super::memory_capture::TurnMemoryCapture>>,
     hot_prs: super::pr_refresh::HotPullRequests,
 ) -> Arc<LiveSink> {
     Arc::new(LiveSink {
@@ -3372,6 +3459,7 @@ pub(crate) fn sink_for(
         subagents: std::sync::Mutex::new(subagents),
         recap,
         rewrite,
+        memory_capture,
         hot_prs,
     })
 }
@@ -3391,7 +3479,7 @@ pub(crate) async fn journal_event(
 /// engine already wrote it — apply only what the row's arrival means for
 /// the worker's own state. See [`LiveSink::native_journal`].
 #[allow(clippy::too_many_arguments)]
-async fn persist_and_publish(
+pub(crate) async fn persist_and_publish(
     db: &DbStore,
     bus: &CodeEventBus,
     owner: &OwnerId,
@@ -4087,6 +4175,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             crate::code::pr_refresh::HotPullRequests::default(),
         );
         (directory, store, sink, session_id)
@@ -4164,6 +4253,7 @@ mod tests {
                 blobs: None,
                 private_root,
                 engine_reads_images: false,
+                memory_loopback: false,
             },
             Arc::new(tokio::sync::Mutex::new(())),
             tokio::sync::watch::channel(false).1,
@@ -4281,6 +4371,7 @@ mod tests {
                 blobs: None,
                 private_root,
                 engine_reads_images: false,
+                memory_loopback: false,
             },
             Arc::new(tokio::sync::Mutex::new(())),
             tokio::sync::watch::channel(false).1,
@@ -4430,6 +4521,7 @@ mod tests {
                 blobs: None,
                 private_root,
                 engine_reads_images: false,
+                memory_loopback: false,
             },
             Arc::new(tokio::sync::Mutex::new(())),
             tokio::sync::watch::channel(false).1,
@@ -4550,6 +4642,7 @@ mod tests {
                 blobs: None,
                 private_root,
                 engine_reads_images: false,
+                memory_loopback: false,
             },
             Arc::new(tokio::sync::Mutex::new(())),
             tokio::sync::watch::channel(false).1,
@@ -4650,6 +4743,7 @@ mod tests {
                 blobs: None,
                 private_root,
                 engine_reads_images: false,
+                memory_loopback: false,
             },
             Arc::new(tokio::sync::Mutex::new(())),
             tokio::sync::watch::channel(false).1,
@@ -4782,6 +4876,7 @@ mod tests {
                 blobs: None,
                 private_root,
                 engine_reads_images: false,
+                memory_loopback: false,
             },
             worktree_lock.clone(),
             tokio::sync::watch::channel(false).1,
@@ -4871,6 +4966,7 @@ mod tests {
             false,
             None,
             attached.subagents,
+            None,
             None,
             None,
             None,
@@ -5336,6 +5432,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             crate::code::pr_refresh::HotPullRequests::default(),
         );
         // The relay's refusals already name the gateway; "sign in in your
@@ -5393,6 +5490,7 @@ mod tests {
                 blobs: None,
                 private_root,
                 engine_reads_images: false,
+                memory_loopback: false,
             },
             Arc::new(tokio::sync::Mutex::new(())),
             quiesce_rx,

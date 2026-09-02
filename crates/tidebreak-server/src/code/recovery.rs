@@ -1142,6 +1142,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             crate::code::pr_refresh::HotPullRequests::default(),
         );
         let private_root = _dir.path().join("private");
@@ -1188,6 +1189,7 @@ mod tests {
                 blobs: None,
                 private_root,
                 engine_reads_images: false,
+                memory_loopback: false,
             },
             std::sync::Arc::new(tokio::sync::Mutex::new(())),
             tokio::sync::watch::channel(false).1,
@@ -1408,6 +1410,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             crate::code::pr_refresh::HotPullRequests::default(),
         );
         let worktree = directory.path().join("wt");
@@ -1469,6 +1472,7 @@ mod tests {
                 blobs: None,
                 private_root,
                 engine_reads_images: false,
+                memory_loopback: false,
             },
             Arc::new(tokio::sync::Mutex::new(())),
             tokio::sync::watch::channel(false).1,

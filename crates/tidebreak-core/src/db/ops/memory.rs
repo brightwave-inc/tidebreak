@@ -434,7 +434,8 @@ where
         .collect()
 }
 
-fn render_digest(
+/// Deterministic digest renderer. An unchanged store re-renders byte-identical markdown.
+pub(crate) fn render_digest(
     scope: MemoryScope,
     mut records: Vec<MemoryRecord>,
     byte_cap: usize,
