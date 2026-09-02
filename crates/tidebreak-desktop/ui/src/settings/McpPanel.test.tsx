@@ -445,8 +445,7 @@ describe("McpPanel", () => {
   });
 
   it("shows the full classified verify failure", async () => {
-    const message =
-      'DNS resolution failed (mcp.example.invalid). Bearer-token environment variable "GATEWAY_TOKEN" is not set in the environment Tidebreak reads. Export it in the shell you start Tidebreak from, then restart Tidebreak.';
+    const message = `DNS resolution failed (mcp.example.invalid). Bearer-token environment variable "GATEWAY_TOKEN" is not set in the environment Tidebreak reads. Export it in the shell you start Tidebreak from, then restart Tidebreak.`;
     const client = api(
       { servers: [] },
       {

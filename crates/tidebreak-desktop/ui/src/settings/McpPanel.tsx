@@ -1142,9 +1142,7 @@ function verifyDescription(server: McpServerInfo): string {
       "Disabled. This server is not available to new turns."
     );
   }
-  return (
-    server.diagnostic ?? "Save the configuration to verify this server."
-  );
+  return server.diagnostic ?? "Save the configuration to verify this server.";
 }
 
 function mountStatus(mounted: McpServerInfo): string {
