@@ -2,6 +2,7 @@
 import {
   act,
   cleanup,
+  fireEvent,
   render,
   screen,
   waitFor,
@@ -9,11 +10,12 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type {
-  ApiClient,
-  GatewayStatus,
-  McpServerInfo,
-  McpServersInfo,
+import {
+  HttpError,
+  type ApiClient,
+  type GatewayStatus,
+  type McpServerInfo,
+  type McpServersInfo,
 } from "../api";
 import { McpPanel } from "./McpPanel";
 
@@ -202,8 +204,8 @@ describe("McpPanel", () => {
       .getAllByRole("listitem")
       .map((item) => item.textContent);
     expect(skipped).toEqual([
-      "private_docs: Namespace already exists.",
-      "bad.name: Namespace must use 1–32 ASCII letters, numbers, underscores, or hyphens.",
+      "private_docs: mcpServers.private_docs: Namespace already exists. Choose a different name.",
+      'bad.name: mcpServers["bad.name"]: Name a server with 1–32 ASCII letters, numbers, underscores, or hyphens. "bad.name" contains a period. A valid value looks like docs or remote-tools.',
     ]);
     expect(screen.getByRole("heading", { name: "calendar" })).toBeVisible();
     expect(screen.getByRole("heading", { name: "remote" })).toBeVisible();
@@ -223,6 +225,87 @@ describe("McpPanel", () => {
     expect(
       within(calendarSection).getByLabelText("Environment value 1"),
     ).toHaveValue("");
+    expect(screen.getByLabelText("MCP JSON")).toHaveValue(await file.text());
+  });
+
+  it("keeps pasted JSON when import fails and lists field-level skips", async () => {
+    const client = api({ servers: [] });
+    const user = userEvent.setup();
+    render(<McpPanel client={client} />);
+
+    await screen.findByText(/No MCP servers configured/);
+    const json = `{
+  "mcpServers": {
+    "docs": { "command": "npx" },
+    "bad name": { "command": "npx" }
+  }
+}`;
+    fireEvent.change(screen.getByLabelText("MCP JSON"), {
+      target: { value: json },
+    });
+    await user.click(
+      screen.getByRole("button", { name: "Import pasted JSON" }),
+    );
+
+    expect(screen.getByLabelText("MCP JSON")).toHaveValue(json);
+    expect(await screen.findByRole("heading", { name: "docs" })).toBeVisible();
+    const skipped = within(
+      screen.getByRole("list", { name: "Skipped MCP servers" }),
+    )
+      .getAllByRole("listitem")
+      .map((item) => item.textContent);
+    expect(skipped).toEqual([
+      'bad name: mcpServers["bad name"]: Name a server with 1–32 ASCII letters, numbers, underscores, or hyphens. "bad name" contains a space. A valid value looks like docs or remote-tools.',
+    ]);
+  });
+
+  it("keeps pasted JSON and names the character when comments make it invalid", async () => {
+    const client = api({ servers: [] });
+    const user = userEvent.setup();
+    render(<McpPanel client={client} />);
+
+    await screen.findByText(/No MCP servers configured/);
+    const json = `{
+  // comment
+  "mcpServers": { "docs": { "command": "npx" } }
+}`;
+    fireEvent.change(screen.getByLabelText("MCP JSON"), {
+      target: { value: json },
+    });
+    await user.click(
+      screen.getByRole("button", { name: "Import pasted JSON" }),
+    );
+
+    expect(screen.getByLabelText("MCP JSON")).toHaveValue(json);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /Couldn't import pasted JSON: JSON at character \d+: this JSON uses a comment/,
+    );
+  });
+
+  it("shows the server's field-level reason when save rejects a server", async () => {
+    const client = api(
+      { servers: [] },
+      {
+        putMcpServers: vi
+          .fn()
+          .mockRejectedValue(
+            new HttpError(
+              400,
+              '400: invalid external MCP server "docs": must configure exactly one of command, url, or gateway endpoint',
+            ),
+          ),
+      },
+    );
+    const user = userEvent.setup();
+    render(<McpPanel client={client} />);
+
+    await screen.findByText(/No MCP servers configured/);
+    await user.click(screen.getByRole("button", { name: "Add server" }));
+    await user.click(screen.getByRole("button", { name: "Save and verify" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      'invalid external MCP server "docs": must configure exactly one of command, url, or gateway endpoint',
+    );
   });
 
   it("sends argv and selected environment names as typed arrays", async () => {
