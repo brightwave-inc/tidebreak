@@ -351,14 +351,17 @@ impl MemorySweep {
             }
             if active.len() < 2 {
                 // Nothing a merge could combine. Complete the try without a
-                // model so the fingerprint settles mechanically.
+                // model so the fingerprint settles mechanically, but keep the
+                // proposal reference: a pending merge outlives its scope
+                // shrinking, and forgetting it here would let a later pass
+                // stack a second one beside it.
                 save_sweep_scope_state(
                     &self.db,
                     owner,
                     &MemorySweepScopeState {
                         scope,
                         fingerprint,
-                        proposal_id: None,
+                        proposal_id: state.and_then(|state| state.proposal_id),
                         last_model_step_at: state.and_then(|state| state.last_model_step_at),
                     },
                     now,
@@ -1119,6 +1122,76 @@ mod tests {
         let run = sweep.sweep_owner(&owner, None, at(2)).await.unwrap();
         assert_eq!(run.outcome, MemorySweepOutcome::NoModel);
         assert_eq!(provider.calls(), 0);
+    }
+
+    /// A pending merge survives its scope shrinking below two active
+    /// records: the trivial completion keeps the proposal reference, so a
+    /// later pass never stacks a second merge beside it.
+    #[tokio::test]
+    async fn a_shrunken_scope_keeps_its_pending_proposal_on_the_hold() {
+        let (_directory, db) = temp_db().await;
+        let owner = OwnerId::local();
+        let backend: &dyn MemoryBackend = &*db;
+        let first = record(MemoryStatus::Active, "Tag before publishing", 1);
+        let second = record(MemoryStatus::Active, "Draft notes before tagging", 1);
+        backend.put(&owner, first.clone()).await.unwrap();
+        backend.put(&owner, second.clone()).await.unwrap();
+
+        let provider = FakeUtilityProvider::new(&[&merge_answer(&[first.id, second.id])]);
+        let sweep = sweep_over(&db, &provider);
+        let run = sweep
+            .sweep_owner(&owner, Some(&utility()), at(2))
+            .await
+            .unwrap();
+        assert_eq!(run.outcome, MemorySweepOutcome::Proposed);
+
+        // The owner archives one source, shrinking the scope below two
+        // actives; the pass settles the fingerprint without a model.
+        backend
+            .set_status(
+                &owner,
+                MemoryStatusChange {
+                    id: first.id,
+                    expected_revision: 1,
+                    status: MemoryStatus::Archived,
+                },
+            )
+            .await
+            .unwrap();
+        let shrunk = sweep
+            .sweep_owner(&owner, Some(&utility()), at(3))
+            .await
+            .unwrap();
+        assert_eq!(shrunk.outcome, MemorySweepOutcome::Unchanged);
+        assert_eq!(provider.calls(), 1);
+
+        // A new record brings the scope back to two actives while the first
+        // merge still waits for review: the hold must keep holding.
+        backend
+            .put(
+                &owner,
+                record(MemoryStatus::Active, "Publish after the tag", 4),
+            )
+            .await
+            .unwrap();
+        let held = sweep
+            .sweep_owner(&owner, Some(&utility()), at(5))
+            .await
+            .unwrap();
+        assert_eq!(held.outcome, MemorySweepOutcome::Unchanged);
+        assert_eq!(provider.calls(), 1);
+        let proposals = backend
+            .list(
+                &owner,
+                MemoryListFilter {
+                    scope: None,
+                    statuses: vec![MemoryStatus::Proposed],
+                    kinds: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(proposals.len(), 1);
     }
 
     #[tokio::test]
