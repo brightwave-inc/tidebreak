@@ -314,8 +314,7 @@ async fn memory_sweep_status_serves_the_recorded_last_run() {
     let (router, token, store, _dir) = memory_app().await;
     let bearer = format!("Bearer {token}");
 
-    let before =
-        assert_ok(request(&router, &bearer, "GET", "/memory/sweep".into()).await).await;
+    let before = assert_ok(request(&router, &bearer, "GET", "/memory/sweep".into()).await).await;
     assert_eq!(before["last_run"], json!(null));
 
     let run = tidebreak_core::MemorySweepRun {
