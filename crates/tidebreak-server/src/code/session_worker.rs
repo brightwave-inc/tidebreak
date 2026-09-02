@@ -4425,6 +4425,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             crate::code::pr_refresh::HotPullRequests::default(),
         );
         let mut session = get_session(&store, &owner, session_id)
@@ -4497,6 +4498,7 @@ mod tests {
                 blobs: None,
                 private_root,
                 engine_reads_images: true,
+                memory_loopback: false,
             },
             Arc::new(tokio::sync::Mutex::new(())),
             tokio::sync::watch::channel(false).1,
