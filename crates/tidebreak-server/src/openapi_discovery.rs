@@ -177,10 +177,9 @@ pub async fn discover_openapi_documents(
         }
         candidates
     };
-    let candidates = match tokio::time::timeout(DISCOVERY_DEADLINE, collect).await {
-        Ok(candidates) => candidates,
-        Err(_) => Vec::new(),
-    };
+    let candidates = tokio::time::timeout(DISCOVERY_DEADLINE, collect)
+        .await
+        .unwrap_or_default();
     Ok(SpecDiscoveryInfo { candidates, tried })
 }
 

@@ -674,11 +674,9 @@ async fn post_discovery(router: &Router, bearer: &str, origin: &str) -> axum::re
 /// Local mock origin: 200 at `ok_path`, 404 elsewhere. Hits still go through
 /// `fetch_spec_document_detailed` admission; the body is served in-process
 /// because this environment cannot accept loopback TCP.
-fn discovery_mock_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+async fn discovery_mock_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(())).lock().await
 }
 
 fn install_mock_origin(ok_path: &'static str, body: Vec<u8>, content_type: &'static str) {
@@ -700,7 +698,7 @@ fn install_mock_origin(ok_path: &'static str, body: Vec<u8>, content_type: &'sta
 
 #[tokio::test]
 async fn spec_discovery_finds_a_well_known_document() {
-    let _guard = discovery_mock_lock();
+    let _guard = discovery_mock_lock().await;
     let spec = issues_spec();
     install_mock_origin("/openapi.json", spec.into_bytes(), "application/json");
     let origin = "https://api.example.com";
@@ -728,9 +726,13 @@ async fn spec_discovery_finds_a_well_known_document() {
 
 #[tokio::test]
 async fn spec_discovery_reports_yaml_as_unsupported() {
-    let _guard = discovery_mock_lock();
+    let _guard = discovery_mock_lock().await;
     let yaml = "openapi: 3.0.3\ninfo:\n  title: Issues\n  version: '1'\npaths: {}\n";
-    install_mock_origin("/openapi.yaml", yaml.to_string().into_bytes(), "application/yaml");
+    install_mock_origin(
+        "/openapi.yaml",
+        yaml.to_string().into_bytes(),
+        "application/yaml",
+    );
     let (router, bearer, _state, _dir) = connected_apps_test_app().await;
     let response = post_discovery(&router, &bearer, "https://api.example.com").await;
     crate::rest_executor::spec_fetch_mock::clear();
