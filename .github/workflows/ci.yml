@@ -235,8 +235,9 @@ jobs:
               crates/tidebreak-desktop/ui/src/generated/*)
                 rust=true; ui=true; workspace=true ;;
               # The UI production graph is an input to the notices; the rest of
-              # the UI tree is not.
-              crates/tidebreak-desktop/ui/package.json|crates/tidebreak-desktop/ui/pnpm-lock.yaml)
+              # the UI tree is not. pnpm-workspace.yaml carries the overrides
+              # and .npmrc the settings the generator resolves that graph with.
+              crates/tidebreak-desktop/ui/package.json|crates/tidebreak-desktop/ui/pnpm-lock.yaml|crates/tidebreak-desktop/ui/pnpm-workspace.yaml|crates/tidebreak-desktop/ui/.npmrc|crates/tidebreak-desktop/ui/.pnpmfile.cjs)
                 notices=true; ui=true ;;
               crates/tidebreak-desktop/ui/*) ui=true ;;
               # Nothing in the workspace depends on tidebreak-desktop, and the
@@ -410,13 +411,12 @@ jobs:
           node-version: 22
           cache: pnpm
           cache-dependency-path: crates/tidebreak-desktop/ui/pnpm-lock.yaml
-      - name: Install UI dependencies
-        working-directory: crates/tidebreak-desktop/ui
-        run: pnpm install --frozen-lockfile
       # Regenerate from the resolved graphs and diff against the checked-in
-      # file. The generator refuses to run against a graph it cannot back with
-      # files, so a partial checkout fails loudly instead of reporting a
-      # smaller, "clean" notice file.
+      # file. The generator installs the UI's production closure for every
+      # platform into a scratch directory itself, so no install step precedes
+      # it, and it refuses to run against a graph it cannot back with files,
+      # so a partial checkout fails loudly instead of reporting a smaller,
+      # "clean" notice file.
       - name: Check the third-party notices
         run: node scripts/generate-third-party-notices.mjs --check
 

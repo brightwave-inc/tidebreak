@@ -24,7 +24,9 @@ import {
   normalizeNoticesForComparison,
   parseSpdxIdentifiers,
   pnpmInvocation,
+  productionClosureConfig,
   renderNotices,
+  SUPPORTED_ARCHITECTURES,
 } from "./generate-third-party-notices.mjs";
 
 const repositoryRoot = path.resolve(
@@ -57,14 +59,55 @@ function writePackage(root, directory, files) {
 }
 
 test("the notices generator resolves the Windows pnpm command shim", () => {
-  assert.deepEqual(pnpmInvocation("win32", "C:\\Windows\\System32\\cmd.exe"), {
-    executable: "C:\\Windows\\System32\\cmd.exe",
-    args: ["/d", "/c", "pnpm", "licenses", "list", "--json", "--prod"],
-  });
-  assert.deepEqual(pnpmInvocation("linux"), {
+  const args = ["licenses", "list", "--json", "--prod"];
+  assert.deepEqual(
+    pnpmInvocation(args, "win32", "C:\\Windows\\System32\\cmd.exe"),
+    {
+      executable: "C:\\Windows\\System32\\cmd.exe",
+      args: ["/d", "/c", "pnpm", ...args],
+    },
+  );
+  assert.deepEqual(pnpmInvocation(args, "linux"), {
     executable: "pnpm",
-    args: ["licenses", "list", "--json", "--prod"],
+    args,
   });
+});
+
+test("the UI closure is resolved for every platform, never the generating host", () => {
+  // A package with one native build per platform must appear in full on every
+  // host, so the install must name its platforms outright. `current` would
+  // reintroduce the host into the output.
+  for (const values of Object.values(SUPPORTED_ARCHITECTURES)) {
+    assert.ok(values.length > 1);
+    assert.ok(!values.includes("current"));
+  }
+  for (const [os, cpu] of [
+    ["linux", "x64"],
+    ["linux", "arm64"],
+    ["darwin", "arm64"],
+    ["win32", "x64"],
+  ]) {
+    assert.ok(SUPPORTED_ARCHITECTURES.os.includes(os));
+    assert.ok(SUPPORTED_ARCHITECTURES.cpu.includes(cpu));
+  }
+
+  const config = productionClosureConfig(
+    "overrides:\n  left-pad@1.0.0: 1.3.0\n\n",
+  );
+  assert.equal(
+    config,
+    "overrides:\n  left-pad@1.0.0: 1.3.0\n" +
+      "supportedArchitectures:\n" +
+      `  os: [${SUPPORTED_ARCHITECTURES.os.join(", ")}]\n` +
+      `  cpu: [${SUPPORTED_ARCHITECTURES.cpu.join(", ")}]\n` +
+      "  libc: [glibc, musl]\n",
+    "the UI's own settings, overrides above all, survive ahead of the platforms",
+  );
+  assert.match(productionClosureConfig(""), /^supportedArchitectures:\n/);
+  assert.throws(
+    () => productionClosureConfig("supportedArchitectures:\n  os: [current]\n"),
+    /already sets supportedArchitectures/,
+  );
 });
 
 test("the notices check ignores Git's Windows line-ending conversion", () => {

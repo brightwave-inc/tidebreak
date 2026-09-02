@@ -5,11 +5,13 @@
 //
 // The generated file is checked in and bundled into the desktop app, so the
 // only property that matters as much as completeness is determinism: the same
-// lockfiles must always produce byte-identical output. Two rules keep that
+// lockfiles must always produce byte-identical output. Three rules keep that
 // true. Nothing derived from the host — absolute paths, timestamps, package
-// counts of the local checkout — reaches the output; and anything that could
-// silently reduce coverage (an unpacked source tree that is missing, a package
-// manager that reports no graph) is a hard error rather than a smaller file.
+// counts of the local checkout — reaches the output; both graphs are resolved
+// for every platform the lockfiles can ship to, not the one generating the
+// file; and anything that could silently reduce coverage (an unpacked source
+// tree that is missing, a package manager that reports no graph) is a hard
+// error rather than a smaller file.
 //
 // Dependency-light on purpose: `cargo metadata` and `pnpm licenses list` are
 // already required to build the product, and both are invoked as pure graph
@@ -20,12 +22,16 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import {
+  copyFileSync,
   existsSync,
+  mkdtempSync,
   readFileSync,
   readdirSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -51,6 +57,60 @@ const LICENSE_FILE_PATTERN =
 const MEANINGFUL_TEXT_PATTERN = /[A-Za-z]/;
 
 const UNDECLARED_LICENSE = "not declared by the package";
+
+// pnpm installs only the optional dependencies whose `os`, `cpu`, and `libc`
+// match the host, and `pnpm licenses list` reports only what is installed. A
+// package that publishes one native build per platform (TypeScript 7's
+// compiler, for example) would therefore make the notices depend on where
+// they were generated: each host sees its own variant and none of the others,
+// and a file regenerated on Linux fails the check on macOS and Windows.
+//
+// So the production closure is resolved in a scratch copy of the UI project
+// that pnpm is told to install for every platform, the same way the Cargo
+// graph is read with `--all-features` to cover other targets. The lists are
+// explicit rather than `current` so the closure is the same on every host;
+// they are the platform and architecture names npm packages declare, which are
+// Node's `process.platform` and `process.arch` values plus the WebAssembly
+// pseudo-architecture. Production only: development dependencies are not
+// distributed, and their native variants would add gigabytes for nothing.
+export const SUPPORTED_ARCHITECTURES = {
+  os: [
+    "aix",
+    "android",
+    "cygwin",
+    "darwin",
+    "freebsd",
+    "linux",
+    "netbsd",
+    "openbsd",
+    "openharmony",
+    "sunos",
+    "win32",
+  ],
+  cpu: [
+    "arm",
+    "arm64",
+    "ia32",
+    "loong64",
+    "mips",
+    "mipsel",
+    "mips64el",
+    "ppc",
+    "ppc64",
+    "riscv64",
+    "s390",
+    "s390x",
+    "wasm32",
+    "x64",
+  ],
+  libc: ["glibc", "musl"],
+};
+
+// Files pnpm reads when resolving and installing the UI project, and so the
+// files that decide the production closure. `overrides` live in
+// pnpm-workspace.yaml, which is why it must travel with the lockfile.
+const UI_CLOSURE_FILES = ["package.json", "pnpm-lock.yaml"];
+const UI_CLOSURE_OPTIONAL_FILES = ["pnpm-workspace.yaml", ".npmrc", ".pnpmfile.cjs"];
 
 // Curated license facts, for packages whose terms are established somewhere
 // other than their own manifest.
@@ -341,8 +401,7 @@ export function collectNodePackages(
         const manifestPath = path.join(packageDirectory, "package.json");
         if (!isFile(manifestPath)) {
           throw new Error(
-            `no installed package for ${entry.name} ${version} at ${packageDirectory}; ` +
-              "run `pnpm install --frozen-lockfile` and regenerate",
+            `no installed package for ${entry.name} ${version} at ${packageDirectory}`,
           );
         }
         const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
@@ -443,8 +502,9 @@ export function renderNotices({ rustPackages, nodePackages }) {
     "",
     "It covers every package in the resolved Cargo workspace graph that is not",
     "a Tidebreak crate, and every package in the desktop UI's production",
-    "dependency graph. Development-only dependencies are excluded because they",
-    "are not distributed.",
+    "dependency graph, on every platform either graph can be built for.",
+    "Development-only dependencies are excluded because they are not",
+    "distributed.",
     "",
     "Each entry records the license expression the package declares, verbatim.",
     "A compound expression is reproduced as written rather than resolved to one",
@@ -503,10 +563,10 @@ function runCargoMetadata(root) {
 }
 
 export function pnpmInvocation(
+  args,
   platform = process.platform,
   commandInterpreter = process.env.ComSpec,
 ) {
-  const args = ["licenses", "list", "--json", "--prod"];
   if (platform === "win32") {
     return {
       executable: commandInterpreter?.trim() || "cmd.exe",
@@ -516,24 +576,83 @@ export function pnpmInvocation(
   return { executable: "pnpm", args };
 }
 
-function runPnpmLicenses(uiDirectory) {
+function runPnpm(args, cwd) {
   // On Windows pnpm is exposed as a .cmd shim, which Node cannot execute
   // directly. Run it through cmd.exe even when this script was launched from
   // Git Bash; Unix hosts keep the direct, shell-free invocation.
-  const pnpm = pnpmInvocation();
-  const output = execFileSync(
-    pnpm.executable,
-    pnpm.args,
-    { cwd: uiDirectory, encoding: "utf8", maxBuffer: 128 * 1024 * 1024 },
-  );
-  const parsed = JSON.parse(output);
-  if (!parsed || typeof parsed !== "object" || Object.keys(parsed).length === 0) {
+  const pnpm = pnpmInvocation(args);
+  return execFileSync(pnpm.executable, pnpm.args, {
+    cwd,
+    encoding: "utf8",
+    maxBuffer: 128 * 1024 * 1024,
+    stdio: ["ignore", "pipe", "inherit"],
+  });
+}
+
+// The pnpm-workspace.yaml the scratch project installs with: the UI's own
+// settings (overrides above all) plus the platform lists. A project that
+// already chooses its architectures would be silently overruled by a second
+// key, so that is refused until someone reconciles the two.
+export function productionClosureConfig(workspaceConfig) {
+  if (/^supportedArchitectures\s*:/m.test(workspaceConfig)) {
     throw new Error(
-      `pnpm reported no production dependencies in ${uiDirectory}; ` +
-        "run `pnpm install --frozen-lockfile` and regenerate",
+      `${UI_RELATIVE_PATH}/pnpm-workspace.yaml already sets ` +
+        "supportedArchitectures; reconcile it with SUPPORTED_ARCHITECTURES " +
+        "in the notices generator",
     );
   }
-  return parsed;
+  const block = [
+    "supportedArchitectures:",
+    ...Object.entries(SUPPORTED_ARCHITECTURES).map(
+      ([key, values]) => `  ${key}: [${values.join(", ")}]`,
+    ),
+  ].join("\n");
+  const base = workspaceConfig.replace(/\s+$/, "");
+  return base ? `${base}\n${block}\n` : `${block}\n`;
+}
+
+// Install the UI's production closure for every platform into a scratch
+// directory and hand its `pnpm licenses list` graph to `callback`, which must
+// read every package file it needs before returning: the directory is removed
+// afterwards. The install is `--frozen-lockfile`, so the scratch resolution is
+// the checked-in one, and `--ignore-scripts`, because nothing here runs.
+function withProductionClosure(uiDirectory, callback) {
+  const scratch = mkdtempSync(path.join(tmpdir(), "tidebreak-notices-"));
+  try {
+    for (const name of UI_CLOSURE_FILES) {
+      copyFileSync(path.join(uiDirectory, name), path.join(scratch, name));
+    }
+    for (const name of UI_CLOSURE_OPTIONAL_FILES) {
+      const source = path.join(uiDirectory, name);
+      if (isFile(source)) copyFileSync(source, path.join(scratch, name));
+    }
+    const workspaceFile = path.join(scratch, "pnpm-workspace.yaml");
+    writeFileSync(
+      workspaceFile,
+      productionClosureConfig(
+        isFile(workspaceFile) ? readFileSync(workspaceFile, "utf8") : "",
+      ),
+    );
+    runPnpm(
+      ["install", "--prod", "--frozen-lockfile", "--ignore-scripts"],
+      scratch,
+    );
+    const parsed = JSON.parse(
+      runPnpm(["licenses", "list", "--json", "--prod"], scratch),
+    );
+    if (
+      !parsed ||
+      typeof parsed !== "object" ||
+      Object.keys(parsed).length === 0
+    ) {
+      throw new Error(
+        `pnpm reported no production dependencies for ${uiDirectory}`,
+      );
+    }
+    return callback(parsed);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
 }
 
 export function generateNotices({ root = repositoryRoot } = {}) {
@@ -541,14 +660,15 @@ export function generateNotices({ root = repositoryRoot } = {}) {
   const uiManifest = JSON.parse(
     readFileSync(path.join(uiDirectory, "package.json"), "utf8"),
   );
-  return renderNotices({
-    rustPackages: collectRustPackages(runCargoMetadata(root)),
-    nodePackages: collectNodePackages(runPnpmLicenses(uiDirectory), {
+  const rustPackages = collectRustPackages(runCargoMetadata(root));
+  const nodePackages = withProductionClosure(uiDirectory, (pnpmLicenses) =>
+    collectNodePackages(pnpmLicenses, {
       root,
       // The UI project itself is Tidebreak, covered by LICENSE and NOTICE.
       excludeNames: [uiManifest.name],
     }),
-  });
+  );
+  return renderNotices({ rustPackages, nodePackages });
 }
 
 export function firstDifference(expected, actual) {

@@ -572,10 +572,14 @@ Cargo workspace graph and the desktop UI's production npm graph by
 see exactly what a change to either lockfile adds to the product's obligations.
 
 - Regenerate it with `node scripts/generate-third-party-notices.mjs` after any
-  dependency change, from a checkout with UI dependencies installed. CI's
-  `third-party notices` lane runs the same generator with `--check` and fails on
-  drift, and the release build repeats that check before signing, so a tag can
-  never ship notices that disagree with its lockfiles.
+  dependency change. The generator resolves the Cargo graph with every feature
+  and installs the UI's production closure for every platform into a scratch
+  directory, so the output is the same on any host: a package that ships one
+  native build per platform is listed in full rather than as the variant the
+  generating machine happens to run. CI's `third-party notices` lane runs the
+  same generator with `--check` and fails on drift, and the release build
+  repeats that check before signing, so a tag can never ship notices that
+  disagree with its lockfiles.
 - The generator reads license facts from each package's own vendored files and
   manifest. `cargo metadata` and `pnpm licenses list` only enumerate the graphs
   and locate the packages, so neither tool's license classification can rewrite
