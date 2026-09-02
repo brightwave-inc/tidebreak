@@ -1288,6 +1288,10 @@ resume_ref?: string, } | { "type": "turn_started",
 /**
  * The turn being processed.
  */
+turn_id: CodeTurnId, } | { "type": "turn_resumed",
+/**
+ * The turn that continues.
+ */
 turn_id: CodeTurnId, } | { "type": "assistant_delta",
 /**
  * The text fragment to append.

@@ -22,8 +22,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-draft-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
+  # Every run regenerates the draft from scratch, so only the newest push to
+  # main matters. Cancelling superseded runs keeps a merge burst from spending
+  # the repository's shared GITHUB_TOKEN budget several times over. Manual
+  # dispatches get a group of their own: cancel-in-progress is evaluated by
+  # the incoming run, so a push sharing the main group would cancel a label
+  # backfill mid-loop. Dispatches queue behind each other instead.
+  group: release-draft-${{ github.event_name == 'workflow_dispatch' && 'dispatch' || github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 jobs:
   label:

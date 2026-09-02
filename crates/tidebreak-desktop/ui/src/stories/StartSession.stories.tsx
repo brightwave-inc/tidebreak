@@ -32,8 +32,8 @@ import { harnessDoctor, harnessDoctorDegraded } from "./fixtures";
 const models: Partial<Record<HarnessKind, ParsedHarnessModel[]>> = {
   claude_code: [
     {
-      id: "claude-fable-5",
-      label: "Claude Fable 5",
+      id: "claude-fable-5-1",
+      label: "Claude Fable 5.1",
       default: true,
       reasoning_efforts: [],
       fast_mode: true,

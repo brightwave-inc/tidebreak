@@ -13,8 +13,8 @@ use tidebreak_core::db::code::{
     recover_interrupted_session, replace_session_attention, save_session, set_session_subagents,
 };
 use tidebreak_core::{
-    Attention, AttentionSource, AttentionState, CodeSession, CodeSessionLifecycle,
-    CodeSubagentStatus, DbStore, FenceReason,
+    Attention, AttentionSource, AttentionState, CapLevel, CodeSession, CodeSessionLifecycle,
+    CodeSubagentStatus, DbStore, FenceReason, HarnessKind,
 };
 
 use super::attention::{emit_digest, replace_attention};
@@ -24,8 +24,28 @@ use super::session_worker::settle_running_subagents;
 /// What boot recovery did to one session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RecoveryAction {
-    Interrupted { session: String },
-    Fenced { session: String },
+    Interrupted {
+        session: String,
+    },
+    /// You kept a waiting turn open so the next worker can resume it.
+    ReattachedPark {
+        session: String,
+    },
+    Fenced {
+        session: String,
+    },
+}
+
+/// Return the `durable_parks` flag this engine declares.
+///
+/// The internal engine keeps a checkpoint across a process restart.
+/// External harnesses do not.
+pub(crate) fn durable_parks_for(kind: HarnessKind) -> CapLevel {
+    if kind.is_in_process() {
+        CapLevel::Supported
+    } else {
+        CapLevel::Unsupported
+    }
 }
 
 /// Probe result for a pid that was recorded at spawn.
@@ -48,6 +68,18 @@ pub(crate) async fn recover_running_sessions_with(
     bus: &CodeEventBus,
     probe: impl Fn(i64, Option<&str>) -> PidLiveness,
 ) -> Result<Vec<RecoveryAction>, tidebreak_core::AgentError> {
+    recover_running_sessions_with_caps(store, bus, probe, |session| {
+        durable_parks_for(session.harness_kind)
+    })
+    .await
+}
+
+pub(crate) async fn recover_running_sessions_with_caps(
+    store: &DbStore,
+    bus: &CodeEventBus,
+    probe: impl Fn(i64, Option<&str>) -> PidLiveness,
+    durable_parks: impl Fn(&CodeSession) -> CapLevel,
+) -> Result<Vec<RecoveryAction>, tidebreak_core::AgentError> {
     let running =
         list_sessions_by_lifecycle_all_owners(store, CodeSessionLifecycle::Running).await?;
     let mut actions = Vec::new();
@@ -61,7 +93,8 @@ pub(crate) async fn recover_running_sessions_with(
                 continue;
             }
         }
-        if let Some(action) = recover_one(store, bus, session, &probe).await? {
+        let parks = durable_parks(&session);
+        if let Some(action) = recover_one(store, bus, session, &probe, parks).await? {
             actions.push(action);
         }
     }
@@ -250,25 +283,14 @@ async fn recover_one(
     bus: &CodeEventBus,
     mut session: CodeSession,
     probe: &impl Fn(i64, Option<&str>) -> PidLiveness,
+    durable_parks: CapLevel,
 ) -> Result<Option<RecoveryAction>, tidebreak_core::AgentError> {
     let Some(pid) = session.child_pid else {
         // No recorded pid: treat as dead. Never invent a pid to probe.
-        let Some(session) = recover_dead_worker(store, bus, &session).await? else {
-            return Ok(None);
-        };
-        return Ok(Some(RecoveryAction::Interrupted {
-            session: session.id.to_string(),
-        }));
+        return dead_worker_action(store, bus, &session, durable_parks).await;
     };
     match probe(pid, session.child_process_identity.as_deref()) {
-        PidLiveness::Dead => {
-            let Some(session) = recover_dead_worker(store, bus, &session).await? else {
-                return Ok(None);
-            };
-            Ok(Some(RecoveryAction::Interrupted {
-                session: session.id.to_string(),
-            }))
-        }
+        PidLiveness::Dead => dead_worker_action(store, bus, &session, durable_parks).await,
         PidLiveness::Alive => {
             settle_running_subagents(&mut session.subagents, CodeSubagentStatus::Failed);
             session.lifecycle = CodeSessionLifecycle::Fenced;
@@ -293,15 +315,32 @@ async fn recover_one(
 
 /// Settle a session whose worker died with a turn still open: interrupt the
 /// turn, journal it, set needs-you, and go Idle, all in one fenced
-/// transaction. Remote sessions reuse this when the sandbox ends beneath an
-/// unsettled turn.
+/// transaction — unless the engine declares durable parks and the open turn
+/// is waiting on a park, in which case the turn stays waiting so a restarted
+/// worker can resume it. Remote sessions reuse this when the sandbox ends
+/// beneath an unsettled turn.
 pub(crate) async fn recover_dead_worker(
     store: &DbStore,
     bus: &CodeEventBus,
     session: &CodeSession,
 ) -> Result<Option<CodeSession>, tidebreak_core::AgentError> {
-    let Some(recovered) =
-        recover_interrupted_session(store, &session.owner, session.id, session.spawn_epoch).await?
+    recover_dead_worker_with(store, bus, session, durable_parks_for(session.harness_kind)).await
+}
+
+pub(crate) async fn recover_dead_worker_with(
+    store: &DbStore,
+    bus: &CodeEventBus,
+    session: &CodeSession,
+    durable_parks: CapLevel,
+) -> Result<Option<CodeSession>, tidebreak_core::AgentError> {
+    let Some(recovered) = recover_interrupted_session(
+        store,
+        &session.owner,
+        session.id,
+        session.spawn_epoch,
+        durable_parks,
+    )
+    .await?
     else {
         return Ok(None);
     };
@@ -310,6 +349,30 @@ pub(crate) async fn recover_dead_worker(
     }
     emit_digest(store, bus, &recovered.session).await;
     Ok(Some(recovered.session))
+}
+
+async fn dead_worker_action(
+    store: &DbStore,
+    bus: &CodeEventBus,
+    session: &CodeSession,
+    durable_parks: CapLevel,
+) -> Result<Option<RecoveryAction>, tidebreak_core::AgentError> {
+    let Some(recovered) = recover_dead_worker_with(store, bus, session, durable_parks).await?
+    else {
+        return Ok(None);
+    };
+    let action =
+        match tidebreak_core::db::code::get_open_turn(store, &session.owner, session.id).await? {
+            Some(turn) if turn.status == tidebreak_core::CodeTurnStatus::Waiting => {
+                RecoveryAction::ReattachedPark {
+                    session: recovered.id.to_string(),
+                }
+            }
+            _ => RecoveryAction::Interrupted {
+                session: recovered.id.to_string(),
+            },
+        };
+    Ok(Some(action))
 }
 
 /// Existence probe of a pid that was recorded at spawn.
@@ -421,13 +484,14 @@ mod tests {
     use std::sync::Arc;
     use tidebreak_core::db::code::{
         get_approval, get_session, get_turn, insert_approval, insert_repo, insert_session,
-        insert_turn, insert_workspace, list_events, set_session_subagents, MAX_REPLAY_EVENTS,
+        insert_turn, insert_workspace, list_events, save_turn, set_session_subagents,
+        MAX_REPLAY_EVENTS,
     };
     use tidebreak_core::{
         ApprovalDecisionKind, Attention, CodeApproval, CodeApprovalId, CodeApprovalKind,
         CodeApprovalState, CodeEvent, CodeRepo, CodeSessionId, CodeSessionKind,
         CodeSubagentSummary, CodeTurn, CodeTurnId, CodeTurnStatus, CodeWorkspace,
-        CodeWorkspaceStatus, HarnessKind, PermissionMode, RepoId, WorkspaceId,
+        CodeWorkspaceStatus, HarnessKind, PermissionMode, RepoId, TurnParkWait, WorkspaceId,
     };
     use tidebreak_harness::HarnessAdapter;
 
@@ -1238,6 +1302,236 @@ mod tests {
         assert_eq!(probe_recorded_pid(self_pid), PidLiveness::Alive);
         assert_eq!(probe_recorded_pid(-1), PidLiveness::Dead);
         assert_eq!(probe_recorded_pid(0), PidLiveness::Dead);
+    }
+
+    async fn park_waiting_turn(store: &DbStore, turn_id: CodeTurnId) {
+        let owner = tidebreak_core::OwnerId::local();
+        let mut turn = get_turn(store, &owner, turn_id).await.unwrap().unwrap();
+        turn.status = CodeTurnStatus::Waiting;
+        turn.park_ref = Some("cp-1".into());
+        turn.park_wait = Some(TurnParkWait::Approval {
+            call_id: "call-1".into(),
+        });
+        assert!(save_turn(store, &owner, &turn).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn recovery_interrupts_a_waiting_turn_without_durable_parks() {
+        let (_dir, store, session_id, turn_id) = seeded_running(None).await;
+        park_waiting_turn(&store, turn_id).await;
+        let bus = crate::code::bus::CodeEventBus::default();
+        let actions = recover_running_sessions_with(&store, &bus, |_, _| PidLiveness::Dead)
+            .await
+            .unwrap();
+        assert!(matches!(
+            actions.as_slice(),
+            [RecoveryAction::Interrupted { .. }]
+        ));
+        let turn = get_turn(&store, &tidebreak_core::OwnerId::local(), turn_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(turn.status, CodeTurnStatus::Interrupted);
+        let events = list_events(
+            &store,
+            &tidebreak_core::OwnerId::local(),
+            session_id,
+            0,
+            MAX_REPLAY_EVENTS,
+        )
+        .await
+        .unwrap()
+        .events;
+        assert!(matches!(
+            &events[0].event,
+            CodeEvent::TurnInterrupted { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn recovery_resumes_a_parked_turn_after_a_worker_restart() {
+        let (directory, store, session_id, turn_id) = seeded_running(None).await;
+        park_waiting_turn(&store, turn_id).await;
+        let approval_id = seed_pending_approval(&store, session_id, turn_id).await;
+        let bus = crate::code::bus::CodeEventBus::default();
+        let actions = recover_running_sessions_with_caps(
+            &store,
+            &bus,
+            |_, _| PidLiveness::Dead,
+            |_| CapLevel::Supported,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            actions.as_slice(),
+            [RecoveryAction::ReattachedPark { .. }]
+        ));
+        let owner = tidebreak_core::OwnerId::local();
+        let turn = get_turn(&store, &owner, turn_id).await.unwrap().unwrap();
+        assert_eq!(turn.status, CodeTurnStatus::Waiting);
+        assert_eq!(turn.park_ref.as_deref(), Some("cp-1"));
+        assert_eq!(
+            get_approval(&store, &owner, approval_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            CodeApprovalState::Pending
+        );
+        let events = list_events(&store, &owner, session_id, 0, MAX_REPLAY_EVENTS)
+            .await
+            .unwrap()
+            .events;
+        assert!(
+            events
+                .iter()
+                .all(|event| !matches!(event.event, CodeEvent::TurnInterrupted { .. })),
+            "a durable park must not journal an interrupt"
+        );
+
+        let store = Arc::new(store);
+        let bus = Arc::new(bus);
+        let session = get_session(&store, &owner, session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let sink = crate::code::session_worker::sink_for(
+            store.clone(),
+            bus.clone(),
+            session.owner.clone(),
+            session_id,
+            session.spawn_epoch,
+            session.harness_kind,
+            false,
+            None,
+            session.subagents.clone(),
+            None,
+            None,
+            None,
+            crate::code::pr_refresh::HotPullRequests::default(),
+        );
+        let worktree = directory.path().join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let private = directory.path().join("private");
+        std::fs::create_dir(&private).unwrap();
+        let private_root =
+            crate::code::scratch::ScratchRoot::open_for_test(&private).expect("scratch root");
+        let adapter = crate::scripted_harness::ScriptedAdapter::new(vec![
+            tidebreak_harness::HarnessEvent::TurnStarted,
+            tidebreak_harness::HarnessEvent::ApprovalRequested {
+                harness_ref: tidebreak_harness::HarnessApprovalRef::engine("call-1"),
+                raw: serde_json::json!({ "tool_name": "Write" }),
+                kind: None,
+            },
+            tidebreak_harness::HarnessEvent::AssistantMessage {
+                text: "resumed after the restart".into(),
+                parent_call_id: None,
+            },
+            tidebreak_harness::HarnessEvent::TurnCompleted {
+                usage: tidebreak_core::CodeUsage::default(),
+            },
+        ])
+        .with_unattended_approvals()
+        .with_parked_turn(
+            2,
+            "cp-1",
+            tidebreak_harness::ParkWait::Approval {
+                call_id: "call-1".into(),
+            },
+        );
+        let engine = adapter
+            .launch(tidebreak_harness::SessionSpec {
+                owner: tidebreak_core::OwnerId::local(),
+                session_id: tidebreak_core::CodeSessionId::new(),
+                worktree,
+                allowed_read_roots: Vec::new(),
+                permission_mode: session.permission_mode,
+                model: None,
+                reasoning_effort: None,
+                fast_mode: false,
+                resume_ref: None,
+                extra_argv: Vec::new(),
+                extra_env: Vec::new(),
+                relay_key_env: None,
+                env: Vec::new(),
+                approval: None,
+                binary: Some(std::path::PathBuf::from("/scripted/engine")),
+                sink: sink.clone() as Arc<dyn tidebreak_harness::HarnessEventSink>,
+                browser: None,
+            })
+            .await
+            .unwrap();
+        let handle = crate::code::session_worker::spawn_session_worker(
+            session,
+            engine,
+            sink,
+            crate::code::session_worker::AttachmentStore {
+                blobs: None,
+                private_root,
+                engine_reads_images: false,
+            },
+            Arc::new(tokio::sync::Mutex::new(())),
+            tokio::sync::watch::channel(false).1,
+        );
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let current = get_session(&store, &owner, session_id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if current.lifecycle == CodeSessionLifecycle::Running {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the recovered worker re-attaches the parked turn");
+
+        let (decide_reply, decide_response) = tokio::sync::oneshot::channel();
+        handle
+            .commands
+            .send(crate::code::session_worker::WorkerCommand::Decide {
+                approval: tidebreak_harness::HarnessApprovalRef::engine("call-1"),
+                decision: Box::new(tidebreak_harness::ApprovalDecision::Approve),
+                reply: decide_reply,
+            })
+            .await
+            .unwrap();
+        decide_response.await.unwrap().unwrap();
+
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let turn = get_turn(&store, &owner, turn_id).await.unwrap().unwrap();
+                if turn.status == CodeTurnStatus::Completed {
+                    break turn;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the park resolves after resume");
+        assert_eq!(completed.park_ref, None);
+        assert_eq!(
+            adapter.resumes().len(),
+            1,
+            "one resume for the recovered park"
+        );
+        let events = list_events(&store, &owner, session_id, 0, MAX_REPLAY_EVENTS)
+            .await
+            .unwrap()
+            .events;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event.event, CodeEvent::TurnResumed { .. })),
+            "the journal records the resume"
+        );
+        let _ = handle
+            .commands
+            .send(crate::code::session_worker::WorkerCommand::Shutdown)
+            .await;
     }
 
     #[cfg(windows)]

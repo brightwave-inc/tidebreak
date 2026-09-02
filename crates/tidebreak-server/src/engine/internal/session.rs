@@ -24,10 +24,10 @@ use tidebreak_core::{
     chat_journal, AcceptTurnOutcome, AcceptTurnSteerOutcome, AnswerUserQuestions,
     AnswerUserQuestionsOutcome, AnswerUserQuestionsRequest, ApprovalDecisionKind, Attention,
     AttentionSource, BeginTurnAdmissionOutcome, CallId, ChatId, CodeApprovalKind, CodeEvent,
-    CodeSessionId, DecidePlanRequest, GrantLevel, GrantScope, ImageRef, InternalApprovalRequest,
-    OwnerId, PermissionMode, PlanDecision, PlanDecisionChoice, ReservedTurnAcceptanceOutcome,
-    SequencedCodeEvent, SequencedEvent, StandingGrant, ToolApprovalStatus, TurnAdmissionRequest,
-    TurnId, TurnSteerId, DEFAULT_ACCEPTED_PLAN_MODE,
+    CodeSessionId, CodeTurnStatus, DecidePlanRequest, GrantLevel, GrantScope, ImageRef,
+    InternalApprovalRequest, OwnerId, PermissionMode, PlanDecision, PlanDecisionChoice,
+    ReservedTurnAcceptanceOutcome, SequencedCodeEvent, SequencedEvent, StandingGrant,
+    ToolApprovalStatus, TurnAdmissionRequest, TurnId, TurnSteerId, DEFAULT_ACCEPTED_PLAN_MODE,
 };
 use tidebreak_harness::{
     ApprovalDecision, HarnessApprovalRef, HarnessError, HarnessEvent, HarnessEventSink,
@@ -121,7 +121,7 @@ impl InternalSession {
             .ensure_foreground_agent_run(chat_id)
             .await
             .map_err(store_error)?;
-        Ok(Self {
+        let session = Self {
             state,
             db,
             bus,
@@ -131,7 +131,49 @@ impl InternalSession {
             sink: spec.sink,
             active: Mutex::new(None),
             decided: Mutex::new(HashSet::new()),
-        })
+        };
+        session.restore_parked_turn().await?;
+        Ok(session)
+    }
+
+    /// Re-attach a waiting turn that survived a worker restart.
+    ///
+    /// `launch` always starts with no in-memory turn. A durable park still
+    /// names the checkpoint on the turn row, so you put that turn back on
+    /// `active` before `resume_turn` runs. `last_seq` is the journal tail
+    /// so you do not replay the park that already landed.
+    async fn restore_parked_turn(&self) -> Result<(), HarnessError> {
+        let Some(turn) =
+            tidebreak_core::db::code::get_open_turn(&self.db, &self.owner, self.session_id)
+                .await
+                .map_err(store_error)?
+        else {
+            return Ok(());
+        };
+        if turn.status != CodeTurnStatus::Waiting || turn.park_ref.is_none() {
+            return Ok(());
+        }
+        // `active` is the chat-lane turn id from `submit`, not the code
+        // turn row. Look up the live `turn_run` so interrupt and steer
+        // still address the parked lane turn after a restart.
+        let Some(run) = self
+            .state
+            .store
+            .list_turn_runs(self.chat_id)
+            .await
+            .map_err(store_error)?
+            .into_iter()
+            .find(|run| run.status.is_live())
+        else {
+            return Ok(());
+        };
+        let last_seq = self.journal_tail().await?;
+        *self.active.lock().expect("active turn") = Some(ActiveTurn {
+            turn_id: run.id,
+            last_seq,
+            started: true,
+        });
+        Ok(())
     }
 
     fn active_turn(&self) -> Option<TurnId> {
@@ -765,6 +807,9 @@ impl HarnessSession for InternalSession {
         park_ref: String,
         input: ResumeInput,
     ) -> Result<TurnOutcome, HarnessError> {
+        if self.active_turn().is_none() {
+            self.restore_parked_turn().await?;
+        }
         let Some(turn_id) = self.active_turn() else {
             return Err(HarnessError::Other(format!(
                 "no parked turn to resume for {park_ref}"

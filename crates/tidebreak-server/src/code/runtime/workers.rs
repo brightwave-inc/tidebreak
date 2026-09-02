@@ -318,6 +318,7 @@ impl CodeRuntime {
                 queue: handle.queue.clone(),
                 sink: handle.sink.clone(),
                 approval_decisions: handle.approval_decisions.clone(),
+                abort: handle.abort.clone(),
             })
             .ok_or_else(|| {
                 ServerError::conflict_kind(

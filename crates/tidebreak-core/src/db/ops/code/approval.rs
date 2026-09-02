@@ -606,6 +606,17 @@ pub async fn abandon_pending_approvals_for_stopped_session(
     {
         return Ok(Vec::new());
     }
+    let waiting_turn_ids: std::collections::HashSet<uuid::Uuid> =
+        entities::code_turn::Entity::find()
+            .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
+            .filter(entities::code_turn::Column::SessionId.eq(session_id.0))
+            .filter(entities::code_turn::Column::Status.eq(CodeTurnStatus::Waiting.as_str()))
+            .all(&transaction)
+            .await
+            .map_err(store_err)?
+            .into_iter()
+            .map(|row| row.id)
+            .collect();
     let rows = entities::code_approval::Entity::find()
         .filter(entities::code_approval::Column::Owner.eq(owner.as_str()))
         .filter(entities::code_approval::Column::SessionId.eq(session_id.0))
@@ -614,7 +625,10 @@ pub async fn abandon_pending_approvals_for_stopped_session(
         .order_by_asc(entities::code_approval::Column::RequestedAt)
         .all(&transaction)
         .await
-        .map_err(store_err)?;
+        .map_err(store_err)?
+        .into_iter()
+        .filter(|row| !waiting_turn_ids.contains(&row.turn_id))
+        .collect::<Vec<_>>();
     let mut abandoned = Vec::new();
     for row in rows {
         let claim = match row.decision_claim {
@@ -638,6 +652,43 @@ pub async fn abandon_pending_approvals_for_stopped_session(
     }
     transaction.commit().await.map_err(store_err)?;
     Ok(abandoned)
+}
+
+/// Point a waiting turn's pending approvals at the worker that just attached.
+///
+/// Recovery leaves those rows pending so the park can still resolve. The
+/// attach bumps `spawn_epoch`, and decide checks that the approval's worker
+/// epoch matches the live session, so you rewrite the rows onto the new
+/// epoch before the worker waits on the park. You also drop any in-flight
+/// claim: the native waiter that held it died with the old worker.
+pub async fn rebind_pending_approvals_to_worker(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+    turn_id: CodeTurnId,
+    to_epoch: i64,
+) -> Result<u64> {
+    let result = entities::code_approval::Entity::update_many()
+        .col_expr(
+            entities::code_approval::Column::WorkerEpoch,
+            sea_orm::sea_query::Expr::value(Some(to_epoch)),
+        )
+        .col_expr(
+            entities::code_approval::Column::DecisionClaim,
+            sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
+        )
+        .col_expr(
+            entities::code_approval::Column::ClaimedAt,
+            sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<chrono::Utc>>::None),
+        )
+        .filter(entities::code_approval::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_approval::Column::SessionId.eq(session_id.0))
+        .filter(entities::code_approval::Column::TurnId.eq(turn_id.0))
+        .filter(entities::code_approval::Column::State.eq(CodeApprovalState::Pending.as_str()))
+        .exec(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(result.rows_affected)
 }
 
 /// The owner's approvals, optionally filtered by state and session.

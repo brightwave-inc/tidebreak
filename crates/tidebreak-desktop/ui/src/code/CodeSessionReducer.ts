@@ -822,6 +822,26 @@ export function reduceCodeSessionEvent(
         effects,
       };
 
+    case "turn_resumed": {
+      // Same turn, not a new one. Keep the transcript on this turn so the
+      // journal reads as a resume rather than a restart.
+      return {
+        state: {
+          ...state,
+          busy: true,
+          activeTurnId: event.turn_id,
+          journalTurnId: event.turn_id,
+          items: insertBeforeTurnBoundary(state.items, event.turn_id, {
+            kind: "notice",
+            id: deps.nextId(),
+            level: "info",
+            message: "The turn resumed after the worker restarted.",
+          }),
+        },
+        effects,
+      };
+    }
+
     case "turn_started": {
       effects.push({ type: "turn_began", turnId: event.turn_id });
       const anchored = anchorUnattributedTerminals(state, event.turn_id);
