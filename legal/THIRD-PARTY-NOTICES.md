@@ -7789,7 +7789,7 @@ License identifiers named across all declared expressions:
 - Repository: alexeyraspopov/picocolors
 - License text: `LICENSE` ([L-fa11af88c78d](#l-fa11af88c78d))
 
-### plotly.js-dist-min 3.7.0
+### plotly.js-dist-min 4.0.0
 
 - License: `MIT`
 - Repository: git+https://github.com/plotly/plotly.js.git
