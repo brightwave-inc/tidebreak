@@ -566,6 +566,31 @@ pub(crate) async fn resolve_default_base_ref(
     Err(WorktreeError::missing_base_ref(looked_for, &tried))
 }
 
+/// Resolve one requested ref, including `origin/<name>` when the local branch
+/// is missing. Does not walk sibling default names.
+pub(crate) async fn resolve_named_base_ref(
+    repo_root: &Path,
+    reference: &str,
+) -> Result<String, WorktreeError> {
+    let reference = reference.trim();
+    if reference.is_empty() {
+        return Err(WorktreeError::user(
+            "You cannot start from an empty base ref.",
+        ));
+    }
+    let mut tried = Vec::new();
+    for candidate in base_ref_candidates(reference) {
+        if tried.contains(&candidate) {
+            continue;
+        }
+        tried.push(candidate.clone());
+        if verify_commit(repo_root, &candidate).await?.is_some() {
+            return Ok(candidate);
+        }
+    }
+    Err(WorktreeError::missing_base_ref(reference, &tried))
+}
+
 /// Create a worktree and branch under the Tidebreak data directory.
 pub(crate) async fn create_worktree(
     repo_root: &Path,
@@ -2429,6 +2454,25 @@ mod tests {
 
         let resolved = resolve_default_base_ref(&repo, Some("main")).await.unwrap();
         assert_eq!(resolved, "origin/trunk");
+    }
+
+    #[tokio::test]
+    async fn named_base_ref_does_not_fall_through_to_the_current_branch() {
+        let (_dir, repo) = init_named_repo("trunk", true);
+        let err = resolve_named_base_ref(&repo, "feature-x")
+            .await
+            .unwrap_err();
+        match &err {
+            WorktreeError::MissingBaseRef { looked_for, tried } => {
+                assert_eq!(looked_for, "feature-x");
+                assert!(tried.contains("feature-x"), "{tried}");
+                assert!(
+                    !tried.contains("trunk"),
+                    "an explicit miss must not walk sibling defaults: {tried}"
+                );
+            }
+            other => panic!("expected MissingBaseRef, got {other:?}"),
+        }
     }
 
     #[tokio::test]

@@ -988,3 +988,46 @@ async fn workspace_create_names_the_missing_base_ref_when_nothing_resolves() {
         "error must name the candidates you tried: {message}"
     );
 }
+
+#[tokio::test]
+async fn workspace_create_does_not_fall_through_an_explicit_missing_ref() {
+    let (router, token, _runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo_on_branch(dir.path(), "trunk", true);
+
+    let registered = client
+        .post(format!("http://{addr}/code/repos"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "path": repo }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(registered.status(), reqwest::StatusCode::CREATED);
+    let repo_body: serde_json::Value = registered.json().await.unwrap();
+    assert_eq!(repo_body["default_base_ref"], "trunk");
+
+    let created = client
+        .post(format!("http://{addr}/code/workspaces"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "repo_id": json_id(&repo_body),
+            "title": "first change",
+            "base_ref": "feature-x",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = created.json().await.unwrap();
+    assert_eq!(body["kind"], "missing_base_ref");
+    let message = body["message"].as_str().unwrap_or("");
+    assert!(
+        message.contains("`feature-x`"),
+        "error must name the missing ref: {message}"
+    );
+    assert!(
+        !message.contains("trunk"),
+        "an explicit miss must not walk sibling defaults: {message}"
+    );
+}
