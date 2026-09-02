@@ -13,7 +13,7 @@
 
 use std::path::Path;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// The curated-registry entry a configured server matched, projected to the
 /// renderer beside the server's health.
@@ -21,16 +21,17 @@ use serde::Serialize;
 /// Presence *is* the tier: a server with a curation is "tested", a server
 /// without one is "community". One field cannot disagree with itself the way
 /// a separate boolean and a separate record could.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
-pub(crate) struct McpCuration {
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(deny_unknown_fields)]
+pub struct McpCuration {
     /// The curated list's own name for the server, which need not match the
     /// namespace the reader configured it under.
-    pub(crate) display_name: String,
+    pub display_name: String,
     /// `YYYY-MM-DD` the entry was last exercised end to end.
-    pub(crate) tested_on: String,
+    pub tested_on: String,
     /// One sentence on what was exercised, for the reader deciding how much
     /// the badge is worth.
-    pub(crate) notes: String,
+    pub notes: String,
 }
 
 /// How a curated entry recognises a stdio definition.

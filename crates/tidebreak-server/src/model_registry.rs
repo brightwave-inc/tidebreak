@@ -22,7 +22,7 @@ pub enum InputModality {
 }
 
 /// How thoroughly Tidebreak has exercised a model's agent-facing behavior.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, ts_rs::TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
 pub enum VerificationTier {
     /// Tool-calling and streaming have been exercised end to end.

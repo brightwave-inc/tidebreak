@@ -16,7 +16,7 @@ use tidebreak_core::{
 use uuid::Uuid;
 
 use crate::api::client::Client;
-use crate::api::wire::{OutputPreview, OutputRevisionRow, OutputSummary};
+use crate::api::wire::{DeliverablePreview, DeliverableSummary, OutputRevisionInfo};
 use crate::connect::{Server, Session};
 use crate::print::OutputFormat;
 
@@ -74,7 +74,7 @@ async fn execute(client: &Client, command: Command, format: OutputFormat) -> Res
                     output.media_type,
                     output.size_bytes,
                     output.revision_count,
-                    output.updated_at
+                    output.updated_at.to_rfc3339()
                 );
             }
             if catalog.truncated {
@@ -132,8 +132,8 @@ async fn execute(client: &Client, command: Command, format: OutputFormat) -> Res
                     revision.revision_id,
                     revision.ordinal,
                     revision.size_bytes,
-                    revision.produced_by,
-                    revision.created_at,
+                    revision.produced_by.as_str(),
+                    revision.created_at.to_rfc3339(),
                     if revision.is_current { "\tcurrent" } else { "" }
                 );
             }
@@ -163,7 +163,7 @@ async fn execute(client: &Client, command: Command, format: OutputFormat) -> Res
     }
 }
 
-fn output_summary_json(output: &OutputSummary) -> serde_json::Value {
+fn output_summary_json(output: &DeliverableSummary) -> serde_json::Value {
     serde_json::json!({
         "outputId": output.output_id,
         "filename": output.filename,
@@ -174,7 +174,7 @@ fn output_summary_json(output: &OutputSummary) -> serde_json::Value {
     })
 }
 
-fn output_preview_json(preview: &OutputPreview) -> serde_json::Value {
+fn output_preview_json(preview: &DeliverablePreview) -> serde_json::Value {
     serde_json::json!({
         "filename": preview.filename,
         "mediaType": preview.media_type,
@@ -184,7 +184,7 @@ fn output_preview_json(preview: &OutputPreview) -> serde_json::Value {
     })
 }
 
-fn output_revision_json(revision: &OutputRevisionRow) -> serde_json::Value {
+fn output_revision_json(revision: &OutputRevisionInfo) -> serde_json::Value {
     serde_json::json!({
         "revisionId": revision.revision_id,
         "ordinal": revision.ordinal,

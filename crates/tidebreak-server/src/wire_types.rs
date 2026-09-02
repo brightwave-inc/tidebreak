@@ -1366,4 +1366,494 @@ mod tests {
             assert_eq!(again, frame, "fixture {name} changed across the round trip");
         }
     }
+
+    // ------------------------------------------------------------------
+    // REST records (brightwave-inc/tidebreak#3005): the response types the
+    // CLI reads over HTTP, fixtured the same way as the chat frames.
+    // ------------------------------------------------------------------
+
+    /// Path of the shared REST record fixtures, relative to this crate.
+    const REST_RECORDS: &str = "fixtures/rest-records.json";
+
+    /// The record types with a fixture, spelled as the fixture file tags them.
+    ///
+    /// A client decodes each entry through the type its tag names, so the
+    /// list is the contract: a type added to [`crate::wire`] without a tag
+    /// here has no fixture, and [`rest_record_fixtures_cover_every_type`]
+    /// fails until it gets one.
+    const REST_RECORD_TYPES: &[&str] = &[
+        "ModelCatalog",
+        "ProvidersList",
+        "McpServersInfo",
+        "AgentRunSnapshot",
+        "DeliverablesCatalog",
+        "DeliverablePreview",
+        "OutputRevisionsCatalog",
+    ];
+
+    fn at(seconds: i64) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::from_timestamp(seconds, 0).expect("a fixed timestamp")
+    }
+
+    /// One real value per REST record the CLI reads, plus the shapes inside
+    /// them that a hand-authored mirror habitually got wrong: an omitted
+    /// optional key, a flattened definition, a typed timestamp, and every
+    /// producer of an output revision.
+    ///
+    /// Each entry is `(name, type tag, value)`; the type tag names the
+    /// [`crate::wire`] type the entry decodes through.
+    fn rest_record_fixtures() -> Vec<(&'static str, &'static str, serde_json::Value)> {
+        use crate::wire::{
+            AgentActivityKind, AgentActivitySnapshot, AgentActivityStatus, AgentRunSnapshot,
+            AgentRunTaskPlanProgress, AgentRunUsageSnapshot, CustomModelConfig, DeliverablePreview,
+            DeliverableSummary, DeliverablesCatalog, ExecProviderSnapshot, InputModality,
+            McpCuration, McpHealth, McpServerDefinition, McpServerInfo, McpServersInfo,
+            ModelCatalog, ModelInfo, ModelRole, ModelRoleInfo, OutputRevisionInfo,
+            OutputRevisionProducer, OutputRevisionSource, OutputRevisionsCatalog, ProviderAuthMode,
+            ProviderInfo, ProviderKind, ProvidersList, SubmittedOutputSnapshot, VerificationTier,
+        };
+        use tidebreak_core::{
+            AgentRunExecutionLocation, AgentRunId, AgentRunStatus, AgentRunTier,
+            AssistantCitationId, CallId, CitationLocator, DocumentId, OutputId, OutputRevisionId,
+            ReasoningEffort,
+        };
+
+        let catalog = ModelCatalog {
+            models: vec![
+                ModelInfo {
+                    key: "anthropic::claude-opus-5".into(),
+                    id: "claude-opus-5".into(),
+                    display_name: "Claude Opus 5".into(),
+                    provider: ProviderKind::Anthropic,
+                    vendor: None,
+                    verification: VerificationTier::Verified,
+                    recommended: true,
+                    available: true,
+                    context_window: 1_000_000,
+                    max_output_tokens: 64_000,
+                    input_modalities: vec![InputModality::Text, InputModality::Image],
+                    supports_reasoning: true,
+                    supports_tools: true,
+                    supports_structured_output: true,
+                    reasoning_efforts: vec![
+                        ReasoningEffort::Low,
+                        ReasoningEffort::Medium,
+                        ReasoningEffort::High,
+                    ],
+                    multimodal: true,
+                },
+                ModelInfo {
+                    key: "model_gateway::claude-opus-5".into(),
+                    id: "claude-opus-5".into(),
+                    display_name: "Claude Opus 5".into(),
+                    provider: ProviderKind::ModelGateway,
+                    vendor: Some(ProviderKind::Anthropic),
+                    verification: VerificationTier::Unverified,
+                    recommended: false,
+                    available: false,
+                    context_window: 200_000,
+                    max_output_tokens: 32_000,
+                    input_modalities: vec![InputModality::Text],
+                    supports_reasoning: false,
+                    supports_tools: true,
+                    supports_structured_output: false,
+                    reasoning_efforts: Vec::new(),
+                    multimodal: false,
+                },
+            ],
+            roles: vec![
+                ModelRoleInfo {
+                    role: ModelRole::Chat,
+                    selection: Some("anthropic::claude-opus-5".into()),
+                    resolved_key: Some("anthropic::claude-opus-5".into()),
+                },
+                ModelRoleInfo {
+                    role: ModelRole::Utility,
+                    selection: None,
+                    resolved_key: None,
+                },
+            ],
+        };
+
+        let providers = ProvidersList {
+            providers: vec![
+                ProviderInfo {
+                    kind: ProviderKind::Anthropic,
+                    enabled: true,
+                    base_url: None,
+                    has_credential: true,
+                    auth_mode: Some(ProviderAuthMode::ApiKey),
+                    models: Vec::new(),
+                },
+                ProviderInfo {
+                    kind: ProviderKind::OpenaiCompatible,
+                    enabled: false,
+                    base_url: Some("http://localhost:11434/v1".into()),
+                    has_credential: false,
+                    auth_mode: None,
+                    models: vec![CustomModelConfig {
+                        id: "llama".into(),
+                        display_name: Some("Llama".into()),
+                        ..CustomModelConfig::default()
+                    }],
+                },
+            ],
+        };
+
+        let mut stdio = McpServerDefinition {
+            name: "filesystem".into(),
+            command: Some("npx".into()),
+            args: vec![
+                "-y".into(),
+                "@modelcontextprotocol/server-filesystem".into(),
+            ],
+            env: ["FS_ROOT".to_owned()].into_iter().collect(),
+            env_values: Default::default(),
+            env_from: vec!["HOME".into()],
+            cwd: Some("/tmp".into()),
+            url: None,
+            bearer_token_env: None,
+            gateway_endpoint: None,
+            request_timeout_ms: 30_000,
+            enabled: true,
+            plugin: None,
+            launch: None,
+        };
+        // The value never serializes; setting one proves the fixture does not
+        // carry it.
+        stdio
+            .env_values
+            .insert("FS_ROOT".into(), "never-on-the-wire".into());
+        let gateway = McpServerDefinition {
+            name: "linear".into(),
+            command: None,
+            args: Vec::new(),
+            env: Default::default(),
+            env_values: Default::default(),
+            env_from: Vec::new(),
+            cwd: None,
+            url: None,
+            bearer_token_env: None,
+            gateway_endpoint: Some("linear".into()),
+            request_timeout_ms: 30_000,
+            enabled: false,
+            plugin: Some("linear-plugin".into()),
+            launch: None,
+        };
+        let mcp = McpServersInfo {
+            servers: vec![
+                McpServerInfo {
+                    definition: stdio,
+                    health: McpHealth::Healthy,
+                    tool_count: 11,
+                    diagnostic: None,
+                    curated: Some(McpCuration {
+                        display_name: "Filesystem".into(),
+                        tested_on: "2026-08-01".into(),
+                        notes: "Read and write under one root.".into(),
+                    }),
+                },
+                McpServerInfo {
+                    definition: gateway,
+                    health: McpHealth::Disabled,
+                    tool_count: 0,
+                    diagnostic: Some("turned off".into()),
+                    curated: None,
+                },
+            ],
+        };
+
+        let running = AgentRunSnapshot {
+            id: AgentRunId(id(0x30)),
+            parent_id: None,
+            tier: AgentRunTier::Background,
+            execution_location: AgentRunExecutionLocation::Container,
+            code_execution_provider: ExecProviderSnapshot::Docker,
+            status: AgentRunStatus::Running,
+            model_steps: 3,
+            usage: AgentRunUsageSnapshot {
+                input_tokens: 1200,
+                output_tokens: 340,
+                cache_read_input_tokens: 800,
+                cache_creation_input_tokens: 0,
+            },
+            task: Some("Summarize the quarterly report".into()),
+            started_at: Some(at(1_756_700_000)),
+            finished_at: None,
+            last_error_code: None,
+            activity: Some(AgentActivitySnapshot {
+                kind: AgentActivityKind::Exec,
+                status: AgentActivityStatus::Running,
+            }),
+            submitted_outputs: Vec::new(),
+            task_plan: Some(AgentRunTaskPlanProgress {
+                completed: 1,
+                total: 3,
+                current: Some("Read the report".into()),
+                updated_at: at(1_756_700_030),
+            }),
+            terminal_text: None,
+            created_at: at(1_756_699_990),
+            updated_at: at(1_756_700_030),
+            spawn_call_id: Some(CallId(id(0x31))),
+        };
+        // The settled shape, with the omittable plan absent.
+        let completed = AgentRunSnapshot {
+            id: AgentRunId(id(0x32)),
+            parent_id: Some(AgentRunId(id(0x30))),
+            tier: AgentRunTier::Foreground,
+            execution_location: AgentRunExecutionLocation::InProcess,
+            code_execution_provider: ExecProviderSnapshot::Off,
+            status: AgentRunStatus::Completed,
+            model_steps: 7,
+            usage: AgentRunUsageSnapshot::default(),
+            task: None,
+            started_at: Some(at(1_756_700_100)),
+            finished_at: Some(at(1_756_700_200)),
+            last_error_code: Some("provider_rate_limited".into()),
+            activity: None,
+            submitted_outputs: vec![SubmittedOutputSnapshot {
+                output_id: OutputId(id(0x40)),
+                filename: "summary.md".into(),
+            }],
+            task_plan: None,
+            terminal_text: Some("Done.".into()),
+            created_at: at(1_756_700_090),
+            updated_at: at(1_756_700_200),
+            spawn_call_id: None,
+        };
+
+        let outputs = DeliverablesCatalog {
+            deliverables: vec![DeliverableSummary {
+                output_id: OutputId(id(0x40)),
+                filename: "summary.md".into(),
+                media_type: "text/markdown".into(),
+                size_bytes: 1234,
+                revision_count: 3,
+                updated_at: at(1_756_700_300),
+                producing_run_id: Some(id(0x32)),
+            }],
+            truncated: false,
+        };
+        let preview = DeliverablePreview {
+            output_id: OutputId(id(0x40)),
+            filename: "summary.md".into(),
+            media_type: "text/markdown".into(),
+            revision_count: 3,
+            revision_id: OutputRevisionId(id(0x43)),
+            content: "# Summary\n\nOne paragraph.\n".into(),
+            truncated: true,
+        };
+        let revisions = OutputRevisionsCatalog {
+            output_id: OutputId(id(0x40)),
+            revisions: vec![
+                OutputRevisionInfo {
+                    revision_id: OutputRevisionId(id(0x41)),
+                    ordinal: 1,
+                    size_bytes: 900,
+                    created_at: at(1_756_700_100),
+                    produced_by: OutputRevisionProducer::Agent,
+                    is_current: false,
+                    sources: vec![
+                        OutputRevisionSource::Document {
+                            citation_id: AssistantCitationId(id(0x50)),
+                            document_id: DocumentId(id(0x51)),
+                            locator: CitationLocator::Pages { start: 2, end: 3 },
+                        },
+                        OutputRevisionSource::Web {
+                            url: "https://example.com/report".into(),
+                            label: "Quarterly report".into(),
+                            domain: "example.com".into(),
+                        },
+                    ],
+                },
+                OutputRevisionInfo {
+                    revision_id: OutputRevisionId(id(0x42)),
+                    ordinal: 2,
+                    size_bytes: 1100,
+                    created_at: at(1_756_700_200),
+                    produced_by: OutputRevisionProducer::BackgroundAgent,
+                    is_current: false,
+                    sources: Vec::new(),
+                },
+                OutputRevisionInfo {
+                    revision_id: OutputRevisionId(id(0x43)),
+                    ordinal: 3,
+                    size_bytes: 1234,
+                    created_at: at(1_756_700_300),
+                    produced_by: OutputRevisionProducer::User,
+                    is_current: true,
+                    sources: Vec::new(),
+                },
+            ],
+        };
+
+        fn value<T: serde::Serialize>(record: &T) -> serde_json::Value {
+            serde_json::to_value(record).expect("a REST record serializes")
+        }
+        vec![
+            ("model_catalog", "ModelCatalog", value(&catalog)),
+            ("providers", "ProvidersList", value(&providers)),
+            ("mcp_servers", "McpServersInfo", value(&mcp)),
+            ("agent_run_running", "AgentRunSnapshot", value(&running)),
+            ("agent_run_completed", "AgentRunSnapshot", value(&completed)),
+            ("outputs", "DeliverablesCatalog", value(&outputs)),
+            ("output_preview", "DeliverablePreview", value(&preview)),
+            (
+                "output_revisions",
+                "OutputRevisionsCatalog",
+                value(&revisions),
+            ),
+        ]
+    }
+
+    /// The checked-in fixture file: a JSON array of `{ "name", "type", "value" }`.
+    fn rendered_rest_records() -> String {
+        let entries = rest_record_fixtures()
+            .into_iter()
+            .map(|(name, kind, value)| {
+                serde_json::json!({ "name": name, "type": kind, "value": value })
+            })
+            .collect::<Vec<_>>();
+        let mut rendered =
+            serde_json::to_string_pretty(&entries).expect("the fixture list serializes");
+        rendered.push('\n');
+        rendered
+    }
+
+    /// Two decoders read these bytes — the CLI's and this crate's own. A diff
+    /// here means a REST record's shape changed.
+    #[test]
+    fn the_rest_record_fixtures_are_current() {
+        generate::check_or_update(REST_RECORDS, &rendered_rest_records(), REGENERATE);
+    }
+
+    /// Every tag in the fixtures is a type the list declares, and every
+    /// declared type has at least one fixture.
+    #[test]
+    fn rest_record_fixtures_cover_every_type() {
+        let tagged: std::collections::BTreeSet<&str> = rest_record_fixtures()
+            .iter()
+            .map(|(_, kind, _)| *kind)
+            .collect();
+        let declared: std::collections::BTreeSet<&str> =
+            REST_RECORD_TYPES.iter().copied().collect();
+        assert_eq!(tagged, declared);
+    }
+
+    /// The server's own round trip through the public wire types, the same
+    /// way the CLI decodes them.
+    #[test]
+    fn every_rest_record_fixture_round_trips() {
+        fn round_trip<T: serde::de::DeserializeOwned + serde::Serialize>(
+            name: &str,
+            value: &serde_json::Value,
+        ) {
+            let decoded: T = serde_json::from_value(value.clone())
+                .unwrap_or_else(|error| panic!("fixture {name} does not decode: {error}"));
+            let again = serde_json::to_value(&decoded).expect("a decoded record serializes");
+            assert_eq!(
+                &again, value,
+                "fixture {name} changed across the round trip"
+            );
+        }
+        for (name, kind, value) in rest_record_fixtures() {
+            match kind {
+                "ModelCatalog" => round_trip::<crate::wire::ModelCatalog>(name, &value),
+                "ProvidersList" => round_trip::<crate::wire::ProvidersList>(name, &value),
+                "McpServersInfo" => round_trip::<crate::wire::McpServersInfo>(name, &value),
+                "AgentRunSnapshot" => round_trip::<crate::wire::AgentRunSnapshot>(name, &value),
+                "DeliverablesCatalog" => {
+                    round_trip::<crate::wire::DeliverablesCatalog>(name, &value)
+                }
+                "DeliverablePreview" => round_trip::<crate::wire::DeliverablePreview>(name, &value),
+                "OutputRevisionsCatalog" => {
+                    round_trip::<crate::wire::OutputRevisionsCatalog>(name, &value)
+                }
+                other => panic!("fixture {name} has an unknown type tag {other}"),
+            }
+        }
+    }
+
+    /// The fixtures carry the shapes a hand-written mirror got wrong: a
+    /// secret-bearing field that never serializes, an omitted optional key,
+    /// and every producer of an output revision.
+    #[test]
+    fn rest_record_fixtures_cover_the_awkward_shapes() {
+        let fixtures = rest_record_fixtures();
+        let by_name = |name: &str| {
+            &fixtures
+                .iter()
+                .find(|(entry, _, _)| *entry == name)
+                .unwrap_or_else(|| panic!("the {name} fixture exists"))
+                .2
+        };
+        let servers = by_name("mcp_servers");
+        assert!(servers["servers"][0].get("env_values").is_none());
+        assert!(servers["servers"][0].get("launch").is_none());
+        assert!(by_name("agent_run_running").get("task_plan").is_some());
+        assert!(by_name("agent_run_completed").get("task_plan").is_none());
+        assert!(by_name("providers")["providers"][0]
+            .get("base_url")
+            .is_none());
+        let producers: std::collections::BTreeSet<&str> = by_name("output_revisions")["revisions"]
+            .as_array()
+            .expect("revisions")
+            .iter()
+            .filter_map(|row| row["producedBy"].as_str())
+            .collect();
+        assert_eq!(
+            producers,
+            ["agent", "backgroundAgent", "user"].into_iter().collect()
+        );
+    }
+
+    /// Unknown keys fail every REST record but the flattened MCP server row,
+    /// which is documented on [`crate::wire`].
+    #[test]
+    fn rest_records_reject_unknown_keys() {
+        fn rejects<T: serde::de::DeserializeOwned>(name: &str, value: &serde_json::Value) {
+            let mut extra = value.clone();
+            extra["extra"] = serde_json::json!(1);
+            assert!(
+                serde_json::from_value::<T>(extra).is_err(),
+                "fixture {name} should reject an unknown key"
+            );
+        }
+        for (name, kind, value) in rest_record_fixtures() {
+            match kind {
+                "ModelCatalog" => rejects::<crate::wire::ModelCatalog>(name, &value),
+                "ProvidersList" => rejects::<crate::wire::ProvidersList>(name, &value),
+                "McpServersInfo" => rejects::<crate::wire::McpServersInfo>(name, &value),
+                "AgentRunSnapshot" => rejects::<crate::wire::AgentRunSnapshot>(name, &value),
+                "DeliverablesCatalog" => rejects::<crate::wire::DeliverablesCatalog>(name, &value),
+                "DeliverablePreview" => rejects::<crate::wire::DeliverablePreview>(name, &value),
+                "OutputRevisionsCatalog" => {
+                    rejects::<crate::wire::OutputRevisionsCatalog>(name, &value)
+                }
+                other => panic!("fixture {name} has an unknown type tag {other}"),
+            }
+        }
+        // Nested records too: a row inside the envelope is guarded on its own.
+        let mut model = rest_record_fixtures()[0].2["models"][0].clone();
+        model["extra"] = serde_json::json!(1);
+        assert!(serde_json::from_value::<crate::wire::ModelInfo>(model).is_err());
+        let mut source = rest_record_fixtures()
+            .iter()
+            .find(|(name, _, _)| *name == "output_revisions")
+            .expect("the revisions fixture")
+            .2["revisions"][0]["sources"][0]
+            .clone();
+        source["extra"] = serde_json::json!(1);
+        assert!(serde_json::from_value::<crate::wire::OutputRevisionSource>(source).is_err());
+        // The one tolerant record: a flattened definition cannot be guarded.
+        let mut server = rest_record_fixtures()
+            .iter()
+            .find(|(name, _, _)| *name == "mcp_servers")
+            .expect("the MCP fixture")
+            .2["servers"][0]
+            .clone();
+        server["extra"] = serde_json::json!(1);
+        assert!(serde_json::from_value::<crate::wire::McpServerInfo>(server).is_ok());
+    }
 }

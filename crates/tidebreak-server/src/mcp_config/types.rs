@@ -141,54 +141,54 @@ pub(crate) struct McpServersConfig {
 /// `bearer_token_env` stays with `url`.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct McpServerDefinition {
-    pub(crate) name: String,
+pub struct McpServerDefinition {
+    pub name: String,
     #[serde(default)]
-    pub(crate) command: Option<String>,
+    pub command: Option<String>,
     #[serde(default)]
-    pub(crate) args: Vec<String>,
+    pub args: Vec<String>,
     /// Names of the environment variables this server is given directly. The
     /// values live in the secret store under [`env_secret_key`] and never
     /// enter this type, so they neither persist in the connected-app record
     /// nor project through the API.
     #[serde(default)]
-    pub(crate) env: BTreeSet<String>,
+    pub env: BTreeSet<String>,
     /// Inbound-only: values for [`env`](Self::env) names being set or
     /// changed. A commit writes these into the secret store and drops them; a
     /// name present in `env` but absent here keeps the value already stored,
     /// which is what makes "leave blank to keep" work. `skip_serializing`
     /// keeps them out of both the persisted record and every projection.
     #[serde(default, skip_serializing)]
-    pub(crate) env_values: BTreeMap<String, String>,
+    pub env_values: BTreeMap<String, String>,
     /// Parent environment names to forward. Their values never enter this type.
     #[serde(default)]
-    pub(crate) env_from: Vec<String>,
+    pub env_from: Vec<String>,
     #[serde(default)]
-    pub(crate) cwd: Option<PathBuf>,
+    pub cwd: Option<PathBuf>,
     /// Streamable HTTP endpoint for a remote server.
     #[serde(default)]
-    pub(crate) url: Option<String>,
+    pub url: Option<String>,
     /// Parent environment name holding the HTTP bearer token. The value is
     /// resolved at connect time and never enters this type.
     #[serde(default)]
-    pub(crate) bearer_token_env: Option<String>,
+    pub bearer_token_env: Option<String>,
     /// Endpoint slug of a gateway MCP endpoint, mounted through the signed-in
     /// model-gateway session. The endpoint URL and its short-lived bearer are
     /// resolved from the session at every connection and never enter this
     /// type.
     #[serde(default)]
-    pub(crate) gateway_endpoint: Option<String>,
+    pub gateway_endpoint: Option<String>,
     #[serde(default = "default_request_timeout_ms")]
-    pub(crate) request_timeout_ms: u64,
+    pub request_timeout_ms: u64,
     #[serde(default = "enabled_by_default")]
-    pub(crate) enabled: bool,
+    pub enabled: bool,
     /// The plugin this server was synthesized from, when it is plugin-sourced.
     ///
     /// Read-only over the API: `PUT /mcp/servers` refuses a body that sets it,
     /// and the runtime rebuilds these entries from the installed plugin tree
     /// rather than from anything a client sends or the store holds.
     #[serde(default)]
-    pub(crate) plugin: Option<String>,
+    pub plugin: Option<String>,
     /// Connect-time material for a plugin-sourced server: the two reserved
     /// directories, the literal environment and headers its `mcp.json`
     /// declared, and the reason it is inert when this client cannot run it.
@@ -714,9 +714,9 @@ pub(crate) enum McpReplaceOutcome {
 }
 
 /// Renderer-safe connection lifecycle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum McpHealth {
+pub enum McpHealth {
     Initializing,
     Healthy,
     Degraded,
@@ -724,25 +724,47 @@ pub(crate) enum McpHealth {
     Disabled,
 }
 
+impl McpHealth {
+    /// The wire spelling, for a client that prints the state without a serde
+    /// round trip. Pinned to the serde form by a test in [`crate::wire`].
+    pub fn as_str(self) -> &'static str {
+        match self {
+            McpHealth::Initializing => "initializing",
+            McpHealth::Healthy => "healthy",
+            McpHealth::Degraded => "degraded",
+            McpHealth::Reconnecting => "reconnecting",
+            McpHealth::Disabled => "disabled",
+        }
+    }
+}
+
 /// One renderer-safe server projection. Resolved `env_from` values and child
 /// process details are intentionally absent.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
-pub(crate) struct McpServerInfo {
+//
+// Also read back by the CLI through [`crate::wire`]. This is the one record
+// on that surface that tolerates unknown keys: `definition` is flattened,
+// and serde does not support `deny_unknown_fields` on either side of a
+// flatten (the flattened struct's own guard is ignored on the way through).
+// The envelope, [`McpServersInfo`], still rejects them. A plain comment, not
+// a doc comment, so the generated `wire.ts` does not carry it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+pub struct McpServerInfo {
     #[serde(flatten)]
-    pub(crate) definition: McpServerDefinition,
-    pub(crate) health: McpHealth,
-    pub(crate) tool_count: usize,
-    pub(crate) diagnostic: Option<String>,
+    pub definition: McpServerDefinition,
+    pub health: McpHealth,
+    pub tool_count: usize,
+    pub diagnostic: Option<String>,
     /// The curated-list entry this definition matches, when Tidebreak has
     /// exercised the server end to end. `null` means community: mounted and
     /// usable, just not something we have driven ourselves. Derived from the
     /// definition on every read, never stored.
-    pub(crate) curated: Option<McpCuration>,
+    pub curated: Option<McpCuration>,
 }
 
-#[derive(Debug, Clone, Serialize, ts_rs::TS)]
-pub(crate) struct McpServersInfo {
-    pub(crate) servers: Vec<McpServerInfo>,
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[serde(deny_unknown_fields)]
+pub struct McpServersInfo {
+    pub servers: Vec<McpServerInfo>,
 }
 
 /// One configured connected app's current namespace and definition

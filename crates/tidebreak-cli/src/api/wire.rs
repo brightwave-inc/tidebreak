@@ -1,247 +1,32 @@
 //! Client-side decode of the server's JSON.
 //!
-//! The chat event socket's frames are the server's own types, imported from
+//! Every shape this crate reads is the server's own type, imported from
 //! `tidebreak_server::wire`: one Rust definition serializes on the server and
 //! deserializes here, so a renamed field is a compile error in this crate the
 //! way it is a type error in the desktop renderer's generated `wire.ts`. The
 //! contract those types carry — closed vocabularies, unknown keys rejected, an
-//! unknown event type failing its frame — is documented on that module.
+//! unknown event type failing its frame — is documented on that module, along
+//! with the one record (`McpServerInfo`) that tolerates unknown keys because
+//! it flattens its definition.
 //!
-//! The REST records below are still hand-written mirrors. Their server types
-//! only serialize today, so they cannot be imported the same way; they read
-//! only the fields a CLI surface uses and let serde drop the rest, and the
-//! opaque strings they carry are bounded with the same
-//! [`tidebreak_server::wire::limits`] the renderer applies. Moving them onto
-//! the server's types is tracked in brightwave-inc/tidebreak#3005.
+//! The chat event socket's frames and the REST records (the model catalog,
+//! providers, MCP servers, agent runs, and conversation outputs) both come
+//! through here; the tests below decode the server's fixtures for each.
 
-use serde::Deserialize;
-use tidebreak_core::CallId;
 pub use tidebreak_core::{
     Chat, PendingPlanApproval, PendingUserQuestions, RendererToolName, ToolActionPreview,
     ToolApprovalKind,
 };
-pub use tidebreak_server::wire::limits;
 pub use tidebreak_server::wire::{
     AgentActivityHistoryItem, ApprovalGrantRung, RendererAgentEvent, RendererChatFrame,
     RendererToolStatus,
 };
-
-/// A timestamp string within [`limits::MAX_WIRE_TIMESTAMP_CHARS`] code points.
-///
-/// The output routes carry timestamps as preformatted strings rather than
-/// `DateTime`s, so the bound is the only check they get; the renderer applies
-/// the same number.
-fn bounded_timestamp<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = String::deserialize(deserializer)?;
-    if value.chars().count() > limits::MAX_WIRE_TIMESTAMP_CHARS {
-        return Err(serde::de::Error::custom(format!(
-            "timestamp exceeds {} characters",
-            limits::MAX_WIRE_TIMESTAMP_CHARS
-        )));
-    }
-    Ok(value)
-}
-
-/// One background agent run, from `GET /chats/{id}/agent-runs`.
-#[derive(Debug, Clone, Deserialize)]
-pub struct AgentRunSnapshot {
-    pub id: tidebreak_core::AgentRunId,
-    #[serde(default)]
-    pub parent_id: Option<tidebreak_core::AgentRunId>,
-    #[serde(default)]
-    pub tier: Option<String>,
-    /// Where the agent run loop itself executes (`in_process` / `container`).
-    /// Not the code-exec backend — see [`Self::code_execution_provider`].
-    #[serde(default)]
-    pub execution_location: Option<String>,
-    /// Host code-execution backend for `exec` (`local` / `e2b` / `docker` /
-    /// `daytona` / `off`). Independent of [`Self::execution_location`].
-    #[serde(default)]
-    pub code_execution_provider: Option<String>,
-    pub status: String,
-    #[serde(default)]
-    pub task: Option<String>,
-    #[serde(default)]
-    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
-    #[serde(default)]
-    pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
-    #[serde(default)]
-    pub last_error_code: Option<String>,
-    /// Files the run named in its terminal `done` submission.
-    #[serde(default)]
-    pub submitted_outputs: Vec<SubmittedOutput>,
-    #[serde(default)]
-    pub terminal_text: Option<String>,
-    #[serde(default)]
-    pub spawn_call_id: Option<CallId>,
-    #[serde(default)]
-    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-/// One file a background run submitted, as the list route returns it.
-#[derive(Debug, Clone, Deserialize)]
-pub struct SubmittedOutput {
-    pub output_id: tidebreak_core::OutputId,
-    pub filename: String,
-}
-
-/// One selectable model, from `GET /models`.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ModelInfo {
-    pub key: String,
-    pub id: String,
-    pub display_name: String,
-    /// The provider that serves the model; decoded for forward compatibility,
-    /// not yet grouped on in the picker.
-    #[allow(dead_code)]
-    #[serde(default)]
-    pub provider: String,
-    #[serde(default)]
-    pub available: bool,
-    #[serde(default)]
-    pub context_window: u32,
-    #[serde(default)]
-    pub reasoning_efforts: Vec<String>,
-}
-
-/// The model catalog response.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ModelCatalog {
-    #[serde(default)]
-    pub models: Vec<ModelInfo>,
-    /// Every named model role, its selection, and what it resolves to now.
-    #[serde(default)]
-    pub roles: Vec<ModelRoleInfo>,
-}
-
-/// One named model role, from `GET /models`.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ModelRoleInfo {
-    pub role: String,
-    /// The catalog key pinned to this role, or `None` for automatic.
-    #[serde(default)]
-    pub selection: Option<String>,
-    /// What the role resolves to right now, selection or not.
-    #[serde(default)]
-    pub resolved_key: Option<String>,
-}
-
-/// One provider row from `GET /providers`.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ProviderInfo {
-    /// Wire form of the provider kind (`anthropic`, `openai_compatible`, …),
-    /// which is also the path segment the write routes take.
-    pub kind: String,
-    #[serde(default)]
-    pub enabled: bool,
-    /// Whether a credential is stored — never the credential itself.
-    #[serde(default)]
-    pub has_credential: bool,
-    /// How the provider is authenticated (`api_key`, `chatgpt`, …), when it is.
-    #[serde(default)]
-    pub auth_mode: Option<String>,
-    #[serde(default)]
-    pub base_url: Option<String>,
-}
-
-/// The `GET /providers` envelope.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ProvidersList {
-    #[serde(default)]
-    pub providers: Vec<ProviderInfo>,
-}
-
-/// One mounted MCP server, from `GET /mcp/servers`. The response flattens each
-/// server's definition into its live projection, so both are read here.
-#[derive(Debug, Clone, Deserialize)]
-pub struct McpServerInfo {
-    pub name: String,
-    #[serde(default)]
-    pub enabled: bool,
-    /// `initializing` / `healthy` / `degraded` / `reconnecting` / `disabled`.
-    #[serde(default)]
-    pub health: String,
-    #[serde(default)]
-    pub tool_count: usize,
-    /// The plugin this server came from, when it is plugin-sourced. Those are
-    /// derived by the server and cannot be edited over the config route.
-    #[serde(default)]
-    pub plugin: Option<String>,
-    #[serde(default)]
-    pub command: Option<String>,
-    #[serde(default)]
-    pub url: Option<String>,
-    #[serde(default)]
-    pub gateway_endpoint: Option<String>,
-    #[serde(default)]
-    pub diagnostic: Option<String>,
-}
-
-/// The `GET /mcp/servers` envelope.
-#[derive(Debug, Clone, Deserialize)]
-pub struct McpServersInfo {
-    #[serde(default)]
-    pub servers: Vec<McpServerInfo>,
-}
-
-/// One row of a conversation's outputs catalog.
-///
-/// The output routes answer in the shape the desktop renderer already
-/// validates, which is why these fields are camelCase where the rest of the
-/// API is not — moving the surface off Tauri was a transport change, not a
-/// payload change.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OutputSummary {
-    pub output_id: tidebreak_core::OutputId,
-    pub filename: String,
-    pub media_type: String,
-    pub size_bytes: u64,
-    pub revision_count: u32,
-    #[serde(deserialize_with = "bounded_timestamp")]
-    pub updated_at: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OutputsCatalog {
-    pub deliverables: Vec<OutputSummary>,
-    /// Whether the conversation has more outputs than one answer carries.
-    pub truncated: bool,
-}
-
-/// One output's bounded text preview.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OutputPreview {
-    pub filename: String,
-    pub media_type: String,
-    pub revision_id: tidebreak_core::OutputRevisionId,
-    pub content: String,
-    pub truncated: bool,
-}
-
-/// One row of an output's version history.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OutputRevisionRow {
-    pub revision_id: tidebreak_core::OutputRevisionId,
-    pub ordinal: u32,
-    pub size_bytes: u64,
-    #[serde(deserialize_with = "bounded_timestamp")]
-    pub created_at: String,
-    pub produced_by: String,
-    pub is_current: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OutputRevisions {
-    pub revisions: Vec<OutputRevisionRow>,
-}
+// REST records.
+pub use tidebreak_server::wire::{
+    AgentRunSnapshot, DeliverablePreview, DeliverableSummary, DeliverablesCatalog, McpServerInfo,
+    McpServersInfo, ModelCatalog, OutputRevisionInfo, OutputRevisionsCatalog, ProviderInfo,
+    ProvidersList,
+};
 
 #[cfg(test)]
 mod tests {
@@ -302,21 +87,98 @@ mod tests {
         assert!(events > 0 && metadata > 0);
     }
 
-    /// The hand-written output mirrors apply the renderer's timestamp bound.
-    #[test]
-    fn output_timestamps_are_bounded_like_the_renderer() {
-        let row = |updated_at: &str| {
-            serde_json::json!({
-                "outputId": "00000000-0000-0000-0000-000000000001",
-                "filename": "report.md",
-                "mediaType": "text/markdown",
-                "sizeBytes": 12,
-                "revisionCount": 1,
-                "updatedAt": updated_at,
+    /// Path of the server's REST record fixtures, relative to this crate.
+    const REST_RECORDS: &str = "../tidebreak-server/fixtures/rest-records.json";
+
+    fn rest_record_fixtures() -> Vec<(String, String, serde_json::Value)> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(REST_RECORDS);
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        let entries: Vec<serde_json::Value> =
+            serde_json::from_str(&text).expect("the fixture file is a JSON array");
+        entries
+            .into_iter()
+            .map(|entry| {
+                let field = |key: &str| {
+                    entry[key]
+                        .as_str()
+                        .unwrap_or_else(|| panic!("every fixture has a {key}"))
+                        .to_owned()
+                };
+                (field("name"), field("type"), entry["value"].clone())
             })
+            .collect()
+    }
+
+    /// Every REST record the server answers with decodes here through the
+    /// type the fixture names, and serializes back to the same bytes. The
+    /// server's own test renders the file from real values, so a response
+    /// field this crate cannot read fails here rather than at a prompt.
+    #[test]
+    fn every_server_rest_record_decodes() {
+        fn round_trip<T: serde::de::DeserializeOwned + serde::Serialize>(
+            name: &str,
+            value: &serde_json::Value,
+        ) {
+            let decoded: T = serde_json::from_value(value.clone())
+                .unwrap_or_else(|error| panic!("fixture {name} does not decode: {error}"));
+            let again = serde_json::to_value(&decoded).expect("a decoded record serializes");
+            assert_eq!(
+                &again, value,
+                "fixture {name} changed across the round trip"
+            );
+        }
+        let fixtures = rest_record_fixtures();
+        assert!(fixtures.len() >= 7, "the fixture list looks truncated");
+        for (name, kind, value) in &fixtures {
+            match kind.as_str() {
+                "ModelCatalog" => round_trip::<ModelCatalog>(name, value),
+                "ProvidersList" => round_trip::<ProvidersList>(name, value),
+                "McpServersInfo" => round_trip::<McpServersInfo>(name, value),
+                "AgentRunSnapshot" => round_trip::<AgentRunSnapshot>(name, value),
+                "DeliverablesCatalog" => round_trip::<DeliverablesCatalog>(name, value),
+                "DeliverablePreview" => round_trip::<DeliverablePreview>(name, value),
+                "OutputRevisionsCatalog" => round_trip::<OutputRevisionsCatalog>(name, value),
+                other => panic!("fixture {name} names a type this crate does not read: {other}"),
+            }
+        }
+    }
+
+    /// The fields the CLI prints are reachable on the server's types: the
+    /// flattened MCP definition, the typed output timestamp, and the producer
+    /// enum a hand-written mirror used to carry as a string.
+    #[test]
+    fn printed_fields_come_from_the_server_types() {
+        let fixtures = rest_record_fixtures();
+        let value = |wanted: &str| {
+            fixtures
+                .iter()
+                .find(|(name, _, _)| name == wanted)
+                .unwrap_or_else(|| panic!("the {wanted} fixture exists"))
+                .2
+                .clone()
         };
-        assert!(serde_json::from_value::<OutputSummary>(row("2026-09-01T12:00:00Z")).is_ok());
-        let too_long = "x".repeat(limits::MAX_WIRE_TIMESTAMP_CHARS + 1);
-        assert!(serde_json::from_value::<OutputSummary>(row(&too_long)).is_err());
+        let servers: McpServersInfo =
+            serde_json::from_value(value("mcp_servers")).expect("decodes");
+        let plugin = servers
+            .servers
+            .iter()
+            .find(|server| server.definition.plugin.is_some())
+            .expect("one server is plugin-sourced");
+        assert_eq!(
+            plugin.definition.gateway_endpoint.as_deref(),
+            Some("linear")
+        );
+        assert_eq!(plugin.health.as_str(), "disabled");
+
+        let revisions: OutputRevisionsCatalog =
+            serde_json::from_value(value("output_revisions")).expect("decodes");
+        let producers: Vec<&str> = revisions
+            .revisions
+            .iter()
+            .map(|revision| revision.produced_by.as_str())
+            .collect();
+        assert_eq!(producers, ["agent", "backgroundAgent", "user"]);
+        assert!(revisions.revisions[0].created_at < revisions.revisions[2].created_at);
     }
 }
