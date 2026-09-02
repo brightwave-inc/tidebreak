@@ -554,6 +554,9 @@ fn spawn_pty(cwd: &Path, cols: u16, rows: u16) -> Result<Spawned, TerminalError>
         .map_err(|err| TerminalError::Spawn(err.to_string()))?;
     let mut cmd = CommandBuilder::new(user_shell());
     cmd.cwd(cwd);
+    for (key, value) in embedded_terminal_env() {
+        cmd.env(key, value);
+    }
     let child = pair
         .slave
         .spawn_command(cmd)
@@ -574,6 +577,28 @@ fn spawn_pty(cwd: &Path, cols: u16, rows: u16) -> Result<Spawned, TerminalError>
         child,
         killer,
     })
+}
+
+/// The terminal type the desktop renders: xterm.js speaks xterm-256color.
+const EMBEDDED_TERM: &str = "xterm-256color";
+
+/// Environment the embedded shell needs regardless of how the app itself was
+/// launched.
+///
+/// A desktop app started from Finder inherits no `TERM`, and portable-pty
+/// sets none. Without it, a line editor has no terminfo: zsh cannot move the
+/// cursor left, so an erase redraws forward and leaves the deleted character
+/// plus a space on screen. The renderer is always xterm.js, so the values are
+/// fixed rather than inherited from whatever terminal launched the app, and
+/// `TERM_PROGRAM` names this app the way other terminal emulators name
+/// themselves.
+fn embedded_terminal_env() -> [(&'static str, &'static str); 4] {
+    [
+        ("TERM", EMBEDDED_TERM),
+        ("COLORTERM", "truecolor"),
+        ("TERM_PROGRAM", "tidebreak"),
+        ("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION")),
+    ]
 }
 
 fn user_shell() -> PathBuf {
@@ -1036,6 +1061,44 @@ mod tests {
         assert_eq!(read.data, expected);
         assert!(!read.overflow);
         assert!(!read.truncated);
+    }
+
+    #[test]
+    fn spawned_shell_sees_the_embedded_terminal_type() {
+        let dir = tempfile::tempdir().unwrap();
+        let hub = TerminalHub::new();
+        let ws = workspace();
+        let snap = hub
+            .open(&OwnerId::local(), ws, dir.path(), Some(80), Some(24))
+            .unwrap();
+        // A plain POSIX command, so the assertion holds for whichever shell
+        // `$SHELL` names on the machine running the test.
+        hub.write(
+            ws,
+            snap.id,
+            b"printf 'T=%s P=%s\\n' \"$TERM\" \"$TERM_PROGRAM\"\r",
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut seen = Vec::new();
+        while Instant::now() < deadline {
+            let read = hub.read(ws, snap.id, 0);
+            seen = read.data;
+            if seen
+                .windows(b"T=xterm-256color P=tidebreak".len())
+                .any(|w| w == b"T=xterm-256color P=tidebreak")
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        let _ = hub.close(ws, snap.id);
+        assert!(
+            seen.windows(b"T=xterm-256color P=tidebreak".len())
+                .any(|w| w == b"T=xterm-256color P=tidebreak"),
+            "shell output: {}",
+            String::from_utf8_lossy(&seen)
+        );
     }
 
     #[test]
