@@ -25,9 +25,9 @@ a stale one.
 
 ## Summary
 
-- Rust crates: 858
+- Rust crates: 860
 - Desktop UI production packages: 515
-- Distinct license texts: 589
+- Distinct license texts: 590
 - Packages with no declared license: 0
 - Packages with a curated license: 28
 
@@ -1272,7 +1272,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/enarx/flagset
 - License text: `LICENSE` ([L-58d1e17ffe51](#l-58d1e17ffe51))
 
-### flate2 1.1.9
+### flate2 1.1.10
 
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/rust-lang/flate2-rs
@@ -2273,6 +2273,12 @@ License identifiers named across all declared expressions:
 - License text: `LICENSE` ([L-58f66933c7bb](#l-58f66933c7bb))
 
 ### miniz_oxide 0.8.9
+
+- License: `MIT OR Zlib OR Apache-2.0`
+- Repository: https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide
+- License text: `LICENSE` ([L-7427abc63036](#l-7427abc63036)), `LICENSE-APACHE.md` ([L-0cec06e0e55f](#l-0cec06e0e55f)), `LICENSE-MIT.md` ([L-ac9859ce4e9a](#l-ac9859ce4e9a)), `LICENSE-ZLIB.md` ([L-eac3911cc3d4](#l-eac3911cc3d4))
+
+### miniz_oxide 0.9.1
 
 - License: `MIT OR Zlib OR Apache-2.0`
 - Repository: https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide
@@ -4371,7 +4377,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/hsivonen/utf8_iter
 - License text: `COPYRIGHT` ([L-76c0e37c107d](#l-76c0e37c107d)), `LICENSE-APACHE` ([L-58d1e17ffe51](#l-58d1e17ffe51)), `LICENSE-MIT` ([L-7dc2f6402447](#l-7dc2f6402447))
 
-### uuid 1.25.0
+### uuid 1.26.0
 
 - License: `Apache-2.0 OR MIT`
 - Repository: https://github.com/uuid-rs/uuid
@@ -5144,6 +5150,12 @@ License identifiers named across all declared expressions:
 - License: `MIT`
 - Repository: https://github.com/zip-rs/zip2
 - License text: `LICENSE` ([L-6ac8711fb340](#l-6ac8711fb340))
+
+### zlib-rs 0.6.7
+
+- License: `Zlib`
+- Repository: https://github.com/trifectatechfoundation/zlib-rs
+- License text: `LICENSE` ([L-6ddf0fba55d4](#l-6ddf0fba55d4))
 
 ### zmij 1.0.23
 
@@ -21493,6 +21505,30 @@ Apache License
    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
    See the License for the specific language governing permissions and
    limitations under the License.
+```
+
+### L-6ddf0fba55d4
+
+```
+(C) 2024 Trifecta Tech Foundation
+
+This software is provided 'as-is', without any express or implied
+warranty. In no event will the authors be held liable for any damages
+arising from the use of this software.
+
+Permission is granted to anyone to use this software for any purpose,
+including commercial applications, and to alter it and redistribute it
+freely, subject to the following restrictions:
+
+1. The origin of this software must not be misrepresented; you must not
+   claim that you wrote the original software. If you use this software
+   in a product, an acknowledgment in the product documentation would be
+   appreciated but is not required.
+
+2. Altered source versions must be plainly marked as such, and must not be
+   misrepresented as being the original software.
+
+3. This notice may not be removed or altered from any source distribution.
 ```
 
 ### L-6e2add96be06
