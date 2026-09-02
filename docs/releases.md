@@ -581,9 +581,9 @@ see exactly what a change to either lockfile adds to the product's obligations.
   repeats that check before signing, so a tag can never ship notices that
   disagree with its lockfiles.
 - The generator reads license facts from each package's own vendored files and
-  manifest. `cargo metadata` and `pnpm licenses list` only enumerate the graphs
-  and locate the packages, so neither tool's license classification can rewrite
-  the notices. Declared expressions are reproduced verbatim, including compound
+  manifest. `cargo metadata` and the scratch `pnpm install` only resolve the
+  graphs and put the packages on disk, so neither tool's license classification
+  can rewrite the notices. Declared expressions are reproduced verbatim, including compound
   ones; identical license texts are stored once and referenced by a
   content-addressed identifier.
 - A package that declares no license is recorded as such rather than guessed

@@ -13,7 +13,7 @@
 // tree that is missing, a package manager that reports no graph) is a hard
 // error rather than a smaller file.
 //
-// Dependency-light on purpose: `cargo metadata` and `pnpm licenses list` are
+// Dependency-light on purpose: `cargo metadata` and `pnpm install` are
 // already required to build the product, and both are invoked as pure graph
 // oracles. License facts are read from each package's own vendored files and
 // manifest, never from a tool's classification, so upgrading either tool
@@ -25,6 +25,7 @@ import {
   copyFileSync,
   existsSync,
   mkdtempSync,
+  lstatSync,
   readFileSync,
   readdirSync,
   rmSync,
@@ -59,11 +60,11 @@ const MEANINGFUL_TEXT_PATTERN = /[A-Za-z]/;
 const UNDECLARED_LICENSE = "not declared by the package";
 
 // pnpm installs only the optional dependencies whose `os`, `cpu`, and `libc`
-// match the host, and `pnpm licenses list` reports only what is installed. A
-// package that publishes one native build per platform (TypeScript 7's
-// compiler, for example) would therefore make the notices depend on where
-// they were generated: each host sees its own variant and none of the others,
-// and a file regenerated on Linux fails the check on macOS and Windows.
+// match the host. A package that publishes one native build per platform
+// (TypeScript 7's compiler, for example) would therefore make the notices
+// depend on where they were generated: each host sees its own variant and
+// none of the others, and a file regenerated on Linux fails the check on macOS
+// and Windows.
 //
 // So the production closure is resolved in a scratch copy of the UI project
 // that pnpm is told to install for every platform, the same way the Cargo
@@ -73,6 +74,12 @@ const UNDECLARED_LICENSE = "not declared by the package";
 // Node's `process.platform` and `process.arch` values plus the WebAssembly
 // pseudo-architecture. Production only: development dependencies are not
 // distributed, and their native variants would add gigabytes for nothing.
+//
+// The installed tree is then read directly rather than through
+// `pnpm licenses list`, which pnpm 10 still filters to the host's platform
+// even when other platforms' packages are installed (pnpm 11 reports them
+// all). The virtual store under `node_modules/.pnpm` holds exactly one
+// directory per installed package instance, so it is the graph.
 export const SUPPORTED_ARCHITECTURES = {
   os: [
     "aix",
@@ -376,52 +383,40 @@ function curatedNodeLicense(
   };
 }
 
-// `pnpm licenses list --json --prod` is used only to enumerate the production
-// closure and locate each package on disk. Its own license classification is
-// deliberately ignored: it reads the manifest we read ourselves, and its
-// heuristics are free to change between pnpm releases.
+// `installed` is the list of `{name, version, path}` the scratch install put
+// on disk. pnpm's own license classification is deliberately not consulted:
+// it reads the manifest we read ourselves, and its heuristics are free to
+// change between pnpm releases.
 export function collectNodePackages(
-  pnpmLicenses,
+  installed,
   { excludeNames = [], root = repositoryRoot } = {},
 ) {
   const excluded = new Set(excludeNames);
   const packages = new Map();
-  for (const entries of Object.values(pnpmLicenses)) {
-    for (const entry of entries) {
-      if (excluded.has(entry.name)) continue;
-      const versions = entry.versions ?? [];
-      const paths = entry.paths ?? [];
-      if (versions.length !== paths.length) {
-        throw new Error(
-          `pnpm reported ${versions.length} versions and ${paths.length} paths for ${entry.name}`,
-        );
-      }
-      versions.forEach((version, index) => {
-        const packageDirectory = paths[index];
-        const manifestPath = path.join(packageDirectory, "package.json");
-        if (!isFile(manifestPath)) {
-          throw new Error(
-            `no installed package for ${entry.name} ${version} at ${packageDirectory}`,
-          );
-        }
-        const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-        const declaredLicense = manifestLicense(manifest);
-        const repository = manifestRepository(manifest);
-        const distributedTexts = collectLicenseTexts(packageDirectory, null);
-        const curated = curatedNodeLicense(
-          { name: entry.name, declaredLicense, repository },
-          { root },
-        );
-        packages.set(`${entry.name}@${version}`, {
-          name: entry.name,
-          version,
-          license: curated?.license ?? declaredLicense ?? UNDECLARED_LICENSE,
-          licenseNote: curated?.note ?? null,
-          repository,
-          licenseTexts: [...distributedTexts, ...(curated?.licenseTexts ?? [])],
-        });
-      });
+  for (const { name, version, path: packageDirectory } of installed) {
+    if (excluded.has(name)) continue;
+    const manifestPath = path.join(packageDirectory, "package.json");
+    if (!isFile(manifestPath)) {
+      throw new Error(
+        `no installed package for ${name} ${version} at ${packageDirectory}`,
+      );
     }
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    const declaredLicense = manifestLicense(manifest);
+    const repository = manifestRepository(manifest);
+    const distributedTexts = collectLicenseTexts(packageDirectory, null);
+    const curated = curatedNodeLicense(
+      { name, declaredLicense, repository },
+      { root },
+    );
+    packages.set(`${name}@${version}`, {
+      name,
+      version,
+      license: curated?.license ?? declaredLicense ?? UNDECLARED_LICENSE,
+      licenseNote: curated?.note ?? null,
+      repository,
+      licenseTexts: [...distributedTexts, ...(curated?.licenseTexts ?? [])],
+    });
   }
   return [...packages.values()].sort(comparePackages);
 }
@@ -562,6 +557,65 @@ function runCargoMetadata(root) {
   return JSON.parse(output);
 }
 
+// Enumerate every package pnpm installed under `modulesDirectory`, from its
+// virtual store: `node_modules/.pnpm/<instance>/node_modules/<name>` is the
+// package itself, a real directory, while its dependencies beside it are
+// symlinks into other instances. A package resolved twice with different
+// peers has two instances of identical files; they are one package to the
+// notices, so instances are deduplicated by name and version.
+export function installedPackages(modulesDirectory) {
+  const store = path.join(modulesDirectory, ".pnpm");
+  if (!existsSync(store)) {
+    throw new Error(`no pnpm virtual store at ${store}`);
+  }
+  const packages = new Map();
+  const record = (packageDirectory) => {
+    const manifestPath = path.join(packageDirectory, "package.json");
+    if (!isFile(manifestPath)) return;
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    if (typeof manifest.name !== "string" || typeof manifest.version !== "string") {
+      throw new Error(`${manifestPath} names no package or version`);
+    }
+    const key = `${manifest.name}@${manifest.version}`;
+    if (!packages.has(key)) {
+      packages.set(key, {
+        name: manifest.name,
+        version: manifest.version,
+        path: packageDirectory,
+      });
+    }
+  };
+  const isRealDirectory = (file) => {
+    try {
+      return lstatSync(file).isDirectory();
+    } catch {
+      return false;
+    }
+  };
+  for (const instance of readdirSync(store).sort(compareStrings)) {
+    // `.pnpm/node_modules` is pnpm's hoisted symlink directory, not a package.
+    if (instance === "node_modules") continue;
+    const instanceModules = path.join(store, instance, "node_modules");
+    if (!isRealDirectory(instanceModules)) continue;
+    for (const entry of readdirSync(instanceModules).sort(compareStrings)) {
+      const candidate = path.join(instanceModules, entry);
+      if (!isRealDirectory(candidate)) continue;
+      if (entry.startsWith("@")) {
+        for (const scoped of readdirSync(candidate).sort(compareStrings)) {
+          const scopedCandidate = path.join(candidate, scoped);
+          if (isRealDirectory(scopedCandidate)) record(scopedCandidate);
+        }
+      } else {
+        record(candidate);
+      }
+    }
+  }
+  if (packages.size === 0) {
+    throw new Error(`pnpm installed no packages under ${modulesDirectory}`);
+  }
+  return [...packages.values()].sort(comparePackages);
+}
+
 export function pnpmInvocation(
   args,
   platform = process.platform,
@@ -612,8 +666,8 @@ export function productionClosureConfig(workspaceConfig) {
 }
 
 // Install the UI's production closure for every platform into a scratch
-// directory and hand its `pnpm licenses list` graph to `callback`, which must
-// read every package file it needs before returning: the directory is removed
+// directory and hand the installed packages to `callback`, which must read
+// every package file it needs before returning: the directory is removed
 // afterwards. The install is `--frozen-lockfile`, so the scratch resolution is
 // the checked-in one, and `--ignore-scripts`, because nothing here runs.
 function withProductionClosure(uiDirectory, callback) {
@@ -637,19 +691,7 @@ function withProductionClosure(uiDirectory, callback) {
       ["install", "--prod", "--frozen-lockfile", "--ignore-scripts"],
       scratch,
     );
-    const parsed = JSON.parse(
-      runPnpm(["licenses", "list", "--json", "--prod"], scratch),
-    );
-    if (
-      !parsed ||
-      typeof parsed !== "object" ||
-      Object.keys(parsed).length === 0
-    ) {
-      throw new Error(
-        `pnpm reported no production dependencies for ${uiDirectory}`,
-      );
-    }
-    return callback(parsed);
+    return callback(installedPackages(path.join(scratch, "node_modules")));
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
@@ -661,8 +703,8 @@ export function generateNotices({ root = repositoryRoot } = {}) {
     readFileSync(path.join(uiDirectory, "package.json"), "utf8"),
   );
   const rustPackages = collectRustPackages(runCargoMetadata(root));
-  const nodePackages = withProductionClosure(uiDirectory, (pnpmLicenses) =>
-    collectNodePackages(pnpmLicenses, {
+  const nodePackages = withProductionClosure(uiDirectory, (installed) =>
+    collectNodePackages(installed, {
       root,
       // The UI project itself is Tidebreak, covered by LICENSE and NOTICE.
       excludeNames: [uiManifest.name],

@@ -7,7 +7,14 @@
 // same bytes.
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -19,6 +26,7 @@ import {
   collectNodePackages,
   collectRustPackages,
   firstDifference,
+  installedPackages,
   licenseTextId,
   normalizeLicenseText,
   normalizeNoticesForComparison,
@@ -59,7 +67,7 @@ function writePackage(root, directory, files) {
 }
 
 test("the notices generator resolves the Windows pnpm command shim", () => {
-  const args = ["licenses", "list", "--json", "--prod"];
+  const args = ["install", "--prod", "--frozen-lockfile", "--ignore-scripts"];
   assert.deepEqual(
     pnpmInvocation(args, "win32", "C:\\Windows\\System32\\cmd.exe"),
     {
@@ -319,20 +327,12 @@ test("the UI collector reads terms from each package, not from pnpm's classifica
   });
 
   const packages = collectNodePackages(
-    {
-      "(MIT OR GPL-3.0-or-later)": [
-        { name: "spdx", versions: ["1.0.0"], paths: [spdx] },
-      ],
-      Unknown: [
-        { name: "undeclared", versions: ["0.25.1"], paths: [undeclared] },
-        {
-          name: "tidebreak-desktop-ui",
-          versions: ["0.0.0"],
-          paths: [ownProject],
-        },
-      ],
-      MIT: [{ name: "legacy", versions: ["0.1.0"], paths: [legacy] }],
-    },
+    [
+      { name: "spdx", version: "1.0.0", path: spdx },
+      { name: "undeclared", version: "0.25.1", path: undeclared },
+      { name: "tidebreak-desktop-ui", version: "0.0.0", path: ownProject },
+      { name: "legacy", version: "0.1.0", path: legacy },
+    ],
     { excludeNames: ["tidebreak-desktop-ui"] },
   );
 
@@ -374,23 +374,57 @@ test("a graph the checkout cannot back with files fails instead of shrinking", (
   );
   assert.throws(
     () =>
-      collectNodePackages({
-        MIT: [
-          {
-            name: "absent",
-            versions: ["1.0.0"],
-            paths: [path.join(root, "absent")],
-          },
-        ],
-      }),
+      collectNodePackages([
+        { name: "absent", version: "1.0.0", path: path.join(root, "absent") },
+      ]),
     /no installed package for absent 1\.0\.0/,
   );
   assert.throws(
-    () =>
-      collectNodePackages({
-        MIT: [{ name: "absent", versions: ["1.0.0", "2.0.0"], paths: [root] }],
-      }),
-    /pnpm reported 2 versions and 1 paths/,
+    () => installedPackages(path.join(root, "never-installed")),
+    /no pnpm virtual store/,
+  );
+});
+
+test("the installed closure is read from pnpm's virtual store, every platform included", () => {
+  const root = scratchTree();
+  const store = path.join(root, "node_modules", ".pnpm");
+  const instance = (key, name, manifest) =>
+    writePackage(root, path.join("node_modules", ".pnpm", key, "node_modules", name), {
+      "package.json": JSON.stringify({ name, ...manifest }),
+    });
+
+  const vue = instance("vue@3.5.0_typescript@7.0.0", "vue", { version: "3.5.0" });
+  // The same package resolved with different peers is two instances of
+  // identical files, and one package to the notices.
+  instance("vue@3.5.0_typescript@7.0.0_zod@4.0.0", "vue", { version: "3.5.0" });
+  // Both native builds sit in the store, however the host is built. Scoped
+  // names nest one level deeper.
+  const linux = instance(
+    "@typescript+typescript-linux-x64@7.0.0",
+    "@typescript/typescript-linux-x64",
+    { version: "7.0.0", os: ["linux"], cpu: ["x64"] },
+  );
+  instance(
+    "@typescript+typescript-darwin-arm64@7.0.0",
+    "@typescript/typescript-darwin-arm64",
+    { version: "7.0.0", os: ["darwin"], cpu: ["arm64"] },
+  );
+  // A dependency beside a package is a symlink into another instance; only
+  // the real directory is that instance's package.
+  symlinkSync(linux, path.join(path.dirname(vue), "typescript-link"), "dir");
+  // pnpm's hoisted symlink directory and its lockfile copy are not packages.
+  mkdirSync(path.join(store, "node_modules"), { recursive: true });
+  writeFileSync(path.join(store, "lock.yaml"), "lockfileVersion: '9.0'\n");
+
+  assert.deepEqual(
+    installedPackages(path.join(root, "node_modules")).map(
+      (entry) => `${entry.name}@${entry.version}`,
+    ),
+    [
+      "@typescript/typescript-darwin-arm64@7.0.0",
+      "@typescript/typescript-linux-x64@7.0.0",
+      "vue@3.5.0",
+    ],
   );
 });
 
@@ -404,17 +438,15 @@ test("a curated license applies only while the evidence behind it holds", () => 
     }),
   });
 
-  const graph = (packageDirectory) => ({
-    Unknown: [
-      {
-        name: JSON.parse(
-          readFileSync(path.join(packageDirectory, "package.json"), "utf8"),
-        ).name,
-        versions: ["0.25.1"],
-        paths: [packageDirectory],
-      },
-    ],
-  });
+  const graph = (packageDirectory) => [
+    {
+      name: JSON.parse(
+        readFileSync(path.join(packageDirectory, "package.json"), "utf8"),
+      ).name,
+      version: "0.25.1",
+      path: packageDirectory,
+    },
+  ];
 
   const [curated] = collectNodePackages(graph(univer));
   assert.equal(curated.license, "Apache-2.0");
