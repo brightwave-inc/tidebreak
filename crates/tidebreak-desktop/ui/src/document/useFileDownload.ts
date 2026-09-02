@@ -273,11 +273,14 @@ function decode<F extends FileDownloadFormat>(
   switch (parseAs) {
     case "text":
       return new TextDecoder().decode(bytes) as Decoded<F>;
-    case "blob":
+    case "blob": {
+      const blobBytes = new Uint8Array(bytes.byteLength);
+      blobBytes.set(bytes);
       return new Blob(
-        [bytes],
+        [blobBytes.buffer],
         contentType ? { type: contentType } : undefined,
       ) as Decoded<F>;
+    }
     default:
       // A copy, so a parser that transfers the buffer cannot detach the cache.
       return bytes.buffer.slice(
