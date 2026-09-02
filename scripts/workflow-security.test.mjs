@@ -611,9 +611,11 @@ function skipsSupersededPush(job) {
   );
 }
 
-test("Windows cargo check typechecks the installer graph", () => {
+test("Windows cargo check is a compile-only installer gate", () => {
   const ci = workflows["ci.yml"];
   const windows = workflowJob(ci, "windows-check");
+  const changes = workflowJob(ci, "changes");
+  assert.match(windows, /Check the Windows installer crates/);
   assert.match(windows, /vars\.CI_WINDOWS_RUNNER \|\| 'windows-latest'/);
   assert.match(windows, /Stage sidecar placeholders for cargo check/);
   assert.doesNotMatch(windows, /prepare-sidecar\.mjs/);
@@ -621,6 +623,9 @@ test("Windows cargo check typechecks the installer graph", () => {
   assert.match(windows, /-p tidebreak-cli/);
   assert.match(windows, /-p tidebreak-host-broker/);
   assert.match(windows, /cargo check --target x86_64-pc-windows-msvc/);
+  assert.doesNotMatch(windows, /cargo test/);
+  assert.doesNotMatch(ci, /windows-ci/);
+  assert.doesNotMatch(changes, /echo "windows=/);
   assert.ok(
     skipsSupersededPush(windows),
     "a superseded main push must skip the Windows lane, not cancel it",
