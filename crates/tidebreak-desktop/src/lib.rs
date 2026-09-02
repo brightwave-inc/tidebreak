@@ -33,6 +33,8 @@ mod browser_runtime_adapter;
     reason = "the staged browser bridge is test-covered and will be wired in #2339 and #2340"
 )]
 mod browser_semantics;
+#[cfg(target_os = "macos")]
+mod browser_url_observer;
 mod channel;
 mod chat_debug;
 mod client_execution;
@@ -955,6 +957,12 @@ pub fn run() {
     app.run(|app, event| match event {
         tauri::RunEvent::WindowEvent { label, event, .. } => {
             documents::handle_window_drag_drop(app, &label, &event);
+        }
+        tauri::RunEvent::ExitRequested { .. } => {
+            // Browser views are torn down with the windows after this; let
+            // go of them before that happens.
+            #[cfg(target_os = "macos")]
+            browser_url_observer::detach_all_browser_url_observers();
         }
         tauri::RunEvent::Exit => {
             tauri::async_runtime::block_on(app.state::<host_access::HostAccess>().shutdown());
