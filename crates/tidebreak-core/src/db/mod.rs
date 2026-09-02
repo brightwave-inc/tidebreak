@@ -184,7 +184,7 @@ impl DbStore {
         lease_token: uuid::Uuid,
         now: chrono::DateTime<Utc>,
         lease_expires_at: chrono::DateTime<Utc>,
-    ) -> Result<Option<crate::model::TurnRun>> {
+    ) -> Result<Option<()>> {
         ops::turn::take_lease_on_turn(self, id, lease_token, now, lease_expires_at).await
     }
 

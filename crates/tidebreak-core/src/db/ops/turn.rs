@@ -58,15 +58,14 @@ pub(in crate::db) use sandbox_spawn::{checkpoint_sandbox_spawn, resumed_sandbox_
 pub(in crate::db) use steer::{accept_turn_steer, apply_turn_steer, list_pending_turn_steers};
 
 /// Take a lease on one already-inserted turn so a session worker can drive
-/// the leg under a durable claim. Returns the running turn, or `None` when
-/// another claim already owns it.
+/// the leg under a durable claim. Returns whether this claim won.
 pub(in crate::db) async fn take_lease_on_turn(
     store: &DbStore,
     id: TurnId,
     lease_token: uuid::Uuid,
     now: chrono::DateTime<Utc>,
     lease_expires_at: chrono::DateTime<Utc>,
-) -> Result<Option<TurnRun>> {
+) -> Result<Option<()>> {
     let now = canonical_db_timestamp(now)?;
     let lease_expires_at = canonical_db_timestamp(lease_expires_at)?;
     if lease_token.is_nil() || lease_expires_at <= now {
@@ -150,21 +149,29 @@ pub(in crate::db) async fn take_lease_on_turn(
         return Ok(None);
     }
     transaction.commit().await.map_err(store_err)?;
-    get_turn(store, id).await
+    // Harness turns have no transcript message. The caller only needs to
+    // know the lease stuck; it already holds the `code_turn` row.
+    Ok(Some(()))
 }
 
 pub(in crate::db) async fn get_turn(store: &DbStore, id: TurnId) -> Result<Option<TurnRun>> {
-    entities::code_turn::Entity::find_by_id(id.0)
+    let Some(row) = entities::code_turn::Entity::find_by_id(id.0)
         .one(&store.conn)
         .await
         .map_err(store_err)?
-        .map(turn_run_from_model)
-        .transpose()
+    else {
+        return Ok(None);
+    };
+    if row.input_message_id.is_none() {
+        return Ok(None);
+    }
+    turn_run_from_model(row).map(Some)
 }
 
 pub(in crate::db) async fn list_turns(store: &DbStore, chat_id: ChatId) -> Result<Vec<TurnRun>> {
     entities::code_turn::Entity::find()
         .filter(entities::code_turn::Column::SessionId.eq(chat_id.0))
+        .filter(entities::code_turn::Column::InputMessageId.is_not_null())
         .order_by_asc(entities::code_turn::Column::StartedAt)
         .order_by_asc(entities::code_turn::Column::Id)
         .all(&store.conn)
@@ -549,11 +556,11 @@ where
         .await
         .map_err(store_err)?;
     }
-    Ok(entities::code_turn::Entity::find_by_id(id.0)
+    entities::code_turn::Entity::find_by_id(id.0)
         .one(conn)
         .await
         .map_err(store_err)?
-        .ok_or_else(|| AgentError::Store(format!("turn {id} vanished after insert")))?)
+        .ok_or_else(|| AgentError::Store(format!("turn {id} vanished after insert")))
 }
 
 pub(in crate::db) async fn claim_turn(
@@ -1045,6 +1052,7 @@ fn due_turn_candidate_condition(now: chrono::DateTime<Utc>) -> sea_orm::Conditio
         )
         .add(entities::code_turn::Column::AvailableAt.lte(now))
         .add(entities::code_turn::Column::UpdatedAt.lte(now))
+        .add(entities::code_turn::Column::InputMessageId.is_not_null())
 }
 
 fn expired_turn_candidate_condition(now: chrono::DateTime<Utc>) -> sea_orm::Condition {
@@ -1055,6 +1063,7 @@ fn expired_turn_candidate_condition(now: chrono::DateTime<Utc>) -> sea_orm::Cond
         ]))
         .add(entities::code_turn::Column::LeaseExpiresAt.lte(now))
         .add(entities::code_turn::Column::UpdatedAt.lte(now))
+        .add(entities::code_turn::Column::InputMessageId.is_not_null())
 }
 
 async fn any_turn_claim_work_on<C>(

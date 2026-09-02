@@ -218,6 +218,7 @@
             "auto_mode": "supported",
             "durable_parks": "unknown",
             "image_input": "supported",
+            "mid_turn_resume": "unsupported",
             "mid_turn_steering": "supported",
             "native_file_change_events": "unsupported",
             "native_interrupt": "supported",
@@ -228,6 +229,7 @@
             "standing_grants": "supported",
             "streaming_deltas": "supported",
             "structured_approvals": "supported",
+            "transcript": "unsupported",
             "user_questions": "supported"
           },
           "commands": [
@@ -258,6 +260,7 @@
             "auto_mode": "supported",
             "durable_parks": "unknown",
             "image_input": "supported",
+            "mid_turn_resume": "unsupported",
             "mid_turn_steering": "supported",
             "native_file_change_events": "unsupported",
             "native_interrupt": "supported",
@@ -268,6 +271,7 @@
             "standing_grants": "supported",
             "streaming_deltas": "supported",
             "structured_approvals": "supported",
+            "transcript": "unsupported",
             "user_questions": "supported"
           },
           "commands": [],

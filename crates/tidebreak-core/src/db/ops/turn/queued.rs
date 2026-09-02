@@ -395,7 +395,6 @@ pub(in crate::db) async fn delete_queued_turn(
         .exec(&transaction)
         .await
         .map_err(store_err)?;
-    if deleted.rows_affected == 1 {}
     transaction.commit().await.map_err(store_err)?;
     Ok(deleted.rows_affected == 1)
 }

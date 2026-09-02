@@ -1027,11 +1027,12 @@ where
     let mut invoked = Vec::new();
     for turn in &turns {
         let skills = super::turn::invoked_skills_from_model(turn)?;
+        let Some(input_message_id) = turn.input_message_id else {
+            continue;
+        };
         if !skills.is_empty() {
             invoked.push(MessageInvokedSkills {
-                message_id: MessageId(turn.input_message_id.ok_or_else(|| {
-                    AgentError::Store(format!("turn {} is missing its input message", turn.id))
-                })?),
+                message_id: MessageId(input_message_id),
                 skills,
             });
         }

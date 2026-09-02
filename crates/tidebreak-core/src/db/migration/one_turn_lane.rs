@@ -470,11 +470,15 @@ BEGIN
         FROM pg_constraint AS constraint_row
         WHERE constraint_row.contype = 'f'
           AND constraint_row.confrelid IN (
-                'turn_run'::regclass,
-                'turn_claim'::regclass,
-                'code_turn_claim'::regclass,
-                'queued_turn'::regclass,
-                'message_attachment'::regclass
+                SELECT oid FROM pg_class
+                WHERE relkind = 'r'
+                  AND relname IN (
+                    'turn_run',
+                    'turn_claim',
+                    'code_turn_claim',
+                    'queued_turn',
+                    'message_attachment'
+                  )
               )
     LOOP
         IF reference.old_target IN ('turn_run', '"turn_run"') THEN
