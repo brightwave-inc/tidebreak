@@ -204,7 +204,7 @@ async fn internal_engine_app_capturing(
 }
 
 fn spawn_turn_worker_with_blobs(state: &AppState) {
-    let worker = crate::turn_worker::TurnWorker::new(
+    let worker = crate::engine::internal::leg::LegDriver::new(
         state.store.clone(),
         state.resolver.clone(),
         state.secrets.clone(),
@@ -219,7 +219,7 @@ fn spawn_turn_worker_with_blobs(state: &AppState) {
         state.queued_turn_wake.clone(),
         state.agent_config.clone(),
         None,
-        crate::turn_worker::TurnWorkerConfig::default(),
+        crate::engine::internal::leg::LegDriverConfig::default(),
     )
     .with_blobs(state.blobs.clone());
     tokio::spawn(worker.run());
