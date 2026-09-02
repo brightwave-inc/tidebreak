@@ -1,0 +1,15 @@
+[mcp_servers]
+
+[mcp_servers.mgrt_986a1b7135f4986150aa5fa0028feeaa]
+command = "/run/model-gateway/runtime/bin/modelctl"
+args = ["--config", "/workspace/.config/modelctl/config.toml", "runtime", "mcp", "--profile", "sandbox", "--endpoint", "primary", "--client", "codex"]
+startup_timeout_sec = 15
+tool_timeout_sec = 930
+required = true
+
+[mcp_servers.mgrt_0919a184d7883eac00a47fd2c9b9ba7b]
+command = "/run/model-gateway/runtime/bin/modelctl"
+args = ["--config", "/workspace/.config/modelctl/config.toml", "runtime", "mcp", "--profile", "sandbox", "--endpoint", "shipright", "--client", "codex"]
+startup_timeout_sec = 15
+tool_timeout_sec = 930
+required = true
