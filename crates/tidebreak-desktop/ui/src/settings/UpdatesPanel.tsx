@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { AlertTriangle, RefreshCw, RotateCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
 import { ClipboardCopyButton } from "../ClipboardCopyButton";
 import { hasNativeHost } from "../host";
 import type { DesktopUpdateState } from "../updates";
@@ -100,7 +101,7 @@ export function UpdatesPanel({
               disabled={!state.enabled || busy}
               onClick={() => void onCheck()}
             >
-              <RefreshCw className={busy ? "animate-spin" : undefined} />
+              {busy ? <Spinner aria-hidden /> : <RefreshCw />}
               {state.status === "checking"
                 ? "Checking…"
                 : state.status === "downloading"
