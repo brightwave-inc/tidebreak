@@ -1063,6 +1063,9 @@ mod tests {
         assert!(!read.truncated);
     }
 
+    // The probe is a POSIX `printf`, and `user_shell()` falls back to
+    // PowerShell on Windows, which never expands it.
+    #[cfg(not(windows))]
     #[test]
     fn spawned_shell_sees_the_embedded_terminal_type() {
         let dir = tempfile::tempdir().unwrap();
