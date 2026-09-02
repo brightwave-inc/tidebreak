@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import { Plus, RefreshCw, Trash2, Upload } from "lucide-react";
-import type {
-  ApiClient,
-  GatewayApps,
-  McpCuration,
-  McpHealth,
-  McpServerDefinition,
-  McpServerInfo,
+import {
+  HttpError,
+  type ApiClient,
+  type GatewayApps,
+  type McpCuration,
+  type McpHealth,
+  type McpServerDefinition,
+  type McpServerInfo,
 } from "../api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -22,7 +23,7 @@ import {
   SettingsStatus,
 } from "./primitives";
 import {
-  parseMcpImport,
+  parseMcpImportText,
   type McpImportResult,
   type McpImportSecret,
 } from "./mcpImport";
@@ -212,6 +213,7 @@ export function McpPanel({
   const [importSummary, setImportSummary] = useState<McpImportSummary | null>(
     null,
   );
+  const [importDraft, setImportDraft] = useState("");
   const importInputRef = useRef<HTMLInputElement>(null);
   // Gateway session state, held here because the gateway endpoints section
   // shares this panel's one server list instead of owning a second copy.
@@ -390,6 +392,15 @@ export function McpPanel({
     }
   }
 
+  function applyImport(text: string, source: string) {
+    const result = parseMcpImportText(text, servers);
+    setImportSummary({ ...result, fileName: source });
+    if (result.servers.length > 0) {
+      markDirty(true);
+      setServers((current) => [...current, ...result.servers]);
+    }
+  }
+
   async function importConfiguration(file: File) {
     setImporting(true);
     setImportError(null);
@@ -399,20 +410,23 @@ export function McpPanel({
         throw new Error("Choose a JSON file no larger than 1 MB.");
       }
       const text = await file.text();
-      let value: unknown;
-      try {
-        value = JSON.parse(text);
-      } catch {
-        throw new Error("The file is not valid JSON.");
-      }
-      const result = parseMcpImport(value, servers);
-      setImportSummary({ ...result, fileName: file.name });
-      if (result.servers.length > 0) {
-        markDirty(true);
-        setServers((current) => [...current, ...result.servers]);
-      }
+      setImportDraft(text);
+      applyImport(text, file.name);
     } catch (err) {
       setImportError(`Couldn't import ${file.name}: ${errorMessage(err)}`);
+    } finally {
+      setImporting(false);
+    }
+  }
+
+  function importPastedJson() {
+    setImporting(true);
+    setImportError(null);
+    setImportSummary(null);
+    try {
+      applyImport(importDraft, "pasted JSON");
+    } catch (err) {
+      setImportError(`Couldn't import pasted JSON: ${errorMessage(err)}`);
     } finally {
       setImporting(false);
     }
@@ -670,32 +684,56 @@ export function McpPanel({
         <>
           <SettingsSection
             title="Import configuration"
-            description="Add servers from a Tidebreak, Claude, or Cursor JSON file. Imported servers stay unsaved until you review them and save."
+            description="Add servers from a Tidebreak, Claude, Cursor, Windsurf, or VS Code JSON file, or paste that JSON here. Imported servers stay unsaved until you review them and save."
           >
             <div className="flex flex-col items-start gap-2">
-              <input
-                ref={importInputRef}
-                type="file"
-                accept=".json,application/json"
-                className="sr-only"
-                aria-label="Import MCP configuration"
-                disabled={working}
-                onChange={(event) => {
-                  const input = event.currentTarget;
-                  const file = input.files?.[0];
-                  if (file !== undefined) void importConfiguration(file);
-                  input.value = "";
-                }}
-              />
-              <Button
-                type="button"
-                variant="outline"
-                disabled={working}
-                onClick={() => importInputRef.current?.click()}
+              <SettingsField
+                label="MCP JSON"
+                hint="Paste a Claude Desktop, Cursor, Windsurf, VS Code, or Tidebreak MCP file. Failed imports keep this text so you can fix it."
               >
-                <Upload size={14} />
-                {importing ? "Importing…" : "Import JSON"}
-              </Button>
+                <textarea
+                  className="min-h-40 w-full rounded-md border bg-transparent p-2 font-mono text-xs"
+                  value={importDraft}
+                  disabled={working}
+                  spellCheck={false}
+                  aria-label="MCP JSON"
+                  placeholder='{ "mcpServers": { "docs": { "command": "npx" } } }'
+                  onChange={(event) => setImportDraft(event.target.value)}
+                />
+              </SettingsField>
+              <div className="flex flex-wrap gap-2">
+                <input
+                  ref={importInputRef}
+                  type="file"
+                  accept=".json,application/json"
+                  className="sr-only"
+                  aria-label="Import MCP configuration"
+                  disabled={working}
+                  onChange={(event) => {
+                    const input = event.currentTarget;
+                    const file = input.files?.[0];
+                    if (file !== undefined) void importConfiguration(file);
+                    input.value = "";
+                  }}
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={working}
+                  onClick={() => importInputRef.current?.click()}
+                >
+                  <Upload size={14} />
+                  {importing ? "Importing…" : "Import JSON file"}
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={working || importDraft.trim().length === 0}
+                  onClick={() => importPastedJson()}
+                >
+                  Import pasted JSON
+                </Button>
+              </div>
               <p className="text-xs text-muted-foreground">
                 Tidebreak imports environment variable names but never their
                 values. Enter secret values again before you save.
@@ -1158,8 +1196,12 @@ function mountStatus(mounted: McpServerInfo): string {
 }
 
 /** A message that can sit mid-sentence: `String(err)` would keep the error
- * class prefix ("HttpError: ...") in front of it. */
+ * class prefix ("HttpError: ...") in front of it. HTTP status prefixes stay
+ * off so a rejected save shows the server's field-level reason. */
 function errorMessage(err: unknown): string {
+  if (err instanceof HttpError) {
+    return err.message.replace(/^\d+:\s*/, "");
+  }
   return err instanceof Error ? err.message : String(err);
 }
 
