@@ -1,7 +1,7 @@
 ---
 name: pdf-documents
 description: Generate PDFs with fpdf2 and merge, split, or fill existing PDFs with pypdf, with visual QA before delivery.
-deps: { python: ["fpdf2==2.8.3", "pypdf==6.15.0"] }
+deps: { python: ["fpdf2==2.8.3", "pypdf==6.16.1"] }
 ---
 
 # PDF documents
@@ -17,7 +17,7 @@ bounded wall clock, and one `pip` invocation per package stays inside it:
 
 ```
 python3 -m pip install --user fpdf2==2.8.3
-python3 -m pip install --user pypdf==6.15.0
+python3 -m pip install --user pypdf==6.16.1
 ```
 
 Installs work only when this chat's network policy allows package managers,
