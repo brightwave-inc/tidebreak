@@ -35,6 +35,7 @@ import type {
 } from "../api/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
 import {
   Dialog,
   DialogOverlay,
@@ -760,11 +761,7 @@ function PrDetailHeader({
             disabled={loading}
             onClick={onRefresh}
           >
-            {loading ? (
-              <LoaderCircle className="animate-spin" />
-            ) : (
-              <RefreshCw />
-            )}
+            {loading ? <Spinner aria-hidden /> : <RefreshCw />}
             <span className="sr-only">Refresh</span>
           </Button>
           {onClose ? (

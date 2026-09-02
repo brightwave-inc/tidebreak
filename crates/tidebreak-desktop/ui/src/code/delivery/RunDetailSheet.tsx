@@ -16,13 +16,8 @@ import {
   PartialErrorBanner,
   RunStateText,
 } from "./status";
-import {
-  ExternalLink,
-  GitBranch,
-  LoaderCircle,
-  RefreshCw,
-  X,
-} from "lucide-react";
+import { ExternalLink, GitBranch, RefreshCw, X } from "lucide-react";
+import { Spinner } from "@/components/ui/spinner";
 import { codeDeliveryRepositoryTarget } from "../CodeDeliveryStore";
 import { friendlyErrorMessage } from "@/lib/utils";
 import { humanize, runBucket } from "./helpers";
@@ -194,11 +189,7 @@ export function RunDetailSheet({
                     disabled={Boolean(busy)}
                     onClick={() => void rerun("all")}
                   >
-                    {busy === "all" ? (
-                      <LoaderCircle className="animate-spin" />
-                    ) : (
-                      <RefreshCw />
-                    )}
+                    {busy === "all" ? <Spinner aria-hidden /> : <RefreshCw />}
                     Rerun all
                   </Button>
                 )}
@@ -209,11 +200,7 @@ export function RunDetailSheet({
                   disabled={Boolean(busy)}
                   onClick={() => void rerun("failed")}
                 >
-                  {busy === "failed" ? (
-                    <LoaderCircle className="animate-spin" />
-                  ) : (
-                    <RefreshCw />
-                  )}
+                  {busy === "failed" ? <Spinner aria-hidden /> : <RefreshCw />}
                   Rerun failed
                 </Button>
               )}

@@ -245,6 +245,9 @@ markers, not as decorative advertising.
 - Do not place an icon in a colored or gray container on high-density
   surfaces. `EmptyMedia variant="icon"` draws no container at all, and it is
   the only icon treatment allowed on an empty surface.
+- Indeterminate progress uses `Spinner`. A busy refresh control swaps to that
+  glyph. Do not put `animate-spin` on `RefreshCw` or `RotateCw`: Lucide's ink
+  box is not the viewBox center, so the glyph orbits.
 
 ### Destructive actions
 
