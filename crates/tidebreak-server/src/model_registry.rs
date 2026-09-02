@@ -77,7 +77,8 @@ const EFFORT_NONE_TO_HIGH: &[ReasoningEffort] = &[
     ReasoningEffort::Medium,
     ReasoningEffort::High,
 ];
-/// Gemini 3.1 Pro Preview starts at `low`; it does not accept `minimal`.
+/// Gemini 3.1 Pro Preview and Gemini Flash from 3.7 on start at `low`; they
+/// reject `minimal`.
 const EFFORT_LOW_TO_HIGH: &[ReasoningEffort] = &[
     ReasoningEffort::Low,
     ReasoningEffort::Medium,
@@ -309,9 +310,13 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
     },
     // Second, not first: the built-in default is this provider's first curated
     // row, and the default stays Opus 5.
+    //
+    // Fable 5.1 is the first Claude that rejects a forced tool choice and
+    // binds its thinking blocks to the conversation prefix. The Anthropic
+    // adapter reads both from the id, so the row carries nothing for them.
     ModelSpec {
-        id: "claude-fable-5",
-        display_name: "Claude Fable 5",
+        id: "claude-fable-5-1",
+        display_name: "Claude Fable 5.1",
         provider: ProviderKind::Anthropic,
         verification: VerificationTier::Verified,
         recommended: true,
@@ -321,6 +326,19 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         supports_reasoning: true,
         supports_vendor_web_search: true,
         // Same adaptive-thinking generation as Opus 5 and Sonnet 5.
+        reasoning_efforts: EFFORT_LOW_TO_MAX,
+    },
+    ModelSpec {
+        id: "claude-fable-5",
+        display_name: "Claude Fable 5",
+        provider: ProviderKind::Anthropic,
+        verification: VerificationTier::Verified,
+        recommended: false,
+        context_window: 1_000_000,
+        max_output_tokens: 128_000,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: true,
+        supports_vendor_web_search: true,
         reasoning_efforts: EFFORT_LOW_TO_MAX,
     },
     ModelSpec {
@@ -523,10 +541,37 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         reasoning_efforts: EFFORT_LOW_TO_XHIGH,
     },
     // Gemini rows are intentionally limited to ids currently published by
-    // Google. All four accept images, expose thinking levels through `high`,
-    // and have 1,048,576 input / 65,536 output token limits; the Flash rows
-    // start at `minimal`, while Pro Preview starts at `low`. The native adapter
-    // owns the corresponding GenerateContent wire shape.
+    // Google. All six accept images, expose thinking levels through `high`,
+    // and have 1,048,576 input / 65,536 output token limits. Flash 3.6 and
+    // earlier start at `minimal`; Flash 3.7 and later reject it and start at
+    // `low`, as Pro Preview does. The native adapter owns the corresponding
+    // GenerateContent wire shape.
+    ModelSpec {
+        id: "gemini-3.8-flash",
+        display_name: "Gemini 3.8 Flash",
+        provider: ProviderKind::Gemini,
+        verification: VerificationTier::Verified,
+        recommended: true,
+        context_window: 1_048_576,
+        max_output_tokens: 65_536,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: true,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_LOW_TO_HIGH,
+    },
+    ModelSpec {
+        id: "gemini-3.7-flash",
+        display_name: "Gemini 3.7 Flash",
+        provider: ProviderKind::Gemini,
+        verification: VerificationTier::Verified,
+        recommended: false,
+        context_window: 1_048_576,
+        max_output_tokens: 65_536,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: true,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_LOW_TO_HIGH,
+    },
     ModelSpec {
         id: "gemini-3.6-flash",
         display_name: "Gemini 3.6 Flash",
@@ -1189,6 +1234,7 @@ mod tests {
         // The generations that do accept `xhigh` keep advertising it.
         for id in [
             "claude-opus-5",
+            "claude-fable-5-1",
             "claude-fable-5",
             "claude-sonnet-5",
             "claude-opus-4-8",
@@ -1313,23 +1359,47 @@ mod tests {
     #[test]
     fn every_gemini_entry_has_the_native_adapter_contract() {
         let gemini: Vec<_> = models_for(ProviderKind::Gemini).collect();
-        assert_eq!(gemini.len(), 4);
+        assert_eq!(gemini.len(), 6);
         for spec in gemini {
             assert_eq!(spec.context_window, 1_048_576, "{}", spec.id);
             assert_eq!(spec.max_output_tokens, 65_536, "{}", spec.id);
             assert!(spec.supports_reasoning, "{}", spec.id);
-            if spec.id != "gemini-3.1-pro-preview" {
+            if !GEMINI_WITHOUT_MINIMAL.contains(&spec.id) {
                 assert_eq!(spec.reasoning_efforts, EFFORT_NONE_TO_HIGH, "{}", spec.id);
             }
         }
     }
 
-    #[test]
-    fn gemini_3_1_pro_excludes_minimal() {
-        let direct = find_for(ProviderKind::Gemini, "gemini-3.1-pro-preview").unwrap();
+    /// The Gemini rows whose endpoint returns an error for `minimal`.
+    const GEMINI_WITHOUT_MINIMAL: &[&str] = &[
+        "gemini-3.8-flash",
+        "gemini-3.7-flash",
+        "gemini-3.1-pro-preview",
+    ];
 
-        assert_eq!(direct.reasoning_efforts, EFFORT_LOW_TO_HIGH);
-        assert!(!direct.reasoning_efforts.contains(&ReasoningEffort::None));
+    #[test]
+    fn gemini_3_1_pro_and_flash_3_7_onward_exclude_minimal() {
+        for id in GEMINI_WITHOUT_MINIMAL {
+            let direct = find_for(ProviderKind::Gemini, id).unwrap();
+            assert_eq!(direct.reasoning_efforts, EFFORT_LOW_TO_HIGH, "{id}");
+            assert!(!direct.reasoning_efforts.contains(&ReasoningEffort::None));
+        }
+    }
+
+    #[test]
+    fn the_anthropic_default_row_stays_opus_5_ahead_of_fable() {
+        // The first curated Anthropic row is what a fresh Anthropic-only install
+        // resolves to. Fable is the demanding-work option, not the default, and
+        // the current Fable sits ahead of the one it replaced.
+        let ids: Vec<_> = models_for(ProviderKind::Anthropic)
+            .map(|spec| spec.id)
+            .collect();
+        assert_eq!(
+            &ids[..3],
+            ["claude-opus-5", "claude-fable-5-1", "claude-fable-5"]
+        );
+        assert!(find("claude-fable-5-1").unwrap().recommended);
+        assert!(!find("claude-fable-5").unwrap().recommended);
     }
 
     #[test]

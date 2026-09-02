@@ -27,6 +27,8 @@ use crate::sse::{
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
+/// The beta that unlocks `thinking.block_binding` — see [`fable_5_1_or_later`].
+const THINKING_BINDING_BETA: &str = "thinking-binding-controls-2026-08-01";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 
 /// Description for the synthetic tool that carries a constrained response.
@@ -108,8 +110,14 @@ impl ModelProvider for AnthropicProvider {
     async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
         let mut body = build_request_json(&req)?;
         // `build_request_json` has already rejected a format it cannot enforce.
+        // A model on the native constraint answers on the text channel with no
+        // tool to read back.
         let output_tool = match &req.response_format {
-            Some(ResponseFormat::JsonSchema { name, .. }) => Some(name.clone()),
+            Some(ResponseFormat::JsonSchema { name, .. })
+                if !fable_5_1_or_later(req.request_shaping_model()) =>
+            {
+                Some(name.clone())
+            }
             _ => None,
         };
         // Setup failures (connection, auth, 4xx/5xx) surface here as `Err` so the
@@ -294,6 +302,10 @@ impl AnthropicProvider {
         api_key: &str,
         conversation: Option<tidebreak_core::id::ChatId>,
     ) -> Result<reqwest::Response> {
+        // The binding control is a beta field, and the header that admits it
+        // is decided from the body so every leg of a paused turn agrees with
+        // the first.
+        let binds_thinking = body.pointer("/thinking/block_binding").is_some();
         let body = serde_json::to_vec(body)?;
         let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
         let url = reqwest::Url::parse(&url)
@@ -304,6 +316,9 @@ impl AnthropicProvider {
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header("content-type", "application/json");
         let mut request = request.header("x-api-key", api_key);
+        if binds_thinking {
+            request = request.header("anthropic-beta", THINKING_BINDING_BETA);
+        }
         // A conversation is declared only where one is configured to be read.
         // The id is a UUID, so it satisfies the gateway's bound on the value
         // (1-256 ASCII graphic bytes) by construction.
@@ -459,18 +474,32 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
             None => body["tools"] = json!([vendor_tool]),
         }
     }
+    let shaping_model = req.request_shaping_model();
     match &req.response_format {
         Some(ResponseFormat::JsonSchema { name, schema }) => {
-            // The Messages API constrains output through a forced tool call, so
-            // the schema becomes a tool nothing above the adapter ever sees: the
-            // stream re-reads its arguments as text (see `normalize`), which is
-            // the channel every other provider delivers structured output on.
             let schema =
                 strict_json_schema(schema, OptionalProperties::AcceptNull).ok_or_else(|| {
                     AgentError::Provider(format!(
                         "response format {name} has no strict JSON Schema form"
                     ))
                 })?;
+            if fable_5_1_or_later(shaping_model) {
+                // Fable 5.1 rejects the forced call below, and it has the
+                // native constraint the forced tool stood in for: the text
+                // channel itself carries the schema-valid answer, so there is no
+                // tool to re-read and the request keeps thinking.
+                set_output_config(
+                    &mut body,
+                    "format",
+                    json!({ "type": "json_schema", "schema": schema }),
+                );
+                return finish_request(body, req, caches_prompt, retention);
+            }
+            // Elsewhere the Messages API constrains output through a forced
+            // tool call, so the schema becomes a tool nothing above the adapter
+            // ever sees: the stream re-reads its arguments as text (see
+            // `normalize`), which is the channel every other provider delivers
+            // structured output on.
             let output_tool = json!({
                 "name": name,
                 "description": STRUCTURED_OUTPUT_TOOL_DESCRIPTION,
@@ -488,6 +517,16 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
         }
         None => {
             if let Some(choice) = &req.tool_choice {
+                // A forced choice is the caller's explicit ask; on a model that
+                // returns 400 for it, failing here names the cause instead of
+                // relaying the provider's rejection as a generic fault.
+                if fable_5_1_or_later(shaping_model)
+                    && matches!(choice, ToolChoice::Required | ToolChoice::Tool { .. })
+                {
+                    return Err(AgentError::Provider(format!(
+                        "{shaping_model} rejects a forced tool choice"
+                    )));
+                }
                 body["tool_choice"] = anthropic_tool_choice(choice)?;
             }
         }
@@ -500,6 +539,17 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
             )))
         }
     }
+    finish_request(body, req, caches_prompt, retention)
+}
+
+/// The tail of [`build_request_json`], after the tool array and the output
+/// constraint are settled.
+fn finish_request(
+    mut body: Value,
+    req: &ChatRequest,
+    caches_prompt: bool,
+    retention: PromptCacheRetention,
+) -> Result<Value> {
     // After the whole tool array is settled, including a structured-output tool
     // appended above.
     if caches_prompt {
@@ -539,8 +589,22 @@ fn build_request_json(req: &ChatRequest) -> Result<Value> {
         // replay below keep the raw blocks whole rather than filtering on
         // `type == "thinking"`.
         body["thinking"] = json!({ "type": "adaptive", "display": "summarized" });
+        if fable_5_1_or_later(req.request_shaping_model()) {
+            // Fable 5.1 signs each thinking block against the prefix that
+            // produced it and rejects a replayed block whose prefix has since
+            // changed. This host does rewrite earlier turns — compaction and
+            // image reduction both do — so the request asks for the stale
+            // blocks to be dropped rather than the 400: the turn proceeds and
+            // the model re-plans without them. The field is a beta; `send`
+            // adds the header that admits it.
+            body["thinking"]["block_binding"] = json!({ "prefix_mismatch_behavior": "drop_block" });
+        }
         if let Some(effort) = req.reasoning_effort {
-            body["output_config"] = json!({ "effort": wire_reasoning_effort(req.request_shaping_model(), effort).as_str() });
+            set_output_config(
+                &mut body,
+                "effort",
+                json!(wire_reasoning_effort(req.request_shaping_model(), effort).as_str()),
+            );
         }
         attach_reasoning_blocks(&mut body, req);
     }
@@ -743,12 +807,48 @@ fn is_cache_markable(block: &Value) -> bool {
 }
 
 /// Whether the request obliges the model to call a specific tool or any tool.
+///
+/// A response format forces the synthetic output tool everywhere except on a
+/// model with the native constraint, where nothing on the wire is forced.
 fn forces_a_tool(req: &ChatRequest) -> bool {
-    req.response_format.is_some()
+    (req.response_format.is_some() && !fable_5_1_or_later(req.request_shaping_model()))
         || matches!(
             req.tool_choice,
             Some(ToolChoice::Required | ToolChoice::Tool { .. })
         )
+}
+
+/// Set one key of the request's `output_config`, keeping the others.
+///
+/// Effort and the output format both live under it and are decided at
+/// different points of the build.
+fn set_output_config(body: &mut Value, key: &str, value: Value) {
+    match body.get_mut("output_config") {
+        Some(Value::Object(config)) => {
+            config.insert(key.to_owned(), value);
+        }
+        _ => body["output_config"] = json!({ key: value }),
+    }
+}
+
+/// Whether `model` is Claude Fable 5.1, its Mythos twin, or a later release of
+/// that line.
+///
+/// Fable 5.1 changed two things the rest of the line did not. It returns a 400
+/// for a forced `tool_choice` (`any` and `tool`), where Opus 5 and Fable 5 both
+/// think by default and still accept one — so the structured-output constraint
+/// goes on `output_config.format` instead of a forced tool. And it binds each
+/// thinking block to the conversation prefix that produced it, so a replayed
+/// block behind a rewritten turn is rejected unless the request opts into
+/// dropping it. Neither follows from the generation alone: an Opus of the same
+/// generation keeps the old contract. So this reads the family and the
+/// generation together, the way `web_search_tool_type` carves out Haiku.
+fn fable_5_1_or_later(model: &str) -> bool {
+    /// First release of the line on this contract.
+    const FIRST: (u32, u32) = (5, 1);
+    let leaf = model.rsplit('/').next().unwrap_or(model);
+    (leaf.contains("fable") || leaf.contains("mythos"))
+        && claude_generation(model).is_some_and(|generation| generation >= FIRST)
 }
 
 fn anthropic_tool_choice(choice: &ToolChoice) -> Result<Value> {
@@ -1945,6 +2045,99 @@ mod tests {
         assert_eq!(body["thinking"]["display"], "summarized");
         // Absent a per-chat override the provider's own effort default holds.
         assert!(body.get("output_config").is_none());
+    }
+
+    #[test]
+    fn fable_5_1_constrains_output_natively_and_keeps_thinking() {
+        let mut req = reasoning_request("claude-fable-5-1", Some(ReasoningEffort::Low));
+        req.response_format = Some(ResponseFormat::JsonSchema {
+            name: "note".into(),
+            schema: json!({
+                "type": "object",
+                "properties": { "body": { "type": "string" } },
+                "required": ["body"],
+            }),
+        });
+        let body = build_request_json(&req).unwrap();
+        // No forced call, no synthetic tool: the model rejects the former, and
+        // the native constraint makes the latter redundant.
+        assert!(body.get("tool_choice").is_none());
+        assert!(body.get("tools").is_none());
+        assert_eq!(body["output_config"]["format"]["type"], "json_schema");
+        assert_eq!(
+            body["output_config"]["format"]["schema"]["additionalProperties"],
+            false
+        );
+        // Effort shares `output_config` with the format rather than replacing
+        // it, and nothing on the wire is forced, so the request still thinks.
+        assert_eq!(body["output_config"]["effort"], "low");
+        assert_eq!(body["thinking"]["type"], "adaptive");
+    }
+
+    #[test]
+    fn fable_5_1_asks_for_stale_thinking_to_be_dropped() {
+        let body = build_request_json(&reasoning_request(
+            "claude-fable-5-1",
+            Some(ReasoningEffort::High),
+        ))
+        .unwrap();
+        assert_eq!(
+            body["thinking"]["block_binding"]["prefix_mismatch_behavior"],
+            "drop_block"
+        );
+        // Opus 5 does not bind its blocks, and the field is a beta the older
+        // rows must not be sent.
+        let body = build_request_json(&reasoning_request(
+            "claude-opus-5",
+            Some(ReasoningEffort::High),
+        ))
+        .unwrap();
+        assert!(body["thinking"].get("block_binding").is_none());
+    }
+
+    #[test]
+    fn fable_5_1_refuses_a_forced_tool_choice_by_name() {
+        for choice in [
+            ToolChoice::Required,
+            ToolChoice::Tool {
+                name: "note".into(),
+            },
+        ] {
+            let mut req = reasoning_request("claude-fable-5-1", None);
+            req.tool_choice = Some(choice);
+            let err = build_request_json(&req).unwrap_err().to_string();
+            assert!(err.contains("claude-fable-5-1"), "{err}");
+            assert!(err.contains("forced tool choice"), "{err}");
+        }
+        // `auto` and `none` are unchanged on the model.
+        let mut req = reasoning_request("claude-fable-5-1", None);
+        req.tool_choice = Some(ToolChoice::None);
+        assert_eq!(
+            build_request_json(&req).unwrap()["tool_choice"],
+            json!({ "type": "none" })
+        );
+    }
+
+    #[test]
+    fn the_fable_5_1_contract_follows_family_and_generation() {
+        for id in [
+            "claude-fable-5-1",
+            "claude-mythos-5-1",
+            "claude-fable-6",
+            "us.anthropic.claude-fable-5-1",
+        ] {
+            assert!(fable_5_1_or_later(id), "{id}");
+        }
+        for id in [
+            "claude-fable-5",
+            "claude-opus-5",
+            "claude-opus-5-1",
+            "claude-sonnet-5",
+            "claude-opus-4-8",
+            "some-gateway-alias",
+        ] {
+            assert!(!fable_5_1_or_later(id), "{id}");
+        }
     }
 
     #[test]

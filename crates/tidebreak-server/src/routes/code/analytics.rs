@@ -454,13 +454,31 @@ fn canonical_model_id(model: &str) -> Option<&'static str> {
     if model_matches(&model, "gpt-5.6-sol") || model_matches(&model, "gpt-5.6") {
         return Some("gpt-5.6-sol");
     }
+    // Longer ids first: a bare `claude-fable-5` must not claim the 5.1 row,
+    // and Flash-Lite must not read as Flash.
     [
         "gpt-5.6-terra",
         "gpt-5.6-luna",
+        "gpt-5.5",
+        "gpt-5.4-mini",
+        "gpt-5.4-nano",
+        "grok-4.6",
+        "grok-4.5",
+        "gemini-3.8-flash",
+        "gemini-3.7-flash",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-3.5-flash",
+        "gemini-3.1-pro-preview",
+        "claude-fable-5-1",
         "claude-fable-5",
         "claude-opus-5",
         "claude-sonnet-5",
         "claude-haiku-4-5",
+        "claude-opus-4-8",
+        "claude-opus-4-7",
+        "claude-opus-4-6",
+        "claude-sonnet-4-6",
     ]
     .into_iter()
     .find(|&id| model_matches(&model, id) || model_has_dated_suffix(&model, id))
@@ -486,23 +504,94 @@ fn model_has_dated_suffix(value: &str, id: &str) -> bool {
 
 fn price_for_canonical(model: &str) -> Option<PriceRate> {
     match model {
+        // OpenAI short-context (under 272K) rates. The GPT-5.6 rows are the
+        // only OpenAI models that bill cache writes. Sol's rate is promotional,
+        // published as holding at least through 2026-11-21.
         "gpt-5.6-sol" => Some(PriceRate {
-            input: 5_000,
-            output: 30_000,
-            cache_read: 500,
-            cache_write: 0,
+            input: 4_000,
+            output: 20_000,
+            cache_read: 400,
+            cache_write: 5_000,
         }),
         "gpt-5.6-terra" => Some(PriceRate {
             input: 2_000,
             output: 12_000,
             cache_read: 200,
-            cache_write: 0,
+            cache_write: 2_500,
         }),
         "gpt-5.6-luna" => Some(PriceRate {
             input: 200,
             output: 1_200,
             cache_read: 20,
+            cache_write: 250,
+        }),
+        "gpt-5.5" => Some(PriceRate {
+            input: 5_000,
+            output: 30_000,
+            cache_read: 500,
             cache_write: 0,
+        }),
+        "gpt-5.4-mini" => Some(PriceRate {
+            input: 750,
+            output: 4_500,
+            cache_read: 75,
+            cache_write: 0,
+        }),
+        "gpt-5.4-nano" => Some(PriceRate {
+            input: 200,
+            output: 1_250,
+            cache_read: 20,
+            cache_write: 0,
+        }),
+        // xAI rates for prompts under 200K tokens; a longer prompt doubles
+        // every token in the request, which this table does not model.
+        "grok-4.6" => Some(PriceRate {
+            input: 2_000,
+            output: 6_000,
+            cache_read: 500,
+            cache_write: 0,
+        }),
+        "grok-4.5" => Some(PriceRate {
+            input: 2_000,
+            output: 6_000,
+            cache_read: 300,
+            cache_write: 0,
+        }),
+        // Gemini bills context-cache storage by the hour rather than per
+        // written token, so cache writes stay at zero. The 3.6 through 3.8
+        // Flash rates are published as doubling on 2027-01-01.
+        "gemini-3.8-flash" | "gemini-3.7-flash" | "gemini-3.6-flash" => Some(PriceRate {
+            input: 750,
+            output: 3_750,
+            cache_read: 75,
+            cache_write: 0,
+        }),
+        "gemini-3.5-flash" => Some(PriceRate {
+            input: 1_500,
+            output: 9_000,
+            cache_read: 150,
+            cache_write: 0,
+        }),
+        "gemini-3.5-flash-lite" => Some(PriceRate {
+            input: 300,
+            output: 2_500,
+            cache_read: 30,
+            cache_write: 0,
+        }),
+        // The rate for prompts up to 200K tokens; longer prompts bill higher.
+        "gemini-3.1-pro-preview" => Some(PriceRate {
+            input: 2_000,
+            output: 12_000,
+            cache_read: 200,
+            cache_write: 0,
+        }),
+        // Same tier and per-token price as Fable 5, but cache reads at a
+        // quarter of the usual tenth of input.
+        "claude-fable-5-1" => Some(PriceRate {
+            input: 10_000,
+            output: 50_000,
+            cache_read: 250,
+            cache_write: 12_500,
         }),
         "claude-fable-5" => Some(PriceRate {
             input: 10_000,
@@ -527,6 +616,18 @@ fn price_for_canonical(model: &str) -> Option<PriceRate> {
             output: 5_000,
             cache_read: 100,
             cache_write: 1_250,
+        }),
+        "claude-opus-4-8" | "claude-opus-4-7" | "claude-opus-4-6" => Some(PriceRate {
+            input: 5_000,
+            output: 25_000,
+            cache_read: 500,
+            cache_write: 6_250,
+        }),
+        "claude-sonnet-4-6" => Some(PriceRate {
+            input: 3_000,
+            output: 15_000,
+            cache_read: 300,
+            cache_write: 3_750,
         }),
         _ => None,
     }
@@ -623,6 +724,61 @@ mod tests {
         assert_eq!(
             canonical_model_id("accounts/fireworks/models/glm-5p2"),
             None
+        );
+        // The point release must not collapse into the model it replaced.
+        assert_eq!(
+            canonical_model_id("claude-fable-5-1"),
+            Some("claude-fable-5-1")
+        );
+        assert_eq!(
+            canonical_model_id("anthropic-us-claude-fable-5"),
+            Some("claude-fable-5")
+        );
+    }
+
+    #[test]
+    fn every_curated_first_party_row_has_a_price() {
+        use crate::providers::ProviderKind;
+
+        // A curated row a session can pick must land on a rate, or its turns
+        // read as free in the dashboard. Curating a model and pricing it are
+        // two edits in two files; this is what ties them together. The
+        // open-weight hosts (Fireworks, Together) price per deployment rather
+        // than per model and stay unpriced on purpose.
+        for provider in [
+            ProviderKind::Anthropic,
+            ProviderKind::Openai,
+            ProviderKind::Xai,
+            ProviderKind::Gemini,
+        ] {
+            for spec in crate::model_registry::models_for(provider) {
+                let canonical = canonical_model_id(spec.id)
+                    .unwrap_or_else(|| panic!("{} has no canonical price id", spec.id));
+                assert!(
+                    price_for_canonical(canonical).is_some(),
+                    "{} canonicalizes to {canonical}, which has no price",
+                    spec.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn provider_prefixed_ids_reach_their_own_row() {
+        // opencode and the gateway prefix the vendor; a Flash-Lite id must not
+        // fall through to the Flash row it extends.
+        assert_eq!(
+            canonical_model_id("google/gemini-3.5-flash-lite"),
+            Some("gemini-3.5-flash-lite")
+        );
+        assert_eq!(
+            canonical_model_id("google/gemini-3.5-flash"),
+            Some("gemini-3.5-flash")
+        );
+        assert_eq!(canonical_model_id("xai/grok-4.6"), Some("grok-4.6"));
+        assert_eq!(
+            canonical_model_id("model_gateway::gpt-5.4-mini"),
+            Some("gpt-5.4-mini")
         );
     }
 
