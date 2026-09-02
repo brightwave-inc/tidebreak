@@ -270,6 +270,13 @@ const wireId = (value: unknown): value is string =>
   nonEmptyBounded(value, MAX_WIRE_ID_CHARS);
 const optionalWireId = (value: unknown): value is string | undefined =>
   value === undefined || nonEmptyBounded(value, MAX_WIRE_ID_CHARS);
+/**
+ * An id or `null`. A session that binds no workspace (the in-process
+ * engine's, decision 0048 step 5) serializes `workspace_id: null` on its
+ * snapshot and `workspace: null` on its digest; the key is always present.
+ */
+const nullableWireId = (value: unknown): value is string | null =>
+  value === null || nonEmptyBounded(value, MAX_WIRE_ID_CHARS);
 
 const timestamp = (value: unknown): value is string =>
   nonEmptyBounded(value, MAX_WIRE_TIMESTAMP_CHARS);
@@ -281,11 +288,15 @@ const nullableTimestamp = (value: unknown): value is string | null =>
 const optionalCursor = (value: unknown): value is string | undefined =>
   value === undefined || nonEmptyBounded(value, MAX_WIRE_CURSOR_CHARS);
 
+// Every kind the server can name on a session, not just the ones the create
+// picker offers: the in-process engine reports `internal` (decision 0048
+// step 5), and a session it runs must parse like any other.
 const HARNESS_KINDS = new Set<HarnessKind>([
   "claude_code",
   "codex",
   "opencode",
   "grok",
+  "internal",
 ]);
 const HARNESS_TIERS = new Set<HarnessTier>([
   "reference",
@@ -2595,7 +2606,7 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
       "external_origin",
     ]) ||
     !wireId(value.id) ||
-    !wireId(value.workspace_id) ||
+    !nullableWireId(value.workspace_id) ||
     !isMember(value.kind, SESSION_KINDS) ||
     !isMember(value.harness_kind, HARNESS_KINDS) ||
     !optionalLine(value.harness_version) ||
@@ -3960,7 +3971,7 @@ export function parseCodeSessionDigest(
       "subagents",
       "recap",
     ]) ||
-    !wireId(value.workspace) ||
+    !nullableWireId(value.workspace) ||
     !wireId(value.session) ||
     !isMember(value.kind, SESSION_KINDS) ||
     (value.harness_kind !== undefined &&
@@ -4062,7 +4073,7 @@ export function parseCodeUpdateNotice(value: unknown): CodeUpdateNotice | null {
           "subagents",
           "recap",
         ]) ||
-        !wireId(value.workspace) ||
+        !nullableWireId(value.workspace) ||
         !wireId(value.session) ||
         !isMember(value.kind, SESSION_KINDS) ||
         (value.harness_kind !== undefined &&

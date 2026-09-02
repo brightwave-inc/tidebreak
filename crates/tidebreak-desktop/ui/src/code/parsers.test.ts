@@ -388,6 +388,33 @@ describe("parseCodeSession attention states", () => {
   });
 });
 
+describe("parseCodeSession without a workspace", () => {
+  // The in-process engine's session binds no workspace (decision 0048
+  // step 5), so the server sends `workspace_id: null`; the key is present.
+  it("keeps the null workspace instead of dropping the session", () => {
+    const parsed = parseCodeSession({ ...SESSION, workspace_id: null });
+    expect(parsed).not.toBeNull();
+    expect(parsed?.workspace_id).toBeNull();
+  });
+
+  it("accepts the in-process engine's harness kind", () => {
+    // The server fixture names `internal`, and the parser's own vocabulary
+    // had not caught up, so the session dropped for that reason too.
+    const parsed = parseCodeSession({
+      ...SESSION,
+      workspace_id: null,
+      harness_kind: "internal",
+    });
+    expect(parsed?.harness_kind).toBe("internal");
+  });
+
+  it("still requires the key and a real id when one is given", () => {
+    const { workspace_id: _omitted, ...missing } = SESSION;
+    expect(parseCodeSession(missing)).toBeNull();
+    expect(parseCodeSession({ ...SESSION, workspace_id: "" })).toBeNull();
+  });
+});
+
 describe("parseCodeSession external origin", () => {
   it("carries a well-formed origin through", () => {
     const parsed = parseCodeSession({
@@ -868,6 +895,27 @@ describe("pull request state in live updates", () => {
     expect(
       parseCodeUpdateNotice({ type: "snapshot", sessions: [digest] }),
     ).toEqual({ type: "snapshot", sessions: [digest] });
+  });
+
+  it("keeps a digest whose session binds no workspace", () => {
+    const orphan = { ...digest, workspace: null };
+    expect(parseCodeSessionDigest(orphan)).toEqual(orphan);
+    expect(parseCodeUpdateNotice({ type: "digest", ...orphan })).toEqual({
+      type: "digest",
+      ...orphan,
+    });
+    expect(
+      parseCodeUpdateNotice({ type: "snapshot", sessions: [orphan] }),
+    ).toEqual({ type: "snapshot", sessions: [orphan] });
+  });
+
+  it("still rejects a digest with the workspace key missing or empty", () => {
+    const { workspace: _omitted, ...missing } = digest;
+    expect(parseCodeSessionDigest(missing)).toBeNull();
+    expect(parseCodeUpdateNotice({ type: "digest", ...missing })).toBeNull();
+    expect(
+      parseCodeUpdateNotice({ type: "digest", ...digest, workspace: "" }),
+    ).toBeNull();
   });
 
   it("rejects malformed rich PR fields instead of silently dropping them", () => {
@@ -1808,17 +1856,10 @@ const CODE_FRAME_PARSERS: Record<string, (value: unknown) => unknown> = {
 };
 
 /**
- * Real server values the desktop still rejects. brightwave-inc/tidebreak#3027:
- * a session that binds no workspace (decision 0048 step 5) serializes
- * `workspace_id: null` on its snapshot and `workspace: null` on its digest
- * and digest notice, and the parsers still require an id there.
+ * Real server values the desktop still rejects, by fixture name. Empty
+ * today; an entry here is a bug with an issue number, not a skip.
  */
-const KNOWN_GAPS = new Set([
-  "fenced session",
-  "internal session digest",
-  "updates: snapshot",
-  "updates: internal session digest",
-]);
+const KNOWN_GAPS = new Set<string>([]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
