@@ -72,7 +72,11 @@ export async function resolveSessionModel(input: {
  * by the workspace, so `reveal` runs first: the page the reader lands on is
  * the one carrying the steps. A failed session leaves the text with the
  * workspace composer, and a failed first turn does the same, so typed words
- * and pasted images are never dropped. The handoff clears on every exit.
+ * and pasted images are never dropped.
+ *
+ * The handoff clears as soon as the session exists. `POST /turns` waits for
+ * the worker to finish the turn, so leaving the overlay up until submit
+ * returns would cover the conversation for the whole first reply.
  */
 export async function startFirstSession(input: {
   client: ApiClient;
@@ -148,14 +152,11 @@ export async function startFirstSession(input: {
       ...(settings.fastMode ? { fast_mode: true } : {}),
     });
     useCodeCatalogStore.getState().rememberSession(session);
-    if (prompt) {
-      setWorkspaceStartup(workspace.id, {
-        ...base,
-        hasFirstMessage: true,
-        phase: "sending_message",
-      });
-    }
     input.onSessionCreated?.(session, posted);
+    // Drop the steps before posting the first turn so the workspace page can
+    // open the session socket and stream. The route does not return until
+    // the turn ends.
+    setWorkspaceStartup(workspace.id, null);
     if (prompt) {
       try {
         const attachments = await publishFirstTurnImages(
