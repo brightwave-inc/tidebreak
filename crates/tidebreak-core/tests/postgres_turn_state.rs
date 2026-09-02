@@ -1572,7 +1572,10 @@ async fn postgres_parent_cancellation_uses_time_after_admission_and_heartbeat_lo
     blocker
         .execute_raw(Statement::from_string(
             DatabaseBackend::Postgres,
-            format!("UPDATE chat SET title = title WHERE id = '{}'", chat.id.0),
+            format!(
+                "UPDATE code_session SET title = title WHERE id = '{}'",
+                chat.id.0
+            ),
         ))
         .await
         .unwrap();
@@ -1957,7 +1960,10 @@ async fn postgres_sandbox_admission_checks_lease_time_after_lock_wait() {
     blocker
         .execute_raw(Statement::from_string(
             DatabaseBackend::Postgres,
-            format!("UPDATE chat SET title = title WHERE id = '{}'", chat.id.0),
+            format!(
+                "UPDATE code_session SET title = title WHERE id = '{}'",
+                chat.id.0
+            ),
         ))
         .await
         .unwrap();
