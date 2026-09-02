@@ -15,10 +15,15 @@ Each server has:
 
 - a stable namespace containing ASCII letters, numbers, `_`, or `-`;
 - exactly one transport:
-  - **stdio** — an executable, zero or more individual arguments, an optional
-    working directory, optional environment variable *names* (`env`) whose
-    values are held in the OS credential store, and optional `env_from` names
-    selected from the Tidebreak host environment; or
+  - **stdio** — an executable (a bare command name or an absolute path), zero
+    or more individual arguments, an optional working directory, optional
+    environment variable *names* (`env`) whose values are held in the OS
+    credential store, and optional `env_from` names selected from the Tidebreak
+    host environment. A bare name is resolved at verify and launch time on the
+    process PATH extended with the login-shell PATH the harness probe already
+    captures (plus `PATHEXT` on Windows). Tidebreak never invokes a shell to
+    run the server. The stored definition keeps what you typed. A relative path
+    that contains separators is refused; or
   - **HTTP** — an `http`/`https` URL and an optional bearer-token variable
     name selected from the Tidebreak host environment; or
   - **gateway** — the slug of a model-gateway MCP endpoint
@@ -76,10 +81,13 @@ and then restart Tidebreak. Save and verify classifies the failure: DNS
 resolution (the host), TLS handshake (the reason), HTTP status (401/403 as
 authentication, 404 as wrong path, 5xx as server error, with the status line),
 protocol negotiation (quotes the first bytes when the endpoint answered but
-not with MCP JSON-RPC), timeout (after N ms), or a stdio launch failure
-(command not found, exit code, first stderr line). Diagnostics never echo a
-URL or a token. Child stderr is not copied into host logs; a failed launch may
-quote its first line in Settings.
+not with MCP JSON-RPC), timeout (after N ms), or a stdio failure: command not
+found (names a bounded list of directories searched), not executable or
+permission denied, launch failure before the MCP handshake (exit status and a
+bounded stderr tail), or MCP protocol failure. A successful stdio verify
+reports the resolved executable path. Diagnostics never echo a URL, token,
+argument value, or environment value. Child stderr is not copied into host
+logs; a failed launch may quote its first line in Settings.
 
 Definitions saved before the values moved into the credential store held them
 in cleartext in the connected-app record. They are migrated on first load: the

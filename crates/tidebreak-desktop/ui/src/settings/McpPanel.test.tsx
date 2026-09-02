@@ -38,6 +38,7 @@ const healthy: McpServersInfo = {
       tool_count: 2,
       diagnostic: null,
       curated: null,
+      resolved_command: "/opt/mcp/docs",
     },
   ],
 };
@@ -140,6 +141,29 @@ describe("McpPanel", () => {
     expect(
       screen.getByText(
         /Tidebreak reads their values from the process environment/i,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("shows the resolved stdio executable path after verify", async () => {
+    render(
+      <McpPanel
+        client={api({
+          servers: [
+            {
+              ...healthy.servers[0],
+              command: "npx",
+              resolved_command: "/opt/homebrew/bin/npx",
+            },
+          ],
+        })}
+      />,
+    );
+    expect(
+      await screen.findByText(
+        (_, node) =>
+          node?.tagName === "P" &&
+          node.textContent === "Resolved npx to /opt/homebrew/bin/npx",
       ),
     ).toBeInTheDocument();
   });

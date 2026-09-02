@@ -282,6 +282,10 @@ fn classified_transport_detail(error: &AgentError) -> Option<String> {
         "Protocol negotiation failed",
         "Timed out after",
         "Process failed to launch",
+        "Command not found:",
+        "Not executable:",
+        "Permission denied:",
+        "Relative executable path",
     ];
     PREFIXES
         .iter()

@@ -12,7 +12,7 @@
 //! or caller overrides case-insensitively, and resolves through `PATH` plus
 //! `PATHEXT` without running a shell profile script.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -194,6 +194,34 @@ pub enum ProbeError {
 /// Resolve `name` through the user's interactive login shell.
 pub async fn resolve_binary(host: &HostEnv, name: &str) -> Result<PathBuf, ProbeError> {
     Ok(probe_shell(host, name).await?.binary)
+}
+
+/// Capture the interactive login-shell environment (Unix) or the process
+/// environment (Windows). MCP stdio resolution reuses this PATH rather than
+/// probing `$SHELL` per command.
+pub async fn capture_login_env(host: &HostEnv) -> Result<Vec<(OsString, OsString)>, ProbeError> {
+    capture_shell_env(host).await
+}
+
+/// Resolve a bare command name against `PATH` (and `PATHEXT` on Windows)
+/// without invoking a shell. Directories that are not absolute are skipped.
+#[must_use]
+pub fn resolve_command_on_path(name: &str, path: &OsStr) -> Option<PathBuf> {
+    if name.is_empty() || name.contains(['/', '\\', '\0']) {
+        return None;
+    }
+    let mut env = vec![(OsString::from("PATH"), path.to_os_string())];
+    if let Some(pathext) = std::env::var_os("PATHEXT") {
+        env.push((OsString::from("PATHEXT"), pathext));
+    }
+    #[cfg(windows)]
+    {
+        resolve_windows_command(&env, name)
+    }
+    #[cfg(not(windows))]
+    {
+        resolve_unix_command(&env, name)
+    }
 }
 
 /// Resolve `name` and capture the shell's environment in one probe.
@@ -762,7 +790,10 @@ fn env_key_eq(left: &std::ffi::OsStr, right: &std::ffi::OsStr, case_insensitive:
     }
 }
 
-pub(crate) fn env_value<'a>(
+/// Look up `key` in a captured environment. Matching is case-insensitive on
+/// Windows.
+#[must_use]
+pub fn env_value<'a>(
     env: &'a [(OsString, OsString)],
     key: &std::ffi::OsStr,
 ) -> Option<&'a OsString> {

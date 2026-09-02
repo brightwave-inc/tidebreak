@@ -10,6 +10,7 @@
 //! carry names only, and values are resolved at the connection boundary.
 
 mod runtime;
+mod stdio;
 mod types;
 mod validation;
 
