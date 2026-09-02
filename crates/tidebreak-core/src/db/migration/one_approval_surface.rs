@@ -602,40 +602,45 @@ where
         .is_some())
 }
 
-fn approval_row(
+/// One card as the backfill mints it: the row's identity, its conversation,
+/// and what the retired row said about it.
+struct CardRow<'a> {
     owner: String,
     session_id: uuid::Uuid,
     turn_id: uuid::Uuid,
     worker_epoch: i64,
     id: uuid::Uuid,
-    kind: &CodeApprovalKind,
+    kind: &'a CodeApprovalKind,
     raw: serde_json::Value,
     state: CodeApprovalState,
     feedback: Option<String>,
     requested_at: chrono::DateTime<chrono::Utc>,
     decided_at: Option<chrono::DateTime<chrono::Utc>>,
     auto_judge_status: Option<String>,
-) -> Result<entities::code_approval::ActiveModel, DbErr> {
+}
+
+fn approval_row(card: CardRow<'_>) -> Result<entities::code_approval::ActiveModel, DbErr> {
     use sea_orm::Set;
+    let id = card.id;
     Ok(entities::code_approval::ActiveModel {
         id: Set(id),
-        owner: Set(owner),
-        session_id: Set(session_id),
-        turn_id: Set(turn_id),
-        kind: Set(serde_json::to_value(kind)
+        owner: Set(card.owner),
+        session_id: Set(card.session_id),
+        turn_id: Set(card.turn_id),
+        kind: Set(serde_json::to_value(card.kind)
             .map_err(|error| DbErr::Custom(format!("approval {id} kind: {error}")))?),
-        harness_raw: Set(raw),
+        harness_raw: Set(card.raw),
         native_call_id: Set(Some(id.to_string())),
         server_capability: Set(None),
         request_sha256: Set(None),
-        worker_epoch: Set(Some(worker_epoch)),
+        worker_epoch: Set(Some(card.worker_epoch)),
         decision_claim: Set(None),
         claimed_at: Set(None),
-        state: Set(state.as_str().to_owned()),
-        feedback: Set(feedback),
-        requested_at: Set(requested_at),
-        decided_at: Set(decided_at),
-        auto_judge_status: Set(auto_judge_status),
+        state: Set(card.state.as_str().to_owned()),
+        feedback: Set(card.feedback),
+        requested_at: Set(card.requested_at),
+        decided_at: Set(card.decided_at),
+        auto_judge_status: Set(card.auto_judge_status),
     })
 }
 
@@ -704,20 +709,20 @@ where
             }
             .to_raw()
             .map_err(|error| DbErr::Custom(format!("tool_call {}: {error}", call.id)))?;
-            approval_row(
+            approval_row(CardRow {
                 owner,
-                call.chat_id,
-                call.turn_id,
-                epoch,
-                call.id,
-                &row_kind,
+                session_id: call.chat_id,
+                turn_id: call.turn_id,
+                worker_epoch: epoch,
+                id: call.id,
+                kind: &row_kind,
                 raw,
                 state,
-                call.approval_reason.clone(),
+                feedback: call.approval_reason.clone(),
                 requested_at,
-                call.approval_decided_at,
-                call.auto_judge_status.clone(),
-            )?
+                decided_at: call.approval_decided_at,
+                auto_judge_status: call.auto_judge_status.clone(),
+            })?
             .insert(conn)
             .await?;
         }
@@ -795,20 +800,20 @@ where
                     )))
                 }
             };
-            approval_row(
+            approval_row(CardRow {
                 owner,
-                request.chat_id,
-                request.turn_id,
-                epoch,
-                request.call_id,
-                &CodeApprovalKind::Questions { questions },
-                serde_json::Value::Null,
+                session_id: request.chat_id,
+                turn_id: request.turn_id,
+                worker_epoch: epoch,
+                id: request.call_id,
+                kind: &CodeApprovalKind::Questions { questions },
+                raw: serde_json::Value::Null,
                 state,
-                None,
-                request.asked_at,
-                request.resolved_at,
-                None,
-            )?
+                feedback: None,
+                requested_at: request.asked_at,
+                decided_at: request.resolved_at,
+                auto_judge_status: None,
+            })?
             .insert(conn)
             .await?;
         }
@@ -862,22 +867,22 @@ where
             }
             .to_raw()
             .map_err(|error| DbErr::Custom(format!("plan_request {}: {error}", request.call_id)))?;
-            approval_row(
+            approval_row(CardRow {
                 owner,
-                request.chat_id,
-                request.turn_id,
-                epoch,
-                request.call_id,
-                &CodeApprovalKind::Plan {
+                session_id: request.chat_id,
+                turn_id: request.turn_id,
+                worker_epoch: epoch,
+                id: request.call_id,
+                kind: &CodeApprovalKind::Plan {
                     proposed_mode: crate::DEFAULT_ACCEPTED_PLAN_MODE,
                 },
                 raw,
                 state,
-                request.feedback.clone(),
-                request.proposed_at,
-                request.resolved_at,
-                None,
-            )?
+                feedback: request.feedback.clone(),
+                requested_at: request.proposed_at,
+                decided_at: request.resolved_at,
+                auto_judge_status: None,
+            })?
             .insert(conn)
             .await?;
         }
