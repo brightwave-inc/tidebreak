@@ -881,6 +881,9 @@ export function CodeComposer({
       return;
     }
     setDraft((current) => {
+      // A remount already restored this composer's store draft. Re-appending
+      // the recovered prompt would duplicate it after you edit and leave.
+      if (current) return current;
       const next = appendRecoveredDraft(current, recoveryDraft);
       draftRef.current = next;
       return next;

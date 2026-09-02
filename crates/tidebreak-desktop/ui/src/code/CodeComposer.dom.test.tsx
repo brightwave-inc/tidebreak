@@ -1143,6 +1143,43 @@ describe("CodeComposer", () => {
     );
     expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("");
   });
+
+  it("does not re-append first-turn recovery after a Settings remount", async () => {
+    const user = userEvent.setup();
+    const recovery = {
+      id: "rec-1",
+      draft: "Fix the exact failing test.",
+    };
+    const first = renderComposer(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        sessionId="sess-1"
+        recovery={recovery}
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+      />,
+    );
+    const box = screen.getByRole("textbox", { name: "Message" });
+    expect(box).toHaveValue("Fix the exact failing test.");
+    await user.type(box, " then retry");
+    expect(box).toHaveValue("Fix the exact failing test. then retry");
+    first.unmount();
+
+    renderComposer(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        sessionId="sess-1"
+        recovery={recovery}
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue(
+      "Fix the exact failing test. then retry",
+    );
+  });
 });
 
 describe("HarnessModelMenu", () => {
