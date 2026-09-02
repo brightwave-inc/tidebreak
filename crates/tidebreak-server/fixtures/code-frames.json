@@ -449,6 +449,7 @@
     "name": "session digest",
     "value": {
       "activity": "shell",
+      "activity_detail": "cargo test -p tidebreak-server code_parser",
       "attention": {
         "source": "lifecycle",
         "state": {
@@ -571,6 +572,7 @@
       "sessions": [
         {
           "activity": "shell",
+          "activity_detail": "cargo test -p tidebreak-server code_parser",
           "attention": {
             "source": "lifecycle",
             "state": {
@@ -644,6 +646,7 @@
     "name": "updates: digest",
     "value": {
       "activity": "shell",
+      "activity_detail": "cargo test -p tidebreak-server code_parser",
       "attention": {
         "source": "lifecycle",
         "state": {

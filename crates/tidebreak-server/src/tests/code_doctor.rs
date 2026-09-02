@@ -71,6 +71,73 @@ async fn stall_sweep_marks_a_silent_running_session() {
     );
 }
 
+/// A monitor tool is silent by design: the engine is waiting on background
+/// work, not stuck, and the rail says "Monitoring" beside it. The sweep must
+/// not call that same session stalled.
+#[tokio::test]
+async fn stall_sweep_leaves_a_monitoring_session_working() {
+    let (router, token, runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let (_repo, workspace) = register_and_workspace(&client, addr, &token, &repo).await;
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    let parsed: CodeSessionId = json_id(&session).parse().unwrap();
+    let owner = tidebreak_core::OwnerId::local();
+    let mut row = tidebreak_core::db::code::get_session(&runtime.db, &owner, parsed)
+        .await
+        .unwrap()
+        .unwrap();
+    row.lifecycle = CodeSessionLifecycle::Running;
+    tidebreak_core::db::code::save_session(&runtime.db, &row)
+        .await
+        .unwrap();
+    tidebreak_core::db::code::append_event(
+        &runtime.db,
+        &owner,
+        parsed,
+        row.spawn_epoch,
+        &tidebreak_core::CodeEvent::ToolStarted {
+            call_id: "monitor-1".into(),
+            name: "Monitor".into(),
+            detail: tidebreak_core::ToolDetail::Other {
+                summary: "watching CI".into(),
+            },
+            parent_call_id: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    crate::code::attention::sweep_stalled(&runtime.db, &runtime.bus, 0)
+        .await
+        .unwrap();
+    let row = tidebreak_core::db::code::get_session(&runtime.db, &owner, parsed)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(row.attention.state, AttentionState::Working),
+        "a session parked on a monitor must stay Working, got {:?}",
+        row.attention
+    );
+}
+
 /// The doctor serves memoized probes, and refresh is the on-demand re-probe
 /// (decision 0034). A cold probe spends an interactive login shell plus a
 /// version and an authentication subprocess per harness, and the code-mode
