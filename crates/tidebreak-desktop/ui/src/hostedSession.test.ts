@@ -5,6 +5,7 @@ import { HostedSignInRequired, hostedServerInfo } from "./boot";
 import {
   captureHandoffToken,
   handoffBearer,
+  handoffFailure,
   hostedSession,
   resetHostedSessionForTests,
 } from "./hostedSession";
@@ -54,6 +55,21 @@ describe("the handoff fragment", () => {
     const win = fakeWindow("#handoff=<script>alert(1)</script>");
     captureHandoffToken(win);
     expect(handoffBearer()).toBeNull();
+  });
+
+  it("keeps the landing route's failure reason and clears it from the address", () => {
+    const win = fakeWindow("#handoff-failed=expired");
+    captureHandoffToken(win);
+    expect(handoffBearer()).toBeNull();
+    expect(handoffFailure()).toBe("expired");
+    expect(win.replaced).toEqual(["/"]);
+  });
+
+  it("ignores a failure reason it has no words for", () => {
+    const win = fakeWindow("#handoff-failed=something-new");
+    captureHandoffToken(win);
+    expect(handoffFailure()).toBeNull();
+    expect(win.replaced).toEqual([]);
   });
 });
 
@@ -114,7 +130,24 @@ describe("the hosted boot branch", () => {
     await expect(attempt).rejects.toBeInstanceOf(HostedSignInRequired);
     await attempt.catch((error: HostedSignInRequired) => {
       expect(error.gatewayUrl).toBe("https://gateway.example.com");
+      expect(error.failure).toBeNull();
     });
+  });
+
+  it("carries the landing route's failure reason to the sign-in screen", async () => {
+    const fetch = discovery({
+      mode: "gateway",
+      gateway_url: "https://gateway.example.com",
+    });
+    await expect(
+      hostedServerInfo({
+        origin: "https://tidebreak.example.com",
+        dev: false,
+        fetch,
+        bearer: null,
+        failure: "unavailable",
+      }),
+    ).rejects.toMatchObject({ failure: "unavailable" });
   });
 
   it("has no console to name for a machine on static tokens", async () => {

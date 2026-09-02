@@ -29,7 +29,17 @@ export type HostedSession = {
  */
 const HANDOFF_FRAGMENT = /^#handoff=([A-Za-z0-9._~-]+)$/;
 
+/**
+ * Why the machine's landing route could not hand the page a bearer. The
+ * route words nothing itself; it lands the page with one of these and the
+ * page does the talking.
+ */
+export type HandoffFailure = "expired" | "invalid" | "unavailable";
+const HANDOFF_FAILURE_FRAGMENT =
+  /^#handoff-failed=(expired|invalid|unavailable)$/;
+
 let handoffToken: string | null = null;
+let failure: HandoffFailure | null = null;
 let session: HostedSession | null = null;
 
 /**
@@ -40,9 +50,11 @@ let session: HostedSession | null = null;
  * this page's life — long enough for boot to retry — and nowhere else.
  */
 export function captureHandoffToken(win: Window = window): void {
+  const failed = HANDOFF_FAILURE_FRAGMENT.exec(win.location.hash);
   const match = HANDOFF_FRAGMENT.exec(win.location.hash);
-  if (!match) return;
-  handoffToken = match[1];
+  if (!failed && !match) return;
+  if (failed) failure = failed[1] as HandoffFailure;
+  if (match) handoffToken = match[1];
   win.history.replaceState(
     win.history.state,
     "",
@@ -53,6 +65,11 @@ export function captureHandoffToken(win: Window = window): void {
 /** The bearer the page arrived with, or `null` if it opened without one. */
 export function handoffBearer(): string | null {
   return handoffToken;
+}
+
+/** Why the page arrived without a bearer, when the landing route said. */
+export function handoffFailure(): HandoffFailure | null {
+  return failure;
 }
 
 /** Record that this page is served by the machine at `next.baseUrl`. */
@@ -68,5 +85,6 @@ export function hostedSession(): HostedSession | null {
 /** Test seam: forget both facts. */
 export function resetHostedSessionForTests(): void {
   handoffToken = null;
+  failure = null;
   session = null;
 }

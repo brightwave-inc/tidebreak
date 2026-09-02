@@ -1,6 +1,7 @@
 import { ExternalLink, RotateCw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import type { HandoffFailure } from "./hostedSession";
 import { Logomark } from "./Logomark";
 import { WindowDragStrip } from "./WindowDragStrip";
 
@@ -10,11 +11,17 @@ import { WindowDragStrip } from "./WindowDragStrip";
  * `no_session`: the page opened without a bearer — someone typed the
  * machine's address, or reloaded a tab. `session_ended`: the bearer the page
  * held stopped being accepted, which after an hour is simply its lifetime.
+ * `handoff_failed`: the page came from the machine's landing route and the
+ * route could not turn the console's code into a bearer; `failure` says why.
  */
-export type HostedSignInReason = "no_session" | "session_ended";
+export type HostedSignInReason =
+  | "no_session"
+  | "session_ended"
+  | "handoff_failed";
 
 export type HostedSignInProps = {
   reason: HostedSignInReason;
+  failure?: HandoffFailure | null;
   /** The machine this page is served by. */
   machineUrl: string;
   /**
@@ -33,13 +40,41 @@ export type HostedSignInProps = {
  * once. So the screen names the console and sends the reader there; the
  * console's Manage Tidebreak action is what brings them back signed in.
  */
+function handoffFailureCopy(failure: HandoffFailure | null | undefined): {
+  title: string;
+  detail: string;
+} {
+  switch (failure) {
+    case "expired":
+      return {
+        title: "That sign-in link has expired",
+        detail:
+          "A link from the console works once, within a minute of being made.",
+      };
+    case "unavailable":
+      return {
+        title: "This machine could not reach your gateway",
+        detail:
+          "Sign-in needs the gateway to answer, and it did not. Nothing about your account has changed.",
+      };
+    default:
+      return {
+        title: "That sign-in link is not valid",
+        detail:
+          "It did not come from the console, or it was changed on the way here.",
+      };
+  }
+}
+
 export function HostedSignIn({
   reason,
+  failure = null,
   machineUrl,
   gatewayUrl,
   onRetry = () => window.location.reload(),
 }: HostedSignInProps) {
-  const ended = reason === "session_ended";
+  const failed =
+    reason === "handoff_failed" ? handoffFailureCopy(failure) : null;
   return (
     <div className="boot" aria-label="Sign in required">
       <WindowDragStrip />
@@ -48,7 +83,12 @@ export function HostedSignIn({
         <h1>Tidebreak</h1>
       </div>
       <div className="welcome-copy">
-        {ended ? (
+        {failed ? (
+          <>
+            <h2>{failed.title}</h2>
+            <p>{failed.detail}</p>
+          </>
+        ) : reason === "session_ended" ? (
           <>
             <h2>Your session on this machine ended</h2>
             <p>

@@ -56,9 +56,12 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
-use axum::extract::{FromRequestParts, Request, State};
+use axum::extract::{FromRequestParts, Query, Request, State};
 use axum::http::{
-    header::{AUTHORIZATION, HOST, ORIGIN, SEC_WEBSOCKET_PROTOCOL, UPGRADE},
+    header::{
+        AUTHORIZATION, CACHE_CONTROL, HOST, LOCATION, ORIGIN, REFERRER_POLICY,
+        SEC_WEBSOCKET_PROTOCOL, UPGRADE,
+    },
     request::Parts,
     HeaderMap, HeaderName, StatusCode,
 };
@@ -217,6 +220,84 @@ pub(crate) async fn discovery(State(state): State<AppState>) -> Json<AuthDiscove
         _ => AuthDiscovery::Local,
     };
     Json(discovery)
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct HandoffQuery {
+    #[serde(default)]
+    code: String,
+}
+
+/// The URL-safe alphabet both a handoff code and a bearer are drawn from.
+fn is_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'~')
+}
+
+/// A handoff code is the gateway's, prefixed so a stray bearer or session id
+/// pasted here is refused before it reaches the network.
+fn handoff_code_is_well_formed(code: &str) -> bool {
+    code.starts_with("mg_ho_") && code.len() <= 256 && code.bytes().all(is_token_byte)
+}
+
+/// Where the landing page lives: the canonical public URL, so an ingress
+/// path prefix survives. Absent (it never is on a gateway-authenticated
+/// machine), the page's own root.
+fn handoff_landing(state: &AppState) -> String {
+    state
+        .config
+        .public_url
+        .as_deref()
+        .and_then(|raw| canonical_public_url(raw).ok())
+        .unwrap_or_default()
+}
+
+/// A `302` to the landing page carrying `fragment` after `#`.
+///
+/// The fragment is the one carrier a bearer may ride in: a browser never
+/// sends it to a server, so it is in no access log, and the page clears it
+/// before the router sees it. `no-store` keeps the redirect itself out of a
+/// cache that could replay it.
+fn handoff_redirect(landing: &str, fragment: &str) -> Response {
+    (
+        StatusCode::FOUND,
+        [
+            (LOCATION, format!("{landing}/#{fragment}")),
+            (CACHE_CONTROL, "no-store".to_owned()),
+            (REFERRER_POLICY, "no-referrer".to_owned()),
+        ],
+    )
+        .into_response()
+}
+
+/// Land a browser on this machine signed in.
+///
+/// The gateway console mints a one-time code and sends the reader here with
+/// it. This route exchanges the code server to server for a bearer bound to
+/// this machine and hands the bearer to the page in the URL fragment; the
+/// page keeps it in memory and presents it like any other bearer. Nothing
+/// is stored, no cookie is set, and the code is never logged.
+///
+/// A machine that does not authenticate through a gateway has no console to
+/// take codes from, so the route does not exist there. A refused or
+/// unusable exchange still lands on the page, with a reason the page can
+/// word, rather than on a bare error a reader cannot act on.
+pub(crate) async fn handoff(
+    State(state): State<AppState>,
+    Query(query): Query<HandoffQuery>,
+) -> Response {
+    let PrincipalAuthenticator::Gateway(gateway) = state.principal_authenticator.as_ref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let landing = handoff_landing(&state);
+    let code = query.code.trim();
+    if !handoff_code_is_well_formed(code) {
+        return handoff_redirect(&landing, "handoff-failed=invalid");
+    }
+    match gateway.redeem_handoff(code).await {
+        HandoffOutcome::Granted(bearer) => handoff_redirect(&landing, &format!("handoff={bearer}")),
+        HandoffOutcome::Refused => handoff_redirect(&landing, "handoff-failed=expired"),
+        HandoffOutcome::Unavailable => handoff_redirect(&landing, "handoff-failed=unavailable"),
+    }
 }
 
 /// Reject requests whose bearer token does not resolve to a principal — from
@@ -383,8 +464,26 @@ impl PrincipalAuthenticator {
 /// Live verifier for Gateway-issued `tidebreak` resource tokens.
 pub(crate) struct GatewayAuthenticator {
     principal_url: reqwest::Url,
+    /// Where a one-time handoff code becomes a bearer; see [`handoff`].
+    handoff_url: reqwest::Url,
     resource: String,
     client: reqwest::Client,
+}
+
+/// What redeeming a handoff code came to.
+pub(crate) enum HandoffOutcome {
+    /// A bearer for this machine, bound by the gateway to this resource.
+    Granted(String),
+    /// The gateway would not exchange the code: unknown, consumed, or past
+    /// its minute. The reader re-enters from the console.
+    Refused,
+    /// The gateway did not answer usably. Nothing about the code is known.
+    Unavailable,
+}
+
+#[derive(serde::Deserialize)]
+struct HandoffGrant {
+    access_token: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -422,19 +521,87 @@ impl GatewayAuthenticator {
                 "the Model Gateway verifier URL must use https (http is allowed only for loopback development)",
             ));
         }
-        base.set_path("/api/v1/tidebreak/principal");
         base.set_query(None);
         base.set_fragment(None);
+        let mut principal_url = base.clone();
+        principal_url.set_path("/api/v1/tidebreak/principal");
+        let mut handoff_url = base;
+        handoff_url.set_path("/oauth/handoff/token");
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(5))
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|error| AgentError::config(format!("gateway auth client: {error}")))?;
         Ok(Self {
-            principal_url: base,
+            principal_url,
+            handoff_url,
             resource,
             client,
         })
+    }
+
+    /// Exchange a console-minted one-time code for a bearer.
+    ///
+    /// The machine only relays. The gateway binds the bearer to this
+    /// machine's resource itself, and every later request re-presents that
+    /// bearer to [`GatewayAuthenticator::resolve`], so nothing the code
+    /// claims is trusted here — not even the shape of what comes back beyond
+    /// it being a bearer this verifier would accept.
+    pub(crate) async fn redeem_handoff(&self, code: &str) -> HandoffOutcome {
+        let response = match self
+            .client
+            .post(self.handoff_url.clone())
+            .json(&serde_json::json!({ "code": code }))
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!(error = %error, "gateway handoff request failed");
+                return HandoffOutcome::Unavailable;
+            }
+        };
+        let status = response.status();
+        if status.is_client_error() {
+            return HandoffOutcome::Refused;
+        }
+        if !status.is_success() {
+            tracing::warn!(%status, "gateway handoff returned an error status");
+            return HandoffOutcome::Unavailable;
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > Self::RESPONSE_LIMIT as u64)
+        {
+            tracing::warn!("gateway handoff response exceeded size limit");
+            return HandoffOutcome::Unavailable;
+        }
+        let bytes = match response.bytes().await {
+            Ok(bytes) if bytes.len() <= Self::RESPONSE_LIMIT => bytes,
+            Ok(_) => {
+                tracing::warn!("gateway handoff response exceeded size limit");
+                return HandoffOutcome::Unavailable;
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "gateway handoff response failed");
+                return HandoffOutcome::Unavailable;
+            }
+        };
+        let grant: HandoffGrant = match serde_json::from_slice(&bytes) {
+            Ok(grant) => grant,
+            Err(error) => {
+                tracing::warn!(error = %error, "gateway handoff response was invalid");
+                return HandoffOutcome::Unavailable;
+            }
+        };
+        if !grant.access_token.starts_with("mg_at_")
+            || grant.access_token.len() > 512
+            || !grant.access_token.bytes().all(is_token_byte)
+        {
+            tracing::warn!("gateway handoff granted something other than a bearer");
+            return HandoffOutcome::Unavailable;
+        }
+        HandoffOutcome::Granted(grant.access_token)
     }
 
     async fn resolve(&self, presented: &str) -> Result<Option<Principal>> {

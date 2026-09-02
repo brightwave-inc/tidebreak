@@ -23,6 +23,7 @@ import { AppContextProvider, type AppContextValue } from "./AppContext";
 
 import { HostedSignInRequired, resolveServerInfo } from "./boot";
 import { HostedSignIn } from "./HostedSignIn";
+import type { HandoffFailure } from "./hostedSession";
 import {
   BootFailure,
   type BootAttachment,
@@ -244,6 +245,7 @@ export function AppShell() {
   // answered, and the page knows which console can sign it in.
   const [hostedSignIn, setHostedSignIn] = useState<{
     gatewayUrl: string | null;
+    failure: HandoffFailure | null;
   } | null>(null);
   const [appVersion, setAppVersion] = useState<string | null>(null);
   const [info, setInfo] = useState<ServerInfo | null>(null);
@@ -514,7 +516,7 @@ export function AppShell() {
       } catch (err) {
         if (cancelled) return;
         if (err instanceof HostedSignInRequired) {
-          setHostedSignIn({ gatewayUrl: err.gatewayUrl });
+          setHostedSignIn({ gatewayUrl: err.gatewayUrl, failure: err.failure });
           return;
         }
         setBootFailure({ stage: "connect", error: err });
@@ -1084,7 +1086,8 @@ export function AppShell() {
   if (hostedSignIn) {
     return (
       <HostedSignIn
-        reason="no_session"
+        reason={hostedSignIn.failure ? "handoff_failed" : "no_session"}
+        failure={hostedSignIn.failure}
         machineUrl={window.location.origin}
         gatewayUrl={hostedSignIn.gatewayUrl}
         onRetry={retryBoot}
