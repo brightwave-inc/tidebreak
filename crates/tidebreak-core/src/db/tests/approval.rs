@@ -817,3 +817,88 @@ async fn approval_reject_reason_rejects_controls_before_commit() {
         ToolApprovalStatus::Pending
     );
 }
+
+/// A standing grant exists only from the transaction that approves the card
+/// it was chosen on. A card that is claimed and then abandoned leaves none;
+/// a settled approve-with-grant leaves exactly one, keyed by the call.
+#[tokio::test]
+async fn a_standing_grant_is_written_by_the_settlement_alone() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let owner = crate::OwnerId::local();
+    let session_id = crate::CodeSessionId(chat.id.0);
+
+    let (_turn, _lease, granted_call, request) = claimed_sensitive_call(&store, &chat).await;
+    store
+        .request_tool_call_approval(&request, Utc::now())
+        .await
+        .unwrap();
+    assert!(store.list_standing_tool_grants().await.unwrap().is_empty());
+    let settlement = crate::db::code::settle_engine_observed_approval(
+        &store,
+        &owner,
+        session_id,
+        0,
+        &granted_call.id.to_string(),
+        crate::ApprovalDecisionKind::ApprovedWithGrant {
+            scope: crate::GrantScope::WholeTool,
+        },
+        Utc::now(),
+    )
+    .await
+    .unwrap()
+    .expect("the card settles");
+    assert_eq!(
+        settlement.approval.state,
+        crate::CodeApprovalState::Approved
+    );
+    let grants = store.list_standing_tool_grants().await.unwrap();
+    assert_eq!(grants.len(), 1);
+    assert_eq!(grants[0].source_call_id, granted_call.id);
+    assert_eq!(grants[0].grant.scope(), &crate::GrantScope::WholeTool);
+    assert!(
+        store
+            .get_tool_call_approval(granted_call.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status
+            == ToolApprovalStatus::Approved
+    );
+
+    // A second card, on a conversation of its own, abandoned before any
+    // decision landed: nothing was minted for it.
+    let other = sample_chat();
+    store.create_chat(&other).await.unwrap();
+    let (_turn, _lease, doomed_call, request) = claimed_sensitive_call(&store, &other).await;
+    store
+        .request_tool_call_approval(&request, Utc::now())
+        .await
+        .unwrap();
+    let abandoned = crate::db::code::abandon_pending_approval(
+        &store,
+        &owner,
+        crate::CodeApprovalId(doomed_call.id.0),
+        crate::CodeSessionId(other.id.0),
+        0,
+        Utc::now(),
+    )
+    .await
+    .unwrap()
+    .expect("the card abandons");
+    assert_eq!(
+        abandoned.approval.state,
+        crate::CodeApprovalState::Abandoned
+    );
+    assert_eq!(store.list_standing_tool_grants().await.unwrap().len(), 1);
+    assert_eq!(
+        store
+            .get_tool_call_approval(doomed_call.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        ToolApprovalStatus::Rejected
+    );
+}

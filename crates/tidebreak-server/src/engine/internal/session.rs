@@ -22,11 +22,12 @@ use tidebreak_core::db::DbStore;
 use tidebreak_core::storage::DecidePlanOutcome;
 use tidebreak_core::{
     chat_journal, AcceptTurnOutcome, AcceptTurnSteerOutcome, AnswerUserQuestions,
-    AnswerUserQuestionsOutcome, AnswerUserQuestionsRequest, Attention, AttentionSource,
-    BeginTurnAdmissionOutcome, CallId, ChatId, CodeEvent, CodeSessionId, DecidePlanRequest,
-    InternalApprovalRequest, MintStandingGrantOutcome, OwnerId, PermissionMode, PlanDecision,
-    PlanDecisionChoice, ReservedTurnAcceptanceOutcome, SequencedCodeEvent, SequencedEvent,
-    ToolApprovalStatus, TurnAdmissionRequest, TurnId, TurnSteerId, DEFAULT_ACCEPTED_PLAN_MODE,
+    AnswerUserQuestionsOutcome, AnswerUserQuestionsRequest, ApprovalDecisionKind, Attention,
+    AttentionSource, BeginTurnAdmissionOutcome, CallId, ChatId, CodeApprovalKind, CodeEvent,
+    CodeSessionId, DecidePlanRequest, GrantLevel, GrantScope, InternalApprovalRequest, OwnerId,
+    PermissionMode, PlanDecision, PlanDecisionChoice, ReservedTurnAcceptanceOutcome,
+    SequencedCodeEvent, SequencedEvent, StandingGrant, ToolApprovalStatus, TurnAdmissionRequest,
+    TurnId, TurnSteerId, DEFAULT_ACCEPTED_PLAN_MODE,
 };
 use tidebreak_harness::{
     ApprovalDecision, HarnessApprovalRef, HarnessError, HarnessEvent, HarnessEventSink,
@@ -385,6 +386,9 @@ impl InternalSession {
                 // published by the chat-side path that made it.
                 let delivered = self.decided.lock().expect("decided").remove(&call_id);
                 if delivered {
+                    if let ApprovalDecisionKind::ApprovedWithGrant { scope } = &decision {
+                        self.record_settled_grant(call_id, scope.clone()).await;
+                    }
                     if let Ok(Some(event)) = chat_journal::chat_event(CodeEvent::ApprovalResolved {
                         approval_id,
                         decision,
@@ -422,6 +426,31 @@ impl InternalSession {
         Ok(None)
     }
 
+    /// Mirror a grant the settlement wrote into the broker's in-memory
+    /// cache, after the fact: the cache follows the store, never leads it.
+    async fn record_settled_grant(&self, call_id: CallId, scope: GrantScope) {
+        let Ok(Some(approval)) = self.state.store.get_tool_call_approval(call_id).await else {
+            return;
+        };
+        let project_id = self
+            .state
+            .store
+            .get_chat(self.chat_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|chat| chat.project_id);
+        if let Some(grant) = StandingGrant::scoped(
+            GrantLevel::for_chat(self.chat_id, project_id),
+            approval.tool_name,
+            approval.kind,
+            scope,
+            Utc::now(),
+        ) {
+            self.state.approvals.standing_grants().record(grant);
+        }
+    }
+
     /// Mark the session as waiting on the reader, the way the worker does
     /// for an approval an external engine raised.
     async fn note_waiting(&self, prompt: &str) {
@@ -455,12 +484,25 @@ impl InternalSession {
 
     /// Settle a parked continuation durably. Idempotent: the decision may
     /// already have landed through [`HarnessSession::decide`] on the leg
-    /// that parked.
+    /// that parked, or through the chat route, whose settlement the worker
+    /// resumed this leg from; a row that is no longer pending is done.
     async fn settle_park(
         &self,
         call_id: CallId,
         decision: &ApprovalDecision,
     ) -> Result<(), HarnessError> {
+        let settled = tidebreak_core::db::code::get_approval(
+            &self.db,
+            &self.owner,
+            chat_journal::approval_id_of(call_id),
+        )
+        .await
+        .map_err(store_error)?
+        .is_some_and(|approval| !approval.state.is_pending());
+        if settled {
+            self.state.turn_job_wake.notify_one();
+            return Ok(());
+        }
         match decision {
             ApprovalDecision::Answers { answers } => {
                 let request = AnswerUserQuestionsRequest {
@@ -561,9 +603,10 @@ impl InternalSession {
     /// Acknowledge a tool decision the session decision route delivers.
     ///
     /// The route claimed the row and settles it once this returns, through
-    /// the same operation every surface settles with; the engine's part is
-    /// to check the card is this conversation's and still open, and to mint
-    /// the standing grant an approve-with-grant names — the internal engine
+    /// the same operation every surface settles with; the settlement is
+    /// what writes the standing grant an approve-with-grant names, in its
+    /// own transaction. The engine's part is to check the card is this
+    /// conversation's, still open, and offers the rung — the internal engine
     /// declares `standing_grants`, and this is where it honors them. The
     /// agent loop then reads the settled row and continues.
     async fn decide_tool_call(
@@ -603,26 +646,22 @@ impl InternalSession {
                         "tool call {call_id} cannot be approved"
                     )));
                 }
-                match self
-                    .state
-                    .store
-                    .mint_standing_grant_for_pending_approval(self.chat_id, call_id, scope)
-                    .await
-                    .map_err(store_error)?
-                {
-                    MintStandingGrantOutcome::Minted(grant) => {
-                        self.state.approvals.standing_grants().record(grant);
-                    }
-                    MintStandingGrantOutcome::NotPending => {
-                        return Err(HarnessError::ApprovalWaiterMissing(format!(
-                            "tool call {call_id} is not waiting on a decision"
-                        )));
-                    }
-                    MintStandingGrantOutcome::GrantNotAvailable => {
-                        return Err(HarnessError::DecisionUnsupported(
-                            "that grant scope is not available for this call".into(),
-                        ));
-                    }
+                let offered = tidebreak_core::db::code::get_approval(
+                    &self.db,
+                    &self.owner,
+                    chat_journal::approval_id_of(call_id),
+                )
+                .await
+                .map_err(store_error)?
+                .map(|approval| match approval.kind {
+                    CodeApprovalKind::ToolUse { offered_grants, .. } => offered_grants,
+                    _ => Vec::new(),
+                })
+                .unwrap_or_default();
+                if !offered.contains(scope) {
+                    return Err(HarnessError::DecisionUnsupported(
+                        "that grant scope is not available for this call".into(),
+                    ));
                 }
             }
             ApprovalDecision::Answers { .. } | ApprovalDecision::PlanDecision { .. } => {

@@ -56,14 +56,14 @@ use crate::storage::{
     DeleteProjectOutcome, FailAgentRunOutcome, FinishAgentRunCancellationOutcome,
     FinishRootAttachmentChangeOutcome, FinishTurnCancellationOutcome,
     HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome, JournaledToolApprovalOutcome,
-    JournaledTurnOutcome, JournaledTurnSteerOutcome, JudgeVerdictOutcome, MintStandingGrantOutcome,
-    MoveChatOutcome, OperationClaimOutcome, OperationLogEntry, OperationLogWrite,
-    ParkSandboxToolCallOutcome, ParkTurnForAgentRunWaitSetOutcome, ParkTurnForClientCallOutcome,
-    PromoteQueuedTurnOutcome, RecordAgentRunModelStepOutcome, RecordTurnFailureOutcome,
-    RequestAgentRunCancellationOutcome, RequestToolApprovalOutcome, RequestTurnCancellationOutcome,
-    ReservedQueuedTurnOutcome, ReservedTurnAcceptanceOutcome, ResolveSandboxToolCallOutcome,
-    ResolveToolCallOutcome, ResumeTurnForAgentRunWaitSetOutcome, RetrySandboxToolCallOutcome,
-    Store, SubmitAgentRunResultOutcome, TurnEventAppend, TurnLeaseFence,
+    JournaledTurnOutcome, JournaledTurnSteerOutcome, JudgeVerdictOutcome, MoveChatOutcome,
+    OperationClaimOutcome, OperationLogEntry, OperationLogWrite, ParkSandboxToolCallOutcome,
+    ParkTurnForAgentRunWaitSetOutcome, ParkTurnForClientCallOutcome, PromoteQueuedTurnOutcome,
+    RecordAgentRunModelStepOutcome, RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome,
+    RequestToolApprovalOutcome, RequestTurnCancellationOutcome, ReservedQueuedTurnOutcome,
+    ReservedTurnAcceptanceOutcome, ResolveSandboxToolCallOutcome, ResolveToolCallOutcome,
+    ResumeTurnForAgentRunWaitSetOutcome, RetrySandboxToolCallOutcome, Store,
+    SubmitAgentRunResultOutcome, TurnEventAppend, TurnLeaseFence,
 };
 use crate::PermissionMode;
 
@@ -2333,15 +2333,6 @@ impl Store for DbStore {
         approved: bool,
     ) -> Result<JudgeVerdictOutcome> {
         ops::approval::resolve_from_judge(self, chat_id, call_id, approved).await
-    }
-
-    async fn mint_standing_grant_for_pending_approval(
-        &self,
-        chat_id: ChatId,
-        call_id: CallId,
-        scope: &crate::GrantScope,
-    ) -> Result<MintStandingGrantOutcome> {
-        ops::approval::mint_standing_grant_for_pending_approval(self, chat_id, call_id, scope).await
     }
 
     async fn list_standing_tool_grants(&self) -> Result<Vec<crate::approval::StandingGrantRecord>> {

@@ -485,6 +485,12 @@ where
         .await
         .map_err(store_err)?
         .ok_or_else(|| AgentError::Store(format!("settled approval {id} disappeared")))?;
+    // A standing grant exists only from the transaction that approves the
+    // card it was chosen on: minted here, beside the row's terminal state
+    // and its resolution row, never ahead of them.
+    if let ApprovalDecisionKind::ApprovedWithGrant { scope } = &decision {
+        mint_standing_grant_on(conn, &row, scope, decided_at).await?;
+    }
     let event = CodeEvent::ApprovalResolved {
         approval_id: id,
         decision,
@@ -495,6 +501,79 @@ where
         approval,
         event: SequencedCodeEvent { seq, event },
     }))
+}
+
+/// Write the standing grant an approved-with-grant settlement names, in
+/// the settling transaction.
+///
+/// Only a card the internal engine minted carries the request the grant is
+/// keyed on (tool name and consent kind); the level follows where the
+/// conversation lives — its project when it has one, else itself. The scope
+/// must be one the kind can be granted at and must cover the parked call's
+/// own arguments, on the same terms the chat route's approve-and-remember
+/// checks. A grant already written for this call (a retry) is left as is.
+async fn mint_standing_grant_on<C>(
+    conn: &C,
+    row: &entities::code_approval::Model,
+    scope: &crate::GrantScope,
+    granted_at: chrono::DateTime<chrono::Utc>,
+) -> Result<()>
+where
+    C: ConnectionTrait,
+{
+    let request = crate::approval::InternalToolApprovalRequest::from_raw(&row.harness_raw)
+        .ok_or_else(|| {
+            AgentError::Store(format!(
+                "approval {} offers no standing grant: it is not a consent card",
+                row.id
+            ))
+        })?;
+    if entities::standing_tool_grant::Entity::find_by_id(row.id)
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let call = entities::tool_call::Entity::find_by_id(row.id)
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .ok_or_else(|| {
+            AgentError::Store(format!(
+                "approval {} is parked on a call that does not exist",
+                row.id
+            ))
+        })?;
+    if call.name != request.tool_name
+        || !request.kind.is_approvable()
+        || !request.kind.grantable_at(scope)
+        || !scope.covers_call(&call.name, &call.arguments)
+    {
+        return Err(AgentError::Store(format!(
+            "approval {} cannot be granted at that scope",
+            row.id
+        )));
+    }
+    let project_id = entities::code_session::Entity::find_by_id(row.session_id)
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .and_then(|session| session.project_id);
+    entities::standing_tool_grant::ActiveModel {
+        source_call_id: Set(row.id),
+        chat_id: Set(project_id.is_none().then_some(row.session_id)),
+        project_id: Set(project_id),
+        tool_name: Set(call.name),
+        approval_kind: Set(request.kind.standing_grant_key().to_owned()),
+        scope: Set(serde_json::to_value(scope)?),
+        granted_at: Set(granted_at),
+    }
+    .insert(conn)
+    .await
+    .map_err(store_err)?;
+    Ok(())
 }
 
 /// Abandon every pending approval after its exact worker has stopped.

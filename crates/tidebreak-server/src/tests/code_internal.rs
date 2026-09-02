@@ -634,6 +634,190 @@ async fn assert_chat_replay_is_the_journal(
     );
 }
 
+/// A questions park answered through the chat route resumes the session
+/// the runtime drives: the route settles the row (the answer carries
+/// context the engine contract has no field for), and the worker resumes
+/// the park from the settled row rather than waiting for a decision that
+/// will never come through the session route.
+#[tokio::test]
+async fn a_questions_park_answered_from_the_chat_route_resumes_the_session() {
+    let (addr, token, runtime, _ran, _dir) = internal_engine_app(vec![
+        Step::Tool {
+            name: "ask_user_questions",
+            input: serde_json::json!({
+                "questions": [{
+                    "id": "greeting",
+                    "header": "Greeting",
+                    "question": "Which greeting?",
+                    "options": [
+                        {"id": "hi", "label": "hi", "description": "short"},
+                        {"id": "hello", "label": "hello", "description": "longer"}
+                    ]
+                }]
+            }),
+        },
+        Step::Text("greeted"),
+    ])
+    .await;
+    let client = reqwest::Client::new();
+    let created = client
+        .post(format!("http://{addr}/code/sessions"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "permission_mode": "ask" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let session: serde_json::Value = created.json().await.unwrap();
+    let hosted: CodeSessionId = session["id"].as_str().unwrap().parse().unwrap();
+    let turn = tokio::spawn({
+        let client = client.clone();
+        let token = token.clone();
+        async move {
+            client
+                .post(format!("http://{addr}/code/sessions/{hosted}/turns"))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({ "message": "ask me" }))
+                .send()
+                .await
+                .unwrap()
+        }
+    });
+    let questions = pending_approval_of_kind(&client, addr, &token, hosted, "questions").await;
+    wait_for_turn_statuses(&client, addr, &token, hosted, &["waiting"]).await;
+
+    let answered = client
+        .post(format!(
+            "http://{addr}/chats/{hosted}/questions/{}/answer",
+            questions["id"].as_str().unwrap()
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "answers": [{ "question_id": "greeting", "selected_option_ids": ["hi"] }],
+            "additional_user_context": "keep it short",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(answered.status(), reqwest::StatusCode::OK);
+
+    let response = tokio::time::timeout(Duration::from_secs(20), turn)
+        .await
+        .expect("the turn completes")
+        .unwrap();
+    assert!(response.status().is_success(), "{}", response.status());
+    assert_eq!(
+        turn_statuses(&client, addr, &token, hosted).await,
+        vec!["completed"]
+    );
+    let events = super::code::journaled_events(&runtime.db, hosted).await;
+    let types = event_types(&events);
+    let requested = position(&types, "approval_requested", 0);
+    let resolved = position(&types, "approval_resolved", requested);
+    let completed = position(&types, "turn_completed", resolved);
+    assert_eq!(completed + 1, types.len(), "{types:?}");
+    let decision = serde_json::to_value(&events[resolved].event).unwrap();
+    assert_eq!(decision["decision"]["type"], "answered");
+}
+
+/// A plan decided through the chat route resumes the session the runtime
+/// drives, whichever path the decision takes: the default mode goes through
+/// the session decision route as an alias and the worker applies the
+/// proposed mode; a chosen mode settles the row directly, carries the mode
+/// itself, and the worker resumes from the settled row.
+#[tokio::test]
+async fn a_plan_accepted_from_the_chat_route_resumes_the_session() {
+    for (chosen_mode, expected_mode) in [(None, "auto"), (Some("ask"), "ask")] {
+        let (addr, token, _runtime, _ran, _dir) = internal_engine_app(vec![
+            Step::Tool {
+                name: "exit_plan_mode",
+                input: serde_json::json!({
+                    "title": "Ship the greeting",
+                    "plan": "1. Run the greeting command.\n2. Ask which greeting to use.\n3. Report back.",
+                }),
+            },
+            Step::Text("planned"),
+        ])
+        .await;
+        let client = reqwest::Client::new();
+        let created = client
+            .post(format!("http://{addr}/code/sessions"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({ "permission_mode": "plan" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+        let session: serde_json::Value = created.json().await.unwrap();
+        let hosted: CodeSessionId = session["id"].as_str().unwrap().parse().unwrap();
+        let turn = tokio::spawn({
+            let client = client.clone();
+            let token = token.clone();
+            async move {
+                client
+                    .post(format!("http://{addr}/code/sessions/{hosted}/turns"))
+                    .bearer_auth(&token)
+                    .json(&serde_json::json!({ "message": "plan it" }))
+                    .send()
+                    .await
+                    .unwrap()
+            }
+        });
+        let plan = pending_approval_of_kind(&client, addr, &token, hosted, "plan").await;
+        wait_for_turn_statuses(&client, addr, &token, hosted, &["waiting"]).await;
+
+        let mut body = serde_json::json!({ "decision": "accept" });
+        if let Some(mode) = chosen_mode {
+            body["permission_mode"] = serde_json::Value::String(mode.to_owned());
+        }
+        let decided = client
+            .post(format!(
+                "http://{addr}/chats/{hosted}/plans/{}/decision",
+                plan["id"].as_str().unwrap()
+            ))
+            .bearer_auth(&token)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(decided.status(), reqwest::StatusCode::OK, "{chosen_mode:?}");
+
+        let response = tokio::time::timeout(Duration::from_secs(20), turn)
+            .await
+            .expect("the turn completes")
+            .unwrap();
+        assert!(response.status().is_success(), "{}", response.status());
+        assert_eq!(
+            turn_statuses(&client, addr, &token, hosted).await,
+            vec!["completed"],
+            "{chosen_mode:?}"
+        );
+        let snapshot: serde_json::Value = client
+            .get(format!("http://{addr}/code/sessions/{hosted}"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            snapshot["permission_mode"], expected_mode,
+            "{chosen_mode:?}"
+        );
+        let chat: serde_json::Value = client
+            .get(format!("http://{addr}/chats/{hosted}"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(chat["permission_mode"], expected_mode, "{chosen_mode:?}");
+    }
+}
+
 /// The plainest turn on the internal engine — one answer, no tools — is in
 /// the journal once: the lane's rows, and nothing the worker wrote beside
 /// them.

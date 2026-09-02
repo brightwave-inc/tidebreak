@@ -19,7 +19,7 @@ use crate::model::{OwnerId, ToolCallExecution, ToolCallStatus, TurnRunStatus};
 use crate::preview::ToolActionPreview;
 use crate::storage::{
     DecideToolApprovalOutcome, JournaledToolApprovalOutcome, JudgeVerdictOutcome,
-    MintStandingGrantOutcome, RequestToolApprovalOutcome,
+    RequestToolApprovalOutcome,
 };
 use crate::tool::ApprovalClass;
 
@@ -895,7 +895,8 @@ pub(in crate::db) async fn decide_with_grant(
     let decided_at = super::agent_run::database_now(&transaction)
         .await?
         .max(current.requested_at);
-    insert_standing_grant(&transaction, call_id, grant, decided_at).await?;
+    // The settlement below writes the grant beside the row's terminal
+    // state; nothing is minted ahead of the decision.
     // Same release as the plain human decision: an unanswered judge loses
     // ownership so its verdict CAS no-ops.
     if current.auto_judge_status == Some(AutoJudgeStatus::Judging) {
@@ -918,80 +919,6 @@ pub(in crate::db) async fn decide_with_grant(
         approval,
         resolution: Box::new(settlement.event),
     })
-}
-
-/// Mint the standing grant an approve-with-grant decision names while the
-/// card is still pending, without deciding the card.
-///
-/// The internal engine's `decide` on the session decision route: the route
-/// has claimed the row and settles it once the engine acknowledges, so the
-/// engine's part is the grant — the same table the chat route's
-/// approve-and-remember writes. Idempotent for the same grant.
-pub(in crate::db) async fn mint_standing_grant_for_pending_approval(
-    store: &DbStore,
-    chat_id: ChatId,
-    call_id: CallId,
-    scope: &GrantScope,
-) -> Result<MintStandingGrantOutcome> {
-    let transaction = store.conn.begin().await.map_err(store_err)?;
-    let Some((_, existing, current)) =
-        pending_tool_approval(&transaction, chat_id, call_id).await?
-    else {
-        transaction.commit().await.map_err(store_err)?;
-        return Ok(MintStandingGrantOutcome::NotPending);
-    };
-    if current.status != ToolApprovalStatus::Pending
-        || existing.status != ToolCallStatus::Pending.as_str()
-    {
-        transaction.commit().await.map_err(store_err)?;
-        return Ok(MintStandingGrantOutcome::NotPending);
-    }
-    if !current.kind.is_approvable() {
-        transaction.commit().await.map_err(store_err)?;
-        return Ok(MintStandingGrantOutcome::GrantNotAvailable);
-    }
-    let session = session_row(&transaction, chat_id).await?;
-    let project_id = session.project_id.map(crate::id::ProjectId);
-    let granted_at = super::agent_run::database_now(&transaction)
-        .await?
-        .max(current.requested_at);
-    let Some(grant) = StandingGrant::scoped(
-        crate::approval::GrantLevel::for_chat(chat_id, project_id),
-        existing.name.clone(),
-        current.kind,
-        scope.clone(),
-        granted_at,
-    ) else {
-        transaction.commit().await.map_err(store_err)?;
-        return Ok(MintStandingGrantOutcome::GrantNotAvailable);
-    };
-    if !grant.covers(
-        chat_id,
-        project_id,
-        &existing.name,
-        current.kind,
-        &existing.arguments,
-    ) {
-        transaction.commit().await.map_err(store_err)?;
-        return Ok(MintStandingGrantOutcome::GrantNotAvailable);
-    }
-    if entities::standing_tool_grant::Entity::find_by_id(call_id.0)
-        .one(&transaction)
-        .await
-        .map_err(store_err)?
-        .is_some()
-    {
-        let outcome = if stored_grant_matches(&transaction, call_id, &grant).await? {
-            MintStandingGrantOutcome::Minted(grant)
-        } else {
-            MintStandingGrantOutcome::GrantNotAvailable
-        };
-        transaction.commit().await.map_err(store_err)?;
-        return Ok(outcome);
-    }
-    insert_standing_grant(&transaction, call_id, &grant, granted_at).await?;
-    transaction.commit().await.map_err(store_err)?;
-    Ok(MintStandingGrantOutcome::Minted(grant))
 }
 
 /// Lock the chat and the call and load the card parked on it. `None` when
@@ -1045,38 +972,6 @@ where
         .await?
         .ok_or_else(|| AgentError::Store(format!("decided approval {call_id} disappeared")))?;
     tool_approval_from_rows(&row, call)
-}
-
-async fn insert_standing_grant<C>(
-    conn: &C,
-    source_call_id: CallId,
-    grant: &StandingGrant,
-    granted_at: DateTime<Utc>,
-) -> Result<()>
-where
-    C: ConnectionTrait,
-{
-    let scope = serde_json::to_value(grant.scope())
-        .map_err(|error| AgentError::Store(format!("invalid standing grant scope: {error}")))?;
-    entities::standing_tool_grant::Entity::insert(entities::standing_tool_grant::ActiveModel {
-        source_call_id: Set(source_call_id.0),
-        chat_id: Set(match grant.level() {
-            crate::approval::GrantLevel::Chat { chat_id } => Some(chat_id.0),
-            crate::approval::GrantLevel::Project { .. } => None,
-        }),
-        project_id: Set(match grant.level() {
-            crate::approval::GrantLevel::Chat { .. } => None,
-            crate::approval::GrantLevel::Project { project_id } => Some(project_id.0),
-        }),
-        tool_name: Set(grant.tool_name().to_owned()),
-        approval_kind: Set(grant.kind().standing_grant_key().into()),
-        scope: Set(scope),
-        granted_at: Set(granted_at),
-    })
-    .exec_without_returning(conn)
-    .await
-    .map_err(store_err)?;
-    Ok(())
 }
 
 async fn stored_grant_matches<C>(

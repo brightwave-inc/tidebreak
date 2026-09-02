@@ -5,7 +5,7 @@ use chrono::Utc;
 use serde::Serialize;
 use tidebreak_core::{
     AnswerUserQuestions, AnswerUserQuestionsOutcome, AnswerUserQuestionsRequest, CallId, ChatId,
-    PendingChatPrompt, PendingUserQuestions, TurnRunStatus,
+    CodeApprovalId, CodeSessionId, PendingChatPrompt, PendingUserQuestions, TurnRunStatus,
 };
 
 use crate::error::ServerError;
@@ -37,6 +37,18 @@ pub async fn list_pending_chat_prompts(
     Ok(Json(store.list_pending_chat_prompts().await?))
 }
 
+/// Whether a session-route refusal means the worker cannot take the
+/// decision at all, rather than that the decision itself is wrong.
+pub(crate) fn worker_cannot_take(error: &ServerError) -> bool {
+    matches!(
+        error.kind(),
+        "session_worker_missing"
+            | "approval_worker_inactive"
+            | "approval_worker_replaced"
+            | "not_found"
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AnswerDisposition {
@@ -56,6 +68,36 @@ pub async fn answer_user_questions(
     Json(answers): Json<AnswerUserQuestions>,
 ) -> Result<Json<AnsweredUserQuestions>, ServerError> {
     store.require_chat(chat_id).await?;
+    // A session a worker drives takes its decisions through the session
+    // decision route, so the worker hears the decision and resumes the park
+    // (decision 0048: the chat routes are aliases). The answers form is what
+    // the engine contract carries; additional context has no field there
+    // and settles the row directly, which the worker resumes from as well.
+    if let Some(code) = state.code.as_ref() {
+        if answers.additional_user_context.is_none() && code.has_worker(CodeSessionId(chat_id.0)) {
+            match code
+                .decide_approval(
+                    &store.owner_id(),
+                    CodeApprovalId(call_id.0),
+                    crate::code::runtime::ApprovalDecisionRequest::Answers {
+                        answers: answers.answers.clone(),
+                    },
+                )
+                .await
+            {
+                Ok(_) => {
+                    state.turn_job_wake.notify_one();
+                    return Ok(Json(AnsweredUserQuestions {
+                        disposition: AnswerDisposition::Answered,
+                    }));
+                }
+                // The worker that would take this decision is not the one
+                // the card belongs to; the row settles directly below.
+                Err(error) if worker_cannot_take(&error) => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
     let outcome = store
         .answer_user_questions(
             &AnswerUserQuestionsRequest {

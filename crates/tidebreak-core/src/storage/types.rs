@@ -940,18 +940,6 @@ pub enum JudgeVerdictOutcome {
     NotOwned,
 }
 
-/// Result of minting the standing grant an approve-with-grant decision
-/// names on a card that is still pending.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MintStandingGrantOutcome {
-    /// The grant exists, written now or by an identical earlier mint.
-    Minted(crate::approval::StandingGrant),
-    /// The card is not pending under this chat and call.
-    NotPending,
-    /// The scope does not describe this call, or the kind cannot be granted.
-    GrantNotAvailable,
-}
-
 /// A client claim and its secret per-claim fencing receipt.
 ///
 /// The token is returned only by claim, never by general pending/history reads

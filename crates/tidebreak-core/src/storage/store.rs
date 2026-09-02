@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::approval::{ApprovalDecision, ApprovalRequest, GrantScope, StandingGrant, ToolApproval};
+use crate::approval::{ApprovalDecision, ApprovalRequest, StandingGrant, ToolApproval};
 use crate::connected_app::{ConnectedApp, ConnectedAppKind};
 use crate::deliverable::{CreateOutput, NewOutputRevision, OutputRecord, OutputRevision};
 use crate::error::{AgentError, Result};
@@ -2682,20 +2682,6 @@ pub trait Store: Send + Sync {
     ) -> Result<JudgeVerdictOutcome> {
         Err(AgentError::Store(
             "durable tool approval storage is not implemented by this Store".into(),
-        ))
-    }
-
-    /// Mint the standing grant an approve-with-grant decision names while
-    /// the card is still pending, without deciding the card: the internal
-    /// engine's part of a decision the session route delivers and settles.
-    async fn mint_standing_grant_for_pending_approval(
-        &self,
-        _chat_id: ChatId,
-        _call_id: CallId,
-        _scope: &GrantScope,
-    ) -> Result<MintStandingGrantOutcome> {
-        Err(AgentError::Store(
-            "durable standing-grant storage is not implemented by this Store".into(),
         ))
     }
 
