@@ -53,14 +53,24 @@ impl CodeRuntime {
                     .unwrap_or_else(|| "repo".into())
             });
         let default_branch_prefix = self.default_branch_prefix(owner).await;
+        let configured_base = default_base_ref
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        let default_base_ref = match worktree::resolve_default_base_ref(
+            &validated.toplevel,
+            configured_base.as_deref(),
+        )
+        .await
+        {
+            Ok(resolved) => resolved,
+            Err(_) => configured_base.unwrap_or_else(|| "main".into()),
+        };
         let repo = CodeRepo {
             id: RepoId::new(),
             owner: owner.clone(),
             root_path: toplevel,
             display_name: name,
-            default_base_ref: default_base_ref
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| "main".into()),
+            default_base_ref,
             branch_prefix: branch_prefix
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or(default_branch_prefix),

@@ -823,3 +823,168 @@ async fn a_signed_out_relay_covered_engine_still_creates_on_a_hosted_machine() {
         .unwrap();
     assert_eq!(created.status(), reqwest::StatusCode::CREATED);
 }
+
+fn init_git_repo_on_branch(
+    dir: &std::path::Path,
+    branch: &str,
+    commit: bool,
+) -> std::path::PathBuf {
+    let repo = dir.join("origin");
+    std::fs::create_dir_all(&repo).unwrap();
+    for args in [
+        ["git", "init", "-b", branch].as_slice(),
+        ["git", "config", "user.email", "dev@example.com"].as_slice(),
+        ["git", "config", "user.name", "Dev"].as_slice(),
+        ["git", "config", "core.autocrlf", "false"].as_slice(),
+    ] {
+        assert!(std::process::Command::new(args[0])
+            .args(&args[1..])
+            .current_dir(&repo)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .status()
+            .unwrap()
+            .success());
+    }
+    if commit {
+        std::fs::write(repo.join("README.md"), "hello\n").unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["add", "README.md"])
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success());
+        assert!(std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success());
+    }
+    repo
+}
+
+#[tokio::test]
+async fn first_turn_starts_when_the_repository_has_no_main_ref() {
+    let (router, token, _runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo_on_branch(dir.path(), "trunk", true);
+
+    let registered = client
+        .post(format!("http://{addr}/code/repos"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "path": repo }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(registered.status(), reqwest::StatusCode::CREATED);
+    let repo_body: serde_json::Value = registered.json().await.unwrap();
+    assert_eq!(repo_body["default_base_ref"], "trunk");
+
+    let patched = client
+        .patch(format!("http://{addr}/code/repos/{}", json_id(&repo_body)))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "default_base_ref": "main" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(patched.status(), reqwest::StatusCode::OK);
+
+    let created = client
+        .post(format!("http://{addr}/code/workspaces"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "repo_id": json_id(&repo_body),
+            "title": "first change",
+            "base_ref": "main",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let workspace: serde_json::Value = created.json().await.unwrap();
+    assert_eq!(workspace["base_ref"], "trunk");
+
+    let persisted = client
+        .get(format!("http://{addr}/code/repos/{}", json_id(&repo_body)))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap();
+    assert_eq!(persisted["default_base_ref"], "trunk");
+
+    let session = client
+        .post(format!(
+            "http://{addr}/code/workspaces/{}/sessions",
+            json_id(&workspace)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "harness": "claude_code",
+            "permission_mode": "plan",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(session.status(), reqwest::StatusCode::CREATED);
+    let session: serde_json::Value = session.json().await.unwrap();
+
+    let turn = client
+        .post(format!(
+            "http://{addr}/code/sessions/{}/turns",
+            json_id(&session)
+        ))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "message": "hello" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(turn.status(), reqwest::StatusCode::ACCEPTED);
+    let turn: serde_json::Value = turn.json().await.unwrap();
+    assert_eq!(turn["status"], "completed");
+}
+
+#[tokio::test]
+async fn workspace_create_names_the_missing_base_ref_when_nothing_resolves() {
+    let (router, token, _runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo_on_branch(dir.path(), "trunk", false);
+
+    let registered = client
+        .post(format!("http://{addr}/code/repos"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "path": repo }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(registered.status(), reqwest::StatusCode::CREATED);
+    let repo_body: serde_json::Value = registered.json().await.unwrap();
+
+    let created = client
+        .post(format!("http://{addr}/code/workspaces"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "repo_id": json_id(&repo_body),
+            "title": "first change",
+            "base_ref": "main",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = created.json().await.unwrap();
+    assert_eq!(body["kind"], "missing_base_ref");
+    let message = body["message"].as_str().unwrap_or("");
+    assert!(
+        message.contains("`main`"),
+        "error must name the missing ref: {message}"
+    );
+    assert!(
+        message.contains("trunk"),
+        "error must name the candidates you tried: {message}"
+    );
+}

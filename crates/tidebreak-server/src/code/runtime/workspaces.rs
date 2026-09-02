@@ -55,9 +55,23 @@ impl CodeRuntime {
         } else {
             title
         };
-        let base = base_ref
-            .filter(|value| !value.trim().is_empty())
+        let explicit_base = base_ref
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        let requested = explicit_base
+            .clone()
             .unwrap_or_else(|| repo.default_base_ref.clone());
+        let repo_root = std::path::Path::new(&repo.root_path);
+        let base = worktree::resolve_default_base_ref(repo_root, Some(&requested))
+            .await
+            .map_err(map_worktree)?;
+        let requested_repo_default =
+            explicit_base.as_deref().unwrap_or(&repo.default_base_ref) == repo.default_base_ref;
+        if requested_repo_default && repo.default_base_ref != base {
+            let mut repo = repo.clone();
+            repo.default_base_ref = base.clone();
+            self.save_repo(&repo).await?;
+        }
         let mut workspace = CodeWorkspace {
             id,
             owner: owner.clone(),
