@@ -22,7 +22,6 @@ use tidebreak_core::{
 use crate::error::ServerError;
 use crate::extract::{Json, Path};
 use crate::principal::ClientExecutor;
-use crate::scoped_store::ScopedStore;
 use crate::state::AppState;
 
 const CLIENT_EXECUTION_LEASE: Duration = Duration::seconds(60);
@@ -191,13 +190,23 @@ pub struct PendingOutputWritebackRequest {
     pub claimed: bool,
 }
 
+/// One pending call plus the conversation that owns it.
+///
+/// The trusted machine executor uses this unscoped projection to sweep a
+/// shared self-host without impersonating one of its named users.
+#[derive(Serialize)]
+pub struct NativePendingClientExecution {
+    pub chat_id: ChatId,
+    pub call: ToolCallRecord,
+}
+
 /// `GET /chats/{id}/client-executions/pending` — renderer-safe consent prompts.
 ///
 /// Unknown, malformed, or non-folder-access client calls are omitted rather
 /// than exposing their canonical records across the renderer boundary.
 pub async fn list_pending_folder_access_requests(
     State(state): State<AppState>,
-    store: ScopedStore,
+    store: crate::scoped_store::ScopedStore,
     Path(id): Path<ChatId>,
 ) -> Result<Json<Vec<PendingFolderAccessRequest>>, ServerError> {
     store.require_chat(id).await?;
@@ -218,7 +227,7 @@ pub async fn list_pending_folder_access_requests(
 /// takes it automatically and it is intentionally omitted from the renderer.
 pub async fn list_pending_output_writebacks(
     State(state): State<AppState>,
-    store: ScopedStore,
+    store: crate::scoped_store::ScopedStore,
     Path(id): Path<ChatId>,
 ) -> Result<Json<Vec<PendingOutputWritebackRequest>>, ServerError> {
     let chat = store.require_chat(id).await?;
@@ -232,15 +241,15 @@ pub async fn list_pending_output_writebacks(
     Ok(Json(requests))
 }
 
-/// Native-only authoritative pending work used by the trusted executor.
+/// Native-only authoritative pending work for one conversation.
 pub async fn list_pending_client_executions_raw(
     State(state): State<AppState>,
-    store: ScopedStore,
     _executor: ClientExecutor,
     Path(id): Path<ChatId>,
 ) -> Result<Json<Vec<ToolCallRecord>>, ServerError> {
-    store.require_chat(id).await?;
-    let calls = store
+    require_native_chat(&state, id).await?;
+    let calls = state
+        .store
         .list_pending_client_tool_calls(id)
         .await?
         .into_iter()
@@ -248,6 +257,30 @@ pub async fn list_pending_client_executions_raw(
         .collect();
     state.turn_job_wake.notify_one();
     Ok(Json(calls))
+}
+
+/// Native-only authoritative pending work across every conversation.
+pub async fn list_all_pending_client_executions(
+    State(state): State<AppState>,
+    _executor: ClientExecutor,
+) -> Result<Json<Vec<NativePendingClientExecution>>, ServerError> {
+    let mut pending = Vec::new();
+    for chat in state.store.list_chats().await? {
+        pending.extend(
+            state
+                .store
+                .list_pending_client_tool_calls(chat.id)
+                .await?
+                .into_iter()
+                .filter(|call| call.name != tidebreak_core::ASK_USER_QUESTIONS_TOOL)
+                .map(|call| NativePendingClientExecution {
+                    chat_id: chat.id,
+                    call,
+                }),
+        );
+    }
+    state.turn_job_wake.notify_one();
+    Ok(Json(pending))
 }
 
 fn renderer_folder_access_request(call: ToolCallRecord) -> Option<PendingFolderAccessRequest> {
@@ -296,22 +329,22 @@ fn renderer_output_writeback_request(
 /// `POST .../{call_id}/claim` — atomically acquire or recover one exact claim.
 pub async fn claim_client_execution(
     State(state): State<AppState>,
-    store: ScopedStore,
     _executor: ClientExecutor,
     Path((id, call_id)): Path<(ChatId, CallId)>,
     Json(body): Json<ClaimClientExecution>,
 ) -> Result<Json<ClaimedClientExecution>, ServerError> {
-    store.require_chat(id).await?;
+    require_native_chat(&state, id).await?;
     ensure_non_nil(body.executor_id, "executor_id")?;
     ensure_non_nil(body.lease_token, "lease_token")?;
     // Polling is also the recovery watchdog after a server restart: sweep a
     // prior executor's expired claim before deciding whether this call can be
     // claimed. The store performs the failure, event append, wait closure, and
     // turn transition atomically.
-    store.list_pending_client_tool_calls(id).await?;
+    state.store.list_pending_client_tool_calls(id).await?;
     state.turn_job_wake.notify_one();
     let now = Utc::now();
-    let outcome = store
+    let outcome = state
+        .store
         .claim_client_tool_call(
             call_id,
             id,
@@ -341,15 +374,16 @@ pub async fn claim_client_execution(
 /// Heartbeats are monotonic liveness updates rather than exact commands: a
 /// repeated request can extend the lease again from its new server receive time.
 pub async fn heartbeat_client_execution(
-    store: ScopedStore,
+    State(state): State<AppState>,
     _executor: ClientExecutor,
     Path((id, call_id)): Path<(ChatId, CallId)>,
     Json(body): Json<HeartbeatClientExecution>,
 ) -> Result<Json<ClientExecutionHeartbeat>, ServerError> {
-    store.require_chat(id).await?;
+    require_native_chat(&state, id).await?;
     ensure_non_nil(body.lease_token, "lease_token")?;
     let now = Utc::now();
-    let disposition = match store
+    let disposition = match state
+        .store
         .heartbeat_client_tool_call(
             call_id,
             id,
@@ -377,19 +411,19 @@ pub async fn heartbeat_client_execution(
 /// with the first committed result.
 pub async fn resolve_client_execution(
     State(state): State<AppState>,
-    store: ScopedStore,
     _executor: ClientExecutor,
     Path((id, call_id)): Path<(ChatId, CallId)>,
     Json(body): Json<ResolveClientExecution>,
 ) -> Result<Json<ResolvedClientExecution>, ServerError> {
-    store.require_chat(id).await?;
+    require_native_chat(&state, id).await?;
     ensure_non_nil(body.lease_token, "lease_token")?;
     let rows = body.resolution.rows().cloned();
     let images = body.resolution.images().map(<[_]>::to_vec);
     let resolution = body.resolution.into_core();
     validate_resolution(&resolution)?;
     let now = Utc::now();
-    let mut resolution_receipt = store
+    let mut resolution_receipt = state
+        .store
         .resolve_client_tool_call_and_append_event_with_rows(
             call_id,
             id,
@@ -402,7 +436,8 @@ pub async fn resolve_client_execution(
         )
         .await?;
     if resolution_receipt.outcome == ResolveToolCallOutcome::LeaseLost {
-        resolution_receipt = store
+        resolution_receipt = state
+            .store
             .resolve_expired_client_tool_call_and_append_event_with_rows(
                 call_id,
                 id,
@@ -446,6 +481,14 @@ pub async fn resolve_client_execution(
         state.turn_job_wake.notify_one();
     }
     Ok(Json(ResolvedClientExecution { disposition }))
+}
+
+async fn require_native_chat(state: &AppState, id: ChatId) -> Result<(), ServerError> {
+    if state.store.get_chat(id).await?.is_some() {
+        Ok(())
+    } else {
+        Err(ServerError::not_found(format!("chat {id} not found")))
+    }
 }
 
 fn ensure_non_nil(value: uuid::Uuid, field: &str) -> Result<(), ServerError> {

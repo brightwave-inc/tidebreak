@@ -1,11 +1,12 @@
 //! The request-facing store view, bound to one authenticated principal.
 //!
-//! Route handlers do not touch [`Store`] directly. They extract a
-//! [`ScopedStore`] — the durable store bound to the requesting principal's
-//! [`OwnerId`] — and every root-aggregate query on it (chats, projects,
-//! documents) is the trait's owner-scoped variant. The unscoped root surface
-//! simply does not exist on this type, and the inner handle never escapes it,
-//! so route code cannot express a query that crosses owners (#853).
+//! Principal-facing route handlers do not touch [`Store`] directly. They
+//! extract a [`ScopedStore`] — the durable store bound to the requesting
+//! principal's [`OwnerId`] — and every root-aggregate query on it (chats,
+//! projects, documents) is the trait's owner-scoped variant. The unscoped root
+//! surface simply does not exist on this type, and the inner handle never
+//! escapes it, so principal-facing route code cannot express a query that
+//! crosses owners (#853).
 //!
 //! Non-root operations (turns, agent runs, events, approvals) hang off a
 //! root by id and pass through unchanged; the handler authorizes the root
@@ -14,7 +15,8 @@
 //! chat or project their level points at. System paths that act on
 //! already-authorized ids — turn workers, retirement scans, post-commit
 //! signalling — are not requests and keep the separate unscoped handle on
-//! [`AppState`].
+//! [`AppState`]. The native executor capability also uses that handle on its
+//! isolated machine routes because it serves every owner without becoming one.
 //!
 //! The extractor fails closed like [`AuthContext`] itself: on a route the
 //! auth middleware does not cover it answers `401`, never a defaulted owner.
@@ -31,15 +33,14 @@ use tidebreak_core::local_app::{AppGrant, AppRecord, AppRevision};
 use tidebreak_core::storage::DecidePlanOutcome;
 use tidebreak_core::{
     AcceptTurnSteerOutcome, AgentRun, AgentRunId, AgentRunResult, AnswerUserQuestionsOutcome,
-    AnswerUserQuestionsRequest, CallId, Chat, ChatId, ChatTranscriptSnapshot,
-    ClaimClientToolCallOutcome, DecidePlanRequest, DeleteChatOutcome, DeleteProjectOutcome,
-    DocumentId, DocumentListCursor, DocumentRecord, DocumentScope, DocumentSourceUpsert,
-    DocumentSummaryRecord, HeartbeatClientToolCallOutcome, ImageRef,
-    JournaledClientToolCallOutcome, JournaledTurnOutcome, MessageAttachment, MoveChatOutcome,
-    NetworkPolicy, OwnerId, PendingPlanApproval, PendingUserQuestions, PermissionMode, Project,
-    ProjectId, ReasoningEffort, RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome,
-    Result, SandboxAgentAdmission, SandboxToolCall, SandboxToolCallReceipt, SequencedEvent, Store,
-    TaskPlan, ToolApproval, ToolCallRecord, ToolCallResolution, TurnId, TurnRun, TurnSteerId,
+    AnswerUserQuestionsRequest, CallId, Chat, ChatId, ChatTranscriptSnapshot, DecidePlanRequest,
+    DeleteChatOutcome, DeleteProjectOutcome, DocumentId, DocumentListCursor, DocumentRecord,
+    DocumentScope, DocumentSourceUpsert, DocumentSummaryRecord, ImageRef, JournaledTurnOutcome,
+    MessageAttachment, MoveChatOutcome, NetworkPolicy, OwnerId, PendingPlanApproval,
+    PendingUserQuestions, PermissionMode, Project, ProjectId, ReasoningEffort,
+    RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome, Result,
+    SandboxAgentAdmission, SandboxToolCall, SandboxToolCallReceipt, SequencedEvent, Store,
+    TaskPlan, ToolApproval, ToolCallRecord, TurnId, TurnRun, TurnSteerId,
 };
 
 use crate::error::ServerError;
@@ -577,89 +578,6 @@ impl ScopedStore {
     /// [`Store::list_tool_calls`].
     pub async fn list_tool_calls(&self, chat_id: ChatId) -> Result<Vec<ToolCallRecord>> {
         self.store.list_tool_calls(chat_id).await
-    }
-
-    /// [`Store::claim_client_tool_call`].
-    pub async fn claim_client_tool_call(
-        &self,
-        id: CallId,
-        chat_id: ChatId,
-        executor_id: uuid::Uuid,
-        lease_token: uuid::Uuid,
-        now: chrono::DateTime<chrono::Utc>,
-        lease_expires_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<ClaimClientToolCallOutcome> {
-        self.store
-            .claim_client_tool_call(id, chat_id, executor_id, lease_token, now, lease_expires_at)
-            .await
-    }
-
-    /// [`Store::heartbeat_client_tool_call`].
-    pub async fn heartbeat_client_tool_call(
-        &self,
-        id: CallId,
-        chat_id: ChatId,
-        lease_token: uuid::Uuid,
-        now: chrono::DateTime<chrono::Utc>,
-        lease_expires_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<HeartbeatClientToolCallOutcome> {
-        self.store
-            .heartbeat_client_tool_call(id, chat_id, lease_token, now, lease_expires_at)
-            .await
-    }
-
-    /// [`Store::resolve_client_tool_call_and_append_event_with_rows`].
-    #[allow(clippy::too_many_arguments)]
-    pub async fn resolve_client_tool_call_and_append_event_with_rows(
-        &self,
-        id: CallId,
-        chat_id: ChatId,
-        lease_token: uuid::Uuid,
-        now: chrono::DateTime<chrono::Utc>,
-        resolution: &ToolCallResolution,
-        resolved_at: chrono::DateTime<chrono::Utc>,
-        rows: Option<&serde_json::Value>,
-        images: Option<&[tidebreak_core::ImageRef]>,
-    ) -> Result<JournaledClientToolCallOutcome> {
-        self.store
-            .resolve_client_tool_call_and_append_event_with_rows(
-                id,
-                chat_id,
-                lease_token,
-                now,
-                resolution,
-                resolved_at,
-                rows,
-                images,
-            )
-            .await
-    }
-
-    /// [`Store::resolve_expired_client_tool_call_and_append_event_with_rows`].
-    #[allow(clippy::too_many_arguments)]
-    pub async fn resolve_expired_client_tool_call_and_append_event_with_rows(
-        &self,
-        id: CallId,
-        chat_id: ChatId,
-        lease_token: uuid::Uuid,
-        now: chrono::DateTime<chrono::Utc>,
-        resolution: &ToolCallResolution,
-        resolved_at: chrono::DateTime<chrono::Utc>,
-        rows: Option<&serde_json::Value>,
-        images: Option<&[tidebreak_core::ImageRef]>,
-    ) -> Result<JournaledClientToolCallOutcome> {
-        self.store
-            .resolve_expired_client_tool_call_and_append_event_with_rows(
-                id,
-                chat_id,
-                lease_token,
-                now,
-                resolution,
-                resolved_at,
-                rows,
-                images,
-            )
-            .await
     }
 }
 
