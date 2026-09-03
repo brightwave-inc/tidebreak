@@ -86,6 +86,10 @@ pub enum ExecUnavailableReason {
     /// nothing can be provisioned yet. Distinct from a missing runtime
     /// because the fix is different: start the daemon rather than install it.
     ContainerRuntimeUnreachable,
+    /// The runtime daemon answered its liveness probe but refused the
+    /// container Tidebreak needs for an execution workspace. The operator
+    /// must fix the runtime policy, resource, or image failure before retrying.
+    ContainerRuntimeRefused,
 }
 
 impl ExecUnavailableReason {
@@ -97,6 +101,7 @@ impl ExecUnavailableReason {
             Self::MissingCredential => "missing_credential",
             Self::MissingContainerRuntime => "missing_container_runtime",
             Self::ContainerRuntimeUnreachable => "container_runtime_unreachable",
+            Self::ContainerRuntimeRefused => "container_runtime_refused",
         }
     }
 
@@ -113,6 +118,9 @@ impl ExecUnavailableReason {
             Self::MissingContainerRuntime => "no container runtime is installed on this host",
             Self::ContainerRuntimeUnreachable => {
                 "the container runtime is installed but its daemon is not responding"
+            }
+            Self::ContainerRuntimeRefused => {
+                "the container runtime refused Tidebreak's workspace container"
             }
         }
     }

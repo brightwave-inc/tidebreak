@@ -157,6 +157,10 @@ const CONTAINER_LIFETIME: Duration = Duration::from_secs(4 * 60 * 60);
 const CLI_GRACE: Duration = Duration::from_secs(15);
 /// Bound on one control-plane invocation (`run`, `inspect`, `start`, `rm`).
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(120);
+/// Maximum stdout or stderr retained from a control-plane command. Docker's
+/// refusal text is operator diagnostics, not model input, and a broken runtime
+/// must not make the host retain an unbounded stream while reporting it.
+const CONTROL_CAPTURE_BYTES: usize = 16 * 1024;
 /// Bound on the daemon liveness probe. Short: this runs behind a settings
 /// read, and an unresponsive daemon must report unavailable rather than hang
 /// the surface.
@@ -165,6 +169,11 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 /// again. Long enough that a settings render costs one probe, short enough
 /// that starting Docker Desktop is reflected without restarting Tidebreak.
 const AVAILABILITY_TTL: Duration = Duration::from_secs(10);
+
+type AvailabilityCache = HashMap<String, (Instant, AvailabilityAnswer)>;
+
+static AVAILABILITY_CACHE: LazyLock<Mutex<AvailabilityCache>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 /// `timeout`'s exit status when it stopped the command.
 const TIMEOUT_EXIT: i32 = 124;
 /// How long the in-container `timeout` waits after `TERM` before `KILL`.
@@ -407,29 +416,35 @@ impl DockerExecutionProvider {
     /// found — neither on `PATH` nor in any of the well-known install
     /// locations [`resolve_container_runtime_binary`] falls back to — or a
     /// CLI whose daemon does not answer (Docker Desktop not started, the
-    /// socket not permitted to this user). The answer is cached for
-    /// [`AVAILABILITY_TTL`] in both directions, so a settings render costs at
-    /// most one probe and starting the daemon is picked up without a restart.
+    /// socket not permitted to this user). Probe answers are cached for
+    /// [`AVAILABILITY_TTL`], so a settings render costs at most one probe and
+    /// starting the daemon is picked up without a restart. A refusal from an
+    /// actual workspace-container invocation stays latched until a later
+    /// container start succeeds because the daemon probe cannot disprove it.
     pub async fn availability() -> Result<(), ExecUnavailableReason> {
         Self::availability_of(&resolve_container_runtime_binary()).await
     }
 
     /// [`Self::availability`] for a named runtime binary.
     pub async fn availability_of(binary: &str) -> Result<(), ExecUnavailableReason> {
-        static CACHE: LazyLock<Mutex<HashMap<String, (Instant, AvailabilityAnswer)>>> =
-            LazyLock::new(|| Mutex::new(HashMap::new()));
-        if let Ok(cache) = CACHE.lock() {
+        if let Ok(cache) = AVAILABILITY_CACHE.lock() {
             if let Some((probed, answer)) = cache.get(binary) {
-                if probed.elapsed() < AVAILABILITY_TTL {
+                if *answer == AvailabilityAnswer::Refused || probed.elapsed() < AVAILABILITY_TTL {
                     return answer.into_result();
                 }
             }
         }
         let answer = probe_runtime(binary).await;
-        if let Ok(mut cache) = CACHE.lock() {
+        if let Ok(mut cache) = AVAILABILITY_CACHE.lock() {
             cache.insert(binary.to_owned(), (Instant::now(), answer));
         }
         answer.into_result()
+    }
+
+    fn record_availability(&self, answer: AvailabilityAnswer) {
+        if let Ok(mut cache) = AVAILABILITY_CACHE.lock() {
+            cache.insert(self.binary.clone(), (Instant::now(), answer));
+        }
     }
 
     /// A fresh runtime invocation with stdio detached from this process.
@@ -448,10 +463,12 @@ impl DockerExecutionProvider {
     async fn control(&self, args: &[String]) -> Result<Vec<u8>, ControlFailure> {
         let mut command = self.command();
         command.args(args);
-        let child = command.spawn().map_err(|_| ControlFailure::Runtime)?;
-        let output = bounded_output(child, CONTROL_TIMEOUT, usize::MAX)
+        let child = command
+            .spawn()
+            .map_err(|_| ControlFailure::MissingRuntime)?;
+        let output = bounded_output(child, CONTROL_TIMEOUT, CONTROL_CAPTURE_BYTES)
             .await
-            .ok_or(ControlFailure::Runtime)?;
+            .ok_or(ControlFailure::Unreachable)?;
         if output.status == Some(0) {
             return Ok(output.stdout);
         }
@@ -524,7 +541,7 @@ impl DockerExecutionProvider {
                     )),
                 }
             }
-            Err(failure) => Err(failure.into_error()),
+            Err(failure) => Err(failure.into_error(self)),
         }
     }
 
@@ -537,7 +554,7 @@ impl DockerExecutionProvider {
         match self.control(&args).await {
             Ok(stdout) => Ok(parse_inspect(&stdout)),
             Err(ControlFailure::Refused(stderr)) if is_no_such_container(&stderr) => Ok(None),
-            Err(failure) => Err(failure.into_error()),
+            Err(failure) => Err(failure.into_error(self)),
         }
     }
 
@@ -548,7 +565,7 @@ impl DockerExecutionProvider {
         match self.control(&remove_args(reference)).await {
             Ok(_) => Ok(()),
             Err(ControlFailure::Refused(stderr)) if is_no_such_container(&stderr) => Ok(()),
-            Err(failure) => Err(failure.into_error()),
+            Err(failure) => Err(failure.into_error(self)),
         }
     }
 
@@ -774,7 +791,13 @@ impl RemoteSandboxAdapter for DockerExecutionProvider {
     }
 
     async fn create_session(&self, workspace_id: &str) -> Result<RemoteSession, ExecError> {
-        let id = self.ensure_container(workspace_id).await?;
+        let id = match self.ensure_container(workspace_id).await {
+            Ok(id) => {
+                self.record_availability(AvailabilityAnswer::Ready);
+                id
+            }
+            Err(error) => return Err(error),
+        };
         Ok(RemoteSession {
             sandbox_id: id,
             endpoint: None,
@@ -1000,6 +1023,7 @@ enum AvailabilityAnswer {
     Ready,
     MissingRuntime,
     Unreachable,
+    Refused,
 }
 
 impl AvailabilityAnswer {
@@ -1008,6 +1032,7 @@ impl AvailabilityAnswer {
             Self::Ready => Ok(()),
             Self::MissingRuntime => Err(ExecUnavailableReason::MissingContainerRuntime),
             Self::Unreachable => Err(ExecUnavailableReason::ContainerRuntimeUnreachable),
+            Self::Refused => Err(ExecUnavailableReason::ContainerRuntimeRefused),
         }
     }
 }
@@ -1037,27 +1062,30 @@ async fn probe_runtime(binary: &str) -> AvailabilityAnswer {
 /// message is a different thing from being unable to run it at all, and only
 /// the refusal carries text worth classifying.
 enum ControlFailure {
-    Runtime,
+    MissingRuntime,
+    Unreachable,
     Refused(String),
 }
 
 impl ControlFailure {
-    fn into_error(self) -> ExecError {
+    fn into_error(self, provider: &DockerExecutionProvider) -> ExecError {
         match self {
-            Self::Runtime => ExecError::Unavailable(RUNTIME_SPAWN_FAILED.into()),
+            Self::MissingRuntime => {
+                provider.record_availability(AvailabilityAnswer::MissingRuntime);
+                ExecError::Unavailable(RUNTIME_SPAWN_FAILED.into())
+            }
+            Self::Unreachable => {
+                provider.record_availability(AvailabilityAnswer::Unreachable);
+                ExecError::Unavailable(RUNTIME_SPAWN_FAILED.into())
+            }
             // The runtime's own message is not surfaced: it is operator
             // diagnostics, and the model-facing error stays a stable sentence.
             Self::Refused(stderr) => {
+                provider.record_availability(AvailabilityAnswer::Refused);
                 tracing::debug!(stderr = %stderr, "container runtime refused an invocation");
                 ExecError::Unavailable("the container runtime refused the request".into())
             }
         }
-    }
-}
-
-impl From<ControlFailure> for ExecError {
-    fn from(failure: ControlFailure) -> Self {
-        failure.into_error()
     }
 }
 
@@ -1691,6 +1719,64 @@ mod tests {
         assert!(is_name_conflict(
             "The container name \"/tidebreak-exec-x\" is already in use"
         ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_container_start_refusal_updates_runtime_availability_until_success() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = directory.path().join("docker-test");
+        let install_runtime = |run_body: &str| {
+            std::fs::write(
+                &runtime,
+                format!(
+                    "#!/bin/sh\ncase \"$1\" in\n  version) printf '27.0.0\\n' ;;\n  inspect) printf 'No such container\\n' >&2; exit 1 ;;\n  run) {run_body} ;;\n  *) exit 1 ;;\nesac\n"
+                ),
+            )
+            .unwrap();
+            let mut permissions = std::fs::metadata(&runtime).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&runtime, permissions).unwrap();
+        };
+        install_runtime("printf 'runtime policy refused container\\n' >&2; exit 125");
+        let binary = runtime.to_string_lossy().into_owned();
+        let provider = provider().with_binary(binary.clone());
+
+        DockerExecutionProvider::availability_of(&binary)
+            .await
+            .expect("the daemon liveness probe answers");
+        let error = match provider.create_session("chat-refused").await {
+            Ok(_) => panic!("the runtime must refuse the workspace container"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, ExecError::Unavailable(_)));
+        assert_eq!(
+            DockerExecutionProvider::availability_of(&binary).await,
+            Err(ExecUnavailableReason::ContainerRuntimeRefused)
+        );
+        AVAILABILITY_CACHE
+            .lock()
+            .unwrap()
+            .get_mut(&binary)
+            .unwrap()
+            .0 = Instant::now() - AVAILABILITY_TTL - Duration::from_secs(1);
+        assert_eq!(
+            DockerExecutionProvider::availability_of(&binary).await,
+            Err(ExecUnavailableReason::ContainerRuntimeRefused),
+            "a daemon liveness probe cannot clear a workspace-container refusal"
+        );
+
+        install_runtime("printf 'container-123\\n'");
+        provider
+            .create_session("chat-ready")
+            .await
+            .expect("a later successful container start restores readiness");
+        assert_eq!(
+            DockerExecutionProvider::availability_of(&binary).await,
+            Ok(())
+        );
     }
 
     /// Requires a working Docker daemon and pulls a multi-gigabyte image on

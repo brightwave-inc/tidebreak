@@ -132,6 +132,10 @@ export const CodeExecutionFailure: Story = {
   args: { panel: "exec", state: "failed" },
 };
 
+export const CodeExecutionDockerRefused: Story = {
+  args: { panel: "exec", state: "docker-refused" },
+};
+
 export const CodeExecutionUnavailableCompact: Story = {
   args: { panel: "exec", state: "disabled" },
   globals: { viewport: { value: "compact", isRotated: false } },
