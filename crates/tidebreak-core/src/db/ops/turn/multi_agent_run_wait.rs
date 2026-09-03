@@ -86,7 +86,7 @@ WHERE w.status = 'waiting' AND w.condition = 'all'
   AND w.claim_count >= w.attempt_count AND w.model_steps > 0
   AND w.input_tokens >= 0 AND w.output_tokens >= 0
   AND w.cache_read_input_tokens >= 0 AND w.cache_creation_input_tokens >= 0
-  AND t.status = 'waiting_for_agent_run'
+  AND t.status IN ('waiting_for_agent_run', 'waiting')
   AND t.attempt_count = w.attempt_count AND t.claim_count = w.claim_count
   AND t.lease_token IS NULL AND t.lease_expires_at IS NULL
   AND t.steer_revision = w.expected_steer_revision AND t.updated_at >= w.parked_at
@@ -624,8 +624,9 @@ pub(in crate::db) async fn resume_turn_for_agent_run_wait_set(
         transaction.commit().await.map_err(store_err)?;
         return Ok(Some(outcome));
     }
+    let adapter_park = adapter_agent_run_park_matches(&turn, &stored, &members)?;
     if stored.status != TurnAgentRunWaitStatus::Waiting.as_str()
-        || turn.status != TurnRunStatus::WaitingForAgentRun.as_str()
+        || (turn.status != TurnRunStatus::WaitingForAgentRun.as_str() && !adapter_park)
         || turn.parent_shape_mismatch(&stored)
     {
         transaction.commit().await.map_err(store_err)?;
@@ -812,7 +813,10 @@ pub(in crate::db) async fn resume_turn_for_agent_run_wait_set(
             sea_orm::sea_query::Expr::value(transition_at),
         )
         .filter(entities::code_turn::Column::Id.eq(turn.id))
-        .filter(entities::code_turn::Column::Status.eq(TurnRunStatus::WaitingForAgentRun.as_str()))
+        .filter(entities::code_turn::Column::Status.is_in([
+            TurnRunStatus::WaitingForAgentRun.as_str(),
+            crate::CodeTurnStatus::Waiting.as_str(),
+        ]))
         .filter(entities::code_turn::Column::AttemptCount.eq(stored.attempt_count))
         .filter(entities::code_turn::Column::ClaimCount.eq(stored.claim_count))
         .exec(&transaction)
@@ -1057,6 +1061,29 @@ where
 
 trait TurnShape {
     fn parent_shape_mismatch(&self, wait: &entities::turn_agent_run_wait_set::Model) -> bool;
+}
+
+fn adapter_agent_run_park_matches(
+    turn: &entities::code_turn::Model,
+    wait: &entities::turn_agent_run_wait_set::Model,
+    members: &[entities::turn_agent_run_wait_member::Model],
+) -> Result<bool> {
+    let Some(crate::TurnParkWait::AgentRuns { run_ids }) =
+        super::client_wait::adapter_park_wait(turn)?
+    else {
+        return Ok(false);
+    };
+    let Some(park_ref) = turn.park_ref.as_deref() else {
+        return Ok(false);
+    };
+    let Ok(park_wait_id) = park_ref.parse::<CallId>() else {
+        return Ok(false);
+    };
+    let parsed_runs = run_ids
+        .iter()
+        .map(|id| id.parse::<AgentRunId>())
+        .collect::<std::result::Result<Vec<_>, _>>();
+    Ok(park_wait_id.0 == wait.id && parsed_runs.is_ok_and(|runs| runs == member_ids(members)))
 }
 
 impl TurnShape for entities::code_turn::Model {

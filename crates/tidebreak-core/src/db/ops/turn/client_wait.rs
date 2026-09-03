@@ -24,14 +24,14 @@ pub(in crate::db) struct ClientWaitTurnTransition {
     pub terminal_event: Option<SequencedEvent>,
 }
 
-/// Return the approval call wrapped by a code-session durable park.
-pub(in crate::db) fn approval_park_call_id(
+/// Return the dependency wrapped by a code-session durable park.
+pub(in crate::db) fn adapter_park_wait(
     turn: &entities::code_turn::Model,
-) -> Result<Option<CallId>> {
+) -> Result<Option<TurnParkWait>> {
     if turn.status != CodeTurnStatus::Waiting.as_str() {
         return Ok(None);
     }
-    let (Some(park_ref), Some(raw_wait)) = (turn.park_ref.as_deref(), turn.park_wait.as_ref())
+    let (Some(_park_ref), Some(raw_wait)) = (turn.park_ref.as_deref(), turn.park_wait.as_ref())
     else {
         return Ok(None);
     };
@@ -41,15 +41,38 @@ pub(in crate::db) fn approval_park_call_id(
             turn.id
         ))
     })?;
+    Ok(Some(wait))
+}
+
+/// Return the client-call dependency wrapped by a durable adapter park.
+pub(in crate::db) fn adapter_client_park_call_id(
+    turn: &entities::code_turn::Model,
+) -> Result<Option<CallId>> {
+    let Some(wait) = adapter_park_wait(turn)? else {
+        return Ok(None);
+    };
+    let call_id = match wait {
+        TurnParkWait::Approval { call_id } | TurnParkWait::ClientToolCall { call_id } => call_id,
+        TurnParkWait::AgentRuns { .. } => return Ok(None),
+    };
+    call_id.parse::<CallId>().map(Some).map_err(|_| {
+        AgentError::Store(format!(
+            "turn {} client park has an invalid call id",
+            turn.id
+        ))
+    })
+}
+
+/// Return the approval call wrapped by a code-session durable park.
+pub(in crate::db) fn approval_park_call_id(
+    turn: &entities::code_turn::Model,
+) -> Result<Option<CallId>> {
+    let Some(wait) = adapter_park_wait(turn)? else {
+        return Ok(None);
+    };
     let TurnParkWait::Approval { call_id } = wait else {
         return Ok(None);
     };
-    if call_id != park_ref {
-        return Err(AgentError::Store(format!(
-            "turn {} approval park has mismatched call ids",
-            turn.id
-        )));
-    }
     call_id.parse::<CallId>().map(Some).map_err(|_| {
         AgentError::Store(format!(
             "turn {} approval park has an invalid call id",
@@ -577,12 +600,12 @@ where
         .await
         .map_err(store_err)?
         .expect("locked client-wait turn exists");
-    let adapter_approval_call = approval_park_call_id(&turn)?;
+    let adapter_client_call = adapter_client_park_call_id(&turn)?;
     if turn.session_id != wait.session_id
         || (!matches!(
             turn.status.as_str(),
             "waiting_for_client" | "cancelling_client"
-        ) && adapter_approval_call != Some(CallId(call.id)))
+        ) && adapter_client_call != Some(CallId(call.id)))
         || turn.attempt_count != wait.attempt_count
         || turn.claim_count != wait.claim_count
         || turn.lease_token.is_some()

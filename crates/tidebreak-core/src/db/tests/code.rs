@@ -125,6 +125,75 @@ async fn an_internal_turn_claim_backfills_its_input_message_once() {
 }
 
 #[tokio::test]
+async fn an_internal_resume_keeps_the_failure_attempt() {
+    let (_dir, store, _session_id, code_turn_id) = seeded_session().await;
+    let turn_id = TurnId(code_turn_id.0);
+    let claimed_at = now();
+    let first_token = uuid::Uuid::new_v4();
+    assert_eq!(
+        store
+            .take_lease_on_turn_with_input_message(
+                turn_id,
+                first_token,
+                claimed_at,
+                claimed_at + chrono::Duration::minutes(1),
+                "hello",
+            )
+            .await
+            .unwrap(),
+        Some(())
+    );
+    let resumed_at = claimed_at + chrono::Duration::seconds(1);
+    entities::code_turn::Entity::update_many()
+        .col_expr(
+            entities::code_turn::Column::Status,
+            sea_orm::sea_query::Expr::value(crate::TurnRunStatus::Resuming.as_str()),
+        )
+        .col_expr(
+            entities::code_turn::Column::LeaseToken,
+            sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
+        )
+        .col_expr(
+            entities::code_turn::Column::LeaseExpiresAt,
+            sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+        )
+        .col_expr(
+            entities::code_turn::Column::AvailableAt,
+            sea_orm::sea_query::Expr::value(resumed_at),
+        )
+        .col_expr(
+            entities::code_turn::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(resumed_at),
+        )
+        .filter(entities::code_turn::Column::Id.eq(code_turn_id.0))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+
+    let second_token = uuid::Uuid::new_v4();
+    assert_eq!(
+        store
+            .take_lease_on_turn(
+                turn_id,
+                second_token,
+                resumed_at,
+                resumed_at + chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap(),
+        Some(())
+    );
+    let resumed = entities::code_turn::Entity::find_by_id(code_turn_id.0)
+        .one(&store.conn)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(resumed.attempt_count, 1);
+    assert_eq!(resumed.claim_count, 2);
+    assert_eq!(resumed.lease_token, Some(second_token));
+}
+
+#[tokio::test]
 async fn repository_transcript_search_survives_workspace_release() {
     let (_dir, store, session_id, turn_id) = seeded_session().await;
     let owner = OwnerId::local();

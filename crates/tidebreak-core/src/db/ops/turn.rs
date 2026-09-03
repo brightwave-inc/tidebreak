@@ -16,6 +16,7 @@ use crate::provider::Usage;
 use crate::storage::{
     AcceptTurnOutcome, ClaimScanTerminalEvent, ClaimTurnRunOutcome, ReservedTurnAcceptanceOutcome,
 };
+use crate::CodeTurnStatus;
 
 use super::super::{entities, store_err, DbStore};
 use super::chat_image_publication as chat_image_publication_ops;
@@ -39,8 +40,9 @@ mod sandbox_spawn;
 pub(in crate::db) mod steer;
 
 pub(in crate::db) use client_wait::{
-    advance_turn_after_client_resolution_on, approval_park_call_id, park_turn_for_client_tool_call,
-    recover_turn_after_client_resolution_on, resumed_client_vendor_web_search,
+    adapter_client_park_call_id, adapter_park_wait, advance_turn_after_client_resolution_on,
+    approval_park_call_id, park_turn_for_client_tool_call, recover_turn_after_client_resolution_on,
+    resumed_client_vendor_web_search,
 };
 #[cfg(test)]
 pub(in crate::db) use multi_agent_run_wait::ready_agent_run_wait_set_candidates_sql;
@@ -133,7 +135,11 @@ async fn take_lease_on_turn_inner(
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     }
-    let next_attempt = std::cmp::Ord::max(existing.attempt_count.saturating_add(1), 1);
+    let next_attempt = if existing.status == TurnRunStatus::Resuming.as_str() {
+        std::cmp::Ord::max(existing.attempt_count, 1)
+    } else {
+        std::cmp::Ord::max(existing.attempt_count.saturating_add(1), 1)
+    };
     let next_claim = std::cmp::Ord::max(existing.claim_count.saturating_add(1), 1);
     let inserted =
         entities::code_turn_claim::Entity::insert(entities::code_turn_claim::ActiveModel {
@@ -1531,6 +1537,7 @@ where
             TurnRunStatus::Queued.as_str(),
             TurnRunStatus::Running.as_str(),
             TurnRunStatus::Cancelling.as_str(),
+            CodeTurnStatus::Waiting.as_str(),
             TurnRunStatus::WaitingForClient.as_str(),
             TurnRunStatus::WaitingForAgentRun.as_str(),
             TurnRunStatus::CancellingClient.as_str(),

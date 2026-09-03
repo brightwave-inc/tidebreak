@@ -595,6 +595,196 @@ async fn a_parked_turn_waits_durably_and_resumes_on_the_awaited_decision() {
 }
 
 #[tokio::test]
+async fn client_and_agent_run_parks_resume_after_a_worker_restart() {
+    let client_call = tidebreak_core::CallId::new().to_string();
+    let agent_wait = tidebreak_core::CallId::new().to_string();
+    let run_ids = vec![
+        tidebreak_core::AgentRunId::new().to_string(),
+        tidebreak_core::AgentRunId::new().to_string(),
+    ];
+    let cases = vec![
+        (
+            client_call.clone(),
+            tidebreak_harness::ParkWait::ClientToolCall {
+                call_id: client_call.clone(),
+            },
+            tidebreak_harness::ResumeInput::ClientToolCompleted {
+                call_id: client_call,
+            },
+        ),
+        (
+            agent_wait.clone(),
+            tidebreak_harness::ParkWait::AgentRuns {
+                run_ids: run_ids.clone(),
+            },
+            tidebreak_harness::ResumeInput::AgentRunsSettled { run_ids },
+        ),
+    ];
+
+    for (park_ref, waiting_on, expected_resume) in cases {
+        let (directory, store, sink, session_id) = seeded_sink().await;
+        let owner = OwnerId::local();
+        let mut session = get_session(&store, &owner, session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        session.lifecycle = CodeSessionLifecycle::Idle;
+        assert!(save_session(&store, &session).await.unwrap());
+
+        let worktree = directory.path().join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let private = directory.path().join("private");
+        std::fs::create_dir(&private).unwrap();
+        let adapter = ScriptedAdapter::new(vec![
+            HarnessEvent::TurnStarted,
+            HarnessEvent::AssistantMessage {
+                text: "resumed after the restart".into(),
+                parent_call_id: None,
+            },
+            HarnessEvent::TurnCompleted {
+                usage: CodeUsage::default(),
+            },
+        ])
+        .with_parked_turn(1, park_ref.clone(), waiting_on.clone());
+        let first_engine = adapter
+            .launch(SessionSpec {
+                owner: owner.clone(),
+                session_id,
+                worktree: worktree.clone(),
+                allowed_read_roots: Vec::new(),
+                permission_mode: session.permission_mode,
+                model: session.model.clone(),
+                reasoning_effort: session.reasoning_effort,
+                fast_mode: session.fast_mode,
+                resume_ref: None,
+                extra_argv: Vec::new(),
+                extra_env: Vec::new(),
+                relay_key_env: None,
+                env: Vec::new(),
+                approval: None,
+                binary: Some(std::path::PathBuf::from("/scripted/engine")),
+                sink: sink.clone() as Arc<dyn tidebreak_harness::HarnessEventSink>,
+                browser: None,
+            })
+            .await
+            .unwrap();
+        let first_private_root =
+            super::super::scratch::ScratchRoot::open_for_test(&private).expect("scratch root");
+        let first = spawn_session_worker(
+            session.clone(),
+            first_engine,
+            sink.clone(),
+            AttachmentStore {
+                blobs: None,
+                private_root: first_private_root,
+                engine_reads_images: false,
+            },
+            Arc::new(tokio::sync::Mutex::new(())),
+            tokio::sync::watch::channel(false).1,
+        );
+        let (turn_reply, _turn_response) = oneshot::channel();
+        first
+            .commands
+            .send(WorkerCommand::RunTurn {
+                message: "park across a restart".into(),
+                attachments: Vec::new(),
+                trigger_delivery: None,
+                reply: turn_reply,
+            })
+            .await
+            .unwrap();
+        let parked = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(turn) = get_open_turn(&store, &owner, session_id).await.unwrap() {
+                    if turn.status == CodeTurnStatus::Waiting {
+                        break turn;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the first worker stores the park");
+        assert_eq!(parked.park_ref.as_deref(), Some(park_ref.as_str()));
+        first.abort.abort();
+        tokio::time::timeout(Duration::from_secs(5), first.commands.closed())
+            .await
+            .expect("the crashed worker releases its command channel");
+
+        session = get_session(&store, &owner, session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let second_engine = adapter
+            .launch(SessionSpec {
+                owner: owner.clone(),
+                session_id,
+                worktree,
+                allowed_read_roots: Vec::new(),
+                permission_mode: session.permission_mode,
+                model: session.model.clone(),
+                reasoning_effort: session.reasoning_effort,
+                fast_mode: session.fast_mode,
+                resume_ref: None,
+                extra_argv: Vec::new(),
+                extra_env: Vec::new(),
+                relay_key_env: None,
+                env: Vec::new(),
+                approval: None,
+                binary: Some(std::path::PathBuf::from("/scripted/engine")),
+                sink: sink.clone() as Arc<dyn tidebreak_harness::HarnessEventSink>,
+                browser: None,
+            })
+            .await
+            .unwrap();
+        let second_private_root =
+            super::super::scratch::ScratchRoot::open_for_test(&private).expect("scratch root");
+        let second = spawn_session_worker(
+            session,
+            second_engine,
+            sink,
+            AttachmentStore {
+                blobs: None,
+                private_root: second_private_root,
+                engine_reads_images: false,
+            },
+            Arc::new(tokio::sync::Mutex::new(())),
+            tokio::sync::watch::channel(false).1,
+        );
+
+        let mut resolved = tidebreak_core::db::code::get_turn(&store, &owner, parked.id)
+            .await
+            .unwrap()
+            .unwrap();
+        resolved.status = CodeTurnStatus::Resuming;
+        assert!(save_turn(&store, &owner, &resolved).await.unwrap());
+
+        let completed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let turn = tidebreak_core::db::code::get_turn(&store, &owner, parked.id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if turn.status == CodeTurnStatus::Completed {
+                    break turn;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the relaunched worker resumes the park");
+        assert_eq!(completed.park_ref, None);
+        assert_eq!(completed.park_wait, None);
+        assert_eq!(
+            adapter.resumes(),
+            vec![(park_ref, expected_resume)],
+            "the recovered park resumes once with its exact dependency"
+        );
+        let _ = second.commands.send(WorkerCommand::Shutdown).await;
+    }
+}
+
+#[tokio::test]
 async fn a_decision_on_the_running_leg_resumes_the_park() {
     let (directory, store, sink, session_id) = seeded_sink().await;
     let owner = OwnerId::local();
