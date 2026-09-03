@@ -17,12 +17,7 @@ uuid = { workspace = true }
 base64 = { workspace = true }
 sha2 = { workspace = true }
 async-trait = { workspace = true }
-tokio = { workspace = true, features = ["rt", "sync", "macros", "time", "io-util"] }
-
-[dev-dependencies]
-# `test-util` pauses the clock so the handshake deadline can be exercised without
-# the suite waiting on it.
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "macros", "time", "io-util", "net", "test-util"] }
+tokio = { workspace = true }
 
 [lints]
 workspace = true

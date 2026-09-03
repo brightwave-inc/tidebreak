@@ -61,7 +61,7 @@ chrono = { workspace = true }
 ts-rs = { workspace = true }
 sea-orm = { workspace = true, optional = true }
 sea-orm-migration = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true, features = ["io-util", "sync"] }
+tokio = { workspace = true, optional = true }
 
 # Keychain backends are per-OS: Security framework (macOS), Credential Manager
 # (Windows), and the Secret Service on Linux. The Linux backend uses

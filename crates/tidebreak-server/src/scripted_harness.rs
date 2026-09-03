@@ -1,8 +1,8 @@
 //! A [`HarnessAdapter`] / [`HarnessSession`] driven by a script of events.
 //!
-//! Compiled only under the `scripted-harness` feature or in this crate's
-//! tests, matching [`scripted_provider`]: a released binary never contains it.
-//! Test-only helpers stay compiled under the feature so CLI e2e can load the
+//! Compiled only under `cfg(debug_assertions)` or in this crate's tests,
+//! matching [`scripted_provider`]: a released binary never contains it.
+//! Test-only helpers stay compiled in debug builds so CLI e2e can load the
 //! adapter; they are unused outside this crate's tests.
 #![cfg_attr(not(test), allow(dead_code))]
 

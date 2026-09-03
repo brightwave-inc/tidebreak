@@ -100,9 +100,9 @@ mod sandbox_web_search_worker;
 mod scoped_memory;
 mod scoped_model_token;
 mod scoped_store;
-#[cfg(any(test, feature = "scripted-harness"))]
+#[cfg(any(test, debug_assertions))]
 mod scripted_harness;
-#[cfg(feature = "scripted-provider")]
+#[cfg(debug_assertions)]
 mod scripted_provider;
 /// Rewriting stored credentials so the running binary owns their keychain items.
 pub mod secret_rehome;
@@ -2119,11 +2119,12 @@ async fn bind_inner(
         )
         .with_on_behalf_of_gateway(on_behalf_of_gateway.clone()),
     );
-    // Under the `scripted-provider` feature only — absent from every released
-    // binary — a scripted provider stands in for configured routing so a test
-    // in another crate can drive a real turn. See [`scripted_provider`].
+    // In debug builds only — release profiles compile with `debug_assertions`
+    // off, so this is absent from every released binary — a scripted provider
+    // stands in for configured routing so a test in another crate can drive a
+    // real turn. See [`scripted_provider`].
     let resolver: Arc<dyn resolver::ProviderResolver> = resolver;
-    #[cfg(feature = "scripted-provider")]
+    #[cfg(debug_assertions)]
     let resolver = scripted_provider::resolver_from_env()?.unwrap_or(resolver);
     let blobs = configured_blob_store(&config).await?;
     // The same lock root `AppState` uses. `BlobWriteGuard` rendezvouses through
@@ -2309,7 +2310,7 @@ async fn bind_inner(
     // A chat is a session on the one journal: every event the lane
     // publishes reaches the session's channel too.
     state.events.mirror_into(runtime.bus.clone());
-    #[cfg(feature = "scripted-harness")]
+    #[cfg(debug_assertions)]
     scripted_harness::install_from_env(&mut runtime.adapters)?;
     // Remote sessions need both halves: the configured runtime endpoint and
     // a gateway to mint owner-scoped tokens through. Half a configuration is

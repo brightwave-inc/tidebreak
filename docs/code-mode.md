@@ -109,7 +109,7 @@ crates/tidebreak-server/src/routes/code/      repos, workspaces, sessions,
                                               session_events, updates, approvals,
                                               git, terminals, harnesses, triggers,
                                               delivery, analytics, usage, browser, llm
-crates/tidebreak-server/src/scripted_harness.rs   feature-gated fake adapter
+crates/tidebreak-server/src/scripted_harness.rs   debug-only fake adapter
                                               (the scripted_provider.rs pattern)
 
 crates/tidebreak-desktop/ui/src/code/         the UI family (below)

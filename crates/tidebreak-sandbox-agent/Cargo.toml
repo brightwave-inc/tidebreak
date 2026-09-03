@@ -23,7 +23,7 @@ tidebreak-core = { path = "../tidebreak-core", default-features = false }
 # Destination hygiene for the egress-proxy mode: dependency-free by charter, so
 # it costs the container image nothing.
 tidebreak-egress = { path = "../tidebreak-egress" }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "process", "time"] }
+tokio = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -36,7 +36,6 @@ thiserror = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "test-util"] }
 tempfile = { workspace = true }
 
 [lints]

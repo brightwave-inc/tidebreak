@@ -19,7 +19,7 @@ image = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["io-std", "io-util", "process", "sync", "time"] }
+tokio = { workspace = true }
 # Only the tool contracts (Tool / ToolRegistry / ToolCtx / …), not the SQLite /
 # keychain / agent-loop machinery — hence default-features = false.
 tidebreak-core = { path = "../tidebreak-core", default-features = false }
@@ -27,4 +27,3 @@ tidebreak-core = { path = "../tidebreak-core", default-features = false }
 [dev-dependencies]
 axum = { workspace = true }
 chrono = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt", "net"] }

@@ -23,6 +23,13 @@ debug = "line-tables-only"
 debug-assertions = true
 overflow-checks = true
 
+# The scripted test seams (`tidebreak-server`'s `scripted_provider` and
+# `scripted_harness`) compile under `cfg(debug_assertions)`. This is Cargo's
+# default for release, but the guarantee that released binaries never contain
+# them rests on it, so it stays pinned rather than implied.
+[profile.release]
+debug-assertions = false
+
 # Shared dependency versions. Crates opt in with `dep.workspace = true` so the
 # whole workspace resolves one version of each.
 [workspace.dependencies]
@@ -34,7 +41,9 @@ brush-parser = "=0.4.0"
 # backreferences and cannot express them.
 fancy-regex = "=0.19.0"
 serde = { version = "=1.0.229", features = ["derive"] }
-serde_json = "=1.0.151"
+# `unbounded_depth` matches what tauri-build already enables in the desktop
+# graph, so every build selection resolves one serde_json instead of two.
+serde_json = { version = "=1.0.151", features = ["unbounded_depth"] }
 # Parses the same `$CODEX_HOME/config.toml` the Codex engine parses, so
 # auth-override detection and the engine child-env filter agree with the
 # engine (and each other) about what the config declares. A substring scan
@@ -69,7 +78,29 @@ ts-rs = { version = "=12.0.1", features = ["chrono-impl", "uuid-impl", "no-serde
 windows-sys = "=0.61.2"
 sea-orm = { version = "=2.0.2", default-features = false, features = ["macros", "runtime-tokio-rustls", "with-uuid", "with-chrono", "with-json"] }
 sea-orm-migration = { version = "=2.0.2", default-features = false, features = ["runtime-tokio-rustls"] }
-tokio = { version = "=1.53.1", features = ["rt", "macros", "fs"] }
+# One unified feature set for every build selection, so `-p` builds, the
+# `--workspace` lanes, and the release sidecar/desktop builds all share the
+# same compiled tokio (and everything above it) instead of resolving
+# per-crate subsets that force rebuilds. This is the union every crate needs:
+# `signal` is the CLI's ctrl-c handling, `rt-multi-thread` backs the server's
+# `block_in_place` bridge, `io-std` is the MCP stdio transport. `test-util`
+# is only paused-clock test plumbing, but it is behavior-neutral unless
+# `pause()` is called, and carrying it here keeps `cargo build` and
+# `cargo test` on one tokio artifact.
+tokio = { version = "=1.53.1", features = [
+    "fs",
+    "io-std",
+    "io-util",
+    "macros",
+    "net",
+    "process",
+    "rt",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+    "test-util",
+    "time",
+] }
 tokio-util = { version = "=0.7.19", features = ["io-util"] }
 # rustls-tls-webpki-roots (never native-tls) matches the reqwest stack; the
 # loopback chat socket itself is plain ws://.
@@ -97,7 +128,9 @@ zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate
 # not cut a release. Drop this patch for a plain version bump once 0.6.1 ships.
 
 tracing = "=0.1.44"
-url = "=2.5.8"
+# `serde` matches what the tauri plugins already enable in the desktop graph,
+# so every build selection resolves one url instead of two.
+url = { version = "=2.5.8", features = ["serde"] }
 # Image header/decode allowlist codecs shared by server, mcp, code-execution.
 image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 dom_smoothie = "=0.18.0"
