@@ -1711,7 +1711,7 @@ async fn scanner_won_cancellation_does_not_wedge_the_only_worker_lane() {
     ));
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn worker_renews_a_near_expiry_ambiguous_claim_before_execution() {
     let dir = tempfile::tempdir().unwrap();
     let inner: Arc<dyn Store> = Arc::new(
@@ -1776,6 +1776,7 @@ async fn worker_renews_a_near_expiry_ambiguous_claim_before_execution() {
         },
     );
     let token = state.token.clone();
+    tokio::time::pause();
     tokio::spawn(worker.run());
     let router = app(state);
     let bearer = format!("Bearer {token}");
@@ -1810,7 +1811,7 @@ async fn worker_renews_a_near_expiry_ambiguous_claim_before_execution() {
     ));
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn worker_heartbeats_while_event_journaling_is_blocked() {
     let dir = tempfile::tempdir().unwrap();
     let inner: Arc<dyn Store> = Arc::new(
@@ -1871,6 +1872,7 @@ async fn worker_heartbeats_while_event_journaling_is_blocked() {
         },
     );
     let token = state.token.clone();
+    tokio::time::pause();
     tokio::spawn(worker.run());
     let router = app(state);
     let bearer = format!("Bearer {token}");

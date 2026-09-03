@@ -1012,7 +1012,7 @@ mod tests {
     /// with a retryable fault. The pump must wait between reads rather than
     /// re-issue the request as fast as the store answers; a tight loop here
     /// hammers a transport that just said it is down.
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn an_unavailable_environment_backs_the_pump_off() {
         let dir = tempfile::tempdir().unwrap();
         let (runtime, fake, owner, repo) = runtime_with_remote(dir.path()).await;
@@ -1037,6 +1037,7 @@ mod tests {
         // No scripted reads: every events request answers Unavailable.
         assert!(fake.event_reads.lock().unwrap().is_empty());
 
+        tokio::time::pause();
         let remote = runtime.remote_sessions().unwrap();
         let initial = std::time::Duration::from_millis(40);
         let pump = tokio::spawn(pump_session(
