@@ -40,7 +40,7 @@ pub(in crate::db) mod steer;
 
 pub(in crate::db) use client_wait::{
     advance_turn_after_client_resolution_on, approval_park_call_id, park_turn_for_client_tool_call,
-    recover_turn_after_client_resolution_on,
+    recover_turn_after_client_resolution_on, resumed_client_vendor_web_search,
 };
 #[cfg(test)]
 pub(in crate::db) use multi_agent_run_wait::ready_agent_run_wait_set_candidates_sql;

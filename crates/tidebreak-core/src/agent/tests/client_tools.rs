@@ -53,6 +53,7 @@ async fn claimed_agent_returns_a_client_tool_checkpoint_without_executing_it() {
     );
     assert!(registry.get("connect_folder").is_none());
     assert_eq!(registry.specs(), vec![client_spec]);
+    let registry = Arc::new(registry);
     let agent = Agent::new(
         Arc::new(ClientToolProvider {
             assistant_text: false,
@@ -60,10 +61,11 @@ async fn claimed_agent_returns_a_client_tool_checkpoint_without_executing_it() {
             name: "connect_folder",
             arguments: r#"{"hint":"Documents"}"#,
         }),
-        Arc::new(registry),
+        registry.clone(),
         store.clone(),
         AgentConfig {
             model: "fake".into(),
+            web_search: TurnWebSearch::Vendor(VendorWebSearch { max_uses: 3 }),
             ..AgentConfig::default()
         },
     )
@@ -78,6 +80,7 @@ async fn claimed_agent_returns_a_client_tool_checkpoint_without_executing_it() {
     let events = emitted_events(rx.collect().await);
     let AgentTurnOutcome::ClientToolCall {
         request,
+        remaining_vendor_web_search,
         usage,
         steer_revision,
         model_steps,
@@ -90,6 +93,10 @@ async fn claimed_agent_returns_a_client_tool_checkpoint_without_executing_it() {
     assert_eq!(request.provider_id, "native_1");
     assert_eq!(request.name, "connect_folder");
     assert_eq!(request.arguments, serde_json::json!({"hint": "Documents"}));
+    assert_eq!(
+        remaining_vendor_web_search,
+        Some(VendorWebSearch { max_uses: 3 })
+    );
     assert_eq!(usage.input_tokens, 5);
     assert_eq!(usage.output_tokens, 2);
     assert_eq!(steer_revision, 0);

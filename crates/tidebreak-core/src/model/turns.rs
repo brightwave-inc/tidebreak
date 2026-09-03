@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::id::{AgentRunId, CallId, ChatId, MessageId, TurnId};
-use crate::provider::Usage;
+use crate::provider::{Usage, VendorWebSearch};
 
 use super::is_false;
 use super::messages::ToolCallRecord;
@@ -406,6 +406,9 @@ pub struct TurnClientWait {
     pub claim_count: i32,
     /// Exact progress delta committed by this checkpoint.
     pub progress: TurnCheckpointProgress,
+    /// Vendor search allowance left after the model produced this checkpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining_vendor_web_search: Option<VendorWebSearch>,
     /// Durable wait lifecycle.
     pub status: TurnClientWaitStatus,
     /// Store-owned time when parking committed.

@@ -9,6 +9,7 @@ use crate::model::{
     ClientToolCallRequest, ToolCallExecution, ToolCallStatus, TurnCheckpointProgress,
     TurnClientWait, TurnClientWaitStatus, TurnRunStatus, TurnSteerStatus,
 };
+use crate::provider::VendorWebSearch;
 use crate::storage::ParkTurnForClientCallOutcome;
 use crate::{
     AgentEvent, CallId, ChatId, CodeTurnStatus, SequencedEvent, TurnId, TurnParkWait, TurnRun,
@@ -57,16 +58,24 @@ pub(in crate::db) fn approval_park_call_id(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::db) async fn park_turn_for_client_tool_call(
     store: &DbStore,
     turn_id: crate::TurnId,
     lease_token: uuid::Uuid,
     expected_steer_revision: i64,
     progress: TurnCheckpointProgress,
+    remaining_vendor_web_search: Option<VendorWebSearch>,
     now: chrono::DateTime<Utc>,
     call: &ClientToolCallRequest,
 ) -> Result<Option<ParkTurnForClientCallOutcome>> {
-    validate_request(turn_id, lease_token, progress, call)?;
+    validate_request(
+        turn_id,
+        lease_token,
+        progress,
+        remaining_vendor_web_search,
+        call,
+    )?;
     let now = canonical_db_timestamp(now)?;
     let Some(scope) = entities::code_turn::Entity::find_by_id(turn_id.0)
         .one(&store.conn)
@@ -109,6 +118,7 @@ pub(in crate::db) async fn park_turn_for_client_tool_call(
             && wait.session_id == call.chat_id.0
             && wait.park_lease_token == lease_token
             && progress_from_wait_model(&wait)? == progress
+            && vendor_web_search_from_wait_model(&wait)? == remaining_vendor_web_search
             && exact_call_request(&existing_call, call);
         let outcome = if exact {
             let renderer_event =
@@ -224,6 +234,9 @@ pub(in crate::db) async fn park_turn_for_client_tool_call(
         output_tokens: Set(i64::from(progress.usage.output_tokens)),
         cache_read_input_tokens: Set(i64::from(progress.usage.cache_read_input_tokens)),
         cache_creation_input_tokens: Set(i64::from(progress.usage.cache_creation_input_tokens)),
+        vendor_web_search_max_uses: Set(
+            remaining_vendor_web_search.map(|search| i64::from(search.max_uses))
+        ),
         status: Set(TurnClientWaitStatus::Waiting.as_str().into()),
         parked_at: Set(now),
         closed_at: Set(None),
@@ -314,12 +327,14 @@ fn validate_request(
     turn_id: crate::TurnId,
     lease_token: uuid::Uuid,
     progress: TurnCheckpointProgress,
+    remaining_vendor_web_search: Option<VendorWebSearch>,
     call: &ClientToolCallRequest,
 ) -> Result<()> {
     if turn_id.0.is_nil()
         || lease_token.is_nil()
         || call.turn_id != turn_id
         || progress.model_steps <= 0
+        || remaining_vendor_web_search.is_some_and(|search| search.max_uses == 0)
         || !call.is_well_formed()
     {
         return Err(AgentError::Store(
@@ -372,10 +387,63 @@ pub(super) fn wait_from_model(model: entities::turn_client_wait::Model) -> Resul
         attempt_count: model.attempt_count,
         claim_count: model.claim_count,
         progress: progress_from_wait_model(&model)?,
+        remaining_vendor_web_search: vendor_web_search_from_wait_model(&model)?,
         status,
         parked_at: model.parked_at,
         closed_at: model.closed_at,
     })
+}
+
+fn vendor_web_search_from_wait_model(
+    model: &entities::turn_client_wait::Model,
+) -> Result<Option<VendorWebSearch>> {
+    let Some(max_uses) = model.vendor_web_search_max_uses else {
+        return Ok(None);
+    };
+    let max_uses = u32::try_from(max_uses).map_err(|_| {
+        AgentError::Store(format!(
+            "client wait {} has an invalid vendor web-search allowance",
+            crate::CallId(model.call_id)
+        ))
+    })?;
+    if max_uses == 0 {
+        return Err(AgentError::Store(format!(
+            "client wait {} has an invalid vendor web-search allowance",
+            crate::CallId(model.call_id)
+        )));
+    }
+    Ok(Some(VendorWebSearch { max_uses }))
+}
+
+pub(in crate::db) async fn resumed_client_vendor_web_search(
+    store: &DbStore,
+    turn_id: crate::TurnId,
+    attempt_count: i32,
+    claim_count: i32,
+) -> Result<Option<VendorWebSearch>> {
+    let Some(previous_claim_count) = claim_count.checked_sub(1) else {
+        return Ok(None);
+    };
+    let waits = entities::turn_client_wait::Entity::find()
+        .filter(entities::turn_client_wait::Column::TurnId.eq(turn_id.0))
+        .filter(entities::turn_client_wait::Column::AttemptCount.eq(attempt_count))
+        .filter(entities::turn_client_wait::Column::ClaimCount.eq(previous_claim_count))
+        .filter(
+            entities::turn_client_wait::Column::Status.eq(TurnClientWaitStatus::Resumed.as_str()),
+        )
+        .filter(entities::turn_client_wait::Column::ClosedAt.is_not_null())
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?;
+    let [wait] = waits.as_slice() else {
+        if waits.is_empty() {
+            return Ok(None);
+        }
+        return Err(AgentError::Store(format!(
+            "turn {turn_id} has multiple client waits for claim {previous_claim_count}"
+        )));
+    };
+    vendor_web_search_from_wait_model(wait)
 }
 
 fn progress_from_wait_model(

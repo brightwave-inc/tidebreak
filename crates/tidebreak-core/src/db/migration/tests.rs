@@ -83,6 +83,7 @@ async fn a_fresh_database_records_the_whole_chain() {
             "m20260902_000006_chat_memory_incognito",
             "m20260903_000001_one_turn_lane",
             "m20260903_000002_ready_agent_run_wait_index",
+            "m20260903_000003_client_wait_vendor_web_search",
         ]
     );
     assert!(db

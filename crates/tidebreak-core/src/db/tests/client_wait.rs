@@ -43,6 +43,7 @@ async fn client_wait_parks_resolves_and_recovers_exactly() {
             cache_creation_input_tokens: 2,
         },
     };
+    let remaining_vendor_web_search = Some(crate::provider::VendorWebSearch { max_uses: 3 });
     assert!(store
         .park_turn_for_client_tool_call(
             turn_id,
@@ -174,7 +175,15 @@ async fn client_wait_parks_resolves_and_recovers_exactly() {
     );
     assert!(store.list_tool_calls(chat.id).await.unwrap().is_empty());
     let (parked_turn, parked_call, parked_wait) = match store
-        .park_turn_for_client_tool_call(turn_id, turn_lease, 2, progress, parked_at, &request)
+        .park_turn_for_client_tool_call_with_search_state(
+            turn_id,
+            turn_lease,
+            2,
+            progress,
+            remaining_vendor_web_search,
+            parked_at,
+            &request,
+        )
         .await
         .unwrap()
         .unwrap()
@@ -195,6 +204,10 @@ async fn client_wait_parks_resolves_and_recovers_exactly() {
     );
     assert_eq!((parked_wait.attempt_count, parked_wait.claim_count), (1, 1));
     assert_eq!(parked_wait.progress, progress);
+    assert_eq!(
+        parked_wait.remaining_vendor_web_search,
+        remaining_vendor_web_search
+    );
     let conflicting_progress = crate::model::TurnCheckpointProgress {
         model_steps: progress.model_steps + 1,
         ..progress
@@ -339,6 +352,15 @@ async fn client_wait_parks_resolves_and_recovers_exactly() {
         .exec(&store.conn)
         .await
         .is_err());
+    assert!(entities::turn_client_wait::Entity::update_many()
+        .col_expr(
+            entities::turn_client_wait::Column::VendorWebSearchMaxUses,
+            sea_orm::sea_query::Expr::value(0),
+        )
+        .filter(entities::turn_client_wait::Column::CallId.eq(request.id.0))
+        .exec(&store.conn)
+        .await
+        .is_err());
     assert_eq!(
         wait.status,
         crate::model::TurnClientWaitStatus::Resumed.as_str()
@@ -347,11 +369,12 @@ async fn client_wait_parks_resolves_and_recovers_exactly() {
 
     assert!(matches!(
         store
-            .park_turn_for_client_tool_call(
+            .park_turn_for_client_tool_call_with_search_state(
                 turn_id,
                 turn_lease,
                 2,
                 progress,
+                remaining_vendor_web_search,
                 Utc::now(),
                 &request,
             )
@@ -376,6 +399,17 @@ async fn client_wait_parks_resolves_and_recovers_exactly() {
     assert_eq!((resumed.attempt_count, resumed.claim_count), (1, 2));
     assert_eq!(resumed.model_steps, progress.model_steps);
     assert_eq!(resumed.usage, progress.usage);
+    assert_eq!(
+        store
+            .resumed_client_vendor_web_search(
+                resumed.id,
+                resumed.attempt_count,
+                resumed.claim_count,
+            )
+            .await
+            .unwrap(),
+        remaining_vendor_web_search
+    );
     let regressing_output = Message {
         id: MessageId::new(),
         chat_id: chat.id,
@@ -1264,6 +1298,7 @@ async fn client_wait_schema_rejects_invalid_scope_claim_and_lifecycle() {
         output_tokens: Set(0),
         cache_read_input_tokens: Set(0),
         cache_creation_input_tokens: Set(0),
+        vendor_web_search_max_uses: Set(None),
         status: Set(crate::model::TurnClientWaitStatus::Waiting.as_str().into()),
         parked_at: Set(second_call.created_at),
         closed_at: Set(None),

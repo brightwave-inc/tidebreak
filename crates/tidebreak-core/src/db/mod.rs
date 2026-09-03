@@ -45,7 +45,7 @@ use crate::model::{
 };
 #[cfg(test)]
 use crate::model::{AgentRunStatus, TurnRunStatus, TurnSteerStatus};
-use crate::provider::{StopReason, Usage};
+use crate::provider::{StopReason, Usage, VendorWebSearch};
 use crate::semantic_checkpoint::{ContextCheckpoint, SaveContextCheckpointOutcome};
 use crate::storage::{
     AcceptAgentRunOutcome, AcceptClaimedToolCallOutcome, AcceptToolCallOutcome, AcceptTurnOutcome,
@@ -2184,12 +2184,14 @@ impl Store for DbStore {
         .await
     }
 
-    async fn park_turn_for_client_tool_call(
+    #[allow(clippy::too_many_arguments)]
+    async fn park_turn_for_client_tool_call_with_search_state(
         &self,
         turn_id: TurnId,
         lease_token: uuid::Uuid,
         expected_steer_revision: i64,
         progress: TurnCheckpointProgress,
+        remaining_vendor_web_search: Option<VendorWebSearch>,
         now: chrono::DateTime<Utc>,
         call: &crate::model::ClientToolCallRequest,
     ) -> Result<Option<ParkTurnForClientCallOutcome>> {
@@ -2199,10 +2201,20 @@ impl Store for DbStore {
             lease_token,
             expected_steer_revision,
             progress,
+            remaining_vendor_web_search,
             now,
             call,
         )
         .await
+    }
+
+    async fn resumed_client_vendor_web_search(
+        &self,
+        turn_id: TurnId,
+        attempt_count: i32,
+        claim_count: i32,
+    ) -> Result<Option<VendorWebSearch>> {
+        ops::turn::resumed_client_vendor_web_search(self, turn_id, attempt_count, claim_count).await
     }
 
     async fn park_turn_for_agent_run_wait_set(

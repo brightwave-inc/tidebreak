@@ -868,6 +868,7 @@ pub mod turn_client_wait {
         pub output_tokens: i64,
         pub cache_read_input_tokens: i64,
         pub cache_creation_input_tokens: i64,
+        pub vendor_web_search_max_uses: Option<i64>,
         pub status: String,
         pub parked_at: DateTimeUtc,
         pub closed_at: Option<DateTimeUtc>,

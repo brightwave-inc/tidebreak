@@ -1366,22 +1366,25 @@ impl Store for PauseTerminalStore {
         }
         Ok(outcome)
     }
-    async fn park_turn_for_client_tool_call(
+    #[allow(clippy::too_many_arguments)]
+    async fn park_turn_for_client_tool_call_with_search_state(
         &self,
         turn_id: TurnId,
         lease_token: uuid::Uuid,
         expected_steer_revision: i64,
         progress: TurnCheckpointProgress,
+        remaining_vendor_web_search: Option<tidebreak_core::VendorWebSearch>,
         now: chrono::DateTime<chrono::Utc>,
         call: &ClientToolCallRequest,
     ) -> Result<Option<ParkTurnForClientCallOutcome>> {
         let outcome = self
             .inner
-            .park_turn_for_client_tool_call(
+            .park_turn_for_client_tool_call_with_search_state(
                 turn_id,
                 lease_token,
                 expected_steer_revision,
                 progress,
+                remaining_vendor_web_search,
                 now,
                 call,
             )
@@ -1392,6 +1395,16 @@ impl Store for PauseTerminalStore {
             ));
         }
         Ok(outcome)
+    }
+    async fn resumed_client_vendor_web_search(
+        &self,
+        turn_id: TurnId,
+        attempt_count: i32,
+        claim_count: i32,
+    ) -> Result<Option<tidebreak_core::VendorWebSearch>> {
+        self.inner
+            .resumed_client_vendor_web_search(turn_id, attempt_count, claim_count)
+            .await
     }
     async fn checkpoint_sandbox_spawn(
         &self,
