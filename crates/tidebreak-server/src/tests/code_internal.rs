@@ -4,8 +4,8 @@
 //! on the code structures: sessions, turns, the sequenced journal, and
 //! approval rows. This module is the tripwire for that: chat's plan
 //! proposals, user questions, tool approvals with grant ladders, and
-//! mid-turn steering all have to be reachable over `/code/*`, and nothing
-//! about the conversation may leak into the chat routes.
+//! mid-turn steering all have to be reachable over the shared session routes.
+//! The `/chats/*` and `/code/sessions/*` families stay as compatibility aliases.
 
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -289,7 +289,7 @@ async fn pending_approval_of_kind(
         loop {
             let approvals: Vec<serde_json::Value> = client
                 .get(format!(
-                    "http://{addr}/code/approvals?session_id={session_id}&state=pending"
+                    "http://{addr}/approvals?session_id={session_id}&state=pending"
                 ))
                 .bearer_auth(token)
                 .send()
@@ -340,7 +340,7 @@ async fn turn_statuses(
     session_id: CodeSessionId,
 ) -> Vec<String> {
     let turns: Vec<serde_json::Value> = client
-        .get(format!("http://{addr}/code/sessions/{session_id}/turns"))
+        .get(format!("http://{addr}/sessions/{session_id}/turns"))
         .bearer_auth(token)
         .send()
         .await
@@ -362,9 +362,7 @@ async fn decide(
     body: serde_json::Value,
 ) {
     let response = client
-        .post(format!(
-            "http://{addr}/code/approvals/{approval_id}/decision"
-        ))
+        .post(format!("http://{addr}/approvals/{approval_id}/decision"))
         .bearer_auth(token)
         .json(&body)
         .send()
@@ -407,7 +405,7 @@ async fn create_internal_session(
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/code/sessions")
+                .uri("/sessions")
                 .header(header::AUTHORIZATION, bearer)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -436,7 +434,7 @@ fn submit_internal_turn(
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/code/sessions/{session_id}/turns"))
+                    .uri(format!("/sessions/{session_id}/turns"))
                     .header(header::AUTHORIZATION, bearer)
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(
@@ -498,7 +496,76 @@ async fn wait_for_durable_park(
     }
 }
 
-/// The whole chat interaction model, reached only through `/code/*`: a plan
+#[tokio::test]
+async fn canonical_and_compatibility_routes_share_session_rows() {
+    let (addr, token, _runtime, _ran, _dir) = internal_engine_app(Vec::new()).await;
+    let client = reqwest::Client::new();
+    let created = client
+        .post(format!("http://{addr}/sessions"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "permission_mode": "ask" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let session: serde_json::Value = created.json().await.unwrap();
+    let session_id = session["id"].as_str().unwrap();
+
+    let canonical: serde_json::Value = client
+        .get(format!("http://{addr}/sessions/{session_id}"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let code_alias: serde_json::Value = client
+        .get(format!("http://{addr}/code/sessions/{session_id}"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(canonical, code_alias);
+
+    let chat_alias: serde_json::Value = client
+        .get(format!("http://{addr}/chats/{session_id}"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(chat_alias["id"], canonical["id"]);
+
+    let canonical_approvals: serde_json::Value = client
+        .get(format!("http://{addr}/approvals?session_id={session_id}"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let code_approvals: serde_json::Value = client
+        .get(format!(
+            "http://{addr}/code/approvals?session_id={session_id}"
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(canonical_approvals, code_approvals);
+}
+
+/// The whole chat interaction model, reached through the shared session routes: a plan
 /// proposal parks the turn as an approval and its acceptance re-postures
 /// the session; a questions card parks and its answers resume; a sensitive
 /// tool waits on a structured approval that offers a grant ladder; a steer
@@ -537,7 +604,7 @@ async fn a_conversation_without_a_workspace_runs_on_the_code_wire() {
     let client = reqwest::Client::new();
 
     let created = client
-        .post(format!("http://{addr}/code/sessions"))
+        .post(format!("http://{addr}/sessions"))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "permission_mode": "plan" }))
         .send()
@@ -578,7 +645,7 @@ async fn a_conversation_without_a_workspace_runs_on_the_code_wire() {
         let token = token.clone();
         async move {
             client
-                .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+                .post(format!("http://{addr}/sessions/{session_id}/turns"))
                 .bearer_auth(&token)
                 .json(&serde_json::json!({ "message": "plan it, then greet" }))
                 .send()
@@ -611,7 +678,7 @@ async fn a_conversation_without_a_workspace_runs_on_the_code_wire() {
     // Accepting the plan moved the session out of plan mode before the
     // resume, so the questions could be asked at all.
     let snapshot: serde_json::Value = client
-        .get(format!("http://{addr}/code/sessions/{session_id}"))
+        .get(format!("http://{addr}/sessions/{session_id}"))
         .bearer_auth(&token)
         .send()
         .await
@@ -621,7 +688,7 @@ async fn a_conversation_without_a_workspace_runs_on_the_code_wire() {
         .unwrap();
     assert_eq!(snapshot["permission_mode"], "auto");
     let listed: Vec<serde_json::Value> = client
-        .get(format!("http://{addr}/code/sessions"))
+        .get(format!("http://{addr}/sessions"))
         .bearer_auth(&token)
         .send()
         .await
@@ -658,7 +725,7 @@ async fn a_conversation_without_a_workspace_runs_on_the_code_wire() {
     assert_eq!(statuses, vec!["running"]);
     let turn_id = {
         let turns: Vec<serde_json::Value> = client
-            .get(format!("http://{addr}/code/sessions/{session_id}/turns"))
+            .get(format!("http://{addr}/sessions/{session_id}/turns"))
             .bearer_auth(&token)
             .send()
             .await
@@ -669,7 +736,7 @@ async fn a_conversation_without_a_workspace_runs_on_the_code_wire() {
         turns[0]["id"].as_str().unwrap().to_owned()
     };
     let steered = client
-        .post(format!("http://{addr}/code/sessions/{session_id}/steer"))
+        .post(format!("http://{addr}/sessions/{session_id}/steer"))
         .bearer_auth(&token)
         .json(&serde_json::json!({
             "expected_turn_id": turn_id,
@@ -858,7 +925,7 @@ async fn a_questions_park_answered_from_the_chat_route_resumes_the_session() {
     .await;
     let client = reqwest::Client::new();
     let created = client
-        .post(format!("http://{addr}/code/sessions"))
+        .post(format!("http://{addr}/sessions"))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "permission_mode": "ask" }))
         .send()
@@ -872,7 +939,7 @@ async fn a_questions_park_answered_from_the_chat_route_resumes_the_session() {
         let token = token.clone();
         async move {
             client
-                .post(format!("http://{addr}/code/sessions/{hosted}/turns"))
+                .post(format!("http://{addr}/sessions/{hosted}/turns"))
                 .bearer_auth(&token)
                 .json(&serde_json::json!({ "message": "ask me" }))
                 .send()
@@ -938,7 +1005,7 @@ async fn a_plan_accepted_from_the_chat_route_resumes_the_session() {
         .await;
         let client = reqwest::Client::new();
         let created = client
-            .post(format!("http://{addr}/code/sessions"))
+            .post(format!("http://{addr}/sessions"))
             .bearer_auth(&token)
             .json(&serde_json::json!({ "permission_mode": "plan" }))
             .send()
@@ -952,7 +1019,7 @@ async fn a_plan_accepted_from_the_chat_route_resumes_the_session() {
             let token = token.clone();
             async move {
                 client
-                    .post(format!("http://{addr}/code/sessions/{hosted}/turns"))
+                    .post(format!("http://{addr}/sessions/{hosted}/turns"))
                     .bearer_auth(&token)
                     .json(&serde_json::json!({ "message": "plan it" }))
                     .send()
@@ -990,7 +1057,7 @@ async fn a_plan_accepted_from_the_chat_route_resumes_the_session() {
             "{chosen_mode:?}"
         );
         let snapshot: serde_json::Value = client
-            .get(format!("http://{addr}/code/sessions/{hosted}"))
+            .get(format!("http://{addr}/sessions/{hosted}"))
             .bearer_auth(&token)
             .send()
             .await
@@ -1260,7 +1327,7 @@ async fn interrupting_an_internal_client_park_closes_the_turn() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/code/sessions/{session_id}/interrupt"))
+                .uri(format!("/sessions/{session_id}/interrupt"))
                 .header(header::AUTHORIZATION, &bearer)
                 .body(Body::empty())
                 .unwrap(),
@@ -1299,7 +1366,7 @@ async fn a_plain_internal_turn_is_journaled_once() {
         internal_engine_app(vec![Step::Text("just the answer")]).await;
     let client = reqwest::Client::new();
     let created = client
-        .post(format!("http://{addr}/code/sessions"))
+        .post(format!("http://{addr}/sessions"))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "permission_mode": "ask" }))
         .send()
@@ -1311,7 +1378,7 @@ async fn a_plain_internal_turn_is_journaled_once() {
 
     let response = tokio::time::timeout(Duration::from_secs(20), async {
         client
-            .post(format!("http://{addr}/code/sessions/{hosted}/turns"))
+            .post(format!("http://{addr}/sessions/{hosted}/turns"))
             .bearer_auth(&token)
             .json(&serde_json::json!({ "message": "say it" }))
             .send()
@@ -1360,7 +1427,7 @@ async fn a_chat_is_not_a_runtime_session_until_the_runtime_drives_it() {
 
     let sessions = || async {
         client
-            .get(format!("http://{addr}/code/sessions"))
+            .get(format!("http://{addr}/sessions"))
             .bearer_auth(&token)
             .send()
             .await
@@ -1386,7 +1453,7 @@ async fn a_chat_is_not_a_runtime_session_until_the_runtime_drives_it() {
 
     // The same id still resolves on the session route: one id, one row.
     let by_id = client
-        .get(format!("http://{addr}/code/sessions/{chat_id}"))
+        .get(format!("http://{addr}/sessions/{chat_id}"))
         .bearer_auth(&token)
         .send()
         .await
@@ -1405,7 +1472,7 @@ async fn deleting_a_hosted_session_through_the_chat_route_removes_it_from_both_s
     let (addr, token, _runtime, _ran, _dir) = internal_engine_app(Vec::new()).await;
     let client = reqwest::Client::new();
     let created = client
-        .post(format!("http://{addr}/code/sessions"))
+        .post(format!("http://{addr}/sessions"))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "permission_mode": "plan" }))
         .send()
@@ -1429,7 +1496,7 @@ async fn deleting_a_hosted_session_through_the_chat_route_removes_it_from_both_s
     assert_eq!(status, reqwest::StatusCode::NO_CONTENT, "{body}");
     for (surface, route) in [
         ("chat", format!("http://{addr}/chats/{id}")),
-        ("code", format!("http://{addr}/code/sessions/{id}")),
+        ("code", format!("http://{addr}/sessions/{id}")),
     ] {
         let missing = client.get(route).bearer_auth(&token).send().await.unwrap();
         assert_eq!(
@@ -1496,7 +1563,7 @@ async fn an_internal_turn_with_an_image_reaches_the_model_with_the_bytes() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/code/sessions")
+                .uri("/sessions")
                 .header(header::AUTHORIZATION, &bearer)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -1516,7 +1583,7 @@ async fn an_internal_turn_with_an_image_reaches_the_model_with_the_bytes() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/code/sessions/{session_id}/attachments/images"))
+                .uri(format!("/sessions/{session_id}/attachments/images"))
                 .header(header::AUTHORIZATION, &bearer)
                 .header(header::CONTENT_TYPE, "image/png")
                 .body(Body::from(pixels.clone()))
@@ -1538,7 +1605,7 @@ async fn an_internal_turn_with_an_image_reaches_the_model_with_the_bytes() {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/code/sessions/{session_id}/turns"))
+                    .uri(format!("/sessions/{session_id}/turns"))
                     .header(header::AUTHORIZATION, &bearer)
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(

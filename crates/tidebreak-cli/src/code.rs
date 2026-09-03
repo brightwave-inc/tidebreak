@@ -714,7 +714,7 @@ async fn execute(client: &Client, command: Command) -> Result<i32> {
     }
 }
 
-/// There is no `GET /code/sessions/{id}`. Walk workspaces to recover the row,
+/// There is no `GET /sessions/{id}`. Walk workspaces to recover the row,
 /// then load its turns. A missing session 404s the same way a dedicated
 /// route would.
 async fn load_session(

@@ -55,7 +55,7 @@ export function useSessionEvents(
     const conn = connectWithBackoff(
       () =>
         activeClient.openSocket(
-          `/code/sessions/${encodeURIComponent(activeSessionId)}/events?after=${lastSeq}`,
+          `/sessions/${encodeURIComponent(activeSessionId)}/events?after=${lastSeq}`,
         ),
       {
         onMessage: (data) => {

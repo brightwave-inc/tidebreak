@@ -37,11 +37,11 @@ class FakeSocket {
 
 describe("machineWsUrl", () => {
   it("maps http(s) to ws(s)", () => {
-    expect(machineWsUrl("https://machine.example/app", "/code/updates")).toBe(
-      "wss://machine.example/app/code/updates",
+    expect(machineWsUrl("https://machine.example/app", "/updates")).toBe(
+      "wss://machine.example/app/updates",
     );
-    expect(machineWsUrl("http://127.0.0.1:8080", "/code/updates")).toBe(
-      "ws://127.0.0.1:8080/code/updates",
+    expect(machineWsUrl("http://127.0.0.1:8080", "/updates")).toBe(
+      "ws://127.0.0.1:8080/updates",
     );
   });
 });
@@ -62,7 +62,7 @@ describe("MachineClient requests", () => {
     });
 
     await expect(
-      client.requestJson("/code/sessions/s-1/turns", {
+      client.requestJson("/sessions/s-1/turns", {
         method: "POST",
         body: { message: "continue" },
         expectedStatus: 202,
@@ -72,7 +72,7 @@ describe("MachineClient requests", () => {
     expect(getAccessToken).toHaveBeenCalledWith("tidebreak:attached");
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(fetchImpl.mock.calls[0]?.[0]).toBe(
-      "https://machine.example/code/sessions/s-1/turns",
+      "https://machine.example/sessions/s-1/turns",
     );
     expect(fetchImpl.mock.calls[0]?.[1]).toMatchObject({
       method: "POST",
@@ -101,7 +101,7 @@ describe("MachineClient requests", () => {
         ),
     });
     await expect(
-      client.requestJson("/code/sessions/s-1/steer"),
+      client.requestJson("/sessions/s-1/steer"),
     ).rejects.toMatchObject({
       status: 422,
       kind: "steering_unavailable",
@@ -115,7 +115,7 @@ describe("MachineClient requests", () => {
       fetchImpl: async () =>
         new Response("<h1>private proxy detail</h1>", { status: 502 }),
     });
-    await expect(proxyClient.getJson("/code/approvals")).rejects.toThrow(
+    await expect(proxyClient.getJson("/approvals")).rejects.toThrow(
       "Machine request failed. (HTTP 502)",
     );
   });
@@ -134,7 +134,7 @@ describe("MachineClient requests", () => {
     });
 
     await expect(
-      client.requestJson("/code/sessions/s-1/interrupt", {
+      client.requestJson("/sessions/s-1/interrupt", {
         method: "POST",
         expectedStatus: 202,
       }),
@@ -153,7 +153,7 @@ describe("connectWithBackoff", () => {
     const conn = connectWithBackoff(
       async () => {
         tokens += 1;
-        const socket = new FakeSocket("wss://example/code/updates", [
+        const socket = new FakeSocket("wss://example/updates", [
           WS_HANDSHAKE,
           `${WS_TOKEN_PREFIX}tok-${tokens}`,
         ]);
@@ -181,7 +181,7 @@ describe("connectWithBackoff", () => {
     const sockets: FakeSocket[] = [];
     const conn = connectWithBackoff(
       async () => {
-        const socket = new FakeSocket("wss://example/code/updates");
+        const socket = new FakeSocket("wss://example/updates");
         sockets.push(socket);
         return socket as unknown as WebSocket;
       },
@@ -203,7 +203,7 @@ describe("connectWithBackoff", () => {
     const sockets: FakeSocket[] = [];
     const conn = connectWithBackoff(
       async () => {
-        const socket = new FakeSocket("wss://example/code/updates");
+        const socket = new FakeSocket("wss://example/updates");
         sockets.push(socket);
         return socket as unknown as WebSocket;
       },

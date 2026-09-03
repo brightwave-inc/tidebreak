@@ -2834,7 +2834,7 @@ function parseCodeTurnAttachments(
 }
 
 /**
- * What `POST /code/sessions/{id}/turns` did with the message.
+ * What `POST /sessions/{id}/turns` did with the message.
  *
  * The route answers 202 for both outcomes: a turn that ran, or a follow-up
  * parked in the session's single queue slot while the current turn finishes.
@@ -3127,7 +3127,7 @@ export function parseDiffstat(value: unknown): Diffstat | null {
   };
 }
 
-/** `GET /code/sessions/{id}/turns` — oldest first. */
+/** `GET /sessions/{id}/turns` — oldest first. */
 export function parseCodeTurnList(value: unknown): CodeTurnSnapshot[] | null {
   if (!Array.isArray(value)) return null;
   const turns: CodeTurnSnapshot[] = [];
