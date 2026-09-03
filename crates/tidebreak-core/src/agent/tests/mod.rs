@@ -315,11 +315,10 @@ async fn search_grant_store() -> Arc<dyn Store> {
 
 async fn cancel_test_chat() -> (Arc<dyn Store>, Chat, tempfile::TempDir) {
     let workspace = tempfile::tempdir().unwrap();
-    let db = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
         DbStore::connect_test_sqlite_fixture(&format!(
             "sqlite://{}?mode=rwc",
-            db.path().join("t.db").display()
+            workspace.path().join("t.db").display()
         ))
         .await
         .unwrap(),
