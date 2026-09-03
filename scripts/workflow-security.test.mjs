@@ -1802,7 +1802,9 @@ test("Linux packaging writes no shared cache before loading updater material", (
   const release = workflows["release.yml"];
   assert.doesNotMatch(release, /^  prepare_linux:/m);
   const buildJob = workflowJob(release, "build_linux");
-  assert.match(buildJob, /needs: \[validate, inspect_hosted\]/);
+  // A credential-free third-party notices gate may sit in front of the
+  // packaging build; nothing else may.
+  assert.match(buildJob, /needs: \[validate, inspect_hosted(?:, notices)?\]/);
   assert.match(buildJob, /ubuntu-22\.04/);
   assert.match(buildJob, /runs-on: \$\{\{ matrix\.runner \}\}/);
   assert.match(buildJob, /target: x86_64-unknown-linux-gnu/);
@@ -2032,17 +2034,58 @@ test("GitHub release assets are attached before immutable publication", () => {
   }
 });
 
-test("universal macOS release and staging packages contain both slices", () => {
-  const releasePrepare = workflowJob(workflows["release.yml"], "prepare_macos");
-  const releaseBuild = workflowJob(workflows["release.yml"], "build_macos");
-  if (!/--target universal-apple-darwin/.test(releaseBuild)) {
-    return;
+// A macOS compile job covers both slices in one of two shapes: one runner
+// compiles Tauri's synthetic universal triple, or a matrix compiles one real
+// triple per runner and a later job joins the slices with lipo. A job that
+// only bundles compiles nothing and is not a compile job. Returns the shape
+// it found, or null when the job does not compile.
+function macosCompileShape(job, label) {
+  if (!/tauri-apps\/tauri-action@/.test(job)) return null;
+  if (/--target universal-apple-darwin/.test(job)) {
+    assert.match(
+      job,
+      /rustup target add aarch64-apple-darwin x86_64-apple-darwin/,
+      `${label} must install both macOS targets`,
+    );
+    return "universal";
   }
-
-  const stagingBuild = workflowJob(
-    workflows["staging-publish.yml"],
-    "build_macos_staging",
+  assert.match(job, /target: aarch64-apple-darwin/, `${label} must compile aarch64`);
+  assert.match(job, /target: x86_64-apple-darwin/, `${label} must compile x86_64`);
+  assert.match(
+    job,
+    /--target \$\{\{ matrix\.target \}\}/,
+    `${label} must compile the matrix target`,
   );
+  assert.match(
+    job,
+    /rustup target add "?\$\{\{ matrix\.target \}\}"?/,
+    `${label} must install the matrix target`,
+  );
+  return "per-arch";
+}
+
+// A per-arch compile is only universal once the workflow lipo-joins the app
+// binary and both sidecars under the synthetic triple the bundler expects.
+function assertPerArchSlicesAreJoined(source, label) {
+  assert.match(source, /lipo -create/, `${label} must lipo-join per-arch slices`);
+  for (const product of [
+    /target\/universal-apple-darwin\/release\/tidebreak-desktop/,
+    /binaries\/tidebreak-host-broker-universal-apple-darwin/,
+    /binaries\/tidebreak-universal-apple-darwin/,
+  ]) {
+    assert.match(source, product, `${label} must produce ${product}`);
+  }
+}
+
+test("universal macOS release and staging packages contain both slices", () => {
+  const release = workflows["release.yml"];
+  const stagingPublish = workflows["staging-publish.yml"];
+  const releasePrepare = workflowJob(release, "prepare_macos");
+  const releaseBuild = workflowJob(release, "build_macos");
+  const stagingBuild = workflowJob(stagingPublish, "build_macos_staging");
+  const stagingPrepare = /^  prepare_macos_staging:$/m.test(stagingPublish)
+    ? workflowJob(stagingPublish, "prepare_macos_staging")
+    : null;
   const warm = workflows["cache-macos.yml"];
   const sidecarPreparation = readFileSync(
     repositoryFile("crates/tidebreak-desktop/scripts/prepare-sidecar.mjs"),
@@ -2059,16 +2102,28 @@ test("universal macOS release and staging packages contain both slices", () => {
     /"lipo",\s*\["-create", \.\.\.stagedSidecars, "-output", destination\]/,
   );
 
-  const preparedArtifacts = /Archive prepared macOS inputs/.test(releasePrepare);
-  const releaseCompile = preparedArtifacts ? releasePrepare : releaseBuild;
-  for (const job of [releaseCompile, stagingBuild, warm]) {
-    assert.match(job, /rustup target add aarch64-apple-darwin x86_64-apple-darwin/);
-    assert.match(job, /--target universal-apple-darwin/);
+  // The release compiles in the credential-free prepare job and the signed
+  // job only bundles the synthetic universal target it is handed.
+  const releaseShape = macosCompileShape(releasePrepare, "prepare_macos");
+  assert.ok(releaseShape, "prepare_macos must compile the macOS app");
+  assert.match(releaseBuild, /--target universal-apple-darwin/);
+  assert.doesNotMatch(releaseBuild, /rustup target add/);
+  if (releaseShape === "per-arch") {
+    assertPerArchSlicesAreJoined(release, "release.yml");
   }
-  if (preparedArtifacts) {
-    assert.match(releaseBuild, /--target universal-apple-darwin/);
-    assert.doesNotMatch(releaseBuild, /rustup target add/);
+
+  // Staging compiles in its prepare job when it has one, otherwise in the
+  // signed job itself; either way the bundle is universal.
+  const stagingShape =
+    (stagingPrepare && macosCompileShape(stagingPrepare, "prepare_macos_staging")) ||
+    macosCompileShape(stagingBuild, "build_macos_staging");
+  assert.ok(stagingShape, "staging must compile the macOS app");
+  assert.match(stagingBuild, /--target universal-apple-darwin/);
+  if (stagingShape === "per-arch") {
+    assertPerArchSlicesAreJoined(stagingPublish, "staging-publish.yml");
   }
+
+  assert.ok(macosCompileShape(warm, "cache-macos.yml"), "the warmer must compile");
 
   for (const job of [releaseBuild, stagingBuild]) {
     assert.match(job, /timeout-minutes: 90/);
