@@ -447,6 +447,9 @@ pub async fn delete_provider_credential(
         state.chatgpt.sign_out().await?;
     }
     providers::delete_credential(&*state.secrets, kind).await?;
+    if kind == ProviderKind::Openai {
+        providers::clear_chatgpt_reconnect_required(&*state.store).await?;
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

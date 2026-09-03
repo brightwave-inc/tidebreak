@@ -1669,6 +1669,104 @@ async fn chatgpt_auth_marks_api_only_openai_models_unavailable() {
 }
 
 #[tokio::test]
+async fn a_rejected_chatgpt_session_is_unavailable_across_configuration_routes() {
+    let (router, token, state, store, _dir) = test_app_with_state().await;
+    let bearer = format!("Bearer {token}");
+    providers::write_credential(
+        &*state.secrets,
+        providers::ProviderKind::Openai,
+        &providers::ProviderCredential::Oauth {},
+    )
+    .await
+    .unwrap();
+    state
+        .secrets
+        .set_secret(
+            crate::connectors::CHATGPT_SECRET_KEY,
+            &serde_json::json!({
+                "access_token": "access",
+                "refresh_token": "refresh",
+                "account_id": "acct-test",
+                "expires_at_unix": 4_102_444_800_u64,
+            })
+            .to_string(),
+        )
+        .await
+        .unwrap();
+    providers::write_config(
+        &*store,
+        providers::ProviderKind::Openai,
+        &providers::ProviderConfig {
+            enabled: true,
+            base_url: None,
+            models: Vec::new(),
+        },
+    )
+    .await
+    .unwrap();
+    providers::mark_chatgpt_reconnect_required(&*store)
+        .await
+        .unwrap();
+
+    let providers_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/providers")
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let providers_body: serde_json::Value = json_body(providers_response).await;
+    let openai = providers_body["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|provider| provider["kind"] == "openai")
+        .unwrap();
+    assert_eq!(openai["auth_mode"], "chatgpt");
+    assert_eq!(openai["has_credential"], false);
+
+    let models_response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/models")
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let models_body: serde_json::Value = json_body(models_response).await;
+    assert!(models_body["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|model| model["provider"] == "openai")
+        .all(|model| model["available"] == false));
+
+    let status_response = router
+        .oneshot(
+            Request::builder()
+                .uri("/providers/openai/chatgpt/status")
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status: serde_json::Value = json_body(status_response).await;
+    assert_eq!(status["signed_in"], false);
+    assert_eq!(
+        status["error"],
+        "Your ChatGPT session is no longer valid. Sign in with ChatGPT again."
+    );
+}
+
+#[tokio::test]
 async fn xai_settings_publish_curated_and_explicit_model_capabilities() {
     let (router, token, _store, _dir) = test_app().await;
     let bearer = format!("Bearer {token}");

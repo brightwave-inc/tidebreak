@@ -806,6 +806,37 @@ pub struct ProviderConfig {
     pub models: Vec<CustomModelConfig>,
 }
 
+/// Non-secret runtime health for a stored ChatGPT OAuth session.
+///
+/// The OAuth credential remains in the OS vault so reconnect and explicit
+/// sign-out retain their normal ownership. This store marker only prevents a
+/// provider rejection from being advertised and routed again.
+const CHATGPT_RECONNECT_REQUIRED_SETTING: &str = "provider.openai.chatgpt_reconnect_required";
+
+pub(crate) async fn chatgpt_reconnect_required(store: &dyn Store) -> Result<bool> {
+    Ok(matches!(
+        store
+            .get_setting(CHATGPT_RECONNECT_REQUIRED_SETTING)
+            .await?,
+        Some(serde_json::Value::Bool(true))
+    ))
+}
+
+pub(crate) async fn mark_chatgpt_reconnect_required(store: &dyn Store) -> Result<()> {
+    store
+        .set_setting(
+            CHATGPT_RECONNECT_REQUIRED_SETTING,
+            &serde_json::Value::Bool(true),
+        )
+        .await
+}
+
+pub(crate) async fn clear_chatgpt_reconnect_required(store: &dyn Store) -> Result<()> {
+    store
+        .delete_setting(CHATGPT_RECONNECT_REQUIRED_SETTING)
+        .await
+}
+
 impl ProviderConfig {
     /// Default config when nothing is stored: disabled, no base URL.
     pub fn disabled() -> Self {
@@ -1705,12 +1736,22 @@ pub async fn list_providers(
             continue;
         }
         let config = read_config(store, kind).await?;
+        let auth_mode = auth_mode_for(secrets, kind).await;
+        let has_credential = has_credential(secrets, kind).await;
+        let has_credential = if kind == ProviderKind::Openai
+            && auth_mode == Some(ProviderAuthMode::Chatgpt)
+            && chatgpt_reconnect_required(store).await?
+        {
+            false
+        } else {
+            has_credential
+        };
         out.push(ProviderInfo {
             kind,
             enabled: config.enabled,
             base_url: kind.effective_base_url(config.base_url.as_deref()),
-            has_credential: has_credential(secrets, kind).await,
-            auth_mode: auth_mode_for(secrets, kind).await,
+            has_credential,
+            auth_mode,
             models: config.models,
         });
     }
@@ -1836,6 +1877,9 @@ pub async fn update_provider(
     }
 
     write_config(store, kind, &config).await?;
+    if kind == ProviderKind::Openai && credential_changed {
+        clear_chatgpt_reconnect_required(store).await?;
+    }
 
     Ok(ProviderInfo {
         kind,
@@ -2443,6 +2487,15 @@ pub async fn provider_is_usable(
         return Ok(false);
     }
     if kind.requires_credential() && !has_credential(secrets, kind).await {
+        return Ok(false);
+    }
+    if kind == ProviderKind::Openai
+        && matches!(
+            auth_mode_for(secrets, kind).await,
+            Some(ProviderAuthMode::Chatgpt)
+        )
+        && chatgpt_reconnect_required(store).await?
+    {
         return Ok(false);
     }
     if !matches!(kind, ProviderKind::Gemini | ProviderKind::Xai) {

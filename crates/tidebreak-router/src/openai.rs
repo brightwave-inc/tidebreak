@@ -250,18 +250,24 @@ impl ModelProvider for OpenAiProvider {
             .send()
             .await
             .map_err(|_| AgentError::Provider(format!("{provider_label} request failed")))?;
-        drop(authorization);
 
         let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            if let Some(source) = &self.token_source {
+                source.authentication_rejected(api_key).await;
+            }
+        }
+        drop(authorization);
         if !status.is_success() {
             let retry_after = crate::sse::retry_after_hint(response.headers());
             let body = read_bounded_error_body(response.bytes_stream()).await;
-            return Err(if provider_label == wire_provider {
+            let error = if provider_label == wire_provider {
                 self.profile
                     .classify_http_error(status.as_u16(), &body, retry_after)
             } else {
                 classify_provider_error(provider_label, status.as_u16(), &body, retry_after)
-            });
+            };
+            return Err(error);
         }
 
         let ceiling = crate::http::timeouts().total_stream;
@@ -1928,6 +1934,58 @@ mod tests {
             error.to_string(),
             "invalid provider request: openai returned 400: The requested model is not available for this account."
         );
+    }
+
+    #[tokio::test]
+    async fn a_rejected_dynamic_bearer_notifies_its_source() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        use axum::http::StatusCode;
+        use axum::routing::post;
+        use axum::Router;
+
+        use crate::BearerTokenSource;
+
+        struct RecordingSource(Arc<AtomicBool>);
+
+        #[async_trait]
+        impl BearerTokenSource for RecordingSource {
+            async fn bearer_token(&self) -> Result<String> {
+                Ok("revoked-token".into())
+            }
+
+            async fn authentication_rejected(&self, _bearer: &str) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        async fn reject() -> (StatusCode, &'static str) {
+            (
+                StatusCode::UNAUTHORIZED,
+                r#"{"error":{"code":"token_revoked","message":"token revoked"}}"#,
+            )
+        }
+
+        let app = Router::new().route("/v1/responses", post(reject));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let rejected = Arc::new(AtomicBool::new(false));
+        let provider = OpenAiProvider::new("")
+            .with_base_url(format!("http://{address}/v1"))
+            .with_token_source(Arc::new(RecordingSource(rejected.clone())));
+        let result = provider
+            .stream(ChatRequest {
+                model: "gpt-5.6-sol".into(),
+                messages: vec![ChatMessage::text(Role::User, "test")],
+                ..Default::default()
+            })
+            .await;
+
+        assert!(matches!(result, Err(AgentError::Authentication(_))));
+        assert!(rejected.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
