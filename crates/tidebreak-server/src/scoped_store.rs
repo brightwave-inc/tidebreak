@@ -289,9 +289,9 @@ impl ScopedStore {
     // see the self-host section of `docs/how-tidebreak-works.md`.
     // ------------------------------------------------------------------
 
-    /// [`Store::get_turn_run`].
-    pub async fn get_turn_run(&self, id: TurnId) -> Result<Option<TurnRun>> {
-        self.store.get_turn_run(id).await
+    /// [`Store::get_turn`].
+    pub async fn get_turn(&self, id: TurnId) -> Result<Option<TurnRun>> {
+        self.store.get_turn(id).await
     }
 
     /// [`Store::accept_turn_steer_with_message_context`].

@@ -1885,12 +1885,12 @@ pub trait Store: Send + Sync {
     }
 
     /// Fetch one durable turn by its exact idempotency identity.
-    async fn get_turn_run(&self, _id: TurnId) -> Result<Option<TurnRun>> {
+    async fn get_turn(&self, _id: TurnId) -> Result<Option<TurnRun>> {
         turn_storage_unavailable()
     }
 
     /// List a chat's durable turn history in deterministic creation-time order.
-    async fn list_turn_runs(&self, _chat_id: ChatId) -> Result<Vec<TurnRun>> {
+    async fn list_turns(&self, _chat_id: ChatId) -> Result<Vec<TurnRun>> {
         turn_storage_unavailable()
     }
 
@@ -2042,7 +2042,7 @@ pub trait Store: Send + Sync {
     /// routed journal event and returned instead of claiming another turn; the
     /// caller publishes it before scanning again. `lease_expires_at` must be
     /// after `now`.
-    async fn claim_turn_run(
+    async fn claim_turn(
         &self,
         _lease_token: uuid::Uuid,
         _now: chrono::DateTime<chrono::Utc>,
@@ -2055,7 +2055,7 @@ pub trait Store: Send + Sync {
     ///
     /// Returns `false` if the turn is not running, the token differs, the lease
     /// already expired, or the proposed expiry does not extend the current one.
-    async fn heartbeat_turn_run(
+    async fn heartbeat_turn(
         &self,
         _id: TurnId,
         _lease_token: uuid::Uuid,
@@ -2074,7 +2074,7 @@ pub trait Store: Send + Sync {
     /// as expired work and resumes the attempt ladder. Used when a process
     /// knows it is about to exit (a restart-to-update) and does not want its
     /// successor to wait out the lease.
-    async fn expire_turn_run_lease(
+    async fn expire_turn_lease(
         &self,
         _id: TurnId,
         _lease_token: uuid::Uuid,
@@ -2258,7 +2258,7 @@ pub trait Store: Send + Sync {
     /// same live attempt rather than mistaking them for lease loss. The caller
     /// must pass the `steer_revision` captured before generation;
     /// completion is fenced if another steer was applied in the meantime.
-    async fn complete_turn_run(
+    async fn complete_turn(
         &self,
         _id: TurnId,
         _lease_token: uuid::Uuid,
@@ -2275,7 +2275,7 @@ pub trait Store: Send + Sync {
     /// journal sequence. No terminal event is visible unless the output message
     /// and terminal state transition commit with it.
     #[allow(clippy::too_many_arguments)]
-    async fn complete_turn_run_and_append_event(
+    async fn complete_turn_and_append_event(
         &self,
         _id: TurnId,
         _lease_token: uuid::Uuid,
@@ -2294,7 +2294,7 @@ pub trait Store: Send + Sync {
     /// The clean message, resolved same-turn citations, terminal transition, and
     /// journal event commit together. Unknown opaque references are ignored.
     #[allow(clippy::too_many_arguments)]
-    async fn complete_turn_run_with_citations_and_append_event(
+    async fn complete_turn_with_citations_and_append_event(
         &self,
         id: TurnId,
         lease_token: uuid::Uuid,
@@ -2307,7 +2307,7 @@ pub trait Store: Send + Sync {
         stop_reason: StopReason,
     ) -> Result<Option<JournaledTurnOutcome<CompleteTurnRunOutcome>>> {
         if citations.is_empty() {
-            self.complete_turn_run_and_append_event(
+            self.complete_turn_and_append_event(
                 id,
                 lease_token,
                 expected_steer_revision,
@@ -2326,7 +2326,7 @@ pub trait Store: Send + Sync {
     /// Complete one claimed turn as a refusal and append that structured
     /// terminal event atomically with its partial-or-empty assistant output.
     #[allow(clippy::too_many_arguments)]
-    async fn complete_refused_turn_run_with_citations_and_append_event(
+    async fn complete_refused_turn_with_citations_and_append_event(
         &self,
         _id: TurnId,
         _lease_token: uuid::Uuid,
@@ -2352,7 +2352,7 @@ pub trait Store: Send + Sync {
     /// remain; otherwise the result is terminally `failed`. Returns `None` when
     /// this claim did not win the live attempt or another resolution already did.
     #[allow(clippy::too_many_arguments)]
-    async fn record_turn_run_failure(
+    async fn record_turn_failure(
         &self,
         _id: TurnId,
         _lease_token: uuid::Uuid,
@@ -2373,7 +2373,7 @@ pub trait Store: Send + Sync {
     /// one transaction, and exact ambiguous retries recover the original
     /// journal sequence.
     #[allow(clippy::too_many_arguments)]
-    async fn record_turn_run_failure_and_append_event(
+    async fn record_turn_failure_and_append_event(
         &self,
         _id: TurnId,
         _lease_token: uuid::Uuid,

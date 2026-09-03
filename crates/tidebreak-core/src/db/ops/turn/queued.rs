@@ -8,7 +8,7 @@
 
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, Set,
-    TransactionTrait, TryInsertResult,
+    TransactionTrait,
 };
 
 use crate::error::{AgentError, Result};
@@ -22,15 +22,15 @@ use super::super::acquire_chat_write_lock;
 use super::super::agent_run::database_now;
 use super::admission;
 
-fn queued_turn_from_model(model: entities::queued_turn::Model) -> Result<QueuedTurn> {
+fn queued_turn_from_model(model: entities::code_queued_turn::Model) -> Result<QueuedTurn> {
     let parse = |json: &str| -> Result<Vec<uuid::Uuid>> {
         serde_json::from_str(json)
             .map_err(|_| AgentError::Store("invalid stored queued-turn attachment list".into()))
     };
     Ok(QueuedTurn {
         id: TurnId(model.id),
-        chat_id: ChatId(model.chat_id),
-        content: model.content,
+        chat_id: ChatId(model.session_id),
+        content: model.message,
         attachments: parse(&model.attachments_json)?,
         file_attachments: parse(&model.file_attachments_json)?
             .into_iter()
@@ -61,10 +61,10 @@ async fn current_head_on<C>(conn: &C, chat_id: ChatId) -> Result<Option<QueuedTu
 where
     C: sea_orm::ConnectionTrait,
 {
-    entities::queued_turn::Entity::find()
-        .filter(entities::queued_turn::Column::ChatId.eq(chat_id.0))
-        .order_by_asc(entities::queued_turn::Column::Position)
-        .order_by_asc(entities::queued_turn::Column::CreatedAt)
+    entities::code_queued_turn::Entity::find()
+        .filter(entities::code_queued_turn::Column::SessionId.eq(chat_id.0))
+        .order_by_asc(entities::code_queued_turn::Column::Position)
+        .order_by_asc(entities::code_queued_turn::Column::CreatedAt)
         .one(conn)
         .await
         .map_err(store_err)?
@@ -111,57 +111,10 @@ async fn enqueue_turn_inner(
         )));
     }
     let now = database_now(&transaction).await?;
+    let _ = reservation;
+    let _ = request;
 
-    let admission_row = entities::turn_admission::Entity::find_by_id(queued.id.0)
-        .one(&transaction)
-        .await
-        .map_err(store_err)?;
-    if let Some(row) = admission_row.as_ref() {
-        if !admission::request_matches(row, &request) {
-            transaction.rollback().await.map_err(store_err)?;
-            return Err(AgentError::Store(
-                "queued turn id was already used with different request data".into(),
-            ));
-        }
-        match row.state.as_str() {
-            admission::STATE_QUEUED => {}
-            admission::STATE_ACCEPTED => {
-                transaction.rollback().await.map_err(store_err)?;
-                return Err(AgentError::Store(
-                    "queued turn id was already accepted".into(),
-                ));
-            }
-            admission::STATE_PENDING => {
-                let Some(lease) = reservation else {
-                    transaction.rollback().await.map_err(store_err)?;
-                    return Ok(ReservedQueuedTurnOutcome::LeaseLost);
-                };
-                if !admission::lease_is_current_on(
-                    &transaction,
-                    lease,
-                    queued.chat_id,
-                    request.fingerprint(),
-                )
-                .await?
-                {
-                    transaction.rollback().await.map_err(store_err)?;
-                    return Ok(ReservedQueuedTurnOutcome::LeaseLost);
-                }
-            }
-            state => {
-                transaction.rollback().await.map_err(store_err)?;
-                return Err(AgentError::Store(format!(
-                    "turn admission {} has invalid state {state}",
-                    queued.id
-                )));
-            }
-        }
-    } else if reservation.is_some() {
-        transaction.rollback().await.map_err(store_err)?;
-        return Ok(ReservedQueuedTurnOutcome::LeaseLost);
-    }
-
-    if let Some(existing) = entities::queued_turn::Entity::find_by_id(queued.id.0)
+    if let Some(existing) = entities::code_queued_turn::Entity::find_by_id(queued.id.0)
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -176,8 +129,8 @@ async fn enqueue_turn_inner(
             "queued turn id was already used with different request data".into(),
         ));
     }
-    let count = entities::queued_turn::Entity::find()
-        .filter(entities::queued_turn::Column::ChatId.eq(queued.chat_id.0))
+    let count = entities::code_queued_turn::Entity::find()
+        .filter(entities::code_queued_turn::Column::SessionId.eq(queued.chat_id.0))
         .count(&transaction)
         .await
         .map_err(store_err)?;
@@ -188,46 +141,25 @@ async fn enqueue_turn_inner(
             QueuedTurn::MAX_PER_CHAT
         )));
     }
-    let position = entities::queued_turn::Entity::find()
-        .filter(entities::queued_turn::Column::ChatId.eq(queued.chat_id.0))
-        .order_by_desc(entities::queued_turn::Column::Position)
+    let position = entities::code_queued_turn::Entity::find()
+        .filter(entities::code_queued_turn::Column::SessionId.eq(queued.chat_id.0))
+        .order_by_desc(entities::code_queued_turn::Column::Position)
         .one(&transaction)
         .await
         .map_err(store_err)?
         .map_or(0, |last| last.position + 1);
 
-    if let Some(lease) = reservation {
-        if !admission::transition_pending_on(&transaction, lease, admission::STATE_QUEUED).await? {
-            transaction.rollback().await.map_err(store_err)?;
-            return Ok(ReservedQueuedTurnOutcome::LeaseLost);
-        }
-    } else if admission_row.is_none() {
-        let inserted =
-            entities::turn_admission::Entity::insert(entities::turn_admission::ActiveModel {
-                id: Set(queued.id.0),
-                chat_id: Set(queued.chat_id.0),
-                fingerprint: Set(request.fingerprint().to_vec()),
-                state: Set(admission::STATE_QUEUED.into()),
-                lease_token: Set(None),
-                lease_expires_at: Set(None),
-                created_at: Set(now),
-                updated_at: Set(now),
-            })
-            .on_conflict_do_nothing()
-            .exec_without_returning(&transaction)
-            .await
-            .map_err(store_err)?;
-        if !matches!(inserted, TryInsertResult::Inserted(1)) {
-            transaction.rollback().await.map_err(store_err)?;
-            return Err(AgentError::Store(
-                "queued turn id was already reserved".into(),
-            ));
-        }
-    }
-    entities::queued_turn::ActiveModel {
+    let session = entities::code_session::Entity::find_by_id(queued.chat_id.0)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+        .ok_or_else(|| AgentError::Store(format!("session {} does not exist", queued.chat_id)))?;
+    entities::code_queued_turn::ActiveModel {
         id: Set(queued.id.0),
-        chat_id: Set(queued.chat_id.0),
-        content: Set(queued.content.clone()),
+        owner: Set(session.owner),
+        session_id: Set(queued.chat_id.0),
+        message: Set(queued.content.clone()),
+        fingerprint: Set(Some(admission_request(queued).fingerprint().to_vec())),
         attachments_json: Set(serde_json::to_string(&queued.attachments).map_err(store_err)?),
         file_attachments_json: Set(serde_json::to_string(
             &queued
@@ -246,7 +178,7 @@ async fn enqueue_turn_inner(
     .insert(&transaction)
     .await
     .map_err(store_err)?;
-    let inserted = entities::queued_turn::Entity::find_by_id(queued.id.0)
+    let inserted = entities::code_queued_turn::Entity::find_by_id(queued.id.0)
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -289,18 +221,7 @@ pub(in crate::db) async fn promote_turn(
         transaction.commit().await.map_err(store_err)?;
         return Ok(PromoteQueuedTurnOutcome::Stale);
     }
-    let Some(admission_row) = entities::turn_admission::Entity::find_by_id(expected.id.0)
-        .one(&transaction)
-        .await
-        .map_err(store_err)?
-    else {
-        transaction.commit().await.map_err(store_err)?;
-        return Ok(PromoteQueuedTurnOutcome::Stale);
-    };
-    if !admission::request_matches(&admission_row, &request) {
-        transaction.commit().await.map_err(store_err)?;
-        return Ok(PromoteQueuedTurnOutcome::Stale);
-    }
+    let _ = request;
     let foreground = super::find_foreground_agent_run_on(&transaction, expected.chat_id)
         .await?
         .ok_or_else(|| {
@@ -310,17 +231,11 @@ pub(in crate::db) async fn promote_turn(
             ))
         })?;
 
-    if admission_row.state == admission::STATE_ACCEPTED {
-        let Some(existing) = entities::turn_run::Entity::find_by_id(expected.id.0)
-            .one(&transaction)
-            .await
-            .map_err(store_err)?
-        else {
-            return Err(AgentError::Store(format!(
-                "accepted turn admission {} is missing its turn",
-                expected.id
-            )));
-        };
+    if let Some(existing) = entities::code_turn::Entity::find_by_id(expected.id.0)
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+    {
         let outcome = super::exact_accepted_turn_on(
             &transaction,
             existing,
@@ -342,10 +257,6 @@ pub(in crate::db) async fn promote_turn(
         transaction.commit().await.map_err(store_err)?;
         return Ok(PromoteQueuedTurnOutcome::Existing(existing));
     }
-    if admission_row.state != admission::STATE_QUEUED {
-        transaction.commit().await.map_err(store_err)?;
-        return Ok(PromoteQueuedTurnOutcome::Stale);
-    }
     if foreground.status != AgentRunStatus::Active {
         return Err(AgentError::Store(format!(
             "chat {} foreground agent run is not active",
@@ -358,7 +269,7 @@ pub(in crate::db) async fn promote_turn(
             super::turn_run_from_model(active)?,
         ));
     }
-    if entities::turn_run::Entity::find_by_id(expected.id.0)
+    if entities::code_turn::Entity::find_by_id(expected.id.0)
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -371,26 +282,6 @@ pub(in crate::db) async fn promote_turn(
     }
 
     let now = database_now(&transaction).await?;
-    let transitioned = entities::turn_admission::Entity::update_many()
-        .col_expr(
-            entities::turn_admission::Column::State,
-            sea_orm::sea_query::Expr::value(admission::STATE_ACCEPTED),
-        )
-        .col_expr(
-            entities::turn_admission::Column::UpdatedAt,
-            sea_orm::sea_query::Expr::value(now),
-        )
-        .filter(entities::turn_admission::Column::Id.eq(expected.id.0))
-        .filter(entities::turn_admission::Column::ChatId.eq(expected.chat_id.0))
-        .filter(entities::turn_admission::Column::Fingerprint.eq(request.fingerprint().to_vec()))
-        .filter(entities::turn_admission::Column::State.eq(admission::STATE_QUEUED))
-        .exec(&transaction)
-        .await
-        .map_err(store_err)?;
-    if transitioned.rows_affected != 1 {
-        transaction.rollback().await.map_err(store_err)?;
-        return Ok(PromoteQueuedTurnOutcome::Stale);
-    }
     let inserted = super::insert_accepted_turn_on(
         &transaction,
         expected.id,
@@ -416,11 +307,11 @@ async fn delete_exact_head_on<C>(conn: &C, expected: &QueuedTurn) -> Result<()>
 where
     C: sea_orm::ConnectionTrait,
 {
-    let deleted = entities::queued_turn::Entity::delete_many()
-        .filter(entities::queued_turn::Column::Id.eq(expected.id.0))
-        .filter(entities::queued_turn::Column::ChatId.eq(expected.chat_id.0))
-        .filter(entities::queued_turn::Column::Position.eq(expected.position))
-        .filter(entities::queued_turn::Column::UpdatedAt.eq(expected.updated_at))
+    let deleted = entities::code_queued_turn::Entity::delete_many()
+        .filter(entities::code_queued_turn::Column::Id.eq(expected.id.0))
+        .filter(entities::code_queued_turn::Column::SessionId.eq(expected.chat_id.0))
+        .filter(entities::code_queued_turn::Column::Position.eq(expected.position))
+        .filter(entities::code_queued_turn::Column::UpdatedAt.eq(expected.updated_at))
         .exec(conn)
         .await
         .map_err(store_err)?;
@@ -450,24 +341,7 @@ pub(in crate::db) async fn delete_turn_if_current(
         transaction.commit().await.map_err(store_err)?;
         return Ok(false);
     }
-    let request = admission_request(expected);
-    let owns_queue = entities::turn_admission::Entity::find_by_id(expected.id.0)
-        .filter(entities::turn_admission::Column::ChatId.eq(expected.chat_id.0))
-        .filter(entities::turn_admission::Column::Fingerprint.eq(request.fingerprint().to_vec()))
-        .filter(entities::turn_admission::Column::State.eq(admission::STATE_QUEUED))
-        .one(&transaction)
-        .await
-        .map_err(store_err)?
-        .is_some();
-    if !owns_queue {
-        transaction.commit().await.map_err(store_err)?;
-        return Ok(false);
-    }
     delete_exact_head_on(&transaction, expected).await?;
-    entities::turn_admission::Entity::delete_by_id(expected.id.0)
-        .exec(&transaction)
-        .await
-        .map_err(store_err)?;
     transaction.commit().await.map_err(store_err)?;
     Ok(true)
 }
@@ -476,10 +350,10 @@ pub(in crate::db) async fn list_queued_turns(
     store: &DbStore,
     chat_id: ChatId,
 ) -> Result<Vec<QueuedTurn>> {
-    entities::queued_turn::Entity::find()
-        .filter(entities::queued_turn::Column::ChatId.eq(chat_id.0))
-        .order_by_asc(entities::queued_turn::Column::Position)
-        .order_by_asc(entities::queued_turn::Column::CreatedAt)
+    entities::code_queued_turn::Entity::find()
+        .filter(entities::code_queued_turn::Column::SessionId.eq(chat_id.0))
+        .order_by_asc(entities::code_queued_turn::Column::Position)
+        .order_by_asc(entities::code_queued_turn::Column::CreatedAt)
         .all(&store.conn)
         .await
         .map_err(store_err)?
@@ -492,9 +366,9 @@ pub(in crate::db) async fn list_queued_turns(
 /// scan. Bounded output: distinct chat ids only.
 pub(in crate::db) async fn chats_with_queued_turns(store: &DbStore) -> Result<Vec<ChatId>> {
     use sea_orm::QuerySelect;
-    Ok(entities::queued_turn::Entity::find()
+    Ok(entities::code_queued_turn::Entity::find()
         .select_only()
-        .column(entities::queued_turn::Column::ChatId)
+        .column(entities::code_queued_turn::Column::SessionId)
         .distinct()
         .into_tuple::<uuid::Uuid>()
         .all(&store.conn)
@@ -515,21 +389,12 @@ pub(in crate::db) async fn delete_queued_turn(
         transaction.commit().await.map_err(store_err)?;
         return Ok(false);
     }
-    let deleted = entities::queued_turn::Entity::delete_many()
-        .filter(entities::queued_turn::Column::Id.eq(id.0))
-        .filter(entities::queued_turn::Column::ChatId.eq(chat_id.0))
+    let deleted = entities::code_queued_turn::Entity::delete_many()
+        .filter(entities::code_queued_turn::Column::Id.eq(id.0))
+        .filter(entities::code_queued_turn::Column::SessionId.eq(chat_id.0))
         .exec(&transaction)
         .await
         .map_err(store_err)?;
-    if deleted.rows_affected == 1 {
-        entities::turn_admission::Entity::delete_many()
-            .filter(entities::turn_admission::Column::Id.eq(id.0))
-            .filter(entities::turn_admission::Column::ChatId.eq(chat_id.0))
-            .filter(entities::turn_admission::Column::State.eq(admission::STATE_QUEUED))
-            .exec(&transaction)
-            .await
-            .map_err(store_err)?;
-    }
     transaction.commit().await.map_err(store_err)?;
     Ok(deleted.rows_affected == 1)
 }
@@ -554,10 +419,10 @@ pub(in crate::db) async fn update_queued_turn(
         return Ok(None);
     }
     let now = database_now(&transaction).await?;
-    let mut rows = entities::queued_turn::Entity::find()
-        .filter(entities::queued_turn::Column::ChatId.eq(chat_id.0))
-        .order_by_asc(entities::queued_turn::Column::Position)
-        .order_by_asc(entities::queued_turn::Column::CreatedAt)
+    let mut rows = entities::code_queued_turn::Entity::find()
+        .filter(entities::code_queued_turn::Column::SessionId.eq(chat_id.0))
+        .order_by_asc(entities::code_queued_turn::Column::Position)
+        .order_by_asc(entities::code_queued_turn::Column::CreatedAt)
         .all(&transaction)
         .await
         .map_err(store_err)?;
@@ -574,41 +439,25 @@ pub(in crate::db) async fn update_queued_turn(
     }
     for (ordinal, row) in rows.iter().enumerate() {
         let is_edited = row.id == id.0;
-        let mut active = entities::queued_turn::ActiveModel {
+        let mut active = entities::code_queued_turn::ActiveModel {
             id: Set(row.id),
             position: Set(i32::try_from(ordinal).unwrap_or(i32::MAX)),
             ..Default::default()
         };
         if is_edited {
             if let Some(content) = content {
-                active.content = Set(content.to_owned());
+                active.message = Set(content.to_owned());
             }
             active.updated_at = Set(now);
         }
         active.update(&transaction).await.map_err(store_err)?;
     }
-    let updated = entities::queued_turn::Entity::find_by_id(id.0)
+    let updated = entities::code_queued_turn::Entity::find_by_id(id.0)
         .one(&transaction)
         .await
         .map_err(store_err)?
         .ok_or_else(|| AgentError::Store("queued turn disappeared".into()))?;
     let updated = queued_turn_from_model(updated)?;
-    let request = TurnAdmissionRequest {
-        id: updated.id,
-        chat_id: updated.chat_id,
-        content: updated.content.clone(),
-        attachments: updated.attachments.clone(),
-        file_attachments: updated.file_attachments.clone(),
-        invoked_skills: updated.invoked_skills.clone(),
-        voice_input_used: updated.voice_input_used,
-    };
-    if !admission::update_queued_fingerprint_on(&transaction, &request, now).await? {
-        transaction.rollback().await.map_err(store_err)?;
-        return Err(AgentError::Store(format!(
-            "queued turn {} is missing its admission ownership",
-            updated.id
-        )));
-    }
     transaction.commit().await.map_err(store_err)?;
     Ok(Some(updated))
 }

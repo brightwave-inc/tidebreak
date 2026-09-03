@@ -5,7 +5,7 @@ async fn make_queued_turn(
     chat_id: ChatId,
     model: &str,
     now: DateTime<Utc>,
-) -> entities::turn_run::ActiveModel {
+) -> entities::code_turn::ActiveModel {
     let turn_id = TurnId::new();
     let input_message_id = MessageId::new();
     let seq = super::ops::conversation::next_message_seq_on(&store.conn, chat_id)
@@ -27,17 +27,37 @@ async fn make_queued_turn(
     .await
     .unwrap();
 
-    entities::turn_run::ActiveModel {
+    let session = entities::code_session::Entity::find_by_id(chat_id.0)
+        .one(&store.conn)
+        .await
+        .unwrap()
+        .unwrap();
+    let last = entities::code_turn::Entity::find()
+        .filter(entities::code_turn::Column::SessionId.eq(chat_id.0))
+        .order_by_desc(entities::code_turn::Column::Ordinal)
+        .one(&store.conn)
+        .await
+        .unwrap();
+    let ordinal = last.map_or(1, |row| row.ordinal + 1);
+    entities::code_turn::ActiveModel {
         id: Set(turn_id.0),
-        chat_id: Set(chat_id.0),
-        agent_run_id: Set(crate::id::AgentRunId::foreground_for_chat(chat_id).0),
-        agent_run_depth: Set(0),
-        input_message_id: Set(input_message_id.0),
-        output_message_id: Set(None),
-        model: Set(model.into()),
-        invoked_skills: Set(serde_json::json!([])),
-        voice_input_used: Set(false),
+        owner: Set(session.owner),
+        session_id: Set(chat_id.0),
+        ordinal: Set(ordinal),
         status: Set(TurnRunStatus::Queued.as_str().into()),
+        model: Set(Some(model.into())),
+        fast_mode: Set(false),
+        user_input: Set("turn input".into()),
+        user_input_blob_id: Set(None),
+        checkpoint_ref: Set(None),
+        diffstat: Set(None),
+        usage: Set(None),
+        narrative: Set(None),
+        rewrite: Set(None),
+        started_at: Set(now),
+        ended_at: Set(None),
+        park_ref: Set(None),
+        park_wait: Set(None),
         attempt_count: Set(0),
         max_attempts: Set(crate::model::TurnRun::DEFAULT_MAX_ATTEMPTS),
         claim_count: Set(0),
@@ -46,17 +66,19 @@ async fn make_queued_turn(
         output_tokens: Set(0),
         cache_read_input_tokens: Set(0),
         cache_creation_input_tokens: Set(0),
-        available_at: Set(now),
+        available_at: Set(Some(now)),
         lease_token: Set(None),
         lease_expires_at: Set(None),
-        started_at: Set(None),
-        finished_at: Set(None),
         last_error_code: Set(None),
         last_error_detail: Set(None),
         steer_revision: Set(0),
         last_steer_applied_at: Set(None),
-        created_at: Set(now),
-        updated_at: Set(now),
+        invoked_skills: Set(serde_json::json!([])),
+        voice_input_used: Set(false),
+        input_message_id: Set(Some(input_message_id.0)),
+        output_message_id: Set(None),
+        updated_at: Set(Some(now)),
+        fingerprint: Set(None),
     }
 }
 
@@ -71,7 +93,7 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
         .insert(&store.conn)
         .await
         .unwrap();
-    let stored = store.get_turn_run(TurnId(first.id)).await.unwrap().unwrap();
+    let stored = store.get_turn(TurnId(first.id)).await.unwrap().unwrap();
     assert_eq!(stored.id, TurnId(first.id));
     assert_eq!(stored.chat_id, chat.id);
     assert_eq!(
@@ -82,7 +104,7 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
     assert_eq!(stored.status, TurnRunStatus::Queued);
     assert_eq!(stored.model_steps, 0);
     assert_eq!(stored.usage, crate::provider::Usage::default());
-    assert_eq!(store.list_turn_runs(chat.id).await.unwrap(), vec![stored]);
+    assert_eq!(store.list_turns(chat.id).await.unwrap(), vec![stored]);
 
     // The database, not a process-local map, owns the one-live-turn invariant.
     assert!(make_queued_turn(&store, chat.id, "gpt-5", now)
@@ -110,32 +132,32 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
     .insert(&store.conn)
     .await
     .unwrap();
-    entities::turn_run::Entity::update_many()
+    entities::code_turn::Entity::update_many()
         .col_expr(
-            entities::turn_run::Column::Status,
+            entities::code_turn::Column::Status,
             sea_orm::sea_query::Expr::value(TurnRunStatus::Completed.as_str()),
         )
         .col_expr(
-            entities::turn_run::Column::AttemptCount,
+            entities::code_turn::Column::AttemptCount,
             sea_orm::sea_query::Expr::value(1),
         )
         .col_expr(
-            entities::turn_run::Column::ClaimCount,
+            entities::code_turn::Column::ClaimCount,
             sea_orm::sea_query::Expr::value(1),
         )
         .col_expr(
-            entities::turn_run::Column::OutputMessageId,
+            entities::code_turn::Column::OutputMessageId,
             sea_orm::sea_query::Expr::value(Some(first_output_id.0)),
         )
         .col_expr(
-            entities::turn_run::Column::StartedAt,
+            entities::code_turn::Column::StartedAt,
             sea_orm::sea_query::Expr::value(Some(now)),
         )
         .col_expr(
-            entities::turn_run::Column::FinishedAt,
+            entities::code_turn::Column::EndedAt,
             sea_orm::sea_query::Expr::value(Some(now)),
         )
-        .filter(entities::turn_run::Column::Id.eq(first.id))
+        .filter(entities::code_turn::Column::Id.eq(first.id))
         .exec(&store.conn)
         .await
         .unwrap();
@@ -148,11 +170,6 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
     let invalid_chat = sample_chat();
     store.create_chat(&invalid_chat).await.unwrap();
 
-    let mut cross_chat_coordinator = make_queued_turn(&store, invalid_chat.id, "gpt-5", now).await;
-    cross_chat_coordinator.agent_run_id =
-        Set(crate::id::AgentRunId::foreground_for_chat(chat.id).0);
-    assert!(cross_chat_coordinator.insert(&store.conn).await.is_err());
-
     let mut negative_accounting = make_queued_turn(&store, invalid_chat.id, "gpt-5", now).await;
     negative_accounting.input_tokens = Set(-1);
     assert!(negative_accounting.insert(&store.conn).await.is_err());
@@ -164,7 +181,7 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
     running_without_lease.status = Set(TurnRunStatus::Running.as_str().into());
     running_without_lease.attempt_count = Set(1);
     running_without_lease.claim_count = Set(1);
-    running_without_lease.started_at = Set(Some(now));
+    running_without_lease.started_at = Set(now);
     assert!(running_without_lease.insert(&store.conn).await.is_err());
 
     let mut cancelling_without_lease =
@@ -172,7 +189,7 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
     cancelling_without_lease.status = Set(TurnRunStatus::Cancelling.as_str().into());
     cancelling_without_lease.attempt_count = Set(1);
     cancelling_without_lease.claim_count = Set(1);
-    cancelling_without_lease.started_at = Set(Some(now));
+    cancelling_without_lease.started_at = Set(now);
     assert!(cancelling_without_lease.insert(&store.conn).await.is_err());
 
     let mut retry_without_error = make_queued_turn(&store, invalid_chat.id, "gpt-5", now).await;
@@ -180,14 +197,14 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
     retry_without_error.attempt_count = Set(1);
     retry_without_error.claim_count = Set(1);
     retry_without_error.max_attempts = Set(2);
-    retry_without_error.started_at = Set(Some(now));
+    retry_without_error.started_at = Set(now);
     assert!(retry_without_error.insert(&store.conn).await.is_err());
 
     let mut failed_without_finish = make_queued_turn(&store, invalid_chat.id, "gpt-5", now).await;
     failed_without_finish.status = Set(TurnRunStatus::Failed.as_str().into());
     failed_without_finish.attempt_count = Set(1);
     failed_without_finish.claim_count = Set(1);
-    failed_without_finish.started_at = Set(Some(now));
+    failed_without_finish.started_at = Set(now);
     failed_without_finish.last_error_code = Set(Some("provider_error".into()));
     assert!(failed_without_finish.insert(&store.conn).await.is_err());
 
@@ -196,8 +213,8 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
     completed_without_output.status = Set(TurnRunStatus::Completed.as_str().into());
     completed_without_output.attempt_count = Set(1);
     completed_without_output.claim_count = Set(1);
-    completed_without_output.started_at = Set(Some(now));
-    completed_without_output.finished_at = Set(Some(now));
+    completed_without_output.started_at = Set(now);
+    completed_without_output.ended_at = Set(Some(now));
     assert!(completed_without_output.insert(&store.conn).await.is_err());
 
     let mut queued_with_output = make_queued_turn(&store, invalid_chat.id, "gpt-5", now).await;
@@ -209,8 +226,8 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
     completed_with_wrong_output.status = Set(TurnRunStatus::Completed.as_str().into());
     completed_with_wrong_output.attempt_count = Set(1);
     completed_with_wrong_output.claim_count = Set(1);
-    completed_with_wrong_output.started_at = Set(Some(now));
-    completed_with_wrong_output.finished_at = Set(Some(now));
+    completed_with_wrong_output.started_at = Set(now);
+    completed_with_wrong_output.ended_at = Set(Some(now));
     completed_with_wrong_output.output_message_id = Set(Some(first_output_id.0));
     assert!(completed_with_wrong_output
         .insert(&store.conn)
@@ -246,8 +263,8 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
     oversized_error.status = Set(TurnRunStatus::Failed.as_str().into());
     oversized_error.attempt_count = Set(1);
     oversized_error.claim_count = Set(1);
-    oversized_error.started_at = Set(Some(now));
-    oversized_error.finished_at = Set(Some(now));
+    oversized_error.started_at = Set(now);
+    oversized_error.ended_at = Set(Some(now));
     oversized_error.last_error_code = Set(Some(
         "e".repeat(crate::model::TurnRun::MAX_ERROR_CODE_LEN + 1),
     ));
@@ -269,13 +286,14 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
     running.status = Set(TurnRunStatus::Running.as_str().into());
     running.attempt_count = Set(1);
     running.claim_count = Set(1);
-    running.started_at = Set(Some(now));
+    running.started_at = Set(now);
     let running_token = uuid::Uuid::new_v4();
     running.lease_token = Set(Some(running_token));
     running.lease_expires_at = Set(Some(now + chrono::Duration::minutes(1)));
-    entities::turn_claim::ActiveModel {
+    entities::code_turn_claim::ActiveModel {
         token: Set(running_token),
         turn_id: Set(running_turn_id),
+        owner: Set("local".into()),
         attempt_count: Set(1),
         claim_count: Set(1),
         claimed_at: Set(now),
@@ -285,12 +303,12 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
     .await
     .unwrap();
     running.insert(&store.conn).await.unwrap();
-    entities::turn_run::Entity::update_many()
+    entities::code_turn::Entity::update_many()
         .col_expr(
-            entities::turn_run::Column::Status,
+            entities::code_turn::Column::Status,
             sea_orm::sea_query::Expr::value(TurnRunStatus::Cancelling.as_str()),
         )
-        .filter(entities::turn_run::Column::Id.eq(running_turn_id))
+        .filter(entities::code_turn::Column::Id.eq(running_turn_id))
         .exec(&store.conn)
         .await
         .unwrap();
@@ -300,9 +318,10 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
         .await
         .is_err());
 
-    let valid_failure = entities::turn_failure::ActiveModel {
+    let valid_failure = entities::code_turn_failure::ActiveModel {
         lease_token: Set(running_token),
         turn_id: Set(running_turn_id),
+        owner: Set("local".into()),
         attempt_count: Set(1),
         model_steps: Set(0),
         input_tokens: Set(0),
@@ -333,13 +352,13 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
     store
         .conn
         .execute_unprepared(&format!(
-            "INSERT INTO turn_failure (
-                lease_token, turn_id, attempt_count, model_steps,
+            "INSERT INTO code_turn_failure (
+                lease_token, turn_id, owner, attempt_count, model_steps,
                 input_tokens, output_tokens, cache_read_input_tokens,
                 cache_creation_input_tokens, requested_retry_at, error_code,
                 error_detail, resolved_at, result_status
             ) VALUES (
-                '{running_token}', '{running_turn_id}', 1, {},
+                '{running_token}', '{running_turn_id}', 'local', 1, {},
                 0, 0, 0, 0, '{}', 'provider_unavailable',
                 NULL, '{}', '{}'
             )",
@@ -355,9 +374,10 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
     assert!(oversized_failure_usage.insert(&store.conn).await.is_err());
     valid_failure.insert(&store.conn).await.unwrap();
 
-    assert!(entities::turn_claim::ActiveModel {
+    assert!(entities::code_turn_claim::ActiveModel {
         token: Set(uuid::Uuid::new_v4()),
         turn_id: Set(running_turn_id),
+        owner: Set("local".into()),
         attempt_count: Set(1),
         claim_count: Set(1),
         claimed_at: Set(now),
@@ -373,7 +393,7 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
     duplicate_lease.status = Set(TurnRunStatus::Running.as_str().into());
     duplicate_lease.attempt_count = Set(1);
     duplicate_lease.claim_count = Set(1);
-    duplicate_lease.started_at = Set(Some(now));
+    duplicate_lease.started_at = Set(now);
     duplicate_lease.lease_token = Set(Some(running_token));
     duplicate_lease.lease_expires_at = Set(Some(now + chrono::Duration::minutes(1)));
     assert!(duplicate_lease.insert(&store.conn).await.is_err());
@@ -384,9 +404,10 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
         make_queued_turn(&store, mismatched_receipt_chat.id, "gpt-5", now).await;
     let mismatched_turn_id = mismatched_receipt.id.clone().unwrap();
     let mismatched_token = uuid::Uuid::new_v4();
-    entities::turn_claim::ActiveModel {
+    entities::code_turn_claim::ActiveModel {
         token: Set(mismatched_token),
         turn_id: Set(mismatched_turn_id),
+        owner: Set("local".into()),
         attempt_count: Set(2),
         claim_count: Set(2),
         claimed_at: Set(now),
@@ -398,7 +419,7 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
     mismatched_receipt.status = Set(TurnRunStatus::Running.as_str().into());
     mismatched_receipt.attempt_count = Set(1);
     mismatched_receipt.claim_count = Set(2);
-    mismatched_receipt.started_at = Set(Some(now));
+    mismatched_receipt.started_at = Set(now);
     mismatched_receipt.lease_token = Set(Some(mismatched_token));
     mismatched_receipt.lease_expires_at = Set(Some(now + chrono::Duration::minutes(1)));
     assert!(mismatched_receipt.insert(&store.conn).await.is_err());
@@ -410,7 +431,7 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
     retry_wait.attempt_count = Set(1);
     retry_wait.claim_count = Set(1);
     retry_wait.max_attempts = Set(2);
-    retry_wait.started_at = Set(Some(now));
+    retry_wait.started_at = Set(now);
     retry_wait.last_error_code = Set(Some("provider_unavailable".into()));
     retry_wait.insert(&store.conn).await.unwrap();
 
@@ -420,8 +441,8 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
     failed.status = Set(TurnRunStatus::Failed.as_str().into());
     failed.attempt_count = Set(1);
     failed.claim_count = Set(1);
-    failed.started_at = Set(Some(now));
-    failed.finished_at = Set(Some(now));
+    failed.started_at = Set(now);
+    failed.ended_at = Set(Some(now));
     failed.last_error_code = Set(Some("unsafe_to_retry".into()));
     failed.last_error_detail = Set(Some("tool outcome is ambiguous".into()));
     failed.insert(&store.conn).await.unwrap();
@@ -430,12 +451,12 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
         let cancelled_chat = sample_chat();
         store.create_chat(&cancelled_chat).await.unwrap();
         let mut cancelled = make_queued_turn(&store, cancelled_chat.id, "gpt-5", now).await;
-        cancelled.status = Set(TurnRunStatus::Cancelled.as_str().into());
-        cancelled.finished_at = Set(Some(now));
+        cancelled.status = Set("interrupted".into());
+        cancelled.ended_at = Set(Some(now));
         if started {
             cancelled.attempt_count = Set(1);
             cancelled.claim_count = Set(1);
-            cancelled.started_at = Set(Some(now));
+            cancelled.started_at = Set(now);
         }
         cancelled.insert(&store.conn).await.unwrap();
     }
@@ -451,11 +472,11 @@ async fn turn_run_input_message_must_match_its_chat_and_turn() {
     let now = DateTime::<Utc>::from_timestamp(1_752_408_000, 0).unwrap();
 
     let mut missing = make_queued_turn(&store, first_chat.id, "gpt-5", now).await;
-    missing.input_message_id = Set(MessageId::new().0);
+    missing.input_message_id = Set(Some(MessageId::new().0));
     assert!(missing.insert(&store.conn).await.is_err());
 
     let mut wrong_chat = make_queued_turn(&store, first_chat.id, "gpt-5", now).await;
-    wrong_chat.chat_id = Set(second_chat.id.0);
+    wrong_chat.session_id = Set(second_chat.id.0);
     assert!(wrong_chat.insert(&store.conn).await.is_err());
 
     let mut wrong_turn = make_queued_turn(&store, first_chat.id, "gpt-5", now).await;
@@ -464,6 +485,7 @@ async fn turn_run_input_message_must_match_its_chat_and_turn() {
 }
 
 #[tokio::test]
+#[ignore = "admission ledger retired in D4a"]
 async fn turn_admission_reservation_is_global_exact_and_recoverable() {
     let (_dir, store) = temp_store().await;
     let first_chat = sample_chat();
@@ -522,18 +544,6 @@ async fn turn_admission_reservation_is_global_exact_and_recoverable() {
 
     // Expire the reservation explicitly instead of asking a loaded runner to
     // finish all assertions inside a tiny wall-clock lease.
-    let expired_at =
-        ops::agent_run::database_now(&store.conn).await.unwrap() - chrono::Duration::seconds(1);
-    let mut reservation: entities::turn_admission::ActiveModel =
-        entities::turn_admission::Entity::find_by_id(turn_id.0)
-            .one(&store.conn)
-            .await
-            .unwrap()
-            .unwrap()
-            .into();
-    reservation.lease_expires_at = Set(Some(expired_at));
-    reservation.update(&store.conn).await.unwrap();
-
     let takeover_token = uuid::Uuid::new_v4();
     let takeover_lease = match store
         .begin_turn_admission(&request, takeover_token, chrono::Duration::seconds(1))
@@ -548,6 +558,7 @@ async fn turn_admission_reservation_is_global_exact_and_recoverable() {
 }
 
 #[tokio::test]
+#[ignore = "admission ledger retired in D4a"]
 async fn turn_admission_rejects_an_unbounded_lease() {
     let (_dir, store) = temp_store().await;
     let chat = sample_chat();
@@ -576,6 +587,7 @@ async fn turn_admission_rejects_an_unbounded_lease() {
 }
 
 #[tokio::test]
+#[ignore = "admission ledger retired in D4a"]
 async fn reserved_queue_promotion_keeps_one_global_turn_owner() {
     let (_dir, store) = temp_store().await;
     let chat = sample_chat();
@@ -698,7 +710,7 @@ async fn queued_promotion_refuses_deleted_edited_and_reordered_snapshots() {
             .unwrap(),
         PromoteQueuedTurnOutcome::Stale
     );
-    assert!(store.get_turn_run(deleted.id).await.unwrap().is_none());
+    assert!(store.get_turn(deleted.id).await.unwrap().is_none());
 
     let edited = store
         .enqueue_queued_turn(&make_queued("before edit"))
@@ -750,6 +762,7 @@ async fn queued_promotion_refuses_deleted_edited_and_reordered_snapshots() {
 }
 
 #[tokio::test]
+#[ignore = "admission ledger retired in D4a"]
 async fn expired_turn_admission_lease_cannot_queue_or_release() {
     let (_dir, store) = temp_store().await;
     let chat = sample_chat();
@@ -835,7 +848,7 @@ async fn turn_acceptance_is_atomic_idempotent_and_chat_scoped() {
         outcome => panic!("unexpected retry outcome: {outcome:?}"),
     };
     assert_eq!(existing, accepted);
-    assert_eq!(store.list_turn_runs(chat.id).await.unwrap().len(), 1);
+    assert_eq!(store.list_turns(chat.id).await.unwrap().len(), 1);
     assert_eq!(store.list_messages(chat.id).await.unwrap().len(), 1);
 
     assert!(matches!(
@@ -898,7 +911,7 @@ async fn turn_acceptance_is_atomic_idempotent_and_chat_scoped() {
         .accept_turn(TurnId::new(), other.id, "gpt-5", "hello\0world")
         .await
         .is_err());
-    assert!(store.list_turn_runs(other.id).await.unwrap().is_empty());
+    assert!(store.list_turns(other.id).await.unwrap().is_empty());
     assert!(store.list_messages(other.id).await.unwrap().is_empty());
 
     entities::agent_run::Entity::update_many()
@@ -972,7 +985,7 @@ async fn concurrent_turn_acceptance_commits_one_request_and_one_message() {
     }
     assert_eq!(accepted, 1);
     assert_eq!(existing, 7);
-    assert_eq!(store.list_turn_runs(chat.id).await.unwrap().len(), 1);
+    assert_eq!(store.list_turns(chat.id).await.unwrap().len(), 1);
     assert_eq!(store.list_messages(chat.id).await.unwrap().len(), 1);
 
     let competing_chat = sample_chat();
@@ -1006,10 +1019,7 @@ async fn concurrent_turn_acceptance_commits_one_request_and_one_message() {
     }
     assert_eq!(accepted, 1);
     assert_eq!(busy, 7);
-    assert_eq!(
-        store.list_turn_runs(competing_chat.id).await.unwrap().len(),
-        1
-    );
+    assert_eq!(store.list_turns(competing_chat.id).await.unwrap().len(), 1);
     assert_eq!(
         store.list_messages(competing_chat.id).await.unwrap().len(),
         1
@@ -1050,10 +1060,7 @@ async fn concurrent_cross_chat_reuse_of_a_turn_id_commits_once() {
     }
     assert_eq!(accepted, 1);
     assert_eq!(conflicted, 1);
-    assert_eq!(
-        store.get_turn_run(turn_id).await.unwrap().unwrap().id,
-        turn_id
-    );
+    assert_eq!(store.get_turn(turn_id).await.unwrap().unwrap().id, turn_id);
     assert_eq!(
         store.list_messages(first_chat.id).await.unwrap().len()
             + store.list_messages(second_chat.id).await.unwrap().len(),
@@ -1084,8 +1091,8 @@ async fn turn_acceptance_rolls_back_when_input_message_insert_fails() {
         .accept_turn(turn_id, chat.id, "gpt-5", "force failure")
         .await
         .is_err());
-    assert_eq!(store.get_turn_run(turn_id).await.unwrap(), None);
-    assert!(store.list_turn_runs(chat.id).await.unwrap().is_empty());
+    assert_eq!(store.get_turn(turn_id).await.unwrap(), None);
+    assert!(store.list_turns(chat.id).await.unwrap().is_empty());
     assert!(store.list_messages(chat.id).await.unwrap().is_empty());
 }
 
@@ -1098,7 +1105,7 @@ async fn turn_acceptance_rolls_back_message_when_turn_insert_fails() {
         .conn
         .execute_unprepared(
             "CREATE TRIGGER fail_turn_run
-             BEFORE INSERT ON turn_run
+             BEFORE INSERT ON code_turn
              WHEN NEW.model = 'force-run-failure'
              BEGIN
                SELECT RAISE(ABORT, 'forced turn failure');
@@ -1112,7 +1119,7 @@ async fn turn_acceptance_rolls_back_message_when_turn_insert_fails() {
         .accept_turn(turn_id, chat.id, "force-run-failure", "input was inserted")
         .await
         .is_err());
-    assert_eq!(store.get_turn_run(turn_id).await.unwrap(), None);
-    assert!(store.list_turn_runs(chat.id).await.unwrap().is_empty());
+    assert_eq!(store.get_turn(turn_id).await.unwrap(), None);
+    assert!(store.list_turns(chat.id).await.unwrap().is_empty());
     assert!(store.list_messages(chat.id).await.unwrap().is_empty());
 }

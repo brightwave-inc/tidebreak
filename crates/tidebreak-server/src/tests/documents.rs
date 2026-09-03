@@ -79,7 +79,7 @@ async fn an_imported_file_commits_with_its_message_and_replays_as_a_chip() {
     assert!(llm_content.contains("transcribed from speech"));
     assert!(llm_content.contains(&document_id.to_string()));
     assert!(llm_content.ends_with("# User message\n\nSummarize this file"));
-    assert!(store.list_turn_runs(chat.id).await.unwrap()[0].voice_input_used);
+    assert!(store.list_turns(chat.id).await.unwrap()[0].voice_input_used);
 }
 
 #[tokio::test]

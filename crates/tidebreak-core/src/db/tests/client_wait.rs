@@ -17,7 +17,7 @@ async fn client_wait_parks_resolves_and_recovers_exactly() {
     let claimed_at = Utc::now();
     let turn_lease = uuid::Uuid::new_v4();
     store
-        .claim_turn_run(
+        .claim_turn(
             turn_lease,
             claimed_at,
             claimed_at + chrono::Duration::minutes(1),
@@ -311,7 +311,7 @@ async fn client_wait_parks_resolves_and_recovers_exactly() {
         completions(store.list_events(chat.id, 0).await.unwrap()).len(),
         1
     );
-    let resumable = store.get_turn_run(turn_id).await.unwrap().unwrap();
+    let resumable = store.get_turn(turn_id).await.unwrap().unwrap();
     assert_eq!(resumable.status, TurnRunStatus::Resuming);
     assert_eq!((resumable.attempt_count, resumable.claim_count), (1, 1));
     assert_eq!(resumable.model_steps, progress.model_steps);
@@ -364,7 +364,7 @@ async fn client_wait_parks_resolves_and_recovers_exactly() {
     ));
     let resumed_lease = uuid::Uuid::new_v4();
     let resumed = store
-        .claim_turn_run(
+        .claim_turn(
             resumed_lease,
             resolved_at,
             resolved_at + chrono::Duration::minutes(1),
@@ -388,7 +388,7 @@ async fn client_wait_parks_resolves_and_recovers_exactly() {
     };
     assert_eq!(
         store
-            .complete_turn_run_and_append_event(
+            .complete_turn_and_append_event(
                 turn_id,
                 turn_lease,
                 2,
@@ -404,7 +404,7 @@ async fn client_wait_parks_resolves_and_recovers_exactly() {
         "a stale claim remains lease-lost even when its proposed usage is lower"
     );
     assert!(store
-        .complete_turn_run_and_append_event(
+        .complete_turn_and_append_event(
             turn_id,
             resumed_lease,
             2,
@@ -485,7 +485,7 @@ async fn client_wait_parks_resolves_and_recovers_exactly() {
                 && turn.usage == expected_total_usage
                 && wait.progress == second_progress
     ));
-    let twice_parked = store.get_turn_run(turn_id).await.unwrap().unwrap();
+    let twice_parked = store.get_turn(turn_id).await.unwrap().unwrap();
     assert_eq!(
         twice_parked.model_steps,
         progress.model_steps + second_progress.model_steps
@@ -510,19 +510,19 @@ async fn client_wait_accounting_overflow_rolls_back_the_checkpoint() {
     let lease_token = uuid::Uuid::new_v4();
     let claimed_at = accepted.available_at + chrono::Duration::seconds(1);
     store
-        .claim_turn_run(
+        .claim_turn(
             lease_token,
             claimed_at,
             claimed_at + chrono::Duration::minutes(1),
         )
         .await
         .unwrap();
-    entities::turn_run::Entity::update_many()
+    entities::code_turn::Entity::update_many()
         .col_expr(
-            entities::turn_run::Column::InputTokens,
+            entities::code_turn::Column::InputTokens,
             sea_orm::sea_query::Expr::value(i64::from(u32::MAX)),
         )
-        .filter(entities::turn_run::Column::Id.eq(turn_id.0))
+        .filter(entities::code_turn::Column::Id.eq(turn_id.0))
         .exec(&store.conn)
         .await
         .unwrap();
@@ -557,7 +557,7 @@ async fn client_wait_accounting_overflow_rolls_back_the_checkpoint() {
         .await
         .unwrap()
         .is_none());
-    let still_running = store.get_turn_run(turn_id).await.unwrap().unwrap();
+    let still_running = store.get_turn(turn_id).await.unwrap().unwrap();
     assert_eq!(still_running.status, TurnRunStatus::Running);
     assert_eq!(still_running.lease_token, Some(lease_token));
     assert_eq!(still_running.usage.input_tokens, u32::MAX);
@@ -579,7 +579,7 @@ async fn park_test_client_wait(
     let claimed_at = accepted.available_at + chrono::Duration::seconds(1);
     let turn_lease = uuid::Uuid::new_v4();
     store
-        .claim_turn_run(
+        .claim_turn(
             turn_lease,
             claimed_at,
             claimed_at + chrono::Duration::minutes(1),
@@ -631,7 +631,7 @@ async fn park_test_user_questions(
     let claimed_at = accepted.available_at + chrono::Duration::seconds(1);
     let lease = uuid::Uuid::new_v4();
     store
-        .claim_turn_run(lease, claimed_at, claimed_at + chrono::Duration::minutes(1))
+        .claim_turn(lease, claimed_at, claimed_at + chrono::Duration::minutes(1))
         .await
         .unwrap()
         .turn
@@ -846,7 +846,7 @@ async fn user_questions_survive_reconnect_and_answer_exactly_once() {
     let resumed_lease = uuid::Uuid::new_v4();
     let resumed_at = answered_at + chrono::Duration::seconds(1);
     let resumed = restarted
-        .claim_turn_run(
+        .claim_turn(
             resumed_lease,
             resumed_at,
             resumed_at + chrono::Duration::minutes(1),
@@ -1077,7 +1077,7 @@ async fn user_question_answer_and_cancel_race_has_one_serial_outcome() {
         .unwrap()
         .is_empty());
     assert_eq!(
-        store.get_turn_run(turn_id).await.unwrap().unwrap().status,
+        store.get_turn(turn_id).await.unwrap().unwrap().status,
         TurnRunStatus::Cancelled
     );
 }
@@ -1163,7 +1163,7 @@ async fn user_question_answer_and_worker_claim_race_is_recoverable() {
     let claim = tokio::spawn(async move {
         barrier.wait().await;
         claim_store
-            .claim_turn_run(
+            .claim_turn(
                 first_lease,
                 claim_at,
                 claim_at + chrono::Duration::minutes(1),
@@ -1182,7 +1182,7 @@ async fn user_question_answer_and_worker_claim_race_is_recoverable() {
     } else {
         let lease = uuid::Uuid::new_v4();
         let turn = store
-            .claim_turn_run(
+            .claim_turn(
                 lease,
                 claim_at + chrono::Duration::seconds(1),
                 claim_at + chrono::Duration::minutes(1),
@@ -1255,7 +1255,7 @@ async fn client_wait_schema_rejects_invalid_scope_claim_and_lifecycle() {
     let valid_second = entities::turn_client_wait::ActiveModel {
         call_id: Set(second_call.id.0),
         turn_id: Set(turn_id.0),
-        chat_id: Set(chat.id.0),
+        session_id: Set(chat.id.0),
         park_lease_token: Set(wait.park_lease_token),
         attempt_count: Set(wait.attempt_count),
         claim_count: Set(wait.claim_count),
@@ -1279,7 +1279,7 @@ async fn client_wait_schema_rejects_invalid_scope_claim_and_lifecycle() {
     assert!(wrong_claim.insert(&store.conn).await.is_err());
 
     let mut wrong_scope = valid_second.clone();
-    wrong_scope.chat_id = Set(ChatId::new().0);
+    wrong_scope.session_id = Set(ChatId::new().0);
     wrong_scope.status = Set(crate::model::TurnClientWaitStatus::Cancelled
         .as_str()
         .into());
@@ -1429,12 +1429,7 @@ async fn client_wait_cancellation_fences_unclaimed_and_claimed_native_work() {
         AgentEvent::TurnCancelled { usage } if usage == test_checkpoint_progress().usage
     ));
     assert_eq!(
-        store
-            .get_turn_run(claimed_turn)
-            .await
-            .unwrap()
-            .unwrap()
-            .status,
+        store.get_turn(claimed_turn).await.unwrap().unwrap().status,
         TurnRunStatus::Cancelled
     );
     let claimed_wait = entities::turn_client_wait::Entity::find_by_id(claimed_call.id.0)
@@ -1539,7 +1534,7 @@ async fn concurrent_client_resolution_and_cancellation_do_not_invert_locks() {
             ResolveToolCallOutcome::Resolved
         );
         assert_eq!(
-            store.get_turn_run(turn_id).await.unwrap().unwrap().status,
+            store.get_turn(turn_id).await.unwrap().unwrap().status,
             TurnRunStatus::Cancelled
         );
     }

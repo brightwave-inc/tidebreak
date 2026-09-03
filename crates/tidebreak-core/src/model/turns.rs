@@ -27,7 +27,7 @@ pub struct TurnRun {
     pub input_message_id: MessageId,
     /// Exact designated terminal assistant message committed with successful
     /// completion. The composite database FK enforces its message/chat/turn
-    /// identity; [`Store::complete_turn_run`](crate::storage::Store::complete_turn_run)
+    /// identity; [`Store::complete_turn`](crate::storage::Store::complete_turn)
     /// enforces the assistant role because a foreign key cannot bind a literal
     /// role value.
     pub output_message_id: Option<MessageId>,
@@ -194,6 +194,16 @@ impl TurnRunStatus {
     pub const fn is_terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
     }
+
+    /// Database tokens that mean this turn was cancelled.
+    ///
+    /// Code writes `interrupted`; chat historically wrote `cancelled`. Both
+    /// remain in the merged status check, so readers have to match both.
+    pub const CANCELLED: &'static [&'static str] = &["cancelled", "interrupted"];
+
+    /// Database tokens that mean this turn is finished.
+    pub const TERMINAL: &'static [&'static str] =
+        &["completed", "failed", "cancelled", "interrupted"];
 }
 
 /// Explicit completion policy for a durable multi-child foreground wait.

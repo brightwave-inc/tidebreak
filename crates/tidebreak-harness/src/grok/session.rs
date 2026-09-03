@@ -1377,6 +1377,7 @@ exit 0
 
         fn turn(text: &str) -> TurnInput {
             TurnInput {
+                turn_id: None,
                 text: text.into(),
                 model: None,
                 reasoning_effort: None,

@@ -113,12 +113,12 @@ fn dispatchable(call: &crate::model::SandboxToolCallRequest) -> SandboxToolCallP
 }
 
 async fn set_turn_max_attempts(store: &DbStore, turn_id: TurnId, max_attempts: i32) {
-    entities::turn_run::Entity::update_many()
+    entities::code_turn::Entity::update_many()
         .col_expr(
-            entities::turn_run::Column::MaxAttempts,
+            entities::code_turn::Column::MaxAttempts,
             sea_orm::sea_query::Expr::value(max_attempts),
         )
-        .filter(entities::turn_run::Column::Id.eq(turn_id.0))
+        .filter(entities::code_turn::Column::Id.eq(turn_id.0))
         .exec(&store.conn)
         .await
         .unwrap();
@@ -208,7 +208,7 @@ async fn park_test_plan(
     let claimed_at = accepted.available_at + chrono::Duration::seconds(1);
     let lease = uuid::Uuid::new_v4();
     store
-        .claim_turn_run(lease, claimed_at, claimed_at + chrono::Duration::minutes(1))
+        .claim_turn(lease, claimed_at, claimed_at + chrono::Duration::minutes(1))
         .await
         .unwrap()
         .turn

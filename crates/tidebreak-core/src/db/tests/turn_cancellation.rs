@@ -83,19 +83,19 @@ async fn queued_and_retry_wait_turns_cancel_immediately_and_idempotently() {
         AcceptTurnOutcome::Accepted(turn) => turn,
         outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
     };
-    entities::turn_run::Entity::update_many()
+    entities::code_turn::Entity::update_many()
         .col_expr(
-            entities::turn_run::Column::MaxAttempts,
+            entities::code_turn::Column::MaxAttempts,
             sea_orm::sea_query::Expr::value(2),
         )
-        .filter(entities::turn_run::Column::Id.eq(retry_turn.id.0))
+        .filter(entities::code_turn::Column::Id.eq(retry_turn.id.0))
         .exec(&store.conn)
         .await
         .unwrap();
     let claimed_at = retry_turn.available_at + chrono::Duration::seconds(1);
     let token = uuid::Uuid::new_v4();
     store
-        .claim_turn_run(token, claimed_at, claimed_at + chrono::Duration::minutes(2))
+        .claim_turn(token, claimed_at, claimed_at + chrono::Duration::minutes(2))
         .await
         .unwrap()
         .turn
@@ -103,7 +103,7 @@ async fn queued_and_retry_wait_turns_cancel_immediately_and_idempotently() {
     let failed_at = claimed_at + chrono::Duration::seconds(1);
     let retry_at = failed_at + chrono::Duration::minutes(1);
     let RecordTurnFailureOutcome::Recorded(receipt) = store
-        .record_turn_run_failure(
+        .record_turn_failure(
             retry_turn.id,
             token,
             failed_at,
@@ -141,7 +141,7 @@ async fn queued_and_retry_wait_turns_cancel_immediately_and_idempotently() {
     assert_eq!(cancelled.last_error_detail, None);
     assert_eq!(
         store
-            .record_turn_run_failure(
+            .record_turn_failure(
                 retry_turn.id,
                 token,
                 retry_cancelled_at,
@@ -199,7 +199,7 @@ async fn immediate_cancellation_rolls_back_when_terminal_event_fails() {
         )
         .await
         .is_err());
-    let still_queued = store.get_turn_run(turn.id).await.unwrap().unwrap();
+    let still_queued = store.get_turn(turn.id).await.unwrap().unwrap();
     assert_eq!(still_queued.status, TurnRunStatus::Queued);
     assert_eq!(still_queued.finished_at, None);
     assert_eq!(store.list_events(chat.id, 0).await.unwrap().len(), 1);
@@ -222,7 +222,7 @@ async fn running_turn_cancellation_holds_the_chat_until_exact_worker_acknowledge
     let expires_at = claimed_at + chrono::Duration::minutes(1);
     let token = uuid::Uuid::new_v4();
     store
-        .claim_turn_run(token, claimed_at, expires_at)
+        .claim_turn(token, claimed_at, expires_at)
         .await
         .unwrap()
         .turn
@@ -242,7 +242,7 @@ async fn running_turn_cancellation_holds_the_chat_until_exact_worker_acknowledge
     assert_eq!(cancelling.lease_expires_at, Some(expires_at));
     assert_eq!(cancelling.finished_at, None);
     assert!(!store
-        .heartbeat_turn_run(
+        .heartbeat_turn(
             turn.id,
             token,
             requested_at + chrono::Duration::seconds(1),
@@ -262,14 +262,14 @@ async fn running_turn_cancellation_holds_the_chat_until_exact_worker_acknowledge
     };
     assert_eq!(
         store
-            .complete_turn_run(turn.id, token, 0, output.created_at, &output)
+            .complete_turn(turn.id, token, 0, output.created_at, &output)
             .await
             .unwrap(),
         None
     );
     assert_eq!(
         store
-            .record_turn_run_failure(
+            .record_turn_failure(
                 turn.id,
                 token,
                 output.created_at,
@@ -431,7 +431,7 @@ async fn cancellation_acknowledgement_accepts_the_request_callers_clock() {
     let token = uuid::Uuid::new_v4();
     let claimed_at = Utc::now();
     store
-        .claim_turn_run(token, claimed_at, claimed_at + chrono::Duration::minutes(1))
+        .claim_turn(token, claimed_at, claimed_at + chrono::Duration::minutes(1))
         .await
         .unwrap()
         .turn
@@ -475,7 +475,7 @@ async fn concurrent_cancellation_requests_converge_on_one_running_turn() {
     let claimed_at = turn.available_at + chrono::Duration::seconds(1);
     let token = uuid::Uuid::new_v4();
     store
-        .claim_turn_run(token, claimed_at, claimed_at + chrono::Duration::minutes(1))
+        .claim_turn(token, claimed_at, claimed_at + chrono::Duration::minutes(1))
         .await
         .unwrap()
         .turn
@@ -510,7 +510,7 @@ async fn concurrent_cancellation_requests_converge_on_one_running_turn() {
     }
     assert_eq!((requested, existing), (1, 7));
     assert_eq!(
-        store.get_turn_run(turn.id).await.unwrap().unwrap().status,
+        store.get_turn(turn.id).await.unwrap().unwrap().status,
         TurnRunStatus::Cancelling
     );
 }

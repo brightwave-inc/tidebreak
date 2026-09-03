@@ -958,7 +958,7 @@ async fn plan_mode_does_not_run_ask_user_questions() {
     let lease_token = uuid::Uuid::new_v4();
     let now = Utc::now();
     store
-        .claim_turn_run(lease_token, now, now + chrono::Duration::minutes(1))
+        .claim_turn(lease_token, now, now + chrono::Duration::minutes(1))
         .await
         .unwrap();
     let mut registry = ToolRegistry::new();

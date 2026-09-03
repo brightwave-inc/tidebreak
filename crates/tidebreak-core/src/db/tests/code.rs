@@ -23,12 +23,13 @@ use crate::db::code::{
     set_workspace_title_if, settle_approval_claim, update_queued_turn, ClaimedApprovalSettlement,
     CodeJournalError, CodeSessionExecutionSettings, CodeTranscriptSearchSource, MAX_REPLAY_EVENTS,
 };
+use crate::db::entities;
 use crate::{
     BlobRetirementStatus, ChatId, ImageMediaType, ImageRef, OwnerId, PermissionMode,
-    ReasoningEffort, Store,
+    ReasoningEffort, Store, TurnId,
 };
 use chrono::Utc;
-use sea_orm::ConnectionTrait;
+use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter};
 
 fn now() -> chrono::DateTime<Utc> {
     Utc::now()
@@ -54,6 +55,73 @@ async fn seeded_session() -> (
     let (dir, store) = temp_store().await;
     let (session_id, turn_id) = seed_owner(&store, &OwnerId::local(), "example").await;
     (dir, store, session_id, turn_id)
+}
+
+#[tokio::test]
+async fn an_internal_turn_claim_backfills_its_input_message_once() {
+    let (_dir, store, session_id, code_turn_id) = seeded_session().await;
+    let turn_id = TurnId(code_turn_id.0);
+    let claimed_at = now();
+    let first_token = uuid::Uuid::new_v4();
+    assert_eq!(
+        store
+            .take_lease_on_turn_with_input_message(
+                turn_id,
+                first_token,
+                claimed_at,
+                claimed_at + chrono::Duration::minutes(1),
+                "hello",
+            )
+            .await
+            .unwrap(),
+        Some(())
+    );
+
+    let first = entities::code_turn::Entity::find_by_id(code_turn_id.0)
+        .one(&store.conn)
+        .await
+        .unwrap()
+        .unwrap();
+    let input_message_id = first
+        .input_message_id
+        .expect("the claim must add the user transcript row");
+    assert_eq!(first.lease_token, Some(first_token));
+    let message = entities::message::Entity::find_by_id(input_message_id)
+        .one(&store.conn)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(message.chat_id, session_id.0);
+    assert_eq!(message.turn_id, code_turn_id.0);
+    assert_eq!(message.role, "user");
+    assert_eq!(message.content, "hello");
+
+    let handed_back_at = claimed_at + chrono::Duration::seconds(1);
+    assert!(store
+        .expire_turn_lease(turn_id, first_token, handed_back_at)
+        .await
+        .unwrap());
+    let second_token = uuid::Uuid::new_v4();
+    assert_eq!(
+        store
+            .take_lease_on_turn_with_input_message(
+                turn_id,
+                second_token,
+                handed_back_at + chrono::Duration::seconds(1),
+                handed_back_at + chrono::Duration::minutes(1),
+                "hello",
+            )
+            .await
+            .unwrap(),
+        Some(())
+    );
+    let messages = entities::message::Entity::find()
+        .filter(entities::message::Column::TurnId.eq(code_turn_id.0))
+        .all(&store.conn)
+        .await
+        .unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].id, input_message_id);
 }
 
 #[tokio::test]
@@ -2269,6 +2337,10 @@ fn chat_and_code_entities_do_not_cross_reference() {
                 && !line.contains("CodeTurnId")
                 && !line.contains("code_turn_attachment")
                 && !line.contains("code_approval")
+                && !line.contains("code_turn_document_attachment")
+                && !line.contains("code_turn_claim")
+                && !line.contains("code_turn_steer")
+                && !line.contains("code_turn_failure")
             {
                 panic!("{} references chat TurnId: {line}", path.display());
             }

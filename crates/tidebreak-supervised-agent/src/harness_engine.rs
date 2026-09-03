@@ -254,6 +254,7 @@ impl Engine for HarnessEngine {
         };
         self.sink.clear();
         let input = TurnInput {
+            turn_id: None,
             text: request.input,
             model: self.spec.model.clone(),
             reasoning_effort: self.spec.reasoning_effort,
@@ -617,6 +618,8 @@ mod tests {
                 durable_parks: CapLevel::Unsupported,
                 user_questions: CapLevel::Unsupported,
                 standing_grants: CapLevel::Unsupported,
+                mid_turn_resume: CapLevel::Unsupported,
+                transcript: CapLevel::Unsupported,
                 memory_loopback: CapLevel::Unsupported,
             }
         }

@@ -422,7 +422,7 @@ async fn assert_rejected_attachment_left_no_turn_rows(store: &DbStore, chat_id: 
         .await
         .unwrap()
         .is_empty());
-    assert!(store.list_turn_runs(chat_id).await.unwrap().is_empty());
+    assert!(store.list_turns(chat_id).await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -568,7 +568,7 @@ async fn attachment_bounds_are_rejected_before_any_row_is_written() {
         .await
         .unwrap()
         .is_empty());
-    assert!(store.list_turn_runs(chat.id).await.unwrap().is_empty());
+    assert!(store.list_turns(chat.id).await.unwrap().is_empty());
 }
 
 #[tokio::test]

@@ -361,7 +361,7 @@ async fn claimed_cancel_carries_partial_output_and_context_notes_the_stop() {
     let claimed_at = Utc::now();
     let lease = uuid::Uuid::new_v4();
     store
-        .claim_turn_run(lease, claimed_at, claimed_at + chrono::Duration::minutes(1))
+        .claim_turn(lease, claimed_at, claimed_at + chrono::Duration::minutes(1))
         .await
         .unwrap()
         .turn

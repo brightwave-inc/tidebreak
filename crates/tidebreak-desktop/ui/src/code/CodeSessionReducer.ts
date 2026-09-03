@@ -219,7 +219,7 @@ export type PendingTerminalReconciliation = {
   candidateTurnId: string | null;
   /** The first retained start after an unassigned terminal, when one appears. */
   nextTurnId: string | null;
-  status: Exclude<CodeTurnStatus, "running" | "waiting">;
+  status: "completed" | "failed" | "interrupted";
   usage: CodeUsage | null;
   error: string | null;
   diffstat: Diffstat | null;
@@ -302,9 +302,17 @@ export function markCodeSessionHydrated(
   return state.hydrated ? state : { ...state, hydrated: true };
 }
 
-/** Whether a turn is still open: live, or parked waiting on a decision. */
-function turnIsOpen(status: CodeTurnStatus): status is "running" | "waiting" {
-  return status === "running" || status === "waiting";
+function turnIsTerminal(
+  status: CodeTurnStatus,
+): status is "completed" | "failed" | "interrupted" {
+  return (
+    status === "completed" || status === "failed" || status === "interrupted"
+  );
+}
+
+/** Whether a turn is still open: live, queued, or parked waiting on a decision. */
+function turnIsOpen(status: CodeTurnStatus): boolean {
+  return !turnIsTerminal(status);
 }
 
 /** Record a turn that a live submit received before its journal start. */
@@ -340,7 +348,7 @@ export function applyCodeTurnSnapshot(
   turn: CodeTurnSnapshot,
 ): CodeSessionState {
   const next = upsertTurnPrompt(state, turn);
-  if (turnIsOpen(turn.status)) return next;
+  if (!turnIsTerminal(turn.status)) return next;
   const durableBoundaryTurnIds = new Set(next.durableBoundaryTurnIds);
   durableBoundaryTurnIds.add(turn.id);
   const withBoundary = {
@@ -396,7 +404,7 @@ function reconcileCodeTurnSnapshotWithPending(
   turn: CodeTurnSnapshot,
   pending: PendingTerminalReconciliation | undefined,
 ): CodeSessionState {
-  if (turnIsOpen(turn.status)) {
+  if (!turnIsTerminal(turn.status)) {
     return applyCodeTurnSnapshot(state, turn);
   }
 
@@ -1518,7 +1526,7 @@ function upsertTurnBoundary(
   items: CodeTranscriptItem[],
   boundary: {
     turnId: string;
-    status: Exclude<CodeTurnStatus, "running" | "waiting">;
+    status: "completed" | "failed" | "interrupted";
     durationMs: number | null;
     usage: CodeUsage | null;
     error: string | null;
@@ -1565,7 +1573,7 @@ function replaceTurnBoundary(
   items: CodeTranscriptItem[],
   boundary: {
     turnId: string;
-    status: Exclude<CodeTurnStatus, "running" | "waiting">;
+    status: "completed" | "failed" | "interrupted";
     durationMs: number | null;
     usage: CodeUsage | null;
     error: string | null;

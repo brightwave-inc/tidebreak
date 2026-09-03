@@ -33,7 +33,7 @@ async fn claimed_agent_returns_a_client_tool_checkpoint_without_executing_it() {
     let lease_token = uuid::Uuid::new_v4();
     let claimed_at = Utc::now();
     store
-        .claim_turn_run(
+        .claim_turn(
             lease_token,
             claimed_at,
             claimed_at + chrono::Duration::minutes(1),
@@ -260,7 +260,7 @@ async fn claimed_foreground_agent_returns_exact_ordered_wait_checkpoint() {
     let lease_token = uuid::Uuid::new_v4();
     let claimed_at = Utc::now();
     store
-        .claim_turn_run(
+        .claim_turn(
             lease_token,
             claimed_at,
             claimed_at + chrono::Duration::minutes(1),
@@ -353,7 +353,7 @@ async fn a_mixed_batch_runs_the_server_call_then_checkpoints_the_client_one() {
     let lease_token = uuid::Uuid::new_v4();
     let claimed_at = Utc::now();
     store
-        .claim_turn_run(
+        .claim_turn(
             lease_token,
             claimed_at,
             claimed_at + chrono::Duration::minutes(1),
@@ -466,7 +466,7 @@ async fn a_client_call_with_unparseable_arguments_is_answered_not_discarded() {
     let lease_token = uuid::Uuid::new_v4();
     let claimed_at = Utc::now();
     store
-        .claim_turn_run(
+        .claim_turn(
             lease_token,
             claimed_at,
             claimed_at + chrono::Duration::minutes(1),
@@ -570,7 +570,7 @@ async fn client_call_with_prose_checkpoints_and_keeps_the_preamble() {
     let lease_token = uuid::Uuid::new_v4();
     let claimed_at = Utc::now();
     store
-        .claim_turn_run(
+        .claim_turn(
             lease_token,
             claimed_at,
             claimed_at + chrono::Duration::minutes(1),

@@ -888,6 +888,54 @@ async fn run_worker(
                     "could not resume the parked turn after a worker restart"
                 );
             }
+        } else if session.harness_kind == HarnessKind::Internal
+            && open.status == CodeTurnStatus::Running
+        {
+            let lease_token = uuid::Uuid::new_v4();
+            let now = Utc::now();
+            let claimed = sink
+                .db
+                .take_lease_on_turn_with_input_message(
+                    tidebreak_core::TurnId(open.id.0),
+                    lease_token,
+                    now,
+                    now + chrono::Duration::seconds(60),
+                    &open.user_input,
+                )
+                .await;
+            match claimed {
+                Ok(Some(())) => {
+                    let input = TurnInput {
+                        turn_id: Some(open.id),
+                        text: open.user_input.clone(),
+                        model: session.model.clone(),
+                        reasoning_effort: session.reasoning_effort,
+                        fast_mode: session.fast_mode,
+                        images: Vec::new(),
+                    };
+                    if let Err(error) = engine.run_turn(input).await {
+                        warn!(
+                            session = %session.id,
+                            error = %error,
+                            "could not resume the running internal turn after a worker restart"
+                        );
+                    }
+                }
+                Ok(None) => {
+                    warn!(
+                        session = %session.id,
+                        turn = %open.id,
+                        "could not reclaim the running internal turn after a worker restart"
+                    );
+                }
+                Err(error) => {
+                    warn!(
+                        session = %session.id,
+                        error = %error,
+                        "could not reclaim the running internal turn after a worker restart"
+                    );
+                }
+            }
         }
     }
 
@@ -1987,7 +2035,6 @@ async fn continue_parked_turn(
             if delivered_here {
                 apply_accepted_plan_mode(db, bus, session, engine, &input).await;
             }
-            turn.status = CodeTurnStatus::Running;
             turn.park_ref = None;
             turn.park_wait = None;
             let _ = save_turn(db, &session.owner, &turn).await;
@@ -2085,7 +2132,6 @@ async fn continue_parked_turn(
                 if delivered_here {
                     apply_accepted_plan_mode(db, bus, session, engine, &input).await;
                 }
-                turn.status = CodeTurnStatus::Running;
                 turn.park_ref = None;
                 turn.park_wait = None;
                 let _ = save_turn(db, &session.owner, &turn).await;
@@ -2490,6 +2536,23 @@ async fn drive_turn_inner(
         }
     }
 
+    // An internal turn that parked for a client or an agent run hands its
+    // lease back and leaves the session idle, but the turn is still open. A
+    // second turn inserted beside it could never take its transcript message
+    // (one live turn per session may own one), so refuse it up front.
+    if session.harness_kind == HarnessKind::Internal {
+        if let Some(open) = get_open_turn(db, &session.owner, session.id)
+            .await
+            .map_err(|err| WorkerError::Failed(err.to_string()))?
+        {
+            return Err(WorkerError::Conflict(format!(
+                "turn {} is still {}; finish it before sending again",
+                open.id,
+                open.status.as_str()
+            )));
+        }
+    }
+
     // An idle send resolves settings after it owns the worktree, so a
     // reservation that committed while this request was in flight reaches the
     // engine. A queued row uses the worker copy initialized before the wait and
@@ -2599,6 +2662,31 @@ async fn drive_turn_inner(
             .map_err(|err| WorkerError::Failed(err.to_string()))?;
     }
     sink.set_turn(turn.id);
+
+    let lease_token = if session.harness_kind == HarnessKind::Internal {
+        let lease_token = uuid::Uuid::new_v4();
+        let now = Utc::now();
+        let lease_expires_at = now + chrono::Duration::seconds(60);
+        let claimed = db
+            .take_lease_on_turn_with_input_message(
+                tidebreak_core::TurnId(turn.id.0),
+                lease_token,
+                now,
+                lease_expires_at,
+                &message,
+            )
+            .await
+            .map_err(|err| WorkerError::Failed(err.to_string()))?;
+        if claimed.is_none() {
+            return Err(WorkerError::Failed(format!(
+                "could not claim a lease on turn {}",
+                turn.id
+            )));
+        }
+        Some(lease_token)
+    } else {
+        None
+    };
 
     session.lifecycle = CodeSessionLifecycle::Running;
     super::attention::replace_attention(
@@ -2715,6 +2803,7 @@ async fn drive_turn_inner(
         _ => engine_text,
     };
     let mut next_input = Some(TurnInput {
+        turn_id: Some(turn.id),
         text: engine_text,
         model: turn_settings.model.clone(),
         reasoning_effort: turn_settings.reasoning_effort,
@@ -2728,6 +2817,8 @@ async fn drive_turn_inner(
     // "the engine is gone" — which would re-attach a worker to a worktree a
     // live child is still writing to.
     let mut pid_changes = engine.child_pid_changes();
+    let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(15));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // Control commands run concurrently with the turn. Awaiting one inline
     // would stop draining the child's stdout — during an interrupt's grace
     // period that is what turns a clean abort into a kill.
@@ -2788,6 +2879,19 @@ async fn drive_turn_inner(
                         let _ = save_session(db, session).await;
                     }
                 }
+                _ = heartbeat.tick() => {
+                    if let Some(lease_token) = lease_token {
+                        let now = Utc::now();
+                        let _ = db
+                            .heartbeat_turn_lease(
+                                tidebreak_core::TurnId(turn.id.0),
+                                lease_token,
+                                now,
+                                now + chrono::Duration::seconds(60),
+                            )
+                            .await;
+                    }
+                }
             }
         };
         let Ok(TurnOutcome::Parked {
@@ -2835,7 +2939,6 @@ async fn drive_turn_inner(
                 if delivered_here {
                     apply_accepted_plan_mode(db, bus, session, engine, &input).await;
                 }
-                turn.status = CodeTurnStatus::Running;
                 turn.park_ref = None;
                 turn.park_wait = None;
                 let _ = save_turn(db, &session.owner, &turn).await;
@@ -2927,9 +3030,16 @@ async fn drive_turn_inner(
                 )
                 .await;
             }
-            if turn.status.is_open() {
+            if turn.status.is_open()
+                && !matches!(
+                    turn.status,
+                    CodeTurnStatus::WaitingForClient | CodeTurnStatus::WaitingForAgentRun
+                )
+            {
                 // The stream ended without closing the turn. Only the worker
-                // knows whether that was asked for.
+                // knows whether that was asked for. Client and agent-run
+                // waits keep the lease-release shape until D4b. An approval
+                // park stays on the worker, so an interrupt must close it.
                 let (status, event) = if interrupted {
                     (
                         CodeTurnStatus::Interrupted,
@@ -4296,6 +4406,138 @@ mod tests {
             )),
             "the journal records the engine's own decision"
         );
+        let _ = handle.commands.send(WorkerCommand::Shutdown).await;
+    }
+
+    /// An internal turn parked for a client hands its lease back and leaves
+    /// the session idle while the row stays open. A send in that gap must be
+    /// refused rather than inserted beside it, where it could never take
+    /// its transcript message.
+    #[tokio::test]
+    async fn a_send_over_an_internal_turn_waiting_on_a_client_is_refused() {
+        let (directory, store, bus, session_id) = seeded_session(HarnessKind::Internal, None).await;
+        let owner = OwnerId::local();
+        let sink = sink_for(
+            store.clone(),
+            bus,
+            owner.clone(),
+            session_id,
+            1,
+            HarnessKind::Internal,
+            false,
+            None,
+            Vec::new(),
+            None,
+            None,
+            None,
+            None,
+            crate::code::pr_refresh::HotPullRequests::default(),
+        );
+        let mut session = get_session(&store, &owner, session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        session.lifecycle = CodeSessionLifecycle::Idle;
+        assert!(save_session(&store, &session).await.unwrap());
+        let waiting = CodeTurn {
+            id: CodeTurnId::new(),
+            session_id,
+            ordinal: 1,
+            status: CodeTurnStatus::WaitingForClient,
+            model: None,
+            fast_mode: false,
+            user_input: "needs the client".into(),
+            user_input_blob_id: None,
+            attachments: Vec::new(),
+            checkpoint_ref: None,
+            diffstat: None,
+            usage: None,
+            narrative: None,
+            rewrite: None,
+            started_at: Utc::now(),
+            ended_at: None,
+            park_ref: None,
+            park_wait: None,
+        };
+        insert_turn(&store, &owner, &waiting).await.unwrap();
+
+        let worktree = directory.path().join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let private = directory.path().join("private");
+        std::fs::create_dir(&private).unwrap();
+        let private_root =
+            super::super::scratch::ScratchRoot::open_for_test(&private).expect("scratch root");
+        let adapter = ScriptedAdapter::new(vec![
+            HarnessEvent::TurnStarted,
+            HarnessEvent::TurnCompleted {
+                usage: CodeUsage::default(),
+            },
+        ]);
+        let engine = adapter
+            .launch(SessionSpec {
+                owner: owner.clone(),
+                session_id,
+                worktree,
+                allowed_read_roots: Vec::new(),
+                permission_mode: session.permission_mode,
+                model: None,
+                reasoning_effort: None,
+                fast_mode: false,
+                resume_ref: None,
+                extra_argv: Vec::new(),
+                extra_env: Vec::new(),
+                relay_key_env: None,
+                env: Vec::new(),
+                approval: None,
+                binary: Some(std::path::PathBuf::from("/scripted/engine")),
+                sink: sink.clone() as Arc<dyn tidebreak_harness::HarnessEventSink>,
+                browser: None,
+            })
+            .await
+            .unwrap();
+        let handle = spawn_session_worker(
+            session.clone(),
+            engine,
+            sink,
+            AttachmentStore {
+                blobs: None,
+                private_root,
+                engine_reads_images: true,
+                memory_loopback: false,
+            },
+            Arc::new(tokio::sync::Mutex::new(())),
+            tokio::sync::watch::channel(false).1,
+        );
+
+        let (turn_reply, turn_response) = oneshot::channel();
+        handle
+            .commands
+            .send(WorkerCommand::RunTurn {
+                message: "and now this".into(),
+                attachments: Vec::new(),
+                trigger_delivery: None,
+                reply: turn_reply,
+            })
+            .await
+            .unwrap();
+        match tokio::time::timeout(Duration::from_secs(5), turn_response)
+            .await
+            .expect("the send is answered")
+            .unwrap()
+        {
+            Err(WorkerError::Conflict(message)) => assert_eq!(
+                message,
+                format!(
+                    "turn {} is still waiting_for_client; finish it before sending again",
+                    waiting.id
+                )
+            ),
+            Err(error) => panic!("unexpected turn rejection: {error:?}"),
+            Ok(turn) => panic!("the send ran as turn {}", turn.id),
+        }
+        let turns = list_turns(&store, &owner, session_id).await.unwrap();
+        assert_eq!(turns.len(), 1, "no second row was inserted: {turns:?}");
+        assert_eq!(turns[0].status, CodeTurnStatus::WaitingForClient);
         let _ = handle.commands.send(WorkerCommand::Shutdown).await;
     }
 

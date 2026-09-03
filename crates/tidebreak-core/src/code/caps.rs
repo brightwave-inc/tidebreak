@@ -113,6 +113,19 @@ pub struct HarnessCaps {
     /// not a separate subsystem. The internal engine's grant ladders
     /// declare it `Supported`.
     pub standing_grants: CapLevel,
+    /// The engine can resume a turn that was interrupted mid-model-call.
+    ///
+    /// Boot recovery skips pid-less sessions that declare this, so a
+    /// restart does not close an in-flight internal turn as interrupted.
+    /// Update-quiesce uses the same flag: `Supported` aborts and hands the
+    /// lease back; `Unsupported` waits for a turn boundary (decision 0080).
+    /// External harnesses declare `Unsupported` — no engine can resume a
+    /// harness turn.
+    pub mid_turn_resume: CapLevel,
+    /// The engine stores a provider transcript (`message` rows) the host
+    /// can read. `GET /chats/{id}/messages` refuses on a session whose
+    /// engine does not declare it, rather than returning an empty list.
+    pub transcript: CapLevel,
     /// The engine mounts Tidebreak's loopback MCP server, so it can call
     /// the memory verb (propose, search, read) on that bridge.
     pub memory_loopback: CapLevel,
@@ -150,6 +163,8 @@ mod tests {
             durable_parks: CapLevel::Unsupported,
             user_questions: CapLevel::Unsupported,
             standing_grants: CapLevel::Unsupported,
+            mid_turn_resume: CapLevel::Unsupported,
+            transcript: CapLevel::Unsupported,
             memory_loopback: CapLevel::Unsupported,
         };
         assert_eq!(caps.resume, CapLevel::Supported);
@@ -158,5 +173,7 @@ mod tests {
         assert_eq!(caps.slash_commands, CapLevel::Unknown);
         assert_eq!(caps.durable_parks, CapLevel::Unsupported);
         assert_eq!(caps.standing_grants, CapLevel::Unsupported);
+        assert_eq!(caps.mid_turn_resume, CapLevel::Unsupported);
+        assert_eq!(caps.transcript, CapLevel::Unsupported);
     }
 }

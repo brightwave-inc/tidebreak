@@ -16,9 +16,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tidebreak_core::{
-    BoundedError, CodeApprovalKind, CodeSessionId, CodeUsage, Diffstat, FileChangeKind, GrantScope,
-    HarnessCaps, HarnessCommand, HarnessKind, HarnessNoticeLevel, OwnerId, PermissionMode,
-    ReasoningEffort, ToolDetail, ToolOutcome, UserQuestionAnswer,
+    BoundedError, CodeApprovalKind, CodeSessionId, CodeTurnId, CodeUsage, Diffstat, FileChangeKind,
+    GrantScope, HarnessCaps, HarnessCommand, HarnessKind, HarnessNoticeLevel, OwnerId,
+    PermissionMode, ReasoningEffort, ToolDetail, ToolOutcome, UserQuestionAnswer,
 };
 
 pub mod browser_channel;
@@ -378,6 +378,9 @@ impl From<ApprovalDecision> for tidebreak_core::ApprovalDecisionKind {
 /// One user turn to feed the engine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnInput {
+    /// The host-named turn this engine call drives. The internal engine
+    /// uses it; every other adapter ignores it.
+    pub turn_id: Option<CodeTurnId>,
     /// The user's message.
     pub text: String,
     /// Model for this turn, when the engine takes one per child.

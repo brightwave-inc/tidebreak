@@ -80,7 +80,7 @@ async fn compact_everything_but_the_last_message(router: &Router, bearer: &str) 
 /// than the one just sent.
 async fn wait_until_idle(store: &Arc<dyn Store>, chat: ChatId) {
     for _ in 0..500 {
-        let runs = store.list_turn_runs(chat).await.unwrap();
+        let runs = store.list_turns(chat).await.unwrap();
         if !runs.is_empty() && runs.iter().all(|turn| turn.status.is_terminal()) {
             return;
         }
@@ -216,7 +216,7 @@ async fn managed_compaction_and_message_admission_share_the_frozen_gateway_ident
         StatusCode::ACCEPTED
     );
     assert_eq!(
-        store.get_turn_run(turn_id).await.unwrap().unwrap().model,
+        store.get_turn(turn_id).await.unwrap().unwrap().model,
         compaction_model,
         "ordinary admission and on-demand compaction must resolve one executable identity"
     );

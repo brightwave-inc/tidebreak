@@ -220,12 +220,12 @@ pub(in crate::db) async fn acquire_turn_write_lock<C>(conn: &C, turn_id: TurnId)
 where
     C: ConnectionTrait,
 {
-    let locked = entities::turn_run::Entity::update_many()
+    let locked = entities::code_turn::Entity::update_many()
         .col_expr(
-            entities::turn_run::Column::UpdatedAt,
-            sea_orm::sea_query::Expr::col(entities::turn_run::Column::UpdatedAt),
+            entities::code_turn::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::col(entities::code_turn::Column::UpdatedAt),
         )
-        .filter(entities::turn_run::Column::Id.eq(turn_id.0))
+        .filter(entities::code_turn::Column::Id.eq(turn_id.0))
         .exec(conn)
         .await
         .map_err(store_err)?;

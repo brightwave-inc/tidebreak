@@ -69,6 +69,8 @@ const CLAUDE: HarnessDoctorEntry = {
     durable_parks: "unsupported",
     user_questions: "unsupported",
     standing_grants: "unsupported",
+    mid_turn_resume: "unsupported",
+    transcript: "unsupported",
     memory_loopback: "unsupported",
   },
   commands: [],

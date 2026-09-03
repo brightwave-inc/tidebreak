@@ -168,6 +168,8 @@ function parseHarnessCaps(value: unknown): HarnessCaps | null {
     !capLevel(caps.durable_parks) ||
     !capLevel(caps.user_questions) ||
     !capLevel(caps.standing_grants) ||
+    !capLevel(caps.mid_turn_resume) ||
+    !capLevel(caps.transcript) ||
     !capLevel(caps.memory_loopback)
   ) {
     return null;
@@ -188,6 +190,8 @@ function parseHarnessCaps(value: unknown): HarnessCaps | null {
     durable_parks: caps.durable_parks,
     user_questions: caps.user_questions,
     standing_grants: caps.standing_grants,
+    mid_turn_resume: caps.mid_turn_resume,
+    transcript: caps.transcript,
     memory_loopback: caps.memory_loopback,
   };
 }

@@ -71,7 +71,7 @@ pub async fn post_compact(
     // the in-process registry only knows about turns this server is running.
     if state
         .store
-        .list_turn_runs(id)
+        .list_turns(id)
         .await?
         .iter()
         .any(|turn| !turn.status.is_terminal())

@@ -211,7 +211,7 @@ async fn delete_chat_erases_quiesced_history_and_fails_closed_for_live_work_or_r
         DeleteChatOutcome::ActiveWork
     );
     assert!(store.get_chat(active.id).await.unwrap().is_some());
-    let active_turn = store.get_turn_run(active_turn_id).await.unwrap().unwrap();
+    let active_turn = store.get_turn(active_turn_id).await.unwrap().unwrap();
     store
         .request_turn_cancellation_and_append_event(
             active_turn_id,
@@ -290,7 +290,7 @@ async fn delete_chat_erases_quiesced_history_and_fails_closed_for_live_work_or_r
             .unwrap(),
         crate::storage::DecidePlanOutcome::Decided { .. }
     ));
-    let planned_turn = store.get_turn_run(planned_turn_id).await.unwrap().unwrap();
+    let planned_turn = store.get_turn(planned_turn_id).await.unwrap().unwrap();
     store
         .request_turn_cancellation_and_append_event(
             planned_turn_id,

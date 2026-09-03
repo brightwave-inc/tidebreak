@@ -302,7 +302,7 @@ impl TurnModelCache {
     }
 
     async fn refresh(&mut self, store: &dyn Store, chat: ChatId) -> Result<(), ()> {
-        let turns = store.list_turn_runs(chat).await.map_err(|_| ())?;
+        let turns = store.list_turns(chat).await.map_err(|_| ())?;
         self.replace_from_turns(
             turns
                 .into_iter()

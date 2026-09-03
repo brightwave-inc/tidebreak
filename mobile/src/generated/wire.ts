@@ -1928,8 +1928,12 @@ rewrite?: string, };
 
 /**
  * Status of one user→engine turn.
+ *
+ * Absorbs [`crate::model::TurnRunStatus`] one-for-one. Chat's `cancelled`
+ * is this enum's `interrupted` — the code token already means the same
+ * thing and is on the wire.
  */
-export type CodeTurnStatus = "running" | "waiting" | "completed" | "failed" | "interrupted";
+export type CodeTurnStatus = "queued" | "running" | "waiting" | "cancelling" | "waiting_for_client" | "waiting_for_agent_run" | "cancelling_client" | "resuming" | "retry_wait" | "completed" | "failed" | "interrupted";
 
 /**
  * One unsequenced notice on `WS /code/updates`.
@@ -2935,6 +2939,23 @@ user_questions: CapLevel,
  * declare it `Supported`.
  */
 standing_grants: CapLevel,
+/**
+ * The engine can resume a turn that was interrupted mid-model-call.
+ *
+ * Boot recovery skips pid-less sessions that declare this, so a
+ * restart does not close an in-flight internal turn as interrupted.
+ * Update-quiesce uses the same flag: `Supported` aborts and hands the
+ * lease back; `Unsupported` waits for a turn boundary (decision 0080).
+ * External harnesses declare `Unsupported` — no engine can resume a
+ * harness turn.
+ */
+mid_turn_resume: CapLevel,
+/**
+ * The engine stores a provider transcript (`message` rows) the host
+ * can read. `GET /chats/{id}/messages` refuses on a session whose
+ * engine does not declare it, rather than returning an empty list.
+ */
+transcript: CapLevel,
 /**
  * The engine mounts Tidebreak's loopback MCP server, so it can call
  * the memory verb (propose, search, read) on that bridge.

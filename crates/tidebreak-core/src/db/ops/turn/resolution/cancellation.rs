@@ -60,7 +60,7 @@ async fn request_turn_cancellation_inner(
         requested_at,
         super::super::super::agent_run::database_now(&transaction).await?,
     );
-    let Some(turn) = entities::turn_run::Entity::find_by_id(id.0)
+    let Some(turn) = entities::code_turn::Entity::find_by_id(id.0)
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -68,7 +68,12 @@ async fn request_turn_cancellation_inner(
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     };
-    let status = turn_run_status_from_db(&turn.status)?;
+    let adapter_approval_call = super::super::approval_park_call_id(&turn)?;
+    let status = if adapter_approval_call.is_some() {
+        TurnRunStatus::WaitingForClient
+    } else {
+        turn_run_status_from_db(&turn.status)?
+    };
     match status {
         TurnRunStatus::Cancelling | TurnRunStatus::CancellingClient | TurnRunStatus::Cancelled => {
             let sequenced_event = if status == TurnRunStatus::Cancelled {
@@ -98,7 +103,10 @@ async fn request_turn_cancellation_inner(
         | TurnRunStatus::Resuming
         | TurnRunStatus::RetryWait => {}
     }
-    if turn.updated_at > requested_at {
+    if turn
+        .updated_at
+        .is_some_and(|updated_at| updated_at > requested_at)
+    {
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     }
@@ -134,9 +142,10 @@ async fn request_turn_cancellation_inner(
             .ok_or_else(|| {
                 AgentError::Store(format!("waiting turn {id} is missing its client receipt"))
             })?;
-        if wait.chat_id != turn.chat_id
+        if wait.session_id != turn.session_id
             || wait.attempt_count != turn.attempt_count
             || wait.claim_count != turn.claim_count
+            || adapter_approval_call.is_some_and(|call_id| call_id.0 != wait.call_id)
         {
             return Err(AgentError::Store(format!(
                 "waiting turn {id} has a mismatched client receipt"
@@ -155,7 +164,7 @@ async fn request_turn_cancellation_inner(
             .expect("locked waiting client call exists");
         let is_foreground_question = call.name == crate::ASK_USER_QUESTIONS_TOOL
             && call.execution == crate::model::ToolCallExecution::Orchestration.as_str();
-        if call.chat_id != turn.chat_id
+        if call.chat_id != turn.session_id
             || call.turn_id != turn.id
             || (call.execution != crate::model::ToolCallExecution::Client.as_str()
                 && !is_foreground_question)
@@ -271,42 +280,42 @@ async fn request_turn_cancellation_inner(
         )
         .await?;
     }
-    let update = entities::turn_run::Entity::update_many()
+    let update = entities::code_turn::Entity::update_many()
         .col_expr(
-            entities::turn_run::Column::Status,
+            entities::code_turn::Column::Status,
             sea_orm::sea_query::Expr::value(next_status.as_str()),
         )
         .col_expr(
-            entities::turn_run::Column::UpdatedAt,
+            entities::code_turn::Column::UpdatedAt,
             sea_orm::sea_query::Expr::value(now),
         );
     let update = if next_status == TurnRunStatus::Cancelled {
         update
             .col_expr(
-                entities::turn_run::Column::FinishedAt,
+                entities::code_turn::Column::EndedAt,
                 sea_orm::sea_query::Expr::value(Some(now)),
             )
             .col_expr(
-                entities::turn_run::Column::LastErrorCode,
+                entities::code_turn::Column::LastErrorCode,
                 sea_orm::sea_query::Expr::value(Option::<String>::None),
             )
             .col_expr(
-                entities::turn_run::Column::LastErrorDetail,
+                entities::code_turn::Column::LastErrorDetail,
                 sea_orm::sea_query::Expr::value(Option::<String>::None),
             )
     } else {
         update
     };
     let update = update
-        .filter(entities::turn_run::Column::Id.eq(id.0))
-        .filter(entities::turn_run::Column::Status.eq(&turn.status))
-        .filter(entities::turn_run::Column::AttemptCount.eq(turn.attempt_count))
-        .filter(entities::turn_run::Column::UpdatedAt.eq(turn.updated_at))
-        .filter(entities::turn_run::Column::UpdatedAt.lte(now));
+        .filter(entities::code_turn::Column::Id.eq(id.0))
+        .filter(entities::code_turn::Column::Status.eq(&turn.status))
+        .filter(entities::code_turn::Column::AttemptCount.eq(turn.attempt_count))
+        .filter(entities::code_turn::Column::UpdatedAt.eq(turn.updated_at))
+        .filter(entities::code_turn::Column::UpdatedAt.lte(now));
     let update = if status == TurnRunStatus::Running {
         update
-            .filter(entities::turn_run::Column::LeaseToken.eq(turn.lease_token))
-            .filter(entities::turn_run::Column::LeaseExpiresAt.eq(turn.lease_expires_at))
+            .filter(entities::code_turn::Column::LeaseToken.eq(turn.lease_token))
+            .filter(entities::code_turn::Column::LeaseExpiresAt.eq(turn.lease_expires_at))
     } else {
         update
     };
@@ -316,7 +325,7 @@ async fn request_turn_cancellation_inner(
         return Ok(None);
     }
     super::super::steer::reject_pending_turn_steers_on(&transaction, id, now).await?;
-    let updated = entities::turn_run::Entity::find_by_id(id.0)
+    let updated = entities::code_turn::Entity::find_by_id(id.0)
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -330,8 +339,14 @@ async fn request_turn_cancellation_inner(
         } else {
             None
         };
-        append_terminal_event_on(&transaction, id, ChatId(turn.chat_id), None, event.as_ref())
-            .await?
+        append_terminal_event_on(
+            &transaction,
+            id,
+            ChatId(turn.session_id),
+            None,
+            event.as_ref(),
+        )
+        .await?
     } else {
         None
     };
@@ -437,7 +452,7 @@ async fn finish_turn_cancellation_inner(
         requested_at,
         super::super::super::agent_run::database_now(&transaction).await?,
     );
-    let Some(claim) = entities::turn_claim::Entity::find_by_id(lease_token)
+    let Some(claim) = entities::code_turn_claim::Entity::find_by_id(lease_token)
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -446,7 +461,7 @@ async fn finish_turn_cancellation_inner(
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     };
-    let Some(turn) = entities::turn_run::Entity::find_by_id(id.0)
+    let Some(turn) = entities::code_turn::Entity::find_by_id(id.0)
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -481,7 +496,7 @@ async fn finish_turn_cancellation_inner(
         || turn.attempt_count != claim.attempt_count
         || turn.claim_count != claim.claim_count
         || turn.lease_token != Some(lease_token)
-        || turn.updated_at > now
+        || turn.updated_at.is_some_and(|updated_at| updated_at > now)
     {
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
@@ -501,7 +516,7 @@ async fn finish_turn_cancellation_inner(
     // the same shape as a completed turn's output.
     let output_message_id = match output {
         Some(output) => {
-            if output.chat_id.0 != turn.chat_id {
+            if output.chat_id.0 != turn.session_id {
                 return Err(AgentError::Store(format!(
                     "turn {id} output belongs to a different chat"
                 )));
@@ -540,30 +555,30 @@ async fn finish_turn_cancellation_inner(
         None => None,
     };
 
-    let mut cancelled = entities::turn_run::Entity::update_many()
+    let mut cancelled = entities::code_turn::Entity::update_many()
         .col_expr(
-            entities::turn_run::Column::Status,
+            entities::code_turn::Column::Status,
             sea_orm::sea_query::Expr::value(TurnRunStatus::Cancelled.as_str()),
         )
         .col_expr(
-            entities::turn_run::Column::LeaseToken,
+            entities::code_turn::Column::LeaseToken,
             sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
         )
         .col_expr(
-            entities::turn_run::Column::LeaseExpiresAt,
+            entities::code_turn::Column::LeaseExpiresAt,
             sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
         )
         .col_expr(
-            entities::turn_run::Column::FinishedAt,
+            entities::code_turn::Column::EndedAt,
             sea_orm::sea_query::Expr::value(Some(now)),
         )
         .col_expr(
-            entities::turn_run::Column::UpdatedAt,
+            entities::code_turn::Column::UpdatedAt,
             sea_orm::sea_query::Expr::value(now),
         );
     if let Some(message_id) = output_message_id {
         cancelled = cancelled.col_expr(
-            entities::turn_run::Column::OutputMessageId,
+            entities::code_turn::Column::OutputMessageId,
             sea_orm::sea_query::Expr::value(Some(message_id)),
         );
     }
@@ -576,37 +591,37 @@ async fn finish_turn_cancellation_inner(
     if let Some(AgentEvent::TurnCancelled { usage }) = terminal_event {
         cancelled = cancelled
             .col_expr(
-                entities::turn_run::Column::InputTokens,
+                entities::code_turn::Column::InputTokens,
                 sea_orm::sea_query::Expr::value(i64::from(usage.input_tokens)),
             )
             .col_expr(
-                entities::turn_run::Column::OutputTokens,
+                entities::code_turn::Column::OutputTokens,
                 sea_orm::sea_query::Expr::value(i64::from(usage.output_tokens)),
             )
             .col_expr(
-                entities::turn_run::Column::CacheReadInputTokens,
+                entities::code_turn::Column::CacheReadInputTokens,
                 sea_orm::sea_query::Expr::value(i64::from(usage.cache_read_input_tokens)),
             )
             .col_expr(
-                entities::turn_run::Column::CacheCreationInputTokens,
+                entities::code_turn::Column::CacheCreationInputTokens,
                 sea_orm::sea_query::Expr::value(i64::from(usage.cache_creation_input_tokens)),
             );
     }
     if let Some(model_steps) = terminal_model_steps {
         cancelled = cancelled.col_expr(
-            entities::turn_run::Column::ModelSteps,
+            entities::code_turn::Column::ModelSteps,
             sea_orm::sea_query::Expr::value(model_steps),
         );
     }
     let cancelled = cancelled
-        .filter(entities::turn_run::Column::Id.eq(id.0))
-        .filter(entities::turn_run::Column::Status.eq(TurnRunStatus::Cancelling.as_str()))
-        .filter(entities::turn_run::Column::AttemptCount.eq(claim.attempt_count))
-        .filter(entities::turn_run::Column::ClaimCount.eq(claim.claim_count))
-        .filter(entities::turn_run::Column::LeaseToken.eq(lease_token))
-        .filter(entities::turn_run::Column::LeaseExpiresAt.eq(turn.lease_expires_at))
-        .filter(entities::turn_run::Column::UpdatedAt.eq(turn.updated_at))
-        .filter(entities::turn_run::Column::UpdatedAt.lte(now))
+        .filter(entities::code_turn::Column::Id.eq(id.0))
+        .filter(entities::code_turn::Column::Status.eq(TurnRunStatus::Cancelling.as_str()))
+        .filter(entities::code_turn::Column::AttemptCount.eq(claim.attempt_count))
+        .filter(entities::code_turn::Column::ClaimCount.eq(claim.claim_count))
+        .filter(entities::code_turn::Column::LeaseToken.eq(lease_token))
+        .filter(entities::code_turn::Column::LeaseExpiresAt.eq(turn.lease_expires_at))
+        .filter(entities::code_turn::Column::UpdatedAt.eq(turn.updated_at))
+        .filter(entities::code_turn::Column::UpdatedAt.lte(now))
         .exec(&transaction)
         .await
         .map_err(store_err)?;
@@ -615,7 +630,7 @@ async fn finish_turn_cancellation_inner(
         return Ok(None);
     }
     super::super::steer::reject_pending_turn_steers_on(&transaction, id, now).await?;
-    let cancelled = entities::turn_run::Entity::find_by_id(id.0)
+    let cancelled = entities::code_turn::Entity::find_by_id(id.0)
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -624,7 +639,7 @@ async fn finish_turn_cancellation_inner(
     let sequenced_event = append_terminal_event_on(
         &transaction,
         id,
-        ChatId(turn.chat_id),
+        ChatId(turn.session_id),
         Some(lease_token),
         terminal_event,
     )
@@ -638,7 +653,7 @@ async fn finish_turn_cancellation_inner(
 
 async fn exact_cancellation_output_on<C>(
     conn: &C,
-    turn: &entities::turn_run::Model,
+    turn: &entities::code_turn::Model,
     output: Option<&Message>,
     citations: &[crate::AssistantCitationInput],
 ) -> Result<bool>

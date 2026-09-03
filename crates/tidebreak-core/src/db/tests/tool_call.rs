@@ -113,7 +113,7 @@ async fn claimed_tool_results_are_co_committed_with_the_turn_lease() {
     let first_claim_at = accepted.available_at;
     let first_lease = uuid::Uuid::new_v4();
     store
-        .claim_turn_run(
+        .claim_turn(
             first_lease,
             first_claim_at,
             first_claim_at + chrono::Duration::seconds(1),
@@ -182,7 +182,7 @@ async fn claimed_tool_results_are_co_committed_with_the_turn_lease() {
     let retry_at = first_claim_at + chrono::Duration::seconds(2);
     let retry_lease = uuid::Uuid::new_v4();
     let retried = store
-        .claim_turn_run(
+        .claim_turn(
             retry_lease,
             retry_at,
             retry_at + chrono::Duration::minutes(1),
@@ -255,7 +255,7 @@ async fn claimed_intermediate_message_is_co_committed_with_the_turn_lease() {
     let claimed_at = accepted.available_at;
     let lease = uuid::Uuid::new_v4();
     store
-        .claim_turn_run(lease, claimed_at, claimed_at + chrono::Duration::seconds(1))
+        .claim_turn(lease, claimed_at, claimed_at + chrono::Duration::seconds(1))
         .await
         .unwrap();
     let message = Message {
@@ -286,7 +286,7 @@ async fn claimed_intermediate_message_is_co_committed_with_the_turn_lease() {
     let retry_at = claimed_at + chrono::Duration::seconds(2);
     let retry_lease = uuid::Uuid::new_v4();
     store
-        .claim_turn_run(
+        .claim_turn(
             retry_lease,
             retry_at,
             retry_at + chrono::Duration::minutes(1),

@@ -1012,7 +1012,7 @@ async fn load_bundle_input(host_access: &HostAccess, chat_id: Uuid) -> Result<Bu
         .ok_or_else(|| "This conversation no longer exists".to_owned())?;
     // Turn history is best-effort: a store without durable turn state still
     // produces a useful journal-and-messages bundle.
-    let turns = store.list_turn_runs(chat_id).await.unwrap_or_default();
+    let turns = store.list_turns(chat_id).await.unwrap_or_default();
     let messages = store
         .list_messages(chat_id)
         .await

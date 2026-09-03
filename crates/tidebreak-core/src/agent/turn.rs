@@ -196,7 +196,7 @@ impl Agent {
     /// accepted user input must already be present in the store.
     /// `output_message_id` is the worker's stable completion identity and is returned in
     /// [`AgentTurnOutcome::Completed`] for an atomic
-    /// [`Store::complete_turn_run`] call. Intermediate assistant/tool state is
+    /// [`Store::complete_turn`] call. Intermediate assistant/tool state is
     /// still persisted as it is produced so a later turn can rebuild context.
     /// Terminal completed/cancelled/failed events are left to the worker to
     /// publish only after its matching durable state transition commits.
@@ -2097,7 +2097,7 @@ impl Agent {
         lease_token: uuid::Uuid,
     ) -> Result<i64> {
         loop {
-            match self.store.get_turn_run(turn_id).await {
+            match self.store.get_turn(turn_id).await {
                 Ok(Some(turn))
                     if turn.status == TurnRunStatus::Running
                         && turn.lease_token == Some(lease_token)

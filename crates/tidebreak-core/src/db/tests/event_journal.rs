@@ -164,7 +164,7 @@ async fn durable_turn_events_are_bound_and_reserve_one_terminal_slot() {
     let lease_expires_at = claimed_at + chrono::Duration::minutes(1);
     let lease_token = uuid::Uuid::new_v4();
     store
-        .claim_turn_run(lease_token, claimed_at, lease_expires_at)
+        .claim_turn(lease_token, claimed_at, lease_expires_at)
         .await
         .unwrap()
         .turn

@@ -1689,7 +1689,7 @@ mod tests {
         let lease_token = uuid::Uuid::new_v4();
         let claimed_at = Utc::now();
         assert!(store
-            .claim_turn_run(
+            .claim_turn(
                 lease_token,
                 claimed_at,
                 claimed_at + chrono::Duration::minutes(5),

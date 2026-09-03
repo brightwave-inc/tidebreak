@@ -24,7 +24,7 @@ async fn reasoning_deltas_rebuild_into_the_transcript() {
     };
     let lease_token = uuid::Uuid::new_v4();
     store
-        .claim_turn_run(
+        .claim_turn(
             lease_token,
             accepted.available_at,
             accepted.available_at + chrono::Duration::minutes(1),
@@ -71,7 +71,7 @@ async fn reasoning_deltas_rebuild_into_the_transcript() {
         created_at: accepted.available_at,
     };
     store
-        .complete_turn_run_and_append_event(
+        .complete_turn_and_append_event(
             turn_id,
             lease_token,
             0,
@@ -136,7 +136,7 @@ async fn message_less_terminal_turns_rebuild_partial_text_and_reasoning() {
     };
     let cancelled_lease = uuid::Uuid::new_v4();
     store
-        .claim_turn_run(
+        .claim_turn(
             cancelled_lease,
             cancelled.available_at,
             cancelled.available_at + chrono::Duration::minutes(1),
@@ -202,7 +202,7 @@ async fn message_less_terminal_turns_rebuild_partial_text_and_reasoning() {
     };
     let failed_lease = uuid::Uuid::new_v4();
     store
-        .claim_turn_run(
+        .claim_turn(
             failed_lease,
             failed.available_at,
             failed.available_at + chrono::Duration::minutes(1),
@@ -236,7 +236,7 @@ async fn message_less_terminal_turns_rebuild_partial_text_and_reasoning() {
             .expect("a live attempt may journal its visible stream");
     }
     store
-        .record_turn_run_failure_and_append_event(
+        .record_turn_failure_and_append_event(
             failed_id,
             failed_lease,
             failed.available_at + chrono::Duration::seconds(1),
@@ -324,7 +324,7 @@ async fn cancellation_with_partial_output_commits_a_durable_message() {
     };
     let lease = uuid::Uuid::new_v4();
     store
-        .claim_turn_run(
+        .claim_turn(
             lease,
             accepted.available_at,
             accepted.available_at + chrono::Duration::minutes(1),
@@ -567,7 +567,7 @@ async fn cancellation_after_committed_step_does_not_rebuild_its_prose() {
     };
     let lease = uuid::Uuid::new_v4();
     store
-        .claim_turn_run(
+        .claim_turn(
             lease,
             accepted.available_at,
             accepted.available_at + chrono::Duration::minutes(1),

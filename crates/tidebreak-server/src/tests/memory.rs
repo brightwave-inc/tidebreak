@@ -598,7 +598,7 @@ async fn an_incognito_chat_composes_no_memory_section_and_captures_nothing() {
         .set_setting(crate::routes::MEMORY_CAPTURE_ENABLED_SETTING, &json!(true))
         .await
         .unwrap();
-    let turn_id = store.list_turn_runs(chat.id).await.unwrap()[0].id;
+    let turn_id = store.list_turns(chat.id).await.unwrap()[0].id;
     let capture = test_capture(&state, db.clone());
     assert_eq!(
         capture.derive(chat.id, turn_id).await.unwrap(),
@@ -631,7 +631,7 @@ async fn capture_is_off_by_default() {
         StatusCode::ACCEPTED
     );
     wait_for_turns(&store, chat.id, 1).await;
-    let turn_id = store.list_turn_runs(chat.id).await.unwrap()[0].id;
+    let turn_id = store.list_turns(chat.id).await.unwrap()[0].id;
     let capture = test_capture(&state, db);
     assert_eq!(
         capture.derive(chat.id, turn_id).await.unwrap(),
@@ -656,7 +656,7 @@ async fn capture_candidates_land_under_the_review_thresholds() {
         StatusCode::ACCEPTED
     );
     wait_for_turns(&store, chat.id, 1).await;
-    let turn_id = store.list_turn_runs(chat.id).await.unwrap()[0].id;
+    let turn_id = store.list_turns(chat.id).await.unwrap()[0].id;
     let user_message = store
         .list_messages(chat.id)
         .await
@@ -742,7 +742,7 @@ async fn capture_candidates_land_under_the_review_thresholds() {
         StatusCode::ACCEPTED
     );
     wait_for_turns(&store, other_chat.id, 1).await;
-    let other_turn = store.list_turn_runs(other_chat.id).await.unwrap()[0].id;
+    let other_turn = store.list_turns(other_chat.id).await.unwrap()[0].id;
     let other_evidence = MemoryEvidence::Message {
         message_id: store
             .list_messages(other_chat.id)
@@ -925,7 +925,7 @@ async fn the_transcript_carries_each_turns_memory_proposals() {
         StatusCode::ACCEPTED
     );
     wait_for_turns(&store, chat.id, 1).await;
-    let turn_id = store.list_turn_runs(chat.id).await.unwrap()[0].id;
+    let turn_id = store.list_turns(chat.id).await.unwrap()[0].id;
     let user_message = store
         .list_messages(chat.id)
         .await

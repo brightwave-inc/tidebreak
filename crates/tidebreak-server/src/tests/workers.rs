@@ -245,7 +245,7 @@ async fn worker_commits_a_mid_stream_refusal_with_its_partial_output() {
         )
     }));
 
-    let turn = store.list_turn_runs(chat.id).await.unwrap().pop().unwrap();
+    let turn = store.list_turns(chat.id).await.unwrap().pop().unwrap();
     assert_eq!(turn.status, TurnRunStatus::Completed);
 
     let response = router
@@ -381,7 +381,7 @@ async fn foreground_spawn_is_nonblocking_and_ordered_wait_resumes_with_child_res
         .delivered_at;
     assert!(second_delivery < first_delivery);
 
-    let turn = store.list_turn_runs(chat.id).await.unwrap().pop().unwrap();
+    let turn = store.list_turns(chat.id).await.unwrap().pop().unwrap();
     assert_eq!(turn.status, TurnRunStatus::Completed);
     assert_eq!(
         turn.claim_count, 4,
@@ -663,7 +663,7 @@ async fn worker_rejects_an_already_accepted_plain_gateway_model_before_egress() 
         AgentEvent::TurnFailed { error, .. } if error.kind == "model_provider_unavailable"
     )));
     let turn = store
-        .get_turn_run(turn_id)
+        .get_turn(turn_id)
         .await
         .unwrap()
         .expect("the rejected legacy turn remains durable");
@@ -810,7 +810,7 @@ async fn concurrent_message_retry_converges_across_a_model_setting_race() {
             .unwrap(),
         StatusCode::ACCEPTED
     );
-    assert_eq!(store.list_turn_runs(chat.id).await.unwrap().len(), 1);
+    assert_eq!(store.list_turns(chat.id).await.unwrap().len(), 1);
     assert_eq!(store.list_messages(chat.id).await.unwrap().len(), 1);
 
     gate.notify_one();
@@ -884,20 +884,6 @@ async fn cross_process_exact_retry_waits_for_durable_admission_without_revalidat
         )
         .await
         .unwrap();
-    let retry_router = router_b.clone();
-    let retry_bearer = bearer_b.clone();
-    let mut retry = tokio::spawn(async move {
-        post_message_body(&retry_router, &retry_bearer, chat.id, request)
-            .await
-            .status()
-    });
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), &mut retry)
-            .await
-            .is_err(),
-        "the second process must wait on durable pending ownership, not revalidate the disabled skill"
-    );
-
     release.notify_one();
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(2), first)
@@ -906,14 +892,16 @@ async fn cross_process_exact_retry_waits_for_durable_admission_without_revalidat
             .unwrap(),
         StatusCode::ACCEPTED
     );
+    // D4a retired the admission ledger. A concurrent in-flight retry is not
+    // fenced; once the first commit lands, the fingerprint on the turn row
+    // is enough and the route must not consult the skill catalog again.
     assert_eq!(
-        tokio::time::timeout(Duration::from_secs(2), retry)
+        post_message_body(&router_b, &bearer_b, chat.id, request)
             .await
-            .expect("second process converged on the durable decision")
-            .unwrap(),
+            .status(),
         StatusCode::ACCEPTED
     );
-    assert_eq!(store.list_turn_runs(chat.id).await.unwrap().len(), 1);
+    assert_eq!(store.list_turns(chat.id).await.unwrap().len(), 1);
     assert_eq!(store.list_messages(chat.id).await.unwrap().len(), 1);
 }
 
@@ -968,7 +956,7 @@ async fn exact_accepted_retry_survives_invoked_skill_becoming_unavailable() {
         StatusCode::CONFLICT,
         "the same accepted id cannot name a different skill identity"
     );
-    assert_eq!(store.list_turn_runs(chat.id).await.unwrap().len(), 1);
+    assert_eq!(store.list_turns(chat.id).await.unwrap().len(), 1);
     assert_eq!(store.list_messages(chat.id).await.unwrap().len(), 1);
 
     gate.notify_one();
@@ -1091,7 +1079,7 @@ async fn retrying_a_later_queued_turn_never_bypasses_fifo() {
         StatusCode::ACCEPTED
     );
 
-    let turns = store.list_turn_runs(chat.id).await.unwrap();
+    let turns = store.list_turns(chat.id).await.unwrap();
     assert_eq!(turns.len(), 1, "retry traffic must not promote queued work");
     assert_eq!(turns[0].id, blocking_id);
     let queued = store.list_queued_turns(chat.id).await.unwrap();
@@ -1212,11 +1200,7 @@ async fn queued_turn_id_cannot_be_accepted_by_another_chat() {
         .status(),
         StatusCode::ACCEPTED
     );
-    assert!(store
-        .list_turn_runs(second_chat.id)
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(store.list_turns(second_chat.id).await.unwrap().is_empty());
     let remaining = store.list_queued_turns(first_chat.id).await.unwrap();
     assert_eq!(remaining.len(), 1);
     assert!(remaining[0].same_request(&queued));
@@ -1317,7 +1301,7 @@ async fn sandbox_container_routing_preserves_in_process_task_and_deadline_shape(
     let reference_lease = uuid::Uuid::new_v4();
     let now = chrono::Utc::now();
     let reference_turn = reference_store
-        .claim_turn_run(reference_lease, now, now + chrono::Duration::minutes(5))
+        .claim_turn(reference_lease, now, now + chrono::Duration::minutes(5))
         .await
         .unwrap()
         .turn
@@ -1476,7 +1460,7 @@ async fn worker_retries_a_transient_provider_failure_without_a_terminal_event() 
         events.last().map(|event| &event.event),
         Some(AgentEvent::TurnCompleted { .. })
     ));
-    let turn = store.list_turn_runs(chat.id).await.unwrap().pop().unwrap();
+    let turn = store.list_turns(chat.id).await.unwrap().pop().unwrap();
     assert_eq!(turn.attempt_count, 2);
     assert_eq!(turn.status, TurnRunStatus::Completed);
 }
@@ -1572,7 +1556,7 @@ async fn zero_budget_resume_runs_the_wrap_up_instead_of_failing() {
         events.last().map(|event| &event.event),
         Some(AgentEvent::TurnCompleted { .. })
     ));
-    let turn = store.list_turn_runs(chat.id).await.unwrap().pop().unwrap();
+    let turn = store.list_turns(chat.id).await.unwrap().pop().unwrap();
     assert_eq!(turn.status, TurnRunStatus::Completed);
     assert_eq!(turn.attempt_count, 2);
     // The wrap-up is outside the budget: only the tool step is counted.
@@ -1911,7 +1895,7 @@ async fn worker_heartbeats_while_event_journaling_is_blocked() {
             Some(AgentEvent::TurnCompleted { .. })
         ),
         "unexpected journal: {events:?}; turns: {:?}",
-        store.list_turn_runs(chat.id).await.unwrap()
+        store.list_turns(chat.id).await.unwrap()
     );
 }
 
@@ -2006,7 +1990,7 @@ async fn an_empty_model_response_does_not_complete_the_turn() {
         events.last().map(|event| &event.event),
         Some(AgentEvent::TurnCompleted { .. })
     ));
-    let turn = store.list_turn_runs(chat.id).await.unwrap().pop().unwrap();
+    let turn = store.list_turns(chat.id).await.unwrap().pop().unwrap();
     assert_eq!(turn.attempt_count, 2);
     let messages = store.list_messages(chat.id).await.unwrap();
     assert_eq!(
@@ -2228,7 +2212,7 @@ async fn cancellation_after_drive_result_persists_the_completed_model_step() {
         Some(AgentEvent::TurnCancelled { usage }) if *usage == expected_usage
     ));
     let turn = store
-        .get_turn_run(turn_id)
+        .get_turn(turn_id)
         .await
         .unwrap()
         .expect("cancelled turn remains queryable");
@@ -2312,7 +2296,7 @@ async fn cancellation_during_stream_persists_the_started_model_step() {
         Some(AgentEvent::TurnCancelled { usage }) if *usage == expected_usage
     ));
     let turn = store
-        .get_turn_run(turn_id)
+        .get_turn(turn_id)
         .await
         .unwrap()
         .expect("cancelled turn remains queryable");

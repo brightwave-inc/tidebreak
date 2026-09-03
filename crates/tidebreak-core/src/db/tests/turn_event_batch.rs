@@ -29,7 +29,7 @@ async fn batched_turn_events_keep_single_append_identity() {
     let lease_expires_at = claimed_at + chrono::Duration::minutes(1);
     let lease_token = uuid::Uuid::new_v4();
     store
-        .claim_turn_run(lease_token, claimed_at, lease_expires_at)
+        .claim_turn(lease_token, claimed_at, lease_expires_at)
         .await
         .unwrap()
         .turn

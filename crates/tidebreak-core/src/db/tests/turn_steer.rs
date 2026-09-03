@@ -6,11 +6,12 @@ fn pending_turn_steer(
     id: crate::id::TurnSteerId,
     content: &str,
     now: DateTime<Utc>,
-) -> entities::turn_steer::ActiveModel {
-    entities::turn_steer::ActiveModel {
+) -> entities::code_turn_steer::ActiveModel {
+    entities::code_turn_steer::ActiveModel {
         id: Set(id.0),
         turn_id: Set(turn.id.0),
-        chat_id: Set(turn.chat_id.0),
+        session_id: Set(turn.chat_id.0),
+        owner: Set("local".into()),
         content: Set(content.into()),
         invoked_skills: Set(serde_json::json!([])),
         voice_input_used: Set(false),
@@ -40,7 +41,7 @@ async fn turn_steer_schema_enforces_durable_delivery_identity() {
     let now = Utc::now();
     let claim_token = uuid::Uuid::new_v4();
     let claimed = store
-        .claim_turn_run(claim_token, now, now + chrono::Duration::minutes(1))
+        .claim_turn(claim_token, now, now + chrono::Duration::minutes(1))
         .await
         .unwrap()
         .turn
@@ -85,29 +86,29 @@ async fn turn_steer_schema_enforces_durable_delivery_identity() {
     .insert(&store.conn)
     .await
     .unwrap();
-    entities::turn_steer::Entity::update_many()
+    entities::code_turn_steer::Entity::update_many()
         .col_expr(
-            entities::turn_steer::Column::Status,
+            entities::code_turn_steer::Column::Status,
             sea_orm::sea_query::Expr::value(TurnSteerStatus::Applied.as_str()),
         )
         .col_expr(
-            entities::turn_steer::Column::AppliedLeaseToken,
+            entities::code_turn_steer::Column::AppliedLeaseToken,
             sea_orm::sea_query::Expr::value(Some(claim_token)),
         )
         .col_expr(
-            entities::turn_steer::Column::MessageId,
+            entities::code_turn_steer::Column::MessageId,
             sea_orm::sea_query::Expr::value(Some(message_id.0)),
         )
         .col_expr(
-            entities::turn_steer::Column::ResolvedAt,
+            entities::code_turn_steer::Column::ResolvedAt,
             sea_orm::sea_query::Expr::value(Some(now)),
         )
-        .filter(entities::turn_steer::Column::Id.eq(first_id.0))
+        .filter(entities::code_turn_steer::Column::Id.eq(first_id.0))
         .exec(&store.conn)
         .await
         .unwrap();
 
-    let applied = entities::turn_steer::Entity::find_by_id(first_id.0)
+    let applied = entities::code_turn_steer::Entity::find_by_id(first_id.0)
         .one(&store.conn)
         .await
         .unwrap()
@@ -207,7 +208,7 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
     let claim_at = Utc::now();
     let lease_token = uuid::Uuid::new_v4();
     store
-        .claim_turn_run(
+        .claim_turn(
             lease_token,
             claim_at,
             claim_at + chrono::Duration::minutes(1),
@@ -291,7 +292,7 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
     );
     assert_eq!(
         store
-            .get_turn_run(turn.id)
+            .get_turn(turn.id)
             .await
             .unwrap()
             .unwrap()
@@ -350,7 +351,7 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
     };
     assert!(matches!(
         store
-            .complete_turn_run(turn.id, lease_token, 1, completed_at, &output)
+            .complete_turn(turn.id, lease_token, 1, completed_at, &output)
             .await
             .unwrap(),
         Some(CompleteTurnRunOutcome::SteerPending(_))
@@ -411,7 +412,7 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
     };
     assert_eq!(
         store
-            .get_turn_run(turn.id)
+            .get_turn(turn.id)
             .await
             .unwrap()
             .unwrap()
@@ -431,7 +432,7 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
     };
     assert!(matches!(
         store
-            .complete_turn_run(
+            .complete_turn(
                 turn.id,
                 lease_token,
                 1,
@@ -455,7 +456,7 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
     };
     assert!(matches!(
         store
-            .complete_turn_run_with_citations_and_append_event(
+            .complete_turn_with_citations_and_append_event(
                 turn.id,
                 lease_token,
                 2,
@@ -475,7 +476,7 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
     ));
     assert!(matches!(
         store
-            .complete_turn_run_with_citations_and_append_event(
+            .complete_turn_with_citations_and_append_event(
                 turn.id,
                 lease_token,
                 2,
@@ -494,7 +495,7 @@ async fn durable_turn_steer_applies_exactly_and_preserves_transcript_order() {
         })
     ));
     assert!(store
-        .complete_turn_run_with_citations_and_append_event(
+        .complete_turn_with_citations_and_append_event(
             turn.id,
             lease_token,
             2,
@@ -666,12 +667,12 @@ async fn turn_steer_admission_validates_identity_payload_and_monotonic_time() {
         (Utc::now() + chrono::Duration::hours(1)).timestamp_micros(),
     )
     .unwrap();
-    entities::turn_run::Entity::update_many()
+    entities::code_turn::Entity::update_many()
         .col_expr(
-            entities::turn_run::Column::UpdatedAt,
+            entities::code_turn::Column::UpdatedAt,
             sea_orm::sea_query::Expr::value(future),
         )
-        .filter(entities::turn_run::Column::Id.eq(turn.id.0))
+        .filter(entities::code_turn::Column::Id.eq(turn.id.0))
         .exec(&store.conn)
         .await
         .unwrap();
@@ -689,12 +690,7 @@ async fn turn_steer_admission_validates_identity_payload_and_monotonic_time() {
         AcceptTurnSteerOutcome::TurnUnavailable
     ));
     assert_eq!(
-        store
-            .get_turn_run(turn.id)
-            .await
-            .unwrap()
-            .unwrap()
-            .updated_at,
+        store.get_turn(turn.id).await.unwrap().unwrap().updated_at,
         future
     );
 }
@@ -727,12 +723,12 @@ async fn turn_steer_application_enforces_fifo_and_message_sequence_on_timestamp_
             .unwrap(),
     );
     let tied_at = high.created_at.min(low.created_at);
-    entities::turn_steer::Entity::update_many()
+    entities::code_turn_steer::Entity::update_many()
         .col_expr(
-            entities::turn_steer::Column::CreatedAt,
+            entities::code_turn_steer::Column::CreatedAt,
             sea_orm::sea_query::Expr::value(tied_at),
         )
-        .filter(entities::turn_steer::Column::Id.is_in([high_id.0, low_id.0]))
+        .filter(entities::code_turn_steer::Column::Id.is_in([high_id.0, low_id.0]))
         .exec(&store.conn)
         .await
         .unwrap();
@@ -740,7 +736,7 @@ async fn turn_steer_application_enforces_fifo_and_message_sequence_on_timestamp_
     let lease = uuid::Uuid::new_v4();
     let claimed_at = Utc::now();
     store
-        .claim_turn_run(lease, claimed_at, claimed_at + chrono::Duration::minutes(1))
+        .claim_turn(lease, claimed_at, claimed_at + chrono::Duration::minutes(1))
         .await
         .unwrap()
         .turn
@@ -802,7 +798,7 @@ async fn concurrent_apply_and_completion_leave_no_pending_steer() {
     let lease_token = uuid::Uuid::new_v4();
     let claim_at = Utc::now();
     store
-        .claim_turn_run(
+        .claim_turn(
             lease_token,
             claim_at,
             claim_at + chrono::Duration::minutes(1),
@@ -845,7 +841,7 @@ async fn concurrent_apply_and_completion_leave_no_pending_steer() {
     let complete = tokio::spawn(async move {
         complete_barrier.wait().await;
         complete_store
-            .complete_turn_run(turn.id, lease_token, 0, Utc::now(), &stale_output)
+            .complete_turn(turn.id, lease_token, 0, Utc::now(), &stale_output)
             .await
             .unwrap()
     });
@@ -871,7 +867,7 @@ async fn concurrent_apply_and_completion_leave_no_pending_steer() {
 
     let completed_at = applied.resolved_at.unwrap() + chrono::Duration::microseconds(1);
     assert!(store
-        .complete_turn_run(
+        .complete_turn(
             turn.id,
             lease_token,
             1,
@@ -985,7 +981,7 @@ async fn concurrent_message_and_steer_reserve_one_shared_identity() {
     let claimed_at = Utc::now();
     assert_eq!(
         store
-            .claim_turn_run(lease, claimed_at, claimed_at + chrono::Duration::minutes(1))
+            .claim_turn(lease, claimed_at, claimed_at + chrono::Duration::minutes(1))
             .await
             .unwrap()
             .turn
@@ -1126,19 +1122,19 @@ async fn terminal_turn_paths_reject_pending_steers_but_retry_wait_preserves_them
         AcceptTurnOutcome::Accepted(turn) => turn,
         other => panic!("unexpected turn acceptance: {other:?}"),
     };
-    entities::turn_run::Entity::update_many()
+    entities::code_turn::Entity::update_many()
         .col_expr(
-            entities::turn_run::Column::MaxAttempts,
+            entities::code_turn::Column::MaxAttempts,
             sea_orm::sea_query::Expr::value(2),
         )
-        .filter(entities::turn_run::Column::Id.eq(retry_turn.id.0))
+        .filter(entities::code_turn::Column::Id.eq(retry_turn.id.0))
         .exec(&store.conn)
         .await
         .unwrap();
     let first_lease = uuid::Uuid::new_v4();
     let first_claim_at = Utc::now();
     store
-        .claim_turn_run(
+        .claim_turn(
             first_lease,
             first_claim_at,
             first_claim_at + chrono::Duration::minutes(1),
@@ -1163,7 +1159,7 @@ async fn terminal_turn_paths_reject_pending_steers_but_retry_wait_preserves_them
     let failed_at = Utc::now();
     let retry_at = failed_at + chrono::Duration::seconds(1);
     let failure = store
-        .record_turn_run_failure(
+        .record_turn_failure(
             retry_turn.id,
             first_lease,
             failed_at,
@@ -1199,7 +1195,7 @@ async fn terminal_turn_paths_reject_pending_steers_but_retry_wait_preserves_them
     );
     let second_lease = uuid::Uuid::new_v4();
     store
-        .claim_turn_run(
+        .claim_turn(
             second_lease,
             retry_at,
             retry_at + chrono::Duration::minutes(1),
@@ -1221,7 +1217,7 @@ async fn terminal_turn_paths_reject_pending_steers_but_retry_wait_preserves_them
     );
     let terminal_at = retry_at + chrono::Duration::seconds(1);
     store
-        .record_turn_run_failure(
+        .record_turn_failure(
             retry_turn.id,
             second_lease,
             terminal_at,
@@ -1266,7 +1262,7 @@ async fn terminal_turn_paths_reject_pending_steers_but_retry_wait_preserves_them
     let expired_claim_at = Utc::now();
     let expires_at = expired_claim_at + chrono::Duration::seconds(1);
     store
-        .claim_turn_run(expired_lease, expired_claim_at, expires_at)
+        .claim_turn(expired_lease, expired_claim_at, expires_at)
         .await
         .unwrap()
         .turn
@@ -1285,7 +1281,7 @@ async fn terminal_turn_paths_reject_pending_steers_but_retry_wait_preserves_them
             .unwrap(),
     );
     store
-        .claim_turn_run(
+        .claim_turn(
             uuid::Uuid::new_v4(),
             expires_at,
             expires_at + chrono::Duration::minutes(1),
@@ -1328,7 +1324,7 @@ async fn failed_steer_message_insert_rolls_back_the_application_receipt() {
     let lease = uuid::Uuid::new_v4();
     let claimed_at = Utc::now();
     store
-        .claim_turn_run(lease, claimed_at, claimed_at + chrono::Duration::minutes(1))
+        .claim_turn(lease, claimed_at, claimed_at + chrono::Duration::minutes(1))
         .await
         .unwrap()
         .turn
@@ -1388,7 +1384,7 @@ async fn failed_steer_event_insert_rolls_back_message_receipt_and_revision() {
     let lease = uuid::Uuid::new_v4();
     let claimed_at = Utc::now();
     store
-        .claim_turn_run(lease, claimed_at, claimed_at + chrono::Duration::minutes(1))
+        .claim_turn(lease, claimed_at, claimed_at + chrono::Duration::minutes(1))
         .await
         .unwrap()
         .turn
@@ -1426,7 +1422,7 @@ async fn failed_steer_event_insert_rolls_back_message_receipt_and_revision() {
     assert_eq!(pending.resolved_at, None);
     assert_eq!(
         store
-            .get_turn_run(turn.id)
+            .get_turn(turn.id)
             .await
             .unwrap()
             .unwrap()
@@ -1492,7 +1488,7 @@ async fn transcript_attributes_invoked_skills_to_the_message_that_named_them() {
     let claim_at = Utc::now();
     let lease_token = uuid::Uuid::new_v4();
     store
-        .claim_turn_run(
+        .claim_turn(
             lease_token,
             claim_at,
             claim_at + chrono::Duration::minutes(1),

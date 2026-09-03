@@ -127,7 +127,7 @@ async fn claimed_foreground_agent_returns_one_bounded_sandbox_checkpoint() {
     let lease_token = uuid::Uuid::new_v4();
     let claimed_at = Utc::now();
     store
-        .claim_turn_run(
+        .claim_turn(
             lease_token,
             claimed_at,
             claimed_at + chrono::Duration::minutes(1),
@@ -287,7 +287,7 @@ async fn sibling_sandbox_spawns_are_rejected_before_any_checkpoint() {
     let lease_token = uuid::Uuid::new_v4();
     let now = Utc::now();
     store
-        .claim_turn_run(lease_token, now, now + chrono::Duration::minutes(1))
+        .claim_turn(lease_token, now, now + chrono::Duration::minutes(1))
         .await
         .unwrap();
     let mut registry = ToolRegistry::new();
@@ -365,7 +365,7 @@ async fn report_blocked_returns_a_persisted_refused_outcome_with_the_explanation
     let lease_token = uuid::Uuid::new_v4();
     let now = Utc::now();
     store
-        .claim_turn_run(lease_token, now, now + chrono::Duration::minutes(1))
+        .claim_turn(lease_token, now, now + chrono::Duration::minutes(1))
         .await
         .unwrap();
     let mut registry = ToolRegistry::new();
@@ -515,7 +515,7 @@ async fn drive_gated_delegation(
     let lease_token = uuid::Uuid::new_v4();
     let now = Utc::now();
     store
-        .claim_turn_run(lease_token, now, now + chrono::Duration::minutes(1))
+        .claim_turn(lease_token, now, now + chrono::Duration::minutes(1))
         .await
         .unwrap();
     let mut registry = ToolRegistry::new();

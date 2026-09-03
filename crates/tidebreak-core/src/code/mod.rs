@@ -90,6 +90,18 @@ code_id_type!(
     /// Identifies one user→engine cycle inside a code session.
     CodeTurnId
 );
+
+impl From<crate::TurnId> for CodeTurnId {
+    fn from(id: crate::TurnId) -> Self {
+        Self(id.0)
+    }
+}
+
+impl From<CodeTurnId> for crate::TurnId {
+    fn from(id: CodeTurnId) -> Self {
+        Self(id.0)
+    }
+}
 code_id_type!(
     /// Identifies one parked approval belonging to a code session.
     CodeApprovalId
@@ -367,9 +379,15 @@ impl CodeWorkspaceStatus {
 }
 
 /// Status of one user→engine turn.
+///
+/// Absorbs [`crate::model::TurnRunStatus`] one-for-one. Chat's `cancelled`
+/// is this enum's `interrupted` — the code token already means the same
+/// thing and is on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum CodeTurnStatus {
+    /// Accepted durably and eligible to be claimed at `available_at`.
+    Queued,
     /// The engine is still working this turn.
     Running,
     /// The engine durably checkpointed the turn and released it; it resumes
@@ -377,21 +395,62 @@ pub enum CodeTurnStatus {
     ///
     /// Only engines declaring `durable_parks` produce this state.
     Waiting,
+    /// Cancellation was requested while a worker still owns the exact lease.
+    Cancelling,
+    /// The worker checkpointed safely and released its lease while one exact
+    /// durable client call executes on the host.
+    WaitingForClient,
+    /// The worker checkpointed safely and released its lease while one exact
+    /// sandbox child result is awaited in the foreground inbox.
+    WaitingForAgentRun,
+    /// Cancellation was requested after the client call may have started.
+    CancellingClient,
+    /// The blocking client call resolved and the checkpoint is eligible for a
+    /// fresh worker lease without consuming another failure attempt.
+    Resuming,
+    /// Failed safely before an ambiguous side effect and awaits another claim.
+    RetryWait,
     /// The turn finished successfully.
     Completed,
     /// The turn failed.
     Failed,
-    /// The turn was interrupted (user or recovery).
+    /// The turn was interrupted (user or recovery). Chat projects this as
+    /// `cancelled`.
     Interrupted,
 }
 
 impl CodeTurnStatus {
+    /// Every status that means the conversation is still working.
+    ///
+    /// One definition, because "busy" must mean the same thing to the host's
+    /// quiescence check and to the reader's attention badge. Mirrors
+    /// [`crate::model::TurnRunStatus::LIVE`] and also includes `waiting`,
+    /// the durable park the chat lane never had.
+    pub const LIVE: &'static [Self] = &[
+        Self::Queued,
+        Self::Running,
+        Self::Waiting,
+        Self::Cancelling,
+        Self::WaitingForClient,
+        Self::WaitingForAgentRun,
+        Self::CancellingClient,
+        Self::Resuming,
+        Self::RetryWait,
+    ];
+
     /// Stable database and wire token.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Queued => "queued",
             Self::Running => "running",
             Self::Waiting => "waiting",
+            Self::Cancelling => "cancelling",
+            Self::WaitingForClient => "waiting_for_client",
+            Self::WaitingForAgentRun => "waiting_for_agent_run",
+            Self::CancellingClient => "cancelling_client",
+            Self::Resuming => "resuming",
+            Self::RetryWait => "retry_wait",
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Interrupted => "interrupted",
@@ -403,19 +462,50 @@ impl CodeTurnStatus {
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(value: &str) -> Option<Self> {
         match value {
+            "queued" => Some(Self::Queued),
             "running" => Some(Self::Running),
             "waiting" => Some(Self::Waiting),
+            "cancelling" => Some(Self::Cancelling),
+            "waiting_for_client" => Some(Self::WaitingForClient),
+            "waiting_for_agent_run" => Some(Self::WaitingForAgentRun),
+            "cancelling_client" => Some(Self::CancellingClient),
+            "resuming" => Some(Self::Resuming),
+            "retry_wait" => Some(Self::RetryWait),
             "completed" => Some(Self::Completed),
             "failed" => Some(Self::Failed),
-            "interrupted" => Some(Self::Interrupted),
+            "interrupted" | "cancelled" => Some(Self::Interrupted),
             _ => None,
         }
     }
 
+    /// Whether this status means the conversation is still working.
+    #[must_use]
+    pub fn is_live(self) -> bool {
+        Self::LIVE.contains(&self)
+    }
+
     /// Whether the turn is still open: the engine owes it a terminal event.
     #[must_use]
-    pub const fn is_open(self) -> bool {
-        matches!(self, Self::Running | Self::Waiting)
+    pub fn is_open(self) -> bool {
+        self.is_live()
+    }
+}
+
+impl From<crate::model::TurnRunStatus> for CodeTurnStatus {
+    fn from(status: crate::model::TurnRunStatus) -> Self {
+        match status {
+            crate::model::TurnRunStatus::Queued => Self::Queued,
+            crate::model::TurnRunStatus::Running => Self::Running,
+            crate::model::TurnRunStatus::Cancelling => Self::Cancelling,
+            crate::model::TurnRunStatus::WaitingForClient => Self::WaitingForClient,
+            crate::model::TurnRunStatus::WaitingForAgentRun => Self::WaitingForAgentRun,
+            crate::model::TurnRunStatus::CancellingClient => Self::CancellingClient,
+            crate::model::TurnRunStatus::Resuming => Self::Resuming,
+            crate::model::TurnRunStatus::RetryWait => Self::RetryWait,
+            crate::model::TurnRunStatus::Completed => Self::Completed,
+            crate::model::TurnRunStatus::Failed => Self::Failed,
+            crate::model::TurnRunStatus::Cancelled => Self::Interrupted,
+        }
     }
 }
 
@@ -2257,6 +2347,31 @@ pub fn classify_trigger_condition(pr: &PullRequestDigest) -> Option<CodeTriggerC
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_status_sets_agree_until_turn_run_status_is_deleted() {
+        use crate::model::TurnRunStatus;
+        let chat: std::collections::HashSet<&str> = TurnRunStatus::LIVE
+            .iter()
+            .map(|status| match status.as_str() {
+                "cancelled" => "interrupted",
+                token => token,
+            })
+            .collect();
+        let code: std::collections::HashSet<&str> = CodeTurnStatus::LIVE
+            .iter()
+            .map(|status| status.as_str())
+            .collect();
+        assert!(
+            chat.is_subset(&code),
+            "CodeTurnStatus::LIVE is missing chat live tokens: {:?}",
+            chat.difference(&code).collect::<Vec<_>>()
+        );
+        assert!(
+            code.contains("waiting"),
+            "CodeTurnStatus::LIVE must include waiting, the durable park"
+        );
+    }
 
     #[test]
     fn code_ids_roundtrip_as_bare_uuids() {

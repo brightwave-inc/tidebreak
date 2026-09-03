@@ -21,7 +21,7 @@ pub(super) async fn live_turn_for_sandbox_test(
     chat_id: ChatId,
 ) -> (crate::TurnRun, uuid::Uuid) {
     if let Some(turn) = store
-        .list_turn_runs(chat_id)
+        .list_turns(chat_id)
         .await
         .unwrap()
         .into_iter()
@@ -45,7 +45,7 @@ pub(super) async fn live_turn_for_sandbox_test(
     let lease = uuid::Uuid::new_v4();
     let now = Utc::now();
     let turn = store
-        .claim_turn_run(lease, now, now + Duration::hours(1))
+        .claim_turn(lease, now, now + Duration::hours(1))
         .await
         .unwrap()
         .turn
@@ -296,7 +296,10 @@ async fn sandbox_admission_is_exact_bounded_and_releases_consumed_terminal_capac
     let first_child = match first {
         crate::AdmitSandboxAgentRunOutcome::Accepted { child, admission } => {
             assert_eq!(admission.origin_turn_id, turn.id);
-            assert_eq!(admission.parent_run_id, turn.agent_run_id);
+            assert_eq!(
+                admission.parent_run_id,
+                crate::id::AgentRunId::foreground_for_chat(turn.chat_id)
+            );
             assert_eq!(admission.spawn_call_id, first_call);
             child
         }
@@ -400,7 +403,7 @@ async fn sandbox_admission_is_exact_bounded_and_releases_consumed_terminal_capac
     ));
     let resumed_lease = uuid::Uuid::new_v4();
     let resumed = store
-        .claim_turn_run(resumed_lease, Utc::now(), Utc::now() + Duration::minutes(5))
+        .claim_turn(resumed_lease, Utc::now(), Utc::now() + Duration::minutes(5))
         .await
         .unwrap()
         .turn
@@ -659,7 +662,7 @@ async fn sandbox_child_cannot_park_a_different_origin_turn() {
         Some(ParkTurnForAgentRunWaitSetOutcome::IdentityConflict)
     ));
     assert_eq!(
-        store.get_turn_run(second_turn.id).await.unwrap(),
+        store.get_turn(second_turn.id).await.unwrap(),
         Some(second_turn)
     );
 }
@@ -1988,7 +1991,7 @@ async fn cancellation_retry_remains_pending_while_parent_completion_is_fenced() 
     };
     assert!(matches!(
         store
-            .complete_turn_run(origin.id, origin_lease, 0, completed_at, &output)
+            .complete_turn(origin.id, origin_lease, 0, completed_at, &output)
             .await
             .unwrap(),
         Some(crate::CompleteTurnRunOutcome::ChildrenOutstanding { child_run_ids, .. })
@@ -3031,15 +3034,15 @@ async fn active_work_counts_gate_host_quiescence() {
     assert!(!busy.is_quiescent());
 
     // Settled rows drop out of both counts.
-    let mut settled_turn: crate::db::entities::turn_run::ActiveModel =
-        crate::db::entities::turn_run::Entity::find_by_id(turn_id.0)
+    let mut settled_turn: crate::db::entities::code_turn::ActiveModel =
+        crate::db::entities::code_turn::Entity::find_by_id(turn_id.0)
             .one(&store.conn)
             .await
             .unwrap()
             .unwrap()
             .into();
     settled_turn.status = Set(TurnRunStatus::Cancelled.as_str().into());
-    settled_turn.finished_at = Set(Some(now));
+    settled_turn.ended_at = Set(Some(now));
     settled_turn.update(&store.conn).await.unwrap();
 
     let mut settled_run: crate::db::entities::agent_run::ActiveModel =
@@ -3277,7 +3280,7 @@ async fn a_background_run_keeps_its_own_plan_and_the_chat_can_still_be_deleted()
             Some(RequestAgentRunCancellationOutcome::Cancelled(_))
         ));
     }
-    let turn = store.get_turn_run(turn.id).await.unwrap().unwrap();
+    let turn = store.get_turn(turn.id).await.unwrap().unwrap();
     store
         .request_turn_cancellation_and_append_event(turn.id, turn.updated_at + Duration::seconds(1))
         .await
@@ -3285,8 +3288,8 @@ async fn a_background_run_keeps_its_own_plan_and_the_chat_can_still_be_deleted()
     // The spawning turn is quiesced the same way a worker acknowledgement
     // would leave it; deletion is what this half of the test is about, not the
     // turn state machine.
-    let mut settled: crate::db::entities::turn_run::ActiveModel =
-        crate::db::entities::turn_run::Entity::find_by_id(turn.id.0)
+    let mut settled: crate::db::entities::code_turn::ActiveModel =
+        crate::db::entities::code_turn::Entity::find_by_id(turn.id.0)
             .one(&store.conn)
             .await
             .unwrap()
@@ -3295,7 +3298,7 @@ async fn a_background_run_keeps_its_own_plan_and_the_chat_can_still_be_deleted()
     settled.status = Set(TurnRunStatus::Cancelled.as_str().into());
     settled.lease_token = Set(None);
     settled.lease_expires_at = Set(None);
-    settled.finished_at = Set(Some(Utc::now()));
+    settled.ended_at = Set(Some(Utc::now()));
     settled.update(&store.conn).await.unwrap();
     let deleted = store.delete_chat(chat.id).await.unwrap();
     match deleted {

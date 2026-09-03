@@ -23,7 +23,7 @@ async fn cancel_stops_a_running_turn() {
         cancel_status,
         StatusCode::ACCEPTED,
         "turn after cancel response: {:?}",
-        store.get_turn_run(turn_id).await.unwrap()
+        store.get_turn(turn_id).await.unwrap()
     );
 
     // The turn preempts the blocked provider call and ends as cancelled —
@@ -169,7 +169,7 @@ async fn cancel_cannot_target_a_turn_through_another_chat() {
         StatusCode::CONFLICT
     );
     assert_ne!(
-        store.get_turn_run(turn_id).await.unwrap().unwrap().status,
+        store.get_turn(turn_id).await.unwrap().unwrap().status,
         tidebreak_core::TurnRunStatus::Cancelled
     );
     assert_eq!(
@@ -1092,7 +1092,7 @@ async fn accept_and_claim_turn_for_route_test(
     let turn_token = uuid::Uuid::new_v4();
     let claimed_at = accepted.available_at;
     let claimed = store
-        .claim_turn_run(
+        .claim_turn(
             turn_token,
             claimed_at,
             claimed_at + chrono::Duration::minutes(1),
@@ -2334,12 +2334,7 @@ async fn client_resolution_publishes_cancellation_and_wakes_resumable_turns() {
         .await
         .expect("resumable client resolution must wake the turn worker");
     assert_eq!(
-        store
-            .get_turn_run(resume_turn)
-            .await
-            .unwrap()
-            .unwrap()
-            .status,
+        store.get_turn(resume_turn).await.unwrap().unwrap().status,
         TurnRunStatus::Resuming
     );
     store
@@ -2509,7 +2504,7 @@ async fn resumed_worker_preserves_checkpoint_usage_and_step_budget() {
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     let exhausted_turn = store
-        .list_turn_runs(exhausted_chat.id)
+        .list_turns(exhausted_chat.id)
         .await
         .unwrap()
         .pop()
@@ -2634,7 +2629,7 @@ async fn worker_checkpoints_a_client_tool_and_resumes_after_its_result() {
     })
     .await
     .expect("worker should durably checkpoint the client tool");
-    let parked = store.get_turn_run(turn_id).await.unwrap().unwrap();
+    let parked = store.get_turn(turn_id).await.unwrap().unwrap();
     assert_eq!(parked.status, TurnRunStatus::WaitingForClient);
     assert_eq!(parked.model_steps, 1);
     assert_eq!(parked.usage.input_tokens, 5);
@@ -2754,7 +2749,7 @@ async fn worker_checkpoints_a_client_tool_and_resumes_after_its_result() {
     .await
     .expect("the last budgeted step still parks its client tool");
     let exhausted_parked = exhausted_store
-        .get_turn_run(exhausted_turn_id)
+        .get_turn(exhausted_turn_id)
         .await
         .unwrap()
         .unwrap();
@@ -2790,7 +2785,7 @@ async fn worker_checkpoints_a_client_tool_and_resumes_after_its_result() {
         );
     }
     let exhausted_turn = exhausted_store
-        .get_turn_run(exhausted_turn_id)
+        .get_turn(exhausted_turn_id)
         .await
         .unwrap()
         .unwrap();
@@ -2909,7 +2904,7 @@ async fn client_execution_poll_terminalizes_an_expired_lease_and_resumes_the_tur
     assert_eq!(pending.status(), StatusCode::OK);
     assert!(json_body::<Vec<ToolCallRecord>>(pending).await.is_empty());
 
-    let turn = store.get_turn_run(turn_id).await.unwrap().unwrap();
+    let turn = store.get_turn(turn_id).await.unwrap().unwrap();
     assert_eq!(turn.status, TurnRunStatus::Resuming);
     let stored_call = store
         .list_tool_calls(chat.id)
@@ -2982,7 +2977,7 @@ async fn cancellation_closes_an_expired_claimed_client_wait_without_executor_ack
         StatusCode::ACCEPTED
     );
     assert_eq!(
-        store.get_turn_run(turn_id).await.unwrap().unwrap().status,
+        store.get_turn(turn_id).await.unwrap().unwrap().status,
         TurnRunStatus::Cancelled
     );
     let stored_call = store
@@ -3659,7 +3654,7 @@ async fn a_headless_folder_request_resumes_the_turn_with_the_declined_result() {
     .expect("the folder request should park the turn");
     assert_eq!(call.name, tidebreak_core::REQUEST_FOLDER_ACCESS_TOOL);
     assert_eq!(
-        store.get_turn_run(turn_id).await.unwrap().unwrap().status,
+        store.get_turn(turn_id).await.unwrap().unwrap().status,
         TurnRunStatus::WaitingForClient
     );
 

@@ -25,7 +25,7 @@ async fn claimed_turn(
     let claimed_at = turn.available_at + Duration::seconds(1);
     let lease_token = uuid::Uuid::new_v4();
     store
-        .claim_turn_run(lease_token, claimed_at, claimed_at + Duration::minutes(1))
+        .claim_turn(lease_token, claimed_at, claimed_at + Duration::minutes(1))
         .await
         .unwrap()
         .turn
@@ -34,29 +34,29 @@ async fn claimed_turn(
 }
 
 async fn set_checkpoint(store: &DbStore, turn_id: TurnId, model_steps: i32, usage: Usage) {
-    let updated = entities::turn_run::Entity::update_many()
+    let updated = entities::code_turn::Entity::update_many()
         .col_expr(
-            entities::turn_run::Column::ModelSteps,
+            entities::code_turn::Column::ModelSteps,
             sea_orm::sea_query::Expr::value(model_steps),
         )
         .col_expr(
-            entities::turn_run::Column::InputTokens,
+            entities::code_turn::Column::InputTokens,
             sea_orm::sea_query::Expr::value(i64::from(usage.input_tokens)),
         )
         .col_expr(
-            entities::turn_run::Column::OutputTokens,
+            entities::code_turn::Column::OutputTokens,
             sea_orm::sea_query::Expr::value(i64::from(usage.output_tokens)),
         )
         .col_expr(
-            entities::turn_run::Column::CacheReadInputTokens,
+            entities::code_turn::Column::CacheReadInputTokens,
             sea_orm::sea_query::Expr::value(i64::from(usage.cache_read_input_tokens)),
         )
         .col_expr(
-            entities::turn_run::Column::CacheCreationInputTokens,
+            entities::code_turn::Column::CacheCreationInputTokens,
             sea_orm::sea_query::Expr::value(i64::from(usage.cache_creation_input_tokens)),
         )
-        .filter(entities::turn_run::Column::Id.eq(turn_id.0))
-        .filter(entities::turn_run::Column::Status.eq(TurnRunStatus::Running.as_str()))
+        .filter(entities::code_turn::Column::Id.eq(turn_id.0))
+        .filter(entities::code_turn::Column::Status.eq(TurnRunStatus::Running.as_str()))
         .exec(&store.conn)
         .await
         .unwrap();
@@ -85,7 +85,7 @@ async fn completed_terminal_event_persists_authoritative_totals_without_checkpoi
         created_at: claimed_at + Duration::seconds(1),
     };
 
-    let completed = super::super::ops::turn::complete_turn_run_and_append_event(
+    let completed = super::super::ops::turn::complete_turn_and_append_event(
         &store,
         turn_id,
         lease_token,
@@ -108,7 +108,7 @@ async fn completed_terminal_event_persists_authoritative_totals_without_checkpoi
         completed.terminal_event.as_ref().map(|event| &event.event),
         Some(AgentEvent::TurnCompleted { usage: stored, .. }) if *stored == usage
     ));
-    let stored = store.get_turn_run(turn_id).await.unwrap().unwrap();
+    let stored = store.get_turn(turn_id).await.unwrap().unwrap();
     assert_eq!((stored.model_steps, stored.usage), (3, usage));
     let notifications = store
         .list_notifications_scoped(&OwnerId::local(), None, 50)
@@ -118,7 +118,7 @@ async fn completed_terminal_event_persists_authoritative_totals_without_checkpoi
     assert_eq!(notifications[0].kind, NotificationKind::AgentCompleted);
     assert_eq!(notifications[0].title, "hello finished");
 
-    let replay = super::super::ops::turn::complete_turn_run_and_append_event(
+    let replay = super::super::ops::turn::complete_turn_and_append_event(
         &store,
         turn_id,
         lease_token,
@@ -146,7 +146,7 @@ async fn completed_terminal_event_persists_authoritative_totals_without_checkpoi
             .len(),
         1
     );
-    assert!(super::super::ops::turn::complete_turn_run_and_append_event(
+    assert!(super::super::ops::turn::complete_turn_and_append_event(
         &store,
         turn_id,
         lease_token,
@@ -191,22 +191,21 @@ async fn refused_terminal_event_replaces_checkpoint_with_authoritative_totals() 
     };
     let refusal = RefusalOutcome::new(RefusalDetails::from_category(Some("policy")), true);
 
-    let completed =
-        super::super::ops::turn::complete_refused_turn_run_with_citations_and_append_event(
-            &store,
-            turn_id,
-            lease_token,
-            0,
-            output.created_at,
-            &output,
-            &[],
-            4,
-            total,
-            refusal.clone(),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+    let completed = super::super::ops::turn::complete_refused_turn_with_citations_and_append_event(
+        &store,
+        turn_id,
+        lease_token,
+        0,
+        output.created_at,
+        &output,
+        &[],
+        4,
+        total,
+        refusal.clone(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     assert!(matches!(
         completed.outcome,
         CompleteTurnRunOutcome::Completed(ref turn)
@@ -217,7 +216,7 @@ async fn refused_terminal_event_replaces_checkpoint_with_authoritative_totals() 
         Some(AgentEvent::TurnRefused { usage, refusal: stored })
             if *usage == total && stored == &refusal
     ));
-    let stored = store.get_turn_run(turn_id).await.unwrap().unwrap();
+    let stored = store.get_turn(turn_id).await.unwrap().unwrap();
     assert_eq!((stored.model_steps, stored.usage), (4, total));
     assert_ne!(stored.usage, checkpoint);
 }

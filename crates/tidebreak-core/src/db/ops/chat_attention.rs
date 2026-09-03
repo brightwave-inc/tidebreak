@@ -4,7 +4,7 @@
 //! mode introduced, so one supervising client watches one queue. Code stores
 //! its attention on `code_session`, because a session is the unit and its
 //! lifecycle lives on the same row. Chat has no such row: a conversation's
-//! liveness is spread across `turn_run`, and its waiting work is the same set
+//! liveness is spread across `code_turn`, and its waiting work is the same set
 //! the inbox already projects.
 //!
 //! So chat derives rather than stores. Adding attention columns to `chat`
@@ -24,8 +24,9 @@ use std::collections::HashMap;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 
 use crate::attention::{Attention, AttentionSource, AttentionState};
+use crate::code::CodeTurnStatus;
 use crate::error::Result;
-use crate::model::{OwnerId, TurnRunStatus};
+use crate::model::OwnerId;
 use crate::storage::{InboxItem, InboxItemKind};
 use crate::ChatId;
 
@@ -62,12 +63,12 @@ pub(in crate::db) async fn chat_attention(
     // A live turn is the weaker claim, so it goes first and a waiting item
     // overwrites it below. A conversation that is both running and holding an
     // approval is, to the reader, waiting on them.
-    let live = entities::turn_run::Entity::find()
+    let live = entities::code_turn::Entity::find()
         .filter(
-            entities::turn_run::Column::Status
-                .is_in(TurnRunStatus::LIVE.iter().map(|status| status.as_str())),
+            entities::code_turn::Column::Status
+                .is_in(CodeTurnStatus::LIVE.iter().map(|status| status.as_str())),
         )
-        .order_by_asc(entities::turn_run::Column::Id)
+        .order_by_asc(entities::code_turn::Column::Id)
         .all(&store.conn)
         .await
         .map_err(store_err)?;
@@ -81,11 +82,11 @@ pub(in crate::db) async fn chat_attention(
         .map(|chat| chat.id)
         .collect::<std::collections::HashSet<_>>();
     for run in live {
-        if !owned.contains(&run.chat_id) {
+        if !owned.contains(&run.session_id) {
             continue;
         }
         attention.insert(
-            ChatId(run.chat_id),
+            ChatId(run.session_id),
             Attention::working(AttentionSource::Lifecycle),
         );
     }

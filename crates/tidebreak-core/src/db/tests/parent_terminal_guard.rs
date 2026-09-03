@@ -87,7 +87,7 @@ async fn completion_fences_children_in_stable_order_without_writing_output() {
     let output = output_for(&turn, chat.id);
 
     let fenced = store
-        .complete_turn_run(turn.id, lease, 0, Utc::now(), &output)
+        .complete_turn(turn.id, lease, 0, Utc::now(), &output)
         .await
         .unwrap()
         .unwrap();
@@ -97,7 +97,7 @@ async fn completion_fences_children_in_stable_order_without_writing_output() {
             if child_run_ids == vec![first.id, second.id]
     ));
     assert_eq!(
-        store.get_turn_run(turn.id).await.unwrap().unwrap().status,
+        store.get_turn(turn.id).await.unwrap().unwrap().status,
         TurnRunStatus::Running
     );
     assert!(!store
@@ -124,7 +124,7 @@ async fn completion_fences_children_in_stable_order_without_writing_output() {
         .unwrap()
         .unwrap();
     let still_fenced = store
-        .complete_turn_run(turn.id, lease, 0, Utc::now(), &output)
+        .complete_turn(turn.id, lease, 0, Utc::now(), &output)
         .await
         .unwrap()
         .unwrap();
@@ -144,7 +144,7 @@ async fn completion_fences_children_in_stable_order_without_writing_output() {
     ));
     assert!(matches!(
         store
-            .complete_turn_run(turn.id, lease, 0, Utc::now(), &output)
+            .complete_turn(turn.id, lease, 0, Utc::now(), &output)
             .await
             .unwrap(),
         Some(CompleteTurnRunOutcome::ChildrenOutstanding { child_run_ids, .. })
@@ -153,7 +153,7 @@ async fn completion_fences_children_in_stable_order_without_writing_output() {
     consume_child(&store, chat.id, second.id).await;
     assert!(matches!(
         store
-            .complete_turn_run(turn.id, lease, 0, Utc::now(), &output)
+            .complete_turn(turn.id, lease, 0, Utc::now(), &output)
             .await
             .unwrap(),
         Some(CompleteTurnRunOutcome::Completed(_))
@@ -214,14 +214,14 @@ async fn completion_fences_needs_input_checkin_without_store_error() {
     // as a store error the turn worker would retry forever.
     assert!(matches!(
         store
-            .complete_turn_run(turn.id, lease, 0, Utc::now(), &output)
+            .complete_turn(turn.id, lease, 0, Utc::now(), &output)
             .await
             .unwrap(),
         Some(CompleteTurnRunOutcome::ChildrenOutstanding { child_run_ids, .. })
             if child_run_ids == vec![child.id]
     ));
     assert_eq!(
-        store.get_turn_run(turn.id).await.unwrap().unwrap().status,
+        store.get_turn(turn.id).await.unwrap().unwrap().status,
         TurnRunStatus::Running
     );
     assert!(!store
@@ -236,7 +236,7 @@ async fn completion_fences_needs_input_checkin_without_store_error() {
     consume_child(&store, chat.id, child.id).await;
     assert!(matches!(
         store
-            .complete_turn_run(turn.id, lease, 0, Utc::now(), &output)
+            .complete_turn(turn.id, lease, 0, Utc::now(), &output)
             .await
             .unwrap(),
         Some(CompleteTurnRunOutcome::ChildrenOutstanding { child_run_ids, .. })
@@ -267,7 +267,7 @@ async fn permanent_failure_fences_live_children_and_retires_only_unconsumed_deli
     let queued = admit_sandbox_call_for_test(&store, chat.id, CallId::new(), "queued").await;
 
     let failure = store
-        .record_turn_run_failure(
+        .record_turn_failure(
             turn.id,
             turn_lease,
             Utc::now(),
@@ -282,7 +282,7 @@ async fn permanent_failure_fences_live_children_and_retires_only_unconsumed_deli
         .unwrap();
     assert!(matches!(failure, RecordTurnFailureOutcome::Recorded(_)));
     assert_eq!(
-        store.get_turn_run(turn.id).await.unwrap().unwrap().status,
+        store.get_turn(turn.id).await.unwrap().unwrap().status,
         TurnRunStatus::Failed
     );
     assert_eq!(
@@ -373,11 +373,11 @@ async fn terminal_child_missing_its_inbox_is_corruption_not_a_silent_retirement(
 
     let output = output_for(&turn, chat.id);
     assert!(store
-        .complete_turn_run(turn.id, lease, 0, Utc::now(), &output)
+        .complete_turn(turn.id, lease, 0, Utc::now(), &output)
         .await
         .is_err());
     assert!(store
-        .record_turn_run_failure(
+        .record_turn_failure(
             turn.id,
             lease,
             Utc::now(),
@@ -390,7 +390,7 @@ async fn terminal_child_missing_its_inbox_is_corruption_not_a_silent_retirement(
         .await
         .is_err());
     assert_eq!(
-        store.get_turn_run(turn.id).await.unwrap().unwrap().status,
+        store.get_turn(turn.id).await.unwrap().unwrap().status,
         TurnRunStatus::Running
     );
 }
@@ -414,7 +414,7 @@ async fn terminal_child_corrupt_result_is_not_retired_by_parent_failure() {
     assert_eq!(updated.rows_affected, 1);
 
     assert!(store
-        .record_turn_run_failure(
+        .record_turn_failure(
             turn.id,
             lease,
             Utc::now(),
@@ -427,7 +427,7 @@ async fn terminal_child_corrupt_result_is_not_retired_by_parent_failure() {
         .await
         .is_err());
     assert_eq!(
-        store.get_turn_run(turn.id).await.unwrap().unwrap().status,
+        store.get_turn(turn.id).await.unwrap().unwrap().status,
         TurnRunStatus::Running
     );
 }

@@ -167,6 +167,26 @@ where
         .exec(connection)
         .await
         .map_err(store_err)?;
+    entities::code_turn_document_attachment::Entity::delete_many()
+        .filter(entities::code_turn_document_attachment::Column::TurnId.is_in(turn_ids.clone()))
+        .exec(connection)
+        .await
+        .map_err(store_err)?;
+    entities::code_turn_steer::Entity::delete_many()
+        .filter(entities::code_turn_steer::Column::SessionId.eq(id.0))
+        .exec(connection)
+        .await
+        .map_err(store_err)?;
+    entities::code_turn_failure::Entity::delete_many()
+        .filter(entities::code_turn_failure::Column::TurnId.is_in(turn_ids.clone()))
+        .exec(connection)
+        .await
+        .map_err(store_err)?;
+    entities::code_turn_claim::Entity::delete_many()
+        .filter(entities::code_turn_claim::Column::TurnId.is_in(turn_ids.clone()))
+        .exec(connection)
+        .await
+        .map_err(store_err)?;
     entities::code_turn_attachment::Entity::delete_many()
         .filter(entities::code_turn_attachment::Column::TurnId.is_in(turn_ids))
         .exec(connection)

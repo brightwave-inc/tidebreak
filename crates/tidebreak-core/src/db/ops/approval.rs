@@ -349,7 +349,7 @@ pub(in crate::db) async fn request_and_append_event(
         grant_scopes: grant_scopes.clone(),
         preview: request.preview.clone(),
     };
-    let turn = entities::turn_run::Entity::find_by_id(request.turn_id.0)
+    let turn = entities::code_turn::Entity::find_by_id(request.turn_id.0)
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -381,7 +381,7 @@ pub(in crate::db) async fn request_and_append_event(
             });
         }
     }
-    let claim = entities::turn_claim::Entity::find_by_id(lease_token)
+    let claim = entities::code_turn_claim::Entity::find_by_id(lease_token)
         .one(&transaction)
         .await
         .map_err(store_err)?;
@@ -399,7 +399,7 @@ pub(in crate::db) async fn request_and_append_event(
         || call.name != request.tool_name
         || call.execution != ToolCallExecution::Server.as_str()
         || call.status != ToolCallStatus::Pending.as_str()
-        || turn.chat_id != request.chat_id.0
+        || turn.session_id != request.chat_id.0
         || turn.status != TurnRunStatus::Running.as_str()
         || !claim_is_live
         || request.kind != ToolApprovalKind::for_call(&request.tool_name, request.class)
@@ -410,7 +410,9 @@ pub(in crate::db) async fn request_and_append_event(
             required_event: None,
         });
     }
-    let requested_at = database_now.max(turn.updated_at).max(call.created_at);
+    let requested_at = database_now
+        .max(turn.updated_at.unwrap_or(database_now))
+        .max(call.created_at);
     let session = session_row(&transaction, request.chat_id).await?;
     if let Some(source_call_id) = matching_standing_grant(
         &transaction,

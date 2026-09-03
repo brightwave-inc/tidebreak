@@ -16,13 +16,13 @@ use futures::channel::mpsc::{unbounded, TryRecvError, UnboundedReceiver};
 use futures::StreamExt;
 use tidebreak_core::{
     Agent, AgentConfig, AgentError, AgentEvent, AgentRunExecutionLocation, AgentRunWaitCondition,
-    AgentRunWaitSetCheckpointRequest, AgentTurnOutcome, BlobStore, CheckpointSandboxSpawnOutcome,
-    ClaimedAgentEvent, CompleteTurnRunOutcome, ForegroundAgentWaitRequest, MessageId,
-    ParkTurnForAgentRunWaitSetOutcome, ParkTurnForClientCallOutcome, RecordTurnFailureOutcome,
-    Result, SandboxAgentSpawnRequest, SandboxSpawnCheckpointRequest, SecretProvider,
-    SequencedEvent, Store, ToolRegistry, ToolScratch, TurnCheckpointProgress, TurnEventAppend,
-    TurnFailureRetry, TurnId, TurnRun, TurnRunStatus, SPAWN_SANDBOX_AGENT_TOOL,
-    WAIT_FOR_AGENTS_TOOL,
+    AgentRunWaitSetCheckpointRequest, AgentTurnOutcome, BlobStore, CallId,
+    CheckpointSandboxSpawnOutcome, ClaimedAgentEvent, CompleteTurnRunOutcome,
+    ForegroundAgentWaitRequest, MessageId, ParkTurnForAgentRunWaitSetOutcome,
+    ParkTurnForClientCallOutcome, RecordTurnFailureOutcome, Result, SandboxAgentSpawnRequest,
+    SandboxSpawnCheckpointRequest, SecretProvider, SequencedEvent, Store, ToolRegistry,
+    ToolScratch, TurnCheckpointProgress, TurnEventAppend, TurnFailureRetry, TurnId, TurnRun,
+    TurnRunStatus, SPAWN_SANDBOX_AGENT_TOOL, WAIT_FOR_AGENTS_TOOL,
 };
 use tokio::sync::{watch, Notify};
 
@@ -91,6 +91,7 @@ impl Default for LegDriverConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LegDriverOutcome {
     Completed(TurnId),
+    WaitingForApproval { turn_id: TurnId, call_id: CallId },
     WaitingForClient(TurnId),
     WaitingForAgentRun(TurnId),
     Resuming(TurnId),
@@ -965,7 +966,7 @@ impl LegDriver {
         for (turn_id, lease_token) in remaining {
             if let Err(error) = self
                 .store
-                .expire_turn_run_lease(turn_id, lease_token, Utc::now())
+                .expire_turn_lease(turn_id, lease_token, Utc::now())
                 .await
             {
                 // The lease then simply expires on its own clock after the
@@ -985,7 +986,7 @@ impl LegDriver {
         let lease_expires_at = now + chrono_duration(self.config.lease)?;
         let action = self
             .store
-            .claim_turn_run(lease_token, now, lease_expires_at)
+            .claim_turn(lease_token, now, lease_expires_at)
             .await?;
         if let Some(terminal) = action.terminal_event {
             self.publish(terminal.chat_id, terminal.event);
@@ -1181,7 +1182,11 @@ impl LegDriver {
         Some(markdown)
     }
 
-    async fn run_turn(&self, turn: TurnRun, lease_token: uuid::Uuid) -> Result<LegDriverOutcome> {
+    pub(crate) async fn run_turn(
+        &self,
+        turn: TurnRun,
+        lease_token: uuid::Uuid,
+    ) -> Result<LegDriverOutcome> {
         if turn.status != TurnRunStatus::Running || turn.lease_token != Some(lease_token) {
             return Err(AgentError::msg(format!(
                 "claimed turn {} has an invalid execution identity",
@@ -1889,7 +1894,7 @@ impl LegDriver {
                     let continue_after_steer = loop {
                         let completion = if let Some(refusal) = refusal.clone() {
                             self.store
-                                .complete_refused_turn_run_with_citations_and_append_event(
+                                .complete_refused_turn_with_citations_and_append_event(
                                     turn.id,
                                     lease_token,
                                     expected_steer_revision,
@@ -1903,7 +1908,7 @@ impl LegDriver {
                                 .await
                         } else {
                             self.store
-                                .complete_turn_run_with_citations_and_append_event(
+                                .complete_turn_with_citations_and_append_event(
                                     turn.id,
                                     lease_token,
                                     expected_steer_revision,
@@ -2193,6 +2198,14 @@ impl LegDriver {
                                     self.publish(turn.chat_id, event);
                                 }
                                 checkpoint_heartbeat.abort_and_wait().await;
+                                if request.name == tidebreak_core::ASK_USER_QUESTIONS_TOOL
+                                    || request.name == tidebreak_core::EXIT_PLAN_MODE_TOOL
+                                {
+                                    return Ok(LegDriverOutcome::WaitingForApproval {
+                                        turn_id: turn.id,
+                                        call_id: request.id,
+                                    });
+                                }
                                 return Ok(LegDriverOutcome::WaitingForClient(turn.id));
                             }
                             Ok(Some(ParkTurnForClientCallOutcome::SteerPending(_)))
@@ -2963,7 +2976,7 @@ impl LegDriver {
             };
             match self
                 .store
-                .heartbeat_turn_run(turn.id, lease_token, now, now + lease)
+                .heartbeat_turn(turn.id, lease_token, now, now + lease)
                 .await
             {
                 Ok(true) => return LeaseState::Running,
@@ -2985,7 +2998,7 @@ impl LegDriver {
 
     async fn lease_state_retry(&self, turn: &TurnRun, lease_token: uuid::Uuid) -> LeaseState {
         loop {
-            match self.store.get_turn_run(turn.id).await {
+            match self.store.get_turn(turn.id).await {
                 Ok(Some(current))
                     if current.lease_token == Some(lease_token)
                         && current.attempt_count == turn.attempt_count
@@ -3014,7 +3027,7 @@ impl LegDriver {
         lease_token: uuid::Uuid,
     ) -> LiveTurnState {
         loop {
-            match self.store.get_turn_run(turn.id).await {
+            match self.store.get_turn(turn.id).await {
                 Ok(Some(current))
                     if current.lease_token == Some(lease_token)
                         && current.attempt_count == turn.attempt_count
@@ -3044,7 +3057,7 @@ impl LegDriver {
         terminal: TerminalIdentity<'_>,
     ) -> ResolutionState {
         loop {
-            match self.store.get_turn_run(turn.id).await {
+            match self.store.get_turn(turn.id).await {
                 Ok(Some(current)) if current.attempt_count == turn.attempt_count => {
                     if current.status == terminal.status() {
                         if !terminal.matches_turn(&current) {
@@ -3262,7 +3275,7 @@ impl LegDriver {
         loop {
             match self
                 .store
-                .record_turn_run_failure_and_append_event(
+                .record_turn_failure_and_append_event(
                     turn.id,
                     lease_token,
                     Utc::now(),
@@ -3523,6 +3536,7 @@ fn log_turn_result(result: std::result::Result<Result<LegDriverOutcome>, tokio::
 fn turn_worker_outcome_label(outcome: &Result<LegDriverOutcome>) -> &'static str {
     match outcome {
         Ok(LegDriverOutcome::Completed(_)) => "completed",
+        Ok(LegDriverOutcome::WaitingForApproval { .. }) => "waiting_for_approval",
         Ok(LegDriverOutcome::WaitingForClient(_)) => "waiting_for_client",
         Ok(LegDriverOutcome::WaitingForAgentRun(_)) => "waiting_for_agent_run",
         Ok(LegDriverOutcome::Resuming(_)) => "resuming",

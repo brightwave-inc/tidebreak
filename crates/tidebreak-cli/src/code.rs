@@ -2824,6 +2824,8 @@ mod tests {
                 durable_parks: CapLevel::Unsupported,
                 user_questions: CapLevel::Unsupported,
                 standing_grants: CapLevel::Unsupported,
+                mid_turn_resume: CapLevel::Unsupported,
+                transcript: CapLevel::Unsupported,
                 memory_loopback: CapLevel::Unsupported,
             }
         }

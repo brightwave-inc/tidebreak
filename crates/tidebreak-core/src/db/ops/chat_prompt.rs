@@ -138,8 +138,8 @@ pub(in crate::db) async fn list_pending_prompt_rows(
         .into_iter()
         .map(|wait| (wait.call_id, wait))
         .collect::<HashMap<_, _>>();
-    let turns = entities::turn_run::Entity::find()
-        .filter(entities::turn_run::Column::Status.eq(TurnRunStatus::WaitingForClient.as_str()))
+    let turns = entities::code_turn::Entity::find()
+        .filter(entities::code_turn::Column::Status.eq(TurnRunStatus::WaitingForClient.as_str()))
         .all(&store.conn)
         .await
         .map_err(store_err)?
@@ -161,9 +161,9 @@ pub(in crate::db) async fn list_pending_prompt_rows(
         if call.chat_id != request.session_id
             || call.turn_id != request.turn_id
             || call.client_executor_id.is_some()
-            || wait.chat_id != request.session_id
+            || wait.session_id != request.session_id
             || wait.turn_id != request.turn_id
-            || turn.chat_id != request.session_id
+            || turn.session_id != request.session_id
             || turn.attempt_count != wait.attempt_count
             || turn.claim_count != wait.claim_count
         {
@@ -203,9 +203,9 @@ pub(in crate::db) async fn list_pending_prompt_rows(
         if call.chat_id != request.session_id
             || call.turn_id != request.turn_id
             || call.client_executor_id.is_some()
-            || wait.chat_id != request.session_id
+            || wait.session_id != request.session_id
             || wait.turn_id != request.turn_id
-            || turn.chat_id != request.session_id
+            || turn.session_id != request.session_id
             || turn.attempt_count != wait.attempt_count
             || turn.claim_count != wait.claim_count
         {
