@@ -580,18 +580,32 @@ jobs:
           echo "Validated the complete immutable release for $RELEASE_TAG."
           echo "exists=true" >> "$GITHUB_OUTPUT"
 
+  notices:
+    name: third-party notices
+    needs: validate
+    if: ${{ needs.validate.outputs.draft == 'true' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/third-party-notices.yml
+    with:
+      sha: ${{ needs.validate.outputs.sha }}
+
   prepare_macos:
-    name: prepare unsigned macOS · universal
-    needs: [validate, inspect_hosted]
+    name: prepare unsigned macOS · ${{ matrix.target }}
+    needs: [validate, inspect_hosted, notices]
     if: >-
       ${{
         needs.validate.outputs.draft == 'true'
         && needs.inspect_hosted.outputs.exists != 'true'
       }}
-    # Set PRODUCTION_MACOS_RUNNER to a provisioned ARM64 larger-runner label
-    # when release compile time matters more than the additional runner cost.
-    runs-on: ${{ vars.PRODUCTION_MACOS_RUNNER || 'macos-latest' }}
+    runs-on: macos-latest
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+          - target: x86_64-apple-darwin
     env:
       CARGO_INCREMENTAL: 0
       RUSTC_WRAPPER: sccache
@@ -624,45 +638,29 @@ jobs:
       - name: Install Rust target
         run: |
           rustup show
-          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          rustup target add "${{ matrix.target }}"
 
       - name: Restore unsigned Rust build cache
         id: rust-build-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            target/release/.cargo-lock
-            target/release/.fingerprint
-            target/release/build
-            target/release/deps
-            target/aarch64-apple-darwin/release/.cargo-lock
-            target/aarch64-apple-darwin/release/.fingerprint
-            target/aarch64-apple-darwin/release/build
-            target/aarch64-apple-darwin/release/deps
-            target/aarch64-apple-darwin/release/tidebreak-desktop
-            target/aarch64-apple-darwin/release/tidebreak-host-broker
-            target/aarch64-apple-darwin/release/tidebreak
-            target/aarch64-apple-darwin/release/libtidebreak_desktop_lib.*
-            target/x86_64-apple-darwin/release/.cargo-lock
-            target/x86_64-apple-darwin/release/.fingerprint
-            target/x86_64-apple-darwin/release/build
-            target/x86_64-apple-darwin/release/deps
-            target/x86_64-apple-darwin/release/tidebreak-desktop
-            target/x86_64-apple-darwin/release/tidebreak-host-broker
-            target/x86_64-apple-darwin/release/tidebreak
-            target/x86_64-apple-darwin/release/libtidebreak_desktop_lib.*
-            crates/tidebreak-desktop/binaries/tidebreak-host-broker-aarch64-apple-darwin
-            crates/tidebreak-desktop/binaries/tidebreak-aarch64-apple-darwin
-            crates/tidebreak-desktop/binaries/tidebreak-host-broker-x86_64-apple-darwin
-            crates/tidebreak-desktop/binaries/tidebreak-x86_64-apple-darwin
-            crates/tidebreak-desktop/binaries/tidebreak-host-broker-universal-apple-darwin
-            crates/tidebreak-desktop/binaries/tidebreak-universal-apple-darwin
-          key: macos-release-prepared-v5-universal-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-${{ needs.validate.outputs.version }}
+            target/${{ matrix.target }}/release/.cargo-lock
+            target/${{ matrix.target }}/release/.fingerprint
+            target/${{ matrix.target }}/release/build
+            target/${{ matrix.target }}/release/deps
+            target/${{ matrix.target }}/release/tidebreak-desktop
+            target/${{ matrix.target }}/release/tidebreak-host-broker
+            target/${{ matrix.target }}/release/tidebreak
+            target/${{ matrix.target }}/release/libtidebreak_desktop_lib.*
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}
+            crates/tidebreak-desktop/binaries/tidebreak-${{ matrix.target }}
+          key: macos-release-target-v5-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-${{ needs.validate.outputs.version }}
           restore-keys: |
-            macos-release-prepared-v5-universal-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-
-            macos-release-target-v5-universal-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}
-            macos-release-target-v5-universal-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
-            macos-release-target-v5-universal-
+            macos-release-target-v5-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-
+            macos-release-target-v5-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}
+            macos-release-target-v5-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            macos-release-target-v5-${{ matrix.target }}-
 
       - name: Set up compiler cache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
@@ -691,13 +689,6 @@ jobs:
         working-directory: crates/tidebreak-desktop/ui
         run: pnpm install --frozen-lockfile --ignore-scripts
 
-      # The signed bundle ships legal/THIRD-PARTY-NOTICES.md as a resource, so
-      # the released tag must not carry a stale copy. Both dependency graphs are
-      # already resolved on this runner, and this job gates the signed build, so
-      # drift fails here, before any signing material is loaded.
-      - name: Verify the third-party notices match the released graph
-        run: node scripts/generate-third-party-notices.mjs --check
-
       - name: Compile without production credentials or bundles
         id: compile
         continue-on-error: true
@@ -705,7 +696,7 @@ jobs:
         with:
           projectPath: crates/tidebreak-desktop
           args: >-
-            --target universal-apple-darwin
+            --target ${{ matrix.target }}
             --config ${{ runner.temp }}/tidebreak-release.json
             --no-bundle
             --ci
@@ -715,32 +706,16 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            target/release/.cargo-lock
-            target/release/.fingerprint
-            target/release/build
-            target/release/deps
-            target/aarch64-apple-darwin/release/.cargo-lock
-            target/aarch64-apple-darwin/release/.fingerprint
-            target/aarch64-apple-darwin/release/build
-            target/aarch64-apple-darwin/release/deps
-            target/aarch64-apple-darwin/release/tidebreak-desktop
-            target/aarch64-apple-darwin/release/tidebreak-host-broker
-            target/aarch64-apple-darwin/release/tidebreak
-            target/aarch64-apple-darwin/release/libtidebreak_desktop_lib.*
-            target/x86_64-apple-darwin/release/.cargo-lock
-            target/x86_64-apple-darwin/release/.fingerprint
-            target/x86_64-apple-darwin/release/build
-            target/x86_64-apple-darwin/release/deps
-            target/x86_64-apple-darwin/release/tidebreak-desktop
-            target/x86_64-apple-darwin/release/tidebreak-host-broker
-            target/x86_64-apple-darwin/release/tidebreak
-            target/x86_64-apple-darwin/release/libtidebreak_desktop_lib.*
-            crates/tidebreak-desktop/binaries/tidebreak-host-broker-aarch64-apple-darwin
-            crates/tidebreak-desktop/binaries/tidebreak-aarch64-apple-darwin
-            crates/tidebreak-desktop/binaries/tidebreak-host-broker-x86_64-apple-darwin
-            crates/tidebreak-desktop/binaries/tidebreak-x86_64-apple-darwin
-            crates/tidebreak-desktop/binaries/tidebreak-host-broker-universal-apple-darwin
-            crates/tidebreak-desktop/binaries/tidebreak-universal-apple-darwin
+            target/${{ matrix.target }}/release/.cargo-lock
+            target/${{ matrix.target }}/release/.fingerprint
+            target/${{ matrix.target }}/release/build
+            target/${{ matrix.target }}/release/deps
+            target/${{ matrix.target }}/release/tidebreak-desktop
+            target/${{ matrix.target }}/release/tidebreak-host-broker
+            target/${{ matrix.target }}/release/tidebreak
+            target/${{ matrix.target }}/release/libtidebreak_desktop_lib.*
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}
+            crates/tidebreak-desktop/binaries/tidebreak-${{ matrix.target }}
           key: ${{ steps.rust-build-cache.outputs.cache-primary-key }}
 
       - name: Require a successful unsigned compilation
@@ -749,9 +724,9 @@ jobs:
 
       - name: Archive prepared macOS inputs
         env:
-          PREPARED_ROOT: ${{ runner.temp }}/tidebreak-prepared-macos
+          PREPARED_ROOT: ${{ runner.temp }}/tidebreak-prepared-macos-${{ matrix.target }}
           RELEASE_CONFIG: ${{ runner.temp }}/tidebreak-release.json
-          RELEASE_TARGET: universal-apple-darwin
+          RELEASE_TARGET: ${{ matrix.target }}
         run: |
           app_binary="target/$RELEASE_TARGET/release/tidebreak-desktop"
           broker_sidecar="crates/tidebreak-desktop/binaries/tidebreak-host-broker-$RELEASE_TARGET"
@@ -788,7 +763,7 @@ jobs:
               "$broker_sidecar" \
               "$cli_sidecar" \
               > SHA256SUMS
-            tar -cf "$GITHUB_WORKSPACE/prepared-macos.tar" \
+            tar -cf "$GITHUB_WORKSPACE/prepared-macos-$RELEASE_TARGET.tar" \
               SHA256SUMS \
               release-config.json \
               target \
@@ -796,10 +771,138 @@ jobs:
           )
           (
             cd "$GITHUB_WORKSPACE"
-            shasum -a 256 prepared-macos.tar > prepared-macos.tar.sha256
+            shasum -a 256 \
+              "prepared-macos-$RELEASE_TARGET.tar" \
+              > "prepared-macos-$RELEASE_TARGET.tar.sha256"
           )
 
       - name: Upload prepared macOS inputs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: tidebreak-prepared-macos-${{ matrix.target }}-${{ github.run_id }}
+          path: |
+            prepared-macos-${{ matrix.target }}.tar
+            prepared-macos-${{ matrix.target }}.tar.sha256
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          overwrite: true
+
+  combine_macos:
+    name: combine unsigned macOS · universal
+    needs: [validate, inspect_hosted, prepare_macos]
+    if: >-
+      ${{
+        always()
+        && needs.validate.result == 'success'
+        && needs.validate.outputs.draft == 'true'
+        && needs.inspect_hosted.result == 'success'
+        && needs.inspect_hosted.outputs.exists != 'true'
+        && needs.prepare_macos.result == 'success'
+      }}
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - name: Download prepared aarch64 macOS inputs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: tidebreak-prepared-macos-aarch64-apple-darwin-${{ github.run_id }}
+          path: ${{ runner.temp }}/prepared-macos-aarch64-apple-darwin-download
+
+      - name: Download prepared x86_64 macOS inputs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: tidebreak-prepared-macos-x86_64-apple-darwin-${{ github.run_id }}
+          path: ${{ runner.temp }}/prepared-macos-x86_64-apple-darwin-download
+
+      - name: Verify and combine prepared macOS slices
+        env:
+          PREPARED_ROOT: ${{ runner.temp }}/tidebreak-prepared-macos-universal
+        run: |
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            download="$RUNNER_TEMP/prepared-macos-$target-download"
+            slice_root="$RUNNER_TEMP/tidebreak-prepared-macos-$target"
+            (
+              cd "$download"
+              shasum -a 256 --check "prepared-macos-$target.tar.sha256"
+            )
+            rm -rf "$slice_root"
+            install -d "$slice_root"
+            tar -xf "$download/prepared-macos-$target.tar" -C "$slice_root"
+            (
+              cd "$slice_root"
+              shasum -a 256 --check SHA256SUMS
+              expected_files="$(printf '%s\n' \
+                "./SHA256SUMS" \
+                "./crates/tidebreak-desktop/binaries/tidebreak-host-broker-$target" \
+                "./crates/tidebreak-desktop/binaries/tidebreak-$target" \
+                "./release-config.json" \
+                "./target/$target/release/tidebreak-desktop" \
+                | LC_ALL=C sort)"
+              actual_files="$(find . -type f -print | LC_ALL=C sort)"
+              [[ "$actual_files" = "$expected_files" ]] || {
+                echo "Prepared $target archive contains an unexpected file set" >&2
+                printf '%s\n' "$actual_files" >&2
+                exit 1
+              }
+            )
+          done
+
+          arm_root="$RUNNER_TEMP/tidebreak-prepared-macos-aarch64-apple-darwin"
+          x86_root="$RUNNER_TEMP/tidebreak-prepared-macos-x86_64-apple-darwin"
+          cmp "$arm_root/release-config.json" "$x86_root/release-config.json"
+
+          app_binary="target/universal-apple-darwin/release/tidebreak-desktop"
+          broker_sidecar="crates/tidebreak-desktop/binaries/tidebreak-host-broker-universal-apple-darwin"
+          cli_sidecar="crates/tidebreak-desktop/binaries/tidebreak-universal-apple-darwin"
+          rm -rf "$PREPARED_ROOT"
+          install -d \
+            "$PREPARED_ROOT/target/universal-apple-darwin/release" \
+            "$PREPARED_ROOT/crates/tidebreak-desktop/binaries"
+          install -m 644 "$arm_root/release-config.json" "$PREPARED_ROOT/release-config.json"
+
+          lipo -create \
+            "$arm_root/target/aarch64-apple-darwin/release/tidebreak-desktop" \
+            "$x86_root/target/x86_64-apple-darwin/release/tidebreak-desktop" \
+            -output "$PREPARED_ROOT/$app_binary"
+          lipo -create \
+            "$arm_root/crates/tidebreak-desktop/binaries/tidebreak-host-broker-aarch64-apple-darwin" \
+            "$x86_root/crates/tidebreak-desktop/binaries/tidebreak-host-broker-x86_64-apple-darwin" \
+            -output "$PREPARED_ROOT/$broker_sidecar"
+          lipo -create \
+            "$arm_root/crates/tidebreak-desktop/binaries/tidebreak-aarch64-apple-darwin" \
+            "$x86_root/crates/tidebreak-desktop/binaries/tidebreak-x86_64-apple-darwin" \
+            -output "$PREPARED_ROOT/$cli_sidecar"
+          chmod 755 \
+            "$PREPARED_ROOT/$app_binary" \
+            "$PREPARED_ROOT/$broker_sidecar" \
+            "$PREPARED_ROOT/$cli_sidecar"
+
+          for file in "$app_binary" "$broker_sidecar" "$cli_sidecar"; do
+            arches="$(lipo -archs "$PREPARED_ROOT/$file")"
+            [[ "$arches" = *arm64* && "$arches" = *x86_64* ]] || {
+              echo "Combined macOS input is not universal: $file ($arches)" >&2
+              exit 1
+            }
+          done
+
+          (
+            cd "$PREPARED_ROOT"
+            shasum -a 256 \
+              release-config.json \
+              "$app_binary" \
+              "$broker_sidecar" \
+              "$cli_sidecar" \
+              > SHA256SUMS
+            tar -cf "$GITHUB_WORKSPACE/prepared-macos.tar" \
+              SHA256SUMS \
+              release-config.json \
+              target \
+              crates
+          )
+          shasum -a 256 prepared-macos.tar > prepared-macos.tar.sha256
+
+      - name: Upload prepared universal macOS inputs
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: tidebreak-prepared-macos-universal-${{ github.run_id }}
@@ -813,7 +916,7 @@ jobs:
 
   build_macos:
     name: macOS · universal
-    needs: [validate, inspect_hosted, prepare_macos]
+    needs: [validate, inspect_hosted, notices, combine_macos]
     if: >-
       ${{
         always()
@@ -821,7 +924,8 @@ jobs:
         && needs.validate.outputs.draft == 'true'
         && needs.inspect_hosted.result == 'success'
         && needs.inspect_hosted.outputs.exists != 'true'
-        && needs.prepare_macos.result == 'success'
+        && needs.notices.result == 'success'
+        && needs.combine_macos.result == 'success'
       }}
     runs-on: macos-latest
     timeout-minutes: 90
@@ -1180,7 +1284,7 @@ jobs:
 
   prepare_windows:
     name: prepare unsigned Windows · ${{ matrix.arch }}
-    needs: [validate, inspect_hosted]
+    needs: [validate, inspect_hosted, notices]
     if: >-
       ${{
         needs.validate.outputs.draft == 'true'
@@ -1305,9 +1409,6 @@ jobs:
         working-directory: crates/tidebreak-desktop/ui
         run: pnpm install --frozen-lockfile --ignore-scripts
 
-      - name: Verify the third-party notices match the released graph
-        run: node scripts/generate-third-party-notices.mjs --check
-
       - name: Compile without production credentials or bundles
         id: compile
         continue-on-error: true
@@ -1408,7 +1509,7 @@ jobs:
 
   build_windows:
     name: Windows · ${{ matrix.arch }}
-    needs: [validate, inspect_hosted, prepare_windows]
+    needs: [validate, inspect_hosted, notices, prepare_windows]
     if: >-
       ${{
         always()
@@ -1416,6 +1517,7 @@ jobs:
         && needs.validate.outputs.draft == 'true'
         && needs.inspect_hosted.result == 'success'
         && needs.inspect_hosted.outputs.exists != 'true'
+        && needs.notices.result == 'success'
         && needs.prepare_windows.result == 'success'
       }}
     runs-on: ${{ matrix.runner }}
@@ -1605,7 +1707,7 @@ jobs:
 
   build_linux:
     name: Linux · ${{ matrix.arch }}
-    needs: [validate, inspect_hosted]
+    needs: [validate, inspect_hosted, notices]
     if: >-
       ${{
         needs.validate.outputs.draft == 'true'
@@ -1717,9 +1819,6 @@ jobs:
       - name: Install UI dependencies
         working-directory: crates/tidebreak-desktop/ui
         run: pnpm install --frozen-lockfile --ignore-scripts
-
-      - name: Verify the third-party notices match the released graph
-        run: node scripts/generate-third-party-notices.mjs --check
 
       - name: Install Rust target
         run: |
