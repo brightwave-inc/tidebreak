@@ -506,7 +506,7 @@ export type AppViewSession = { frame_path: string, };
 export type ApprovalClass = "read_only" | "workspace" | "sensitive";
 
 /**
- * Outcome recorded on [`CodeEvent::ApprovalResolved`].
+ * Outcome recorded on [`Event::ApprovalResolved`].
  */
 export type ApprovalDecisionKind = { "type": "approve" } | { "type": "deny",
 /**
@@ -538,6 +538,59 @@ feedback?: string, };
  * the action that was actually under review.
  */
 export type ApprovalGrantRung = "exact_action" | { "command_prefix": { tokens: number, } } | { "path_prefix": { segments: number, } } | "whole_tool";
+
+/**
+ * Identifies one parked approval belonging to a session.
+ */
+export type ApprovalId = string;
+
+/**
+ * Best-effort classification of what an approval is asking.
+ */
+export type ApprovalKind = { "type": "command",
+/**
+ * Command string.
+ */
+cmd: string,
+/**
+ * Working directory, when reported.
+ */
+cwd?: string | null, } | { "type": "file_write",
+/**
+ * Paths involved.
+ */
+paths: Array<string>, } | { "type": "network",
+/**
+ * Host or summary the engine reported.
+ */
+summary: string, } | { "type": "other",
+/**
+ * Engine-provided summary.
+ */
+summary: string, } | { "type": "tool_use",
+/**
+ * The action exactly as the consent decision will read it.
+ */
+preview: ToolActionPreview,
+/**
+ * Grant rungs the decider may mint, narrowest first. Empty when the
+ * call supports no standing grant.
+ */
+offered_grants: Array<GrantScope>, } | { "type": "questions",
+/**
+ * The questions, bounded by the engine's own validation.
+ */
+questions: Array<UserQuestion>, } | { "type": "plan",
+/**
+ * Permission mode the conversation moves to when the plan is
+ * accepted.
+ */
+proposed_mode: PermissionMode, };
+
+/**
+ * State of a persisted approval.
+ */
+export type ApprovalState = "pending" | "approved" | "denied" | "abandoned";
 
 /**
  * Opaque renderer identity for one assistant-message citation.
@@ -607,7 +660,7 @@ note: string, };
 export type AutoJudgeStatus = "judging" | "approved" | "declined";
 
 /**
- * Bounded error carried on [`CodeEvent::TurnFailed`].
+ * Bounded error carried on [`Event::TurnFailed`].
  */
 export type BoundedError = {
 /**
@@ -634,7 +687,7 @@ export type Chat = {
 /**
  * Stable identifier.
  */
-id: ChatId,
+id: SessionId,
 /**
  * The project this chat belongs to, or `None` for a loose (projectless) chat.
  */
@@ -682,11 +735,6 @@ memory_incognito: boolean,
 created_at: string, };
 
 export type ChatGptSignInStatus = { signed_in: boolean, pending_authorization_url?: string, error?: string, };
-
-/**
- * Identifies a persistent conversation.
- */
-export type ChatId = string;
 
 /**
  * A renderer-safe durable transcript entry. Internal routing and tool state
@@ -924,66 +972,13 @@ approve: boolean, } };
 export type CodeApprovalDecisionBody = { decision: CodeApprovalDecision, feedback?: string, };
 
 /**
- * Identifies one parked approval belonging to a code session.
- */
-export type CodeApprovalId = string;
-
-/**
- * Best-effort classification of what an approval is asking.
- */
-export type CodeApprovalKind = { "type": "command",
-/**
- * Command string.
- */
-cmd: string,
-/**
- * Working directory, when reported.
- */
-cwd?: string | null, } | { "type": "file_write",
-/**
- * Paths involved.
- */
-paths: Array<string>, } | { "type": "network",
-/**
- * Host or summary the engine reported.
- */
-summary: string, } | { "type": "other",
-/**
- * Engine-provided summary.
- */
-summary: string, } | { "type": "tool_use",
-/**
- * The action exactly as the consent decision will read it.
- */
-preview: ToolActionPreview,
-/**
- * Grant rungs the decider may mint, narrowest first. Empty when the
- * call supports no standing grant.
- */
-offered_grants: Array<GrantScope>, } | { "type": "questions",
-/**
- * The questions, bounded by the engine's own validation.
- */
-questions: Array<UserQuestion>, } | { "type": "plan",
-/**
- * Permission mode the conversation moves to when the plan is
- * accepted.
- */
-proposed_mode: PermissionMode, };
-
-/**
  * One parked or decided engine approval.
  */
-export type CodeApprovalSnapshot = { id: CodeApprovalId, session_id: CodeSessionId, turn_id: CodeTurnId, kind: CodeApprovalKind,
+export type CodeApprovalSnapshot = { id: ApprovalId, session_id: SessionId, turn_id: TurnId, kind: ApprovalKind,
 /**
  * Exact JSON the engine sent, already size-capped. The card renders this.
  */
-harness_raw_json: string, state: CodeApprovalState, feedback?: string, requested_at: string, decided_at?: string, };
-
-/**
- * State of a persisted approval.
- */
-export type CodeApprovalState = "pending" | "approved" | "denied" | "abandoned";
+harness_raw_json: string, state: ApprovalState, feedback?: string, requested_at: string, decided_at?: string, };
 
 /**
  * One failing check's downloaded job log:
@@ -1278,237 +1273,6 @@ export type CodeDeliveryWorkspaceLink = { workspace_id: WorkspaceId, repo_id: Re
 relation?: CodePullRequestRelation, };
 
 /**
- * One event in an external agent-engine session's journal.
- *
- * Serialized as an internally-tagged union (a `type` field selects the
- * variant), and `#[non_exhaustive]` so new event kinds can be added without
- * breaking downstream consumers.
- */
-export type CodeEvent = { "type": "session_started",
-/**
- * Which engine.
- */
-harness_kind: HarnessKind,
-/**
- * Version observed at launch.
- */
-harness_version: string,
-/**
- * Engine-native resume token, when the stream reported one.
- */
-resume_ref?: string, } | { "type": "turn_started",
-/**
- * The turn being processed.
- */
-turn_id: CodeTurnId, } | { "type": "turn_resumed",
-/**
- * The turn that continues.
- */
-turn_id: CodeTurnId, } | { "type": "assistant_delta",
-/**
- * The text fragment to append.
- */
-text: string, } | { "type": "assistant_message",
-/**
- * The message text.
- */
-text: string,
-/**
- * The `Task` call this message ran inside, when a harness subagent
- * produced it (decision 52). Absent on the parent's own messages.
- */
-parent_call_id?: string, } | { "type": "reasoning_delta",
-/**
- * The reasoning fragment.
- */
-text: string, } | { "type": "tool_started",
-/**
- * Engine-native call id.
- */
-call_id: string,
-/**
- * Tool name as the engine reported it.
- */
-name: string,
-/**
- * Display-oriented classification.
- */
-detail: ToolDetail,
-/**
- * The `Task` call this call ran inside, when a harness subagent
- * issued it (decision 52). Absent on the parent's own calls.
- */
-parent_call_id?: string, } | { "type": "tool_completed",
-/**
- * Engine-native call id.
- */
-call_id: string,
-/**
- * How it finished.
- */
-outcome: ToolOutcome,
-/**
- * Bounded preview of the result.
- */
-preview: string,
-/**
- * The call's whole output, already cut to what the model was shown.
- *
- * Internal engine: its tools run in this process, so the server
- * holds the result and the chat surface replays it. External
- * adapters leave it unset; their results ride `preview`.
- */
-output?: ToolOutput,
-/**
- * Closed projection of what the call did. Internal engine.
- */
-action?: ToolActionPreview,
-/**
- * Closed projection of what the call produced. Internal engine.
- */
-result?: ToolResultPreview,
-/**
- * Classification rebuilt from the call's complete arguments.
- *
- * Engines open a tool call before its arguments finish streaming, so
- * the detail on [`CodeEvent::ToolStarted`] can name nothing. This is
- * the correction: adapters that see the final arguments fill it in,
- * and renderers merge it into the started call. It is `None` when
- * the engine's completion payload carries no arguments.
- */
-detail?: ToolDetail,
-/**
- * The `Task` call this call ran inside, when a harness subagent
- * issued it (decision 52). Absent on the parent's own calls.
- */
-parent_call_id?: string, } | { "type": "file_changed",
-/**
- * Path relative to the worktree, when the engine reports one.
- */
-path: string,
-/**
- * Kind of change.
- */
-kind: FileChangeKind,
-/**
- * Bounded diffstat.
- */
-diffstat: Diffstat, } | { "type": "approval_requested",
-/**
- * Hint id; the row is the source of truth.
- */
-approval_id: CodeApprovalId,
-/**
- * What the card asks, for the chat surface's replay. Internal
- * engine; absent on every row an external adapter writes.
- */
-request?: InternalApprovalRequest, } | { "type": "approval_resolved",
-/**
- * The approval that was decided.
- */
-approval_id: CodeApprovalId,
-/**
- * The decision.
- */
-decision: ApprovalDecisionKind, } | { "type": "user_steered",
-/**
- * The steered user text, already bounded.
- */
-text: string,
-/**
- * Stable id of the persisted user message, so a reconnecting
- * renderer reconciles the event with the transcript row without
- * content matching. Internal engine.
- */
-message_id?: string, } | { "type": "turn_completed",
-/**
- * Token accounting as reported by the engine.
- */
-usage: CodeUsage,
-/**
- * Checkpoint recorded at turn end, when any.
- */
-checkpoint?: CheckpointHint,
-/**
- * Why the final model call stopped. Internal engine.
- */
-stop_reason?: StopReason, } | { "type": "turn_failed",
-/**
- * Bounded error.
- */
-error: BoundedError,
-/**
- * The failure's machine-readable kind beside its message, so the
- * renderer can categorize it. Internal engine.
- */
-detail?: AgentErrorInfo, } | { "type": "turn_interrupted",
-/**
- * Token accounting up to the interruption, when the engine reports
- * it. Internal engine.
- */
-usage?: CodeUsage, } | { "type": "turn_refused",
-/**
- * Token accounting up to the refusal.
- */
-usage: CodeUsage,
-/**
- * Category detail and whether visible output is incomplete.
- */
-refusal: RefusalOutcome, } | { "type": "checkpoint_recorded",
-/**
- * The turn that ended at this checkpoint.
- */
-turn_id: CodeTurnId,
-/**
- * Bounded diffstat.
- */
-diffstat: Diffstat, } | { "type": "harness_notice",
-/**
- * Severity.
- */
-level: HarnessNoticeLevel,
-/**
- * Bounded message.
- */
-message: string, } | { "type": "attention_changed",
-/**
- * New state.
- */
-state: AttentionState,
-/**
- * Who or what set it.
- */
-source: AttentionSource, } | { "type": "stream_interrupted" } | { "type": "tool_args_delta",
-/**
- * The call these args belong to.
- */
-call_id: string,
-/**
- * Partial JSON to concatenate.
- */
-fragment: string, } | { "type": "task_plan_updated",
-/**
- * The tool call that committed the replacement.
- */
-call_id: string,
-/**
- * Turn that made the call.
- */
-turn_id: CodeTurnId, } | { "type": "context_truncated",
-/**
- * Estimated tokens of the full transcript before reduction.
- */
-original_tokens: number,
-/**
- * Estimated tokens after fitting to the budget.
- */
-fitted_tokens: number, } | { "type": "compaction_started" } | { "type": "compaction_finished",
-/**
- * Whether a new (or confirmed) checkpoint was stored.
- */
-compacted: boolean, };
-
-/**
  * One changed path in a workspace or turn file list.
  */
 export type CodeFileChange = { path: string, kind: FileChangeKind, insertions: number, deletions: number, previous_path?: string, };
@@ -1521,7 +1285,7 @@ export type CodeForkBody = {
 /**
  * Fork at the end of this turn; later turns stay out of the handoff.
  */
-at_turn?: CodeTurnId, };
+at_turn?: TurnId, };
 
 /**
  * A written fork handoff: `POST /code/sessions/{id}/fork`.
@@ -1713,27 +1477,19 @@ export type CodeRepoSource = { kind: string, available: boolean, remediation?: s
 export type CodeRepoSources = { sources: Array<CodeRepoSource>, chooses_destination: boolean, };
 
 /**
- * What a running interactive session is actually occupied with. This is
- * intentionally coarser than a transcript tool name: list surfaces need to
- * distinguish agent generation, a shell, a passive monitor, and delegated
- * work without leaking command text into every digest.
- */
-export type CodeSessionActivity = "agent" | "shell" | "monitor" | "subagents" | "file" | "search" | "tool";
-
-/**
  * Cheap per-session digest on `/code/updates`.
  */
 export type CodeSessionDigest = {
 /**
  * `None` for a session that binds no workspace.
  */
-workspace: WorkspaceId | null, session: CodeSessionId, kind: CodeSessionKind,
+workspace: WorkspaceId | null, session: SessionId, kind: SessionKind,
 /**
  * Engine identity for list surfaces that collapse several sessions into
  * one workspace row. Optional on the wire so a desktop can still read a
  * digest from an older server during an update.
  */
-harness_kind?: HarnessKind, lifecycle: CodeSessionLifecycle, attention: Attention, title: string, turn_count: number,
+harness_kind?: HarnessKind, lifecycle: SessionLifecycle, attention: Attention, title: string, turn_count: number,
 /**
  * Timestamp trigger delivery uses to rank candidate sessions: the newest
  * turn start, or session creation before the first turn. Optional so a
@@ -1743,7 +1499,7 @@ trigger_target_at?: string,
 /**
  * What the live turn is occupied with, while running.
  */
-activity?: CodeSessionActivity,
+activity?: SessionActivity,
 /**
  * The subject of the tool the live turn is waiting on: the command,
  * path, query, or task description. Present only while `activity`
@@ -1792,29 +1548,14 @@ channel_kind: string,
 external_key: string, };
 
 /**
- * Identifies one durable conversation with an external agent engine.
- */
-export type CodeSessionId = string;
-
-/**
- * Why a session exists: the user's conversation, or an automation task.
- */
-export type CodeSessionKind = "interactive" | "watch";
-
-/**
- * Lifecycle of a persisted code session.
- */
-export type CodeSessionLifecycle = "created" | "idle" | "running" | "fenced" | "ended";
-
-/**
  * One durable conversation with an external agent engine.
  */
-export type CodeSessionSnapshot = { id: CodeSessionId,
+export type CodeSessionSnapshot = { id: SessionId,
 /**
  * `None` for a session that binds no workspace: the in-process
  * engine's (decision 0048 step 5).
  */
-workspace_id: WorkspaceId | null, kind: CodeSessionKind, harness_kind: HarnessKind, harness_version?: string, harness_resume_ref?: string, permission_mode: PermissionMode, model?: string,
+workspace_id: WorkspaceId | null, kind: SessionKind, harness_kind: HarnessKind, harness_version?: string, harness_resume_ref?: string, permission_mode: PermissionMode, model?: string,
 /**
  * Absent means the engine's own default, which is not any level.
  */
@@ -1822,7 +1563,7 @@ reasoning_effort?: ReasoningEffort,
 /**
  * Whether this session runs its turns in the engine's fast mode.
  */
-fast_mode: boolean, lifecycle: CodeSessionLifecycle, fence_reason?: FenceReason, attention: Attention, unrecognized_event_count: number, created_at: string,
+fast_mode: boolean, lifecycle: SessionLifecycle, fence_reason?: FenceReason, attention: Attention, unrecognized_event_count: number, created_at: string,
 /**
  * Present when an external channel created the session.
  */
@@ -1901,11 +1642,6 @@ export type CodeTriggerId = string;
 export type CodeTriggerSnapshot = { id: CodeTriggerId, repo_id: RepoId, condition: CodeTriggerCondition, action: CodeTriggerAction, enabled: boolean, created_at: string, updated_at: string, };
 
 /**
- * Identifies one user→engine cycle inside a code session.
- */
-export type CodeTurnId = string;
-
-/**
  * Where one closing-message rewrite stands.
  */
 export type CodeTurnRewriteState = "rewriting" | "rewritten" | "failed";
@@ -1913,20 +1649,11 @@ export type CodeTurnRewriteState = "rewriting" | "rewritten" | "failed";
 /**
  * One user→engine turn.
  */
-export type CodeTurnSnapshot = { id: CodeTurnId, session_id: CodeSessionId, ordinal: number, status: CodeTurnStatus, model?: string, fast_mode: boolean, user_input: string, attachments: Array<ImageRef>, usage?: CodeUsage, checkpoint_ref?: string, diffstat?: Diffstat, started_at: string, ended_at?: string,
+export type CodeTurnSnapshot = { id: TurnId, session_id: SessionId, ordinal: number, status: TurnStatus, model?: string, fast_mode: boolean, user_input: string, attachments: Array<ImageRef>, usage?: TurnUsage, checkpoint_ref?: string, diffstat?: Diffstat, started_at: string, ended_at?: string,
 /**
  * Lucid rewrite of the closing message. The journal keeps the original.
  */
 rewrite?: string, };
-
-/**
- * Status of one user→engine turn.
- *
- * Absorbs [`crate::model::TurnRunStatus`] one-for-one. Chat's `cancelled`
- * is this enum's `interrupted` — the code token already means the same
- * thing and is on the wire.
- */
-export type CodeTurnStatus = "queued" | "running" | "waiting" | "cancelling" | "waiting_for_client" | "waiting_for_agent_run" | "cancelling_client" | "resuming" | "retry_wait" | "completed" | "failed" | "interrupted";
 
 /**
  * One unsequenced notice on `WS /code/updates`.
@@ -1937,11 +1664,11 @@ export type CodeUpdateNotice = { "type": "snapshot",
 /**
  * One row per live session.
  */
-sessions: Array<CodeSessionDigest>, } | { "type": "digest", workspace: WorkspaceId | null, session: CodeSessionId, kind: CodeSessionKind,
+sessions: Array<CodeSessionDigest>, } | { "type": "digest", workspace: WorkspaceId | null, session: SessionId, kind: SessionKind,
 /**
  * Engine identity for the session represented by this digest.
  */
-harness_kind?: HarnessKind, lifecycle: CodeSessionLifecycle, attention: Attention, title: string, turn_count: number,
+harness_kind?: HarnessKind, lifecycle: SessionLifecycle, attention: Attention, title: string, turn_count: number,
 /**
  * Timestamp trigger delivery uses to rank candidate sessions.
  */
@@ -1949,7 +1676,7 @@ trigger_target_at?: string,
 /**
  * What the live turn is occupied with, while running.
  */
-activity?: CodeSessionActivity,
+activity?: SessionActivity,
 /**
  * The subject of the tool the live turn is waiting on, while
  * `activity` names one.
@@ -1982,69 +1709,7 @@ recap?: string,
 /**
  * Pending memory proposals that originated in this session.
  */
-memory_proposal_count?: number, } | { "type": "terminal_activity", workspace_id: WorkspaceId, terminal_id: CodeTerminalId, } | { "type": "clone_progress", job: string, phase: string, percent?: number, done: boolean, error?: string, repo_id?: RepoId, } | { "type": "harness_install", kind: HarnessKind, version?: string, phase: string, done: boolean, error?: string, } | { "type": "delivery" } | { "type": "turn_rewrite", session: CodeSessionId, turn_id: CodeTurnId, state: CodeTurnRewriteState, rewrite?: string, };
-
-/**
- * Token accounting for one turn.
- *
- * The four counts are **disjoint** and they are **turn totals**, summed over
- * every model call the engine made while servicing the turn. This is the same
- * contract the chat side states on `RendererTurnUsage`, and the reason to
- * state it here is that every adapter reports something different natively:
- * one engine sends a running total beside the last call's slice, another
- * folds the cached portion back into the prompt count, another overwrites a
- * snapshot per message. Normalizing belongs in the adapter, so that anything
- * reading this struct — cost accounting, the CLI's turn list, the desktop's
- * context indicator — can compare two harnesses without knowing which engine
- * produced the row.
- *
- * Concretely: `input_tokens` is the *fresh*, uncached prompt only. It never
- * includes `cache_read_input_tokens` or `cache_creation_input_tokens`, so
- * the prompt an engine actually sent is the sum of all three. Missing fields
- * stay zero, which is not the same as "the engine sent zero" — an engine that
- * does not surface cache counts reports nothing rather than a real zero.
- *
- * None of the four answers "how full is the window". Summing turn totals
- * counts the same transcript once per model call, so a long turn reads as a
- * multiple of the prompt that was actually resident. That reading has its own
- * field: [`CodeUsage::context_tokens`].
- */
-export type CodeUsage = {
-/**
- * Fresh, uncached input tokens. Excludes both cache fields.
- */
-input_tokens: number,
-/**
- * Output tokens, summed over the turn's model calls.
- */
-output_tokens: number,
-/**
- * Cache-read input tokens, when the engine reports them.
- */
-cache_read_input_tokens: number,
-/**
- * Cache-write input tokens, when the engine reports them.
- */
-cache_creation_input_tokens: number,
-/**
- * Prompt tokens resident on the turn's final model call — what actually
- * occupied the context window at the end of the turn.
- *
- * Distinct from the four counts above, which are the turn's *spend*
- * summed across every model call. On a six-call turn those sum to
- * roughly six prompts; this is the one prompt that was live when the
- * turn ended, and it is the only honest numerator for "how full is the
- * window".
- *
- * Zero when the engine does not publish enough to compute it.
- */
-context_tokens: number,
-/**
- * Prompt tokens resident on the turn's first model call, when the engine
- * publishes per-call usage. This exposes startup context separately from
- * context that grows while the turn runs.
- */
-first_call_context_tokens?: number, };
+memory_proposal_count?: number, } | { "type": "terminal_activity", workspace_id: WorkspaceId, terminal_id: CodeTerminalId, } | { "type": "clone_progress", job: string, phase: string, percent?: number, done: boolean, error?: string, repo_id?: RepoId, } | { "type": "harness_install", kind: HarnessKind, version?: string, phase: string, done: boolean, error?: string, } | { "type": "delivery" } | { "type": "turn_rewrite", session: SessionId, turn_id: TurnId, state: CodeTurnRewriteState, rewrite?: string, };
 
 /**
  * Identifies one durable watch task on a workspace's pull request.
@@ -2054,7 +1719,7 @@ export type CodeWatchId = string;
 /**
  * One durable watch task on a workspace's pull request.
  */
-export type CodeWatchSnapshot = { id: CodeWatchId, workspace_id: WorkspaceId, session_id: CodeSessionId, pr_number: number, state: CodeWatchState, detail?: string, cycles: number, created_at: string, updated_at: string, };
+export type CodeWatchSnapshot = { id: CodeWatchId, workspace_id: WorkspaceId, session_id: SessionId, pr_number: number, state: CodeWatchState, detail?: string, cycles: number, created_at: string, updated_at: string, };
 
 /**
  * Bounded image reference recorded on a code-mode user turn.
@@ -2071,17 +1736,17 @@ export type CodeWorkspaceBlob = { path: string, content: string, truncated: bool
 /**
  * Bounded unified diff for `GET /code/workspaces/{id}/diff`.
  */
-export type CodeWorkspaceDiff = { diff: string, truncated: boolean, stat: Diffstat, turn_id?: CodeTurnId, file?: string, };
+export type CodeWorkspaceDiff = { diff: string, truncated: boolean, stat: Diffstat, turn_id?: TurnId, file?: string, };
 
 /**
  * Bounded changed-file list for `GET /code/workspaces/{id}/files`.
  */
-export type CodeWorkspaceFiles = { files: Array<CodeFileChange>, truncated: boolean, stat: Diffstat, turn_id?: CodeTurnId, };
+export type CodeWorkspaceFiles = { files: Array<CodeFileChange>, truncated: boolean, stat: Diffstat, turn_id?: TurnId, };
 
 /**
  * One repository-wide conversation-history match.
  */
-export type CodeWorkspaceHistorySearchMatch = { workspace_id: WorkspaceId, workspace_title: string, session_id: CodeSessionId, turn_id?: CodeTurnId, source: CodeWorkspaceHistorySearchSource, preview: string, created_at: string, };
+export type CodeWorkspaceHistorySearchMatch = { workspace_id: WorkspaceId, workspace_title: string, session_id: SessionId, turn_id?: TurnId, source: CodeWorkspaceHistorySearchSource, preview: string, created_at: string, };
 
 /**
  * Stored field that produced a workspace conversation-history match.
@@ -2522,6 +2187,237 @@ export type EgressConfig = { "mode": "open" } | { "mode": "allowlist", domains: 
 export type EgressEnforcementStatus = "boundary" | "conditional_boundary" | "applied_with_gaps" | "unconfirmed" | "not_enforced";
 
 /**
+ * One event in an external agent-engine session's journal.
+ *
+ * Serialized as an internally-tagged union (a `type` field selects the
+ * variant), and `#[non_exhaustive]` so new event kinds can be added without
+ * breaking downstream consumers.
+ */
+export type Event = { "type": "session_started",
+/**
+ * Which engine.
+ */
+harness_kind: HarnessKind,
+/**
+ * Version observed at launch.
+ */
+harness_version: string,
+/**
+ * Engine-native resume token, when the stream reported one.
+ */
+resume_ref?: string, } | { "type": "turn_started",
+/**
+ * The turn being processed.
+ */
+turn_id: TurnId, } | { "type": "turn_resumed",
+/**
+ * The turn that continues.
+ */
+turn_id: TurnId, } | { "type": "assistant_delta",
+/**
+ * The text fragment to append.
+ */
+text: string, } | { "type": "assistant_message",
+/**
+ * The message text.
+ */
+text: string,
+/**
+ * The `Task` call this message ran inside, when a harness subagent
+ * produced it (decision 52). Absent on the parent's own messages.
+ */
+parent_call_id?: string, } | { "type": "reasoning_delta",
+/**
+ * The reasoning fragment.
+ */
+text: string, } | { "type": "tool_started",
+/**
+ * Engine-native call id.
+ */
+call_id: string,
+/**
+ * Tool name as the engine reported it.
+ */
+name: string,
+/**
+ * Display-oriented classification.
+ */
+detail: ToolDetail,
+/**
+ * The `Task` call this call ran inside, when a harness subagent
+ * issued it (decision 52). Absent on the parent's own calls.
+ */
+parent_call_id?: string, } | { "type": "tool_completed",
+/**
+ * Engine-native call id.
+ */
+call_id: string,
+/**
+ * How it finished.
+ */
+outcome: ToolOutcome,
+/**
+ * Bounded preview of the result.
+ */
+preview: string,
+/**
+ * The call's whole output, already cut to what the model was shown.
+ *
+ * Internal engine: its tools run in this process, so the server
+ * holds the result and the chat surface replays it. External
+ * adapters leave it unset; their results ride `preview`.
+ */
+output?: ToolOutput,
+/**
+ * Closed projection of what the call did. Internal engine.
+ */
+action?: ToolActionPreview,
+/**
+ * Closed projection of what the call produced. Internal engine.
+ */
+result?: ToolResultPreview,
+/**
+ * Classification rebuilt from the call's complete arguments.
+ *
+ * Engines open a tool call before its arguments finish streaming, so
+ * the detail on [`Event::ToolStarted`] can name nothing. This is
+ * the correction: adapters that see the final arguments fill it in,
+ * and renderers merge it into the started call. It is `None` when
+ * the engine's completion payload carries no arguments.
+ */
+detail?: ToolDetail,
+/**
+ * The `Task` call this call ran inside, when a harness subagent
+ * issued it (decision 52). Absent on the parent's own calls.
+ */
+parent_call_id?: string, } | { "type": "file_changed",
+/**
+ * Path relative to the worktree, when the engine reports one.
+ */
+path: string,
+/**
+ * Kind of change.
+ */
+kind: FileChangeKind,
+/**
+ * Bounded diffstat.
+ */
+diffstat: Diffstat, } | { "type": "approval_requested",
+/**
+ * Hint id; the row is the source of truth.
+ */
+approval_id: ApprovalId,
+/**
+ * What the card asks, for the chat surface's replay. Internal
+ * engine; absent on every row an external adapter writes.
+ */
+request?: InternalApprovalRequest, } | { "type": "approval_resolved",
+/**
+ * The approval that was decided.
+ */
+approval_id: ApprovalId,
+/**
+ * The decision.
+ */
+decision: ApprovalDecisionKind, } | { "type": "user_steered",
+/**
+ * The steered user text, already bounded.
+ */
+text: string,
+/**
+ * Stable id of the persisted user message, so a reconnecting
+ * renderer reconciles the event with the transcript row without
+ * content matching. Internal engine.
+ */
+message_id?: string, } | { "type": "turn_completed",
+/**
+ * Token accounting as reported by the engine.
+ */
+usage: TurnUsage,
+/**
+ * Checkpoint recorded at turn end, when any.
+ */
+checkpoint?: CheckpointHint,
+/**
+ * Why the final model call stopped. Internal engine.
+ */
+stop_reason?: StopReason, } | { "type": "turn_failed",
+/**
+ * Bounded error.
+ */
+error: BoundedError,
+/**
+ * The failure's machine-readable kind beside its message, so the
+ * renderer can categorize it. Internal engine.
+ */
+detail?: AgentErrorInfo, } | { "type": "turn_interrupted",
+/**
+ * Token accounting up to the interruption, when the engine reports
+ * it. Internal engine.
+ */
+usage?: TurnUsage, } | { "type": "turn_refused",
+/**
+ * Token accounting up to the refusal.
+ */
+usage: TurnUsage,
+/**
+ * Category detail and whether visible output is incomplete.
+ */
+refusal: RefusalOutcome, } | { "type": "checkpoint_recorded",
+/**
+ * The turn that ended at this checkpoint.
+ */
+turn_id: TurnId,
+/**
+ * Bounded diffstat.
+ */
+diffstat: Diffstat, } | { "type": "harness_notice",
+/**
+ * Severity.
+ */
+level: HarnessNoticeLevel,
+/**
+ * Bounded message.
+ */
+message: string, } | { "type": "attention_changed",
+/**
+ * New state.
+ */
+state: AttentionState,
+/**
+ * Who or what set it.
+ */
+source: AttentionSource, } | { "type": "stream_interrupted" } | { "type": "tool_args_delta",
+/**
+ * The call these args belong to.
+ */
+call_id: string,
+/**
+ * Partial JSON to concatenate.
+ */
+fragment: string, } | { "type": "task_plan_updated",
+/**
+ * The tool call that committed the replacement.
+ */
+call_id: string,
+/**
+ * Turn that made the call.
+ */
+turn_id: TurnId, } | { "type": "context_truncated",
+/**
+ * Estimated tokens of the full transcript before reduction.
+ */
+original_tokens: number,
+/**
+ * Estimated tokens after fitting to the budget.
+ */
+fitted_tokens: number, } | { "type": "compaction_started" } | { "type": "compaction_finished",
+/**
+ * Whether a new (or confirmed) checkpoint was stored.
+ */
+compacted: boolean, };
+
+/**
  * The execution backend that ran a command, as a closed vocabulary.
  *
  * Read through this enum rather than surfaced as a string, on the same terms
@@ -2816,7 +2712,7 @@ export type GitSourceControlSettings = { auto_rename_branches: boolean, branch_p
  * mean, so it grants for itself. The card states which one it is about to
  * write; a grant nobody expected is the failure the ladder exists to prevent.
  */
-export type GrantLevel = { "level": "chat", chat_id: ChatId, } | { "level": "project", project_id: ProjectId, };
+export type GrantLevel = { "level": "chat", chat_id: SessionId, } | { "level": "project", project_id: ProjectId, };
 
 /**
  * How much a standing grant covers.
@@ -3156,7 +3052,7 @@ byte_len: number, };
  * (the repository check `chat_and_code_entities_do_not_cross_reference`
  * enforces it). When step 5 merges the entities this collapses to one id.
  */
-export type InboxConversation = { "surface": "chat", chat_id: ChatId, } | { "surface": "code", session_id: CodeSessionId,
+export type InboxConversation = { "surface": "chat", chat_id: SessionId, } | { "surface": "code", session_id: SessionId,
 /**
  * `None` for a session with no workspace: the in-process engine's.
  */
@@ -3255,11 +3151,11 @@ preview?: ToolActionPreview, } | { "kind": "questions",
 /**
  * Turn that resumes after the answer commits.
  */
-turn_id: CodeTurnId, } | { "kind": "plan",
+turn_id: TurnId, } | { "kind": "plan",
 /**
  * Turn that resumes after the decision commits.
  */
-turn_id: CodeTurnId, };
+turn_id: TurnId, };
 
 /**
  * Renderer-safe resolved policy. Carries only what surfaces need to render
@@ -3522,11 +3418,19 @@ export type MemoryEvidence = { "kind": "message",
 /**
  * Exact message identity.
  */
-message_id: MessageId, } | { "kind": "code_event",
+message_id: MessageId, } | { "kind": "event",
 /**
  * Session that owns the event sequence.
  */
-session_id: CodeSessionId,
+session_id: SessionId,
+/**
+ * One-based event sequence.
+ */
+seq: number, } | { "kind": "code_event",
+/**
+ * Session that owns the event sequence.
+ */
+session_id: SessionId,
 /**
  * One-based event sequence.
  */
@@ -3580,7 +3484,7 @@ export type MemoryOrigin = {
 /**
  * Originating work-mode conversation.
  */
-chat_id?: ChatId | null,
+chat_id?: SessionId | null,
 /**
  * Originating work-mode turn.
  */
@@ -3588,11 +3492,11 @@ turn_id?: TurnId | null,
 /**
  * Originating code session.
  */
-code_session_id?: CodeSessionId | null,
+code_session_id?: SessionId | null,
 /**
  * Originating code turn.
  */
-code_turn_id?: CodeTurnId | null,
+code_turn_id?: TurnId | null,
 /**
  * Workspace attached to the originating code session.
  */
@@ -3988,7 +3892,7 @@ export type NetworkPolicy = { "mode": "off" } | { "mode": "package_managers" } |
 /**
  * Where opening the row takes the reader.
  */
-export type NotificationContextSnapshot = { "surface": "chat", chat_id: ChatId, } | { "surface": "code", session_id: CodeSessionId, workspace_id: WorkspaceId, };
+export type NotificationContextSnapshot = { "surface": "chat", chat_id: SessionId, } | { "surface": "code", session_id: SessionId, workspace_id: WorkspaceId, };
 
 /**
  * Identifies one durable agent-finished notification.
@@ -4538,22 +4442,12 @@ head_sha?: string,
 auto_merge_enabled?: boolean, in_merge_queue?: boolean, };
 
 /**
- * One durable queued follow-up: a message parked while the session or its
- * workspace checkout was busy, promoted FIFO once the session is free.
- *
- * `id` names the row for edits and retraction, and is the turn id the
- * promoted turn is inserted under. `position` is 0-based and dense within
- * the session.
- */
-export type QueuedCodeTurn = { id: CodeTurnId, session_id: CodeSessionId, message: string, position: number, created_at: string, updated_at: string, };
-
-/**
  * The id is the client-generated turn id promotion will accept under, so an
  * ambiguous promotion retry resolves to `Existing` rather than a duplicate
  * turn. Rows are FIFO by `position` within a chat and fully durable: a queue
  * survives restarts and is visible to every client on the chat.
  */
-export type QueuedTurn = {
+export type QueuedAgentTurn = {
 /**
  * The turn id this row becomes when promoted.
  */
@@ -4561,7 +4455,7 @@ id: TurnId,
 /**
  * Owning chat.
  */
-chat_id: ChatId,
+chat_id: SessionId,
 /**
  * Byte-exact user message.
  */
@@ -4594,6 +4488,16 @@ created_at: string,
  * When it was last edited or reordered.
  */
 updated_at: string, };
+
+/**
+ * One durable queued follow-up: a message parked while the session or its
+ * workspace checkout was busy, promoted FIFO once the session is free.
+ *
+ * `id` names the row for edits and retraction, and is the turn id the
+ * promoted turn is inserted under. `position` is 0-based and dense within
+ * the session.
+ */
+export type QueuedCodeTurn = { id: TurnId, session_id: SessionId, message: string, position: number, created_at: string, updated_at: string, };
 
 /**
  * A named command the user can run in a workspace.
@@ -4942,7 +4846,7 @@ export type SequencedCodeEventFrame = {
  * streamed behind, not a position the frame occupies — resume from it
  * and you lose nothing, because no row holds this event.
  */
-seq: number, event: CodeEvent, replayed?: boolean,
+seq: number, event: Event, replayed?: boolean,
 /**
  * Set on a live-only event the journal does not hold: assistant deltas,
  * and the catch-up delta a mid-turn reader gets on connect. Apply it but
@@ -4961,6 +4865,29 @@ replacement?: boolean,
  * frame is not coming.
  */
 truncated?: boolean, };
+
+/**
+ * What a running interactive session is actually occupied with. This is
+ * intentionally coarser than a transcript tool name: list surfaces need to
+ * distinguish agent generation, a shell, a passive monitor, and delegated
+ * work without leaking command text into every digest.
+ */
+export type SessionActivity = "agent" | "shell" | "monitor" | "subagents" | "file" | "search" | "tool";
+
+/**
+ * Identifies a persistent conversation.
+ */
+export type SessionId = string;
+
+/**
+ * Why a session exists: the user's conversation, or an automation task.
+ */
+export type SessionKind = "interactive" | "watch";
+
+/**
+ * Lifecycle of a persisted code session.
+ */
+export type SessionLifecycle = "created" | "idle" | "running" | "fenced" | "ended";
 
 /**
  * Body of `PUT /code/worktree-root`. A null or blank root clears the setting.
@@ -5581,6 +5508,77 @@ export type TurnFailureCategory = "rate_limited" | "auth" | "provider_access" | 
 export type TurnId = string;
 
 /**
+ * Status of one user→engine turn.
+ *
+ * Absorbs [`crate::model::TurnRunStatus`] one-for-one. Chat's `cancelled`
+ * is this enum's `interrupted` — the code token already means the same
+ * thing and is on the wire.
+ */
+export type TurnStatus = "queued" | "running" | "waiting" | "cancelling" | "waiting_for_client" | "waiting_for_agent_run" | "cancelling_client" | "resuming" | "retry_wait" | "completed" | "failed" | "interrupted";
+
+/**
+ * Token accounting for one turn.
+ *
+ * The four counts are **disjoint** and they are **turn totals**, summed over
+ * every model call the engine made while servicing the turn. This is the same
+ * contract the chat side states on `RendererTurnUsage`, and the reason to
+ * state it here is that every adapter reports something different natively:
+ * one engine sends a running total beside the last call's slice, another
+ * folds the cached portion back into the prompt count, another overwrites a
+ * snapshot per message. Normalizing belongs in the adapter, so that anything
+ * reading this struct — cost accounting, the CLI's turn list, the desktop's
+ * context indicator — can compare two harnesses without knowing which engine
+ * produced the row.
+ *
+ * Concretely: `input_tokens` is the *fresh*, uncached prompt only. It never
+ * includes `cache_read_input_tokens` or `cache_creation_input_tokens`, so
+ * the prompt an engine actually sent is the sum of all three. Missing fields
+ * stay zero, which is not the same as "the engine sent zero" — an engine that
+ * does not surface cache counts reports nothing rather than a real zero.
+ *
+ * None of the four answers "how full is the window". Summing turn totals
+ * counts the same transcript once per model call, so a long turn reads as a
+ * multiple of the prompt that was actually resident. That reading has its own
+ * field: [`TurnUsage::context_tokens`].
+ */
+export type TurnUsage = {
+/**
+ * Fresh, uncached input tokens. Excludes both cache fields.
+ */
+input_tokens: number,
+/**
+ * Output tokens, summed over the turn's model calls.
+ */
+output_tokens: number,
+/**
+ * Cache-read input tokens, when the engine reports them.
+ */
+cache_read_input_tokens: number,
+/**
+ * Cache-write input tokens, when the engine reports them.
+ */
+cache_creation_input_tokens: number,
+/**
+ * Prompt tokens resident on the turn's final model call — what actually
+ * occupied the context window at the end of the turn.
+ *
+ * Distinct from the four counts above, which are the turn's *spend*
+ * summed across every model call. On a six-call turn those sum to
+ * roughly six prompts; this is the one prompt that was live when the
+ * turn ended, and it is the only honest numerator for "how full is the
+ * window".
+ *
+ * Zero when the engine does not publish enough to compute it.
+ */
+context_tokens: number,
+/**
+ * Prompt tokens resident on the turn's first model call, when the engine
+ * publishes per-call usage. This exposes startup context separately from
+ * context that grows while the turn runs.
+ */
+first_call_context_tokens?: number, };
+
+/**
  * Switch a trigger on or off. The row survives either way, so the scoping
  * does not have to be rebuilt to turn a rule back on.
  */
@@ -5767,3 +5765,18 @@ export const RENDERER_TOOL_NAMES = [
 export const MAX_WIRE_ID_CHARS = 128;
 export const MAX_WIRE_TIMESTAMP_CHARS = 64;
 export const MAX_WIRE_CURSOR_CHARS = 256;
+
+// Compatibility aliases for clients that still use the earlier conversation names.
+export type ChatId = SessionId;
+export type CodeApprovalId = ApprovalId;
+export type CodeApprovalKind = ApprovalKind;
+export type CodeApprovalState = ApprovalState;
+export type CodeEvent = Event;
+export type CodeSessionActivity = SessionActivity;
+export type CodeSessionId = SessionId;
+export type CodeSessionKind = SessionKind;
+export type CodeSessionLifecycle = SessionLifecycle;
+export type CodeTurnId = TurnId;
+export type CodeTurnStatus = TurnStatus;
+export type CodeUsage = TurnUsage;
+export type QueuedTurn = QueuedAgentTurn;
