@@ -884,45 +884,22 @@ async fn a_recovered_session_accepts_a_turn() {
     let addr3 = serve(app(fenced_state)).await;
     let client3 = reqwest::Client::new();
 
-    let stuck = client3
+    let after_orphan_exit = client3
         .post(format!("http://{addr3}/code/sessions/{session_id}/turns"))
         .bearer_auth(&token3)
-        .json(&serde_json::json!({ "message": "while fenced" }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(stuck.status(), reqwest::StatusCode::CONFLICT);
-    let stuck_body: serde_json::Value = stuck.json().await.unwrap();
-    assert_eq!(stuck_body["kind"], "session_fenced");
-
-    let reaped = client3
-        .post(format!("http://{addr3}/code/sessions/{session_id}/reap"))
-        .bearer_auth(&token3)
-        .send()
-        .await
-        .unwrap();
-    let status = reaped.status();
-    let body = reaped.text().await.unwrap();
-    assert_eq!(status, reqwest::StatusCode::OK, "reap failed: {body}");
-    let after_reap: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(after_reap["lifecycle"], "idle");
-
-    let after = client3
-        .post(format!("http://{addr3}/code/sessions/{session_id}/turns"))
-        .bearer_auth(&token3)
-        .json(&serde_json::json!({ "message": "after reap" }))
+        .json(&serde_json::json!({ "message": "after orphan exit" }))
         .send()
         .await
         .unwrap();
     assert_eq!(
-        after.status(),
+        after_orphan_exit.status(),
         reqwest::StatusCode::ACCEPTED,
-        "reap must attach a worker: {}",
-        after.text().await.unwrap()
+        "boot recovery must attach a worker after the orphan exits: {}",
+        after_orphan_exit.text().await.unwrap()
     );
-    let after_body: serde_json::Value = after.json().await.unwrap();
+    let after_body: serde_json::Value = after_orphan_exit.json().await.unwrap();
     assert_eq!(after_body["status"], "completed");
-    assert_eq!(after_body["user_input"], "after reap");
+    assert_eq!(after_body["user_input"], "after orphan exit");
 }
 
 #[tokio::test]
