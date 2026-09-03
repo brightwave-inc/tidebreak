@@ -20,7 +20,6 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 /// Largest OpenAPI document accepted as ingest *input*, in bytes. Real vendor
@@ -617,13 +616,7 @@ fn truncate_to_display_prefix(text: &str) -> String {
 
 /// Lowercase-hex SHA-256 of the raw document bytes.
 pub(crate) fn sha256_hex(document: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(document);
-    hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    tidebreak_core::sha256_hex(document)
 }
 
 /// Validate one path template and return its `{param}` names.
@@ -1062,14 +1055,7 @@ mod tests {
 
         let catalog = ingest_openapi_document(&bytes, None).unwrap();
 
-        let mut hasher = Sha256::new();
-        hasher.update(&bytes);
-        let expected_digest: String = hasher
-            .finalize()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
-        assert_eq!(catalog.document_sha256, expected_digest);
+        assert_eq!(catalog.document_sha256, sha256_hex(&bytes));
 
         assert_eq!(
             catalog.operations.keys().collect::<Vec<_>>(),

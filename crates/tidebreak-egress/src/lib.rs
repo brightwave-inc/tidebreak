@@ -462,6 +462,36 @@ impl EgressEnforcement {
     }
 }
 
+/// Split `host:port` or `[v6]:port` into a lowercased host and a non-zero port.
+#[must_use]
+pub fn parse_authority(authority: &str) -> Option<(String, u16)> {
+    if let Some(rest) = authority.strip_prefix('[') {
+        let (host, port) = rest.split_once("]:")?;
+        let port = port.parse::<u16>().ok().filter(|port| *port != 0)?;
+        return Some((host.to_ascii_lowercase(), port));
+    }
+    let (host, port) = authority.rsplit_once(':')?;
+    if host.is_empty() || host.contains(':') {
+        return None;
+    }
+    let port = port.parse::<u16>().ok().filter(|port| *port != 0)?;
+    Some((host.trim_end_matches('.').to_ascii_lowercase(), port))
+}
+
+/// Whether `address` sits in `network`/`prefix` (IPv4).
+#[must_use]
+pub fn in_v4_block(address: Ipv4Addr, network: [u8; 4], prefix: u32) -> bool {
+    let mask = u32::MAX << (32 - prefix);
+    u32::from(address) & mask == u32::from(Ipv4Addr::from(network)) & mask
+}
+
+/// Whether `address` sits in the IPv6 prefix whose first hextet is `network`.
+#[must_use]
+pub fn in_v6_prefix(address: Ipv6Addr, network: u16, prefix: u32) -> bool {
+    let mask = u16::MAX << (16 - prefix);
+    address.segments()[0] & mask == network & mask
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

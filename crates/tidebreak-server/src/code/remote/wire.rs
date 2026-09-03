@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 pub(crate) const EVENTS_MAX_WAIT_SECONDS: u32 = 25;
 
 /// Largest message body the environment accepts, in bytes.
-pub(crate) const MESSAGE_MAX_BODY_BYTES: usize = 32 * 1024;
+const MESSAGE_MAX_BODY_BYTES: usize = 32 * 1024;
 
 /// One spawn request's arguments, exactly as the environment defines them.
 ///
@@ -90,6 +90,7 @@ pub(crate) struct SpawnRepository {
 /// What one accepted spawn produced. The spawner detaches; what it keeps is
 /// the identifier and the cursor position to resume from.
 #[derive(Clone, Debug, Deserialize)]
+#[allow(dead_code)]
 pub(crate) struct SandboxLease {
     /// Sandbox identifier every other call takes. Opaque here.
     pub sandbox_id: String,
@@ -152,6 +153,7 @@ impl SandboxState {
 
 /// Current state of one sandbox, reduced to the fields this server acts on.
 #[derive(Clone, Debug, Deserialize)]
+#[allow(dead_code)]
 pub(crate) struct SandboxStatus {
     /// Sandbox identifier.
     pub sandbox_id: String,
@@ -205,6 +207,7 @@ pub(crate) struct EventCursor {
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct SandboxEvents {
     /// Sandbox identifier.
+    #[allow(dead_code)]
     pub sandbox_id: String,
     /// State at read time, so an event poll need not also poll status.
     pub state: SandboxState,
@@ -228,6 +231,7 @@ pub(crate) struct SandboxEvent {
     pub payload: serde_json::Value,
     /// UTC event timestamp.
     #[serde(default)]
+    #[allow(dead_code)]
     pub created_at: String,
 }
 
@@ -261,6 +265,7 @@ impl SandboxMessage {
 /// The receipt for one appended message. Durability, never delivery:
 /// delivery is at-least-once and asynchronous.
 #[derive(Clone, Copy, Debug, Deserialize)]
+#[allow(dead_code)]
 pub(crate) struct MessageReceipt {
     /// Per-sandbox monotonic sequence this message was recorded at.
     pub seq: i64,

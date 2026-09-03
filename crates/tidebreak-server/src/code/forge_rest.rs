@@ -320,29 +320,6 @@ pub(crate) async fn delivery_pull_requests(
         .collect()
 }
 
-/// Read one repository's GitHub Actions runs.
-#[allow(dead_code)]
-pub(crate) async fn workflow_runs(
-    api_base: &str,
-    target: &CodeGitHubRepositoryTarget,
-    credential: &GitCredential,
-) -> Result<Value, String> {
-    let (status, value) = request(
-        reqwest::Method::GET,
-        format!(
-            "{api_base}/repos/{}/{}/actions/runs?per_page=100",
-            target.owner, target.name
-        ),
-        credential,
-        None,
-    )
-    .await?;
-    if !status.is_success() {
-        return Err(forge_message(status, &value));
-    }
-    Ok(value)
-}
-
 /// Read one repository's deployments.
 pub(crate) async fn deployments(
     api_base: &str,

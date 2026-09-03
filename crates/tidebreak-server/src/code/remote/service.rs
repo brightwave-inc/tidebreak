@@ -52,7 +52,7 @@ const PUMP_FAULT_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_se
 /// How long promotion leaves a session alone after a machine-side refusal
 /// (cap full, sign-in needed). Refusals journal a notice and poke attention;
 /// retrying every sweep tick would repeat both every two seconds.
-pub(crate) const PROMOTION_RETRY_HOLD: std::time::Duration = std::time::Duration::from_secs(150);
+const PROMOTION_RETRY_HOLD: std::time::Duration = std::time::Duration::from_secs(150);
 
 /// Resolve one deployment's remote spawn settings from boot configuration.
 /// The per-spawn ceiling bounds one runaway incarnation. The per-session
@@ -299,9 +299,9 @@ impl Drop for RemoteSweepGuard {
 
 /// What one sweep pass found, which sets the floor before the next.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct RemoteSweepActivity {
+struct RemoteSweepActivity {
     /// Incarnations that still owe events and so hold a pump task.
-    pub(crate) draining: usize,
+    draining: usize,
 }
 
 /// The safety-net wait after a pass: tight while something drains, slow
@@ -316,7 +316,7 @@ fn sweep_floor(activity: RemoteSweepActivity) -> std::time::Duration {
 
 /// One sweep pass: expire stale intents and reconcile pump tasks against
 /// the incarnations that still owe events.
-pub(crate) async fn sweep_remote(runtime: &Arc<CodeRuntime>) -> RemoteSweepActivity {
+async fn sweep_remote(runtime: &Arc<CodeRuntime>) -> RemoteSweepActivity {
     let mut activity = RemoteSweepActivity::default();
     let Some(remote) = runtime.remote_sessions() else {
         return activity;

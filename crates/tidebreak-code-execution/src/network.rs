@@ -6,12 +6,14 @@
 //! bytes. A Seatbelt profile exposes exactly this listener port.
 
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
 use tidebreak_core::NetworkPolicy;
-use tidebreak_egress::{DomainPattern, EgressDestination};
+use tidebreak_egress::{
+    in_v4_block, in_v6_prefix, parse_authority, DomainPattern, EgressDestination,
+};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{lookup_host, TcpListener, TcpStream};
 use tokio::sync::Semaphore;
@@ -310,20 +312,6 @@ where
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "egress tunnel shutdown timed out"))?
 }
 
-fn parse_authority(authority: &str) -> Option<(String, u16)> {
-    if let Some(rest) = authority.strip_prefix('[') {
-        let (host, port) = rest.split_once("]:")?;
-        let port = port.parse::<u16>().ok().filter(|port| *port != 0)?;
-        return Some((host.to_ascii_lowercase(), port));
-    }
-    let (host, port) = authority.rsplit_once(':')?;
-    if host.is_empty() || host.contains(':') {
-        return None;
-    }
-    let port = port.parse::<u16>().ok().filter(|port| *port != 0)?;
-    Some((host.trim_end_matches('.').to_ascii_lowercase(), port))
-}
-
 fn policy_permits(policy: &NetworkPolicy, host: &str, port: u16) -> bool {
     if EgressDestination::parse(host).is_err() {
         return false;
@@ -401,16 +389,6 @@ fn is_restricted(address: IpAddr) -> bool {
                     .is_some_and(|mapped| is_restricted(IpAddr::V4(mapped)))
         }
     }
-}
-
-fn in_v4_block(address: Ipv4Addr, network: [u8; 4], prefix: u32) -> bool {
-    let mask = u32::MAX << (32 - prefix);
-    u32::from(address) & mask == u32::from(Ipv4Addr::from(network)) & mask
-}
-
-fn in_v6_prefix(address: Ipv6Addr, network: u16, prefix: u32) -> bool {
-    let mask = u16::MAX << (16 - prefix);
-    address.segments()[0] & mask == network & mask
 }
 
 async fn reject(stream: &mut TcpStream, code: u16, reason: &str) -> io::Result<()> {

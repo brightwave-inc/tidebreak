@@ -1855,13 +1855,6 @@ name: string,
 status: CodeSubagentStatus, };
 
 /**
- * Unsequenced activity notice published on the updates channel.
- *
- * Never journaled. A client that missed one just pulls from its last cursor.
- */
-export type CodeTerminalActivityNotice = { workspace_id: WorkspaceId, terminal_id: CodeTerminalId, };
-
-/**
  * Identifies one auxiliary terminal attached to a workspace.
  */
 export type CodeTerminalId = string;

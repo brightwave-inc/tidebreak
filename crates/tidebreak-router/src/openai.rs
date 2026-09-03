@@ -164,13 +164,6 @@ impl OpenAiProvider {
         self
     }
 
-    /// Override the `originator` header sent in ChatGPT mode.
-    #[must_use]
-    pub fn with_chatgpt_originator(mut self, originator: impl Into<String>) -> Self {
-        self.chatgpt_originator = originator.into();
-        self
-    }
-
     /// Override the reported provider id and error-message label.
     #[must_use]
     pub fn with_provider_label(mut self, label: &'static str) -> Self {

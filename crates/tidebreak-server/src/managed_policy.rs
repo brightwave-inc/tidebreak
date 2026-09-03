@@ -22,7 +22,7 @@
 //! tests — it is deliberately not reachable from any renderer-writable
 //! route, which is what makes the state sticky rather than a setting.
 
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{ErrorKind, Write};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tidebreak_core::{AgentError, Config, PermissionMode, Result, Store};
+use tidebreak_core::{sync_directory, AgentError, Config, PermissionMode, Result, Store};
 
 /// The filename the provisioned policy lives under, directly in the data
 /// directory. Deliberately outside the SQLite profile: a pre-v1 schema-epoch
@@ -383,16 +383,6 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
             path.display()
         ))
     })
-}
-
-#[cfg(unix)]
-fn sync_directory(path: &Path) -> std::io::Result<()> {
-    File::open(path)?.sync_all()
-}
-
-#[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> std::io::Result<()> {
-    Ok(())
 }
 
 /// Select this platform's OS policy reader.

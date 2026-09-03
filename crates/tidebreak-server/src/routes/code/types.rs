@@ -2168,16 +2168,6 @@ pub struct CodeTerminalRead {
     pub ended: bool,
 }
 
-/// Unsequenced activity notice published on the updates channel.
-///
-/// Never journaled. A client that missed one just pulls from its last cursor.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
-#[allow(dead_code)]
-pub struct CodeTerminalActivityNotice {
-    pub workspace_id: WorkspaceId,
-    pub terminal_id: CodeTerminalId,
-}
-
 /// Cheap per-session digest on `/code/updates`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]

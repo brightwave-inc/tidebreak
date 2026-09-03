@@ -49,6 +49,19 @@ pub enum EventPayload {
     Failed(String),
 }
 
+/// The sandbox could not accept an emitted event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum EmitError {
+    /// The un-acknowledged event buffer is full; the sandbox has checkpointed
+    /// and stopped producing rather than dropping events. A drain that advances
+    /// the host's cursor clears this.
+    #[error("event buffer overflowed; sandbox checkpointed")]
+    Overflow,
+    /// The event payload exceeds its declared per-event bound and is refused.
+    #[error("event payload exceeds its per-event bound")]
+    TooLarge,
+}
+
 impl EventPayload {
     /// Whether the payload is within its declared per-event bound.
     #[must_use]

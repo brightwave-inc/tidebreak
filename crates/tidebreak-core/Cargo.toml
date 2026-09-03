@@ -35,7 +35,7 @@ keychain = ["dep:keyring", "dep:tokio"]
 # The built-in filesystem tools (read_file / list_dir / write_file).
 tools = ["dep:cap-fs-ext", "dep:cap-std", "dep:tokio"]
 # Durable local byte storage for desktop documents and artifacts.
-blob-fs = ["dep:async-stream", "dep:tokio", "dep:windows-sys"]
+blob-fs = ["dep:async-stream", "dep:tokio"]
 # S3-compatible byte storage for self-hosted deployments.
 blob-object = ["dep:object_store", "dep:tokio"]
 
@@ -71,7 +71,7 @@ tokio = { workspace = true, optional = true, features = ["io-util", "sync"] }
 keyring = { version = "=3.6.3", features = ["apple-native"], optional = true }
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "=3.6.3", features = ["windows-native"], optional = true }
-windows-sys = { version = "=0.61.2", features = ["Win32_Storage_FileSystem"], optional = true }
+windows-sys = { version = "=0.61.2", features = ["Win32_Storage_FileSystem"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "=3.6.3", features = ["async-secret-service", "crypto-rust", "tokio"], optional = true }
 

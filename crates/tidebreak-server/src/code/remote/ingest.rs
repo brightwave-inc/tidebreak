@@ -51,7 +51,7 @@ pub(crate) struct IngestBinding {
 
 /// What one sandbox event becomes on the session.
 #[derive(Debug, Default, PartialEq)]
-pub(crate) struct Projection {
+struct Projection {
     /// Journal rows to append, in order.
     pub journal: Vec<CodeEvent>,
     /// Attention to apply after the journal commit.
@@ -108,7 +108,7 @@ fn payload_str<'a>(payload: &'a Value, key: &str) -> Option<&'a str> {
 /// recognized but journal nothing here; [`ingest_events`] reads the terminal
 /// ones off the cursor read's own `state` field instead, where they are
 /// authoritative.
-pub(crate) fn project_event(binding: &IngestBinding, kind: &str, payload: &Value) -> Projection {
+fn project_event(binding: &IngestBinding, kind: &str, payload: &Value) -> Projection {
     let mut out = Projection::default();
     match kind {
         "supervisor_started" => {

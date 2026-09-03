@@ -39,7 +39,7 @@ use std::time::Duration;
 use std::os::unix::fs::OpenOptionsExt;
 
 use serde::{Deserialize, Serialize};
-use tidebreak_core::{AgentError, Config, DbStore, Result};
+use tidebreak_core::{replace_file, sync_directory, AgentError, Config, DbStore, Result};
 
 const DATABASE_FILE: &str = "tidebreak.db";
 const MARKER_FILE: &str = "tidebreak-schema.json";
@@ -385,64 +385,6 @@ fn write_current_marker_inner(data_dir: &Path, failure: MarkerWriteFailure) -> R
             marker.display()
         ))
     })
-}
-
-/// Atomically move `temporary` over `destination`.
-///
-/// Shared with [`crate::code::worktree_orphans`], which writes its own sidecar
-/// into this directory with the same publish-or-leave-the-old-one guarantee.
-#[cfg(unix)]
-pub(crate) fn replace_file(temporary: &Path, destination: &Path) -> std::io::Result<()> {
-    std::fs::rename(temporary, destination)
-}
-
-#[cfg(windows)]
-pub(crate) fn replace_file(temporary: &Path, destination: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-    };
-
-    let temporary = temporary
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
-    let destination = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
-    let succeeded = unsafe {
-        MoveFileExW(
-            temporary.as_ptr(),
-            destination.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if succeeded == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
-pub(crate) fn replace_file(_temporary: &Path, _destination: &Path) -> std::io::Result<()> {
-    Err(std::io::Error::new(
-        ErrorKind::Unsupported,
-        "atomic schema marker replacement is unsupported on this platform",
-    ))
-}
-
-#[cfg(unix)]
-fn sync_directory(path: &Path) -> std::io::Result<()> {
-    File::open(path)?.sync_all()
-}
-
-#[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> std::io::Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]

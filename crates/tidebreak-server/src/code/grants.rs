@@ -157,7 +157,12 @@ impl super::runtime::CodeRuntime {
     /// Mint the grant a connect approval produces. Refuses an identity that
     /// already holds a live grant — revoke first, so a re-link is an
     /// explicit replacement.
-    #[cfg_attr(not(test), allow(dead_code))]
+    ///
+    /// Production minting is not wired yet; tests (including
+    /// `src/tests/code_external.rs`) drive the token pair through this
+    /// helper. Keep it compiled only in tests until a connect-approval
+    /// path calls it.
+    #[cfg(test)]
     pub(crate) async fn mint_adapter_grant(
         &self,
         owner: &OwnerId,
@@ -223,7 +228,6 @@ impl super::runtime::CodeRuntime {
     }
 
     /// Revoke one grant on the owner's word and sever its live streams.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) async fn revoke_adapter_grant(
         &self,
         owner: &OwnerId,

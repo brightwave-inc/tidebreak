@@ -4238,6 +4238,8 @@ pub(crate) async fn browser_remove_inspect_overlay(
 mod tests {
     use super::*;
 
+    static SOURCE: &str = include_str!("browser_semantics.rs");
+
     fn native_resolution() -> NativeActionResolution {
         NativeActionResolution {
             status: NativeActionResolutionStatus::Ready,
@@ -4490,7 +4492,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn select_uses_only_focused_arrow_keys_without_click_or_enter() {
-        let source = include_str!("browser_semantics.rs");
+        let source = SOURCE;
         let select_start = source
             .find("unsafe fn send_native_select_step")
             .expect("select helper");
@@ -4531,7 +4533,7 @@ mod tests {
             [(1, 0, 0), (2, -120, -100), (4, 0, 0)]
         );
 
-        let source = include_str!("browser_semantics.rs");
+        let source = SOURCE;
         let scroll_start = source
             .find("fn send_native_scroll(")
             .expect("scroll helper");
@@ -4549,7 +4551,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn hover_uses_webkits_native_mouse_move_delivery() {
-        let source = include_str!("browser_semantics.rs");
+        let source = SOURCE;
         assert!(source.contains("window.setAcceptsMouseMovedEvents(true)"));
         assert!(source.contains("NSEventType::MouseMoved"));
         assert!(source.contains("window.sendEvent(&event)"));
@@ -4561,7 +4563,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn native_input_fails_closed_without_active_target_focus() {
-        let source = include_str!("browser_semantics.rs");
+        let source = SOURCE;
         assert!(source.contains("app.isActive()"));
         assert!(source.contains("window.isKeyWindow()"));
         assert!(source.contains("window.isVisible()"));
@@ -4616,7 +4618,7 @@ mod tests {
 
     #[test]
     fn semantic_scripts_run_outside_the_page_javascript_world() {
-        let source = include_str!("browser_semantics.rs");
+        let source = SOURCE;
         assert!(source.contains("TidebreakBrowserSemantics"));
         assert!(source.contains("BROWSER_SEMANTICS_CONTENT_WORLD"));
         assert!(source.contains("evaluateJavaScript_inFrame_inContentWorld_completionHandler"));

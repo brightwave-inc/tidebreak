@@ -63,18 +63,7 @@ pub enum ConnectError {
     Unreachable(String),
 }
 
-/// The sandbox could not accept an emitted event.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum EmitError {
-    /// The un-acknowledged event buffer is full; the sandbox has checkpointed
-    /// and stopped producing rather than dropping events. A drain that advances
-    /// the host's cursor clears this.
-    #[error("event buffer overflowed; sandbox checkpointed")]
-    Overflow,
-    /// The event payload exceeds its declared per-event bound and is refused.
-    #[error("event payload exceeds its per-event bound")]
-    TooLarge,
-}
+pub use crate::events::EmitError;
 
 /// The outcome of one sandbox-originated reverse call over the current session.
 #[derive(Debug, Clone)]

@@ -38,7 +38,7 @@ use super::{RemoteSandboxError, SandboxProvisioner};
 /// How long an unactivated intent may sit before the sweep closes it: long
 /// enough for a slow spawn round trip, short enough that a crashed server
 /// does not hold a concurrency slot for an afternoon.
-pub(crate) const STALE_INTENT_AGE: chrono::Duration = chrono::Duration::minutes(10);
+const STALE_INTENT_AGE: chrono::Duration = chrono::Duration::minutes(10);
 
 /// Spawn-time settings for one remote session's sandboxes.
 #[derive(Clone, Debug)]

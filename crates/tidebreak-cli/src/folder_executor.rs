@@ -81,14 +81,15 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use tidebreak_core::{
-    validate_import_connected_file_arguments, validate_list_connected_folders_arguments,
-    validate_list_folder_arguments, validate_read_connected_file_arguments,
-    validate_request_folder_access_arguments, validate_write_output_to_connected_folder_arguments,
-    AgentError, CallId, ChatId, GrantedFolderCapability, ImportConnectedFileArgs,
-    ImportConnectedFileResult, ListFolderArgs, ReadConnectedFileArgs, RequestFolderAccessResult,
-    Result, ResultEntry, ResultEntryKind, ToolCallExecution, ToolCallRecord, ToolCallStatus,
-    IMPORT_CONNECTED_FILE_TOOL, LIST_CONNECTED_FOLDERS_TOOL, LIST_FOLDER_TOOL,
-    READ_CONNECTED_FILE_TOOL, REQUEST_FOLDER_ACCESS_TOOL, WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL,
+    truncate_utf8, validate_import_connected_file_arguments,
+    validate_list_connected_folders_arguments, validate_list_folder_arguments,
+    validate_read_connected_file_arguments, validate_request_folder_access_arguments,
+    validate_write_output_to_connected_folder_arguments, AgentError, CallId, ChatId,
+    GrantedFolderCapability, ImportConnectedFileArgs, ImportConnectedFileResult, ListFolderArgs,
+    ReadConnectedFileArgs, RequestFolderAccessResult, Result, ResultEntry, ResultEntryKind,
+    ToolCallExecution, ToolCallRecord, ToolCallStatus, IMPORT_CONNECTED_FILE_TOOL,
+    LIST_CONNECTED_FOLDERS_TOOL, LIST_FOLDER_TOOL, READ_CONNECTED_FILE_TOOL,
+    REQUEST_FOLDER_ACCESS_TOOL, WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL,
 };
 use tidebreak_host_broker::{
     Capability, EntryKind, ExecutionContext, OperationEnvelope, OperationRequest, OperationResult,
@@ -799,17 +800,6 @@ fn granted_folder_capabilities(capabilities: &[Capability]) -> Vec<GrantedFolder
             _ => None,
         })
         .collect()
-}
-
-fn truncate_utf8(value: &str, max_bytes: usize) -> (String, bool) {
-    if value.len() <= max_bytes {
-        return (value.to_owned(), false);
-    }
-    let mut end = max_bytes;
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    (value[..end].to_owned(), true)
 }
 
 /// The last segment of a connected-folder path, so a row leads with the file.

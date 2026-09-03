@@ -665,24 +665,6 @@ pub async fn control_lane_cancel_preempts_saturated_request_lane() {
     call_c.abort();
 }
 
-/// Run every conformance scenario in sequence.
-pub async fn run_all() {
-    version_mismatch_is_refused().await;
-    unauthenticated_attach_is_refused().await;
-    deny_by_default_refuses_ungranted_capability().await;
-    over_bound_request_is_refused().await;
-    over_bound_event_is_refused().await;
-    event_stream_resumes_from_committed_cursor().await;
-    event_buffer_overflow_checkpoints_and_resumes().await;
-    reverse_rpc_correlates_concurrent_calls().await;
-    reverse_rpc_cancel_aborts_in_flight().await;
-    control_lane_cancel_preempts_saturated_request_lane().await;
-    reverse_rpc_disconnect_fails_inflight_then_reissue_replays().await;
-    reverse_rpc_reissue_with_a_different_request_conflicts().await;
-    self_hosted_and_managed_share_one_attach_path().await;
-    artifact_collection_roundtrips_and_is_bounded().await;
-}
-
 fn echo() -> (Arc<dyn CapabilityResponder>, Arc<AtomicUsize>) {
     let executions = Arc::new(AtomicUsize::new(0));
     let responder = Arc::new(EchoResponder {

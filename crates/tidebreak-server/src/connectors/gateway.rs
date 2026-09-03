@@ -1298,16 +1298,6 @@ impl GatewayConnection {
             .await
     }
 
-    /// A fresh access token held only in this process.
-    ///
-    /// Refresh rotation remains serialized with every other token mint, and
-    /// the rotated refresh token is saved before the access token becomes
-    /// usable. Tidebreak resources route here automatically through
-    /// [`Self::access_token`].
-    pub async fn volatile_access_token(&self, resource: &str) -> Result<String> {
-        self.volatile_access_token_bound(resource, None).await
-    }
-
     async fn volatile_access_token_bound(
         &self,
         resource: &str,
@@ -1659,13 +1649,6 @@ impl GatewayConnection {
         self.auth
             .endpoint(&format!("mcp/{slug}"))
             .map(|url| url.to_string())
-    }
-
-    /// A fresh access token bound to the `mcp:<slug>` resource, from cache
-    /// when possible and via rotating refresh otherwise.
-    pub async fn mcp_access_token(&self, slug: &str) -> Result<String> {
-        validate_mcp_endpoint_slug(slug)?;
-        self.access_token(&format!("mcp:{slug}")).await
     }
 
     /// Revoke the session at its own gateway (best-effort, bounded) and

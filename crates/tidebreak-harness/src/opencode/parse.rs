@@ -112,11 +112,6 @@ impl OpencodeStreamParser {
         }
     }
 
-    /// Parse one inbound SSE event object.
-    pub fn push_sse(&mut self, event: &Value) -> Vec<HarnessEvent> {
-        self.push_inbound(&serde_json::json!({ "kind": "sse", "event": event }))
-    }
-
     fn push_outbound(&mut self, value: &Value) -> Vec<HarnessEvent> {
         let kind = value.get("kind").and_then(Value::as_str).unwrap_or("");
         if kind != "http" {

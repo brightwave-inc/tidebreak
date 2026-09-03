@@ -442,16 +442,8 @@ fn publish_new_file(temporary: &Path, destination: &Path) -> std::io::Result<()>
     }
 }
 
-#[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<()> {
-    File::open(path)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| blob_error("sync directory", error))
-}
-
-#[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> Result<()> {
-    Ok(())
+    crate::sync_directory(path).map_err(|error| blob_error("sync directory", error))
 }
 
 fn blob_error(action: &str, error: std::io::Error) -> AgentError {

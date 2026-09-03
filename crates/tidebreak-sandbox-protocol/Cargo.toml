@@ -9,6 +9,11 @@ homepage.workspace = true
 authors.workspace = true
 publish = false
 
+[features]
+# In-process reference backend and the conformance suite. Off in shipped
+# consumers (server, sandbox-agent); this crate's tests enable it.
+conformance = []
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -20,6 +25,7 @@ async-trait = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "macros", "time", "io-util"] }
 
 [dev-dependencies]
+tidebreak-sandbox-protocol = { path = ".", features = ["conformance"] }
 # `test-util` pauses the clock so the handshake deadline can be exercised without
 # the suite waiting on it.
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "macros", "time", "io-util", "net", "test-util"] }

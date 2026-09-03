@@ -30,10 +30,10 @@ use sha2::{Digest as _, Sha256};
 use tauri::{AppHandle, Manager as _};
 use tidebreak_core::{
     accept_workspace_artifact, binary_media_type_for_extension, deliverable_media_type,
-    validate_binary_deliverable, validate_portable_filename, AgentError, BrowserControllerKind,
-    ChatId, OutputId, OutputRevisionId, RevisionProducer, WorkspaceArtifactProposal,
-    CHART_FILENAME_SUFFIX, MAX_BINARY_DELIVERABLE_BYTES, MAX_DELIVERABLE_BYTES,
-    MAX_DELIVERABLE_NAME_CHARS,
+    sync_directory, validate_binary_deliverable, validate_portable_filename, AgentError,
+    BrowserControllerKind, ChatId, OutputId, OutputRevisionId, RevisionProducer,
+    WorkspaceArtifactProposal, CHART_FILENAME_SUFFIX, MAX_BINARY_DELIVERABLE_BYTES,
+    MAX_DELIVERABLE_BYTES, MAX_DELIVERABLE_NAME_CHARS,
 };
 use url::Url;
 use uuid::Uuid;
@@ -993,10 +993,6 @@ fn write_atomically(directory: &Path, destination: &Path, bytes: &[u8]) -> io::R
         let _ = fs::remove_file(temporary);
     }
     result
-}
-
-fn sync_directory(path: &Path) -> io::Result<()> {
-    File::open(path)?.sync_all()
 }
 
 fn invalid_data(error: impl std::fmt::Display) -> io::Error {
