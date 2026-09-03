@@ -37,7 +37,7 @@ fn replace_file_inner(_temporary: &Path, _destination: &Path) -> io::Result<()> 
     ))
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, feature = "blob-fs"))]
 fn replace_file_windows(temporary: &Path, destination: &Path) -> io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
@@ -66,6 +66,11 @@ fn replace_file_windows(temporary: &Path, destination: &Path) -> io::Result<()> 
     } else {
         Ok(())
     }
+}
+
+#[cfg(all(windows, not(feature = "blob-fs")))]
+fn replace_file_windows(temporary: &Path, destination: &Path) -> io::Result<()> {
+    std::fs::rename(temporary, destination)
 }
 
 #[cfg(unix)]
