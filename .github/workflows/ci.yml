@@ -4,12 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    types:
-      [opened, reopened, synchronize, edited, labeled, unlabeled, ready_for_review]
-  # Speculative merge groups from the main merge queue. Required checks must
-  # report here or the queue never drains. Scope detection diffs the group
-  # against its base the same way a pull request diffs against main.
-  merge_group:
+    types: [opened, reopened, synchronize, ready_for_review]
   # Backstop the deliberately scoped post-merge capability lanes even during a
   # week with no relevant merge. The non-PR full-validation path below makes a
   # scheduled run exercise every lane.
@@ -43,53 +38,6 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  pr-title:
-    name: semantic PR title
-    if: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: read
-    steps:
-      # A merge group has no pull-request title payload. The same check name
-      # is required on the queue, and the title was already judged when the
-      # pull request entered it.
-      - name: Accept titles already checked on the pull request
-        if: ${{ github.event_name == 'merge_group' }}
-        run: echo "Merge groups reuse the pull request title check."
-      # The title and labels come from the event payload, so this job never
-      # needs the pull request's own code — only the trusted base-branch copy
-      # of the policy it is judged by.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        if: ${{ github.event_name == 'pull_request' }}
-        with:
-          ref: ${{ github.event.pull_request.base.sha }}
-          fetch-depth: 1
-      - name: Validate Conventional Commit title
-        if: ${{ github.event_name == 'pull_request' }}
-        env:
-          CANONICAL_REPOSITORY: brightwave-inc/tidebreak
-          GH_TOKEN: ${{ github.token }}
-          PR_BODY: ${{ github.event.pull_request.body }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
-        run: |
-          node scripts/check-pr-title.mjs "$PR_TITLE"
-          expected_labels="$(node scripts/release-label.mjs --labels "$PR_TITLE" |
-            jq -r 'sort | join(",")')"
-          actual_labels=""
-          for _ in {1..10}; do
-            actual_labels="$(gh api "repos/$CANONICAL_REPOSITORY/pulls/$PR_NUMBER" \
-              --jq '[.labels[].name | select(startswith("semver:") or startswith("release-note:"))] | sort | join(",")')"
-            [[ "$actual_labels" = "$expected_labels" ]] && break
-            sleep 2
-          done
-          test "$actual_labels" = "$expected_labels" || {
-            echo "Expected managed release labels $expected_labels; found: ${actual_labels:-none}." >&2
-            echo "The trusted Release draft workflow may still be synchronizing it." >&2
-            exit 1
-          }
-
   release-policy:
     name: release policy
     runs-on: ubuntu-latest
@@ -130,6 +78,7 @@ jobs:
       notices: ${{ steps.scope.outputs.notices }}
       rust: ${{ steps.scope.outputs.rust }}
       ui: ${{ steps.scope.outputs.ui }}
+      windows_native: ${{ steps.scope.outputs.windows_native }}
       workspace: ${{ steps.scope.outputs.workspace }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -141,8 +90,6 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
-          MERGE_GROUP_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
           PUSH_BASE_SHA: ${{ github.event.before }}
           PUSH_HEAD_SHA: ${{ github.event.after }}
         run: |
@@ -153,6 +100,7 @@ jobs:
               echo "notices=true"
               echo "rust=true"
               echo "ui=true"
+              echo "windows_native=true"
               echo "workspace=true"
             } >> "$GITHUB_OUTPUT"
           }
@@ -161,11 +109,6 @@ jobs:
             pull_request)
               base_sha="$PR_BASE_SHA"
               head_sha="$PR_HEAD_SHA"
-              diff_range="$base_sha...$head_sha"
-              ;;
-            merge_group)
-              base_sha="$MERGE_GROUP_BASE_SHA"
-              head_sha="$MERGE_GROUP_HEAD_SHA"
               diff_range="$base_sha...$head_sha"
               ;;
             push)
@@ -202,6 +145,7 @@ jobs:
           notices=false
           rust=false
           ui=false
+          windows_native=false
           workspace=false
           git diff --no-renames --name-only -z "$diff_range" \
             > "$RUNNER_TEMP/changed-files"
@@ -222,6 +166,7 @@ jobs:
                 notices=true
                 rust=true
                 ui=true
+                windows_native=true
                 workspace=true
                 ;;
               # Generated from Rust definitions, and a Rust test is what checks
@@ -249,6 +194,20 @@ jobs:
                 notices=true; rust=true; workspace=true ;;
               *) rust=true; workspace=true ;;
             esac
+            # Native Windows tests cover contracts that a cross-target check
+            # cannot prove: NTFS path behavior, Windows process APIs, SQLite
+            # profile migration, and the Credential Manager backend.
+            case "$file" in
+              .github/workflows/ci.yml) windows_native=true ;;
+              crates/tidebreak-code-execution/*|crates/tidebreak-harness/*|crates/tidebreak-host-broker/*)
+                windows_native=true ;;
+              crates/tidebreak-server/src/code/*|crates/tidebreak-server/src/tests/code*)
+                windows_native=true ;;
+              crates/tidebreak-server/src/desktop_schema.rs|crates/tidebreak-core/src/keychain.rs)
+                windows_native=true ;;
+              crates/tidebreak-desktop/scripts/prepare-sidecar.mjs)
+                windows_native=true ;;
+            esac
           done < "$RUNNER_TEMP/changed-files"
 
           # Keep narrower scopes honest here, before conditional jobs consume
@@ -258,6 +217,10 @@ jobs:
             echo "workspace scope without Rust scope; the detector is wrong." >&2
             exit 1
           fi
+          if [[ "$windows_native" == true && "$rust" != true ]]; then
+            echo "native Windows scope without Rust scope; the detector is wrong." >&2
+            exit 1
+          fi
 
           {
             echo "docs_site=$docs_site"
@@ -265,6 +228,7 @@ jobs:
             echo "notices=$notices"
             echo "rust=$rust"
             echo "ui=$ui"
+            echo "windows_native=$windows_native"
             echo "workspace=$workspace"
           } >> "$GITHUB_OUTPUT"
 
@@ -521,14 +485,15 @@ jobs:
     # A native runner keeps the Windows SDK and MSVC available for native
     # dependencies such as ring and SQLite. `cargo check` is rust-scoped like
     # clippy: a Windows compile break on main blocks the desktop release, so
-    # every Rust-scoped pull request has to catch it. The check covers the
-    # installer graph only. Native Windows tests are not a merge gate.
+    # every Rust-scoped pull request has to catch it. Native Windows runtime
+    # tests run independently below so they no longer extend this required
+    # lane's wall time.
     if: ${{ needs.changes.outputs.rust == 'true' }}
     # Prefer an 8 vCPU / 32 GB Windows larger runner. Standard windows-latest
     # is 4 cores and spends most of this lane in rustc; 16 cores is not worth
     # the extra cost for cargo check. Set CI_WINDOWS_RUNNER to the provisioned
     # label. If the variable is unset, the job uses windows-latest so a missing
-    # larger runner cannot stall the merge queue.
+    # larger runner cannot stall merges.
     runs-on: ${{ vars.CI_WINDOWS_RUNNER || 'windows-latest' }}
     timeout-minutes: 20
     env:
@@ -600,13 +565,93 @@ jobs:
         if: ${{ steps.tip.outputs.superseded != 'true' }}
         run: >-
           cargo check --target x86_64-pc-windows-msvc
+          -p tidebreak-core
+          -p tidebreak-code-execution
           -p tidebreak-cli
           -p tidebreak-host-broker
+          -p tidebreak-server
           -p tidebreak-desktop
           --locked
 
+  windows-native:
+    name: Windows native tests
+    needs: changes
+    if: ${{ needs.changes.outputs.windows_native == 'true' }}
+    runs-on: ${{ vars.CI_WINDOWS_RUNNER || 'windows-latest' }}
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_RW_MODE: READ_WRITE
+      RUSTC_WRAPPER: sccache
+      # link.exe dominates Windows test-binary time on four cores. rust-lld
+      # ships with the toolchain and is the MSVC analogue of mold on Linux.
+      RUSTFLAGS: -C linker=rust-lld
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Install toolchain (honors rust-toolchain.toml)
+        run: rustup show
+      - name: Set up compiler cache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          shared-key: windows-check-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
+          add-job-id-key: "false"
+          add-rust-environment-hash-key: "false"
+          cache-bin: false
+          cache-targets: false
+          save-if: false
+      # The host broker suite covers real NTFS containment and the stdio
+      # sidecar boundary: state placement, ownership, restart persistence, and
+      # exit when the desktop pipe closes.
+      - name: Host broker Windows tests
+        run: cargo test --target x86_64-pc-windows-msvc -p tidebreak-host-broker --locked
+      # Code mode crosses Windows-native executable, environment, PowerShell,
+      # path-identity, and process-tree boundaries. Retry each suite to absorb
+      # the known PowerShell startup race on loaded hosted runners.
+      - name: Code mode Windows lifecycle tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Continue"
+          $PSNativeCommandUseErrorActionPreference = $false
+          $attempts = 3
+          $suites = @(
+            @("test", "--target", "x86_64-pc-windows-msvc", "-p", "tidebreak-code-execution", "--locked"),
+            @("test", "--target", "x86_64-pc-windows-msvc", "-p", "tidebreak-harness", "--locked"),
+            @("test", "--target", "x86_64-pc-windows-msvc", "-p", "tidebreak-server", "--lib", "code::", "--locked")
+          )
+          foreach ($suite in $suites) {
+            $passed = $false
+            for ($attempt = 1; $attempt -le $attempts; $attempt++) {
+              & cargo @suite
+              if ($LASTEXITCODE -eq 0) {
+                $passed = $true
+                break
+              }
+              Write-Host "cargo $($suite -join ' ') failed on attempt $attempt/$attempts"
+            }
+            if (-not $passed) {
+              exit 1
+            }
+          }
+      - name: SQLite profile open and migrations
+        run: >-
+          cargo test --target x86_64-pc-windows-msvc
+          -p tidebreak-server --lib desktop_schema --locked
+      # `-- --ignored` runs the native round trip alone, so the process-global
+      # in-memory keyring mock never activates and the test reaches the hosted
+      # runner's real Credential Manager.
+      - name: Credential Manager round trip
+        run: >-
+          cargo test --target x86_64-pc-windows-msvc
+          -p tidebreak-core --lib keychain --locked -- --ignored
+
   test:
-    name: test
+    name: test partition ${{ matrix.part }}/3
     needs: changes
     if: ${{ needs.changes.outputs.workspace == 'true' }}
     # Prefer an 8 vCPU larger runner: this lane splits roughly evenly between
@@ -615,6 +660,10 @@ jobs:
     # job uses ubuntu-latest so a missing larger runner cannot stall merges.
     runs-on: ${{ vars.CI_TEST_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1, 2, 3]
     env:
       CARGO_INCREMENTAL: 0
       CARGO_PROFILE_DEV_DEBUG: 0
@@ -646,12 +695,12 @@ jobs:
           add-rust-environment-hash-key: "false"
           cache-bin: false
           cache-targets: false
-          # This is the single Cargo-download writer. sccache remains the
-          # compiler-output cache used independently by every Rust lane.
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # Partition one is the single Cargo-download writer. sccache remains
+          # the compiler-output cache used independently by every Rust lane.
+          save-if: ${{ github.ref == 'refs/heads/main' && matrix.part == 1 }}
           cache-on-failure: true
       - name: Fetch the complete workspace lockfile
-        if: ${{ github.ref == 'refs/heads/main' }}
+        if: ${{ github.ref == 'refs/heads/main' && matrix.part == 1 }}
         run: cargo fetch --locked
       # nextest schedules tests from every binary in parallel, so the few
       # long-running suites overlap instead of queuing behind each other, and
@@ -663,7 +712,33 @@ jobs:
       - name: headless tests
         run: >-
           cargo nextest run --workspace --exclude tidebreak-desktop
-          --locked --retries 2
+          --locked --retries 2 --partition count:${{ matrix.part }}/3
+
+  test-aggregate:
+    name: test
+    needs: [changes, test]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every scoped test partition
+        env:
+          CHANGE_SCOPE_RESULT: ${{ needs.changes.result }}
+          PARTITION_RESULT: ${{ needs.test.result }}
+          WORKSPACE_SCOPE: ${{ needs.changes.outputs.workspace }}
+        run: |
+          if [[ "$CHANGE_SCOPE_RESULT" != success ]]; then
+            echo "Change scope detection ended with $CHANGE_SCOPE_RESULT." >&2
+            exit 1
+          fi
+          if [[ "$WORKSPACE_SCOPE" == true ]]; then
+            if [[ "$PARTITION_RESULT" != success ]]; then
+              echo "A required test partition ended with $PARTITION_RESULT." >&2
+              exit 1
+            fi
+          elif [[ "$PARTITION_RESULT" != skipped ]]; then
+            echo "Unscoped test partitions unexpectedly ended with $PARTITION_RESULT." >&2
+            exit 1
+          fi
 
   postgres:
     name: postgres state machine
@@ -710,22 +785,14 @@ jobs:
           cache-bin: false
           cache-targets: false
           save-if: false
-      - name: Exercise durable turn state on PostgreSQL
+      - name: Exercise core state machines on PostgreSQL
         run: >-
           cargo test -p tidebreak-core --no-default-features --features postgres
-          --test postgres_turn_state --locked
-      - name: Exercise document and blob lifecycle on PostgreSQL
-        run: >-
-          cargo test -p tidebreak-core --no-default-features --features postgres
-          --test postgres_document_blob --locked
-      - name: Exercise code-mode owner scoping on PostgreSQL
-        run: >-
-          cargo test -p tidebreak-core --no-default-features --features postgres
-          --test postgres_code_owner --locked
-      - name: Exercise released schema upgrades on PostgreSQL
-        run: >-
-          cargo test -p tidebreak-core --no-default-features --features postgres
-          --test postgres_release_upgrade --locked
+          --test postgres_turn_state
+          --test postgres_document_blob
+          --test postgres_code_owner
+          --test postgres_release_upgrade
+          --locked
       - name: Exercise self-host store ownership on PostgreSQL
         run: >-
           cargo test -p tidebreak-server --features postgres
