@@ -32,9 +32,9 @@ use cap_std::fs::{Dir, OpenOptions};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use tauri::{AppHandle, Manager, State};
-use tidebreak_core::event::{AgentEvent, SequencedEvent};
+use tidebreak_core::event::{AgentEvent, SequencedAgentEvent};
 use tidebreak_core::model::{Chat, Message, TurnRun};
-use tidebreak_core::ChatId;
+use tidebreak_core::SessionId;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
@@ -516,7 +516,7 @@ pub(crate) struct BundleInput {
     pub(crate) chat: Chat,
     pub(crate) turns: Vec<TurnRun>,
     pub(crate) messages: Vec<Message>,
-    pub(crate) events: Vec<SequencedEvent>,
+    pub(crate) events: Vec<SequencedAgentEvent>,
 }
 
 /// How much of the document to keep. The clipboard is bounded; a saved file
@@ -756,9 +756,9 @@ enum JournalEntry<'a> {
     },
 }
 
-fn coalesce(events: &[SequencedEvent]) -> Vec<JournalEntry<'_>> {
+fn coalesce(events: &[SequencedAgentEvent]) -> Vec<JournalEntry<'_>> {
     let mut entries: Vec<JournalEntry<'_>> = Vec::new();
-    for SequencedEvent { seq, event } in events {
+    for SequencedAgentEvent { seq, event } in events {
         match event {
             AgentEvent::TextDelta { text } | AgentEvent::ReasoningDelta { text } => {
                 let kind = if matches!(event, AgentEvent::TextDelta { .. }) {
@@ -813,7 +813,7 @@ fn coalesce(events: &[SequencedEvent]) -> Vec<JournalEntry<'_>> {
     entries
 }
 
-fn render_journal(out: &mut String, events: &[SequencedEvent], limit: BundleLimit) {
+fn render_journal(out: &mut String, events: &[SequencedAgentEvent], limit: BundleLimit) {
     let _ = writeln!(out, "## Journal\n");
     if events.is_empty() {
         let _ = writeln!(out, "No journal events.\n");
@@ -1001,7 +1001,7 @@ async fn load_bundle_input(host_access: &HostAccess, chat_id: Uuid) -> Result<Bu
     if chat_id.is_nil() {
         return Err("Invalid conversation id".to_owned());
     }
-    let chat_id = ChatId(chat_id);
+    let chat_id = SessionId(chat_id);
     let store = host_access
         .store()
         .ok_or_else(|| "Tidebreak is still starting".to_owned())?;
@@ -1344,7 +1344,7 @@ mod tests {
     /// A chat that failed a turn after one tool call, which is the shape most
     /// bug reports actually have.
     fn sample_input() -> BundleInput {
-        let chat_id = ChatId(uuid(1));
+        let chat_id = SessionId(uuid(1));
         let turn_id = TurnId(uuid(2));
         let call_id = CallId(uuid(3));
         BundleInput {
@@ -1406,44 +1406,44 @@ mod tests {
                 created_at: at(0),
             }],
             events: vec![
-                SequencedEvent {
+                SequencedAgentEvent {
                     seq: 1,
                     event: AgentEvent::TurnStarted { turn_id },
                 },
-                SequencedEvent {
+                SequencedAgentEvent {
                     seq: 2,
                     event: AgentEvent::TextDelta {
                         text: "Check".to_owned(),
                     },
                 },
-                SequencedEvent {
+                SequencedAgentEvent {
                     seq: 3,
                     event: AgentEvent::TextDelta {
                         text: "ing.".to_owned(),
                     },
                 },
-                SequencedEvent {
+                SequencedAgentEvent {
                     seq: 4,
                     event: AgentEvent::ToolCallStarted {
                         call_id,
                         name: "exec".to_owned(),
                     },
                 },
-                SequencedEvent {
+                SequencedAgentEvent {
                     seq: 5,
                     event: AgentEvent::ToolCallArgsDelta {
                         call_id,
                         fragment: "{\"command\":".to_owned(),
                     },
                 },
-                SequencedEvent {
+                SequencedAgentEvent {
                     seq: 6,
                     event: AgentEvent::ToolCallArgsDelta {
                         call_id,
                         fragment: "\"git status\"}".to_owned(),
                     },
                 },
-                SequencedEvent {
+                SequencedAgentEvent {
                     seq: 7,
                     event: AgentEvent::ToolCallCompleted {
                         call_id,
@@ -1452,7 +1452,7 @@ mod tests {
                         result: None,
                     },
                 },
-                SequencedEvent {
+                SequencedAgentEvent {
                     seq: 8,
                     event: AgentEvent::TurnFailed {
                         error: AgentErrorInfo {

@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 use tidebreak_core::{
-    ApprovalClass, ChatId, Result, Tool, ToolCtx, ToolErrorCategory, ToolOutput, ToolRegistry,
+    ApprovalClass, Result, SessionId, Tool, ToolCtx, ToolErrorCategory, ToolOutput, ToolRegistry,
     ToolSpec, TurnId,
 };
 
@@ -77,14 +77,14 @@ fn fail_args(message: impl Into<String>) -> Result<ToolOutput> {
     ))
 }
 
-fn required_chat_id(args: &Value) -> std::result::Result<ChatId, ToolOutput> {
+fn required_chat_id(args: &Value) -> std::result::Result<SessionId, ToolOutput> {
     let Some(value) = args.get("chat_id").and_then(Value::as_str) else {
         return Err(ToolOutput::failed(
             ToolErrorCategory::InvalidArguments,
             "chat_id is required",
         ));
     };
-    ChatId::from_str(value).map_err(|_| {
+    SessionId::from_str(value).map_err(|_| {
         ToolOutput::failed(
             ToolErrorCategory::InvalidArguments,
             "chat_id must be a UUID",
@@ -113,7 +113,7 @@ fn timeout_from(args: &Value) -> std::result::Result<Duration, ToolOutput> {
     }
 }
 
-async fn remember(state: &AgentMcp, chat: ChatId, turn_id: TurnId, result: &TurnResult) {
+async fn remember(state: &AgentMcp, chat: SessionId, turn_id: TurnId, result: &TurnResult) {
     state.follows.lock().await.insert(
         chat,
         FollowState {

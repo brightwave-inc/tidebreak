@@ -4,7 +4,7 @@
 //! Nothing in this crate's traits assumes the engine is a coding agent.
 //! Tidebreak's own internal loop is a future implementor of the same
 //! contract. Orchestration, persistence, and UI consume only
-//! [`tidebreak_core::CodeEvent`]; this crate emits the unpersisted sibling
+//! [`tidebreak_core::Event`]; this crate emits the unpersisted sibling
 //! [`HarnessEvent`].
 
 #![deny(missing_docs)]
@@ -16,9 +16,9 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tidebreak_core::{
-    BoundedError, CodeApprovalKind, CodeSessionId, CodeTurnId, CodeUsage, Diffstat, FileChangeKind,
-    GrantScope, HarnessCaps, HarnessCommand, HarnessKind, HarnessNoticeLevel, OwnerId,
-    PermissionMode, ReasoningEffort, ToolDetail, ToolOutcome, UserQuestionAnswer,
+    ApprovalKind, BoundedError, Diffstat, FileChangeKind, GrantScope, HarnessCaps, HarnessCommand,
+    HarnessKind, HarnessNoticeLevel, OwnerId, PermissionMode, ReasoningEffort, SessionId,
+    ToolDetail, ToolOutcome, TurnId, TurnUsage, UserQuestionAnswer,
 };
 
 pub mod browser_channel;
@@ -143,7 +143,7 @@ pub fn observe_auth_mode(
     )
 }
 
-/// Normalized, unpersisted event. Maps 1:1 onto [`tidebreak_core::CodeEvent`]
+/// Normalized, unpersisted event. Maps 1:1 onto [`tidebreak_core::Event`]
 /// minus persistence ids (turn id, approval id).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -237,7 +237,7 @@ pub enum HarnessEvent {
         /// adapters leave it `None` and the server keeps its best-effort
         /// classification.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        kind: Option<CodeApprovalKind>,
+        kind: Option<ApprovalKind>,
     },
     /// An approval was decided (observed on the stream, or after [`HarnessSession::decide`]).
     ApprovalResolved {
@@ -254,7 +254,7 @@ pub enum HarnessEvent {
     /// The turn finished successfully.
     TurnCompleted {
         /// Token accounting as reported by the engine.
-        usage: CodeUsage,
+        usage: TurnUsage,
     },
     /// The turn failed.
     TurnFailed {
@@ -380,7 +380,7 @@ impl From<ApprovalDecision> for tidebreak_core::ApprovalDecisionKind {
 pub struct TurnInput {
     /// The host-named turn this engine call drives. The internal engine
     /// uses it; every other adapter ignores it.
-    pub turn_id: Option<CodeTurnId>,
+    pub turn_id: Option<TurnId>,
     /// The user's message.
     pub text: String,
     /// Model for this turn, when the engine takes one per child.
@@ -698,7 +698,7 @@ pub struct SessionSpec {
     /// The durable session this launch serves. An in-process engine keys
     /// its own durable state on it, so a relaunch finds the same state
     /// without a native resume token; external engines ignore it.
-    pub session_id: CodeSessionId,
+    pub session_id: SessionId,
     /// Worktree the engine should use as its working directory.
     pub worktree: PathBuf,
     /// Absolute directory roots that engine tools may read outside the worktree.

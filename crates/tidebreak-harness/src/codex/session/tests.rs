@@ -262,7 +262,7 @@ impl crate::HarnessEventSink for RecordingSink {
 fn unit_session(sink: Arc<dyn crate::HarnessEventSink>) -> CodexSession {
     CodexSession::new(SessionSpec {
         owner: tidebreak_core::OwnerId::local(),
-        session_id: tidebreak_core::CodeSessionId::new(),
+        session_id: tidebreak_core::SessionId::new(),
         worktree: PathBuf::from("."),
         allowed_read_roots: Vec::new(),
         permission_mode: PermissionMode::Auto,
@@ -468,7 +468,7 @@ fn spec_for(
 ) -> SessionSpec {
     SessionSpec {
         owner: tidebreak_core::OwnerId::local(),
-        session_id: tidebreak_core::CodeSessionId::new(),
+        session_id: tidebreak_core::SessionId::new(),
         worktree: dir.to_path_buf(),
         allowed_read_roots: Vec::new(),
         permission_mode: PermissionMode::Auto,

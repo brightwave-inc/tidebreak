@@ -354,8 +354,7 @@ where
                     .map_err(backend_err)?
                     .is_some()
             }
-            MemoryEvidence::Event { session_id, seq }
-            | MemoryEvidence::CodeEvent { session_id, seq } => {
+            MemoryEvidence::Event { session_id, seq } => {
                 entities::event::Entity::find_by_id((session_id.0, *seq))
                     .filter(entities::event::Column::Owner.eq(owner.as_str()))
                     .one(conn)
@@ -367,10 +366,7 @@ where
         if !resolves {
             return Err(MemoryError::EvidenceNotFound(match evidence {
                 MemoryEvidence::Message { message_id } => format!("message {message_id}"),
-                MemoryEvidence::Event { session_id, seq }
-                | MemoryEvidence::CodeEvent { session_id, seq } => {
-                    format!("code event {session_id}:{seq}")
-                }
+                MemoryEvidence::Event { session_id, seq } => format!("event {session_id}:{seq}"),
             }));
         }
     }

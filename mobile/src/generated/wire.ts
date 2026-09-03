@@ -3266,14 +3266,6 @@ session_id: SessionId,
 /**
  * One-based event sequence.
  */
-seq: number, } | { "kind": "code_event",
-/**
- * Session that owns the event sequence.
- */
-session_id: SessionId,
-/**
- * One-based event sequence.
- */
 seq: number, };
 
 /**
@@ -4337,7 +4329,7 @@ updated_at: string, };
  * promoted turn is inserted under. `position` is 0-based and dense within
  * the session.
  */
-export type QueuedCodeTurn = { id: TurnId, session_id: SessionId, message: string, position: number, created_at: string, updated_at: string, };
+export type QueuedTurn = { id: TurnId, session_id: SessionId, message: string, position: number, created_at: string, updated_at: string, };
 
 /**
  * A named command the user can run in a workspace.
@@ -5768,28 +5760,3 @@ export const RENDERER_TOOL_NAMES = [
 export const MAX_WIRE_ID_CHARS = 128;
 export const MAX_WIRE_TIMESTAMP_CHARS = 64;
 export const MAX_WIRE_CURSOR_CHARS = 256;
-
-// Compatibility aliases for clients that still use the earlier conversation names.
-export type ChatId = SessionId;
-export type CodeApprovalDecision = ApprovalDecision;
-export type CodeApprovalDecisionBody = ApprovalDecisionBody;
-export type CodeApprovalId = ApprovalId;
-export type CodeApprovalKind = ApprovalKind;
-export type CodeApprovalSnapshot = ApprovalSnapshot;
-export type CodeApprovalState = ApprovalState;
-export type CodeEvent = Event;
-export type CodeSessionActivity = SessionActivity;
-export type CodeSessionDigest = SessionDigest;
-export type CodeSessionExternalOrigin = SessionExternalOrigin;
-export type CodeSessionId = SessionId;
-export type CodeSessionKind = SessionKind;
-export type CodeSessionLifecycle = SessionLifecycle;
-export type CodeSessionSnapshot = SessionSnapshot;
-export type CodeTurnId = TurnId;
-export type CodeTurnRewriteState = TurnRewriteState;
-export type CodeTurnSnapshot = TurnSnapshot;
-export type CodeTurnStatus = TurnStatus;
-export type CodeUpdateNotice = UpdateNotice;
-export type CodeUsage = TurnUsage;
-export type QueuedTurn = QueuedAgentTurn;
-export type SequencedCodeEventFrame = SequencedEventFrame;

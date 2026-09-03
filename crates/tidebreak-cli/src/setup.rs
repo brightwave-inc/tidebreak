@@ -16,7 +16,7 @@
 
 use std::io::Read as _;
 
-use tidebreak_core::{AgentActivityDetail, AgentError, AgentRunId, ChatId, Result, TurnId};
+use tidebreak_core::{AgentActivityDetail, AgentError, AgentRunId, Result, SessionId, TurnId};
 
 use crate::api::client::Client;
 use crate::api::wire::{McpServerInfo, McpServersInfo};
@@ -106,22 +106,22 @@ pub enum Command {
     /// A fresh chat (server-side defaults seed the rest).
     ChatCreate,
     /// Delete a chat outright.
-    ChatDelete { chat: ChatId },
+    ChatDelete { chat: SessionId },
     /// Steer an active turn with more user text.
     ///
     /// `turn` is the durable turn identity from the chat's event stream (not
     /// an agent-run id). A fresh steer id is minted per call.
     ChatSteer {
-        chat: ChatId,
+        chat: SessionId,
         turn: TurnId,
         content: String,
     },
     /// Background (and foreground) agent runs for one chat.
-    AgentRunList { chat: ChatId },
+    AgentRunList { chat: SessionId },
     /// One run's status plus its ordered activity timeline.
-    AgentRunShow { chat: ChatId, run: AgentRunId },
+    AgentRunShow { chat: SessionId, run: AgentRunId },
     /// Ask a background run to stop.
-    AgentRunCancel { chat: ChatId, run: AgentRunId },
+    AgentRunCancel { chat: SessionId, run: AgentRunId },
 }
 
 /// Run one setup command against the profile's server, and shut down anything

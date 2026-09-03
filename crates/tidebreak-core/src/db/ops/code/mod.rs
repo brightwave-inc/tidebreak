@@ -100,13 +100,6 @@ pub enum JournalError {
     Store(#[from] AgentError),
 }
 
-#[doc(hidden)]
-pub use self::session::SessionExecutionSettings as CodeSessionExecutionSettings;
-#[doc(hidden)]
-pub use self::turn::TurnMetric as CodeTurnMetric;
-#[doc(hidden)]
-pub use self::JournalError as CodeJournalError;
-
 /// Acquire the shared write lock for one code-session row.
 ///
 /// Sequence allocation and epoch checks take this lock so independently

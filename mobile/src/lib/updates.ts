@@ -1,7 +1,7 @@
 import type {
   Attention,
-  CodeSessionDigest,
-  CodeUpdateNotice,
+  SessionDigest as CodeSessionDigest,
+  UpdateNotice as CodeUpdateNotice,
 } from "../generated/wire";
 
 export type UpdatesState = {

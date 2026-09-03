@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
-import type { CodeApprovalSnapshot } from "../generated/wire";
+import type { ApprovalSnapshot as CodeApprovalSnapshot } from "../generated/wire";
 import {
   approvalSummary,
   approvalTitle,

@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 use tidebreak_core::{
-    BoundedError, CodeUsage, HarnessKind, HarnessNoticeLevel, ToolDetail, ToolOutcome,
+    BoundedError, HarnessKind, HarnessNoticeLevel, ToolDetail, ToolOutcome, TurnUsage,
     MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS,
 };
 
@@ -653,11 +653,11 @@ fn tool_result_preview(block: &Value) -> String {
     bound(&text, MAX_PREVIEW_CHARS)
 }
 
-fn usage_from(value: Option<&Value>) -> CodeUsage {
+fn usage_from(value: Option<&Value>) -> TurnUsage {
     let Some(value) = value else {
-        return CodeUsage::default();
+        return TurnUsage::default();
     };
-    CodeUsage {
+    TurnUsage {
         input_tokens: value
             .get("input_tokens")
             .and_then(Value::as_u64)

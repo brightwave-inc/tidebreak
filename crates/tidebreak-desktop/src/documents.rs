@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, DragDropEvent, Emitter, Manager, State, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
-use tidebreak_core::{ChatId, DocumentBlob, DocumentId, DocumentReadiness, Store};
+use tidebreak_core::{DocumentBlob, DocumentId, DocumentReadiness, SessionId, Store};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::oneshot;
 use tokio_util::io::ReaderStream;
@@ -583,7 +583,7 @@ pub(crate) async fn import_document_paths(
 pub(crate) async fn resolve_conversation_scope(
     host_access: &HostAccess,
     chat_id: Uuid,
-) -> Result<ChatId, String> {
+) -> Result<SessionId, String> {
     if chat_id.is_nil() {
         return Err("Invalid conversation".to_owned());
     }
@@ -596,8 +596,8 @@ pub(crate) async fn resolve_conversation_scope(
 async fn resolve_conversation_scope_from_store(
     store: &dyn Store,
     chat_id: Uuid,
-) -> Result<ChatId, String> {
-    let chat_id = ChatId::from(chat_id);
+) -> Result<SessionId, String> {
+    let chat_id = SessionId::from(chat_id);
     store
         .get_chat(chat_id)
         .await
@@ -610,7 +610,7 @@ async fn resolve_document_scope(
     host_access: &HostAccess,
     chat_id: Uuid,
     document_id: Uuid,
-) -> Result<(ChatId, DocumentId), String> {
+) -> Result<(SessionId, DocumentId), String> {
     let chat_id = resolve_conversation_scope(host_access, chat_id).await?;
     if document_id.is_nil() {
         return Err("Invalid source".to_owned());
@@ -630,23 +630,23 @@ async fn resolve_document_scope(
     Ok((chat_id, document_id))
 }
 
-fn documents_path(chat_id: ChatId) -> String {
+fn documents_path(chat_id: SessionId) -> String {
     format!("/chats/{chat_id}/documents")
 }
 
-fn document_path(chat_id: ChatId, document_id: DocumentId) -> String {
+fn document_path(chat_id: SessionId, document_id: DocumentId) -> String {
     format!("{}/{document_id}", documents_path(chat_id))
 }
 
-pub(crate) fn raw_documents_path(chat_id: ChatId) -> String {
+pub(crate) fn raw_documents_path(chat_id: SessionId) -> String {
     format!("{}/raw", documents_path(chat_id))
 }
 
-fn streamed_raw_documents_path(chat_id: ChatId) -> String {
+fn streamed_raw_documents_path(chat_id: SessionId) -> String {
     format!("{}/raw-stream", documents_path(chat_id))
 }
 
-fn document_file_content_path(chat_id: ChatId, document_id: DocumentId) -> String {
+fn document_file_content_path(chat_id: SessionId, document_id: DocumentId) -> String {
     format!("{}/file-content", document_path(chat_id, document_id))
 }
 
@@ -822,7 +822,7 @@ fn prepare_selected_document(
 
 async fn import_selected_document(
     app_state: &Arc<AppState>,
-    chat_id: ChatId,
+    chat_id: SessionId,
     source: DocumentImportSource,
     display_name: String,
 ) -> Result<CompletedDocumentImport, String> {
@@ -854,7 +854,7 @@ async fn import_selected_document(
 
 async fn import_selected_document_once(
     app_state: &Arc<AppState>,
-    chat_id: ChatId,
+    chat_id: SessionId,
     source: DocumentImportSource,
     display_name: String,
 ) -> Result<CompletedDocumentImport, ImportFailure> {
@@ -966,7 +966,7 @@ mod tests {
         };
         store.create_project(&project).await.unwrap();
         let standalone = Chat {
-            id: ChatId::new(),
+            id: SessionId::new(),
             project_id: None,
             title: None,
             model: None,
@@ -979,7 +979,7 @@ mod tests {
             created_at: chrono::Utc::now(),
         };
         let project_chat = Chat {
-            id: ChatId::new(),
+            id: SessionId::new(),
             project_id: Some(project.id),
             ..standalone.clone()
         };

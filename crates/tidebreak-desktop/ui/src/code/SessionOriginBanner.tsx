@@ -11,7 +11,7 @@
 import { MessageCircle } from "lucide-react";
 
 import { openExternal } from "@/host";
-import type { CodeSessionExternalOrigin } from "../generated/wire";
+import type { SessionExternalOrigin as CodeSessionExternalOrigin } from "../generated/wire";
 
 function channelLabel(kind: string): string {
   return kind === "slack" ? "Slack" : kind;

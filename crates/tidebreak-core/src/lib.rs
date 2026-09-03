@@ -186,26 +186,23 @@ pub use client_tools::{
 };
 pub use code::{
     bound_subagents, classify_trigger_condition, Approval, ApprovalDecisionKind, ApprovalKind,
-    ApprovalState, BoundedError, CapLevel, CheckpointHint, CodeApproval, CodeApprovalId,
-    CodeApprovalKind, CodeApprovalState, CodeBindingId, CodeConnectHandshake, CodeConnectState,
-    CodeEvent, CodeExternalBinding, CodeExternalGrant, CodeGrantId, CodeGrantProfile,
+    ApprovalState, BoundedError, CapLevel, CheckpointHint, CodeBindingId, CodeConnectHandshake,
+    CodeConnectState, CodeExternalBinding, CodeExternalGrant, CodeGrantId, CodeGrantProfile,
     CodeHandshakeId, CodeIncarnationId, CodePullRequestAttribution, CodePullRequestDiscovery,
     CodePullRequestFact, CodePullRequestId, CodePullRequestLiveState, CodePullRequestRelation,
-    CodePullRequestState, CodeQueuedTurn, CodeRepo, CodeSession, CodeSessionActivity,
-    CodeSessionId, CodeSessionIncarnation, CodeSessionKind, CodeSessionLifecycle,
-    CodeSubagentStatus, CodeSubagentSummary, CodeTerminalId, CodeTrigger, CodeTriggerAction,
-    CodeTriggerCondition, CodeTriggerDeliveryId, CodeTriggerDeliverySink, CodeTriggerFire,
-    CodeTriggerFireIdentity, CodeTriggerFirePayload, CodeTriggerFireState, CodeTriggerId, CodeTurn,
-    CodeTurnId, CodeTurnStatus, CodeUsage, CodeWatch, CodeWatchId, CodeWatchState,
-    CodeWorkflowRunFact, CodeWorkflowRunId, CodeWorkspace, CodeWorkspaceStatus, Diffstat, Event,
-    ExternalMessageRecord, ExternalSessionResolution, FileChangeKind, GrantRotation, HarnessCaps,
-    HarnessCommand, HarnessKind, HarnessNoticeLevel, HarnessTier, HarnessUpdateChannel,
-    IncarnationAdmission, IncarnationState, InternalApprovalRequest, PullRequestCheck,
-    PullRequestCheckBucket, PullRequestCheckCounts, PullRequestComment, PullRequestCommentKind,
-    PullRequestDigest, QuickAction, RepoId, SequencedCodeEvent, Session, SessionActivity,
-    SessionKind, SessionLifecycle, ToolDetail, ToolOutcome, Turn, TurnParkWait, TurnStatus,
-    TurnUsage, WorkspaceId, MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS,
-    MAX_SESSION_SUBAGENTS, MAX_TOOL_SUMMARY_CHARS,
+    CodePullRequestState, CodeRepo, CodeSessionIncarnation, CodeSubagentStatus,
+    CodeSubagentSummary, CodeTerminalId, CodeTrigger, CodeTriggerAction, CodeTriggerCondition,
+    CodeTriggerDeliveryId, CodeTriggerDeliverySink, CodeTriggerFire, CodeTriggerFireIdentity,
+    CodeTriggerFirePayload, CodeTriggerFireState, CodeTriggerId, CodeWatch, CodeWatchId,
+    CodeWatchState, CodeWorkflowRunFact, CodeWorkflowRunId, CodeWorkspace, CodeWorkspaceStatus,
+    Diffstat, Event, ExternalMessageRecord, ExternalSessionResolution, FileChangeKind,
+    GrantRotation, HarnessCaps, HarnessCommand, HarnessKind, HarnessNoticeLevel, HarnessTier,
+    HarnessUpdateChannel, IncarnationAdmission, IncarnationState, InternalApprovalRequest,
+    PullRequestCheck, PullRequestCheckBucket, PullRequestCheckCounts, PullRequestComment,
+    PullRequestCommentKind, PullRequestDigest, QueuedTurn, QuickAction, RepoId, SequencedEvent,
+    Session, SessionActivity, SessionKind, SessionLifecycle, ToolDetail, ToolOutcome, Turn,
+    TurnParkWait, TurnStatus, TurnUsage, WorkspaceId, MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS,
+    MAX_PREVIEW_CHARS, MAX_SESSION_SUBAGENTS, MAX_TOOL_SUMMARY_CHARS,
 };
 pub use compaction::{
     CompactionPolicy, CompactionSelection, CompactionSourceBoundary, CompactionTokenBounds,
@@ -252,10 +249,10 @@ pub use deliverable_acceptance::{
 };
 pub use digest::sha256_hex;
 pub use error::{AgentError, AgentErrorInfo, ProviderErrorInfo, ProviderFailure, Result};
-pub use event::{AgentEvent, SequencedAgentEvent, SequencedAgentEvent as SequencedEvent};
+pub use event::{AgentEvent, SequencedAgentEvent};
 pub use fs_atomic::{replace_file, sync_directory};
 pub use id::{
-    AgentRunId, ApprovalId, AssistantCitationId, CallId, ChatId, ChunkId, DocumentId, HostRootId,
+    AgentRunId, ApprovalId, AssistantCitationId, CallId, ChunkId, DocumentId, HostRootId,
     HostRootIdError, MessageId, NotificationId, OutputCitationId, OutputId, OutputRevisionId,
     ProjectId, RootAttachmentChangeId, RootAttachmentChangeIdError, SessionId, StepId, TurnId,
     TurnSteerId,
@@ -291,18 +288,17 @@ pub use model::{
     DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, ExecFileChange, ExecFileRejection,
     ExecFileRejectionReason, ExecFileRejectionRecord, ExecFileSnapshot, ExecFileSnapshotRecord,
     ExecUndoState, Message, MessageAttachment, MessageDocumentAttachment, NetworkPolicy, OwnerId,
-    Project, QueuedAgentTurn, QueuedAgentTurn as QueuedTurn, ReasoningEffort, Role,
-    RootAttachmentChange, RootAttachmentChangeAction, RootAttachmentChangeFailure,
-    RootAttachmentChangePhase, RootAttachmentChangeTerminal, RootAttachmentOrigin,
-    RootAttachmentSubjectKind, SandboxAgentAdmission, SandboxSpawnCheckpoint,
-    SandboxSpawnCheckpointRequest, SandboxToolCall, SandboxToolCallParkEntry,
-    SandboxToolCallReceipt, SandboxToolCallRequest, SandboxToolCallStatus, ToolCallExecution,
-    ToolCallRecord, ToolCallResolution, ToolCallStatus, TurnAdmissionLease, TurnAdmissionRequest,
-    TurnAgentRunWaitSet, TurnAgentRunWaitStatus, TurnCheckpointProgress, TurnClientWait,
-    TurnClientWaitStatus, TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteer,
-    TurnSteerStatus, EXEC_SNAPSHOT_RETAINED_TURNS, MAX_ATTACHMENT_REVISION,
-    MAX_EXEC_SNAPSHOT_BYTES, MAX_EXEC_WORKSPACE_FILE_BYTES, MAX_MESSAGE_ATTACHMENTS,
-    MAX_ROOT_ATTACHMENTS,
+    Project, QueuedAgentTurn, ReasoningEffort, Role, RootAttachmentChange,
+    RootAttachmentChangeAction, RootAttachmentChangeFailure, RootAttachmentChangePhase,
+    RootAttachmentChangeTerminal, RootAttachmentOrigin, RootAttachmentSubjectKind,
+    SandboxAgentAdmission, SandboxSpawnCheckpoint, SandboxSpawnCheckpointRequest, SandboxToolCall,
+    SandboxToolCallParkEntry, SandboxToolCallReceipt, SandboxToolCallRequest,
+    SandboxToolCallStatus, ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus,
+    TurnAdmissionLease, TurnAdmissionRequest, TurnAgentRunWaitSet, TurnAgentRunWaitStatus,
+    TurnCheckpointProgress, TurnClientWait, TurnClientWaitStatus, TurnFailureReceipt,
+    TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteer, TurnSteerStatus,
+    EXEC_SNAPSHOT_RETAINED_TURNS, MAX_ATTACHMENT_REVISION, MAX_EXEC_SNAPSHOT_BYTES,
+    MAX_EXEC_WORKSPACE_FILE_BYTES, MAX_MESSAGE_ATTACHMENTS, MAX_ROOT_ATTACHMENTS,
 };
 #[cfg(feature = "blob-object")]
 pub use object_blob::ObjectBlobStore;

@@ -22,8 +22,7 @@ function folderRequest(callId: string) {
   return { callId, turnId: "turn-1", displayPath: "~/Notes" };
 }
 
-/** One parked item as the cross-chat read returns it. */
-/** One chat-surface inbox entry, with the calls parked behind it. */
+/** One internal-session inbox entry, with the calls parked behind it. */
 function inboxEntry(
   chatId: string,
   calls: Array<{
@@ -32,7 +31,7 @@ function inboxEntry(
   }>,
 ) {
   return {
-    conversation: { surface: "chat" as const, chatId },
+    conversation: { sessionId: chatId, workspaceId: null },
     title: null,
     attention: {
       state: {

@@ -19,8 +19,8 @@ use std::sync::{
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde_json::Value;
 use tidebreak_core::{
-    ApprovalClass, ApprovalDecision, ApprovalGate, ApprovalRequest, CallId, ChatId, DocumentBlob,
-    ImageAttachments, ImageMediaType, ImageRef, StandingGrants, ToolActionPreview,
+    ApprovalClass, ApprovalDecision, ApprovalGate, ApprovalRequest, CallId, DocumentBlob,
+    ImageAttachments, ImageMediaType, ImageRef, SessionId, StandingGrants, ToolActionPreview,
     ToolApprovalKind, ToolCtx, ToolOutput, ToolRegistry, TurnId, VERSION,
 };
 
@@ -70,7 +70,7 @@ impl ApprovalBridge {
     /// without re-consulting the gate.
     async fn decide(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         tool_name: &str,
         class: ApprovalClass,
         arguments: &Value,
@@ -155,9 +155,9 @@ impl McpServer {
         class == ApprovalClass::ReadOnly || self.approval.is_some()
     }
 
-    /// The [`ChatId`] the exposed tools run under (from the configured [`ToolCtx`]).
+    /// The [`SessionId`] the exposed tools run under (from the configured [`ToolCtx`]).
     #[must_use]
-    pub fn chat_id(&self) -> ChatId {
+    pub fn chat_id(&self) -> SessionId {
         self.ctx.chat_id
     }
 
@@ -675,11 +675,11 @@ mod tests {
     }
 
     fn server_with(tools: ToolRegistry) -> McpServer {
-        let ctx = ToolCtx::new_legacy_workspace(ChatId::new(), None, PathBuf::from("/tmp/ws"));
+        let ctx = ToolCtx::new_legacy_workspace(SessionId::new(), None, PathBuf::from("/tmp/ws"));
         McpServer::new(Arc::new(tools), ctx)
     }
 
-    fn ctx_for(chat_id: ChatId) -> ToolCtx {
+    fn ctx_for(chat_id: SessionId) -> ToolCtx {
         ToolCtx::new_legacy_workspace(chat_id, None, PathBuf::from("/tmp/ws"))
     }
 
@@ -973,7 +973,7 @@ mod tests {
                 class: ApprovalClass::Sensitive,
                 ran: Arc::clone(&sensitive_ran),
             }));
-        let server = McpServer::new(Arc::new(tools), ctx_for(ChatId::new()))
+        let server = McpServer::new(Arc::new(tools), ctx_for(SessionId::new()))
             .with_approval_gate(Arc::new(AutoApproveGate));
         initialize_session(&server).await;
 
@@ -1014,7 +1014,7 @@ mod tests {
             class: ApprovalClass::Sensitive,
             ran: Arc::clone(&sensitive_ran),
         }));
-        let server = McpServer::new(Arc::new(tools), ctx_for(ChatId::new()))
+        let server = McpServer::new(Arc::new(tools), ctx_for(SessionId::new()))
             .with_approval_gate(Arc::new(RefuseGate));
         initialize_session(&server).await;
 
@@ -1048,7 +1048,7 @@ mod tests {
                 class: ApprovalClass::ReadOnly,
                 ran: Arc::clone(&ran),
             }));
-        let server = McpServer::new(Arc::new(tools), ctx_for(ChatId::new()));
+        let server = McpServer::new(Arc::new(tools), ctx_for(SessionId::new()));
         initialize_session(&server).await;
 
         // `echo` advertises a required `text`; a call without it is the client's
@@ -1089,7 +1089,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_standing_grant_runs_a_mutating_tool_without_consulting_the_gate() {
-        let chat_id = ChatId::new();
+        let chat_id = SessionId::new();
         let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
         // "search" is the sole standing-grantable action today.
         let tools = ToolRegistry::new().with(Box::new(ClassifiedTool {

@@ -17,7 +17,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tidebreak_core::{AgentError, AutoApproveGate, ChatId, Result, ToolCtx, ToolRegistry, TurnId};
+use tidebreak_core::{
+    AgentError, AutoApproveGate, Result, SessionId, ToolCtx, ToolRegistry, TurnId,
+};
 use tokio::sync::Mutex;
 
 use crate::api::client::Client;
@@ -40,7 +42,7 @@ struct FollowState {
 /// Shared process state for every mounted tool.
 struct AgentMcp {
     client: Mutex<Client>,
-    follows: Mutex<HashMap<ChatId, FollowState>>,
+    follows: Mutex<HashMap<SessionId, FollowState>>,
 }
 
 /// Serve `tidebreak agent-mcp`: resolve the attach (or embed) endpoint, build
@@ -53,7 +55,7 @@ pub(crate) async fn run(server: connect::Server) -> Result<()> {
     });
 
     let tools = Arc::new(assemble_registry(state));
-    let ctx = ToolCtx::without_private_scratch(ChatId::new(), None);
+    let ctx = ToolCtx::without_private_scratch(SessionId::new(), None);
     let mcp =
         tidebreak_mcp::McpServer::new(tools, ctx).with_approval_gate(Arc::new(AutoApproveGate));
 

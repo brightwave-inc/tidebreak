@@ -6,8 +6,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use tidebreak_core::{
-    AgentError, AgentRunId, CallId, ChatId, DocumentId, MessageId, OutputId, OutputRevisionId,
-    Result, TurnId,
+    AgentError, AgentRunId, CallId, DocumentId, MessageId, OutputId, OutputRevisionId, Result,
+    SessionId, TurnId,
 };
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -49,7 +49,7 @@ const WEB_SEARCH_CREDENTIAL_STORAGE_UNAVAILABLE: &str =
 /// `POST /chats` returns the whole `Chat`; only the id is read.
 #[derive(Deserialize)]
 struct ChatCreated {
-    id: ChatId,
+    id: SessionId,
 }
 
 /// What the ingest route says about one published source.
@@ -197,7 +197,7 @@ impl Client {
     }
 
     /// Create a fresh chat (server-side defaults seed the rest).
-    pub async fn create_chat(&self) -> Result<ChatId> {
+    pub async fn create_chat(&self) -> Result<SessionId> {
         let response = self
             .http
             .post(format!("{}/chats", self.base))
@@ -214,7 +214,7 @@ impl Client {
     }
 
     /// Verify a chat exists before a command operates on it.
-    pub async fn require_chat(&self, chat: ChatId) -> Result<()> {
+    pub async fn require_chat(&self, chat: SessionId) -> Result<()> {
         let response = self
             .http
             .get(format!("{}/chats/{chat}", self.base))
@@ -229,7 +229,7 @@ impl Client {
     }
 
     /// One chat's record (title, model, permission mode, …).
-    pub async fn get_chat(&self, chat: ChatId) -> Result<Chat> {
+    pub async fn get_chat(&self, chat: SessionId) -> Result<Chat> {
         self.get_json(format!("{}/chats/{chat}", self.base)).await
     }
 
@@ -239,7 +239,7 @@ impl Client {
     }
 
     /// Patch the chat's model selection; `None` clears back to the default.
-    pub async fn set_chat_model(&self, chat: ChatId, model: Option<&str>) -> Result<()> {
+    pub async fn set_chat_model(&self, chat: SessionId, model: Option<&str>) -> Result<()> {
         let response = self
             .http
             .patch(format!("{}/chats/{chat}", self.base))
@@ -252,7 +252,11 @@ impl Client {
     }
 
     /// Patch the chat's permission mode; `None` clears back to `ask`.
-    pub async fn set_chat_permission_mode(&self, chat: ChatId, mode: Option<&str>) -> Result<Chat> {
+    pub async fn set_chat_permission_mode(
+        &self,
+        chat: SessionId,
+        mode: Option<&str>,
+    ) -> Result<Chat> {
         let response = self
             .http
             .patch(format!("{}/chats/{chat}", self.base))
@@ -268,7 +272,7 @@ impl Client {
     }
 
     /// Delete a chat outright.
-    pub async fn delete_chat(&self, chat: ChatId) -> Result<()> {
+    pub async fn delete_chat(&self, chat: SessionId) -> Result<()> {
         let response = self
             .http
             .delete(format!("{}/chats/{chat}", self.base))
@@ -452,7 +456,7 @@ impl Client {
     }
 
     /// Background agent runs for a chat.
-    pub async fn list_agent_runs(&self, chat: ChatId) -> Result<Vec<AgentRunSnapshot>> {
+    pub async fn list_agent_runs(&self, chat: SessionId) -> Result<Vec<AgentRunSnapshot>> {
         self.get_json(format!("{}/chats/{chat}/agent-runs", self.base))
             .await
     }
@@ -460,7 +464,7 @@ impl Client {
     /// A background run's ordered activity timeline.
     pub async fn list_agent_run_activity(
         &self,
-        chat: ChatId,
+        chat: SessionId,
         run: AgentRunId,
     ) -> Result<Vec<AgentActivityHistoryItem>> {
         self.get_json(format!(
@@ -471,7 +475,7 @@ impl Client {
     }
 
     /// Ask a background run to stop (`202`).
-    pub async fn cancel_agent_run(&self, chat: ChatId, run: AgentRunId) -> Result<()> {
+    pub async fn cancel_agent_run(&self, chat: SessionId, run: AgentRunId) -> Result<()> {
         let response = self
             .http
             .post(format!(
@@ -487,7 +491,7 @@ impl Client {
     }
 
     /// Tool-call approvals awaiting a decision on this chat.
-    pub async fn list_pending_approvals(&self, chat: ChatId) -> Result<Vec<serde_json::Value>> {
+    pub async fn list_pending_approvals(&self, chat: SessionId) -> Result<Vec<serde_json::Value>> {
         self.get_json(format!("{}/chats/{chat}/approvals", self.base))
             .await
     }
@@ -496,7 +500,10 @@ impl Client {
     ///
     /// This is the renderer-facing pending set (bearer auth), not the native
     /// executor's raw claim list. A call appears here only after it has parked.
-    pub async fn list_pending_folder_access(&self, chat: ChatId) -> Result<Vec<serde_json::Value>> {
+    pub async fn list_pending_folder_access(
+        &self,
+        chat: SessionId,
+    ) -> Result<Vec<serde_json::Value>> {
         self.get_json(format!(
             "{}/chats/{chat}/client-executions/pending",
             self.base
@@ -505,13 +512,13 @@ impl Client {
     }
 
     /// The durable transcript plus terminal turns and the journal watermark.
-    pub async fn chat_transcript(&self, chat: ChatId) -> Result<serde_json::Value> {
+    pub async fn chat_transcript(&self, chat: SessionId) -> Result<serde_json::Value> {
         self.get_json(format!("{}/chats/{chat}/messages", self.base))
             .await
     }
 
     /// Plans awaiting review on this chat.
-    pub async fn list_pending_plans(&self, chat: ChatId) -> Result<Vec<PendingPlanApproval>> {
+    pub async fn list_pending_plans(&self, chat: SessionId) -> Result<Vec<PendingPlanApproval>> {
         self.get_json(format!("{}/chats/{chat}/plans/pending", self.base))
             .await
     }
@@ -520,7 +527,7 @@ impl Client {
     /// continuation on accept (`None` leaves the server default, `auto`).
     pub async fn decide_plan(
         &self,
-        chat: ChatId,
+        chat: SessionId,
         call_id: CallId,
         accept: bool,
         feedback: Option<&str>,
@@ -552,7 +559,10 @@ impl Client {
     }
 
     /// Question blocks the model is waiting on.
-    pub async fn list_pending_questions(&self, chat: ChatId) -> Result<Vec<PendingUserQuestions>> {
+    pub async fn list_pending_questions(
+        &self,
+        chat: SessionId,
+    ) -> Result<Vec<PendingUserQuestions>> {
         self.get_json(format!("{}/chats/{chat}/questions/pending", self.base))
             .await
     }
@@ -561,7 +571,7 @@ impl Client {
     /// `{question_id, selections, custom_answer?}`.
     pub async fn answer_questions(
         &self,
-        chat: ChatId,
+        chat: SessionId,
         call_id: CallId,
         answers: serde_json::Value,
     ) -> Result<()> {
@@ -582,7 +592,7 @@ impl Client {
     /// Steer an active turn with more user text (`202`).
     pub async fn steer(
         &self,
-        chat: ChatId,
+        chat: SessionId,
         turn_id: TurnId,
         steer_id: TurnId,
         content: &str,
@@ -610,7 +620,7 @@ impl Client {
     /// [`Self::attach_document`]. Empty slices are the ordinary text-only send.
     pub async fn post_message(
         &self,
-        chat: ChatId,
+        chat: SessionId,
         turn_id: TurnId,
         content: &str,
         attachments: &[uuid::Uuid],
@@ -633,7 +643,11 @@ impl Client {
     }
 
     /// Read one turn's durable terminal state after live event delivery fails.
-    pub async fn durable_turn(&self, chat: ChatId, turn_id: TurnId) -> Result<Option<DurableTurn>> {
+    pub async fn durable_turn(
+        &self,
+        chat: SessionId,
+        turn_id: TurnId,
+    ) -> Result<Option<DurableTurn>> {
         let transcript: DurableTranscript = self
             .get_json(format!("{}/chats/{chat}/messages", self.base))
             .await?;
@@ -641,7 +655,7 @@ impl Client {
     }
 
     /// Cancel one exact turn (`202`; `409` if it already finished).
-    pub async fn cancel_turn(&self, chat: ChatId, turn_id: TurnId) -> Result<()> {
+    pub async fn cancel_turn(&self, chat: SessionId, turn_id: TurnId) -> Result<()> {
         let response = self
             .http
             .post(format!("{}/chats/{chat}/cancel", self.base))
@@ -658,7 +672,7 @@ impl Client {
     /// ignored on approval.
     pub async fn decide_approval(
         &self,
-        chat: ChatId,
+        chat: SessionId,
         call_id: CallId,
         approve: bool,
         reason: &str,
@@ -686,7 +700,7 @@ impl Client {
     /// Open the chat event socket: replay of everything after `after`, then
     /// live frames. Auth rides `Sec-WebSocket-Protocol` (token prefix plus the
     /// `tidebreak-v1` handshake value the server selects back).
-    pub async fn open_events(&self, chat: ChatId, after: i64) -> Result<EventSocket> {
+    pub async fn open_events(&self, chat: SessionId, after: i64) -> Result<EventSocket> {
         let url = format!(
             "{}/chats/{chat}/events?after={after}",
             self.base.replacen("http", "ws", 1)
@@ -762,7 +776,7 @@ impl Client {
     // ------------------------------------------------------------------
 
     /// The conversation's live outputs.
-    pub async fn list_outputs(&self, chat: ChatId) -> Result<DeliverablesCatalog> {
+    pub async fn list_outputs(&self, chat: SessionId) -> Result<DeliverablesCatalog> {
         self.get_json(format!("{}/chats/{chat}/outputs", self.base))
             .await
     }
@@ -770,7 +784,7 @@ impl Client {
     /// One output's bounded text preview: its current revision, or an exact one.
     pub async fn read_output(
         &self,
-        chat: ChatId,
+        chat: SessionId,
         output: OutputId,
         revision: Option<OutputRevisionId>,
     ) -> Result<DeliverablePreview> {
@@ -787,7 +801,7 @@ impl Client {
     /// An output's version history.
     pub async fn list_output_revisions(
         &self,
-        chat: ChatId,
+        chat: SessionId,
         output: OutputId,
     ) -> Result<OutputRevisionsCatalog> {
         self.get_json(format!(
@@ -800,7 +814,7 @@ impl Client {
     /// One revision's complete bytes — what an export writes to disk.
     pub async fn read_output_bytes(
         &self,
-        chat: ChatId,
+        chat: SessionId,
         output: OutputId,
         revision: Option<OutputRevisionId>,
     ) -> Result<Vec<u8>> {
@@ -822,7 +836,7 @@ impl Client {
     /// it is sniffed from the bytes rather than taken from the file name.
     pub async fn attach_document(
         &self,
-        chat: ChatId,
+        chat: SessionId,
         title: &str,
         media_type: &str,
         bytes: Vec<u8>,
@@ -842,7 +856,7 @@ impl Client {
     /// validates and may refuse; it never becomes a path.
     pub async fn publish_document_source(
         &self,
-        chat: ChatId,
+        chat: SessionId,
         title: Option<&str>,
         uri: Option<&str>,
         media_type: &str,
@@ -877,7 +891,7 @@ impl Client {
     /// later turn references.
     pub async fn attach_image(
         &self,
-        chat: ChatId,
+        chat: SessionId,
         media_type: &str,
         bytes: Vec<u8>,
     ) -> Result<uuid::Uuid> {
@@ -1031,7 +1045,7 @@ pub struct PendingClientCall {
 /// One parked call plus the conversation that owns it.
 #[derive(Debug, Clone, Deserialize)]
 pub struct NativePendingClientExecution {
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     pub call: PendingClientCall,
 }
 
@@ -1133,7 +1147,7 @@ impl Client {
     pub async fn pending_client_executions(
         &self,
         executor_token: &str,
-        chat: ChatId,
+        chat: SessionId,
     ) -> ExecutionResult<Vec<PendingClientCall>> {
         let response = self
             .http
@@ -1161,7 +1175,7 @@ impl Client {
     pub async fn claim_client_execution(
         &self,
         executor_token: &str,
-        chat: ChatId,
+        chat: SessionId,
         call_id: CallId,
         executor_id: uuid::Uuid,
         lease_token: uuid::Uuid,
@@ -1191,7 +1205,7 @@ impl Client {
     pub async fn heartbeat_client_execution(
         &self,
         executor_token: &str,
-        chat: ChatId,
+        chat: SessionId,
         call_id: CallId,
         lease_token: uuid::Uuid,
     ) -> ExecutionResult<()> {
@@ -1214,7 +1228,7 @@ impl Client {
     pub async fn resolve_client_execution(
         &self,
         executor_token: &str,
-        chat: ChatId,
+        chat: SessionId,
         call_id: CallId,
         lease_token: uuid::Uuid,
         outcome: &ClientExecutionOutcome,

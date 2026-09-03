@@ -70,7 +70,7 @@ pub trait BearerTokenSource: Send + Sync {
     async fn authorize_model_route(
         &self,
         route_model: &str,
-        conversation: Option<tidebreak_core::id::ChatId>,
+        conversation: Option<tidebreak_core::id::SessionId>,
     ) -> Result<(String, Option<ModelRouteLease>)> {
         let token = self.bearer_token_for(conversation).await?;
         let lease = self.lease_model_route(route_model).await?;
@@ -87,7 +87,7 @@ pub trait BearerTokenSource: Send + Sync {
     /// emits. Everything else serves the shared token.
     async fn bearer_token_for(
         &self,
-        conversation: Option<tidebreak_core::id::ChatId>,
+        conversation: Option<tidebreak_core::id::SessionId>,
     ) -> Result<String> {
         let _ = conversation;
         self.bearer_token().await
@@ -148,7 +148,7 @@ pub(crate) async fn authorize_bearer_request(
     source: &dyn BearerTokenSource,
     route_model: &str,
     wire_model: &str,
-    conversation: Option<tidebreak_core::id::ChatId>,
+    conversation: Option<tidebreak_core::id::SessionId>,
 ) -> Result<(String, Option<ModelRouteLease>)> {
     // Managed sources perform the final validation after their network-backed
     // mint while retaining the same local authority guard through dispatch.

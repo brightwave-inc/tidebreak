@@ -271,14 +271,6 @@ pub enum MemoryEvidence {
         /// One-based event sequence.
         seq: i64,
     },
-    /// Compatibility spelling until the server rename slice lands.
-    #[doc(hidden)]
-    CodeEvent {
-        /// Session that owns the event sequence.
-        session_id: SessionId,
-        /// One-based event sequence.
-        seq: i64,
-    },
 }
 
 /// Authorship and source evidence for one record.

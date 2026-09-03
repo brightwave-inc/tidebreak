@@ -1460,7 +1460,7 @@ mod tests {
     ) -> ClaudeSession {
         ClaudeSession::new(SessionSpec {
             owner: tidebreak_core::OwnerId::local(),
-            session_id: tidebreak_core::CodeSessionId::new(),
+            session_id: tidebreak_core::SessionId::new(),
             worktree: worktree.to_path_buf(),
             allowed_read_roots: Vec::new(),
             permission_mode,
@@ -1634,7 +1634,7 @@ done
         let dir = tempfile::tempdir().unwrap();
         let session = ClaudeSession::new(SessionSpec {
             owner: tidebreak_core::OwnerId::local(),
-            session_id: tidebreak_core::CodeSessionId::new(),
+            session_id: tidebreak_core::SessionId::new(),
             worktree: dir.path().to_path_buf(),
             allowed_read_roots: Vec::new(),
             permission_mode: PermissionMode::Ask,
@@ -1839,7 +1839,7 @@ done
         );
         let session = ClaudeSession::new(SessionSpec {
             owner: tidebreak_core::OwnerId::local(),
-            session_id: tidebreak_core::CodeSessionId::new(),
+            session_id: tidebreak_core::SessionId::new(),
             worktree: dir.path().to_path_buf(),
             allowed_read_roots: Vec::new(),
             permission_mode: PermissionMode::Plan,
@@ -1896,7 +1896,7 @@ done
         let dir = tempfile::tempdir().unwrap();
         let session = ClaudeSession::new(SessionSpec {
             owner: tidebreak_core::OwnerId::local(),
-            session_id: tidebreak_core::CodeSessionId::new(),
+            session_id: tidebreak_core::SessionId::new(),
             worktree: dir.path().to_path_buf(),
             allowed_read_roots: Vec::new(),
             permission_mode: PermissionMode::Plan,

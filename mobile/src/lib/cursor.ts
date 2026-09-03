@@ -1,4 +1,4 @@
-import type { SequencedCodeEventFrame } from "../generated/wire";
+import type { SequencedEventFrame as SequencedCodeEventFrame } from "../generated/wire";
 
 /**
  * Resume cursor for `GET /sessions/{id}/events?after=`.

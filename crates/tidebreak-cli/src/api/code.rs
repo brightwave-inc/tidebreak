@@ -11,7 +11,7 @@
 //! frame. A reader drops a failed frame or notice and keeps the socket open.
 //!
 //! One tolerance stays, and it is the server's, not this crate's: the event
-//! union inside a frame is `tidebreak_core::CodeEvent`, which the server also
+//! union inside a frame is `tidebreak_core::Event`, which the server also
 //! reads back from its own journal, so a variant accepts keys it does not
 //! declare. The frame around it does not.
 //!
@@ -20,16 +20,15 @@
 
 use serde::{Deserialize, Serialize};
 use tidebreak_core::{
-    AgentError, CapLevel, CodeApprovalId, CodeEvent, CodeSessionId, CodeTurnId, HarnessCaps,
-    HarnessKind, PermissionMode, RepoId, Result, WorkspaceId,
+    AgentError, ApprovalId, CapLevel, Event, HarnessCaps, HarnessKind, PermissionMode, RepoId,
+    Result, SessionId, TurnId, WorkspaceId,
 };
 
 pub use tidebreak_server::wire::{
-    CodeActionSnapshot, CodeApprovalSnapshot, CodeCommitSnapshot, CodePushSnapshot,
-    CodeRepoSnapshot, CodeSessionDigest, CodeSessionSnapshot, CodeTurnSnapshot, CodeUpdateNotice,
+    ApprovalSnapshot, CodeActionSnapshot, CodeCommitSnapshot, CodePushSnapshot, CodeRepoSnapshot,
     CodeWorkspaceDiff, CodeWorkspaceFiles, CodeWorkspacePrSnapshot, CodeWorkspaceSnapshot,
-    HarnessAuthMode, HarnessDoctorReport, QueuedCodeTurn, QueuedCodeTurnsSnapshot,
-    SequencedCodeEventFrame,
+    HarnessAuthMode, HarnessDoctorReport, QueuedTurn, QueuedTurnsSnapshot, SequencedEventFrame,
+    SessionDigest, SessionSnapshot, TurnSnapshot, UpdateNotice,
 };
 
 use super::client::{Client, EventSocket};
@@ -42,8 +41,8 @@ use super::client::{Client, EventSocket};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum SubmitTurnResponse {
-    Ran(CodeTurnSnapshot),
-    Queued(QueuedCodeTurn),
+    Ran(TurnSnapshot),
+    Queued(QueuedTurn),
 }
 
 impl Client {
@@ -136,11 +135,13 @@ impl Client {
         .await
     }
 
-    pub async fn list_workspace_sessions(
-        &self,
-        id: WorkspaceId,
-    ) -> Result<Vec<CodeSessionSnapshot>> {
+    pub async fn list_workspace_sessions(&self, id: WorkspaceId) -> Result<Vec<SessionSnapshot>> {
         self.get_json(format!("{}/code/workspaces/{id}/sessions", self.base_url()))
+            .await
+    }
+
+    pub async fn get_session(&self, id: SessionId) -> Result<SessionSnapshot> {
+        self.get_json(format!("{}/sessions/{id}", self.base_url()))
             .await
     }
 
@@ -149,7 +150,7 @@ impl Client {
         workspace: WorkspaceId,
         harness: HarnessKind,
         permission_mode: PermissionMode,
-    ) -> Result<CodeSessionSnapshot> {
+    ) -> Result<SessionSnapshot> {
         self.create_session_with(workspace, harness, permission_mode, None)
             .await
     }
@@ -160,7 +161,7 @@ impl Client {
         harness: HarnessKind,
         permission_mode: PermissionMode,
         model: Option<&str>,
-    ) -> Result<CodeSessionSnapshot> {
+    ) -> Result<SessionSnapshot> {
         let mut body = serde_json::json!({
             "harness": harness,
             "permission_mode": permission_mode,
@@ -177,7 +178,7 @@ impl Client {
 
     pub async fn submit_turn(
         &self,
-        session: CodeSessionId,
+        session: SessionId,
         message: &str,
     ) -> Result<SubmitTurnResponse> {
         self.post_json(
@@ -187,23 +188,17 @@ impl Client {
         .await
     }
 
-    pub async fn list_session_turns(
-        &self,
-        session: CodeSessionId,
-    ) -> Result<Vec<CodeTurnSnapshot>> {
+    pub async fn list_session_turns(&self, session: SessionId) -> Result<Vec<TurnSnapshot>> {
         self.get_json(format!("{}/sessions/{session}/turns", self.base_url()))
             .await
     }
 
-    pub async fn list_queued_code_turns(
-        &self,
-        session: CodeSessionId,
-    ) -> Result<QueuedCodeTurnsSnapshot> {
+    pub async fn list_queued_code_turns(&self, session: SessionId) -> Result<QueuedTurnsSnapshot> {
         self.get_json(format!("{}/sessions/{session}/queued", self.base_url()))
             .await
     }
 
-    pub async fn interrupt_session(&self, session: CodeSessionId) -> Result<()> {
+    pub async fn interrupt_session(&self, session: SessionId) -> Result<()> {
         self.post_ok(
             format!("{}/sessions/{session}/interrupt", self.base_url()),
             &serde_json::json!({}),
@@ -211,7 +206,7 @@ impl Client {
         .await
     }
 
-    pub async fn reap_session(&self, session: CodeSessionId) -> Result<CodeSessionSnapshot> {
+    pub async fn reap_session(&self, session: SessionId) -> Result<SessionSnapshot> {
         self.post_json(
             format!("{}/sessions/{session}/reap", self.base_url()),
             &serde_json::json!({}),
@@ -221,9 +216,9 @@ impl Client {
 
     pub async fn set_session_permission_mode(
         &self,
-        session: CodeSessionId,
+        session: SessionId,
         mode: PermissionMode,
-    ) -> Result<CodeSessionSnapshot> {
+    ) -> Result<SessionSnapshot> {
         self.post_json(
             format!("{}/sessions/{session}/mode", self.base_url()),
             &serde_json::json!({ "permission_mode": mode }),
@@ -233,9 +228,9 @@ impl Client {
 
     pub async fn list_approvals(
         &self,
-        session: Option<CodeSessionId>,
+        session: Option<SessionId>,
         pending_only: bool,
-    ) -> Result<Vec<CodeApprovalSnapshot>> {
+    ) -> Result<Vec<ApprovalSnapshot>> {
         let mut url = format!("{}/approvals", self.base_url());
         let mut separator = '?';
         if pending_only {
@@ -252,10 +247,10 @@ impl Client {
 
     pub async fn decide_code_approval(
         &self,
-        id: CodeApprovalId,
+        id: ApprovalId,
         approve: bool,
         feedback: Option<&str>,
-    ) -> Result<CodeApprovalSnapshot> {
+    ) -> Result<ApprovalSnapshot> {
         let mut body = serde_json::json!({
             "decision": if approve { "approve" } else { "deny" },
         });
@@ -272,7 +267,7 @@ impl Client {
     pub async fn workspace_files(
         &self,
         workspace: WorkspaceId,
-        turn: Option<CodeTurnId>,
+        turn: Option<TurnId>,
     ) -> Result<CodeWorkspaceFiles> {
         let mut url = format!("{}/code/workspaces/{workspace}/files", self.base_url());
         if let Some(turn) = turn {
@@ -284,7 +279,7 @@ impl Client {
     pub async fn workspace_diff(
         &self,
         workspace: WorkspaceId,
-        turn: Option<CodeTurnId>,
+        turn: Option<TurnId>,
         file: Option<&str>,
     ) -> Result<CodeWorkspaceDiff> {
         let mut url = format!("{}/code/workspaces/{workspace}/diff", self.base_url());
@@ -370,11 +365,7 @@ impl Client {
         .await
     }
 
-    pub async fn open_code_events(
-        &self,
-        session: CodeSessionId,
-        after: i64,
-    ) -> Result<EventSocket> {
+    pub async fn open_code_events(&self, session: SessionId, after: i64) -> Result<EventSocket> {
         self.open_ws(&format!("/sessions/{session}/events?after={after}"))
             .await
     }
@@ -427,31 +418,31 @@ fn urlencode(value: &str) -> String {
 /// everything else — a failure, an interruption, a model refusal — is a
 /// failure of the work, not of the command itself, as `tidebreak chat`
 /// already reads them.
-pub fn turn_exit_code(event: &CodeEvent) -> Option<i32> {
+pub fn turn_exit_code(event: &Event) -> Option<i32> {
     match event {
-        CodeEvent::TurnCompleted { .. } => Some(0),
-        CodeEvent::TurnFailed { .. }
-        | CodeEvent::TurnInterrupted { .. }
-        | CodeEvent::TurnRefused { .. } => Some(1),
+        Event::TurnCompleted { .. } => Some(0),
+        Event::TurnFailed { .. } | Event::TurnInterrupted { .. } | Event::TurnRefused { .. } => {
+            Some(1)
+        }
         _ => None,
     }
 }
 
 /// Whether this event ends the turn `code run` is waiting on.
-pub fn is_turn_terminal(event: &CodeEvent) -> bool {
+pub fn is_turn_terminal(event: &Event) -> bool {
     turn_exit_code(event).is_some()
 }
 
 /// Decode one session-event socket frame. Unknown payloads are ignored by
 /// the human renderer; `--json` prints the raw line instead of this type.
-pub fn decode_event_frame(text: &str) -> Result<SequencedCodeEventFrame> {
+pub fn decode_event_frame(text: &str) -> Result<SequencedEventFrame> {
     serde_json::from_str(text)
         .map_err(|error| AgentError::msg(format!("bad code event frame: {error}")))
 }
 
 /// Decode one `/updates` notice. An unrecognized tag becomes
-/// [`CodeUpdateNotice::Unknown`] rather than failing the stream.
-pub fn decode_update_notice(text: &str) -> Result<CodeUpdateNotice> {
+/// [`UpdateNotice::Unknown`] rather than failing the stream.
+pub fn decode_update_notice(text: &str) -> Result<UpdateNotice> {
     serde_json::from_str(text)
         .map_err(|error| AgentError::msg(format!("bad code update notice: {error}")))
 }
@@ -459,7 +450,7 @@ pub fn decode_update_notice(text: &str) -> Result<CodeUpdateNotice> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tidebreak_core::{AttentionSource, AttentionState, CodeSessionLifecycle};
+    use tidebreak_core::{AttentionSource, AttentionState, SessionLifecycle};
 
     #[test]
     fn a_sequenced_frame_round_trips_the_fields_agents_script_against() {
@@ -471,12 +462,12 @@ mod tests {
             },
             "replayed": true
         });
-        let frame: SequencedCodeEventFrame = serde_json::from_value(raw.clone()).unwrap();
+        let frame: SequencedEventFrame = serde_json::from_value(raw.clone()).unwrap();
         assert_eq!(frame.seq, 4);
         assert_eq!(frame.replayed, Some(true));
         assert!(matches!(
             frame.event,
-            CodeEvent::AssistantDelta { ref text } if text == "hello"
+            Event::AssistantDelta { ref text } if text == "hello"
         ));
         let encoded = serde_json::to_value(&frame).unwrap();
         assert_eq!(encoded["seq"], 4);
@@ -501,7 +492,7 @@ mod tests {
         assert_eq!(frame.replayed, None);
         assert!(matches!(
             frame.event,
-            CodeEvent::AssistantDelta { ref text } if text == "half"
+            Event::AssistantDelta { ref text } if text == "half"
         ));
     }
 
@@ -530,7 +521,7 @@ mod tests {
     #[test]
     fn update_snapshot_and_digest_keep_their_tags() {
         let snapshot = decode_update_notice(r#"{"type":"snapshot","sessions":[]}"#).unwrap();
-        assert!(matches!(snapshot, CodeUpdateNotice::Snapshot { sessions } if sessions.is_empty()));
+        assert!(matches!(snapshot, UpdateNotice::Snapshot { sessions } if sessions.is_empty()));
 
         let digest = decode_update_notice(
             &serde_json::json!({
@@ -550,7 +541,7 @@ mod tests {
         )
         .unwrap();
         match digest {
-            CodeUpdateNotice::Digest {
+            UpdateNotice::Digest {
                 title,
                 turn_count,
                 attention,
@@ -559,7 +550,7 @@ mod tests {
             } => {
                 assert_eq!(title, "fix login");
                 assert_eq!(turn_count, 2);
-                assert_eq!(lifecycle, CodeSessionLifecycle::Running);
+                assert_eq!(lifecycle, SessionLifecycle::Running);
                 assert!(matches!(attention.state, AttentionState::Working));
                 assert_eq!(attention.source, AttentionSource::Lifecycle);
             }
@@ -637,19 +628,19 @@ mod tests {
             match kind.as_str() {
                 "repo" => round_trip::<CodeRepoSnapshot>(name, value),
                 "workspace" => round_trip::<CodeWorkspaceSnapshot>(name, value),
-                "session" => round_trip::<CodeSessionSnapshot>(name, value),
+                "session" => round_trip::<SessionSnapshot>(name, value),
                 "turn" => round_trip::<SubmitTurnResponse>(name, value),
                 "queued_turn" => round_trip::<SubmitTurnResponse>(name, value),
-                "queued_turns" => round_trip::<QueuedCodeTurnsSnapshot>(name, value),
+                "queued_turns" => round_trip::<QueuedTurnsSnapshot>(name, value),
                 "harness_doctor" => round_trip::<HarnessDoctorReport>(name, value),
                 "workspace_files" => round_trip::<CodeWorkspaceFiles>(name, value),
                 "workspace_diff" => round_trip::<CodeWorkspaceDiff>(name, value),
-                "approval" => round_trip::<CodeApprovalSnapshot>(name, value),
+                "approval" => round_trip::<ApprovalSnapshot>(name, value),
                 "commit" => round_trip::<CodeCommitSnapshot>(name, value),
                 "push" => round_trip::<CodePushSnapshot>(name, value),
                 "workspace_pr" => round_trip::<CodeWorkspacePrSnapshot>(name, value),
                 "action" => round_trip::<CodeActionSnapshot>(name, value),
-                "session_digest" => round_trip::<CodeSessionDigest>(name, value),
+                "session_digest" => round_trip::<SessionDigest>(name, value),
                 "update_notice" => {
                     let notice = decode_update_notice(&value.to_string())
                         .unwrap_or_else(|error| panic!("fixture {name}: {error}"));

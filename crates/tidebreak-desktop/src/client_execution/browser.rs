@@ -19,10 +19,10 @@ use tidebreak_core::{
     validate_browser_wait_arguments, BrowserActArgs, BrowserGrantCapability, BrowserListArgs,
     BrowserListResult, BrowserNavigateArgs, BrowserOrigin, BrowserPageSnapshot,
     BrowserScreenshotArgs, BrowserScreenshotResult, BrowserSnapshotArgs, BrowserUploadArgs,
-    BrowserUploadResource, BrowserUploadStatus, BrowserWaitArgs, BrowserWaitResult, CallId, ChatId,
-    ImageRef, OutputId, OutputRevisionId, ToolCallExecution, ToolCallRecord, ToolCallStatus,
-    BROWSER_ACT_TOOL, BROWSER_LIST_TOOL, BROWSER_NAVIGATE_TOOL, BROWSER_SCREENSHOT_TOOL,
-    BROWSER_SNAPSHOT_TOOL, BROWSER_UPLOAD_TOOL, BROWSER_WAIT_TOOL,
+    BrowserUploadResource, BrowserUploadStatus, BrowserWaitArgs, BrowserWaitResult, CallId,
+    ImageRef, OutputId, OutputRevisionId, SessionId, ToolCallExecution, ToolCallRecord,
+    ToolCallStatus, BROWSER_ACT_TOOL, BROWSER_LIST_TOOL, BROWSER_NAVIGATE_TOOL,
+    BROWSER_SCREENSHOT_TOOL, BROWSER_SNAPSHOT_TOOL, BROWSER_UPLOAD_TOOL, BROWSER_WAIT_TOOL,
 };
 use tidebreak_host_broker::{RelativePath, RootId, MAX_READ_FILE_BINARY_BYTES};
 use tidebreak_server::output_files::{
@@ -417,7 +417,7 @@ async fn publish_resolution(
     }
 }
 
-fn validate_call_identity(call: &ToolCallRecord, chat_id: ChatId, call_id: CallId) -> bool {
+fn validate_call_identity(call: &ToolCallRecord, chat_id: SessionId, call_id: CallId) -> bool {
     call.chat_id == chat_id && call.id == call_id && is_foreground_browser_call(call)
 }
 
@@ -790,7 +790,7 @@ async fn reresolve_browser_upload_source(
             let store = state
                 .store()
                 .ok_or_else(|| "browser upload resource is unavailable".to_owned())?;
-            let chat_id = ChatId::from(context.chat_id);
+            let chat_id = SessionId::from(context.chat_id);
             require_exact_revision(store, chat_id, *output_id, *revision_id, *byte_len, *sha256)
                 .await
                 .map_err(|_| "browser upload resource changed before attachment".to_owned())?;
@@ -820,7 +820,7 @@ async fn resolve_output_upload_source(
     let store = state
         .store()
         .ok_or_else(|| "browser upload resource is unavailable".to_owned())?;
-    let chat_id = ChatId::from(context.chat_id);
+    let chat_id = SessionId::from(context.chat_id);
     let (output, revision) = require_live_output(store, chat_id, output_id)
         .await
         .map_err(|_| "browser upload resource is unavailable".to_owned())?;
@@ -838,7 +838,7 @@ async fn resolve_output_upload_source(
 
 async fn read_output_upload_file(
     app: &AppHandle,
-    chat_id: ChatId,
+    chat_id: SessionId,
     output: tidebreak_core::OutputRecord,
     revision: tidebreak_core::OutputRevision,
 ) -> Result<BrowserUploadFile, String> {
@@ -1173,7 +1173,7 @@ mod tests {
     fn call(name: &str, arguments: serde_json::Value) -> ToolCallRecord {
         ToolCallRecord {
             id: CallId::new(),
-            chat_id: ChatId::new(),
+            chat_id: SessionId::new(),
             turn_id: tidebreak_core::TurnId::new(),
             provider_id: "tool-1".to_owned(),
             name: name.to_owned(),
@@ -1479,7 +1479,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = super::super::receipt_store::ReceiptStore::open(temp.path()).unwrap();
         let receipt =
-            ForegroundBrowserReceipt::new(ChatId::new(), CallId::new(), store.executor_id());
+            ForegroundBrowserReceipt::new(SessionId::new(), CallId::new(), store.executor_id());
         let serialized = serde_json::to_value(&receipt).unwrap();
         let keys = serialized
             .as_object()

@@ -22,6 +22,21 @@
 //! SDK — the surface a tool server needs is small, and this keeps the crate light
 //! and fully unit-testable in-process.
 //!
+//! ```
+//! use std::sync::Arc;
+//! use tidebreak_core::{SessionId, ToolCtx, ToolRegistry};
+//! use tidebreak_mcp::McpServer;
+//!
+//! # fn demo() -> std::io::Result<()> {
+//! let tools = Arc::new(ToolRegistry::new());
+//! let ctx = ToolCtx::try_new_legacy_workspace(SessionId::new(), None, ".".into())?;
+//! let server = McpServer::new(tools, ctx);
+//! // then: `tidebreak_mcp::serve_stdio(server).await` inside an async runtime.
+//! # let _ = server;
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! The server enforces the MCP session lifecycle: tool requests remain gated until
 //! a valid `initialize` exchange is acknowledged by `notifications/initialized`.
 //! The client performs the matching lifecycle before it advertises any mounted
@@ -47,13 +62,13 @@ pub use stdio::{serve, serve_stdio};
 mod tests {
     use std::sync::Arc;
 
-    use tidebreak_core::{ChatId, ToolCtx, ToolRegistry};
+    use tidebreak_core::{SessionId, ToolCtx, ToolRegistry};
 
     use super::McpServer;
 
     #[test]
     fn server_constructs_for_a_legacy_workspace() -> std::io::Result<()> {
-        let chat_id = ChatId::new();
+        let chat_id = SessionId::new();
         let tools = Arc::new(ToolRegistry::new());
         let ctx = ToolCtx::try_new_legacy_workspace(chat_id, None, ".".into())?;
         let server = McpServer::new(tools, ctx);

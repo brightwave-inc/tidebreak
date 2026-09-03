@@ -12,16 +12,11 @@ pub use event::{
     HarnessNoticeLevel, InternalApprovalRequest, SequencedEvent, ToolDetail, ToolOutcome,
     TurnUsage, MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS, MAX_TOOL_SUMMARY_CHARS,
 };
-#[doc(hidden)]
-pub use event::{Event as CodeEvent, SequencedEvent as SequencedCodeEvent, TurnUsage as CodeUsage};
 
 use crate::attention::{Attention, FenceReason};
 use crate::image::ImageRef;
 use crate::PermissionMode;
-pub use crate::{
-    ApprovalId, ApprovalId as CodeApprovalId, SessionId, SessionId as CodeSessionId, TurnId,
-    TurnId as CodeTurnId,
-};
+pub use crate::{ApprovalId, SessionId, TurnId};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use uuid::Uuid;
@@ -2308,16 +2303,6 @@ pub fn classify_trigger_condition(pr: &PullRequestDigest) -> Option<CodeTriggerC
     }
     None
 }
-
-// Remove these compatibility exports after the server and client rename
-// slices land. They keep this core-only slice buildable for unchanged callers.
-#[doc(hidden)]
-pub use self::{
-    Approval as CodeApproval, ApprovalKind as CodeApprovalKind, ApprovalState as CodeApprovalState,
-    QueuedTurn as CodeQueuedTurn, Session as CodeSession, SessionActivity as CodeSessionActivity,
-    SessionKind as CodeSessionKind, SessionLifecycle as CodeSessionLifecycle, Turn as CodeTurn,
-    TurnStatus as CodeTurnStatus,
-};
 
 #[cfg(test)]
 mod tests {
