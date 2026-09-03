@@ -1,6 +1,6 @@
 import { CircleAlert } from "lucide-react";
 
-import { Spinner } from "@/components/ui/spinner";
+import { Loader } from "@/components/motion/loader";
 import { WithTooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
@@ -58,10 +58,7 @@ export function SessionLifecycleIndicator({
         )}
       >
         {lifecycle === "running" && (
-          <Spinner
-            className={cn("size-3", STATUS_MARK.running)}
-            aria-hidden="true"
-          />
+          <Loader variant="comet" size={12} className="text-live" decorative />
         )}
         <span>{label}</span>
         {unrecognizedEventCount > 0 && (

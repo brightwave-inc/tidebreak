@@ -7,8 +7,8 @@ import {
   type RendererToolName,
   type ToolActionPreview,
 } from "./api";
+import { Loader } from "@/components/motion/loader";
 import { Badge } from "@/components/ui/badge";
-import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 import { ToolStatusIcon, type ToolTone } from "./ToolStatusIcon";
@@ -387,7 +387,12 @@ export function ToolCommandCard({
               <TabsContent value="output" className="mt-0">
                 {output === null ? (
                   <p className="text-muted-foreground flex items-center gap-1.5 py-1 text-xs">
-                    <Spinner className="size-3.5" aria-hidden="true" />
+                    <Loader
+                      variant="comet"
+                      size={14}
+                      className="text-live"
+                      decorative
+                    />
                     Waiting for output…
                   </p>
                 ) : null}
@@ -413,7 +418,12 @@ export function ToolCommandCard({
           className="text-muted-foreground flex items-start gap-1.5 text-xs"
           role="status"
         >
-          <Spinner className="mt-0.5 size-3 shrink-0" aria-hidden="true" />
+          <Loader
+            variant="comet"
+            size={12}
+            className="mt-0.5 text-live"
+            decorative
+          />
           {SANDBOX_PREPARING_NOTICE}
         </p>
       )}
@@ -459,7 +469,7 @@ function ToolStatusBadge({
   if (presentation.tone === "running") {
     return (
       <Badge variant="outline" className="shrink-0 gap-1">
-        <Spinner className="size-3" aria-hidden="true" />
+        <Loader variant="comet" size={12} className="text-live" decorative />
         {preparing ? "Preparing sandbox…" : "Running…"}
       </Badge>
     );

@@ -35,10 +35,10 @@ import { useAgentRuns } from "./useAgentRuns";
 import { PanelBreadcrumb } from "@/components/PanelHeader";
 import { PanelFrame } from "@/panel/PanelFrame";
 import { usePanelNav } from "@/panel/usePanelNav";
+import { Loader } from "@/components/motion/loader";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Spinner } from "@/components/ui/spinner";
 
 /**
  * One background run, opened beside the conversation from its row in the
@@ -353,7 +353,7 @@ export function AgentRunStatusBadge({
     case "cancelling":
       return (
         <Badge variant="outline" size="sm">
-          <Spinner className="size-3" aria-hidden="true" />
+          <Loader variant="comet" size={12} className="text-live" decorative />
           Stopping
         </Badge>
       );
@@ -377,7 +377,7 @@ export function AgentRunStatusBadge({
     case "running":
       return (
         <Badge variant="info" size="sm">
-          <Spinner className="size-3" aria-hidden="true" />
+          <Loader variant="comet" size={12} className="text-live" decorative />
           Running
         </Badge>
       );

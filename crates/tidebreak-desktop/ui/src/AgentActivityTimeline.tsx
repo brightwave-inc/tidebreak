@@ -7,9 +7,9 @@ import { ToolCardShell } from "./ToolCardShell";
 import { ToolIcon } from "./ToolIcon";
 import { execCommandHeadline } from "./ToolPreview";
 import { ToolStatusIcon, type ToolTone } from "./ToolStatusIcon";
+import { Loader } from "@/components/motion/loader";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 
 export type AgentActivityState = {
@@ -325,7 +325,7 @@ function ExecActivityBadge({
     case "running":
       return (
         <Badge variant="outline" className="shrink-0 gap-1">
-          <Spinner className="size-3" aria-hidden="true" />
+          <Loader variant="comet" size={12} className="text-live" decorative />
           Running…
         </Badge>
       );

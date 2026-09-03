@@ -11,7 +11,7 @@ import type {
 } from "../api/types";
 import type { ComposerWorkspaceFiles } from "@/Composer";
 import { LiveLabel } from "@/LiveLabel";
-import { Spinner } from "@/components/ui/spinner";
+import { Loader } from "@/components/motion/loader";
 import { cn } from "@/lib/utils";
 import { clampPermissionMode } from "../PermissionModeMenu";
 import { useManagedPolicy } from "../managedPolicy";
@@ -76,7 +76,12 @@ export function WorkspaceSessionStartingState({
       <div className="flex min-h-0 flex-1 items-center justify-center px-6 py-10">
         <div className="w-full max-w-md">
           <div className="flex items-start gap-3">
-            <Spinner className="mt-1 size-4 text-live" aria-hidden />
+            <Loader
+              variant="comet"
+              size={16}
+              className="mt-1 text-live"
+              decorative
+            />
             <div className="min-w-0">
               <h2 className="text-lg font-semibold">
                 {startup.heading ?? "Starting your session"}
@@ -170,7 +175,7 @@ function StartupStep({
         {state === "complete" ? (
           <Check className="size-3.5 text-success" aria-hidden />
         ) : state === "active" ? (
-          <Spinner className="size-3.5 text-live" aria-hidden />
+          <Loader variant="comet" size={14} className="text-live" decorative />
         ) : (
           <Circle className="size-2.5 text-border" aria-hidden />
         )}

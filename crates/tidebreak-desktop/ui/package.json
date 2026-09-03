@@ -82,6 +82,7 @@
     "lucide-react": "1.37.0",
     "mdast-util-from-markdown": "2.0.3",
     "monaco-editor": "0.56.0",
+    "motion": "13.1.1",
     "pdf-lib": "1.17.1",
     "plotly.js-dist-min": "4.0.0",
     "react": "19.2.8",
