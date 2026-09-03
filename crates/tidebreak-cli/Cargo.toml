@@ -44,7 +44,7 @@ serde = { workspace = true }
 # never enters model-facing text or log data.
 image = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
+tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 # The connected-folder executor's diagnostics belong in the profile's log file:
 # it polls, so stderr would flood a print run.
@@ -53,9 +53,5 @@ url = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
-# The scripted model provider and scripted code-mode engine the end-to-end
-# tests drive. Enabling them here compiles them into the `tidebreak` binary
-# the tests spawn, and only when the tests are built.
-tidebreak-server = { path = "../tidebreak-server", features = ["scripted-provider", "scripted-harness"] }
 tempfile = { workspace = true }
 jsonschema = { workspace = true }

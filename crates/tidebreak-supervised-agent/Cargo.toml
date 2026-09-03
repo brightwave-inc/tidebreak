@@ -21,12 +21,11 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tidebreak-core = { path = "../tidebreak-core", default-features = false }
 tidebreak-harness = { path = "../tidebreak-harness" }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process", "sync", "time"] }
+tokio = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true }
 tempfile = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "process", "sync", "time", "test-util"] }
 
 [lints]
 workspace = true

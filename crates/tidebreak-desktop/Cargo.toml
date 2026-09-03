@@ -57,7 +57,7 @@ tauri-plugin-updater = "=2.10.1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["io-util", "process", "rt-multi-thread", "macros", "sync", "time"] }
+tokio = { workspace = true }
 tokio-util = { workspace = true }
 unicode-general-category = { workspace = true }
 url = { workspace = true }

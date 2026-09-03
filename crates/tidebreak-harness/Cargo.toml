@@ -26,7 +26,7 @@ tempfile = { workspace = true }
 thiserror = { workspace = true }
 tidebreak-core = { path = "../tidebreak-core", default-features = false }
 tidebreak-managed-node = { path = "../tidebreak-managed-node" }
-tokio = { workspace = true, features = ["io-util", "macros", "process", "rt", "sync", "time"] }
+tokio = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
@@ -36,9 +36,6 @@ libc = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Threading"] }
-
-[dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }
 
 [[bin]]
 name = "tidebreak-harness-capture"

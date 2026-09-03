@@ -16,20 +16,20 @@ workspace = true
 # `TIDEBREAK_DATABASE_URL` names. Off by default: the desktop profile is
 # SQLite-only and the driver is a heavy build-time dependency.
 postgres = ["tidebreak-core/postgres", "sea-orm/sqlx-postgres", "tidebreak-core/blob-object"]
-# Compile the scripted model provider in, so a test in another crate can drive
-# a real turn through the binary. Off by default and never enabled by a release
-# build: see `src/scripted_provider.rs`.
-scripted-provider = []
-# Compile the scripted external-engine adapter in, so a test in another crate
-# can drive a real code-mode turn through the binary. Off by default.
-scripted-harness = []
 
 [dependencies]
 tidebreak-shell-policy = { path = "../tidebreak-shell-policy" }
 tidebreak-code-execution = { path = "../tidebreak-code-execution" }
 tidebreak-harness = { path = "../tidebreak-harness" }
 tidebreak-managed-node = { path = "../tidebreak-managed-node" }
-tidebreak-core = { path = "../tidebreak-core", default-features = false, features = ["sqlite", "tools", "keychain", "blob-fs"] }
+# Default features on purpose: the server wants exactly core's default set
+# (`sqlite`, `tools`, `keychain`, `blob-fs`), and asking for the parts with
+# `default-features = false` would drop the `default` pseudo-feature that a
+# `--workspace` build (where core is its own build root) turns on — producing
+# a second, byte-identical core rlib. Leaner dependents still say
+# `default-features = false`; feature unification ORs `default` back in
+# whenever the server is in the graph.
+tidebreak-core = { path = "../tidebreak-core" }
 tidebreak-egress = { path = "../tidebreak-egress" }
 tidebreak-mcp = { path = "../tidebreak-mcp" }
 tidebreak-router = { path = "../tidebreak-router" }
@@ -38,9 +38,7 @@ axum = { workspace = true }
 # Pool sizing for the store this host opens (`host_connect_options`); the
 # driver features come from `tidebreak-core`.
 sea-orm = { workspace = true }
-# `rt-multi-thread` backs the durable operation log's synchronous `OperationStore`
-# bridge (`tokio::task::block_in_place`); the host runs on a multi-thread runtime.
-tokio = { workspace = true, features = ["net", "process", "rt", "rt-multi-thread", "sync", "macros", "time"] }
+tokio = { workspace = true }
 tower-http = { version = "=0.7.0", features = ["cors", "fs", "limit"] }
 futures = { workspace = true }
 async-trait = { workspace = true }
@@ -117,7 +115,5 @@ winreg = "=0.56.0"
 # so the sandbox-resident driver tests can drive the actual sandbox side over a
 # loopback socket, with only Docker and the host model mocked.
 tidebreak-sandbox-agent = { path = "../tidebreak-sandbox-agent" }
-# `test-util` provides the paused Tokio clock used by the HostGate tests.
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "sync", "test-util"] }
 tower = { version = "=0.5.3", features = ["util"] }
 tokio-tungstenite = { workspace = true }
