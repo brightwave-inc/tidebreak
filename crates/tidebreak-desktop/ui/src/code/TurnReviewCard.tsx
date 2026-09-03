@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 
 import type { Diffstat } from "../api/types";
+import { AssistantMessageBody } from "@/AssistantMessageBody";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -74,11 +75,14 @@ export function harnessVersionRequirement(error: string | null): string | null {
 
 export function TurnReviewCard({
   turn,
+  recap,
   onOpenTurnDiff,
   onForkFromTurn,
   onFileIssue,
 }: {
   turn: TurnBoundary;
+  /** A quiet reading of what the completed turn accomplished. */
+  recap?: string;
   /** Scope the review sidebar to this turn's changes. */
   onOpenTurnDiff?: (turnId: string) => void;
   /** Hand everything up to this turn to a fresh agent, in a new tab. */
@@ -120,6 +124,7 @@ export function TurnReviewCard({
         ) : (
           <p>{turn.error ?? "The engine stopped without saying why."}</p>
         )}
+        {recap && <TurnRecap text={recap} tone="critical" />}
         {(diffstat || actions || onFileIssue) && (
           <div className="flex items-center gap-2">
             {diffstat}
@@ -133,7 +138,7 @@ export function TurnReviewCard({
 
   if (turn.status === "interrupted") {
     return (
-      <SeamRow label="Turn interrupted" tone="warning">
+      <SeamRow label="Turn interrupted" tone="warning" recap={recap}>
         <CircleSlash size={13} aria-hidden="true" />
         <span>Turn interrupted</span>
         {duration && <span className="tabular-nums">· {duration}</span>}
@@ -144,7 +149,7 @@ export function TurnReviewCard({
   }
 
   return (
-    <SeamRow label="Turn finished" tone="quiet">
+    <SeamRow label="Turn finished" tone="quiet" recap={recap}>
       <Check size={13} aria-hidden="true" />
       <span>Turn finished</span>
       {duration && <span className="tabular-nums">· {duration}</span>}
@@ -251,10 +256,12 @@ function CodingHarnessesLink({ children }: { children: ReactNode }) {
 function SeamRow({
   label,
   tone,
+  recap,
   children,
 }: {
   label: string;
   tone: "quiet" | "warning";
+  recap?: string;
   children: ReactNode;
 }) {
   return (
@@ -262,13 +269,36 @@ function SeamRow({
       role="group"
       aria-label={label}
       className={cn(
-        "flex flex-wrap items-center gap-1.5 border-t pt-2 text-xs",
+        "border-t pt-2 text-xs",
         tone === "warning"
           ? "text-warning-foreground"
           : "text-muted-foreground",
       )}
     >
-      {children}
+      <div className="flex flex-wrap items-center gap-1.5">{children}</div>
+      {recap && <TurnRecap text={recap} />}
+    </div>
+  );
+}
+
+/** The recap stays subordinate to the turn outcome and keeps markdown links. */
+function TurnRecap({
+  text,
+  tone = "quiet",
+}: {
+  text: string;
+  tone?: "quiet" | "critical";
+}) {
+  return (
+    <div
+      className={cn(
+        "mt-1.5 [&_.message-markdown]:text-xs",
+        tone === "critical"
+          ? "text-critical-foreground-muted"
+          : "text-muted-foreground",
+      )}
+    >
+      <AssistantMessageBody text={text} streaming={false} />
     </div>
   );
 }

@@ -103,7 +103,7 @@ type Story = StoryObj<typeof meta>;
 
 export const ProgressUpdates: Story = {};
 
-/** A fallback recap uses the same block as a captured closing recap. */
+/** A fallback recap stays quiet beneath the turn seam. */
 export const SessionRecap: Story = {
   args: {
     items,
@@ -112,7 +112,7 @@ export const SessionRecap: Story = {
   },
 };
 
-/** A turn with no closing message keeps the fallback recap above its boundary. */
+/** A turn with no closing message keeps the same quiet boundary recap. */
 export const SessionRecapWithoutClosingMessage: Story = {
   args: {
     items: [
@@ -159,7 +159,7 @@ export const RewriteRewriting: Story = {
   },
 };
 
-/** Rewritten: original stays, recap sits under it. */
+/** Rewritten: original stays, and the recap moves to the quiet turn seam. */
 export const RewriteRewritten: Story = {
   args: { items: rewrittenItems },
 };

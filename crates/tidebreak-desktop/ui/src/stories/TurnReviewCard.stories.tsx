@@ -52,6 +52,14 @@ type Story = StoryObj<typeof meta>;
 
 export const Completed: Story = {};
 
+/** A recap is quiet supporting text beneath the completed-turn row. */
+export const CompletedWithRecap: Story = {
+  args: {
+    recap:
+      "Auth middleware is wired up and its tests pass. Next: hook the refresh path into the session store.",
+  },
+};
+
 /**
  * With a fork handler, the seam carries a quiet actions menu: "Fork from
  * here" hands everything up to this turn to a fresh agent in a new tab.
