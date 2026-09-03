@@ -264,9 +264,7 @@ fn classify_document(url: &str, content_type: Option<&str>, body: &[u8]) -> Spec
     // `.yaml` URL that serves JSON should classify by content.
     let first_byte = body.iter().copied().find(|b| !b.is_ascii_whitespace());
     let body_is_json = matches!(first_byte, Some(b'{') | Some(b'['));
-    if !body_is_json
-        && (media.contains("yaml") || looks_like_yaml(body) || path_looks_yaml(url))
-    {
+    if !body_is_json && (media.contains("yaml") || looks_like_yaml(body) || path_looks_yaml(url)) {
         return SpecDiscoveryCandidate {
             url: url.to_owned(),
             operation_count: None,
