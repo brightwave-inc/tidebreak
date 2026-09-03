@@ -107,6 +107,15 @@ async fn stall_sweep_leaves_a_monitoring_session_working() {
     tidebreak_core::db::code::save_session(&runtime.db, &row)
         .await
         .unwrap();
+    tidebreak_core::db::code::replace_session_attention(
+        &runtime.db,
+        &owner,
+        parsed,
+        &tidebreak_core::Attention::working(tidebreak_core::AttentionSource::Lifecycle),
+        false,
+    )
+    .await
+    .unwrap();
     tidebreak_core::db::code::append_event(
         &runtime.db,
         &owner,
