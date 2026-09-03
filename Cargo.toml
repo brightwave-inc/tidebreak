@@ -137,5 +137,6 @@ dom_smoothie = "=0.18.0"
 # Exact version dom_smoothie builds against; pins move together.
 dom_query = "=0.28.0"
 
-[patch.crates-io]
-symphonia = { git = "https://github.com/pdeljanov/Symphonia", rev = "619c6806e5122b3206b8938773a801dd4a8a5950" }
+# SANDBOX-ONLY (restore before commit)
+# [patch.crates-io]
+# symphonia = { git = "https://github.com/pdeljanov/Symphonia", rev = "619c6806e5122b3206b8938773a801dd4a8a5950" }
