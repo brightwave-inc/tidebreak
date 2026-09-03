@@ -1043,7 +1043,7 @@ describe("CodeTranscript", () => {
       screen.getByText("Now check what identity we store for the child."),
     ).toBeInTheDocument();
   });
-  it("shows the session recap in the newest closing message only", () => {
+  it("shows the session recap under the newest turn boundary only", () => {
     const boundary = (id: string, turnId: string): CodeTranscriptItem => ({
       kind: "turn_boundary",
       id,
@@ -1080,14 +1080,13 @@ describe("CodeTranscript", () => {
     );
 
     expect(screen.getAllByText(recap)).toHaveLength(1);
-    expect(screen.getAllByText("Recap")).toHaveLength(1);
-    expect(
-      within(screen.getAllByLabelText("Assistant")[1]!).getByText(recap),
-    ).toBeInTheDocument();
     expect(
       within(
         screen.getAllByRole("group", { name: "Turn finished" })[1]!,
-      ).queryByText(recap),
+      ).getByText(recap),
+    ).toBeInTheDocument();
+    expect(
+      within(screen.getAllByLabelText("Assistant")[1]!).queryByText(recap),
     ).not.toBeInTheDocument();
   });
 
@@ -1127,10 +1126,14 @@ describe("CodeTranscript", () => {
 
     expect(screen.getByText(closingRecap)).toBeInTheDocument();
     expect(screen.queryByText(sessionRecap)).not.toBeInTheDocument();
-    expect(screen.getAllByText("Recap")).toHaveLength(1);
+    expect(
+      within(screen.getByRole("group", { name: "Turn finished" })).getByText(
+        closingRecap,
+      ),
+    ).toBeInTheDocument();
   });
 
-  it("shows a standalone recap when the turn has no closing message", () => {
+  it("shows the fallback recap under the boundary without a closing message", () => {
     const recap = "The interrupted turn left the retry test unchanged.";
     render(
       <CodeTranscript
@@ -1150,14 +1153,14 @@ describe("CodeTranscript", () => {
       />,
     );
 
-    const standalone = screen.getByLabelText("Recap");
-    expect(within(standalone).getByText(recap)).toBeInTheDocument();
     expect(
-      screen.getByRole("group", { name: "Turn interrupted" }),
-    ).not.toHaveTextContent(recap);
+      within(screen.getByRole("group", { name: "Turn interrupted" })).getByText(
+        recap,
+      ),
+    ).toBeInTheDocument();
   });
 
-  it("keeps the original closing message and shows the recap beside it", () => {
+  it("keeps the original closing message and shows the recap under the boundary", () => {
     const original = "Workspace switching now reuses recent transcript stores.";
     const rewrite =
       "Workspace switching reuses recent transcript stores. It reconnects from the last event sequence.";
@@ -1174,12 +1177,27 @@ describe("CodeTranscript", () => {
             rewrite,
             rewriteState: "rewritten",
           },
+          {
+            kind: "turn_boundary",
+            id: "b1",
+            turnId: "t1",
+            status: "completed",
+            durationMs: 4_000,
+            usage: USAGE,
+            error: null,
+            diffstat: null,
+          },
         ]}
       />,
     );
 
     expect(screen.getByText(original)).toBeInTheDocument();
     expect(screen.getByText(rewrite)).toBeInTheDocument();
-    expect(screen.getByText("Recap")).toBeInTheDocument();
+    expect(
+      within(screen.getByRole("group", { name: "Turn finished" })).getByText(
+        rewrite,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Recap")).not.toBeInTheDocument();
   });
 });

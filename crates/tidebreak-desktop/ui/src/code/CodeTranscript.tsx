@@ -166,31 +166,40 @@ export function CodeTranscript({
     );
   }
   const presentationItems = codeTranscriptPresentationItems(items);
-  // The recap belongs to the newest settled turn. Put it on that turn's final
-  // assistant row, which is where captured Claude recaps already live.
+  // Captured and fallback recaps share the quiet turn seam. Stored recaps live
+  // on the closing assistant row, while the session digest supplies only the
+  // newest fallback, so project both sources onto their boundary here.
   let newestBoundaryId: string | undefined;
-  let newestBoundaryTurnId: string | undefined;
   for (let index = presentationItems.length - 1; index >= 0; index -= 1) {
     const item = presentationItems[index];
     if (item?.kind === "turn_boundary") {
       newestBoundaryId = item.id;
-      newestBoundaryTurnId = item.turnId ?? undefined;
       break;
     }
   }
-  let recapOwnerId: string | undefined;
-  if (newestBoundaryTurnId) {
-    for (let index = presentationItems.length - 1; index >= 0; index -= 1) {
-      const item = presentationItems[index];
-      if (
-        item?.kind === "assistant" &&
-        item.turnId === newestBoundaryTurnId &&
-        item.parentCallId === null
-      ) {
-        recapOwnerId = item.id;
-        break;
-      }
+
+  const storedRecapsByTurn = new Map<string, string>();
+  for (const item of presentationItems) {
+    if (
+      item.kind === "assistant" &&
+      item.turnId &&
+      item.parentCallId === null &&
+      item.rewriteState === "rewritten" &&
+      item.rewrite?.trim()
+    ) {
+      storedRecapsByTurn.set(item.turnId, item.rewrite.trim());
     }
+  }
+
+  const recapByBoundary = new Map<string, string>();
+  for (const item of presentationItems) {
+    if (item.kind !== "turn_boundary") continue;
+    const stored = item.turnId
+      ? storedRecapsByTurn.get(item.turnId)
+      : undefined;
+    const fallback = item.id === newestBoundaryId ? recap?.trim() : undefined;
+    const displayed = stored ?? fallback;
+    if (displayed) recapByBoundary.set(item.id, displayed);
   }
   const copyOwnerIds = assistantCopyOwnerIds(items, busy);
   return (
@@ -241,12 +250,7 @@ export function CodeTranscript({
                   onFileIssue={onFileIssue}
                   sessionId={sessionId}
                   onReveal={onReveal}
-                  recap={
-                    row.item.id === recapOwnerId ||
-                    (!recapOwnerId && row.item.id === newestBoundaryId)
-                      ? recap
-                      : undefined
-                  }
+                  recap={recapByBoundary.get(row.item.id)}
                 />,
               ),
         )}
@@ -597,10 +601,9 @@ const TranscriptItem = memo(function TranscriptItem({
   sessionId?: string;
   onReveal?: () => void;
   /**
-   * Where the session stands, on the newest turn's recap row only.
+   * Where the turn stands, on its boundary row only.
    *
-   * Passed to exactly one row. The closing assistant message owns the recap
-   * when one exists; the turn boundary owns a standalone fallback otherwise.
+   * Captured and fallback recaps both use the boundary's quiet presentation.
    */
   recap?: string;
 }) {
@@ -641,7 +644,6 @@ const TranscriptItem = memo(function TranscriptItem({
           item={item}
           animateStreaming={animateStreaming}
           ownsCopyAction={ownsCopyAction}
-          recap={recap}
         />
       );
     case "reasoning":
@@ -709,15 +711,13 @@ const TranscriptItem = memo(function TranscriptItem({
     }
     case "turn_boundary":
       return (
-        <>
-          {recap && <StandaloneRecap text={recap} />}
-          <TurnReviewCard
-            turn={item}
-            onOpenTurnDiff={onOpenTurnDiff}
-            onForkFromTurn={onForkFromTurn}
-            onFileIssue={onFileIssue}
-          />
-        </>
+        <TurnReviewCard
+          turn={item}
+          recap={recap}
+          onOpenTurnDiff={onOpenTurnDiff}
+          onForkFromTurn={onForkFromTurn}
+          onFileIssue={onFileIssue}
+        />
       );
   }
 });
@@ -726,24 +726,19 @@ function AssistantRewriteMessage({
   item,
   animateStreaming,
   ownsCopyAction,
-  recap,
 }: {
   item: Extract<CodeTranscriptItem, { kind: "assistant" }>;
   animateStreaming: boolean;
   ownsCopyAction?: boolean;
-  /** Fallback recap for engines that do not supply a captured closing recap. */
-  recap?: string;
 }) {
-  const rewritten = item.rewriteState === "rewritten" && Boolean(item.rewrite);
-  const displayedRecap = rewritten && item.rewrite ? item.rewrite : recap;
   return (
     <article className="message message-assistant" aria-label="Assistant">
-      {item.rewriteState === "rewriting" && !displayedRecap && (
+      {item.rewriteState === "rewriting" && (
         <p className="text-muted-foreground mb-2 text-xs" role="status">
           Writing a recap…
         </p>
       )}
-      {item.rewriteState === "failed" && !displayedRecap && (
+      {item.rewriteState === "failed" && (
         <p className="text-muted-foreground mb-2 text-xs" role="status">
           Couldn't write a recap. The original stands.
         </p>
@@ -752,7 +747,6 @@ function AssistantRewriteMessage({
         text={item.text}
         streaming={item.streaming && animateStreaming}
       />
-      {displayedRecap && <RecapBlock text={displayedRecap} separated />}
       <MessageFooter
         role="assistant"
         text={item.text}
@@ -760,31 +754,6 @@ function AssistantRewriteMessage({
         sequenceEnd={ownsCopyAction}
       />
     </article>
-  );
-}
-
-function StandaloneRecap({ text }: { text: string }) {
-  return (
-    <article className="message message-assistant" aria-label="Recap">
-      <RecapBlock text={text} />
-    </article>
-  );
-}
-
-function RecapBlock({
-  text,
-  separated = false,
-}: {
-  text: string;
-  separated?: boolean;
-}) {
-  return (
-    <div className={cn(separated && "mt-3 border-t border-border-subtle pt-3")}>
-      <p className="text-muted-foreground mb-1 text-2xs font-medium tracking-wide uppercase">
-        Recap
-      </p>
-      <AssistantMessageBody text={text} streaming={false} />
-    </div>
   );
 }
 
