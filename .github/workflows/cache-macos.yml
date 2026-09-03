@@ -19,7 +19,7 @@ permissions:
 concurrency:
   # Let the active main-tip compilation finish so a later release can consume
   # its compiler outputs. GitHub retains at most one newer pending run.
-  group: tidebreak-macos-release-cache-${{ github.ref }}
+  group: tidebreak-macos-release-cache
   cancel-in-progress: false
 
 jobs:
