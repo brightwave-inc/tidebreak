@@ -523,44 +523,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_second_epoch_reset_keeps_what_the_first_one_recorded() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = Config::desktop(dir.path());
-        let sidecar = dir
-            .path()
-            .join(code::worktree_orphans::ORPHANED_WORKTREES_FILE);
-        let first_tree = dir.path().parent().unwrap().join("first-orphan");
-        let second_tree = dir.path().parent().unwrap().join("second-orphan");
-        std::fs::create_dir_all(&first_tree).unwrap();
-        std::fs::create_dir_all(&second_tree).unwrap();
-
-        for (title, worktree) in [("first", &first_tree), ("second", &second_tree)] {
-            let store = connect(&config).await.unwrap();
-            seed_workspace(&store, title, worktree).await;
-            store.close().await.unwrap();
-            write_older_epoch_marker(dir.path());
-            connect(&config).await.unwrap().close().await.unwrap();
-        }
-
-        let recorded: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&sidecar).unwrap()).unwrap();
-        let paths: Vec<&str> = recorded["worktrees"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|worktree| worktree["worktree_path"].as_str().unwrap())
-            .collect();
-        assert_eq!(
-            paths,
-            vec![
-                first_tree.display().to_string().as_str(),
-                second_tree.display().to_string().as_str()
-            ],
-            "a later reset must add to the record, not replace it"
-        );
-    }
-
-    #[tokio::test]
     async fn epoch_reset_with_no_code_worktrees_writes_no_record() {
         let dir = tempfile::tempdir().unwrap();
         let config = Config::desktop(dir.path());

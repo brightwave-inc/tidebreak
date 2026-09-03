@@ -401,24 +401,10 @@ impl ScriptedAdapter {
         self
     }
 
-    /// Keep the child pid across turns, the way session-long engines do, so
-    /// the worker's idle park timer (decision 0064) arms for this adapter.
-    #[cfg(test)]
-    pub(crate) fn with_session_long_child(mut self) -> Self {
-        self.session_long_child = true;
-        self
-    }
-
     /// How many engine sessions the worker terminated.
     #[cfg(test)]
     pub(crate) fn shutdown_count(&self) -> u64 {
         self.shutdowns.load(Ordering::SeqCst)
-    }
-
-    /// How many times a session of this adapter has been parked.
-    #[cfg(test)]
-    pub(crate) fn park_count(&self) -> u64 {
-        self.parks.load(Ordering::SeqCst)
     }
 
     /// Model an engine that asks for an approval and then stops waiting for

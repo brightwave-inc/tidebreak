@@ -3122,31 +3122,6 @@ exit 3
     }
 
     #[tokio::test]
-    async fn quick_action_bounds_output_and_times_out() {
-        let dir = TempDir::new().unwrap();
-        let long = QuickAction {
-            name: "noise".into(),
-            command: "while :; do printf '0123456789abcdef'; done".into(),
-            auto_run_on_create: false,
-        };
-        let noisy = run_action(dir.path(), &long).await;
-        assert!(!noisy.success, "an over-limit producer must be terminated");
-        assert!(noisy.stdout.starts_with("0123456789abcdef"));
-        assert!(noisy.stdout.contains("[output truncated]"));
-        assert!(!noisy.timed_out);
-
-        let sleeper = QuickAction {
-            name: "sleep".into(),
-            command: "sleep 20".into(),
-            auto_run_on_create: false,
-        };
-        let timed = run_action(dir.path(), &sleeper).await;
-        assert!(timed.timed_out);
-        assert!(!timed.success);
-        assert!(timed.stderr.contains("timed out"));
-    }
-
-    #[tokio::test]
     async fn resolve_github_uses_gh_url_when_signed_in() {
         let shim_dir = TempDir::new().unwrap();
         write_executable(

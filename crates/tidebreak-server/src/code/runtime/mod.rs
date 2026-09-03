@@ -269,8 +269,6 @@ pub(crate) struct CodeRuntime {
     #[cfg(test)]
     archive_shutdown_timeout: AtomicBool,
     #[cfg(test)]
-    fail_next_workspace_final_save: AtomicBool,
-    #[cfg(test)]
     fail_next_workspace_release_metadata: AtomicBool,
 }
 
@@ -472,8 +470,6 @@ impl CodeRuntime {
             #[cfg(test)]
             archive_shutdown_timeout: AtomicBool::new(false),
             #[cfg(test)]
-            fail_next_workspace_final_save: AtomicBool::new(false),
-            #[cfg(test)]
             fail_next_workspace_release_metadata: AtomicBool::new(false),
         }
     }
@@ -632,8 +628,6 @@ impl CodeRuntime {
             #[cfg(test)]
             archive_shutdown_timeout: AtomicBool::new(false),
             #[cfg(test)]
-            fail_next_workspace_final_save: AtomicBool::new(false),
-            #[cfg(test)]
             fail_next_workspace_release_metadata: AtomicBool::new(false),
         }
     }
@@ -702,12 +696,6 @@ impl CodeRuntime {
     pub(crate) fn set_archive_shutdown_timeout(&self, enabled: bool) {
         self.archive_shutdown_timeout
             .store(enabled, Ordering::SeqCst);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn fail_next_workspace_final_save(&self) {
-        self.fail_next_workspace_final_save
-            .store(true, Ordering::SeqCst);
     }
 
     #[cfg(test)]

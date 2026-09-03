@@ -165,15 +165,6 @@ impl CodeRuntime {
         &self,
         workspace: &CodeWorkspace,
     ) -> Result<bool, ServerError> {
-        #[cfg(test)]
-        if self
-            .fail_next_workspace_final_save
-            .swap(false, Ordering::SeqCst)
-        {
-            return Err(ServerError::internal(
-                "injected workspace lifecycle persistence failure",
-            ));
-        }
         Ok(save_workspace(&self.db, workspace).await?)
     }
 

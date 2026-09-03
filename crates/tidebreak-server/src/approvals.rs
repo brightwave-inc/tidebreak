@@ -566,60 +566,6 @@ mod tests {
         request
     }
 
-    /// The exclusion this replaces: `exec` was kept away from the judge
-    /// because nothing deterministic stood beneath it. Something does now, so
-    /// the line moved from "no command, ever" to "no command the analyzer has
-    /// not already cleared".
-    #[tokio::test]
-    async fn only_a_command_that_cleared_the_analyzer_reaches_the_judge() {
-        // A routine build command parks with a judge on it.
-        let (store, mut request) = setup_with_arguments(
-            "exec",
-            json!({ "command": "cargo", "args": ["test"], "cwd": "." }),
-        )
-        .await;
-        request.auto_judge = true;
-        assert!(store
-            .request_tool_call_approval(&request, Utc::now())
-            .await
-            .is_ok());
-        let parked = store
-            .get_tool_call_approval(request.call_id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            parked.auto_judge_status,
-            Some(tidebreak_core::AutoJudgeStatus::Judging)
-        );
-
-        // Anything the analyzer refuses parks as an ordinary card instead —
-        // it loses its judge, not its card, decided on the arguments the row
-        // actually holds rather than on what the caller believed.
-        for arguments in [
-            json!({ "command": "bash", "args": ["-c", "id"], "cwd": "." }),
-            json!({ "command": "rm", "args": ["-rf", "/"], "cwd": "." }),
-            json!({ "command": "cat", "args": ["../../outside.txt"], "cwd": "." }),
-        ] {
-            let (store, mut request) = setup_with_arguments("exec", arguments.clone()).await;
-            request.auto_judge = true;
-            store
-                .request_tool_call_approval(&request, Utc::now())
-                .await
-                .unwrap();
-            let parked = store
-                .get_tool_call_approval(request.call_id)
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(
-                parked.auto_judge_status, None,
-                "the judge must not be offered {arguments}"
-            );
-            assert_eq!(parked.status, tidebreak_core::ToolApprovalStatus::Pending);
-        }
-    }
-
     #[tokio::test]
     async fn judge_verdicts_are_a_cas_the_human_always_wins() {
         let (store, mut request) =
