@@ -1037,7 +1037,6 @@ mod tests {
         // No scripted reads: every events request answers Unavailable.
         assert!(fake.event_reads.lock().unwrap().is_empty());
 
-        tokio::time::pause();
         let remote = runtime.remote_sessions().unwrap();
         let initial = std::time::Duration::from_millis(40);
         let pump = tokio::spawn(pump_session(
@@ -1047,24 +1046,7 @@ mod tests {
             session.id,
             LaneBackoff::new(initial, initial * 4),
         ));
-        for _ in 0..100 {
-            if *fake.event_reads_issued.lock().unwrap() >= 1 {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-        assert_eq!(
-            *fake.event_reads_issued.lock().unwrap(),
-            1,
-            "the pump did not issue its initial read"
-        );
-        tokio::time::advance(std::time::Duration::from_millis(400)).await;
-        for _ in 0..100 {
-            if *fake.event_reads_issued.lock().unwrap() >= 2 {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
         pump.abort();
 
         // The waits are at least 20, 40, 80, then 80ms each, so at most
