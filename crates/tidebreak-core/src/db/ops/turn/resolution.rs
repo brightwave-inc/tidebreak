@@ -1061,13 +1061,7 @@ where
         event,
     )
     .await?;
-    let notification_kind = match event {
-        AgentEvent::TurnCompleted { .. } | AgentEvent::TurnRefused { .. } => {
-            Some(crate::NotificationKind::AgentCompleted)
-        }
-        AgentEvent::TurnFailed { .. } => Some(crate::NotificationKind::AgentFailed),
-        _ => None,
-    };
+    let notification_kind = terminal_notification_kind(event);
     if let Some(kind) = notification_kind {
         super::super::notification::record_work_turn_notification_on(conn, chat_id, id, kind)
             .await?;
@@ -1106,13 +1100,7 @@ where
             "turn {id} has a different terminal event"
         )));
     }
-    let notification_kind = match &event {
-        AgentEvent::TurnCompleted { .. } | AgentEvent::TurnRefused { .. } => {
-            Some(crate::NotificationKind::AgentCompleted)
-        }
-        AgentEvent::TurnFailed { .. } => Some(crate::NotificationKind::AgentFailed),
-        _ => None,
-    };
+    let notification_kind = terminal_notification_kind(&event);
     if let Some(kind) = notification_kind {
         super::super::notification::record_work_turn_notification_on(
             conn,
@@ -1126,6 +1114,18 @@ where
         seq: stored.seq,
         event,
     }))
+}
+
+fn terminal_notification_kind(event: &AgentEvent) -> Option<crate::NotificationKind> {
+    match event {
+        AgentEvent::TurnCompleted { .. } => Some(crate::NotificationKind::AgentCompleted),
+        AgentEvent::TurnRefused { refusal, .. } if refusal.category() == Some("blocked") => {
+            Some(crate::NotificationKind::AgentFailed)
+        }
+        AgentEvent::TurnRefused { .. } => Some(crate::NotificationKind::AgentCompleted),
+        AgentEvent::TurnFailed { .. } => Some(crate::NotificationKind::AgentFailed),
+        _ => None,
+    }
 }
 
 async fn exact_failure_terminal_event_on<C>(

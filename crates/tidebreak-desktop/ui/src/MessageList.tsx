@@ -1341,6 +1341,9 @@ export function refusalCopy(
   category: string | null,
   partialOutput: boolean,
 ): string {
+  if (category === "blocked") {
+    return "Tidebreak could not complete this task.";
+  }
   const reason =
     (
       {

@@ -607,6 +607,9 @@ describe("terminal transcript presentation", () => {
     expect(refusalCopy(null, false)).toBe(
       "The model declined this response because it matched a safety policy.",
     );
+    expect(refusalCopy("blocked", true)).toBe(
+      "Tidebreak could not complete this task.",
+    );
   });
 
   it("surfaces a turn's memory proposals right after the turn that produced them", () => {
