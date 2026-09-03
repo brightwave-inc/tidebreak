@@ -298,6 +298,35 @@ describe("DoctorList", () => {
     );
     expect(onCheckUpdates).toHaveBeenCalledTimes(1);
   });
+
+  it("keeps the workspace-less internal engine out of the coding doctor", () => {
+    render(
+      <DoctorList
+        report={{
+          harnesses: [
+            {
+              ...notDownloaded,
+              kind: "internal",
+              found: true,
+              installable: false,
+              authenticated: true,
+              tier: "reference",
+            },
+            {
+              ...notDownloaded,
+              kind: "claude_code",
+              found: true,
+              authenticated: true,
+              tier: "reference",
+            },
+          ],
+        }}
+      />,
+    );
+
+    expect(screen.queryByText("Tidebreak")).not.toBeInTheDocument();
+    expect(screen.getByText("1 of 1 engine ready.")).toBeInTheDocument();
+  });
 });
 
 const notDownloaded: HarnessDoctorEntry = {

@@ -820,6 +820,42 @@ describe("NewWorkspaceDialog", () => {
     expect(createCodeWorkspace).not.toHaveBeenCalled();
   });
 
+  it("does not offer the workspace-less internal engine", async () => {
+    const repos = [repo("repo-new", "tidebreak")];
+    const signedOut = { ...harness("claude_code"), authenticated: false };
+    useCodeCatalogStore.setState({
+      repos,
+      doctor: {
+        harnesses: [harness("internal"), signedOut],
+      } as never,
+    });
+    const createCodeWorkspace = vi.fn();
+    await renderWithRouter(
+      <AppContextProvider
+        value={app({
+          createCodeWorkspace,
+          listCodeHarnessModels: claudeModels(),
+        })}
+      >
+        <NewWorkspaceDialog open onOpenChange={vi.fn()} repos={repos} />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+
+    const user = userEvent.setup();
+    await user.click(
+      screen.getByRole("button", { name: "Harness: Claude Code" }),
+    );
+    expect(screen.queryByText("Tidebreak")).not.toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    expect(screen.getByRole("button", { name: /Create/ })).toBeDisabled();
+    fireEvent.keyDown(screen.getByRole("dialog"), {
+      key: "Enter",
+      metaKey: true,
+    });
+    expect(createCodeWorkspace).not.toHaveBeenCalled();
+  });
+
   it("creates on Enter in the message; Shift+Enter stays a newline", async () => {
     const repos = [repo("repo-new", "tidebreak")];
     useCodeCatalogStore.setState({

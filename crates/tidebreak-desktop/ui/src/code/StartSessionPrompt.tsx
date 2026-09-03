@@ -35,6 +35,7 @@ import {
   harnessUnusableReason,
   preferredCodeModels,
   PERMISSION_MODE_POLICY_BLOCKED,
+  workspaceHarnesses,
   type CodeModelOption,
 } from "./labels";
 
@@ -264,9 +265,10 @@ export function StartSessionPrompt({
   const ensureHarnessModels = useCodeCatalogStore(
     (state) => state.ensureHarnessModels,
   );
-  const selectable = harnesses.filter((entry) => !harnessUnusableReason(entry));
+  const choices = workspaceHarnesses(harnesses);
+  const selectable = choices.filter((entry) => !harnessUnusableReason(entry));
   const selected =
-    harnesses.find(
+    choices.find(
       (entry) => entry.kind === picked && !harnessUnusableReason(entry),
     ) ??
     selectable.find((entry) => harnessCanStartNow(entry)) ??
@@ -410,7 +412,7 @@ export function StartSessionPrompt({
           fastMode={postedFastMode}
           harnessMenu={
             <HarnessPicker
-              harnesses={harnesses}
+              harnesses={choices}
               value={selected?.kind ?? null}
               disabled={starting}
               variant="composer"

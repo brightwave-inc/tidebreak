@@ -201,6 +201,32 @@ describe("CodeHome", () => {
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 
+  it("does not count the workspace-less internal engine as a coding engine", async () => {
+    const external = {
+      ...READY_DOCTOR.harnesses[0],
+      authenticated: false,
+    } as HarnessDoctorEntry;
+    const internal = {
+      ...READY_DOCTOR.harnesses[0],
+      kind: "internal",
+      installable: false,
+    } as HarnessDoctorEntry;
+    await renderHome(
+      app({
+        getHarnessDoctor: vi.fn(async () => ({
+          harnesses: [internal, external],
+        })),
+      }),
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "Set up a coding engine" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Start with a repository" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("leaves the loading empty when the doctor request fails", async () => {
     await renderHome(
       app({

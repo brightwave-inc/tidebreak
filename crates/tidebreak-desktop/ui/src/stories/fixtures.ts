@@ -548,6 +548,16 @@ export const harnessDoctor: HarnessDoctorReport = {
         structured_approvals: "unsupported",
       },
     }),
+    doctorEntry({
+      kind: "internal",
+      installable: false,
+      version: "0.1.0",
+      caps: {
+        ...fullCaps,
+        slash_commands: "unsupported",
+        native_file_change_events: "unsupported",
+      },
+    }),
   ],
 };
 

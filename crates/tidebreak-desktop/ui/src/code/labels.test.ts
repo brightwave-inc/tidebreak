@@ -16,6 +16,7 @@ import {
   preferredCodeModels,
   sessionLifecycleTooltip,
   sessionPermissionModeTooltip,
+  workspaceHarnesses,
 } from "./labels";
 
 function caps(
@@ -256,6 +257,17 @@ describe("harnessUnusableReason", () => {
     expect(
       harnessCanStartNow({ ...entry, found: true, authenticated: true }),
     ).toBe(true);
+  });
+});
+
+describe("workspaceHarnesses", () => {
+  it("keeps the internal engine out of repo-backed create surfaces", () => {
+    expect(
+      workspaceHarnesses([
+        { kind: "internal", marker: "chat" },
+        { kind: "claude_code", marker: "workspace" },
+      ] as const),
+    ).toEqual([{ kind: "claude_code", marker: "workspace" }]);
   });
 });
 

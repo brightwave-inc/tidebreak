@@ -23,6 +23,7 @@ import {
   HARNESS_TIER_LABELS,
   harnessNeedsDownload,
   isHarnessReady,
+  workspaceHarnesses,
 } from "./labels";
 
 /**
@@ -68,8 +69,9 @@ export function DoctorList({
   onCheckUpdates?: () => void;
   checkingUpdates?: boolean;
 }) {
-  const ready = report.harnesses.filter(isHarnessReady).length;
-  const total = report.harnesses.length;
+  const harnesses = workspaceHarnesses(report.harnesses);
+  const ready = harnesses.filter(isHarnessReady).length;
+  const total = harnesses.length;
   const onLatest = report.update_channel === "latest";
   return (
     <section className="flex flex-col gap-3">
@@ -81,7 +83,7 @@ export function DoctorList({
             // know "can I start work" does not walk every row to find out.
             <p className="text-muted-foreground text-sm">
               {ready === 0
-                ? report.harnesses.every((entry) => entry.found)
+                ? harnesses.every((entry) => entry.found)
                   ? "No engine is ready yet. Sign in to one below, then re-check."
                   : "No engine is ready yet. Download one, or pick it when you start a workspace."
                 : `${ready} of ${total} ${total === 1 ? "engine" : "engines"} ready.`}
@@ -123,7 +125,7 @@ export function DoctorList({
         </div>
       </div>
       <div className="divide-subtle overflow-hidden rounded-lg border divide-y">
-        {report.harnesses.map((entry) => (
+        {harnesses.map((entry) => (
           <DoctorRow
             key={entry.kind}
             entry={entry}

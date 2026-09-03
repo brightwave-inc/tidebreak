@@ -85,6 +85,7 @@ import {
   preferredCodeModels,
   CREATE_PERMISSION_MODE_FIXED,
   HARNESS_LABELS,
+  workspaceHarnesses,
   type CodeModelOption,
 } from "./labels";
 
@@ -272,7 +273,7 @@ export function NewWorkspaceDialog({
     [addedRepo, repos],
   );
 
-  const allHarnesses = doctor?.harnesses ?? [];
+  const allHarnesses = workspaceHarnesses(doctor?.harnesses ?? []);
   const selectableHarnesses = allHarnesses.filter(
     (entry) => !harnessUnusableReason(entry),
   );
