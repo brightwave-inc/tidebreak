@@ -1,0 +1,31 @@
+[package]
+name = "tidebreak-code-remote"
+description = "Remote code-session sandbox client, event ingestion, and lifecycle driver."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lib]
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+tidebreak-core = { path = "../tidebreak-core" }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tidebreak-core = { path = "../tidebreak-core", features = ["test-util"] }
+axum = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true }

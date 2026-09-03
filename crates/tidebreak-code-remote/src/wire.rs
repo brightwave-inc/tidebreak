@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 /// Longest `events` wait the environment honors, in seconds. A larger
 /// request is clamped server-side; staying at or under it keeps the clamp
 /// out of the picture.
-pub(crate) const EVENTS_MAX_WAIT_SECONDS: u32 = 25;
+pub const EVENTS_MAX_WAIT_SECONDS: u32 = 25;
 
 /// Largest message body the environment accepts, in bytes.
 const MESSAGE_MAX_BODY_BYTES: usize = 32 * 1024;
@@ -29,7 +29,7 @@ const MESSAGE_MAX_BODY_BYTES: usize = 32 * 1024;
 /// environment intersects rather than trusting these values. `max_turns` is
 /// a spawn-only opt-in — omission means no supervisor turn cap.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
-pub(crate) struct SpawnArguments {
+pub struct SpawnArguments {
     /// Administrator-defined profile name on the runtime endpoint.
     pub profile: String,
     /// Harness token the sandbox drives headless (`claude_code`, `codex`,
@@ -79,7 +79,7 @@ pub(crate) struct SpawnArguments {
 
 /// One git repository a spawn declares.
 #[derive(Clone, Debug, PartialEq, Serialize)]
-pub(crate) struct SpawnRepository {
+pub struct SpawnRepository {
     /// HTTPS URL of the repository.
     pub url: String,
     /// Branch or commit to start from. Absent means the remote's default.
@@ -91,7 +91,7 @@ pub(crate) struct SpawnRepository {
 /// the identifier and the cursor position to resume from.
 #[derive(Clone, Debug, Deserialize)]
 #[allow(dead_code)]
-pub(crate) struct SandboxLease {
+pub struct SandboxLease {
     /// Sandbox identifier every other call takes. Opaque here.
     pub sandbox_id: String,
     /// Lifecycle state at the moment the row committed.
@@ -112,7 +112,7 @@ pub(crate) struct SandboxLease {
 /// it cannot read.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum SandboxState {
+pub enum SandboxState {
     /// Recorded and preflighted; no backend object exists yet.
     Pending,
     /// A backend object has been requested and is not yet ready.
@@ -139,7 +139,7 @@ pub(crate) enum SandboxState {
 impl SandboxState {
     /// Whether the environment will run this sandbox no further.
     #[must_use]
-    pub(crate) fn is_terminal(self) -> bool {
+    pub fn is_terminal(self) -> bool {
         matches!(
             self,
             Self::Completed
@@ -154,7 +154,7 @@ impl SandboxState {
 /// Current state of one sandbox, reduced to the fields this server acts on.
 #[derive(Clone, Debug, Deserialize)]
 #[allow(dead_code)]
-pub(crate) struct SandboxStatus {
+pub struct SandboxStatus {
     /// Sandbox identifier.
     pub sandbox_id: String,
     /// Current lifecycle state.
@@ -190,7 +190,7 @@ pub(crate) struct SandboxStatus {
 
 /// Cursor into one sandbox's durable, gap-free event stream.
 #[derive(Clone, Copy, Debug, Default, Serialize)]
-pub(crate) struct EventCursor {
+pub struct EventCursor {
     /// Highest sequence already seen; omit to read from the beginning.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub after_seq: Option<i64>,
@@ -205,7 +205,7 @@ pub(crate) struct EventCursor {
 
 /// A page of one sandbox's durable event stream.
 #[derive(Clone, Debug, Deserialize)]
-pub(crate) struct SandboxEvents {
+pub struct SandboxEvents {
     /// Sandbox identifier.
     #[allow(dead_code)]
     pub sandbox_id: String,
@@ -221,7 +221,7 @@ pub(crate) struct SandboxEvents {
 
 /// One durable sandbox progress event.
 #[derive(Clone, Debug, Deserialize)]
-pub(crate) struct SandboxEvent {
+pub struct SandboxEvent {
     /// Per-sandbox monotonic, gap-free sequence number.
     pub seq: i64,
     /// Event kind slug.
@@ -237,7 +237,7 @@ pub(crate) struct SandboxEvent {
 
 /// One message on its way into a running sandbox's inbox.
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct SandboxMessage {
+pub struct SandboxMessage {
     /// Ordinary input for the sandbox's next turn. The environment attaches
     /// no meaning to it.
     pub body: String,
@@ -248,7 +248,7 @@ pub(crate) struct SandboxMessage {
 
 impl SandboxMessage {
     /// Refuses a body the environment would refuse, before the request.
-    pub(crate) fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> Result<(), String> {
         if self.body.trim().is_empty() {
             return Err("sandbox message body is empty".to_owned());
         }
@@ -266,7 +266,7 @@ impl SandboxMessage {
 /// delivery is at-least-once and asynchronous.
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[allow(dead_code)]
-pub(crate) struct MessageReceipt {
+pub struct MessageReceipt {
     /// Per-sandbox monotonic sequence this message was recorded at.
     pub seq: i64,
     /// Whether it will preempt the turn in flight.
@@ -279,7 +279,7 @@ pub(crate) struct MessageReceipt {
 
 /// The environment's error body: `{"error", "error_description"}`.
 #[derive(Clone, Debug, Default, Deserialize)]
-pub(crate) struct RuntimeErrorBody {
+pub struct RuntimeErrorBody {
     /// Machine-readable refusal code.
     #[serde(default)]
     pub error: String,

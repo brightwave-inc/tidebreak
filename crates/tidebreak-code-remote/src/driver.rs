@@ -28,12 +28,13 @@ use tidebreak_core::{
     FenceReason, IncarnationAdmission, IncarnationState, OwnerId,
 };
 
-use super::super::attention::persist_session;
-use super::super::bus::CodeEventBus;
-use super::super::recovery;
 use super::ingest::{ingest_events, IngestBinding, IngestOutcome};
 use super::wire::{EventCursor, SandboxMessage, SpawnArguments};
-use super::{RemoteSandboxError, SandboxProvisioner};
+use super::{
+    apply_attention, fence_session, journal_event, persist_session, reap_session,
+    recover_dead_worker, replace_attention, RemoteReapError, RemoteSandboxError, RemoteSessionHost,
+    SandboxProvisioner,
+};
 
 /// How long an unactivated intent may sit before the sweep closes it: long
 /// enough for a slow spawn round trip, short enough that a crashed server
@@ -42,7 +43,7 @@ const STALE_INTENT_AGE: chrono::Duration = chrono::Duration::minutes(10);
 
 /// Spawn-time settings for one remote session's sandboxes.
 #[derive(Clone, Debug)]
-pub(crate) struct RemoteSpawnSettings {
+pub struct RemoteSpawnSettings {
     /// Administrator-defined profile on the runtime endpoint.
     pub profile: String,
     /// Concurrent live incarnations one owner may hold.
@@ -56,7 +57,7 @@ pub(crate) struct RemoteSpawnSettings {
 
 /// What one submitted turn became.
 #[derive(Debug)]
-pub(crate) enum RemoteTurnOutcome {
+pub enum RemoteTurnOutcome {
     /// The turn reached the live sandbox's inbox.
     Delivered {
         /// The turn row, running. Boxed: the rows dwarf the refusals.
@@ -100,11 +101,11 @@ pub(crate) enum RemoteTurnOutcome {
 /// The driver one remote session's lifecycle calls go through: the store,
 /// the live bus, the transport, and the spawn settings, borrowed together
 /// so every operation reads the same world.
-pub(crate) struct RemoteDriver<'a> {
+pub struct RemoteDriver<'a> {
     /// The store every row lives in.
     pub db: &'a Arc<DbStore>,
     /// Live-update bus the journal publishes to.
-    pub bus: &'a CodeEventBus,
+    pub bus: &'a dyn RemoteSessionHost,
     /// The environment transport.
     pub provisioner: &'a dyn SandboxProvisioner,
     /// Spawn-time settings.
@@ -114,10 +115,10 @@ pub(crate) struct RemoteDriver<'a> {
 /// Surface the sign-in need on the session's attention.
 async fn sign_in_needed(
     db: &Arc<DbStore>,
-    bus: &CodeEventBus,
+    bus: &dyn RemoteSessionHost,
     session: &CodeSession,
 ) -> Result<(), tidebreak_core::AgentError> {
-    let _ = super::super::attention::apply_attention(
+    apply_attention(
         db,
         bus,
         &session.owner,
@@ -128,7 +129,6 @@ async fn sign_in_needed(
             "sign in to the sandbox environment",
             AttentionSource::Structured,
         ),
-        false,
     )
     .await?;
     Ok(())
@@ -140,12 +140,12 @@ async fn sign_in_needed(
 /// reason in the transcript.
 async fn refusal_notice(
     db: &Arc<DbStore>,
-    bus: &CodeEventBus,
+    bus: &dyn RemoteSessionHost,
     session: &CodeSession,
     message: String,
     attention: &str,
 ) -> Result<(), tidebreak_core::AgentError> {
-    let _ = super::super::session_worker::journal_event(
+    journal_event(
         db,
         bus,
         &session.owner,
@@ -157,13 +157,12 @@ async fn refusal_notice(
         },
     )
     .await;
-    let _ = super::super::attention::apply_attention(
+    apply_attention(
         db,
         bus,
         &session.owner,
         session.id,
         Attention::needs_you(attention, AttentionSource::Lifecycle),
-        false,
     )
     .await?;
     Ok(())
@@ -215,7 +214,7 @@ fn refusal_names(error: &RemoteSandboxError, reference: &str) -> bool {
 /// project them, settle turn rows, and close the incarnation when the
 /// environment says the sandbox ended.
 #[derive(Debug, Default)]
-pub(crate) struct PumpReport {
+pub struct PumpReport {
     /// Sandbox event sequences ingested this pump.
     pub ingested: u64,
     /// Whether the incarnation was closed this pump.
@@ -302,7 +301,7 @@ impl RemoteDriver<'_> {
     /// The session row is updated (lifecycle, attention) on success; the caller
     /// persists nothing else. `session`, `workspace`, and `repo` are the current
     /// rows — the caller owns loading and authorization.
-    pub(crate) async fn submit_turn(
+    pub async fn submit_turn(
         &self,
         session: &mut CodeSession,
         workspace: &CodeWorkspace,
@@ -320,7 +319,7 @@ impl RemoteDriver<'_> {
     /// trying, and outcomes like a held flush must leave the row queued.
     /// The claim itself is the local worker's atomic promotion; see
     /// [`start_turn_row`] for what a stale claim does.
-    pub(crate) async fn submit_turn_from(
+    pub async fn submit_turn_from(
         &self,
         session: &mut CodeSession,
         workspace: &CodeWorkspace,
@@ -563,7 +562,7 @@ impl RemoteDriver<'_> {
                     // earlier checkpoint or the base instead of looping on
                     // this refusal. Then fence so a reap starts fresh.
                     forget_session_wip_ref(db, &owner, session.id, &resume_ref).await?;
-                    recovery::fence_session(
+                    fence_session(
                         db,
                         bus,
                         session,
@@ -583,7 +582,7 @@ impl RemoteDriver<'_> {
     /// Idle when no incarnation is active. The caller schedules pumps; this
     /// function is safe to call on any cadence because the cursor is durable
     /// and replays are no-ops.
-    pub(crate) async fn pump(
+    pub async fn pump(
         &self,
         session: &mut CodeSession,
         wait_seconds: u16,
@@ -660,7 +659,7 @@ impl RemoteDriver<'_> {
                     detail: format!("the environment no longer serves this sandbox: {error}"),
                 };
                 report.fenced = Some(reason.clone());
-                recovery::fence_session(db, bus, session, reason).await?;
+                fence_session(db, bus, session, reason).await?;
                 return Ok(report);
             }
         };
@@ -714,7 +713,7 @@ impl RemoteDriver<'_> {
                 .await?
                 .filter(|turn| turn.status == CodeTurnStatus::Running);
             if open.is_some() {
-                if let Some(recovered) = recovery::recover_dead_worker(db, bus, session).await? {
+                if let Some(recovered) = recover_dead_worker(db, bus, session).await? {
                     *session = recovered;
                 }
             }
@@ -740,7 +739,7 @@ impl RemoteDriver<'_> {
         }
         if let Some(reason) = outcome.fence {
             report.fenced = Some(reason.clone());
-            recovery::fence_session(db, bus, session, reason).await?;
+            fence_session(db, bus, session, reason).await?;
         }
         Ok(report)
     }
@@ -750,10 +749,7 @@ impl RemoteDriver<'_> {
     ///
     /// Unlike a local reap, nothing is relaunched — the next turn reincarnates
     /// on demand.
-    pub(crate) async fn reap(
-        &self,
-        session: CodeSession,
-    ) -> Result<CodeSession, recovery::ReapSessionError> {
+    pub async fn reap(&self, session: CodeSession) -> Result<CodeSession, RemoteReapError> {
         let (db, bus, provisioner) = (self.db, self.bus, self.provisioner);
         let owner = session.owner.clone();
         if let Ok(Some(row)) = latest_incarnation(db, &owner, session.id).await {
@@ -779,7 +775,7 @@ impl RemoteDriver<'_> {
                 let _ = mark_incarnation_terminal_events_journaled(db, &owner, row.id).await;
             }
         }
-        recovery::reap_session(db, bus, session).await
+        reap_session(db, bus, session).await
     }
 }
 
@@ -789,9 +785,9 @@ impl RemoteDriver<'_> {
 /// An intent that never activated is a crash between provision and store.
 /// The sandbox it may have spawned is unknown to this server, so it cannot
 /// be cancelled from here; the ceilings requested at spawn bound it.
-pub(crate) async fn sweep_stale_intents(
+pub async fn sweep_stale_intents(
     db: &Arc<DbStore>,
-    bus: &CodeEventBus,
+    bus: &dyn RemoteSessionHost,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<u64, tidebreak_core::AgentError> {
     let cutoff = now - STALE_INTENT_AGE;
@@ -805,7 +801,7 @@ pub(crate) async fn sweep_stale_intents(
         else {
             continue;
         };
-        recovery::fence_session(
+        fence_session(
             db,
             bus,
             &mut session,
@@ -835,7 +831,7 @@ fn repository_url(repo: &CodeRepo) -> Result<String, tidebreak_core::AgentError>
 /// Insert the running turn row and mark the session working.
 async fn start_turn_row(
     db: &Arc<DbStore>,
-    bus: &CodeEventBus,
+    bus: &dyn RemoteSessionHost,
     session: &mut CodeSession,
     ordinal: i64,
     text: &str,
@@ -894,7 +890,7 @@ async fn start_turn_row(
         None => insert_turn(db, &session.owner, &turn).await?,
     }
     session.lifecycle = CodeSessionLifecycle::Running;
-    super::super::attention::replace_attention(
+    replace_attention(
         session,
         Attention::working(AttentionSource::Lifecycle),
         false,
@@ -1414,7 +1410,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (db, bus, mut session, _workspace, _repo) = seed(dir.path()).await;
         super::super::fixtures::seeded_incarnation(&db, &session).await;
-        recovery::fence_session(
+        fence_session(
             &db,
             &bus,
             &mut session,

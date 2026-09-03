@@ -29,8 +29,8 @@ use tidebreak_core::{
     OwnerId, SequencedCodeEvent, MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS,
 };
 
-use super::super::bus::CodeEventBus;
 use super::wire::{SandboxEvent, SandboxEvents, SandboxState};
+use super::{apply_attention, RemoteSessionHost};
 
 /// The session-side identity one cursor read is ingested under.
 #[derive(Clone, Debug)]
@@ -240,7 +240,7 @@ fn project_event(binding: &IngestBinding, kind: &str, payload: &Value) -> Projec
 /// projection.
 pub(crate) async fn ingest_events(
     db: &Arc<DbStore>,
-    bus: &CodeEventBus,
+    bus: &dyn RemoteSessionHost,
     binding: &IngestBinding,
     read: &SandboxEvents,
 ) -> Result<IngestOutcome, tidebreak_core::AgentError> {
@@ -295,7 +295,7 @@ fn terminal_state_words(state: SandboxState) -> &'static str {
 /// Returns whether the event was ingested now (false when the cursor had it).
 async fn apply_one(
     db: &Arc<DbStore>,
-    bus: &CodeEventBus,
+    bus: &dyn RemoteSessionHost,
     binding: &IngestBinding,
     event: &SandboxEvent,
     outcome: &mut IngestOutcome,
@@ -340,15 +340,7 @@ async fn apply_one(
     // them leaves attention stale, and the replay is what corrects it.
     // Re-applying an attention the session already holds is a no-op.
     if let Some(next) = projection.attention {
-        let _ = super::super::attention::apply_attention(
-            db,
-            bus,
-            &binding.owner,
-            binding.session_id,
-            next,
-            false,
-        )
-        .await?;
+        apply_attention(db, bus, &binding.owner, binding.session_id, next).await?;
     }
     Ok(ingested.is_some())
 }
