@@ -1226,6 +1226,51 @@ describe("CodeComposer", () => {
     expect(useComposerDrafts.getState().drafts["sess-1"]).toBeFalsy();
   });
 
+  it("clears the persisted draft before the turn request settles", async () => {
+    let resolveSend!: () => void;
+    const onSend = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSend = resolve;
+        }),
+    );
+    const sending = renderComposer(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        sessionId="sess-1"
+        onSend={onSend}
+        onInterrupt={vi.fn()}
+      />,
+    );
+
+    const box = screen.getByRole("textbox", { name: "Message" });
+    fireEvent.change(box, { target: { value: "accepted on the way out" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(onSend).toHaveBeenCalledOnce());
+    expect(box).toHaveValue("");
+    expect(useComposerDrafts.getState().drafts["sess-1"]).toBeFalsy();
+
+    sending.unmount();
+    renderComposer(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        sessionId="sess-1"
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("");
+
+    await act(async () => {
+      resolveSend();
+      await Promise.resolve();
+    });
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("");
+    expect(useComposerDrafts.getState().drafts["sess-1"]).toBeFalsy();
+  });
+
   it("does not re-append first-turn recovery after a Settings remount", async () => {
     const user = userEvent.setup();
     const recovery = {
