@@ -506,6 +506,33 @@ export type AppViewSession = { frame_path: string, };
 export type ApprovalClass = "read_only" | "workspace" | "sensitive";
 
 /**
+ * The decision on one approval.
+ *
+ * The richer variants are capability-gated: the server refuses them for an
+ * engine whose capability vector does not declare the channel, and a grant
+ * is named by its index into the rungs the approval's own kind offered —
+ * a client can pick a rung the card showed, never invent a scope.
+ */
+export type ApprovalDecision = "approve" | "deny" | { "approve_with_grant": {
+/**
+ * Index into the approval kind's `offered_grants`, narrowest first.
+ */
+grant_index: number, } } | { "answers": {
+/**
+ * Answers to a questions approval, validated server-side.
+ */
+answers: Array<UserQuestionAnswer>, } } | { "plan_decision": {
+/**
+ * Whether the proposed plan is accepted.
+ */
+approve: boolean, } };
+
+/**
+ * Body of `POST /approvals/{id}/decision`.
+ */
+export type ApprovalDecisionBody = { decision: ApprovalDecision, feedback?: string, };
+
+/**
  * Outcome recorded on [`Event::ApprovalResolved`].
  */
 export type ApprovalDecisionKind = { "type": "approve" } | { "type": "deny",
@@ -586,6 +613,15 @@ questions: Array<UserQuestion>, } | { "type": "plan",
  * accepted.
  */
 proposed_mode: PermissionMode, };
+
+/**
+ * One parked or decided engine approval.
+ */
+export type ApprovalSnapshot = { id: ApprovalId, session_id: SessionId, turn_id: TurnId, kind: ApprovalKind,
+/**
+ * Exact JSON the engine sent, already size-capped. The card renders this.
+ */
+harness_raw_json: string, state: ApprovalState, feedback?: string, requested_at: string, decided_at?: string, };
 
 /**
  * State of a persisted approval.
@@ -945,42 +981,6 @@ export type CodeAnalyticsSnapshot = { range: CodeAnalyticsRange, from?: string, 
 export type CodeAnalyticsTotals = { sessions: number, turns: number, completed_turns: number, failed_turns: number, interrupted_turns: number, running_turns: number, input_tokens: number, output_tokens: number, cache_read_tokens: number, cache_write_tokens: number, total_tokens: number, estimated_cost_microusd: number, pull_requests_opened: number, pull_requests_merged: number, };
 
 /**
- * The decision on one approval.
- *
- * The richer variants are capability-gated: the server refuses them for an
- * engine whose capability vector does not declare the channel, and a grant
- * is named by its index into the rungs the approval's own kind offered —
- * a client can pick a rung the card showed, never invent a scope.
- */
-export type CodeApprovalDecision = "approve" | "deny" | { "approve_with_grant": {
-/**
- * Index into the approval kind's `offered_grants`, narrowest first.
- */
-grant_index: number, } } | { "answers": {
-/**
- * Answers to a questions approval, validated server-side.
- */
-answers: Array<UserQuestionAnswer>, } } | { "plan_decision": {
-/**
- * Whether the proposed plan is accepted.
- */
-approve: boolean, } };
-
-/**
- * Body of `POST /code/approvals/{id}/decision`.
- */
-export type CodeApprovalDecisionBody = { decision: CodeApprovalDecision, feedback?: string, };
-
-/**
- * One parked or decided engine approval.
- */
-export type CodeApprovalSnapshot = { id: ApprovalId, session_id: SessionId, turn_id: TurnId, kind: ApprovalKind,
-/**
- * Exact JSON the engine sent, already size-capped. The card renders this.
- */
-harness_raw_json: string, state: ApprovalState, feedback?: string, requested_at: string, decided_at?: string, };
-
-/**
  * One failing check's downloaded job log:
  * `POST /code/workspaces/{id}/pr/check-logs`.
  *
@@ -1278,7 +1278,7 @@ relation?: CodePullRequestRelation, };
 export type CodeFileChange = { path: string, kind: FileChangeKind, insertions: number, deletions: number, previous_path?: string, };
 
 /**
- * Body of `POST /code/sessions/{id}/fork`. An absent body forks at the
+ * Body of `POST /sessions/{id}/fork`. An absent body forks at the
  * newest turn.
  */
 export type CodeForkBody = {
@@ -1288,7 +1288,7 @@ export type CodeForkBody = {
 at_turn?: TurnId, };
 
 /**
- * A written fork handoff: `POST /code/sessions/{id}/fork`.
+ * A written fork handoff: `POST /sessions/{id}/fork`.
  *
  * `path` is the condensed transcript, absolute under private storage so a
  * child agent of any engine can read it without Git ever indexing it. `dir`
@@ -1477,99 +1477,6 @@ export type CodeRepoSource = { kind: string, available: boolean, remediation?: s
 export type CodeRepoSources = { sources: Array<CodeRepoSource>, chooses_destination: boolean, };
 
 /**
- * Cheap per-session digest on `/code/updates`.
- */
-export type CodeSessionDigest = {
-/**
- * `None` for a session that binds no workspace.
- */
-workspace: WorkspaceId | null, session: SessionId, kind: SessionKind,
-/**
- * Engine identity for list surfaces that collapse several sessions into
- * one workspace row. Optional on the wire so a desktop can still read a
- * digest from an older server during an update.
- */
-harness_kind?: HarnessKind, lifecycle: SessionLifecycle, attention: Attention, title: string, turn_count: number,
-/**
- * Timestamp trigger delivery uses to rank candidate sessions: the newest
- * turn start, or session creation before the first turn. Optional so a
- * desktop can still read a digest from an older server during an update.
- */
-trigger_target_at?: string,
-/**
- * What the live turn is occupied with, while running.
- */
-activity?: SessionActivity,
-/**
- * The subject of the tool the live turn is waiting on: the command,
- * path, query, or task description. Present only while `activity`
- * names a tool, and bounded to one line.
- */
-activity_detail?: string, pr_state?: PullRequestDigest,
-/**
- * How many pull requests hold a durable attribution to this workspace
- * (decision 77). Absent when none do.
- */
-pr_count?: number,
-/**
- * Watch progress, present only on `kind: watch` digests.
- */
-watch_state?: CodeWatchState, watch_detail?: string, watch_cycles?: number,
-/**
- * Harness subagents on this session, present only when any were
- * observed (decision 52).
- */
-subagents?: Array<CodeSubagentSummary>,
-/**
- * Where this session stands, in a sentence, derived from the newest turn
- * that carries one. Absent until a turn has been recapped, and on
- * machines with no utility model to derive one.
- */
-recap?: string,
-/**
- * Pending memory proposals that originated in this session.
- */
-memory_proposal_count?: number, };
-
-/**
- * Where an externally created session came from. The desktop renders it
- * as the provenance banner; a session the desktop created carries none.
- */
-export type CodeSessionExternalOrigin = {
-/**
- * The channel family, for example `slack`.
- */
-channel_kind: string,
-/**
- * The channel's durable conversation identity, opaque to the server.
- * For Slack this is `workspace/channel/thread_ts`, which the desktop
- * turns into a thread permalink.
- */
-external_key: string, };
-
-/**
- * One durable conversation with an external agent engine.
- */
-export type CodeSessionSnapshot = { id: SessionId,
-/**
- * `None` for a session that binds no workspace: the in-process
- * engine's (decision 0048 step 5).
- */
-workspace_id: WorkspaceId | null, kind: SessionKind, harness_kind: HarnessKind, harness_version?: string, harness_resume_ref?: string, permission_mode: PermissionMode, model?: string,
-/**
- * Absent means the engine's own default, which is not any level.
- */
-reasoning_effort?: ReasoningEffort,
-/**
- * Whether this session runs its turns in the engine's fast mode.
- */
-fast_mode: boolean, lifecycle: SessionLifecycle, fence_reason?: FenceReason, attention: Attention, unrecognized_event_count: number, created_at: string,
-/**
- * Present when an external channel created the session.
- */
-external_origin?: CodeSessionExternalOrigin, };
-
-/**
  * Status of a harness subagent, derived from its spanning `Task` call
  * (decision 52): the call's start is the subagent's start, its result is
  * the end and outcome.
@@ -1594,6 +1501,13 @@ name: string,
  * Status derived from the spanning call.
  */
 status: CodeSubagentStatus, };
+
+/**
+ * Unsequenced activity notice published on the updates channel.
+ *
+ * Never journaled. A client that missed one just pulls from its last cursor.
+ */
+export type CodeTerminalActivityNotice = { workspace_id: WorkspaceId, terminal_id: CodeTerminalId, };
 
 /**
  * Identifies one auxiliary terminal attached to a workspace.
@@ -1640,76 +1554,6 @@ export type CodeTriggerId = string;
  * One armed trigger, as the interface reads it.
  */
 export type CodeTriggerSnapshot = { id: CodeTriggerId, repo_id: RepoId, condition: CodeTriggerCondition, action: CodeTriggerAction, enabled: boolean, created_at: string, updated_at: string, };
-
-/**
- * Where one closing-message rewrite stands.
- */
-export type CodeTurnRewriteState = "rewriting" | "rewritten" | "failed";
-
-/**
- * One user→engine turn.
- */
-export type CodeTurnSnapshot = { id: TurnId, session_id: SessionId, ordinal: number, status: TurnStatus, model?: string, fast_mode: boolean, user_input: string, attachments: Array<ImageRef>, usage?: TurnUsage, checkpoint_ref?: string, diffstat?: Diffstat, started_at: string, ended_at?: string,
-/**
- * Lucid rewrite of the closing message. The journal keeps the original.
- */
-rewrite?: string, };
-
-/**
- * One unsequenced notice on `WS /code/updates`.
- *
- * A connect is restated as [`Self::Snapshot`]; later notices are live only.
- */
-export type CodeUpdateNotice = { "type": "snapshot",
-/**
- * One row per live session.
- */
-sessions: Array<CodeSessionDigest>, } | { "type": "digest", workspace: WorkspaceId | null, session: SessionId, kind: SessionKind,
-/**
- * Engine identity for the session represented by this digest.
- */
-harness_kind?: HarnessKind, lifecycle: SessionLifecycle, attention: Attention, title: string, turn_count: number,
-/**
- * Timestamp trigger delivery uses to rank candidate sessions.
- */
-trigger_target_at?: string,
-/**
- * What the live turn is occupied with, while running.
- */
-activity?: SessionActivity,
-/**
- * The subject of the tool the live turn is waiting on, while
- * `activity` names one.
- */
-activity_detail?: string,
-/**
- * Boxed to keep the notice enum's variants near one size; the wire
- * shape is unchanged.
- */
-pr_state?: PullRequestDigest,
-/**
- * How many pull requests hold a durable attribution to this
- * workspace (decision 77). Absent when none do.
- */
-pr_count?: number,
-/**
- * Watch progress, present only on `kind: watch` digests.
- */
-watch_state?: CodeWatchState, watch_detail?: string, watch_cycles?: number,
-/**
- * Harness subagents on this session, present only when any were
- * observed (decision 52).
- */
-subagents?: Array<CodeSubagentSummary>,
-/**
- * Where this session stands, in a sentence, derived from the newest
- * turn that carries one.
- */
-recap?: string,
-/**
- * Pending memory proposals that originated in this session.
- */
-memory_proposal_count?: number, } | { "type": "terminal_activity", workspace_id: WorkspaceId, terminal_id: CodeTerminalId, } | { "type": "clone_progress", job: string, phase: string, percent?: number, done: boolean, error?: string, repo_id?: RepoId, } | { "type": "harness_install", kind: HarnessKind, version?: string, phase: string, done: boolean, error?: string, } | { "type": "delivery" } | { "type": "turn_rewrite", session: SessionId, turn_id: TurnId, state: CodeTurnRewriteState, rewrite?: string, };
 
 /**
  * Identifies one durable watch task on a workspace's pull request.
@@ -3047,16 +2891,12 @@ byte_len: number, };
 
 /**
  * Which conversation an entry belongs to.
- *
- * Tagged because chat ids and code session ids are still separate spaces
- * (the repository check `chat_and_code_entities_do_not_cross_reference`
- * enforces it). When step 5 merges the entities this collapses to one id.
  */
-export type InboxConversation = { "surface": "chat", chat_id: SessionId, } | { "surface": "code", session_id: SessionId,
+export type InboxConversation = { session_id: SessionId,
 /**
- * `None` for a session with no workspace: the in-process engine's.
+ * Present when the conversation belongs to a repo-backed workspace.
  */
-workspace_id: WorkspaceId | null, };
+workspace_id?: WorkspaceId, };
 
 /**
  * One conversation that wants the reader, and why.
@@ -4840,7 +4680,7 @@ export type RootAttachmentOrigin = "project_default" | "conversation";
 /**
  * One event on the per-session WebSocket.
  */
-export type SequencedCodeEventFrame = {
+export type SequencedEventFrame = {
 /**
  * Journal position. On a `transient` frame this is the cursor the event
  * streamed behind, not a position the frame occupies — resume from it
@@ -4875,6 +4715,77 @@ truncated?: boolean, };
 export type SessionActivity = "agent" | "shell" | "monitor" | "subagents" | "file" | "search" | "tool";
 
 /**
+ * Cheap per-session digest on `/updates`.
+ */
+export type SessionDigest = {
+/**
+ * `None` for a session that binds no workspace.
+ */
+workspace: WorkspaceId | null, session: SessionId, kind: SessionKind,
+/**
+ * Engine identity for list surfaces that collapse several sessions into
+ * one workspace row. Optional on the wire so a desktop can still read a
+ * digest from an older server during an update.
+ */
+harness_kind?: HarnessKind, lifecycle: SessionLifecycle, attention: Attention, title: string, turn_count: number,
+/**
+ * Timestamp trigger delivery uses to rank candidate sessions: the newest
+ * turn start, or session creation before the first turn. Optional so a
+ * desktop can still read a digest from an older server during an update.
+ */
+trigger_target_at?: string,
+/**
+ * What the live turn is occupied with, while running.
+ */
+activity?: SessionActivity,
+/**
+ * The subject of the tool the live turn is waiting on: the command,
+ * path, query, or task description. Present only while `activity`
+ * names a tool, and bounded to one line.
+ */
+activity_detail?: string, pr_state?: PullRequestDigest,
+/**
+ * How many pull requests hold a durable attribution to this workspace
+ * (decision 77). Absent when none do.
+ */
+pr_count?: number,
+/**
+ * Watch progress, present only on `kind: watch` digests.
+ */
+watch_state?: CodeWatchState, watch_detail?: string, watch_cycles?: number,
+/**
+ * Harness subagents on this session, present only when any were
+ * observed (decision 52).
+ */
+subagents?: Array<CodeSubagentSummary>,
+/**
+ * Where this session stands, in a sentence, derived from the newest turn
+ * that carries one. Absent until a turn has been recapped, and on
+ * machines with no utility model to derive one.
+ */
+recap?: string,
+/**
+ * Pending memory proposals that originated in this session.
+ */
+memory_proposal_count?: number, };
+
+/**
+ * Where an externally created session came from. The desktop renders it
+ * as the provenance banner; a session the desktop created carries none.
+ */
+export type SessionExternalOrigin = {
+/**
+ * The channel family, for example `slack`.
+ */
+channel_kind: string,
+/**
+ * The channel's durable conversation identity, opaque to the server.
+ * For Slack this is `workspace/channel/thread_ts`, which the desktop
+ * turns into a thread permalink.
+ */
+external_key: string, };
+
+/**
  * Identifies a persistent conversation.
  */
 export type SessionId = string;
@@ -4888,6 +4799,28 @@ export type SessionKind = "interactive" | "watch";
  * Lifecycle of a persisted code session.
  */
 export type SessionLifecycle = "created" | "idle" | "running" | "fenced" | "ended";
+
+/**
+ * One durable conversation with an external agent engine.
+ */
+export type SessionSnapshot = { id: SessionId,
+/**
+ * `None` for a session that binds no workspace: the in-process
+ * engine's (decision 0048 step 5).
+ */
+workspace_id: WorkspaceId | null, kind: SessionKind, harness_kind: HarnessKind, harness_version?: string, harness_resume_ref?: string, permission_mode: PermissionMode, model?: string,
+/**
+ * Absent means the engine's own default, which is not any level.
+ */
+reasoning_effort?: ReasoningEffort,
+/**
+ * Whether this session runs its turns in the engine's fast mode.
+ */
+fast_mode: boolean, lifecycle: SessionLifecycle, fence_reason?: FenceReason, attention: Attention, unrecognized_event_count: number, created_at: string,
+/**
+ * Present when an external channel created the session.
+ */
+external_origin?: SessionExternalOrigin, };
 
 /**
  * Body of `PUT /code/worktree-root`. A null or blank root clears the setting.
@@ -5508,6 +5441,20 @@ export type TurnFailureCategory = "rate_limited" | "auth" | "provider_access" | 
 export type TurnId = string;
 
 /**
+ * Where one closing-message rewrite stands.
+ */
+export type TurnRewriteState = "rewriting" | "rewritten" | "failed";
+
+/**
+ * One user→engine turn.
+ */
+export type TurnSnapshot = { id: TurnId, session_id: SessionId, ordinal: number, status: TurnStatus, model?: string, fast_mode: boolean, user_input: string, attachments: Array<ImageRef>, usage?: TurnUsage, checkpoint_ref?: string, diffstat?: Diffstat, started_at: string, ended_at?: string,
+/**
+ * Lucid rewrite of the closing message. The journal keeps the original.
+ */
+rewrite?: string, };
+
+/**
  * Status of one user→engine turn.
  *
  * Absorbs [`crate::model::TurnRunStatus`] one-for-one. Chat's `cancelled`
@@ -5588,6 +5535,62 @@ export type UpdateCodeTriggerBody = { enabled: boolean, };
  * Body of `PATCH /memory/records/{id}`.
  */
 export type UpdateMemoryRecordBody = { expected_revision: number, kind: MemoryKind, title: string, body: string, author: MemoryAuthor, origin: MemoryOrigin, evidence: Array<MemoryEvidence>, links: Array<MemoryLink>, expires_at: string | null, observation_count: number, };
+
+/**
+ * One unsequenced notice on `WS /updates`.
+ *
+ * A connect is restated as [`Self::Snapshot`]; later notices are live only.
+ */
+export type UpdateNotice = { "type": "snapshot",
+/**
+ * One row per live session.
+ */
+sessions: Array<SessionDigest>, } | { "type": "digest", workspace: WorkspaceId | null, session: SessionId, kind: SessionKind,
+/**
+ * Engine identity for the session represented by this digest.
+ */
+harness_kind?: HarnessKind, lifecycle: SessionLifecycle, attention: Attention, title: string, turn_count: number,
+/**
+ * Timestamp trigger delivery uses to rank candidate sessions.
+ */
+trigger_target_at?: string,
+/**
+ * What the live turn is occupied with, while running.
+ */
+activity?: SessionActivity,
+/**
+ * The subject of the tool the live turn is waiting on, while
+ * `activity` names one.
+ */
+activity_detail?: string,
+/**
+ * Boxed to keep the notice enum's variants near one size; the wire
+ * shape is unchanged.
+ */
+pr_state?: PullRequestDigest,
+/**
+ * How many pull requests hold a durable attribution to this
+ * workspace (decision 77). Absent when none do.
+ */
+pr_count?: number,
+/**
+ * Watch progress, present only on `kind: watch` digests.
+ */
+watch_state?: CodeWatchState, watch_detail?: string, watch_cycles?: number,
+/**
+ * Harness subagents on this session, present only when any were
+ * observed (decision 52).
+ */
+subagents?: Array<CodeSubagentSummary>,
+/**
+ * Where this session stands, in a sentence, derived from the newest
+ * turn that carries one.
+ */
+recap?: string,
+/**
+ * Pending memory proposals that originated in this session.
+ */
+memory_proposal_count?: number, } | { "type": "terminal_activity", workspace_id: WorkspaceId, terminal_id: CodeTerminalId, } | { "type": "clone_progress", job: string, phase: string, percent?: number, done: boolean, error?: string, repo_id?: RepoId, } | { "type": "harness_install", kind: HarnessKind, version?: string, phase: string, done: boolean, error?: string, } | { "type": "delivery" } | { "type": "turn_rewrite", session: SessionId, turn_id: TurnId, state: TurnRewriteState, rewrite?: string, };
 
 /**
  * One bounded question shown to the user.
@@ -5768,15 +5771,25 @@ export const MAX_WIRE_CURSOR_CHARS = 256;
 
 // Compatibility aliases for clients that still use the earlier conversation names.
 export type ChatId = SessionId;
+export type CodeApprovalDecision = ApprovalDecision;
+export type CodeApprovalDecisionBody = ApprovalDecisionBody;
 export type CodeApprovalId = ApprovalId;
 export type CodeApprovalKind = ApprovalKind;
+export type CodeApprovalSnapshot = ApprovalSnapshot;
 export type CodeApprovalState = ApprovalState;
 export type CodeEvent = Event;
 export type CodeSessionActivity = SessionActivity;
+export type CodeSessionDigest = SessionDigest;
+export type CodeSessionExternalOrigin = SessionExternalOrigin;
 export type CodeSessionId = SessionId;
 export type CodeSessionKind = SessionKind;
 export type CodeSessionLifecycle = SessionLifecycle;
+export type CodeSessionSnapshot = SessionSnapshot;
 export type CodeTurnId = TurnId;
+export type CodeTurnRewriteState = TurnRewriteState;
+export type CodeTurnSnapshot = TurnSnapshot;
 export type CodeTurnStatus = TurnStatus;
+export type CodeUpdateNotice = UpdateNotice;
 export type CodeUsage = TurnUsage;
 export type QueuedTurn = QueuedAgentTurn;
+export type SequencedCodeEventFrame = SequencedEventFrame;
