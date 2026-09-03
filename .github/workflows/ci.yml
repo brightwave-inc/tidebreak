@@ -388,14 +388,13 @@ jobs:
     if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
     env:
       CARGO_INCREMENTAL: 0
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
-      SCCACHE_GHA_ENABLED: "true"
-      # GitHub scopes pull-request caches to the PR merge ref. Let reruns reuse
-      # changed compiler outputs; cache-cleanup.yml removes that scope on close.
-      SCCACHE_GHA_RW_MODE: READ_WRITE
       RUSTC_WRAPPER: sccache
       RUSTFLAGS: -C link-arg=-fuse-ld=mold
     steps:
@@ -403,9 +402,10 @@ jobs:
       - name: Install toolchain (honors rust-toolchain.toml)
         run: rustup show
       - name: Set up compiler cache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        uses: ./.github/actions/setup-sccache-s3
         with:
-          version: v0.16.0
+          access: ${{ github.event_name == 'pull_request' && 'read' || 'write' }}
+          remote-cache-enabled: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install system deps (Tauri)
         timeout-minutes: 8
         run: |
@@ -443,12 +443,13 @@ jobs:
     if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
     env:
       CARGO_INCREMENTAL: 0
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
-      SCCACHE_GHA_ENABLED: "true"
-      SCCACHE_GHA_RW_MODE: READ_WRITE
       RUSTC_WRAPPER: sccache
       RUSTFLAGS: -C link-arg=-fuse-ld=mold
     steps:
@@ -456,9 +457,10 @@ jobs:
       - name: Install toolchain (honors rust-toolchain.toml)
         run: rustup show
       - name: Set up compiler cache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        uses: ./.github/actions/setup-sccache-s3
         with:
-          version: v0.16.0
+          access: ${{ github.event_name == 'pull_request' && 'read' || 'write' }}
+          remote-cache-enabled: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install system deps (Tauri)
         timeout-minutes: 8
         run: |
@@ -496,11 +498,12 @@ jobs:
     # larger runner cannot stall merges.
     runs-on: ${{ vars.CI_WINDOWS_RUNNER || 'windows-latest' }}
     timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
     env:
       CARGO_INCREMENTAL: 0
       CARGO_PROFILE_DEV_DEBUG: 0
-      SCCACHE_GHA_ENABLED: "true"
-      SCCACHE_GHA_RW_MODE: READ_WRITE
       RUSTC_WRAPPER: sccache
     steps:
       # A newer main commit contains this one, so its own Windows run proves
@@ -531,9 +534,10 @@ jobs:
         run: rustup show
       - name: Set up compiler cache
         if: ${{ steps.tip.outputs.superseded != 'true' }}
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        uses: ./.github/actions/setup-sccache-s3
         with:
-          version: v0.16.0
+          access: ${{ github.event_name == 'pull_request' && 'read' || 'write' }}
+          remote-cache-enabled: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         if: ${{ steps.tip.outputs.superseded != 'true' }}
         with:
@@ -579,12 +583,13 @@ jobs:
     if: ${{ needs.changes.outputs.windows_native == 'true' }}
     runs-on: ${{ vars.CI_WINDOWS_RUNNER || 'windows-latest' }}
     timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
     env:
       CARGO_INCREMENTAL: 0
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
-      SCCACHE_GHA_ENABLED: "true"
-      SCCACHE_GHA_RW_MODE: READ_WRITE
       RUSTC_WRAPPER: sccache
       # link.exe dominates Windows test-binary time on four cores. rust-lld
       # ships with the toolchain and is the MSVC analogue of mold on Linux.
@@ -594,9 +599,10 @@ jobs:
       - name: Install toolchain (honors rust-toolchain.toml)
         run: rustup show
       - name: Set up compiler cache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        uses: ./.github/actions/setup-sccache-s3
         with:
-          version: v0.16.0
+          access: ${{ github.event_name == 'pull_request' && 'read' || 'write' }}
+          remote-cache-enabled: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: windows-check-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
@@ -660,6 +666,9 @@ jobs:
     # job uses ubuntu-latest so a missing larger runner cannot stall merges.
     runs-on: ${{ vars.CI_TEST_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -668,8 +677,6 @@ jobs:
       CARGO_INCREMENTAL: 0
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
-      SCCACHE_GHA_ENABLED: "true"
-      SCCACHE_GHA_RW_MODE: READ_WRITE
       RUSTC_WRAPPER: sccache
       RUSTFLAGS: -C link-arg=-fuse-ld=mold
     steps:
@@ -681,9 +688,10 @@ jobs:
         with:
           tool: cargo-nextest@0.9.143
       - name: Set up compiler cache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        uses: ./.github/actions/setup-sccache-s3
         with:
-          version: v0.16.0
+          access: ${{ github.event_name == 'pull_request' && 'read' || 'write' }}
+          remote-cache-enabled: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install headless system deps
         timeout-minutes: 8
         run: |
@@ -746,6 +754,9 @@ jobs:
     if: ${{ needs.changes.outputs.workspace == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
     services:
       postgres:
         image: postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
@@ -766,17 +777,16 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: 0
       TIDEBREAK_POSTGRES_TEST_URL: postgres://postgres:postgres@localhost:5432/tidebreak_test
       TIDEBREAK_REQUIRE_POSTGRES_TEST: "true"
-      SCCACHE_GHA_ENABLED: "true"
-      SCCACHE_GHA_RW_MODE: READ_WRITE
       RUSTC_WRAPPER: sccache
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install toolchain (honors rust-toolchain.toml)
         run: rustup show
       - name: Set up compiler cache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        uses: ./.github/actions/setup-sccache-s3
         with:
-          version: v0.16.0
+          access: ${{ github.event_name == 'pull_request' && 'read' || 'write' }}
+          remote-cache-enabled: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: cargo-registry-v3-${{ hashFiles('Cargo.lock') }}
@@ -804,20 +814,22 @@ jobs:
     if: ${{ needs.changes.outputs.workspace == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    permissions:
+      contents: read
+      id-token: write
     env:
       CARGO_INCREMENTAL: 0
       CARGO_PROFILE_DEV_DEBUG: 0
-      SCCACHE_GHA_ENABLED: "true"
-      SCCACHE_GHA_RW_MODE: READ_WRITE
       RUSTC_WRAPPER: sccache
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Install toolchain (honors rust-toolchain.toml)
         run: rustup show
       - name: Set up compiler cache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        uses: ./.github/actions/setup-sccache-s3
         with:
-          version: v0.16.0
+          access: ${{ github.event_name == 'pull_request' && 'read' || 'write' }}
+          remote-cache-enabled: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: cargo-registry-v3-${{ hashFiles('Cargo.lock') }}

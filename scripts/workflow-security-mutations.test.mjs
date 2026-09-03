@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 const repositoryRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const policyTest = join(repositoryRoot, "scripts", "workflow-security.test.mjs");
 const fixturePaths = [
+  ".github/actions/setup-sccache-s3/action.yml",
   ".github/workflows",
   ".github/CODEOWNERS",
   ".github/release-drafter.yml",
@@ -138,6 +139,32 @@ test("the mirrored workflow-security fixture passes before mutation", () => {
 });
 
 const mutations = [
+  {
+    name: "compiler cache pull-request write access",
+    file: ".github/workflows/ci.yml",
+    expected: "compiler caches use OIDC-scoped S3 access",
+    mutate: (source) =>
+      source.replace(
+        "access: ${{ github.event_name == 'pull_request' && 'read' || 'write' }}",
+        "access: write",
+      ),
+  },
+  {
+    name: "compiler cache role escalation",
+    file: ".github/actions/setup-sccache-s3/action.yml",
+    expected: "compiler caches use OIDC-scoped S3 access",
+    mutate: (source) => source.replace("inputs.access == 'write'", "true"),
+  },
+  {
+    name: "compiler cache fork OIDC access",
+    file: ".github/workflows/ci.yml",
+    expected: "compiler caches use OIDC-scoped S3 access",
+    mutate: (source) =>
+      source.replace(
+        "          remote-cache-enabled: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}\n",
+        "",
+      ),
+  },
   {
     name: "self-host mutable runtime packages",
     file: "deploy/self-host/Dockerfile",

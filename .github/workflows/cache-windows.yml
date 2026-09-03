@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - .cargo/**
+      - .github/actions/setup-sccache-s3/**
       - .github/workflows/cache-windows.yml
       - Cargo.lock
       - Cargo.toml
@@ -51,6 +52,9 @@ jobs:
     needs: cargo-downloads
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
+    permissions:
+      contents: read
+      id-token: write
     defaults:
       run:
         shell: bash
@@ -67,11 +71,6 @@ jobs:
     env:
       CARGO_INCREMENTAL: 0
       RUSTC_WRAPPER: sccache
-      SCCACHE_GHA_ENABLED: "true"
-      # GitHub throttles sccache's many small writes. Retain its existing
-      # object cache as a read-only fallback and persist build outputs below
-      # with one cache archive per architecture.
-      SCCACHE_GHA_RW_MODE: READ_ONLY
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -100,14 +99,11 @@ jobs:
             crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}.exe
             crates/tidebreak-desktop/binaries/tidebreak-${{ matrix.target }}.exe
           key: windows-release-target-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
-          restore-keys: |
-            windows-release-target-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
-            windows-release-target-v1-${{ matrix.arch }}-
 
       - name: Set up compiler cache
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        uses: ./.github/actions/setup-sccache-s3
         with:
-          version: v0.16.0
+          access: write
 
       - name: Cache Cargo downloads
         uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2

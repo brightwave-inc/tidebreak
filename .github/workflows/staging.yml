@@ -86,6 +86,7 @@ jobs:
 
           changed="$(git diff --name-only "$hosted" "$STAGING_SHA" -- \
             .cargo \
+            .github/actions/setup-sccache-s3 \
             .github/workflows/release.yml \
             .github/workflows/staging-publish.yml \
             .github/workflows/staging.yml \

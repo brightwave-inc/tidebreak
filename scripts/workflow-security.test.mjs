@@ -25,6 +25,10 @@ const workflows = Object.fromEntries(
     .filter((name) => name.endsWith(".yml") || name.endsWith(".yaml"))
     .map((name) => [name, readFileSync(join(workflowDirectory, name), "utf8")]),
 );
+const compilerCacheAction = readFileSync(
+  repositoryFile(".github", "actions", "setup-sccache-s3", "action.yml"),
+  "utf8",
+);
 const releaseDrafterConfig = readFileSync(
   repositoryFile(".github", "release-drafter.yml"),
   "utf8",
@@ -687,10 +691,11 @@ test("Windows cargo check and native tests run in parallel scoped jobs", () => {
     /cancel-in-progress/,
     "cancelling this lane reddens a commit whose own checks all passed",
   );
+  assert.match(windowsCheck, /id-token: write/);
   assert.match(windowsCheck, /RUSTC_WRAPPER: sccache/);
   assert.match(
     windowsCheck,
-    /uses: (?:mozilla-actions\/sccache-action@[0-9a-f]{40}|\.\/\.github\/actions\/setup-sccache-s3)/,
+    /uses: \.\/\.github\/actions\/setup-sccache-s3/,
   );
 
   assert.match(windowsNative, /name: Windows native tests/);
@@ -700,10 +705,11 @@ test("Windows cargo check and native tests run in parallel scoped jobs", () => {
     /if: \$\{\{ needs\.changes\.outputs\.windows_native == 'true' \}\}/,
   );
   assert.match(windowsNative, /vars\.CI_WINDOWS_RUNNER \|\| 'windows-latest'/);
+  assert.match(windowsNative, /id-token: write/);
   assert.match(windowsNative, /RUSTC_WRAPPER: sccache/);
   assert.match(
     windowsNative,
-    /uses: (?:mozilla-actions\/sccache-action@[0-9a-f]{40}|\.\/\.github\/actions\/setup-sccache-s3)/,
+    /uses: \.\/\.github\/actions\/setup-sccache-s3/,
   );
   assert.match(windowsNative, /uses: Swatinem\/rust-cache@[0-9a-f]{40}/);
   assert.match(windowsNative, /Host broker Windows tests/);
@@ -763,9 +769,9 @@ test("UI tests and production build each gate the UI lane", () => {
   assert.doesNotMatch(ci, /matrix\.task/);
 });
 
-test("compiler caches use the approved GitHub or S3 backend", () => {
+test("compiler caches use OIDC-scoped S3 access", () => {
   const ci = workflows["ci.yml"];
-  const compilerJobs = [
+  const ciJobs = [
     "lint",
     "desktop",
     "windows-check",
@@ -774,49 +780,71 @@ test("compiler caches use the approved GitHub or S3 backend", () => {
     "postgres",
     "self-host-build",
   ];
-  const usesS3 = ci.includes("uses: ./.github/actions/setup-sccache-s3");
 
-  for (const name of compilerJobs) {
+  assert.match(compilerCacheAction, /SCCACHE_BUCKET=bw-rust-sccache-767397701846/);
+  assert.match(compilerCacheAction, /SCCACHE_REGION=us-east-1/);
+  assert.match(compilerCacheAction, /SCCACHE_S3_KEY_PREFIX=rust-v1/);
+  assert.match(compilerCacheAction, /read\) cache_mode=READ_ONLY/);
+  assert.match(compilerCacheAction, /write\) cache_mode=READ_WRITE/);
+  assert.match(compilerCacheAction, /SCCACHE_S3_RW_MODE=\$cache_mode/);
+  assert.match(compilerCacheAction, /SCCACHE_S3_SERVER_SIDE_ENCRYPTION=true/);
+  assert.match(
+    compilerCacheAction,
+    /inputs\.access == 'write'.*bw-github-ci-sccache-write-role.*bw-github-ci-sccache-read-role/,
+  );
+  assert.match(
+    compilerCacheAction,
+    /uses: aws-actions\/configure-aws-credentials@[0-9a-f]{40}/,
+  );
+  assert.match(
+    compilerCacheAction,
+    /uses: mozilla-actions\/sccache-action@[0-9a-f]{40}/,
+  );
+  assert.ok(
+    compilerCacheAction.indexOf("- name: Configure compiler cache environment") <
+      compilerCacheAction.indexOf("- name: Authenticate to the compiler cache") &&
+      compilerCacheAction.indexOf("- name: Authenticate to the compiler cache") <
+        compilerCacheAction.indexOf("- name: Install sccache"),
+    "the S3 environment and credentials must exist before the sccache server starts",
+  );
+
+  const forkGuard =
+    "remote-cache-enabled: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}";
+  const accessMode =
+    "access: ${{ github.event_name == 'pull_request' && 'read' || 'write' }}";
+  for (const name of ciJobs) {
     const job = workflowJob(ci, name);
-    assert.match(job, /RUSTC_WRAPPER: sccache/);
-    if (usesS3) {
-      assert.match(job, /permissions:\n      contents: read\n      id-token: write/);
-      assert.match(job, /uses: \.\/\.github\/actions\/setup-sccache-s3/);
-      assert.ok(
-        job.includes(
-          "access: ${{ github.event_name == 'pull_request' && 'read' || 'write' }}",
-        ),
-        `${name} must keep pull requests read-only`,
-      );
-      assert.ok(
-        job.includes(
-          "remote-cache-enabled: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}",
-        ),
-        `${name} must keep fork pull requests off the remote cache`,
-      );
-      assert.doesNotMatch(job, /SCCACHE_GHA_/);
-    } else {
-      assert.match(job, /SCCACHE_GHA_ENABLED: "true"/);
-      assert.match(job, /SCCACHE_GHA_RW_MODE: READ_WRITE/);
-      assert.match(job, /uses: mozilla-actions\/sccache-action@[0-9a-f]{40}/);
-    }
+    assert.match(job, /permissions:\n      contents: read\n      id-token: write/);
+    assert.match(job, /uses: \.\/\.github\/actions\/setup-sccache-s3/);
+    assert.ok(job.includes(accessMode), `${name} must keep pull requests read-only`);
+    assert.ok(job.includes(forkGuard), `${name} must skip OIDC on fork pull requests`);
   }
 
-  const cleanup = workflows["cache-cleanup.yml"];
-  if (usesS3) {
-    assert.equal(cleanup, undefined);
-  } else {
-    assert.ok(cleanup);
-    assert.match(
-      cleanup,
-      /^on:\n(?:  #.*\n)+  pull_request_target:\n    types: \[closed\]/m,
-    );
-    assert.match(cleanup, /^permissions:\n  actions: write\n  contents: read$/m);
-    assert.match(
-      cleanup,
-      /gh cache delete --repo "\$GITHUB_REPOSITORY"\n\s+--all --succeed-on-no-caches\n\s+--ref "refs\/pull\/\$\{PR_NUMBER\}\/merge"/,
-    );
-    assert.doesNotMatch(cleanup, /actions\/checkout|secrets\./);
+  for (const [file, name] of [
+    ["release.yml", "prepare_macos"],
+    ["release.yml", "prepare_windows"],
+    ["release.yml", "build_linux"],
+    ["staging-publish.yml", "prepare_macos_staging"],
+    ["cache-macos.yml", "warm"],
+    ["cache-windows.yml", "warm"],
+    ["cache-linux.yml", "warm"],
+  ]) {
+    const job = workflowJob(workflows[file], name);
+    assert.match(job, /permissions:\n      contents: read\n      id-token: write/);
+    assert.match(job, /uses: \.\/\.github\/actions\/setup-sccache-s3/);
+    assert.match(job, /access: write/);
+  }
+
+  assert.equal(workflows["cache-cleanup.yml"], undefined);
+  for (const name of [
+    "ci.yml",
+    "release.yml",
+    "staging-publish.yml",
+    "cache-macos.yml",
+    "cache-windows.yml",
+    "cache-linux.yml",
+  ]) {
+    assert.doesNotMatch(workflows[name], /SCCACHE_GHA_/);
   }
 });
 
@@ -1667,9 +1695,26 @@ test("cache warming cannot access production credentials or publish", () => {
   assert.doesNotMatch(cache, /APPLE_|TAURI_SIGNING|AWS_|DOWNLOADS_/);
   assert.doesNotMatch(cache, /actions\/upload-artifact/);
 
+  for (const name of ["cache-macos.yml", "cache-windows.yml", "cache-linux.yml"]) {
+    assert.doesNotMatch(
+      workflows[name],
+      /restore-keys:/,
+      `${name} must compile against S3 instead of restoring an older target archive`,
+    );
+  }
+
   const release = workflows["release.yml"];
   assert.doesNotMatch(release, /cache_warm_only/);
   assert.doesNotMatch(release, /^  warm-macos-cache:/m);
+
+  const prepareMacos = workflowJob(release, "prepare_macos");
+  const prepareWindows = workflowJob(release, "prepare_windows");
+  const buildLinux = workflowJob(release, "build_linux");
+  assert.doesNotMatch(prepareMacos, /restore-keys:/);
+  assert.doesNotMatch(prepareWindows, /restore-keys:/);
+  assert.doesNotMatch(prepareWindows, /windows-release-target-v1-/);
+  assert.doesNotMatch(buildLinux, /actions\/cache\/restore@/);
+  assert.doesNotMatch(buildLinux, /linux-release-target-v1-/);
 
   for (const workflow of [cache, release]) {
     const downloadCaches = [
