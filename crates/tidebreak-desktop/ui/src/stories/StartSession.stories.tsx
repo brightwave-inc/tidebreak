@@ -1,6 +1,6 @@
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { fn } from "storybook/test";
+import { expect, fn, within } from "storybook/test";
 import {
   createMemoryHistory,
   createRootRoute,
@@ -135,18 +135,40 @@ function StartSession({
   starting = false,
   fork,
   permissionModeCeiling,
+  pastedText,
 }: {
   harnesses: typeof harnessDoctor.harnesses;
   starting?: boolean;
   fork?: CodeForkTranscript;
   permissionModeCeiling?: PermissionMode;
+  pastedText?: string;
 }) {
+  const pastedTextApplied = useRef(false);
   // A fork seeds the framing lines the same way the workspace page does, so
   // the story shows the state the reader actually lands in.
   useEffect(() => {
     if (!fork) return;
     useCodeUiStore.getState().offerComposerPrompt("ws-1", forkFraming(fork));
   }, [fork]);
+  useEffect(() => {
+    if (!pastedText || pastedTextApplied.current) return;
+    const frame = window.requestAnimationFrame(() => {
+      const composer = document.querySelector<HTMLTextAreaElement>(
+        "[data-composer-input]",
+      );
+      if (!composer) return;
+      const event = new Event("paste", { bubbles: true, cancelable: true });
+      Object.defineProperty(event, "clipboardData", {
+        value: {
+          files: [],
+          getData: (type: string) => (type === "text/plain" ? pastedText : ""),
+        },
+      });
+      composer.dispatchEvent(event);
+      pastedTextApplied.current = true;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [pastedText]);
   const policy: ManagedPolicy = {
     managed: Boolean(permissionModeCeiling),
     source: permissionModeCeiling ? "os" : "unmanaged",
@@ -193,6 +215,18 @@ type Story = StoryObj<typeof meta>;
 
 /** Four engines, each with its honest mode list. */
 export const AllEngines: Story = {};
+
+export const PastedTextBeforeSession: Story = {
+  args: {
+    pastedText: `Session report\n${"x".repeat(1_000)}`,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const composer = await canvas.findByRole("textbox", { name: "Message" });
+    await expect(composer).toHaveValue("");
+    await expect(await canvas.findByText("Pasted text")).toBeVisible();
+  },
+};
 
 export const Starting: Story = {
   args: { starting: true },

@@ -1216,22 +1216,18 @@ export function CodeComposer({
               }
             : undefined
         }
-        pastedTexts={
-          sessionId
-            ? {
-                items: pastedTexts,
-                onPaste: (text) =>
-                  updatePastedTexts((current) => [
-                    ...current,
-                    { id: crypto.randomUUID(), text },
-                  ]),
-                onRemove: (id) =>
-                  updatePastedTexts((current) =>
-                    current.filter((item) => item.id !== id),
-                  ),
-              }
-            : undefined
-        }
+        pastedTexts={{
+          items: pastedTexts,
+          onPaste: (text) =>
+            updatePastedTexts((current) => [
+              ...current,
+              { id: crypto.randomUUID(), text },
+            ]),
+          onRemove: (id) =>
+            updatePastedTexts((current) =>
+              current.filter((item) => item.id !== id),
+            ),
+        }}
         workspaceFiles={workspaceFiles}
         onDraftChange={(value) => {
           draftRef.current = value;
