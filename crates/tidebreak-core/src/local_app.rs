@@ -17,7 +17,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::deliverable::RevisionProducer;
-use crate::id::{AgentRunId, AppId, AppRevisionId, ChatId, ConnectedAppId, HostRootId, TurnId};
+use crate::id::{AgentRunId, AppId, AppRevisionId, ConnectedAppId, HostRootId, SessionId, TurnId};
 
 /// Stable name of the foreground tool that creates and revises local apps.
 ///
@@ -156,7 +156,7 @@ pub struct AppRevision {
     ///
     /// Deliberately not a foreign key: the app is profile-scoped and must
     /// outlive the conversation, so this id may dangle after a chat deletion.
-    pub chat_id: Option<ChatId>,
+    pub chat_id: Option<SessionId>,
     /// Host-stamped creation time.
     pub created_at: DateTime<Utc>,
 }
@@ -180,7 +180,7 @@ pub struct NewAppRevision {
     /// exclusive with `turn_id`.
     pub producing_run_id: Option<AgentRunId>,
     /// Originating conversation, recorded as nullable provenance.
-    pub chat_id: Option<ChatId>,
+    pub chat_id: Option<SessionId>,
     /// Host-stamped creation time.
     pub created_at: DateTime<Utc>,
 }

@@ -282,7 +282,7 @@ impl ModelProvider for BoomProvider {
 
 async fn search_grant_chat(store: &Arc<dyn Store>) -> Chat {
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -324,7 +324,7 @@ async fn cancel_test_chat() -> (Arc<dyn Store>, Chat, tempfile::TempDir) {
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,

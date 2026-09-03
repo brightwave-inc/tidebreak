@@ -92,7 +92,7 @@ where
     let Some(event_seq) = wait.event_seq else {
         return Ok(false);
     };
-    let Some(event) = entities::code_event::Entity::find_by_id((wait.session_id, event_seq))
+    let Some(event) = entities::event::Entity::find_by_id((wait.session_id, event_seq))
         .one(conn)
         .await
         .map_err(store_err)?

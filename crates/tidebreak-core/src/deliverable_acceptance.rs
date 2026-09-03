@@ -25,7 +25,7 @@ use crate::deliverable::{
     MAX_BINARY_DELIVERABLE_BYTES, OUTPUTS_DIRECTORY,
 };
 use crate::error::{AgentError, Result};
-use crate::id::{ChatId, OutputId, OutputRevisionId};
+use crate::id::{OutputId, OutputRevisionId, SessionId};
 use crate::storage::Store;
 use crate::OutputRecord;
 
@@ -41,7 +41,7 @@ pub struct WorkspaceArtifactProposal {
     /// acceptance can be retried without forking the record.
     pub output_id: OutputId,
     /// Conversation that will own the accepted output.
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     /// Portable display filename shown in the catalog and save dialog.
     pub filename: String,
     /// Declared media type of the artifact. Curated text filenames must use
@@ -162,7 +162,7 @@ fn workspace_artifact_kind(proposal: &WorkspaceArtifactProposal) -> Result<Deliv
 pub async fn restore_output_to_revision(
     store: &dyn Store,
     scratch: &Dir,
-    chat_id: ChatId,
+    chat_id: SessionId,
     output_id: OutputId,
     target_revision_id: OutputRevisionId,
     now: DateTime<Utc>,
@@ -271,7 +271,7 @@ pub async fn restore_output_to_revision(
 pub async fn save_user_output_revision(
     store: &dyn Store,
     scratch: &Dir,
-    chat_id: ChatId,
+    chat_id: SessionId,
     output_id: OutputId,
     expected_current: OutputRevisionId,
     content: &str,

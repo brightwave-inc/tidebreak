@@ -3,8 +3,8 @@
 use chrono::{Duration, Utc};
 use sea_orm::{ConnectionTrait, Database, DatabaseBackend, Statement};
 use tidebreak_core::{
-    AcceptTurnOutcome, BlobRetirementStatus, Chat, ChatId, DbStore, DeleteChatOutcome,
-    DocumentBlob, DocumentId, DocumentScope, DocumentSourceUpsert, ImageMediaType, ImageRef, Store,
+    AcceptTurnOutcome, BlobRetirementStatus, Chat, DbStore, DeleteChatOutcome, DocumentBlob,
+    DocumentId, DocumentScope, DocumentSourceUpsert, ImageMediaType, ImageRef, SessionId, Store,
     TurnId,
 };
 
@@ -563,7 +563,7 @@ async fn empty_postgres_tables(url: &str) {
 
 fn source_for(
     id: DocumentId,
-    chat_id: Option<ChatId>,
+    chat_id: Option<SessionId>,
     origin_uri: &str,
     title: &str,
     source_blob: DocumentBlob,
@@ -594,7 +594,7 @@ fn image_for(blob: &DocumentBlob, width: u32, height: u32) -> ImageRef {
 
 fn sample_chat() -> Chat {
     Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,

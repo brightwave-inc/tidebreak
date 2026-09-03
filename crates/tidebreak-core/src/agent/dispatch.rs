@@ -8,7 +8,7 @@ use crate::approval::{
 };
 use crate::error::{AgentError, Result};
 use crate::event::AgentEvent;
-use crate::id::{AgentRunId, CallId, ChatId, TurnId};
+use crate::id::{AgentRunId, CallId, SessionId, TurnId};
 use crate::image::ImageAttachments;
 use crate::model::{
     Chat, Role, ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus,
@@ -122,7 +122,7 @@ impl Agent {
     /// its completion and activity events.
     pub(crate) async fn accept_provider_executed_call(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         turn_id: TurnId,
         call_id: CallId,
         block: &ContentBlock,
@@ -171,7 +171,7 @@ impl Agent {
     /// [`Self::accept_provider_executed_call`].
     pub(crate) async fn complete_provider_executed_call(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         turn_id: TurnId,
         call_id: CallId,
         block: &ContentBlock,
@@ -233,7 +233,7 @@ impl Agent {
     /// which the caller replays instead of repeating the side effect.
     pub(crate) async fn accept_server_call(
         &self,
-        chat_id: crate::id::ChatId,
+        chat_id: crate::id::SessionId,
         turn_id: TurnId,
         call: &PendingCall,
     ) -> Result<Option<ToolOutput>> {
@@ -1115,7 +1115,7 @@ impl Agent {
     /// and publish the result the model reads.
     pub(crate) async fn settle_gated_spawn(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         turn_id: TurnId,
         call: &PendingCall,
         events: &EventSink<'_>,

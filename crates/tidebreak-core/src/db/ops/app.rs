@@ -14,7 +14,7 @@ use sea_orm::{
 };
 
 use crate::error::{AgentError, Result};
-use crate::id::{AppId, AppRevisionId, ChatId};
+use crate::id::{AppId, AppRevisionId, SessionId};
 use crate::local_app::{
     validate_app_gateway_draft, validate_app_grant, validate_app_manifest, AppGatewayDraft,
     AppGrant, AppGrantBinding, AppManifest, AppRecord, AppRevision, CreateApp, NewAppRevision,
@@ -28,7 +28,7 @@ use super::turn::canonical_db_timestamp;
 pub(in crate::db) async fn create_app(
     store: &DbStore,
     owner: Option<&OwnerId>,
-    chat_id: Option<ChatId>,
+    chat_id: Option<SessionId>,
     request: &CreateApp,
 ) -> Result<AppRecord> {
     let manifest_json = validate_revision(&request.revision)?;
@@ -80,7 +80,7 @@ pub(in crate::db) async fn create_app(
 pub(in crate::db) async fn append_app_revision(
     store: &DbStore,
     owner: Option<&OwnerId>,
-    chat_id: Option<ChatId>,
+    chat_id: Option<SessionId>,
     app_id: AppId,
     revision: &NewAppRevision,
 ) -> Result<AppRecord> {
@@ -158,7 +158,7 @@ pub(in crate::db) async fn get_app(
 
 pub(in crate::db) async fn get_app_for_chat(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
     id: AppId,
 ) -> Result<Option<AppRecord>> {
     let owner = resolve_owner_on(&store.conn, None, Some(chat_id)).await?;
@@ -223,7 +223,7 @@ pub(in crate::db) async fn get_app_revision(
 
 pub(in crate::db) async fn get_app_revision_for_chat(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
     id: AppRevisionId,
 ) -> Result<Option<AppRevision>> {
     let owner = resolve_owner_on(&store.conn, None, Some(chat_id)).await?;
@@ -655,7 +655,7 @@ fn effective_owner(owner: Option<&OwnerId>) -> &OwnerId {
 async fn resolve_owner_on<C>(
     conn: &C,
     owner: Option<&OwnerId>,
-    chat_id: Option<ChatId>,
+    chat_id: Option<SessionId>,
 ) -> Result<OwnerId>
 where
     C: ConnectionTrait,
@@ -663,7 +663,7 @@ where
     match (owner, chat_id) {
         (Some(owner), None) => Ok(owner.clone()),
         (None, Some(chat_id)) => {
-            let chat = entities::code_session::Entity::find_by_id(chat_id.0)
+            let chat = entities::session::Entity::find_by_id(chat_id.0)
                 .one(conn)
                 .await
                 .map_err(store_err)?
@@ -721,7 +721,7 @@ fn revision_from_model(model: entities::app_revision::Model) -> Result<AppRevisi
         sha256,
         turn_id: model.turn_id.map(crate::id::TurnId),
         producing_run_id: model.producing_run_id.map(crate::id::AgentRunId),
-        chat_id: model.chat_id.map(crate::id::ChatId),
+        chat_id: model.chat_id.map(crate::id::SessionId),
         created_at: model.created_at,
     })
 }

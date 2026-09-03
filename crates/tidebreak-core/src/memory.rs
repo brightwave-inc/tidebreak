@@ -11,8 +11,8 @@ use thiserror::Error;
 use ts_rs::TS;
 use uuid::Uuid;
 
-use crate::code::{CodeSessionId, CodeTurnId, RepoId, WorkspaceId};
-use crate::id::{ChatId, MessageId, TurnId};
+use crate::code::{RepoId, WorkspaceId};
+use crate::id::{MessageId, SessionId, TurnId};
 use crate::model::OwnerId;
 
 /// Largest markdown body accepted for one memory record.
@@ -240,16 +240,16 @@ impl MemoryAuthor {
 pub struct MemoryOrigin {
     /// Originating work-mode conversation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chat_id: Option<ChatId>,
+    pub chat_id: Option<SessionId>,
     /// Originating work-mode turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<TurnId>,
     /// Originating code session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub code_session_id: Option<CodeSessionId>,
+    pub code_session_id: Option<SessionId>,
     /// Originating code turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub code_turn_id: Option<CodeTurnId>,
+    pub code_turn_id: Option<TurnId>,
     /// Workspace attached to the originating code session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<WorkspaceId>,
@@ -265,9 +265,17 @@ pub enum MemoryEvidence {
         message_id: MessageId,
     },
     /// One durable code-journal event.
+    Event {
+        /// Session that owns the event sequence.
+        session_id: SessionId,
+        /// One-based event sequence.
+        seq: i64,
+    },
+    /// Compatibility spelling until the server rename slice lands.
+    #[doc(hidden)]
     CodeEvent {
         /// Session that owns the event sequence.
-        session_id: CodeSessionId,
+        session_id: SessionId,
         /// One-based event sequence.
         seq: i64,
     },

@@ -8,7 +8,7 @@ use crate::agent_tools::{
     SandboxAgentFileResource, MAX_SANDBOX_DONE_OUTPUTS, MAX_SANDBOX_DONE_SUMMARY_CHARS,
 };
 use crate::error::{AgentError, Result};
-use crate::id::{AgentRunId, CallId, ChatId, TurnId};
+use crate::id::{AgentRunId, CallId, SessionId, TurnId};
 use crate::model::{
     AgentRun, AgentRunCancellationReason, AgentRunExecutionLocation, AgentRunInboxEntry,
     AgentRunInboxStatus, AgentRunResult, AgentRunResultPayload, AgentRunStatus,
@@ -34,7 +34,7 @@ pub(in crate::db) mod progress;
 
 pub(in crate::db) async fn insert_foreground_agent_run_on<C>(
     conn: &C,
-    chat_id: ChatId,
+    chat_id: SessionId,
     created_at: chrono::DateTime<Utc>,
 ) -> Result<AgentRunId>
 where
@@ -97,7 +97,7 @@ where
 /// exist is an error, not a creation.
 pub(in crate::db) async fn ensure_foreground_agent_run(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
 ) -> Result<()> {
     let transaction = store.conn.begin().await.map_err(store_err)?;
     if !acquire_chat_write_lock(&transaction, chat_id).await? {
@@ -115,7 +115,7 @@ pub(in crate::db) async fn ensure_foreground_agent_run(
 
 pub(in crate::db) async fn find_foreground_agent_run_on<C>(
     conn: &C,
-    chat_id: ChatId,
+    chat_id: SessionId,
 ) -> Result<Option<AgentRun>>
 where
     C: sea_orm::ConnectionTrait,
@@ -129,7 +129,7 @@ where
 pub(in crate::db) async fn accept_agent_run(
     store: &DbStore,
     id: AgentRunId,
-    chat_id: ChatId,
+    chat_id: SessionId,
     parent_id: Option<AgentRunId>,
     spawn_call_id: Option<CallId>,
     tier: AgentRunTier,
@@ -368,7 +368,7 @@ async fn admit_sandbox_agent_run_at(
     // Validate the caller timestamp at the boundary, but never use a value
     // captured before lock acquisition to fence a live lease.
     canonical_db_timestamp(now)?;
-    let Some(scope) = entities::code_turn::Entity::find_by_id(origin_turn_id.0)
+    let Some(scope) = entities::turn::Entity::find_by_id(origin_turn_id.0)
         .one(&store.conn)
         .await
         .map_err(store_err)?
@@ -380,13 +380,13 @@ async fn admit_sandbox_agent_run_at(
     // chat and turn ownership. This gives the unsettled-child classifier one
     // stable snapshot and preserves the global scheduler -> chat -> turn order.
     acquire_agent_run_claim_lock(&transaction).await?;
-    if !acquire_chat_write_lock(&transaction, ChatId(scope.session_id)).await?
+    if !acquire_chat_write_lock(&transaction, SessionId(scope.session_id)).await?
         || !acquire_turn_write_lock(&transaction, origin_turn_id).await?
     {
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     }
-    let turn = entities::code_turn::Entity::find_by_id(origin_turn_id.0)
+    let turn = entities::turn::Entity::find_by_id(origin_turn_id.0)
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -418,10 +418,12 @@ async fn admit_sandbox_agent_run_at(
             if let Some(outcome) = resolve_existing_sandbox_admission_on(
                 &store.conn,
                 origin_turn_id,
-                ChatId(turn.session_id),
+                SessionId(turn.session_id),
                 AgentRunId(
-                    crate::id::AgentRunId::foreground_for_chat(crate::id::ChatId(turn.session_id))
-                        .0,
+                    crate::id::AgentRunId::foreground_for_chat(crate::id::SessionId(
+                        turn.session_id,
+                    ))
+                    .0,
                 ),
                 spawn_call_id,
                 input,
@@ -452,7 +454,7 @@ pub(in crate::db) async fn get_sandbox_agent_admission(
 #[allow(clippy::too_many_arguments)]
 pub(in crate::db) async fn admit_sandbox_agent_run_on<C>(
     conn: &C,
-    turn: &entities::code_turn::Model,
+    turn: &entities::turn::Model,
     spawn_call_id: CallId,
     input: &str,
     resource: Option<&SandboxAgentFileResource>,
@@ -466,9 +468,9 @@ where
     C: sea_orm::ConnectionTrait,
 {
     let origin_turn_id = TurnId(turn.id);
-    let chat_id = ChatId(turn.session_id);
+    let chat_id = SessionId(turn.session_id);
     let parent_id = AgentRunId(
-        crate::id::AgentRunId::foreground_for_chat(crate::id::ChatId(turn.session_id)).0,
+        crate::id::AgentRunId::foreground_for_chat(crate::id::SessionId(turn.session_id)).0,
     );
     let child_run_id = AgentRunId::sandbox_for_spawn_call(spawn_call_id);
 
@@ -621,7 +623,7 @@ where
 async fn resolve_existing_sandbox_admission_on<C>(
     conn: &C,
     origin_turn_id: TurnId,
-    chat_id: ChatId,
+    chat_id: SessionId,
     parent_id: AgentRunId,
     spawn_call_id: CallId,
     input: &str,
@@ -2476,7 +2478,7 @@ where
 
 pub(in crate::db) async fn list_agent_runs(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
 ) -> Result<Vec<AgentRun>> {
     entities::agent_run::Entity::find()
         .filter(entities::agent_run::Column::ChatId.eq(chat_id.0))
@@ -2730,7 +2732,7 @@ pub(in crate::db) fn agent_run_from_model(model: entities::agent_run::Model) -> 
     validate_stored_shape(&model, tier, status)?;
     Ok(AgentRun {
         id: AgentRunId(model.id),
-        chat_id: ChatId(model.chat_id),
+        chat_id: SessionId(model.chat_id),
         parent_id: model.parent_id.map(AgentRunId),
         spawn_call_id: model.spawn_call_id.map(CallId),
         tier,
@@ -2810,7 +2812,7 @@ pub(super) fn sandbox_agent_admission_from_model(
         child_run_id: AgentRunId(model.id),
         parent_run_id: AgentRunId(model.parent_id.ok_or_else(invalid)?),
         origin_turn_id: TurnId(model.origin_turn_id.ok_or_else(invalid)?),
-        chat_id: ChatId(model.chat_id),
+        chat_id: SessionId(model.chat_id),
         spawn_call_id: CallId(model.spawn_call_id.ok_or_else(invalid)?),
         resource,
         admitted_at: model.admitted_at.ok_or_else(invalid)?,
@@ -3181,7 +3183,7 @@ fn agent_run_inbox_from_models(
     Ok(AgentRunInboxEntry {
         parent_run_id: AgentRunId(model.parent_run_id),
         child_run_id: AgentRunId(model.child_run_id),
-        chat_id: ChatId(model.chat_id),
+        chat_id: SessionId(model.chat_id),
         result,
         status,
         claim_count: model.claim_count,
@@ -3272,7 +3274,7 @@ where
 
 async fn find_foreground_on<C>(
     conn: &C,
-    chat_id: ChatId,
+    chat_id: SessionId,
 ) -> Result<Option<entities::agent_run::Model>>
 where
     C: sea_orm::ConnectionTrait,
@@ -3287,7 +3289,7 @@ where
 
 fn existing_request_outcome(
     existing: entities::agent_run::Model,
-    chat_id: ChatId,
+    chat_id: SessionId,
     parent_id: Option<AgentRunId>,
     spawn_call_id: Option<CallId>,
     tier: AgentRunTier,

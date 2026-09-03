@@ -5,7 +5,7 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use uuid::Uuid;
 
 use crate::error::{AgentError, Result};
-use crate::id::{ChatId, RootAttachmentChangeId};
+use crate::id::{RootAttachmentChangeId, SessionId};
 use crate::model::{RootAttachmentChange, RootAttachmentChangePhase, RootAttachmentSubjectKind};
 use crate::storage::MAX_PENDING_ROOT_ATTACHMENT_CHANGES;
 
@@ -57,8 +57,8 @@ pub(in crate::db) async fn list_pending_root_attachment_changes(
         .iter()
         .map(|change| change.chat_id.0)
         .collect::<Vec<_>>();
-    let chats = entities::code_session::Entity::find()
-        .filter(entities::code_session::Column::Id.is_in(chat_ids))
+    let chats = entities::session::Entity::find()
+        .filter(entities::session::Column::Id.is_in(chat_ids))
         .all(&store.conn)
         .await
         .map_err(store_err)?
@@ -104,7 +104,7 @@ where
 }
 
 pub(super) fn derive_subject(
-    chat_id: ChatId,
+    chat_id: SessionId,
     project_id: Option<Uuid>,
 ) -> Result<(RootAttachmentSubjectKind, Uuid)> {
     if let Some(project_id) = project_id {
@@ -126,7 +126,7 @@ pub(super) async fn validate_change_subject_on<C>(
 where
     C: sea_orm::ConnectionTrait,
 {
-    let chat = entities::code_session::Entity::find_by_id(change.chat_id.0)
+    let chat = entities::session::Entity::find_by_id(change.chat_id.0)
         .one(conn)
         .await
         .map_err(store_err)?

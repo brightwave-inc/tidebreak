@@ -61,10 +61,10 @@ async fn postgres_v058_upgrade_repairs_the_pre_pin_code_schema() {
         [
             ("code_repo".to_owned(), "cloned_from".to_owned()),
             ("code_repo".to_owned(), "removed_at".to_owned()),
-            ("code_session".to_owned(), "reasoning_effort".to_owned()),
             ("code_workspace".to_owned(), "bundle_bytes".to_owned()),
             ("code_workspace".to_owned(), "released_at".to_owned()),
             ("code_workspace".to_owned(), "released_tip".to_owned()),
+            ("session".to_owned(), "reasoning_effort".to_owned()),
         ]
     );
     assert_eq!(snapshot.repo_count, 2);
@@ -282,7 +282,7 @@ INSERT INTO code_approval (
                    ('code_workspace', 'released_at'),
                    ('code_workspace', 'released_tip'),
                    ('code_workspace', 'bundle_bytes'),
-                   ('code_session', 'reasoning_effort')
+                   ('session', 'reasoning_effort')
                )
              ORDER BY table_name, column_name"
                 .to_owned(),
@@ -315,10 +315,10 @@ INSERT INTO code_approval (
              UPDATE code_workspace
              SET status = 'released', released_tip = 'deadbeef', bundle_bytes = 42
              WHERE id = '00000000-0000-0000-0000-000000000302';
-             UPDATE code_session
+             UPDATE \"session\"
              SET reasoning_effort = 'high'
              WHERE id = '00000000-0000-0000-0000-000000000303';
-             UPDATE code_approval
+             UPDATE approval
              SET state = 'abandoned'
              WHERE id = '00000000-0000-0000-0000-000000000305';",
         )
@@ -353,7 +353,7 @@ INSERT INTO code_approval (
         .query_one_raw(Statement::from_string(
             DatabaseBackend::Postgres,
             "SELECT reasoning_effort
-             FROM code_session
+             FROM \"session\"
              WHERE id = '00000000-0000-0000-0000-000000000303'"
                 .to_owned(),
         ))
@@ -364,7 +364,7 @@ INSERT INTO code_approval (
         .query_one_raw(Statement::from_string(
             DatabaseBackend::Postgres,
             "SELECT state
-             FROM code_approval
+             FROM approval
              WHERE id = '00000000-0000-0000-0000-000000000305'"
                 .to_owned(),
         ))
@@ -381,14 +381,14 @@ INSERT INTO code_approval (
         .is_err();
     let invalid_reasoning_effort_rejected = verifier
         .execute_unprepared(
-            "UPDATE code_session SET reasoning_effort = 'garbage'
+            "UPDATE \"session\" SET reasoning_effort = 'garbage'
              WHERE id = '00000000-0000-0000-0000-000000000303'",
         )
         .await
         .is_err();
     let invalid_approval_state_rejected = verifier
         .execute_unprepared(
-            "UPDATE code_approval SET state = 'garbage'
+            "UPDATE approval SET state = 'garbage'
              WHERE id = '00000000-0000-0000-0000-000000000305'",
         )
         .await
@@ -516,7 +516,7 @@ async fn exercise_release_upgrade(url: &str) -> Result<UpgradeSnapshot, String> 
         .query_one_raw(Statement::from_string(
             DatabaseBackend::Postgres,
             "SELECT blob_id, width, height, byte_len
-             FROM code_turn_attachment
+             FROM turn_attachment
              WHERE turn_id = '00000000-0000-0000-0000-000000000204'"
                 .to_owned(),
         ))
@@ -529,7 +529,7 @@ async fn exercise_release_upgrade(url: &str) -> Result<UpgradeSnapshot, String> 
             "SELECT column_name, is_nullable, column_default
              FROM information_schema.columns
              WHERE table_schema = 'public'
-               AND table_name = 'code_turn_attachment'
+               AND table_name = 'turn_attachment'
                AND column_name IN ('width', 'height')
              ORDER BY column_name"
                 .to_owned(),
@@ -548,14 +548,14 @@ async fn exercise_release_upgrade(url: &str) -> Result<UpgradeSnapshot, String> 
         .map_err(|error| error.to_string())?;
     let width_lower_bound_rejected = verifier
         .execute_unprepared(
-            "UPDATE code_turn_attachment SET width = 0
+            "UPDATE turn_attachment SET width = 0
              WHERE turn_id = '00000000-0000-0000-0000-000000000204'",
         )
         .await
         .is_err();
     let height_upper_bound_rejected = verifier
         .execute_unprepared(
-            "UPDATE code_turn_attachment SET height = 8001
+            "UPDATE turn_attachment SET height = 8001
              WHERE turn_id = '00000000-0000-0000-0000-000000000204'",
         )
         .await
@@ -688,8 +688,8 @@ async fn exercise_release_upgrade(url: &str) -> Result<UpgradeSnapshot, String> 
 }
 
 /// The chat side of a v0.60.0 database after the conversation merge: every
-/// seeded row survives, the chat is a session row, and the foreign keys
-/// that named `chat` name `code_session` with their delete actions intact.
+/// seeded row survives, the chat is a session row, and the foreign keys that
+/// named `chat` name `session` with their delete actions intact.
 struct ConversationMergeSnapshot {
     chat_table_present: bool,
     session_columns: Vec<(String, String)>,
@@ -697,8 +697,8 @@ struct ConversationMergeSnapshot {
     foreign_keys: Vec<(String, String)>,
     orphan_rejected: bool,
     /// What the chat replay read serves for the seeded conversation after
-    /// the journal moved into `code_event`.
-    replayed: Vec<tidebreak_core::SequencedEvent>,
+    /// the journal moved into `event`.
+    replayed: Vec<tidebreak_core::SequencedAgentEvent>,
 }
 
 /// The one journal row the v0.60 conversation carries: its turn's terminal
@@ -757,27 +757,29 @@ async fn postgres_v060_upgrade_merges_conversations_into_sessions() {
         snapshot.rows,
         [
             ("agent_run".to_owned(), 1),
-            ("code_event".to_owned(), 1),
-            ("code_turn".to_owned(), 1),
+            ("event".to_owned(), 1),
+            ("turn".to_owned(), 1),
             ("message".to_owned(), 2),
             ("tool_call".to_owned(), 1),
         ]
     );
     assert_eq!(
         snapshot.replayed,
-        [tidebreak_core::SequencedEvent {
+        [tidebreak_core::SequencedAgentEvent {
             seq: 1,
             event: seeded_terminal_event(),
         }],
-        "the chat replay serves the journal from code_event"
+        "the chat replay serves the journal from event"
     );
     assert_eq!(
         snapshot.foreign_keys,
         [
             ("agent_run".to_owned(), "r".to_owned()),
+            ("approval".to_owned(), "a".to_owned()),
             ("chat_image_publication".to_owned(), "r".to_owned()),
             ("chat_root_attachment".to_owned(), "c".to_owned()),
             ("context_checkpoint".to_owned(), "c".to_owned()),
+            ("event".to_owned(), "a".to_owned()),
             ("exec_file_change".to_owned(), "r".to_owned()),
             ("message".to_owned(), "a".to_owned()),
             ("message_identity".to_owned(), "a".to_owned()),
@@ -786,6 +788,7 @@ async fn postgres_v060_upgrade_merges_conversations_into_sessions() {
             ("standing_tool_grant".to_owned(), "c".to_owned()),
             ("task_plan".to_owned(), "r".to_owned()),
             ("tool_call".to_owned(), "a".to_owned()),
+            ("turn".to_owned(), "a".to_owned()),
         ]
     );
     assert!(
@@ -901,14 +904,14 @@ async fn exercise_conversation_merge(url: &str) -> Result<ConversationMergeSnaps
              FROM (
                 SELECT (each).key, (each).value
                 FROM (
-                    SELECT jsonb_each_text(to_jsonb(code_session) - 'id' - 'owner' - 'created_at'
+                    SELECT jsonb_each_text(to_jsonb(\"session\") - 'id' - 'owner' - 'created_at'
                         - 'model' - 'fast_mode' - 'permission_mode_revision'
                         - 'permission_mode_intent' - 'permission_mode_intent_revision'
                         - 'permission_mode_intent_epoch' - 'permission_mode_intent_lifecycle'
                         - 'harness_version' - 'harness_resume_ref' - 'fence_reason'
                         - 'child_pid' - 'child_process_identity' - 'subagents'
                         - 'unrecognized_event_count' - 'project_id' - 'attachment_revision') AS each
-                    FROM code_session
+                    FROM \"session\"
                     WHERE id = '00000000-0000-0000-0000-00000000a001'
                 ) AS pairs
              ) AS columns
@@ -928,23 +931,18 @@ async fn exercise_conversation_merge(url: &str) -> Result<ConversationMergeSnaps
         })
         .collect::<Result<Vec<_>, String>>()?;
     let mut rows = Vec::new();
-    for table in [
-        "agent_run",
-        "code_event",
-        "code_turn",
-        "message",
-        "tool_call",
+    for (table, column) in [
+        ("agent_run", "chat_id"),
+        ("event", "session_id"),
+        ("turn", "session_id"),
+        ("message", "chat_id"),
+        ("tool_call", "chat_id"),
     ] {
-        let column = if table == "code_event" || table == "code_turn" {
-            "session_id"
-        } else {
-            "chat_id"
-        };
         let count: i64 = verifier
             .query_one_raw(Statement::from_string(
                 DatabaseBackend::Postgres,
                 format!(
-                    "SELECT count(*)::bigint AS n FROM {table}
+                    "SELECT count(*)::bigint AS n FROM \"{table}\"
                      WHERE {column} = '00000000-0000-0000-0000-00000000a001'"
                 ),
             ))
@@ -960,7 +958,7 @@ async fn exercise_conversation_merge(url: &str) -> Result<ConversationMergeSnaps
             DatabaseBackend::Postgres,
             "SELECT conrelid::regclass::text AS table_name, confdeltype::text AS delete_action
              FROM pg_constraint
-             WHERE contype = 'f' AND confrelid = 'code_session'::regclass
+             WHERE contype = 'f' AND confrelid = '\"session\"'::regclass
                AND conrelid::regclass::text NOT LIKE 'code_%'
              ORDER BY table_name"
                 .to_owned(),
@@ -993,7 +991,7 @@ async fn exercise_conversation_merge(url: &str) -> Result<ConversationMergeSnaps
     let replayed = {
         use tidebreak_core::Store as _;
         store
-            .list_events(tidebreak_core::ChatId(uuid::Uuid::from_u128(0xa001)), 0)
+            .list_events(tidebreak_core::SessionId(uuid::Uuid::from_u128(0xa001)), 0)
             .await
             .map_err(|error| error.to_string())?
     };

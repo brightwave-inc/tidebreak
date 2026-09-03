@@ -2,7 +2,7 @@ use super::*;
 
 async fn parked_client_call_for_adapter_test(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
 ) -> (TurnId, crate::model::ClientToolCallRequest) {
     let turn_id = TurnId::new();
     assert!(matches!(
@@ -50,7 +50,7 @@ async fn parked_client_call_for_adapter_test(
     (turn_id, request)
 }
 
-async fn resolve_adapter_client_call(store: &DbStore, chat_id: ChatId, call_id: CallId) {
+async fn resolve_adapter_client_call(store: &DbStore, chat_id: SessionId, call_id: CallId) {
     let claimed_at = Utc::now();
     let client_lease = uuid::Uuid::new_v4();
     assert!(matches!(
@@ -101,22 +101,22 @@ async fn adapter_client_wait_resolves_from_the_generic_park() {
         crate::db::code::store_turn_park(
             &store,
             &OwnerId::local(),
-            crate::CodeTurnId(turn_id.0),
+            crate::TurnId(turn_id.0),
             &park_ref,
             &wait,
         )
         .await
         .unwrap(),
-        Some(crate::CodeTurnStatus::Waiting)
+        Some(crate::TurnStatus::Waiting)
     );
 
     resolve_adapter_client_call(&store, chat.id, request.id).await;
 
-    let turn = crate::db::code::get_turn(&store, &OwnerId::local(), crate::CodeTurnId(turn_id.0))
+    let turn = crate::db::code::get_turn(&store, &OwnerId::local(), crate::TurnId(turn_id.0))
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(turn.status, crate::CodeTurnStatus::Resuming);
+    assert_eq!(turn.status, crate::TurnStatus::Resuming);
     assert_eq!(turn.park_ref.as_deref(), Some(park_ref.as_str()));
     assert_eq!(turn.park_wait, Some(wait));
 }
@@ -137,31 +137,31 @@ async fn adapter_client_park_preserves_a_resolution_that_won_first() {
         crate::db::code::store_turn_park(
             &store,
             &OwnerId::local(),
-            crate::CodeTurnId(turn_id.0),
+            crate::TurnId(turn_id.0),
             &park_ref,
             &wait,
         )
         .await
         .unwrap(),
-        Some(crate::CodeTurnStatus::Resuming)
+        Some(crate::TurnStatus::Resuming)
     );
     assert_eq!(
         crate::db::code::clear_turn_park(
             &store,
             &OwnerId::local(),
-            crate::CodeTurnId(turn_id.0),
+            crate::TurnId(turn_id.0),
             &park_ref,
             &wait,
         )
         .await
         .unwrap(),
-        Some(crate::CodeTurnStatus::Resuming)
+        Some(crate::TurnStatus::Resuming)
     );
-    let turn = crate::db::code::get_turn(&store, &OwnerId::local(), crate::CodeTurnId(turn_id.0))
+    let turn = crate::db::code::get_turn(&store, &OwnerId::local(), crate::TurnId(turn_id.0))
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(turn.status, crate::CodeTurnStatus::Resuming);
+    assert_eq!(turn.status, crate::TurnStatus::Resuming);
     assert_eq!(turn.park_ref, None);
     assert_eq!(turn.park_wait, None);
 }
@@ -180,15 +180,15 @@ async fn an_approval_park_rejects_mismatched_call_ids() {
         crate::db::code::store_turn_park(
             &store,
             &OwnerId::local(),
-            crate::CodeTurnId(turn_id.0),
+            crate::TurnId(turn_id.0),
             &park_ref,
             &wait,
         )
         .await
         .unwrap(),
-        Some(crate::CodeTurnStatus::Waiting)
+        Some(crate::TurnStatus::Waiting)
     );
-    let turn = entities::code_turn::Entity::find_by_id(turn_id.0)
+    let turn = entities::turn::Entity::find_by_id(turn_id.0)
         .one(&store.conn)
         .await
         .unwrap()
@@ -211,13 +211,13 @@ async fn cancelling_a_resuming_adapter_park_keeps_the_resolved_receipt() {
         crate::db::code::store_turn_park(
             &store,
             &OwnerId::local(),
-            crate::CodeTurnId(turn_id.0),
+            crate::TurnId(turn_id.0),
             &park_ref,
             &wait,
         )
         .await
         .unwrap(),
-        Some(crate::CodeTurnStatus::Waiting)
+        Some(crate::TurnStatus::Waiting)
     );
     resolve_adapter_client_call(&store, chat.id, request.id).await;
 
@@ -262,13 +262,13 @@ async fn adapter_client_park_cancels_with_its_client_receipt() {
         crate::db::code::store_turn_park(
             &store,
             &OwnerId::local(),
-            crate::CodeTurnId(turn_id.0),
+            crate::TurnId(turn_id.0),
             &park_ref,
             &wait,
         )
         .await
         .unwrap(),
-        Some(crate::CodeTurnStatus::Waiting)
+        Some(crate::TurnStatus::Waiting)
     );
 
     assert!(matches!(
@@ -279,11 +279,11 @@ async fn adapter_client_park_cancels_with_its_client_receipt() {
         Some(RequestTurnCancellationOutcome::Cancelled(turn))
             if turn.status == TurnRunStatus::Cancelled
     ));
-    let turn = crate::db::code::get_turn(&store, &OwnerId::local(), crate::CodeTurnId(turn_id.0))
+    let turn = crate::db::code::get_turn(&store, &OwnerId::local(), crate::TurnId(turn_id.0))
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(turn.status, crate::CodeTurnStatus::Interrupted);
+    assert_eq!(turn.status, crate::TurnStatus::Interrupted);
     assert_eq!(turn.park_ref.as_deref(), Some(park_ref.as_str()));
     assert_eq!(turn.park_wait, Some(wait));
     let call = store
@@ -587,7 +587,7 @@ async fn client_wait_parks_resolves_and_recovers_exactly() {
     // ever revisiting the call. Nothing else announces that it finished, so the
     // renderer showed the row running from `ToolCallStarted` until the chat was
     // reopened. It announces itself here instead.
-    let completions = |events: Vec<crate::SequencedEvent>| {
+    let completions = |events: Vec<crate::SequencedAgentEvent>| {
         events
             .into_iter()
             .filter(|event| matches!(event.event, AgentEvent::ToolCallCompleted { .. }))
@@ -860,12 +860,12 @@ async fn client_wait_accounting_overflow_rolls_back_the_checkpoint() {
         )
         .await
         .unwrap();
-    entities::code_turn::Entity::update_many()
+    entities::turn::Entity::update_many()
         .col_expr(
-            entities::code_turn::Column::InputTokens,
+            entities::turn::Column::InputTokens,
             sea_orm::sea_query::Expr::value(i64::from(u32::MAX)),
         )
-        .filter(entities::code_turn::Column::Id.eq(turn_id.0))
+        .filter(entities::turn::Column::Id.eq(turn_id.0))
         .exec(&store.conn)
         .await
         .unwrap();
@@ -908,7 +908,7 @@ async fn client_wait_accounting_overflow_rolls_back_the_checkpoint() {
 
 async fn park_test_client_wait(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
 ) -> (TurnId, crate::model::ClientToolCallRequest, DateTime<Utc>) {
     let turn_id = TurnId::new();
     let accepted = match store
@@ -960,7 +960,7 @@ async fn park_test_client_wait(
 
 async fn park_test_user_questions(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
 ) -> (TurnId, crate::model::ClientToolCallRequest, DateTime<Utc>) {
     let turn_id = TurnId::new();
     let accepted = match store
@@ -1024,7 +1024,7 @@ async fn park_test_user_questions(
     match parked {
         ParkTurnForClientCallOutcome::Parked {
             renderer_event:
-                Some(SequencedEvent {
+                Some(SequencedAgentEvent {
                     event:
                         AgentEvent::UserQuestionsAsked {
                             call_id,
@@ -1623,7 +1623,7 @@ async fn client_wait_schema_rejects_invalid_scope_claim_and_lifecycle() {
     assert!(wrong_claim.insert(&store.conn).await.is_err());
 
     let mut wrong_scope = valid_second.clone();
-    wrong_scope.session_id = Set(ChatId::new().0);
+    wrong_scope.session_id = Set(SessionId::new().0);
     wrong_scope.status = Set(crate::model::TurnClientWaitStatus::Cancelled
         .as_str()
         .into());
@@ -1666,7 +1666,7 @@ async fn client_wait_cancellation_fences_unclaimed_and_claimed_native_work() {
     ));
     assert!(matches!(
         cancelled.terminal_event,
-        Some(SequencedEvent {
+        Some(SequencedAgentEvent {
             event: AgentEvent::TurnCancelled { usage },
             ..
         }) if usage == test_checkpoint_progress().usage
@@ -1686,7 +1686,7 @@ async fn client_wait_cancellation_fences_unclaimed_and_claimed_native_work() {
     );
 
     let claimed_chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         ..sample_chat()
     };
     store.create_chat(&claimed_chat).await.unwrap();
@@ -2008,7 +2008,7 @@ async fn client_tool_call_is_fenced_by_its_exact_lease() {
         store
             .heartbeat_client_tool_call(
                 call.id,
-                ChatId::new(),
+                SessionId::new(),
                 lease_token,
                 claimed_at + chrono::Duration::seconds(1),
                 extended_expiry,
@@ -2053,7 +2053,7 @@ async fn client_tool_call_is_fenced_by_its_exact_lease() {
         store
             .resolve_client_tool_call(
                 call.id,
-                ChatId::new(),
+                SessionId::new(),
                 lease_token,
                 resolved_at,
                 &resolution,
@@ -2109,7 +2109,7 @@ async fn client_tool_call_is_fenced_by_its_exact_lease() {
         store
             .resolve_client_tool_call(
                 call.id,
-                ChatId::new(),
+                SessionId::new(),
                 lease_token,
                 resolved_at,
                 &resolution,

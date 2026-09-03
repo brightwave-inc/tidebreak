@@ -46,13 +46,9 @@ async fn chat_claim_scan_skips_turns_owned_by_code_session_workers() {
         outcome => panic!("unexpected runtime acceptance outcome: {outcome:?}"),
     };
     assert_eq!(
-        crate::db::code::bump_spawn_epoch(
-            &store,
-            crate::code::CodeSessionId(runtime_chat.id.0),
-            None,
-        )
-        .await
-        .unwrap(),
+        crate::db::code::bump_spawn_epoch(&store, crate::code::SessionId(runtime_chat.id.0), None,)
+            .await
+            .unwrap(),
         1
     );
 
@@ -68,37 +64,37 @@ async fn chat_claim_scan_skips_turns_owned_by_code_session_workers() {
     };
 
     let due_at = Utc::now();
-    entities::code_turn::Entity::update_many()
+    entities::turn::Entity::update_many()
         .col_expr(
-            entities::code_turn::Column::Status,
+            entities::turn::Column::Status,
             sea_orm::sea_query::Expr::value(TurnRunStatus::Resuming.as_str()),
         )
         .col_expr(
-            entities::code_turn::Column::AvailableAt,
+            entities::turn::Column::AvailableAt,
             sea_orm::sea_query::Expr::value(due_at - chrono::Duration::seconds(1)),
         )
         .col_expr(
-            entities::code_turn::Column::UpdatedAt,
+            entities::turn::Column::UpdatedAt,
             sea_orm::sea_query::Expr::value(due_at - chrono::Duration::seconds(1)),
         )
         .col_expr(
-            entities::code_turn::Column::ParkRef,
+            entities::turn::Column::ParkRef,
             sea_orm::sea_query::Expr::value(Some("approval".to_owned())),
         )
-        .filter(entities::code_turn::Column::Id.eq(runtime_turn.id.0))
+        .filter(entities::turn::Column::Id.eq(runtime_turn.id.0))
         .exec(&store.conn)
         .await
         .unwrap();
-    entities::code_turn::Entity::update_many()
+    entities::turn::Entity::update_many()
         .col_expr(
-            entities::code_turn::Column::AvailableAt,
+            entities::turn::Column::AvailableAt,
             sea_orm::sea_query::Expr::value(due_at),
         )
         .col_expr(
-            entities::code_turn::Column::UpdatedAt,
+            entities::turn::Column::UpdatedAt,
             sea_orm::sea_query::Expr::value(due_at),
         )
-        .filter(entities::code_turn::Column::Id.eq(plain_turn.id.0))
+        .filter(entities::turn::Column::Id.eq(plain_turn.id.0))
         .exec(&store.conn)
         .await
         .unwrap();
@@ -338,12 +334,12 @@ async fn turn_claim_and_heartbeat_require_the_exact_live_lease() {
         AcceptTurnOutcome::Accepted(turn) => turn,
         outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
     };
-    entities::code_turn::Entity::update_many()
+    entities::turn::Entity::update_many()
         .col_expr(
-            entities::code_turn::Column::MaxAttempts,
+            entities::turn::Column::MaxAttempts,
             sea_orm::sea_query::Expr::value(2),
         )
-        .filter(entities::code_turn::Column::Id.eq(turn_id.0))
+        .filter(entities::turn::Column::Id.eq(turn_id.0))
         .exec(&store.conn)
         .await
         .unwrap();
@@ -573,29 +569,29 @@ async fn resuming_turn_claims_a_new_lease_without_consuming_failure_budget() {
     assert_eq!(first.max_attempts, TurnRun::DEFAULT_MAX_ATTEMPTS);
 
     let resume_at = first_claimed_at + chrono::Duration::seconds(10);
-    let parked = entities::code_turn::Entity::update_many()
+    let parked = entities::turn::Entity::update_many()
         .col_expr(
-            entities::code_turn::Column::Status,
+            entities::turn::Column::Status,
             sea_orm::sea_query::Expr::value(TurnRunStatus::Resuming.as_str()),
         )
         .col_expr(
-            entities::code_turn::Column::LeaseToken,
+            entities::turn::Column::LeaseToken,
             sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
         )
         .col_expr(
-            entities::code_turn::Column::LeaseExpiresAt,
+            entities::turn::Column::LeaseExpiresAt,
             sea_orm::sea_query::Expr::value(Option::<DateTime<Utc>>::None),
         )
         .col_expr(
-            entities::code_turn::Column::AvailableAt,
+            entities::turn::Column::AvailableAt,
             sea_orm::sea_query::Expr::value(resume_at),
         )
         .col_expr(
-            entities::code_turn::Column::UpdatedAt,
+            entities::turn::Column::UpdatedAt,
             sea_orm::sea_query::Expr::value(resume_at),
         )
-        .filter(entities::code_turn::Column::Id.eq(turn_id.0))
-        .filter(entities::code_turn::Column::LeaseToken.eq(first.lease_token))
+        .filter(entities::turn::Column::Id.eq(turn_id.0))
+        .filter(entities::turn::Column::LeaseToken.eq(first.lease_token))
         .exec(&store.conn)
         .await
         .unwrap();
@@ -811,7 +807,7 @@ async fn claim_scan_rolls_back_terminal_state_when_event_append_fails() {
         .unwrap()
         .turn
         .unwrap();
-    entities::code_event::ActiveModel {
+    entities::event::ActiveModel {
         session_id: Set(chat.id.0),
         owner: Set("local".to_owned()),
         seq: Set(1),
@@ -968,12 +964,12 @@ async fn stale_turn_attempt_cannot_complete_a_reclaimed_turn() {
         AcceptTurnOutcome::Accepted(turn) => turn,
         outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
     };
-    entities::code_turn::Entity::update_many()
+    entities::turn::Entity::update_many()
         .col_expr(
-            entities::code_turn::Column::MaxAttempts,
+            entities::turn::Column::MaxAttempts,
             sea_orm::sea_query::Expr::value(2),
         )
-        .filter(entities::code_turn::Column::Id.eq(turn_id.0))
+        .filter(entities::turn::Column::Id.eq(turn_id.0))
         .exec(&store.conn)
         .await
         .unwrap();
@@ -1093,12 +1089,12 @@ async fn turn_claim_orders_queued_and_expired_work_by_effective_due_time() {
         AcceptTurnOutcome::Accepted(turn) => turn,
         outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
     };
-    entities::code_turn::Entity::update_many()
+    entities::turn::Entity::update_many()
         .col_expr(
-            entities::code_turn::Column::MaxAttempts,
+            entities::turn::Column::MaxAttempts,
             sea_orm::sea_query::Expr::value(2),
         )
-        .filter(entities::code_turn::Column::Id.eq(expired_turn.id.0))
+        .filter(entities::turn::Column::Id.eq(expired_turn.id.0))
         .exec(&store.conn)
         .await
         .unwrap();
@@ -1122,16 +1118,16 @@ async fn turn_claim_orders_queued_and_expired_work_by_effective_due_time() {
         outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
     };
     let queued_due_at = first_expiry - chrono::Duration::seconds(1);
-    entities::code_turn::Entity::update_many()
+    entities::turn::Entity::update_many()
         .col_expr(
-            entities::code_turn::Column::AvailableAt,
+            entities::turn::Column::AvailableAt,
             sea_orm::sea_query::Expr::value(queued_due_at),
         )
         .col_expr(
-            entities::code_turn::Column::UpdatedAt,
+            entities::turn::Column::UpdatedAt,
             sea_orm::sea_query::Expr::value(queued_due_at),
         )
-        .filter(entities::code_turn::Column::Id.eq(queued_turn.id.0))
+        .filter(entities::turn::Column::Id.eq(queued_turn.id.0))
         .exec(&store.conn)
         .await
         .unwrap();
@@ -1174,12 +1170,12 @@ async fn turn_claim_prefers_an_earlier_expired_lease_over_queued_work() {
         AcceptTurnOutcome::Accepted(turn) => turn,
         outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
     };
-    entities::code_turn::Entity::update_many()
+    entities::turn::Entity::update_many()
         .col_expr(
-            entities::code_turn::Column::MaxAttempts,
+            entities::turn::Column::MaxAttempts,
             sea_orm::sea_query::Expr::value(2),
         )
-        .filter(entities::code_turn::Column::Id.eq(expired_turn.id.0))
+        .filter(entities::turn::Column::Id.eq(expired_turn.id.0))
         .exec(&store.conn)
         .await
         .unwrap();
@@ -1203,16 +1199,16 @@ async fn turn_claim_prefers_an_earlier_expired_lease_over_queued_work() {
         outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
     };
     let queued_due_at = first_expiry + chrono::Duration::seconds(1);
-    entities::code_turn::Entity::update_many()
+    entities::turn::Entity::update_many()
         .col_expr(
-            entities::code_turn::Column::AvailableAt,
+            entities::turn::Column::AvailableAt,
             sea_orm::sea_query::Expr::value(queued_due_at),
         )
         .col_expr(
-            entities::code_turn::Column::UpdatedAt,
+            entities::turn::Column::UpdatedAt,
             sea_orm::sea_query::Expr::value(queued_due_at),
         )
-        .filter(entities::code_turn::Column::Id.eq(queued_turn.id.0))
+        .filter(entities::turn::Column::Id.eq(queued_turn.id.0))
         .exec(&store.conn)
         .await
         .unwrap();

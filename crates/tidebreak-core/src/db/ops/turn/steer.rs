@@ -5,8 +5,8 @@ use sea_orm::{
 };
 
 use crate::error::{AgentError, Result};
-use crate::event::{AgentEvent, SequencedEvent};
-use crate::id::{ChatId, MessageId, TurnId, TurnSteerId};
+use crate::event::{AgentEvent, SequencedAgentEvent};
+use crate::id::{MessageId, SessionId, TurnId, TurnSteerId};
 use crate::model::{TurnRunStatus, TurnSteer, TurnSteerStatus};
 use crate::storage::{AcceptTurnSteerOutcome, ApplyTurnSteerOutcome, JournaledTurnSteerOutcome};
 
@@ -26,7 +26,7 @@ pub(in crate::db) async fn accept_turn_steer(
     store: &DbStore,
     id: TurnSteerId,
     turn_id: TurnId,
-    chat_id: ChatId,
+    chat_id: SessionId,
     content: &str,
     invoked_skills: &[String],
     interrupt: bool,
@@ -94,7 +94,7 @@ pub(in crate::db) async fn accept_turn_steer(
         return Ok(AcceptTurnSteerOutcome::IdentityConflict);
     }
 
-    let turn = entities::code_turn::Entity::find_by_id(turn_id.0)
+    let turn = entities::turn::Entity::find_by_id(turn_id.0)
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -201,32 +201,32 @@ pub(in crate::db) async fn accept_turn_steer(
         && interrupt
         && super::multi_agent_run_wait::interrupt_wait_set_for_steer_on(&transaction, &turn, now)
             .await?;
-    let touched = entities::code_turn::Entity::update_many().col_expr(
-        entities::code_turn::Column::UpdatedAt,
+    let touched = entities::turn::Entity::update_many().col_expr(
+        entities::turn::Column::UpdatedAt,
         sea_orm::sea_query::Expr::value(now),
     );
     let touched = if interrupted_ordered_wait {
         touched
             .col_expr(
-                entities::code_turn::Column::Status,
+                entities::turn::Column::Status,
                 sea_orm::sea_query::Expr::value(TurnRunStatus::Resuming.as_str()),
             )
             .col_expr(
-                entities::code_turn::Column::AvailableAt,
+                entities::turn::Column::AvailableAt,
                 sea_orm::sea_query::Expr::value(now),
             )
     } else {
         touched
     }
-    .filter(entities::code_turn::Column::Id.eq(turn_id.0))
-    .filter(entities::code_turn::Column::Status.eq(&turn.status))
-    .filter(entities::code_turn::Column::AttemptCount.eq(turn.attempt_count))
-    .filter(entities::code_turn::Column::UpdatedAt.eq(turn.updated_at))
-    .filter(entities::code_turn::Column::UpdatedAt.lte(now));
+    .filter(entities::turn::Column::Id.eq(turn_id.0))
+    .filter(entities::turn::Column::Status.eq(&turn.status))
+    .filter(entities::turn::Column::AttemptCount.eq(turn.attempt_count))
+    .filter(entities::turn::Column::UpdatedAt.eq(turn.updated_at))
+    .filter(entities::turn::Column::UpdatedAt.lte(now));
     let touched = if status == TurnRunStatus::Running {
         touched
-            .filter(entities::code_turn::Column::LeaseToken.eq(turn.lease_token))
-            .filter(entities::code_turn::Column::LeaseExpiresAt.eq(turn.lease_expires_at))
+            .filter(entities::turn::Column::LeaseToken.eq(turn.lease_token))
+            .filter(entities::turn::Column::LeaseExpiresAt.eq(turn.lease_expires_at))
     } else {
         touched
     }
@@ -266,7 +266,7 @@ pub(in crate::db) async fn list_pending_turn_steers(
     else {
         return Ok(None);
     };
-    let live = entities::code_turn::Entity::find_by_id(turn_id.0)
+    let live = entities::turn::Entity::find_by_id(turn_id.0)
         .one(&store.conn)
         .await
         .map_err(store_err)?
@@ -326,11 +326,11 @@ pub(in crate::db) async fn apply_turn_steer(
         ));
     }
     let now = canonical_db_timestamp(now)?;
-    let Some(chat_id) = entities::code_turn::Entity::find_by_id(turn_id.0)
+    let Some(chat_id) = entities::turn::Entity::find_by_id(turn_id.0)
         .one(&store.conn)
         .await
         .map_err(store_err)?
-        .map(|turn| ChatId(turn.session_id))
+        .map(|turn| SessionId(turn.session_id))
     else {
         return Ok(None);
     };
@@ -417,7 +417,7 @@ pub(in crate::db) async fn apply_turn_steer(
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     };
-    let Some(turn) = entities::code_turn::Entity::find_by_id(turn_id.0)
+    let Some(turn) = entities::turn::Entity::find_by_id(turn_id.0)
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -444,7 +444,7 @@ pub(in crate::db) async fn apply_turn_steer(
         .ok_or_else(|| AgentError::Store(format!("turn {turn_id} steer revision overflow")))?;
 
     if let Some(preceding) = preceding_assistant {
-        validate_preceding_assistant(preceding, turn_id, ChatId(turn.session_id), now)?;
+        validate_preceding_assistant(preceding, turn_id, SessionId(turn.session_id), now)?;
         if !reserve_message_identity_on(
             &transaction,
             preceding.id,
@@ -484,7 +484,7 @@ pub(in crate::db) async fn apply_turn_steer(
     if !transfer_steer_message_identity_on(
         &transaction,
         MessageId(steer.id),
-        ChatId(steer.session_id),
+        SessionId(steer.session_id),
         TurnId(steer.turn_id),
     )
     .await?
@@ -498,7 +498,7 @@ pub(in crate::db) async fn apply_turn_steer(
         id: Set(steer.id),
         chat_id: Set(steer.session_id),
         turn_id: Set(steer.turn_id),
-        seq: Set(next_message_seq_on(&transaction, ChatId(steer.session_id)).await?),
+        seq: Set(next_message_seq_on(&transaction, SessionId(steer.session_id)).await?),
         role: Set("user".into()),
         content: Set(steer.content.clone()),
         llm_content: Set(crate::model::user_message_llm_content(
@@ -552,29 +552,29 @@ pub(in crate::db) async fn apply_turn_steer(
         return Ok(None);
     }
 
-    let touched = entities::code_turn::Entity::update_many()
+    let touched = entities::turn::Entity::update_many()
         .col_expr(
-            entities::code_turn::Column::UpdatedAt,
+            entities::turn::Column::UpdatedAt,
             sea_orm::sea_query::Expr::value(now),
         )
         .col_expr(
-            entities::code_turn::Column::SteerRevision,
+            entities::turn::Column::SteerRevision,
             sea_orm::sea_query::Expr::value(next_steer_revision),
         )
         .col_expr(
-            entities::code_turn::Column::LastSteerAppliedAt,
+            entities::turn::Column::LastSteerAppliedAt,
             sea_orm::sea_query::Expr::value(Some(now)),
         )
-        .filter(entities::code_turn::Column::Id.eq(turn_id.0))
-        .filter(entities::code_turn::Column::Status.eq(TurnRunStatus::Running.as_str()))
-        .filter(entities::code_turn::Column::AttemptCount.eq(claim.attempt_count))
-        .filter(entities::code_turn::Column::ClaimCount.eq(claim.claim_count))
-        .filter(entities::code_turn::Column::LeaseToken.eq(lease_token))
-        .filter(entities::code_turn::Column::LeaseExpiresAt.eq(turn.lease_expires_at))
-        .filter(entities::code_turn::Column::LeaseExpiresAt.gt(now))
-        .filter(entities::code_turn::Column::SteerRevision.eq(turn.steer_revision))
-        .filter(entities::code_turn::Column::UpdatedAt.eq(turn.updated_at))
-        .filter(entities::code_turn::Column::UpdatedAt.lte(now))
+        .filter(entities::turn::Column::Id.eq(turn_id.0))
+        .filter(entities::turn::Column::Status.eq(TurnRunStatus::Running.as_str()))
+        .filter(entities::turn::Column::AttemptCount.eq(claim.attempt_count))
+        .filter(entities::turn::Column::ClaimCount.eq(claim.claim_count))
+        .filter(entities::turn::Column::LeaseToken.eq(lease_token))
+        .filter(entities::turn::Column::LeaseExpiresAt.eq(turn.lease_expires_at))
+        .filter(entities::turn::Column::LeaseExpiresAt.gt(now))
+        .filter(entities::turn::Column::SteerRevision.eq(turn.steer_revision))
+        .filter(entities::turn::Column::UpdatedAt.eq(turn.updated_at))
+        .filter(entities::turn::Column::UpdatedAt.lte(now))
         .exec(&transaction)
         .await
         .map_err(store_err)?;
@@ -595,7 +595,7 @@ pub(in crate::db) async fn apply_turn_steer(
     };
     let seq = append_event_on(
         &transaction,
-        ChatId(applied.session_id),
+        SessionId(applied.session_id),
         Some(turn_id),
         Some(lease_token),
         Some(attempt_event_ordinal),
@@ -607,7 +607,7 @@ pub(in crate::db) async fn apply_turn_steer(
     transaction.commit().await.map_err(store_err)?;
     Ok(Some(JournaledTurnSteerOutcome {
         outcome: ApplyTurnSteerOutcome::Applied(applied),
-        event: SequencedEvent { seq, event },
+        event: SequencedAgentEvent { seq, event },
     }))
 }
 
@@ -642,7 +642,7 @@ where
 fn validate_steer_input(
     id: TurnSteerId,
     turn_id: TurnId,
-    chat_id: ChatId,
+    chat_id: SessionId,
     content: &str,
     invoked_skills: &[String],
 ) -> Result<()> {
@@ -667,7 +667,7 @@ fn validate_steer_input(
 fn exact_accepted_steer(
     existing: entities::code_turn_steer::Model,
     turn_id: TurnId,
-    chat_id: ChatId,
+    chat_id: SessionId,
     content: &str,
     invoked_skills: &[String],
     interrupt: bool,
@@ -741,13 +741,13 @@ async fn exact_applied_event_on<C>(
     steer: &entities::code_turn_steer::Model,
     lease_token: uuid::Uuid,
     attempt_event_ordinal: i32,
-) -> Result<SequencedEvent>
+) -> Result<SequencedAgentEvent>
 where
     C: ConnectionTrait,
 {
-    let event = entities::code_event::Entity::find()
-        .filter(entities::code_event::Column::LeaseToken.eq(lease_token))
-        .filter(entities::code_event::Column::AttemptEventOrdinal.eq(attempt_event_ordinal))
+    let event = entities::event::Entity::find()
+        .filter(entities::event::Column::LeaseToken.eq(lease_token))
+        .filter(entities::event::Column::AttemptEventOrdinal.eq(attempt_event_ordinal))
         .one(conn)
         .await
         .map_err(store_err)?
@@ -774,7 +774,7 @@ where
             TurnSteerId(steer.id)
         )));
     }
-    Ok(SequencedEvent {
+    Ok(SequencedAgentEvent {
         seq: event.seq,
         event: payload,
     })
@@ -828,7 +828,7 @@ where
 fn validate_preceding_assistant(
     message: &crate::model::Message,
     turn_id: TurnId,
-    chat_id: ChatId,
+    chat_id: SessionId,
     now: chrono::DateTime<Utc>,
 ) -> Result<()> {
     let created_at = canonical_db_timestamp(message.created_at)?;
@@ -851,7 +851,7 @@ fn turn_steer_from_model(model: entities::code_turn_steer::Model) -> Result<Turn
     Ok(TurnSteer {
         id: TurnSteerId(model.id),
         turn_id: TurnId(model.turn_id),
-        chat_id: ChatId(model.session_id),
+        chat_id: SessionId(model.session_id),
         invoked_skills: invoked_skills_from_steer(&model)?,
         content: model.content,
         voice_input_used: model.voice_input_used,

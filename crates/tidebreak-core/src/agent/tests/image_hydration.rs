@@ -83,7 +83,7 @@ async fn store_with_chat(name: &str) -> (Arc<DbStore>, Chat, tempfile::TempDir) 
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,

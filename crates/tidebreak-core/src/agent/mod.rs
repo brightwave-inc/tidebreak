@@ -53,7 +53,7 @@ use crate::approval::{ApprovalGate, StandingGrants};
 use crate::cancel::CancelToken;
 use crate::citation::AssistantCitationInput;
 use crate::error::ProviderErrorInfo;
-use crate::id::{CallId, ChatId, MessageId, TurnId};
+use crate::id::{CallId, MessageId, SessionId, TurnId};
 use crate::model::{Message, Role, ToolCallRecord};
 use crate::preview::ToolActionPreview;
 use crate::provider::{
@@ -293,7 +293,7 @@ pub(crate) struct AssistantCandidate {
 impl AssistantCandidate {
     /// This candidate as a durable message under `message_id`.
     ///
-    fn message(&self, message_id: MessageId, chat_id: ChatId, turn_id: TurnId) -> Message {
+    fn message(&self, message_id: MessageId, chat_id: SessionId, turn_id: TurnId) -> Message {
         Message {
             id: message_id,
             chat_id,

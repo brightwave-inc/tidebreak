@@ -192,7 +192,7 @@ async fn durable_turn_events_are_bound_and_reserve_one_terminal_slot() {
         Some(1),
         "an exact ambiguous retry recovers its original sequence"
     );
-    let stored = entities::code_event::Entity::find_by_id((chat.id.0, 1))
+    let stored = entities::event::Entity::find_by_id((chat.id.0, 1))
         .one(&store.conn)
         .await
         .unwrap()
@@ -261,7 +261,7 @@ async fn durable_turn_events_are_bound_and_reserve_one_terminal_slot() {
     );
     assert!(store.append_event(chat.id, &started).await.is_err());
 
-    entities::code_event::ActiveModel {
+    entities::event::ActiveModel {
         session_id: Set(chat.id.0),
         owner: Set("local".to_owned()),
         seq: Set(2),
@@ -276,7 +276,7 @@ async fn durable_turn_events_are_bound_and_reserve_one_terminal_slot() {
     .insert(&store.conn)
     .await
     .unwrap();
-    assert!(entities::code_event::ActiveModel {
+    assert!(entities::event::ActiveModel {
         session_id: Set(chat.id.0),
         owner: Set("local".to_owned()),
         seq: Set(3),
@@ -291,7 +291,7 @@ async fn durable_turn_events_are_bound_and_reserve_one_terminal_slot() {
     .insert(&store.conn)
     .await
     .is_err());
-    assert!(entities::code_event::ActiveModel {
+    assert!(entities::event::ActiveModel {
         session_id: Set(chat.id.0),
         owner: Set("local".to_owned()),
         seq: Set(4),
@@ -306,7 +306,7 @@ async fn durable_turn_events_are_bound_and_reserve_one_terminal_slot() {
     .insert(&store.conn)
     .await
     .is_err());
-    assert!(entities::code_event::ActiveModel {
+    assert!(entities::event::ActiveModel {
         session_id: Set(chat.id.0),
         owner: Set("local".to_owned()),
         seq: Set(5),
@@ -385,5 +385,5 @@ async fn event_for_unknown_chat_is_rejected() {
     let event = AgentEvent::TurnStarted {
         turn_id: TurnId::new(),
     };
-    assert!(store.append_event(ChatId::new(), &event).await.is_err());
+    assert!(store.append_event(SessionId::new(), &event).await.is_err());
 }

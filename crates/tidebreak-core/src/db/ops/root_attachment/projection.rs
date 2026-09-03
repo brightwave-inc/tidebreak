@@ -2,7 +2,7 @@ use sea_orm::sea_query::Expr;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 
 use crate::error::{AgentError, Result};
-use crate::id::{ChatId, HostRootId};
+use crate::id::{HostRootId, SessionId};
 use crate::model::{
     RootAttachmentChange, RootAttachmentChangeAction, MAX_ATTACHMENT_REVISION, MAX_ROOT_ATTACHMENTS,
 };
@@ -12,7 +12,7 @@ use super::super::conversation::attachment_origin_from_db;
 
 pub(super) async fn load_projection<C>(
     conn: &C,
-    chat_id: ChatId,
+    chat_id: SessionId,
     revision: i64,
 ) -> Result<Vec<entities::chat_root_attachment::Model>>
 where
@@ -86,20 +86,20 @@ pub(super) fn validate_pending_projection(
 
 pub(super) async fn set_chat_revision<C>(
     conn: &C,
-    chat_id: ChatId,
+    chat_id: SessionId,
     before: i64,
     after: i64,
 ) -> Result<()>
 where
     C: sea_orm::ConnectionTrait,
 {
-    let updated = entities::code_session::Entity::update_many()
+    let updated = entities::session::Entity::update_many()
         .col_expr(
-            entities::code_session::Column::AttachmentRevision,
+            entities::session::Column::AttachmentRevision,
             Expr::value(after),
         )
-        .filter(entities::code_session::Column::Id.eq(chat_id.0))
-        .filter(entities::code_session::Column::AttachmentRevision.eq(before))
+        .filter(entities::session::Column::Id.eq(chat_id.0))
+        .filter(entities::session::Column::AttachmentRevision.eq(before))
         .exec(conn)
         .await
         .map_err(store_err)?;
@@ -113,7 +113,7 @@ where
 
 pub(super) async fn remove_projection_row<C>(
     conn: &C,
-    chat_id: ChatId,
+    chat_id: SessionId,
     root_id: HostRootId,
     position: u32,
     before_revision: i64,

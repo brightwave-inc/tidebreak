@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AgentError, Result};
-use crate::id::{ChatId, MessageId};
+use crate::id::{MessageId, SessionId};
 use crate::provider::Usage;
 
 /// Legacy checkpoint payload format. Still readable for projection; new writes
@@ -276,7 +276,7 @@ pub fn strip_json_fence(content: &str) -> &str {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextCheckpoint {
     /// Conversation exclusively owning this checkpoint.
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     /// Inclusive durable-message boundary covered by `content`.
     pub source_message_id: MessageId,
     /// Version of the structured checkpoint payload.

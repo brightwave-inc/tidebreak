@@ -10,7 +10,7 @@ use tidebreak_core::{
     AgentRunStatus, AgentRunTier, AgentRunWaitCondition, AgentRunWaitSetCheckpointRequest,
     AnswerUserQuestions, AnswerUserQuestionsOutcome, AnswerUserQuestionsRequest,
     ApplyTurnSteerOutcome, AssistantCitationInput, BeginRootAttachmentChange,
-    BeginRootAttachmentChangeOutcome, CallId, Chat, ChatId, ChatRootAttachment,
+    BeginRootAttachmentChangeOutcome, CallId, Chat, ChatRootAttachment,
     CheckpointSandboxSpawnOutcome, CitationLocator, ClaimClientToolCallOutcome,
     ClientToolCallRequest, CompleteTurnRunOutcome, DbStore, DeleteChatOutcome,
     DeleteProjectOutcome, DocumentBlob, DocumentId, DocumentSourceUpsert, DocumentUpsert,
@@ -20,10 +20,11 @@ use tidebreak_core::{
     ProjectId, RecordTurnFailureOutcome, RequestAgentRunCancellationOutcome,
     RequestTurnCancellationOutcome, ResolveToolCallOutcome, ResumeTurnForAgentRunWaitSetOutcome,
     Role, RootAttachmentChangeAction, RootAttachmentChangeId, RootAttachmentChangeTerminal,
-    RootAttachmentOrigin, SandboxSpawnCheckpointRequest, SpawnSandboxAgentResult, StopReason,
-    Store, SubmitAgentRunResultOutcome, ToolCallExecution, ToolCallRecord, ToolCallResolution,
-    ToolCallStatus, TurnCheckpointProgress, TurnFailureRetry, TurnId, TurnRun, TurnRunStatus,
-    TurnSteerId, TurnSteerStatus, Usage, UserQuestionAnswer, ASK_USER_QUESTIONS_TOOL,
+    RootAttachmentOrigin, SandboxSpawnCheckpointRequest, SessionId, SpawnSandboxAgentResult,
+    StopReason, Store, SubmitAgentRunResultOutcome, ToolCallExecution, ToolCallRecord,
+    ToolCallResolution, ToolCallStatus, TurnCheckpointProgress, TurnFailureRetry, TurnId, TurnRun,
+    TurnRunStatus, TurnSteerId, TurnSteerStatus, Usage, UserQuestionAnswer,
+    ASK_USER_QUESTIONS_TOOL,
 };
 
 static POSTGRES_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -157,7 +158,7 @@ async fn set_postgres_turn_max_attempts(url: &str, turn_id: TurnId, max_attempts
     let connection = Database::connect(url).await.unwrap();
     let updated = connection
         .execute_unprepared(&format!(
-            "UPDATE code_turn SET max_attempts = {max_attempts} WHERE id = '{}'",
+            "UPDATE \"turn\" SET max_attempts = {max_attempts} WHERE id = '{}'",
             turn_id.0
         ))
         .await
@@ -277,7 +278,7 @@ async fn postgres_completion_persists_authoritative_totals_with_and_without_chec
             let updated = connection
                 .execute_raw(Statement::from_sql_and_values(
                     DatabaseBackend::Postgres,
-                    "UPDATE code_turn SET model_steps = $1, input_tokens = $2, output_tokens = $3, cache_read_input_tokens = $4, cache_creation_input_tokens = $5 WHERE id = $6 AND status = 'running'",
+                    "UPDATE \"turn\" SET model_steps = $1, input_tokens = $2, output_tokens = $3, cache_read_input_tokens = $4, cache_creation_input_tokens = $5 WHERE id = $6 AND status = 'running'",
                     [
                         model_steps.into(),
                         i64::from(usage.input_tokens).into(),
@@ -657,7 +658,7 @@ fn utc_now_at_postgres_precision() -> chrono::DateTime<Utc> {
 
 fn sample_chat() -> Chat {
     Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -712,7 +713,7 @@ async fn postgres_claim_exact_turn(
 
 async fn postgres_live_turn(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
 ) -> (tidebreak_core::TurnRun, uuid::Uuid) {
     if let Some(turn) = store
         .list_turns(chat_id)
@@ -749,7 +750,7 @@ async fn postgres_live_turn(
 
 async fn postgres_admit_sandbox(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
     call: CallId,
     input: &str,
 ) -> tidebreak_core::AgentRun {
@@ -793,7 +794,7 @@ async fn postgres_complete_next_child(store: &DbStore, text: &str) -> AgentRunId
     child.id
 }
 
-async fn cleanup_postgres_sandbox_chat(store: &DbStore, chat_id: ChatId) {
+async fn cleanup_postgres_sandbox_chat(store: &DbStore, chat_id: SessionId) {
     for run in store
         .list_agent_runs(chat_id)
         .await
@@ -1531,7 +1532,7 @@ async fn postgres_parent_cancellation_uses_time_after_admission_and_heartbeat_lo
         .execute_raw(Statement::from_string(
             DatabaseBackend::Postgres,
             format!(
-                "UPDATE code_session SET title = title WHERE id = '{}'",
+                "UPDATE \"session\" SET title = title WHERE id = '{}'",
                 chat.id.0
             ),
         ))
@@ -1906,7 +1907,7 @@ async fn postgres_sandbox_admission_checks_lease_time_after_lock_wait() {
         .execute_raw(Statement::from_string(
             DatabaseBackend::Postgres,
             format!(
-                "UPDATE code_turn SET lease_expires_at = clock_timestamp() + interval '50 milliseconds' WHERE id = '{}'",
+                r#"UPDATE "turn" SET lease_expires_at = clock_timestamp() + interval '50 milliseconds' WHERE id = '{}'"#,
                 turn.id.0
             ),
         ))
@@ -1919,7 +1920,7 @@ async fn postgres_sandbox_admission_checks_lease_time_after_lock_wait() {
         .execute_raw(Statement::from_string(
             DatabaseBackend::Postgres,
             format!(
-                "UPDATE code_session SET title = title WHERE id = '{}'",
+                "UPDATE \"session\" SET title = title WHERE id = '{}'",
                 chat.id.0
             ),
         ))

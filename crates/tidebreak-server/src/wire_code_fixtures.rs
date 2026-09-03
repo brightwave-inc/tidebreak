@@ -1050,7 +1050,7 @@ fn the_code_frame_fixtures_are_current() {
 /// new variant fails here until it has one.
 #[test]
 fn the_code_frame_fixtures_cover_every_event() {
-    let declared = declared_tags::<CodeEvent>("CodeEvent");
+    let declared = declared_tags::<CodeEvent>("Event");
     let covered = fixture_tags("event_frame", |value| value.get("event")?.get("type"));
     let missing: Vec<_> = declared.difference(&covered).collect();
     assert!(

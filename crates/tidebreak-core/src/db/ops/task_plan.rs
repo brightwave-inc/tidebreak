@@ -5,7 +5,7 @@ use crate::error::{AgentError, Result};
 use crate::event::AgentEvent;
 use crate::storage::TurnLeaseFence;
 use crate::{
-    AgentRunId, AgentRunTaskPlan, CallId, ChatId, TaskPlan, TaskPlanStep, TurnId,
+    AgentRunId, AgentRunTaskPlan, CallId, SessionId, TaskPlan, TaskPlanStep, TurnId,
     UPDATE_TASK_PLAN_TOOL,
 };
 
@@ -30,7 +30,7 @@ use super::{acquire_chat_write_lock, acquire_turn_write_lock, conversation::appe
 /// chat's history.
 pub(in crate::db) async fn upsert_for_chat(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
     call_id: CallId,
     steps: &[TaskPlanStep],
     updated_at: DateTime<Utc>,
@@ -140,7 +140,7 @@ pub(in crate::db) async fn upsert_for_chat(
 /// history instead of vanishing with the worker.
 pub(in crate::db) async fn get_for_chat(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
 ) -> Result<Option<TaskPlan>> {
     let Some(row) = entities::task_plan::Entity::find_by_id(chat_id.0)
         .one(&store.conn)

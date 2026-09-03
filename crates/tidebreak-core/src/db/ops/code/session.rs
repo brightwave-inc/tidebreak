@@ -5,8 +5,8 @@ use sea_orm::{
 
 use crate::attention::{Attention, AttentionSource, AttentionState, FenceReason};
 use crate::code::{
-    CodeSession, CodeSessionId, CodeSessionKind, CodeSessionLifecycle, CodeSubagentSummary,
-    HarnessKind, WorkspaceId,
+    CodeSubagentSummary, HarnessKind, Session, SessionId, SessionKind, SessionLifecycle,
+    WorkspaceId,
 };
 use crate::error::{AgentError, Result};
 use crate::OwnerId;
@@ -19,25 +19,25 @@ use super::acquire_code_session_write_lock;
 /// One durable permission-mode transition owned by an exact worker epoch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PermissionModeChangeIntent {
-    pub session_id: CodeSessionId,
+    pub session_id: SessionId,
     pub owner: OwnerId,
     pub revision: i64,
     pub previous_mode: PermissionMode,
     pub requested_mode: PermissionMode,
-    pub lifecycle: CodeSessionLifecycle,
+    pub lifecycle: SessionLifecycle,
     pub worker_epoch: i64,
 }
 
 /// A session plus the unresolved mode transition that blocks recovery.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PendingPermissionModeChange {
-    pub session: CodeSession,
+    pub session: Session,
     pub intent: PermissionModeChangeIntent,
 }
 
 /// The model-dependent execution settings one session actively uses.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CodeSessionExecutionSettings {
+pub struct SessionExecutionSettings {
     /// Engine model id, when the session selected one.
     pub model: Option<String>,
     /// Reasoning effort, or the engine default when absent.
@@ -46,8 +46,8 @@ pub struct CodeSessionExecutionSettings {
     pub fast_mode: bool,
 }
 
-impl From<&CodeSession> for CodeSessionExecutionSettings {
-    fn from(session: &CodeSession) -> Self {
+impl From<&Session> for SessionExecutionSettings {
+    fn from(session: &Session) -> Self {
         Self {
             model: session.model.clone(),
             reasoning_effort: session.reasoning_effort,
@@ -58,17 +58,17 @@ impl From<&CodeSession> for CodeSessionExecutionSettings {
 
 /// Insert a session row. The row belongs to `session.owner`, denormalized
 /// from the workspace it runs in.
-pub async fn insert_session(store: &DbStore, session: &CodeSession) -> Result<()> {
+pub async fn insert_session(store: &DbStore, session: &Session) -> Result<()> {
     insert_session_on(&store.conn, session).await
 }
 
 /// [`insert_session`] against any connection, so a caller can commit the
 /// session with the rows that depend on it.
-pub(in crate::db) async fn insert_session_on<C>(connection: &C, session: &CodeSession) -> Result<()>
+pub(in crate::db) async fn insert_session_on<C>(connection: &C, session: &Session) -> Result<()>
 where
     C: sea_orm::ConnectionTrait,
 {
-    entities::code_session::ActiveModel {
+    entities::session::ActiveModel {
         id: Set(session.id.0),
         owner: Set(session.owner.as_str().to_owned()),
         workspace_id: Set(session.workspace_id.map(|workspace| workspace.0)),
@@ -125,28 +125,28 @@ where
 /// The chat cascade (`ops::conversation::delete_chat`) is the one deleter of
 /// a conversation row, and a conversation the internal engine has hosted
 /// carries code-side rows too: attaching journals `SessionStarted` into
-/// `code_event`, and a turn adds `code_turn`, its attachments, approvals,
+/// `event`, and a turn adds `turn`, its attachments, approvals,
 /// queued turns, and image reservations. Every one of those keys the session
 /// with a foreign key that does not cascade, so they go here, leaves first.
 pub(in crate::db) async fn delete_session_dependents_on<C>(
     connection: &C,
-    id: CodeSessionId,
+    id: SessionId,
 ) -> Result<Vec<uuid::Uuid>>
 where
     C: ConnectionTrait,
 {
-    let turn_ids = entities::code_turn::Entity::find()
+    let turn_ids = entities::turn::Entity::find()
         .select_only()
-        .column(entities::code_turn::Column::Id)
-        .filter(entities::code_turn::Column::SessionId.eq(id.0))
+        .column(entities::turn::Column::Id)
+        .filter(entities::turn::Column::SessionId.eq(id.0))
         .into_tuple::<uuid::Uuid>()
         .all(connection)
         .await
         .map_err(store_err)?;
-    let mut blob_ids = entities::code_turn_attachment::Entity::find()
+    let mut blob_ids = entities::turn_attachment::Entity::find()
         .select_only()
-        .column(entities::code_turn_attachment::Column::BlobId)
-        .filter(entities::code_turn_attachment::Column::TurnId.is_in(turn_ids.clone()))
+        .column(entities::turn_attachment::Column::BlobId)
+        .filter(entities::turn_attachment::Column::TurnId.is_in(turn_ids.clone()))
         .into_tuple::<uuid::Uuid>()
         .all(connection)
         .await
@@ -162,8 +162,8 @@ where
             .map_err(store_err)?,
     );
 
-    entities::code_approval::Entity::delete_many()
-        .filter(entities::code_approval::Column::SessionId.eq(id.0))
+    entities::approval::Entity::delete_many()
+        .filter(entities::approval::Column::SessionId.eq(id.0))
         .exec(connection)
         .await
         .map_err(store_err)?;
@@ -187,18 +187,18 @@ where
         .exec(connection)
         .await
         .map_err(store_err)?;
-    entities::code_turn_attachment::Entity::delete_many()
-        .filter(entities::code_turn_attachment::Column::TurnId.is_in(turn_ids))
+    entities::turn_attachment::Entity::delete_many()
+        .filter(entities::turn_attachment::Column::TurnId.is_in(turn_ids))
         .exec(connection)
         .await
         .map_err(store_err)?;
-    entities::code_turn::Entity::delete_many()
-        .filter(entities::code_turn::Column::SessionId.eq(id.0))
+    entities::turn::Entity::delete_many()
+        .filter(entities::turn::Column::SessionId.eq(id.0))
         .exec(connection)
         .await
         .map_err(store_err)?;
-    entities::code_event::Entity::delete_many()
-        .filter(entities::code_event::Column::SessionId.eq(id.0))
+    entities::event::Entity::delete_many()
+        .filter(entities::event::Column::SessionId.eq(id.0))
         .exec(connection)
         .await
         .map_err(store_err)?;
@@ -244,12 +244,12 @@ where
 /// default at turn time" (decision 0048 step 5). The runtime and the engine's
 /// launch always write a value before a worker acts, so the default stands in
 /// only for a row the code side reads before that.
-fn stored_permission_mode(row: &entities::code_session::Model) -> Result<PermissionMode> {
+fn stored_permission_mode(row: &entities::session::Model) -> Result<PermissionMode> {
     match row.permission_mode.as_deref() {
         None => Ok(PermissionMode::DEFAULT),
         Some(stored) => PermissionMode::from_str(stored).ok_or_else(|| {
             AgentError::Store(format!(
-                "code_session {} has unknown permission_mode {stored}",
+                "session {} has unknown permission_mode {stored}",
                 row.id
             ))
         }),
@@ -263,13 +263,13 @@ fn stored_permission_mode(row: &entities::code_session::Model) -> Result<Permiss
 /// worker attaches (`spawn_epoch` bumps, `lifecycle` leaves `idle`), and a
 /// session created with a workspace is the runtime's from the start. Every
 /// listing the runtime or the code routes take applies this, so boot
-/// recovery, the sweeps, and `GET /code/sessions` never enumerate a
+/// recovery, the sweeps, and `GET /sessions` never enumerate a
 /// conversation that only the chat routes have touched.
 pub(in crate::db) fn code_runtime_sessions() -> sea_orm::Condition {
     sea_orm::Condition::any()
-        .add(entities::code_session::Column::WorkspaceId.is_not_null())
-        .add(entities::code_session::Column::SpawnEpoch.gt(0))
-        .add(entities::code_session::Column::Lifecycle.ne(CodeSessionLifecycle::Idle.as_str()))
+        .add(entities::session::Column::WorkspaceId.is_not_null())
+        .add(entities::session::Column::SpawnEpoch.gt(0))
+        .add(entities::session::Column::Lifecycle.ne(SessionLifecycle::Idle.as_str()))
 }
 
 /// Load one of the owner's sessions by id.
@@ -278,10 +278,10 @@ pub(in crate::db) fn code_runtime_sessions() -> sea_orm::Condition {
 pub async fn get_session(
     store: &DbStore,
     owner: &OwnerId,
-    id: CodeSessionId,
-) -> Result<Option<CodeSession>> {
-    let Some(row) = entities::code_session::Entity::find_by_id(id.0)
-        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+    id: SessionId,
+) -> Result<Option<Session>> {
+    let Some(row) = entities::session::Entity::find_by_id(id.0)
+        .filter(entities::session::Column::Owner.eq(owner.as_str()))
         .one(&store.conn)
         .await
         .map_err(store_err)?
@@ -297,11 +297,8 @@ pub async fn get_session(
 /// was spawned against after bumping the spawn epoch, and the id it holds
 /// was authorized when the worker was created. Nothing reachable from a
 /// route may call it.
-pub async fn get_session_all_owners(
-    store: &DbStore,
-    id: CodeSessionId,
-) -> Result<Option<CodeSession>> {
-    let Some(row) = entities::code_session::Entity::find_by_id(id.0)
+pub async fn get_session_all_owners(store: &DbStore, id: SessionId) -> Result<Option<Session>> {
+    let Some(row) = entities::session::Entity::find_by_id(id.0)
         .one(&store.conn)
         .await
         .map_err(store_err)?
@@ -320,9 +317,9 @@ pub async fn get_session_all_owners(
 pub async fn replace_session_execution_settings(
     store: &DbStore,
     owner: &OwnerId,
-    expected: &CodeSession,
-    next: &CodeSessionExecutionSettings,
-) -> Result<Option<CodeSession>> {
+    expected: &Session,
+    next: &SessionExecutionSettings,
+) -> Result<Option<Session>> {
     if &expected.owner != owner {
         return Ok(None);
     }
@@ -331,8 +328,8 @@ pub async fn replace_session_execution_settings(
         transaction.rollback().await.map_err(store_err)?;
         return Ok(None);
     }
-    let Some(row) = entities::code_session::Entity::find_by_id(expected.id.0)
-        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+    let Some(row) = entities::session::Entity::find_by_id(expected.id.0)
+        .filter(entities::session::Column::Owner.eq(owner.as_str()))
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -350,26 +347,26 @@ pub async fn replace_session_execution_settings(
         transaction.rollback().await.map_err(store_err)?;
         return Ok(None);
     }
-    let updated = entities::code_session::Entity::update_many()
+    let updated = entities::session::Entity::update_many()
         .col_expr(
-            entities::code_session::Column::Model,
+            entities::session::Column::Model,
             sea_orm::sea_query::Expr::value(next.model.clone()),
         )
         .col_expr(
-            entities::code_session::Column::ReasoningEffort,
+            entities::session::Column::ReasoningEffort,
             sea_orm::sea_query::Expr::value(
                 next.reasoning_effort
                     .map(|effort| effort.as_str().to_owned()),
             ),
         )
         .col_expr(
-            entities::code_session::Column::FastMode,
+            entities::session::Column::FastMode,
             sea_orm::sea_query::Expr::value(next.fast_mode),
         )
-        .filter(entities::code_session::Column::Id.eq(expected.id.0))
-        .filter(entities::code_session::Column::Owner.eq(expected.owner.as_str()))
-        .filter(entities::code_session::Column::Lifecycle.eq(expected.lifecycle.as_str()))
-        .filter(entities::code_session::Column::SpawnEpoch.eq(expected.spawn_epoch))
+        .filter(entities::session::Column::Id.eq(expected.id.0))
+        .filter(entities::session::Column::Owner.eq(expected.owner.as_str()))
+        .filter(entities::session::Column::Lifecycle.eq(expected.lifecycle.as_str()))
+        .filter(entities::session::Column::SpawnEpoch.eq(expected.spawn_epoch))
         .exec(&transaction)
         .await
         .map_err(store_err)?;
@@ -393,7 +390,7 @@ pub async fn replace_session_execution_settings(
 pub async fn begin_permission_mode_change(
     store: &DbStore,
     owner: &OwnerId,
-    expected: &CodeSession,
+    expected: &Session,
     requested_mode: PermissionMode,
 ) -> Result<Option<PermissionModeChangeIntent>> {
     if &expected.owner != owner {
@@ -404,8 +401,8 @@ pub async fn begin_permission_mode_change(
         transaction.rollback().await.map_err(store_err)?;
         return Ok(None);
     }
-    let Some(row) = entities::code_session::Entity::find_by_id(expected.id.0)
-        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+    let Some(row) = entities::session::Entity::find_by_id(expected.id.0)
+        .filter(entities::session::Column::Owner.eq(owner.as_str()))
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -439,25 +436,25 @@ pub async fn begin_permission_mode_change(
         lifecycle: expected.lifecycle,
         worker_epoch: expected.spawn_epoch,
     };
-    let updated = entities::code_session::Entity::update_many()
+    let updated = entities::session::Entity::update_many()
         .col_expr(
-            entities::code_session::Column::PermissionModeIntent,
+            entities::session::Column::PermissionModeIntent,
             sea_orm::sea_query::Expr::value(Some(requested_mode.as_str().to_owned())),
         )
         .col_expr(
-            entities::code_session::Column::PermissionModeIntentRevision,
+            entities::session::Column::PermissionModeIntentRevision,
             sea_orm::sea_query::Expr::value(Some(revision)),
         )
         .col_expr(
-            entities::code_session::Column::PermissionModeIntentEpoch,
+            entities::session::Column::PermissionModeIntentEpoch,
             sea_orm::sea_query::Expr::value(Some(expected.spawn_epoch)),
         )
         .col_expr(
-            entities::code_session::Column::PermissionModeIntentLifecycle,
+            entities::session::Column::PermissionModeIntentLifecycle,
             sea_orm::sea_query::Expr::value(Some(expected.lifecycle.as_str().to_owned())),
         )
         .filter(permission_mode_change_base(owner, &intent))
-        .filter(entities::code_session::Column::PermissionModeIntent.is_null())
+        .filter(entities::session::Column::PermissionModeIntent.is_null())
         .exec(&transaction)
         .await
         .map_err(store_err)?;
@@ -500,21 +497,21 @@ pub async fn discard_permission_mode_change(
     if &intent.owner != owner {
         return Ok(false);
     }
-    let result = entities::code_session::Entity::update_many()
+    let result = entities::session::Entity::update_many()
         .col_expr(
-            entities::code_session::Column::PermissionModeIntent,
+            entities::session::Column::PermissionModeIntent,
             sea_orm::sea_query::Expr::value(Option::<String>::None),
         )
         .col_expr(
-            entities::code_session::Column::PermissionModeIntentRevision,
+            entities::session::Column::PermissionModeIntentRevision,
             sea_orm::sea_query::Expr::value(Option::<i64>::None),
         )
         .col_expr(
-            entities::code_session::Column::PermissionModeIntentEpoch,
+            entities::session::Column::PermissionModeIntentEpoch,
             sea_orm::sea_query::Expr::value(Option::<i64>::None),
         )
         .col_expr(
-            entities::code_session::Column::PermissionModeIntentLifecycle,
+            entities::session::Column::PermissionModeIntentLifecycle,
             sea_orm::sea_query::Expr::value(Option::<String>::None),
         )
         .filter(permission_mode_change_identity(owner, intent))
@@ -530,7 +527,7 @@ pub async fn fence_permission_mode_change(
     owner: &OwnerId,
     intent: &PermissionModeChangeIntent,
     reason: &FenceReason,
-) -> Result<Option<CodeSession>> {
+) -> Result<Option<Session>> {
     if &intent.owner != owner {
         return Ok(None);
     }
@@ -553,41 +550,41 @@ pub async fn fence_permission_mode_change(
     if crate::attention::should_replace(&session.attention, &attention) {
         session.attention = attention;
     }
-    let updated = entities::code_session::Entity::update_many()
+    let updated = entities::session::Entity::update_many()
         .col_expr(
-            entities::code_session::Column::Lifecycle,
-            sea_orm::sea_query::Expr::value(CodeSessionLifecycle::Fenced.as_str()),
+            entities::session::Column::Lifecycle,
+            sea_orm::sea_query::Expr::value(SessionLifecycle::Fenced.as_str()),
         )
         .col_expr(
-            entities::code_session::Column::FenceReason,
+            entities::session::Column::FenceReason,
             sea_orm::sea_query::Expr::value(Some(serde_json::to_value(reason)?)),
         )
         .col_expr(
-            entities::code_session::Column::ChildPid,
+            entities::session::Column::ChildPid,
             sea_orm::sea_query::Expr::value(Option::<i64>::None),
         )
         .col_expr(
-            entities::code_session::Column::AttentionState,
+            entities::session::Column::AttentionState,
             sea_orm::sea_query::Expr::value(serde_json::to_value(&session.attention.state)?),
         )
         .col_expr(
-            entities::code_session::Column::AttentionSource,
+            entities::session::Column::AttentionSource,
             sea_orm::sea_query::Expr::value(session.attention.source.as_str()),
         )
         .col_expr(
-            entities::code_session::Column::PermissionModeIntent,
+            entities::session::Column::PermissionModeIntent,
             sea_orm::sea_query::Expr::value(Option::<String>::None),
         )
         .col_expr(
-            entities::code_session::Column::PermissionModeIntentRevision,
+            entities::session::Column::PermissionModeIntentRevision,
             sea_orm::sea_query::Expr::value(Option::<i64>::None),
         )
         .col_expr(
-            entities::code_session::Column::PermissionModeIntentEpoch,
+            entities::session::Column::PermissionModeIntentEpoch,
             sea_orm::sea_query::Expr::value(Option::<i64>::None),
         )
         .col_expr(
-            entities::code_session::Column::PermissionModeIntentLifecycle,
+            entities::session::Column::PermissionModeIntentLifecycle,
             sea_orm::sea_query::Expr::value(Option::<String>::None),
         )
         .filter(permission_mode_change_exact(owner, intent))
@@ -607,9 +604,9 @@ pub async fn list_pending_permission_mode_changes(
     store: &DbStore,
     owner: &OwnerId,
 ) -> Result<Vec<PendingPermissionModeChange>> {
-    entities::code_session::Entity::find()
-        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
-        .filter(entities::code_session::Column::PermissionModeIntent.is_not_null())
+    entities::session::Entity::find()
+        .filter(entities::session::Column::Owner.eq(owner.as_str()))
+        .filter(entities::session::Column::PermissionModeIntent.is_not_null())
         .all(&store.conn)
         .await
         .map_err(store_err)?
@@ -630,18 +627,18 @@ enum PermissionModeIntentUpdate {
 async fn acquire_permission_mode_change_write_lock<C>(
     conn: &C,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
 ) -> Result<bool>
 where
     C: ConnectionTrait,
 {
-    let locked = entities::code_session::Entity::update_many()
+    let locked = entities::session::Entity::update_many()
         .col_expr(
-            entities::code_session::Column::UnrecognizedEventCount,
-            sea_orm::sea_query::Expr::col(entities::code_session::Column::UnrecognizedEventCount),
+            entities::session::Column::UnrecognizedEventCount,
+            sea_orm::sea_query::Expr::col(entities::session::Column::UnrecognizedEventCount),
         )
-        .filter(entities::code_session::Column::Id.eq(session_id.0))
-        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+        .filter(entities::session::Column::Id.eq(session_id.0))
+        .filter(entities::session::Column::Owner.eq(owner.as_str()))
         .exec(conn)
         .await
         .map_err(store_err)?;
@@ -669,31 +666,31 @@ async fn update_permission_mode_intent(
         transaction.rollback().await.map_err(store_err)?;
         return Ok(false);
     }
-    let mut query = entities::code_session::Entity::update_many()
+    let mut query = entities::session::Entity::update_many()
         .col_expr(
-            entities::code_session::Column::PermissionModeIntent,
+            entities::session::Column::PermissionModeIntent,
             sea_orm::sea_query::Expr::value(Option::<String>::None),
         )
         .col_expr(
-            entities::code_session::Column::PermissionModeIntentRevision,
+            entities::session::Column::PermissionModeIntentRevision,
             sea_orm::sea_query::Expr::value(Option::<i64>::None),
         )
         .col_expr(
-            entities::code_session::Column::PermissionModeIntentEpoch,
+            entities::session::Column::PermissionModeIntentEpoch,
             sea_orm::sea_query::Expr::value(Option::<i64>::None),
         )
         .col_expr(
-            entities::code_session::Column::PermissionModeIntentLifecycle,
+            entities::session::Column::PermissionModeIntentLifecycle,
             sea_orm::sea_query::Expr::value(Option::<String>::None),
         );
     if matches!(update, PermissionModeIntentUpdate::Confirm) {
         query = query
             .col_expr(
-                entities::code_session::Column::PermissionMode,
+                entities::session::Column::PermissionMode,
                 sea_orm::sea_query::Expr::value(intent.requested_mode.as_str()),
             )
             .col_expr(
-                entities::code_session::Column::PermissionModeRevision,
+                entities::session::Column::PermissionModeRevision,
                 sea_orm::sea_query::Expr::value(intent.revision),
             );
     }
@@ -712,12 +709,12 @@ async fn update_permission_mode_intent(
 
 fn permission_mode_change_base(owner: &OwnerId, intent: &PermissionModeChangeIntent) -> Condition {
     Condition::all()
-        .add(entities::code_session::Column::Id.eq(intent.session_id.0))
-        .add(entities::code_session::Column::Owner.eq(owner.as_str()))
-        .add(entities::code_session::Column::Lifecycle.eq(intent.lifecycle.as_str()))
-        .add(entities::code_session::Column::SpawnEpoch.eq(intent.worker_epoch))
-        .add(entities::code_session::Column::PermissionMode.eq(intent.previous_mode.as_str()))
-        .add(entities::code_session::Column::PermissionModeRevision.eq(intent.revision - 1))
+        .add(entities::session::Column::Id.eq(intent.session_id.0))
+        .add(entities::session::Column::Owner.eq(owner.as_str()))
+        .add(entities::session::Column::Lifecycle.eq(intent.lifecycle.as_str()))
+        .add(entities::session::Column::SpawnEpoch.eq(intent.worker_epoch))
+        .add(entities::session::Column::PermissionMode.eq(intent.previous_mode.as_str()))
+        .add(entities::session::Column::PermissionModeRevision.eq(intent.revision - 1))
 }
 
 fn permission_mode_change_exact(owner: &OwnerId, intent: &PermissionModeChangeIntent) -> Condition {
@@ -731,29 +728,24 @@ fn permission_mode_change_identity(
     intent: &PermissionModeChangeIntent,
 ) -> Condition {
     Condition::all()
-        .add(entities::code_session::Column::Id.eq(intent.session_id.0))
-        .add(entities::code_session::Column::Owner.eq(owner.as_str()))
-        .add(entities::code_session::Column::PermissionModeRevision.eq(intent.revision - 1))
-        .add(
-            entities::code_session::Column::PermissionModeIntent.eq(intent.requested_mode.as_str()),
-        )
-        .add(entities::code_session::Column::PermissionModeIntentRevision.eq(intent.revision))
-        .add(entities::code_session::Column::PermissionModeIntentEpoch.eq(intent.worker_epoch))
-        .add(
-            entities::code_session::Column::PermissionModeIntentLifecycle
-                .eq(intent.lifecycle.as_str()),
-        )
+        .add(entities::session::Column::Id.eq(intent.session_id.0))
+        .add(entities::session::Column::Owner.eq(owner.as_str()))
+        .add(entities::session::Column::PermissionModeRevision.eq(intent.revision - 1))
+        .add(entities::session::Column::PermissionModeIntent.eq(intent.requested_mode.as_str()))
+        .add(entities::session::Column::PermissionModeIntentRevision.eq(intent.revision))
+        .add(entities::session::Column::PermissionModeIntentEpoch.eq(intent.worker_epoch))
+        .add(entities::session::Column::PermissionModeIntentLifecycle.eq(intent.lifecycle.as_str()))
 }
 
 async fn exact_permission_mode_intent<C>(
     conn: &C,
     owner: &OwnerId,
     intent: &PermissionModeChangeIntent,
-) -> Result<Option<entities::code_session::Model>>
+) -> Result<Option<entities::session::Model>>
 where
     C: ConnectionTrait,
 {
-    entities::code_session::Entity::find_by_id(intent.session_id.0)
+    entities::session::Entity::find_by_id(intent.session_id.0)
         .filter(permission_mode_change_exact(owner, intent))
         .one(conn)
         .await
@@ -761,7 +753,7 @@ where
 }
 
 fn permission_mode_intent_from_row(
-    row: &entities::code_session::Model,
+    row: &entities::session::Model,
 ) -> Result<PermissionModeChangeIntent> {
     let requested = row.permission_mode_intent.as_deref().ok_or_else(|| {
         AgentError::Store(format!(
@@ -785,7 +777,7 @@ fn permission_mode_intent_from_row(
                 row.id
             ))
         })?;
-    let lifecycle = CodeSessionLifecycle::from_str(lifecycle_token).ok_or_else(|| {
+    let lifecycle = SessionLifecycle::from_str(lifecycle_token).ok_or_else(|| {
         AgentError::Store(format!(
             "code session {} has unknown permission-mode intent lifecycle {}",
             row.id, lifecycle_token
@@ -804,7 +796,7 @@ fn permission_mode_intent_from_row(
         )));
     }
     Ok(PermissionModeChangeIntent {
-        session_id: CodeSessionId(row.id),
+        session_id: SessionId(row.id),
         owner: OwnerId::new(&row.owner)?,
         revision,
         previous_mode,
@@ -825,14 +817,14 @@ fn permission_mode_intent_from_row(
 /// superseded worker cannot keep a live epoch.
 pub async fn bump_spawn_epoch(
     store: &DbStore,
-    id: CodeSessionId,
+    id: SessionId,
     child_pid: Option<i64>,
 ) -> Result<i64> {
     let transaction = store.conn.begin().await.map_err(store_err)?;
     if !acquire_code_session_write_lock(&transaction, id).await? {
         return Err(AgentError::Store(format!("code session {id} not found")));
     }
-    let Some(session) = entities::code_session::Entity::find_by_id(id.0)
+    let Some(session) = entities::session::Entity::find_by_id(id.0)
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -843,21 +835,21 @@ pub async fn bump_spawn_epoch(
         .spawn_epoch
         .checked_add(1)
         .ok_or_else(|| AgentError::Store(format!("code session {id} spawn epoch overflow")))?;
-    let updated = entities::code_session::Entity::update_many()
+    let updated = entities::session::Entity::update_many()
         .col_expr(
-            entities::code_session::Column::SpawnEpoch,
+            entities::session::Column::SpawnEpoch,
             sea_orm::sea_query::Expr::value(next),
         )
         .col_expr(
-            entities::code_session::Column::ChildPid,
+            entities::session::Column::ChildPid,
             sea_orm::sea_query::Expr::value(child_pid),
         )
         .col_expr(
-            entities::code_session::Column::ChildProcessIdentity,
+            entities::session::Column::ChildProcessIdentity,
             sea_orm::sea_query::Expr::value(Option::<String>::None),
         )
-        .filter(entities::code_session::Column::Id.eq(id.0))
-        .filter(entities::code_session::Column::SpawnEpoch.eq(session.spawn_epoch))
+        .filter(entities::session::Column::Id.eq(id.0))
+        .filter(entities::session::Column::SpawnEpoch.eq(session.spawn_epoch))
         .exec(&transaction)
         .await
         .map_err(store_err)?;
@@ -871,11 +863,11 @@ pub async fn bump_spawn_epoch(
 }
 
 /// The owner's sessions, most recently created first.
-pub async fn list_sessions(store: &DbStore, owner: &OwnerId) -> Result<Vec<CodeSession>> {
-    entities::code_session::Entity::find()
-        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+pub async fn list_sessions(store: &DbStore, owner: &OwnerId) -> Result<Vec<Session>> {
+    entities::session::Entity::find()
+        .filter(entities::session::Column::Owner.eq(owner.as_str()))
         .filter(code_runtime_sessions())
-        .order_by_desc(entities::code_session::Column::CreatedAt)
+        .order_by_desc(entities::session::Column::CreatedAt)
         .all(&store.conn)
         .await
         .map_err(store_err)?
@@ -889,11 +881,11 @@ pub async fn list_sessions_for_workspace(
     store: &DbStore,
     owner: &OwnerId,
     workspace_id: WorkspaceId,
-) -> Result<Vec<CodeSession>> {
-    entities::code_session::Entity::find()
-        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
-        .filter(entities::code_session::Column::WorkspaceId.eq(workspace_id.0))
-        .order_by_desc(entities::code_session::Column::CreatedAt)
+) -> Result<Vec<Session>> {
+    entities::session::Entity::find()
+        .filter(entities::session::Column::Owner.eq(owner.as_str()))
+        .filter(entities::session::Column::WorkspaceId.eq(workspace_id.0))
+        .order_by_desc(entities::session::Column::CreatedAt)
         .all(&store.conn)
         .await
         .map_err(store_err)?
@@ -907,10 +899,10 @@ pub async fn list_sessions_for_workspace(
 /// A system path, not a request path: boot recovery re-attaches a worker to
 /// each live session regardless of who owns it. Nothing reachable from a
 /// route may call it.
-pub async fn list_sessions_all_owners(store: &DbStore) -> Result<Vec<CodeSession>> {
-    entities::code_session::Entity::find()
+pub async fn list_sessions_all_owners(store: &DbStore) -> Result<Vec<Session>> {
+    entities::session::Entity::find()
         .filter(code_runtime_sessions())
-        .order_by_desc(entities::code_session::Column::CreatedAt)
+        .order_by_desc(entities::session::Column::CreatedAt)
         .all(&store.conn)
         .await
         .map_err(store_err)?
@@ -927,10 +919,10 @@ pub async fn list_sessions_all_owners(store: &DbStore) -> Result<Vec<CodeSession
 /// route may call it.
 pub async fn list_sessions_by_lifecycle_all_owners(
     store: &DbStore,
-    lifecycle: CodeSessionLifecycle,
-) -> Result<Vec<CodeSession>> {
-    entities::code_session::Entity::find()
-        .filter(entities::code_session::Column::Lifecycle.eq(lifecycle.as_str().to_owned()))
+    lifecycle: SessionLifecycle,
+) -> Result<Vec<Session>> {
+    entities::session::Entity::find()
+        .filter(entities::session::Column::Lifecycle.eq(lifecycle.as_str().to_owned()))
         .filter(code_runtime_sessions())
         .all(&store.conn)
         .await
@@ -949,56 +941,55 @@ pub async fn list_sessions_by_lifecycle_all_owners(
 /// `spawn_epoch` must be non-decreasing, and `Ended` is terminal: a caller
 /// that is not `Ended` cannot overwrite that lifecycle. Returns `false` when
 /// nothing was written.
-pub async fn save_session(store: &DbStore, session: &CodeSession) -> Result<bool> {
+pub async fn save_session(store: &DbStore, session: &Session) -> Result<bool> {
     let mut predicate = Condition::all()
-        .add(entities::code_session::Column::Id.eq(session.id.0))
-        .add(entities::code_session::Column::Owner.eq(session.owner.as_str()))
-        .add(entities::code_session::Column::SpawnEpoch.lte(session.spawn_epoch));
-    if session.lifecycle != CodeSessionLifecycle::Ended {
+        .add(entities::session::Column::Id.eq(session.id.0))
+        .add(entities::session::Column::Owner.eq(session.owner.as_str()))
+        .add(entities::session::Column::SpawnEpoch.lte(session.spawn_epoch));
+    if session.lifecycle != SessionLifecycle::Ended {
         predicate = predicate.add(
-            entities::code_session::Column::Lifecycle
-                .ne(CodeSessionLifecycle::Ended.as_str().to_owned()),
+            entities::session::Column::Lifecycle.ne(SessionLifecycle::Ended.as_str().to_owned()),
         );
     }
-    let mut update = entities::code_session::Entity::update_many()
+    let mut update = entities::session::Entity::update_many()
         .col_expr(
-            entities::code_session::Column::HarnessKind,
+            entities::session::Column::HarnessKind,
             sea_orm::sea_query::Expr::value(session.harness_kind.as_str().to_owned()),
         )
         .col_expr(
-            entities::code_session::Column::HarnessVersion,
+            entities::session::Column::HarnessVersion,
             sea_orm::sea_query::Expr::value(session.harness_version.clone()),
         )
         .col_expr(
-            entities::code_session::Column::Lifecycle,
+            entities::session::Column::Lifecycle,
             sea_orm::sea_query::Expr::value(session.lifecycle.as_str().to_owned()),
         )
         .col_expr(
-            entities::code_session::Column::FenceReason,
+            entities::session::Column::FenceReason,
             sea_orm::sea_query::Expr::value(match &session.fence_reason {
                 Some(reason) => Some(serde_json::to_value(reason)?),
                 None => None,
             }),
         )
         .col_expr(
-            entities::code_session::Column::ChildPid,
+            entities::session::Column::ChildPid,
             sea_orm::sea_query::Expr::value(session.child_pid),
         )
         .col_expr(
-            entities::code_session::Column::ChildProcessIdentity,
+            entities::session::Column::ChildProcessIdentity,
             sea_orm::sea_query::Expr::value(session.child_process_identity.clone()),
         )
         .col_expr(
-            entities::code_session::Column::SpawnEpoch,
+            entities::session::Column::SpawnEpoch,
             sea_orm::sea_query::Expr::value(session.spawn_epoch),
         )
         .col_expr(
-            entities::code_session::Column::UnrecognizedEventCount,
+            entities::session::Column::UnrecognizedEventCount,
             sea_orm::sea_query::Expr::value(session.unrecognized_event_count),
         );
     if let Some(resume_ref) = &session.harness_resume_ref {
         update = update.col_expr(
-            entities::code_session::Column::HarnessResumeRef,
+            entities::session::Column::HarnessResumeRef,
             sea_orm::sea_query::Expr::value(Some(resume_ref.clone())),
         );
     }
@@ -1033,7 +1024,7 @@ pub async fn save_session(store: &DbStore, session: &CodeSession) -> Result<bool
 pub async fn replace_session_attention(
     store: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     next: &Attention,
     from_user: bool,
 ) -> Result<Option<Attention>> {
@@ -1047,7 +1038,7 @@ pub async fn replace_session_attention(
 pub(in crate::db) async fn replace_session_attention_on<C>(
     conn: &C,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     next: &Attention,
     from_user: bool,
 ) -> Result<Option<Attention>>
@@ -1057,8 +1048,8 @@ where
     if !acquire_code_session_write_lock(conn, session_id).await? {
         return Ok(None);
     }
-    let row = entities::code_session::Entity::find_by_id(session_id.0)
-        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+    let row = entities::session::Entity::find_by_id(session_id.0)
+        .filter(entities::session::Column::Owner.eq(owner.as_str()))
         .one(conn)
         .await
         .map_err(store_err)?;
@@ -1069,17 +1060,17 @@ where
     if current == *next || (!from_user && !crate::attention::should_replace(&current, next)) {
         return Ok(None);
     }
-    let updated = entities::code_session::Entity::update_many()
+    let updated = entities::session::Entity::update_many()
         .col_expr(
-            entities::code_session::Column::AttentionState,
+            entities::session::Column::AttentionState,
             sea_orm::sea_query::Expr::value(serde_json::to_value(&next.state)?),
         )
         .col_expr(
-            entities::code_session::Column::AttentionSource,
+            entities::session::Column::AttentionSource,
             sea_orm::sea_query::Expr::value(next.source.as_str()),
         )
-        .filter(entities::code_session::Column::Id.eq(session_id.0))
-        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+        .filter(entities::session::Column::Id.eq(session_id.0))
+        .filter(entities::session::Column::Owner.eq(owner.as_str()))
         .exec(conn)
         .await
         .map_err(store_err)?;
@@ -1098,20 +1089,20 @@ where
 pub async fn set_session_subagents(
     store: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     subagents: &[CodeSubagentSummary],
 ) -> Result<bool> {
-    let result = entities::code_session::Entity::update_many()
+    let result = entities::session::Entity::update_many()
         .col_expr(
-            entities::code_session::Column::Subagents,
+            entities::session::Column::Subagents,
             sea_orm::sea_query::Expr::value(if subagents.is_empty() {
                 None
             } else {
                 Some(serde_json::to_value(subagents)?)
             }),
         )
-        .filter(entities::code_session::Column::Id.eq(session_id.0))
-        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+        .filter(entities::session::Column::Id.eq(session_id.0))
+        .filter(entities::session::Column::Owner.eq(owner.as_str()))
         .exec(&store.conn)
         .await
         .map_err(store_err)?;
@@ -1126,21 +1117,20 @@ pub async fn set_session_subagents(
 pub async fn set_session_harness_resume_ref(
     store: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     spawn_epoch: i64,
     resume_ref: &str,
 ) -> Result<bool> {
-    let result = entities::code_session::Entity::update_many()
+    let result = entities::session::Entity::update_many()
         .col_expr(
-            entities::code_session::Column::HarnessResumeRef,
+            entities::session::Column::HarnessResumeRef,
             sea_orm::sea_query::Expr::value(Some(resume_ref.to_owned())),
         )
-        .filter(entities::code_session::Column::Id.eq(session_id.0))
-        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
-        .filter(entities::code_session::Column::SpawnEpoch.eq(spawn_epoch))
+        .filter(entities::session::Column::Id.eq(session_id.0))
+        .filter(entities::session::Column::Owner.eq(owner.as_str()))
+        .filter(entities::session::Column::SpawnEpoch.eq(spawn_epoch))
         .filter(
-            entities::code_session::Column::Lifecycle
-                .eq(CodeSessionLifecycle::Running.as_str().to_owned()),
+            entities::session::Column::Lifecycle.eq(SessionLifecycle::Running.as_str().to_owned()),
         )
         .exec(&store.conn)
         .await
@@ -1155,20 +1145,19 @@ pub async fn set_session_harness_resume_ref(
 pub async fn clear_session_harness_resume_ref(
     store: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     spawn_epoch: i64,
 ) -> Result<bool> {
-    let result = entities::code_session::Entity::update_many()
+    let result = entities::session::Entity::update_many()
         .col_expr(
-            entities::code_session::Column::HarnessResumeRef,
+            entities::session::Column::HarnessResumeRef,
             sea_orm::sea_query::Expr::value(Option::<String>::None),
         )
-        .filter(entities::code_session::Column::Id.eq(session_id.0))
-        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
-        .filter(entities::code_session::Column::SpawnEpoch.eq(spawn_epoch))
+        .filter(entities::session::Column::Id.eq(session_id.0))
+        .filter(entities::session::Column::Owner.eq(owner.as_str()))
+        .filter(entities::session::Column::SpawnEpoch.eq(spawn_epoch))
         .filter(
-            entities::code_session::Column::Lifecycle
-                .ne(CodeSessionLifecycle::Ended.as_str().to_owned()),
+            entities::session::Column::Lifecycle.ne(SessionLifecycle::Ended.as_str().to_owned()),
         )
         .exec(&store.conn)
         .await
@@ -1176,46 +1165,43 @@ pub async fn clear_session_harness_resume_ref(
     Ok(result.rows_affected == 1)
 }
 
-pub(super) fn session_from_row(row: entities::code_session::Model) -> Result<CodeSession> {
+pub(super) fn session_from_row(row: entities::session::Model) -> Result<Session> {
     let harness_kind = HarnessKind::from_str(&row.harness_kind).ok_or_else(|| {
         AgentError::Store(format!(
-            "code_session {} has unknown harness_kind {}",
+            "session {} has unknown harness_kind {}",
             row.id, row.harness_kind
         ))
     })?;
     let permission_mode = stored_permission_mode(&row)?;
-    let kind = CodeSessionKind::from_str(&row.kind).ok_or_else(|| {
-        AgentError::Store(format!(
-            "code_session {} has unknown kind {}",
-            row.id, row.kind
-        ))
+    let kind = SessionKind::from_str(&row.kind).ok_or_else(|| {
+        AgentError::Store(format!("session {} has unknown kind {}", row.id, row.kind))
     })?;
-    let lifecycle = CodeSessionLifecycle::from_str(&row.lifecycle).ok_or_else(|| {
+    let lifecycle = SessionLifecycle::from_str(&row.lifecycle).ok_or_else(|| {
         AgentError::Store(format!(
-            "code_session {} has unknown lifecycle {}",
+            "session {} has unknown lifecycle {}",
             row.id, row.lifecycle
         ))
     })?;
     let source = AttentionSource::from_str(&row.attention_source).ok_or_else(|| {
         AgentError::Store(format!(
-            "code_session {} has unknown attention_source {}",
+            "session {} has unknown attention_source {}",
             row.id, row.attention_source
         ))
     })?;
-    let state = serde_json::from_value::<AttentionState>(row.attention_state).map_err(|err| {
-        AgentError::Store(format!("code_session {} attention_state: {err}", row.id))
-    })?;
-    let fence_reason = match row.fence_reason {
-        Some(value) => Some(serde_json::from_value::<FenceReason>(value).map_err(|err| {
-            AgentError::Store(format!("code_session {} fence_reason: {err}", row.id))
-        })?),
-        None => None,
-    };
+    let state = serde_json::from_value::<AttentionState>(row.attention_state)
+        .map_err(|err| AgentError::Store(format!("session {} attention_state: {err}", row.id)))?;
+    let fence_reason =
+        match row.fence_reason {
+            Some(value) => Some(serde_json::from_value::<FenceReason>(value).map_err(|err| {
+                AgentError::Store(format!("session {} fence_reason: {err}", row.id))
+            })?),
+            None => None,
+        };
     let reasoning_effort = match row.reasoning_effort.as_deref() {
         Some(token) => Some(
             crate::model::ReasoningEffort::from_str(token).ok_or_else(|| {
                 AgentError::Store(format!(
-                    "code_session {} has unknown reasoning_effort {token}",
+                    "session {} has unknown reasoning_effort {token}",
                     row.id
                 ))
             })?,
@@ -1223,15 +1209,12 @@ pub(super) fn session_from_row(row: entities::code_session::Model) -> Result<Cod
         None => None,
     };
     let subagents = match row.subagents {
-        Some(value) => {
-            serde_json::from_value::<Vec<CodeSubagentSummary>>(value).map_err(|err| {
-                AgentError::Store(format!("code_session {} subagents: {err}", row.id))
-            })?
-        }
+        Some(value) => serde_json::from_value::<Vec<CodeSubagentSummary>>(value)
+            .map_err(|err| AgentError::Store(format!("session {} subagents: {err}", row.id)))?,
         None => Vec::new(),
     };
-    Ok(CodeSession {
-        id: CodeSessionId(row.id),
+    Ok(Session {
+        id: SessionId(row.id),
         owner: OwnerId::new(&row.owner)?,
         workspace_id: row.workspace_id.map(WorkspaceId),
         kind,

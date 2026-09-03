@@ -83,7 +83,94 @@ impl MigratorTrait for Migrator {
             Box::new(RestoreTurnClaimIndexes),
             Box::new(PendingPromptIndexes),
             Box::new(SandboxToolRecoveryIndexes),
+            Box::new(UniversalSessionNames),
         ]
+    }
+}
+
+/// Rename the shared conversation tables after chat and code use one model.
+struct UniversalSessionNames;
+
+impl MigrationName for UniversalSessionNames {
+    fn name(&self) -> &str {
+        "m20260903_000007_universal_session_names"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for UniversalSessionNames {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let connection = manager.get_connection();
+        for statement in [
+            r#"ALTER TABLE "code_session" RENAME TO "session""#,
+            r#"ALTER TABLE "code_turn" RENAME TO "turn""#,
+            r#"ALTER TABLE "code_event" RENAME TO "event""#,
+            r#"ALTER TABLE "code_approval" RENAME TO "approval""#,
+            r#"ALTER TABLE "code_turn_attachment" RENAME TO "turn_attachment""#,
+        ] {
+            connection.execute_unprepared(statement).await?;
+        }
+
+        // Both route families used their own pause-setting prefix even after
+        // they began writing the same queue rows. Preserve the code value
+        // first, then let an internal-session chat value win if both exist.
+        connection
+            .execute_unprepared(
+                r#"
+INSERT INTO setting (key, value_json)
+SELECT replace(key, 'code.sessions.', 'sessions.'), value_json
+FROM setting
+WHERE key LIKE 'code.sessions.%.queue_paused'
+ON CONFLICT (key) DO NOTHING;
+
+INSERT INTO setting (key, value_json)
+SELECT replace(key, 'chats.', 'sessions.'), value_json
+FROM setting
+WHERE key LIKE 'chats.%.queue_paused'
+ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json;
+
+DELETE FROM setting
+WHERE key LIKE 'code.sessions.%.queue_paused'
+   OR key LIKE 'chats.%.queue_paused';
+"#,
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        let connection = manager.get_connection();
+        // Older chat and code builds read different prefixes. Restore both so
+        // either route family sees the same pause state after a rollback.
+        connection
+            .execute_unprepared(
+                r#"
+INSERT INTO setting (key, value_json)
+SELECT replace(key, 'sessions.', 'code.sessions.'), value_json
+FROM setting
+WHERE key LIKE 'sessions.%.queue_paused'
+ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json;
+
+INSERT INTO setting (key, value_json)
+SELECT replace(key, 'sessions.', 'chats.'), value_json
+FROM setting
+WHERE key LIKE 'sessions.%.queue_paused'
+ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json;
+
+DELETE FROM setting WHERE key LIKE 'sessions.%.queue_paused';
+"#,
+            )
+            .await?;
+        for statement in [
+            r#"ALTER TABLE "turn_attachment" RENAME TO "code_turn_attachment""#,
+            r#"ALTER TABLE "approval" RENAME TO "code_approval""#,
+            r#"ALTER TABLE "event" RENAME TO "code_event""#,
+            r#"ALTER TABLE "turn" RENAME TO "code_turn""#,
+            r#"ALTER TABLE "session" RENAME TO "code_session""#,
+        ] {
+            connection.execute_unprepared(statement).await?;
+        }
+        Ok(())
     }
 }
 
@@ -3710,10 +3797,14 @@ impl MigrationTrait for ConversationsAreSessions {
         // columns and the chat table is gone. The SQLite path cannot be one
         // transaction, so a retry checks both halves and finishes whichever
         // an interrupted attempt left undone.
-        if manager.has_column("code_session", "project_id").await?
-            && !manager.has_table("chat").await?
-        {
-            return Ok(());
+        if !manager.has_table("chat").await? {
+            let legacy_complete = manager.has_table("code_session").await?
+                && manager.has_column("code_session", "project_id").await?;
+            let universal_complete = manager.has_table("session").await?
+                && manager.has_column("session", "project_id").await?;
+            if legacy_complete || universal_complete {
+                return Ok(());
+            }
         }
         match manager.get_database_backend() {
             DbBackend::Postgres => {

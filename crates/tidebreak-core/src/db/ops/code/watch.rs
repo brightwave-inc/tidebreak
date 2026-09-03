@@ -3,7 +3,7 @@
 use chrono::{DateTime, Utc};
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set};
 
-use crate::code::{CodeSessionId, CodeWatch, CodeWatchId, CodeWatchState, WorkspaceId};
+use crate::code::{CodeWatch, CodeWatchId, CodeWatchState, SessionId, WorkspaceId};
 use crate::error::{AgentError, Result};
 use crate::OwnerId;
 
@@ -70,7 +70,7 @@ pub async fn latest_watch_for_workspace(
 pub async fn latest_watch_for_session(
     store: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
 ) -> Result<Option<CodeWatch>> {
     let row = entities::code_watch::Entity::find()
         .filter(entities::code_watch::Column::Owner.eq(owner.as_str()))
@@ -277,7 +277,7 @@ fn watch_from_row(row: entities::code_watch::Model) -> Result<CodeWatch> {
         id: CodeWatchId(row.id),
         owner: OwnerId::new(&row.owner)?,
         workspace_id: WorkspaceId(row.workspace_id),
-        session_id: CodeSessionId(row.session_id),
+        session_id: SessionId(row.session_id),
         pr_number,
         state,
         detail: row.detail,

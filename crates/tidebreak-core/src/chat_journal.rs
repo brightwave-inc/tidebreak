@@ -1,9 +1,9 @@
 //! The chat journal as an alias over the code journal.
 //!
-//! Since decision 0048 step 5 there is one journal: `code_event`, with
-//! [`CodeEvent`] as its vocabulary. The chat surface keeps reading
+//! Since decision 0048 step 5 there is one journal: `event`, with
+//! [`Event`] as its vocabulary. The chat surface keeps reading
 //! [`AgentEvent`] rows because that is the contract its clients bind to, so
-//! the chat lane's events are written as `CodeEvent` rows through
+//! the chat lane's events are written as `Event` rows through
 //! [`journal_row`] and read back through [`chat_event`]. The two are a
 //! round trip: every field a chat event carries has a home on the code row,
 //! and the chat journal fixture (`fixtures/journal-events.json`) is the
@@ -16,9 +16,8 @@
 //! nothing.
 
 use crate::code::{
-    ApprovalDecisionKind, BoundedError, CodeApprovalId, CodeEvent, CodeTurnId, CodeUsage,
-    InternalApprovalRequest, ToolDetail, ToolOutcome, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS,
-    MAX_TOOL_SUMMARY_CHARS,
+    ApprovalDecisionKind, ApprovalId, BoundedError, Event, InternalApprovalRequest, ToolDetail,
+    ToolOutcome, TurnUsage, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS, MAX_TOOL_SUMMARY_CHARS,
 };
 use crate::error::{AgentError, Result};
 use crate::event::AgentEvent;
@@ -35,15 +34,15 @@ use crate::tool::{ToolErrorCategory, ToolOutput};
 /// sees what an external engine would have reported and the chat reader gets
 /// its event back exactly.
 #[must_use]
-pub fn journal_row(event: &AgentEvent) -> CodeEvent {
+pub fn journal_row(event: &AgentEvent) -> Event {
     match event {
-        AgentEvent::TurnStarted { turn_id } => CodeEvent::TurnStarted {
-            turn_id: CodeTurnId(turn_id.0),
+        AgentEvent::TurnStarted { turn_id } => Event::TurnStarted {
+            turn_id: TurnId(turn_id.0),
         },
-        AgentEvent::TextDelta { text } => CodeEvent::AssistantDelta { text: text.clone() },
-        AgentEvent::ReasoningDelta { text } => CodeEvent::ReasoningDelta { text: text.clone() },
-        AgentEvent::StreamInterrupted => CodeEvent::StreamInterrupted,
-        AgentEvent::ToolCallStarted { call_id, name } => CodeEvent::ToolStarted {
+        AgentEvent::TextDelta { text } => Event::AssistantDelta { text: text.clone() },
+        AgentEvent::ReasoningDelta { text } => Event::ReasoningDelta { text: text.clone() },
+        AgentEvent::StreamInterrupted => Event::StreamInterrupted,
+        AgentEvent::ToolCallStarted { call_id, name } => Event::ToolStarted {
             call_id: call_id.to_string(),
             name: name.clone(),
             detail: ToolDetail::Other {
@@ -51,14 +50,14 @@ pub fn journal_row(event: &AgentEvent) -> CodeEvent {
             },
             parent_call_id: None,
         },
-        AgentEvent::ToolCallArgsDelta { call_id, fragment } => CodeEvent::ToolArgsDelta {
+        AgentEvent::ToolCallArgsDelta { call_id, fragment } => Event::ToolArgsDelta {
             call_id: call_id.to_string(),
             fragment: fragment.clone(),
         },
-        AgentEvent::UserQuestionsAsked { call_id, turn_id } => CodeEvent::ApprovalRequested {
+        AgentEvent::UserQuestionsAsked { call_id, turn_id } => Event::ApprovalRequested {
             approval_id: approval_id_of(*call_id),
             request: Some(InternalApprovalRequest::Questions {
-                turn_id: CodeTurnId(turn_id.0),
+                turn_id: TurnId(turn_id.0),
             }),
         },
         AgentEvent::ApprovalRequired {
@@ -69,7 +68,7 @@ pub fn journal_row(event: &AgentEvent) -> CodeEvent {
             kind,
             grant_scopes,
             preview,
-        } => CodeEvent::ApprovalRequested {
+        } => Event::ApprovalRequested {
             approval_id: approval_id_of(*call_id),
             request: Some(InternalApprovalRequest::ToolUse {
                 auto_judging: *auto_judging,
@@ -80,7 +79,7 @@ pub fn journal_row(event: &AgentEvent) -> CodeEvent {
                 preview: preview.clone(),
             }),
         },
-        AgentEvent::ApprovalDecided { call_id, approved } => CodeEvent::ApprovalResolved {
+        AgentEvent::ApprovalDecided { call_id, approved } => Event::ApprovalResolved {
             approval_id: approval_id_of(*call_id),
             decision: if *approved {
                 ApprovalDecisionKind::Approve
@@ -93,7 +92,7 @@ pub fn journal_row(event: &AgentEvent) -> CodeEvent {
             output,
             action,
             result,
-        } => CodeEvent::ToolCompleted {
+        } => Event::ToolCompleted {
             call_id: call_id.to_string(),
             outcome: tool_outcome(output),
             preview: bounded(&output.content, MAX_PREVIEW_CHARS),
@@ -103,16 +102,16 @@ pub fn journal_row(event: &AgentEvent) -> CodeEvent {
             detail: action.as_ref().map(tool_detail),
             parent_call_id: None,
         },
-        AgentEvent::TurnCompleted { usage, stop_reason } => CodeEvent::TurnCompleted {
+        AgentEvent::TurnCompleted { usage, stop_reason } => Event::TurnCompleted {
             usage: code_usage(*usage),
             checkpoint: None,
             stop_reason: Some(*stop_reason),
         },
-        AgentEvent::TurnRefused { usage, refusal } => CodeEvent::TurnRefused {
+        AgentEvent::TurnRefused { usage, refusal } => Event::TurnRefused {
             usage: code_usage(*usage),
             refusal: refusal.clone(),
         },
-        AgentEvent::TurnFailed { error } => CodeEvent::TurnFailed {
+        AgentEvent::TurnFailed { error } => Event::TurnFailed {
             error: BoundedError {
                 message: bounded(
                     &format!("{}: {}", error.kind, error.message),
@@ -121,36 +120,36 @@ pub fn journal_row(event: &AgentEvent) -> CodeEvent {
             },
             detail: Some(error.clone()),
         },
-        AgentEvent::TurnCancelled { usage } => CodeEvent::TurnInterrupted {
+        AgentEvent::TurnCancelled { usage } => Event::TurnInterrupted {
             usage: Some(code_usage(*usage)),
         },
         AgentEvent::UserSteered {
             message_id,
             content,
-        } => CodeEvent::UserSteered {
+        } => Event::UserSteered {
             text: content.clone(),
             message_id: Some(message_id.0),
         },
         AgentEvent::ContextTruncated {
             original_tokens,
             fitted_tokens,
-        } => CodeEvent::ContextTruncated {
+        } => Event::ContextTruncated {
             original_tokens: *original_tokens,
             fitted_tokens: *fitted_tokens,
         },
-        AgentEvent::CompactionStarted => CodeEvent::CompactionStarted,
-        AgentEvent::CompactionFinished { compacted } => CodeEvent::CompactionFinished {
+        AgentEvent::CompactionStarted => Event::CompactionStarted,
+        AgentEvent::CompactionFinished { compacted } => Event::CompactionFinished {
             compacted: *compacted,
         },
-        AgentEvent::PlanProposed { call_id, turn_id } => CodeEvent::ApprovalRequested {
+        AgentEvent::PlanProposed { call_id, turn_id } => Event::ApprovalRequested {
             approval_id: approval_id_of(*call_id),
             request: Some(InternalApprovalRequest::Plan {
-                turn_id: CodeTurnId(turn_id.0),
+                turn_id: TurnId(turn_id.0),
             }),
         },
-        AgentEvent::TaskPlanUpdated { call_id, turn_id } => CodeEvent::TaskPlanUpdated {
+        AgentEvent::TaskPlanUpdated { call_id, turn_id } => Event::TaskPlanUpdated {
             call_id: call_id.to_string(),
-            turn_id: CodeTurnId(turn_id.0),
+            turn_id: TurnId(turn_id.0),
         },
     }
 }
@@ -160,23 +159,23 @@ pub fn journal_row(event: &AgentEvent) -> CodeEvent {
 ///
 /// Fails only on a row that claims the chat shape and cannot be read — a
 /// call id that is not a UUID — which is corruption, not a code-only row.
-pub fn chat_event(event: CodeEvent) -> Result<Option<AgentEvent>> {
+pub fn chat_event(event: Event) -> Result<Option<AgentEvent>> {
     Ok(Some(match event {
-        CodeEvent::TurnStarted { turn_id } => AgentEvent::TurnStarted {
+        Event::TurnStarted { turn_id } => AgentEvent::TurnStarted {
             turn_id: TurnId(turn_id.0),
         },
-        CodeEvent::AssistantDelta { text } => AgentEvent::TextDelta { text },
-        CodeEvent::ReasoningDelta { text } => AgentEvent::ReasoningDelta { text },
-        CodeEvent::StreamInterrupted => AgentEvent::StreamInterrupted,
-        CodeEvent::ToolStarted { call_id, name, .. } => AgentEvent::ToolCallStarted {
+        Event::AssistantDelta { text } => AgentEvent::TextDelta { text },
+        Event::ReasoningDelta { text } => AgentEvent::ReasoningDelta { text },
+        Event::StreamInterrupted => AgentEvent::StreamInterrupted,
+        Event::ToolStarted { call_id, name, .. } => AgentEvent::ToolCallStarted {
             call_id: call_id_of(&call_id)?,
             name,
         },
-        CodeEvent::ToolArgsDelta { call_id, fragment } => AgentEvent::ToolCallArgsDelta {
+        Event::ToolArgsDelta { call_id, fragment } => AgentEvent::ToolCallArgsDelta {
             call_id: call_id_of(&call_id)?,
             fragment,
         },
-        CodeEvent::ApprovalRequested {
+        Event::ApprovalRequested {
             approval_id,
             request: Some(request),
         } => match request {
@@ -208,7 +207,7 @@ pub fn chat_event(event: CodeEvent) -> Result<Option<AgentEvent>> {
         // A consent card's decision. The structured resolutions — answers,
         // a plan verdict — settle a parked continuation whose chat fact is
         // the call's own completion row, journaled with the answer.
-        CodeEvent::ApprovalResolved {
+        Event::ApprovalResolved {
             approval_id,
             decision:
                 decision @ (ApprovalDecisionKind::Approve
@@ -222,7 +221,7 @@ pub fn chat_event(event: CodeEvent) -> Result<Option<AgentEvent>> {
                 ApprovalDecisionKind::Approve | ApprovalDecisionKind::ApprovedWithGrant { .. }
             ),
         },
-        CodeEvent::ToolCompleted {
+        Event::ToolCompleted {
             call_id,
             output: Some(output),
             action,
@@ -234,7 +233,7 @@ pub fn chat_event(event: CodeEvent) -> Result<Option<AgentEvent>> {
             action,
             result,
         },
-        CodeEvent::TurnCompleted {
+        Event::TurnCompleted {
             usage,
             stop_reason: Some(stop_reason),
             ..
@@ -242,68 +241,68 @@ pub fn chat_event(event: CodeEvent) -> Result<Option<AgentEvent>> {
             usage: chat_usage(&usage),
             stop_reason,
         },
-        CodeEvent::TurnRefused { usage, refusal } => AgentEvent::TurnRefused {
+        Event::TurnRefused { usage, refusal } => AgentEvent::TurnRefused {
             usage: chat_usage(&usage),
             refusal,
         },
-        CodeEvent::TurnFailed {
+        Event::TurnFailed {
             detail: Some(error),
             ..
         } => AgentEvent::TurnFailed { error },
-        CodeEvent::TurnInterrupted { usage: Some(usage) } => AgentEvent::TurnCancelled {
+        Event::TurnInterrupted { usage: Some(usage) } => AgentEvent::TurnCancelled {
             usage: chat_usage(&usage),
         },
-        CodeEvent::UserSteered {
+        Event::UserSteered {
             text,
             message_id: Some(message_id),
         } => AgentEvent::UserSteered {
             message_id: MessageId(message_id),
             content: text,
         },
-        CodeEvent::ContextTruncated {
+        Event::ContextTruncated {
             original_tokens,
             fitted_tokens,
         } => AgentEvent::ContextTruncated {
             original_tokens,
             fitted_tokens,
         },
-        CodeEvent::CompactionStarted => AgentEvent::CompactionStarted,
-        CodeEvent::CompactionFinished { compacted } => AgentEvent::CompactionFinished { compacted },
-        CodeEvent::TaskPlanUpdated { call_id, turn_id } => AgentEvent::TaskPlanUpdated {
+        Event::CompactionStarted => AgentEvent::CompactionStarted,
+        Event::CompactionFinished { compacted } => AgentEvent::CompactionFinished { compacted },
+        Event::TaskPlanUpdated { call_id, turn_id } => AgentEvent::TaskPlanUpdated {
             call_id: call_id_of(&call_id)?,
             turn_id: TurnId(turn_id.0),
         },
         // Rows only an external engine writes, and code-shaped rows the
         // chat lane never produces (a completion with no stop reason, a
         // steer with no message row, a failure with no kind).
-        CodeEvent::SessionStarted { .. }
-        | CodeEvent::TurnResumed { .. }
-        | CodeEvent::AssistantMessage { .. }
-        | CodeEvent::ToolCompleted { output: None, .. }
-        | CodeEvent::FileChanged { .. }
-        | CodeEvent::ApprovalRequested { request: None, .. }
-        | CodeEvent::ApprovalResolved {
+        Event::SessionStarted { .. }
+        | Event::TurnResumed { .. }
+        | Event::AssistantMessage { .. }
+        | Event::ToolCompleted { output: None, .. }
+        | Event::FileChanged { .. }
+        | Event::ApprovalRequested { request: None, .. }
+        | Event::ApprovalResolved {
             decision:
                 ApprovalDecisionKind::Answered { .. } | ApprovalDecisionKind::PlanDecided { .. },
             ..
         }
-        | CodeEvent::TurnCompleted {
+        | Event::TurnCompleted {
             stop_reason: None, ..
         }
-        | CodeEvent::TurnFailed { detail: None, .. }
-        | CodeEvent::TurnInterrupted { usage: None }
-        | CodeEvent::UserSteered {
+        | Event::TurnFailed { detail: None, .. }
+        | Event::TurnInterrupted { usage: None }
+        | Event::UserSteered {
             message_id: None, ..
         }
-        | CodeEvent::CheckpointRecorded { .. }
-        | CodeEvent::HarnessNotice { .. }
-        | CodeEvent::AttentionChanged { .. } => return Ok(None),
+        | Event::CheckpointRecorded { .. }
+        | Event::HarnessNotice { .. }
+        | Event::AttentionChanged { .. } => return Ok(None),
     }))
 }
 
 /// Decode a stored journal payload as the chat event it replays as.
 pub fn decode_chat_event(payload: serde_json::Value) -> Result<Option<AgentEvent>> {
-    chat_event(serde_json::from_value::<CodeEvent>(payload)?)
+    chat_event(serde_json::from_value::<Event>(payload)?)
 }
 
 /// Decode a stored journal payload that must be a chat event.
@@ -320,8 +319,8 @@ pub fn decode_chat_event_required(payload: serde_json::Value) -> Result<AgentEve
 /// The approval row an internal-engine card is parked on: the row's id is
 /// the call id, so the chat surface recovers one from the other.
 #[must_use]
-pub fn approval_id_of(call_id: CallId) -> CodeApprovalId {
-    CodeApprovalId(call_id.0)
+pub fn approval_id_of(call_id: CallId) -> ApprovalId {
+    ApprovalId(call_id.0)
 }
 
 fn call_id_of(raw: &str) -> Result<CallId> {
@@ -345,8 +344,8 @@ pub fn bounded(text: &str, max: usize) -> String {
 
 /// Token accounting in the code journal's shape.
 #[must_use]
-pub fn code_usage(usage: Usage) -> CodeUsage {
-    CodeUsage {
+pub fn code_usage(usage: Usage) -> TurnUsage {
+    TurnUsage {
         input_tokens: u64::from(usage.input_tokens),
         output_tokens: u64::from(usage.output_tokens),
         cache_read_input_tokens: u64::from(usage.cache_read_input_tokens),
@@ -359,7 +358,7 @@ pub fn code_usage(usage: Usage) -> CodeUsage {
 /// Token accounting in the chat's shape. Lossless for what the chat lane
 /// wrote; a count only an external engine could report saturates.
 #[must_use]
-pub fn chat_usage(usage: &CodeUsage) -> Usage {
+pub fn chat_usage(usage: &TurnUsage) -> Usage {
     Usage {
         input_tokens: u32::try_from(usage.input_tokens).unwrap_or(u32::MAX),
         output_tokens: u32::try_from(usage.output_tokens).unwrap_or(u32::MAX),
@@ -443,25 +442,25 @@ mod tests {
     #[test]
     fn external_rows_project_to_nothing() {
         for event in [
-            CodeEvent::SessionStarted {
+            Event::SessionStarted {
                 harness_kind: HarnessKind::ClaudeCode,
                 harness_version: "1".into(),
                 resume_ref: None,
             },
-            CodeEvent::AssistantMessage {
+            Event::AssistantMessage {
                 text: "hi".into(),
                 parent_call_id: None,
             },
-            CodeEvent::TurnCompleted {
-                usage: CodeUsage::default(),
+            Event::TurnCompleted {
+                usage: TurnUsage::default(),
                 checkpoint: None,
                 stop_reason: None,
             },
-            CodeEvent::TurnInterrupted { usage: None },
-            CodeEvent::TurnResumed {
-                turn_id: CodeTurnId::new(),
+            Event::TurnInterrupted { usage: None },
+            Event::TurnResumed {
+                turn_id: TurnId::new(),
             },
-            CodeEvent::UserSteered {
+            Event::UserSteered {
                 text: "go".into(),
                 message_id: None,
             },
@@ -482,10 +481,10 @@ mod tests {
         let row = journal_row(&asked);
         assert_eq!(
             row,
-            CodeEvent::ApprovalRequested {
+            Event::ApprovalRequested {
                 approval_id: approval_id_of(call_id),
                 request: Some(InternalApprovalRequest::Questions {
-                    turn_id: CodeTurnId(turn_id.0),
+                    turn_id: TurnId(turn_id.0),
                 }),
             }
         );
@@ -498,7 +497,7 @@ mod tests {
         // A structured resolution is the park's own; the chat fact is the
         // completion the answer journals.
         assert_eq!(
-            chat_event(CodeEvent::ApprovalResolved {
+            chat_event(Event::ApprovalResolved {
                 approval_id: approval_id_of(call_id),
                 decision: ApprovalDecisionKind::Answered {
                     answers: Vec::new()
@@ -508,7 +507,7 @@ mod tests {
             None
         );
         assert_eq!(
-            chat_event(CodeEvent::ApprovalRequested {
+            chat_event(Event::ApprovalRequested {
                 approval_id: approval_id_of(call_id),
                 request: None,
             })
@@ -519,7 +518,7 @@ mod tests {
 
     #[test]
     fn a_chat_shaped_row_with_a_bad_call_id_is_corruption_not_silence() {
-        let row = CodeEvent::ToolArgsDelta {
+        let row = Event::ToolArgsDelta {
             call_id: "toolu_1".into(),
             fragment: "{".into(),
         };

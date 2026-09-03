@@ -4,7 +4,7 @@ use sea_orm::{
 };
 
 use crate::error::{AgentError, Result};
-use crate::id::{CallId, ChatId};
+use crate::id::{CallId, SessionId};
 use crate::model::{ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus};
 use crate::storage::{
     AcceptClaimedToolCallOutcome, AcceptToolCallOutcome, ClaimClientToolCallOutcome,
@@ -163,7 +163,7 @@ pub(in crate::db) async fn accept_claimed_tool_call(
 pub(in crate::db) async fn claim_client_tool_call(
     store: &DbStore,
     id: CallId,
-    chat_id: ChatId,
+    chat_id: SessionId,
     executor_id: uuid::Uuid,
     lease_token: uuid::Uuid,
     now: DateTime<Utc>,
@@ -230,7 +230,7 @@ pub(in crate::db) async fn claim_client_tool_call(
 pub(in crate::db) async fn heartbeat_client_tool_call(
     store: &DbStore,
     id: CallId,
-    chat_id: ChatId,
+    chat_id: SessionId,
     lease_token: uuid::Uuid,
     now: DateTime<Utc>,
     lease_expires_at: DateTime<Utc>,
@@ -318,7 +318,7 @@ pub(in crate::db) async fn resolve_server_tool_call_with_preview(
 pub(in crate::db) async fn resolve_claimed_server_tool_call(
     store: &DbStore,
     id: CallId,
-    chat_id: ChatId,
+    chat_id: SessionId,
     turn_id: crate::TurnId,
     lease_token: uuid::Uuid,
     now: DateTime<Utc>,
@@ -350,7 +350,7 @@ pub(in crate::db) async fn resolve_claimed_server_tool_call(
 pub(in crate::db) async fn abandon_inherited_server_tool_call(
     store: &DbStore,
     id: CallId,
-    chat_id: ChatId,
+    chat_id: SessionId,
     turn_id: crate::TurnId,
     lease_token: uuid::Uuid,
     now: DateTime<Utc>,
@@ -381,7 +381,7 @@ pub(in crate::db) async fn abandon_inherited_server_tool_call(
 pub(in crate::db) async fn resolve_client_tool_call_and_append_event(
     store: &DbStore,
     id: CallId,
-    chat_id: ChatId,
+    chat_id: SessionId,
     lease_token: uuid::Uuid,
     now: DateTime<Utc>,
     resolution: &ToolCallResolution,
@@ -415,7 +415,7 @@ pub(in crate::db) async fn resolve_client_tool_call_and_append_event(
 pub(in crate::db) async fn resolve_expired_client_tool_call_and_append_event(
     store: &DbStore,
     id: CallId,
-    chat_id: ChatId,
+    chat_id: SessionId,
     lease_token: uuid::Uuid,
     now: DateTime<Utc>,
     resolution: &ToolCallResolution,
@@ -447,7 +447,7 @@ pub(in crate::db) async fn resolve_expired_client_tool_call_and_append_event(
 
 pub(in crate::db) async fn list_pending_client_tool_calls(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
 ) -> Result<Vec<ToolCallRecord>> {
     expire_claimed_client_tool_calls(store, chat_id, Utc::now()).await?;
     let models = entities::tool_call::Entity::find()
@@ -463,7 +463,7 @@ pub(in crate::db) async fn list_pending_client_tool_calls(
 
 async fn expire_claimed_client_tool_calls(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
     now: DateTime<Utc>,
 ) -> Result<()> {
     let now = canonical_db_timestamp(now)?;
@@ -718,7 +718,7 @@ async fn resolve_tool_call(
         let event = client_completion_event(&resolved, resolution, preview);
         super::conversation::append_event_on(
             &transaction,
-            ChatId(resolved.chat_id),
+            SessionId(resolved.chat_id),
             None,
             None,
             None,
@@ -794,19 +794,19 @@ fn journaled_call_outcome(outcome: ResolveToolCallOutcome) -> JournaledClientToo
 enum ResolutionAuthority {
     Server,
     ClaimedServer {
-        chat_id: ChatId,
+        chat_id: SessionId,
         turn_id: crate::TurnId,
         lease_token: uuid::Uuid,
         now: DateTime<Utc>,
         inherited: bool,
     },
     LiveClient {
-        chat_id: ChatId,
+        chat_id: SessionId,
         lease_token: uuid::Uuid,
         now: DateTime<Utc>,
     },
     ExpiredClient {
-        chat_id: ChatId,
+        chat_id: SessionId,
         lease_token: uuid::Uuid,
         now: DateTime<Utc>,
     },
@@ -859,7 +859,7 @@ impl ResolutionAuthority {
         }
     }
 
-    const fn chat_id(self) -> Option<ChatId> {
+    const fn chat_id(self) -> Option<SessionId> {
         match self {
             Self::Server => None,
             Self::ClaimedServer { chat_id, .. }
@@ -1019,7 +1019,7 @@ fn terminal_authority_matches(
         }
         ResolutionAuthority::LiveClient { .. } | ResolutionAuthority::ExpiredClient { .. } => {
             model.execution == ToolCallExecution::Client.as_str()
-                && Some(ChatId(model.chat_id)) == authority.chat_id()
+                && Some(SessionId(model.chat_id)) == authority.chat_id()
                 && model.client_lease_token == authority.lease_token()
         }
     }
@@ -1041,7 +1041,7 @@ pub(in crate::db) fn tool_call_from_model(
 ) -> Result<ToolCallRecord> {
     Ok(ToolCallRecord {
         id: CallId(model.id),
-        chat_id: ChatId(model.chat_id),
+        chat_id: SessionId(model.chat_id),
         turn_id: crate::id::TurnId(model.turn_id),
         provider_id: model.provider_id,
         name: model.name,

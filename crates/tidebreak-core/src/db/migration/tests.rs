@@ -87,6 +87,7 @@ async fn a_fresh_database_records_the_whole_chain() {
             "m20260903_000004_restore_turn_claim_indexes",
             "m20260903_000005_pending_prompt_indexes",
             "m20260903_000006_sandbox_tool_recovery_indexes",
+            "m20260903_000007_universal_session_names",
         ]
     );
     assert!(db
@@ -126,7 +127,7 @@ async fn turn_claim_indexes_reach_existing_sqlite_databases() {
         );
     }
 
-    Migrator::up(&db, None).await.unwrap();
+    Migrator::up(&db, Some(1)).await.unwrap();
 
     for (index, query) in [
         (
@@ -208,7 +209,7 @@ async fn pending_prompt_indexes_reach_existing_sqlite_databases() {
         ),
         (
             "idx_code_approval_pending_prompt",
-            "SELECT * FROM code_approval WHERE state = 'pending' \
+            "SELECT * FROM approval WHERE state = 'pending' \
              ORDER BY session_id, requested_at, id",
         ),
     ] {
@@ -553,7 +554,7 @@ async fn assert_chat_replay(db: &sea_orm::DatabaseConnection, chat_id: uuid::Uui
     use crate::storage::Store as _;
     let store = crate::db::DbStore { conn: db.clone() };
     let replayed = store
-        .list_events(crate::ChatId(chat_id), 0)
+        .list_events(crate::SessionId(chat_id), 0)
         .await
         .expect("the chat replay reads the one journal");
     assert_eq!(
@@ -671,24 +672,24 @@ async fn assert_conversations_merged(db: &sea_orm::DatabaseConnection) {
         count(db, "sqlite_master WHERE type = 'table' AND name = 'chat'").await,
         0
     );
-    assert_eq!(count(db, "code_session").await, 2);
+    assert_eq!(count(db, "\"session\"").await, 2);
     assert_eq!(
         count(
             db,
-            "code_event WHERE session_id = X'0000000000000000000000000000a001'"
+            "event WHERE session_id = X'0000000000000000000000000000a001'"
         )
         .await,
         seeded_chat_events().len() as i64,
-        "the journal moved into code_event"
+        "the journal moved into event"
     );
     assert_chat_replay(db, uuid::Uuid::from_u128(0xa001)).await;
     for (table, expected) in [
         ("message", 2),
         ("agent_run", 1),
-        ("code_turn", 1),
+        ("\"turn\"", 1),
         ("tool_call", 1),
     ] {
-        let filter = if table == "code_turn" {
+        let filter = if table == "\"turn\"" {
             "session_id"
         } else {
             "chat_id"
@@ -709,7 +710,7 @@ async fn assert_conversations_merged(db: &sea_orm::DatabaseConnection) {
             "SELECT workspace_id, harness_kind, kind, lifecycle, spawn_epoch, \
              permission_mode, reasoning_effort, attention_state, attention_source, \
              title, network_policy, attachment_revision \
-             FROM code_session WHERE id = X'0000000000000000000000000000a001'"
+             FROM \"session\" WHERE id = X'0000000000000000000000000000a001'"
                 .to_owned(),
         ))
         .await
@@ -758,7 +759,7 @@ async fn assert_conversations_merged(db: &sea_orm::DatabaseConnection) {
         .query_one_raw(Statement::from_string(
             DbBackend::Sqlite,
             "SELECT spawn_epoch, permission_mode, title \
-             FROM code_session WHERE id = X'0000000000000000000000000000b001'"
+             FROM \"session\" WHERE id = X'0000000000000000000000000000b001'"
                 .to_owned(),
         ))
         .await
@@ -904,10 +905,10 @@ INSERT INTO code_event (owner, session_id, seq, event, created_at) VALUES (
     .unwrap();
 }
 
-/// What the journal move leaves behind: no `event` table, the receipts
-/// and their unique indexes on `code_event`, every foreign key satisfied,
-/// the bridge's copies replaced by the backfill, and the chat replay
-/// serving the seeded journal in order.
+/// What the journal move leaves behind: one `event` table, the receipts
+/// and their unique indexes on it, every foreign key satisfied, the
+/// bridge's copies replaced by the backfill, and the chat replay serving
+/// the seeded journal in order.
 async fn assert_one_journal(db: &sea_orm::DatabaseConnection) {
     assert!(db
         .query_all_raw(Statement::from_string(
@@ -919,6 +920,14 @@ async fn assert_one_journal(db: &sea_orm::DatabaseConnection) {
         .is_empty());
     assert_eq!(
         count(db, "sqlite_master WHERE type = 'table' AND name = 'event'").await,
+        1
+    );
+    assert_eq!(
+        count(
+            db,
+            "sqlite_master WHERE type = 'table' AND name = 'code_event'"
+        )
+        .await,
         0
     );
     for index in [
@@ -939,7 +948,7 @@ async fn assert_one_journal(db: &sea_orm::DatabaseConnection) {
     assert_eq!(
         count(
             db,
-            "code_event WHERE session_id = X'0000000000000000000000000000c001'"
+            "event WHERE session_id = X'0000000000000000000000000000c001'"
         )
         .await,
         seeded_chat_events().len() as i64,
@@ -948,7 +957,7 @@ async fn assert_one_journal(db: &sea_orm::DatabaseConnection) {
     let terminal = db
         .query_one_raw(Statement::from_string(
             DbBackend::Sqlite,
-            "SELECT seq, turn_id, terminal FROM code_event \
+            "SELECT seq, turn_id, terminal FROM event \
              WHERE session_id = X'0000000000000000000000000000c001' AND terminal"
                 .to_owned(),
         ))
@@ -970,7 +979,7 @@ async fn assert_one_journal(db: &sea_orm::DatabaseConnection) {
 }
 
 /// A merged SQLite profile keeps its chat journal while the rows move
-/// into `code_event`, and a second pass changes nothing.
+/// into the shared journal, and a second pass changes nothing.
 #[tokio::test]
 async fn a_pre_journal_database_replays_its_chat_events_from_the_one_journal() {
     use sea_orm_migration::MigrationTrait as _;
@@ -1259,18 +1268,14 @@ async fn assert_one_approval_surface(db: &sea_orm::DatabaseConnection) {
             "tool_call keeps {column}"
         );
     }
-    let chat_id = crate::ChatId(uuid::Uuid::from_u128(0xe001));
+    let chat_id = crate::SessionId(uuid::Uuid::from_u128(0xe001));
     let store = crate::db::DbStore { conn: db.clone() };
     let owner = crate::OwnerId::local();
 
-    let mut rows = crate::db::code::list_approvals(
-        &store,
-        &owner,
-        None,
-        Some(crate::CodeSessionId(chat_id.0)),
-    )
-    .await
-    .unwrap();
+    let mut rows =
+        crate::db::code::list_approvals(&store, &owner, None, Some(crate::SessionId(chat_id.0)))
+            .await
+            .unwrap();
     rows.sort_by_key(|row| row.id.0);
     assert_eq!(
         rows.iter().map(|row| row.id.0).collect::<Vec<_>>(),
@@ -1282,9 +1287,9 @@ async fn assert_one_approval_surface(db: &sea_orm::DatabaseConnection) {
     let [card, questions, plan, granted] = rows.as_slice() else {
         unreachable!()
     };
-    assert_eq!(card.state, crate::CodeApprovalState::Pending);
+    assert_eq!(card.state, crate::ApprovalState::Pending);
     assert!(
-        matches!(&card.kind, crate::CodeApprovalKind::ToolUse { offered_grants, .. } if !offered_grants.is_empty())
+        matches!(&card.kind, crate::ApprovalKind::ToolUse { offered_grants, .. } if !offered_grants.is_empty())
     );
     assert_eq!(card.worker_epoch, Some(2));
     assert_eq!(
@@ -1295,11 +1300,11 @@ async fn assert_one_approval_surface(db: &sea_orm::DatabaseConnection) {
         card.auto_judge_status,
         Some(crate::AutoJudgeStatus::Judging)
     );
-    assert_eq!(questions.state, crate::CodeApprovalState::Approved);
+    assert_eq!(questions.state, crate::ApprovalState::Approved);
     assert!(
-        matches!(&questions.kind, crate::CodeApprovalKind::Questions { questions } if questions.len() == 1 && questions[0].id == "greeting")
+        matches!(&questions.kind, crate::ApprovalKind::Questions { questions } if questions.len() == 1 && questions[0].id == "greeting")
     );
-    assert_eq!(plan.state, crate::CodeApprovalState::Denied);
+    assert_eq!(plan.state, crate::ApprovalState::Denied);
     assert_eq!(plan.feedback.as_deref(), Some("not yet"));
     assert_eq!(
         crate::PlanProposalBody::from_raw(&plan.harness_raw).unwrap(),
@@ -1308,7 +1313,7 @@ async fn assert_one_approval_surface(db: &sea_orm::DatabaseConnection) {
             plan: "1. do it".into()
         }
     );
-    assert_eq!(granted.state, crate::CodeApprovalState::Approved);
+    assert_eq!(granted.state, crate::ApprovalState::Approved);
 
     let pending = store
         .list_pending_tool_call_approvals(chat_id, 100)
@@ -1826,7 +1831,7 @@ async fn a_v060_sqlite_database_keeps_release_rows() {
         .query_one_raw(Statement::from_string(
             DbBackend::Sqlite,
             "SELECT blob_id, width, height, byte_len \
-             FROM code_turn_attachment WHERE turn_id = \
+             FROM turn_attachment WHERE turn_id = \
              '00000000-0000-0000-0000-000000000104'"
                 .to_owned(),
         ))
@@ -1841,14 +1846,14 @@ async fn a_v060_sqlite_database_keeps_release_rows() {
     assert_eq!(attachment.try_get::<i32>("", "height").unwrap(), 1);
     assert_eq!(attachment.try_get::<i64>("", "byte_len").unwrap(), 8);
 
-    // The park rebuild recreates code_turn; the seeded row must survive
-    // with its status intact and the new columns empty.
+    // The park migration rebuilds the old code_turn before the final
+    // rename. The seeded row must keep its status and empty park columns.
     let turn = db
         .query_one_raw(Statement::from_string(
             DbBackend::Sqlite,
             "SELECT status, park_ref IS NULL AS park_ref_null, \
                     park_wait IS NULL AS park_wait_null \
-             FROM code_turn \
+             FROM \"turn\" \
              WHERE id = '00000000-0000-0000-0000-000000000104'"
                 .to_owned(),
         ))
@@ -1922,7 +1927,7 @@ async fn a_v060_sqlite_database_keeps_release_rows() {
     let columns = db
         .query_all_raw(Statement::from_string(
             DbBackend::Sqlite,
-            "PRAGMA table_info('code_turn_attachment')".to_owned(),
+            "PRAGMA table_info('turn_attachment')".to_owned(),
         ))
         .await
         .unwrap();

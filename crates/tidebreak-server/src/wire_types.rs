@@ -551,8 +551,29 @@ mod tests {
             &[
                 generate::render_tool_name_list(&names),
                 generate::render_wire_limits(),
+                conversation_compatibility_aliases(),
             ],
         )
+    }
+
+    /// Keep clients on the earlier names while the conversation rename lands
+    /// in separate server and client changes.
+    fn conversation_compatibility_aliases() -> String {
+        "// Compatibility aliases for clients that still use the earlier conversation names.\n\
+         export type ChatId = SessionId;\n\
+         export type CodeApprovalId = ApprovalId;\n\
+         export type CodeApprovalKind = ApprovalKind;\n\
+         export type CodeApprovalState = ApprovalState;\n\
+         export type CodeEvent = Event;\n\
+         export type CodeSessionActivity = SessionActivity;\n\
+         export type CodeSessionId = SessionId;\n\
+         export type CodeSessionKind = SessionKind;\n\
+         export type CodeSessionLifecycle = SessionLifecycle;\n\
+         export type CodeTurnId = TurnId;\n\
+         export type CodeTurnStatus = TurnStatus;\n\
+         export type CodeUsage = TurnUsage;\n\
+         export type QueuedTurn = QueuedAgentTurn;\n"
+            .to_owned()
     }
 
     /// The WebSocket frame types, which until now had no contract at all: the

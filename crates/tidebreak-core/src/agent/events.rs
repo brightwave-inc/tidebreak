@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use futures::channel::{mpsc::UnboundedSender, oneshot};
 
 use crate::error::{AgentError, Result};
-use crate::event::{AgentEvent, SequencedEvent};
+use crate::event::{AgentEvent, SequencedAgentEvent};
 use crate::provider::Usage;
 
 #[derive(Default)]
@@ -24,9 +24,15 @@ pub enum ClaimedAgentEvent {
     /// Append this event under its exact attempt ordinal.
     Pending { ordinal: i32, event: AgentEvent },
     /// Publish an event whose journal transaction already committed.
-    Committed { ordinal: i32, event: SequencedEvent },
+    Committed {
+        ordinal: i32,
+        event: SequencedAgentEvent,
+    },
     /// Consume an already committed event ordinal without live publication.
-    Recovered { ordinal: i32, event: SequencedEvent },
+    Recovered {
+        ordinal: i32,
+        event: SequencedAgentEvent,
+    },
     /// Acknowledge after all preceding channel items have been handled.
     Flush(oneshot::Sender<()>),
 }
@@ -78,7 +84,7 @@ impl EventSink<'_> {
         }
     }
 
-    pub(crate) fn send_committed(&self, ordinal: i32, event: SequencedEvent) -> Result<()> {
+    pub(crate) fn send_committed(&self, ordinal: i32, event: SequencedAgentEvent) -> Result<()> {
         let Self::Claimed { sender, .. } = self else {
             return Err(AgentError::Store(
                 "legacy turn cannot publish a committed durable event".into(),
@@ -105,7 +111,7 @@ impl EventSink<'_> {
     pub(crate) fn send_committed_proposed(
         &self,
         ordinal: i32,
-        event: SequencedEvent,
+        event: SequencedAgentEvent,
     ) -> Result<()> {
         self.send_recovered_or_committed_proposed(ordinal, event, true)
     }
@@ -113,7 +119,7 @@ impl EventSink<'_> {
     pub(crate) fn send_recovered_proposed(
         &self,
         ordinal: i32,
-        event: SequencedEvent,
+        event: SequencedAgentEvent,
     ) -> Result<()> {
         self.send_recovered_or_committed_proposed(ordinal, event, false)
     }
@@ -121,7 +127,7 @@ impl EventSink<'_> {
     pub(crate) fn send_recovered_or_committed_proposed(
         &self,
         ordinal: i32,
-        event: SequencedEvent,
+        event: SequencedAgentEvent,
         publish: bool,
     ) -> Result<()> {
         let Self::Claimed {

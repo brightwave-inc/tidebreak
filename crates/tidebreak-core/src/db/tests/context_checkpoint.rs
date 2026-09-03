@@ -38,7 +38,7 @@ async fn store_with_messages() -> (tempfile::TempDir, DbStore, Chat, Message, Me
 }
 
 fn checkpoint(
-    chat_id: ChatId,
+    chat_id: SessionId,
     source_message_id: MessageId,
     content: &str,
     second: i64,

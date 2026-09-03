@@ -1,11 +1,9 @@
 //! A chat's attention, derived from the rows that already describe it.
 //!
-//! Decision 48 step 3 gives every conversation the attention vocabulary code
-//! mode introduced, so one supervising client watches one queue. Code stores
-//! its attention on `code_session`, because a session is the unit and its
-//! lifecycle lives on the same row. Chat has no such row: a conversation's
-//! liveness is spread across `code_turn`, and its waiting work is the same set
-//! the inbox already projects.
+//! Decision 48 step 3 gives every conversation the same attention vocabulary,
+//! so one supervising client watches one queue. A session stores attention
+//! beside its lifecycle. An internal session still derives its attention from
+//! turns and the waiting work that the inbox projects.
 //!
 //! So chat derives rather than stores. Adding attention columns to `chat`
 //! would duplicate state `turn_run` owns and need a write at every turn
@@ -24,11 +22,11 @@ use std::collections::HashMap;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 
 use crate::attention::{Attention, AttentionSource, AttentionState};
-use crate::code::CodeTurnStatus;
+use crate::code::TurnStatus;
 use crate::error::Result;
 use crate::model::OwnerId;
 use crate::storage::{InboxItem, InboxItemKind};
-use crate::ChatId;
+use crate::SessionId;
 
 use super::super::{entities, store_err, DbStore};
 use super::conversation::internal_sessions;
@@ -57,23 +55,23 @@ pub(in crate::db) async fn chat_attention(
     store: &DbStore,
     owner: &OwnerId,
     items: &[InboxItem],
-) -> Result<HashMap<ChatId, Attention>> {
-    let mut attention = HashMap::<ChatId, Attention>::new();
+) -> Result<HashMap<SessionId, Attention>> {
+    let mut attention = HashMap::<SessionId, Attention>::new();
 
     // A live turn is the weaker claim, so it goes first and a waiting item
     // overwrites it below. A conversation that is both running and holding an
     // approval is, to the reader, waiting on them.
-    let live = entities::code_turn::Entity::find()
+    let live = entities::turn::Entity::find()
         .filter(
-            entities::code_turn::Column::Status
-                .is_in(CodeTurnStatus::LIVE.iter().map(|status| status.as_str())),
+            entities::turn::Column::Status
+                .is_in(TurnStatus::LIVE.iter().map(|status| status.as_str())),
         )
-        .order_by_asc(entities::code_turn::Column::Id)
+        .order_by_asc(entities::turn::Column::Id)
         .all(&store.conn)
         .await
         .map_err(store_err)?;
-    let owned = entities::code_session::Entity::find()
-        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+    let owned = entities::session::Entity::find()
+        .filter(entities::session::Column::Owner.eq(owner.as_str()))
         .filter(internal_sessions())
         .all(&store.conn)
         .await
@@ -86,7 +84,7 @@ pub(in crate::db) async fn chat_attention(
             continue;
         }
         attention.insert(
-            ChatId(run.session_id),
+            SessionId(run.session_id),
             Attention::working(AttentionSource::Lifecycle),
         );
     }
