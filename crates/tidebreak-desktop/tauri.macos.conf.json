@@ -5,10 +5,11 @@
       {
         "label": "main",
         "title": "Tidebreak",
-        "width": 1100,
-        "height": 760,
+        "width": 1280,
+        "height": 800,
         "minWidth": 720,
         "minHeight": 480,
+        "center": true,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
         "dragDropEnabled": true,
