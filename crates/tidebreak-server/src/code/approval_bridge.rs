@@ -20,7 +20,7 @@ use sha2::{Digest as _, Sha256};
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
-use tidebreak_core::{CodeApprovalId, CodeSessionId, CodeSessionLifecycle, CodeTurnId, OwnerId};
+use tidebreak_core::{ApprovalId, OwnerId, SessionId, SessionLifecycle, TurnId};
 use tidebreak_harness::claude::approvals::{
     PermissionPromptRequest, PermissionPromptResponse, APPROVAL_MCP_TOOL,
 };
@@ -37,7 +37,7 @@ const APPROVAL_WAIT_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct NativeCallKey {
-    session_id: CodeSessionId,
+    session_id: SessionId,
     spawn_epoch: i64,
     call_id: String,
 }
@@ -45,12 +45,12 @@ struct NativeCallKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ApprovalTokenSubject {
     owner: OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     spawn_epoch: i64,
 }
 
 struct ParkedApproval {
-    session_id: CodeSessionId,
+    session_id: SessionId,
     approval: HarnessApprovalRef,
     sender: oneshot::Sender<ApprovalResolution>,
 }
@@ -70,7 +70,7 @@ struct ApprovalParks {
 #[derive(Default)]
 pub(crate) struct ApprovalBridge {
     tokens: Mutex<HashMap<String, ApprovalTokenSubject>>,
-    by_session: Mutex<HashMap<CodeSessionId, String>>,
+    by_session: Mutex<HashMap<SessionId, String>>,
     parked: Mutex<ApprovalParks>,
 }
 
@@ -83,7 +83,7 @@ impl ApprovalBridge {
     pub(crate) fn issue_token(
         &self,
         owner: &OwnerId,
-        session_id: CodeSessionId,
+        session_id: SessionId,
         spawn_epoch: i64,
     ) -> String {
         let token = format!("cma_{}", Uuid::new_v4());
@@ -112,7 +112,7 @@ impl ApprovalBridge {
     }
 
     /// Revoke one worker's bearer and close every native call it parked.
-    pub(crate) fn revoke_session(&self, session_id: CodeSessionId) {
+    pub(crate) fn revoke_session(&self, session_id: SessionId) {
         let mut by_session = self.by_session.lock().expect("approval tokens");
         let mut tokens = self.tokens.lock().expect("approval tokens");
         let mut parked = self.parked.lock().expect("approval park");
@@ -120,10 +120,10 @@ impl ApprovalBridge {
     }
 
     fn revoke_session_locked(
-        by_session: &mut HashMap<CodeSessionId, String>,
+        by_session: &mut HashMap<SessionId, String>,
         tokens: &mut HashMap<String, ApprovalTokenSubject>,
         parked: &mut ApprovalParks,
-        session_id: CodeSessionId,
+        session_id: SessionId,
     ) {
         by_session.remove(&session_id);
         tokens.retain(|_, subject| subject.session_id != session_id);
@@ -271,10 +271,10 @@ impl ApprovalCompleter for ApprovalBridge {
 
 fn approval_ref(
     owner: &OwnerId,
-    session_id: CodeSessionId,
-    turn_id: CodeTurnId,
+    session_id: SessionId,
+    turn_id: TurnId,
     spawn_epoch: i64,
-    approval_id: CodeApprovalId,
+    approval_id: ApprovalId,
     request: &PermissionPromptRequest,
 ) -> Result<HarnessApprovalRef, ServerError> {
     let bytes = serde_json::to_vec(request)
@@ -324,8 +324,8 @@ fn deny_parked(
 
 async fn await_decision(
     runtime: &crate::code::CodeRuntime,
-    session_id: CodeSessionId,
-    approval_id: CodeApprovalId,
+    session_id: SessionId,
+    approval_id: ApprovalId,
     approval: &HarnessApprovalRef,
     receiver: oneshot::Receiver<ApprovalResolution>,
 ) -> ApprovalDecision {
@@ -493,7 +493,7 @@ async fn handle_tools_call(
             "the worker that issued this approval token is no longer attached",
         ));
     }
-    if session.lifecycle == CodeSessionLifecycle::Ended {
+    if session.lifecycle == SessionLifecycle::Ended {
         return Err(ServerError::conflict_kind(
             "session_ended",
             "session has ended",
@@ -514,7 +514,7 @@ async fn handle_tools_call(
                     "the session has no running turn for this approval",
                 )
             })?;
-    let approval_id = CodeApprovalId::new();
+    let approval_id = ApprovalId::new();
     let harness_ref = approval_ref(
         &session.owner,
         subject.session_id,
@@ -708,7 +708,7 @@ async fn handle_memory_tool(
                         workspace_id: session.workspace_id,
                         ..Default::default()
                     },
-                    evidence: vec![MemoryEvidence::CodeEvent {
+                    evidence: vec![MemoryEvidence::Event {
                         session_id: subject.session_id,
                         seq: evidence_seq,
                     }],
@@ -782,10 +782,10 @@ mod tests {
 
     fn approval(
         owner: &OwnerId,
-        session_id: CodeSessionId,
-        turn_id: CodeTurnId,
+        session_id: SessionId,
+        turn_id: TurnId,
         spawn_epoch: i64,
-        approval_id: CodeApprovalId,
+        approval_id: ApprovalId,
         call_id: &str,
         token: &str,
     ) -> HarnessApprovalRef {
@@ -807,8 +807,8 @@ mod tests {
     async fn the_same_native_call_id_is_isolated_between_sessions() {
         let bridge = ApprovalBridge::new();
         let owner = OwnerId::local();
-        let first_session = CodeSessionId::new();
-        let second_session = CodeSessionId::new();
+        let first_session = SessionId::new();
+        let second_session = SessionId::new();
         let first_bearer = bridge.issue_token(&owner, first_session, 1);
         let second_bearer = bridge.issue_token(&owner, second_session, 1);
         let first_subject = bridge.subject_for_token(&first_bearer).unwrap();
@@ -816,18 +816,18 @@ mod tests {
         let first = approval(
             &owner,
             first_session,
-            CodeTurnId::new(),
+            TurnId::new(),
             1,
-            CodeApprovalId::new(),
+            ApprovalId::new(),
             "toolu_same",
             "cap-first",
         );
         let second = approval(
             &owner,
             second_session,
-            CodeTurnId::new(),
+            TurnId::new(),
             1,
-            CodeApprovalId::new(),
+            ApprovalId::new(),
             "toolu_same",
             "cap-second",
         );
@@ -861,24 +861,24 @@ mod tests {
     fn a_duplicate_native_call_id_is_rejected_within_one_worker() {
         let bridge = ApprovalBridge::new();
         let owner = OwnerId::local();
-        let session_id = CodeSessionId::new();
+        let session_id = SessionId::new();
         let bearer = bridge.issue_token(&owner, session_id, 4);
         let subject = bridge.subject_for_token(&bearer).unwrap();
         let first = approval(
             &owner,
             session_id,
-            CodeTurnId::new(),
+            TurnId::new(),
             4,
-            CodeApprovalId::new(),
+            ApprovalId::new(),
             "toolu_duplicate",
             "cap-first",
         );
         let second = approval(
             &owner,
             session_id,
-            CodeTurnId::new(),
+            TurnId::new(),
             4,
-            CodeApprovalId::new(),
+            ApprovalId::new(),
             "toolu_duplicate",
             "cap-second",
         );
@@ -897,10 +897,10 @@ mod tests {
         let owner = OwnerId::local();
         let approval = approval(
             &owner,
-            CodeSessionId::new(),
-            CodeTurnId::new(),
+            SessionId::new(),
+            TurnId::new(),
             1,
-            CodeApprovalId::new(),
+            ApprovalId::new(),
             "toolu_missing",
             "cap-missing",
         );
@@ -915,15 +915,15 @@ mod tests {
     async fn completing_a_closed_waiter_fails() {
         let bridge = ApprovalBridge::new();
         let owner = OwnerId::local();
-        let session_id = CodeSessionId::new();
+        let session_id = SessionId::new();
         let bearer = bridge.issue_token(&owner, session_id, 2);
         let subject = bridge.subject_for_token(&bearer).unwrap();
         let approval = approval(
             &owner,
             session_id,
-            CodeTurnId::new(),
+            TurnId::new(),
             2,
-            CodeApprovalId::new(),
+            ApprovalId::new(),
             "toolu_closed",
             "cap-closed",
         );
@@ -940,15 +940,15 @@ mod tests {
     async fn completion_waits_until_the_handler_accepts_the_decision() {
         let bridge = ApprovalBridge::new();
         let owner = OwnerId::local();
-        let session_id = CodeSessionId::new();
+        let session_id = SessionId::new();
         let bearer = bridge.issue_token(&owner, session_id, 2);
         let subject = bridge.subject_for_token(&bearer).unwrap();
         let approval = approval(
             &owner,
             session_id,
-            CodeTurnId::new(),
+            TurnId::new(),
             2,
-            CodeApprovalId::new(),
+            ApprovalId::new(),
             "toolu_ack",
             "cap-ack",
         );
@@ -971,15 +971,15 @@ mod tests {
     async fn losing_acknowledgement_after_delivery_is_ambiguous() {
         let bridge = ApprovalBridge::new();
         let owner = OwnerId::local();
-        let session_id = CodeSessionId::new();
+        let session_id = SessionId::new();
         let bearer = bridge.issue_token(&owner, session_id, 2);
         let subject = bridge.subject_for_token(&bearer).unwrap();
         let approval = approval(
             &owner,
             session_id,
-            CodeTurnId::new(),
+            TurnId::new(),
             2,
-            CodeApprovalId::new(),
+            ApprovalId::new(),
             "toolu_lost_ack",
             "cap-lost-ack",
         );
@@ -1002,8 +1002,8 @@ mod tests {
     async fn token_rotation_closes_only_the_replaced_workers_calls() {
         let bridge = ApprovalBridge::new();
         let owner = OwnerId::local();
-        let replaced_session = CodeSessionId::new();
-        let other_session = CodeSessionId::new();
+        let replaced_session = SessionId::new();
+        let other_session = SessionId::new();
         let replaced_bearer = bridge.issue_token(&owner, replaced_session, 8);
         let other_bearer = bridge.issue_token(&owner, other_session, 3);
         let replaced_subject = bridge.subject_for_token(&replaced_bearer).unwrap();
@@ -1011,18 +1011,18 @@ mod tests {
         let replaced = approval(
             &owner,
             replaced_session,
-            CodeTurnId::new(),
+            TurnId::new(),
             8,
-            CodeApprovalId::new(),
+            ApprovalId::new(),
             "toolu_replaced",
             "cap-replaced",
         );
         let other = approval(
             &owner,
             other_session,
-            CodeTurnId::new(),
+            TurnId::new(),
             3,
-            CodeApprovalId::new(),
+            ApprovalId::new(),
             "toolu_other",
             "cap-other",
         );
@@ -1056,15 +1056,15 @@ mod tests {
     fn a_token_revoked_after_lookup_cannot_park() {
         let bridge = ApprovalBridge::new();
         let owner = OwnerId::local();
-        let session_id = CodeSessionId::new();
+        let session_id = SessionId::new();
         let stale_bearer = bridge.issue_token(&owner, session_id, 1);
         let stale_subject = bridge.subject_for_token(&stale_bearer).unwrap();
         let stale_approval = approval(
             &owner,
             session_id,
-            CodeTurnId::new(),
+            TurnId::new(),
             1,
-            CodeApprovalId::new(),
+            ApprovalId::new(),
             "toolu_stale",
             "cap-stale",
         );

@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use unicode_general_category::{get_general_category, GeneralCategory};
 
 use tidebreak_core::{
-    AgentError, ChatId, DocumentBlob, DocumentId, DocumentListCursor, DocumentReadiness,
-    DocumentRecord, DocumentScope, DocumentSourceUpsert, DocumentSummaryRecord, ProjectId,
+    AgentError, DocumentBlob, DocumentId, DocumentListCursor, DocumentReadiness, DocumentRecord,
+    DocumentScope, DocumentSourceUpsert, DocumentSummaryRecord, ProjectId, SessionId,
 };
 
 use crate::document_decode::decode_document;
@@ -41,7 +41,7 @@ pub struct IngestDocument {
 pub struct PromoteDocument {
     /// The conversation that owns the document being promoted. It must belong to
     /// the project in the path.
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     /// The conversation-owned document to share with the project.
     pub document_id: DocumentId,
 }
@@ -97,7 +97,7 @@ pub struct DocumentSummary {
     /// Stable identifier shared with citations and delete/get routes.
     pub document_id: DocumentId,
     /// Owning conversation for conversation-scoped sources.
-    pub chat_id: Option<ChatId>,
+    pub chat_id: Option<SessionId>,
     /// Owning project, or `None` for a legacy unscoped source.
     pub project_id: Option<ProjectId>,
     /// Source path or URL, or `None` for inline content.
@@ -352,7 +352,7 @@ pub async fn promote_document_to_project(
 pub async fn ingest_chat_document(
     State(state): State<AppState>,
     store: ScopedStore,
-    Path(chat_id): Path<ChatId>,
+    Path(chat_id): Path<SessionId>,
     Json(body): Json<IngestDocument>,
 ) -> Result<impl IntoResponse, ServerError> {
     store.require_chat(chat_id).await?;
@@ -362,7 +362,7 @@ pub async fn ingest_chat_document(
 async fn ingest_document_in_scope(
     state: &AppState,
     store: &ScopedStore,
-    chat_id: Option<ChatId>,
+    chat_id: Option<SessionId>,
     project_id: Option<ProjectId>,
     body: IngestDocument,
 ) -> Result<(StatusCode, Json<IngestResult>), ServerError> {
@@ -422,7 +422,7 @@ pub async fn ingest_raw_project_document(
 pub async fn ingest_raw_chat_document(
     State(state): State<AppState>,
     store: ScopedStore,
-    Path(chat_id): Path<ChatId>,
+    Path(chat_id): Path<SessionId>,
     Query(query): Query<RawDocumentQuery>,
     headers: HeaderMap,
     RawBytes(bytes): RawBytes,
@@ -446,7 +446,7 @@ pub async fn ingest_raw_chat_document(
 pub async fn ingest_streamed_raw_chat_document(
     State(state): State<AppState>,
     store: ScopedStore,
-    Path(chat_id): Path<ChatId>,
+    Path(chat_id): Path<SessionId>,
     Query(query): Query<StreamedRawDocumentQuery>,
     headers: HeaderMap,
     body: Body,
@@ -515,7 +515,7 @@ pub async fn ingest_streamed_raw_chat_document(
 async fn ingest_raw_document_in_scope(
     state: &AppState,
     store: &ScopedStore,
-    chat_id: Option<ChatId>,
+    chat_id: Option<SessionId>,
     project_id: Option<ProjectId>,
     query: RawDocumentQuery,
     headers: &HeaderMap,
@@ -542,7 +542,7 @@ async fn ingest_raw_document_in_scope(
 async fn publish_document_source(
     state: &AppState,
     store: &ScopedStore,
-    chat_id: Option<ChatId>,
+    chat_id: Option<SessionId>,
     project_id: Option<ProjectId>,
     origin_uri: Option<String>,
     title: Option<String>,
@@ -722,7 +722,7 @@ pub async fn list_project_documents(
 /// `GET /chats/{chat_id}/documents` — list only sources owned by one conversation.
 pub async fn list_chat_documents(
     store: ScopedStore,
-    Path(chat_id): Path<ChatId>,
+    Path(chat_id): Path<SessionId>,
     Query(query): Query<DocumentListQuery>,
 ) -> Result<Json<DocumentListPage>, ServerError> {
     store.require_chat(chat_id).await?;
@@ -801,7 +801,7 @@ pub async fn get_project_document(
 /// the path conversation owns it.
 pub async fn get_chat_document(
     store: ScopedStore,
-    Path((chat_id, document_id)): Path<(ChatId, DocumentId)>,
+    Path((chat_id, document_id)): Path<(SessionId, DocumentId)>,
 ) -> Result<Json<ChatDocumentDetail>, ServerError> {
     store
         .get_document(document_id)
@@ -850,7 +850,7 @@ pub async fn get_project_document_file_content(
 pub async fn get_chat_document_file_content(
     State(state): State<AppState>,
     store: ScopedStore,
-    Path((chat_id, document_id)): Path<(ChatId, DocumentId)>,
+    Path((chat_id, document_id)): Path<(SessionId, DocumentId)>,
     method: Method,
     headers: HeaderMap,
 ) -> Result<Response, ServerError> {
@@ -975,7 +975,7 @@ async fn serve_document_file_content(
     state: &AppState,
     store: &ScopedStore,
     document_id: DocumentId,
-    chat_id: Option<ChatId>,
+    chat_id: Option<SessionId>,
     project_id: Option<ProjectId>,
     method: Method,
     headers: &HeaderMap,
@@ -1245,7 +1245,7 @@ pub async fn delete_project_document(
 pub async fn delete_chat_document(
     State(state): State<AppState>,
     store: ScopedStore,
-    Path((chat_id, document_id)): Path<(ChatId, DocumentId)>,
+    Path((chat_id, document_id)): Path<(SessionId, DocumentId)>,
 ) -> Result<StatusCode, ServerError> {
     if store
         .get_document(document_id)

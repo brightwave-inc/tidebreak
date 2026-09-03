@@ -389,7 +389,7 @@ mod tests {
         // types with the conversation path, but one generated module keeps the
         // renderer importing from a single place.
         generate::collect_from::<crate::routes::Settings>(&cfg, &mut out);
-        generate::collect_from::<tidebreak_core::QueuedTurn>(&cfg, &mut out);
+        generate::collect_from::<tidebreak_core::QueuedAgentTurn>(&cfg, &mut out);
         generate::collect_from::<crate::routes::ModelInfo>(&cfg, &mut out);
         generate::collect_from::<crate::routes::ModelRoleInfo>(&cfg, &mut out);
         // Memory: backend capabilities, records, search, context, revisions,
@@ -468,11 +468,11 @@ mod tests {
         generate::collect_from::<crate::routes::code::WorkspaceTitleProposal>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeConnectPage>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeGrantSnapshot>(&cfg, &mut out);
-        generate::collect_from::<crate::routes::code::CodeSessionSnapshot>(&cfg, &mut out);
-        generate::collect_from::<crate::routes::code::CodeTurnSnapshot>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::SessionSnapshot>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::TurnSnapshot>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeAnalyticsSnapshot>(&cfg, &mut out);
-        generate::collect_from::<crate::routes::code::QueuedCodeTurn>(&cfg, &mut out);
-        generate::collect_from::<crate::routes::code::SequencedCodeEventFrame>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::QueuedTurn>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::SequencedEventFrame>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::HarnessDoctorReport>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::HarnessModelList>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeWorkspaceFiles>(&cfg, &mut out);
@@ -482,10 +482,11 @@ mod tests {
         generate::collect_from::<crate::routes::code::CodeWorkspaceDiff>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeTerminalSnapshot>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeTerminalRead>(&cfg, &mut out);
-        generate::collect_from::<crate::routes::code::CodeSessionDigest>(&cfg, &mut out);
-        generate::collect_from::<crate::routes::code::CodeUpdateNotice>(&cfg, &mut out);
-        generate::collect_from::<crate::routes::code::CodeApprovalSnapshot>(&cfg, &mut out);
-        generate::collect_from::<crate::routes::code::CodeApprovalDecisionBody>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::CodeTerminalActivityNotice>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::SessionDigest>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::UpdateNotice>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::ApprovalSnapshot>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::ApprovalDecisionBody>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeCommitSnapshot>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodePushSnapshot>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeWorkspacePrSnapshot>(&cfg, &mut out);

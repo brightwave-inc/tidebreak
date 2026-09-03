@@ -18,9 +18,9 @@ use tidebreak_core::{
     BrowserEngineDescriptor, BrowserEngineName, BrowserListResult, BrowserLoadState,
     BrowserNavigateArgs, BrowserNavigateResult, BrowserPageSnapshot, BrowserScreenshotArgs,
     BrowserScreenshotResult, BrowserSessionSummary, BrowserSnapshotArgs, BrowserViewport,
-    BrowserWaitArgs, BrowserWaitResult, BrowserWaitStatus, CodeRepo, CodeSession, CodeSessionId,
-    CodeSessionKind, CodeSessionLifecycle, CodeWorkspace, CodeWorkspaceStatus, DbStore,
-    HarnessKind, OwnerId, PermissionMode, RepoId, Store, WorkspaceId,
+    BrowserWaitArgs, BrowserWaitResult, BrowserWaitStatus, CodeRepo, CodeWorkspace,
+    CodeWorkspaceStatus, DbStore, HarnessKind, OwnerId, PermissionMode, RepoId, Session, SessionId,
+    SessionKind, SessionLifecycle, Store, WorkspaceId,
 };
 use tidebreak_harness::AdapterRegistry;
 
@@ -270,7 +270,7 @@ async fn serve(router: Router) -> std::net::SocketAddr {
     a
 }
 
-async fn seed_session(db: &DbStore, lc: CodeSessionLifecycle) -> (WorkspaceId, CodeSessionId) {
+async fn seed_session(db: &DbStore, lc: SessionLifecycle) -> (WorkspaceId, SessionId) {
     let repo_id = RepoId::new();
     db::code::insert_repo(
         db,
@@ -311,11 +311,11 @@ async fn seed_session(db: &DbStore, lc: CodeSessionLifecycle) -> (WorkspaceId, C
         bundle_bytes: None,
     };
     db::code::insert_workspace(db, &ws).await.unwrap();
-    let s = CodeSession {
-        id: CodeSessionId::new(),
+    let s = Session {
+        id: SessionId::new(),
         owner: OwnerId::local(),
         workspace_id: Some(ws.id),
-        kind: CodeSessionKind::Interactive,
+        kind: SessionKind::Interactive,
         harness_kind: HarnessKind::ClaudeCode,
         harness_version: None,
         harness_resume_ref: None,
@@ -337,7 +337,7 @@ async fn seed_session(db: &DbStore, lc: CodeSessionLifecycle) -> (WorkspaceId, C
     (ws.id, s.id)
 }
 
-fn mint_token(code: &CodeRuntime, ws: WorkspaceId, s: CodeSessionId) -> String {
+fn mint_token(code: &CodeRuntime, ws: WorkspaceId, s: SessionId) -> String {
     let bridge = crate::code::browser_channel::test_bridge_command();
     let sp = code
         .browser_tokens
@@ -382,7 +382,7 @@ async fn get(addr: std::net::SocketAddr, rt: &str, tok: Option<&str>) -> reqwest
 #[tokio::test]
 async fn valid_token_lists() {
     let a = browser_app(Some(Arc::new(FakeBrowserRuntime::default()))).await;
-    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let (ws, s) = seed_session(&a.code.db, SessionLifecycle::Idle).await;
     let t = mint_token(&a.code, ws, s);
     let r = get(a.addr, "list", Some(&t)).await;
     assert_eq!(r.status(), reqwest::StatusCode::OK);
@@ -399,7 +399,7 @@ async fn valid_token_lists() {
 #[tokio::test]
 async fn missing_and_unknown_401() {
     let a = browser_app(Some(Arc::new(FakeBrowserRuntime::default()))).await;
-    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let (ws, s) = seed_session(&a.code.db, SessionLifecycle::Idle).await;
     let _ = mint_token(&a.code, ws, s);
     assert_eq!(
         get(a.addr, "list", None).await.status(),
@@ -415,7 +415,7 @@ async fn missing_and_unknown_401() {
 #[tokio::test]
 async fn app_token_not_browser() {
     let a = browser_app(Some(Arc::new(FakeBrowserRuntime::default()))).await;
-    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let (ws, s) = seed_session(&a.code.db, SessionLifecycle::Idle).await;
     let _ = mint_token(&a.code, ws, s);
     assert_eq!(
         get(
@@ -432,7 +432,7 @@ async fn app_token_not_browser() {
 #[tokio::test]
 async fn revoked_then_401() {
     let a = browser_app(Some(Arc::new(FakeBrowserRuntime::default()))).await;
-    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let (ws, s) = seed_session(&a.code.db, SessionLifecycle::Idle).await;
     let t = mint_token(&a.code, ws, s);
     a.code.browser_tokens.revoke(s);
     let r = get(a.addr, "list", Some(&t)).await;
@@ -443,7 +443,7 @@ async fn revoked_then_401() {
 #[tokio::test]
 async fn ended_session_403() {
     let a = browser_app(Some(Arc::new(FakeBrowserRuntime::default()))).await;
-    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Ended).await;
+    let (ws, s) = seed_session(&a.code.db, SessionLifecycle::Ended).await;
     let t = mint_token(&a.code, ws, s);
     assert_eq!(
         get(a.addr, "list", Some(&t)).await.status(),
@@ -455,7 +455,7 @@ async fn ended_session_403() {
 #[tokio::test]
 async fn cross_workspace_404() {
     let a = browser_app(Some(Arc::new(FakeBrowserRuntime::default()))).await;
-    let (_, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let (_, s) = seed_session(&a.code.db, SessionLifecycle::Idle).await;
     let t = mint_token(&a.code, WorkspaceId::new(), s);
     assert_eq!(
         get(a.addr, "list", Some(&t)).await.status(),
@@ -467,7 +467,7 @@ async fn cross_workspace_404() {
 #[tokio::test]
 async fn missing_runtime_501() {
     let a = browser_app(None).await;
-    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let (ws, s) = seed_session(&a.code.db, SessionLifecycle::Idle).await;
     let t = mint_token(&a.code, ws, s);
     let r = get(a.addr, "list", Some(&t)).await;
     assert_eq!(r.status(), reqwest::StatusCode::NOT_IMPLEMENTED);
@@ -481,7 +481,7 @@ async fn missing_runtime_501() {
 #[tokio::test]
 async fn stale_snapshot_409() {
     let a = browser_app(Some(Arc::new(FakeBrowserRuntime::stale()))).await;
-    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let (ws, s) = seed_session(&a.code.db, SessionLifecycle::Idle).await;
     let t = mint_token(&a.code, ws, s);
     let r = post(
         a.addr,
@@ -500,7 +500,7 @@ async fn stale_snapshot_409() {
 #[tokio::test]
 async fn unshared_origin_403() {
     let a = browser_app(Some(Arc::new(FakeBrowserRuntime::not_authorized()))).await;
-    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let (ws, s) = seed_session(&a.code.db, SessionLifecycle::Idle).await;
     let t = mint_token(&a.code, ws, s);
     let r = post(
         a.addr,
@@ -518,7 +518,7 @@ async fn unshared_origin_403() {
 #[tokio::test]
 async fn navigate_roundtrip() {
     let a = browser_app(Some(Arc::new(FakeBrowserRuntime::default()))).await;
-    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let (ws, s) = seed_session(&a.code.db, SessionLifecycle::Idle).await;
     let t = mint_token(&a.code, ws, s);
     let r = post(
         a.addr,
@@ -544,7 +544,7 @@ async fn navigate_roundtrip() {
 #[tokio::test]
 async fn snapshot_roundtrip() {
     let a = browser_app(Some(Arc::new(FakeBrowserRuntime::default()))).await;
-    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let (ws, s) = seed_session(&a.code.db, SessionLifecycle::Idle).await;
     let t = mint_token(&a.code, ws, s);
     let r = post(
         a.addr,
@@ -563,7 +563,7 @@ async fn snapshot_roundtrip() {
 #[tokio::test]
 async fn navigate_refuses_non_http() {
     let a = browser_app(Some(Arc::new(FakeBrowserRuntime::default()))).await;
-    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let (ws, s) = seed_session(&a.code.db, SessionLifecycle::Idle).await;
     let t = mint_token(&a.code, ws, s);
     for u in ["file:///etc/passwd", "https://user:secret@example.com"] {
         assert_eq!(
@@ -584,7 +584,7 @@ async fn navigate_refuses_non_http() {
 #[tokio::test]
 async fn wait_roundtrip() {
     let a = browser_app(Some(Arc::new(FakeBrowserRuntime::default()))).await;
-    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let (ws, s) = seed_session(&a.code.db, SessionLifecycle::Idle).await;
     let t = mint_token(&a.code, ws, s);
     let r = post(
         a.addr,
@@ -608,7 +608,7 @@ async fn wait_roundtrip() {
 #[tokio::test]
 async fn wait_refuses_missing_browser_id() {
     let a = browser_app(Some(Arc::new(FakeBrowserRuntime::default()))).await;
-    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let (ws, s) = seed_session(&a.code.db, SessionLifecycle::Idle).await;
     let t = mint_token(&a.code, ws, s);
     assert_eq!(
         post(
@@ -631,7 +631,7 @@ async fn wait_refuses_missing_browser_id() {
 #[tokio::test]
 async fn wait_refuses_non_well_formed() {
     let a = browser_app(Some(Arc::new(FakeBrowserRuntime::default()))).await;
-    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let (ws, s) = seed_session(&a.code.db, SessionLifecycle::Idle).await;
     let t = mint_token(&a.code, ws, s);
     assert_eq!(
         post(
@@ -649,7 +649,7 @@ async fn wait_refuses_non_well_formed() {
 #[tokio::test]
 async fn wait_stale_409() {
     let a = browser_app(Some(Arc::new(FakeBrowserRuntime::stale()))).await;
-    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let (ws, s) = seed_session(&a.code.db, SessionLifecycle::Idle).await;
     let t = mint_token(&a.code, ws, s);
     let r = post(
         a.addr,
@@ -669,7 +669,7 @@ async fn wait_stale_409() {
 #[tokio::test]
 async fn wait_missing_runtime_501() {
     let a = browser_app(None).await;
-    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let (ws, s) = seed_session(&a.code.db, SessionLifecycle::Idle).await;
     let t = mint_token(&a.code, ws, s);
     let r = post(
         a.addr,
@@ -689,7 +689,7 @@ async fn wait_missing_runtime_501() {
 #[tokio::test]
 async fn screenshot_roundtrip() {
     let a = browser_app(Some(Arc::new(FakeBrowserRuntime::default()))).await;
-    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let (ws, s) = seed_session(&a.code.db, SessionLifecycle::Idle).await;
     let t = mint_token(&a.code, ws, s);
     let r = post(
         a.addr,
@@ -711,7 +711,7 @@ async fn screenshot_roundtrip() {
 #[tokio::test]
 async fn screenshot_refuses_non_well_formed() {
     let a = browser_app(Some(Arc::new(FakeBrowserRuntime::default()))).await;
-    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let (ws, s) = seed_session(&a.code.db, SessionLifecycle::Idle).await;
     let t = mint_token(&a.code, ws, s);
     assert_eq!(
         post(
@@ -729,7 +729,7 @@ async fn screenshot_refuses_non_well_formed() {
 #[tokio::test]
 async fn screenshot_stale_409() {
     let a = browser_app(Some(Arc::new(FakeBrowserRuntime::stale()))).await;
-    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let (ws, s) = seed_session(&a.code.db, SessionLifecycle::Idle).await;
     let t = mint_token(&a.code, ws, s);
     let r = post(
         a.addr,
@@ -748,7 +748,7 @@ async fn screenshot_stale_409() {
 #[tokio::test]
 async fn screenshot_missing_runtime_501() {
     let a = browser_app(None).await;
-    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let (ws, s) = seed_session(&a.code.db, SessionLifecycle::Idle).await;
     let t = mint_token(&a.code, ws, s);
     let r = post(
         a.addr,
@@ -767,7 +767,7 @@ async fn screenshot_missing_runtime_501() {
 #[tokio::test]
 async fn act_roundtrip() {
     let a = browser_app(Some(Arc::new(FakeBrowserRuntime::default()))).await;
-    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let (ws, s) = seed_session(&a.code.db, SessionLifecycle::Idle).await;
     let t = mint_token(&a.code, ws, s);
     let r = post(
         a.addr,
@@ -793,7 +793,7 @@ async fn act_roundtrip() {
 #[tokio::test]
 async fn act_refuses_non_well_formed_or_stale_requests() {
     let a = browser_app(Some(Arc::new(FakeBrowserRuntime::default()))).await;
-    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let (ws, s) = seed_session(&a.code.db, SessionLifecycle::Idle).await;
     let t = mint_token(&a.code, ws, s);
     assert_eq!(
         post(
@@ -814,7 +814,7 @@ async fn act_refuses_non_well_formed_or_stale_requests() {
     );
 
     let stale = browser_app(Some(Arc::new(FakeBrowserRuntime::stale()))).await;
-    let (ws, s) = seed_session(&stale.code.db, CodeSessionLifecycle::Idle).await;
+    let (ws, s) = seed_session(&stale.code.db, SessionLifecycle::Idle).await;
     let t = mint_token(&stale.code, ws, s);
     assert_eq!(
         post(
@@ -838,7 +838,7 @@ async fn act_refuses_non_well_formed_or_stale_requests() {
 #[tokio::test]
 async fn act_missing_runtime_501() {
     let a = browser_app(None).await;
-    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let (ws, s) = seed_session(&a.code.db, SessionLifecycle::Idle).await;
     let t = mint_token(&a.code, ws, s);
     let r = post(
         a.addr,
@@ -859,7 +859,7 @@ async fn act_missing_runtime_501() {
 #[tokio::test]
 async fn new_routes_require_capability_token() {
     let a = browser_app(Some(Arc::new(FakeBrowserRuntime::default()))).await;
-    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let (ws, s) = seed_session(&a.code.db, SessionLifecycle::Idle).await;
     let _t = mint_token(&a.code, ws, s);
     for (rt, body) in [
         (
@@ -900,7 +900,7 @@ async fn new_routes_require_capability_token() {
 #[tokio::test]
 async fn new_routes_refuse_wrong_workspace_scope() {
     let a = browser_app(Some(Arc::new(FakeBrowserRuntime::default()))).await;
-    let (_, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let (_, s) = seed_session(&a.code.db, SessionLifecycle::Idle).await;
     let t = mint_token(&a.code, WorkspaceId::new(), s);
     for (rt, body) in [
         (
@@ -927,7 +927,7 @@ async fn new_routes_refuse_wrong_workspace_scope() {
 #[tokio::test]
 async fn new_routes_refuse_ended_session() {
     let a = browser_app(Some(Arc::new(FakeBrowserRuntime::default()))).await;
-    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Ended).await;
+    let (ws, s) = seed_session(&a.code.db, SessionLifecycle::Ended).await;
     let t = mint_token(&a.code, ws, s);
     for (rt, body) in [
         (
@@ -954,7 +954,7 @@ async fn new_routes_refuse_ended_session() {
 #[tokio::test]
 async fn snapshot_needs_browser_id() {
     let a = browser_app(Some(Arc::new(FakeBrowserRuntime::default()))).await;
-    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let (ws, s) = seed_session(&a.code.db, SessionLifecycle::Idle).await;
     let t = mint_token(&a.code, ws, s);
     assert_eq!(
         post(a.addr, "snapshot", Some(&t), serde_json::json!({}))
@@ -967,7 +967,7 @@ async fn snapshot_needs_browser_id() {
 #[tokio::test]
 async fn bodies_reject_subject_ids() {
     let a = browser_app(Some(Arc::new(FakeBrowserRuntime::default()))).await;
-    let (ws, s) = seed_session(&a.code.db, CodeSessionLifecycle::Idle).await;
+    let (ws, s) = seed_session(&a.code.db, SessionLifecycle::Idle).await;
     let t = mint_token(&a.code, ws, s);
     for (rt, body) in [
         (

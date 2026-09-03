@@ -312,7 +312,7 @@ async fn a_completed_turn_stores_the_derived_rewrite() {
     let turns = tidebreak_core::db::code::list_turns(
         &runtime.db,
         &tidebreak_core::OwnerId::local(),
-        tidebreak_core::CodeSessionId(uuid::Uuid::parse_str(&session_id).unwrap()),
+        tidebreak_core::SessionId(uuid::Uuid::parse_str(&session_id).unwrap()),
     )
     .await
     .unwrap();
@@ -324,13 +324,13 @@ async fn a_completed_turn_stores_the_derived_rewrite() {
     let events = tidebreak_core::db::code::list_recent_events(
         &runtime.db,
         &tidebreak_core::OwnerId::local(),
-        tidebreak_core::CodeSessionId(uuid::Uuid::parse_str(&session_id).unwrap()),
+        tidebreak_core::SessionId(uuid::Uuid::parse_str(&session_id).unwrap()),
         400,
     )
     .await
     .unwrap();
     let closing = events.iter().find_map(|sequenced| match &sequenced.event {
-        tidebreak_core::CodeEvent::AssistantMessage {
+        tidebreak_core::Event::AssistantMessage {
             text,
             parent_call_id: None,
         } => Some(text.as_str()),
@@ -404,8 +404,8 @@ async fn a_machine_with_no_utility_model_stores_no_rewrite() {
     let outcome = rewriter
         .derive(
             &tidebreak_core::OwnerId::local(),
-            tidebreak_core::CodeSessionId(uuid::Uuid::new_v4()),
-            tidebreak_core::CodeTurnId(uuid::Uuid::new_v4()),
+            tidebreak_core::SessionId(uuid::Uuid::new_v4()),
+            tidebreak_core::TurnId(uuid::Uuid::new_v4()),
         )
         .await
         .unwrap();
@@ -442,7 +442,7 @@ async fn a_failed_rewrite_leaves_the_original() {
     let turns = tidebreak_core::db::code::list_turns(
         &runtime.db,
         &tidebreak_core::OwnerId::local(),
-        tidebreak_core::CodeSessionId(uuid::Uuid::parse_str(&session_id).unwrap()),
+        tidebreak_core::SessionId(uuid::Uuid::parse_str(&session_id).unwrap()),
     )
     .await
     .unwrap();
@@ -451,13 +451,13 @@ async fn a_failed_rewrite_leaves_the_original() {
     let events = tidebreak_core::db::code::list_recent_events(
         &runtime.db,
         &tidebreak_core::OwnerId::local(),
-        tidebreak_core::CodeSessionId(uuid::Uuid::parse_str(&session_id).unwrap()),
+        tidebreak_core::SessionId(uuid::Uuid::parse_str(&session_id).unwrap()),
         400,
     )
     .await
     .unwrap();
     let closing = events.iter().find_map(|sequenced| match &sequenced.event {
-        tidebreak_core::CodeEvent::AssistantMessage {
+        tidebreak_core::Event::AssistantMessage {
             text,
             parent_call_id: None,
         } => Some(text.as_str()),

@@ -47,7 +47,7 @@ const TERMINAL_EXIT_GRACE: Duration = Duration::from_secs(5);
 pub(crate) struct TerminalHub {
     inner: Mutex<HubInner>,
     /// One notice channel per owner. Terminal activity rides
-    /// `/code/updates`, so it is partitioned the same way the digests are:
+    /// `/updates`, so it is partitioned the same way the digests are:
     /// a subscriber's receiver only ever carries its own owner's notices.
     notices: Mutex<HashMap<OwnerId, broadcast::Sender<TerminalNotice>>>,
 }

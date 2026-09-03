@@ -16,7 +16,7 @@ impl ProviderResolver for RegistryEnforcingResolver {
 }
 
 /// Put a chat in `Allow` so a delegation runs without an approval card.
-async fn allow_delegation(store: &dyn Store, chat: ChatId) {
+async fn allow_delegation(store: &dyn Store, chat: SessionId) {
     store
         .update_chat_metadata(
             chat,
@@ -30,7 +30,7 @@ async fn allow_delegation(store: &dyn Store, chat: ChatId) {
         .unwrap();
 }
 
-async fn approval_call_ids(store: &Arc<dyn Store>, chat: ChatId) -> Vec<CallId> {
+async fn approval_call_ids(store: &Arc<dyn Store>, chat: SessionId) -> Vec<CallId> {
     store
         .list_events(chat, 0)
         .await
@@ -103,7 +103,7 @@ fn test_router_with_skills_from_store(
 async fn post_message_body(
     router: &Router,
     bearer: &str,
-    chat: ChatId,
+    chat: SessionId,
     body: serde_json::Value,
 ) -> axum::response::Response {
     router
@@ -191,7 +191,7 @@ async fn unknown_chat_is_404() {
     let response = router
         .oneshot(
             Request::builder()
-                .uri(format!("/chats/{}", ChatId::new()))
+                .uri(format!("/chats/{}", SessionId::new()))
                 .header(header::AUTHORIZATION, format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -544,7 +544,7 @@ async fn worker_drains_a_turn_queued_before_startup() {
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -619,7 +619,7 @@ async fn worker_rejects_an_already_accepted_plain_gateway_model_before_egress() 
     .unwrap();
 
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -1099,7 +1099,7 @@ async fn queued_retry_compares_attachment_identity_before_blob_resolution() {
     let attachment_id = uuid::Uuid::new_v4();
     let now = chrono::Utc::now();
     store
-        .enqueue_queued_turn(&tidebreak_core::QueuedTurn {
+        .enqueue_queued_turn(&tidebreak_core::QueuedAgentTurn {
             id: queued_id,
             chat_id: chat.id,
             content: "queued image".into(),
@@ -1157,7 +1157,7 @@ async fn queued_turn_id_cannot_be_accepted_by_another_chat() {
     let first_chat = make_chat(&router, &bearer).await;
     let second_chat = make_chat(&router, &bearer).await;
     let queued_id = TurnId::new();
-    let queued = tidebreak_core::QueuedTurn {
+    let queued = tidebreak_core::QueuedAgentTurn {
         id: queued_id,
         chat_id: first_chat.id,
         content: "owned by the first chat".into(),
@@ -1275,7 +1275,7 @@ async fn sandbox_container_routing_preserves_in_process_task_and_deadline_shape(
     let (_reference_dir, reference_store) = temp_db_store("in-process-reference.db").await;
     let reference_store: Arc<dyn Store> = Arc::new(reference_store);
     let reference_chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: Some("in-process reference".into()),
         model: Some("fake".into()),
@@ -2046,7 +2046,7 @@ async fn post_message_rejects_blank_content_as_bad_request() {
 async fn message_to_unknown_chat_is_404() {
     let (router, token, _store, _dir) = test_app().await;
     assert_eq!(
-        send_message(&router, &format!("Bearer {token}"), ChatId::new(), "hi").await,
+        send_message(&router, &format!("Bearer {token}"), SessionId::new(), "hi").await,
         StatusCode::NOT_FOUND
     );
 }
@@ -2900,7 +2900,7 @@ struct FixedWebSearchResolver {
 impl WebSearchResolver for FixedWebSearchResolver {
     async fn resolve(
         &self,
-        _chat: Option<tidebreak_core::ChatId>,
+        _chat: Option<tidebreak_core::SessionId>,
     ) -> Result<Option<Arc<dyn WebSearchProvider>>, WebSearchResolverError> {
         Ok(Some(self.provider.clone()))
     }

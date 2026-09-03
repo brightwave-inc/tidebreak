@@ -10,7 +10,7 @@ use tidebreak_code_execution::{
     DOCUMENT_SCRIPT_FILES,
 };
 use tidebreak_core::{
-    exec_attachment_file_name, BlobStore, ChatId, HostRootId, MessageDocumentAttachment, Store,
+    exec_attachment_file_name, BlobStore, HostRootId, MessageDocumentAttachment, SessionId, Store,
     TurnId, MAX_EXEC_WORKSPACE_FILE_BYTES,
 };
 
@@ -47,13 +47,13 @@ pub trait StagedFolders: Send + Sync {
     /// stages that folder. `None` covers every case where the user's folder is
     /// still the only view — no turn in flight, a read-only grant, or a folder
     /// the overlay could not stage.
-    fn staged_root(&self, chat: ChatId, root_id: HostRootId) -> Option<PathBuf>;
+    fn staged_root(&self, chat: SessionId, root_id: HostRootId) -> Option<PathBuf>;
 
     /// Publish one trusted file through the same conditional materializer and
     /// turn journal as an overlay write.
     async fn materialize_connected_file(
         &self,
-        chat: ChatId,
+        chat: SessionId,
         turn: TurnId,
         root_id: HostRootId,
         relative: &str,
@@ -64,7 +64,7 @@ pub trait StagedFolders: Send + Sync {
     /// Reconcile an interrupted publication against its exact content.
     async fn connected_file_matches(
         &self,
-        chat: ChatId,
+        chat: SessionId,
         root_id: HostRootId,
         relative: &str,
         byte_len: u64,
@@ -122,7 +122,7 @@ pub(super) fn staged_set_note(files: &[WorkspaceFilePath]) -> String {
 pub(super) async fn materialize_chat_attachments(
     store: &dyn Store,
     blobs: &dyn BlobStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
     host_dir: &std::path::Path,
 ) -> std::result::Result<(), ExecError> {
     let attachments = store

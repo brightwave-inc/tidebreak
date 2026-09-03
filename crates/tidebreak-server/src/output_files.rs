@@ -25,8 +25,8 @@ use cap_std::fs::{Dir, DirBuilder, OpenOptions};
 use sha2::{Digest, Sha256};
 
 use tidebreak_core::{
-    revision_byte_ceiling, ChatId, OutputId, OutputRecord, OutputRevision, OutputRevisionId, Store,
-    OUTPUTS_DIRECTORY,
+    revision_byte_ceiling, OutputId, OutputRecord, OutputRevision, OutputRevisionId, SessionId,
+    Store, OUTPUTS_DIRECTORY,
 };
 
 /// The one live output plus its current revision, bound to one conversation.
@@ -36,7 +36,7 @@ use tidebreak_core::{
 /// to tell them apart from the outside.
 pub async fn require_live_output(
     store: &Arc<dyn Store>,
-    chat_id: ChatId,
+    chat_id: SessionId,
     output_id: OutputId,
 ) -> Result<(OutputRecord, OutputRevision), String> {
     let output = store
@@ -57,7 +57,7 @@ pub async fn require_live_output(
 /// One exact revision of a live output, by id.
 pub async fn require_output_revision(
     store: &Arc<dyn Store>,
-    chat_id: ChatId,
+    chat_id: SessionId,
     output_id: OutputId,
     revision_id: OutputRevisionId,
 ) -> Result<(OutputRecord, OutputRevision), String> {
@@ -81,7 +81,7 @@ pub async fn require_output_revision(
 /// immediately before it happens.
 pub async fn require_exact_revision(
     store: &Arc<dyn Store>,
-    chat_id: ChatId,
+    chat_id: SessionId,
     output_id: OutputId,
     revision_id: OutputRevisionId,
     byte_len: u64,
@@ -116,7 +116,7 @@ pub async fn require_exact_revision(
 /// Open the exact conversation's private scratch directory, refusing symlinked
 /// components. This is the directory the append-only revision writers in
 /// `tidebreak-core` publish into.
-pub fn open_chat_scratch(scratch_root: &Path, chat_id: ChatId) -> Result<Dir, String> {
+pub fn open_chat_scratch(scratch_root: &Path, chat_id: SessionId) -> Result<Dir, String> {
     let Some(root) = open_regular_directory(scratch_root)? else {
         return Err("Output content is unavailable".to_owned());
     };
@@ -133,7 +133,7 @@ pub fn open_chat_scratch(scratch_root: &Path, chat_id: ChatId) -> Result<Dir, St
 /// Native host operations use this when they publish an output before a turn
 /// has created the chat directory. Every path component is checked without
 /// following symlinks before the returned capability can write below it.
-pub fn open_or_create_chat_scratch(scratch_root: &Path, chat_id: ChatId) -> Result<Dir, String> {
+pub fn open_or_create_chat_scratch(scratch_root: &Path, chat_id: SessionId) -> Result<Dir, String> {
     match fs::symlink_metadata(scratch_root) {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
         Ok(_) => return Err("Private output storage is invalid".to_owned()),
@@ -192,7 +192,7 @@ pub fn open_or_create_chat_scratch(scratch_root: &Path, chat_id: ChatId) -> Resu
 /// Blocking file I/O — call it from a blocking context.
 pub fn read_output_revision_bytes(
     scratch_root: &Path,
-    chat_id: ChatId,
+    chat_id: SessionId,
     output: &OutputRecord,
     revision: &OutputRevision,
 ) -> Result<Vec<u8>, String> {
@@ -296,7 +296,7 @@ mod tests {
     use super::*;
 
     fn output_record(
-        chat_id: ChatId,
+        chat_id: SessionId,
         filename: &str,
         content: &[u8],
     ) -> (OutputRecord, OutputRevision) {
@@ -343,7 +343,7 @@ mod tests {
     fn immutable_revision_reads_are_exactly_scoped_and_content_addressed() {
         let scratch = tempfile::tempdir().unwrap();
         let content = b"private";
-        let (output, revision) = output_record(ChatId::new(), "brief.txt", content);
+        let (output, revision) = output_record(SessionId::new(), "brief.txt", content);
         let path = revision_path(scratch.path(), &output, &revision);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, content).unwrap();
@@ -353,7 +353,8 @@ mod tests {
             content
         );
         assert!(
-            read_output_revision_bytes(scratch.path(), ChatId::new(), &output, &revision).is_err()
+            read_output_revision_bytes(scratch.path(), SessionId::new(), &output, &revision)
+                .is_err()
         );
         std::fs::write(path, b"tampered").unwrap();
         assert!(
@@ -365,7 +366,7 @@ mod tests {
     fn chat_scratch_is_created_with_private_directories() {
         let parent = tempfile::tempdir().unwrap();
         let scratch_root = parent.path().join("scratch");
-        let chat_id = ChatId::new();
+        let chat_id = SessionId::new();
 
         let _scratch = open_or_create_chat_scratch(&scratch_root, chat_id).unwrap();
 
@@ -399,11 +400,11 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         let scratch_root = parent.path().join("scratch");
         symlink(outside.path(), &scratch_root).unwrap();
-        assert!(open_or_create_chat_scratch(&scratch_root, ChatId::new()).is_err());
+        assert!(open_or_create_chat_scratch(&scratch_root, SessionId::new()).is_err());
 
         fs::remove_file(&scratch_root).unwrap();
         fs::create_dir(&scratch_root).unwrap();
-        let chat_id = ChatId::new();
+        let chat_id = SessionId::new();
         symlink(outside.path(), scratch_root.join(chat_id.to_string())).unwrap();
         assert!(open_or_create_chat_scratch(&scratch_root, chat_id).is_err());
     }
@@ -416,7 +417,7 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         let content = b"private";
-        let (output, revision) = output_record(ChatId::new(), "brief.txt", content);
+        let (output, revision) = output_record(SessionId::new(), "brief.txt", content);
         let path = revision_path(scratch.path(), &output, &revision);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let outside_source = outside.path().join("source.txt");

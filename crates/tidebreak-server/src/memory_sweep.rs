@@ -36,10 +36,10 @@ use tidebreak_core::db::memory_sweep::{
     record_sweep_run, save_sweep_scope_state,
 };
 use tidebreak_core::{
-    AgentError, CodeSessionLifecycle, DbStore, MemoryAuthor, MemoryBackend, MemoryEvidence,
-    MemoryKind, MemoryLink, MemoryLinkRelation, MemoryListFilter, MemoryOrigin, MemoryProvenance,
-    MemoryRecord, MemoryRecordId, MemoryScope, MemoryStatus, MemoryStatusChange,
-    MemorySweepOutcome, MemorySweepRun, MemorySweepScopeState, MemorySweepStatus, OwnerId, Result,
+    AgentError, DbStore, MemoryAuthor, MemoryBackend, MemoryEvidence, MemoryKind, MemoryLink,
+    MemoryLinkRelation, MemoryListFilter, MemoryOrigin, MemoryProvenance, MemoryRecord,
+    MemoryRecordId, MemoryScope, MemoryStatus, MemoryStatusChange, MemorySweepOutcome,
+    MemorySweepRun, MemorySweepScopeState, MemorySweepStatus, OwnerId, Result, SessionLifecycle,
     Store, UtilityModel, MAX_MEMORY_EVIDENCE, MAX_MEMORY_LINKS, MAX_MEMORY_TITLE_CHARS,
 };
 
@@ -603,7 +603,7 @@ impl MemorySweep {
         Ok(tidebreak_core::db::code::list_sessions(&self.db, owner)
             .await?
             .iter()
-            .any(|session| session.lifecycle == CodeSessionLifecycle::Running))
+            .any(|session| session.lifecycle == SessionLifecycle::Running))
     }
 
     fn backend(&self) -> &dyn MemoryBackend {

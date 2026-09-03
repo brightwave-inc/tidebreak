@@ -9,7 +9,7 @@ use axum::extract::Query;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde::Deserialize;
 use tidebreak_core::{
-    CodePullRequestId, CodeSession, CodeSessionId, CodeTurnStatus, HarnessKind, RepoId, WorkspaceId,
+    CodePullRequestId, HarnessKind, RepoId, Session, SessionId, TurnStatus, WorkspaceId,
 };
 
 use crate::code::ScopedCode;
@@ -77,8 +77,8 @@ fn build_snapshot(
     repo_filter: Option<RepoId>,
     repos: Vec<tidebreak_core::CodeRepo>,
     workspaces: Vec<tidebreak_core::CodeWorkspace>,
-    sessions: Vec<CodeSession>,
-    turns: Vec<tidebreak_core::db::code::CodeTurnMetric>,
+    sessions: Vec<Session>,
+    turns: Vec<tidebreak_core::db::code::TurnMetric>,
     pull_requests: Vec<tidebreak_core::CodePullRequestFact>,
     attributions: Vec<tidebreak_core::CodePullRequestAttribution>,
 ) -> CodeAnalyticsSnapshot {
@@ -86,7 +86,7 @@ fn build_snapshot(
         .iter()
         .map(|workspace| (workspace.id, workspace.repo_id))
         .collect();
-    let session_by_id: HashMap<CodeSessionId, &CodeSession> = sessions
+    let session_by_id: HashMap<SessionId, &Session> = sessions
         .iter()
         .filter(|session| {
             session
@@ -138,22 +138,22 @@ fn build_snapshot(
 
         totals.turns = totals.turns.saturating_add(1);
         match turn.status {
-            CodeTurnStatus::Completed => {
+            TurnStatus::Completed => {
                 totals.completed_turns = totals.completed_turns.saturating_add(1)
             }
-            CodeTurnStatus::Failed => totals.failed_turns = totals.failed_turns.saturating_add(1),
-            CodeTurnStatus::Interrupted => {
+            TurnStatus::Failed => totals.failed_turns = totals.failed_turns.saturating_add(1),
+            TurnStatus::Interrupted => {
                 totals.interrupted_turns = totals.interrupted_turns.saturating_add(1)
             }
-            CodeTurnStatus::Running
-            | CodeTurnStatus::Waiting
-            | CodeTurnStatus::Queued
-            | CodeTurnStatus::Cancelling
-            | CodeTurnStatus::WaitingForClient
-            | CodeTurnStatus::WaitingForAgentRun
-            | CodeTurnStatus::CancellingClient
-            | CodeTurnStatus::Resuming
-            | CodeTurnStatus::RetryWait => {
+            TurnStatus::Running
+            | TurnStatus::Waiting
+            | TurnStatus::Queued
+            | TurnStatus::Cancelling
+            | TurnStatus::WaitingForClient
+            | TurnStatus::WaitingForAgentRun
+            | TurnStatus::CancellingClient
+            | TurnStatus::Resuming
+            | TurnStatus::RetryWait => {
                 totals.running_turns = totals.running_turns.saturating_add(1)
             }
         }
@@ -418,7 +418,7 @@ struct UsageTotals {
 }
 
 impl UsageTotals {
-    fn from_usage(usage: &tidebreak_core::CodeUsage) -> Self {
+    fn from_usage(usage: &tidebreak_core::TurnUsage) -> Self {
         let total = usage
             .input_tokens
             .saturating_add(usage.output_tokens)
@@ -643,7 +643,7 @@ fn price_for_canonical(model: &str) -> Option<PriceRate> {
 
 #[derive(Debug, Default)]
 struct DailyAccumulator {
-    sessions: HashSet<CodeSessionId>,
+    sessions: HashSet<SessionId>,
     turns: u64,
     total_tokens: u64,
     cost_millimicrousd: u128,
@@ -653,7 +653,7 @@ struct DailyAccumulator {
 
 #[derive(Debug, Default)]
 struct MetricsAccumulator {
-    sessions: HashSet<CodeSessionId>,
+    sessions: HashSet<SessionId>,
     turns: u64,
     tokens: u64,
     cost_millimicrousd: u128,
@@ -670,7 +670,7 @@ struct ModelKey {
 
 #[derive(Debug, Default)]
 struct ModelAccumulator {
-    sessions: HashSet<CodeSessionId>,
+    sessions: HashSet<SessionId>,
     turns: u64,
     tokens: u64,
     cost_millimicrousd: u128,

@@ -4,13 +4,12 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use tidebreak_core::{
-    Attention, CapLevel, CodeApproval, CodeApprovalId, CodeApprovalKind, CodeApprovalState,
-    CodeEvent, CodePullRequestRelation, CodeRepo, CodeSession, CodeSessionKind,
-    CodeSessionLifecycle, CodeSubagentSummary, CodeTerminalId, CodeTrigger, CodeTriggerAction,
-    CodeTriggerCondition, CodeTriggerId, CodeTurn, CodeTurnId, CodeTurnStatus, CodeWatch,
-    CodeWatchId, CodeWatchState, CodeWorkspace, CodeWorkspaceStatus, Diffstat, FenceReason,
-    FileChangeKind, HarnessCaps, HarnessKind, HarnessTier, PermissionMode, PullRequestDigest,
-    QuickAction, ReasoningEffort, RepoId, WorkspaceId,
+    Approval, ApprovalId, ApprovalKind, ApprovalState, Attention, CapLevel,
+    CodePullRequestRelation, CodeRepo, CodeSubagentSummary, CodeTerminalId, CodeTrigger,
+    CodeTriggerAction, CodeTriggerCondition, CodeTriggerId, CodeWatch, CodeWatchId, CodeWatchState,
+    CodeWorkspace, CodeWorkspaceStatus, Diffstat, Event, FenceReason, FileChangeKind, HarnessCaps,
+    HarnessKind, HarnessTier, PermissionMode, PullRequestDigest, QuickAction, ReasoningEffort,
+    RepoId, Session, SessionKind, SessionLifecycle, Turn, TurnId, TurnStatus, WorkspaceId,
 };
 
 /// One adapter grant, as the desktop grants list renders it. Carries no
@@ -203,7 +202,7 @@ impl From<CodeWorkspace> for CodeWorkspaceSnapshot {
 /// as the provenance banner; a session the desktop created carries none.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
-pub struct CodeSessionExternalOrigin {
+pub struct SessionExternalOrigin {
     /// The channel family, for example `slack`.
     pub channel_kind: String,
     /// The channel's durable conversation identity, opaque to the server.
@@ -215,12 +214,12 @@ pub struct CodeSessionExternalOrigin {
 /// One durable conversation with an external agent engine.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
-pub struct CodeSessionSnapshot {
-    pub id: tidebreak_core::CodeSessionId,
+pub struct SessionSnapshot {
+    pub id: tidebreak_core::SessionId,
     /// `None` for a session that binds no workspace: the in-process
     /// engine's (decision 0048 step 5).
     pub workspace_id: Option<WorkspaceId>,
-    pub kind: CodeSessionKind,
+    pub kind: SessionKind,
     pub harness_kind: HarnessKind,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -239,7 +238,7 @@ pub struct CodeSessionSnapshot {
     /// Whether this session runs its turns in the engine's fast mode.
     #[serde(default)]
     pub fast_mode: bool,
-    pub lifecycle: CodeSessionLifecycle,
+    pub lifecycle: SessionLifecycle,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub fence_reason: Option<FenceReason>,
@@ -249,11 +248,11 @@ pub struct CodeSessionSnapshot {
     /// Present when an external channel created the session.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
-    pub external_origin: Option<CodeSessionExternalOrigin>,
+    pub external_origin: Option<SessionExternalOrigin>,
 }
 
-impl From<CodeSession> for CodeSessionSnapshot {
-    fn from(session: CodeSession) -> Self {
+impl From<Session> for SessionSnapshot {
+    fn from(session: Session) -> Self {
         Self {
             id: session.id,
             workspace_id: session.workspace_id,
@@ -280,11 +279,11 @@ impl From<CodeSession> for CodeSessionSnapshot {
 /// One user→engine turn.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
-pub struct CodeTurnSnapshot {
-    pub id: tidebreak_core::CodeTurnId,
-    pub session_id: tidebreak_core::CodeSessionId,
+pub struct TurnSnapshot {
+    pub id: tidebreak_core::TurnId,
+    pub session_id: tidebreak_core::SessionId,
     pub ordinal: i64,
-    pub status: CodeTurnStatus,
+    pub status: TurnStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub model: Option<String>,
@@ -294,7 +293,7 @@ pub struct CodeTurnSnapshot {
     pub attachments: Vec<tidebreak_core::ImageRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
-    pub usage: Option<tidebreak_core::CodeUsage>,
+    pub usage: Option<tidebreak_core::TurnUsage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub checkpoint_ref: Option<String>,
@@ -311,8 +310,8 @@ pub struct CodeTurnSnapshot {
     pub rewrite: Option<String>,
 }
 
-impl From<CodeTurn> for CodeTurnSnapshot {
-    fn from(turn: CodeTurn) -> Self {
+impl From<Turn> for TurnSnapshot {
+    fn from(turn: Turn) -> Self {
         Self {
             id: turn.id,
             session_id: turn.session_id,
@@ -450,12 +449,12 @@ pub struct CodeAnalyticsSnapshot {
 /// One event on the per-session WebSocket.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
-pub struct SequencedCodeEventFrame {
+pub struct SequencedEventFrame {
     /// Journal position. On a `transient` frame this is the cursor the event
     /// streamed behind, not a position the frame occupies — resume from it
     /// and you lose nothing, because no row holds this event.
     pub seq: i64,
-    pub event: CodeEvent,
+    pub event: Event,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub replayed: Option<bool>,
@@ -479,12 +478,12 @@ pub struct SequencedCodeEventFrame {
     pub truncated: Option<bool>,
 }
 
-/// `GET /code/sessions/{id}/debug` — journal plus turn rows for a bug report.
+/// `GET /sessions/{id}/debug` — journal plus turn rows for a bug report.
 #[derive(Debug, Clone, PartialEq, Serialize, TS)]
-pub struct CodeSessionDebug {
-    pub session: CodeSessionSnapshot,
-    pub turns: Vec<CodeTurnSnapshot>,
-    pub events: Vec<SequencedCodeEventFrame>,
+pub struct SessionDebug {
+    pub session: SessionSnapshot,
+    pub turns: Vec<TurnSnapshot>,
+    pub events: Vec<SequencedEventFrame>,
 }
 
 /// Doctor report for every registered engine adapter.
@@ -741,7 +740,7 @@ pub struct CodeRepoSource {
     pub remediation: Option<String>,
 }
 
-/// A written fork handoff: `POST /code/sessions/{id}/fork`.
+/// A written fork handoff: `POST /sessions/{id}/fork`.
 ///
 /// `path` is the condensed transcript, absolute under private storage so a
 /// child agent of any engine can read it without Git ever indexing it. `dir`
@@ -766,7 +765,7 @@ pub struct CodeForkTranscript {
     pub truncated: bool,
 }
 
-/// Body of `POST /code/sessions/{id}/fork`. An absent body forks at the
+/// Body of `POST /sessions/{id}/fork`. An absent body forks at the
 /// newest turn.
 #[derive(Debug, Default, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
@@ -774,7 +773,7 @@ pub struct CodeForkBody {
     /// Fork at the end of this turn; later turns stay out of the handoff.
     #[serde(default)]
     #[ts(optional)]
-    pub at_turn: Option<tidebreak_core::CodeTurnId>,
+    pub at_turn: Option<tidebreak_core::TurnId>,
 }
 
 /// Where new worktrees land: `GET`/`PUT /code/worktree-root`.
@@ -1021,7 +1020,7 @@ pub struct CodeWorkspacePullRequests {
 pub struct CodeWatchSnapshot {
     pub id: CodeWatchId,
     pub workspace_id: WorkspaceId,
-    pub session_id: tidebreak_core::CodeSessionId,
+    pub session_id: tidebreak_core::SessionId,
     pub pr_number: u64,
     pub state: CodeWatchState,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1761,7 +1760,7 @@ pub struct CodeActionSnapshot {
 }
 
 /// Body of `POST /code/workspaces/{id}/sessions`.
-/// `POST /code/sessions`: a conversation with no workspace, hosted by the
+/// `POST /sessions`: a conversation with no workspace, hosted by the
 /// in-process engine (decision 0048 step 5). The engine is implied.
 #[derive(Debug, Deserialize, TS)]
 pub struct CreateInternalSessionBody {
@@ -1801,14 +1800,14 @@ pub struct CreateRemoteSessionBody {
     pub reasoning_effort: Option<ReasoningEffort>,
 }
 
-/// Body of `POST /code/sessions/{id}/mode`.
+/// Body of `POST /sessions/{id}/mode`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SetPermissionModeBody {
     pub permission_mode: PermissionMode,
 }
 
-/// Body of `POST /code/sessions/{id}/effort`.
+/// Body of `POST /sessions/{id}/effort`.
 ///
 /// `null` is a choice, not an omission: it hands the level back to the
 /// engine's own default.
@@ -1818,14 +1817,14 @@ pub struct SetReasoningEffortBody {
     pub reasoning_effort: Option<ReasoningEffort>,
 }
 
-/// Body of `POST /code/sessions/{id}/fast-mode`.
+/// Body of `POST /sessions/{id}/fast-mode`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SetFastModeBody {
     pub fast_mode: bool,
 }
 
-/// Body of `POST /code/sessions/{id}/turns`.
+/// Body of `POST /sessions/{id}/turns`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SubmitTurnBody {
@@ -1850,11 +1849,11 @@ pub struct SubmitTurnAttachment {
     pub media_type: String,
 }
 
-/// Body of `POST /code/sessions/{id}/steer`.
+/// Body of `POST /sessions/{id}/steer`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SteerBody {
-    pub expected_turn_id: tidebreak_core::CodeTurnId,
+    pub expected_turn_id: tidebreak_core::TurnId,
     pub guidance: String,
 }
 
@@ -1866,17 +1865,17 @@ pub struct SteerBody {
 /// the session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
-pub struct QueuedCodeTurn {
-    pub id: tidebreak_core::CodeTurnId,
-    pub session_id: tidebreak_core::CodeSessionId,
+pub struct QueuedTurn {
+    pub id: tidebreak_core::TurnId,
+    pub session_id: tidebreak_core::SessionId,
     pub message: String,
     pub position: i32,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
-impl From<tidebreak_core::CodeQueuedTurn> for QueuedCodeTurn {
-    fn from(row: tidebreak_core::CodeQueuedTurn) -> Self {
+impl From<tidebreak_core::code::QueuedTurn> for QueuedTurn {
+    fn from(row: tidebreak_core::code::QueuedTurn) -> Self {
         Self {
             id: row.id,
             session_id: row.session_id,
@@ -1888,25 +1887,25 @@ impl From<tidebreak_core::CodeQueuedTurn> for QueuedCodeTurn {
     }
 }
 
-/// Response of `GET /code/sessions/{id}/queued`.
+/// Response of `GET /sessions/{id}/queued`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct QueuedCodeTurnsSnapshot {
-    pub queued: Vec<QueuedCodeTurn>,
+pub struct QueuedTurnsSnapshot {
+    pub queued: Vec<QueuedTurn>,
     pub paused: bool,
 }
 
-/// Body of `PATCH /code/sessions/{id}/queued/{queued_id}`.
+/// Body of `PATCH /sessions/{id}/queued/{queued_id}`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct QueuedCodeTurnUpdate {
+pub struct QueuedTurnUpdate {
     #[serde(default)]
     pub message: Option<String>,
     #[serde(default)]
     pub position: Option<i32>,
 }
 
-/// Body of `PUT /code/sessions/{id}/queue-paused`.
+/// Body of `PUT /sessions/{id}/queue-paused`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QueuePausedBody {
@@ -1974,10 +1973,10 @@ pub enum CodeWorkspaceHistorySearchSource {
 pub struct CodeWorkspaceHistorySearchMatch {
     pub workspace_id: WorkspaceId,
     pub workspace_title: String,
-    pub session_id: tidebreak_core::CodeSessionId,
+    pub session_id: tidebreak_core::SessionId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
-    pub turn_id: Option<CodeTurnId>,
+    pub turn_id: Option<TurnId>,
     pub source: CodeWorkspaceHistorySearchSource,
     pub preview: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
@@ -1996,7 +1995,7 @@ pub struct CodeWorkspaceSearch {
 #[derive(Debug, Deserialize)]
 pub struct WorkspaceFilesQuery {
     #[serde(default)]
-    pub turn: Option<CodeTurnId>,
+    pub turn: Option<TurnId>,
 }
 
 /// Query for `GET /code/workspaces/{id}/blob`.
@@ -2018,7 +2017,7 @@ pub struct CodeWorkspaceBlob {
 #[derive(Debug, Deserialize)]
 pub struct WorkspaceDiffQuery {
     #[serde(default)]
-    pub turn: Option<CodeTurnId>,
+    pub turn: Option<TurnId>,
     #[serde(default)]
     pub file: Option<String>,
 }
@@ -2045,7 +2044,7 @@ pub struct CodeWorkspaceFiles {
     pub stat: Diffstat,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
-    pub turn_id: Option<CodeTurnId>,
+    pub turn_id: Option<TurnId>,
 }
 
 /// Bounded unified diff for `GET /code/workspaces/{id}/diff`.
@@ -2057,7 +2056,7 @@ pub struct CodeWorkspaceDiff {
     pub stat: Diffstat,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
-    pub turn_id: Option<CodeTurnId>,
+    pub turn_id: Option<TurnId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub file: Option<String>,
@@ -2066,14 +2065,14 @@ pub struct CodeWorkspaceDiff {
 /// One parked or decided engine approval.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
-pub struct CodeApprovalSnapshot {
-    pub id: CodeApprovalId,
-    pub session_id: tidebreak_core::CodeSessionId,
-    pub turn_id: tidebreak_core::CodeTurnId,
-    pub kind: CodeApprovalKind,
+pub struct ApprovalSnapshot {
+    pub id: ApprovalId,
+    pub session_id: tidebreak_core::SessionId,
+    pub turn_id: tidebreak_core::TurnId,
+    pub kind: ApprovalKind,
     /// Exact JSON the engine sent, already size-capped. The card renders this.
     pub harness_raw_json: String,
-    pub state: CodeApprovalState,
+    pub state: ApprovalState,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub feedback: Option<String>,
@@ -2083,8 +2082,8 @@ pub struct CodeApprovalSnapshot {
     pub decided_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-impl From<CodeApproval> for CodeApprovalSnapshot {
-    fn from(approval: CodeApproval) -> Self {
+impl From<Approval> for ApprovalSnapshot {
+    fn from(approval: Approval) -> Self {
         Self {
             id: approval.id,
             session_id: approval.session_id,
@@ -2099,11 +2098,11 @@ impl From<CodeApproval> for CodeApprovalSnapshot {
     }
 }
 
-/// Body of `POST /code/approvals/{id}/decision`.
+/// Body of `POST /approvals/{id}/decision`.
 #[derive(Debug, Deserialize, Serialize, TS)]
 #[serde(deny_unknown_fields)]
-pub struct CodeApprovalDecisionBody {
-    pub decision: CodeApprovalDecision,
+pub struct ApprovalDecisionBody {
+    pub decision: ApprovalDecision,
     #[serde(default)]
     #[ts(optional)]
     pub feedback: Option<String>,
@@ -2117,7 +2116,7 @@ pub struct CodeApprovalDecisionBody {
 /// a client can pick a rung the card showed, never invent a scope.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
-pub enum CodeApprovalDecision {
+pub enum ApprovalDecision {
     Approve,
     Deny,
     ApproveWithGrant {
@@ -2142,16 +2141,16 @@ pub struct InstallHarnessQuery {
     pub deliberate: bool,
 }
 
-/// Query for `GET /code/approvals`.
+/// Query for `GET /approvals`.
 #[derive(Debug, Deserialize)]
 pub struct ListApprovalsQuery {
     #[serde(default)]
-    pub state: Option<CodeApprovalState>,
+    pub state: Option<ApprovalState>,
     #[serde(default)]
-    pub session_id: Option<tidebreak_core::CodeSessionId>,
+    pub session_id: Option<tidebreak_core::SessionId>,
 }
 
-/// Query for `GET /code/sessions/{id}/events`.
+/// Query for `GET /sessions/{id}/events`.
 #[derive(Debug, Deserialize)]
 pub struct SessionEventsQuery {
     #[serde(default)]
@@ -2185,21 +2184,31 @@ pub struct CodeTerminalRead {
     pub ended: bool,
 }
 
-/// Cheap per-session digest on `/code/updates`.
+/// Unsequenced activity notice published on the updates channel.
+///
+/// Never journaled. A client that missed one just pulls from its last cursor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[allow(dead_code)]
+pub struct CodeTerminalActivityNotice {
+    pub workspace_id: WorkspaceId,
+    pub terminal_id: CodeTerminalId,
+}
+
+/// Cheap per-session digest on `/updates`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
-pub struct CodeSessionDigest {
+pub struct SessionDigest {
     /// `None` for a session that binds no workspace.
     pub workspace: Option<WorkspaceId>,
-    pub session: tidebreak_core::CodeSessionId,
-    pub kind: CodeSessionKind,
+    pub session: tidebreak_core::SessionId,
+    pub kind: SessionKind,
     /// Engine identity for list surfaces that collapse several sessions into
     /// one workspace row. Optional on the wire so a desktop can still read a
     /// digest from an older server during an update.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub harness_kind: Option<HarnessKind>,
-    pub lifecycle: CodeSessionLifecycle,
+    pub lifecycle: SessionLifecycle,
     pub attention: Attention,
     pub title: String,
     pub turn_count: i64,
@@ -2212,7 +2221,7 @@ pub struct CodeSessionDigest {
     /// What the live turn is occupied with, while running.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
-    pub activity: Option<tidebreak_core::CodeSessionActivity>,
+    pub activity: Option<tidebreak_core::SessionActivity>,
     /// The subject of the tool the live turn is waiting on: the command,
     /// path, query, or task description. Present only while `activity`
     /// names a tool, and bounded to one line.
@@ -2254,7 +2263,7 @@ pub struct CodeSessionDigest {
     pub memory_proposal_count: Option<u64>,
 }
 
-impl From<crate::code::bus::SessionDigest> for CodeSessionDigest {
+impl From<crate::code::bus::SessionDigest> for SessionDigest {
     fn from(digest: crate::code::bus::SessionDigest) -> Self {
         Self {
             workspace: digest.workspace,
@@ -2280,27 +2289,27 @@ impl From<crate::code::bus::SessionDigest> for CodeSessionDigest {
     }
 }
 
-/// One unsequenced notice on `WS /code/updates`.
+/// One unsequenced notice on `WS /updates`.
 ///
 /// A connect is restated as [`Self::Snapshot`]; later notices are live only.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub enum CodeUpdateNotice {
+pub enum UpdateNotice {
     /// Full current digest of every non-ended session.
     Snapshot {
         /// One row per live session.
-        sessions: Vec<CodeSessionDigest>,
+        sessions: Vec<SessionDigest>,
     },
     /// One session's current digest.
     Digest {
         workspace: Option<WorkspaceId>,
-        session: tidebreak_core::CodeSessionId,
-        kind: CodeSessionKind,
+        session: tidebreak_core::SessionId,
+        kind: SessionKind,
         /// Engine identity for the session represented by this digest.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         harness_kind: Option<HarnessKind>,
-        lifecycle: CodeSessionLifecycle,
+        lifecycle: SessionLifecycle,
         attention: Attention,
         title: String,
         turn_count: i64,
@@ -2311,7 +2320,7 @@ pub enum CodeUpdateNotice {
         /// What the live turn is occupied with, while running.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
-        activity: Option<tidebreak_core::CodeSessionActivity>,
+        activity: Option<tidebreak_core::SessionActivity>,
         /// The subject of the tool the live turn is waiting on, while
         /// `activity` names one.
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -2391,9 +2400,9 @@ pub enum CodeUpdateNotice {
     /// Lucid rewrite of a completed turn's closing message. Not restated on
     /// connect: the turn snapshot carries the stored rewrite.
     TurnRewrite {
-        session: tidebreak_core::CodeSessionId,
-        turn_id: tidebreak_core::CodeTurnId,
-        state: CodeTurnRewriteState,
+        session: tidebreak_core::SessionId,
+        turn_id: tidebreak_core::TurnId,
+        state: TurnRewriteState,
         #[serde(skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
         rewrite: Option<String>,
@@ -2403,13 +2412,13 @@ pub enum CodeUpdateNotice {
 /// Where one closing-message rewrite stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
-pub enum CodeTurnRewriteState {
+pub enum TurnRewriteState {
     Rewriting,
     Rewritten,
     Failed,
 }
 
-impl CodeUpdateNotice {
+impl UpdateNotice {
     pub(crate) fn harness_install(progress: crate::code::bus::HarnessInstallProgress) -> Self {
         Self::HarnessInstall {
             kind: progress.kind,
@@ -2432,7 +2441,7 @@ impl CodeUpdateNotice {
     }
 
     pub(crate) fn digest(digest: crate::code::bus::SessionDigest) -> Self {
-        let wire = CodeSessionDigest::from(digest);
+        let wire = SessionDigest::from(digest);
         Self::Digest {
             workspace: wire.workspace,
             session: wire.session,
@@ -2461,16 +2470,16 @@ impl CodeUpdateNotice {
             session: notice.session,
             turn_id: notice.turn_id,
             state: match notice.state {
-                crate::code::bus::TurnRewriteState::Rewriting => CodeTurnRewriteState::Rewriting,
-                crate::code::bus::TurnRewriteState::Rewritten => CodeTurnRewriteState::Rewritten,
-                crate::code::bus::TurnRewriteState::Failed => CodeTurnRewriteState::Failed,
+                crate::code::bus::TurnRewriteState::Rewriting => TurnRewriteState::Rewriting,
+                crate::code::bus::TurnRewriteState::Rewritten => TurnRewriteState::Rewritten,
+                crate::code::bus::TurnRewriteState::Failed => TurnRewriteState::Failed,
             },
             rewrite: notice.rewrite,
         }
     }
 }
 
-/// Body of `POST /code/sessions/{id}/attention`.
+/// Body of `POST /sessions/{id}/attention`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SetAttentionBody {

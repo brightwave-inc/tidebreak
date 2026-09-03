@@ -24,9 +24,9 @@ use tidebreak_core::db::code::{
     promote_attribution_to_authored, save_pull_request_fact,
 };
 use tidebreak_core::{
-    CodeEvent, CodePullRequestAttribution, CodePullRequestDiscovery, CodePullRequestFact,
-    CodePullRequestId, CodePullRequestRelation, CodePullRequestState, CodeSession, CodeSessionId,
-    CodeTurnId, DbStore, OwnerId, ToolDetail, ToolOutcome, WorkspaceId,
+    CodePullRequestAttribution, CodePullRequestDiscovery, CodePullRequestFact, CodePullRequestId,
+    CodePullRequestRelation, CodePullRequestState, DbStore, Event, OwnerId, Session, SessionId,
+    ToolDetail, ToolOutcome, TurnId, WorkspaceId,
 };
 use tidebreak_shell_policy::simple_command_argvs;
 
@@ -83,8 +83,8 @@ struct PushAct {
 /// its own fix turn a repeat, and parks the watch.
 pub(crate) async fn sweep_turn_for_pull_request_acts(
     db: &DbStore,
-    session: &CodeSession,
-    turn_id: CodeTurnId,
+    session: &Session,
+    turn_id: TurnId,
     gh_search_path: Option<&str>,
     hot: Option<&super::pr_refresh::HotPullRequests>,
 ) {
@@ -105,8 +105,8 @@ pub(crate) async fn sweep_turn_for_pull_request_acts(
     let mut commands: HashMap<String, RecordedCommand> = HashMap::new();
     for sequenced in &events {
         match &sequenced.event {
-            CodeEvent::TurnStarted { turn_id: started } if *started == turn_id => break,
-            CodeEvent::ToolCompleted {
+            Event::TurnStarted { turn_id: started } if *started == turn_id => break,
+            Event::ToolCompleted {
                 call_id,
                 outcome,
                 preview,
@@ -130,7 +130,7 @@ pub(crate) async fn sweep_turn_for_pull_request_acts(
                     });
                 }
             }
-            CodeEvent::ToolStarted {
+            Event::ToolStarted {
                 call_id,
                 detail: ToolDetail::Command { cmd, cwd },
                 parent_call_id,
@@ -258,8 +258,8 @@ pub(crate) async fn sweep_turn_for_pull_request_acts(
 /// Reports whether a fact landed, so the caller can mark the workspace hot.
 async fn confirm_changed_checkout(
     db: &DbStore,
-    session: &CodeSession,
-    turn_id: CodeTurnId,
+    session: &Session,
+    turn_id: TurnId,
     gh_search_path: Option<&str>,
 ) -> bool {
     let turn = match get_turn(db, &session.owner, turn_id).await {
@@ -375,7 +375,7 @@ async fn confirm_changed_checkout(
 /// Reports whether a fact landed, so the caller can mark the workspace hot.
 async fn confirm_create(
     db: &DbStore,
-    session: &CodeSession,
+    session: &Session,
     command: &RecordedCommand,
     create: &CreateAct,
     preview: Option<&str>,
@@ -455,7 +455,7 @@ async fn confirm_create(
 /// Reports whether a fact landed, so the caller can mark the workspace hot.
 async fn confirm_push(
     db: &DbStore,
-    session: &CodeSession,
+    session: &Session,
     command: &RecordedCommand,
     push: &PushAct,
     gh_search_path: Option<&str>,
@@ -543,7 +543,7 @@ pub(crate) async fn record_confirmed_fact(
     db: &DbStore,
     owner: &OwnerId,
     workspace_id: WorkspaceId,
-    session_id: Option<CodeSessionId>,
+    session_id: Option<SessionId>,
     parent_call_id: Option<String>,
     target: &CodeGitHubRepositoryTarget,
     value: &Value,

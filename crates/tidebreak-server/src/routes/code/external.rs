@@ -16,8 +16,8 @@ use axum::http::StatusCode;
 use axum::response::Response;
 
 use tidebreak_core::{
-    CodeExternalGrant, CodeSessionId, ExternalSessionResolution, GrantRotation, HarnessKind,
-    PermissionMode, RepoId,
+    CodeExternalGrant, ExternalSessionResolution, GrantRotation, HarnessKind, PermissionMode,
+    RepoId, SessionId,
 };
 
 use crate::code::runtime::{ExternalMessageOutcome, NewSessionSettings};
@@ -25,7 +25,7 @@ use crate::error::ServerError;
 use crate::extract::{Json, Path, Query};
 use crate::state::AppState;
 
-use super::types::{CodeSessionSnapshot, QueuedCodeTurn, SessionEventsQuery};
+use super::types::{QueuedTurn, SessionEventsQuery, SessionSnapshot};
 
 /// The authenticated grant behind an adapter request.
 ///
@@ -67,7 +67,7 @@ impl FromRequestParts<AppState> for ExternalGrantAuth {
 async fn require_bound(
     state: &AppState,
     grant: &CodeExternalGrant,
-    session: CodeSessionId,
+    session: SessionId,
 ) -> Result<std::sync::Arc<crate::code::runtime::CodeRuntime>, ServerError> {
     let runtime = state
         .code
@@ -102,7 +102,7 @@ pub struct ExternalSessionBody {
 pub struct ExternalSessionResponse {
     /// `created`, `existing`, or `ended`.
     pub status: &'static str,
-    pub session_id: CodeSessionId,
+    pub session_id: SessionId,
 }
 
 /// `POST /external/code/sessions` — idempotent get-or-create for one
@@ -180,9 +180,9 @@ pub struct ExternalMessageResponse {
     /// `new_turn`, `queued`, or `dropped`.
     pub outcome: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub turn_id: Option<tidebreak_core::CodeTurnId>,
+    pub turn_id: Option<tidebreak_core::TurnId>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub queued: Option<QueuedCodeTurn>,
+    pub queued: Option<QueuedTurn>,
 }
 
 /// `POST /external/code/sessions/{id}/messages` — deliver one message.
@@ -190,7 +190,7 @@ pub struct ExternalMessageResponse {
 pub async fn external_messages(
     State(state): State<AppState>,
     ExternalGrantAuth(grant): ExternalGrantAuth,
-    Path(id): Path<CodeSessionId>,
+    Path(id): Path<SessionId>,
     Json(body): Json<ExternalMessageBody>,
 ) -> Result<Json<ExternalMessageResponse>, ServerError> {
     let runtime = require_bound(&state, &grant, id).await?;
@@ -213,7 +213,7 @@ pub async fn external_messages(
         ExternalMessageOutcome::Queued(row) => ExternalMessageResponse {
             outcome: "queued",
             turn_id: Some(row.id),
-            queued: Some(QueuedCodeTurn::from(*row)),
+            queued: Some(QueuedTurn::from(*row)),
         },
         ExternalMessageOutcome::Dropped => ExternalMessageResponse {
             outcome: "dropped",
@@ -230,7 +230,7 @@ pub async fn external_messages(
 pub async fn external_events(
     State(state): State<AppState>,
     ExternalGrantAuth(grant): ExternalGrantAuth,
-    Path(id): Path<CodeSessionId>,
+    Path(id): Path<SessionId>,
     Query(query): Query<SessionEventsQuery>,
     upgrade: WebSocketUpgrade,
 ) -> Result<Response, ServerError> {
@@ -255,7 +255,7 @@ pub async fn external_events(
         // lifecycle and the attention snapshot arrive first, as their own
         // frame shape.
         let snapshot = serde_json::json!({
-            "snapshot": CodeSessionSnapshot::from(session),
+            "snapshot": SessionSnapshot::from(session),
         });
         if let Ok(json) = serde_json::to_string(&snapshot) {
             if socket
@@ -300,7 +300,7 @@ pub async fn external_events(
 pub async fn external_interrupt(
     State(state): State<AppState>,
     ExternalGrantAuth(grant): ExternalGrantAuth,
-    Path(id): Path<CodeSessionId>,
+    Path(id): Path<SessionId>,
 ) -> Result<StatusCode, ServerError> {
     let runtime = require_bound(&state, &grant, id).await?;
     let _ = runtime.get_session(&grant.owner, id).await?;
@@ -313,11 +313,11 @@ pub async fn external_interrupt(
 pub async fn external_reap(
     State(state): State<AppState>,
     ExternalGrantAuth(grant): ExternalGrantAuth,
-    Path(id): Path<CodeSessionId>,
-) -> Result<Json<CodeSessionSnapshot>, ServerError> {
+    Path(id): Path<SessionId>,
+) -> Result<Json<SessionSnapshot>, ServerError> {
     let runtime = require_bound(&state, &grant, id).await?;
     let session = runtime.reap(&grant.owner, id).await?;
-    Ok(Json(CodeSessionSnapshot::from(session)))
+    Ok(Json(SessionSnapshot::from(session)))
 }
 
 #[derive(serde::Deserialize)]

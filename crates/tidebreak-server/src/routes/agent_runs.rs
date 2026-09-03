@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use tidebreak_code_execution::ExecProviderKind;
 use tidebreak_core::{
-    AgentRun, AgentRunExecutionLocation, AgentRunStatus, AgentRunTier, CallId, ChatId,
-    RequestAgentRunCancellationOutcome, SandboxToolCall, SandboxToolCallStatus, TurnId,
+    AgentRun, AgentRunExecutionLocation, AgentRunStatus, AgentRunTier, CallId,
+    RequestAgentRunCancellationOutcome, SandboxToolCall, SandboxToolCallStatus, SessionId, TurnId,
 };
 
 use crate::agent_control_tools::SandboxCancellationAcceleration;
@@ -460,7 +460,7 @@ fn sandbox_activity_history_item(
 pub async fn list_agent_runs(
     State(state): State<AppState>,
     store: ScopedStore,
-    Path(id): Path<ChatId>,
+    Path(id): Path<SessionId>,
 ) -> Result<Json<Vec<AgentRunSnapshot>>, ServerError> {
     store.require_chat(id).await?;
     let runs = store.list_agent_runs(id).await?;
@@ -538,7 +538,7 @@ pub async fn list_agent_runs(
 /// identifier exists.
 pub async fn list_agent_run_activity(
     store: ScopedStore,
-    Path((chat_id, run_id)): Path<(ChatId, tidebreak_core::AgentRunId)>,
+    Path((chat_id, run_id)): Path<(SessionId, tidebreak_core::AgentRunId)>,
 ) -> Result<Json<Vec<AgentActivityHistoryItem>>, ServerError> {
     store.require_chat(chat_id).await?;
     let run = store
@@ -598,7 +598,7 @@ pub async fn list_agent_run_activity(
 /// made a plan is not an error; it answers `null`.
 pub async fn get_agent_run_task_plan(
     store: ScopedStore,
-    Path((chat_id, run_id)): Path<(ChatId, tidebreak_core::AgentRunId)>,
+    Path((chat_id, run_id)): Path<(SessionId, tidebreak_core::AgentRunId)>,
 ) -> Result<Json<Option<tidebreak_core::AgentRunTaskPlan>>, ServerError> {
     store.require_chat(chat_id).await?;
     let run = store
@@ -667,7 +667,7 @@ pub struct AgentRunProgressQuery {
 /// exists.
 pub async fn list_agent_run_progress(
     store: ScopedStore,
-    Path((chat_id, run_id)): Path<(ChatId, tidebreak_core::AgentRunId)>,
+    Path((chat_id, run_id)): Path<(SessionId, tidebreak_core::AgentRunId)>,
     Query(query): Query<AgentRunProgressQuery>,
 ) -> Result<Json<AgentRunProgressPage>, ServerError> {
     store.require_chat(chat_id).await?;
@@ -727,7 +727,7 @@ pub enum AgentRunCancellationStatus {
 pub async fn post_agent_run_cancel(
     State(state): State<AppState>,
     store: ScopedStore,
-    Path((chat_id, run_id)): Path<(ChatId, tidebreak_core::AgentRunId)>,
+    Path((chat_id, run_id)): Path<(SessionId, tidebreak_core::AgentRunId)>,
 ) -> Result<(StatusCode, Json<AgentRunCancellationSnapshot>), ServerError> {
     store.require_chat(chat_id).await?;
     let Some(run) = store.get_agent_run(run_id).await? else {
@@ -805,7 +805,7 @@ pub struct AgentRunResumeBody {
 pub async fn post_agent_run_resume(
     State(state): State<AppState>,
     store: ScopedStore,
-    Path((chat_id, run_id)): Path<(ChatId, tidebreak_core::AgentRunId)>,
+    Path((chat_id, run_id)): Path<(SessionId, tidebreak_core::AgentRunId)>,
     Json(body): Json<AgentRunResumeBody>,
 ) -> Result<StatusCode, ServerError> {
     let guidance = body
@@ -858,7 +858,7 @@ pub struct AgentRunSteerBody {
 pub async fn post_agent_run_steer(
     State(state): State<AppState>,
     store: ScopedStore,
-    Path((chat_id, run_id)): Path<(ChatId, tidebreak_core::AgentRunId)>,
+    Path((chat_id, run_id)): Path<(SessionId, tidebreak_core::AgentRunId)>,
     Json(body): Json<AgentRunSteerBody>,
 ) -> Result<StatusCode, ServerError> {
     let content = body.content.trim().to_owned();
@@ -919,7 +919,7 @@ pub(super) async fn signal_sandbox_run_after_commit(
 /// Signal only children durably owned by the cancelled origin turn.
 pub(super) async fn signal_origin_sandbox_runs_after_commit(
     state: &AppState,
-    chat_id: ChatId,
+    chat_id: SessionId,
     origin_turn_id: TurnId,
 ) {
     let Ok(runs) = state.store.list_agent_runs(chat_id).await else {

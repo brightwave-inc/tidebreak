@@ -1116,7 +1116,7 @@ async fn sync_never_rewrites_durable_model_selections() {
         .await
         .unwrap();
     let pinned = tidebreak_core::Chat {
-        id: tidebreak_core::ChatId::new(),
+        id: tidebreak_core::SessionId::new(),
         project_id: None,
         title: None,
         model: Some("claude-opus-5".into()),
@@ -1638,12 +1638,12 @@ async fn the_route_token_source_mints_llm_tokens_per_rotation() {
 
     // A conversation mints inside that chat's attestation context: cached
     // per chat, distinct across chats, and never the shared token.
-    let chat = tidebreak_core::id::ChatId::new();
+    let chat = tidebreak_core::id::SessionId::new();
     let attested = source.bearer_token_for(Some(chat)).await.unwrap();
     assert_ne!(attested, token);
     assert_eq!(source.bearer_token_for(Some(chat)).await.unwrap(), attested);
     let other = source
-        .bearer_token_for(Some(tidebreak_core::id::ChatId::new()))
+        .bearer_token_for(Some(tidebreak_core::id::SessionId::new()))
         .await
         .unwrap();
     assert_ne!(other, attested);
@@ -1964,7 +1964,7 @@ async fn mounts_a_gateway_endpoint_from_the_signed_in_session() {
     // the same attestation context the chat's inference tokens carry —
     // the invariant that lets an attested endpoint match the call against
     // the observation the inference recorded.
-    let chat = tidebreak_core::id::ChatId::new();
+    let chat = tidebreak_core::id::SessionId::new();
     let snapshot = mcp.snapshot();
     let tool = snapshot.get("mcp__tools__lookup").unwrap();
     let ctx = tidebreak_core::ToolCtx::without_private_scratch(chat, None);
@@ -2143,7 +2143,7 @@ async fn assembled_state_mints_inference_and_mcp_dispatch_in_one_attestation_con
         crate::mcp_config::McpHealth::Healthy
     );
 
-    let chat = tidebreak_core::id::ChatId::new();
+    let chat = tidebreak_core::id::SessionId::new();
     let snapshot = state.mcp.snapshot();
     let tool = snapshot.get("mcp__tools__lookup").unwrap();
     let ctx = tidebreak_core::ToolCtx::without_private_scratch(chat, None);
@@ -2919,7 +2919,7 @@ async fn a_schema_epoch_reset_keeps_the_policy_and_its_session() {
     .unwrap();
     store
         .create_chat(&tidebreak_core::Chat {
-            id: tidebreak_core::ChatId::new(),
+            id: tidebreak_core::SessionId::new(),
             project_id: None,
             title: Some("lost to the reset".to_owned()),
             model: None,

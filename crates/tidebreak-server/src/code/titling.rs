@@ -19,7 +19,7 @@
 use std::sync::Arc;
 
 use tidebreak_core::db::code::{get_session, get_workspace, set_workspace_title_if};
-use tidebreak_core::{CodeSessionId, CodeWorkspaceStatus, OwnerId, Result, WorkspaceId};
+use tidebreak_core::{CodeWorkspaceStatus, OwnerId, Result, SessionId, WorkspaceId};
 
 use crate::chat_titling::{
     derive_text_with_retries, head, TitleProposal, MAX_TITLE_SOURCE_MESSAGE_BYTES,
@@ -83,7 +83,7 @@ pub(crate) async fn propose_for_creation(
 pub(crate) fn spawn_for_turn(
     state: &AppState,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     message: String,
 ) {
     let Some(code) = state.code.clone() else {
@@ -119,7 +119,7 @@ async fn derive_workspace_title(
     state: &AppState,
     code: &Arc<CodeRuntime>,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     message: &str,
 ) -> Result<Outcome> {
     let Some(session) = get_session(&code.db, owner, session_id).await? else {

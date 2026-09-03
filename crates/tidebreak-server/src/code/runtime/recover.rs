@@ -30,7 +30,7 @@ impl CodeRuntime {
     /// Group by kind so many saved sessions share one install and one cold
     /// probe. Recovery already runs after bind, so these downloads do not hold
     /// the server port closed.
-    async fn prepare_recovered_harnesses(&self, sessions: &[CodeSession]) -> HashSet<HarnessKind> {
+    async fn prepare_recovered_harnesses(&self, sessions: &[Session]) -> HashSet<HarnessKind> {
         let mut kinds = sessions
             .iter()
             .map(|session| session.harness_kind)
@@ -79,7 +79,7 @@ impl CodeRuntime {
     /// Terminal paths pass the database-backed session scope explicitly so
     /// the adapter is still tombstoned when a prior launch failure already
     /// removed the transient bearer token and capfile.
-    pub(super) fn revoke_browser_session(&self, session: &CodeSession) {
+    pub(super) fn revoke_browser_session(&self, session: &Session) {
         self.browser_tokens.revoke(session.id);
         self.approvals.revoke_session(session.id);
         if let Some(relay) = &self.harness_llm {
@@ -102,7 +102,7 @@ impl CodeRuntime {
     /// stays live and can be reused by the fresh channel. Only terminal end
     /// paths call [`Self::revoke_browser_session`] and plant the adapter's
     /// enduring tombstone.
-    pub(super) fn revoke_worker_channels(&self, session_id: CodeSessionId) {
+    pub(super) fn revoke_worker_channels(&self, session_id: SessionId) {
         self.browser_tokens.revoke(session_id);
         self.approvals.revoke_session(session_id);
         if let Some(relay) = &self.harness_llm {
@@ -156,7 +156,7 @@ impl CodeRuntime {
             if sessions.iter().any(|session| {
                 matches!(
                     session.lifecycle,
-                    CodeSessionLifecycle::Running | CodeSessionLifecycle::Fenced
+                    SessionLifecycle::Running | SessionLifecycle::Fenced
                 )
             }) {
                 tracing::warn!(
@@ -228,12 +228,12 @@ impl CodeRuntime {
                 }
             }
         }
-        let resumable: Vec<CodeSession> = recovered_sessions
+        let resumable: Vec<Session> = recovered_sessions
             .into_iter()
             .filter(|session| {
                 !matches!(
                     session.lifecycle,
-                    CodeSessionLifecycle::Ended | CodeSessionLifecycle::Fenced
+                    SessionLifecycle::Ended | SessionLifecycle::Fenced
                 ) && !remote_workspaces.contains(&session.workspace_id)
                     && !self
                         .workers
@@ -252,7 +252,7 @@ impl CodeRuntime {
                     Ok(Some(latest))
                         if !matches!(
                             latest.lifecycle,
-                            CodeSessionLifecycle::Ended | CodeSessionLifecycle::Fenced
+                            SessionLifecycle::Ended | SessionLifecycle::Fenced
                         ) && !self
                             .workers
                             .lock()
@@ -373,12 +373,12 @@ mod tests {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
-    fn saved_session(owner: &OwnerId, kind: HarnessKind) -> CodeSession {
-        CodeSession {
-            id: CodeSessionId::new(),
+    fn saved_session(owner: &OwnerId, kind: HarnessKind) -> Session {
+        Session {
+            id: SessionId::new(),
             owner: owner.clone(),
             workspace_id: None,
-            kind: CodeSessionKind::Interactive,
+            kind: SessionKind::Interactive,
             harness_kind: kind,
             harness_version: Some("0.147.0".into()),
             harness_resume_ref: Some("saved-session".into()),
@@ -386,7 +386,7 @@ mod tests {
             model: None,
             reasoning_effort: None,
             fast_mode: false,
-            lifecycle: CodeSessionLifecycle::Idle,
+            lifecycle: SessionLifecycle::Idle,
             fence_reason: None,
             child_pid: None,
             child_process_identity: None,

@@ -27,7 +27,7 @@ impl SelectedModelCapabilities {
         self.reasoning_efforts.contains(&effort)
     }
 
-    pub(super) fn deactivate_unsupported(&self, settings: &mut CodeSessionExecutionSettings) {
+    pub(super) fn deactivate_unsupported(&self, settings: &mut SessionExecutionSettings) {
         if self.reasoning_known
             && settings
                 .reasoning_effort
@@ -150,21 +150,21 @@ impl CodeRuntime {
     pub(crate) async fn set_permission_mode(
         &self,
         owner: &OwnerId,
-        id: CodeSessionId,
+        id: SessionId,
         mode: PermissionMode,
-    ) -> Result<CodeSession, ServerError> {
+    ) -> Result<Session, ServerError> {
         let session = self.get_session(owner, id).await?;
         if session.permission_mode == mode {
             return Ok(session);
         }
         match session.lifecycle {
-            CodeSessionLifecycle::Running => {
+            SessionLifecycle::Running => {
                 return Err(ServerError::conflict_kind(
                     "turn_running",
                     "finish or interrupt the running turn before changing the permission mode",
                 ));
             }
-            CodeSessionLifecycle::Ended => {
+            SessionLifecycle::Ended => {
                 return Err(ServerError::conflict_kind(
                     "session_ended",
                     "this session has ended; start a new one to pick a different mode",
@@ -364,7 +364,7 @@ impl CodeRuntime {
     /// Ask the live engine to take a mode, then hold its worker for settlement.
     pub(super) async fn repostured_in_place(
         &self,
-        id: CodeSessionId,
+        id: SessionId,
         expected_spawn_epoch: i64,
         mode: PermissionMode,
     ) -> Result<LivePermissionModeOutcome, ServerError> {
@@ -406,7 +406,7 @@ impl CodeRuntime {
         owner: &OwnerId,
         intent: &PermissionModeChangeIntent,
         change: LivePermissionModeChange,
-    ) -> Result<Option<CodeSession>, ServerError> {
+    ) -> Result<Option<Session>, ServerError> {
         let LivePermissionModeChange { settlement, handle } = change;
         let _ = settlement.send(PermissionModeSettlement::Abort);
         let handle = if let Some(registered) =
@@ -440,11 +440,11 @@ impl CodeRuntime {
 
     pub(super) async fn commit_execution_settings(
         &self,
-        expected: &CodeSession,
-        next: &CodeSessionExecutionSettings,
+        expected: &Session,
+        next: &SessionExecutionSettings,
         action: &'static str,
-    ) -> Result<CodeSession, ServerError> {
-        let applies_to_future_turn = expected.lifecycle == CodeSessionLifecycle::Running
+    ) -> Result<Session, ServerError> {
+        let applies_to_future_turn = expected.lifecycle == SessionLifecycle::Running
             || get_open_turn(&self.db, &expected.owner, expected.id)
                 .await?
                 .is_some();
@@ -524,7 +524,7 @@ impl CodeRuntime {
 
     pub(super) fn take_worker_for_epoch(
         &self,
-        id: CodeSessionId,
+        id: SessionId,
         spawn_epoch: i64,
     ) -> Option<WorkerHandle> {
         let mut workers = self.workers.lock().expect("code workers");
@@ -538,7 +538,7 @@ impl CodeRuntime {
     pub(super) async fn note_permission_mode(
         &self,
         owner: &OwnerId,
-        session: &CodeSession,
+        session: &Session,
         previous: PermissionMode,
         mode: PermissionMode,
         revision: i64,
@@ -549,7 +549,7 @@ impl CodeRuntime {
             owner,
             session.id,
             session.spawn_epoch,
-            CodeEvent::HarnessNotice {
+            Event::HarnessNotice {
                 level: tidebreak_core::HarnessNoticeLevel::Info,
                 message: format!(
                     "permission mode changed from {previous} to {mode} at revision {revision}"
@@ -569,18 +569,18 @@ impl CodeRuntime {
     pub(crate) async fn set_reasoning_effort(
         &self,
         owner: &OwnerId,
-        id: CodeSessionId,
+        id: SessionId,
         effort: Option<ReasoningEffort>,
-    ) -> Result<CodeSession, ServerError> {
+    ) -> Result<Session, ServerError> {
         let session = self.get_session(owner, id).await?;
         match session.lifecycle {
-            CodeSessionLifecycle::Running => {
+            SessionLifecycle::Running => {
                 return Err(ServerError::conflict_kind(
                     "turn_running",
                     "finish or interrupt the running turn before changing the reasoning effort",
                 ));
             }
-            CodeSessionLifecycle::Ended => {
+            SessionLifecycle::Ended => {
                 return Err(ServerError::conflict_kind(
                     "session_ended",
                     "this session has ended; start a new one to pick a different effort",
@@ -604,11 +604,11 @@ impl CodeRuntime {
                 session.model.as_deref(),
             )
             .await;
-        let mut next = CodeSessionExecutionSettings::from(&session);
+        let mut next = SessionExecutionSettings::from(&session);
         selected.deactivate_unsupported(&mut next);
         next.reasoning_effort = effort;
         Self::validate_execution_settings(session.harness_kind, &next, &selected)?;
-        if next == CodeSessionExecutionSettings::from(&session) {
+        if next == SessionExecutionSettings::from(&session) {
             return Ok(session);
         }
         self.commit_execution_settings(&session, &next, "the reasoning effort could be saved")
@@ -624,18 +624,18 @@ impl CodeRuntime {
     pub(crate) async fn set_fast_mode(
         &self,
         owner: &OwnerId,
-        id: CodeSessionId,
+        id: SessionId,
         fast_mode: bool,
-    ) -> Result<CodeSession, ServerError> {
+    ) -> Result<Session, ServerError> {
         let session = self.get_session(owner, id).await?;
         match session.lifecycle {
-            CodeSessionLifecycle::Running => {
+            SessionLifecycle::Running => {
                 return Err(ServerError::conflict_kind(
                     "turn_running",
                     "finish or interrupt the running turn before changing fast mode",
                 ));
             }
-            CodeSessionLifecycle::Ended => {
+            SessionLifecycle::Ended => {
                 return Err(ServerError::conflict_kind(
                     "session_ended",
                     "this session has ended; start a new one to run it in fast mode",
@@ -659,11 +659,11 @@ impl CodeRuntime {
                 session.model.as_deref(),
             )
             .await;
-        let mut next = CodeSessionExecutionSettings::from(&session);
+        let mut next = SessionExecutionSettings::from(&session);
         selected.deactivate_unsupported(&mut next);
         next.fast_mode = fast_mode;
         Self::validate_execution_settings(session.harness_kind, &next, &selected)?;
-        if next == CodeSessionExecutionSettings::from(&session) {
+        if next == SessionExecutionSettings::from(&session) {
             return Ok(session);
         }
         self.commit_execution_settings(&session, &next, "fast mode could be saved")
@@ -755,7 +755,7 @@ impl CodeRuntime {
 
     pub(super) fn validate_execution_settings(
         harness: HarnessKind,
-        settings: &CodeSessionExecutionSettings,
+        settings: &SessionExecutionSettings,
         selected: &SelectedModelCapabilities,
     ) -> Result<(), ServerError> {
         let model = settings.model.as_deref().unwrap_or("the default model");
@@ -921,7 +921,7 @@ mod selected_model_capabilities_tests {
         };
         let capabilities =
             CodeRuntime::selected_model_capabilities(&adapter, &probe, Some("configured")).await;
-        let mut settings = CodeSessionExecutionSettings {
+        let mut settings = SessionExecutionSettings {
             model: Some("configured".into()),
             reasoning_effort: Some(ReasoningEffort::High),
             fast_mode: true,
@@ -1028,7 +1028,7 @@ mod selected_model_capabilities_tests {
             fast_mode: false,
             fast_mode_known: true,
         };
-        let mut settings = CodeSessionExecutionSettings {
+        let mut settings = SessionExecutionSettings {
             model: Some("steady".into()),
             reasoning_effort: Some(ReasoningEffort::High),
             fast_mode: true,

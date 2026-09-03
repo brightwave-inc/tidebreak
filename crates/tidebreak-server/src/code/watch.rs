@@ -1,7 +1,7 @@
 //! Durable watch tasks: a server-side loop that keeps one workspace's pull
 //! request moving until it merges or genuinely needs the user.
 //!
-//! The watch owns a dedicated [`CodeSessionKind::Watch`] session in the same
+//! The watch owns a dedicated [`SessionKind::Watch`] session in the same
 //! worktree as the conversation it forked from. Each sweep reads the PR
 //! digest through the normal `workspace_pr` path (so the updates channel sees
 //! every read), classifies it, and either waits, submits one bounded fix
@@ -26,9 +26,9 @@ use tidebreak_core::db::code::{
     release_watch_submission, reserve_watch_submission, save_watch, WatchSubmissionClaim,
 };
 use tidebreak_core::{
-    Attention, AttentionSource, AttentionState, CodeSession, CodeSessionKind, CodeSessionLifecycle,
-    CodeWatch, CodeWatchId, CodeWatchState, CodeWorkspaceStatus, HarnessKind, OwnerId,
-    PermissionMode, PullRequestDigest, WorkspaceId,
+    Attention, AttentionSource, AttentionState, CodeWatch, CodeWatchId, CodeWatchState,
+    CodeWorkspaceStatus, HarnessKind, OwnerId, PermissionMode, PullRequestDigest, Session,
+    SessionKind, SessionLifecycle, WorkspaceId,
 };
 
 use super::attention::{apply_attention, emit_workspace_digests};
@@ -258,12 +258,12 @@ pub(crate) fn fix_turn_instruction(reason: WatchReason, pr: &PullRequestDigest) 
 }
 
 fn watch_session_settings(
-    sessions: &[CodeSession],
+    sessions: &[Session],
     permission_mode_ceiling: Option<PermissionMode>,
 ) -> Result<(HarnessKind, NewSessionSettings), ServerError> {
     let (harness, model, permission_mode) = sessions
         .iter()
-        .find(|session| session.kind == CodeSessionKind::Interactive)
+        .find(|session| session.kind == SessionKind::Interactive)
         .map(|session| {
             (
                 session.harness_kind,
@@ -348,13 +348,7 @@ impl CodeRuntime {
             _ => {}
         }
         let session = self
-            .create_session_of_kind(
-                owner,
-                workspace_id,
-                CodeSessionKind::Watch,
-                harness,
-                settings,
-            )
+            .create_session_of_kind(owner, workspace_id, SessionKind::Watch, harness, settings)
             .await?;
         let now = Utc::now();
         let watch = CodeWatch {
@@ -446,7 +440,7 @@ async fn sweep_one(runtime: &Arc<CodeRuntime>, watch: &mut CodeWatch) -> Result<
         .await;
     };
     match session.lifecycle {
-        CodeSessionLifecycle::Ended => {
+        SessionLifecycle::Ended => {
             return finish_watch(
                 runtime.as_ref(),
                 watch,
@@ -455,7 +449,7 @@ async fn sweep_one(runtime: &Arc<CodeRuntime>, watch: &mut CodeWatch) -> Result<
             )
             .await;
         }
-        CodeSessionLifecycle::Fenced => {
+        SessionLifecycle::Fenced => {
             return finish_watch(
                 runtime.as_ref(),
                 watch,
@@ -467,9 +461,7 @@ async fn sweep_one(runtime: &Arc<CodeRuntime>, watch: &mut CodeWatch) -> Result<
         // A running fix turn no longer skips the sweep: the state read below
         // still happens, and only the transitions that need an idle worktree
         // hold (decision 66).
-        CodeSessionLifecycle::Running
-        | CodeSessionLifecycle::Created
-        | CodeSessionLifecycle::Idle => {}
+        SessionLifecycle::Running | SessionLifecycle::Created | SessionLifecycle::Idle => {}
     }
     if reconcile_watch_submission(runtime, watch, &session).await? {
         return Ok(());
@@ -504,7 +496,7 @@ async fn sweep_one(runtime: &Arc<CodeRuntime>, watch: &mut CodeWatch) -> Result<
     let sessions = list_sessions_for_workspace(&runtime.db, &owner, watch.workspace_id).await?;
     let turn_in_flight = sessions
         .iter()
-        .any(|other| other.lifecycle == CodeSessionLifecycle::Running);
+        .any(|other| other.lifecycle == SessionLifecycle::Running);
     // The store answers first (decision 66): the reconcile sweep's one list
     // read per repository keeps the live tier fresh, and write-through keeps
     // the workspace column equal to it. Only a missing or stale tier pays a
@@ -758,12 +750,12 @@ async fn sweep_one(runtime: &Arc<CodeRuntime>, watch: &mut CodeWatch) -> Result<
 async fn reconcile_watch_submission(
     runtime: &CodeRuntime,
     watch: &mut CodeWatch,
-    session: &tidebreak_core::CodeSession,
+    session: &tidebreak_core::Session,
 ) -> Result<bool, ServerError> {
     let Some(reservation) = watch_submission_reservation(watch) else {
         return Ok(false);
     };
-    let accepted = session.lifecycle == CodeSessionLifecycle::Running
+    let accepted = session.lifecycle == SessionLifecycle::Running
         || watch_submission_was_accepted(runtime, &watch.owner, watch.session_id, watch.updated_at)
             .await?;
     let reservation_detail = watch.detail.clone().unwrap_or_default();
@@ -815,7 +807,7 @@ async fn reconcile_watch_submission(
 async fn watch_submission_was_accepted(
     runtime: &CodeRuntime,
     owner: &OwnerId,
-    session_id: tidebreak_core::CodeSessionId,
+    session_id: tidebreak_core::SessionId,
     reserved_at: chrono::DateTime<Utc>,
 ) -> Result<bool, ServerError> {
     if list_queued_turns(&runtime.db, owner, session_id)
@@ -997,7 +989,7 @@ mod tests {
     #[test]
     fn watch_inherits_the_newest_interactive_session_settings() {
         let mut watch = crate::code::remote::fixtures::session_value();
-        watch.kind = CodeSessionKind::Watch;
+        watch.kind = SessionKind::Watch;
         watch.harness_kind = HarnessKind::Grok;
         watch.permission_mode = PermissionMode::Plan;
         watch.model = Some("watch-model".to_owned());
@@ -1027,7 +1019,7 @@ mod tests {
     #[test]
     fn watch_without_an_interactive_session_uses_auto() {
         let mut watch = crate::code::remote::fixtures::session_value();
-        watch.kind = CodeSessionKind::Watch;
+        watch.kind = SessionKind::Watch;
 
         let (harness, settings) =
             watch_session_settings(&[watch], Some(PermissionMode::Auto)).unwrap();
@@ -1182,7 +1174,7 @@ mod tests {
             id: CodeWatchId::new(),
             owner: OwnerId::local(),
             workspace_id: WorkspaceId::new(),
-            session_id: tidebreak_core::CodeSessionId::new(),
+            session_id: tidebreak_core::SessionId::new(),
             pr_number: 12,
             state: CodeWatchState::Blocked,
             detail: Some(reason.to_owned()),
@@ -1306,7 +1298,7 @@ mod tests {
             id: CodeWatchId::new(),
             owner: OwnerId::local(),
             workspace_id: WorkspaceId::new(),
-            session_id: tidebreak_core::CodeSessionId::new(),
+            session_id: tidebreak_core::SessionId::new(),
             pr_number: 12,
             state: CodeWatchState::Fixing,
             detail: Some(watch_submission_detail(
@@ -1344,7 +1336,7 @@ mod tests {
             id: CodeWatchId::new(),
             owner: OwnerId::local(),
             workspace_id: WorkspaceId::new(),
-            session_id: tidebreak_core::CodeSessionId::new(),
+            session_id: tidebreak_core::SessionId::new(),
             pr_number: 12,
             state: CodeWatchState::Fixing,
             detail: Some(watch_submission_detail(

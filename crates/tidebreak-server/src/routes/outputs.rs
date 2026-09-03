@@ -28,8 +28,8 @@ use serde::{Deserialize, Serialize};
 
 use tidebreak_core::{
     deliverable_media_type, media_type_is_text, revision_byte_ceiling, AgentError,
-    AssistantCitationId, ChatId, ChatTranscriptSnapshot, CitationLocator, DocumentId, OutputId,
-    OutputRecord, OutputRevision, OutputRevisionId, ResultEntryKind, ToolCallRecord,
+    AssistantCitationId, ChatTranscriptSnapshot, CitationLocator, DocumentId, OutputId,
+    OutputRecord, OutputRevision, OutputRevisionId, ResultEntryKind, SessionId, ToolCallRecord,
     ToolCallStatus, ToolResultPreview, TurnId, WEB_SEARCH_TOOL,
 };
 
@@ -215,7 +215,7 @@ pub struct RevisionQuery {
 pub async fn list_chat_outputs(
     State(state): State<AppState>,
     store: ScopedStore,
-    Path(chat_id): Path<ChatId>,
+    Path(chat_id): Path<SessionId>,
 ) -> Result<Json<DeliverablesCatalog>, ServerError> {
     store.require_chat(chat_id).await?;
     let mut outputs = state
@@ -244,7 +244,7 @@ pub async fn list_chat_outputs(
 pub async fn get_chat_output(
     State(state): State<AppState>,
     store: ScopedStore,
-    Path((chat_id, output_id)): Path<(ChatId, OutputId)>,
+    Path((chat_id, output_id)): Path<(SessionId, OutputId)>,
 ) -> Result<Json<DeliverablePreview>, ServerError> {
     store.require_chat(chat_id).await?;
     let (output, revision) = require_live_output(&state.store, chat_id, output_id)
@@ -260,7 +260,7 @@ pub async fn get_chat_output(
 pub async fn get_chat_output_revision(
     State(state): State<AppState>,
     store: ScopedStore,
-    Path((chat_id, output_id, revision_id)): Path<(ChatId, OutputId, OutputRevisionId)>,
+    Path((chat_id, output_id, revision_id)): Path<(SessionId, OutputId, OutputRevisionId)>,
 ) -> Result<Json<DeliverablePreview>, ServerError> {
     store.require_chat(chat_id).await?;
     let (output, revision) = require_output_revision(&state.store, chat_id, output_id, revision_id)
@@ -281,7 +281,7 @@ pub async fn get_chat_output_revision(
 pub async fn get_chat_output_content(
     State(state): State<AppState>,
     store: ScopedStore,
-    Path((chat_id, output_id)): Path<(ChatId, OutputId)>,
+    Path((chat_id, output_id)): Path<(SessionId, OutputId)>,
     Query(query): Query<RevisionQuery>,
 ) -> Result<Response, ServerError> {
     store.require_chat(chat_id).await?;
@@ -321,7 +321,7 @@ pub async fn get_chat_output_content(
 pub async fn list_chat_output_revisions(
     State(state): State<AppState>,
     store: ScopedStore,
-    Path((chat_id, output_id)): Path<(ChatId, OutputId)>,
+    Path((chat_id, output_id)): Path<(SessionId, OutputId)>,
 ) -> Result<Json<OutputRevisionsCatalog>, ServerError> {
     store.require_chat(chat_id).await?;
     let (output, _) = require_live_output(&state.store, chat_id, output_id)
@@ -462,7 +462,7 @@ fn web_domain(value: &str) -> Option<String> {
 pub async fn restore_chat_output_revision(
     State(state): State<AppState>,
     store: ScopedStore,
-    Path((chat_id, output_id, revision_id)): Path<(ChatId, OutputId, OutputRevisionId)>,
+    Path((chat_id, output_id, revision_id)): Path<(SessionId, OutputId, OutputRevisionId)>,
 ) -> Result<Json<DeliverableSummary>, ServerError> {
     store.require_chat(chat_id).await?;
     let scratch = chat_scratch(&state, chat_id).await?;
@@ -486,7 +486,7 @@ pub async fn restore_chat_output_revision(
 pub async fn save_chat_output_revision(
     State(state): State<AppState>,
     store: ScopedStore,
-    Path((chat_id, output_id)): Path<(ChatId, OutputId)>,
+    Path((chat_id, output_id)): Path<(SessionId, OutputId)>,
     Json(body): Json<SaveOutputRevisionBody>,
 ) -> Result<Json<SaveOutputRevisionResult>, ServerError> {
     store.require_chat(chat_id).await?;
@@ -525,7 +525,7 @@ pub async fn save_chat_output_revision(
 pub async fn delete_chat_output(
     State(state): State<AppState>,
     store: ScopedStore,
-    Path((chat_id, output_id)): Path<(ChatId, OutputId)>,
+    Path((chat_id, output_id)): Path<(SessionId, OutputId)>,
 ) -> Result<Json<DeliverableSummary>, ServerError> {
     store.require_chat(chat_id).await?;
     let (output, revision) = require_live_output(&state.store, chat_id, output_id)
@@ -540,7 +540,7 @@ pub async fn delete_chat_output(
 pub async fn restore_chat_output(
     State(state): State<AppState>,
     store: ScopedStore,
-    Path((chat_id, output_id)): Path<(ChatId, OutputId)>,
+    Path((chat_id, output_id)): Path<(SessionId, OutputId)>,
 ) -> Result<Json<DeliverableSummary>, ServerError> {
     store.require_chat(chat_id).await?;
     // A restore targets a soft-deleted output, so it cannot go through the
@@ -558,7 +558,7 @@ pub async fn restore_chat_output(
 
 async fn current_summary(
     state: &AppState,
-    chat_id: ChatId,
+    chat_id: SessionId,
     output_id: OutputId,
 ) -> Result<Json<DeliverableSummary>, ServerError> {
     let (output, revision) = require_live_output(&state.store, chat_id, output_id)
@@ -570,7 +570,10 @@ async fn current_summary(
 }
 
 /// Open the conversation's private scratch directory for an append-only write.
-async fn chat_scratch(state: &AppState, chat_id: ChatId) -> Result<cap_std::fs::Dir, ServerError> {
+async fn chat_scratch(
+    state: &AppState,
+    chat_id: SessionId,
+) -> Result<cap_std::fs::Dir, ServerError> {
     let scratch_root = state.config.data_dir.join("scratch");
     tokio::task::spawn_blocking(move || open_chat_scratch(&scratch_root, chat_id))
         .await
@@ -580,7 +583,7 @@ async fn chat_scratch(state: &AppState, chat_id: ChatId) -> Result<cap_std::fs::
 
 async fn revision_bytes(
     state: &AppState,
-    chat_id: ChatId,
+    chat_id: SessionId,
     output: &OutputRecord,
     revision: &OutputRevision,
 ) -> Result<Vec<u8>, ServerError> {
@@ -598,7 +601,7 @@ async fn revision_bytes(
 /// Build the bounded preview of one exact revision's content.
 async fn revision_preview(
     state: &AppState,
-    chat_id: ChatId,
+    chat_id: SessionId,
     output: &OutputRecord,
     revision: &OutputRevision,
 ) -> Result<DeliverablePreview, ServerError> {

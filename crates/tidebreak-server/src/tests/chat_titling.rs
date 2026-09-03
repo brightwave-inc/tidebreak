@@ -193,7 +193,7 @@ async fn titling_app_with_answers(
 }
 
 /// The chat's title once the background titling call has stored one.
-async fn wait_for_title(store: &Arc<dyn Store>, chat: ChatId) -> Option<String> {
+async fn wait_for_title(store: &Arc<dyn Store>, chat: SessionId) -> Option<String> {
     for _ in 0..300 {
         let title = store.get_chat(chat).await.unwrap().unwrap().title;
         if title.is_some() {

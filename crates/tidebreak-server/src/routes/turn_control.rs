@@ -6,9 +6,9 @@ use chrono::Utc;
 use serde::Deserialize;
 
 use tidebreak_core::{
-    AcceptTurnOutcome, AcceptTurnSteerOutcome, BeginTurnAdmissionOutcome, ChatId, DocumentId,
+    AcceptTurnOutcome, AcceptTurnSteerOutcome, BeginTurnAdmissionOutcome, DocumentId,
     PromoteQueuedTurnOutcome, RequestTurnCancellationOutcome, ReservedQueuedTurnOutcome,
-    ReservedTurnAcceptanceOutcome, TurnAdmissionRequest, TurnId, TurnSteer, TurnSteerId,
+    ReservedTurnAcceptanceOutcome, SessionId, TurnAdmissionRequest, TurnId, TurnSteer, TurnSteerId,
 };
 
 use crate::error::ServerError;
@@ -54,7 +54,7 @@ pub struct PostMessage {
     /// Queue instead of refusing when the chat has a live turn.
     ///
     /// With this set, `ChatBusy` durably parks the validated message as a
-    /// [`tidebreak_core::QueuedTurn`]; the promoter runs it as its own turn
+    /// [`tidebreak_core::QueuedAgentTurn`]; the promoter runs it as its own turn
     /// once the chat is free. An idle chat sends immediately either way.
     #[serde(default)]
     pub queue: bool,
@@ -117,7 +117,7 @@ async fn require_invocable_skills(state: &AppState, invoked: &[String]) -> Resul
 /// persisted with the turn describes the content that actually exists.
 async fn resolve_message_attachments(
     state: &AppState,
-    chat_id: ChatId,
+    chat_id: SessionId,
     ids: &[uuid::Uuid],
 ) -> Result<Vec<tidebreak_core::ImageRef>, ServerError> {
     if ids.is_empty() {
@@ -160,7 +160,7 @@ async fn resolve_message_attachments(
 
 async fn resolve_file_attachments(
     store: &ScopedStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
     ids: &[DocumentId],
 ) -> Result<Vec<DocumentId>, ServerError> {
     if ids.is_empty() {
@@ -243,7 +243,7 @@ async fn require_image_capable_model(
     require_image_input(&policy)
 }
 
-fn turn_admission_from_message(chat_id: ChatId, body: &PostMessage) -> TurnAdmissionRequest {
+fn turn_admission_from_message(chat_id: SessionId, body: &PostMessage) -> TurnAdmissionRequest {
     TurnAdmissionRequest {
         id: body.turn_id,
         chat_id,
@@ -255,9 +255,12 @@ fn turn_admission_from_message(chat_id: ChatId, body: &PostMessage) -> TurnAdmis
     }
 }
 
-fn queued_turn_from_message(chat_id: ChatId, body: &PostMessage) -> tidebreak_core::QueuedTurn {
+fn queued_turn_from_message(
+    chat_id: SessionId,
+    body: &PostMessage,
+) -> tidebreak_core::QueuedAgentTurn {
     let now = Utc::now();
-    tidebreak_core::QueuedTurn {
+    tidebreak_core::QueuedAgentTurn {
         id: body.turn_id,
         chat_id,
         content: body.content.clone(),
@@ -340,7 +343,7 @@ mod image_capability_tests {
 pub async fn post_message(
     State(state): State<AppState>,
     store: ScopedStore,
-    Path(id): Path<ChatId>,
+    Path(id): Path<SessionId>,
     Json(body): Json<PostMessage>,
 ) -> Result<StatusCode, ServerError> {
     if body.turn_id.0.is_nil() {
@@ -472,17 +475,17 @@ pub async fn post_message(
 /// Response of `GET /chats/{chat_id}/queued`.
 #[derive(Debug, serde::Serialize)]
 pub struct QueuedTurnsSnapshot {
-    pub queued: Vec<tidebreak_core::QueuedTurn>,
+    pub queued: Vec<tidebreak_core::QueuedAgentTurn>,
     pub paused: bool,
 }
 
-fn queue_paused_setting(chat_id: ChatId) -> String {
-    format!("chats.{chat_id}.queue_paused")
+fn queue_paused_setting(chat_id: SessionId) -> String {
+    format!("sessions.{chat_id}.queue_paused")
 }
 
 pub(crate) async fn read_queue_paused(
     store: &dyn tidebreak_core::Store,
-    chat_id: ChatId,
+    chat_id: SessionId,
 ) -> tidebreak_core::Result<bool> {
     Ok(store
         .get_setting(&queue_paused_setting(chat_id))
@@ -495,7 +498,7 @@ pub(crate) async fn read_queue_paused(
 pub async fn list_queued_turns(
     State(state): State<AppState>,
     store: ScopedStore,
-    Path(id): Path<ChatId>,
+    Path(id): Path<SessionId>,
 ) -> Result<Json<QueuedTurnsSnapshot>, ServerError> {
     store.require_chat(id).await?;
     Ok(Json(QueuedTurnsSnapshot {
@@ -518,9 +521,9 @@ pub struct QueuedTurnUpdate {
 pub async fn patch_queued_turn(
     State(state): State<AppState>,
     store: ScopedStore,
-    Path((id, turn_id)): Path<(ChatId, TurnId)>,
+    Path((id, turn_id)): Path<(SessionId, TurnId)>,
     Json(body): Json<QueuedTurnUpdate>,
-) -> Result<Json<tidebreak_core::QueuedTurn>, ServerError> {
+) -> Result<Json<tidebreak_core::QueuedAgentTurn>, ServerError> {
     store.require_chat(id).await?;
     match state
         .store
@@ -538,7 +541,7 @@ pub async fn patch_queued_turn(
 pub async fn delete_queued_turn(
     State(state): State<AppState>,
     store: ScopedStore,
-    Path((id, turn_id)): Path<(ChatId, TurnId)>,
+    Path((id, turn_id)): Path<(SessionId, TurnId)>,
 ) -> Result<StatusCode, ServerError> {
     store.require_chat(id).await?;
     if state.store.delete_queued_turn(id, turn_id).await? {
@@ -561,7 +564,7 @@ pub struct QueuePausedBody {
 pub async fn put_queue_paused(
     State(state): State<AppState>,
     store: ScopedStore,
-    Path(id): Path<ChatId>,
+    Path(id): Path<SessionId>,
     Json(body): Json<QueuePausedBody>,
 ) -> Result<StatusCode, ServerError> {
     store.require_chat(id).await?;
@@ -586,7 +589,7 @@ pub async fn put_queue_paused(
 pub async fn post_queue_send_now(
     State(state): State<AppState>,
     store: ScopedStore,
-    Path(id): Path<ChatId>,
+    Path(id): Path<SessionId>,
 ) -> Result<StatusCode, ServerError> {
     store.require_chat(id).await?;
     state
@@ -629,7 +632,7 @@ pub struct SteerBody {
 pub async fn post_steer(
     State(state): State<AppState>,
     store: ScopedStore,
-    Path(id): Path<ChatId>,
+    Path(id): Path<SessionId>,
     Json(body): Json<SteerBody>,
 ) -> Result<StatusCode, ServerError> {
     if body.steer_id.0.is_nil() {
@@ -690,7 +693,7 @@ pub struct CancelBody {
 pub async fn post_cancel(
     State(state): State<AppState>,
     store: ScopedStore,
-    Path(id): Path<ChatId>,
+    Path(id): Path<SessionId>,
     Json(body): Json<CancelBody>,
 ) -> Result<StatusCode, ServerError> {
     // Distinguish "unknown chat" (404) from "known chat, nothing running" (409).

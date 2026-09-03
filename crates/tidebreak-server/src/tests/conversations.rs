@@ -545,7 +545,7 @@ async fn chat_created_with_empty_model_is_rejected() {
 pub(super) async fn patch_chat(
     router: &Router,
     bearer: &str,
-    chat: ChatId,
+    chat: SessionId,
     body: serde_json::Value,
 ) -> axum::response::Response {
     router
@@ -1682,7 +1682,7 @@ async fn patch_chat_rejects_empty_model_and_unknown_chat() {
     let missing = patch_chat(
         &router,
         &bearer,
-        ChatId::new(),
+        SessionId::new(),
         serde_json::json!({"model": "m"}),
     )
     .await;

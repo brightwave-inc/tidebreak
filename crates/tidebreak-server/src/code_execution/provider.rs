@@ -16,8 +16,8 @@ use tidebreak_code_execution::{
     WorkspaceLifecycle, WorkspaceListing, WriteOverlay, WriteSnapshotSink, PACKAGE_CACHE_DIR,
 };
 use tidebreak_core::{
-    BlobStore, CallId, Chat, ChatId, ExecFileRejectionReason, ExecFileRejectionRecord, HostRootId,
-    NetworkPolicy, RevisionProducer, SecretProvider, Store, TurnId,
+    BlobStore, CallId, Chat, ExecFileRejectionReason, ExecFileRejectionRecord, HostRootId,
+    NetworkPolicy, RevisionProducer, SecretProvider, SessionId, Store, TurnId,
 };
 
 use crate::exec_write_snapshot::TurnSnapshotSink;
@@ -85,7 +85,7 @@ pub struct ConfiguredExecProvider {
     /// A turn opens one entry when it resolves its folder grants and closes it
     /// when the turn ends; every `exec` in between finds it here and points the
     /// sandbox at the staged copy instead of the user's folder.
-    write_overlays: Mutex<HashMap<ChatId, StagedTurn>>,
+    write_overlays: Mutex<HashMap<SessionId, StagedTurn>>,
     /// The supported Python runtime selected for local execution and package
     /// caching once per process. `None` leaves the system interpreter in place
     /// and disables the shared cache.
@@ -110,7 +110,7 @@ pub struct ConfiguredExecProvider {
     /// built per execution — so without this the same warning would land on
     /// every card that recreates a sandbox. Warning once per chat is what a
     /// reader needs: the second card says nothing new.
-    degradation_reported: Mutex<HashSet<ChatId>>,
+    degradation_reported: Mutex<HashSet<SessionId>>,
 }
 
 /// Publishes a provider's first-run image preparation to the chat that is
@@ -123,7 +123,7 @@ impl tidebreak_code_execution::SandboxPreparationSink for SandboxPreparationNoti
     fn report(&self, workspace_id: &str, stage: tidebreak_code_execution::SandboxPreparation) {
         // The workspace identity is the chat's; a workspace that does not name
         // one has no window to tell, and the execution itself proceeds.
-        let Ok(chat) = workspace_id.parse::<ChatId>() else {
+        let Ok(chat) = workspace_id.parse::<SessionId>() else {
             return;
         };
         self.events.publish_metadata(
@@ -137,7 +137,7 @@ impl tidebreak_code_execution::SandboxPreparationSink for SandboxPreparationNoti
 
 #[async_trait]
 impl StagedFolders for ConfiguredExecProvider {
-    fn staged_root(&self, chat: ChatId, root_id: HostRootId) -> Option<PathBuf> {
+    fn staged_root(&self, chat: SessionId, root_id: HostRootId) -> Option<PathBuf> {
         self.write_overlays
             .lock()
             .expect("write overlay registry is not poisoned")
@@ -149,7 +149,7 @@ impl StagedFolders for ConfiguredExecProvider {
 
     async fn materialize_connected_file(
         &self,
-        chat: ChatId,
+        chat: SessionId,
         turn: TurnId,
         root_id: HostRootId,
         relative: &str,
@@ -191,7 +191,7 @@ impl StagedFolders for ConfiguredExecProvider {
 
     async fn connected_file_matches(
         &self,
-        chat: ChatId,
+        chat: SessionId,
         root_id: HostRootId,
         relative: &str,
         byte_len: u64,
@@ -640,7 +640,7 @@ impl ConfiguredExecProvider {
     /// on purpose — prompt enrichment is not an authority boundary, and
     /// `execute` re-prepares (with the provider-correct mirroring flag)
     /// before any command runs.
-    pub(crate) async fn stage_turn_workspace(&self, chat_id: ChatId) {
+    pub(crate) async fn stage_turn_workspace(&self, chat_id: SessionId) {
         // A configuration with no skills at all — a headless embedding — has
         // no workspace to prepare. An install that has *disabled* every skill
         // is a different case: a workspace may already hold staged copies, and
@@ -985,7 +985,7 @@ impl ConfiguredExecProvider {
     /// the largest or most unusual folders.
     pub(super) async fn open_write_overlay(
         &self,
-        chat: ChatId,
+        chat: SessionId,
         turn: TurnId,
         grants: &mut [ResolvedExecFolderGrant],
     ) {
@@ -1042,7 +1042,7 @@ impl ConfiguredExecProvider {
     /// to do. A turn that is abandoned rather than finished never reaches here,
     /// and its staged writes are discarded when the next turn sweeps them:
     /// applying them later would write a folder that has since moved on.
-    pub(crate) async fn close_write_overlay(&self, chat: ChatId) -> Option<TurnId> {
+    pub(crate) async fn close_write_overlay(&self, chat: SessionId) -> Option<TurnId> {
         let staged = self
             .write_overlays
             .lock()
@@ -1136,7 +1136,7 @@ impl ConfiguredExecProvider {
     /// registry for exactly the length of the turn, so nothing an in-flight
     /// execution holds can keep it alive past the point where its writes are
     /// applied.
-    fn staged_folders(&self, chat: ChatId) -> HashMap<PathBuf, PathBuf> {
+    fn staged_folders(&self, chat: SessionId) -> HashMap<PathBuf, PathBuf> {
         self.write_overlays
             .lock()
             .expect("write overlay registry is not poisoned")
@@ -1154,7 +1154,7 @@ impl ConfiguredExecProvider {
 
     fn overlay_inspector(
         &self,
-        chat: ChatId,
+        chat: SessionId,
     ) -> Option<tidebreak_code_execution::OverlayInspector> {
         self.write_overlays
             .lock()
@@ -1219,7 +1219,7 @@ impl ConfiguredExecProvider {
 
     async fn writable_connected_root(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         root_id: HostRootId,
     ) -> std::result::Result<PathBuf, RejectedChangeReason> {
         let chat = self
@@ -1361,7 +1361,7 @@ impl ConfiguredExecProvider {
     /// network policy — because the user chose that policy for this work.
     pub async fn execute_for_agent_run(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         request: ExecRequest,
     ) -> std::result::Result<ExecResponse, ExecError> {
         if !request.folder_grants.is_empty() {
@@ -1397,8 +1397,8 @@ impl ConfiguredExecProvider {
         kind: ExecProviderKind,
         provider: Box<dyn ExecProvider>,
         request: ExecRequest,
-        chat: Option<ChatId>,
-        degradation_chat: ChatId,
+        chat: Option<SessionId>,
+        degradation_chat: SessionId,
     ) -> std::result::Result<ExecResponse, ExecError> {
         let host_dir = self.scratch_root.join(request.workspace_id.as_str());
         let skills = self.current_skills().await;
@@ -1509,7 +1509,7 @@ impl ConfiguredExecProvider {
     pub async fn collect_agent_run_outputs(
         &self,
         workspace: &ExecutionWorkspaceId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         call_id: CallId,
         run_id: tidebreak_core::AgentRunId,
     ) -> std::result::Result<OutputArtifactScan, ExecError> {
@@ -1544,7 +1544,7 @@ impl ConfiguredExecProvider {
     async fn publish_output_directory(
         &self,
         workspace: &ExecutionWorkspaceId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         call_id: CallId,
         producer: RevisionProducer,
     ) -> std::result::Result<OutputArtifactScan, ExecError> {
@@ -1854,7 +1854,7 @@ impl ExecProvider for ConfiguredExecProvider {
         let chat_id = request
             .workspace_id
             .as_str()
-            .parse::<ChatId>()
+            .parse::<SessionId>()
             .map_err(|_| {
                 ExecError::InvalidRequest(
                     "execution workspace does not identify a conversation".into(),
@@ -1917,7 +1917,7 @@ impl ExecProvider for ConfiguredExecProvider {
         workspace: &ExecutionWorkspaceId,
         execution: &ExecutionId,
     ) -> std::result::Result<OutputArtifactScan, ExecError> {
-        let chat_id = workspace.as_str().parse::<ChatId>().map_err(|_| {
+        let chat_id = workspace.as_str().parse::<SessionId>().map_err(|_| {
             ExecError::InvalidRequest("execution workspace does not identify a conversation".into())
         })?;
         let call_id = execution.as_str().parse::<CallId>().map_err(|_| {

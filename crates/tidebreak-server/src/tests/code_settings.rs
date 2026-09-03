@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
 use tidebreak_core::{
-    CapLevel, CodeSessionId, CodeSessionLifecycle, FenceReason, HarnessKind, PermissionMode,
-    ReasoningEffort,
+    CapLevel, FenceReason, HarnessKind, PermissionMode, ReasoningEffort, SessionId,
+    SessionLifecycle,
 };
 
 async fn execute_code_db_unprepared(dir: &tempfile::TempDir, statement: &str) {
@@ -507,7 +507,7 @@ async fn a_queued_turn_receives_the_validated_effective_settings() {
         .unwrap();
     let session: serde_json::Value = created.json().await.unwrap();
     let session_id = json_id(&session).to_owned();
-    let parsed: CodeSessionId = session_id.parse().unwrap();
+    let parsed: SessionId = session_id.parse().unwrap();
 
     let first = {
         let client = client.clone();
@@ -593,7 +593,7 @@ async fn a_live_setting_update_becomes_active_only_after_its_exact_write_commits
     execute_code_db_unprepared(
         &dir,
         "CREATE TRIGGER ignore_reasoning_effort_update
-         BEFORE UPDATE OF reasoning_effort ON session
+         BEFORE UPDATE OF reasoning_effort ON \"session\"
          WHEN NEW.reasoning_effort IS NOT OLD.reasoning_effort
          BEGIN
            SELECT RAISE(IGNORE);
@@ -730,7 +730,7 @@ async fn a_permission_mode_intent_persistence_failure_never_reaches_the_engine()
     execute_code_db_unprepared(
         &dir,
         "CREATE TRIGGER fail_permission_mode_intent
-         BEFORE UPDATE OF permission_mode_intent ON session
+         BEFORE UPDATE OF permission_mode_intent ON \"session\"
          WHEN NEW.permission_mode_intent IS NOT NULL
          BEGIN
            SELECT RAISE(FAIL, 'permission-mode intent write failed');
@@ -782,7 +782,7 @@ async fn a_permission_mode_confirmation_failure_terminates_and_fences_the_engine
     execute_code_db_unprepared(
         &dir,
         "CREATE TRIGGER ignore_permission_mode_confirmation
-         BEFORE UPDATE OF permission_mode ON session
+         BEFORE UPDATE OF permission_mode ON \"session\"
          WHEN NEW.permission_mode <> OLD.permission_mode
          BEGIN
            SELECT RAISE(IGNORE);
@@ -813,7 +813,7 @@ async fn a_permission_mode_confirmation_failure_terminates_and_fences_the_engine
     .unwrap()
     .unwrap();
     assert_eq!(stored.permission_mode, PermissionMode::Plan);
-    assert_eq!(stored.lifecycle, CodeSessionLifecycle::Fenced);
+    assert_eq!(stored.lifecycle, SessionLifecycle::Fenced);
     assert!(matches!(
         stored.fence_reason,
         Some(FenceReason::ProbeAmbiguous { .. })
