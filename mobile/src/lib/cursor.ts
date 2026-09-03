@@ -1,7 +1,7 @@
 import type { SequencedCodeEventFrame } from "../generated/wire";
 
 /**
- * Resume cursor for `GET /code/sessions/{id}/events?after=`.
+ * Resume cursor for `GET /sessions/{id}/events?after=`.
  *
  * Transient frames stamp the journal position they streamed behind; applying
  * them must not advance the cursor. Resume from the last durable seq.

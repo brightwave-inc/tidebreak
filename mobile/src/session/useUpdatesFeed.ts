@@ -20,7 +20,7 @@ export function useUpdatesFeed(client: MachineClient | null): {
       return;
     }
     const conn = connectWithBackoff(
-      () => client.openSocket("/code/updates"),
+      () => client.openSocket("/updates"),
       {
         onMessage: (data) => {
           try {

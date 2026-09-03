@@ -1069,7 +1069,7 @@ describe("active turn steering", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe("http://127.0.0.1/code/sessions/session-1/steer");
+    expect(url).toBe("http://127.0.0.1/sessions/session-1/steer");
     expect(init.method).toBe("POST");
     expect(JSON.parse(String(init.body))).toEqual({
       expected_turn_id: "turn-1",
@@ -1855,7 +1855,7 @@ describe("code workspace sessions", () => {
     expect(init.method ?? "GET").toBe("GET");
   });
 
-  it("lists GET /code/sessions/{id}/turns", async () => {
+  it("lists GET /sessions/{id}/turns", async () => {
     const turn = {
       id: "turn-1",
       session_id: "sess-1",
@@ -1876,7 +1876,7 @@ describe("code workspace sessions", () => {
       turn,
     ]);
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "http://127.0.0.1/code/sessions/sess-1/turns",
+      "http://127.0.0.1/sessions/sess-1/turns",
     );
   });
 });

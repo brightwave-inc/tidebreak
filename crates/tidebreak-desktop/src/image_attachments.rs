@@ -291,7 +291,7 @@ async fn publish_code_image_bytes(
 }
 
 fn code_image_attachments_path(session_id: Uuid) -> String {
-    format!("/code/sessions/{session_id}/attachments/images")
+    format!("/sessions/{session_id}/attachments/images")
 }
 
 /// Whether this file should be attached as an image rather than imported as a

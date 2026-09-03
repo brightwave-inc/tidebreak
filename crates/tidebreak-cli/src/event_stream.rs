@@ -1,7 +1,7 @@
 //! Shared event-socket follow: subscribe, reconnect, durable fallback.
 //!
 //! Print mode and `agent-mcp` watch a chat turn over `/chats/{id}/events`.
-//! Code-mode tools watch `/code/sessions/{id}/events`. The reconnect ladder
+//! Code-mode tools watch `/sessions/{id}/events`. The reconnect ladder
 //! lives here so those surfaces stay in lockstep; each caller decides what a
 //! frame *means*.
 

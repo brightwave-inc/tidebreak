@@ -34,7 +34,7 @@ pub use tidebreak_server::wire::{
 
 use super::client::{Client, EventSocket};
 
-/// Result of `POST /code/sessions/{id}/turns`: the turn that ran on `200`, or
+/// Result of `POST /sessions/{id}/turns`: the turn that ran on `200`, or
 /// the follow-up the server parked on `202`. The server answers with one of
 /// two snapshots rather than a tagged union, so this is the one code-mode
 /// shape the client composes itself. Both arms reject unknown keys, so a
@@ -181,7 +181,7 @@ impl Client {
         message: &str,
     ) -> Result<SubmitTurnResponse> {
         self.post_json(
-            format!("{}/code/sessions/{session}/turns", self.base_url()),
+            format!("{}/sessions/{session}/turns", self.base_url()),
             &serde_json::json!({ "message": message }),
         )
         .await
@@ -191,7 +191,7 @@ impl Client {
         &self,
         session: CodeSessionId,
     ) -> Result<Vec<CodeTurnSnapshot>> {
-        self.get_json(format!("{}/code/sessions/{session}/turns", self.base_url()))
+        self.get_json(format!("{}/sessions/{session}/turns", self.base_url()))
             .await
     }
 
@@ -199,16 +199,13 @@ impl Client {
         &self,
         session: CodeSessionId,
     ) -> Result<QueuedCodeTurnsSnapshot> {
-        self.get_json(format!(
-            "{}/code/sessions/{session}/queued",
-            self.base_url()
-        ))
-        .await
+        self.get_json(format!("{}/sessions/{session}/queued", self.base_url()))
+            .await
     }
 
     pub async fn interrupt_session(&self, session: CodeSessionId) -> Result<()> {
         self.post_ok(
-            format!("{}/code/sessions/{session}/interrupt", self.base_url()),
+            format!("{}/sessions/{session}/interrupt", self.base_url()),
             &serde_json::json!({}),
         )
         .await
@@ -216,7 +213,7 @@ impl Client {
 
     pub async fn reap_session(&self, session: CodeSessionId) -> Result<CodeSessionSnapshot> {
         self.post_json(
-            format!("{}/code/sessions/{session}/reap", self.base_url()),
+            format!("{}/sessions/{session}/reap", self.base_url()),
             &serde_json::json!({}),
         )
         .await
@@ -228,7 +225,7 @@ impl Client {
         mode: PermissionMode,
     ) -> Result<CodeSessionSnapshot> {
         self.post_json(
-            format!("{}/code/sessions/{session}/mode", self.base_url()),
+            format!("{}/sessions/{session}/mode", self.base_url()),
             &serde_json::json!({ "permission_mode": mode }),
         )
         .await
@@ -239,7 +236,7 @@ impl Client {
         session: Option<CodeSessionId>,
         pending_only: bool,
     ) -> Result<Vec<CodeApprovalSnapshot>> {
-        let mut url = format!("{}/code/approvals", self.base_url());
+        let mut url = format!("{}/approvals", self.base_url());
         let mut separator = '?';
         if pending_only {
             url.push_str("?state=pending");
@@ -266,7 +263,7 @@ impl Client {
             body["feedback"] = feedback.into();
         }
         self.post_json(
-            format!("{}/code/approvals/{id}/decision", self.base_url()),
+            format!("{}/approvals/{id}/decision", self.base_url()),
             &body,
         )
         .await
@@ -378,12 +375,12 @@ impl Client {
         session: CodeSessionId,
         after: i64,
     ) -> Result<EventSocket> {
-        self.open_ws(&format!("/code/sessions/{session}/events?after={after}"))
+        self.open_ws(&format!("/sessions/{session}/events?after={after}"))
             .await
     }
 
     pub async fn open_code_updates(&self) -> Result<EventSocket> {
-        self.open_ws("/code/updates").await
+        self.open_ws("/updates").await
     }
 }
 
@@ -452,7 +449,7 @@ pub fn decode_event_frame(text: &str) -> Result<SequencedCodeEventFrame> {
         .map_err(|error| AgentError::msg(format!("bad code event frame: {error}")))
 }
 
-/// Decode one `/code/updates` notice. An unrecognized tag becomes
+/// Decode one `/updates` notice. An unrecognized tag becomes
 /// [`CodeUpdateNotice::Unknown`] rather than failing the stream.
 pub fn decode_update_notice(text: &str) -> Result<CodeUpdateNotice> {
     serde_json::from_str(text)

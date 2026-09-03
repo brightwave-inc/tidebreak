@@ -30,7 +30,7 @@ export function withCodeEventsApi<TBase extends Constructor<HttpCore>>(
       after: number,
       onFrame: (frame: SequencedCodeEventFrame) => void,
     ): WebSocket {
-      const url = `${this.baseUrl.replace(/^http/, "ws")}/code/sessions/${encodeURIComponent(sessionId)}/events?after=${after}`;
+      const url = `${this.baseUrl.replace(/^http/, "ws")}/sessions/${encodeURIComponent(sessionId)}/events?after=${after}`;
       const protocols = [WS_HANDSHAKE, `${WS_TOKEN_PREFIX}${this.token}`];
       const socket = new WebSocket(url, protocols);
       socket.onmessage = (msg) => {
@@ -47,7 +47,7 @@ export function withCodeEventsApi<TBase extends Constructor<HttpCore>>(
 
     /** Open the install-wide digest channel; auth via Sec-WebSocket-Protocol. */
     openCodeUpdates(onNotice: (notice: CodeUpdateNotice) => void): WebSocket {
-      const url = `${this.baseUrl.replace(/^http/, "ws")}/code/updates`;
+      const url = `${this.baseUrl.replace(/^http/, "ws")}/updates`;
       const protocols = [WS_HANDSHAKE, `${WS_TOKEN_PREFIX}${this.token}`];
       const socket = new WebSocket(url, protocols);
       socket.onmessage = (msg) => {
@@ -69,7 +69,7 @@ export function withCodeEventsApi<TBase extends Constructor<HttpCore>>(
       return requireParsed(
         parseCodeSession(
           await this.json(
-            `/code/sessions/${encodeURIComponent(sessionId)}/attention`,
+            `/sessions/${encodeURIComponent(sessionId)}/attention`,
             {
               method: "POST",
               headers: this.headers(true),
@@ -89,7 +89,7 @@ export function withCodeEventsApi<TBase extends Constructor<HttpCore>>(
       if (query?.state) params.set("state", query.state);
       if (query?.sessionId) params.set("session_id", query.sessionId);
       const suffix = params.size > 0 ? `?${params}` : "";
-      const body = await this.json<unknown>(`/code/approvals${suffix}`, {
+      const body = await this.json<unknown>(`/approvals${suffix}`, {
         headers: this.headers(),
       });
       return parseList(body, parseCodeApproval, "code approvals");
@@ -102,7 +102,7 @@ export function withCodeEventsApi<TBase extends Constructor<HttpCore>>(
       return requireParsed(
         parseCodeApproval(
           await this.json(
-            `/code/approvals/${encodeURIComponent(approvalId)}/decision`,
+            `/approvals/${encodeURIComponent(approvalId)}/decision`,
             {
               method: "POST",
               headers: this.headers(true),

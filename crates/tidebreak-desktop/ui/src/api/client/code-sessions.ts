@@ -63,7 +63,7 @@ export function withCodeSessionsApi<TBase extends Constructor<HttpCore>>(
 
     async getCodeSessionDebug(sessionId: string): Promise<unknown> {
       return this.json(
-        `/code/sessions/${encodeURIComponent(sessionId)}/debug`,
+        `/sessions/${encodeURIComponent(sessionId)}/debug`,
         {
           headers: this.headers(),
         },
@@ -72,7 +72,7 @@ export function withCodeSessionsApi<TBase extends Constructor<HttpCore>>(
 
     async listCodeSessionTurns(sessionId: string): Promise<CodeTurnSnapshot[]> {
       const body = await this.json<unknown>(
-        `/code/sessions/${encodeURIComponent(sessionId)}/turns`,
+        `/sessions/${encodeURIComponent(sessionId)}/turns`,
         { headers: this.headers() },
       );
       return requireParsed(parseCodeTurnList(body), "code session turns");
@@ -101,7 +101,7 @@ export function withCodeSessionsApi<TBase extends Constructor<HttpCore>>(
       return requireParsed(
         parseCodeTurnSubmission(
           await this.json(
-            `/code/sessions/${encodeURIComponent(sessionId)}/turns`,
+            `/sessions/${encodeURIComponent(sessionId)}/turns`,
             {
               method: "POST",
               headers: this.headers(true),
@@ -136,7 +136,7 @@ export function withCodeSessionsApi<TBase extends Constructor<HttpCore>>(
       return requireParsed(
         parseCodeSession(
           await this.json(
-            `/code/sessions/${encodeURIComponent(sessionId)}/mode`,
+            `/sessions/${encodeURIComponent(sessionId)}/mode`,
             {
               method: "POST",
               headers: this.headers(true),
@@ -156,7 +156,7 @@ export function withCodeSessionsApi<TBase extends Constructor<HttpCore>>(
       return requireParsed(
         parseCodeSession(
           await this.json(
-            `/code/sessions/${encodeURIComponent(sessionId)}/effort`,
+            `/sessions/${encodeURIComponent(sessionId)}/effort`,
             {
               method: "POST",
               headers: this.headers(true),
@@ -176,7 +176,7 @@ export function withCodeSessionsApi<TBase extends Constructor<HttpCore>>(
       return requireParsed(
         parseCodeSession(
           await this.json(
-            `/code/sessions/${encodeURIComponent(sessionId)}/fast-mode`,
+            `/sessions/${encodeURIComponent(sessionId)}/fast-mode`,
             {
               method: "POST",
               headers: this.headers(true),
@@ -194,7 +194,7 @@ export function withCodeSessionsApi<TBase extends Constructor<HttpCore>>(
       signal?: AbortSignal,
     ): Promise<Blob> {
       return this.blob(
-        `/code/sessions/${encodeURIComponent(sessionId)}/attachments/images/${encodeURIComponent(blobId)}`,
+        `/sessions/${encodeURIComponent(sessionId)}/attachments/images/${encodeURIComponent(blobId)}`,
         signal,
       );
     }
@@ -209,7 +209,7 @@ export function withCodeSessionsApi<TBase extends Constructor<HttpCore>>(
       guidance: string,
     ): Promise<void> {
       return this.json(
-        `/code/sessions/${encodeURIComponent(sessionId)}/steer`,
+        `/sessions/${encodeURIComponent(sessionId)}/steer`,
         {
           method: "POST",
           headers: this.headers(true),
@@ -223,7 +223,7 @@ export function withCodeSessionsApi<TBase extends Constructor<HttpCore>>(
 
     interruptCodeSession(sessionId: string): Promise<void> {
       return this.json(
-        `/code/sessions/${encodeURIComponent(sessionId)}/interrupt`,
+        `/sessions/${encodeURIComponent(sessionId)}/interrupt`,
         {
           method: "POST",
           headers: this.headers(),
@@ -236,7 +236,7 @@ export function withCodeSessionsApi<TBase extends Constructor<HttpCore>>(
       sessionId: string,
     ): Promise<{ queued: QueuedCodeTurn[]; paused: boolean }> {
       const snapshot = await this.json<{ queued: unknown[]; paused: boolean }>(
-        `/code/sessions/${encodeURIComponent(sessionId)}/queued`,
+        `/sessions/${encodeURIComponent(sessionId)}/queued`,
         { headers: this.headers() },
       );
       return {
@@ -255,7 +255,7 @@ export function withCodeSessionsApi<TBase extends Constructor<HttpCore>>(
       return requireParsed(
         parseQueuedCodeTurn(
           await this.json(
-            `/code/sessions/${encodeURIComponent(sessionId)}/queued/${encodeURIComponent(queuedId)}`,
+            `/sessions/${encodeURIComponent(sessionId)}/queued/${encodeURIComponent(queuedId)}`,
             {
               method: "PATCH",
               headers: this.headers(true),
@@ -272,7 +272,7 @@ export function withCodeSessionsApi<TBase extends Constructor<HttpCore>>(
       queuedId: string,
     ): Promise<void> {
       await this.json<unknown>(
-        `/code/sessions/${encodeURIComponent(sessionId)}/queued/${encodeURIComponent(queuedId)}`,
+        `/sessions/${encodeURIComponent(sessionId)}/queued/${encodeURIComponent(queuedId)}`,
         { method: "DELETE", headers: this.headers() },
         204,
       );
@@ -283,7 +283,7 @@ export function withCodeSessionsApi<TBase extends Constructor<HttpCore>>(
       paused: boolean,
     ): Promise<void> {
       await this.json<unknown>(
-        `/code/sessions/${encodeURIComponent(sessionId)}/queue-paused`,
+        `/sessions/${encodeURIComponent(sessionId)}/queue-paused`,
         {
           method: "PUT",
           headers: this.headers(true),
@@ -296,7 +296,7 @@ export function withCodeSessionsApi<TBase extends Constructor<HttpCore>>(
     /** Release a paused queue so the worker starts the head row. */
     async sendCodeQueuedNow(sessionId: string): Promise<void> {
       await this.json<unknown>(
-        `/code/sessions/${encodeURIComponent(sessionId)}/queued/send-now`,
+        `/sessions/${encodeURIComponent(sessionId)}/queued/send-now`,
         { method: "POST", headers: this.headers() },
         204,
       );
@@ -318,7 +318,7 @@ export function withCodeSessionsApi<TBase extends Constructor<HttpCore>>(
       return requireParsed(
         parseCodeForkTranscript(
           await this.json(
-            `/code/sessions/${encodeURIComponent(sessionId)}/fork`,
+            `/sessions/${encodeURIComponent(sessionId)}/fork`,
             {
               method: "POST",
               headers: this.headers(true),
@@ -334,7 +334,7 @@ export function withCodeSessionsApi<TBase extends Constructor<HttpCore>>(
       return requireParsed(
         parseCodeSession(
           await this.json(
-            `/code/sessions/${encodeURIComponent(sessionId)}/reap`,
+            `/sessions/${encodeURIComponent(sessionId)}/reap`,
             {
               method: "POST",
               headers: this.headers(),
