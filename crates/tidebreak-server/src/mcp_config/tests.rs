@@ -1577,7 +1577,7 @@ async fn verify_classifies_dns_resolution_failure() {
     assert!(!error.contains("Could not connect to this server. Check its URL and credentials."));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn verify_classifies_tls_handshake_failure() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -1675,7 +1675,7 @@ async fn verify_classifies_protocol_negotiation_and_quotes_first_bytes() {
     assert!(error.contains("<html>not-mcp</html>"), "{error}");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn verify_classifies_timeout_after_configured_milliseconds() {
     let app = axum::Router::new().route(
         "/mcp",

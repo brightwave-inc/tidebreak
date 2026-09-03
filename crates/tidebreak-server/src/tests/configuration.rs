@@ -4893,7 +4893,7 @@ async fn the_plugin_catalog_reports_badges_and_persists_toggles() {
 /// because the bundle brought a skill with npm pins back to life — so nothing
 /// waits for the first turn that reaches for them. A write that switches
 /// nothing on provisions nothing.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test(start_paused = true)]
 async fn enabling_a_plugin_provisions_the_host_tools_its_skills_declare() {
     #[derive(Default)]
     struct RecordingBroker {
@@ -4974,7 +4974,7 @@ async fn enabling_a_plugin_provisions_the_host_tools_its_skills_declare() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    tokio::time::advance(std::time::Duration::from_millis(200)).await;
     assert!(broker.ensured.lock().unwrap().is_empty());
 }
 
