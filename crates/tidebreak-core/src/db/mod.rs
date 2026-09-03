@@ -20,12 +20,12 @@ use crate::approval::{ApprovalDecision, ApprovalRequest, ToolApproval};
 use crate::connected_app::{ConnectedApp, ConnectedAppKind};
 use crate::deliverable::{CreateOutput, NewOutputRevision, OutputRecord, OutputRevision};
 use crate::error::{AgentError, Result};
-use crate::event::{AgentEvent, SequencedEvent};
+use crate::event::{AgentEvent, SequencedAgentEvent};
 #[cfg(test)]
 use crate::id::MessageId;
 use crate::id::{
-    AgentRunId, AppId, AppRevisionId, CallId, ChatId, DocumentId, HostRootId, OutputId,
-    OutputRevisionId, ProjectId, RootAttachmentChangeId, TurnId, TurnSteerId,
+    AgentRunId, AppId, AppRevisionId, CallId, DocumentId, HostRootId, OutputId, OutputRevisionId,
+    ProjectId, RootAttachmentChangeId, SessionId, TurnId, TurnSteerId,
 };
 use crate::image::ImageRef;
 use crate::local_app::{
@@ -38,7 +38,7 @@ use crate::model::{
     AgentRunTier, AgentRunWaitSetCandidate, BeginRootAttachmentChange, BlobRetirement,
     BlobRetirementStatus, Chat, DocumentBlob, DocumentListCursor, DocumentRecord, DocumentScope,
     DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, Message, MessageAttachment,
-    MessageDocumentAttachment, NetworkPolicy, OwnerId, Project, QueuedTurn, ReasoningEffort,
+    MessageDocumentAttachment, NetworkPolicy, OwnerId, Project, QueuedAgentTurn, ReasoningEffort,
     RootAttachmentChange, RootAttachmentChangeTerminal, SandboxToolCall, SandboxToolCallParkEntry,
     SandboxToolCallReceipt, ToolCallRecord, ToolCallResolution, TurnAdmissionLease,
     TurnAdmissionRequest, TurnCheckpointProgress, TurnFailureRetry, TurnRun, MAX_ROOT_ATTACHMENTS,
@@ -504,8 +504,8 @@ impl DbStore {
             }
         }
 
-        let has_chats = entities::code_session::Entity::find()
-            .filter(entities::code_session::Column::ProjectId.eq(id.0))
+        let has_chats = entities::session::Entity::find()
+            .filter(entities::session::Column::ProjectId.eq(id.0))
             .one(&transaction)
             .await
             .map_err(store_err)?
@@ -618,7 +618,7 @@ impl Store for DbStore {
 
     async fn move_chat_to_project(
         &self,
-        id: ChatId,
+        id: SessionId,
         project_id: Option<ProjectId>,
     ) -> Result<MoveChatOutcome> {
         ops::conversation::move_chat_to_project(self, id, project_id, None).await
@@ -627,7 +627,7 @@ impl Store for DbStore {
     async fn move_chat_to_project_scoped(
         &self,
         owner: &OwnerId,
-        id: ChatId,
+        id: SessionId,
         project_id: Option<ProjectId>,
     ) -> Result<MoveChatOutcome> {
         ops::conversation::move_chat_to_project(self, id, project_id, Some(owner)).await
@@ -769,7 +769,7 @@ impl Store for DbStore {
 
     async fn record_exec_file_snapshots(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         turn_id: TurnId,
         files: &[crate::model::ExecFileSnapshotRecord],
     ) -> Result<()> {
@@ -778,14 +778,14 @@ impl Store for DbStore {
 
     async fn list_exec_file_snapshots(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
     ) -> Result<Vec<crate::model::ExecFileSnapshot>> {
         ops::exec_file_change::list_snapshots_for_chat(self, chat_id).await
     }
 
     async fn record_exec_file_rejections(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         turn_id: TurnId,
         files: &[crate::model::ExecFileRejectionRecord],
     ) -> Result<()> {
@@ -794,7 +794,7 @@ impl Store for DbStore {
 
     async fn list_exec_file_rejections(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
     ) -> Result<Vec<crate::model::ExecFileRejection>> {
         ops::exec_file_change::list_rejections_for_chat(self, chat_id).await
     }
@@ -900,7 +900,7 @@ impl Store for DbStore {
         ops::conversation::create_chat(self, chat, None).await
     }
 
-    async fn ensure_foreground_agent_run(&self, chat_id: ChatId) -> Result<()> {
+    async fn ensure_foreground_agent_run(&self, chat_id: SessionId) -> Result<()> {
         ops::agent_run::ensure_foreground_agent_run(self, chat_id).await
     }
 
@@ -930,21 +930,21 @@ impl Store for DbStore {
             .await
     }
 
-    async fn set_chat_model(&self, id: ChatId, model: Option<String>) -> Result<()> {
+    async fn set_chat_model(&self, id: SessionId, model: Option<String>) -> Result<()> {
         ops::conversation::set_chat_model(self, id, model).await
     }
 
-    async fn set_chat_title(&self, id: ChatId, title: Option<String>) -> Result<()> {
+    async fn set_chat_title(&self, id: SessionId, title: Option<String>) -> Result<()> {
         ops::conversation::set_chat_title(self, id, title).await
     }
 
-    async fn set_chat_title_if_unset(&self, id: ChatId, title: &str) -> Result<bool> {
+    async fn set_chat_title_if_unset(&self, id: SessionId, title: &str) -> Result<bool> {
         ops::conversation::set_chat_title_if_unset(self, id, title).await
     }
 
     async fn update_chat_metadata(
         &self,
-        id: ChatId,
+        id: SessionId,
         title: Option<Option<String>>,
         model: Option<Option<String>>,
         reasoning_effort: Option<Option<ReasoningEffort>>,
@@ -964,14 +964,18 @@ impl Store for DbStore {
         .await
     }
 
-    async fn set_chat_memory_incognito(&self, id: ChatId, memory_incognito: bool) -> Result<bool> {
+    async fn set_chat_memory_incognito(
+        &self,
+        id: SessionId,
+        memory_incognito: bool,
+    ) -> Result<bool> {
         ops::conversation::set_chat_memory_incognito(self, id, memory_incognito, None).await
     }
 
     async fn set_chat_memory_incognito_scoped(
         &self,
         owner: &OwnerId,
-        id: ChatId,
+        id: SessionId,
         memory_incognito: bool,
     ) -> Result<bool> {
         ops::conversation::set_chat_memory_incognito(self, id, memory_incognito, Some(owner)).await
@@ -980,7 +984,7 @@ impl Store for DbStore {
     async fn update_chat_metadata_scoped(
         &self,
         owner: &OwnerId,
-        id: ChatId,
+        id: SessionId,
         title: Option<Option<String>>,
         model: Option<Option<String>>,
         reasoning_effort: Option<Option<ReasoningEffort>>,
@@ -1000,15 +1004,15 @@ impl Store for DbStore {
         .await
     }
 
-    async fn get_chat(&self, id: ChatId) -> Result<Option<Chat>> {
+    async fn get_chat(&self, id: SessionId) -> Result<Option<Chat>> {
         ops::conversation::get_chat(self, id, None).await
     }
 
-    async fn chat_owner(&self, id: ChatId) -> Result<Option<OwnerId>> {
+    async fn chat_owner(&self, id: SessionId) -> Result<Option<OwnerId>> {
         ops::conversation::chat_owner(self, id).await
     }
 
-    async fn get_chat_scoped(&self, owner: &OwnerId, id: ChatId) -> Result<Option<Chat>> {
+    async fn get_chat_scoped(&self, owner: &OwnerId, id: SessionId) -> Result<Option<Chat>> {
         ops::conversation::get_chat(self, id, Some(owner)).await
     }
 
@@ -1020,17 +1024,21 @@ impl Store for DbStore {
         ops::conversation::list_chats(self, Some(owner)).await
     }
 
-    async fn delete_chat(&self, id: ChatId) -> Result<DeleteChatOutcome> {
+    async fn delete_chat(&self, id: SessionId) -> Result<DeleteChatOutcome> {
         ops::conversation::delete_chat(self, id, None).await
     }
 
-    async fn delete_chat_scoped(&self, owner: &OwnerId, id: ChatId) -> Result<DeleteChatOutcome> {
+    async fn delete_chat_scoped(
+        &self,
+        owner: &OwnerId,
+        id: SessionId,
+    ) -> Result<DeleteChatOutcome> {
         ops::conversation::delete_chat(self, id, Some(owner)).await
     }
 
     async fn get_chat_transcript(
         &self,
-        id: ChatId,
+        id: SessionId,
     ) -> Result<Option<crate::storage::ChatTranscriptSnapshot>> {
         ops::conversation::get_chat_transcript(self, id, None).await
     }
@@ -1038,7 +1046,7 @@ impl Store for DbStore {
     async fn get_chat_transcript_scoped(
         &self,
         owner: &OwnerId,
-        id: ChatId,
+        id: SessionId,
     ) -> Result<Option<crate::storage::ChatTranscriptSnapshot>> {
         ops::conversation::get_chat_transcript(self, id, Some(owner)).await
     }
@@ -1068,13 +1076,13 @@ impl Store for DbStore {
         ops::output::get_output(self, id).await
     }
 
-    async fn list_outputs(&self, chat_id: ChatId, limit: u64) -> Result<Vec<OutputRecord>> {
+    async fn list_outputs(&self, chat_id: SessionId, limit: u64) -> Result<Vec<OutputRecord>> {
         ops::output::list_outputs(self, chat_id, limit).await
     }
 
     async fn find_outputs_by_filename(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         filename: &str,
     ) -> Result<Vec<OutputRecord>> {
         ops::output::find_outputs_by_filename(self, chat_id, filename).await
@@ -1113,7 +1121,11 @@ impl Store for DbStore {
         ops::app::create_app(self, None, None, request).await
     }
 
-    async fn create_app_for_chat(&self, chat_id: ChatId, request: &CreateApp) -> Result<AppRecord> {
+    async fn create_app_for_chat(
+        &self,
+        chat_id: SessionId,
+        request: &CreateApp,
+    ) -> Result<AppRecord> {
         ops::app::create_app(self, None, Some(chat_id), request).await
     }
 
@@ -1131,7 +1143,7 @@ impl Store for DbStore {
 
     async fn append_app_revision_for_chat(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         app_id: AppId,
         revision: &NewAppRevision,
     ) -> Result<AppRecord> {
@@ -1155,7 +1167,7 @@ impl Store for DbStore {
         ops::app::get_app(self, Some(owner), id).await
     }
 
-    async fn get_app_for_chat(&self, chat_id: ChatId, id: AppId) -> Result<Option<AppRecord>> {
+    async fn get_app_for_chat(&self, chat_id: SessionId, id: AppId) -> Result<Option<AppRecord>> {
         ops::app::get_app_for_chat(self, chat_id, id).await
     }
 
@@ -1193,7 +1205,7 @@ impl Store for DbStore {
 
     async fn get_app_revision_for_chat(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         id: AppRevisionId,
     ) -> Result<Option<AppRevision>> {
         ops::app::get_app_revision_for_chat(self, chat_id, id).await
@@ -1309,7 +1321,10 @@ impl Store for DbStore {
         ops::context_checkpoint::save_context_checkpoint(self, checkpoint).await
     }
 
-    async fn get_context_checkpoint(&self, chat_id: ChatId) -> Result<Option<ContextCheckpoint>> {
+    async fn get_context_checkpoint(
+        &self,
+        chat_id: SessionId,
+    ) -> Result<Option<ContextCheckpoint>> {
         ops::context_checkpoint::get_context_checkpoint(self, chat_id).await
     }
 
@@ -1355,7 +1370,7 @@ impl Store for DbStore {
     async fn accept_agent_run(
         &self,
         id: AgentRunId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         parent_id: Option<AgentRunId>,
         spawn_call_id: Option<CallId>,
         tier: AgentRunTier,
@@ -1571,7 +1586,7 @@ impl Store for DbStore {
         ops::agent_run::get_agent_run(self, id).await
     }
 
-    async fn list_agent_runs(&self, chat_id: ChatId) -> Result<Vec<AgentRun>> {
+    async fn list_agent_runs(&self, chat_id: SessionId) -> Result<Vec<AgentRun>> {
         ops::agent_run::list_agent_runs(self, chat_id).await
     }
 
@@ -1902,7 +1917,7 @@ impl Store for DbStore {
         ops::turn::get_turn(self, id).await
     }
 
-    async fn list_turns(&self, chat_id: ChatId) -> Result<Vec<TurnRun>> {
+    async fn list_turns(&self, chat_id: SessionId) -> Result<Vec<TurnRun>> {
         ops::turn::list_turns(self, chat_id).await
     }
 
@@ -1926,7 +1941,7 @@ impl Store for DbStore {
     async fn accept_turn(
         &self,
         id: TurnId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         model: &str,
         content: &str,
     ) -> Result<AcceptTurnOutcome> {
@@ -1936,7 +1951,7 @@ impl Store for DbStore {
     async fn accept_turn_with_attachments(
         &self,
         id: TurnId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         model: &str,
         content: &str,
         images: &[ImageRef],
@@ -1960,7 +1975,7 @@ impl Store for DbStore {
     async fn accept_turn_with_message_context(
         &self,
         id: TurnId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         model: &str,
         content: &str,
         images: &[ImageRef],
@@ -1985,7 +2000,7 @@ impl Store for DbStore {
     async fn accept_reserved_turn_with_message_context(
         &self,
         lease: TurnAdmissionLease,
-        chat_id: ChatId,
+        chat_id: SessionId,
         model: &str,
         content: &str,
         images: &[ImageRef],
@@ -2044,50 +2059,50 @@ impl Store for DbStore {
         ops::turn::fence_turn_lease(self, id, lease_token, now).await
     }
 
-    async fn enqueue_queued_turn(&self, queued: &QueuedTurn) -> Result<QueuedTurn> {
+    async fn enqueue_queued_turn(&self, queued: &QueuedAgentTurn) -> Result<QueuedAgentTurn> {
         ops::turn::queued::enqueue_turn(self, queued).await
     }
 
     async fn enqueue_reserved_turn(
         &self,
         lease: TurnAdmissionLease,
-        queued: &QueuedTurn,
+        queued: &QueuedAgentTurn,
     ) -> Result<ReservedQueuedTurnOutcome> {
         ops::turn::queued::enqueue_reserved_turn(self, lease, queued).await
     }
 
     async fn promote_queued_turn_with_message_context(
         &self,
-        expected: &QueuedTurn,
+        expected: &QueuedAgentTurn,
         model: &str,
         images: &[ImageRef],
     ) -> Result<PromoteQueuedTurnOutcome> {
         ops::turn::queued::promote_turn(self, expected, model, images).await
     }
 
-    async fn delete_queued_turn_if_current(&self, expected: &QueuedTurn) -> Result<bool> {
+    async fn delete_queued_turn_if_current(&self, expected: &QueuedAgentTurn) -> Result<bool> {
         ops::turn::queued::delete_turn_if_current(self, expected).await
     }
 
-    async fn list_queued_turns(&self, chat_id: ChatId) -> Result<Vec<QueuedTurn>> {
+    async fn list_queued_turns(&self, chat_id: SessionId) -> Result<Vec<QueuedAgentTurn>> {
         ops::turn::queued::list_queued_turns(self, chat_id).await
     }
 
-    async fn chats_with_queued_turns(&self) -> Result<Vec<ChatId>> {
+    async fn chats_with_queued_turns(&self) -> Result<Vec<SessionId>> {
         ops::turn::queued::chats_with_queued_turns(self).await
     }
 
-    async fn delete_queued_turn(&self, chat_id: ChatId, id: TurnId) -> Result<bool> {
+    async fn delete_queued_turn(&self, chat_id: SessionId, id: TurnId) -> Result<bool> {
         ops::turn::queued::delete_queued_turn(self, chat_id, id).await
     }
 
     async fn update_queued_turn(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         id: TurnId,
         content: Option<&str>,
         position: Option<i32>,
-    ) -> Result<Option<QueuedTurn>> {
+    ) -> Result<Option<QueuedAgentTurn>> {
         ops::turn::queued::update_queued_turn(self, chat_id, id, content, position).await
     }
 
@@ -2095,7 +2110,7 @@ impl Store for DbStore {
         &self,
         id: TurnSteerId,
         turn_id: TurnId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         content: &str,
         interrupt: bool,
     ) -> Result<AcceptTurnSteerOutcome> {
@@ -2108,7 +2123,7 @@ impl Store for DbStore {
         &self,
         id: TurnSteerId,
         turn_id: TurnId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         content: &str,
         invoked_skills: &[String],
         interrupt: bool,
@@ -2419,29 +2434,29 @@ impl Store for DbStore {
             .await
     }
 
-    async fn list_messages(&self, chat_id: ChatId) -> Result<Vec<Message>> {
+    async fn list_messages(&self, chat_id: SessionId) -> Result<Vec<Message>> {
         ops::conversation::list_messages(self, chat_id).await
     }
 
     async fn list_cancelled_output_message_ids(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
     ) -> Result<Vec<crate::MessageId>> {
         ops::conversation::list_cancelled_output_message_ids(self, chat_id).await
     }
 
-    async fn list_message_attachments(&self, chat_id: ChatId) -> Result<Vec<MessageAttachment>> {
+    async fn list_message_attachments(&self, chat_id: SessionId) -> Result<Vec<MessageAttachment>> {
         ops::message_attachment::list_for_chat(self, chat_id).await
     }
 
-    async fn publish_chat_image(&self, chat_id: ChatId, image: &ImageRef) -> Result<bool> {
+    async fn publish_chat_image(&self, chat_id: SessionId, image: &ImageRef) -> Result<bool> {
         ops::chat_image_publication::publish(self, chat_id, image, None).await
     }
 
     async fn publish_chat_image_scoped(
         &self,
         owner: &OwnerId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         image: &ImageRef,
     ) -> Result<bool> {
         ops::chat_image_publication::publish(self, chat_id, image, Some(owner)).await
@@ -2450,7 +2465,7 @@ impl Store for DbStore {
     async fn publish_code_session_image(
         &self,
         owner: &OwnerId,
-        session_id: crate::CodeSessionId,
+        session_id: crate::SessionId,
         image: &crate::ImageRef,
         created_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<bool> {
@@ -2460,7 +2475,7 @@ impl Store for DbStore {
     async fn get_published_code_session_image(
         &self,
         owner: &OwnerId,
-        session_id: crate::CodeSessionId,
+        session_id: crate::SessionId,
         blob_id: uuid::Uuid,
     ) -> Result<Option<crate::ImageRef>> {
         ops::code::get_published_session_image(self, owner, session_id, blob_id).await
@@ -2468,7 +2483,7 @@ impl Store for DbStore {
 
     async fn get_published_chat_image(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         blob_id: uuid::Uuid,
     ) -> Result<Option<ImageRef>> {
         ops::chat_image_publication::get(self, chat_id, blob_id).await
@@ -2476,7 +2491,7 @@ impl Store for DbStore {
 
     async fn list_message_document_attachments(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
     ) -> Result<Vec<MessageDocumentAttachment>> {
         ops::message_document_attachment::list_for_chat(self, chat_id).await
     }
@@ -2521,7 +2536,7 @@ impl Store for DbStore {
 
     async fn decide_tool_call_approval(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         call_id: CallId,
         decision: &ApprovalDecision,
         decided_at: chrono::DateTime<Utc>,
@@ -2531,7 +2546,7 @@ impl Store for DbStore {
 
     async fn decide_tool_call_approval_with_grant(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         call_id: CallId,
         decision: &ApprovalDecision,
         grant: &crate::StandingGrant,
@@ -2546,7 +2561,7 @@ impl Store for DbStore {
 
     async fn list_pending_tool_call_approvals(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         limit: u64,
     ) -> Result<Vec<ToolApproval>> {
         ops::approval::list_pending(self, chat_id, limit).await
@@ -2558,7 +2573,7 @@ impl Store for DbStore {
 
     async fn resolve_tool_call_approval_from_judge(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         call_id: CallId,
         approved: bool,
     ) -> Result<JudgeVerdictOutcome> {
@@ -2591,7 +2606,7 @@ impl Store for DbStore {
     async fn claim_client_tool_call(
         &self,
         id: CallId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         executor_id: uuid::Uuid,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<Utc>,
@@ -2612,7 +2627,7 @@ impl Store for DbStore {
     async fn heartbeat_client_tool_call(
         &self,
         id: CallId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<Utc>,
         lease_expires_at: chrono::DateTime<Utc>,
@@ -2658,7 +2673,7 @@ impl Store for DbStore {
     async fn resolve_claimed_server_tool_call_with_artifacts(
         &self,
         id: CallId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         turn_id: TurnId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<Utc>,
@@ -2684,7 +2699,7 @@ impl Store for DbStore {
     async fn resolve_claimed_server_tool_call(
         &self,
         id: CallId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         turn_id: TurnId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<Utc>,
@@ -2709,7 +2724,7 @@ impl Store for DbStore {
     async fn abandon_inherited_server_tool_call(
         &self,
         id: CallId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         turn_id: TurnId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<Utc>,
@@ -2732,7 +2747,7 @@ impl Store for DbStore {
     async fn resolve_client_tool_call_and_append_event(
         &self,
         id: CallId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<Utc>,
         resolution: &ToolCallResolution,
@@ -2756,7 +2771,7 @@ impl Store for DbStore {
     async fn resolve_client_tool_call_and_append_event_with_rows(
         &self,
         id: CallId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<Utc>,
         resolution: &ToolCallResolution,
@@ -2781,7 +2796,7 @@ impl Store for DbStore {
     async fn resolve_expired_client_tool_call_and_append_event(
         &self,
         id: CallId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<Utc>,
         resolution: &ToolCallResolution,
@@ -2805,7 +2820,7 @@ impl Store for DbStore {
     async fn resolve_expired_client_tool_call_and_append_event_with_rows(
         &self,
         id: CallId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<Utc>,
         resolution: &ToolCallResolution,
@@ -2827,13 +2842,16 @@ impl Store for DbStore {
         .await
     }
 
-    async fn list_pending_client_tool_calls(&self, chat_id: ChatId) -> Result<Vec<ToolCallRecord>> {
+    async fn list_pending_client_tool_calls(
+        &self,
+        chat_id: SessionId,
+    ) -> Result<Vec<ToolCallRecord>> {
         ops::client_execution::list_pending_client_tool_calls(self, chat_id).await
     }
 
     async fn list_pending_user_questions(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
     ) -> Result<Vec<crate::PendingUserQuestions>> {
         ops::user_question::list_pending(self, chat_id).await
     }
@@ -2855,7 +2873,7 @@ impl Store for DbStore {
 
     async fn record_work_turn_notification(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         turn_id: TurnId,
         kind: crate::NotificationKind,
     ) -> Result<Option<crate::Notification>> {
@@ -2896,7 +2914,7 @@ impl Store for DbStore {
         &self,
         owner: &OwnerId,
         items: &[crate::InboxItem],
-    ) -> Result<std::collections::HashMap<crate::ChatId, crate::Attention>> {
+    ) -> Result<std::collections::HashMap<crate::SessionId, crate::Attention>> {
         ops::chat_attention::chat_attention(self, owner, items).await
     }
 
@@ -2910,14 +2928,14 @@ impl Store for DbStore {
 
     async fn list_pending_plan_approvals(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
     ) -> Result<Vec<crate::PendingPlanApproval>> {
         ops::plan::list_pending(self, chat_id).await
     }
 
     async fn update_task_plan(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         call_id: CallId,
         steps: &[crate::TaskPlanStep],
         updated_at: chrono::DateTime<Utc>,
@@ -2925,7 +2943,7 @@ impl Store for DbStore {
         ops::task_plan::upsert_for_chat(self, chat_id, call_id, steps, updated_at).await
     }
 
-    async fn get_task_plan(&self, chat_id: ChatId) -> Result<Option<crate::TaskPlan>> {
+    async fn get_task_plan(&self, chat_id: SessionId) -> Result<Option<crate::TaskPlan>> {
         ops::task_plan::get_for_chat(self, chat_id).await
     }
 
@@ -2937,7 +2955,7 @@ impl Store for DbStore {
         ops::plan::decide(self, request, decided_at).await
     }
 
-    async fn list_tool_calls(&self, chat_id: ChatId) -> Result<Vec<ToolCallRecord>> {
+    async fn list_tool_calls(&self, chat_id: SessionId) -> Result<Vec<ToolCallRecord>> {
         ops::conversation::list_tool_calls(self, chat_id).await
     }
 
@@ -2974,17 +2992,17 @@ impl Store for DbStore {
         Ok(())
     }
 
-    async fn append_event(&self, chat_id: ChatId, event: &AgentEvent) -> Result<i64> {
+    async fn append_event(&self, chat_id: SessionId, event: &AgentEvent) -> Result<i64> {
         ops::conversation::append_event(self, chat_id, event).await
     }
 
-    async fn append_chat_event(&self, chat_id: ChatId, event: &AgentEvent) -> Result<i64> {
+    async fn append_chat_event(&self, chat_id: SessionId, event: &AgentEvent) -> Result<i64> {
         ops::conversation::append_chat_event(self, chat_id, event).await
     }
 
     async fn append_turn_event(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         turn_id: TurnId,
         lease_token: uuid::Uuid,
         attempt_event_ordinal: i32,
@@ -3005,7 +3023,7 @@ impl Store for DbStore {
 
     async fn append_turn_events(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         turn_id: TurnId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<Utc>,
@@ -3020,7 +3038,7 @@ impl Store for DbStore {
         turn_id: TurnId,
         lease_token: uuid::Uuid,
         event: &AgentEvent,
-    ) -> Result<Option<SequencedEvent>> {
+    ) -> Result<Option<SequencedAgentEvent>> {
         ops::turn::recover_exact_terminal_event(self, turn_id, lease_token, event).await
     }
 
@@ -3031,7 +3049,7 @@ impl Store for DbStore {
         output: &Message,
         citations: &[crate::AssistantCitationInput],
         event: &AgentEvent,
-    ) -> Result<Option<SequencedEvent>> {
+    ) -> Result<Option<SequencedAgentEvent>> {
         ops::turn::recover_exact_completed_turn_event(
             self,
             turn_id,
@@ -3043,15 +3061,19 @@ impl Store for DbStore {
         .await
     }
 
-    async fn list_events(&self, chat_id: ChatId, after: i64) -> Result<Vec<SequencedEvent>> {
+    async fn list_events(
+        &self,
+        chat_id: SessionId,
+        after: i64,
+    ) -> Result<Vec<SequencedAgentEvent>> {
         ops::conversation::list_events(self, chat_id, after).await
     }
 
     async fn list_events_for_call(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         call_id: CallId,
-    ) -> Result<Vec<SequencedEvent>> {
+    ) -> Result<Vec<SequencedAgentEvent>> {
         ops::conversation::list_events_for_call(self, chat_id, call_id).await
     }
 
@@ -3117,14 +3139,14 @@ impl Store for DbStore {
 /// lock, so a present parent cannot disappear underneath this read.
 pub(in crate::db) async fn document_scope_owner_on<C>(
     conn: &C,
-    chat_id: Option<ChatId>,
+    chat_id: Option<SessionId>,
     project_id: Option<ProjectId>,
 ) -> Result<Option<String>>
 where
     C: ConnectionTrait,
 {
     if let Some(chat_id) = chat_id {
-        let chat = entities::code_session::Entity::find_by_id(chat_id.0)
+        let chat = entities::session::Entity::find_by_id(chat_id.0)
             .one(conn)
             .await
             .map_err(store_err)?
@@ -3364,7 +3386,7 @@ fn source_blob_from_model(
 fn document_from_model(model: entities::document::Model) -> Result<DocumentRecord> {
     Ok(DocumentRecord {
         id: DocumentId(model.id),
-        chat_id: model.chat_id.map(ChatId),
+        chat_id: model.chat_id.map(SessionId),
         project_id: model.project_id.map(ProjectId),
         origin_uri: model.origin_uri,
         media_type: model.media_type,
@@ -3383,7 +3405,7 @@ fn document_from_model(model: entities::document::Model) -> Result<DocumentRecor
 fn document_summary_from_row(row: DocumentSummaryRow) -> Result<DocumentSummaryRecord> {
     Ok(DocumentSummaryRecord {
         id: DocumentId(row.id),
-        chat_id: row.chat_id.map(ChatId),
+        chat_id: row.chat_id.map(SessionId),
         project_id: row.project_id.map(ProjectId),
         origin_uri: row.origin_uri,
         media_type: row.media_type,

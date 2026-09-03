@@ -6,7 +6,7 @@ use sea_orm::{
 };
 
 use crate::error::{AgentError, Result};
-use crate::id::{ChatId, DocumentId, MessageId, TurnId};
+use crate::id::{DocumentId, MessageId, SessionId, TurnId};
 use crate::model::{MessageDocumentAttachment, MAX_MESSAGE_ATTACHMENTS};
 
 use super::super::{entities, source_blob_from_model, store_err, DbStore};
@@ -35,7 +35,7 @@ pub(in crate::db) fn validate_count(images: usize, documents: &[DocumentId]) -> 
 
 pub(in crate::db) async fn insert_on<C>(
     conn: &C,
-    chat_id: ChatId,
+    chat_id: SessionId,
     turn_id: TurnId,
     message_id: MessageId,
     documents: &[DocumentId],
@@ -48,7 +48,7 @@ where
         return Ok(Vec::new());
     }
 
-    let owner = entities::code_session::Entity::find_by_id(chat_id.0)
+    let owner = entities::session::Entity::find_by_id(chat_id.0)
         .one(conn)
         .await
         .map_err(store_err)?
@@ -121,22 +121,22 @@ where
 
 pub(in crate::db) async fn list_for_chat(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
 ) -> Result<Vec<MessageDocumentAttachment>> {
     list_for_chat_on(&store.conn, chat_id).await
 }
 
 pub(in crate::db) async fn list_for_chat_on<C>(
     conn: &C,
-    chat_id: ChatId,
+    chat_id: SessionId,
 ) -> Result<Vec<MessageDocumentAttachment>>
 where
     C: ConnectionTrait,
 {
-    let turn_ids = entities::code_turn::Entity::find()
+    let turn_ids = entities::turn::Entity::find()
         .select_only()
-        .column(entities::code_turn::Column::Id)
-        .filter(entities::code_turn::Column::SessionId.eq(chat_id.0))
+        .column(entities::turn::Column::Id)
+        .filter(entities::turn::Column::SessionId.eq(chat_id.0))
         .into_tuple::<uuid::Uuid>()
         .all(conn)
         .await
@@ -193,7 +193,7 @@ where
 fn from_models(
     row: entities::code_turn_document_attachment::Model,
     document: entities::document::Model,
-    chat_id: ChatId,
+    chat_id: SessionId,
 ) -> Result<MessageDocumentAttachment> {
     let source_blob = source_blob_from_model(
         document.source_blob_id,

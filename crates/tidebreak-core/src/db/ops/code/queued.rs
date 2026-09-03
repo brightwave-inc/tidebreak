@@ -15,7 +15,7 @@ use sea_orm::{
     QuerySelect, Set, TransactionTrait,
 };
 
-use crate::code::{CodeQueuedTurn, CodeSessionId, CodeTurn, CodeTurnId};
+use crate::code::{QueuedTurn, SessionId, Turn, TurnId};
 use crate::error::{AgentError, Result};
 use crate::OwnerId;
 
@@ -25,10 +25,10 @@ use super::acquire_code_session_write_lock;
 
 pub(super) fn queued_turn_from_model(
     model: entities::code_queued_turn::Model,
-) -> Result<CodeQueuedTurn> {
-    Ok(CodeQueuedTurn {
-        id: CodeTurnId(model.id),
-        session_id: CodeSessionId(model.session_id),
+) -> Result<QueuedTurn> {
+    Ok(QueuedTurn {
+        id: TurnId(model.id),
+        session_id: SessionId(model.session_id),
         message: model.message,
         attachments: serde_json::from_str(&model.attachments_json).map_err(|_| {
             AgentError::Store("invalid stored code queued-turn attachment list".into())
@@ -39,11 +39,7 @@ pub(super) fn queued_turn_from_model(
     })
 }
 
-async fn list_on<C>(
-    conn: &C,
-    owner: &OwnerId,
-    session_id: CodeSessionId,
-) -> Result<Vec<CodeQueuedTurn>>
+async fn list_on<C>(conn: &C, owner: &OwnerId, session_id: SessionId) -> Result<Vec<QueuedTurn>>
 where
     C: ConnectionTrait,
 {
@@ -64,8 +60,8 @@ where
 pub async fn list_queued_turns(
     store: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
-) -> Result<Vec<CodeQueuedTurn>> {
+    session_id: SessionId,
+) -> Result<Vec<QueuedTurn>> {
     list_on(&store.conn, owner, session_id).await
 }
 
@@ -76,7 +72,7 @@ pub async fn list_queued_turns(
 /// session row on the machine.
 pub async fn sessions_with_queued_turns_all_owners(
     store: &DbStore,
-) -> Result<Vec<(OwnerId, CodeSessionId)>> {
+) -> Result<Vec<(OwnerId, SessionId)>> {
     entities::code_queued_turn::Entity::find()
         .select_only()
         .column(entities::code_queued_turn::Column::Owner)
@@ -87,7 +83,7 @@ pub async fn sessions_with_queued_turns_all_owners(
         .await
         .map_err(store_err)?
         .into_iter()
-        .map(|(owner, session_id)| Ok((OwnerId::new(&owner)?, CodeSessionId(session_id))))
+        .map(|(owner, session_id)| Ok((OwnerId::new(&owner)?, SessionId(session_id))))
         .collect()
 }
 
@@ -95,8 +91,8 @@ pub async fn sessions_with_queued_turns_all_owners(
 pub async fn queued_turn_head(
     store: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
-) -> Result<Option<CodeQueuedTurn>> {
+    session_id: SessionId,
+) -> Result<Option<QueuedTurn>> {
     entities::code_queued_turn::Entity::find()
         .filter(entities::code_queued_turn::Column::Owner.eq(owner.as_str()))
         .filter(entities::code_queued_turn::Column::SessionId.eq(session_id.0))
@@ -114,8 +110,8 @@ pub async fn queued_turn_head(
 pub async fn enqueue_queued_turn(
     store: &DbStore,
     owner: &OwnerId,
-    queued: &CodeQueuedTurn,
-) -> Result<CodeQueuedTurn> {
+    queued: &QueuedTurn,
+) -> Result<QueuedTurn> {
     if queued.id.0.is_nil() || queued.message.trim().is_empty() || queued.message.contains('\0') {
         return Err(AgentError::Store("invalid code queued turn".into()));
     }
@@ -127,11 +123,11 @@ pub async fn enqueue_queued_turn(
         )));
     }
     let rows = list_on(&transaction, owner, queued.session_id).await?;
-    if rows.len() >= CodeQueuedTurn::MAX_PER_SESSION {
+    if rows.len() >= QueuedTurn::MAX_PER_SESSION {
         transaction.commit().await.map_err(store_err)?;
         return Err(AgentError::Store(format!(
             "a session may queue at most {} messages",
-            CodeQueuedTurn::MAX_PER_SESSION
+            QueuedTurn::MAX_PER_SESSION
         )));
     }
     let position = rows.last().map_or(0, |last| last.position + 1);
@@ -171,8 +167,8 @@ pub async fn enqueue_queued_turn(
 pub async fn promote_queued_turn(
     store: &DbStore,
     owner: &OwnerId,
-    expected: &CodeQueuedTurn,
-    turn: &CodeTurn,
+    expected: &QueuedTurn,
+    turn: &Turn,
 ) -> Result<bool> {
     let transaction = store.conn.begin().await.map_err(store_err)?;
     if !acquire_code_session_write_lock(&transaction, expected.session_id).await? {
@@ -210,8 +206,8 @@ pub async fn promote_queued_turn(
 pub async fn promote_moved_queued_turn(
     store: &DbStore,
     owner: &OwnerId,
-    expected: &CodeQueuedTurn,
-    turn: &CodeTurn,
+    expected: &QueuedTurn,
+    turn: &Turn,
 ) -> Result<bool> {
     let transaction = store.conn.begin().await.map_err(store_err)?;
     if !acquire_code_session_write_lock(&transaction, expected.session_id).await? {
@@ -241,8 +237,8 @@ pub async fn promote_moved_queued_turn(
 pub async fn delete_queued_turn(
     store: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
-    id: CodeTurnId,
+    session_id: SessionId,
+    id: TurnId,
 ) -> Result<bool> {
     let deleted = entities::code_queued_turn::Entity::delete_many()
         .filter(entities::code_queued_turn::Column::Id.eq(id.0))
@@ -259,7 +255,7 @@ pub async fn delete_queued_turn(
 pub async fn delete_session_queued_turns(
     store: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
 ) -> Result<u64> {
     let deleted = entities::code_queued_turn::Entity::delete_many()
         .filter(entities::code_queued_turn::Column::Owner.eq(owner.as_str()))
@@ -275,11 +271,11 @@ pub async fn delete_session_queued_turns(
 pub async fn update_queued_turn(
     store: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
-    id: CodeTurnId,
+    session_id: SessionId,
+    id: TurnId,
     message: Option<&str>,
     position: Option<i32>,
-) -> Result<Option<CodeQueuedTurn>> {
+) -> Result<Option<QueuedTurn>> {
     if let Some(message) = message {
         if message.trim().is_empty() || message.contains('\0') {
             return Err(AgentError::Store("invalid code queued-turn message".into()));
@@ -335,8 +331,8 @@ pub async fn update_queued_turn(
     Ok(Some(updated))
 }
 
-fn queue_paused_setting(session_id: CodeSessionId) -> String {
-    format!("code.sessions.{session_id}.queue_paused")
+fn queue_paused_setting(session_id: SessionId) -> String {
+    format!("sessions.{session_id}.queue_paused")
 }
 
 /// Whether promotion is paused for this session. Absent reads as running,
@@ -345,11 +341,7 @@ fn queue_paused_setting(session_id: CodeSessionId) -> String {
 /// The key lives in the settings table, which carries no owner column, so
 /// the owner check anchors on the session row: a foreign owner reads the
 /// default and observes nothing.
-pub async fn queue_paused(
-    store: &DbStore,
-    owner: &OwnerId,
-    session_id: CodeSessionId,
-) -> Result<bool> {
+pub async fn queue_paused(store: &DbStore, owner: &OwnerId, session_id: SessionId) -> Result<bool> {
     if super::session::get_session(store, owner, session_id)
         .await?
         .is_none()
@@ -372,7 +364,7 @@ pub async fn queue_paused(
 pub async fn set_queue_paused(
     store: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     paused: bool,
 ) -> Result<()> {
     if super::session::get_session(store, owner, session_id)

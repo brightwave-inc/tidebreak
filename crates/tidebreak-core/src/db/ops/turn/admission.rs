@@ -1,5 +1,5 @@
 //! Request validation for turn identity. The admission ledger is retired;
-//! identity lives on `code_turn.fingerprint`.
+//! identity lives on `turn.fingerprint`.
 
 use sea_orm::EntityTrait;
 
@@ -50,7 +50,7 @@ pub(in crate::db) async fn begin(
     // An exact retry must not consult the model catalog. The fingerprint is
     // the caller request; if it already committed, the route returns Accepted
     // before it tries to resolve a provider that may have gone away.
-    if let Some(existing) = entities::code_turn::Entity::find_by_id(request.id.0)
+    if let Some(existing) = entities::turn::Entity::find_by_id(request.id.0)
         .one(&store.conn)
         .await
         .map_err(store_err)?

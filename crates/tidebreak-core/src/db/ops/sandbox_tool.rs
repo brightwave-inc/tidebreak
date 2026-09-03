@@ -10,7 +10,7 @@ use crate::agent_tools::{
     SANDBOX_READ_DELEGATED_FILE_TOOL,
 };
 use crate::error::{AgentError, Result};
-use crate::id::{AgentRunId, CallId, ChatId, HostRootId};
+use crate::id::{AgentRunId, CallId, HostRootId, SessionId};
 use crate::model::{
     AgentRunStatus, AgentRunTier, DelegatedFileReadClaim, SandboxToolCall,
     SandboxToolCallParkEntry, SandboxToolCallReceipt, SandboxToolCallRequest,
@@ -379,7 +379,7 @@ pub(in crate::db) async fn claim_delegated_file_read(
     let transaction = store.conn.begin().await.map_err(store_err)?;
     // Attachment mutation and sandbox scheduling share this established order.
     acquire_agent_run_claim_lock(&transaction).await?;
-    if !acquire_chat_write_lock(&transaction, ChatId(initial.chat_id)).await? {
+    if !acquire_chat_write_lock(&transaction, SessionId(initial.chat_id)).await? {
         if let Some(current) = entities::sandbox_tool_call::Entity::find_by_id(id.0)
             .one(&transaction)
             .await
@@ -415,7 +415,7 @@ pub(in crate::db) async fn claim_delegated_file_read(
     let Some(resource) = delegated_file_resource_on(
         &transaction,
         AgentRunId(existing.agent_run_id),
-        ChatId(existing.chat_id),
+        SessionId(existing.chat_id),
     )
     .await?
     .filter(|_| validate_sandbox_read_delegated_file_arguments(&existing.arguments)) else {
@@ -660,7 +660,7 @@ pub(in crate::db) async fn heartbeat_delegated_file_read(
     }
     let transaction = store.conn.begin().await.map_err(store_err)?;
     acquire_agent_run_claim_lock(&transaction).await?;
-    if !acquire_chat_write_lock(&transaction, ChatId(initial.chat_id)).await? {
+    if !acquire_chat_write_lock(&transaction, SessionId(initial.chat_id)).await? {
         if let Some(current) = entities::sandbox_tool_call::Entity::find_by_id(id.0)
             .one(&transaction)
             .await
@@ -696,7 +696,7 @@ pub(in crate::db) async fn heartbeat_delegated_file_read(
     if delegated_file_resource_on(
         &transaction,
         AgentRunId(call.agent_run_id),
-        ChatId(call.chat_id),
+        SessionId(call.chat_id),
     )
     .await?
     .filter(|_| validate_sandbox_read_delegated_file_arguments(&call.arguments))
@@ -975,7 +975,7 @@ pub(in crate::db) async fn resolve_delegated_file_read(
             ResolveSandboxToolCallOutcome::AlreadyTerminal
         });
     }
-    if !acquire_chat_write_lock(&transaction, ChatId(scope.chat_id)).await? {
+    if !acquire_chat_write_lock(&transaction, SessionId(scope.chat_id)).await? {
         if let Some(current) = entities::sandbox_tool_call::Entity::find_by_id(id.0)
             .one(&transaction)
             .await
@@ -1018,7 +1018,7 @@ pub(in crate::db) async fn resolve_delegated_file_read(
     if delegated_file_resource_on(
         &transaction,
         AgentRunId(call.agent_run_id),
-        ChatId(call.chat_id),
+        SessionId(call.chat_id),
     )
     .await?
     .filter(|_| validate_sandbox_read_delegated_file_arguments(&call.arguments))
@@ -1424,7 +1424,7 @@ where
 async fn delegated_file_resource_on<C>(
     conn: &C,
     agent_run_id: AgentRunId,
-    chat_id: ChatId,
+    chat_id: SessionId,
 ) -> Result<Option<SandboxAgentFileResource>>
 where
     C: ConnectionTrait,
@@ -1551,7 +1551,7 @@ fn call_from_model(model: entities::sandbox_tool_call::Model) -> Result<SandboxT
     Ok(SandboxToolCall {
         id: CallId(model.id),
         agent_run_id: AgentRunId(model.agent_run_id),
-        chat_id: crate::id::ChatId(model.chat_id),
+        chat_id: crate::id::SessionId(model.chat_id),
         provider_id: model.provider_id,
         name: model.name,
         arguments: model.arguments,

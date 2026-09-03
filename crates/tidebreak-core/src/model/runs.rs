@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::id::{ChatId, HostRootId, ProjectId};
+use crate::id::{HostRootId, ProjectId, SessionId};
 
 use super::chat_settings::{NetworkPolicy, ReasoningEffort};
 use super::identity::{
@@ -18,7 +18,7 @@ use crate::PermissionMode;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 pub struct Chat {
     /// Stable identifier.
-    pub id: ChatId,
+    pub id: SessionId,
     /// The project this chat belongs to, or `None` for a loose (projectless) chat.
     pub project_id: Option<ProjectId>,
     /// Human-facing title; `None` until one is set or derived.
@@ -139,7 +139,7 @@ pub struct AgentRun {
     /// Stable idempotency identity.
     pub id: crate::id::AgentRunId,
     /// Conversation that owns this run and its events.
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     /// Foreground coordinator that owns this run. Always absent at depth zero.
     pub parent_id: Option<crate::id::AgentRunId>,
     /// Exact tool-call identity that requested a sandbox child.
@@ -305,7 +305,7 @@ pub struct SandboxAgentAdmission {
     /// Exact foreground turn that admitted the child.
     pub origin_turn_id: crate::id::TurnId,
     /// Conversation shared by the origin turn, parent, and child.
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     /// Exact model call that requested the child.
     pub spawn_call_id: crate::id::CallId,
     /// Optional exact file identity delegated only to this child.
@@ -329,7 +329,7 @@ pub struct SandboxSpawnCheckpoint {
     pub child_run_id: crate::id::AgentRunId,
     pub parent_run_id: crate::id::AgentRunId,
     pub origin_turn_id: crate::id::TurnId,
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     pub lease_token: Uuid,
     pub attempt_count: i32,
     pub claim_count: i32,
@@ -554,7 +554,7 @@ pub struct AgentRunInboxEntry {
     /// Completed sandbox child. One child has exactly one inbox entry.
     pub child_run_id: crate::id::AgentRunId,
     /// Chat shared by parent and child.
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     /// Exact result receipt that was delivered.
     pub result: AgentRunResult,
     /// Durable continuation state for this exact child result.
@@ -737,7 +737,7 @@ impl AgentRunStatus {
 pub struct SandboxToolCallRequest {
     pub id: crate::id::CallId,
     pub agent_run_id: crate::id::AgentRunId,
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     pub provider_id: String,
     pub name: String,
     pub arguments: serde_json::Value,
@@ -813,7 +813,7 @@ impl SandboxToolCallStatus {
 pub struct SandboxToolCall {
     pub id: crate::id::CallId,
     pub agent_run_id: crate::id::AgentRunId,
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     pub provider_id: String,
     pub name: String,
     pub arguments: serde_json::Value,

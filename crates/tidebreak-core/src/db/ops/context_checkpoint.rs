@@ -9,7 +9,7 @@ use sea_orm::{
 };
 
 use crate::error::{AgentError, Result};
-use crate::id::{ChatId, MessageId};
+use crate::id::{MessageId, SessionId};
 use crate::semantic_checkpoint::{ContextCheckpoint, SaveContextCheckpointOutcome};
 
 use super::super::{entities, store_err, DbStore};
@@ -96,14 +96,14 @@ pub(in crate::db) async fn save_context_checkpoint(
 
 pub(in crate::db) async fn get_context_checkpoint(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
 ) -> Result<Option<ContextCheckpoint>> {
     find_context_checkpoint_on(&store.conn, chat_id).await
 }
 
 async fn find_context_checkpoint_model_on<C>(
     conn: &C,
-    chat_id: ChatId,
+    chat_id: SessionId,
 ) -> Result<Option<entities::context_checkpoint::Model>>
 where
     C: ConnectionTrait,
@@ -116,7 +116,7 @@ where
 
 async fn find_context_checkpoint_on<C>(
     conn: &C,
-    chat_id: ChatId,
+    chat_id: SessionId,
 ) -> Result<Option<ContextCheckpoint>>
 where
     C: ConnectionTrait,
@@ -127,7 +127,7 @@ where
         .transpose()
 }
 
-async fn require_context_checkpoint_on<C>(conn: &C, chat_id: ChatId) -> Result<ContextCheckpoint>
+async fn require_context_checkpoint_on<C>(conn: &C, chat_id: SessionId) -> Result<ContextCheckpoint>
 where
     C: ConnectionTrait,
 {
@@ -142,7 +142,7 @@ fn context_checkpoint_from_model(
     model: entities::context_checkpoint::Model,
 ) -> Result<ContextCheckpoint> {
     let checkpoint = ContextCheckpoint {
-        chat_id: ChatId(model.chat_id),
+        chat_id: SessionId(model.chat_id),
         source_message_id: MessageId(model.source_message_id),
         format_version: u16::try_from(model.format_version).map_err(|_| {
             AgentError::Store("stored context checkpoint format version is outside u16".into())

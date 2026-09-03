@@ -112,7 +112,7 @@ async fn chats_and_messages_roundtrip() {
 
     assert_eq!(store.get_chat(chat.id).await.unwrap().as_ref(), Some(&chat));
     assert_eq!(store.list_chats().await.unwrap(), vec![chat.clone()]);
-    assert_eq!(store.get_chat(ChatId::new()).await.unwrap(), None);
+    assert_eq!(store.get_chat(SessionId::new()).await.unwrap(), None);
 
     let msg = Message {
         id: MessageId::new(),

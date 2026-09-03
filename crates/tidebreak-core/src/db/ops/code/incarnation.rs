@@ -20,8 +20,7 @@ use sea_orm::{
 };
 
 use crate::code::{
-    CodeIncarnationId, CodeSessionId, CodeSessionIncarnation, IncarnationAdmission,
-    IncarnationState,
+    CodeIncarnationId, CodeSessionIncarnation, IncarnationAdmission, IncarnationState, SessionId,
 };
 use crate::error::{AgentError, Result};
 use crate::OwnerId;
@@ -36,7 +35,7 @@ fn incarnation_from_model(
     Ok(CodeSessionIncarnation {
         id: CodeIncarnationId(model.id),
         owner: OwnerId::new(&model.owner)?,
-        session_id: CodeSessionId(model.session_id),
+        session_id: SessionId(model.session_id),
         incarnation: model.incarnation,
         state: IncarnationState::from_str(&model.state).ok_or_else(|| {
             AgentError::Store(format!(
@@ -77,7 +76,7 @@ fn live_states() -> [&'static str; 2] {
 pub async fn create_incarnation_intent(
     store: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     starting_turn: i32,
     cap: usize,
 ) -> Result<IncarnationAdmission> {
@@ -91,10 +90,8 @@ pub async fn create_incarnation_intent(
         .await
         .map_err(store_err)?;
     if live.len() >= cap {
-        let mut running: Vec<CodeSessionId> = live
-            .iter()
-            .map(|row| CodeSessionId(row.session_id))
-            .collect();
+        let mut running: Vec<SessionId> =
+            live.iter().map(|row| SessionId(row.session_id)).collect();
         running.sort_by_key(|id| id.0);
         running.dedup();
         txn.rollback().await.map_err(store_err)?;
@@ -294,7 +291,7 @@ pub async fn record_incarnation_spend(
 #[derive(Debug, Default)]
 pub struct IncarnationSideEffects<'a> {
     /// Journal rows to append, in order.
-    pub journal: &'a [crate::CodeEvent],
+    pub journal: &'a [crate::Event],
     /// The supervisor's terminal deliverable to retain.
     pub task_output: Option<&'a str>,
     /// The WIP checkpoint ref to retain, for resume.
@@ -318,7 +315,7 @@ pub struct IncarnationSideEffects<'a> {
 pub async fn ingest_incarnation_event(
     store: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     spawn_epoch: i64,
     id: CodeIncarnationId,
     seq: i64,
@@ -330,8 +327,8 @@ pub async fn ingest_incarnation_event(
             "code session {session_id} not found"
         )));
     }
-    let Some(session) = entities::code_session::Entity::find_by_id(session_id.0)
-        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+    let Some(session) = entities::session::Entity::find_by_id(session_id.0)
+        .filter(entities::session::Column::Owner.eq(owner.as_str()))
         .one(&txn)
         .await
         .map_err(store_err)?
@@ -406,7 +403,7 @@ pub async fn ingest_incarnation_event(
 pub async fn latest_pushed_wip_ref(
     store: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
 ) -> Result<Option<String>> {
     Ok(entities::code_session_incarnation::Entity::find()
         .filter(entities::code_session_incarnation::Column::Owner.eq(owner.as_str()))
@@ -428,7 +425,7 @@ pub async fn latest_pushed_wip_ref(
 pub async fn forget_session_wip_ref(
     store: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     reference: &str,
 ) -> Result<()> {
     let now = database_now(&store.conn).await?;
@@ -454,7 +451,7 @@ pub async fn forget_session_wip_ref(
 pub async fn latest_incarnation(
     store: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
 ) -> Result<Option<CodeSessionIncarnation>> {
     entities::code_session_incarnation::Entity::find()
         .filter(entities::code_session_incarnation::Column::Owner.eq(owner.as_str()))
@@ -482,7 +479,7 @@ pub async fn latest_incarnations_of_live_sessions_all_owners(
         r#"
 SELECT i.*
 FROM code_session_incarnation i
-JOIN code_session s ON s.id = i.session_id AND s.owner = i.owner
+JOIN "session" s ON s.id = i.session_id AND s.owner = i.owner
 WHERE s.lifecycle NOT IN ('{fenced}', '{ended}')
   AND i.incarnation = (
     SELECT MAX(later.incarnation)
@@ -491,8 +488,8 @@ WHERE s.lifecycle NOT IN ('{fenced}', '{ended}')
   )
 ORDER BY s.created_at DESC, i.id ASC
 "#,
-        fenced = crate::code::CodeSessionLifecycle::Fenced.as_str(),
-        ended = crate::code::CodeSessionLifecycle::Ended.as_str(),
+        fenced = crate::code::SessionLifecycle::Fenced.as_str(),
+        ended = crate::code::SessionLifecycle::Ended.as_str(),
     );
     entities::code_session_incarnation::Entity::find()
         .from_raw_sql(Statement::from_string(
@@ -511,7 +508,7 @@ ORDER BY s.created_at DESC, i.id ASC
 pub async fn session_spend_microusd(
     store: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
 ) -> Result<i64> {
     let rows = entities::code_session_incarnation::Entity::find()
         .filter(entities::code_session_incarnation::Column::Owner.eq(owner.as_str()))

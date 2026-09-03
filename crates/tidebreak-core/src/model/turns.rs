@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::id::{AgentRunId, CallId, ChatId, MessageId, TurnId};
+use crate::id::{AgentRunId, CallId, MessageId, SessionId, TurnId};
 use crate::provider::{Usage, VendorWebSearch};
 
 use super::is_false;
@@ -20,7 +20,7 @@ pub struct TurnRun {
     /// Stable turn and idempotency identity.
     pub id: TurnId,
     /// Conversation this turn belongs to.
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     /// Foreground coordinator that owns this conversation segment.
     pub agent_run_id: AgentRunId,
     /// Exact persisted user message that supplied this turn's initial input.
@@ -248,7 +248,7 @@ pub struct TurnAgentRunWaitSet {
     /// Exact origin turn that admitted every child and owns this checkpoint.
     pub turn_id: TurnId,
     /// Conversation shared by the turn and every child.
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     /// Bounded, unique children in caller-requested order.
     pub child_run_ids: Vec<crate::id::AgentRunId>,
     /// Completion policy committed as immutable request identity.
@@ -349,7 +349,7 @@ pub struct ClientToolCallRequest {
     /// Caller-supplied idempotency identity.
     pub id: CallId,
     /// Owning conversation.
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     /// Turn checkpointed for this call.
     pub turn_id: TurnId,
     /// Provider/tool namespace that produced the request.
@@ -397,7 +397,7 @@ pub struct TurnClientWait {
     /// Turn that released its worker lease.
     pub turn_id: TurnId,
     /// Owning conversation.
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     /// Worker lease segment that created the checkpoint.
     pub park_lease_token: Uuid,
     /// Failure attempt containing the checkpoint.
@@ -454,7 +454,7 @@ impl TurnClientWaitStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TurnAdmissionRequest {
     pub id: TurnId,
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     pub content: String,
     pub attachments: Vec<Uuid>,
     pub file_attachments: Vec<crate::id::DocumentId>,
@@ -510,11 +510,11 @@ pub struct TurnAdmissionLease {
 /// turn. Rows are FIFO by `position` within a chat and fully durable: a queue
 /// survives restarts and is visible to every client on the chat.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
-pub struct QueuedTurn {
+pub struct QueuedAgentTurn {
     /// The turn id this row becomes when promoted.
     pub id: TurnId,
     /// Owning chat.
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     /// Byte-exact user message.
     pub content: String,
     /// Image-attachment ids, in display order.
@@ -533,7 +533,7 @@ pub struct QueuedTurn {
     pub updated_at: DateTime<Utc>,
 }
 
-impl QueuedTurn {
+impl QueuedAgentTurn {
     /// Maximum queued messages one chat may hold.
     pub const MAX_PER_CHAT: usize = 32;
 
@@ -557,7 +557,7 @@ pub struct TurnSteer {
     /// Exact turn that receives this instruction.
     pub turn_id: TurnId,
     /// Owning chat, duplicated so the database can enforce turn/message scope.
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     /// Byte-exact user instruction.
     pub content: String,
     /// Skills the user explicitly named for this instruction.

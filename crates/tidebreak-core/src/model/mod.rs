@@ -47,7 +47,7 @@ pub use runs::{
 };
 pub use turns::{
     AgentRunWaitCondition, AgentRunWaitSetCandidate, AgentRunWaitSetCheckpointRequest,
-    ClientToolCallRequest, QueuedTurn, TurnAdmissionLease, TurnAdmissionRequest,
+    ClientToolCallRequest, QueuedAgentTurn, TurnAdmissionLease, TurnAdmissionRequest,
     TurnAgentRunWaitSet, TurnAgentRunWaitStatus, TurnCheckpointProgress, TurnClientWait,
     TurnClientWaitStatus, TurnFailureReceipt, TurnFailureRetry, TurnRun, TurnRunStatus, TurnSteer,
     TurnSteerStatus,

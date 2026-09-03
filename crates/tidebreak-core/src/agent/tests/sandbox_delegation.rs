@@ -103,7 +103,7 @@ async fn claimed_foreground_agent_returns_one_bounded_sandbox_checkpoint() {
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -266,7 +266,7 @@ async fn sibling_sandbox_spawns_are_rejected_before_any_checkpoint() {
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -344,7 +344,7 @@ async fn report_blocked_returns_a_persisted_refused_outcome_with_the_explanation
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -494,7 +494,7 @@ async fn drive_gated_delegation(
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,

@@ -13,8 +13,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::RwLock;
 
-use crate::event::SequencedEvent;
-use crate::id::{CallId, ChatId, ProjectId, TurnId};
+use crate::event::SequencedAgentEvent;
+use crate::id::{CallId, ProjectId, SessionId, TurnId};
 use crate::preview::ToolActionPreview;
 use crate::tool::ApprovalClass;
 use chrono::{DateTime, Utc};
@@ -423,7 +423,7 @@ pub fn is_auto_judge_candidate(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolApproval {
     pub call_id: CallId,
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     pub turn_id: TurnId,
     pub tool_name: String,
     pub class: ApprovalClass,
@@ -503,7 +503,7 @@ impl ToolApproval {
 #[serde(tag = "level", rename_all = "snake_case")]
 pub enum GrantLevel {
     /// Every later matching call in one chat.
-    Chat { chat_id: ChatId },
+    Chat { chat_id: SessionId },
     /// Every later matching call in any chat filed under one project.
     Project { project_id: ProjectId },
 }
@@ -511,7 +511,7 @@ pub enum GrantLevel {
 impl GrantLevel {
     /// The level a grant made from this chat should be written at.
     #[must_use]
-    pub const fn for_chat(chat_id: ChatId, project_id: Option<ProjectId>) -> Self {
+    pub const fn for_chat(chat_id: SessionId, project_id: Option<ProjectId>) -> Self {
         match project_id {
             Some(project_id) => Self::Project { project_id },
             None => Self::Chat { chat_id },
@@ -521,7 +521,7 @@ impl GrantLevel {
     /// Whether this level reaches a call made in `chat_id` under
     /// `project_id`.
     #[must_use]
-    pub fn reaches(self, chat_id: ChatId, project_id: Option<ProjectId>) -> bool {
+    pub fn reaches(self, chat_id: SessionId, project_id: Option<ProjectId>) -> bool {
         match self {
             Self::Chat { chat_id: granted } => granted == chat_id,
             // A project grant covers the project it names, and only a chat
@@ -945,7 +945,7 @@ impl StandingGrant {
     #[must_use]
     pub(crate) fn covers(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         project_id: Option<ProjectId>,
         tool_name: &str,
         kind: ToolApprovalKind,
@@ -1042,7 +1042,7 @@ impl StandingGrants {
     #[must_use]
     pub fn covers(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         project_id: Option<ProjectId>,
         tool_name: &str,
         kind: ToolApprovalKind,
@@ -1076,7 +1076,7 @@ pub struct ApprovalRequest {
     /// Correlates with `ApprovalRequired` / the HTTP path.
     pub call_id: CallId,
     /// Chat the turn belongs to.
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     /// Turn that is parked.
     pub turn_id: TurnId,
     /// Tool name the model invoked.
@@ -1123,13 +1123,13 @@ pub enum ApprovalRequiredPublication {
     /// live publication.
     Committed {
         event_ordinal: i32,
-        event: SequencedEvent,
+        event: SequencedAgentEvent,
     },
     /// An exact receipt was recovered after the approval had already become
     /// terminal. Consume its ordinal without flashing a stale required card.
     Recovered {
         event_ordinal: i32,
-        event: SequencedEvent,
+        event: SequencedAgentEvent,
     },
     /// Exact recovery found no new requirement to publish.
     None,
@@ -1211,7 +1211,7 @@ impl ApprovalGate for AutoApproveGate {
 mod standing_grant_tests {
     use super::*;
 
-    fn grant(chat_id: ChatId, tool: &str) -> StandingGrant {
+    fn grant(chat_id: SessionId, tool: &str) -> StandingGrant {
         StandingGrant::new(
             GrantLevel::Chat { chat_id },
             tool,
@@ -1249,12 +1249,12 @@ mod standing_grant_tests {
 
     #[test]
     fn escaping_exec_is_standing_grantable() {
-        let chat = ChatId::new();
+        let chat = SessionId::new();
         let grants = StandingGrants::from_grants(vec![grant(chat, "exec")]);
         let kind = ToolApprovalKind::for_tool_name("exec");
         assert!(grants.covers(chat, None, "exec", kind, &no_args()));
         // Deny-by-default still holds for a different chat.
-        assert!(!grants.covers(ChatId::new(), None, "exec", kind, &no_args()));
+        assert!(!grants.covers(SessionId::new(), None, "exec", kind, &no_args()));
     }
 
     #[test]
@@ -1265,7 +1265,7 @@ mod standing_grant_tests {
         assert!(!kind.is_standing_grantable());
         assert!(StandingGrant::new(
             GrantLevel::Chat {
-                chat_id: ChatId::new()
+                chat_id: SessionId::new()
             },
             "mcp__documents__search",
             kind,
@@ -1278,7 +1278,7 @@ mod standing_grant_tests {
     fn non_approvable_tools_cannot_be_granted() {
         assert!(StandingGrant::new(
             GrantLevel::Chat {
-                chat_id: ChatId::new()
+                chat_id: SessionId::new()
             },
             "third_party_sensitive",
             ToolApprovalKind::for_tool_name("third_party_sensitive"),
@@ -1289,7 +1289,7 @@ mod standing_grant_tests {
 
     #[test]
     fn empty_set_covers_nothing() {
-        let chat = ChatId::new();
+        let chat = SessionId::new();
         let grants = StandingGrants::new();
         assert!(!grants.covers(
             chat,
@@ -1302,8 +1302,8 @@ mod standing_grant_tests {
 
     #[test]
     fn grant_covers_only_its_exact_chat_and_tool() {
-        let chat = ChatId::new();
-        let other_chat = ChatId::new();
+        let chat = SessionId::new();
+        let other_chat = SessionId::new();
         let grants = StandingGrants::from_grants(vec![grant(chat, "search")]);
         let kind = ToolApprovalKind::for_tool_name("search");
 
@@ -1353,7 +1353,7 @@ mod standing_grant_tests {
 
     #[test]
     fn an_exact_grant_covers_only_the_vector_it_named() {
-        let chat = ChatId::new();
+        let chat = SessionId::new();
         let kind = ToolApprovalKind::for_tool_name("exec");
         let grants = StandingGrants::new();
         grants.record(
@@ -1380,7 +1380,7 @@ mod standing_grant_tests {
     /// and the person would be asked again about something they had settled.
     #[test]
     fn a_grant_ignores_how_the_call_narrates_itself() {
-        let chat = ChatId::new();
+        let chat = SessionId::new();
         let kind = ToolApprovalKind::for_tool_name("exec");
         let grants = StandingGrants::new();
         let narrated = serde_json::json!({
@@ -1433,7 +1433,7 @@ mod standing_grant_tests {
     /// projection carried it must not stretch over calls that stage files.
     #[test]
     fn a_grant_that_named_no_staged_files_does_not_cover_a_call_that_stages_them() {
-        let chat = ChatId::new();
+        let chat = SessionId::new();
         let kind = ToolApprovalKind::for_tool_name("exec");
         let grants = StandingGrants::new();
         // How a grant stored before `files` existed reads back: the field is
@@ -1477,7 +1477,7 @@ mod standing_grant_tests {
 
     #[test]
     fn a_clamped_call_never_matches_or_creates_a_narrow_grant() {
-        let chat = ChatId::new();
+        let chat = SessionId::new();
         let kind = ToolApprovalKind::for_tool_name("exec");
         let long = "x".repeat(crate::preview::MAX_ACTION_FIELD_CHARS);
         let grants = StandingGrants::new();
@@ -1512,7 +1512,7 @@ mod standing_grant_tests {
 
     #[test]
     fn an_exact_grant_is_not_widened_by_a_dropped_or_extra_argument() {
-        let chat = ChatId::new();
+        let chat = SessionId::new();
         let kind = ToolApprovalKind::for_tool_name("exec");
         let grants = StandingGrants::new();
         grants.record(
@@ -1556,7 +1556,7 @@ mod standing_grant_tests {
 
     #[test]
     fn an_exact_grant_is_scoped_to_the_directory_it_was_given_in() {
-        let chat = ChatId::new();
+        let chat = SessionId::new();
         let kind = ToolApprovalKind::for_tool_name("exec");
         let grants = StandingGrants::new();
         grants.record(
@@ -1585,7 +1585,7 @@ mod standing_grant_tests {
 
     #[test]
     fn an_executable_grant_covers_any_arguments_to_it() {
-        let chat = ChatId::new();
+        let chat = SessionId::new();
         let kind = ToolApprovalKind::for_tool_name("exec");
         let grants = StandingGrants::new();
         grants.record(
@@ -1614,7 +1614,7 @@ mod standing_grant_tests {
     /// standing yes to the routine, never a blanket one.
     #[test]
     fn the_widest_grant_still_stops_at_the_floor() {
-        let chat = ChatId::new();
+        let chat = SessionId::new();
         let kind = ToolApprovalKind::for_tool_name("exec");
         let grants = StandingGrants::new();
         grants.record(grant(chat, "exec"));
@@ -1663,7 +1663,7 @@ mod standing_grant_tests {
             &exec_args("cargo", &["test"])
         ));
 
-        let chat = ChatId::new();
+        let chat = SessionId::new();
         let grants = StandingGrants::new();
         grants.record(
             StandingGrant::scoped(
@@ -1769,7 +1769,7 @@ mod standing_grant_tests {
 
     #[test]
     fn a_query_grant_covers_that_query_and_no_other_search() {
-        let chat = ChatId::new();
+        let chat = SessionId::new();
         let kind = ToolApprovalKind::for_tool_name("web_search");
         let grants = StandingGrants::new();
         grants.record(
@@ -1824,7 +1824,7 @@ mod standing_grant_tests {
 
     #[test]
     fn narrow_grants_for_the_same_tool_accumulate_rather_than_collapse() {
-        let chat = ChatId::new();
+        let chat = SessionId::new();
         let kind = ToolApprovalKind::for_tool_name("exec");
         let grants = StandingGrants::new();
         for command in ["cargo", "git"] {
@@ -1848,7 +1848,7 @@ mod standing_grant_tests {
 
     #[test]
     fn recording_is_idempotent_and_revocable() {
-        let chat = ChatId::new();
+        let chat = SessionId::new();
         let kind = ToolApprovalKind::for_tool_name("search");
         let grants = StandingGrants::new();
         grants.record(grant(chat, "search"));
@@ -1866,7 +1866,7 @@ mod standing_grant_tests {
         serde_json::json!({ "path": path, "content": "drafted text" })
     }
 
-    fn place_grant(chat: ChatId, prefix: &str) -> StandingGrant {
+    fn place_grant(chat: SessionId, prefix: &str) -> StandingGrant {
         StandingGrant::scoped(
             GrantLevel::Chat { chat_id: chat },
             "write_file",
@@ -1881,7 +1881,7 @@ mod standing_grant_tests {
 
     #[test]
     fn a_place_grant_covers_writes_under_it_and_nothing_else() {
-        let chat = ChatId::new();
+        let chat = SessionId::new();
         let kind = ToolApprovalKind::WorkspaceMayModifyFiles;
         let grants = StandingGrants::from_grants(vec![place_grant(chat, "reports")]);
         let covers = |path: &str| grants.covers(chat, None, "write_file", kind, &write_args(path));
@@ -1913,7 +1913,7 @@ mod standing_grant_tests {
     #[test]
     fn a_workspace_write_is_grantable_only_about_a_place() {
         let level = GrantLevel::Chat {
-            chat_id: ChatId::new(),
+            chat_id: SessionId::new(),
         };
         let kind = ToolApprovalKind::WorkspaceMayModifyFiles;
         // The whole-tool "yes" already exists as the chat's Auto mode.

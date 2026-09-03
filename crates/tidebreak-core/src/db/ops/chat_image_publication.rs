@@ -10,7 +10,7 @@ use sea_orm::{
 };
 
 use crate::error::{AgentError, Result};
-use crate::id::ChatId;
+use crate::id::SessionId;
 use crate::image::{ImageMediaType, ImageRef};
 use crate::model::OwnerId;
 
@@ -27,7 +27,7 @@ use super::conversation::internal_sessions;
 /// the same transaction makes the reservation a durable live reference.
 pub(in crate::db) async fn publish(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
     image: &ImageRef,
     owner: Option<&OwnerId>,
 ) -> Result<bool> {
@@ -46,8 +46,8 @@ pub(in crate::db) async fn publish(
         return Ok(false);
     }
     if let Some(owner) = owner {
-        let owned = entities::code_session::Entity::find_by_id(chat_id.0)
-            .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+        let owned = entities::session::Entity::find_by_id(chat_id.0)
+            .filter(entities::session::Column::Owner.eq(owner.as_str()))
             .filter(internal_sessions())
             .one(&transaction)
             .await
@@ -104,7 +104,7 @@ pub(in crate::db) async fn publish(
 /// Resolve one exact publication reservation for `chat_id`.
 pub(in crate::db) async fn get(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
     blob_id: uuid::Uuid,
 ) -> Result<Option<ImageRef>> {
     entities::chat_image_publication::Entity::find_by_id((chat_id.0, blob_id))
@@ -123,7 +123,7 @@ pub(in crate::db) async fn get(
 /// transaction commits its new references.
 pub(in crate::db) async fn require_exact_on<C>(
     conn: &C,
-    chat_id: ChatId,
+    chat_id: SessionId,
     images: &[ImageRef],
 ) -> Result<()>
 where
@@ -154,7 +154,7 @@ where
 /// Distinct publication blobs reserved by `chat_id`, ascending.
 pub(in crate::db) async fn list_chat_blob_ids_on<C>(
     conn: &C,
-    chat_id: ChatId,
+    chat_id: SessionId,
 ) -> Result<Vec<uuid::Uuid>>
 where
     C: ConnectionTrait,
@@ -177,7 +177,7 @@ where
 ///
 /// The chat deletion transaction owns retirement of the returned/freed blobs;
 /// this helper only removes references.
-pub(in crate::db) async fn delete_for_chat_on<C>(conn: &C, chat_id: ChatId) -> Result<()>
+pub(in crate::db) async fn delete_for_chat_on<C>(conn: &C, chat_id: SessionId) -> Result<()>
 where
     C: ConnectionTrait,
 {

@@ -2,10 +2,10 @@ use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 
 use crate::approval::ToolApproval;
-use crate::code::{CodeSessionId, CodeTurnId, WorkspaceId};
+use crate::code::WorkspaceId;
 use crate::error::Result;
-use crate::event::{AgentEvent, SequencedEvent};
-use crate::id::{AgentRunId, CallId, ChatId, MessageId, NotificationId, TurnId};
+use crate::event::{AgentEvent, SequencedAgentEvent};
+use crate::id::{AgentRunId, CallId, MessageId, NotificationId, SessionId, TurnId};
 use crate::model::{
     AgentRun, AgentRunInboxEntry, AgentRunResult, Message, MessageAttachment,
     MessageDocumentAttachment, RootAttachmentChange, ToolCallRecord, TurnAdmissionLease,
@@ -125,7 +125,7 @@ pub enum ChatTerminalTurnStatus {
 /// folder-access arguments, executor state, or any other canonical tool data.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PendingChatPrompt {
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     pub question_call_ids: Vec<CallId>,
     pub plan_call_ids: Vec<CallId>,
     pub folder_access_call_ids: Vec<CallId>,
@@ -196,10 +196,10 @@ impl NotificationKind {
 #[serde(tag = "surface", rename_all = "snake_case")]
 pub enum NotificationContext {
     Chat {
-        chat_id: ChatId,
+        chat_id: SessionId,
     },
     Code {
-        session_id: CodeSessionId,
+        session_id: SessionId,
         workspace_id: WorkspaceId,
     },
 }
@@ -224,8 +224,8 @@ pub struct NotificationListCursor {
 
 /// Watch sessions never mint a row. Interactive conversation sessions do.
 #[must_use]
-pub fn code_session_mints_notification(kind: crate::code::CodeSessionKind) -> bool {
-    matches!(kind, crate::code::CodeSessionKind::Interactive)
+pub fn code_session_mints_notification(kind: crate::code::SessionKind) -> bool {
+    matches!(kind, crate::code::SessionKind::Interactive)
 }
 
 /// A Work turn mints a row only when it is durably finished or failed.
@@ -255,7 +255,7 @@ pub fn notification_title(name: Option<&str>, kind: NotificationKind) -> String 
 #[must_use]
 pub fn work_notification_dedupe_key(
     kind: NotificationKind,
-    chat_id: ChatId,
+    chat_id: SessionId,
     turn_id: TurnId,
 ) -> String {
     format!("{}:chat:{chat_id}:turn:{turn_id}", kind.as_str())
@@ -265,8 +265,8 @@ pub fn work_notification_dedupe_key(
 #[must_use]
 pub fn code_notification_dedupe_key(
     kind: NotificationKind,
-    session_id: CodeSessionId,
-    turn_id: CodeTurnId,
+    session_id: SessionId,
+    turn_id: TurnId,
 ) -> String {
     format!("{}:code:{session_id}:turn:{turn_id}", kind.as_str())
 }
@@ -281,7 +281,7 @@ pub fn code_notification_dedupe_key(
 /// the chat the item deep-links to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InboxItem {
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     /// The conversation's title, or `None` while it is still untitled.
     pub chat_title: Option<String>,
     pub turn_id: TurnId,
@@ -549,7 +549,7 @@ pub enum ReservedTurnAcceptanceOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReservedQueuedTurnOutcome {
     /// The queue row and its durable ownership state committed together.
-    Queued(crate::model::QueuedTurn),
+    Queued(crate::model::QueuedAgentTurn),
     /// The lease expired, was released, or was taken over before commit.
     LeaseLost,
 }
@@ -637,14 +637,14 @@ pub enum CheckpointSandboxSpawnOutcome {
         turn: Box<TurnRun>,
         call: ToolCallRecord,
         checkpoint: crate::model::SandboxSpawnCheckpoint,
-        event: SequencedEvent,
+        event: SequencedAgentEvent,
     },
     /// An exact retry recovered the immutable committed transition.
     Existing {
         child: AgentRun,
         call: ToolCallRecord,
         checkpoint: crate::model::SandboxSpawnCheckpoint,
-        event: SequencedEvent,
+        event: SequencedAgentEvent,
     },
     /// This call or one of its bound identities was reused with different
     /// provider output, accounting, provenance, or journal order.
@@ -792,7 +792,7 @@ pub struct JournaledTurnSteerOutcome {
     /// The steer application result.
     pub outcome: ApplyTurnSteerOutcome,
     /// The exact nonterminal journal row committed by the application.
-    pub event: SequencedEvent,
+    pub event: SequencedAgentEvent,
 }
 
 /// Result of atomically completing one exact claimed turn.
@@ -906,7 +906,7 @@ pub enum RequestToolApprovalOutcome {
 pub struct JournaledToolApprovalOutcome {
     pub outcome: RequestToolApprovalOutcome,
     /// Present only for a new commit or an exact retry of the same claim slot.
-    pub required_event: Option<SequencedEvent>,
+    pub required_event: Option<SequencedAgentEvent>,
 }
 
 /// Result of deciding one exact durable approval request.
@@ -918,7 +918,7 @@ pub enum DecideToolApprovalOutcome {
         approval: ToolApproval,
         /// The decision's journal row, committed with it, for live delivery
         /// on both surfaces.
-        resolution: Box<crate::code::SequencedCodeEvent>,
+        resolution: Box<crate::code::SequencedEvent>,
     },
     /// An exact retry recovered the same decision bytes.
     Existing(ToolApproval),
@@ -932,7 +932,7 @@ pub enum DecideToolApprovalOutcome {
 #[derive(Debug, Clone, PartialEq)]
 pub enum JudgeVerdictOutcome {
     /// The judge approved; the card is decided and its journal row committed.
-    Approved(Box<crate::code::SequencedCodeEvent>),
+    Approved(Box<crate::code::SequencedEvent>),
     /// The judge declined; the card stays pending for the human.
     Declined,
     /// The judge no longer owned the call: a human got there first, or it
@@ -995,9 +995,9 @@ pub enum DecidePlanOutcome {
         turn: TurnRun,
         /// The call's journaled completion, committed with the decision so a
         /// live renderer settles the card now rather than at the turn's end.
-        completion_event: Box<SequencedEvent>,
+        completion_event: Box<SequencedAgentEvent>,
         /// The approval row's own decision, journaled before the completion.
-        resolution: Box<crate::code::SequencedCodeEvent>,
+        resolution: Box<crate::code::SequencedEvent>,
     },
     /// An ambiguous retry recovered the same committed decision.
     Existing(TurnRun),
@@ -1018,9 +1018,9 @@ pub enum AnswerUserQuestionsOutcome {
         turn: TurnRun,
         /// The call's journaled completion, committed with the answer so a
         /// live renderer settles the card now rather than at the turn's end.
-        completion_event: Box<SequencedEvent>,
+        completion_event: Box<SequencedAgentEvent>,
         /// The approval row's own decision, journaled before the completion.
-        resolution: Box<crate::code::SequencedCodeEvent>,
+        resolution: Box<crate::code::SequencedEvent>,
     },
     /// An ambiguous retry recovered the same committed answers.
     Existing(TurnRun),
@@ -1057,7 +1057,7 @@ pub enum ParkTurnForClientCallOutcome {
         wait: TurnClientWait,
         /// Renderer refresh hint committed in the same transaction, when this
         /// client continuation has a renderer-owned presentation.
-        renderer_event: Option<SequencedEvent>,
+        renderer_event: Option<SequencedAgentEvent>,
     },
     /// An exact retry recovered the previously committed checkpoint.
     Existing {
@@ -1065,7 +1065,7 @@ pub enum ParkTurnForClientCallOutcome {
         call: ToolCallRecord,
         wait: TurnClientWait,
         /// Exact renderer event recovered after an ambiguous commit response.
-        renderer_event: Option<SequencedEvent>,
+        renderer_event: Option<SequencedAgentEvent>,
     },
     /// The call identity already names a different immutable request.
     IdentityConflict,
@@ -1107,7 +1107,7 @@ pub enum ResumeTurnForAgentRunWaitSetOutcome {
         call: ToolCallRecord,
         wait: TurnAgentRunWaitSet,
         results: Vec<AgentRunInboxEntry>,
-        event: SequencedEvent,
+        event: SequencedAgentEvent,
     },
     /// The exact continuation retry recovered its prior consumption and wake.
     Existing {
@@ -1115,7 +1115,7 @@ pub enum ResumeTurnForAgentRunWaitSetOutcome {
         call: ToolCallRecord,
         wait: TurnAgentRunWaitSet,
         results: Vec<AgentRunInboxEntry>,
-        event: SequencedEvent,
+        event: SequencedAgentEvent,
     },
     /// At least one requested child has not delivered a result yet.
     NotReady(TurnAgentRunWaitSet),
@@ -1137,7 +1137,7 @@ pub struct JournaledClientToolCallOutcome {
     /// Wait-backed turn after it resumed or terminalized, when applicable.
     pub turn: Option<TurnRun>,
     /// Exact terminal event committed by client-owned cancellation.
-    pub terminal_event: Option<SequencedEvent>,
+    pub terminal_event: Option<SequencedAgentEvent>,
 }
 
 /// A durable turn transition together with any terminal event committed by it.
@@ -1146,18 +1146,18 @@ pub struct JournaledTurnOutcome<T> {
     /// The state-machine result.
     pub outcome: T,
     /// The exact terminal journal row when this operation publishes one.
-    pub terminal_event: Option<SequencedEvent>,
+    pub terminal_event: Option<SequencedAgentEvent>,
 }
 
 /// A terminal event committed while a claim scan cleans expired work.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClaimScanTerminalEvent {
     /// Chat whose per-chat journal assigned the sequence.
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     /// Turn terminalized by the scan.
     pub turn_id: TurnId,
     /// Exact committed journal event.
-    pub event: SequencedEvent,
+    pub event: SequencedAgentEvent,
 }
 
 /// Result of one durable claim action.

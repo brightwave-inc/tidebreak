@@ -56,7 +56,7 @@ async fn turn_completion_atomically_persists_exact_output_and_recovers_retries()
         .await
         .is_err());
     invalid = output.clone();
-    invalid.chat_id = ChatId::new();
+    invalid.chat_id = SessionId::new();
     assert!(store
         .complete_turn(turn_id, lease_token, 0, output.created_at, &invalid)
         .await
@@ -129,12 +129,12 @@ async fn turn_failure_receipt_recovers_exact_retries_after_the_turn_advances() {
         AcceptTurnOutcome::Accepted(turn) => turn,
         outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
     };
-    entities::code_turn::Entity::update_many()
+    entities::turn::Entity::update_many()
         .col_expr(
-            entities::code_turn::Column::MaxAttempts,
+            entities::turn::Column::MaxAttempts,
             sea_orm::sea_query::Expr::value(2),
         )
-        .filter(entities::code_turn::Column::Id.eq(turn_id.0))
+        .filter(entities::turn::Column::Id.eq(turn_id.0))
         .exec(&store.conn)
         .await
         .unwrap();
@@ -426,7 +426,7 @@ async fn turn_failure_exhaustion_retains_retry_intent_and_rolls_back_atomically(
         .conn
         .execute_unprepared(
             "CREATE TRIGGER fail_turn_failure
-             BEFORE UPDATE OF status ON code_turn
+             BEFORE UPDATE OF status ON \"turn\"
              WHEN NEW.status = 'failed'
              BEGIN SELECT RAISE(FAIL, 'forced turn failure rollback'); END",
         )
@@ -521,7 +521,7 @@ async fn turn_failure_rolls_back_receipt_and_state_when_terminal_event_fails() {
         .unwrap()
         .turn
         .unwrap();
-    entities::code_event::ActiveModel {
+    entities::event::ActiveModel {
         session_id: Set(chat.id.0),
         owner: Set("local".to_owned()),
         seq: Set(1),
@@ -804,12 +804,12 @@ async fn turn_completion_and_failure_serialize_to_one_terminal_decision() {
         AcceptTurnOutcome::Accepted(turn) => turn,
         outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
     };
-    entities::code_turn::Entity::update_many()
+    entities::turn::Entity::update_many()
         .col_expr(
-            entities::code_turn::Column::MaxAttempts,
+            entities::turn::Column::MaxAttempts,
             sea_orm::sea_query::Expr::value(2),
         )
-        .filter(entities::code_turn::Column::Id.eq(turn_id.0))
+        .filter(entities::turn::Column::Id.eq(turn_id.0))
         .exec(&store.conn)
         .await
         .unwrap();
@@ -1102,7 +1102,7 @@ async fn turn_completion_rolls_back_output_when_state_update_fails() {
         .conn
         .execute_unprepared(
             "CREATE TRIGGER fail_turn_completion
-             BEFORE UPDATE OF status ON code_turn
+             BEFORE UPDATE OF status ON \"turn\"
              WHEN NEW.status = 'completed'
              BEGIN SELECT RAISE(FAIL, 'forced turn completion failure'); END",
         )
@@ -1154,7 +1154,7 @@ async fn turn_completion_rolls_back_state_and_output_when_terminal_event_fails()
         .unwrap()
         .turn
         .unwrap();
-    entities::code_event::ActiveModel {
+    entities::event::ActiveModel {
         session_id: Set(chat.id.0),
         owner: Set("local".to_owned()),
         seq: Set(1),

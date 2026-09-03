@@ -5,7 +5,7 @@
 
 use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter};
 
-use crate::code::CodeSessionId;
+use crate::code::SessionId;
 use crate::error::{AgentError, Result};
 use crate::OwnerId;
 
@@ -55,9 +55,9 @@ pub use workspace::*;
 pub async fn record_code_turn_notification(
     store: &super::super::DbStore,
     owner: &OwnerId,
-    session_id: crate::code::CodeSessionId,
+    session_id: crate::code::SessionId,
     workspace_id: crate::code::WorkspaceId,
-    turn_id: crate::code::CodeTurnId,
+    turn_id: crate::code::TurnId,
     workspace_title: Option<&str>,
     kind: crate::NotificationKind,
 ) -> crate::error::Result<crate::Notification> {
@@ -76,12 +76,12 @@ pub async fn record_code_turn_notification(
 /// Typed journal-append failure. A stale spawn epoch is a distinct variant so
 /// a superseded worker cannot be mistaken for a generic store error.
 #[derive(Debug, thiserror::Error)]
-pub enum CodeJournalError {
+pub enum JournalError {
     /// The session row is gone.
     #[error("code session {session_id} not found")]
     SessionNotFound {
         /// Missing session.
-        session_id: CodeSessionId,
+        session_id: SessionId,
     },
     /// The writer’s spawn epoch does not match the session row.
     #[error(
@@ -89,7 +89,7 @@ pub enum CodeJournalError {
     )]
     StaleSpawnEpoch {
         /// Session the write targeted.
-        session_id: CodeSessionId,
+        session_id: SessionId,
         /// Epoch the writer still believes it owns.
         attempted: i64,
         /// Epoch currently on the session row.
@@ -100,23 +100,30 @@ pub enum CodeJournalError {
     Store(#[from] AgentError),
 }
 
+#[doc(hidden)]
+pub use self::session::SessionExecutionSettings as CodeSessionExecutionSettings;
+#[doc(hidden)]
+pub use self::turn::TurnMetric as CodeTurnMetric;
+#[doc(hidden)]
+pub use self::JournalError as CodeJournalError;
+
 /// Acquire the shared write lock for one code-session row.
 ///
 /// Sequence allocation and epoch checks take this lock so independently
 /// running workers cannot race a journal append with a spawn-epoch bump.
 pub(in crate::db) async fn acquire_code_session_write_lock<C>(
     conn: &C,
-    session_id: CodeSessionId,
+    session_id: SessionId,
 ) -> Result<bool>
 where
     C: ConnectionTrait,
 {
-    let locked = entities::code_session::Entity::update_many()
+    let locked = entities::session::Entity::update_many()
         .col_expr(
-            entities::code_session::Column::UnrecognizedEventCount,
-            sea_orm::sea_query::Expr::col(entities::code_session::Column::UnrecognizedEventCount),
+            entities::session::Column::UnrecognizedEventCount,
+            sea_orm::sea_query::Expr::col(entities::session::Column::UnrecognizedEventCount),
         )
-        .filter(entities::code_session::Column::Id.eq(session_id.0))
+        .filter(entities::session::Column::Id.eq(session_id.0))
         .exec(conn)
         .await
         .map_err(store_err)?;

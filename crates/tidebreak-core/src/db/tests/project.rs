@@ -139,12 +139,12 @@ async fn corrupted_root_projection_rows_fail_closed_on_read() {
     let (_dir, store) = temp_store().await;
     let standalone = sample_chat();
     store.create_chat(&standalone).await.unwrap();
-    entities::code_session::Entity::update_many()
+    entities::session::Entity::update_many()
         .col_expr(
-            entities::code_session::Column::AttachmentRevision,
+            entities::session::Column::AttachmentRevision,
             sea_orm::sea_query::Expr::value(1_i64),
         )
-        .filter(entities::code_session::Column::Id.eq(standalone.id.0))
+        .filter(entities::session::Column::Id.eq(standalone.id.0))
         .exec(&store.conn)
         .await
         .unwrap();
@@ -161,12 +161,12 @@ async fn corrupted_root_projection_rows_fail_closed_on_read() {
 
     let gapped = sample_chat();
     store.create_chat(&gapped).await.unwrap();
-    entities::code_session::Entity::update_many()
+    entities::session::Entity::update_many()
         .col_expr(
-            entities::code_session::Column::AttachmentRevision,
+            entities::session::Column::AttachmentRevision,
             sea_orm::sea_query::Expr::value(1_i64),
         )
-        .filter(entities::code_session::Column::Id.eq(gapped.id.0))
+        .filter(entities::session::Column::Id.eq(gapped.id.0))
         .exec(&store.conn)
         .await
         .unwrap();
@@ -186,12 +186,12 @@ async fn corrupted_root_projection_rows_fail_closed_on_read() {
     let mut mixed = sample_chat();
     mixed.project_id = Some(project.id);
     store.create_chat(&mixed).await.unwrap();
-    entities::code_session::Entity::update_many()
+    entities::session::Entity::update_many()
         .col_expr(
-            entities::code_session::Column::AttachmentRevision,
+            entities::session::Column::AttachmentRevision,
             sea_orm::sea_query::Expr::value(2_i64),
         )
-        .filter(entities::code_session::Column::Id.eq(mixed.id.0))
+        .filter(entities::session::Column::Id.eq(mixed.id.0))
         .exec(&store.conn)
         .await
         .unwrap();
@@ -234,7 +234,7 @@ async fn project_membership_fk_and_attachment_insertions_are_atomic() {
     let orphan = store
         .conn
         .execute_unprepared(&format!(
-            "INSERT INTO code_session (
+            "INSERT INTO \"session\" (
                 id, project_id, harness_kind, permission_mode, lifecycle,
                 attention_state, attention_source, created_at
              ) VALUES (
@@ -481,7 +481,7 @@ async fn moving_a_chat_snapshots_project_defaults_and_refuses_over_connected_fol
     let empty_project = sample_project();
     store.create_project(&empty_project).await.unwrap();
     let mut second = sample_chat();
-    second.id = ChatId::new();
+    second.id = SessionId::new();
     second.project_id = Some(empty_project.id);
     store.create_chat(&second).await.unwrap();
     assert_eq!(
@@ -501,7 +501,7 @@ async fn moving_a_chat_snapshots_project_defaults_and_refuses_over_connected_fol
     );
     assert_eq!(
         store
-            .move_chat_to_project(ChatId::new(), Some(project.id))
+            .move_chat_to_project(SessionId::new(), Some(project.id))
             .await
             .unwrap(),
         MoveChatOutcome::ChatNotFound

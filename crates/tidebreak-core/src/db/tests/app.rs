@@ -152,7 +152,7 @@ async fn a_revision_records_one_producer_and_dangling_conversation_provenance() 
     // The originating conversation is provenance without a foreign key: this
     // chat id references no chat row at all and the write still lands, which
     // is exactly what keeps an app alive after its conversation is deleted.
-    let orphan_chat = ChatId::new();
+    let orphan_chat = SessionId::new();
     let turn_id = TurnId::new();
     let mut request = create_request(1);
     request.revision.turn_id = Some(turn_id);

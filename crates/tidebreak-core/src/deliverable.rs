@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 
-use crate::id::{AgentRunId, ChatId, OutputId, OutputRevisionId, TurnId};
+use crate::id::{AgentRunId, OutputId, OutputRevisionId, SessionId, TurnId};
 
 /// Private-scratch directory holding immutable revision bytes.
 ///
@@ -71,7 +71,7 @@ pub struct OutputRecord {
     /// Durable opaque identity, stable across every revision.
     pub id: OutputId,
     /// Conversation that exclusively owns this output.
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     /// Display filename. Not identity, but unique among a conversation's
     /// live outputs: at most one live record answers to a given name.
     pub filename: String,
@@ -246,7 +246,7 @@ pub struct CreateOutput {
     /// Caller-minted identity, so an ambiguous store response can be retried.
     pub id: OutputId,
     /// Conversation that will own the output.
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     /// Display filename, validated by [`validate_deliverable_name`] for text
     /// and [`validate_binary_deliverable`] for binary artifacts.
     pub filename: String,

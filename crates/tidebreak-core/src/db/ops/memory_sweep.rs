@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set};
 
-use crate::code::CodeTurnStatus;
+use crate::code::TurnStatus;
 use crate::error::{AgentError, Result};
 use crate::memory::{
     MemoryRecordId, MemoryScope, MemorySweepOutcome, MemorySweepRun, MemorySweepScopeState,
@@ -181,25 +181,25 @@ pub async fn latest_sweep_run(store: &DbStore, owner: &OwnerId) -> Result<Option
 
 /// Whether the owner has a live work-mode turn.
 ///
-/// Reads [`CodeTurnStatus::LIVE`] — the one definition of "busy" — joined to
+/// Reads [`TurnStatus::LIVE`] — the one definition of "busy" — joined to
 /// the owner's internal-engine sessions.
 pub async fn owner_has_live_chat_turn(store: &DbStore, owner: &OwnerId) -> Result<bool> {
-    let live = entities::code_turn::Entity::find()
+    let live = entities::turn::Entity::find()
         .filter(
-            entities::code_turn::Column::Status
-                .is_in(CodeTurnStatus::LIVE.iter().map(|status| status.as_str())),
+            entities::turn::Column::Status
+                .is_in(TurnStatus::LIVE.iter().map(|status| status.as_str())),
         )
-        .filter(entities::code_turn::Column::InputMessageId.is_not_null())
+        .filter(entities::turn::Column::InputMessageId.is_not_null())
         .all(&store.conn)
         .await
         .map_err(store_err)?;
     if live.is_empty() {
         return Ok(false);
     }
-    let owned = entities::code_session::Entity::find()
+    let owned = entities::session::Entity::find()
         .select_only()
-        .column(entities::code_session::Column::Id)
-        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+        .column(entities::session::Column::Id)
+        .filter(entities::session::Column::Owner.eq(owner.as_str()))
         .filter(internal_sessions())
         .into_tuple::<uuid::Uuid>()
         .all(&store.conn)

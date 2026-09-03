@@ -346,17 +346,18 @@ where
                     )));
                 };
                 // A chat is a session (decision 48): the message's chat id
-                // names a `code_session` row, whose owner column gates it.
-                entities::code_session::Entity::find_by_id(message.chat_id)
-                    .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+                // names a `session` row, whose owner column gates it.
+                entities::session::Entity::find_by_id(message.chat_id)
+                    .filter(entities::session::Column::Owner.eq(owner.as_str()))
                     .one(conn)
                     .await
                     .map_err(backend_err)?
                     .is_some()
             }
-            MemoryEvidence::CodeEvent { session_id, seq } => {
-                entities::code_event::Entity::find_by_id((session_id.0, *seq))
-                    .filter(entities::code_event::Column::Owner.eq(owner.as_str()))
+            MemoryEvidence::Event { session_id, seq }
+            | MemoryEvidence::CodeEvent { session_id, seq } => {
+                entities::event::Entity::find_by_id((session_id.0, *seq))
+                    .filter(entities::event::Column::Owner.eq(owner.as_str()))
                     .one(conn)
                     .await
                     .map_err(backend_err)?
@@ -366,7 +367,8 @@ where
         if !resolves {
             return Err(MemoryError::EvidenceNotFound(match evidence {
                 MemoryEvidence::Message { message_id } => format!("message {message_id}"),
-                MemoryEvidence::CodeEvent { session_id, seq } => {
+                MemoryEvidence::Event { session_id, seq }
+                | MemoryEvidence::CodeEvent { session_id, seq } => {
                     format!("code event {session_id}:{seq}")
                 }
             }));

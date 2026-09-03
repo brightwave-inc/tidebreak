@@ -210,12 +210,15 @@ fn is_false(value: &bool) -> bool {
 /// it has seen and resumes with `after = <seq>`, so a dropped or reconnecting
 /// connection catches up without gaps and without replaying what it already has.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SequencedEvent {
+pub struct SequencedAgentEvent {
     /// Monotonic per-chat sequence number; the first event in a chat is 1.
     pub seq: i64,
     /// The event at this position in the chat's stream.
     pub event: AgentEvent,
 }
+
+#[doc(hidden)]
+pub use SequencedAgentEvent as SequencedEvent;
 
 #[cfg(test)]
 mod tests {
@@ -461,7 +464,7 @@ mod tests {
     }
 
     /// The chat journal is an alias over the code journal (decision 48):
-    /// a chat event is stored as a `CodeEvent` row through
+    /// a chat event is stored as a `Event` row through
     /// `crate::chat_journal::journal_row` and replayed through
     /// `crate::chat_journal::chat_event`. This fixture pins what the replay
     /// serves, so it is the tripwire decision 48 asks for: a row that comes

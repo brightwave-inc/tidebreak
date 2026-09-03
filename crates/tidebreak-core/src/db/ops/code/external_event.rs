@@ -20,7 +20,7 @@ use sea_orm::{
     TransactionTrait,
 };
 
-use crate::code::{CodeQueuedTurn, CodeSessionId, CodeTurnId, ExternalMessageRecord};
+use crate::code::{ExternalMessageRecord, QueuedTurn, SessionId, TurnId};
 use crate::error::{AgentError, Result};
 use crate::OwnerId;
 
@@ -32,7 +32,7 @@ use super::queued::queued_turn_from_model;
 async fn find_event_on<C>(
     conn: &C,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     event_id: &str,
 ) -> Result<Option<entities::code_external_event::Model>>
 where
@@ -54,7 +54,7 @@ where
 async fn order_queued_by_channel_ts<C>(
     conn: &C,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
 ) -> Result<()>
 where
     C: ConnectionTrait,
@@ -116,7 +116,7 @@ where
 pub async fn record_external_message(
     store: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     event_id: &str,
     channel_ts: &str,
     message: &str,
@@ -138,7 +138,7 @@ pub async fn record_external_message(
     if let Some(event) = find_event_on(&transaction, owner, session_id, event_id).await? {
         transaction.commit().await.map_err(store_err)?;
         return Ok(ExternalMessageRecord::Replay {
-            turn_id: CodeTurnId(event.turn_id),
+            turn_id: TurnId(event.turn_id),
         });
     }
     let existing = entities::code_queued_turn::Entity::find()
@@ -149,16 +149,16 @@ pub async fn record_external_message(
         .all(&transaction)
         .await
         .map_err(store_err)?;
-    if existing.len() >= CodeQueuedTurn::MAX_PER_SESSION {
+    if existing.len() >= QueuedTurn::MAX_PER_SESSION {
         transaction.commit().await.map_err(store_err)?;
         return Err(AgentError::Store(format!(
             "a session may queue at most {} messages",
-            CodeQueuedTurn::MAX_PER_SESSION
+            QueuedTurn::MAX_PER_SESSION
         )));
     }
     let position = existing.last().map_or(0, |last| last.position + 1);
     let now = database_now(&transaction).await?;
-    let queued_id = CodeTurnId::new();
+    let queued_id = TurnId::new();
     entities::code_queued_turn::ActiveModel {
         id: Set(queued_id.0),
         owner: Set(owner.as_str().to_owned()),
@@ -196,7 +196,7 @@ pub async fn record_external_message(
             return Err(store_err(error));
         };
         return Ok(ExternalMessageRecord::Replay {
-            turn_id: CodeTurnId(event.turn_id),
+            turn_id: TurnId(event.turn_id),
         });
     }
     order_queued_by_channel_ts(&transaction, owner, session_id).await?;

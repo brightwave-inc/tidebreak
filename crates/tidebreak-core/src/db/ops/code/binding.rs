@@ -8,8 +8,8 @@
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set, TransactionTrait};
 
 use crate::code::{
-    CodeBindingId, CodeExternalBinding, CodeGrantId, CodeSession, CodeSessionId,
-    CodeSessionLifecycle, CodeWorkspace, ExternalSessionResolution,
+    CodeBindingId, CodeExternalBinding, CodeGrantId, CodeWorkspace, ExternalSessionResolution,
+    Session, SessionId, SessionLifecycle,
 };
 use crate::error::Result;
 use crate::OwnerId;
@@ -26,7 +26,7 @@ fn binding_from_model(
         channel_kind: model.channel_kind,
         external_key: model.external_key,
         grant_id: CodeGrantId(model.grant_id),
-        session_id: CodeSessionId(model.session_id),
+        session_id: SessionId(model.session_id),
         created_at: model.created_at,
     })
 }
@@ -56,7 +56,7 @@ pub async fn get_external_binding(
 pub async fn list_external_bindings_for_sessions(
     store: &DbStore,
     owner: &OwnerId,
-    session_ids: &[CodeSessionId],
+    session_ids: &[SessionId],
 ) -> Result<Vec<CodeExternalBinding>> {
     if session_ids.is_empty() {
         return Ok(Vec::new());
@@ -82,7 +82,7 @@ pub async fn list_external_bindings_for_sessions(
 pub async fn session_bound_to_grant(
     store: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     grant_id: CodeGrantId,
 ) -> Result<bool> {
     Ok(entities::code_external_binding::Entity::find()
@@ -107,12 +107,12 @@ where
     if binding.grant_id != grant_id.0 {
         return Ok(ExternalSessionResolution::GrantMismatch);
     }
-    let session_id = CodeSessionId(binding.session_id);
-    let ended = entities::code_session::Entity::find_by_id(binding.session_id)
+    let session_id = SessionId(binding.session_id);
+    let ended = entities::session::Entity::find_by_id(binding.session_id)
         .one(connection)
         .await
         .map_err(store_err)?
-        .is_none_or(|session| session.lifecycle == CodeSessionLifecycle::Ended.as_str());
+        .is_none_or(|session| session.lifecycle == SessionLifecycle::Ended.as_str());
     if ended {
         return Ok(ExternalSessionResolution::Ended { session_id });
     }
@@ -136,7 +136,7 @@ pub async fn resolve_external_session(
     channel_kind: &str,
     external_key: &str,
     workspace: &CodeWorkspace,
-    session: &CodeSession,
+    session: &Session,
 ) -> Result<ExternalSessionResolution> {
     let transaction = store.conn.begin().await.map_err(store_err)?;
     if let Some(hit) = entities::code_external_binding::Entity::find()
@@ -197,4 +197,21 @@ pub async fn resolve_external_session(
             classify_hit(&store.conn, hit, grant_id).await
         }
     }
+}
+
+/// Every binding pointing at one session, for revoke and scope sweeps.
+pub async fn list_bindings_for_session(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: SessionId,
+) -> Result<Vec<CodeExternalBinding>> {
+    entities::code_external_binding::Entity::find()
+        .filter(entities::code_external_binding::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_external_binding::Column::SessionId.eq(session_id.0))
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .map(binding_from_model)
+        .collect()
 }

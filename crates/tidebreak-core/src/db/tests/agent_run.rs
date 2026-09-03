@@ -1,24 +1,24 @@
 use super::{sample_chat, temp_store};
 use crate::{
     AcceptAgentRunOutcome, AgentRun, AgentRunId, AgentRunInboxStatus, AgentRunStatus, AgentRunTier,
-    CallId, ChatId, ClaimSandboxToolCallOutcome, DbStore, FinishAgentRunCancellationOutcome,
-    MessageId, ParkSandboxToolCallOutcome, ParkTurnForAgentRunWaitSetOutcome,
+    CallId, ClaimSandboxToolCallOutcome, DbStore, FinishAgentRunCancellationOutcome, MessageId,
+    ParkSandboxToolCallOutcome, ParkTurnForAgentRunWaitSetOutcome,
     RequestAgentRunCancellationOutcome, RequestFolderAccessArgs, RequestedFolderCapability,
     RequestedFolderHint, ResolveSandboxToolCallOutcome, ResumeTurnForAgentRunWaitSetOutcome, Role,
-    SandboxAdmissionMode, SandboxProvisionState, SandboxToolCallRequest, Store,
+    SandboxAdmissionMode, SandboxProvisionState, SandboxToolCallRequest, SessionId, Store,
     SubmitAgentRunResultOutcome, ToolCallResolution, TurnCheckpointProgress, TurnId, TurnRunStatus,
     Usage,
 };
 use chrono::{Duration, Utc};
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 
-async fn accepted_sandbox_for_tool_test(store: &DbStore, chat_id: ChatId) -> AgentRun {
+async fn accepted_sandbox_for_tool_test(store: &DbStore, chat_id: SessionId) -> AgentRun {
     admit_sandbox_for_test(store, chat_id, "Use the durable sandbox tool checkpoint").await
 }
 
 pub(super) async fn live_turn_for_sandbox_test(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
 ) -> (crate::TurnRun, uuid::Uuid) {
     if let Some(turn) = store
         .list_turns(chat_id)
@@ -56,7 +56,7 @@ pub(super) async fn live_turn_for_sandbox_test(
 
 pub(super) async fn admit_sandbox_call_for_test(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
     call_id: CallId,
     input: &str,
 ) -> AgentRun {
@@ -81,13 +81,13 @@ pub(super) async fn admit_sandbox_call_for_test(
     }
 }
 
-async fn admit_sandbox_for_test(store: &DbStore, chat_id: ChatId, input: &str) -> AgentRun {
+async fn admit_sandbox_for_test(store: &DbStore, chat_id: SessionId, input: &str) -> AgentRun {
     admit_sandbox_call_for_test(store, chat_id, CallId::new(), input).await
 }
 
 async fn admit_sandbox_container_for_test(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
     input: &str,
 ) -> AgentRun {
     let (turn, lease) = live_turn_for_sandbox_test(store, chat_id).await;
@@ -152,7 +152,7 @@ async fn force_expired_agent_deadline(store: &DbStore, id: AgentRunId) {
 
 async fn submit_sandbox_result(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
     input: &str,
     text: &str,
 ) -> (AgentRunId, crate::AgentRunResult) {
@@ -187,7 +187,7 @@ fn wait_id_for_child(child_run_id: AgentRunId) -> CallId {
 /// production `wait_for_agents` checkpoint the server actually takes.
 async fn park_foreground_turn_on_child(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
     child_run_id: AgentRunId,
 ) -> crate::TurnRun {
     let (running, lease_token) = live_turn_for_sandbox_test(store, chat_id).await;
@@ -202,9 +202,9 @@ async fn park_foreground_turn_on_child(
     };
     let now = Utc::now();
     // The wait-set checkpoint requires the claim's first journal event.
-    if crate::db::entities::code_event::Entity::find()
-        .filter(crate::db::entities::code_event::Column::LeaseToken.eq(lease_token))
-        .filter(crate::db::entities::code_event::Column::AttemptEventOrdinal.eq(1))
+    if crate::db::entities::event::Entity::find()
+        .filter(crate::db::entities::event::Column::LeaseToken.eq(lease_token))
+        .filter(crate::db::entities::event::Column::AttemptEventOrdinal.eq(1))
         .one(&store.conn)
         .await
         .unwrap()
@@ -997,7 +997,7 @@ async fn agent_run_acceptance_rejects_invalid_shapes_and_identity_reuse() {
         .await
         .is_err());
     assert!(store
-        .list_agent_runs(ChatId::new())
+        .list_agent_runs(SessionId::new())
         .await
         .unwrap()
         .is_empty());
@@ -1689,7 +1689,7 @@ async fn live_parent_inbox_candidates_skip_sixteen_obsolete_deliveries() {
     // fighting that per-turn ceiling.
     for index in 0..16 {
         let mut obsolete = sample_chat();
-        obsolete.id = ChatId::new();
+        obsolete.id = SessionId::new();
         store.create_chat(&obsolete).await.unwrap();
         submit_sandbox_result(
             &store,
@@ -3138,8 +3138,8 @@ async fn active_work_counts_gate_host_quiescence() {
     assert!(!busy.is_quiescent());
 
     // Settled rows drop out of both counts.
-    let mut settled_turn: crate::db::entities::code_turn::ActiveModel =
-        crate::db::entities::code_turn::Entity::find_by_id(turn_id.0)
+    let mut settled_turn: crate::db::entities::turn::ActiveModel =
+        crate::db::entities::turn::Entity::find_by_id(turn_id.0)
             .one(&store.conn)
             .await
             .unwrap()
@@ -3392,8 +3392,8 @@ async fn a_background_run_keeps_its_own_plan_and_the_chat_can_still_be_deleted()
     // The spawning turn is quiesced the same way a worker acknowledgement
     // would leave it; deletion is what this half of the test is about, not the
     // turn state machine.
-    let mut settled: crate::db::entities::code_turn::ActiveModel =
-        crate::db::entities::code_turn::Entity::find_by_id(turn.id.0)
+    let mut settled: crate::db::entities::turn::ActiveModel =
+        crate::db::entities::turn::Entity::find_by_id(turn.id.0)
             .one(&store.conn)
             .await
             .unwrap()

@@ -5,10 +5,10 @@ use crate::approval::{ApprovalDecision, ApprovalRequest, StandingGrant, ToolAppr
 use crate::connected_app::{ConnectedApp, ConnectedAppKind};
 use crate::deliverable::{CreateOutput, NewOutputRevision, OutputRecord, OutputRevision};
 use crate::error::{AgentError, Result};
-use crate::event::{AgentEvent, SequencedEvent};
+use crate::event::{AgentEvent, SequencedAgentEvent};
 use crate::id::{
-    AgentRunId, AppId, AppRevisionId, CallId, ChatId, DocumentId, MessageId, OutputId,
-    OutputRevisionId, ProjectId, RootAttachmentChangeId, TurnId, TurnSteerId,
+    AgentRunId, AppId, AppRevisionId, CallId, DocumentId, MessageId, OutputId, OutputRevisionId,
+    ProjectId, RootAttachmentChangeId, SessionId, TurnId, TurnSteerId,
 };
 use crate::image::ImageRef;
 use crate::local_app::{
@@ -20,7 +20,7 @@ use crate::model::{
     BlobRetirementStatus, Chat, ClientToolCallRequest, DocumentListCursor, DocumentRecord,
     DocumentScope, DocumentSourceUpsert, DocumentSummaryRecord, DocumentUpsert, ExecFileRejection,
     ExecFileRejectionRecord, ExecFileSnapshot, ExecFileSnapshotRecord, Message, MessageAttachment,
-    MessageDocumentAttachment, NetworkPolicy, OwnerId, Project, QueuedTurn, ReasoningEffort,
+    MessageDocumentAttachment, NetworkPolicy, OwnerId, Project, QueuedAgentTurn, ReasoningEffort,
     RootAttachmentChange, RootAttachmentChangeTerminal, ToolCallRecord, ToolCallResolution,
     TurnAdmissionLease, TurnCheckpointProgress, TurnFailureRetry, TurnRun, TurnSteer,
 };
@@ -130,7 +130,7 @@ pub trait Store: Send + Sync {
     /// refused: its broker grants are keyed to the identity it is leaving.
     async fn move_chat_to_project(
         &self,
-        _id: ChatId,
+        _id: SessionId,
         _project_id: Option<ProjectId>,
     ) -> Result<MoveChatOutcome> {
         Err(AgentError::Store(
@@ -186,7 +186,7 @@ pub trait Store: Send + Sync {
     /// window, enqueueing whatever that frees.
     async fn record_exec_file_snapshots(
         &self,
-        _chat_id: ChatId,
+        _chat_id: SessionId,
         _turn_id: TurnId,
         _files: &[ExecFileSnapshotRecord],
     ) -> Result<()> {
@@ -194,14 +194,14 @@ pub trait Store: Send + Sync {
     }
 
     /// This chat's journaled file changes, newest first.
-    async fn list_exec_file_snapshots(&self, _chat_id: ChatId) -> Result<Vec<ExecFileSnapshot>> {
+    async fn list_exec_file_snapshots(&self, _chat_id: SessionId) -> Result<Vec<ExecFileSnapshot>> {
         document_storage_unavailable()
     }
 
     /// Journal the staged files one turn could not safely materialize.
     async fn record_exec_file_rejections(
         &self,
-        _chat_id: ChatId,
+        _chat_id: SessionId,
         _turn_id: TurnId,
         _files: &[ExecFileRejectionRecord],
     ) -> Result<()> {
@@ -209,7 +209,10 @@ pub trait Store: Send + Sync {
     }
 
     /// This chat's rejected staged files, newest first.
-    async fn list_exec_file_rejections(&self, _chat_id: ChatId) -> Result<Vec<ExecFileRejection>> {
+    async fn list_exec_file_rejections(
+        &self,
+        _chat_id: SessionId,
+    ) -> Result<Vec<ExecFileRejection>> {
         document_storage_unavailable()
     }
 
@@ -326,7 +329,7 @@ pub trait Store: Send + Sync {
     async fn create_chat_with_project_defaults(&self, chat: &Chat) -> Result<Chat>;
 
     /// Fetch a chat by id, or `None` if it doesn't exist.
-    async fn get_chat(&self, id: ChatId) -> Result<Option<Chat>>;
+    async fn get_chat(&self, id: SessionId) -> Result<Option<Chat>>;
 
     /// Which owner a chat belongs to, or `None` when it does not exist.
     ///
@@ -337,7 +340,7 @@ pub trait Store: Send + Sync {
     ///
     /// The default answers `None`, which callers must read as "this store
     /// cannot name an owner", never as "the local owner".
-    async fn chat_owner(&self, id: ChatId) -> Result<Option<OwnerId>> {
+    async fn chat_owner(&self, id: SessionId) -> Result<Option<OwnerId>> {
         let _ = id;
         Ok(None)
     }
@@ -353,7 +356,7 @@ pub trait Store: Send + Sync {
     /// flow; deletion never guesses at native broker state. Conversation-owned
     /// documents are removed and retained source blobs are enqueued for
     /// asynchronous retirement.
-    async fn delete_chat(&self, _id: ChatId) -> Result<DeleteChatOutcome> {
+    async fn delete_chat(&self, _id: SessionId) -> Result<DeleteChatOutcome> {
         Err(AgentError::Store(
             "conversation deletion is not implemented by this Store".into(),
         ))
@@ -361,15 +364,15 @@ pub trait Store: Send + Sync {
 
     /// Atomically load a chat's durable messages and its event-journal
     /// watermark. Returns `None` when the chat does not exist.
-    async fn get_chat_transcript(&self, id: ChatId) -> Result<Option<ChatTranscriptSnapshot>>;
+    async fn get_chat_transcript(&self, id: SessionId) -> Result<Option<ChatTranscriptSnapshot>>;
 
     /// Set (or clear, with `None`) a chat's model override. A no-op if the chat
     /// doesn't exist.
-    async fn set_chat_model(&self, id: ChatId, model: Option<String>) -> Result<()>;
+    async fn set_chat_model(&self, id: SessionId, model: Option<String>) -> Result<()>;
 
     /// Set (or clear, with `None`) a chat's human-facing title. A no-op if the
     /// chat doesn't exist.
-    async fn set_chat_title(&self, id: ChatId, title: Option<String>) -> Result<()>;
+    async fn set_chat_title(&self, id: SessionId, title: Option<String>) -> Result<()>;
 
     /// Set a chat's title only while it has none, reporting whether it applied.
     ///
@@ -378,14 +381,14 @@ pub trait Store: Send + Sync {
     /// produced; an unconditional write would replace the name the user just
     /// typed with a guess. Whoever names the conversation first keeps it, which
     /// also makes renaming a chat the way to opt out of ever being renamed for.
-    async fn set_chat_title_if_unset(&self, id: ChatId, title: &str) -> Result<bool>;
+    async fn set_chat_title_if_unset(&self, id: SessionId, title: &str) -> Result<bool>;
 
     /// Atomically update whichever user-editable chat metadata fields are
     /// present. An outer `None` leaves that field alone; an inner `None`
     /// clears it. Returns `false` if the chat does not exist.
     async fn update_chat_metadata(
         &self,
-        id: ChatId,
+        id: SessionId,
         title: Option<Option<String>>,
         model: Option<Option<String>>,
         reasoning_effort: Option<Option<ReasoningEffort>>,
@@ -399,7 +402,11 @@ pub trait Store: Send + Sync {
     ///
     /// A dedicated write rather than another [`Store::update_chat_metadata`]
     /// parameter: the switch has no cleared state and no sticky default.
-    async fn set_chat_memory_incognito(&self, id: ChatId, memory_incognito: bool) -> Result<bool>;
+    async fn set_chat_memory_incognito(
+        &self,
+        id: SessionId,
+        memory_incognito: bool,
+    ) -> Result<bool>;
 
     // ------------------------------------------------------------------
     // Owner-scoped root surface (#853).
@@ -427,7 +434,7 @@ pub trait Store: Send + Sync {
     /// A chat created through [`Store::create_chat`] carries the run from
     /// the start; a session the code runtime created gets it when the
     /// internal engine first hosts it. A missing session is an error.
-    async fn ensure_foreground_agent_run(&self, chat_id: ChatId) -> Result<()> {
+    async fn ensure_foreground_agent_run(&self, chat_id: SessionId) -> Result<()> {
         let _ = chat_id;
         Err(AgentError::Store(
             "foreground agent runs are not implemented by this Store".into(),
@@ -471,7 +478,7 @@ pub trait Store: Send + Sync {
 
     /// Fetch `owner`'s chat by id; `None` when it does not exist **or**
     /// belongs to someone else.
-    async fn get_chat_scoped(&self, owner: &OwnerId, id: ChatId) -> Result<Option<Chat>> {
+    async fn get_chat_scoped(&self, owner: &OwnerId, id: SessionId) -> Result<Option<Chat>> {
         let _ = owner;
         self.get_chat(id).await
     }
@@ -480,7 +487,7 @@ pub trait Store: Send + Sync {
     async fn publish_chat_image_scoped(
         &self,
         owner: &OwnerId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         image: &ImageRef,
     ) -> Result<bool> {
         let _ = owner;
@@ -495,7 +502,11 @@ pub trait Store: Send + Sync {
 
     /// [`Store::delete_chat`] restricted to `owner`'s chats; someone else's
     /// chat reports [`DeleteChatOutcome::NotFound`].
-    async fn delete_chat_scoped(&self, owner: &OwnerId, id: ChatId) -> Result<DeleteChatOutcome> {
+    async fn delete_chat_scoped(
+        &self,
+        owner: &OwnerId,
+        id: SessionId,
+    ) -> Result<DeleteChatOutcome> {
         let _ = owner;
         self.delete_chat(id).await
     }
@@ -504,7 +515,7 @@ pub trait Store: Send + Sync {
     async fn get_chat_transcript_scoped(
         &self,
         owner: &OwnerId,
-        id: ChatId,
+        id: SessionId,
     ) -> Result<Option<ChatTranscriptSnapshot>> {
         let _ = owner;
         self.get_chat_transcript(id).await
@@ -516,7 +527,7 @@ pub trait Store: Send + Sync {
     async fn update_chat_metadata_scoped(
         &self,
         owner: &OwnerId,
-        id: ChatId,
+        id: SessionId,
         title: Option<Option<String>>,
         model: Option<Option<String>>,
         reasoning_effort: Option<Option<ReasoningEffort>>,
@@ -540,7 +551,7 @@ pub trait Store: Send + Sync {
     async fn set_chat_memory_incognito_scoped(
         &self,
         owner: &OwnerId,
-        id: ChatId,
+        id: SessionId,
         memory_incognito: bool,
     ) -> Result<bool> {
         let _ = owner;
@@ -593,7 +604,7 @@ pub trait Store: Send + Sync {
     async fn move_chat_to_project_scoped(
         &self,
         owner: &OwnerId,
-        id: ChatId,
+        id: SessionId,
         project_id: Option<ProjectId>,
     ) -> Result<MoveChatOutcome> {
         let _ = owner;
@@ -722,7 +733,7 @@ pub trait Store: Send + Sync {
     }
 
     /// List a conversation's live outputs, most recently updated first.
-    async fn list_outputs(&self, _chat_id: ChatId, _limit: u64) -> Result<Vec<OutputRecord>> {
+    async fn list_outputs(&self, _chat_id: SessionId, _limit: u64) -> Result<Vec<OutputRecord>> {
         output_storage_unavailable()
     }
 
@@ -735,7 +746,7 @@ pub trait Store: Send + Sync {
     /// hoping it is on the page.
     async fn find_outputs_by_filename(
         &self,
-        _chat_id: ChatId,
+        _chat_id: SessionId,
         _filename: &str,
     ) -> Result<Vec<OutputRecord>> {
         output_storage_unavailable()
@@ -810,7 +821,7 @@ pub trait Store: Send + Sync {
     /// Create an app owned by the same principal as `chat_id`.
     async fn create_app_for_chat(
         &self,
-        _chat_id: ChatId,
+        _chat_id: SessionId,
         _request: &CreateApp,
     ) -> Result<AppRecord> {
         app_storage_unavailable()
@@ -838,7 +849,7 @@ pub trait Store: Send + Sync {
     /// Append only when the app belongs to the same principal as `chat_id`.
     async fn append_app_revision_for_chat(
         &self,
-        _chat_id: ChatId,
+        _chat_id: SessionId,
         _app_id: AppId,
         _revision: &NewAppRevision,
     ) -> Result<AppRecord> {
@@ -866,7 +877,7 @@ pub trait Store: Send + Sync {
     }
 
     /// Fetch one app only when it belongs to the same principal as `chat_id`.
-    async fn get_app_for_chat(&self, _chat_id: ChatId, _id: AppId) -> Result<Option<AppRecord>> {
+    async fn get_app_for_chat(&self, _chat_id: SessionId, _id: AppId) -> Result<Option<AppRecord>> {
         app_storage_unavailable()
     }
 
@@ -911,7 +922,7 @@ pub trait Store: Send + Sync {
     /// Fetch a revision only through an app owned by `chat_id`'s principal.
     async fn get_app_revision_for_chat(
         &self,
-        _chat_id: ChatId,
+        _chat_id: SessionId,
         _id: AppRevisionId,
     ) -> Result<Option<AppRevision>> {
         app_storage_unavailable()
@@ -1100,7 +1111,10 @@ pub trait Store: Send + Sync {
     /// This record is intentionally distinct from visible messages. Consumers
     /// that later project it into a provider request must treat it as bounded,
     /// untrusted historical data rather than as a capability grant.
-    async fn get_context_checkpoint(&self, _chat_id: ChatId) -> Result<Option<ContextCheckpoint>> {
+    async fn get_context_checkpoint(
+        &self,
+        _chat_id: SessionId,
+    ) -> Result<Option<ContextCheckpoint>> {
         context_checkpoint_storage_unavailable()
     }
 
@@ -1160,7 +1174,7 @@ pub trait Store: Send + Sync {
     async fn accept_agent_run(
         &self,
         _id: AgentRunId,
-        _chat_id: ChatId,
+        _chat_id: SessionId,
         _parent_id: Option<AgentRunId>,
         _spawn_call_id: Option<CallId>,
         _tier: AgentRunTier,
@@ -1459,7 +1473,7 @@ pub trait Store: Send + Sync {
     }
 
     /// List a chat's runs in deterministic creation order.
-    async fn list_agent_runs(&self, _chat_id: ChatId) -> Result<Vec<AgentRun>> {
+    async fn list_agent_runs(&self, _chat_id: SessionId) -> Result<Vec<AgentRun>> {
         agent_run_storage_unavailable()
     }
 
@@ -1890,7 +1904,7 @@ pub trait Store: Send + Sync {
     }
 
     /// List a chat's durable turn history in deterministic creation-time order.
-    async fn list_turns(&self, _chat_id: ChatId) -> Result<Vec<TurnRun>> {
+    async fn list_turns(&self, _chat_id: SessionId) -> Result<Vec<TurnRun>> {
         turn_storage_unavailable()
     }
 
@@ -1935,7 +1949,7 @@ pub trait Store: Send + Sync {
     async fn accept_turn(
         &self,
         id: TurnId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         model: &str,
         content: &str,
     ) -> Result<AcceptTurnOutcome> {
@@ -1967,7 +1981,7 @@ pub trait Store: Send + Sync {
     async fn accept_turn_with_attachments(
         &self,
         _id: TurnId,
-        _chat_id: ChatId,
+        _chat_id: SessionId,
         _model: &str,
         _content: &str,
         _images: &[ImageRef],
@@ -1989,7 +2003,7 @@ pub trait Store: Send + Sync {
     async fn accept_turn_with_message_context(
         &self,
         id: TurnId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         model: &str,
         content: &str,
         images: &[ImageRef],
@@ -2018,7 +2032,7 @@ pub trait Store: Send + Sync {
     async fn accept_reserved_turn_with_message_context(
         &self,
         _lease: TurnAdmissionLease,
-        _chat_id: ChatId,
+        _chat_id: SessionId,
         _model: &str,
         _content: &str,
         _images: &[ImageRef],
@@ -2110,7 +2124,7 @@ pub trait Store: Send + Sync {
     /// [`AcceptTurnSteerOutcome::TurnUnavailable`].
     /// Durably queue a message to run as its own turn once the chat is free.
     /// An exact ambiguous retry returns the original row.
-    async fn enqueue_queued_turn(&self, _queued: &QueuedTurn) -> Result<QueuedTurn> {
+    async fn enqueue_queued_turn(&self, _queued: &QueuedAgentTurn) -> Result<QueuedAgentTurn> {
         turn_storage_unavailable()
     }
 
@@ -2118,7 +2132,7 @@ pub trait Store: Send + Sync {
     async fn enqueue_reserved_turn(
         &self,
         _lease: TurnAdmissionLease,
-        _queued: &QueuedTurn,
+        _queued: &QueuedAgentTurn,
     ) -> Result<ReservedQueuedTurnOutcome> {
         turn_storage_unavailable()
     }
@@ -2132,7 +2146,7 @@ pub trait Store: Send + Sync {
     /// without executing or deleting anything.
     async fn promote_queued_turn_with_message_context(
         &self,
-        _expected: &QueuedTurn,
+        _expected: &QueuedAgentTurn,
         _model: &str,
         _images: &[ImageRef],
     ) -> Result<PromoteQueuedTurnOutcome> {
@@ -2142,33 +2156,33 @@ pub trait Store: Send + Sync {
     /// Drop a promoter snapshot only while it is still the exact unchanged
     /// FIFO head. This keeps mutable prerequisite failures from deleting an
     /// edited or reordered message observed through a stale read.
-    async fn delete_queued_turn_if_current(&self, _expected: &QueuedTurn) -> Result<bool> {
+    async fn delete_queued_turn_if_current(&self, _expected: &QueuedAgentTurn) -> Result<bool> {
         turn_storage_unavailable()
     }
 
     /// The chat's queued messages, FIFO.
-    async fn list_queued_turns(&self, _chat_id: ChatId) -> Result<Vec<QueuedTurn>> {
+    async fn list_queued_turns(&self, _chat_id: SessionId) -> Result<Vec<QueuedAgentTurn>> {
         turn_storage_unavailable()
     }
 
     /// Chats currently holding queued messages, for the promoter's scan.
-    async fn chats_with_queued_turns(&self) -> Result<Vec<ChatId>> {
+    async fn chats_with_queued_turns(&self) -> Result<Vec<SessionId>> {
         turn_storage_unavailable()
     }
 
     /// Retract one queued message. `false` when no such row exists.
-    async fn delete_queued_turn(&self, _chat_id: ChatId, _id: TurnId) -> Result<bool> {
+    async fn delete_queued_turn(&self, _chat_id: SessionId, _id: TurnId) -> Result<bool> {
         turn_storage_unavailable()
     }
 
     /// Edit a queued message and/or move it, keeping positions dense.
     async fn update_queued_turn(
         &self,
-        _chat_id: ChatId,
+        _chat_id: SessionId,
         _id: TurnId,
         _content: Option<&str>,
         _position: Option<i32>,
-    ) -> Result<Option<QueuedTurn>> {
+    ) -> Result<Option<QueuedAgentTurn>> {
         turn_storage_unavailable()
     }
 
@@ -2176,7 +2190,7 @@ pub trait Store: Send + Sync {
         &self,
         _id: TurnSteerId,
         _turn_id: TurnId,
-        _chat_id: ChatId,
+        _chat_id: SessionId,
         _content: &str,
         _interrupt: bool,
     ) -> Result<AcceptTurnSteerOutcome> {
@@ -2196,7 +2210,7 @@ pub trait Store: Send + Sync {
         &self,
         id: TurnSteerId,
         turn_id: TurnId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         content: &str,
         invoked_skills: &[String],
         interrupt: bool,
@@ -2567,7 +2581,7 @@ pub trait Store: Send + Sync {
     }
 
     /// List a chat's messages in creation order.
-    async fn list_messages(&self, chat_id: ChatId) -> Result<Vec<Message>>;
+    async fn list_messages(&self, chat_id: SessionId) -> Result<Vec<Message>>;
 
     /// Output message ids of the chat's cancelled turns (#1182).
     ///
@@ -2575,7 +2589,10 @@ pub trait Store: Send + Sync {
     /// model is told the user stopped the response there, rather than left to
     /// infer it from a mid-sentence cut. Best-effort: the default keeps stores
     /// without turn state serving unannotated transcripts.
-    async fn list_cancelled_output_message_ids(&self, _chat_id: ChatId) -> Result<Vec<MessageId>> {
+    async fn list_cancelled_output_message_ids(
+        &self,
+        _chat_id: SessionId,
+    ) -> Result<Vec<MessageId>> {
         Ok(Vec::new())
     }
 
@@ -2585,7 +2602,10 @@ pub trait Store: Send + Sync {
     /// how history regains the images a turn was submitted with. Stores without
     /// attachment support report none, which degrades a reloaded turn to its
     /// text rather than failing the load.
-    async fn list_message_attachments(&self, _chat_id: ChatId) -> Result<Vec<MessageAttachment>> {
+    async fn list_message_attachments(
+        &self,
+        _chat_id: SessionId,
+    ) -> Result<Vec<MessageAttachment>> {
         Ok(Vec::new())
     }
 
@@ -2594,7 +2614,7 @@ pub trait Store: Send + Sync {
     /// Returns `false` when the chat does not exist. Exact retries with the
     /// same descriptor are idempotent; implementations must reject conflicting
     /// metadata for the same `(chat_id, blob_id)` reservation.
-    async fn publish_chat_image(&self, _chat_id: ChatId, _image: &ImageRef) -> Result<bool> {
+    async fn publish_chat_image(&self, _chat_id: SessionId, _image: &ImageRef) -> Result<bool> {
         image_publication_storage_unavailable()
     }
 
@@ -2607,7 +2627,7 @@ pub trait Store: Send + Sync {
     async fn publish_code_session_image(
         &self,
         _owner: &OwnerId,
-        _session_id: crate::CodeSessionId,
+        _session_id: crate::SessionId,
         _image: &ImageRef,
         _created_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<bool> {
@@ -2619,7 +2639,7 @@ pub trait Store: Send + Sync {
     async fn get_published_code_session_image(
         &self,
         _owner: &OwnerId,
-        _session_id: crate::CodeSessionId,
+        _session_id: crate::SessionId,
         _blob_id: uuid::Uuid,
     ) -> Result<Option<ImageRef>> {
         image_publication_storage_unavailable()
@@ -2629,7 +2649,7 @@ pub trait Store: Send + Sync {
     /// `chat_id`.
     async fn get_published_chat_image(
         &self,
-        _chat_id: ChatId,
+        _chat_id: SessionId,
         _blob_id: uuid::Uuid,
     ) -> Result<Option<ImageRef>> {
         image_publication_storage_unavailable()
@@ -2638,7 +2658,7 @@ pub trait Store: Send + Sync {
     /// List a chat's file attachments, ordered by message then position.
     async fn list_message_document_attachments(
         &self,
-        _chat_id: ChatId,
+        _chat_id: SessionId,
     ) -> Result<Vec<MessageDocumentAttachment>> {
         Ok(Vec::new())
     }
@@ -2685,7 +2705,7 @@ pub trait Store: Send + Sync {
     /// Decide a previously registered approval exactly once.
     async fn decide_tool_call_approval(
         &self,
-        _chat_id: ChatId,
+        _chat_id: SessionId,
         _call_id: CallId,
         _decision: &ApprovalDecision,
         _decided_at: chrono::DateTime<chrono::Utc>,
@@ -2700,7 +2720,7 @@ pub trait Store: Send + Sync {
     /// exact call is pending; a later retry may not widen a one-shot decision.
     async fn decide_tool_call_approval_with_grant(
         &self,
-        _chat_id: ChatId,
+        _chat_id: SessionId,
         _call_id: CallId,
         _decision: &ApprovalDecision,
         _grant: &StandingGrant,
@@ -2732,7 +2752,7 @@ pub trait Store: Send + Sync {
     /// got there first, or it resolved).
     async fn resolve_tool_call_approval_from_judge(
         &self,
-        _chat_id: ChatId,
+        _chat_id: SessionId,
         _call_id: CallId,
         _approved: bool,
     ) -> Result<JudgeVerdictOutcome> {
@@ -2764,7 +2784,7 @@ pub trait Store: Send + Sync {
     /// List a bounded page of pending approvals for one chat.
     async fn list_pending_tool_call_approvals(
         &self,
-        _chat_id: ChatId,
+        _chat_id: SessionId,
         _limit: u64,
     ) -> Result<Vec<ToolApproval>> {
         Err(AgentError::Store(
@@ -2778,7 +2798,7 @@ pub trait Store: Send + Sync {
     async fn claim_client_tool_call(
         &self,
         id: CallId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         executor_id: uuid::Uuid,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
@@ -2789,7 +2809,7 @@ pub trait Store: Send + Sync {
     async fn heartbeat_client_tool_call(
         &self,
         id: CallId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
         lease_expires_at: chrono::DateTime<chrono::Utc>,
@@ -2821,7 +2841,7 @@ pub trait Store: Send + Sync {
     async fn resolve_claimed_server_tool_call(
         &self,
         _id: CallId,
-        _chat_id: ChatId,
+        _chat_id: SessionId,
         _turn_id: TurnId,
         _lease_token: uuid::Uuid,
         _now: chrono::DateTime<chrono::Utc>,
@@ -2837,7 +2857,7 @@ pub trait Store: Send + Sync {
     async fn resolve_claimed_server_tool_call_with_artifacts(
         &self,
         id: CallId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         turn_id: TurnId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
@@ -2865,7 +2885,7 @@ pub trait Store: Send + Sync {
     async fn abandon_inherited_server_tool_call(
         &self,
         _id: CallId,
-        _chat_id: ChatId,
+        _chat_id: SessionId,
         _turn_id: TurnId,
         _lease_token: uuid::Uuid,
         _now: chrono::DateTime<chrono::Utc>,
@@ -2882,7 +2902,7 @@ pub trait Store: Send + Sync {
     async fn resolve_client_tool_call(
         &self,
         id: CallId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
         resolution: &ToolCallResolution,
@@ -2907,7 +2927,7 @@ pub trait Store: Send + Sync {
     async fn resolve_client_tool_call_and_append_event(
         &self,
         id: CallId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
         resolution: &ToolCallResolution,
@@ -2927,7 +2947,7 @@ pub trait Store: Send + Sync {
     async fn resolve_client_tool_call_and_append_event_with_rows(
         &self,
         id: CallId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
         resolution: &ToolCallResolution,
@@ -2953,7 +2973,7 @@ pub trait Store: Send + Sync {
     async fn resolve_expired_client_tool_call(
         &self,
         id: CallId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
         resolution: &ToolCallResolution,
@@ -2977,7 +2997,7 @@ pub trait Store: Send + Sync {
     async fn resolve_expired_client_tool_call_and_append_event(
         &self,
         id: CallId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
         resolution: &ToolCallResolution,
@@ -2990,7 +3010,7 @@ pub trait Store: Send + Sync {
     async fn resolve_expired_client_tool_call_and_append_event_with_rows(
         &self,
         id: CallId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
         resolution: &ToolCallResolution,
@@ -3010,12 +3030,15 @@ pub trait Store: Send + Sync {
     }
 
     /// List unclaimed and claimed client work for authoritative recovery.
-    async fn list_pending_client_tool_calls(&self, chat_id: ChatId) -> Result<Vec<ToolCallRecord>>;
+    async fn list_pending_client_tool_calls(
+        &self,
+        chat_id: SessionId,
+    ) -> Result<Vec<ToolCallRecord>>;
 
     /// List only validated renderer-safe foreground question cards.
     async fn list_pending_user_questions(
         &self,
-        _chat_id: ChatId,
+        _chat_id: SessionId,
     ) -> Result<Vec<PendingUserQuestions>> {
         turn_storage_unavailable()
     }
@@ -3057,7 +3080,7 @@ pub trait Store: Send + Sync {
     /// dedupe key, so a reconnect cannot double-insert.
     async fn record_work_turn_notification(
         &self,
-        _chat_id: ChatId,
+        _chat_id: SessionId,
         _turn_id: TurnId,
         _kind: crate::NotificationKind,
     ) -> Result<Option<crate::Notification>> {
@@ -3109,7 +3132,7 @@ pub trait Store: Send + Sync {
         &self,
         _owner: &OwnerId,
         _items: &[InboxItem],
-    ) -> Result<std::collections::HashMap<crate::ChatId, crate::Attention>> {
+    ) -> Result<std::collections::HashMap<crate::SessionId, crate::Attention>> {
         turn_storage_unavailable()
     }
 
@@ -3126,7 +3149,7 @@ pub trait Store: Send + Sync {
     /// List only validated renderer-safe pending plan proposals.
     async fn list_pending_plan_approvals(
         &self,
-        _chat_id: ChatId,
+        _chat_id: SessionId,
     ) -> Result<Vec<crate::PendingPlanApproval>> {
         turn_storage_unavailable()
     }
@@ -3152,7 +3175,7 @@ pub trait Store: Send + Sync {
     /// longer owns its turn — an ordinary retry outcome, not a failure.
     async fn update_task_plan(
         &self,
-        _chat_id: ChatId,
+        _chat_id: SessionId,
         _call_id: CallId,
         _steps: &[crate::TaskPlanStep],
         _updated_at: chrono::DateTime<chrono::Utc>,
@@ -3161,12 +3184,12 @@ pub trait Store: Send + Sync {
     }
 
     /// The chat's current task plan, or `None` when it has never made one.
-    async fn get_task_plan(&self, _chat_id: ChatId) -> Result<Option<crate::TaskPlan>> {
+    async fn get_task_plan(&self, _chat_id: SessionId) -> Result<Option<crate::TaskPlan>> {
         turn_storage_unavailable()
     }
 
     /// List a chat's tool calls in creation order.
-    async fn list_tool_calls(&self, chat_id: ChatId) -> Result<Vec<ToolCallRecord>>;
+    async fn list_tool_calls(&self, chat_id: SessionId) -> Result<Vec<ToolCallRecord>>;
 
     /// Read a setting (profile, model prefs, approval policy), or `None`.
     async fn get_setting(&self, key: &str) -> Result<Option<Value>>;
@@ -3183,7 +3206,7 @@ pub trait Store: Send + Sync {
     /// rejects a chat once it has any durable turn history; durable workers must
     /// use [`append_turn_event`](Self::append_turn_event) so stale attempts are
     /// fenced and ambiguous retries recover the original sequence.
-    async fn append_event(&self, chat_id: ChatId, event: &AgentEvent) -> Result<i64>;
+    async fn append_event(&self, chat_id: SessionId, event: &AgentEvent) -> Result<i64>;
 
     /// Append a nonterminal event that belongs to the chat rather than to a
     /// turn.
@@ -3195,7 +3218,7 @@ pub trait Store: Send + Sync {
     /// durable turn history, because the event describes the chat and claims no
     /// turn's ordinal space. Terminal events are never chat-scoped: they resolve
     /// a turn, and only turn resolution may write one.
-    async fn append_chat_event(&self, _chat_id: ChatId, _event: &AgentEvent) -> Result<i64> {
+    async fn append_chat_event(&self, _chat_id: SessionId, _event: &AgentEvent) -> Result<i64> {
         turn_storage_unavailable()
     }
 
@@ -3208,7 +3231,7 @@ pub trait Store: Send + Sync {
     /// and cancelled events are reserved for atomic turn resolution.
     async fn append_turn_event(
         &self,
-        _chat_id: ChatId,
+        _chat_id: SessionId,
         _turn_id: TurnId,
         _lease_token: uuid::Uuid,
         _attempt_event_ordinal: i32,
@@ -3234,7 +3257,7 @@ pub trait Store: Send + Sync {
     /// the attempt no longer owns a live running lease.
     async fn append_turn_events(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         turn_id: TurnId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
@@ -3272,7 +3295,7 @@ pub trait Store: Send + Sync {
         _turn_id: TurnId,
         _lease_token: uuid::Uuid,
         _event: &AgentEvent,
-    ) -> Result<Option<SequencedEvent>> {
+    ) -> Result<Option<SequencedAgentEvent>> {
         turn_storage_unavailable()
     }
 
@@ -3289,7 +3312,7 @@ pub trait Store: Send + Sync {
         _output: &Message,
         citations: &[crate::AssistantCitationInput],
         event: &AgentEvent,
-    ) -> Result<Option<SequencedEvent>> {
+    ) -> Result<Option<SequencedAgentEvent>> {
         if citations.is_empty() {
             self.recover_exact_turn_terminal_event(turn_id, lease_token, event)
                 .await
@@ -3300,7 +3323,8 @@ pub trait Store: Send + Sync {
 
     /// List a chat's journaled events with `seq` greater than `after`, in
     /// sequence order. Pass `0` to replay from the start.
-    async fn list_events(&self, chat_id: ChatId, after: i64) -> Result<Vec<SequencedEvent>>;
+    async fn list_events(&self, chat_id: SessionId, after: i64)
+        -> Result<Vec<SequencedAgentEvent>>;
 
     /// Args-delta and completion events for one tool call, in sequence order.
     ///
@@ -3308,9 +3332,9 @@ pub trait Store: Send + Sync {
     /// [`list_events`](Self::list_events) and keeps the same two kinds.
     async fn list_events_for_call(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         call_id: CallId,
-    ) -> Result<Vec<SequencedEvent>> {
+    ) -> Result<Vec<SequencedAgentEvent>> {
         Ok(self
             .list_events(chat_id, 0)
             .await?

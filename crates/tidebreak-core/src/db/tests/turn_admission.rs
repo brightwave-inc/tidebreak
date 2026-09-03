@@ -2,10 +2,10 @@ use super::*;
 
 async fn make_queued_turn(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
     model: &str,
     now: DateTime<Utc>,
-) -> entities::code_turn::ActiveModel {
+) -> entities::turn::ActiveModel {
     let turn_id = TurnId::new();
     let input_message_id = MessageId::new();
     let seq = super::ops::conversation::next_message_seq_on(&store.conn, chat_id)
@@ -27,19 +27,19 @@ async fn make_queued_turn(
     .await
     .unwrap();
 
-    let session = entities::code_session::Entity::find_by_id(chat_id.0)
+    let session = entities::session::Entity::find_by_id(chat_id.0)
         .one(&store.conn)
         .await
         .unwrap()
         .unwrap();
-    let last = entities::code_turn::Entity::find()
-        .filter(entities::code_turn::Column::SessionId.eq(chat_id.0))
-        .order_by_desc(entities::code_turn::Column::Ordinal)
+    let last = entities::turn::Entity::find()
+        .filter(entities::turn::Column::SessionId.eq(chat_id.0))
+        .order_by_desc(entities::turn::Column::Ordinal)
         .one(&store.conn)
         .await
         .unwrap();
     let ordinal = last.map_or(1, |row| row.ordinal + 1);
-    entities::code_turn::ActiveModel {
+    entities::turn::ActiveModel {
         id: Set(turn_id.0),
         owner: Set(session.owner),
         session_id: Set(chat_id.0),
@@ -132,32 +132,32 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
     .insert(&store.conn)
     .await
     .unwrap();
-    entities::code_turn::Entity::update_many()
+    entities::turn::Entity::update_many()
         .col_expr(
-            entities::code_turn::Column::Status,
+            entities::turn::Column::Status,
             sea_orm::sea_query::Expr::value(TurnRunStatus::Completed.as_str()),
         )
         .col_expr(
-            entities::code_turn::Column::AttemptCount,
+            entities::turn::Column::AttemptCount,
             sea_orm::sea_query::Expr::value(1),
         )
         .col_expr(
-            entities::code_turn::Column::ClaimCount,
+            entities::turn::Column::ClaimCount,
             sea_orm::sea_query::Expr::value(1),
         )
         .col_expr(
-            entities::code_turn::Column::OutputMessageId,
+            entities::turn::Column::OutputMessageId,
             sea_orm::sea_query::Expr::value(Some(first_output_id.0)),
         )
         .col_expr(
-            entities::code_turn::Column::StartedAt,
+            entities::turn::Column::StartedAt,
             sea_orm::sea_query::Expr::value(Some(now)),
         )
         .col_expr(
-            entities::code_turn::Column::EndedAt,
+            entities::turn::Column::EndedAt,
             sea_orm::sea_query::Expr::value(Some(now)),
         )
-        .filter(entities::code_turn::Column::Id.eq(first.id))
+        .filter(entities::turn::Column::Id.eq(first.id))
         .exec(&store.conn)
         .await
         .unwrap();
@@ -303,12 +303,12 @@ async fn turn_run_schema_enforces_delivery_and_single_writer_invariants() {
     .await
     .unwrap();
     running.insert(&store.conn).await.unwrap();
-    entities::code_turn::Entity::update_many()
+    entities::turn::Entity::update_many()
         .col_expr(
-            entities::code_turn::Column::Status,
+            entities::turn::Column::Status,
             sea_orm::sea_query::Expr::value(TurnRunStatus::Cancelling.as_str()),
         )
-        .filter(entities::code_turn::Column::Id.eq(running_turn_id))
+        .filter(entities::turn::Column::Id.eq(running_turn_id))
         .exec(&store.conn)
         .await
         .unwrap();
@@ -594,7 +594,7 @@ async fn reserved_queue_promotion_keeps_one_global_turn_owner() {
     let other_chat = sample_chat();
     store.create_chat(&chat).await.unwrap();
     store.create_chat(&other_chat).await.unwrap();
-    let queued = QueuedTurn {
+    let queued = QueuedAgentTurn {
         id: TurnId::new(),
         chat_id: chat.id,
         content: "queued admission".into(),
@@ -685,7 +685,7 @@ async fn queued_promotion_refuses_deleted_edited_and_reordered_snapshots() {
     let chat = sample_chat();
     store.create_chat(&chat).await.unwrap();
 
-    let make_queued = |content: &str| QueuedTurn {
+    let make_queued = |content: &str| QueuedAgentTurn {
         id: TurnId::new(),
         chat_id: chat.id,
         content: content.into(),
@@ -767,7 +767,7 @@ async fn expired_turn_admission_lease_cannot_queue_or_release() {
     let (_dir, store) = temp_store().await;
     let chat = sample_chat();
     store.create_chat(&chat).await.unwrap();
-    let queued = QueuedTurn {
+    let queued = QueuedAgentTurn {
         id: TurnId::new(),
         chat_id: chat.id,
         content: "lease expires".into(),
@@ -886,7 +886,7 @@ async fn turn_acceptance_is_atomic_idempotent_and_chat_scoped() {
         AcceptTurnOutcome::IdentityConflict
     ));
 
-    let missing = ChatId::new();
+    let missing = SessionId::new();
     assert!(store
         .accept_turn(TurnId::new(), missing, "gpt-5", "hello")
         .await
@@ -1105,7 +1105,7 @@ async fn turn_acceptance_rolls_back_message_when_turn_insert_fails() {
         .conn
         .execute_unprepared(
             "CREATE TRIGGER fail_turn_run
-             BEFORE INSERT ON code_turn
+             BEFORE INSERT ON \"turn\"
              WHEN NEW.model = 'force-run-failure'
              BEGIN
                SELECT RAISE(ABORT, 'forced turn failure');

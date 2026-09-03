@@ -5,11 +5,11 @@ use std::collections::{HashMap, HashSet};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 
 use crate::approval::InternalToolApprovalRequest;
-use crate::code::CodeApprovalState;
+use crate::code::ApprovalState;
 use crate::error::Result;
 use crate::model::OwnerId;
 use crate::storage::{InboxItem, InboxItemKind};
-use crate::{CallId, ChatId, TurnId};
+use crate::{CallId, SessionId, TurnId};
 
 use super::super::{entities, store_err, DbStore};
 use super::conversation::internal_sessions;
@@ -32,8 +32,8 @@ pub(in crate::db) async fn list_inbox_items(
 ) -> Result<Vec<InboxItem>> {
     // The owner's chats are both the scope filter and the source of titles, so
     // an item can never name a conversation the reader may not see.
-    let chats = entities::code_session::Entity::find()
-        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+    let chats = entities::session::Entity::find()
+        .filter(entities::session::Column::Owner.eq(owner.as_str()))
         .filter(internal_sessions())
         .all(&store.conn)
         .await
@@ -51,10 +51,10 @@ pub(in crate::db) async fn list_inbox_items(
     // Consent cards are the approval rows that carry the engine's own tool
     // request; a park (questions, a plan) is projected below from the same
     // table by its kind.
-    let approvals = entities::code_approval::Entity::find()
-        .filter(entities::code_approval::Column::State.eq(CodeApprovalState::Pending.as_str()))
-        .order_by_asc(entities::code_approval::Column::RequestedAt)
-        .order_by_asc(entities::code_approval::Column::Id)
+    let approvals = entities::approval::Entity::find()
+        .filter(entities::approval::Column::State.eq(ApprovalState::Pending.as_str()))
+        .order_by_asc(entities::approval::Column::RequestedAt)
+        .order_by_asc(entities::approval::Column::Id)
         .all(&store.conn)
         .await
         .map_err(store_err)?;
@@ -67,7 +67,7 @@ pub(in crate::db) async fn list_inbox_items(
         };
         approval_call_ids.insert(row.id);
         items.push(InboxItem {
-            chat_id: ChatId(row.session_id),
+            chat_id: SessionId(row.session_id),
             chat_title: title.clone(),
             turn_id: TurnId(row.turn_id),
             call_id: CallId(row.id),
