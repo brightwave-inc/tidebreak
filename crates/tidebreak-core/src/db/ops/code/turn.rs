@@ -15,7 +15,8 @@ use crate::{AgentRunId, CallId, OwnerId};
 use super::super::super::{entities, store_err, DbStore};
 use super::super::blob as blob_ops;
 use super::super::{
-    acquire_advisory_lock, acquire_session_write_lock, acquire_turn_write_lock, AdvisoryLockName,
+    acquire_advisory_lock, acquire_code_turn_write_lock, acquire_session_write_lock,
+    AdvisoryLockName,
 };
 
 /// The fields analytics needs from one turn.
@@ -452,7 +453,7 @@ pub async fn store_turn_park(
         acquire_advisory_lock(&transaction, AdvisoryLockName::TurnAgentRunWait).await?;
     }
     if !acquire_session_write_lock(&transaction, scope.session_id).await?
-        || !acquire_turn_write_lock(&transaction, crate::TurnId(id.0)).await?
+        || !acquire_code_turn_write_lock(&transaction, id).await?
     {
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
@@ -582,7 +583,7 @@ pub async fn clear_turn_park(
     };
     let transaction = store.conn.begin().await.map_err(store_err)?;
     if !acquire_session_write_lock(&transaction, scope.session_id).await?
-        || !acquire_turn_write_lock(&transaction, crate::TurnId(id.0)).await?
+        || !acquire_code_turn_write_lock(&transaction, id).await?
     {
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
@@ -699,14 +700,14 @@ where
         TurnParkWait::AgentRuns { .. } => {
             return Err(AgentError::Store(format!(
                 "turn {} client park has an agent-run wait",
-                crate::TurnId(turn.id)
+                CodeTurnId(turn.id)
             )));
         }
     };
     let call_id = call_id.parse::<CallId>().map_err(|_| {
         AgentError::Store(format!(
             "turn {} client park has an invalid call id",
-            crate::TurnId(turn.id)
+            CodeTurnId(turn.id)
         ))
     })?;
     let receipt = entities::turn_client_wait::Entity::find_by_id(call_id.0)
@@ -716,7 +717,7 @@ where
         .ok_or_else(|| {
             AgentError::Store(format!(
                 "turn {} client park is missing wait {call_id}",
-                crate::TurnId(turn.id)
+                CodeTurnId(turn.id)
             ))
         })?;
     if receipt.turn_id != turn.id
@@ -727,7 +728,7 @@ where
     {
         return Err(AgentError::Store(format!(
             "turn {} client park has a mismatched wait {call_id}",
-            crate::TurnId(turn.id)
+            CodeTurnId(turn.id)
         )));
     }
     Ok(())
@@ -746,13 +747,13 @@ where
     let TurnParkWait::AgentRuns { run_ids } = wait else {
         return Err(AgentError::Store(format!(
             "turn {} agent-run park has a different wait kind",
-            crate::TurnId(turn.id)
+            CodeTurnId(turn.id)
         )));
     };
     let wait_id = park_ref.parse::<CallId>().map_err(|_| {
         AgentError::Store(format!(
             "turn {} agent-run park has an invalid wait id",
-            crate::TurnId(turn.id)
+            CodeTurnId(turn.id)
         ))
     })?;
     let expected_runs = run_ids
@@ -761,7 +762,7 @@ where
             id.parse::<AgentRunId>().map_err(|_| {
                 AgentError::Store(format!(
                     "turn {} agent-run park has an invalid run id",
-                    crate::TurnId(turn.id)
+                    CodeTurnId(turn.id)
                 ))
             })
         })
@@ -773,7 +774,7 @@ where
         .ok_or_else(|| {
             AgentError::Store(format!(
                 "turn {} agent-run park is missing wait {wait_id}",
-                crate::TurnId(turn.id)
+                CodeTurnId(turn.id)
             ))
         })?;
     let members = entities::turn_agent_run_wait_member::Entity::find()
@@ -795,7 +796,7 @@ where
     {
         return Err(AgentError::Store(format!(
             "turn {} agent-run park has a mismatched wait {wait_id}",
-            crate::TurnId(turn.id)
+            CodeTurnId(turn.id)
         )));
     }
     Ok(())

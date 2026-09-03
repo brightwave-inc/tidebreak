@@ -1,5 +1,6 @@
 use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder};
 
+use crate::code::CodeTurnId;
 use crate::error::{AgentError, Result};
 use crate::id::{CallId, ChatId, ProjectId, TurnId};
 
@@ -241,4 +242,15 @@ where
         .await
         .map_err(store_err)?;
     Ok(locked.rows_affected == 1)
+}
+
+/// Acquire the same durable-turn lock using the code-mode turn identifier.
+pub(in crate::db) async fn acquire_code_turn_write_lock<C>(
+    conn: &C,
+    turn_id: CodeTurnId,
+) -> Result<bool>
+where
+    C: ConnectionTrait,
+{
+    acquire_turn_write_lock(conn, TurnId(turn_id.0)).await
 }
