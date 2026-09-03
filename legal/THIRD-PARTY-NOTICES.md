@@ -28,8 +28,8 @@ a stale one.
 ## Summary
 
 - Rust crates: 861
-- Desktop UI production packages: 535
-- Distinct license texts: 592
+- Desktop UI production packages: 531
+- Distinct license texts: 591
 - Packages with no declared license: 0
 - Packages with a curated license: 28
 
@@ -5484,17 +5484,6 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/grpc/grpc-node.git
 - License text: `LICENSE` ([L-c5accbbd8546](#l-c5accbbd8546))
 
-### @hugeicons/core-free-icons 4.3.0
-
-- License: `MIT`
-- License text: not distributed with this package
-
-### @hugeicons/react 1.1.10
-
-- License: `MIT`
-- Repository: https://github.com/hugeicons/hugeicons.git
-- License text: `LICENSE.md` ([L-5b2ce5496b3c](#l-5b2ce5496b3c))
-
 ### @jridgewell/gen-mapping 0.3.13
 
 - License: `MIT`
@@ -5826,12 +5815,6 @@ License identifiers named across all declared expressions:
 - License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
 
 ### @radix-ui/react-tabs 1.1.21
-
-- License: `MIT`
-- Repository: git+https://github.com/radix-ui/primitives.git
-- License text: `LICENSE` ([L-74144f6a3a6c](#l-74144f6a3a6c))
-
-### @radix-ui/react-toggle 1.1.18
 
 - License: `MIT`
 - Repository: git+https://github.com/radix-ui/primitives.git
@@ -7550,12 +7533,6 @@ License identifiers named across all declared expressions:
 - License: `MIT`
 - Repository: git://github.com/markedjs/marked.git
 - License text: `LICENSE.md` ([L-dd923de97698](#l-dd923de97698))
-
-### marked 18.0.11
-
-- License: `MIT`
-- Repository: git+https://github.com/markedjs/marked.git
-- License text: `LICENSE` ([L-dd923de97698](#l-dd923de97698))
 
 ### mdast-util-find-and-replace 3.0.2
 
@@ -18306,32 +18283,6 @@ DEALINGS IN THE SOFTWARE.
 
 ```
 Copyright (c) 2015 Edward Barnard
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-```
-
-### L-5b2ce5496b3c
-
-```
-MIT License
-
-Copyright (c) 2025 Hugeicons
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
