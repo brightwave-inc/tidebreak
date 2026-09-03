@@ -1741,8 +1741,10 @@ pub(crate) fn slugify(value: &str) -> String {
     slug
 }
 
-/// Branch name: repo prefix plus a slug of the title, or a two-word fallback.
-pub(crate) fn branch_name(prefix: &str, title: &str, seed: u128) -> String {
+/// Branch name: repo prefix plus a title slug, or a generated name that also
+/// carries the workspace id. The id keeps the 400 readable word pairs from
+/// colliding with an older workspace or a concurrent create.
+pub(crate) fn branch_name(prefix: &str, title: &str, id: &uuid::Uuid) -> String {
     let prefix = if prefix.is_empty() {
         String::new()
     } else if prefix.ends_with('/') {
@@ -1752,7 +1754,7 @@ pub(crate) fn branch_name(prefix: &str, title: &str, seed: u128) -> String {
     };
     let slug = slugify(title);
     let slug = if slug.is_empty() {
-        two_word_name(seed)
+        format!("{}-{}", two_word_name(id.as_u128()), short_id(id))
     } else {
         slug
     };
@@ -2871,12 +2873,28 @@ mod tests {
     }
 
     #[test]
-    fn untitled_workspaces_get_two_word_branch_names() {
-        let name = branch_name("tidebreak/", "", 42);
+    fn untitled_workspace_branches_keep_the_readable_name_and_add_the_id() {
+        let id = uuid::Uuid::from_u128(42);
+        let name = branch_name("tidebreak/", "", &id);
         assert!(name.starts_with("tidebreak/"));
         let slug = name.strip_prefix("tidebreak/").unwrap();
         assert!(slug.contains('-'), "{slug}");
+        assert_eq!(slug, format!("{}-{}", two_word_name(42), short_id(&id)));
         assert_eq!(slugify("Hello, World!"), "hello-world");
+    }
+
+    #[test]
+    fn untitled_workspace_branches_stay_unique_when_word_pairs_repeat() {
+        let first = uuid::Uuid::from_u128(42);
+        let second = uuid::Uuid::from_u128(42 + (400_u128 << 96));
+        assert_eq!(
+            two_word_name(first.as_u128()),
+            two_word_name(second.as_u128())
+        );
+        assert_ne!(
+            branch_name("tidebreak/", "", &first),
+            branch_name("tidebreak/", "", &second)
+        );
     }
 
     #[tokio::test]

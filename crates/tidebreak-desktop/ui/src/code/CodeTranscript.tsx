@@ -281,6 +281,13 @@ export function codeTranscriptPresentationItems(
       return false;
     }
     if (
+      item.kind === "notice" &&
+      item.level === "info" &&
+      /^trigger [0-9a-f-]+ fired: /.test(item.message)
+    ) {
+      return false;
+    }
+    if (
       item.kind !== "notice" ||
       item.level !== "error" ||
       !hasTurnRecovery(item.message)

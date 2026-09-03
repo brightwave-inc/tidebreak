@@ -48,7 +48,7 @@ impl CodeRuntime {
             .filter(|value| !value.is_empty())
             .unwrap_or_default();
         let id = WorkspaceId::new();
-        let branch = branch_name(&repo.branch_prefix, &title, id.0.as_u128());
+        let branch = branch_name(&repo.branch_prefix, &title, id.as_uuid());
         let existing = list_workspaces(&self.db, owner, Some(repo.id)).await?;
         if existing
             .iter()

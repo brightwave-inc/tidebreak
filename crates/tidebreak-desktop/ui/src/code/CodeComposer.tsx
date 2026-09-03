@@ -1017,6 +1017,11 @@ export function CodeComposer({
         await onSend(message);
       }
     } catch (err) {
+      // A refresh can replace this composer while the turn request is still
+      // waiting for the engine to finish. The old response may then close
+      // without proving that the server refused the turn. Do not let that
+      // obsolete request repopulate the replacement composer's draft.
+      if (!mountedRef.current) return;
       images.restore(held);
       updatePastedTexts((current) => [
         ...submittedPastedTexts,

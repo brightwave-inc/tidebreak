@@ -326,7 +326,24 @@ describe("workspaceStatusRank", () => {
     ).toBe("running");
   });
 
-  it("ranks stalled and fenced with needs-you", () => {
+  it("keeps a silent running command with live work", () => {
+    expect(
+      workspaceStatusRank(
+        workspace("ws-a", "app"),
+        digest("ws-a", {
+          lifecycle: "running",
+          attention: {
+            state: { type: "stalled", idle_secs: 90 },
+            source: "heuristic",
+          },
+          activity: "shell",
+          activity_detail: "cargo test -p tidebreak-server",
+        }),
+      ),
+    ).toBe("running");
+  });
+
+  it("ranks a stale stall and a fenced session with needs-you", () => {
     expect(
       workspaceStatusRank(
         workspace("ws-a", "app"),

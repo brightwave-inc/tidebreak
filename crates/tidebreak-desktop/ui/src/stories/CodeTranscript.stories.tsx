@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { fn } from "storybook/test";
+import { expect, fn, within } from "storybook/test";
 import { CodeTranscript } from "@/code/CodeTranscript";
 import type { CodeTranscriptItem } from "@/code/CodeSessionReducer";
 
@@ -102,6 +102,53 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 export const ProgressUpdates: Story = {};
+
+/** Internal trigger delivery stays out of the transcript after the turn runs. */
+export const TriggerFireNoticeHidden: Story = {
+  args: {
+    items: [
+      {
+        kind: "assistant",
+        id: "assistant-trigger-result",
+        turnId: "turn-trigger",
+        parentCallId: null,
+        text: "I addressed the requested changes and reran the focused tests.",
+        streaming: false,
+      },
+      {
+        kind: "notice",
+        id: "trigger-fire",
+        level: "info",
+        message:
+          "trigger d655b722-50c4-4560-b09b-991a56182771 fired: changes requested on #3105",
+      },
+      {
+        kind: "turn_boundary",
+        id: "boundary-trigger",
+        turnId: "turn-trigger",
+        status: "completed",
+        durationMs: 130_000,
+        usage: null,
+        error: null,
+        diffstat: {
+          files: 1,
+          insertions: 5,
+          deletions: 5,
+          truncated: false,
+        },
+      },
+    ],
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      canvas.getByText(/addressed the requested changes/),
+    ).toBeInTheDocument();
+    await expect(
+      canvas.queryByText(/trigger d655b722/),
+    ).not.toBeInTheDocument();
+  },
+};
 
 /** A fallback recap stays quiet beneath the turn seam. */
 export const SessionRecap: Story = {
