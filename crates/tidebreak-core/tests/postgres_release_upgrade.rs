@@ -61,10 +61,10 @@ async fn postgres_v058_upgrade_repairs_the_pre_pin_code_schema() {
         [
             ("code_repo".to_owned(), "cloned_from".to_owned()),
             ("code_repo".to_owned(), "removed_at".to_owned()),
-            ("session".to_owned(), "reasoning_effort".to_owned()),
             ("code_workspace".to_owned(), "bundle_bytes".to_owned()),
             ("code_workspace".to_owned(), "released_at".to_owned()),
             ("code_workspace".to_owned(), "released_tip".to_owned()),
+            ("session".to_owned(), "reasoning_effort".to_owned()),
         ]
     );
     assert_eq!(snapshot.repo_count, 2);
@@ -775,9 +775,11 @@ async fn postgres_v060_upgrade_merges_conversations_into_sessions() {
         snapshot.foreign_keys,
         [
             ("agent_run".to_owned(), "r".to_owned()),
+            ("approval".to_owned(), "a".to_owned()),
             ("chat_image_publication".to_owned(), "r".to_owned()),
             ("chat_root_attachment".to_owned(), "c".to_owned()),
             ("context_checkpoint".to_owned(), "c".to_owned()),
+            ("event".to_owned(), "a".to_owned()),
             ("exec_file_change".to_owned(), "r".to_owned()),
             ("message".to_owned(), "a".to_owned()),
             ("message_identity".to_owned(), "a".to_owned()),
@@ -786,6 +788,7 @@ async fn postgres_v060_upgrade_merges_conversations_into_sessions() {
             ("standing_tool_grant".to_owned(), "c".to_owned()),
             ("task_plan".to_owned(), "r".to_owned()),
             ("tool_call".to_owned(), "a".to_owned()),
+            ("turn".to_owned(), "a".to_owned()),
         ]
     );
     assert!(
