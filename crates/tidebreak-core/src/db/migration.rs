@@ -80,6 +80,7 @@ impl MigratorTrait for Migrator {
             Box::new(one_turn_lane::OneTurnLane),
             Box::new(ReadyAgentRunWaitIndex),
             Box::new(ClientWaitVendorWebSearch),
+            Box::new(RestoreTurnClaimIndexes),
         ]
     }
 }
@@ -4559,6 +4560,38 @@ impl MigrationTrait for ClientWaitVendorWebSearch {
     async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
         // A downgrade keeps the checkpoint state so it cannot accidentally
         // reopen a provider search allowance after the migration runs again.
+        Ok(())
+    }
+}
+
+/// Restore the claim indexes lost when SQLite rebuilt `code_turn`.
+struct RestoreTurnClaimIndexes;
+
+impl MigrationName for RestoreTurnClaimIndexes {
+    fn name(&self) -> &str {
+        "m20260903_000004_restore_turn_claim_indexes"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for RestoreTurnClaimIndexes {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(
+                r#"CREATE INDEX IF NOT EXISTS "idx_code_turn_due"
+                       ON "code_turn" ("status", "available_at", "started_at");
+                   CREATE INDEX IF NOT EXISTS "idx_code_turn_stale_lease"
+                       ON "code_turn" ("status", "lease_expires_at")"#,
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // PostgreSQL already owns these indexes through the one-turn-lane
+        // migration. A rollback must not remove required claim-path indexes
+        // from either backend.
         Ok(())
     }
 }
