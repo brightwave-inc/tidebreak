@@ -7,7 +7,7 @@ use crate::{
     ToolCallStatus, TurnAgentRunWaitStatus, TurnRunStatus, TurnSteerId,
 };
 use chrono::{Duration, Utc};
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+use sea_orm::{ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, QueryFilter, Statement};
 use sea_orm_migration::MigratorTrait;
 
 #[allow(clippy::too_many_arguments)]
@@ -410,6 +410,31 @@ async fn recovery_scan_becomes_ready_only_after_the_last_ordered_child() {
         .await
         .unwrap()
         .is_empty());
+}
+
+#[tokio::test]
+async fn recovery_scan_starts_from_the_open_wait_set() {
+    let (_dir, store) = temp_store().await;
+    let plan = store
+        .conn
+        .query_all_raw(Statement::from_string(
+            DbBackend::Sqlite,
+            format!(
+                "EXPLAIN QUERY PLAN {}",
+                crate::db::ops::turn::ready_agent_run_wait_set_candidates_sql(8)
+            ),
+        ))
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| row.try_get::<String>("", "detail").unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        plan.contains("idx_turn_agent_run_wait_set_ready"),
+        "the resolver must start from the indexed open-wait set:\n{plan}"
+    );
 }
 
 #[tokio::test]
