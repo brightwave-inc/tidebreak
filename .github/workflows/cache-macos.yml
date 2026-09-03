@@ -44,17 +44,23 @@ jobs:
           cargo fetch --locked --target x86_64-apple-darwin
 
   warm:
-    name: macOS cache · universal
+    name: macOS cache · ${{ matrix.target }}
     needs: cargo-downloads
     runs-on: macos-latest
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+          - target: x86_64-apple-darwin
     env:
       CARGO_INCREMENTAL: 0
       RUSTC_WRAPPER: sccache
       SCCACHE_GHA_ENABLED: "true"
       # GitHub throttles sccache's many small writes. Retain its existing
-      # object cache as a read-only fallback and persist build outputs below
-      # with one cache archive containing both universal slices.
+      # object cache as a read-only fallback and persist each architecture's
+      # build outputs in one archive that the matching release prepare restores.
       SCCACHE_GHA_RW_MODE: READ_ONLY
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -62,43 +68,27 @@ jobs:
       - name: Install Rust target
         run: |
           rustup show
-          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          rustup target add "${{ matrix.target }}"
 
       - name: Restore unsigned Rust build cache
         id: rust-build-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            target/release/.cargo-lock
-            target/release/.fingerprint
-            target/release/build
-            target/release/deps
-            target/aarch64-apple-darwin/release/.cargo-lock
-            target/aarch64-apple-darwin/release/.fingerprint
-            target/aarch64-apple-darwin/release/build
-            target/aarch64-apple-darwin/release/deps
-            target/aarch64-apple-darwin/release/tidebreak-desktop
-            target/aarch64-apple-darwin/release/tidebreak-host-broker
-            target/aarch64-apple-darwin/release/tidebreak
-            target/aarch64-apple-darwin/release/libtidebreak_desktop_lib.*
-            target/x86_64-apple-darwin/release/.cargo-lock
-            target/x86_64-apple-darwin/release/.fingerprint
-            target/x86_64-apple-darwin/release/build
-            target/x86_64-apple-darwin/release/deps
-            target/x86_64-apple-darwin/release/tidebreak-desktop
-            target/x86_64-apple-darwin/release/tidebreak-host-broker
-            target/x86_64-apple-darwin/release/tidebreak
-            target/x86_64-apple-darwin/release/libtidebreak_desktop_lib.*
-            crates/tidebreak-desktop/binaries/tidebreak-host-broker-aarch64-apple-darwin
-            crates/tidebreak-desktop/binaries/tidebreak-aarch64-apple-darwin
-            crates/tidebreak-desktop/binaries/tidebreak-host-broker-x86_64-apple-darwin
-            crates/tidebreak-desktop/binaries/tidebreak-x86_64-apple-darwin
-            crates/tidebreak-desktop/binaries/tidebreak-host-broker-universal-apple-darwin
-            crates/tidebreak-desktop/binaries/tidebreak-universal-apple-darwin
-          key: macos-release-target-v5-universal-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
+            target/${{ matrix.target }}/release/.cargo-lock
+            target/${{ matrix.target }}/release/.fingerprint
+            target/${{ matrix.target }}/release/build
+            target/${{ matrix.target }}/release/deps
+            target/${{ matrix.target }}/release/tidebreak-desktop
+            target/${{ matrix.target }}/release/tidebreak-host-broker
+            target/${{ matrix.target }}/release/tidebreak
+            target/${{ matrix.target }}/release/libtidebreak_desktop_lib.*
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}
+            crates/tidebreak-desktop/binaries/tidebreak-${{ matrix.target }}
+          key: macos-release-target-v5-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
           restore-keys: |
-            macos-release-target-v5-universal-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
-            macos-release-target-v5-universal-
+            macos-release-target-v5-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+            macos-release-target-v5-${{ matrix.target }}-
 
       - name: Set up compiler cache
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
@@ -133,22 +123,19 @@ jobs:
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
         with:
           projectPath: crates/tidebreak-desktop
-          args: --target universal-apple-darwin --no-bundle --ci
+          args: --target ${{ matrix.target }} --no-bundle --ci
 
       - name: Report unsigned Rust build cache size
         if: ${{ !cancelled() }}
         run: |
           du -ch \
-            target/release/{.cargo-lock,.fingerprint,build,deps} \
-            target/{aarch64-apple-darwin,x86_64-apple-darwin}/release/{.cargo-lock,.fingerprint,build,deps} \
-            target/{aarch64-apple-darwin,x86_64-apple-darwin}/release/tidebreak-desktop \
-            target/{aarch64-apple-darwin,x86_64-apple-darwin}/release/tidebreak-host-broker \
-            target/{aarch64-apple-darwin,x86_64-apple-darwin}/release/tidebreak \
-            target/{aarch64-apple-darwin,x86_64-apple-darwin}/release/libtidebreak_desktop_lib.* \
-            crates/tidebreak-desktop/binaries/tidebreak-host-broker-{aarch64-apple-darwin,x86_64-apple-darwin} \
-            crates/tidebreak-desktop/binaries/tidebreak-{aarch64-apple-darwin,x86_64-apple-darwin} \
-            crates/tidebreak-desktop/binaries/tidebreak-host-broker-universal-apple-darwin \
-            crates/tidebreak-desktop/binaries/tidebreak-universal-apple-darwin \
+            target/${{ matrix.target }}/release/{.cargo-lock,.fingerprint,build,deps} \
+            target/${{ matrix.target }}/release/tidebreak-desktop \
+            target/${{ matrix.target }}/release/tidebreak-host-broker \
+            target/${{ matrix.target }}/release/tidebreak \
+            target/${{ matrix.target }}/release/libtidebreak_desktop_lib.* \
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }} \
+            crates/tidebreak-desktop/binaries/tidebreak-${{ matrix.target }} \
             2>/dev/null | tail -1 || true
 
       - name: Save unsigned Rust build cache
@@ -156,32 +143,16 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
-            target/release/.cargo-lock
-            target/release/.fingerprint
-            target/release/build
-            target/release/deps
-            target/aarch64-apple-darwin/release/.cargo-lock
-            target/aarch64-apple-darwin/release/.fingerprint
-            target/aarch64-apple-darwin/release/build
-            target/aarch64-apple-darwin/release/deps
-            target/aarch64-apple-darwin/release/tidebreak-desktop
-            target/aarch64-apple-darwin/release/tidebreak-host-broker
-            target/aarch64-apple-darwin/release/tidebreak
-            target/aarch64-apple-darwin/release/libtidebreak_desktop_lib.*
-            target/x86_64-apple-darwin/release/.cargo-lock
-            target/x86_64-apple-darwin/release/.fingerprint
-            target/x86_64-apple-darwin/release/build
-            target/x86_64-apple-darwin/release/deps
-            target/x86_64-apple-darwin/release/tidebreak-desktop
-            target/x86_64-apple-darwin/release/tidebreak-host-broker
-            target/x86_64-apple-darwin/release/tidebreak
-            target/x86_64-apple-darwin/release/libtidebreak_desktop_lib.*
-            crates/tidebreak-desktop/binaries/tidebreak-host-broker-aarch64-apple-darwin
-            crates/tidebreak-desktop/binaries/tidebreak-aarch64-apple-darwin
-            crates/tidebreak-desktop/binaries/tidebreak-host-broker-x86_64-apple-darwin
-            crates/tidebreak-desktop/binaries/tidebreak-x86_64-apple-darwin
-            crates/tidebreak-desktop/binaries/tidebreak-host-broker-universal-apple-darwin
-            crates/tidebreak-desktop/binaries/tidebreak-universal-apple-darwin
+            target/${{ matrix.target }}/release/.cargo-lock
+            target/${{ matrix.target }}/release/.fingerprint
+            target/${{ matrix.target }}/release/build
+            target/${{ matrix.target }}/release/deps
+            target/${{ matrix.target }}/release/tidebreak-desktop
+            target/${{ matrix.target }}/release/tidebreak-host-broker
+            target/${{ matrix.target }}/release/tidebreak
+            target/${{ matrix.target }}/release/libtidebreak_desktop_lib.*
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}
+            crates/tidebreak-desktop/binaries/tidebreak-${{ matrix.target }}
           key: ${{ steps.rust-build-cache.outputs.cache-primary-key }}
 
       - name: Require a successful cache-warm compilation

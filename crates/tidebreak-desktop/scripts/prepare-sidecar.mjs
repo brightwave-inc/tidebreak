@@ -27,7 +27,9 @@ mkdirSync(destinationDir, { recursive: true });
 // Tauri's synthetic universal target builds the app once per real Rust target
 // and lipo-combines the app executable. Its bundler expects an already-combined
 // external binary under the synthetic target name, while the per-target Cargo
-// builds still need their own target-suffixed sidecars.
+// builds still need their own target-suffixed sidecars. Release CI can instead
+// invoke this hook once per real target on parallel runners, then lipo the two
+// staged sidecars alongside the two desktop binaries before `tauri bundle`.
 const targets =
   triple === "universal-apple-darwin"
     ? ["aarch64-apple-darwin", "x86_64-apple-darwin"]

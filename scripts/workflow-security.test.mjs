@@ -1528,6 +1528,14 @@ test("cache warming cannot access production credentials or publish", () => {
   assert.match(cache, /^  cargo-downloads:$/m);
   assert.match(cache, /^    needs: cargo-downloads$/m);
   assert.match(cache, /cargo fetch --locked --target aarch64-apple-darwin/);
+  assert.match(cache, /target: aarch64-apple-darwin/);
+  assert.match(cache, /target: x86_64-apple-darwin/);
+  assert.match(cache, /--target \$\{\{ matrix\.target \}\} --no-bundle --ci/);
+  assert.match(
+    cache,
+    /macos-release-target-v5-\$\{\{ matrix\.target \}\}-\$\{\{ hashFiles\('Cargo\.lock', 'rust-toolchain\.toml'\) \}\}-\$\{\{ github\.sha \}\}/,
+  );
+  assert.doesNotMatch(cache, /macos-release-target-v5-universal/);
   assert.match(cache, /cancel-in-progress: false/);
   assert.match(cache, /--no-bundle --ci/);
   assert.match(cache, /continue-on-error: true/);
@@ -1575,7 +1583,7 @@ function stepNames(job) {
 
 test("credential-free compile jobs never load production secrets", () => {
   const release = workflows["release.yml"];
-  for (const jobName of ["prepare_macos", "prepare_windows"]) {
+  for (const jobName of ["prepare_macos", "combine_macos", "prepare_windows"]) {
     const job = workflowJob(release, jobName);
     assert.doesNotMatch(job, /^    environment:/m);
     assert.doesNotMatch(job, /secrets\./);
@@ -1857,6 +1865,7 @@ test("an existing immutable release resumes without rebuilding or overwriting", 
   const release = workflows["release.yml"];
   const inspectJob = workflowJob(release, "inspect_hosted");
   const prepareJob = workflowJob(release, "prepare_macos");
+  const combineJob = workflowJob(release, "combine_macos");
   const signedBuildJob = workflowJob(release, "build_macos");
   const publishJob = workflowJob(release, "publish");
 
@@ -1865,6 +1874,7 @@ test("an existing immutable release resumes without rebuilding or overwriting", 
   assert.match(inspectJob, /prepare-published-release\.mjs/);
   assert.match(inspectJob, /Validated the complete immutable release/);
   assert.match(prepareJob, /needs\.inspect_hosted\.outputs\.exists != 'true'/);
+  assert.match(combineJob, /needs\.inspect_hosted\.outputs\.exists != 'true'/);
   assert.match(
     signedBuildJob,
     /needs\.inspect_hosted\.outputs\.exists != 'true'/,
@@ -2054,21 +2064,8 @@ test("GitHub release assets are attached before immutable publication", () => {
   }
 });
 
-// A macOS compile job covers both slices in one of two shapes: one runner
-// compiles Tauri's synthetic universal triple, or a matrix compiles one real
-// triple per runner and a later job joins the slices with lipo. A job that
-// only bundles compiles nothing and is not a compile job. Returns the shape
-// it found, or null when the job does not compile.
-function macosCompileShape(job, label) {
-  if (!/tauri-apps\/tauri-action@/.test(job)) return null;
-  if (/--target universal-apple-darwin/.test(job)) {
-    assert.match(
-      job,
-      /rustup target add aarch64-apple-darwin x86_64-apple-darwin/,
-      `${label} must install both macOS targets`,
-    );
-    return "universal";
-  }
+function assertPerArchMacosCompile(job, label) {
+  assert.match(job, /tauri-apps\/tauri-action@/, `${label} must compile with Tauri`);
   assert.match(job, /target: aarch64-apple-darwin/, `${label} must compile aarch64`);
   assert.match(job, /target: x86_64-apple-darwin/, `${label} must compile x86_64`);
   assert.match(
@@ -2081,7 +2078,6 @@ function macosCompileShape(job, label) {
     /rustup target add "?\$\{\{ matrix\.target \}\}"?/,
     `${label} must install the matrix target`,
   );
-  return "per-arch";
 }
 
 // A per-arch compile is only universal once the workflow lipo-joins the app
@@ -2101,11 +2097,10 @@ test("universal macOS release and staging packages contain both slices", () => {
   const release = workflows["release.yml"];
   const stagingPublish = workflows["staging-publish.yml"];
   const releasePrepare = workflowJob(release, "prepare_macos");
+  const releaseCombine = workflowJob(release, "combine_macos");
   const releaseBuild = workflowJob(release, "build_macos");
   const stagingBuild = workflowJob(stagingPublish, "build_macos_staging");
-  const stagingPrepare = /^  prepare_macos_staging:$/m.test(stagingPublish)
-    ? workflowJob(stagingPublish, "prepare_macos_staging")
-    : null;
+  const stagingPrepare = workflowJob(stagingPublish, "prepare_macos_staging");
   const warm = workflows["cache-macos.yml"];
   const sidecarPreparation = readFileSync(
     repositoryFile("crates/tidebreak-desktop/scripts/prepare-sidecar.mjs"),
@@ -2122,28 +2117,45 @@ test("universal macOS release and staging packages contain both slices", () => {
     /"lipo",\s*\["-create", \.\.\.stagedSidecars, "-output", destination\]/,
   );
 
-  // The release compiles in the credential-free prepare job and the signed
-  // job only bundles the synthetic universal target it is handed.
-  const releaseShape = macosCompileShape(releasePrepare, "prepare_macos");
-  assert.ok(releaseShape, "prepare_macos must compile the macOS app");
+  // Production compiles one real target per runner, combines exactly the app
+  // and two sidecars, then gives the signed job the same universal archive
+  // contract it consumed before the split.
+  assertPerArchMacosCompile(releasePrepare, "prepare_macos");
+  assertPerArchMacosCompile(warm, "cache-macos.yml");
+  assert.equal(
+    releaseCombine.split("lipo -create").length - 1,
+    3,
+    "combine_macos must join the app binary and both sidecars",
+  );
+  assertPerArchSlicesAreJoined(releaseCombine, "combine_macos");
+  assert.match(releaseCombine, /tidebreak-prepared-macos-aarch64-apple-darwin-/);
+  assert.match(releaseCombine, /tidebreak-prepared-macos-x86_64-apple-darwin-/);
+  assert.match(releaseCombine, /tidebreak-prepared-macos-universal-/);
+  assert.match(releaseCombine, /shasum -a 256 --check/);
+  assert.match(releasePrepare, /macos-release-target-v5-\$\{\{ matrix\.target \}\}/);
+  assert.doesNotMatch(releasePrepare, /macos-release-target-v5-universal/);
   assert.match(releaseBuild, /--target universal-apple-darwin/);
+  assert.match(releaseBuild, /needs: \[validate, inspect_hosted, notices, combine_macos\]/);
+  assert.match(releaseBuild, /tauri bundle/);
+  assert.doesNotMatch(releaseBuild, /tauri-apps\/tauri-action@/);
   assert.doesNotMatch(releaseBuild, /rustup target add/);
-  if (releaseShape === "per-arch") {
-    assertPerArchSlicesAreJoined(release, "release.yml");
-  }
 
-  // Staging compiles in its prepare job when it has one, otherwise in the
-  // signed job itself; either way the bundle is universal.
-  const stagingShape =
-    (stagingPrepare && macosCompileShape(stagingPrepare, "prepare_macos_staging")) ||
-    macosCompileShape(stagingBuild, "build_macos_staging");
-  assert.ok(stagingShape, "staging must compile the macOS app");
+  // Staging still compiles the synthetic universal target once, but transfers
+  // its prepared bytes instead of rebuilding them in the signing job.
+  assert.match(stagingPrepare, /tauri-apps\/tauri-action@/);
+  assert.match(
+    stagingPrepare,
+    /rustup target add aarch64-apple-darwin x86_64-apple-darwin/,
+  );
+  assert.match(stagingPrepare, /--target universal-apple-darwin/);
+  assert.match(stagingPrepare, /Upload prepared staging macOS inputs/);
+  assert.match(stagingBuild, /Download prepared staging macOS inputs/);
+  assert.match(stagingBuild, /shasum -a 256 --check/);
   assert.match(stagingBuild, /--target universal-apple-darwin/);
-  if (stagingShape === "per-arch") {
-    assertPerArchSlicesAreJoined(stagingPublish, "staging-publish.yml");
-  }
-
-  assert.ok(macosCompileShape(warm, "cache-macos.yml"), "the warmer must compile");
+  assert.match(stagingBuild, /tauri bundle/);
+  assert.doesNotMatch(stagingBuild, /tauri-apps\/tauri-action@/);
+  assert.doesNotMatch(stagingBuild, /rustup target add/);
+  assert.doesNotMatch(stagingPublish, /actions\/cache\/(?:restore|save)@/);
 
   for (const job of [releaseBuild, stagingBuild]) {
     assert.match(job, /timeout-minutes: 90/);
@@ -2154,6 +2166,71 @@ test("universal macOS release and staging packages contain both slices", () => {
     assert.match(job, /sidecar_arches="\$\(lipo -archs "\$sidecar"\)"/);
     assert.match(job, /cli_sidecar="\$app_path\/Contents\/MacOS\/tidebreak"/);
     assert.match(job, /cli_arches="\$\(lipo -archs "\$cli_sidecar"\)"/);
+  }
+});
+
+test("release and staging share one third-party notices implementation", () => {
+  const noticesWorkflow = workflows["third-party-notices.yml"];
+  const notices = workflowJob(noticesWorkflow, "check");
+  assert.equal(
+    noticesWorkflow.split("node scripts/generate-third-party-notices.mjs --check")
+      .length - 1,
+    1,
+    "the reusable workflow must check the notices exactly once",
+  );
+  assert.match(noticesWorkflow, /^on:\n  workflow_call:\n/m);
+  assert.match(noticesWorkflow, /^permissions:\n  contents: read$/m);
+  assert.match(notices, /runs-on: ubuntu-latest/);
+  assert.match(notices, /cargo fetch --locked\n/);
+  assert.match(
+    notices,
+    /cargo fetch --locked --manifest-path crates\/tidebreak-whisper\/Cargo\.toml/,
+  );
+  assert.match(
+    notices,
+    /hashFiles\('Cargo\.lock', 'crates\/tidebreak-whisper\/Cargo\.lock'\)/,
+  );
+
+  for (const {
+    file,
+    validate,
+    platformJobs,
+  } of [
+    {
+      file: "release.yml",
+      validate: "validate",
+      platformJobs: [
+        "prepare_macos",
+        "build_macos",
+        "prepare_windows",
+        "build_windows",
+        "build_linux",
+      ],
+    },
+    {
+      file: "staging-publish.yml",
+      validate: "validate_staging",
+      platformJobs: ["prepare_macos_staging", "build_macos_staging"],
+    },
+  ]) {
+    const source = workflows[file];
+    const caller = workflowJob(source, "notices");
+    assert.match(caller, new RegExp(`needs: ${validate}`));
+    assert.match(
+      caller,
+      /uses: \.\/\.github\/workflows\/third-party-notices\.yml/,
+    );
+    assert.match(
+      caller,
+      new RegExp(`sha: \\$\\{\\{ needs\\.${validate}\\.outputs\\.sha \\}\\}`),
+    );
+    for (const jobName of platformJobs) {
+      assert.match(
+        workflowJob(source, jobName),
+        /needs: \[[^\]]*notices[^\]]*\]/,
+        `${jobName} must depend on the shared notices check`,
+      );
+    }
   }
 });
 
@@ -2219,6 +2296,7 @@ test("staging desktop publishes only under the staging prefix", () => {
   // already hosts, which is the filter the push trigger's `paths` list was.
   assert.match(staging, /staging\/manifest\.json\?poll=/);
   assert.match(staging, /git diff --name-only "\$hosted" "\$STAGING_SHA"/);
+  assert.match(staging, /\.github\/workflows\/third-party-notices\.yml/);
   assert.match(
     staging,
     /if: \$\{\{ needs\.resolve\.outputs\.changed == 'true' \}\}/,

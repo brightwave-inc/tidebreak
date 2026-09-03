@@ -390,20 +390,19 @@ has its own workflows and failure boundary, a later signing, notarization, or
 publication failure cannot prevent that main-tip cache run from finishing. If
 a shared cache is empty or has been evicted, manually run the matching warm
 workflow from `main`; the production release workflow also compiles the exact tag
-and product version in a credential-free prerequisite. That prerequisite saves
-its release-specific unsigned cache before reporting a compile failure. After a
-successful compile, it uploads the final binary, universal sidecars, and Tauri
+and product version in credential-free prerequisites. On macOS, one
+`macos-latest` runner compiles each real architecture and saves its
+release-specific unsigned cache before reporting a compile failure. A third
+credential-free job verifies both prepared slices, combines the desktop binary
+and both sidecars with `lipo`, and uploads the universal inputs and Tauri
 configuration in a one-day, run-scoped artifact. The `desktop-production` job
 verifies that artifact before it loads signing material, then packages those
 exact binaries without compiling again. Six warm archives plus the
 release-specific ones compete for the repository's shared cache budget, so an
 evicted archive costs a slower release, never a broken one.
 
-To use a larger macOS runner for production compiles, set the repository
-variable `PRODUCTION_MACOS_RUNNER` to a provisioned ARM64 organization runner
-label. If you omit the variable, the workflow uses `macos-latest`. The signing
-and notarization job stays on the standard runner because it no longer compiles
-the application.
+The signing and notarization job stays on its own standard runner because it
+receives the prepared universal inputs and does not compile the application.
 
 ### Production environment configuration
 

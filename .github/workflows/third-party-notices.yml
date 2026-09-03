@@ -1,0 +1,44 @@
+name: Check released third-party notices
+
+on:
+  workflow_call:
+    inputs:
+      sha:
+        description: Full source commit whose released dependency graphs to check
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: third-party notices
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.sha }}
+      - name: Install toolchain (honors rust-toolchain.toml)
+        run: rustup show
+      - name: Cache Cargo downloads
+        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          shared-key: notices-cargo-registry-v2-${{ hashFiles('Cargo.lock', 'crates/tidebreak-whisper/Cargo.lock') }}
+          cache-targets: false
+          cache-bin: false
+      - name: Fetch both released Cargo graphs
+        run: |
+          cargo fetch --locked
+          cargo fetch --locked --manifest-path crates/tidebreak-whisper/Cargo.toml
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          version: 10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: crates/tidebreak-desktop/ui/pnpm-lock.yaml
+      - name: Check the third-party notices
+        run: node scripts/generate-third-party-notices.mjs --check

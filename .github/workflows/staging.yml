@@ -89,6 +89,7 @@ jobs:
             .github/workflows/release.yml \
             .github/workflows/staging-publish.yml \
             .github/workflows/staging.yml \
+            .github/workflows/third-party-notices.yml \
             Cargo.lock \
             Cargo.toml \
             crates \

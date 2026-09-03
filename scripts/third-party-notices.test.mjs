@@ -523,6 +523,10 @@ test("the notices ship with the desktop app and are verified against drift", () 
     repositoryFile(".github", "workflows", "release.yml"),
     "utf8",
   );
+  const noticesWorkflow = readFileSync(
+    repositoryFile(".github", "workflows", "third-party-notices.yml"),
+    "utf8",
+  );
   assert.ok(
     release.includes(`${NOTICES_RELATIVE_PATH}:${NOTICES_RELATIVE_PATH}`) &&
       release.includes('cmp "$source_file" "$bundled"') &&
@@ -530,8 +534,8 @@ test("the notices ship with the desktop app and are verified against drift", () 
     "the release lane must compare the bundled notices against the checked-in file",
   );
   assert.ok(
-    release.includes(`${REGENERATE_COMMAND} --check`),
-    "the release lane must refuse a tag whose notices are stale",
+    noticesWorkflow.includes(`${REGENERATE_COMMAND} --check`),
+    "the shared release notice gate must refuse stale notices",
   );
   const ci = readFileSync(
     repositoryFile(".github", "workflows", "ci.yml"),
