@@ -100,8 +100,9 @@ async fn temp_db_store(database_name: &str) -> (tempfile::TempDir, DbStore) {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join(database_name);
     let url = format!("sqlite://{}?mode=rwc", database.display());
-    // Preserve the host's tested concurrency ceiling while the fixture keeps
-    // only one connection warm and avoids migration, WAL, and fsync costs.
+    // Preserve the host's tested concurrency ceiling (which selects WAL, as
+    // in production) while the fixture keeps only one connection warm and
+    // skips migration and fsync costs.
     let store = DbStore::connect_test_sqlite_fixture_with_max_connections(
         &url,
         super::HOST_MAX_CONNECTIONS,

@@ -156,9 +156,20 @@ impl DbStore {
         options
             .max_connections(max_connections.max(1))
             .min_connections(1);
-        options.map_sqlx_sqlite_opts(|sqlite| {
+        // A single connection never contends with itself, so the rollback
+        // journal is the cheapest choice. A pooled fixture mirrors production
+        // and uses WAL: a request must still read while a background worker
+        // holds a write transaction, which the workers tests provoke on
+        // purpose by blocking event journaling. With synchronous off, WAL
+        // costs nothing extra here.
+        let journal_mode = if max_connections > 1 {
+            sea_orm::sqlx::sqlite::SqliteJournalMode::Wal
+        } else {
+            sea_orm::sqlx::sqlite::SqliteJournalMode::Delete
+        };
+        options.map_sqlx_sqlite_opts(move |sqlite| {
             sqlite
-                .journal_mode(sea_orm::sqlx::sqlite::SqliteJournalMode::Delete)
+                .journal_mode(journal_mode)
                 .synchronous(sea_orm::sqlx::sqlite::SqliteSynchronous::Off)
                 .busy_timeout(SQLITE_BUSY_TIMEOUT)
         });
