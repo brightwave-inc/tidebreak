@@ -166,7 +166,9 @@ impl CodeRuntime {
     /// A registry that cannot be reached is a warning here, not an error: the
     /// caller has an installed version or the pin to fall back on.
     async fn lookup_latest(&self, kind: HarnessKind, node_root: &Path) -> Option<String> {
-        match tidebreak_harness::latest_published_version(kind, Some(node_root)).await {
+        match tidebreak_harness::latest_published_version(&self.data_dir, kind, Some(node_root))
+            .await
+        {
             Ok(version) => {
                 self.harness_releases.record(kind, version.clone());
                 Some(version)
@@ -245,10 +247,16 @@ impl CodeRuntime {
             .filter(|kind| tidebreak_harness::pin_for(*kind).is_some())
             .map(|kind| {
                 let node_root = node_root.clone();
+                let data_dir = self.data_dir.clone();
                 async move {
                     (
                         kind,
-                        tidebreak_harness::latest_published_version(kind, Some(&node_root)).await,
+                        tidebreak_harness::latest_published_version(
+                            &data_dir,
+                            kind,
+                            Some(&node_root),
+                        )
+                        .await,
                     )
                 }
             });

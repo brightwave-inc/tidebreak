@@ -227,26 +227,22 @@ fn is_plausible_version(candidate: &str) -> bool {
 /// network round trip, and the doctor's Check for updates and a deliberate
 /// install are the only callers.
 pub async fn latest_published_version(
+    data_dir: &Path,
     kind: HarnessKind,
     managed_node_root: Option<&Path>,
 ) -> Result<String, String> {
     let node_root = verified_managed_node_root(managed_node_root)
         .ok_or_else(|| "install the managed Node runtime before checking for updates".to_owned())?;
     let pin = pin_for(kind).ok_or_else(|| format!("{kind} has no pin"))?;
-    let mut command = Command::new(managed_npm_executable(node_root));
-    command
-        .args([
-            "view",
-            "--no-fund",
-            "--no-audit",
-            "--no-update-notifier",
-            pin.package,
-            "dist-tags.latest",
-        ])
-        .env("PATH", prepend_path(&managed_node_path_dir(node_root)))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    let mut command = npm_command(data_dir, node_root);
+    command.args([
+        "view",
+        "--no-fund",
+        "--no-audit",
+        "--no-update-notifier",
+        pin.package,
+        "dist-tags.latest",
+    ]);
     let child = spawn_process_tree(&mut command)
         .map_err(|err| format!("npm view {}: {err}", pin.package))?;
     let output = timeout(LOOKUP_TIMEOUT, child.wait_with_output())
@@ -343,7 +339,7 @@ pub async fn ensure_installed_version(
         .await
         .map_err(|err| format!("could not create harness install dir: {err}"))?;
     let spec = format!("{}@{}", pin.package, version);
-    let mut command = Command::new(managed_npm_executable(node_root));
+    let mut command = npm_command(data_dir, node_root);
     command
         .args([
             "install",
@@ -353,11 +349,7 @@ pub async fn ensure_installed_version(
             "--no-progress",
             &spec,
         ])
-        .current_dir(&dir)
-        .env("PATH", prepend_path(&managed_node_path_dir(node_root)))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .current_dir(&dir);
     let child =
         spawn_process_tree(&mut command).map_err(|err| format!("npm install {spec}: {err}"))?;
     let output = timeout(INSTALL_TIMEOUT, child.wait_with_output())
@@ -400,6 +392,31 @@ fn verified_managed_node_root(managed_node_root: Option<&Path>) -> Option<&Path>
     (is_absolute_executable(&managed_node_executable(root))
         && is_absolute_executable(&managed_npm_executable(root)))
     .then_some(root)
+}
+
+/// Where npm keeps its cache and logs for every command this crate runs.
+///
+/// npm defaults both to `$HOME/.npm`, and a self-host container may run as a
+/// uid with no home at all: Kubernetes hands an unmapped uid `HOME=/`, and
+/// the first thing npm does is fail to create `/.npm/_logs`, so every install
+/// died before a byte was fetched. The cache lives beside the installs so it
+/// depends on nothing but the data directory.
+pub fn npm_cache_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("tools").join("npm-cache")
+}
+
+/// The managed runtime's npm with the environment every command needs: the
+/// runtime first on PATH, and its cache under the data directory rather than
+/// wherever `$HOME` points.
+fn npm_command(data_dir: &Path, node_root: &Path) -> Command {
+    let mut command = Command::new(managed_npm_executable(node_root));
+    command
+        .env("PATH", prepend_path(&managed_node_path_dir(node_root)))
+        .env("npm_config_cache", npm_cache_dir(data_dir))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command
 }
 
 fn prepend_path(bin: &Path) -> std::ffi::OsString {
@@ -546,6 +563,31 @@ mod tests {
         assert_eq!(path.file_name().unwrap(), "claude.cmd");
         #[cfg(not(windows))]
         assert_eq!(path.file_name().unwrap(), "claude");
+    }
+
+    /// A container may run as a uid that owns no home directory. npm must
+    /// never learn where `$HOME` points: its cache and logs go under the data
+    /// directory for every command, install and registry lookup alike.
+    #[test]
+    fn npm_keeps_its_cache_under_the_data_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        let node_root = tmp.path().join("node");
+        let command = npm_command(&data_dir, &node_root);
+        let std_command = command.as_std();
+        let cache = std_command
+            .get_envs()
+            .find(|(key, _)| *key == "npm_config_cache")
+            .and_then(|(_, value)| value)
+            .expect("npm is told where its cache lives");
+        assert_eq!(
+            std::path::Path::new(cache),
+            data_dir.join("tools").join("npm-cache")
+        );
+        assert!(
+            std_command.get_envs().all(|(key, _)| key != "HOME"),
+            "npm's cache placement does not depend on HOME"
+        );
     }
 
     #[test]

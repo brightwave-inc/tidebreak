@@ -984,6 +984,10 @@ async fn serve() -> Result<()> {
     // Tracing events land in `logs/tidebreak.log` under the profile data dir
     // (plus stderr in debug builds); see `tidebreak_server::logging`.
     tidebreak_server::logging::init_logging(&config.data_dir);
+    if profile == Profile::SelfHost {
+        // The container may run as a uid with no home; see the function.
+        tidebreak_server::ensure_home_dir();
+    }
     let server = tidebreak_server::bind_configured(config).await?;
     // The daemon is the trusted client for its own connected-folder tool calls:
     // it holds this machine's broker state, so a turn that reads a folder an
