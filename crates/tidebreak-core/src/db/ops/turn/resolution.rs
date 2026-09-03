@@ -1119,7 +1119,9 @@ where
 fn terminal_notification_kind(event: &AgentEvent) -> Option<crate::NotificationKind> {
     match event {
         AgentEvent::TurnCompleted { .. } => Some(crate::NotificationKind::AgentCompleted),
-        AgentEvent::TurnRefused { refusal, .. } if refusal.category() == Some("blocked") => {
+        AgentEvent::TurnRefused { refusal, .. }
+            if refusal.source() == Some(crate::RefusalSource::ReportBlocked) =>
+        {
             Some(crate::NotificationKind::AgentFailed)
         }
         AgentEvent::TurnRefused { .. } => Some(crate::NotificationKind::AgentCompleted),

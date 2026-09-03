@@ -228,7 +228,7 @@ async fn refused_terminal_event_replaces_checkpoint_with_authoritative_totals() 
 }
 
 #[tokio::test]
-async fn blocked_refusal_mints_a_failed_notification() {
+async fn report_blocked_refusal_mints_a_failed_notification() {
     let (_dir, store) = temp_store().await;
     let (chat, turn_id, lease_token, claimed_at) =
         claimed_turn(&store, "report an operational blocker").await;
@@ -253,7 +253,7 @@ async fn blocked_refusal_mints_a_failed_notification() {
         &[],
         1,
         Usage::default(),
-        RefusalOutcome::new(RefusalDetails::from_category(Some("blocked")), true),
+        RefusalOutcome::report_blocked(),
     )
     .await
     .unwrap()
@@ -266,4 +266,45 @@ async fn blocked_refusal_mints_a_failed_notification() {
     assert_eq!(notifications.len(), 1);
     assert_eq!(notifications[0].kind, NotificationKind::AgentFailed);
     assert_eq!(notifications[0].title, "hello failed");
+}
+
+#[tokio::test]
+async fn provider_blocked_refusal_remains_a_completed_notification() {
+    let (_dir, store) = temp_store().await;
+    let (chat, turn_id, lease_token, claimed_at) =
+        claimed_turn(&store, "persist a provider refusal").await;
+    let output = Message {
+        id: MessageId::new(),
+        chat_id: chat.id,
+        turn_id,
+        role: Role::Assistant,
+        reasoning: Default::default(),
+        content: "Provider refusal".into(),
+        llm_content: None,
+        created_at: claimed_at + Duration::seconds(1),
+    };
+
+    super::super::ops::turn::complete_refused_turn_with_citations_and_append_event(
+        &store,
+        turn_id,
+        lease_token,
+        0,
+        output.created_at,
+        &output,
+        &[],
+        1,
+        Usage::default(),
+        RefusalOutcome::new(RefusalDetails::from_category(Some("blocked")), true),
+    )
+    .await
+    .unwrap()
+    .expect("live provider refusal completion");
+
+    let notifications = store
+        .list_notifications_scoped(&OwnerId::local(), None, 50)
+        .await
+        .unwrap();
+    assert_eq!(notifications.len(), 1);
+    assert_eq!(notifications[0].kind, NotificationKind::AgentCompleted);
+    assert_eq!(notifications[0].title, "hello finished");
 }

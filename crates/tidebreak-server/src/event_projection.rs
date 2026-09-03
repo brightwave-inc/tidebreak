@@ -149,6 +149,16 @@ impl From<tidebreak_core::Usage> for RendererTurnUsage {
 pub struct RendererRefusal {
     pub category: Option<String>,
     pub partial_output: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub source: Option<RendererRefusalSource>,
+}
+
+/// The Tidebreak-owned source of a refusal, when one exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum RendererRefusalSource {
+    ReportBlocked,
 }
 
 /// Exact model route involved in a provider failure, with no diagnostics.
@@ -172,6 +182,12 @@ impl From<&tidebreak_core::RefusalOutcome> for RendererRefusal {
         Self {
             category: value.category().map(str::to_owned),
             partial_output: value.partial_output(),
+            source: match value.source() {
+                Some(tidebreak_core::RefusalSource::ReportBlocked) => {
+                    Some(RendererRefusalSource::ReportBlocked)
+                }
+                Some(_) | None => None,
+            },
         }
     }
 }
@@ -605,6 +621,7 @@ mod tests {
                     refusal: RendererRefusal {
                         category: Some("general_harms".into()),
                         partial_output: true,
+                        source: None,
                     },
                     usage: RendererTurnUsage {
                         input_tokens: 42,

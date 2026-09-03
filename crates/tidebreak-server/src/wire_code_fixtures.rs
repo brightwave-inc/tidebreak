@@ -27,8 +27,8 @@ use tidebreak_core::{
     CodeWatchState, CodeWorkspaceStatus, Diffstat, FenceReason, FileChangeKind, GrantScope,
     HarnessCaps, HarnessCommand, HarnessKind, HarnessNoticeLevel, HarnessTier, ImageMediaType,
     ImageRef, InternalApprovalRequest, PermissionMode, PullRequestCheckCounts, PullRequestDigest,
-    QuickAction, ReasoningEffort, RefusalDetails, RefusalOutcome, RepoId, ToolApprovalKind,
-    ToolDetail, ToolOutcome, WorkspaceId,
+    QuickAction, ReasoningEffort, RefusalOutcome, RepoId, ToolApprovalKind, ToolDetail,
+    ToolOutcome, WorkspaceId,
 };
 
 /// Path of the shared code-mode fixtures, relative to this crate.
@@ -884,10 +884,7 @@ fn event_frames() -> Vec<Fixture> {
                 56,
                 CodeEvent::TurnRefused {
                     usage: usage(),
-                    refusal: RefusalOutcome::new(
-                        RefusalDetails::from_category(Some("safety")),
-                        true,
-                    ),
+                    refusal: RefusalOutcome::report_blocked(),
                 },
             ),
         ),

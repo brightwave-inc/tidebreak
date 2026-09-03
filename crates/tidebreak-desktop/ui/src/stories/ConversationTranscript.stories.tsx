@@ -268,6 +268,7 @@ const blockedMessages: ChatMessage[] = [
     role: "refusal",
     category: "blocked",
     partialOutput: true,
+    source: "report_blocked",
   },
 ];
 

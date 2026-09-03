@@ -319,6 +319,7 @@ pub(crate) mod generate {
 #[cfg(test)]
 mod tests {
     use super::generate;
+    use crate::event_projection::RendererRefusalSource;
     use std::collections::BTreeMap;
 
     /// Path of the generated bindings, relative to this crate.
@@ -1201,8 +1202,9 @@ mod tests {
                     16,
                     RendererAgentEvent::TurnRefused {
                         refusal: RendererRefusal {
-                            category: Some("safety".into()),
+                            category: Some("blocked".into()),
                             partial_output: true,
+                            source: Some(RendererRefusalSource::ReportBlocked),
                         },
                         usage,
                     },

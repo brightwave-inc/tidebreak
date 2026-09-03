@@ -3749,8 +3749,16 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
           "refusal",
         ]) ||
         !isRecord(value.refusal) ||
+        !onlyKeys<Extract<WireCodeEvent, { type: "turn_refused" }>["refusal"]>(
+          value.refusal,
+          ["details", "partial_output", "source"],
+        ) ||
         !isRecord(value.refusal.details) ||
         typeof value.refusal.partial_output !== "boolean" ||
+        !(
+          value.refusal.source === undefined ||
+          value.refusal.source === "report_blocked"
+        ) ||
         !(
           value.refusal.details.category === null ||
           typeof value.refusal.details.category === "string"
@@ -3766,6 +3774,7 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
         refusal: {
           details: { category: value.refusal.details.category },
           partial_output: value.refusal.partial_output,
+          ...(value.refusal.source ? { source: value.refusal.source } : {}),
         },
       };
     }

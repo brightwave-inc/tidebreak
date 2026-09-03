@@ -608,6 +608,9 @@ describe("terminal transcript presentation", () => {
       "The model declined this response because it matched a safety policy.",
     );
     expect(refusalCopy("blocked", true)).toBe(
+      "The response above is incomplete. The model declined this response because it matched the blocked safety category.",
+    );
+    expect(refusalCopy("blocked", true, "report_blocked")).toBe(
       "Tidebreak could not complete this task.",
     );
   });

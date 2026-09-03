@@ -4643,7 +4643,15 @@ export type RefusalDetails = { category: string | null, };
 /**
  * Durable outcome metadata for a refused completion.
  */
-export type RefusalOutcome = { details: RefusalDetails, partial_output: boolean, };
+export type RefusalOutcome = { details: RefusalDetails, partial_output: boolean, source?: RefusalSource, };
+
+/**
+ * The Tidebreak-owned source of a refusal, when one exists.
+ *
+ * Provider refusals leave this absent. Keeping the field optional preserves
+ * journal rows written before Tidebreak recorded its own terminal blockers.
+ */
+export type RefusalSource = "report_blocked";
 
 export type RendererAgentEvent = { "type": "turn_started", turn_id: TurnId, } | { "type": "text_delta", text: string, } | { "type": "reasoning_delta", text: string, } | { "type": "stream_interrupted" } | { "type": "tool_call_started", call_id: CallId, name: RendererToolName, } | { "type": "tool_call_args_delta", call_id: CallId, } | { "type": "user_questions_asked", call_id: CallId, turn_id: TurnId, } | { "type": "plan_proposed", call_id: CallId, turn_id: TurnId, } | { "type": "task_plan_updated", call_id: CallId, turn_id: TurnId, } | { "type": "approval_required", call_id: CallId, action: RendererToolName, approval: ToolApprovalKind, class: ApprovalClass,
 /**
@@ -4728,7 +4736,12 @@ export type RendererModelIdentity = { id: string, provider: ProviderKind, };
 /**
  * Bounded refusal metadata safe to present in the desktop transcript.
  */
-export type RendererRefusal = { category: string | null, partial_output: boolean, };
+export type RendererRefusal = { category: string | null, partial_output: boolean, source?: RendererRefusalSource, };
+
+/**
+ * The Tidebreak-owned source of a refusal, when one exists.
+ */
+export type RendererRefusalSource = "report_blocked";
 
 export type RendererSequencedEvent = { seq: number, event: RendererAgentEvent, replayed?: boolean, };
 

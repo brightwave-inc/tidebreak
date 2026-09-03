@@ -58,7 +58,10 @@ import {
 } from "./MessageWebSources";
 import { useSourceNav } from "./panel/SourceNav";
 import { TurnFailureNotice, turnFailureOffersRetry } from "./TurnFailureNotice";
-import type { TurnFailureCategory } from "./generated/wire";
+import type {
+  RendererRefusalSource,
+  TurnFailureCategory,
+} from "./generated/wire";
 import { ChangeSummaryCard } from "./ChangeSummaryCard";
 import {
   MemoryProposalCard,
@@ -96,6 +99,7 @@ export type ChatMessage =
       role: "refusal";
       category: string | null;
       partialOutput: boolean;
+      source?: RendererRefusalSource;
     }
   | {
       id: string;
@@ -1319,7 +1323,7 @@ function MessageBubbleImpl({
   if (message.role === "refusal") {
     return (
       <div className="message-notice is-refusal" role="status">
-        {refusalCopy(message.category, message.partialOutput)}
+        {refusalCopy(message.category, message.partialOutput, message.source)}
       </div>
     );
   }
@@ -1340,8 +1344,9 @@ export const TURN_CANCELLED_NOTICE = "Response cancelled";
 export function refusalCopy(
   category: string | null,
   partialOutput: boolean,
+  source?: RendererRefusalSource,
 ): string {
-  if (category === "blocked") {
+  if (source === "report_blocked") {
     return "Tidebreak could not complete this task.";
   }
   const reason =
