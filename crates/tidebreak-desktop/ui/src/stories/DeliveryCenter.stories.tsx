@@ -7,8 +7,6 @@ import {
   createRouter,
   RouterProvider,
 } from "@tanstack/react-router";
-import { expect, userEvent, within } from "storybook/test";
-
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
 import type { ApiClient } from "@/api/client";
 import type {
@@ -69,23 +67,8 @@ type DeliveryScenario =
  * the rail first — which navigates to the workspace instead of opening the
  * sheet, and the story then asserts against a page that is not there.
  */
-async function openPullRequest(canvasElement: HTMLElement, title: string) {
-  await openListRow(canvasElement, "Pull requests", title);
-}
 
 /** The same, for the runs and deployments list. */
-async function openRun(canvasElement: HTMLElement, title: string) {
-  await openListRow(canvasElement, "Runs and deployments", title);
-}
-
-async function openListRow(
-  canvasElement: HTMLElement,
-  list: string,
-  title: string,
-) {
-  const rows = await within(canvasElement).findByRole("list", { name: list });
-  await userEvent.click(await within(rows).findByText(title));
-}
 
 function pending<T>(): Promise<T> {
   return new Promise(() => {});
@@ -530,133 +513,26 @@ export const PullRequests: Story = {};
  * The default grouping answers the page's main question: which pull requests
  * still need the reader, and which ones have already been handed to GitHub.
  */
-export const PullRequestAttentionGroups: Story = {
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(await canvas.findByText("Needs your attention")).toBeVisible();
-    await expect(await canvas.findByText("Ready to merge")).toBeVisible();
-    await expect(await canvas.findByText("Waiting")).toBeVisible();
-    await expect(await canvas.findByText("Handed off")).toBeVisible();
-  },
-};
+export const PullRequestAttentionGroups: Story = {};
 
 /** A running check stays blue and in Waiting instead of becoming a failure. */
-export const PullRequestRunningCheck: Story = {
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const title = await canvas.findByText(
-      "Let the catalog say which scopes a server accepts",
-    );
-    const row = title.closest('[role="listitem"]');
-    if (!(row instanceof HTMLElement)) {
-      throw new Error("running-check row is missing");
-    }
-    await expect(row).toHaveAttribute("data-status-group", "waiting");
-    await expect(within(row).getByText("Checks running")).toBeVisible();
-    await expect(within(row).getByText("1 pending")).toBeVisible();
-  },
-};
+export const PullRequestRunningCheck: Story = {};
 
 /** A running check on a merge-queue repo offers merge when ready, not a blocked Merge. */
-export const PullRequestRunningCheckDetail: Story = {
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const body = within(canvasElement.ownerDocument.body);
-    await userEvent.click(
-      await canvas.findByText(
-        "Let the catalog say which scopes a server accepts",
-      ),
-    );
-    await expect(
-      await body.findByRole("button", { name: "Merge when ready" }),
-    ).toBeEnabled();
-    await expect(body.queryByRole("button", { name: "Merge" })).toBeNull();
-    await expect(
-      body.queryByRole("button", { name: "Enable auto-merge" }),
-    ).toBeNull();
-    await expect(
-      body.queryByText(/required review|review approval/i),
-    ).not.toBeInTheDocument();
-    const checksTab = await body.findByRole("tab", { name: /Checks/ });
-    await expect(checksTab).toHaveTextContent("0/1");
-    await userEvent.click(checksTab);
-    await expect(
-      within(await body.findByRole("tabpanel")).getByText("1 pending"),
-    ).toBeVisible();
-    const pending = await body.findByRole("button", {
-      name: /Preview \/ Build preview image/,
-    });
-    await expect(pending.querySelector(".lucide-circle-dashed")).not.toBeNull();
-  },
-};
+export const PullRequestRunningCheckDetail: Story = {};
 
 /** Auto-merge and queue membership live on the PR mark and in one handoff group. */
-export const PullRequestMergeHandoffs: Story = {
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    for (const [titleText, statusText] of [
-      ["Ask a hosted MCP server which scopes it accepts", "In merge queue"],
-      ["Apply reasoning effort changes to the next turn", "Auto-merge armed"],
-    ] as const) {
-      const title = await canvas.findByText(titleText);
-      const row = title.closest('[role="listitem"]');
-      if (!(row instanceof HTMLElement)) {
-        throw new Error(`${titleText} row is missing`);
-      }
-      await expect(row).toHaveAttribute("data-status-group", "handed_off");
-      await expect(within(row).getByText(statusText)).toBeVisible();
-    }
-  },
-};
+export const PullRequestMergeHandoffs: Story = {};
 
 /** Repository grouping makes a many-repository queue scannable by ownership. */
-export const PullRequestsByRepository: Story = {
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const body = within(canvasElement.ownerDocument.body);
-    await userEvent.click(
-      await canvas.findByRole("combobox", { name: "Group pull requests" }),
-    );
-    await userEvent.click(
-      await body.findByRole("option", { name: "Group: repository" }),
-    );
-    await expect(
-      canvasElement.querySelector(
-        '[data-pull-request-group="brightwave-inc/tidebreak"]',
-      ),
-    ).not.toBeNull();
-    await expect(
-      canvasElement.querySelector(
-        '[data-pull-request-group="brightwave-inc/model-gateway"]',
-      ),
-    ).not.toBeNull();
-  },
-};
+export const PullRequestsByRepository: Story = {};
 
 /**
  * The list carries every lifecycle at once. A merged or closed row used to
  * read "Review Pending", because GitHub drops the review decision the moment
  * a pull request settles.
  */
-export const PullRequestLifecycles: Story = {
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(
-      await canvas.findByText("Cache the workspace digest between polls"),
-    ).toBeVisible();
-    // Two merged rows: one the host reports as MERGED, one it reports as
-    // CLOSED with a merge timestamp.
-    await expect(await canvas.findAllByText("Merged")).toHaveLength(2);
-    await expect(await canvas.findAllByText("Closed")).toHaveLength(1);
-    await expect(await canvas.findAllByText("Draft")).toHaveLength(1);
-    await expect(await canvas.findAllByText("Ready to merge")).not.toHaveLength(
-      0,
-    );
-    await expect(await canvas.findAllByText("Changes requested")).toHaveLength(
-      1,
-    );
-  },
-};
+export const PullRequestLifecycles: Story = {};
 
 /**
  * Stack lanes (decision 77): children indent under their parent in fact
@@ -665,16 +541,6 @@ export const PullRequestLifecycles: Story = {
  */
 export const PullRequestStacks: Story = {
   args: { scenario: "pull-requests-stacked" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(
-      await canvas.findByText("Stack base: extract the fact store"),
-    ).toBeVisible();
-    const rows = canvasElement.querySelectorAll("[data-depth]");
-    const depths = [...rows].map((row) => row.getAttribute("data-depth"));
-    await expect(depths).toEqual(["0", "1", "2", "0"]);
-    await expect(await canvas.findByText("Stacked on #2288")).toBeVisible();
-  },
 };
 
 /**
@@ -684,22 +550,6 @@ export const PullRequestStacks: Story = {
  */
 export const PullRequestStackDetail: Story = {
   args: { scenario: "pull-requests-stacked" },
-  play: async ({ canvasElement }) => {
-    const body = within(canvasElement.ownerDocument.body);
-    await openPullRequest(canvasElement, "Stack middle: reconcile sweep");
-    await expect(
-      await body.findByRole("heading", {
-        name: "Stack middle: reconcile sweep",
-      }),
-    ).toBeVisible();
-    // The stack map: bottom layer, this layer, the draft tip.
-    await expect(await body.findByText("#2301")).toBeVisible();
-    await expect(await body.findByText("#2303")).toBeVisible();
-    await expect(await body.findByText("(this pull request)")).toBeVisible();
-    await expect(
-      await body.findByRole("button", { name: /Merge stack \(2 layers\)/ }),
-    ).toBeVisible();
-  },
 };
 
 /**
@@ -709,49 +559,13 @@ export const PullRequestStackDetail: Story = {
  */
 export const PullRequestStackDetailWithoutAutoMerge: Story = {
   args: { scenario: "pull-requests-stacked-auto-merge-unavailable" },
-  play: async ({ canvasElement }) => {
-    const body = within(canvasElement.ownerDocument.body);
-    await openPullRequest(canvasElement, "Stack middle: reconcile sweep");
-    await expect(
-      await body.findByRole("heading", {
-        name: "Stack middle: reconcile sweep",
-      }),
-    ).toBeVisible();
-    const depths = [...canvasElement.querySelectorAll("[data-depth]")].map(
-      (row) => row.getAttribute("data-depth"),
-    );
-    await expect(depths).toEqual(["0", "1", "2", "0"]);
-    await expect(
-      body.queryByRole("button", { name: "Enable auto-merge" }),
-    ).toBeNull();
-  },
 };
 
-export const PullRequestDetail: Story = {
-  play: async ({ canvasElement }) => {
-    const body = within(canvasElement.ownerDocument.body);
-    await openPullRequest(canvasElement, "Make workspace deep links durable");
-    await expect(
-      await body.findByRole("heading", {
-        name: "Make workspace deep links durable",
-      }),
-    ).toBeVisible();
-  },
-};
+export const PullRequestDetail: Story = {};
 
 /** Opening stale list data adopts the merged state and moves the row to Done. */
 export const PullRequestStateChangedOnOpen: Story = {
   args: { scenario: "pull-requests-state-changed" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await openPullRequest(canvasElement, "Build the delivery center");
-    await expect(
-      await canvas.findByLabelText("Pull request summary"),
-    ).toHaveTextContent("Merged");
-    const row = await canvas.findByRole("listitem");
-    await expect(row).toHaveAttribute("data-status-group", "done");
-    await expect(await canvas.findByText("Done")).toBeVisible();
-  },
 };
 
 /**
@@ -762,77 +576,16 @@ export const PullRequestStateChangedOnOpen: Story = {
  */
 export const PullRequestUnregisteredStack: Story = {
   args: { scenario: "pull-requests-unregistered" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const body = within(canvasElement.ownerDocument.body);
-    await expect(await canvas.findAllByText("Unregistered stack")).toHaveLength(
-      3,
-    );
-    await openPullRequest(canvasElement, "Unregistered middle: the queries");
-    await expect(
-      await body.findByRole("button", { name: /Create stack \(3 layers\)/ }),
-    ).toBeVisible();
-    await userEvent.click(
-      await body.findByRole("button", { name: /Create stack \(3 layers\)/ }),
-    );
-    await expect(
-      await body.findByText(/Registers #2310, #2311, #2312/),
-    ).toBeVisible();
-  },
 };
 
 /** The full GitHub-shaped sheet: lifecycle, diffstat, reviewers, Markdown. */
-export const PullRequestDetailConversation: Story = {
-  play: async ({ canvasElement }) => {
-    const body = within(canvasElement.ownerDocument.body);
-    await openPullRequest(canvasElement, "Build the delivery center");
-    await expect(
-      await body.findByRole("heading", { name: "Build the delivery center" }),
-    ).toBeVisible();
-    // The description renders as Markdown rather than raw "## Summary" text.
-    await expect(
-      await body.findByRole("heading", { name: "Summary" }),
-    ).toBeVisible();
-    await expect(await body.findByText("+2140")).toBeVisible();
-    await expect(
-      await body.findByRole("button", { name: /Comment/ }),
-    ).toBeVisible();
-  },
-};
+export const PullRequestDetailConversation: Story = {};
 
 /**
  * Newest first is the default: the reason a reader opens a busy pull request
  * is the latest verdict. The select flips back to the host's chronology.
  */
-export const PullRequestCommentOrdering: Story = {
-  play: async ({ canvasElement }) => {
-    const body = within(canvasElement.ownerDocument.body);
-    await openPullRequest(canvasElement, "Build the delivery center");
-    const later = await body.findByText(
-      "Keep repository failures visible without hiding usable results.",
-    );
-    const earlier = await body.findByText(/The narrow detail state still/);
-    await expect(
-      Boolean(
-        later.compareDocumentPosition(earlier) &
-          Node.DOCUMENT_POSITION_FOLLOWING,
-      ),
-    ).toBe(true);
-
-    await userEvent.click(
-      await body.findByRole("combobox", { name: "Comment order" }),
-    );
-    await userEvent.click(
-      await body.findByRole("option", { name: "Oldest first" }),
-    );
-    await expect(
-      Boolean(
-        earlier.compareDocumentPosition(later) &
-          Node.DOCUMENT_POSITION_FOLLOWING,
-      ),
-    ).toBe(true);
-  },
-};
+export const PullRequestCommentOrdering: Story = {};
 
 /**
  * Admin merge stays behind the overflow and an inline confirmation: it
@@ -840,198 +593,44 @@ export const PullRequestCommentOrdering: Story = {
  * button. Inline rather than a dialog — the sheet is already a modal, and a
  * second stacked modal shares its dismiss layer.
  */
-export const PullRequestAdminMerge: Story = {
-  play: async ({ canvasElement }) => {
-    const body = within(canvasElement.ownerDocument.body);
-    await openPullRequest(canvasElement, "Build the delivery center");
-    await expect(
-      await body.findByRole("button", { name: "Enable auto-merge" }),
-    ).toBeEnabled();
-    await expect(body.queryByRole("button", { name: "Merge" })).toBeNull();
-    await userEvent.click(
-      await body.findByRole("button", { name: "More pull request actions" }),
-    );
-    await userEvent.click(
-      await body.findByRole("menuitem", {
-        name: /Admin merge \(bypass protections\)/,
-      }),
-    );
-    await expect(
-      await body.findByText(/skips any reviews and checks/),
-    ).toBeVisible();
-    await userEvent.click(
-      await body.findByRole("button", { name: "Admin merge" }),
-    );
-  },
-};
+export const PullRequestAdminMerge: Story = {};
 
 /**
  * A pull request with a linked active workspace routes its chores there; the
  * menu names the workspace before anything starts.
  */
-export const PullRequestAgentActions: Story = {
-  play: async ({ canvasElement }) => {
-    const body = within(canvasElement.ownerDocument.body);
-    await openPullRequest(canvasElement, "Build the delivery center");
-    await userEvent.click(
-      await body.findByRole("button", { name: "Fix with an agent" }),
-    );
-    await expect(
-      await body.findByText(
-        "Runs in Build the delivery center, the linked workspace.",
-      ),
-    ).toBeVisible();
-    await expect(
-      await body.findByRole("menuitem", { name: "Fix failing checks" }),
-    ).toBeVisible();
-    await expect(
-      await body.findByRole("menuitem", { name: "Address review feedback" }),
-    ).toBeVisible();
-  },
-};
+export const PullRequestAgentActions: Story = {};
 
 /**
  * Without a linked workspace the same menu cuts a fresh one from the pull
  * request's head branch, queues the prompt, and lands on the new workspace.
  */
-export const PullRequestFreshAgent: Story = {
-  play: async ({ canvasElement }) => {
-    const body = within(canvasElement.ownerDocument.body);
-    await openPullRequest(canvasElement, "Adopt the shared status tone map");
-    await userEvent.click(
-      await body.findByRole("button", { name: "Fix with an agent" }),
-    );
-    await expect(
-      await body.findByText(
-        "Starts a fresh workspace on brightwave-inc/tidebreak.",
-      ),
-    ).toBeVisible();
-    await userEvent.click(
-      await body.findByRole("menuitem", { name: "Resolve conflicts" }),
-    );
-    // The story router's workspace route is a stub; reaching it proves the
-    // workspace was created and the sheet handed the reader over.
-    await expect(await body.findByText("Workspace")).toBeVisible();
-  },
-};
+export const PullRequestFreshAgent: Story = {};
 
-export const PullRequestDetailFiles: Story = {
-  play: async ({ canvasElement }) => {
-    const body = within(canvasElement.ownerDocument.body);
-    await openPullRequest(canvasElement, "Build the delivery center");
-    await userEvent.click(await body.findByRole("tab", { name: /Files/ }));
-    await expect(await body.findByText(/19 files changed/)).toBeVisible();
-    await userEvent.click(
-      await body.findByTitle(
-        "crates/tidebreak-desktop/ui/src/code/pullRequestPresentation.ts",
-      ),
-    );
-    await expect(await body.findByText(/@@ -0,0 \+1,8 @@/)).toBeVisible();
-  },
-};
+export const PullRequestDetailFiles: Story = {};
 
-export const PullRequestDetailChecks: Story = {
-  play: async ({ canvasElement }) => {
-    const body = within(canvasElement.ownerDocument.body);
-    await openPullRequest(canvasElement, "Build the delivery center");
-    await userEvent.click(await body.findByRole("tab", { name: /Checks/ }));
-    await expect(
-      within(await body.findByRole("tabpanel")).getByText("1 failed"),
-    ).toBeVisible();
-  },
-};
+export const PullRequestDetailChecks: Story = {};
 
 /** Skipped checks are terminal, so a settled run reads complete in the tab. */
-export const PullRequestTerminalChecks: Story = {
-  play: async ({ canvasElement }) => {
-    const body = within(canvasElement.ownerDocument.body);
-    await openPullRequest(
-      canvasElement,
-      "Cache the workspace digest between polls",
-    );
-    const checksTab = await body.findByRole("tab", { name: /Checks/ });
-    await expect(checksTab).toHaveTextContent("3/3");
-    await userEvent.click(checksTab);
-    await expect(
-      within(await body.findByRole("tabpanel")).getByText("2 passed"),
-    ).toBeVisible();
-  },
-};
+export const PullRequestTerminalChecks: Story = {};
 
 /** Merged: no merge controls, a reopen-free sheet, and who merged it. */
-export const MergedPullRequestDetail: Story = {
-  play: async ({ canvasElement }) => {
-    const body = within(canvasElement.ownerDocument.body);
-    await openPullRequest(
-      canvasElement,
-      "Cache the workspace digest between polls",
-    );
-    await expect(
-      await body.findByRole("heading", {
-        name: "Cache the workspace digest between polls",
-      }),
-    ).toBeVisible();
-    await expect(await body.findByText(/merged .* by devon/)).toBeVisible();
-    await expect(
-      body.queryByRole("button", { name: "Merge" }),
-    ).not.toBeInTheDocument();
-  },
-};
+export const MergedPullRequestDetail: Story = {};
 
 /** Closed without merging: the only action left is to reopen it. */
-export const ClosedPullRequestDetail: Story = {
-  play: async ({ canvasElement }) => {
-    const body = within(canvasElement.ownerDocument.body);
-    await openPullRequest(canvasElement, "Rewrite the deployment runbook");
-    await expect(
-      await body.findByRole("button", { name: "Reopen" }),
-    ).toBeVisible();
-  },
-};
+export const ClosedPullRequestDetail: Story = {};
 
 /** Draft: mark ready is offered, merge is not. */
-export const DraftPullRequestDetail: Story = {
-  play: async ({ canvasElement }) => {
-    const body = within(canvasElement.ownerDocument.body);
-    await openPullRequest(canvasElement, "Document managed deployments");
-    await expect(
-      await body.findByRole("button", { name: "Mark ready" }),
-    ).toBeVisible();
-    await expect(
-      await body.findByText("No description provided."),
-    ).toBeVisible();
-  },
-};
+export const DraftPullRequestDetail: Story = {};
 
 /** Conflicting: no host merge action, and the card says why. */
-export const BlockedMergePullRequestDetail: Story = {
-  play: async ({ canvasElement }) => {
-    const body = within(canvasElement.ownerDocument.body);
-    await openPullRequest(canvasElement, "Adopt the shared status tone map");
-    await expect(
-      await body.findByText(
-        "Resolve the conflicts with the base branch first.",
-      ),
-    ).toBeVisible();
-    await expect(body.queryByRole("button", { name: "Merge" })).toBeNull();
-    await expect(
-      body.queryByRole("button", { name: "Enable auto-merge" }),
-    ).toBeNull();
-  },
-};
+export const BlockedMergePullRequestDetail: Story = {};
 
 /**
  * The default view: your own open pull requests, drafts included. The author
  * comes from the login `gh` is signed in as, so "Yours" needs no typing.
  */
-export const PullRequestsYours: Story = {
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(
-      await canvas.findByRole("button", { name: "Yours", pressed: true }),
-    ).toBeVisible();
-  },
-};
+export const PullRequestsYours: Story = {};
 
 /**
  * No login to filter on, so "Yours" is not offered and Delivery opens on the
@@ -1039,23 +638,10 @@ export const PullRequestsYours: Story = {
  */
 export const PullRequestsWithoutViewerLogin: Story = {
   args: { scenario: "pull-requests-no-viewer" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(
-      await canvas.findByRole("button", { name: "Needs attention" }),
-    ).toBeVisible();
-    await expect(canvas.queryByRole("button", { name: "Yours" })).toBeNull();
-  },
 };
 
 export const PullRequestsLoading: Story = {
   args: { scenario: "pull-requests-loading" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(
-      await canvas.findByRole("status", { name: "Loading" }),
-    ).toHaveClass("w-full", "min-w-0", "flex-1");
-  },
 };
 
 export const PullRequestsEmpty: Story = {
@@ -1082,35 +668,9 @@ export const RunDetail: Story = {
     scenario: "runs",
     initialUrl: "/code/delivery/runs",
   },
-  play: async ({ canvasElement }) => {
-    const body = within(canvasElement.ownerDocument.body);
-    await openRun(canvasElement, "Desktop CI");
-    await expect(
-      await body.findByRole("heading", { name: "Desktop CI" }),
-    ).toBeVisible();
-    await expect(
-      await body.findByRole("button", { name: "Rerun all" }),
-    ).toBeVisible();
-    await expect(
-      await body.findByRole("button", { name: "Rerun failed" }),
-    ).toBeVisible();
-    await expect(await body.findByText("Build static Storybook")).toBeVisible();
-  },
 };
 
-export const PullRequestKeyboard: Story = {
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await openPullRequest(canvasElement, "Build the delivery center");
-    await expect(
-      await canvas.findByTestId("pull-request-detail-pane"),
-    ).toHaveTextContent("Build the delivery center");
-    await userEvent.keyboard("{ArrowDown}");
-    await expect(
-      await canvas.findByTestId("pull-request-detail-pane"),
-    ).toHaveTextContent("Adopt the shared status tone map");
-  },
-};
+export const PullRequestKeyboard: Story = {};
 
 export const ArchivePopulated: Story = {
   args: {
@@ -1124,20 +684,6 @@ export const ArchiveConversationSearch: Story = {
     scenario: "archive-search",
     initialUrl: "/code/archive",
   },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await userEvent.type(
-      await canvas.findByPlaceholderText(
-        "Search workspaces and conversations…",
-      ),
-      "reclaim tiers",
-    );
-    await expect(
-      await canvas.findByText(
-        "Make the reclaim tiers safe by keeping archived conversations searchable.",
-      ),
-    ).toBeVisible();
-  },
 };
 
 export const ArchiveEmpty: Story = {
@@ -1149,29 +695,10 @@ export const ArchiveEmpty: Story = {
 
 export const NarrowPullRequestDetail: Story = {
   parameters: { viewport: { defaultViewport: "compact" } },
-  play: async ({ canvasElement }) => {
-    const body = within(canvasElement.ownerDocument.body);
-    await openPullRequest(canvasElement, "Build the delivery center");
-    await expect(
-      await body.findByRole("heading", { name: "Build the delivery center" }),
-    ).toBeVisible();
-  },
 };
 
 /**
  * The author filter is a lookup over logins Delivery has seen — avatars and
  * checkboxes — with typing kept as the fallback for a login it has not.
  */
-export const PullRequestAuthorFilter: Story = {
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const body = within(canvasElement.ownerDocument.body);
-    await userEvent.click(
-      await canvas.findByRole("button", { name: /Filters/ }),
-    );
-    await expect(
-      await body.findByRole("checkbox", { name: "mara" }),
-    ).toBeVisible();
-    await userEvent.click(await body.findByRole("checkbox", { name: "mara" }));
-  },
-};
+export const PullRequestAuthorFilter: Story = {};

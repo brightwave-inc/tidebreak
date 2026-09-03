@@ -1,6 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { fn, userEvent, within } from "storybook/test";
-
+import { fn } from "storybook/test";
 import { AgentsPanel } from "@/settings/AgentsPanel";
 import { AppearancePanel } from "@/settings/AppearancePanel";
 import { CompactionPanel } from "@/settings/CompactionPanel";
@@ -129,12 +128,6 @@ export const ContextDefaults: Story = {
 
 export const ContextAdvanced: Story = {
   args: { panel: "context" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await userEvent.click(
-      await canvas.findByRole("button", { name: "Advanced" }),
-    );
-  },
 };
 
 export const ContextFailure: Story = {

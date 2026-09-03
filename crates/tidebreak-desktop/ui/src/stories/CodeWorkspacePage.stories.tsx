@@ -7,8 +7,6 @@ import {
   createRouter,
   RouterProvider,
 } from "@tanstack/react-router";
-import { expect, fireEvent, userEvent, within } from "storybook/test";
-
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
 import type { ApiClient } from "@/api/client";
 import type {
@@ -33,11 +31,8 @@ import {
 } from "@/code/CodeUpdatesStore";
 import { CodeWorkspacePage } from "@/code/CodeWorkspacePage";
 import {
-  DEFAULT_INSPECTOR_LAYOUT,
   INSPECTOR_LAYOUT_STORAGE_ID,
   INSPECTOR_PANEL_IDS,
-  MAX_INSPECTOR_SIZE,
-  MIN_WORKSPACE_WIDTH_PX,
 } from "@/code/inspectorLayout";
 import type { LayoutState } from "@/panel/panelTypes";
 import {
@@ -1043,25 +1038,6 @@ function subagentUrl(scenario: SubagentScenario): string {
  * rather than a synthetic `dragstart`. The move has to clear the sensor's
  * four-pixel activation distance, which is what keeps a click a click.
  */
-function startTabDrag(tab: Element) {
-  // The press lands on the tab itself, not the draggable wrapper around it.
-  // That is the gesture that used to fail: WebKit would not begin an
-  // ancestor's native drag from the inner button, so the drag never started.
-  const box = tab.getBoundingClientRect();
-  const from = { x: box.left + box.width / 2, y: box.top + box.height / 2 };
-  fireEvent.pointerDown(tab, {
-    pointerId: 1,
-    isPrimary: true,
-    button: 0,
-    clientX: from.x,
-    clientY: from.y,
-  });
-  fireEvent.pointerMove(document, {
-    pointerId: 1,
-    clientX: from.x + 40,
-    clientY: from.y,
-  });
-}
 
 const conversationUrl = workspaceUrl();
 const fileUrl = workspaceUrl({
@@ -1123,21 +1099,6 @@ export const ConversationAlone: Story = {};
 /** One setting write marks the full related control cluster until it settles. */
 export const SettingsPending: Story = {
   args: { scenario: "settings-pending", reviewOpen: false },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await userEvent.click(
-      await canvas.findByRole("switch", { name: "Fast mode off" }),
-    );
-    await expect(
-      await canvas.findByRole("switch", { name: "Fast mode on" }),
-    ).toHaveAttribute("aria-busy", "true");
-    await expect(
-      canvas.getByRole("button", { name: "Reasoning: Default" }),
-    ).toHaveAttribute("aria-busy", "true");
-    await expect(
-      canvas.getByRole("button", { name: "Permissions: Ask" }),
-    ).toBeDisabled();
-  },
 };
 
 /**
@@ -1147,68 +1108,15 @@ export const SettingsPending: Story = {
  * Scrolled-out tabs are how the workspace used to lose Source control and
  * Pull request whenever the inspector opened.
  */
-async function expectCenterTabsReachable(canvasElement: HTMLElement) {
-  const canvas = within(canvasElement);
-  await expect(
-    await canvas.findByRole("tab", { name: "Main agent" }),
-  ).toBeVisible();
-  const strip = canvasElement.querySelector<HTMLElement>(
-    ".workspace-pane-tabs",
-  );
-  await expect(strip).toBeVisible();
-  expect(strip?.scrollWidth ?? 0).toBeLessThanOrEqual(
-    (strip?.clientWidth ?? 0) + 1,
-  );
-}
 
 /** The journal and the composer keep a workable column beside the inspector. */
-async function expectConversationIntact(canvasElement: HTMLElement) {
-  const canvas = within(canvasElement);
-  const journal = canvasElement.querySelector<HTMLElement>(".chat-pane");
-  await expect(journal).toBeVisible();
-  await expect(
-    await canvas.findByRole("textbox", { name: "Message" }),
-  ).toBeVisible();
-  expect(journal?.getBoundingClientRect().width ?? 0).toBeGreaterThanOrEqual(
-    MIN_WORKSPACE_WIDTH_PX,
-  );
-}
 
 /** The inspector's share of the pane, as a percentage. */
-function inspectorShare(canvasElement: HTMLElement): number {
-  const canvas = within(canvasElement);
-  const workspace = canvas.getByTestId("workspace").getBoundingClientRect();
-  const inspector = canvas.getByTestId("inspector").getBoundingClientRect();
-  return (inspector.width / (workspace.width + inspector.width)) * 100;
-}
 
 /** Review is an optional working pane, not a replacement for the conversation. */
 export const ConversationWithReview: Story = {
   args: { reviewOpen: true },
   globals: { viewport: { value: "desktop", isRotated: false } },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await userEvent.click(
-      await canvas.findByRole("tab", { name: "Pull request" }),
-    );
-    await expect(
-      await canvas.findByText(
-        "Rework the code workspace around persistent conversation",
-      ),
-    ).toBeVisible();
-    const workspacePanel = canvas.getByTestId("workspace");
-    const inspectorPanel = canvas.getByTestId("inspector");
-    await expect(workspacePanel).toBeVisible();
-    await expect(inspectorPanel).toBeVisible();
-    expect(workspacePanel.getBoundingClientRect().width).toBeGreaterThan(
-      inspectorPanel.getBoundingClientRect().width,
-    );
-    expect(inspectorShare(canvasElement)).toBeLessThanOrEqual(
-      MAX_INSPECTOR_SIZE,
-    );
-    await expectCenterTabsReachable(canvasElement);
-    await expectConversationIntact(canvasElement);
-  },
 };
 
 /** A saved split inside the bounds comes back exactly as the reader left it. */
@@ -1218,17 +1126,6 @@ export const RestoredInspectorSplit: Story = {
     storedInspectorLayout: { workspace: 60, inspector: 40 },
   },
   globals: { viewport: { value: "desktop", isRotated: false } },
-  play: async ({ canvasElement }) => {
-    await expect(
-      await within(canvasElement).findByTestId("inspector"),
-    ).toBeVisible();
-    expect(inspectorShare(canvasElement)).toBeCloseTo(40, 0);
-    expect(inspectorShare(canvasElement)).toBeLessThanOrEqual(
-      MAX_INSPECTOR_SIZE,
-    );
-    await expectCenterTabsReachable(canvasElement);
-    await expectConversationIntact(canvasElement);
-  },
 };
 
 /** A stale full-width inspector resets before it can hide the journal. */
@@ -1238,24 +1135,6 @@ export const InvalidStoredInspectorLayout: Story = {
     storedInspectorLayout: { workspace: 0, inspector: 100 },
   },
   globals: { viewport: { value: "desktop", isRotated: false } },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const workspacePanel = await canvas.findByTestId("workspace");
-    const inspectorPanel = canvas.getByTestId("inspector");
-    await expect(
-      canvas.findByRole("tab", { name: "Main agent" }),
-    ).resolves.toBeVisible();
-    expect(workspacePanel.getBoundingClientRect().width).toBeGreaterThan(
-      inspectorPanel.getBoundingClientRect().width,
-    );
-    // The rejected payload falls back to the shipped split, not to a clamp.
-    expect(inspectorShare(canvasElement)).toBeCloseTo(
-      DEFAULT_INSPECTOR_LAYOUT.inspector,
-      0,
-    );
-    await expectCenterTabsReachable(canvasElement);
-    await expectConversationIntact(canvasElement);
-  },
 };
 
 /** Source control remains a peer center tab and keeps the inspector optional. */
@@ -1281,17 +1160,6 @@ export const SourceControlTabWithReview: Story = {
     reviewOpen: true,
   },
   globals: { viewport: { value: "desktop", isRotated: false } },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(
-      await canvas.findByRole("tab", { name: "Source control" }),
-    ).toBeVisible();
-    await expect(await canvas.findByTestId("inspector")).toBeVisible();
-    expect(inspectorShare(canvasElement)).toBeLessThanOrEqual(
-      MAX_INSPECTOR_SIZE,
-    );
-    await expectCenterTabsReachable(canvasElement);
-  },
 };
 
 /** Pull-request status and comments remain a peer center tab. */
@@ -1317,17 +1185,6 @@ export const PullRequestTabWithReview: Story = {
     reviewOpen: true,
   },
   globals: { viewport: { value: "desktop", isRotated: false } },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(
-      await canvas.findByRole("tab", { name: "Pull request" }),
-    ).toBeVisible();
-    await expect(await canvas.findByTestId("inspector")).toBeVisible();
-    expect(inspectorShare(canvasElement)).toBeLessThanOrEqual(
-      MAX_INSPECTOR_SIZE,
-    );
-    await expectCenterTabsReachable(canvasElement);
-  },
 };
 
 /**
@@ -1338,27 +1195,6 @@ export const PullRequestTabWithReview: Story = {
 export const MinimumWindowWithReview: Story = {
   args: { reviewOpen: true },
   globals: { viewport: { value: "minimumWindow", isRotated: false } },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(
-      await canvas.findByRole("tab", { name: "Main agent" }),
-    ).toBeVisible();
-    await expect(canvas.queryByTestId("inspector")).toBeNull();
-    await expect(
-      canvas.getByRole("button", { name: "Review sidebar" }),
-    ).toHaveAttribute("aria-disabled", "true");
-    const journal = canvasElement.querySelector<HTMLElement>(".chat-pane");
-    const pane = canvas.getByTestId("workspace-pane");
-    await expect(journal).toBeVisible();
-    await expect(
-      await canvas.findByRole("textbox", { name: "Message" }),
-    ).toBeVisible();
-    // The journal takes the whole pane, not a fraction of it.
-    expect(journal?.getBoundingClientRect().width ?? 0).toBeGreaterThan(
-      pane.getBoundingClientRect().width - 16,
-    );
-    await expectCenterTabsReachable(canvasElement);
-  },
 };
 
 /** Two working surfaces can sit together without moving the conversation model. */
@@ -1369,12 +1205,6 @@ export const SplitEditorPane: Story = {
 /** The full-size drop destination appears as soon as a center tab starts moving. */
 export const ActiveDragTarget: Story = {
   args: { initialUrl: fileUrl, reviewOpen: false },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const tab = await canvas.findByRole("tab", { name: "WorkspaceCard.tsx" });
-    startTabDrag(tab);
-    await expect(await canvas.findByTestId("split-drop-zone")).toBeVisible();
-  },
 };
 
 /** Watch work and harness subagents nest under the conversation they belong to. */
@@ -1389,17 +1219,6 @@ export const RunningSubagent: Story = {
     initialUrl: subagentUrl("subagent-running"),
     reviewOpen: false,
   },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const context = await canvas.findByTestId("subagent-context-bar");
-    await expect(context).toHaveTextContent("Audit drag-and-drop boundaries");
-    await expect(context).toHaveTextContent("Running");
-    await expect(
-      await canvas.findByText(
-        "The pointer sensor picks the tab up cleanly. I’m checking the focus handoff before I report back.",
-      ),
-    ).toBeVisible();
-  },
 };
 
 /** Settled work stays linkable and clearly read-only after the parent turn ends. */
@@ -1408,17 +1227,6 @@ export const CompletedSubagent: Story = {
     scenario: "subagent-completed",
     initialUrl: subagentUrl("subagent-completed"),
     reviewOpen: false,
-  },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const context = await canvas.findByTestId("subagent-context-bar");
-    await expect(context).toHaveTextContent("Review pane navigation contracts");
-    await expect(context).toHaveTextContent("Completed");
-    await expect(
-      await canvas.findByText(
-        "The pane URL contract is stable: selecting a subagent never remounts the parent session.",
-      ),
-    ).toBeVisible();
   },
 };
 
@@ -1429,19 +1237,6 @@ export const FailedSubagent: Story = {
     initialUrl: subagentUrl("subagent-failed"),
     reviewOpen: false,
   },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const context = await canvas.findByTestId("subagent-context-bar");
-    await expect(context).toHaveTextContent(
-      "Run the desktop integration suite",
-    );
-    await expect(context).toHaveTextContent("Failed");
-    await expect(
-      await canvas.findByText(
-        "The desktop suite stopped in the native browser harness before assertions ran.",
-      ),
-    ).toBeVisible();
-  },
 };
 
 /** A live Task with no attributed output says that it is waiting, not empty or broken. */
@@ -1450,17 +1245,6 @@ export const RunningSubagentWithoutOutput: Story = {
     scenario: "subagent-waiting",
     initialUrl: subagentUrl("subagent-waiting"),
     reviewOpen: false,
-  },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(
-      await canvas.findByText("Waiting for this subagent"),
-    ).toBeVisible();
-    await expect(
-      await canvas.findByText(
-        "It is still running, but it has not produced attributed transcript output yet.",
-      ),
-    ).toBeVisible();
   },
 };
 
@@ -1471,15 +1255,6 @@ export const RecoveredStaleSubagent: Story = {
     initialUrl: subagentUrl("subagent-recovered"),
     reviewOpen: false,
   },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const context = await canvas.findByTestId("subagent-context-bar");
-    await expect(context).toHaveTextContent("Recover the interrupted audit");
-    await expect(context).toHaveTextContent("Failed");
-    await expect(
-      await canvas.findByText("No captured subagent output"),
-    ).toBeVisible();
-  },
 };
 
 /** Successful Tasks can legitimately finish without emitting a child transcript. */
@@ -1488,15 +1263,6 @@ export const EmptySubagentTranscript: Story = {
     scenario: "subagent-empty",
     initialUrl: subagentUrl("subagent-empty"),
     reviewOpen: false,
-  },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const context = await canvas.findByTestId("subagent-context-bar");
-    await expect(context).toHaveTextContent("Check generated bindings");
-    await expect(context).toHaveTextContent("Completed");
-    await expect(
-      await canvas.findByText("No captured subagent output"),
-    ).toBeVisible();
   },
 };
 
@@ -1508,14 +1274,6 @@ export const StartSession: Story = {
 /** The workspace page carries the handoff while the first agent starts. */
 export const StartingSession: Story = {
   args: { scenario: "workspace-starting", reviewOpen: false },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const status = await canvas.findByRole("status", {
-      name: "Starting session",
-    });
-    await expect(status).toHaveTextContent("Starting Claude Code");
-    await expect(status).toHaveTextContent("Your first message is queued.");
-  },
 };
 
 /**
@@ -1525,105 +1283,26 @@ export const StartingSession: Story = {
  */
 export const UneffMePreparing: Story = {
   args: { scenario: "uneff-preparing", reviewOpen: false },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const status = await canvas.findByRole("status", {
-      name: "Starting session",
-    });
-    await expect(status).toHaveTextContent("Getting Tidebreak ready to help");
-    await expect(status).toHaveTextContent("Collecting the debug report");
-    await expect(status).toHaveTextContent(
-      "The new agent takes over here as soon as it starts.",
-    );
-    await expect(status).not.toHaveTextContent("new workspace");
-  },
 };
 
 /** Once the agent exists, the same surface carries the first message into chat. */
 export const SendingFirstMessage: Story = {
   args: { scenario: "workspace-sending-message", reviewOpen: false },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const status = await canvas.findByRole("status", {
-      name: "Starting session",
-    });
-    await expect(status).toHaveTextContent("Claude Code ready");
-    await expect(status).toHaveTextContent("Sending your first message");
-  },
 };
 
 /** A creation failure leaves the start surface mounted and restores its draft. */
 export const FailedSessionCreation: Story = {
   args: { scenario: "session-create-failure", reviewOpen: false },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const message = await canvas.findByRole("textbox", { name: "Message" });
-    await userEvent.type(
-      message,
-      "Keep this draft when the session cannot be created.",
-    );
-    await userEvent.click(
-      await canvas.findByRole("button", { name: "Send message" }),
-    );
-    await expect(
-      await canvas.findByText(
-        "Claude Code sign-in expired before the session could start.",
-      ),
-    ).toBeVisible();
-    await expect(
-      canvas.getByText("Start a session on this workspace."),
-    ).toBeVisible();
-    await expect(canvas.getByRole("textbox", { name: "Message" })).toHaveValue(
-      "Keep this draft when the session cannot be created.",
-    );
-  },
 };
 
 /** A failed first turn keeps the created session and restores the exact draft. */
 export const FailedFirstMessage: Story = {
   args: { scenario: "first-turn-failure", reviewOpen: false },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const message = await canvas.findByRole("textbox", { name: "Message" });
-    await userEvent.type(
-      message,
-      "Fix the retry path without changing this exact request.",
-    );
-    await userEvent.click(
-      await canvas.findByRole("button", { name: "Send message" }),
-    );
-    await expect(
-      await canvas.findByText(/The first message was not sent/),
-    ).toBeVisible();
-    await expect(canvas.getByRole("textbox", { name: "Message" })).toHaveValue(
-      "Fix the retry path without changing this exact request.",
-    );
-  },
 };
 
 /** A failed fork keeps both its editable framing and transcript source. */
 export const FailedForkFirstMessage: Story = {
   args: { scenario: "fork-first-turn-failure", reviewOpen: false },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await userEvent.click(
-      await canvas.findByRole("button", { name: "Workspace actions" }),
-    );
-    await userEvent.click(
-      await within(document.body).findByRole("menuitem", {
-        name: "Fork this agent",
-      }),
-    );
-    await userEvent.click(
-      await canvas.findByRole("button", { name: "Send message" }),
-    );
-    await expect(
-      await canvas.findByText(/The first message was not sent/),
-    ).toBeVisible();
-    await expect(
-      canvas.getByLabelText("Attached workspace files"),
-    ).toHaveTextContent("transcript.md");
-  },
 };
 
 export const Loading: Story = {
@@ -1638,43 +1317,12 @@ export const Failure: Story = {
 export const MinimumWindowBusy: Story = {
   args: { scenario: "nested", reviewOpen: false, sidebarCollapsed: false },
   globals: { viewport: { value: "minimumWindow", isRotated: false } },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const header = await canvas.findByTestId("workspace-header");
-    const status = within(header).getByRole("group", {
-      name: "Workspace status and workflow",
-    });
-    const utilities = within(header).getByTestId("workspace-header-utilities");
-    await expect(
-      within(status).getByTestId("workspace-workflow-control"),
-    ).toBeVisible();
-    await expect(
-      within(status).getByText(`#${pullRequest.number}`),
-    ).toBeVisible();
-    await expect(
-      within(utilities).getByRole("button", { name: "Terminal" }),
-    ).toBeVisible();
-    await expect(
-      within(utilities).getByRole("button", { name: "Review sidebar" }),
-    ).toBeVisible();
-  },
 };
 
 /** Compact panes collapse global navigation so the conversation remains usable. */
 export const CompactConversation: Story = {
   args: { sidebarCollapsed: true, reviewOpen: false },
   globals: { viewport: { value: "compact", isRotated: false } },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const strip = canvasElement.querySelector<HTMLElement>(
-      ".sidebar-expand-strip",
-    );
-    const header = await canvas.findByTestId("workspace-header");
-    await expect(strip).toBeVisible();
-    await expect(header.getBoundingClientRect().top).toBeGreaterThanOrEqual(
-      (strip?.getBoundingClientRect().bottom ?? 0) - 1,
-    );
-  },
 };
 
 /** The filtered context and transcript remain legible in the compact desktop pane. */

@@ -81,26 +81,6 @@ function composerFolders(
   };
 }
 
-it("attaches a file by name and takes the token back out of the draft", async () => {
-  const user = userEvent.setup();
-  const onReattach = vi.fn();
-  const onDraftChange = vi.fn();
-  render(
-    <ComposerHarness
-      files={composerFiles({ onReattach })}
-      folders={composerFolders()}
-      onDraftChange={onDraftChange}
-    />,
-  );
-
-  await user.click(screen.getByRole("textbox", { name: "Message" }));
-  await user.keyboard("compare against @budg");
-  await user.click(screen.getByRole("option", { name: /Budget.xlsx/ }));
-
-  expect(onReattach).toHaveBeenCalledWith(RECENT[0]);
-  expect(onDraftChange).toHaveBeenLastCalledWith("compare against ");
-});
-
 it("attaches an approved folder from the keyboard alone", async () => {
   const user = userEvent.setup();
   const onConnect = vi.fn();

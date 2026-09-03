@@ -1,7 +1,6 @@
 import type { ReactNode } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { fn, userEvent, within } from "storybook/test";
-
+import { fn } from "storybook/test";
 import type { ApiClient, GatewayStatus, ManagedPolicy } from "@/api";
 import { ErrorBoundary } from "@/ErrorBoundary";
 import { ManagedGate } from "@/ManagedGate";
@@ -215,10 +214,4 @@ export const NetworkPolicyFailure: Story = {
       })}
     />
   ),
-  play: async ({ canvasElement }) => {
-    const body = within(canvasElement.ownerDocument.body);
-    await userEvent.click(
-      await body.findByRole("button", { name: "Apply network policy" }),
-    );
-  },
 };

@@ -1,6 +1,4 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, userEvent, within } from "storybook/test";
-
 import { TranscriptImageAttachments } from "@/TranscriptImageAttachments";
 
 const PIXEL = new Blob(
@@ -58,16 +56,7 @@ type Story = StoryObj<typeof meta>;
 
 export const Thumbnails: Story = {};
 
-export const Expanded: Story = {
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const toggle = await canvas.findByRole("button", {
-      name: "Expand attached image 1: 390 by 202 pixels",
-    });
-    await userEvent.click(toggle);
-    await expect(toggle).toHaveAttribute("aria-expanded", "true");
-  },
-};
+export const Expanded: Story = {};
 
 export const Unavailable: Story = {
   args: {

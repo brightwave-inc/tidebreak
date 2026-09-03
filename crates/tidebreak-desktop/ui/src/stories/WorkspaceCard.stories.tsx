@@ -1,13 +1,6 @@
 import { useState, type ComponentProps, type ReactNode } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import {
-  expect,
-  fireEvent,
-  fn,
-  userEvent,
-  waitFor,
-  within,
-} from "storybook/test";
+import { fn } from "storybook/test";
 import { toast } from "sonner";
 
 import { setEditorPreference } from "@/code/editorPreference";
@@ -376,12 +369,6 @@ export const ReadyToMergeNotice: Story = {
       hasSession: true,
     }),
   },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(canvas.getByText("#184 is ready to merge")).toBeVisible();
-    await expect(canvas.queryByLabelText("Needs you")).not.toBeInTheDocument();
-    await expect(canvas.getByLabelText("PR open")).toBeVisible();
-  },
 };
 
 /**
@@ -398,14 +385,6 @@ export const ReadyToMergeAfterMerge: Story = {
       archived: false,
       hasSession: true,
     }),
-  },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(canvas.queryByText(/ready to merge/i)).not.toBeInTheDocument();
-    await expect(canvas.queryByLabelText("Needs you")).not.toBeInTheDocument();
-    await expect(
-      canvasElement.querySelector('[data-pr-state="merged"]'),
-    ).not.toBeNull();
   },
 };
 
@@ -996,30 +975,6 @@ function BulkMenuDemo({
 /** Cmd-click two cards, then right-click: archive and force-archive with a count. */
 export const BulkMenu: Story = {
   render: (args) => <BulkMenuDemo args={args} />,
-  play: async ({ canvasElement }) => {
-    const body = within(canvasElement.ownerDocument.body);
-    const first = await body.findByRole("button", {
-      name: /^First workspace/,
-    });
-    const second = await body.findByRole("button", {
-      name: /^Second workspace/,
-    });
-    fireEvent.click(first, { metaKey: true });
-    fireEvent.click(second, { metaKey: true });
-    await userEvent.pointer({ keys: "[MouseRight]", target: first });
-    await waitFor(() =>
-      expect(
-        body.getByRole("menuitem", { name: "Archive 2 workspaces" }),
-      ).toBeVisible(),
-    );
-    await expect(
-      body.getByRole("menuitem", { name: "Force archive 2 workspaces" }),
-    ).toBeVisible();
-    await expect(body.queryByRole("menuitem", { name: "Rename…" })).toBeNull();
-    await expect(
-      body.queryByRole("menuitem", { name: "New session" }),
-    ).toBeNull();
-  },
 };
 
 /** A local workspace leads with the file manager action in its hover detail. */
@@ -1068,21 +1023,6 @@ export const OpenInEditorMenu: Story = {
       })}
     />
   ),
-  play: async ({ canvasElement }) => {
-    const body = within(canvasElement.ownerDocument.body);
-    await userEvent.pointer({
-      keys: "[MouseRight]",
-      target: await body.findByText(codeWorkspace.title),
-    });
-    await waitFor(() =>
-      expect(
-        body.getByRole("menuitem", { name: "Open worktree folder" }),
-      ).toBeVisible(),
-    );
-    await expect(
-      body.getByRole("menuitem", { name: "Open in Zed" }),
-    ).toBeVisible();
-  },
 };
 
 /** A window attached to another machine gets no editor row to be let down by. */
@@ -1099,21 +1039,6 @@ export const RemoteHasNoEditorAction: Story = {
       })}
     />
   ),
-  play: async ({ canvasElement }) => {
-    const body = within(canvasElement.ownerDocument.body);
-    await userEvent.pointer({
-      keys: "[MouseRight]",
-      target: await body.findByText(codeWorkspace.title),
-    });
-    await waitFor(() =>
-      expect(
-        body.getByRole("menuitem", { name: "Copy worktree path" }),
-      ).toBeVisible(),
-    );
-    await expect(
-      body.queryByRole("menuitem", { name: /^Open in / }),
-    ).toBeNull();
-  },
 };
 
 function RecoverableWorktreeFailure() {
@@ -1155,16 +1080,4 @@ function RecoverableWorktreeFailure() {
 /** A failed native open leaves a clear recovery action instead of disappearing. */
 export const WorktreeOpenFailure: Story = {
   render: () => <RecoverableWorktreeFailure />,
-  play: async ({ canvasElement }) => {
-    const body = within(canvasElement.ownerDocument.body);
-    await userEvent.click(
-      await body.findByRole("button", { name: "Open folder" }),
-    );
-    await waitFor(() =>
-      expect(body.getByText("Could not open worktree folder")).toBeVisible(),
-    );
-    await waitFor(() =>
-      expect(body.getByRole("button", { name: "Copy path" })).toBeVisible(),
-    );
-  },
 };

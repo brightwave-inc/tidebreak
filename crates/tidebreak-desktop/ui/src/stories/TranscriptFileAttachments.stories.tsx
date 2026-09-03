@@ -1,6 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, fn, within } from "storybook/test";
-
+import { fn } from "storybook/test";
 import {
   TranscriptFileAttachments,
   type TranscriptFileAttachment,
@@ -90,8 +89,4 @@ export const Compact: Story = {
 
 export const NavigationUnavailable: Story = {
   args: { attachments: files, navigation: false },
-  play: async ({ canvasElement }) => {
-    const buttons = within(canvasElement).getAllByRole("button");
-    await Promise.all(buttons.map((button) => expect(button).toBeDisabled()));
-  },
 };

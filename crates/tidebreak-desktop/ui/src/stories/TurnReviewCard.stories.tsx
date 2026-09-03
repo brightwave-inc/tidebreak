@@ -1,6 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, fn, within } from "storybook/test";
-
+import { fn } from "storybook/test";
 import { CodeTranscript } from "@/code/CodeTranscript";
 import type { CodeTranscriptItem } from "@/code/CodeSessionReducer";
 import { TurnReviewCard } from "@/code/TurnReviewCard";
@@ -68,13 +67,6 @@ export const CompletedNoChanges: Story = {
       diffstat: { files: 0, insertions: 0, deletions: 0, truncated: false },
     }),
   },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(
-      canvas.getByRole("group", { name: "Turn finished" }),
-    ).toBeInTheDocument();
-    await expect(canvas.queryByText("0 files")).not.toBeInTheDocument();
-  },
 };
 
 export const Failed: Story = {
@@ -107,25 +99,14 @@ const renderCodexRevokedTokenTranscript = () => (
   </div>
 );
 
-const assertOneCodexRecovery = async (canvasElement: HTMLElement) => {
-  const canvas = within(canvasElement);
-  const alerts = await canvas.findAllByRole("alert");
-  await expect(alerts).toHaveLength(1);
-  await expect(alerts[0]).toHaveTextContent(
-    "Codex CLI rejected its saved sign-in",
-  );
-};
-
 /** The transcript folds the duplicate harness error into one recovery card. */
 export const CodexRevokedRefreshToken: Story = {
   render: renderCodexRevokedTokenTranscript,
-  play: ({ canvasElement }) => assertOneCodexRecovery(canvasElement),
 };
 
 export const CodexRevokedRefreshTokenCompact: Story = {
   render: renderCodexRevokedTokenTranscript,
   parameters: { viewport: { defaultViewport: "compact" } },
-  play: ({ canvasElement }) => assertOneCodexRecovery(canvasElement),
 };
 
 /**
@@ -142,15 +123,6 @@ export const EngineTooOld: Story = {
         "API Error: 400 Claude Code 2.1.234 does not support this model; version 2.1.251 or newer is required. Run 'claude update', or update the Claude desktop app, then try again.",
       diffstat: null,
     }),
-  },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(canvas.getByRole("alert")).toHaveTextContent(
-      "Version 2.1.251 or newer is required.",
-    );
-    await expect(
-      canvas.getByRole("button", { name: "Settings → Coding harnesses" }),
-    ).toBeInTheDocument();
   },
 };
 

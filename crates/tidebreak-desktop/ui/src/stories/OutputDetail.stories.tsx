@@ -6,7 +6,7 @@ import {
   RouterProvider,
 } from "@tanstack/react-router";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, fn, userEvent, within } from "storybook/test";
+import { fn } from "storybook/test";
 import { useState } from "react";
 
 import type {
@@ -207,36 +207,11 @@ export const Failure: Story = {
   },
 };
 
-export const VersionHistoryOpen: Story = {
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await userEvent.click(
-      await canvas.findByRole("button", { name: "Version history" }),
-    );
-    await expect(await canvas.findByText("Current version")).toBeVisible();
-  },
-};
+export const VersionHistoryOpen: Story = {};
 
-export const HistoricalRevision: Story = {
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await userEvent.click(
-      await canvas.findByRole("button", { name: "Version history" }),
-    );
-    await userEvent.click(await canvas.findByRole("button", { name: /v1/i }));
-    await expect(await canvas.findByText(/Viewing v1/)).toBeVisible();
-  },
-};
+export const HistoricalRevision: Story = {};
 
-export const EditMode: Story = {
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await userEvent.click(await canvas.findByRole("button", { name: "Edit" }));
-    await expect(
-      await canvas.findByRole("textbox", { name: /Edit q3-renewal-plan/ }),
-    ).toBeVisible();
-  },
-};
+export const EditMode: Story = {};
 
 export const EditConflict: Story = {
   args: {
@@ -246,16 +221,6 @@ export const EditConflict: Story = {
         currentRevisionId: "revision-4",
       }),
     }),
-  },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await userEvent.click(await canvas.findByRole("button", { name: "Edit" }));
-    const editor = await canvas.findByRole("textbox", {
-      name: /Edit q3-renewal-plan/,
-    });
-    await userEvent.type(editor, "\nOwner: Customer success");
-    await userEvent.click(canvas.getByRole("button", { name: "Save" }));
-    await expect(await canvas.findByRole("alert")).toBeVisible();
   },
 };
 

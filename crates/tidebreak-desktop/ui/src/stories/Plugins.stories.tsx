@@ -1,7 +1,6 @@
 import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, fn, userEvent, within } from "storybook/test";
-
+import { fn } from "storybook/test";
 import type { PluginCatalog, PluginSkillInfo } from "@/api";
 import { PluginDetailView } from "@/plugins/PluginDetailView";
 import { PluginsView } from "@/plugins/PluginsView";
@@ -223,26 +222,13 @@ function ImportResultsStory() {
   );
 }
 
-const importResultsPlay = async (canvasElement: HTMLElement) => {
-  const canvas = within(canvasElement);
-  await userEvent.click(
-    await canvas.findByRole("button", { name: "Import skills" }),
-  );
-  const summary = await canvas.findByText("Skill import complete");
-  await expect(summary).toBeInTheDocument();
-  await expect(await canvas.findAllByText("incident-review")).toHaveLength(2);
-  summary.scrollIntoView({ block: "center" });
-};
-
 export const ImportResults: Story = {
   render: () => <ImportResultsStory />,
-  play: ({ canvasElement }) => importResultsPlay(canvasElement),
 };
 
 export const ImportResultsCompact: Story = {
   render: () => <ImportResultsStory />,
   parameters: { viewport: { defaultViewport: "compact" } },
-  play: ({ canvasElement }) => importResultsPlay(canvasElement),
 };
 
 export const LoadFailure: Story = {

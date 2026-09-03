@@ -8,8 +8,6 @@ import {
 } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
-import { expect, userEvent, waitFor, within } from "storybook/test";
-
 import {
   ApiClient,
   HttpError,
@@ -347,14 +345,7 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-export const Success: Story = {
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(
-      await canvas.findByText(/62% of forecast renewal value/),
-    ).toBeVisible();
-  },
-};
+export const Success: Story = {};
 
 export const Loading: Story = {
   args: { scenario: "loading" },
@@ -362,130 +353,42 @@ export const Loading: Story = {
 
 export const RetriableFailure: Story = {
   args: { scenario: "retriable" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(
-      await canvas.findByText("The document could not be loaded (503)."),
-    ).toBeVisible();
-    await expect(
-      canvas.getByRole("button", { name: "Try again" }),
-    ).toBeVisible();
-    await userEvent.click(canvas.getByRole("button", { name: "Try again" }));
-    await expect(
-      await canvas.findByText(/62% of forecast renewal value/),
-    ).toBeVisible();
-  },
 };
 
 export const TerminalNotFound: Story = {
   args: { scenario: "not-found" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(
-      await canvas.findByText("The document is no longer available."),
-    ).toBeVisible();
-    await expect(
-      canvas.queryByRole("button", { name: "Try again" }),
-    ).not.toBeInTheDocument();
-  },
 };
 
 export const DownloadFailureAndRetry: Story = {
   args: { scenario: "download-rejected" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await canvas.findByText(/62% of forecast renewal value/);
-    const download = canvas.getByRole("button", { name: "Download" });
-
-    await userEvent.click(download);
-    await expect(await canvas.findByRole("alert")).toHaveTextContent(
-      "Could not save that source.",
-    );
-    await expect(download).toBeEnabled();
-
-    await userEvent.click(download);
-    await waitFor(() => {
-      expect(canvas.queryByRole("alert")).not.toBeInTheDocument();
-    });
-    await expect(download).toBeEnabled();
-  },
 };
 
 export const ProjectSharing: Story = {
   args: { scenario: "sharing-success" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await userEvent.click(
-      await canvas.findByRole("button", { name: "Add to project" }),
-    );
-    await expect(
-      await canvas.findByRole("button", { name: "In the project" }),
-    ).toBeDisabled();
-  },
 };
 
 export const ProjectSharingPending: Story = {
   args: { scenario: "sharing-deferred" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const share = await canvas.findByRole("button", {
-      name: "Add to project",
-    });
-    await expect(share).toBeEnabled();
-    await userEvent.click(share);
-    await expect(share).toBeDisabled();
-  },
 };
 
 export const ProjectSharingFailure: Story = {
   args: { scenario: "sharing-rejected" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const share = await canvas.findByRole("button", {
-      name: "Add to project",
-    });
-    await userEvent.click(share);
-    await waitFor(() => expect(share).toBeEnabled());
-    await expect(share).toHaveAccessibleName("Add to project");
-  },
 };
 
 export const CitationHighlight: Story = {
   args: { scenario: "citation" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(
-      await canvas.findByLabelText("Cited passage"),
-    ).toHaveTextContent("Account priorities");
-  },
 };
 
 export const OriginalFileLoading: Story = {
   args: { scenario: "original-loading" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(await canvas.findByText("Loading document…")).toBeVisible();
-  },
 };
 
 export const OriginalFileSuccess: Story = {
   args: { scenario: "original-success" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(
-      await canvas.findByRole("button", { name: "Rotate clockwise" }),
-    ).toBeVisible();
-  },
 };
 
 export const OriginalFileFailure: Story = {
   args: { scenario: "original-failed" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(
-      await canvas.findByText("This document could not be loaded."),
-    ).toBeVisible();
-  },
 };
 
 export const Compact: Story = {

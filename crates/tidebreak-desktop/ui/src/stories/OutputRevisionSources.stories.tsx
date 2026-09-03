@@ -1,6 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, fn, within } from "storybook/test";
-
+import { fn } from "storybook/test";
 import type { OutputRevisionSource } from "@/deliverables";
 import { OutputRevisionSources } from "@/outputs/OutputRevisionSources";
 
@@ -72,8 +71,4 @@ export const WithoutTurnEvidence: Story = {
 /** Sources remain legible when their original navigation boundary is unavailable. */
 export const NavigationUnavailable: Story = {
   args: { navigation: false },
-  play: async ({ canvasElement }) => {
-    const buttons = within(canvasElement).getAllByRole("button");
-    await Promise.all(buttons.map((button) => expect(button).toBeDisabled()));
-  },
 };

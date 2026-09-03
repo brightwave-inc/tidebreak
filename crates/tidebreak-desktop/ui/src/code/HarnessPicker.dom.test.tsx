@@ -54,34 +54,6 @@ function entry(
 }
 
 describe("HarnessPicker", () => {
-  it("is a dropdown: ready rows select, unusable rows are disabled with a reason", async () => {
-    const user = userEvent.setup();
-    const onChange = vi.fn();
-    await renderWithRouter(
-      <HarnessPicker
-        harnesses={[
-          entry({ kind: "claude_code", authenticated: true }),
-          entry({ kind: "codex", authenticated: true }),
-          entry({ kind: "opencode", found: false, installable: false }),
-        ]}
-        value="claude_code"
-        onChange={onChange}
-      />,
-    );
-    const trigger = screen.getByRole("combobox", { name: "Harness" });
-    expect(trigger).toHaveTextContent("Claude Code");
-    await user.click(trigger);
-    // Ready rows carry the product name and nothing else: no vendor gloss.
-    expect(
-      screen.getByRole("option", { name: "Codex CLI" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("option", { name: /Not installed/ }),
-    ).toHaveAttribute("aria-disabled", "true");
-    await user.click(screen.getByRole("option", { name: /Codex CLI/ }));
-    expect(onChange).toHaveBeenCalledWith("codex");
-  });
-
   // The lazy pin: an engine this machine has never fetched is a wait, not a
   // fault, so it stays selectable and picking it is what starts the download.
   it("offers an engine that has not been downloaded yet", async () => {

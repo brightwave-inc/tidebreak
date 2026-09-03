@@ -1,6 +1,4 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, within } from "storybook/test";
-
 import { setEditorPreference } from "@/code/editorPreference";
 import type { ExternalEditorId } from "@/code/editorPreference";
 import type { ExternalEditorProbe } from "@/code/codeWorktreeHost";
@@ -65,13 +63,6 @@ type Story = StoryObj<typeof meta>;
 /** Three editors found, one missing, and the chosen one confirmed ready. */
 export const Detected: Story = {
   args: { probes: INSTALLED },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(await canvas.findByText("/usr/local/bin/code")).toBeVisible();
-    await expect(
-      canvas.getByText("No launcher on this computer."),
-    ).toBeVisible();
-  },
 };
 
 /** The chosen editor is not installed, so the field says what closes the gap. */

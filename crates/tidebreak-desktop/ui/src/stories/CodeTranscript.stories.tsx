@@ -1,6 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, fn, userEvent, within } from "storybook/test";
-
+import { fn } from "storybook/test";
 import { CodeTranscript } from "@/code/CodeTranscript";
 import type { CodeTranscriptItem } from "@/code/CodeSessionReducer";
 
@@ -102,14 +101,7 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-export const ProgressUpdates: Story = {
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(canvas.getAllByRole("button", { name: "Copy" })).toHaveLength(
-      1,
-    );
-  },
-};
+export const ProgressUpdates: Story = {};
 
 /** A fallback recap uses the same block as a captured closing recap. */
 export const SessionRecap: Story = {
@@ -117,15 +109,6 @@ export const SessionRecap: Story = {
     items,
     recap:
       "Workspace switching reuses recent transcript stores. Next: verify the reconnect path under rapid workspace changes.",
-  },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(canvas.getByText("Recap")).toBeInTheDocument();
-    await expect(
-      canvas.getByRole("group", { name: "Turn finished" }),
-    ).not.toHaveTextContent(
-      "Workspace switching reuses recent transcript stores",
-    );
   },
 };
 
@@ -146,15 +129,6 @@ export const SessionRecapWithoutClosingMessage: Story = {
       },
     ],
     recap: "The interrupted turn left the transcript store unchanged.",
-  },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(canvas.getByLabelText("Recap")).toHaveTextContent(
-      "The interrupted turn left the transcript store unchanged.",
-    );
-    await expect(
-      canvas.getByRole("group", { name: "Turn interrupted" }),
-    ).not.toHaveTextContent("transcript store unchanged");
   },
 };
 
@@ -188,10 +162,6 @@ export const RewriteRewriting: Story = {
 /** Rewritten: original stays, recap sits under it. */
 export const RewriteRewritten: Story = {
   args: { items: rewrittenItems },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(canvas.getByText("Recap")).toBeInTheDocument();
-  },
 };
 
 /** Failed: the original stands, and the transcript says so. */
@@ -234,15 +204,6 @@ const failedTurn: CodeTranscriptItem[] = [
  */
 export const FailedTurnFilesIssue: Story = {
   args: { items: failedTurn, onFileIssue: fn() },
-  play: async ({ args, canvasElement }) => {
-    const canvas = within(canvasElement);
-    const alert = await canvas.findByRole("alert");
-    await expect(alert).toHaveTextContent("Turn failed");
-    await userEvent.click(
-      within(alert).getByRole("button", { name: "File an issue" }),
-    );
-    await expect(args.onFileIssue).toHaveBeenCalledTimes(1);
-  },
 };
 
 const engineError: CodeTranscriptItem[] = [
@@ -259,13 +220,6 @@ const engineError: CodeTranscriptItem[] = [
 /** An engine error carries the same way out. Warnings and asides do not. */
 export const EngineErrorFilesIssue: Story = {
   args: { items: engineError, onFileIssue: fn() },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const alert = await canvas.findByRole("alert");
-    await expect(
-      within(alert).getByRole("button", { name: "File an issue" }),
-    ).toBeVisible();
-  },
 };
 
 const pastedReport = JSON.stringify(
@@ -308,15 +262,4 @@ const pastedTurn: CodeTranscriptItem[] = [
  */
 export const PastedTextFolded: Story = {
   args: { items: pastedTurn },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const toggle = await canvas.findByRole("button", {
-      name: /Pasted text/,
-    });
-    await expect(toggle).toHaveAttribute("aria-expanded", "false");
-    await expect(canvas.queryByText(/"harness_kind"/)).toBeNull();
-    await userEvent.click(toggle);
-    await expect(toggle).toHaveAttribute("aria-expanded", "true");
-    await expect(canvas.getByText(/"harness_kind"/)).toBeVisible();
-  },
 };

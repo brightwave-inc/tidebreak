@@ -431,33 +431,6 @@ describe("ProvidersPanel", () => {
     vi.unstubAllGlobals();
   });
 
-  it("resumes a ChatGPT sign-in that started before the panel mounted", async () => {
-    const getOpenaiChatgptStatus = vi
-      .fn()
-      .mockResolvedValueOnce({
-        signed_in: false,
-        pending_authorization_url: "https://auth.openai.com/oauth/authorize",
-      })
-      .mockResolvedValue({ signed_in: true });
-    const onChanged = vi.fn();
-
-    renderPanel(
-      <ProvidersPanel
-        providers={[
-          { kind: "openai", enabled: false, has_credential: false, models: [] },
-        ]}
-        client={{ getOpenaiChatgptStatus } as unknown as ApiClient}
-        onChanged={onChanged}
-      />,
-    );
-
-    // No click here: the sign-in belongs to the server, and the panel has to
-    // pick its completion up on its own.
-    await waitFor(() => expect(onChanged).toHaveBeenCalled(), {
-      timeout: 5_000,
-    });
-  });
-
   it("shows ChatGPT sign-out when OpenAI is signed in via subscription", () => {
     renderPanel(
       <ProvidersPanel

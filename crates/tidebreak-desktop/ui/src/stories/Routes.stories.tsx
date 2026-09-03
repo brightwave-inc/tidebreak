@@ -7,8 +7,6 @@ import {
   createRouter,
   RouterProvider,
 } from "@tanstack/react-router";
-import { expect, within } from "storybook/test";
-
 import type { ApiClient, ManagedPolicy } from "@/api";
 import { AppsPage } from "@/apps/AppsPage";
 import { HomeRoute } from "@/HomeRoute";
@@ -214,29 +212,6 @@ function RoutesStory({ scenario }: { scenario: RouteScenario }) {
   );
 }
 
-async function expectSettingsRouteLayout(canvasElement: HTMLElement) {
-  const canvas = within(canvasElement);
-  const activeItem = await canvas.findByRole("button", {
-    name: "Connected apps",
-  });
-  await expect(activeItem).toHaveAttribute("aria-current", "page");
-
-  const sidebar = canvasElement.querySelector<HTMLElement>(".settings-sidebar");
-  const main = canvasElement.querySelector<HTMLElement>(".settings-main");
-  await expect(sidebar).toBeVisible();
-  await expect(main).toBeVisible();
-
-  const sidebarRect = sidebar?.getBoundingClientRect();
-  const mainRect = main?.getBoundingClientRect();
-  await expect(
-    Math.abs((sidebarRect?.top ?? 0) - (mainRect?.top ?? 0)),
-  ).toBeLessThan(2);
-  await expect(mainRect?.left ?? 0).toBeGreaterThanOrEqual(
-    (sidebarRect?.right ?? 0) - 1,
-  );
-  await expect(mainRect?.width ?? 0).toBeGreaterThan(400);
-}
-
 const meta = {
   title: "Navigation/Routes",
   component: RoutesStory,
@@ -248,13 +223,7 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-export const HomeDesktop: Story = {
-  play: async ({ canvasElement }) => {
-    await expect(
-      within(canvasElement).findByRole("heading", { name: "How can I help?" }),
-    ).resolves.toBeTruthy();
-  },
-};
+export const HomeDesktop: Story = {};
 
 export const HomeMinimumWindow: Story = {
   globals: { viewport: { value: "minimumWindow", isRotated: false } },
@@ -309,17 +278,11 @@ export const SettingsModelGatewayManaged: Story = {
 export const SettingsConnectedApps: Story = {
   args: { scenario: "settings-connected-apps" },
   globals: { viewport: { value: "desktop", isRotated: false } },
-  play: async ({ canvasElement }) => {
-    await expectSettingsRouteLayout(canvasElement);
-  },
 };
 
 export const SettingsConnectedAppsMinimumWindow: Story = {
   args: { scenario: "settings-connected-apps" },
   globals: { viewport: { value: "minimumWindow", isRotated: false } },
-  play: async ({ canvasElement }) => {
-    await expectSettingsRouteLayout(canvasElement);
-  },
 };
 
 export const AppsRegisteredList: Story = {

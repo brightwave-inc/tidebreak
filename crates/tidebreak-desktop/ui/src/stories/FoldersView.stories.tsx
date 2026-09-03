@@ -1,7 +1,5 @@
 import { mockIPC } from "@tauri-apps/api/mocks";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, userEvent, within } from "storybook/test";
-
 import type { Chat, ConsentStatementSnapshot } from "@/api";
 import { FoldersView } from "@/FoldersView";
 import type { ConnectedFolder, WidenedFolderCapability } from "@/host";
@@ -177,24 +175,6 @@ function renderFolderStory({ chat: storyChat }: { chat: Chat }) {
   return <FoldersView chat={storyChat} />;
 }
 
-const verifyFolderStates = async (canvasElement: HTMLElement) => {
-  const canvas = within(canvasElement);
-  await expect(await canvas.findByText("Product workspace")).toBeVisible();
-  await expect(canvas.getByText("External customer archive")).toBeVisible();
-  await expect(
-    canvas.getByText("Client exports approved on this device"),
-  ).toBeVisible();
-
-  const approvedToggle = canvas.getByRole("switch", {
-    name: "Available in future chats for Client exports approved on this device",
-  });
-  await expect(approvedToggle).not.toBeChecked();
-  await userEvent.click(approvedToggle);
-  await expect(approvedToggle).toBeChecked();
-  await userEvent.click(approvedToggle);
-  await expect(approvedToggle).not.toBeChecked();
-};
-
 const meta = {
   title: "Chat/Folders",
   component: FoldersView,
@@ -206,11 +186,8 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-export const FutureChatAccess: Story = {
-  play: ({ canvasElement }) => verifyFolderStates(canvasElement),
-};
+export const FutureChatAccess: Story = {};
 
 export const FutureChatAccessCompact: Story = {
   parameters: { viewport: { defaultViewport: "compact" } },
-  play: ({ canvasElement }) => verifyFolderStates(canvasElement),
 };

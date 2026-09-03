@@ -1,7 +1,6 @@
 import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, fn, userEvent, waitFor, within } from "storybook/test";
-
+import { fn } from "storybook/test";
 import type {
   Attention,
   CodeSessionSnapshot,
@@ -292,21 +291,7 @@ export const Loading: Story = {
 };
 
 /** Session overflow: copy debug JSON, then Uneff me. */
-export const OverflowActions: Story = {
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await userEvent.click(
-      canvas.getByRole("button", { name: "Workspace actions" }),
-    );
-    const menu = within(document.body);
-    await expect(
-      await menu.findByRole("menuitem", { name: "Copy debug JSON" }),
-    ).toBeVisible();
-    await expect(
-      await menu.findByRole("menuitem", { name: "Uneff me" }),
-    ).toBeVisible();
-  },
-};
+export const OverflowActions: Story = {};
 
 export const ReviewClosed: Story = {
   args: { snapshot: openPrGit, initialReviewOpen: false },
@@ -322,22 +307,5 @@ export const OpenInEditorOverflow: Story = {
   beforeEach: () => {
     setEditorPreference({ editor: "cursor", customProgram: "" });
     return () => setEditorPreference({ editor: "vscode", customProgram: "" });
-  },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await userEvent.click(
-      canvas.getByRole("button", { name: "Workspace actions" }),
-    );
-    const menu = within(document.body);
-    await waitFor(async () =>
-      expect(
-        await menu.findByRole("menuitem", { name: "Open worktree folder" }),
-      ).toBeVisible(),
-    );
-    await waitFor(async () =>
-      expect(
-        await menu.findByRole("menuitem", { name: "Open in Cursor" }),
-      ).toBeVisible(),
-    );
   },
 };

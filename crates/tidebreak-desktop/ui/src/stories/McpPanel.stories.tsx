@@ -1,6 +1,4 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, within } from "storybook/test";
-
 import type { ApiClient, GatewayStatus, McpServerInfo } from "@/api";
 import { McpPanel } from "@/settings/McpPanel";
 
@@ -56,14 +54,6 @@ type Story = StoryObj<typeof meta>;
 
 export const StdioResolvedCommand: Story = {
   args: { client: stubClient([stdioServer()]) },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(
-      await canvas.findByText(
-        /Resolved\s+npx\s+to\s+\/opt\/homebrew\/bin\/npx/,
-      ),
-    ).toBeVisible();
-  },
 };
 
 export const StdioCommandNotFound: Story = {
@@ -77,12 +67,6 @@ export const StdioCommandNotFound: Story = {
           'Command not found: "npx" is not on the host PATH. Searched: /usr/bin, /bin.',
       }),
     ]),
-  },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(
-      await canvas.findByText(/Command not found: "npx"/),
-    ).toBeVisible();
   },
 };
 

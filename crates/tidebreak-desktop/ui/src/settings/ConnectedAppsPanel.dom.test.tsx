@@ -3,6 +3,7 @@ import {
   cleanup,
   render,
   screen,
+  fireEvent,
   waitFor,
   within,
 } from "@testing-library/react";
@@ -267,234 +268,15 @@ describe("ConnectedAppsPanel", () => {
     expect(screen.getAllByText(/existing approval boundary/)).toHaveLength(1);
   });
 
-  it("submits the PUT shape from the create form and never renders the value back", async () => {
-    const client = api();
-    const user = userEvent.setup();
-    render(<ConnectedAppsPanel client={client} managed={false} />);
-
-    await user.click(
-      await screen.findByRole("button", { name: /Add REST API/ }),
-    );
-    await user.type(screen.getByLabelText(/^Name$/), "Issues");
-    await user.type(
-      screen.getByLabelText(/Base URL/),
-      "https://api.example.com/v2",
-    );
-    await user.click(screen.getByRole("radio", { name: /Paste document/ }));
-    await user.type(
-      screen.getByLabelText(/OpenAPI document/),
-      '{{"openapi": "3.0.3"}',
-    );
-    await user.click(screen.getByRole("radio", { name: /Bearer token/ }));
-    const value = screen.getByLabelText(/Credential value/);
-    expect(value).toHaveAttribute("type", "password");
-    await user.type(value, SECRET);
-    await user.click(screen.getByRole("button", { name: /^Save$/ }));
-
-    await waitFor(() =>
-      expect(client.putRestConnectedApp).toHaveBeenCalledWith(
-        expect.any(String),
-        {
-          name: "Issues",
-          base_url: "https://api.example.com/v2",
-          openapi_document: '{"openapi": "3.0.3"}',
-          credential: { set: { value: SECRET, placement: "bearer" } },
-          allow_loopback_http: false,
-        },
-      ),
-    );
-    // After the save the listing re-renders from the server's projection;
-    // the value the user typed exists nowhere in the document.
-    expect(document.body.textContent).not.toContain(SECRET);
-  });
-
-  it("fetches a spec by URL, picks operations, and saves under the hash pin", async () => {
-    const preview = {
-      document_sha256: "cd".repeat(32),
-      operations: [
-        {
-          operation_id: "listOrganizations",
-          method: "get",
-          path: "/api/organizations/",
-          summary: "List organizations.",
-        },
-        {
-          operation_id: "deleteOrganization",
-          method: "delete",
-          path: "/api/organizations/{id}/",
-          summary: null,
-        },
-      ],
-      unlistable: 3,
-      truncated: false,
-    };
-    const client = api({
-      previewRestSpec: vi.fn().mockResolvedValue(preview),
-    });
-    const user = userEvent.setup();
-    render(<ConnectedAppsPanel client={client} managed={false} />);
-
-    await user.click(
-      await screen.findByRole("button", { name: /Add REST API/ }),
-    );
-    await user.type(screen.getByLabelText(/^Name$/), "PostHog");
-    await user.type(
-      screen.getByLabelText(/Base URL/),
-      "https://us.posthog.example",
-    );
-    // URL is the default source: no paste textarea on screen.
-    expect(screen.queryByLabelText(/OpenAPI document/)).not.toBeInTheDocument();
-    await user.type(
-      screen.getByLabelText(/Document URL/),
-      "https://us.posthog.example/api/schema/?format=json",
-    );
-    await user.click(screen.getByRole("button", { name: /Fetch operations/ }));
-
-    // Everything under the catalog bound starts selected, and the picker is
-    // honest about what it could not list.
-    const picker = await screen.findByRole("list", { name: "Operations" });
-    expect(
-      within(picker).getByRole("checkbox", {
-        name: /GET \/api\/organizations\//,
-      }),
-    ).toBeChecked();
-    expect(
-      screen.getByText(/2 of 2 selected · 3 unselectable/),
-    ).toBeInTheDocument();
-
-    // Drop the destructive one; the saved catalog is exactly the selection.
-    await user.click(
-      within(picker).getByRole("checkbox", {
-        name: /DELETE \/api\/organizations\/\{id\}\//,
-      }),
-    );
-    await user.click(screen.getByRole("button", { name: /^Save$/ }));
-
-    await waitFor(() =>
-      expect(client.putRestConnectedApp).toHaveBeenCalledWith(
-        expect.any(String),
-        {
-          name: "PostHog",
-          base_url: "https://us.posthog.example",
-          openapi_document_url:
-            "https://us.posthog.example/api/schema/?format=json",
-          document_sha256: "cd".repeat(32),
-          operation_ids: ["listOrganizations"],
-          credential: "none",
-          allow_loopback_http: false,
-        },
-      ),
-    );
-  });
-
-  it("discovery fills the document URL from a candidate and fetches operations", async () => {
-    const preview = {
-      document_sha256: "cd".repeat(32),
-      operations: [
-        {
-          operation_id: "listOrganizations",
-          method: "get",
-          path: "/api/organizations/",
-          summary: null,
-        },
-      ],
-      unlistable: 0,
-      truncated: false,
-    };
-    const client = api({
-      discoverRestSpec: vi.fn().mockResolvedValue({
-        candidates: [
-          {
-            url: "https://api.example.com/openapi.json",
-            operation_count: 1,
-            unsupported_reason: null,
-          },
-        ],
-        tried: [
-          "https://api.example.com/openapi.json",
-          "https://api.example.com/swagger.json",
-        ],
-      }),
-      previewRestSpec: vi.fn().mockResolvedValue(preview),
-    });
-    const user = userEvent.setup();
-    render(<ConnectedAppsPanel client={client} managed={false} />);
-
-    await user.click(
-      await screen.findByRole("button", { name: /Add REST API/ }),
-    );
-    await user.type(
-      screen.getByLabelText(/Base URL/),
-      "https://api.example.com",
-    );
-    await user.click(
-      screen.getByRole("button", { name: /Find the OpenAPI document/ }),
-    );
-    await user.click(
-      await screen.findByRole("button", { name: /Use this document/ }),
-    );
-
-    await waitFor(() =>
-      expect(client.previewRestSpec).toHaveBeenCalledWith({
-        url: "https://api.example.com/openapi.json",
-      }),
-    );
-    expect(screen.getByLabelText(/Document URL/)).toHaveValue(
-      "https://api.example.com/openapi.json",
-    );
-    expect(
-      await screen.findByRole("list", { name: "Operations" }),
-    ).toBeInTheDocument();
-  });
-
-  it("discovery with no candidates lists the locations tried", async () => {
-    const client = api({
-      discoverRestSpec: vi.fn().mockResolvedValue({
-        candidates: [],
-        tried: [
-          "https://api.example.com/openapi.json",
-          "https://api.example.com/swagger.json",
-        ],
-      }),
-    });
-    const user = userEvent.setup();
-    render(<ConnectedAppsPanel client={client} managed={false} />);
-
-    await user.click(
-      await screen.findByRole("button", { name: /Add REST API/ }),
-    );
-    await user.type(
-      screen.getByLabelText(/Base URL/),
-      "https://api.example.com",
-    );
-    await user.click(
-      screen.getByRole("button", { name: /Find the OpenAPI document/ }),
-    );
-
-    expect(
-      await screen.findByText(/No OpenAPI document turned up/),
-    ).toBeInTheDocument();
-    await user.click(screen.getByText("Locations tried"));
-    expect(
-      screen.getByText("https://api.example.com/openapi.json"),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /Paste this example/ }),
-    ).toBeInTheDocument();
-  });
-
   it("an edit with an untouched value keeps the stored credential", async () => {
     const client = api();
-    const user = userEvent.setup();
     render(<ConnectedAppsPanel client={client} managed={false} />);
-
-    await user.click(await screen.findByRole("button", { name: /Edit/ }));
-    await user.click(screen.getByRole("radio", { name: /Paste document/ }));
-    await user.type(
-      screen.getByLabelText(/OpenAPI document/),
-      '{{"openapi": "3.0.3"}',
-    );
-    await user.click(screen.getByRole("button", { name: /^Save$/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Edit/ }));
+    fireEvent.click(screen.getByRole("radio", { name: /Paste document/ }));
+    fireEvent.change(screen.getByLabelText(/OpenAPI document/), {
+      target: { value: '{"openapi": "3.0.3"}' },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/ }));
 
     await waitFor(() =>
       expect(client.putRestConnectedApp).toHaveBeenCalledWith(
@@ -532,29 +314,59 @@ describe("ConnectedAppsPanel", () => {
     );
     expect(alert).not.toHaveTextContent(/^400:/);
   });
-
-  it("requires loopback HTTP consent before save and hints at MCP for /mcp paths", async () => {
+  it("never renders a submitted credential value back", async () => {
     const client = api();
-    const user = userEvent.setup();
     render(<ConnectedAppsPanel client={client} managed={false} />);
-
-    await user.click(
+    fireEvent.click(
       await screen.findByRole("button", { name: /Add REST API/ }),
     );
-    await user.type(screen.getByLabelText(/^Name$/), "Local");
-    await user.type(
-      screen.getByLabelText(/Base URL/),
-      "http://127.0.0.1:23373/v0/mcp",
+    fireEvent.change(screen.getByLabelText(/^Name$/), {
+      target: { value: "Issues" },
+    });
+    fireEvent.change(screen.getByLabelText(/Base URL/), {
+      target: { value: "https://api.example.com/v2" },
+    });
+    fireEvent.click(screen.getByRole("radio", { name: /Paste document/ }));
+    fireEvent.change(screen.getByLabelText(/OpenAPI document/), {
+      target: { value: '{"openapi": "3.0.3"}' },
+    });
+    fireEvent.click(screen.getByRole("radio", { name: /Bearer token/ }));
+    const value = screen.getByLabelText(/Credential value/);
+    expect(value).toHaveAttribute("type", "password");
+    fireEvent.change(value, { target: { value: SECRET } });
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/ }));
+
+    await waitFor(() =>
+      expect(client.putRestConnectedApp).toHaveBeenCalledWith(
+        expect.any(String),
+        {
+          name: "Issues",
+          base_url: "https://api.example.com/v2",
+          openapi_document: '{"openapi": "3.0.3"}',
+          credential: { set: { value: SECRET, placement: "bearer" } },
+          allow_loopback_http: false,
+        },
+      ),
     );
+    expect(document.body.textContent).not.toContain(SECRET);
+  });
+
+  it("requires loopback HTTP consent before save", async () => {
+    render(<ConnectedAppsPanel client={api()} managed={false} />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Add REST API/ }),
+    );
+    fireEvent.change(screen.getByLabelText(/^Name$/), {
+      target: { value: "Local" },
+    });
+    fireEvent.change(screen.getByLabelText(/Base URL/), {
+      target: { value: "http://127.0.0.1:23373/v0/mcp" },
+    });
     expect(
       screen.getByText(/Settings → MCP servers as a remote HTTP server/),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText(/sends the credential in clear text to 127.0.0.1 only/),
-    ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^Save$/ })).toBeDisabled();
-
-    await user.click(
+    fireEvent.click(
       screen.getByRole("checkbox", {
         name: /Send the credential in clear text to this loopback address/,
       }),

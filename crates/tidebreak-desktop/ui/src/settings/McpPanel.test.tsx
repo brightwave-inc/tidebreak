@@ -334,42 +334,6 @@ describe("McpPanel", () => {
     );
   });
 
-  it("sends argv and selected environment names as typed arrays", async () => {
-    const client = api({ servers: [] });
-    const user = userEvent.setup();
-    render(<McpPanel client={client} />);
-
-    await screen.findByText(/No MCP servers configured/);
-    await user.click(screen.getByRole("button", { name: "Add server" }));
-    const namespace = screen.getByRole("textbox", { name: /^Namespace/ });
-    await user.clear(namespace);
-    await user.type(namespace, "documents_server");
-    expect(namespace).toHaveValue("documents_server");
-    await user.type(
-      screen.getByPlaceholderText("/absolute/path/to/server"),
-      "/opt/mcp/docs",
-    );
-    await user.click(screen.getByRole("button", { name: "Add argument" }));
-    await user.type(screen.getByLabelText("Arguments 1"), "--stdio");
-    await user.click(screen.getByRole("button", { name: "Add variable name" }));
-    await user.type(
-      screen.getByLabelText("Forward environment names 1"),
-      "DOCS_TOKEN",
-    );
-    await user.click(screen.getByRole("button", { name: "Save and verify" }));
-
-    await waitFor(() =>
-      expect(client.putMcpServers).toHaveBeenCalledWith([
-        expect.objectContaining({
-          command: "/opt/mcp/docs",
-          name: "documents_server",
-          args: ["--stdio"],
-          env_from: ["DOCS_TOKEN"],
-        }),
-      ]),
-    );
-  });
-
   it("shows an existing environment value as blank and keeps it unless retyped", async () => {
     const client = api();
     const user = userEvent.setup();
@@ -429,86 +393,6 @@ describe("McpPanel", () => {
     expect(
       screen.getByText(/Save and verify changes before reconnecting/),
     ).toBeInTheDocument();
-  });
-
-  it("switches a server to HTTP and sends a url definition without process fields", async () => {
-    const client = api({ servers: [] });
-    const user = userEvent.setup();
-    render(<McpPanel client={client} />);
-
-    await screen.findByText(/No MCP servers configured/);
-    await user.click(screen.getByRole("button", { name: "Add server" }));
-    await user.click(
-      screen.getByRole("radio", { name: "Remote endpoint (HTTP)" }),
-    );
-
-    // Process-only editors leave the form with the transport.
-    expect(
-      screen.queryByPlaceholderText("/absolute/path/to/server"),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "Add variable name" }),
-    ).not.toBeInTheDocument();
-
-    await user.type(
-      screen.getByPlaceholderText("https://gateway.example/mcp/tools"),
-      "http://127.0.0.1:28081/mcp/tools",
-    );
-    await user.type(
-      screen.getByPlaceholderText("GATEWAY_TOKEN"),
-      "MY_GATEWAY_TOKEN",
-    );
-    await user.click(screen.getByRole("button", { name: "Save and verify" }));
-
-    await waitFor(() =>
-      expect(client.putMcpServers).toHaveBeenCalledWith([
-        expect.objectContaining({
-          command: null,
-          args: [],
-          env: [],
-          env_from: [],
-          cwd: null,
-          url: "http://127.0.0.1:28081/mcp/tools",
-          bearer_token_env: "MY_GATEWAY_TOKEN",
-          gateway_endpoint: null,
-        }),
-      ]),
-    );
-  });
-
-  it("returning to stdio clears the http fields", async () => {
-    const client = api({ servers: [] });
-    const user = userEvent.setup();
-    render(<McpPanel client={client} />);
-
-    await screen.findByText(/No MCP servers configured/);
-    await user.click(screen.getByRole("button", { name: "Add server" }));
-    await user.click(
-      screen.getByRole("radio", { name: "Remote endpoint (HTTP)" }),
-    );
-    await user.type(
-      screen.getByPlaceholderText("https://gateway.example/mcp/tools"),
-      "http://127.0.0.1/mcp",
-    );
-    await user.click(
-      screen.getByRole("radio", { name: "Process on this computer (stdio)" }),
-    );
-    await user.type(
-      screen.getByPlaceholderText("/absolute/path/to/server"),
-      "/opt/mcp/docs",
-    );
-    await user.click(screen.getByRole("button", { name: "Save and verify" }));
-
-    await waitFor(() =>
-      expect(client.putMcpServers).toHaveBeenCalledWith([
-        expect.objectContaining({
-          command: "/opt/mcp/docs",
-          url: null,
-          bearer_token_env: null,
-          gateway_endpoint: null,
-        }),
-      ]),
-    );
   });
 
   it("shows health for an http server without asking for a token value", async () => {

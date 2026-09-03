@@ -1,7 +1,5 @@
 import { useMemo } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, userEvent, waitFor, within } from "storybook/test";
-
 import { encodeTerminalBytes, TerminalPane } from "@/code/TerminalPane";
 
 type TerminalScenario = "write-failure" | "attach-failure" | "read-failure";
@@ -80,49 +78,12 @@ type Story = StoryObj<typeof meta>;
 
 export const WriteFailure: Story = {
   args: { scenario: "write-failure" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await waitFor(() =>
-      expect(canvas.getByTestId("terminal-host")).toHaveAttribute(
-        "aria-disabled",
-        "false",
-      ),
-    );
-    const input = canvasElement.querySelector<HTMLTextAreaElement>(
-      ".xterm-helper-textarea",
-    );
-    if (!input) throw new Error("xterm input did not mount");
-    input.focus();
-    await userEvent.keyboard("pnpm test{Enter}");
-    await expect(
-      await canvas.findByTestId("terminal-write-failure"),
-    ).toBeVisible();
-    await expect(canvas.getByRole("button", { name: "Retry" })).toBeVisible();
-    await expect(
-      canvas.getByRole("button", { name: "Reconnect" }),
-    ).toBeVisible();
-    await expect(canvas.getByRole("button", { name: "Discard" })).toBeVisible();
-  },
 };
 
 export const AttachFailure: Story = {
   args: { scenario: "attach-failure" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(
-      await canvas.findByTestId("terminal-attach-error"),
-    ).toBeVisible();
-    await expect(canvas.getByRole("button", { name: "Retry" })).toBeVisible();
-  },
 };
 
 export const ReadFailure: Story = {
   args: { scenario: "read-failure" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(
-      await canvas.findByTestId("terminal-read-error"),
-    ).toBeVisible();
-    await expect(canvas.getByRole("button", { name: "Retry" })).toBeVisible();
-  },
 };

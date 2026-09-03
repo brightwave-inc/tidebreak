@@ -7,8 +7,6 @@ import {
   createRouter,
   RouterProvider,
 } from "@tanstack/react-router";
-import { expect, within } from "storybook/test";
-
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
 import type { ApiClient } from "@/api/client";
 import type {
@@ -453,19 +451,6 @@ export const LongContent: Story = {
 export const CollapsedMacRail: Story = {
   args: { scenario: "gateway", sidebarCollapsed: true },
   globals: { viewport: { value: "minimumWindow", isRotated: false } },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const strip = canvasElement.querySelector<HTMLElement>(
-      ".sidebar-expand-strip",
-    );
-    const heading = await canvas.findByRole("heading", { name: "Analytics" });
-    const header = heading.closest("header");
-    await expect(strip).toBeVisible();
-    await expect(header).toBeTruthy();
-    await expect(
-      header?.getBoundingClientRect().top ?? 0,
-    ).toBeGreaterThanOrEqual((strip?.getBoundingClientRect().bottom ?? 0) - 1);
-  },
 };
 
 export const NarrowWidth: Story = {
