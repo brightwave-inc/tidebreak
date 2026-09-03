@@ -3,7 +3,6 @@
 use super::code::*;
 
 use crate::scripted_harness::plain_text_script;
-use tidebreak_core::{CodeWorkspaceStatus, WorkspaceId};
 
 #[tokio::test]
 async fn two_repos_with_the_same_name_get_distinct_worktrees() {

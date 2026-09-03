@@ -4,17 +4,12 @@ use super::code::*;
 use super::*;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use axum::Router;
-use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 use crate::code::CodeRuntime;
 use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
-use tidebreak_core::{
-    CodeRepo, CodeTurnId, CodeWorkspace, CodeWorkspaceStatus, RepoId, Store, WorkspaceId,
-};
+use tidebreak_core::{CodeRepo, CodeWorkspace, CodeWorkspaceStatus, RepoId, Store, WorkspaceId};
 use tidebreak_harness::AdapterRegistry;
 
 /// A self-host code app with two principals: alice is an admin, bob a member.
