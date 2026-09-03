@@ -32,6 +32,47 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 jobs:
+  pr-title:
+    name: semantic PR title
+    # The label job below applies the managed semver and release-note labels
+    # this check compares against; running after it avoids judging a pull
+    # request before its labels exist.
+    needs: label
+    if: ${{ github.event_name == 'pull_request_target' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      # pull_request_target is safe here because only trusted base-branch code
+      # is checked out; no code or workflow from the PR head is executed.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 1
+      - name: Validate Conventional Commit title
+        env:
+          CANONICAL_REPOSITORY: brightwave-inc/tidebreak
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          node scripts/check-pr-title.mjs "$PR_TITLE"
+          expected_labels="$(node scripts/release-label.mjs --labels "$PR_TITLE" |
+            jq -r 'sort | join(",")')"
+          actual_labels=""
+          for _ in {1..10}; do
+            actual_labels="$(gh api "repos/$CANONICAL_REPOSITORY/pulls/$PR_NUMBER" \
+              --jq '[.labels[].name | select(startswith("semver:") or startswith("release-note:"))] | sort | join(",")')"
+            [[ "$actual_labels" = "$expected_labels" ]] && break
+            sleep 2
+          done
+          test "$actual_labels" = "$expected_labels" || {
+            echo "Expected managed release labels $expected_labels; found: ${actual_labels:-none}." >&2
+            echo "The trusted Release draft workflow may still be synchronizing it." >&2
+            exit 1
+          }
+
   label:
     name: semantic version label
     if: ${{ github.event_name == 'pull_request_target' }}
