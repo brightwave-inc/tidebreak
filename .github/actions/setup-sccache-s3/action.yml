@@ -1,0 +1,49 @@
+name: Set up sccache with S3
+description: Install sccache and connect eligible GitHub jobs to the shared S3 backend.
+
+inputs:
+  access:
+    description: Use read for untrusted builds and write for protected main or release builds.
+    required: true
+  remote-cache-enabled:
+    description: Set to false when GitHub does not issue an OIDC token, such as a fork pull request.
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Configure compiler cache environment
+      if: ${{ inputs.remote-cache-enabled == 'true' }}
+      shell: bash
+      env:
+        CACHE_ACCESS: ${{ inputs.access }}
+      run: |
+        case "$CACHE_ACCESS" in
+          read) cache_mode=READ_ONLY ;;
+          write) cache_mode=READ_WRITE ;;
+          *)
+            echo "Compiler cache access must be read or write." >&2
+            exit 1
+            ;;
+        esac
+        {
+          echo "SCCACHE_BUCKET=bw-rust-sccache-767397701846"
+          echo "SCCACHE_REGION=us-east-1"
+          echo "SCCACHE_S3_KEY_PREFIX=rust-v1"
+          echo "SCCACHE_S3_RW_MODE=$cache_mode"
+          echo "SCCACHE_S3_SERVER_SIDE_ENCRYPTION=true"
+        } >> "$GITHUB_ENV"
+
+    - name: Authenticate to the compiler cache
+      if: ${{ inputs.remote-cache-enabled == 'true' }}
+      uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
+      with:
+        role-to-assume: ${{ inputs.access == 'write' && 'arn:aws:iam::767397701846:role/bw-github-ci-sccache-write-role' || 'arn:aws:iam::767397701846:role/bw-github-ci-sccache-read-role' }}
+        aws-region: us-east-1
+        role-session-name: tidebreak-sccache-${{ github.run_id }}
+
+    - name: Install sccache
+      uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      with:
+        version: v0.16.0
