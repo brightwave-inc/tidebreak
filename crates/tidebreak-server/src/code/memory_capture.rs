@@ -7,7 +7,7 @@ use std::sync::Arc;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use tidebreak_core::db::code::{get_session, get_turn, list_recent_events};
+use tidebreak_core::db::code::{get_session, get_turn, get_workspace, list_recent_events};
 use tidebreak_core::{
     AgentError, CodeEvent, CodeSessionId, CodeTurnId, CodeTurnStatus, DbStore, HarnessNoticeLevel,
     MemoryAuthor, MemoryBackend, MemoryEvidence, MemoryKind, MemoryOrigin, MemoryProvenance,
@@ -22,6 +22,8 @@ use super::recap::TurnRecapper;
 
 const MEMORY_CAPTURE_SCHEMA: &str = "memory_proposal";
 const MAX_CONTEXT_DIFF_BYTES: usize = 4 * 1024;
+const CONTEXT_DIFF_READ_ATTEMPTS: usize = 8;
+const CONTEXT_DIFF_READ_BACKOFF: std::time::Duration = std::time::Duration::from_millis(250);
 /// How many times the evidence read retries before the capture reports failure.
 const EVIDENCE_READ_ATTEMPTS: usize = 3;
 /// Pause between evidence read attempts.
@@ -294,16 +296,80 @@ async fn context_file_hint(
     if paths.is_empty() {
         return Ok(String::new());
     }
-    let mut block = String::from("\n<context-files>\n");
-    for path in paths {
-        block.push_str(&path);
+
+    if let Some(diff) = context_file_diff(db, owner, session_id, turn_id, &paths).await? {
+        return Ok(context_file_block(&diff));
+    }
+
+    Ok(context_file_block(&paths.join("\n")))
+}
+
+async fn context_file_diff(
+    db: &DbStore,
+    owner: &OwnerId,
+    session_id: CodeSessionId,
+    turn_id: CodeTurnId,
+    paths: &[String],
+) -> Result<Option<String>> {
+    let Some(session) = get_session(db, owner, session_id).await? else {
+        return Ok(None);
+    };
+    let Some(workspace_id) = session.workspace_id else {
+        return Ok(None);
+    };
+    let Some(workspace) = get_workspace(db, owner, workspace_id).await? else {
+        return Ok(None);
+    };
+
+    for attempt in 0..CONTEXT_DIFF_READ_ATTEMPTS {
+        if attempt > 0 {
+            tokio::time::sleep(CONTEXT_DIFF_READ_BACKOFF).await;
+        }
+        let Some(turn) = get_turn(db, owner, turn_id).await? else {
+            return Ok(None);
+        };
+        if turn.checkpoint_ref.is_none() {
+            continue;
+        }
+        let Ok((worktree, from, to, _)) =
+            super::checkpoint::resolve_diff_range(db, &workspace, Some(turn_id)).await
+        else {
+            return Ok(None);
+        };
+        let Ok(diff) = super::checkpoint::produce_diff_for_paths(
+            &worktree,
+            &from,
+            &to,
+            paths,
+            MAX_CONTEXT_DIFF_BYTES,
+        )
+        .await
+        else {
+            return Ok(None);
+        };
+        return Ok((!diff.is_empty()).then_some(diff));
+    }
+
+    Ok(None)
+}
+
+fn context_file_block(body: &str) -> String {
+    const OPEN: &str = "\n<context-files>\n";
+    const CLOSE: &str = "</context-files>\n";
+
+    let body_budget = MAX_CONTEXT_DIFF_BYTES.saturating_sub(OPEN.len() + CLOSE.len() + 1);
+    let mut end = body.len().min(body_budget);
+    while end > 0 && !body.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut block = String::with_capacity(OPEN.len() + end + 1 + CLOSE.len());
+    block.push_str(OPEN);
+    block.push_str(&body[..end]);
+    if !body[..end].ends_with('\n') {
         block.push('\n');
     }
-    block.push_str("</context-files>\n");
-    if block.len() > MAX_CONTEXT_DIFF_BYTES {
-        block.truncate(MAX_CONTEXT_DIFF_BYTES);
-    }
-    Ok(block)
+    block.push_str(CLOSE);
+    block
 }
 
 pub(crate) fn is_agent_context_file(path: &str) -> bool {
@@ -323,7 +389,32 @@ pub(crate) fn is_agent_context_file(path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+    use std::process::Command as StdCommand;
+
     use super::*;
+    use tidebreak_core::db::code::{
+        append_event, insert_repo, insert_session, insert_turn, insert_workspace, save_turn,
+    };
+    use tidebreak_core::{
+        Attention, AttentionSource, AttentionState, CodeRepo, CodeSession, CodeSessionKind,
+        CodeSessionLifecycle, CodeTurn, CodeWorkspace, CodeWorkspaceStatus, Diffstat,
+        FileChangeKind, HarnessKind, PermissionMode, RepoId, WorkspaceId,
+    };
+
+    fn git(repo: &Path, args: &[&str]) {
+        let output = StdCommand::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     #[test]
     fn agent_context_paths_are_recognized() {
@@ -332,5 +423,176 @@ mod tests {
         assert!(is_agent_context_file(".cursor/rules/rust.md"));
         assert!(is_agent_context_file(".github/copilot-instructions.md"));
         assert!(!is_agent_context_file("src/main.rs"));
+    }
+
+    #[tokio::test]
+    async fn context_file_hint_includes_the_turns_context_diff() {
+        let directory = tempfile::tempdir().unwrap();
+        let repo = directory.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "-b", "main"]);
+        git(&repo, &["config", "user.email", "tidebreak@localhost"]);
+        git(&repo, &["config", "user.name", "Tidebreak"]);
+        std::fs::write(repo.join("CLAUDE.md"), "Keep the old rule.\n").unwrap();
+        git(&repo, &["add", "CLAUDE.md"]);
+        git(&repo, &["commit", "-m", "initial"]);
+
+        let db = DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            directory.path().join("code.db").display()
+        ))
+        .await
+        .unwrap();
+        let owner = OwnerId::local();
+        let repo_id = RepoId::new();
+        insert_repo(
+            &db,
+            &CodeRepo {
+                id: repo_id,
+                owner: owner.clone(),
+                root_path: repo.display().to_string(),
+                display_name: "example".into(),
+                default_base_ref: "main".into(),
+                branch_prefix: "tidebreak/".into(),
+                setup_script: None,
+                archive_script: None,
+                quick_actions: Vec::new(),
+                created_at: chrono::Utc::now(),
+                removed_at: None,
+                cloned_from: None,
+                origin_host: None,
+                origin_owner: None,
+                origin_name: None,
+            },
+        )
+        .await
+        .unwrap();
+        let workspace_id = WorkspaceId::new();
+        insert_workspace(
+            &db,
+            &CodeWorkspace {
+                id: workspace_id,
+                owner: owner.clone(),
+                repo_id,
+                title: "context diff".into(),
+                worktree_path: repo.display().to_string(),
+                branch_name: "tidebreak/context-diff".into(),
+                base_ref: "main".into(),
+                status: CodeWorkspaceStatus::Active,
+                pr: None,
+                created_at: chrono::Utc::now(),
+                archived_at: None,
+                released_at: None,
+                released_tip: None,
+                bundle_bytes: None,
+            },
+        )
+        .await
+        .unwrap();
+        let session_id = CodeSessionId::new();
+        insert_session(
+            &db,
+            &CodeSession {
+                id: session_id,
+                owner: owner.clone(),
+                workspace_id: Some(workspace_id),
+                kind: CodeSessionKind::Interactive,
+                harness_kind: HarnessKind::ClaudeCode,
+                harness_version: None,
+                harness_resume_ref: None,
+                permission_mode: PermissionMode::Plan,
+                model: None,
+                reasoning_effort: None,
+                fast_mode: false,
+                lifecycle: CodeSessionLifecycle::Idle,
+                fence_reason: None,
+                child_pid: None,
+                child_process_identity: None,
+                spawn_epoch: 1,
+                attention: Attention::new(AttentionState::Idle, AttentionSource::Lifecycle),
+                unrecognized_event_count: 0,
+                subagents: Vec::new(),
+                created_at: chrono::Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+        super::super::checkpoint::record_session_baseline(&repo, workspace_id, session_id)
+            .await
+            .unwrap();
+
+        let turn_id = CodeTurnId::new();
+        let mut turn = CodeTurn {
+            id: turn_id,
+            session_id,
+            ordinal: 1,
+            status: CodeTurnStatus::Completed,
+            model: None,
+            fast_mode: false,
+            user_input: "Update the instructions.".into(),
+            user_input_blob_id: None,
+            attachments: Vec::new(),
+            checkpoint_ref: None,
+            diffstat: None,
+            usage: None,
+            narrative: None,
+            rewrite: None,
+            started_at: chrono::Utc::now(),
+            ended_at: Some(chrono::Utc::now()),
+            park_ref: None,
+            park_wait: None,
+        };
+        insert_turn(&db, &owner, &turn).await.unwrap();
+        append_event(
+            &db,
+            &owner,
+            session_id,
+            1,
+            &CodeEvent::TurnStarted { turn_id },
+        )
+        .await
+        .unwrap();
+        std::fs::write(repo.join("CLAUDE.md"), "Keep the new rule.\n").unwrap();
+        append_event(
+            &db,
+            &owner,
+            session_id,
+            1,
+            &CodeEvent::FileChanged {
+                path: "CLAUDE.md".into(),
+                kind: FileChangeKind::Modified,
+                diffstat: Diffstat {
+                    files: 1,
+                    insertions: 1,
+                    deletions: 1,
+                    truncated: false,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        let recorded = super::super::checkpoint::record_checkpoint(
+            &repo,
+            workspace_id,
+            session_id,
+            1,
+            CodeTurnStatus::Completed,
+            None,
+            "main",
+        )
+        .await
+        .unwrap();
+        turn.checkpoint_ref = Some(recorded.checkpoint_ref);
+        turn.diffstat = Some(recorded.diffstat);
+        save_turn(&db, &owner, &turn).await.unwrap();
+
+        let material = context_file_hint(&db, &owner, session_id, turn_id)
+            .await
+            .unwrap();
+
+        assert!(material.contains("diff --git a/CLAUDE.md b/CLAUDE.md"));
+        assert!(material.contains("-Keep the old rule."));
+        assert!(material.contains("+Keep the new rule."));
+        assert!(material.len() <= MAX_CONTEXT_DIFF_BYTES);
     }
 }
