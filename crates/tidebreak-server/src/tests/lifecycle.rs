@@ -1068,6 +1068,30 @@ pub(super) async fn post_native_json(
         .unwrap()
 }
 
+/// POST a JSON body with only the machine executor capability.
+async fn post_executor_json(
+    router: &Router,
+    uri: &str,
+    body: serde_json::Value,
+) -> axum::response::Response {
+    router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header(
+                    crate::auth::CLIENT_EXECUTOR_HEADER,
+                    crate::state::TEST_CLIENT_EXECUTOR_TOKEN,
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
 /// Park a turn on a client tool call without running the agent loop.
 ///
 /// This and the other `park_*_for_route_test` helpers accept a turn and then
@@ -1465,7 +1489,6 @@ async fn client_execution_api_polls_claims_heartbeats_and_resolves_idempotently(
         .oneshot(
             Request::builder()
                 .uri(format!("/chats/{}/client-executions/pending/raw", chat.id))
-                .header(header::AUTHORIZATION, &bearer)
                 .header(
                     crate::auth::CLIENT_EXECUTOR_HEADER,
                     crate::state::TEST_CLIENT_EXECUTOR_TOKEN,
@@ -1501,7 +1524,7 @@ async fn client_execution_api_polls_claims_heartbeats_and_resolves_idempotently(
         .unwrap();
     assert_eq!(renderer_only.status(), StatusCode::UNAUTHORIZED);
 
-    let first = post_native_json(&router, &bearer, &claim_uri, claim_body.clone()).await;
+    let first = post_executor_json(&router, &claim_uri, claim_body.clone()).await;
     assert_eq!(first.status(), StatusCode::OK);
     let first: serde_json::Value = json_body(first).await;
     assert_eq!(first["disposition"], "claimed");
@@ -1510,15 +1533,14 @@ async fn client_execution_api_polls_claims_heartbeats_and_resolves_idempotently(
 
     // A lost response can be retried with the stable secret token even though
     // the server calculates a fresh proposed expiry for the second request.
-    let retry = post_native_json(&router, &bearer, &claim_uri, claim_body).await;
+    let retry = post_executor_json(&router, &claim_uri, claim_body).await;
     assert_eq!(retry.status(), StatusCode::OK);
     let retry: serde_json::Value = json_body(retry).await;
     assert_eq!(retry["disposition"], "existing");
     assert_eq!(retry["lease_token"], lease_token.to_string());
 
-    let stolen = post_native_json(
+    let stolen = post_executor_json(
         &router,
-        &bearer,
         &claim_uri,
         serde_json::json!({
             "executor_id": executor_id,
@@ -1545,9 +1567,8 @@ async fn client_execution_api_polls_claims_heartbeats_and_resolves_idempotently(
         "authoritative polling must never disclose the secret lease token"
     );
 
-    let wrong_chat_heartbeat = post_native_json(
+    let wrong_chat_heartbeat = post_executor_json(
         &router,
-        &bearer,
         &format!(
             "/chats/{}/client-executions/{}/heartbeat",
             other_chat.id, call.id
@@ -1558,9 +1579,8 @@ async fn client_execution_api_polls_claims_heartbeats_and_resolves_idempotently(
     assert_eq!(wrong_chat_heartbeat.status(), StatusCode::CONFLICT);
 
     tokio::time::sleep(Duration::from_millis(2)).await;
-    let heartbeat = post_native_json(
+    let heartbeat = post_executor_json(
         &router,
-        &bearer,
         &format!("/chats/{}/client-executions/{}/heartbeat", chat.id, call.id),
         serde_json::json!({"lease_token": lease_token}),
     )
@@ -1574,9 +1594,8 @@ async fn client_execution_api_polls_claims_heartbeats_and_resolves_idempotently(
         "lease_token": lease_token,
         "resolution": {"status": "completed", "result": "folder connected"},
     });
-    let wrong_chat_resolve = post_native_json(
+    let wrong_chat_resolve = post_executor_json(
         &router,
-        &bearer,
         &format!(
             "/chats/{}/client-executions/{}/resolve",
             other_chat.id, call.id
@@ -1585,9 +1604,8 @@ async fn client_execution_api_polls_claims_heartbeats_and_resolves_idempotently(
     )
     .await;
     assert_eq!(wrong_chat_resolve.status(), StatusCode::CONFLICT);
-    let wrong_token = post_native_json(
+    let wrong_token = post_executor_json(
         &router,
-        &bearer,
         &resolve_uri,
         serde_json::json!({
             "lease_token": uuid::Uuid::new_v4(),
@@ -1597,7 +1615,7 @@ async fn client_execution_api_polls_claims_heartbeats_and_resolves_idempotently(
     .await;
     assert_eq!(wrong_token.status(), StatusCode::CONFLICT);
 
-    let resolved = post_native_json(&router, &bearer, &resolve_uri, resolution.clone()).await;
+    let resolved = post_executor_json(&router, &resolve_uri, resolution.clone()).await;
     assert_eq!(resolved.status(), StatusCode::OK);
     let resolved: serde_json::Value = json_body(resolved).await;
     assert_eq!(resolved["disposition"], "resolved");
@@ -1605,14 +1623,13 @@ async fn client_execution_api_polls_claims_heartbeats_and_resolves_idempotently(
     // Resolution time is server-owned metadata, not part of the stable command
     // identity, so an ambiguous retry converges on token + terminal payload.
     tokio::time::sleep(Duration::from_millis(2)).await;
-    let retry = post_native_json(&router, &bearer, &resolve_uri, resolution).await;
+    let retry = post_executor_json(&router, &resolve_uri, resolution).await;
     assert_eq!(retry.status(), StatusCode::OK);
     let retry: serde_json::Value = json_body(retry).await;
     assert_eq!(retry["disposition"], "existing");
 
-    let conflicting = post_native_json(
+    let conflicting = post_executor_json(
         &router,
-        &bearer,
         &resolve_uri,
         serde_json::json!({
             "lease_token": lease_token,
@@ -3074,34 +3091,90 @@ async fn client_execution_api_validates_scope_identity_and_terminal_payloads() {
     assert_eq!(oversized.status(), StatusCode::BAD_REQUEST);
 }
 
-/// The native-only surface requires a principal, not just the capability:
-/// presenting only the client-executor credential names nobody and is
-/// rejected before any handler runs.
+/// The machine executor sweeps named owners without impersonating one.
 #[tokio::test]
-async fn client_executor_credential_alone_is_rejected() {
-    let (router, _token, _store, _dir) = test_app().await;
+async fn client_executor_capability_reaches_only_its_machine_surface() {
+    let (dir, store) = temp_db_store("self-host-executor.db").await;
+    let store: Arc<dyn Store> = Arc::new(store);
+    let tokens_file = dir.path().join("tokens");
+    std::fs::write(&tokens_file, format!("alice {ALICE_TOKEN} admin\n")).unwrap();
+    let mut config = Config::desktop(dir.path());
+    config.profile = tidebreak_core::Profile::SelfHost;
+    config.auth_tokens_file = Some(tokens_file);
+    let state = AppState::new(
+        config,
+        store.clone(),
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    let router = app(state);
+    let alice = format!("Bearer {ALICE_TOKEN}");
+    let chat = make_chat(&router, &alice).await;
+    let call = ToolCallRecord {
+        id: CallId::new(),
+        chat_id: chat.id,
+        turn_id: TurnId::new(),
+        provider_id: "native".into(),
+        name: "connect_folder".into(),
+        arguments: serde_json::json!({}),
+        raw_arguments: None,
+        execution: ToolCallExecution::Client,
+        status: ToolCallStatus::Pending,
+        result: None,
+        result_preview: None,
+        provider_replay: None,
+        error_code: None,
+        error_detail: None,
+        client_executor_id: None,
+        client_lease_expires_at: None,
+        created_at: chrono::Utc::now(),
+        resolved_at: None,
+    };
+    store.accept_tool_call(&call).await.unwrap();
+
+    let capability_request = |uri: &str| {
+        Request::builder()
+            .uri(uri)
+            .header(
+                crate::auth::CLIENT_EXECUTOR_HEADER,
+                crate::state::TEST_CLIENT_EXECUTOR_TOKEN,
+            )
+            .body(Body::empty())
+            .unwrap()
+    };
 
     let response = router
-        .oneshot(
-            Request::builder()
-                .uri("/sandbox-file-reads/pending")
-                .header(
-                    crate::auth::CLIENT_EXECUTOR_HEADER,
-                    crate::state::TEST_CLIENT_EXECUTOR_TOKEN,
-                )
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .clone()
+        .oneshot(capability_request("/native/client-executions/pending"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let pending: serde_json::Value = json_body(response).await;
+    assert_eq!(pending[0]["chat_id"], chat.id.to_string());
+    assert_eq!(pending[0]["call"]["id"], call.id.to_string());
+
+    let response = router
+        .clone()
+        .oneshot(capability_request("/chats"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let response = router
+        .oneshot(capability_request("/sandbox-file-reads/pending"))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
-/// The auth middleware is the one place a principal is minted: the bearer
-/// resolves to the local owner without the executor capability, the native
-/// credential upgrades the capability bit on that principal, and the
-/// capability alone cannot reach a handler. Probes the real middlewares in
-/// the production layering (bearer outermost).
+/// The bearer middleware creates the principal. The executor middleware adds
+/// its independent machine proof and marks an existing context for routes that
+/// deliberately require both credentials.
 #[tokio::test]
 async fn auth_middleware_resolves_principal_and_capability() {
     use crate::principal::{AuthContext, Principal};

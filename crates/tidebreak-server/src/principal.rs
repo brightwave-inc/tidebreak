@@ -12,9 +12,8 @@
 //!   is an extractor that fails closed: a handler that asks for it on a route
 //!   the auth layer does not cover gets `401`, never a defaulted identity.
 //! - **The client-executor credential is a capability, not a principal.** It
-//!   marks a bit on an existing context; it cannot conjure an identity on its
-//!   own. [`ClientExecutor`] types that requirement into handler signatures so
-//!   it survives router refactors.
+//!   admits only the machine routes that use [`ClientExecutor`]. It never
+//!   creates an [`AuthContext`] or grants access to owner-scoped routes.
 //!
 //! A principal also carries a [`Role`]: the split between the member plane
 //! (owner-scoped data and capability discovery) and the deployment plane
@@ -208,26 +207,24 @@ impl<S: Send + Sync> FromRequestParts<S> for AuthContext {
     }
 }
 
-/// Proof the request presented the native client-executor credential on top of
-/// an authenticated principal.
+/// Proof that the request presented the native client-executor credential.
 ///
 /// Handlers on the native-only surface take this so the requirement is part of
 /// the handler's type, not only of which router it happens to be mounted on.
-/// When owner-scoped queries land, this grows the principal the capability was
-/// granted on; until a consumer exists it stays a bare proof token.
+/// This proof grants machine authority only. It never supplies a principal for
+/// owner-scoped routes.
 #[derive(Debug, Clone, Copy)]
 pub struct ClientExecutor;
 
 impl<S: Send + Sync> FromRequestParts<S> for ClientExecutor {
     type Rejection = StatusCode;
 
-    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        let auth = AuthContext::from_request_parts(parts, state).await?;
-        if auth.client_executor {
-            Ok(Self)
-        } else {
-            Err(StatusCode::UNAUTHORIZED)
-        }
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        parts
+            .extensions
+            .get::<ClientExecutor>()
+            .copied()
+            .ok_or(StatusCode::UNAUTHORIZED)
     }
 }
 

@@ -322,6 +322,33 @@ pub fn app(state: AppState) -> Router {
                 .layer(DefaultBodyLimit::max(routes::MAX_IMAGE_ATTACHMENT_BYTES)),
         );
 
+    let machine_client_executor_api = Router::new()
+        .route(
+            "/native/client-executions/pending",
+            get(routes::list_all_pending_client_executions),
+        )
+        .route(
+            "/chats/{id}/client-executions/pending/raw",
+            get(routes::list_pending_client_executions_raw),
+        )
+        .route(
+            "/chats/{id}/client-executions/{call_id}/claim",
+            post(routes::claim_client_execution),
+        )
+        .route(
+            "/chats/{id}/client-executions/{call_id}/heartbeat",
+            post(routes::heartbeat_client_execution),
+        )
+        .route(
+            "/chats/{id}/client-executions/{call_id}/resolve",
+            post(routes::resolve_client_execution),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_client_executor_token,
+        ))
+        .with_state(state.clone());
+
     let client_executor_api = Router::new()
         .route(
             "/native/mcp/servers",
@@ -343,22 +370,6 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/sandbox-file-reads/{call_id}/resolve",
             post(routes::resolve_delegated_file_read),
-        )
-        .route(
-            "/chats/{id}/client-executions/pending/raw",
-            get(routes::list_pending_client_executions_raw),
-        )
-        .route(
-            "/chats/{id}/client-executions/{call_id}/claim",
-            post(routes::claim_client_execution),
-        )
-        .route(
-            "/chats/{id}/client-executions/{call_id}/heartbeat",
-            post(routes::heartbeat_client_execution),
-        )
-        .route(
-            "/chats/{id}/client-executions/{call_id}/resolve",
-            post(routes::resolve_client_execution),
         );
     // The reader's half of the document surface. `ChatDocumentDetail` omits the
     // catalog's `uri` and index bookkeeping, so unlike the full-fidelity routes
@@ -1357,6 +1368,7 @@ pub fn app(state: AppState) -> Router {
     let root = Router::new()
         .merge(view_frames)
         .merge(auth_discovery)
+        .merge(machine_client_executor_api)
         .merge(api);
     // The renderer bundle, when this machine carries one, answers what no
     // route claimed. It sits with the API inside the origin and CORS layers

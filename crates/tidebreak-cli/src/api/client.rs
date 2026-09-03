@@ -1028,6 +1028,13 @@ pub struct PendingClientCall {
     pub client_executor_id: Option<uuid::Uuid>,
 }
 
+/// One parked call plus the conversation that owns it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct NativePendingClientExecution {
+    pub chat_id: ChatId,
+    pub call: PendingClientCall,
+}
+
 /// The canonical call one claim installed, plus the receipt needed to operate
 /// it.
 ///
@@ -1103,6 +1110,25 @@ impl std::fmt::Display for ClientExecutionError {
 type ExecutionResult<T> = std::result::Result<T, ClientExecutionError>;
 
 impl Client {
+    /// Every client-owned tool call parked across this server.
+    pub async fn all_pending_client_executions(
+        &self,
+        executor_token: &str,
+    ) -> ExecutionResult<Vec<NativePendingClientExecution>> {
+        let response = self
+            .http
+            .get(format!("{}/native/client-executions/pending", self.base))
+            .header(CLIENT_EXECUTOR_HEADER, executor_token)
+            .send()
+            .await
+            .map_err(|error| ClientExecutionError::Failed(request_error(error)))?;
+        Self::expect_execution_success(response)
+            .await?
+            .json::<Vec<NativePendingClientExecution>>()
+            .await
+            .map_err(|error| ClientExecutionError::Failed(request_error(error)))
+    }
+
     /// Every client-owned tool call currently parked on this chat.
     pub async fn pending_client_executions(
         &self,

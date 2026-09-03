@@ -72,7 +72,7 @@ use futures::StreamExt as _;
 use tidebreak_core::{AgentError, Profile, Result};
 
 use crate::error::ServerError;
-use crate::principal::{AuthContext, Principal, Role, UserId};
+use crate::principal::{AuthContext, ClientExecutor, Principal, Role, UserId};
 use crate::state::AppState;
 
 /// Handshake subprotocol the server selects when the client offered it.
@@ -849,10 +849,10 @@ pub async fn require_admin(request: Request, next: Next) -> Response {
 
 /// Require the second credential held only by the trusted native host.
 ///
-/// The credential is a capability, not a principal: it marks the bit on the
-/// [`AuthContext`] the bearer middleware already attached, and fails closed if
-/// no context is present — the native credential alone names nobody and must
-/// never admit a request by itself.
+/// The credential is a machine capability, not a principal. It admits only
+/// routes mounted on the native executor surface. When bearer authentication
+/// already attached an [`AuthContext`], it also marks that context so native
+/// configuration routes can distinguish the host from the renderer.
 pub async fn require_client_executor_token(
     State(state): State<AppState>,
     mut request: Request,
@@ -866,13 +866,13 @@ pub async fn require_client_executor_token(
         Some(token)
             if constant_time_eq(token.as_bytes(), state.client_executor_token.as_bytes()) =>
         {
-            let Some(auth) = request.extensions().get::<AuthContext>().cloned() else {
-                return StatusCode::UNAUTHORIZED.into_response();
-            };
-            request.extensions_mut().insert(AuthContext {
-                client_executor: true,
-                ..auth
-            });
+            request.extensions_mut().insert(ClientExecutor);
+            if let Some(auth) = request.extensions().get::<AuthContext>().cloned() {
+                request.extensions_mut().insert(AuthContext {
+                    client_executor: true,
+                    ..auth
+                });
+            }
             next.run(request).await
         }
         _ => StatusCode::UNAUTHORIZED.into_response(),

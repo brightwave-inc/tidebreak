@@ -195,31 +195,26 @@ impl FolderExecutor {
     }
 
     /// One pass: finish what an earlier run left behind, then take up new work.
-    ///
-    /// One conversation's failure never hides another's: the daemon walks every
-    /// chat it can see, and a chat that cannot be read this pass is reported and
-    /// retried on the next.
     async fn sweep(&self, scope: &Scope) -> Result<()> {
         let recovered = self.recover().await?;
-        for chat in self.chats(scope).await? {
-            if let Err(error) = self.discover(chat, &recovered).await {
-                tracing::warn!(%error, "connected-folder work deferred");
+        match scope {
+            Scope::Chat(chat) => self.discover(*chat, &recovered).await?,
+            Scope::AllChats => {
+                for pending in self
+                    .client
+                    .all_pending_client_executions(&self.executor_token)
+                    .await?
+                {
+                    if let Err(error) = self
+                        .discover_call(pending.chat_id, pending.call, &recovered)
+                        .await
+                    {
+                        tracing::warn!(%error, "connected-folder work deferred");
+                    }
+                }
             }
         }
         Ok(())
-    }
-
-    async fn chats(&self, scope: &Scope) -> Result<Vec<ChatId>> {
-        match scope {
-            Scope::Chat(chat) => Ok(vec![*chat]),
-            Scope::AllChats => Ok(self
-                .client
-                .list_chats()
-                .await?
-                .into_iter()
-                .map(|chat| chat.id)
-                .collect()),
-        }
     }
 
     /// Drive every persisted receipt to a terminal result, and report which
@@ -242,21 +237,30 @@ impl FolderExecutor {
             .pending_client_executions(&self.executor_token, chat)
             .await?;
         for call in pending {
-            if covered.contains(&call.id) || !handles(&call.name) {
-                continue;
-            }
-            // Never race another executor. The server hands a claimed call to
-            // nobody else, so a call already owned is either being run by its
-            // owner or is that owner's to recover from its own receipt.
-            if call.client_executor_id.is_some() {
-                continue;
-            }
-            let receipt =
-                Receipt::new(chat, call.id, self.executor_id, recovery_policy(&call.name));
-            self.receipts.save(&receipt)?;
-            if let Err(error) = self.execute(receipt).await {
-                tracing::warn!(%error, "connected-folder execution deferred");
-            }
+            self.discover_call(chat, call, covered).await?;
+        }
+        Ok(())
+    }
+
+    async fn discover_call(
+        &self,
+        chat: ChatId,
+        call: crate::api::client::PendingClientCall,
+        covered: &HashSet<CallId>,
+    ) -> Result<()> {
+        if covered.contains(&call.id) || !handles(&call.name) {
+            return Ok(());
+        }
+        // Never race another executor. The server hands a claimed call to
+        // nobody else, so a call already owned is either being run by its
+        // owner or is that owner's to recover from its own receipt.
+        if call.client_executor_id.is_some() {
+            return Ok(());
+        }
+        let receipt = Receipt::new(chat, call.id, self.executor_id, recovery_policy(&call.name));
+        self.receipts.save(&receipt)?;
+        if let Err(error) = self.execute(receipt).await {
+            tracing::warn!(%error, "connected-folder execution deferred");
         }
         Ok(())
     }
