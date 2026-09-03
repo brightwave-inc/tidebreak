@@ -327,6 +327,60 @@ sleep 2
     let _ = child.kill().await;
 }
 
+/// `thread/resume` returns the entire persisted thread in one response. A
+/// healthy response larger than the normal turn-event limit must still reach
+/// the matching RPC waiter.
+#[cfg(unix)]
+#[tokio::test]
+async fn read_until_rpc_accepts_a_large_thread_resume_response() {
+    let payload_bytes = StreamBudget::default().max_partial_line + 1_024;
+    let script = format!(
+        r#"
+payload=$(printf '%*s' {payload_bytes} '' | tr ' ' a)
+printf '{{"id":7,"result":{{"thread":{{"id":"THREAD-1","turns":[{{"content":"%s"}}]}}}}}}\n' "$payload"
+sleep 2
+"#
+    );
+    let (session, mut child) = session_reading_script(&script).await;
+    session
+        .read_until_rpc(7, Duration::from_secs(2), THREAD_LOAD_ABSOLUTE_CEILING)
+        .await
+        .expect("a valid response above the normal line limit should be read");
+    let _ = child.kill().await;
+}
+
+/// Even startup responses stay bounded. If Codex exceeds its larger RPC
+/// budget, fail at the overflow instead of waiting for an RPC timeout.
+#[cfg(unix)]
+#[tokio::test]
+async fn rpc_line_overflow_fails_immediately() {
+    let (session, mut child) = session_reading_script(
+        r#"
+printf '{"id":7,"result":{"thread":{"id":"THREAD-1","turns":[{"content":"'
+printf '%*s' 80 '' | tr ' ' a
+printf '"}]}}}\n'
+sleep 2
+"#,
+    )
+    .await;
+    let budget = StreamBudget {
+        max_partial_line: 64,
+        ..StreamBudget::default()
+    };
+    let err = session
+        .read_lines_with_budget(budget, true)
+        .await
+        .expect_err("an oversized RPC line should fail at the parse budget");
+    match err {
+        HarnessError::Other(message) => assert_eq!(
+            message,
+            "engine stdout line exceeded the 64 byte parse budget"
+        ),
+        other => panic!("expected a parse-budget error, got {other:?}"),
+    }
+    let _ = child.kill().await;
+}
+
 /// A child that goes silent is still bounded by one inactivity window.
 #[cfg(unix)]
 #[tokio::test]

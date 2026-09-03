@@ -378,7 +378,7 @@ pub(crate) fn compose_for_surface(
         }
         if has("read_document") {
             lines.push(
-                "- A file attachment announces its exact document id and truthful read or exec route in the user message. Follow that route directly instead of rediscovering the attachment first.",
+                "- A file attachment announces its exact document id and every available read or exec route in the user message. Follow those routes directly instead of rediscovering the attachment first.",
             );
         }
         if has("search") {
@@ -628,6 +628,10 @@ pub(crate) fn compose_for_surface(
         };
         lines.push(
             "- Only the user can change the network policy; a refused connection means the current policy blocks it, so report that instead of retrying."
+                .to_owned(),
+        );
+        lines.push(
+            "- If an `exec` result says that the execution provider is unavailable or marks the failure as non-retryable, do not call `exec` again in this turn. Report the outage, and continue only with work that does not require execution."
                 .to_owned(),
         );
         if package_installs_reachable {
@@ -952,6 +956,8 @@ mod tests {
         let with_exec = compose(&[spec("exec")]);
         assert!(with_exec.contains("Make an execution claim only after an `exec` result"));
         assert!(with_exec.contains("if `exec` is unavailable this turn"));
+        assert!(with_exec.contains("do not call `exec` again in this turn"));
+        assert!(with_exec.contains("marks the failure as non-retryable"));
 
         let without_exec = compose(&[spec("read_file")]);
         assert!(without_exec.contains("if `exec` is unavailable this turn"));
@@ -1802,7 +1808,7 @@ mod tests {
         // Re-pinned for the Tidebreak product identity carried by the prompt.
         assert_eq!(
             identity(&prompt),
-            "foreground-v2:sha256:3ef4bea725300afbc4fae6d46eea7589cef11dcf278d44d22d68961a74819593"
+            "foreground-v2:sha256:d402ebea810d1cc517071542f5f682a6cda62d721f4f410c307b5db9a565862b"
         );
     }
 }

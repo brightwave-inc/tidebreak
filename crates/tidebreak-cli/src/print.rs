@@ -285,12 +285,15 @@ async fn one_turn(
                 printer.tool_started(call_id, name);
             }
             RendererAgentEvent::ToolCallCompleted {
-                call_id, status, ..
+                call_id,
+                status,
+                failure,
+                ..
             } => {
                 // The call is over however it ended, so a refusal still waiting
                 // for it to park has nothing left to wait for.
                 declines.finished(call_id);
-                printer.tool_completed(call_id, status);
+                printer.tool_completed(call_id, status, failure.as_ref());
             }
             RendererAgentEvent::ApprovalRequired {
                 call_id,
@@ -960,13 +963,21 @@ impl Printer {
         self.tools.insert(call_id, name.as_str());
     }
 
-    fn tool_completed(&mut self, call_id: CallId, status: RendererToolStatus) {
+    fn tool_completed(
+        &mut self,
+        call_id: CallId,
+        status: RendererToolStatus,
+        failure: Option<&crate::api::wire::RendererToolFailure>,
+    ) {
         let name = self.tools.remove(&call_id).unwrap_or("tool");
         let status = match status {
             RendererToolStatus::Completed => "ok",
             RendererToolStatus::Failed => "failed",
         };
         self.notice(&format!("tool: {name} {status}"));
+        if let Some(failure) = failure {
+            self.notice(tool_failure_notice(failure.reason));
+        }
     }
 
     /// Progress and problems go to stderr in both formats, so stdout stays
@@ -1009,6 +1020,17 @@ impl Printer {
     }
 }
 
+fn tool_failure_notice(reason: crate::api::wire::RendererToolFailureReason) -> &'static str {
+    match reason {
+        crate::api::wire::RendererToolFailureReason::LeaseExpired => {
+            "the client executor lease expired"
+        }
+        crate::api::wire::RendererToolFailureReason::ProviderUnavailable => {
+            "the execution provider is unavailable"
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1031,5 +1053,13 @@ mod tests {
             .expect_err("an unreachable server must not read as nothing pending");
 
         assert_eq!(halt.reason, HaltReason::PendingLookupFailed);
+    }
+
+    #[test]
+    fn execution_provider_failures_have_a_bounded_cli_notice() {
+        assert_eq!(
+            tool_failure_notice(crate::api::wire::RendererToolFailureReason::ProviderUnavailable),
+            "the execution provider is unavailable"
+        );
     }
 }

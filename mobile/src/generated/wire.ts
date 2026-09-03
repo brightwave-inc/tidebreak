@@ -4736,7 +4736,7 @@ export type RendererToolFailure = { code: RendererToolFailureCode, reason: Rende
 
 export type RendererToolFailureCode = "executor_unavailable";
 
-export type RendererToolFailureReason = "lease_expired";
+export type RendererToolFailureReason = "lease_expired" | "provider_unavailable";
 
 /**
  * A tool name the renderer is allowed to present.

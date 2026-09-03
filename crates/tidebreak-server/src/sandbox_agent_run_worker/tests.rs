@@ -3426,6 +3426,8 @@ fn sandbox_system_prompt_teaches_exec_argv_form() {
         prompt.contains("output/"),
         "prompt must still point deliverables at output/: {prompt}"
     );
+    assert!(prompt.contains("When the task asks for plain text"));
+    assert!(prompt.contains("return the complete text directly instead of calling done"));
     // Empty catalog: no skills section and no "there is no skills catalog"
     // denial that would contradict a later host with skills.
     assert!(!prompt.contains(SANDBOX_PROMPT_SKILLS_INTRO));
@@ -4013,7 +4015,9 @@ async fn a_call_made_after_the_budget_is_spent_is_refused_rather_than_failing_th
         })
         .collect();
     assert!(
-        notice.contains("entire step budget") && notice.contains("done"),
+        notice.contains("entire step budget")
+            && notice.contains("done")
+            && notice.contains("plain text"),
         "the exhausted request should say the cadence is spent, got {notice:?}"
     );
 

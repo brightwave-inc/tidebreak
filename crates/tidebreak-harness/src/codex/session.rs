@@ -27,6 +27,10 @@ use tidebreak_core::{PermissionMode, ReasoningEffort, MAX_NOTICE_CHARS};
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 const THREAD_LOAD_TIMEOUT: Duration = Duration::from_secs(120);
 const THREAD_LOAD_ABSOLUTE_CEILING: Duration = Duration::from_secs(30 * 60);
+/// `thread/resume` returns the full persisted thread in one JSON-RPC line.
+/// Keep normal turn events on the shared 256 KiB limit, but admit a bounded
+/// response large enough for established Codex threads during startup.
+const RPC_MAX_PARTIAL_LINE: usize = 16 * 1_024 * 1_024;
 #[cfg(not(test))]
 const PROCESS_INTERRUPT_GRACE: Duration = Duration::from_secs(2);
 #[cfg(test)]
@@ -1011,7 +1015,17 @@ impl CodexSession {
                     "timed out waiting for rpc id {rpc_id}"
                 )));
             }
-            let lines = timeout(inactivity.min(remaining), self.read_lines()).await;
+            let lines = timeout(
+                inactivity.min(remaining),
+                self.read_lines_with_budget(
+                    StreamBudget {
+                        max_partial_line: RPC_MAX_PARTIAL_LINE,
+                        ..StreamBudget::default()
+                    },
+                    true,
+                ),
+            )
+            .await;
             let lines = match lines {
                 Ok(Ok(lines)) => lines,
                 Ok(Err(err)) => return Err(err),
@@ -1110,11 +1124,19 @@ impl CodexSession {
     }
 
     async fn read_lines(&self) -> Result<Vec<String>, HarnessError> {
+        self.read_lines_with_budget(StreamBudget::default(), false)
+            .await
+    }
+
+    async fn read_lines_with_budget(
+        &self,
+        budget: StreamBudget,
+        reject_overflow: bool,
+    ) -> Result<Vec<String>, HarnessError> {
         let Some(stdout) = self.stdout.lock().expect("codex stdout").clone() else {
             return Err(HarnessError::Other("engine child has no stdout".into()));
         };
         let mut reader = stdout.lock().await;
-        let budget = StreamBudget::default();
         let mut chunk = vec![0_u8; budget.chunk_size];
         loop {
             match reader.stdout.read(&mut chunk).await? {
@@ -1124,8 +1146,15 @@ impl CodexSession {
                     if tick.overflow_chunks > 0 {
                         warn!(
                             overflow_chunks = tick.overflow_chunks,
+                            max_partial_line = budget.max_partial_line,
                             "engine stdout exceeded the parse budget"
                         );
+                        if reject_overflow {
+                            return Err(HarnessError::Other(format!(
+                                "engine stdout line exceeded the {} byte parse budget",
+                                budget.max_partial_line
+                            )));
+                        }
                     }
                     if !tick.lines.is_empty() {
                         return Ok(tick.lines);

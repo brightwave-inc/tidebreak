@@ -214,8 +214,9 @@ fn cadence_notice(config: &AgentConfig, steps: usize) -> Option<String> {
     if steps.saturating_add(2) > config.max_steps {
         Some(
             "You have used this task's entire step budget. exec and search are no longer \
-             available and calling them will not run anything. Finish now: call done with the \
-             filenames you wrote under output/ and a short summary of what you produced."
+             available and calling them will not run anything. Finish now. If the task asks for \
+             files, call done with the filenames you wrote under output/ and a short summary. If \
+             the task asks for plain text, return the complete text directly."
                 .to_owned(),
         )
     } else {

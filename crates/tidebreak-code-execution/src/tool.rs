@@ -6,12 +6,13 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tidebreak_core::preview::MAX_ACTION_SUMMARY_CHARS;
 use tidebreak_core::{
-    ApprovalClass, Result, Tool, ToolCtx, ToolOutput, ToolSpec, SUMMARY_ARGUMENT_DESCRIPTION,
+    ApprovalClass, Result, Tool, ToolCtx, ToolErrorCategory, ToolOutput, ToolSpec,
+    SUMMARY_ARGUMENT_DESCRIPTION,
 };
 
 use crate::{
-    ExecProvider, ExecRequest, ExecutionId, ExecutionWorkspaceId, MAX_ARGUMENTS, MAX_COMMAND_BYTES,
-    MAX_CWD_BYTES, MAX_STAGED_PATHS,
+    ExecError, ExecProvider, ExecRequest, ExecutionId, ExecutionWorkspaceId, MAX_ARGUMENTS,
+    MAX_COMMAND_BYTES, MAX_CWD_BYTES, MAX_STAGED_PATHS,
 };
 
 pub const EXEC_TOOL_NAME: &str = "exec";
@@ -75,7 +76,9 @@ impl Tool for ExecTool {
                           'files' argument, plus whatever earlier commands in the same sandbox \
                           session created. List every file or directory the command reads — \
                           including files you just wrote with write_file and attached documents \
-                          under documents/ — or the command will not find them there. A listed \
+                          at the exact documents/ paths announced in the user message — or the \
+                          command will not find them there. An attachment title by itself is not \
+                          a workspace path. A listed \
                           directory stages recursively; a listed path that does not exist fails \
                           the call on every provider. Every provider returns bounded \
                           stdout/stderr. Files you save in output/ are published to the user \
@@ -94,12 +97,12 @@ impl Tool for ExecTool {
                           bundled document helpers are present, invoke them directly from \
                           .tidebreak/exec-scripts (always available without listing them). \
                           Examples: command python3 with args \
-                          [\".tidebreak/exec-scripts/render_pdf.py\", \"documents/report.pdf\", \
-                          \"--pages\", \"1-2\"] and files [\"documents/report.pdf\"]; command \
+                          [\".tidebreak/exec-scripts/render_pdf.py\", \"<announced documents/ path>\", \
+                          \"--pages\", \"1-2\"] and files [\"<same announced path>\"]; command \
                           python3 with args [\".tidebreak/exec-scripts/extract_pdf_figures.py\", \
-                          \"documents/report.pdf\"] and files [\"documents/report.pdf\"]; or \
+                          \"<announced documents/ path>\"] and files [\"<same announced path>\"]; or \
                           command python3 with args [\".tidebreak/exec-scripts/analyze_xlsx.py\", \
-                          \"documents/model.xlsx\"] and files [\"documents/model.xlsx\"]. Each \
+                          \"<announced documents/ path>\"] and files [\"<same announced path>\"]. Each \
                           helper writes visual review files to preview/ and prints a concise \
                           summary; a missing Python or document dependency is reported as a \
                           command error."
@@ -185,6 +188,21 @@ impl Tool for ExecTool {
         };
         let response = match self.provider.execute(request).await {
             Ok(response) => response,
+            Err(ExecError::Unavailable(reason)) => {
+                return Ok(ToolOutput::failed(
+                    ToolErrorCategory::TransportFailed,
+                    format!(
+                        "code execution provider is unavailable: {reason}\nretryable: false\n\
+                         Do not call exec again in this turn. Report the outage, and continue \
+                         only with work that does not require execution."
+                    ),
+                )
+                .with_data(json!({
+                    "failure": "executor_unavailable",
+                    "reason": "provider_unavailable",
+                    "retryable": false,
+                })));
+            }
             Err(error) => return Ok(ToolOutput::error(error.to_string())),
         };
         // Regardless of the exit code: a failing later step must not hide
@@ -423,6 +441,12 @@ mod tests {
         assert!(spec.description.contains("attaching or copying"));
         assert!(spec
             .description
+            .contains("exact documents/ paths announced"));
+        assert!(spec
+            .description
+            .contains("An attachment title by itself is not a workspace path"));
+        assert!(spec
+            .description
             .contains("connecting its containing folder"));
         assert!(spec
             .description
@@ -476,6 +500,46 @@ mod tests {
         );
         assert!(output.content.contains("60012 ms"), "{}", output.content);
         assert_eq!(output.data.as_ref().unwrap()["timed_out"], true);
+    }
+
+    struct UnavailableProvider;
+
+    #[async_trait]
+    impl ExecProvider for UnavailableProvider {
+        async fn execute(
+            &self,
+            _request: ExecRequest,
+        ) -> std::result::Result<ExecResponse, ExecError> {
+            Err(ExecError::Unavailable(
+                "the container runtime refused the request".into(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn unavailable_provider_is_non_retryable_and_structured() {
+        let output = ExecTool::new(Arc::new(UnavailableProvider))
+            .execute(
+                &ToolCtx::new_legacy_workspace(ChatId::new(), None, PathBuf::from("/tmp/unused"))
+                    .with_call_id(CallId::new()),
+                json!({"command": "python3", "args": ["--version"]}),
+            )
+            .await
+            .unwrap();
+
+        assert!(output.is_error);
+        assert_eq!(
+            output.error_category,
+            Some(ToolErrorCategory::TransportFailed)
+        );
+        assert!(output.content.contains("retryable: false"));
+        assert!(output
+            .content
+            .contains("Do not call exec again in this turn"));
+        let data = output.data.as_ref().unwrap();
+        assert_eq!(data["failure"], "executor_unavailable");
+        assert_eq!(data["reason"], "provider_unavailable");
+        assert_eq!(data["retryable"], false);
     }
 
     struct PreviewProvider {

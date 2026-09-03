@@ -416,6 +416,7 @@ pub enum RendererToolFailureCode {
 #[serde(rename_all = "snake_case")]
 pub enum RendererToolFailureReason {
     LeaseExpired,
+    ProviderUnavailable,
 }
 
 impl From<&SequencedEvent> for RendererSequencedEvent {
@@ -543,12 +544,19 @@ impl From<&SequencedEvent> for RendererSequencedEvent {
 
 fn renderer_tool_failure(output: &tidebreak_core::ToolOutput) -> Option<RendererToolFailure> {
     let data = output.data.as_ref()?;
-    (output.is_error
-        && data.get("failure").and_then(serde_json::Value::as_str) == Some("executor_unavailable")
-        && data.get("reason").and_then(serde_json::Value::as_str) == Some("lease_expired"))
-    .then_some(RendererToolFailure {
+    if !output.is_error
+        || data.get("failure").and_then(serde_json::Value::as_str) != Some("executor_unavailable")
+    {
+        return None;
+    }
+    let reason = match data.get("reason").and_then(serde_json::Value::as_str) {
+        Some("lease_expired") => RendererToolFailureReason::LeaseExpired,
+        Some("provider_unavailable") => RendererToolFailureReason::ProviderUnavailable,
+        _ => return None,
+    };
+    Some(RendererToolFailure {
         code: RendererToolFailureCode::ExecutorUnavailable,
-        reason: RendererToolFailureReason::LeaseExpired,
+        reason,
     })
 }
 
@@ -667,6 +675,45 @@ mod tests {
             project(AgentEvent::CompactionFinished { compacted: false }),
             RendererAgentEvent::CompactionFinished { compacted: false }
         );
+    }
+
+    #[test]
+    fn unavailable_exec_projects_a_bounded_failure_reason() {
+        let call_id = CallId::new();
+        let projected = RendererSequencedEvent::from(&SequencedEvent {
+            seq: 1,
+            event: AgentEvent::ToolCallCompleted {
+                call_id,
+                output: ToolOutput::failed(
+                    tidebreak_core::ToolErrorCategory::TransportFailed,
+                    "private provider diagnostic",
+                )
+                .with_data(serde_json::json!({
+                    "failure": "executor_unavailable",
+                    "reason": "provider_unavailable",
+                    "retryable": false,
+                })),
+                action: None,
+                result: None,
+            },
+        });
+
+        assert_eq!(
+            projected.event,
+            RendererAgentEvent::ToolCallCompleted {
+                call_id,
+                status: RendererToolStatus::Failed,
+                failure: Some(RendererToolFailure {
+                    code: RendererToolFailureCode::ExecutorUnavailable,
+                    reason: RendererToolFailureReason::ProviderUnavailable,
+                }),
+                action: None,
+                result: None,
+            }
+        );
+        assert!(!serde_json::to_string(&projected)
+            .unwrap()
+            .contains("private provider diagnostic"));
     }
 
     #[test]
