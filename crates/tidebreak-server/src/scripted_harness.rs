@@ -1,9 +1,9 @@
 //! A [`HarnessAdapter`] / [`HarnessSession`] driven by a script of events.
 //!
-//! Compiled only under the `scripted-harness` feature or in this crate's
-//! tests, matching [`scripted_provider`]: a released binary never contains it.
-//! Test-only builders are gated with `#[cfg(test)]` so a feature-enabled
-//! binary does not carry them.
+//! Compiled only under `cfg(debug_assertions)` or in this crate's tests,
+//! matching [`scripted_provider`]: a released binary never contains it.
+//! Test-only builders are gated with `#[cfg(test)]` so a debug binary does not
+//! carry them.
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

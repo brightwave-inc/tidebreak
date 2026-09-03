@@ -38,11 +38,11 @@ futures = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true, optional = true }
 async-stream = { workspace = true, optional = true }
-tokio = { workspace = true, features = ["time"], optional = true }
+tokio = { workspace = true, optional = true }
 url = { workspace = true }
 uuid = { workspace = true, optional = true }
 
 [dev-dependencies]
 axum = { workspace = true }
 tidebreak-core = { path = "../tidebreak-core", default-features = false, features = ["tools"] }
-tokio = { workspace = true, features = ["net", "rt-multi-thread", "test-util"] }
+tokio = { workspace = true }

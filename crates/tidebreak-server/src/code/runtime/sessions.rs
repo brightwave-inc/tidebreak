@@ -83,11 +83,11 @@ impl CodeRuntime {
             // Skip when a CLI e2e has replaced this kind with the scripted
             // engine: that binary has no pin and must not try to download one.
             let skip_pin = {
-                #[cfg(feature = "scripted-harness")]
+                #[cfg(debug_assertions)]
                 {
                     crate::scripted_harness::env_is_set()
                 }
-                #[cfg(not(feature = "scripted-harness"))]
+                #[cfg(not(debug_assertions))]
                 {
                     false
                 }

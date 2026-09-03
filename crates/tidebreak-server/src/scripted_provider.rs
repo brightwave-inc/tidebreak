@@ -7,10 +7,13 @@
 //! This module is the one seam that does, and it stays deliberately small — a
 //! list of steps in, provider events out.
 //!
-//! It is compiled only under the `scripted-provider` feature, which
-//! `tidebreak-cli` enables from its dev-dependencies. A released binary never
-//! contains it, so the environment variable below cannot divert a real
-//! installation's model traffic.
+//! It is compiled only under `cfg(debug_assertions)`, which the release
+//! profile pins off (see the root manifest's `[profile.release]`). A released
+//! binary never contains it, so the environment variable below cannot divert a
+//! real installation's model traffic. The debug gate — rather than a cargo
+//! feature `tidebreak-cli` turns on from its dev-dependencies — keeps every
+//! dev-profile build of this crate on one feature set, so `-p` builds and
+//! `--workspace` builds share the same compiled rlib.
 //!
 //! `TIDEBREAK_SCRIPTED_PROVIDER` holds the script as a JSON array, one entry per
 //! model step:

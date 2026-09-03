@@ -1,5 +1,5 @@
 //! End-to-end tests of `tidebreak agent-mcp` code-mode tools over a real
-//! `tidebreak serve` with the feature-gated scripted harness.
+//! `tidebreak serve` with the debug-only scripted harness.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
