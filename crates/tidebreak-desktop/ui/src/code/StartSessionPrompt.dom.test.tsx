@@ -107,6 +107,27 @@ function entry(
 }
 
 describe("StartSessionPrompt", () => {
+  it("does not offer the workspace-less internal engine", async () => {
+    const onStart = vi.fn();
+    await renderWithRouter(
+      wrap(
+        <StartSessionPrompt
+          workspaceId="workspace-1"
+          harnesses={[entry("internal", {})]}
+          starting={false}
+          selectedMode={null}
+          onSelectMode={vi.fn()}
+          onStart={onStart}
+        />,
+      ),
+    );
+
+    expect(screen.queryByText("Tidebreak")).not.toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Harness" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
+    expect(onStart).not.toHaveBeenCalled();
+  });
+
   it("does not offer attachments before a real session exists", async () => {
     await renderWithRouter(
       wrap(

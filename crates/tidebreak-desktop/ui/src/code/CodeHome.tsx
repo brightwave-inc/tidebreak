@@ -21,7 +21,7 @@ import { useCodeUiStore } from "./CodeUiStore";
 import { useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { DoctorList } from "./DoctorList";
 import { FOCUS_RING, HOVER_TINT } from "./interactive";
-import { harnessUnusableReason } from "./labels";
+import { harnessUnusableReason, workspaceHarnesses } from "./labels";
 import { middleTruncate } from "./workspaceCards";
 
 /**
@@ -64,8 +64,9 @@ function CodeHomeBody() {
 
   // Startable now, or one download away. Either way the reader can get to
   // work from here, so the register form is what the page owes them.
-  const usable =
-    doctor?.harnesses.some((entry) => !harnessUnusableReason(entry)) ?? false;
+  const usable = workspaceHarnesses(doctor?.harnesses ?? []).some(
+    (entry) => !harnessUnusableReason(entry),
+  );
   const showRepos = loaded && repos.length > 0;
   const showEmpty = loaded && repos.length === 0 && usable;
   const showDoctor = Boolean(doctor && !usable);

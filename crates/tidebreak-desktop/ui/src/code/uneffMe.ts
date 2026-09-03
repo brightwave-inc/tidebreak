@@ -12,6 +12,7 @@ import {
   createPermissionModes,
   defaultCreatePermissionMode,
   harnessCanStartNow,
+  workspaceHarnesses,
 } from "./labels";
 import type { FirstSessionSettings } from "./startWorkspaceSession";
 
@@ -180,7 +181,9 @@ export function uneffSessionSettings(input: {
   lastCreate: CodeCreateDefaults | null;
   ceiling: PermissionMode | null | undefined;
 }): FirstSessionSettings | null {
-  const ready = (input.doctor?.harnesses ?? []).filter(harnessCanStartNow);
+  const ready = workspaceHarnesses(input.doctor?.harnesses ?? []).filter(
+    harnessCanStartNow,
+  );
   const entry =
     ready.find((candidate) => candidate.kind === input.sourceHarness) ??
     ready.find((candidate) => candidate.kind === input.lastCreate?.harness) ??

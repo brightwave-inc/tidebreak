@@ -251,6 +251,15 @@ describe("uneff me session settings", () => {
     ).toBeNull();
     expect(
       uneffSessionSettings({
+        doctor: {
+          harnesses: [{ ...CLAUDE, kind: "internal", installable: false }],
+        },
+        lastCreate: null,
+        ceiling: null,
+      }),
+    ).toBeNull();
+    expect(
+      uneffSessionSettings({
         doctor: { harnesses: [CLAUDE] },
         lastCreate: null,
         ceiling: "plan",

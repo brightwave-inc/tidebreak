@@ -20,6 +20,7 @@ import {
   HARNESS_LABELS,
   harnessNeedsDownload,
   harnessUnusableReason,
+  workspaceHarnesses,
 } from "./labels";
 
 /** What picking a not-yet-downloaded engine does. */
@@ -63,9 +64,10 @@ export function HarnessPicker({
 }) {
   const navigate = useNavigate();
   const harnessesPath: string = "/settings/coding-harnesses";
-  const selected = harnesses.find((entry) => entry.kind === value);
+  const choices = workspaceHarnesses(harnesses);
+  const selected = choices.find((entry) => entry.kind === value);
   const SelectedIcon = selected ? HARNESS_ICONS[selected.kind] : null;
-  const anyUnusable = harnesses.some((entry) => harnessUnusableReason(entry));
+  const anyUnusable = choices.some((entry) => harnessUnusableReason(entry));
 
   return (
     <div
@@ -76,9 +78,9 @@ export function HarnessPicker({
       }
     >
       <Select
-        value={value ?? undefined}
+        value={selected?.kind}
         onValueChange={(next) => onChange(next as HarnessKind)}
-        disabled={disabled || harnesses.length === 0}
+        disabled={disabled || choices.length === 0}
       >
         <SelectTrigger
           aria-label="Harness"
@@ -100,10 +102,7 @@ export function HarnessPicker({
           </SelectValue>
         </SelectTrigger>
         <SelectContent scrollButtons={false}>
-          {harnesses.map((entry) => {
-            // The in-process engine hosts conversations without a
-            // workspace; it is never a pick for a repo-bound session.
-            if (entry.kind === "internal") return null;
+          {choices.map((entry) => {
             const reason = harnessUnusableReason(entry);
             const note =
               reason ?? (harnessNeedsDownload(entry) ? DOWNLOAD_NOTE : null);

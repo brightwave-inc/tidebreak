@@ -160,4 +160,31 @@ describe("HarnessPicker", () => {
       screen.queryByRole("button", { name: "Coding harnesses" }),
     ).not.toBeInTheDocument();
   });
+
+  it("does not show the internal engine even when a caller passes it as selected", async () => {
+    await renderWithRouter(
+      <HarnessPicker
+        harnesses={[
+          entry({
+            kind: "internal",
+            installable: false,
+            authenticated: true,
+          }),
+          entry({ kind: "claude_code", authenticated: true }),
+        ]}
+        value="internal"
+        onChange={vi.fn()}
+      />,
+    );
+
+    const trigger = screen.getByRole("combobox", { name: "Harness" });
+    expect(trigger).not.toHaveTextContent("Tidebreak");
+    await userEvent.setup().click(trigger);
+    expect(
+      screen.queryByRole("option", { name: "Tidebreak" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("option", { name: "Claude Code" }),
+    ).toBeInTheDocument();
+  });
 });

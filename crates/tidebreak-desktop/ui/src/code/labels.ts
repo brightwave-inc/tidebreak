@@ -232,6 +232,19 @@ export function harnessCanStartNow(entry: {
 }
 
 /**
+ * Engines a repo-backed workspace may start.
+ *
+ * The internal engine hosts conversations without a workspace. The server
+ * lists it in the shared engine doctor, but every Code workspace create path
+ * must keep it out of its readiness checks and pickers.
+ */
+export function workspaceHarnesses<T extends { kind: HarnessKind }>(
+  entries: readonly T[],
+): T[] {
+  return entries.filter((entry) => entry.kind !== "internal");
+}
+
+/**
  * Create default: the most autonomous posture the engine honors, walking
  * Allow → Auto → Ask → Plan (decision 0039, amended 2026-08-18). Approving
  * every step of a fresh session cost more than it caught, so create starts
