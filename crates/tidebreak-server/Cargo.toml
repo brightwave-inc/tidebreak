@@ -111,6 +111,7 @@ windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Globali
 winreg = "=0.56.0"
 
 [dev-dependencies]
+tidebreak-core = { path = "../tidebreak-core", features = ["test-util"] }
 # The real in-container agent (loop, supervisor, sandbox-resident tool registry)
 # so the sandbox-resident driver tests can drive the actual sandbox side over a
 # loopback socket, with only Docker and the host model mocked.

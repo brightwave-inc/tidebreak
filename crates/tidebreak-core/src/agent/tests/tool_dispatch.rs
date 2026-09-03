@@ -283,7 +283,7 @@ async fn large_tool_results_are_truncated() {
     std::fs::write(workspace.path().join("note.txt"), "x".repeat(10_000)).unwrap();
     let db = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect(&format!(
+        DbStore::connect_test_sqlite_fixture(&format!(
             "sqlite://{}?mode=rwc",
             db.path().join("t.db").display()
         ))
@@ -661,7 +661,7 @@ async fn registry_fails_closed_for_every_consumer_when_a_tool_schema_is_unusable
 async fn arguments_violating_the_advertised_schema_are_refused_before_the_tool_runs() {
     let db = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect(&format!(
+        DbStore::connect_test_sqlite_fixture(&format!(
             "sqlite://{}?mode=rwc",
             db.path().join("t.db").display()
         ))
@@ -790,7 +790,7 @@ impl ModelProvider for TruncatedArgsProvider {
 async fn malformed_arguments_go_back_to_the_model_instead_of_running_the_tool() {
     let db = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect(&format!(
+        DbStore::connect_test_sqlite_fixture(&format!(
             "sqlite://{}?mode=rwc",
             db.path().join("t.db").display()
         ))

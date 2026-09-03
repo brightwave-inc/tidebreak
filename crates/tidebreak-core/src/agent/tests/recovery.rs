@@ -103,7 +103,7 @@ async fn assert_sensitive_restart_recovery(
 ) {
     let db = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect(&format!(
+        DbStore::connect_test_sqlite_fixture(&format!(
             "sqlite://{}?mode=rwc",
             db.path().join("restart.db").display()
         ))
@@ -292,7 +292,7 @@ async fn pending_workspace_restart(
 ) {
     let db = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect(&format!(
+        DbStore::connect_test_sqlite_fixture(&format!(
             "sqlite://{}?mode=rwc",
             db.path().join("cancelled-restart.db").display()
         ))

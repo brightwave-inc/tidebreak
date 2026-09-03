@@ -49,12 +49,10 @@ async fn temp_store() -> (tempfile::TempDir, DbStore) {
 }
 
 async fn temp_store_with_max_connections(max_connections: u32) -> (tempfile::TempDir, DbStore) {
-    let template = migrated_sqlite_template_for_tests().await.unwrap();
     let dir = tempfile::tempdir().unwrap();
     let database = dir.path().join("test.db");
-    std::fs::copy(template, &database).unwrap();
-    let url = format!("sqlite://{}?mode=rw", database.display());
-    let store = DbStore::connect_test_sqlite(&url, max_connections)
+    let url = format!("sqlite://{}?mode=rwc", database.display());
+    let store = DbStore::connect_test_sqlite_fixture_with_max_connections(&url, max_connections)
         .await
         .unwrap();
     (dir, store)

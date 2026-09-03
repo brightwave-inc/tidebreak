@@ -514,7 +514,7 @@ mod tests {
     async fn fixture() -> Fixture {
         let directory = tempfile::tempdir().unwrap();
         let store = Arc::new(
-            DbStore::connect(&format!(
+            DbStore::connect_test_sqlite_fixture(&format!(
                 "sqlite://{}?mode=rwc",
                 directory.path().join("create-app.db").display()
             ))

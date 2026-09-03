@@ -6,7 +6,7 @@ async fn sensitive_tool_parks_until_approved() {
 
     let db = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect(&format!(
+        DbStore::connect_test_sqlite_fixture(&format!(
             "sqlite://{}?mode=rwc",
             db.path().join("t.db").display()
         ))
@@ -116,7 +116,7 @@ async fn sensitive_call_with_prose_keeps_the_preamble_and_parks() {
 
     let db = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect(&format!(
+        DbStore::connect_test_sqlite_fixture(&format!(
             "sqlite://{}?mode=rwc",
             db.path().join("t.db").display()
         ))
@@ -234,7 +234,7 @@ impl ModelProvider for SiblingBoomProvider {
 async fn a_second_sensitive_call_runs_once_the_first_is_terminal() {
     let db = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect(&format!(
+        DbStore::connect_test_sqlite_fixture(&format!(
             "sqlite://{}?mode=rwc",
             db.path().join("t.db").display()
         ))
@@ -419,7 +419,7 @@ async fn a_sensitive_call_parks_only_after_its_plain_sibling_is_terminal() {
     std::fs::write(workspace.path().join("a.txt"), "read first").unwrap();
     let db = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect(&format!(
+        DbStore::connect_test_sqlite_fixture(&format!(
             "sqlite://{}?mode=rwc",
             db.path().join("t.db").display()
         ))
@@ -929,7 +929,7 @@ impl ModelProvider for PlanModeQuestionProvider {
 async fn plan_mode_does_not_run_ask_user_questions() {
     let db = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect(&format!(
+        DbStore::connect_test_sqlite_fixture(&format!(
             "sqlite://{}?mode=rwc",
             db.path().join("plan-questions.db").display()
         ))
@@ -1230,7 +1230,7 @@ async fn ungranted_escaping_exec_still_parks_deny_by_default() {
 async fn sensitive_tool_is_refused_without_a_gate() {
     let db = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect(&format!(
+        DbStore::connect_test_sqlite_fixture(&format!(
             "sqlite://{}?mode=rwc",
             db.path().join("t.db").display()
         ))

@@ -95,7 +95,7 @@ impl ModelProvider for SiblingSandboxSpawnProvider {
 async fn claimed_foreground_agent_returns_one_bounded_sandbox_checkpoint() {
     let db = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect(&format!(
+        DbStore::connect_test_sqlite_fixture(&format!(
             "sqlite://{}?mode=rwc",
             db.path().join("t.db").display()
         ))
@@ -258,7 +258,7 @@ async fn claimed_foreground_agent_returns_one_bounded_sandbox_checkpoint() {
 async fn sibling_sandbox_spawns_are_rejected_before_any_checkpoint() {
     let db = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect(&format!(
+        DbStore::connect_test_sqlite_fixture(&format!(
             "sqlite://{}?mode=rwc",
             db.path().join("siblings.db").display()
         ))
@@ -336,7 +336,7 @@ async fn sibling_sandbox_spawns_are_rejected_before_any_checkpoint() {
 async fn report_blocked_returns_a_persisted_refused_outcome_with_the_explanation() {
     let db = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect(&format!(
+        DbStore::connect_test_sqlite_fixture(&format!(
             "sqlite://{}?mode=rwc",
             db.path().join("report-blocked.db").display()
         ))
@@ -486,7 +486,7 @@ async fn drive_gated_delegation(
 ) -> (AgentTurnOutcome, Vec<AgentEvent>) {
     let db = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect(&format!(
+        DbStore::connect_test_sqlite_fixture(&format!(
             "sqlite://{}?mode=rwc",
             db.path().join("gate.db").display()
         ))

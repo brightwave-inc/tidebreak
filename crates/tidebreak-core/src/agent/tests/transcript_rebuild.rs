@@ -560,7 +560,7 @@ async fn second_turn_rebuilds_prior_tool_calls_into_transcript() {
     std::fs::write(workspace.path().join("note.txt"), "hello from disk").unwrap();
     let db = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect(&format!(
+        DbStore::connect_test_sqlite_fixture(&format!(
             "sqlite://{}?mode=rwc",
             db.path().join("t.db").display()
         ))

@@ -166,6 +166,30 @@ impl DbStore {
         Ok(Self { conn })
     }
 
+    /// Clone the migrated test template into `url` with one connection.
+    #[cfg(any(test, feature = "test-util"))]
+    #[doc(hidden)]
+    pub async fn connect_test_sqlite_fixture(url: &str) -> Result<Self> {
+        Self::connect_test_sqlite_fixture_with_max_connections(url, 1).await
+    }
+
+    /// Clone the migrated test template into `url`, then open it cheaply.
+    #[cfg(any(test, feature = "test-util"))]
+    #[doc(hidden)]
+    pub async fn connect_test_sqlite_fixture_with_max_connections(
+        url: &str,
+        max_connections: u32,
+    ) -> Result<Self> {
+        let database = url
+            .strip_prefix("sqlite://")
+            .and_then(|path| path.strip_suffix("?mode=rwc"))
+            .ok_or_else(|| store_err("test SQLite URL must end in ?mode=rwc"))?;
+        let template = migrated_sqlite_template_for_tests().await?;
+        std::fs::copy(template, database).map_err(store_err)?;
+        let read_write_url = format!("sqlite://{database}?mode=rw");
+        Self::connect_test_sqlite(&read_write_url, max_connections).await
+    }
+
     /// Connect with explicit SeaORM pool options and run migrations.
     ///
     /// Most callers should use [`Self::connect`]. This constructor is for
