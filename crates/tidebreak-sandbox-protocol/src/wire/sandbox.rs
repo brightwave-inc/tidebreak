@@ -28,6 +28,7 @@ use tokio::{
 };
 
 use crate::{
+    events::EmitError,
     events::{EventPayload, SandboxEvent},
     ids::{EventCursor, OperationId, RequestId, Sequence},
     protocol::{
@@ -35,7 +36,6 @@ use crate::{
         MAX_INFLIGHT_REQUESTS, PROTOCOL_VERSION,
     },
     provisioning::TransportSecret,
-    reference::EmitError,
     reverse::{
         Capability, ControlFrame, RequestFrame, ReverseEnvelope, ReverseRequest, ReverseResult,
     },

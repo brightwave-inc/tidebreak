@@ -217,7 +217,6 @@ import {
   type CodeCheckLog as WireCodeCheckLog,
   type CodeCheckLogError as WireCodeCheckLogError,
   type CodeCheckLogsSnapshot as WireCodeCheckLogsSnapshot,
-  type CodeTerminalActivityNotice as WireCodeTerminalActivityNotice,
   type PullRequestDigest as WirePullRequestDigest,
   type PullRequestCheck as WirePullRequestCheck,
   type PullRequestCheckBucket as WirePullRequestCheckBucket,
@@ -1330,7 +1329,6 @@ export type CodePrMergeMethod = WireCodePrMergeMethod;
 export type MergeCodePrBody = WireMergeCodePrBody;
 export type CodeTerminalSnapshot = WireCodeTerminalSnapshot;
 export type CodeTerminalRead = WireCodeTerminalRead;
-export type CodeTerminalActivityNotice = WireCodeTerminalActivityNotice;
 export type CodeSessionDigest = WireCodeSessionDigest;
 export type CodeUpdateNotice = WireCodeUpdateNotice;
 export type CodeCloneDefaults = WireCodeCloneDefaults;

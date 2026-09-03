@@ -176,6 +176,7 @@ impl HarnessLlmRelay {
     /// Refusals are 401 with the vendor's authentication shape so the
     /// engine fails the turn fast instead of retrying; a gateway that does
     /// not answer is 502 so the engine's own retry policy applies.
+    #[allow(clippy::result_large_err)]
     async fn exchange(
         &self,
         endpoint: RelayEndpoint,

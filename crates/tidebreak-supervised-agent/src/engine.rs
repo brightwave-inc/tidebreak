@@ -55,14 +55,6 @@ pub struct EngineError {
     pub message: String,
 }
 
-/// The running turn cannot take a mid-turn message.
-///
-/// Not an error: some engines only accept input between turns. The driver
-/// keeps the message queued for the next turn.
-#[derive(Debug, thiserror::Error)]
-#[error("the engine cannot be steered mid-turn")]
-pub struct SteerRefused;
-
 /// What happened when the driver tried to steer a running turn.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SteerOutcome {

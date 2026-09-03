@@ -42,8 +42,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use tidebreak_core::{
-    input_schema_for, AgentError, ChatId, ChatMessage, ChatRequest, Message, ModelProvider,
-    PromptCacheMode, ProviderEvent, ResponseFormat, Result, Role, StopReason, Store, UtilityModel,
+    input_schema_for, strip_json_fence, AgentError, ChatId, ChatMessage, ChatRequest, Message,
+    ModelProvider, PromptCacheMode, ProviderEvent, ResponseFormat, Result, Role, StopReason, Store,
+    UtilityModel,
 };
 
 use crate::bus::{ChatMetadataNotice, EventBus};
@@ -532,21 +533,6 @@ pub(crate) fn head(text: &str, max_bytes: usize) -> &str {
         end -= 1;
     }
     &text[..end]
-}
-
-/// Unwrap a fenced code block, for runtimes that accept an output constraint and
-/// then answer the prompt instead.
-fn strip_json_fence(content: &str) -> &str {
-    content
-        .strip_prefix("```json")
-        .and_then(|content| content.strip_suffix("```"))
-        .or_else(|| {
-            content
-                .strip_prefix("```")
-                .and_then(|content| content.strip_suffix("```"))
-        })
-        .map(str::trim)
-        .unwrap_or(content)
 }
 
 #[cfg(test)]

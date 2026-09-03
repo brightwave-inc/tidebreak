@@ -87,28 +87,26 @@ pub(crate) use terminals::{
 pub(crate) use triggers::{
     create_repo_trigger, delete_repo_trigger, list_repo_triggers, update_repo_trigger,
 };
-#[allow(unused_imports)]
+#[cfg(test)]
 pub(crate) use types::{
-    CodeActionSnapshot, CodeAnalyticsDay, CodeAnalyticsHarness, CodeAnalyticsModel,
-    CodeAnalyticsPricingCoverage, CodeAnalyticsRange, CodeAnalyticsRepository,
-    CodeAnalyticsSnapshot, CodeAnalyticsTotals, CodeApprovalDecisionBody, CodeApprovalSnapshot,
-    CodeCheckLog, CodeCheckLogError, CodeCheckLogsSnapshot, CodeCloneDefaults,
-    CodeCloneJobSnapshot, CodeCommitSnapshot, CodeConnectPage, CodeDeliveryActionResult,
+    CodeActionSnapshot, CodeAnalyticsSnapshot, CodeApprovalDecisionBody, CodeApprovalSnapshot,
+    CodeCheckLogsSnapshot, CodeCommitSnapshot, CodeConnectPage, CodeDeliveryActionResult,
     CodeDeliveryPullRequestActionBody, CodeDeliveryPullRequestDetail, CodeDeliveryPullRequestFile,
     CodeDeliveryPullRequestQuery, CodeDeliveryPullRequestTarget, CodeDeliveryPullRequestsPage,
     CodeDeliveryRepositoriesSnapshot, CodeDeliveryRunActionBody, CodeDeliveryRunDetail,
-    CodeDeliveryRunQuery, CodeDeliveryRunTarget, CodeDeliveryRunsPage, CodeFileChange,
-    CodeForkBody, CodeForkTranscript, CodeGithubRepositories, CodeGithubRepository,
-    CodeGrantSnapshot, CodeHarnessInstallSnapshot, CodePrCommentsSnapshot, CodePushSnapshot,
-    CodeRepoSnapshot, CodeRepoSource, CodeRepoSources, CodeSessionDebug, CodeSessionDigest,
-    CodeSessionSnapshot, CodeTerminalActivityNotice, CodeTerminalRead, CodeTerminalSnapshot,
-    CodeTriggerSnapshot, CodeTurnSnapshot, CodeUpdateNotice, CodeWorkspaceBlob, CodeWorkspaceDiff,
-    CodeWorkspaceFiles, CodeWorkspaceHistorySearchMatch, CodeWorkspaceHistorySearchSource,
-    CodeWorkspacePrSnapshot, CodeWorkspacePullRequests, CodeWorkspaceSearch,
-    CodeWorkspaceSearchMatch, CodeWorkspaceSnapshot, CodeWorkspaceTree, CodeWorktreeRoot,
+    CodeDeliveryRunQuery, CodeDeliveryRunTarget, CodeDeliveryRunsPage, CodeForkBody,
+    CodeForkTranscript, CodeGrantSnapshot, CodePrCommentsSnapshot, CodePushSnapshot,
+    CodeRepoSnapshot, CodeSessionDigest, CodeSessionSnapshot, CodeTerminalRead,
+    CodeTerminalSnapshot, CodeTriggerSnapshot, CodeTurnSnapshot, CodeUpdateNotice,
+    CodeWorkspaceBlob, CodeWorkspaceDiff, CodeWorkspaceFiles, CodeWorkspacePrSnapshot,
+    CodeWorkspacePullRequests, CodeWorkspaceSearch, CodeWorkspaceSnapshot, CodeWorkspaceTree,
     CreateCodeTriggerBody, HarnessDoctorReport, HarnessModelList, MergeCodePrBody, QueuedCodeTurn,
     ResolveCodeDeliveryRepositoriesBody, SequencedCodeEventFrame, SetCodeWorktreeRootBody,
     UpdateCodeTriggerBody,
+};
+pub(crate) use types::{
+    CodeCloneDefaults, CodeCloneJobSnapshot, CodeGithubRepositories, CodeGithubRepository,
+    CodeHarnessInstallSnapshot, CodeRepoSource, CodeRepoSources, CodeWorktreeRoot,
 };
 pub(crate) use updates::code_updates;
 pub(crate) use usage::subscription_usage;

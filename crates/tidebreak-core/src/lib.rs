@@ -65,6 +65,8 @@ pub mod context;
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub mod db;
 pub mod deliverable;
+pub mod digest;
+pub mod fs_atomic;
 #[cfg(feature = "blob-object")]
 mod object_blob;
 // Host-side acceptance writes bytes into private scratch, so it depends on the
@@ -98,6 +100,7 @@ pub mod semantic_checkpoint;
 pub mod steer;
 pub mod storage;
 pub mod task_plan;
+pub mod text;
 pub mod tool;
 #[cfg(feature = "tools")]
 pub mod tools;
@@ -245,8 +248,10 @@ pub use deliverable_acceptance::{
     accept_workspace_artifact, restore_output_to_revision, save_user_output_revision,
     WorkspaceArtifactProposal,
 };
+pub use digest::sha256_hex;
 pub use error::{AgentError, AgentErrorInfo, ProviderErrorInfo, ProviderFailure, Result};
 pub use event::{AgentEvent, SequencedEvent};
+pub use fs_atomic::{replace_file, sync_directory};
 pub use id::{
     AgentRunId, AssistantCitationId, CallId, ChatId, ChunkId, DocumentId, HostRootId,
     HostRootIdError, MessageId, NotificationId, OutputCitationId, OutputId, OutputRevisionId,
@@ -326,7 +331,7 @@ pub use secret_bundle::{
 };
 pub use secret_cache::CachingSecretProvider;
 pub use semantic_checkpoint::{
-    ContextCheckpoint, ContextCheckpointPayloadV1, ContextCheckpointPayloadV2,
+    strip_json_fence, ContextCheckpoint, ContextCheckpointPayloadV1, ContextCheckpointPayloadV2,
     SaveContextCheckpointOutcome, CONTEXT_CHECKPOINT_FORMAT_V1, CONTEXT_CHECKPOINT_FORMAT_V2,
     MAX_CONTEXT_CHECKPOINT_BYTES, MAX_CONTEXT_CHECKPOINT_ITEMS, MAX_CONTEXT_CHECKPOINT_ITEM_BYTES,
 };
@@ -364,6 +369,7 @@ pub use task_plan::{
     TaskPlanStepStatus, UpdateTaskPlanArgs, MAX_TASK_PLAN_STEPS, MAX_TASK_PLAN_STEP_CHARS,
     UPDATE_TASK_PLAN_TOOL,
 };
+pub use text::truncate_utf8;
 pub use tool::{
     input_schema_for, strict_json_schema, ApprovalClass, OptionalProperties, ScratchPriorContents,
     ScratchWriteJournal, Tool, ToolCtx, ToolErrorCategory, ToolOutput, ToolScratch, ToolSpec,

@@ -1425,7 +1425,7 @@ async fn map_result(
             }
             let tree_text = serde_json::to_string(&tree.tree).unwrap_or_else(|_| "{}".to_owned());
             let (tree_text, over_limit) =
-                super::folder_operations::truncate_utf8(&tree_text, MAX_TREE_RESULT_BYTES);
+                tidebreak_core::truncate_utf8(&tree_text, MAX_TREE_RESULT_BYTES);
             completed(serde_json::json!({
                 "status": "ok",
                 "app_name": tree.app_name,

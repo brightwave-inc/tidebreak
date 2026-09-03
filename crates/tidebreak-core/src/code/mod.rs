@@ -1181,19 +1181,6 @@ impl CodePullRequestLiveState {
             observed_at,
         }
     }
-
-    /// Whether any live field other than `observed_at` differs. Broadcasts
-    /// key on this, so a read that confirms no movement stays silent.
-    #[must_use]
-    pub fn differs_from(&self, other: &Self) -> bool {
-        self.checks_summary != other.checks_summary
-            || self.checks != other.checks
-            || self.review_decision != other.review_decision
-            || self.mergeable != other.mergeable
-            || self.merge_state_status != other.merge_state_status
-            || self.auto_merge_enabled != other.auto_merge_enabled
-            || self.in_merge_queue != other.in_merge_queue
-    }
 }
 
 /// Durable observation of one GitHub Actions workflow run.

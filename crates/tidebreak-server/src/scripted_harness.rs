@@ -2,9 +2,8 @@
 //!
 //! Compiled only under the `scripted-harness` feature or in this crate's
 //! tests, matching [`scripted_provider`]: a released binary never contains it.
-//! Test-only helpers stay compiled under the feature so CLI e2e can load the
-//! adapter; they are unused outside this crate's tests.
-#![cfg_attr(not(test), allow(dead_code))]
+//! Test-only builders are gated with `#[cfg(test)]` so a feature-enabled
+//! binary does not carry them.
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -47,6 +46,7 @@ impl ScriptedApprover {
         rx
     }
 
+    #[cfg(test)]
     pub(crate) fn observed(&self) -> Vec<(String, ApprovalDecision)> {
         self.observed.lock().expect("scripted observed").clone()
     }
@@ -209,13 +209,13 @@ impl ScriptedAdapter {
 
     /// How many times this adapter has been probed. The runtime memoizes
     /// probes, so this is how a test sees a cache hit from a cold read.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn probe_count(&self) -> u64 {
         self.probes.load(Ordering::SeqCst)
     }
 
     /// The approval endpoint each launched session was given, in order.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn launched_approvals(&self) -> Vec<Option<String>> {
         self.launched_approvals
             .lock()
@@ -225,6 +225,7 @@ impl ScriptedAdapter {
 
     /// Fails every turn the way an engine does once it has lost the session
     /// this one resumed: not a turn failure, a dead resume ref.
+    #[cfg(test)]
     pub(crate) fn with_lost_resume(mut self, detail: &str) -> Self {
         self.lost_resume = Some(detail.to_owned());
         self
@@ -239,7 +240,7 @@ impl ScriptedAdapter {
     }
 
     /// Make the native approval channel reject every decision.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn with_approval_delivery_error(self, detail: impl Into<String>) -> Self {
         *self
             .approver
@@ -250,7 +251,7 @@ impl ScriptedAdapter {
     }
 
     /// Accept the approval, then delay the native acknowledgement.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn with_approval_ack_delay(mut self, delay: Duration) -> Self {
         self.approval_ack_delay = delay;
         self
@@ -258,24 +259,28 @@ impl ScriptedAdapter {
 
     /// Overrides the auto posture independently of the approval channel,
     /// for exercising the mode gate's per-flag refusals.
+    #[cfg(test)]
     pub(crate) fn with_auto_mode(mut self, level: CapLevel) -> Self {
         self.auto_mode = level;
         self
     }
 
     /// Overrides plan independently of the other postures.
+    #[cfg(test)]
     pub(crate) fn with_plan_mode(mut self, level: CapLevel) -> Self {
         self.plan_mode = level;
         self
     }
 
     /// Overrides the allow-everything posture independently of Auto.
+    #[cfg(test)]
     pub(crate) fn with_allow_mode(mut self, level: CapLevel) -> Self {
         self.allow_mode = level;
         self
     }
 
     /// Declares whether this scripted engine consumes image attachments.
+    #[cfg(test)]
     pub(crate) fn with_image_input(mut self, level: CapLevel) -> Self {
         self.image_input = level;
         self
@@ -284,7 +289,7 @@ impl ScriptedAdapter {
     /// Declares the durable-park capability and, when parking, where the
     /// script splits: `run_turn` plays `events[..split]` and parks with this
     /// ref and wait; `resume_turn` plays the rest.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn with_parked_turn(
         mut self,
         split: usize,
@@ -296,39 +301,22 @@ impl ScriptedAdapter {
         self
     }
 
-    /// Declares the structured user-questions capability.
-    #[allow(dead_code)]
-    pub(crate) fn with_user_questions(mut self, level: CapLevel) -> Self {
-        self.user_questions = level;
-        self
-    }
-
-    /// Declares the standing-grant decision capability.
-    #[allow(dead_code)]
-    pub(crate) fn with_standing_grants(mut self, level: CapLevel) -> Self {
-        self.standing_grants = level;
-        self
-    }
-
-    /// Every `resume_turn` the sessions were handed, in order.
-    #[allow(dead_code)]
-    pub(crate) fn resumes(&self) -> Vec<(String, ResumeInput)> {
-        self.resumes.lock().expect("scripted resumes").clone()
-    }
-
     /// Declares an effort ladder, the way every adapter but opencode has one.
+    #[cfg(test)]
     pub(crate) fn with_reasoning_levels(mut self, level: CapLevel) -> Self {
         self.reasoning_levels = level;
         self
     }
 
     /// Use another adapter identity while keeping the scripted engine.
+    #[cfg(test)]
     pub(crate) fn with_kind(mut self, kind: HarnessKind) -> Self {
         self.kind = kind;
         self
     }
 
     /// Publish an exact model catalog for capability-validation tests.
+    #[cfg(test)]
     pub(crate) fn with_models(mut self, models: Vec<ListedHarnessModel>) -> Self {
         self.models = models;
         self
@@ -336,6 +324,7 @@ impl ScriptedAdapter {
 
     /// Model an engine that re-postures a live session on its own channel,
     /// the way Claude Code and Codex do. Left off, the runtime relaunches.
+    #[cfg(test)]
     pub(crate) fn with_live_mode_switch(mut self) -> Self {
         self.live_mode_switch = true;
         self
@@ -344,27 +333,37 @@ impl ScriptedAdapter {
     /// Model opencode: the posture rides session creation, the session reports
     /// a resume ref, and resuming it does not re-apply the posture — so a
     /// relaunch would come back running the old mode.
+    #[cfg(test)]
     pub(crate) fn with_posture_fixed_at_session_start(mut self) -> Self {
         self.posture_fixed = true;
         self
     }
 
+    /// Every `resume_turn` the sessions were handed, in order.
+    #[cfg(test)]
+    pub(crate) fn resumes(&self) -> Vec<(String, ResumeInput)> {
+        self.resumes.lock().expect("scripted resumes").clone()
+    }
+
     /// What each turn handed the engine, in order.
+    #[cfg(test)]
     pub(crate) fn turn_inputs(&self) -> Vec<ScriptedTurnInput> {
         self.inputs.lock().expect("scripted inputs").clone()
     }
 
     /// The effort each turn actually ran at, in order.
+    #[cfg(test)]
     pub(crate) fn turn_efforts(&self) -> Vec<Option<ReasoningEffort>> {
         self.turns.lock().expect("scripted turns").clone()
     }
 
     /// Every mode a live switch moved this engine onto, in order.
+    #[cfg(test)]
     pub(crate) fn live_modes(&self) -> Vec<PermissionMode> {
         self.modes.lock().expect("scripted modes").clone()
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn observed_decisions(&self) -> Vec<(String, ApprovalDecision)> {
         self.approver.observed()
     }
@@ -374,17 +373,20 @@ impl ScriptedAdapter {
         self
     }
 
+    #[cfg(test)]
     pub(crate) fn with_steering(mut self, level: CapLevel) -> Self {
         self.mid_turn_steering = level;
         self
     }
 
+    #[cfg(test)]
     pub(crate) fn with_steering_delay(mut self, delay: Duration) -> Self {
         self.mid_turn_steering = CapLevel::Supported;
         self.steering_delay = delay;
         self
     }
 
+    #[cfg(test)]
     pub(crate) fn with_steering_rejection(mut self, detail: impl Into<String>) -> Self {
         self.mid_turn_steering = CapLevel::Supported;
         self.steering_rejection = Some(detail.into());
@@ -393,7 +395,7 @@ impl ScriptedAdapter {
 
     /// Publish this pid for the duration of each turn, the way an adapter
     /// that spawns one child per turn does.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn with_child_pid(mut self, pid: i64) -> Self {
         self.child_pid = Some(pid);
         self
@@ -401,17 +403,20 @@ impl ScriptedAdapter {
 
     /// Keep the child pid across turns, the way session-long engines do, so
     /// the worker's idle park timer (decision 0064) arms for this adapter.
+    #[cfg(test)]
     pub(crate) fn with_session_long_child(mut self) -> Self {
         self.session_long_child = true;
         self
     }
 
     /// How many engine sessions the worker terminated.
+    #[cfg(test)]
     pub(crate) fn shutdown_count(&self) -> u64 {
         self.shutdowns.load(Ordering::SeqCst)
     }
 
     /// How many times a session of this adapter has been parked.
+    #[cfg(test)]
     pub(crate) fn park_count(&self) -> u64 {
         self.parks.load(Ordering::SeqCst)
     }
@@ -419,6 +424,7 @@ impl ScriptedAdapter {
     /// Model an engine that asks for an approval and then stops waiting for
     /// one, the way Claude Code's own 60-second permission-prompt timeout
     /// does: the script plays straight past the request.
+    #[cfg(test)]
     pub(crate) fn with_unattended_approvals(mut self) -> Self {
         self.park_approvals = false;
         self
@@ -426,6 +432,7 @@ impl ScriptedAdapter {
 
     /// Stands in for a parser that could not map part of the stream: the
     /// scripted session reports this many unrecognized events per turn.
+    #[cfg(test)]
     pub(crate) fn with_unrecognized_per_turn(mut self, count: u64) -> Self {
         self.unrecognized_per_turn = count;
         self
@@ -433,7 +440,7 @@ impl ScriptedAdapter {
 
     /// Model an engine that dies without saying anything — a SIGKILLed child
     /// reaches EOF exactly like a finished one.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn with_silent_interrupt(mut self) -> Self {
         self.silent_interrupt = true;
         self
@@ -441,7 +448,7 @@ impl ScriptedAdapter {
 
     /// Report this local sign-in state from the probe, for surfaces that
     /// branch on it — the doctor's hosted report among them.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn with_authenticated(self, authenticated: Option<bool>) -> Self {
         self.set_authenticated(authenticated);
         self
@@ -449,7 +456,7 @@ impl ScriptedAdapter {
 
     /// Flip the sign-in state the next probe reports. Tests use this to
     /// model a user signing in after the doctor has already cached signed-out.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn set_authenticated(&self, authenticated: Option<bool>) {
         *self.authenticated.lock().expect("scripted auth") = authenticated;
     }
@@ -598,6 +605,7 @@ struct ScriptedSession {
 
 /// One turn as the engine received it.
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub(crate) struct ScriptedTurnInput {
     /// The prompt text, which is not always the message the person typed.
     pub text: String,
@@ -933,6 +941,7 @@ fn parse_script(script: &str) -> std::result::Result<ScriptedHarnessScript, serd
 }
 
 /// A short successful turn: one assistant delta, then completed.
+#[cfg(test)]
 pub(crate) fn plain_text_script() -> Vec<HarnessEvent> {
     vec![
         HarnessEvent::SessionStarted {

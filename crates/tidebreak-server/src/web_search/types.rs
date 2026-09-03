@@ -916,7 +916,7 @@ fn trim_string_field(value: &mut Option<String>, excess: usize) -> bool {
     let Some(current) = value else {
         return false;
     };
-    let trimmed = truncate_utf8_bytes(current, current.len().saturating_sub(excess));
+    let trimmed = tidebreak_core::truncate_utf8(current, current.len().saturating_sub(excess)).0;
     if trimmed.is_empty() {
         *value = None;
     } else {
@@ -929,19 +929,8 @@ fn trim_required_field(value: &mut String, excess: usize) -> bool {
     if value.is_empty() {
         return false;
     }
-    *value = truncate_utf8_bytes(value, value.len().saturating_sub(excess));
+    *value = tidebreak_core::truncate_utf8(value, value.len().saturating_sub(excess)).0;
     true
-}
-
-fn truncate_utf8_bytes(value: &str, max_bytes: usize) -> String {
-    if value.len() <= max_bytes {
-        return value.to_owned();
-    }
-    let mut end = max_bytes;
-    while end > 0 && !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    value[..end].to_owned()
 }
 
 #[cfg(test)]

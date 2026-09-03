@@ -6,6 +6,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use tidebreak_core::{replace_file, sync_directory};
 use tidebreak_host_broker::RootId;
 use uuid::Uuid;
 
@@ -118,51 +119,6 @@ fn write_atomically(directory: &Path, destination: &Path, bytes: &[u8]) -> io::R
         let _ = fs::remove_file(&temporary);
     }
     result
-}
-
-#[cfg(unix)]
-fn replace_file(temporary: &Path, destination: &Path) -> io::Result<()> {
-    fs::rename(temporary, destination)
-}
-
-#[cfg(windows)]
-fn replace_file(temporary: &Path, destination: &Path) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt as _;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-    };
-
-    let temporary = temporary
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
-    let destination = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
-    let succeeded = unsafe {
-        MoveFileExW(
-            temporary.as_ptr(),
-            destination.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if succeeded == 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn sync_directory(directory: &Path) -> io::Result<()> {
-    std::fs::File::open(directory)?.sync_all()
-}
-
-#[cfg(windows)]
-fn sync_directory(_directory: &Path) -> io::Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]

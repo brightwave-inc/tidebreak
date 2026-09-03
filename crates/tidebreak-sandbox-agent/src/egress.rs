@@ -27,10 +27,10 @@
 //! the host — and an absent or malformed value means deny-all, never open.
 
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
-use tidebreak_egress::EgressDestination;
+use tidebreak_egress::{in_v4_block, in_v6_prefix, parse_authority, EgressDestination};
 use tidebreak_sandbox_protocol::SandboxNetworkPolicy;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{lookup_host, TcpListener, TcpStream};
@@ -301,20 +301,6 @@ async fn read_connect_request(stream: &mut TcpStream) -> Result<ConnectRequest, 
     })
 }
 
-fn parse_authority(authority: &str) -> Option<(String, u16)> {
-    if let Some(rest) = authority.strip_prefix('[') {
-        let (host, port) = rest.split_once("]:")?;
-        let port = port.parse::<u16>().ok().filter(|port| *port != 0)?;
-        return Some((host.to_ascii_lowercase(), port));
-    }
-    let (host, port) = authority.rsplit_once(':')?;
-    if host.is_empty() || host.contains(':') {
-        return None;
-    }
-    let port = port.parse::<u16>().ok().filter(|port| *port != 0)?;
-    Some((host.trim_end_matches('.').to_ascii_lowercase(), port))
-}
-
 /// Whether the compiled policy admits `host:port`. The destination must also be
 /// a well-formed public name or address encoding ([`EgressDestination`]), so an
 /// alternate IP spelling cannot slip past the exact-host comparison.
@@ -382,16 +368,6 @@ fn is_restricted(address: IpAddr) -> bool {
                     .is_some_and(|mapped| is_restricted(IpAddr::V4(mapped)))
         }
     }
-}
-
-fn in_v4_block(address: Ipv4Addr, network: [u8; 4], prefix: u32) -> bool {
-    let mask = u32::MAX << (32 - prefix);
-    u32::from(address) & mask == u32::from(Ipv4Addr::from(network)) & mask
-}
-
-fn in_v6_prefix(address: Ipv6Addr, network: u16, prefix: u32) -> bool {
-    let mask = u16::MAX << (16 - prefix);
-    address.segments()[0] & mask == network & mask
 }
 
 async fn reject(stream: &mut TcpStream, code: u16, reason: &str) -> io::Result<()> {

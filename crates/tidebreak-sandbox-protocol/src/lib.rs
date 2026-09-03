@@ -7,9 +7,9 @@
 //! It is a public, versioned interface third parties implement — a self-hosted
 //! backend means someone other than Tidebreak runs the sandbox side of it — so
 //! the wire contract, not any one backend, is the deliverable. Tidebreak's own
-//! backends are its first consumers; the [in-process reference](reference) here
-//! is the first of them and the target the [conformance suite](conformance)
-//! runs against.
+//! backends are its first consumers; the in-process reference backend
+//! (feature `conformance`) is the first of them and the target the
+//! conformance suite runs against.
 //!
 //! It follows the [`tidebreak-host-broker`](https://docs.rs/tidebreak-host-broker)
 //! envelope discipline deliberately: a single [`PROTOCOL_VERSION`] checked for
@@ -28,8 +28,9 @@
 //!
 //! # What this slice ships, and what it defers
 //!
-//! This crate ships the protocol contract, reference backend, and conformance
-//! suite. The reference backend uses an in-memory [`OperationStore`], while the
+//! This crate ships the protocol contract. The reference backend and
+//! conformance suite compile only under the `conformance` feature (enabled
+//! by this crate's tests). The reference backend uses an in-memory [`OperationStore`], while the
 //! server supplies the crash-safe durable implementation. Reverse responses are
 //! retained for replay until the sandbox acknowledges consuming them; the host
 //! then reduces durable entries to commit markers (see [`oplog`]).
@@ -46,12 +47,13 @@
 //! the reserved control lane share one connection) are transport-specific and
 //! belong to a concrete backend — the local container backend in delivery-
 //! sequence step 7, exercised there as the managed `exec` adapters are. The
-//! [reference backend](reference) passes typed frames in-process to pin
+//! The reference backend passes typed frames in-process to pin
 //! semantics; it is not the byte transport, and "a public versioned interface
 //! third parties implement" means these types and rules, plus a concrete
 //! transport a backend supplies.
 
 pub mod artifacts;
+#[cfg(any(test, feature = "conformance"))]
 pub mod conformance;
 pub mod events;
 pub mod host;
@@ -60,6 +62,7 @@ pub mod init;
 pub mod oplog;
 pub mod protocol;
 pub mod provisioning;
+#[cfg(any(test, feature = "conformance"))]
 pub mod reference;
 pub mod reverse;
 pub mod steer;

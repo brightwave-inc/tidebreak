@@ -96,8 +96,8 @@ pub struct AttachRequest {
 /// the sandbox's own version so the host learns the mismatch rather than getting
 /// a blank refusal — the same courtesy the broker's `Hello` extends. A refusal
 /// still leaves the connection unusable. Backends compute this with
-/// [`handshake`]; the reference backend surfaces a refusal as
-/// [`ConnectError::VersionRefused`](crate::reference::ConnectError::VersionRefused).
+/// [`handshake`]. A reference backend surfaces a version mismatch as a
+/// refused attach rather than a dropped connection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HandshakeResponse {

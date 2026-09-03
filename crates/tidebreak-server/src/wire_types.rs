@@ -480,7 +480,6 @@ mod tests {
         generate::collect_from::<crate::routes::code::CodeWorkspaceDiff>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeTerminalSnapshot>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeTerminalRead>(&cfg, &mut out);
-        generate::collect_from::<crate::routes::code::CodeTerminalActivityNotice>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeSessionDigest>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeUpdateNotice>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeApprovalSnapshot>(&cfg, &mut out);

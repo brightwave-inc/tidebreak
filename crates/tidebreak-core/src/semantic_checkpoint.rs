@@ -251,7 +251,10 @@ pub fn original_requests_from_content(content: &str) -> Vec<String> {
     Vec::new()
 }
 
-fn strip_json_fence(content: &str) -> &str {
+/// Unwrap a fenced code block, for runtimes that accept an output constraint
+/// and then answer the prompt instead.
+#[must_use]
+pub fn strip_json_fence(content: &str) -> &str {
     content
         .strip_prefix("```json")
         .and_then(|content| content.strip_suffix("```"))

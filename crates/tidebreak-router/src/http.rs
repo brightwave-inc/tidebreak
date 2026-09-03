@@ -57,11 +57,6 @@ const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(300);
 /// an hour is pathological under any latency profile.
 const DEFAULT_STREAM_TIMEOUT: Duration = Duration::from_secs(3600);
 
-/// Total budget for a non-streaming provider call (token exchange, and other
-/// small request/response round trips). These have a known, small body, so a
-/// plain total deadline is the right shape.
-const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-
 /// The transport deadlines applied to every provider adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderTimeouts {
@@ -133,12 +128,6 @@ pub fn streaming_client() -> reqwest::Client {
         None => builder,
     };
     build(builder)
-}
-
-/// A client for small, non-streaming provider calls, under a total deadline.
-#[must_use]
-pub fn request_client() -> reqwest::Client {
-    build(reqwest::Client::builder().timeout(DEFAULT_REQUEST_TIMEOUT))
 }
 
 /// Why a provider byte stream stopped early.

@@ -26,9 +26,9 @@ use tidebreak_code_execution::{
     ScratchDir, StagedChange, WriteSnapshotSink,
 };
 use tidebreak_core::{
-    BlobStore, ChatId, DocumentBlob, ExecFileChange, ExecFileRejectionReason, ExecFileSnapshot,
-    ExecFileSnapshotRecord, ExecUndoState, ImageMediaType, ScratchPriorContents, Store, TurnId,
-    MAX_EXEC_WORKSPACE_FILE_BYTES,
+    sha256_hex, BlobStore, ChatId, DocumentBlob, ExecFileChange, ExecFileRejectionReason,
+    ExecFileSnapshot, ExecFileSnapshotRecord, ExecUndoState, ImageMediaType, ScratchPriorContents,
+    Store, TurnId, MAX_EXEC_WORKSPACE_FILE_BYTES,
 };
 use ts_rs::TS;
 
@@ -218,13 +218,6 @@ impl WriteSnapshotSink for TurnSnapshotSink {
             },
         }))
     }
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-
-    let digest: [u8; 32] = Sha256::digest(bytes).into();
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// Result of replaying one turn's durable file-change journal.
@@ -1024,7 +1017,7 @@ fn parse_sha256(value: &str) -> Option<[u8; 32]> {
         return None;
     }
     let mut digest = [0_u8; 32];
-    for (output, encoded) in digest.iter_mut().zip(value.as_bytes().chunks_exact(2)) {
+    for (output, encoded) in digest.iter_mut().zip(value.as_bytes().as_chunks::<2>().0) {
         let encoded = std::str::from_utf8(encoded).ok()?;
         *output = u8::from_str_radix(encoded, 16).ok()?;
     }

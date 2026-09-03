@@ -198,20 +198,3 @@ pub async fn resolve_external_session(
         }
     }
 }
-
-/// Every binding pointing at one session, for revoke and scope sweeps.
-pub async fn list_bindings_for_session(
-    store: &DbStore,
-    owner: &OwnerId,
-    session_id: CodeSessionId,
-) -> Result<Vec<CodeExternalBinding>> {
-    entities::code_external_binding::Entity::find()
-        .filter(entities::code_external_binding::Column::Owner.eq(owner.as_str()))
-        .filter(entities::code_external_binding::Column::SessionId.eq(session_id.0))
-        .all(&store.conn)
-        .await
-        .map_err(store_err)?
-        .into_iter()
-        .map(binding_from_model)
-        .collect()
-}

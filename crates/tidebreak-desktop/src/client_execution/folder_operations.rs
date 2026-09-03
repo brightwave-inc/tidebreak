@@ -10,11 +10,12 @@ use std::collections::HashSet;
 use tauri::Manager;
 use tidebreak_code_execution::host_paths::{resolve_scratch_directory, ScratchEntryKind};
 use tidebreak_core::{
-    validate_import_connected_file_arguments, validate_list_connected_folders_arguments,
-    validate_list_folder_arguments, validate_read_connected_file_arguments, CallId,
-    GrantedFolderCapability, ListFolderArgs, ReadConnectedFileArgs, ResultEntry, ResultEntryKind,
-    ToolCallExecution, ToolCallRecord, ToolCallStatus, IMPORT_CONNECTED_FILE_TOOL,
-    LIST_CONNECTED_FOLDERS_TOOL, LIST_FOLDER_TOOL, READ_CONNECTED_FILE_TOOL,
+    truncate_utf8, validate_import_connected_file_arguments,
+    validate_list_connected_folders_arguments, validate_list_folder_arguments,
+    validate_read_connected_file_arguments, CallId, GrantedFolderCapability, ListFolderArgs,
+    ReadConnectedFileArgs, ResultEntry, ResultEntryKind, ToolCallExecution, ToolCallRecord,
+    ToolCallStatus, IMPORT_CONNECTED_FILE_TOOL, LIST_CONNECTED_FOLDERS_TOOL, LIST_FOLDER_TOOL,
+    READ_CONNECTED_FILE_TOOL,
 };
 use tidebreak_host_broker::{
     Capability, DirectoryEntry, EntryKind, OperationEnvelope, OperationRequest, OperationResult,
@@ -584,17 +585,6 @@ pub(super) fn granted_folder_capabilities(
             _ => None,
         })
         .collect()
-}
-
-pub(super) fn truncate_utf8(value: &str, max_bytes: usize) -> (String, bool) {
-    if value.len() <= max_bytes {
-        return (value.to_owned(), false);
-    }
-    let mut end = max_bytes;
-    while !value.is_char_boundary(end) {
-        end -= 1;
-    }
-    (value[..end].to_owned(), true)
 }
 
 fn unavailable(code: &str, message: &str) -> StoredResolution {

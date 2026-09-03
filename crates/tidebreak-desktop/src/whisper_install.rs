@@ -288,15 +288,7 @@ fn verify_signature(bytes: &[u8], signature_base64: &str) -> Result<(), String> 
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    let digest = hasher.finalize();
-    let mut hex = String::with_capacity(64);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(hex, "{byte:02x}");
-    }
-    hex
+    tidebreak_core::sha256_hex(bytes)
 }
 
 fn sha256_hex_of_file(path: &Path) -> std::io::Result<String> {

@@ -206,7 +206,7 @@ fn read_sidecar(sidecar: &Path) -> std::io::Result<OrphanedWorktrees> {
                 "could not parse the record of previously orphaned code worktrees; keeping it \
                  beside the new one"
             );
-            crate::desktop_schema::replace_file(sidecar, &previous)?;
+            tidebreak_core::replace_file(sidecar, &previous)?;
             Ok(OrphanedWorktrees::default())
         }
     }
@@ -220,7 +220,7 @@ fn write_sidecar(sidecar: &Path, record: &OrphanedWorktrees) -> std::io::Result<
         uuid::Uuid::new_v4()
     ));
     let result = std::fs::write(&temporary, &bytes)
-        .and_then(|()| crate::desktop_schema::replace_file(&temporary, sidecar));
+        .and_then(|()| tidebreak_core::replace_file(&temporary, sidecar));
     if result.is_err() {
         let _ = std::fs::remove_file(&temporary);
     }

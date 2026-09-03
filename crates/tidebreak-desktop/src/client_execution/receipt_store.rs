@@ -13,9 +13,9 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tidebreak_core::{
-    validate_portable_filename, CallId, ChatId, HostRootId, OutputId, OutputRevisionId,
-    OutputWriteMode, RootAttachmentChangeId, MAX_ATTACHMENT_REVISION, MAX_BINARY_DELIVERABLE_BYTES,
-    MAX_CONNECTED_FOLDER_PATH_BYTES,
+    replace_file, sync_directory, validate_portable_filename, CallId, ChatId, HostRootId, OutputId,
+    OutputRevisionId, OutputWriteMode, RootAttachmentChangeId, MAX_ATTACHMENT_REVISION,
+    MAX_BINARY_DELIVERABLE_BYTES, MAX_CONNECTED_FOLDER_PATH_BYTES,
 };
 use tidebreak_host_broker::GrantSubject;
 use tidebreak_host_broker::OperationId;
@@ -1657,60 +1657,6 @@ fn write_atomically(directory: &Path, destination: &Path, bytes: &[u8]) -> io::R
         let _ = fs::remove_file(temporary);
     }
     result
-}
-
-#[cfg(unix)]
-fn replace_file(temporary: &Path, destination: &Path) -> io::Result<()> {
-    fs::rename(temporary, destination)
-}
-
-#[cfg(windows)]
-fn replace_file(temporary: &Path, destination: &Path) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
-    };
-
-    let temporary = temporary
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
-    let destination = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
-    let succeeded = unsafe {
-        MoveFileExW(
-            temporary.as_ptr(),
-            destination.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if succeeded == 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
-fn replace_file(_temporary: &Path, _destination: &Path) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "atomic client-execution receipt replacement is unsupported on this platform",
-    ))
-}
-
-#[cfg(unix)]
-fn sync_directory(path: &Path) -> io::Result<()> {
-    File::open(path)?.sync_all()
-}
-
-#[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> io::Result<()> {
-    Ok(())
 }
 
 fn invalid_data(error: impl std::fmt::Display) -> io::Error {

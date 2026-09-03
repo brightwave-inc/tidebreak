@@ -31,10 +31,6 @@
 //!
 //! [`0079`]: ../../../../../docs/decisions/0079-supervised-agent-declines-the-sandbox-protocol.md
 
-// The session runtime constructs the provisioner and drives sessions through
-// `service`. Items the runtime does not yet call stay allowed as dead.
-#![cfg_attr(not(test), allow(dead_code))]
-
 pub(crate) mod driver;
 #[cfg(test)]
 pub(crate) mod fixtures;
