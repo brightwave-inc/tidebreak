@@ -3732,31 +3732,31 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/pdeljanov/Symphonia
 - License text: `LICENSE` ([L-4b89d4518bd1](#l-4b89d4518bd1))
 
-### symphonia-codec-aac 0.6.0
+### symphonia-codec-aac 0.6.1
 
 - License: `MPL-2.0`
 - Repository: https://github.com/pdeljanov/Symphonia
 - License text: `LICENSE` ([L-4b89d4518bd1](#l-4b89d4518bd1))
 
-### symphonia-codec-alac 0.6.0
+### symphonia-codec-alac 0.6.1
 
 - License: `MPL-2.0`
 - Repository: https://github.com/pdeljanov/Symphonia
 - License text: `LICENSE` ([L-4b89d4518bd1](#l-4b89d4518bd1))
 
-### symphonia-common 0.6.0
+### symphonia-common 0.6.1
 
 - License: `MPL-2.0`
 - Repository: https://github.com/pdeljanov/Symphonia
 - License text: `LICENSE` ([L-4b89d4518bd1](#l-4b89d4518bd1))
 
-### symphonia-core 0.6.0
+### symphonia-core 0.6.1
 
 - License: `MPL-2.0`
 - Repository: https://github.com/pdeljanov/Symphonia
 - License text: `LICENSE` ([L-4b89d4518bd1](#l-4b89d4518bd1))
 
-### symphonia-format-isomp4 0.6.0
+### symphonia-format-isomp4 0.6.1
 
 - License: `MPL-2.0`
 - Repository: https://github.com/pdeljanov/Symphonia
@@ -3768,7 +3768,7 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/pdeljanov/Symphonia
 - License text: `LICENSE` ([L-4b89d4518bd1](#l-4b89d4518bd1))
 
-### symphonia-metadata 0.6.0
+### symphonia-metadata 0.6.1
 
 - License: `MPL-2.0`
 - Repository: https://github.com/pdeljanov/Symphonia
