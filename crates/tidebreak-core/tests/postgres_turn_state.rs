@@ -1906,7 +1906,7 @@ async fn postgres_sandbox_admission_checks_lease_time_after_lock_wait() {
         .execute_raw(Statement::from_string(
             DatabaseBackend::Postgres,
             format!(
-                "UPDATE code_turn SET lease_expires_at = clock_timestamp() + interval '200 milliseconds' WHERE id = '{}'",
+                "UPDATE code_turn SET lease_expires_at = clock_timestamp() + interval '50 milliseconds' WHERE id = '{}'",
                 turn.id.0
             ),
         ))
@@ -1925,6 +1925,16 @@ async fn postgres_sandbox_admission_checks_lease_time_after_lock_wait() {
         ))
         .await
         .unwrap();
+    let blocker_pid = blocker
+        .query_one_raw(Statement::from_string(
+            DatabaseBackend::Postgres,
+            "SELECT pg_backend_pid() AS pid",
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get::<i32>("", "pid")
+        .unwrap();
 
     let contender = store.clone();
     let call = CallId::new();
@@ -1942,7 +1952,8 @@ async fn postgres_sandbox_admission_checks_lease_time_after_lock_wait() {
             )
             .await
     });
-    tokio::time::sleep(StdDuration::from_millis(350)).await;
+    wait_for_postgres_lock_wait(&setup_connection, blocker_pid).await;
+    tokio::time::sleep(StdDuration::from_millis(75)).await;
     blocker.commit().await.unwrap();
 
     assert!(matches!(
@@ -2246,13 +2257,23 @@ async fn postgres_sandbox_claim_uses_statement_time_after_scheduler_lock_wait() 
         ))
         .await
         .unwrap();
+    let blocker_pid = transaction
+        .query_one_raw(Statement::from_string(
+            DatabaseBackend::Postgres,
+            "SELECT pg_backend_pid() AS pid",
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get::<i32>("", "pid")
+        .unwrap();
 
     let claimant = DbStore::connect(&url).await.unwrap();
     let claim = tokio::spawn(async move {
         claimant
             .claim_agent_run(
                 uuid::Uuid::new_v4(),
-                Duration::milliseconds(100),
+                Duration::milliseconds(50),
                 1_024,
                 1_024,
             )
@@ -2260,9 +2281,8 @@ async fn postgres_sandbox_claim_uses_statement_time_after_scheduler_lock_wait() 
             .unwrap()
             .unwrap()
     });
-    // Give the claimant time to begin its transaction and block on the row.
-    // The wait is deliberately longer than the requested lease duration.
-    tokio::time::sleep(StdDuration::from_millis(500)).await;
+    wait_for_postgres_lock_wait(&blocker, blocker_pid).await;
+    tokio::time::sleep(StdDuration::from_millis(75)).await;
     let lock_released_at = Utc::now();
     transaction.commit().await.unwrap();
 
@@ -4223,4 +4243,32 @@ async fn postgres_user_questions_resume_exactly_and_serialize_with_cancellation(
         store.delete_chat(race_chat.id).await.unwrap(),
         DeleteChatOutcome::Deleted { .. }
     ));
+}
+
+async fn wait_for_postgres_lock_wait(observer: &sea_orm::DatabaseConnection, blocker_pid: i32) {
+    tokio::time::timeout(StdDuration::from_secs(5), async {
+        loop {
+            let waiting = observer
+                .query_one_raw(Statement::from_string(
+                    DatabaseBackend::Postgres,
+                    format!(
+                        "SELECT EXISTS (\
+                         SELECT 1 FROM pg_stat_activity \
+                         WHERE {blocker_pid} = ANY(pg_blocking_pids(pid))\
+                         ) AS waiting"
+                    ),
+                ))
+                .await
+                .unwrap()
+                .unwrap()
+                .try_get::<bool>("", "waiting")
+                .unwrap();
+            if waiting {
+                return;
+            }
+            tokio::time::sleep(StdDuration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the contender blocked on the fixture transaction");
 }
