@@ -34,6 +34,9 @@ export function ingestErrorGuidance(message: string): string {
   if (lower.includes("html")) {
     return `${message} That URL is a documentation page. Find a link to the OpenAPI JSON, or paste the JSON itself.`;
   }
+  if (lower.includes("specification index")) {
+    return message;
+  }
   if (lower.includes("yaml")) {
     return `${message} Convert it to JSON, or point at a .json URL.`;
   }
@@ -106,8 +109,14 @@ export function DiscoveryResults({
   const usable = discovery.candidates.filter(
     (candidate) => candidate.operation_count != null,
   );
+  const indexes = discovery.candidates.filter(
+    (candidate) =>
+      candidate.child_urls != null && candidate.child_urls.length > 0,
+  );
   const unsupported = discovery.candidates.filter(
-    (candidate) => candidate.unsupported_reason != null,
+    (candidate) =>
+      candidate.unsupported_reason != null &&
+      (candidate.child_urls == null || candidate.child_urls.length === 0),
   );
   if (discovery.candidates.length === 0) {
     return (
@@ -141,6 +150,29 @@ export function DiscoveryResults({
           ))}
         </ul>
       )}
+      {indexes.map((candidate) => (
+        <div key={candidate.url} className="flex flex-col gap-1.5">
+          <p className="text-sm text-muted-foreground">
+            <span className="font-mono text-xs">{candidate.url}</span> is a spec
+            index. Pick a document:
+          </p>
+          <ul className="flex flex-col gap-1" aria-label="Child documents">
+            {candidate.child_urls?.map((childUrl) => (
+              <li key={childUrl} className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => onChoose(childUrl)}
+                >
+                  Use this document
+                </Button>
+                <span className="font-mono text-xs">{childUrl}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
       {unsupported.map((candidate) => (
         <p key={candidate.url} className="text-sm text-muted-foreground">
           <span className="font-mono text-xs">{candidate.url}</span>

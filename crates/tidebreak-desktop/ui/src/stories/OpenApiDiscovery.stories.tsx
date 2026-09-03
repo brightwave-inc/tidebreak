@@ -47,6 +47,78 @@ export const FoundCandidates: Story = {
   ),
 };
 
+export const SpecIndex: Story = {
+  render: () => (
+    <DiscoveryResults
+      discovering={false}
+      onChoose={fn()}
+      discovery={{
+        candidates: [
+          {
+            url: "https://developers.beehiiv.com/openapi.json",
+            operation_count: null,
+            unsupported_reason:
+              "this URL is a specification index pointing to 3 child documents; use one of the child documents instead",
+            child_urls: [
+              "https://developers.beehiiv.com/openapi/webhooks.json",
+              "https://developers.beehiiv.com/openapi/oauth2.json",
+              "https://developers.beehiiv.com/openapi/api-reference.json",
+            ],
+          },
+        ],
+        tried: [
+          "https://developers.beehiiv.com/openapi.json",
+          "https://developers.beehiiv.com/openapi.yaml",
+          "https://developers.beehiiv.com/swagger.json",
+        ],
+      }}
+    />
+  ),
+};
+
+export const SpecIndexWithResolvedChildren: Story = {
+  render: () => (
+    <DiscoveryResults
+      discovering={false}
+      onChoose={fn()}
+      discovery={{
+        candidates: [
+          {
+            url: "https://developers.beehiiv.com/openapi.json",
+            operation_count: null,
+            unsupported_reason:
+              "this URL is a specification index pointing to 3 child documents; use one of the child documents instead",
+            child_urls: [
+              "https://developers.beehiiv.com/openapi/webhooks.json",
+              "https://developers.beehiiv.com/openapi/oauth2.json",
+              "https://developers.beehiiv.com/openapi/api-reference.json",
+            ],
+          },
+          {
+            url: "https://developers.beehiiv.com/openapi/webhooks.json",
+            operation_count: 4,
+            unsupported_reason: null,
+          },
+          {
+            url: "https://developers.beehiiv.com/openapi/oauth2.json",
+            operation_count: 6,
+            unsupported_reason: null,
+          },
+          {
+            url: "https://developers.beehiiv.com/openapi/api-reference.json",
+            operation_count: 42,
+            unsupported_reason: null,
+          },
+        ],
+        tried: [
+          "https://developers.beehiiv.com/openapi.json",
+          "https://developers.beehiiv.com/openapi.yaml",
+        ],
+      }}
+    />
+  ),
+};
+
 export const NothingFound: Story = {
   render: () => (
     <DiscoveryResults
