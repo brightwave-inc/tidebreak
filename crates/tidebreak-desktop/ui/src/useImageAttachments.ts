@@ -179,7 +179,7 @@ export function useImageAttachments(
         path:
           scope === "code"
             ? (id) =>
-                `/code/sessions/${encodeURIComponent(id)}/attachments/images`
+                `/sessions/${encodeURIComponent(id)}/attachments/images`
             : undefined,
       });
     }

@@ -493,7 +493,7 @@ const USAGE = {
 };
 
 describe("parseCodeTurnList", () => {
-  it("accepts GET /code/sessions/{id}/turns", () => {
+  it("accepts GET /sessions/{id}/turns", () => {
     expect(parseCodeTurnList([TURN])).toEqual([TURN]);
     expect(parseCodeTurnList([])).toEqual([]);
   });
@@ -536,7 +536,7 @@ describe("parseCodeTurnList", () => {
 
 describe("parseCodeTurnSubmission", () => {
   it("tells a turn that ran from a follow-up the server queued", () => {
-    // Both arrive as 202 on POST /code/sessions/{id}/turns. Reading the
+    // Both arrive as 202 on POST /sessions/{id}/turns. Reading the
     // queue receipt as a malformed turn reports a failure for a message the
     // server is holding, and the retry it invites double-sends.
     expect(parseCodeTurnSubmission(TURN)).toEqual({ kind: "ran", turn: TURN });
