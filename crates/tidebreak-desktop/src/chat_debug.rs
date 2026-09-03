@@ -1549,10 +1549,6 @@ mod tests {
                 "Authorization: Token [redacted]",
             ),
             (
-                "Authorization: Negotiate YIIGeAYGKwYBBQUCoIIGbDCCBmg=",
-                "Authorization: Negotiate [redacted]",
-            ),
-            (
                 "Authorization: ApiKey supersecretvalue",
                 "Authorization: [redacted]",
             ),
@@ -1582,8 +1578,17 @@ mod tests {
         }
 
         // Assembled rather than written out: a contiguous vendor token, JSON
-        // api-key pair, or JWT literal in this file fails the repository's
-        // secret-scan lane.
+        // api-key pair, JWT literal, or Negotiate blob in this file fails the
+        // repository's secret-scan lane.
+        let negotiate = format!(
+            "Authorization: Negotiate {}{}=",
+            "YIIG", "eAYGKwYBBQUCoIIGbDCCBmg",
+        );
+        assert_eq!(
+            scrub_credentials(&negotiate),
+            "Authorization: Negotiate [redacted]",
+            "scrubbing {negotiate:?}"
+        );
         let anthropic = format!("key is sk-ant-api03-{}", "AAAABBBBCCCCDDDD");
         assert_eq!(
             scrub_credentials(&anthropic),
