@@ -144,6 +144,34 @@ async fn temp_db_store(database_name: &str) -> (tempfile::TempDir, DbStore) {
 }
 
 #[test]
+fn desktop_pool_stays_full_and_does_not_reap_connections() {
+    let options = crate::desktop_connect_options("sqlite::memory:");
+
+    assert_eq!(options.get_max_connections(), Some(8));
+    assert_eq!(options.get_min_connections(), Some(8));
+    assert_eq!(
+        options.get_acquire_timeout(),
+        Some(std::time::Duration::from_secs(30))
+    );
+    assert_eq!(options.get_idle_timeout(), Some(None));
+    assert_eq!(options.get_max_lifetime(), Some(None));
+}
+
+#[test]
+fn self_host_pool_keeps_database_lifetime_defaults() {
+    let options = crate::host_connect_options("postgres://localhost/tidebreak");
+
+    assert_eq!(options.get_max_connections(), Some(8));
+    assert_eq!(options.get_min_connections(), Some(1));
+    assert_eq!(
+        options.get_acquire_timeout(),
+        Some(std::time::Duration::from_secs(30))
+    );
+    assert_eq!(options.get_idle_timeout(), None);
+    assert_eq!(options.get_max_lifetime(), None);
+}
+
+#[test]
 fn transcript_citation_json_is_closed_and_renderer_bounded() {
     let message_id = MessageId::new();
     let snapshot = crate::routes::ChatMessageSnapshot {

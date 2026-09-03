@@ -86,7 +86,7 @@ impl SchemaMarker {
 
 pub(super) async fn connect(config: &Config) -> Result<DbStore> {
     connect_with(config, |database_url| async move {
-        DbStore::connect_with_options(crate::host_connect_options(&database_url)).await
+        DbStore::connect_with_options(crate::desktop_connect_options(&database_url)).await
     })
     .await
 }
