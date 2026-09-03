@@ -5,7 +5,7 @@ use super::code::*;
 use std::time::Duration;
 
 use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
-use tidebreak_core::{CapLevel, CodeEvent, CodeSessionId, CodeTurnId, CodeTurnStatus};
+use tidebreak_core::{CapLevel, Event, SessionId, TurnId, TurnStatus};
 
 #[tokio::test]
 async fn unsupported_explicit_steer_is_refused_without_queueing() {
@@ -34,7 +34,7 @@ async fn unsupported_explicit_steer_is_refused_without_queueing() {
         .await
         .unwrap();
     let session_id = json_id(&session).to_owned();
-    let parsed: CodeSessionId = session_id.parse().unwrap();
+    let parsed: SessionId = session_id.parse().unwrap();
     let turn = tokio::spawn({
         let client = client.clone();
         let token = token.clone();
@@ -97,7 +97,7 @@ async fn supported_steer_reaches_the_active_turn_once_without_creating_a_follow_
         .await
         .unwrap();
     let session_id = json_id(&session).to_owned();
-    let parsed: CodeSessionId = session_id.parse().unwrap();
+    let parsed: SessionId = session_id.parse().unwrap();
     let (mut events, _) = runtime.bus.attach(parsed);
 
     let turn = tokio::spawn({
@@ -116,7 +116,7 @@ async fn supported_steer_reaches_the_active_turn_once_without_creating_a_follow_
     });
     let active_turn_id = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if let CodeEvent::TurnStarted { turn_id } = events.recv().await.unwrap().event {
+            if let Event::TurnStarted { turn_id } = events.recv().await.unwrap().event {
                 break turn_id;
             }
         }
@@ -190,10 +190,10 @@ async fn supported_steer_reaches_the_active_turn_once_without_creating_a_follow_
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let event = events.recv().await.unwrap().event;
-            if let CodeEvent::UserSteered { text, .. } = &event {
+            if let Event::UserSteered { text, .. } = &event {
                 steer_events.push(text.clone());
             }
-            if matches!(event, CodeEvent::TurnCompleted { .. }) {
+            if matches!(event, Event::TurnCompleted { .. }) {
                 break;
             }
         }
@@ -250,7 +250,7 @@ async fn supported_steer_requires_an_active_turn() {
         ))
         .bearer_auth(&token)
         .json(&serde_json::json!({
-            "expected_turn_id": CodeTurnId::new(),
+            "expected_turn_id": TurnId::new(),
             "guidance": "too late",
         }))
         .send()
@@ -299,7 +299,7 @@ async fn steer_rejects_blank_nul_and_oversized_guidance() {
             ))
             .bearer_auth(&token)
             .json(&serde_json::json!({
-                "expected_turn_id": CodeTurnId::new(),
+                "expected_turn_id": TurnId::new(),
                 "guidance": guidance,
             }))
             .send()
@@ -338,7 +338,7 @@ async fn stale_turn_steering_is_rejected_before_reaching_the_adapter() {
         .await
         .unwrap();
     let session_id = json_id(&session).to_owned();
-    let parsed: CodeSessionId = session_id.parse().unwrap();
+    let parsed: SessionId = session_id.parse().unwrap();
     let turn = tokio::spawn({
         let client = client.clone();
         let token = token.clone();
@@ -355,7 +355,7 @@ async fn stale_turn_steering_is_rejected_before_reaching_the_adapter() {
     });
     let active_turn_id = wait_for_open_turn(&runtime, parsed).await;
     let stale_turn_id = loop {
-        let candidate = CodeTurnId::new();
+        let candidate = TurnId::new();
         if candidate != active_turn_id {
             break candidate;
         }
@@ -380,7 +380,7 @@ async fn stale_turn_steering_is_rejected_before_reaching_the_adapter() {
     assert!(
         events
             .iter()
-            .all(|event| !matches!(event.event, CodeEvent::UserSteered { .. })),
+            .all(|event| !matches!(event.event, Event::UserSteered { .. })),
         "stale steering reached the adapter: {events:?}"
     );
 }
@@ -417,7 +417,7 @@ async fn stalled_native_steering_times_out_without_wedging_turn_completion() {
         .await
         .unwrap();
     let session_id = json_id(&session).to_owned();
-    let parsed: CodeSessionId = session_id.parse().unwrap();
+    let parsed: SessionId = session_id.parse().unwrap();
     let turn = tokio::spawn({
         let client = client.clone();
         let token = token.clone();
@@ -522,7 +522,7 @@ async fn terminal_turn_event_closes_steering_before_a_late_command_is_admitted()
         .await
         .unwrap();
     let session_id = json_id(&session).to_owned();
-    let parsed: CodeSessionId = session_id.parse().unwrap();
+    let parsed: SessionId = session_id.parse().unwrap();
     let (mut events, _) = runtime.bus.attach(parsed);
     let turn = tokio::spawn({
         let client = client.clone();
@@ -542,8 +542,8 @@ async fn terminal_turn_event_closes_steering_before_a_late_command_is_admitted()
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             match events.recv().await.unwrap().event {
-                CodeEvent::TurnStarted { turn_id } => active_turn_id = Some(turn_id),
-                CodeEvent::TurnCompleted { .. } => break,
+                Event::TurnStarted { turn_id } => active_turn_id = Some(turn_id),
+                Event::TurnCompleted { .. } => break,
                 _ => {}
             }
         }
@@ -596,7 +596,7 @@ async fn a_native_steer_rejection_does_not_fail_or_redirect_the_turn() {
         .await
         .unwrap();
     let session_id = json_id(&session).to_owned();
-    let parsed: CodeSessionId = session_id.parse().unwrap();
+    let parsed: SessionId = session_id.parse().unwrap();
     let (mut events, _) = runtime.bus.attach(parsed);
     let turn = tokio::spawn({
         let client = client.clone();
@@ -614,7 +614,7 @@ async fn a_native_steer_rejection_does_not_fail_or_redirect_the_turn() {
     });
     let active_turn_id = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            if let CodeEvent::TurnStarted { turn_id } = events.recv().await.unwrap().event {
+            if let Event::TurnStarted { turn_id } = events.recv().await.unwrap().event {
                 break turn_id;
             }
         }
@@ -645,5 +645,5 @@ async fn a_native_steer_rejection_does_not_fail_or_redirect_the_turn() {
     .await
     .unwrap();
     assert_eq!(turns.len(), 1);
-    assert_eq!(turns[0].status, CodeTurnStatus::Completed);
+    assert_eq!(turns[0].status, TurnStatus::Completed);
 }

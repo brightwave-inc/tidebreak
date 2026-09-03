@@ -280,7 +280,7 @@ impl CodeRuntime {
             if sessions.iter().any(|session| {
                 matches!(
                     session.lifecycle,
-                    CodeSessionLifecycle::Running | CodeSessionLifecycle::Fenced
+                    SessionLifecycle::Running | SessionLifecycle::Fenced
                 )
             }) {
                 return Err(ServerError::conflict_kind(
@@ -899,8 +899,8 @@ impl CodeRuntime {
         &self,
         owner: &OwnerId,
         workspace_id: WorkspaceId,
-        turn_id: Option<CodeTurnId>,
-    ) -> Result<(Vec<ChangedFile>, bool, Diffstat, Option<CodeTurnId>), ServerError> {
+        turn_id: Option<TurnId>,
+    ) -> Result<(Vec<ChangedFile>, bool, Diffstat, Option<TurnId>), ServerError> {
         let workspace = self.get_workspace(owner, workspace_id).await?;
         if workspace.is_remote() {
             return Err(ServerError::conflict_kind(
@@ -933,9 +933,9 @@ impl CodeRuntime {
         &self,
         owner: &OwnerId,
         workspace_id: WorkspaceId,
-        turn_id: Option<CodeTurnId>,
+        turn_id: Option<TurnId>,
         file: Option<&str>,
-    ) -> Result<(String, bool, Diffstat, Option<CodeTurnId>), ServerError> {
+    ) -> Result<(String, bool, Diffstat, Option<TurnId>), ServerError> {
         let workspace = self.get_workspace(owner, workspace_id).await?;
         if workspace.is_remote() {
             return Err(ServerError::conflict_kind(
@@ -964,7 +964,7 @@ impl CodeRuntime {
         let sessions = list_sessions_for_workspace(&self.db, owner, workspace_id).await?;
         if sessions
             .iter()
-            .any(|session| session.lifecycle == CodeSessionLifecycle::Running)
+            .any(|session| session.lifecycle == SessionLifecycle::Running)
         {
             return Err(ServerError::conflict_kind(
                 "session_running",
@@ -987,7 +987,7 @@ impl CodeRuntime {
         let mut all_stopped = true;
         let sessions = list_sessions_for_workspace(&self.db, owner, workspace_id).await?;
         for mut session in sessions {
-            if session.lifecycle == CodeSessionLifecycle::Ended {
+            if session.lifecycle == SessionLifecycle::Ended {
                 continue;
             }
             let handle = self
@@ -1007,7 +1007,7 @@ impl CodeRuntime {
             // interrupted mid-turn re-reads the row on its way round the loop
             // and leaves on its own when it finds the session ended, so one
             // `Shutdown` is enough however busy it was.
-            session.lifecycle = CodeSessionLifecycle::Ended;
+            session.lifecycle = SessionLifecycle::Ended;
             session.child_pid = None;
             session.child_process_identity = None;
             session.fence_reason = None;
@@ -1020,7 +1020,7 @@ impl CodeRuntime {
             // The outgoing worker still holds this epoch, so a persist during
             // the wait can overwrite Ended. Re-assert from a fresh load.
             let mut current = self.get_session(owner, session.id).await?;
-            current.lifecycle = CodeSessionLifecycle::Ended;
+            current.lifecycle = SessionLifecycle::Ended;
             current.child_pid = None;
             current.child_process_identity = None;
             current.fence_reason = None;
@@ -1056,7 +1056,7 @@ impl CodeRuntime {
     /// The workspace a session binds, when it binds one.
     pub(crate) async fn session_workspace(
         &self,
-        session: &CodeSession,
+        session: &Session,
     ) -> Result<Option<CodeWorkspace>, ServerError> {
         match session.workspace_id {
             Some(workspace_id) => self
@@ -1069,7 +1069,7 @@ impl CodeRuntime {
 
     /// The workspace id a checkout-bound operation needs, or the conflict a
     /// session without one answers.
-    pub(crate) fn require_workspace_id(session: &CodeSession) -> Result<WorkspaceId, ServerError> {
+    pub(crate) fn require_workspace_id(session: &Session) -> Result<WorkspaceId, ServerError> {
         session.workspace_id.ok_or_else(|| {
             ServerError::conflict_kind(
                 "session_has_no_workspace",

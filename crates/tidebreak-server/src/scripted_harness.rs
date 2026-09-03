@@ -940,7 +940,7 @@ pub(crate) fn plain_text_script() -> Vec<HarnessEvent> {
             text: "hello from the scripted engine".into(),
         },
         HarnessEvent::TurnCompleted {
-            usage: tidebreak_core::CodeUsage {
+            usage: tidebreak_core::TurnUsage {
                 input_tokens: 4,
                 output_tokens: 6,
                 cache_read_input_tokens: 0,
@@ -955,7 +955,7 @@ pub(crate) fn plain_text_script() -> Vec<HarnessEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tidebreak_core::{CodeUsage, PermissionMode};
+    use tidebreak_core::{PermissionMode, TurnUsage};
 
     /// Sink that collects every emitted event for assertions.
     #[derive(Default)]
@@ -973,7 +973,7 @@ mod tests {
     fn spec(sink: Arc<CollectingSink>, worktree: &Path) -> SessionSpec {
         SessionSpec {
             owner: tidebreak_core::OwnerId::local(),
-            session_id: tidebreak_core::CodeSessionId::new(),
+            session_id: tidebreak_core::SessionId::new(),
             worktree: worktree.to_path_buf(),
             allowed_read_roots: Vec::new(),
             permission_mode: PermissionMode::Ask,
@@ -1002,7 +1002,7 @@ mod tests {
                 text: "after the park".into(),
             },
             HarnessEvent::TurnCompleted {
-                usage: CodeUsage::default(),
+                usage: TurnUsage::default(),
             },
         ]
     }

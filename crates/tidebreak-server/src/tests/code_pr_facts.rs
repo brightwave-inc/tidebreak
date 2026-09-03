@@ -15,10 +15,10 @@ use tidebreak_core::db::code::{
     save_turn,
 };
 use tidebreak_core::{
-    Attention, AttentionSource, CodeEvent, CodePullRequestRelation, CodePullRequestState, CodeRepo,
-    CodeSession, CodeSessionId, CodeSessionKind, CodeSessionLifecycle, CodeTurn, CodeTurnId,
-    CodeTurnStatus, CodeWorkspace, CodeWorkspaceStatus, Diffstat, HarnessKind, OwnerId,
-    PermissionMode, RepoId, ToolDetail, ToolOutcome, WorkspaceId,
+    Attention, AttentionSource, CodePullRequestRelation, CodePullRequestState, CodeRepo,
+    CodeWorkspace, CodeWorkspaceStatus, Diffstat, Event, HarnessKind, OwnerId, PermissionMode,
+    RepoId, Session, SessionId, SessionKind, SessionLifecycle, ToolDetail, ToolOutcome, Turn,
+    TurnId, TurnStatus, WorkspaceId,
 };
 
 use crate::code::pr_facts;
@@ -97,8 +97,8 @@ fn write_gh_shim_with_view(dir: &std::path::Path, log: &std::path::Path, view_js
 
 async fn mark_turn_checkout_changed(
     store: &tidebreak_core::DbStore,
-    session: &CodeSession,
-    turn_id: CodeTurnId,
+    session: &Session,
+    turn_id: TurnId,
 ) {
     let mut turn = get_turn(store, &session.owner, turn_id)
         .await
@@ -114,10 +114,7 @@ async fn mark_turn_checkout_changed(
     save_turn(store, &session.owner, &turn).await.unwrap();
 }
 
-async fn seeded(
-    store: &tidebreak_core::DbStore,
-    worktree: &std::path::Path,
-) -> (CodeSession, CodeTurnId) {
+async fn seeded(store: &tidebreak_core::DbStore, worktree: &std::path::Path) -> (Session, TurnId) {
     let owner = OwnerId::local();
     let repo_id = RepoId::new();
     insert_repo(
@@ -164,11 +161,11 @@ async fn seeded(
     )
     .await
     .unwrap();
-    let session = CodeSession {
-        id: CodeSessionId::new(),
+    let session = Session {
+        id: SessionId::new(),
         owner: owner.clone(),
         workspace_id: Some(workspace_id),
-        kind: CodeSessionKind::Interactive,
+        kind: SessionKind::Interactive,
         harness_kind: HarnessKind::ClaudeCode,
         harness_version: Some("2.1.233".into()),
         harness_resume_ref: None,
@@ -176,7 +173,7 @@ async fn seeded(
         model: None,
         reasoning_effort: None,
         fast_mode: false,
-        lifecycle: CodeSessionLifecycle::Idle,
+        lifecycle: SessionLifecycle::Idle,
         fence_reason: None,
         child_pid: None,
         child_process_identity: None,
@@ -187,15 +184,15 @@ async fn seeded(
         created_at: chrono::Utc::now(),
     };
     insert_session(store, &session).await.unwrap();
-    let turn_id = CodeTurnId::new();
+    let turn_id = TurnId::new();
     insert_turn(
         store,
         &owner,
-        &CodeTurn {
+        &Turn {
             id: turn_id,
             session_id: session.id,
             ordinal: 1,
-            status: CodeTurnStatus::Completed,
+            status: TurnStatus::Completed,
             model: None,
             fast_mode: false,
             user_input: "ship it".into(),
@@ -219,7 +216,7 @@ async fn seeded(
         &owner,
         session.id,
         0,
-        &CodeEvent::TurnStarted { turn_id },
+        &Event::TurnStarted { turn_id },
     )
     .await
     .unwrap();
@@ -229,7 +226,7 @@ async fn seeded(
 #[allow(clippy::too_many_arguments)]
 async fn journal_command(
     store: &tidebreak_core::DbStore,
-    session: &CodeSession,
+    session: &Session,
     call_id: &str,
     cmd: &str,
     cwd: &std::path::Path,
@@ -242,7 +239,7 @@ async fn journal_command(
         &session.owner,
         session.id,
         0,
-        &CodeEvent::ToolStarted {
+        &Event::ToolStarted {
             call_id: call_id.into(),
             name: "Bash".into(),
             detail: ToolDetail::Command {
@@ -259,7 +256,7 @@ async fn journal_command(
         &session.owner,
         session.id,
         0,
-        &CodeEvent::ToolCompleted {
+        &Event::ToolCompleted {
             call_id: call_id.into(),
             outcome,
             preview: preview.into(),

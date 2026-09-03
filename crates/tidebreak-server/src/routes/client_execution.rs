@@ -12,10 +12,10 @@ use serde::{Deserialize, Serialize};
 
 use chrono::{Duration, Utc};
 use tidebreak_core::{
-    CallId, ChatId, ClaimClientToolCallOutcome, HeartbeatClientToolCallOutcome, OutputWriteMode,
+    CallId, ClaimClientToolCallOutcome, HeartbeatClientToolCallOutcome, OutputWriteMode,
     PermissionMode, RequestFolderAccessArgs, RequestedFolderHint, ResolveToolCallOutcome,
-    ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus, TurnId, TurnRunStatus,
-    WriteOutputToConnectedFolderArgs, REQUEST_FOLDER_ACCESS_TOOL,
+    SessionId, ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus, TurnId,
+    TurnRunStatus, WriteOutputToConnectedFolderArgs, REQUEST_FOLDER_ACCESS_TOOL,
     WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL,
 };
 
@@ -196,7 +196,7 @@ pub struct PendingOutputWritebackRequest {
 /// shared self-host without impersonating one of its named users.
 #[derive(Serialize)]
 pub struct NativePendingClientExecution {
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     pub call: ToolCallRecord,
 }
 
@@ -207,7 +207,7 @@ pub struct NativePendingClientExecution {
 pub async fn list_pending_folder_access_requests(
     State(state): State<AppState>,
     store: crate::scoped_store::ScopedStore,
-    Path(id): Path<ChatId>,
+    Path(id): Path<SessionId>,
 ) -> Result<Json<Vec<PendingFolderAccessRequest>>, ServerError> {
     store.require_chat(id).await?;
     let requests = store
@@ -228,7 +228,7 @@ pub async fn list_pending_folder_access_requests(
 pub async fn list_pending_output_writebacks(
     State(state): State<AppState>,
     store: crate::scoped_store::ScopedStore,
-    Path(id): Path<ChatId>,
+    Path(id): Path<SessionId>,
 ) -> Result<Json<Vec<PendingOutputWritebackRequest>>, ServerError> {
     let chat = store.require_chat(id).await?;
     let requests = store
@@ -245,7 +245,7 @@ pub async fn list_pending_output_writebacks(
 pub async fn list_pending_client_executions_raw(
     State(state): State<AppState>,
     _executor: ClientExecutor,
-    Path(id): Path<ChatId>,
+    Path(id): Path<SessionId>,
 ) -> Result<Json<Vec<ToolCallRecord>>, ServerError> {
     require_native_chat(&state, id).await?;
     let calls = state
@@ -330,7 +330,7 @@ fn renderer_output_writeback_request(
 pub async fn claim_client_execution(
     State(state): State<AppState>,
     _executor: ClientExecutor,
-    Path((id, call_id)): Path<(ChatId, CallId)>,
+    Path((id, call_id)): Path<(SessionId, CallId)>,
     Json(body): Json<ClaimClientExecution>,
 ) -> Result<Json<ClaimedClientExecution>, ServerError> {
     require_native_chat(&state, id).await?;
@@ -376,7 +376,7 @@ pub async fn claim_client_execution(
 pub async fn heartbeat_client_execution(
     State(state): State<AppState>,
     _executor: ClientExecutor,
-    Path((id, call_id)): Path<(ChatId, CallId)>,
+    Path((id, call_id)): Path<(SessionId, CallId)>,
     Json(body): Json<HeartbeatClientExecution>,
 ) -> Result<Json<ClientExecutionHeartbeat>, ServerError> {
     require_native_chat(&state, id).await?;
@@ -412,7 +412,7 @@ pub async fn heartbeat_client_execution(
 pub async fn resolve_client_execution(
     State(state): State<AppState>,
     _executor: ClientExecutor,
-    Path((id, call_id)): Path<(ChatId, CallId)>,
+    Path((id, call_id)): Path<(SessionId, CallId)>,
     Json(body): Json<ResolveClientExecution>,
 ) -> Result<Json<ResolvedClientExecution>, ServerError> {
     require_native_chat(&state, id).await?;
@@ -483,7 +483,7 @@ pub async fn resolve_client_execution(
     Ok(Json(ResolvedClientExecution { disposition }))
 }
 
-async fn require_native_chat(state: &AppState, id: ChatId) -> Result<(), ServerError> {
+async fn require_native_chat(state: &AppState, id: SessionId) -> Result<(), ServerError> {
     if state.store.get_chat(id).await?.is_some() {
         Ok(())
     } else {

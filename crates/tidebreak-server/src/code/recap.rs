@@ -48,9 +48,7 @@ use serde::{Deserialize, Serialize};
 use tidebreak_core::db::code::{
     get_session, get_turn, list_recent_events, list_turns, set_turn_narrative,
 };
-use tidebreak_core::{
-    CodeEvent, CodeSessionId, CodeTurnId, CodeTurnStatus, DbStore, HarnessKind, OwnerId, Result,
-};
+use tidebreak_core::{DbStore, Event, HarnessKind, OwnerId, Result, SessionId, TurnId, TurnStatus};
 
 use crate::chat_titling::{derive_text_with_retries, head, Proposal};
 use crate::resolver::ProviderResolver;
@@ -145,7 +143,7 @@ pub(crate) enum Outcome {
 pub(crate) trait TurnRecap: Send + Sync {
     /// Derive and store the recap for `turn_id`. Returns immediately; nothing
     /// waits on the result and a lost recap costs nothing.
-    fn spawn(&self, owner: OwnerId, session_id: CodeSessionId, turn_id: CodeTurnId);
+    fn spawn(&self, owner: OwnerId, session_id: SessionId, turn_id: TurnId);
 }
 
 /// Derives recaps on the utility role, one at a time per session.
@@ -180,7 +178,7 @@ pub(crate) struct TurnRecapper {
     /// Only the newest queued turn is kept. One it replaces was superseded
     /// before its recap was ever written, and the newer turn's line describes
     /// the session that turn left behind.
-    in_flight: Arc<Mutex<HashMap<CodeSessionId, Option<CodeTurnId>>>>,
+    in_flight: Arc<Mutex<HashMap<SessionId, Option<TurnId>>>>,
 }
 
 impl TurnRecapper {
@@ -221,8 +219,8 @@ impl TurnRecapper {
     pub(crate) async fn derive(
         &self,
         owner: &OwnerId,
-        session_id: CodeSessionId,
-        turn_id: CodeTurnId,
+        session_id: SessionId,
+        turn_id: TurnId,
     ) -> Result<Outcome> {
         if !turn_recaps_enabled(&*self.store).await? {
             return Ok(Outcome::NotApplicable);
@@ -234,7 +232,7 @@ impl TurnRecapper {
         // already carries a line is not re-derived: the sink fires once per
         // completion, and a retry would spend a second call to say the same
         // thing.
-        if turn.status != CodeTurnStatus::Completed || turn.narrative.is_some() {
+        if turn.status != TurnStatus::Completed || turn.narrative.is_some() {
             return Ok(Outcome::NotApplicable);
         }
         let Some(session) = get_session(&self.db, owner, session_id).await? else {
@@ -285,7 +283,7 @@ impl TurnRecapper {
             return Ok(Outcome::Declined);
         };
         // A targeted column write, never a whole-row save. The checkpoint task
-        // is writing this same row from a `CodeTurn` it read before the turn
+        // is writing this same row from a `Turn` it read before the turn
         // ended, so a whole-row save from either side blanks the other's work:
         // ours would drop the checkpoint ref, and theirs would drop this line
         // — silently, and only sometimes, depending on which finished last.
@@ -308,8 +306,8 @@ impl TurnRecapper {
     pub(crate) async fn turn_material(
         &self,
         owner: &OwnerId,
-        session_id: CodeSessionId,
-        turn: &tidebreak_core::CodeTurn,
+        session_id: SessionId,
+        turn: &tidebreak_core::Turn,
     ) -> Result<String> {
         self.material(owner, session_id, turn).await
     }
@@ -317,8 +315,8 @@ impl TurnRecapper {
     async fn material(
         &self,
         owner: &OwnerId,
-        session_id: CodeSessionId,
-        turn: &tidebreak_core::CodeTurn,
+        session_id: SessionId,
+        turn: &tidebreak_core::Turn,
     ) -> Result<String> {
         let mut material = String::new();
         // The session's first request is its goal. On turn one that is this
@@ -365,8 +363,8 @@ impl TurnRecapper {
     async fn turn_record(
         &self,
         owner: &OwnerId,
-        session_id: CodeSessionId,
-        turn_id: CodeTurnId,
+        session_id: SessionId,
+        turn_id: TurnId,
     ) -> Result<(Option<String>, Vec<String>)> {
         let events = list_recent_events(&self.db, owner, session_id, RECAP_EVENT_WINDOW).await?;
         let mut closing = None;
@@ -375,12 +373,12 @@ impl TurnRecapper {
         // and the walk can stop the moment it reaches this turn's start.
         for sequenced in &events {
             match &sequenced.event {
-                CodeEvent::TurnStarted { turn_id: started } if *started == turn_id => break,
-                CodeEvent::AssistantMessage {
+                Event::TurnStarted { turn_id: started } if *started == turn_id => break,
+                Event::AssistantMessage {
                     text,
                     parent_call_id: None,
                 } if closing.is_none() => closing = Some(text.clone()),
-                CodeEvent::ToolCompleted {
+                Event::ToolCompleted {
                     call_id: _,
                     outcome,
                     detail: Some(detail),
@@ -393,7 +391,7 @@ impl TurnRecapper {
                         activity.push(format!("{outcome:?}: {subject}"));
                     }
                 }
-                CodeEvent::FileChanged { path, kind, .. }
+                Event::FileChanged { path, kind, .. }
                     if activity.len() < MAX_RECAP_ACTIVITY_LINES =>
                 {
                     activity.push(format!("{kind:?} {path}"));
@@ -407,7 +405,7 @@ impl TurnRecapper {
 }
 
 impl TurnRecap for TurnRecapper {
-    fn spawn(&self, owner: OwnerId, session_id: CodeSessionId, turn_id: CodeTurnId) {
+    fn spawn(&self, owner: OwnerId, session_id: SessionId, turn_id: TurnId) {
         let Some((mut claim, mut turn_id)) =
             RecapClaim::acquire(&self.in_flight, session_id, turn_id)
         else {
@@ -462,8 +460,8 @@ pub(crate) async fn turn_recaps_enabled(
 
 /// A session's place in [`TurnRecapper::in_flight`], released on drop.
 struct RecapClaim {
-    in_flight: Arc<Mutex<HashMap<CodeSessionId, Option<CodeTurnId>>>>,
-    session_id: CodeSessionId,
+    in_flight: Arc<Mutex<HashMap<SessionId, Option<TurnId>>>>,
+    session_id: SessionId,
     released: bool,
 }
 
@@ -476,10 +474,10 @@ impl RecapClaim {
     /// database, a provider, and a policy source to assert something none of
     /// them take part in.
     fn acquire(
-        in_flight: &Arc<Mutex<HashMap<CodeSessionId, Option<CodeTurnId>>>>,
-        session_id: CodeSessionId,
-        turn_id: CodeTurnId,
-    ) -> Option<(Self, CodeTurnId)> {
+        in_flight: &Arc<Mutex<HashMap<SessionId, Option<TurnId>>>>,
+        session_id: SessionId,
+        turn_id: TurnId,
+    ) -> Option<(Self, TurnId)> {
         let in_flight = in_flight.clone();
         let mut guard = in_flight
             .lock()
@@ -507,7 +505,7 @@ impl RecapClaim {
     /// Take the one turn that completed while this call ran. With none queued,
     /// release atomically so a concurrent next turn either queues here or
     /// starts a fresh task; there is no gap in which its trigger can be lost.
-    fn take_pending_or_release(&mut self) -> Option<CodeTurnId> {
+    fn take_pending_or_release(&mut self) -> Option<TurnId> {
         let mut in_flight = self
             .in_flight
             .lock()
@@ -536,16 +534,16 @@ impl Drop for RecapClaim {
 mod tests {
     use super::*;
 
-    fn claims() -> Arc<Mutex<HashMap<CodeSessionId, Option<CodeTurnId>>>> {
+    fn claims() -> Arc<Mutex<HashMap<SessionId, Option<TurnId>>>> {
         Arc::new(Mutex::new(HashMap::new()))
     }
 
-    fn session() -> CodeSessionId {
-        CodeSessionId(uuid::Uuid::new_v4())
+    fn session() -> SessionId {
+        SessionId(uuid::Uuid::new_v4())
     }
 
-    fn turn() -> CodeTurnId {
-        CodeTurnId(uuid::Uuid::new_v4())
+    fn turn() -> TurnId {
+        TurnId(uuid::Uuid::new_v4())
     }
 
     /// A turn that finishes while an earlier recap is still running is queued,

@@ -15,7 +15,7 @@ use async_trait::async_trait;
 #[cfg(test)]
 use chrono::Utc;
 use tidebreak_core::{
-    AgentError, ChatId, ClaimSandboxToolCallOutcome, Result, SandboxToolCall, Store,
+    AgentError, ClaimSandboxToolCallOutcome, Result, SandboxToolCall, SessionId, Store,
     ToolCallResolution,
 };
 use tokio::sync::Notify;
@@ -40,7 +40,7 @@ pub(crate) trait SandboxWebSearch: Send + Sync {
     /// against the chat it belongs to rather than against host settings alone.
     async fn resolve(
         &self,
-        chat: ChatId,
+        chat: SessionId,
     ) -> std::result::Result<Option<Arc<dyn WebSearchProvider>>, SandboxWebSearchError>;
 }
 
@@ -63,7 +63,7 @@ struct HostSandboxWebSearch {
 impl SandboxWebSearch for HostSandboxWebSearch {
     async fn resolve(
         &self,
-        chat: ChatId,
+        chat: SessionId,
     ) -> std::result::Result<Option<Arc<dyn WebSearchProvider>>, SandboxWebSearchError> {
         web_search::resolve_provider(
             &*self.store,
@@ -461,9 +461,9 @@ mod tests {
 
     use crate::web_search::{WebSearchProviderKind, WebSearchResult};
     use tidebreak_core::{
-        AgentRunStatus, CallId, Chat, ChatId, ClaimSandboxToolCallOutcome, DbStore,
+        AgentRunStatus, CallId, Chat, ClaimSandboxToolCallOutcome, DbStore,
         ParkSandboxToolCallOutcome, RequestAgentRunCancellationOutcome, SandboxToolCallRequest,
-        Store,
+        SessionId, Store,
     };
 
     use super::*;
@@ -520,7 +520,7 @@ mod tests {
     impl SandboxWebSearch for BlockingResolution {
         async fn resolve(
             &self,
-            _chat: ChatId,
+            _chat: SessionId,
         ) -> std::result::Result<Option<Arc<dyn WebSearchProvider>>, SandboxWebSearchError>
         {
             let _drop = DropMarker(self.dropped.clone());
@@ -569,7 +569,7 @@ mod tests {
     impl SandboxWebSearch for FakeSearch {
         async fn resolve(
             &self,
-            _chat: ChatId,
+            _chat: SessionId,
         ) -> std::result::Result<Option<Arc<dyn WebSearchProvider>>, SandboxWebSearchError>
         {
             self.resolution.clone()
@@ -595,7 +595,7 @@ mod tests {
         arguments: serde_json::Value,
     ) -> SandboxToolCallRequest {
         let chat = Chat {
-            id: ChatId::new(),
+            id: SessionId::new(),
             project_id: None,
             title: Some("sandbox web search".into()),
             model: Some("model".into()),

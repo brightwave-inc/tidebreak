@@ -44,10 +44,10 @@
 //!
 //! The same module carries the code-mode surface the CLI drives: repo,
 //! workspace, session, turn, approval, and delivery snapshots, the sequenced
-//! event frame on `/code/sessions/{id}/events`, and the notices on
-//! `/code/updates`. They follow the strictness above. The one shape a client
-//! composes itself is the response to `POST /code/sessions/{id}/turns`, which
-//! is a [`CodeTurnSnapshot`] on `200` and a [`QueuedCodeTurn`] on `202`.
+//! event frame on `/sessions/{id}/events`, and the notices on
+//! `/updates`. They follow the strictness above. The one shape a client
+//! composes itself is the response to `POST /sessions/{id}/turns`, which
+//! is a [`TurnSnapshot`] on `200` and a [`QueuedTurn`] on `202`.
 //!
 //! # Limits
 //!
@@ -81,17 +81,26 @@ pub use crate::routes::{
 };
 
 // Code mode: the snapshots the REST routes return, the per-session event
-// frame, and the notices on `/code/updates`. Same contract as the chat
+// frame, and the notices on `/updates`. Same contract as the chat
 // socket above: closed vocabularies, unknown keys rejected, an unknown notice
 // or event type failing its frame. The fixtures in `fixtures/code-frames.json`
 // are serialized from these types (see `wire_code_fixtures`).
 pub use crate::routes::code::types::{
-    CodeActionSnapshot, CodeApprovalSnapshot, CodeCommitSnapshot, CodeFileChange, CodePushSnapshot,
-    CodeRepoSnapshot, CodeSessionDigest, CodeSessionExternalOrigin, CodeSessionSnapshot,
-    CodeTurnRewriteState, CodeTurnSnapshot, CodeUpdateNotice, CodeWatchSnapshot, CodeWorkspaceDiff,
-    CodeWorkspaceFiles, CodeWorkspacePrSnapshot, CodeWorkspaceSnapshot, HarnessAuthMode,
-    HarnessDoctorEntry, HarnessDoctorReport, QueuedCodeTurn, QueuedCodeTurnsSnapshot,
-    SequencedCodeEventFrame,
+    ApprovalSnapshot, CodeActionSnapshot, CodeCommitSnapshot, CodeFileChange, CodePushSnapshot,
+    CodeRepoSnapshot, CodeWatchSnapshot, CodeWorkspaceDiff, CodeWorkspaceFiles,
+    CodeWorkspacePrSnapshot, CodeWorkspaceSnapshot, HarnessAuthMode, HarnessDoctorEntry,
+    HarnessDoctorReport, QueuedTurn, QueuedTurnsSnapshot, SequencedEventFrame, SessionDigest,
+    SessionExternalOrigin, SessionSnapshot, TurnRewriteState, TurnSnapshot, UpdateNotice,
+};
+
+// Keep the unchanged CLI compiling while the D6 rename lands in server and
+// client slices. The client slice removes these compatibility exports.
+pub use crate::routes::code::types::{
+    ApprovalSnapshot as CodeApprovalSnapshot, QueuedTurn as QueuedCodeTurn,
+    QueuedTurnsSnapshot as QueuedCodeTurnsSnapshot, SequencedEventFrame as SequencedCodeEventFrame,
+    SessionDigest as CodeSessionDigest, SessionExternalOrigin as CodeSessionExternalOrigin,
+    SessionSnapshot as CodeSessionSnapshot, TurnRewriteState as CodeTurnRewriteState,
+    TurnSnapshot as CodeTurnSnapshot, UpdateNotice as CodeUpdateNotice,
 };
 
 /// Guard sizes for the opaque strings a client draws from this surface.

@@ -25,12 +25,11 @@ use tidebreak_core::db::code::{
     reschedule_trigger_fire_delivery_failure, trigger_delivery_accepted, trigger_fire_heads_for_pr,
 };
 use tidebreak_core::{
-    classify_trigger_condition, Attention, AttentionSource, CapLevel, CodeEvent,
-    CodePullRequestFact, CodePullRequestId, CodeSession, CodeSessionId, CodeSessionKind,
-    CodeSessionLifecycle, CodeTrigger, CodeTriggerAction, CodeTriggerCondition,
-    CodeTriggerDeliveryId, CodeTriggerFire, CodeTriggerFireIdentity, CodeTriggerFirePayload,
-    CodeTurnId, CodeWorkspaceStatus, HarnessNoticeLevel, OwnerId, PullRequestDigest, RepoId,
-    WorkspaceId,
+    classify_trigger_condition, Attention, AttentionSource, CapLevel, CodePullRequestFact,
+    CodePullRequestId, CodeTrigger, CodeTriggerAction, CodeTriggerCondition, CodeTriggerDeliveryId,
+    CodeTriggerFire, CodeTriggerFireIdentity, CodeTriggerFirePayload, CodeWorkspaceStatus, Event,
+    HarnessNoticeLevel, OwnerId, PullRequestDigest, RepoId, Session, SessionId, SessionKind,
+    SessionLifecycle, TurnId, WorkspaceId,
 };
 use tracing::{debug, warn};
 
@@ -707,17 +706,17 @@ async fn claim_fires(
 enum Delivery {
     /// Interrupt the turn already running. Only where the harness declares it.
     Steer {
-        session_id: CodeSessionId,
-        turn_id: CodeTurnId,
+        session_id: SessionId,
+        turn_id: TurnId,
     },
     /// Submit a turn. The workspace is quiet, so nothing is contended.
-    Turn { session_id: CodeSessionId },
+    Turn { session_id: SessionId },
     /// Raise attention and leave the session alone.
-    Notify { session_id: CodeSessionId },
+    Notify { session_id: SessionId },
 }
 
 impl Delivery {
-    fn session_id(self) -> CodeSessionId {
+    fn session_id(self) -> SessionId {
         match self {
             Self::Steer { session_id, .. }
             | Self::Turn { session_id }
@@ -970,7 +969,7 @@ async fn plan_delivery(
     // outbox pending so a later lease delivers it.
     let busy = sessions
         .iter()
-        .any(|session| session.lifecycle == CodeSessionLifecycle::Running);
+        .any(|session| session.lifecycle == SessionLifecycle::Running);
     if !busy {
         return Ok(Some(Delivery::Turn {
             session_id: target.id,
@@ -978,7 +977,7 @@ async fn plan_delivery(
     }
 
     // Busy: steering is the only way in, and only where the engine takes it.
-    if target.lifecycle != CodeSessionLifecycle::Running {
+    if target.lifecycle != SessionLifecycle::Running {
         return Ok(None);
     }
     let adapter = runtime.adapter(target.harness_kind)?;
@@ -1004,16 +1003,16 @@ async fn plan_delivery(
 async fn most_recently_active(
     runtime: &Arc<CodeRuntime>,
     owner: &OwnerId,
-    sessions: &[CodeSession],
-) -> Result<Option<CodeSession>, ServerError> {
-    let mut best: Option<(chrono::DateTime<chrono::Utc>, CodeSession)> = None;
+    sessions: &[Session],
+) -> Result<Option<Session>, ServerError> {
+    let mut best: Option<(chrono::DateTime<chrono::Utc>, Session)> = None;
     for session in sessions {
-        if session.kind != CodeSessionKind::Interactive {
+        if session.kind != SessionKind::Interactive {
             continue;
         }
         if matches!(
             session.lifecycle,
-            CodeSessionLifecycle::Ended | CodeSessionLifecycle::Fenced
+            SessionLifecycle::Ended | SessionLifecycle::Fenced
         ) {
             continue;
         }
@@ -1106,7 +1105,7 @@ fn describe_condition(condition: CodeTriggerCondition, number: u64) -> String {
 async fn note_fire(
     runtime: &Arc<CodeRuntime>,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     identity: &CodeTriggerFireIdentity,
     condition: CodeTriggerCondition,
 ) {
@@ -1119,7 +1118,7 @@ async fn note_fire(
         owner,
         session_id,
         session.spawn_epoch,
-        CodeEvent::HarnessNotice {
+        Event::HarnessNotice {
             level: HarnessNoticeLevel::Info,
             message: format!(
                 "trigger {} fired: {}",

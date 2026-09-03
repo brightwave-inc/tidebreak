@@ -10,10 +10,10 @@ use tidebreak_core::db::code::{
     recover_interrupted_session, replace_session_attention, save_session, set_session_subagents,
 };
 use tidebreak_core::{
-    Attention, AttentionSource, AttentionState, CapLevel, CodeEvent, CodeIncarnationId, CodeRepo,
-    CodeSession, CodeSessionId, CodeSessionKind, CodeSessionLifecycle, CodeSubagentStatus,
-    CodeWorkspace, CodeWorkspaceStatus, DbStore, FenceReason, HarnessKind, IncarnationAdmission,
-    OwnerId, PermissionMode, RepoId, WorkspaceId,
+    Attention, AttentionSource, AttentionState, CapLevel, CodeIncarnationId, CodeRepo,
+    CodeSubagentStatus, CodeWorkspace, CodeWorkspaceStatus, DbStore, Event, FenceReason,
+    HarnessKind, IncarnationAdmission, OwnerId, PermissionMode, RepoId, Session, SessionId,
+    SessionKind, SessionLifecycle, WorkspaceId,
 };
 
 use super::{replace_attention, RemoteReapError, RemoteSessionHost};
@@ -23,12 +23,12 @@ pub(crate) struct TestEvents;
 
 #[async_trait::async_trait]
 impl RemoteSessionHost for TestEvents {
-    fn publish(&self, _session: CodeSessionId, _event: tidebreak_core::SequencedCodeEvent) {}
+    fn publish(&self, _session: SessionId, _event: tidebreak_core::code::SequencedEvent) {}
 
     async fn persist_session(
         &self,
         store: &DbStore,
-        session: &CodeSession,
+        session: &Session,
     ) -> Result<bool, tidebreak_core::AgentError> {
         let saved = save_session(store, session).await?;
         if saved {
@@ -48,7 +48,7 @@ impl RemoteSessionHost for TestEvents {
         &self,
         store: &DbStore,
         owner: &OwnerId,
-        session_id: CodeSessionId,
+        session_id: SessionId,
         next: Attention,
     ) -> Result<(), tidebreak_core::AgentError> {
         let _ = replace_session_attention(store, owner, session_id, &next, false).await?;
@@ -59,9 +59,9 @@ impl RemoteSessionHost for TestEvents {
         &self,
         store: &DbStore,
         owner: &OwnerId,
-        session_id: CodeSessionId,
+        session_id: SessionId,
         spawn_epoch: i64,
-        event: CodeEvent,
+        event: Event,
     ) {
         let _ = append_event(store, owner, session_id, spawn_epoch, &event).await;
     }
@@ -69,7 +69,7 @@ impl RemoteSessionHost for TestEvents {
     async fn fence_session(
         &self,
         store: &DbStore,
-        session: &mut CodeSession,
+        session: &mut Session,
         reason: FenceReason,
     ) -> Result<(), tidebreak_core::AgentError> {
         if matches!(reason, FenceReason::ResumeLost { .. }) {
@@ -88,7 +88,7 @@ impl RemoteSessionHost for TestEvents {
                 )));
             }
         }
-        session.lifecycle = CodeSessionLifecycle::Fenced;
+        session.lifecycle = SessionLifecycle::Fenced;
         for subagent in &mut session.subagents {
             if subagent.status == CodeSubagentStatus::Running {
                 subagent.status = CodeSubagentStatus::Failed;
@@ -117,8 +117,8 @@ impl RemoteSessionHost for TestEvents {
     async fn recover_dead_worker(
         &self,
         store: &DbStore,
-        session: &CodeSession,
-    ) -> Result<Option<CodeSession>, tidebreak_core::AgentError> {
+        session: &Session,
+    ) -> Result<Option<Session>, tidebreak_core::AgentError> {
         let durable_parks = if session.harness_kind.is_in_process() {
             CapLevel::Supported
         } else {
@@ -138,8 +138,8 @@ impl RemoteSessionHost for TestEvents {
     async fn reap_session(
         &self,
         store: &DbStore,
-        session: CodeSession,
-    ) -> Result<CodeSession, RemoteReapError> {
+        session: Session,
+    ) -> Result<Session, RemoteReapError> {
         let Some(recovered) = reap_fenced_session(
             store,
             &session.owner,
@@ -159,12 +159,12 @@ impl RemoteSessionHost for TestEvents {
 }
 
 /// A session value with sensible remote defaults, unsaved.
-pub(crate) fn session_value() -> CodeSession {
-    CodeSession {
-        id: CodeSessionId::new(),
+pub(crate) fn session_value() -> Session {
+    Session {
+        id: SessionId::new(),
         owner: OwnerId::local(),
         workspace_id: Some(WorkspaceId::new()),
-        kind: CodeSessionKind::Interactive,
+        kind: SessionKind::Interactive,
         harness_kind: HarnessKind::ClaudeCode,
         harness_version: None,
         harness_resume_ref: None,
@@ -172,7 +172,7 @@ pub(crate) fn session_value() -> CodeSession {
         model: None,
         reasoning_effort: None,
         fast_mode: false,
-        lifecycle: CodeSessionLifecycle::Running,
+        lifecycle: SessionLifecycle::Running,
         fence_reason: None,
         child_pid: None,
         child_process_identity: None,
@@ -188,13 +188,7 @@ pub(crate) fn session_value() -> CodeSession {
 /// path), and one session, all inserted.
 pub(crate) async fn seed(
     root: &Path,
-) -> (
-    Arc<DbStore>,
-    TestEvents,
-    CodeSession,
-    CodeWorkspace,
-    CodeRepo,
-) {
+) -> (Arc<DbStore>, TestEvents, Session, CodeWorkspace, CodeRepo) {
     let db = Arc::new(
         DbStore::connect(&format!(
             "sqlite://{}?mode=rwc",
@@ -246,10 +240,7 @@ pub(crate) async fn seed(
 }
 
 /// Reserve and activate one incarnation for the session.
-pub(crate) async fn seeded_incarnation(
-    db: &Arc<DbStore>,
-    session: &CodeSession,
-) -> CodeIncarnationId {
+pub(crate) async fn seeded_incarnation(db: &Arc<DbStore>, session: &Session) -> CodeIncarnationId {
     let admission = create_incarnation_intent(db, &session.owner, session.id, 1, 4)
         .await
         .unwrap();

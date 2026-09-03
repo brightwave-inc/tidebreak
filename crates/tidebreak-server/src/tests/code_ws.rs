@@ -10,7 +10,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
-use tidebreak_core::{CodeEvent, CodeSessionId};
+use tidebreak_core::{Event, SessionId};
 use tidebreak_harness::HarnessEvent;
 
 #[tokio::test(flavor = "multi_thread")]
@@ -103,14 +103,14 @@ async fn ws_replays_then_lives_without_gaps_or_duplicates() {
 
     // Concurrent write after connect: journal a notice and publish a later seq
     // first so the socket must fill the gap from the journal.
-    let parsed: CodeSessionId = session_id.parse().unwrap();
+    let parsed: SessionId = session_id.parse().unwrap();
     let current = *seqs.last().unwrap();
     let _ = tidebreak_core::db::code::append_event(
         &runtime.db,
         &tidebreak_core::OwnerId::local(),
         parsed,
         1,
-        &tidebreak_core::CodeEvent::HarnessNotice {
+        &tidebreak_core::Event::HarnessNotice {
             level: tidebreak_core::HarnessNoticeLevel::Info,
             message: "gap-a".into(),
         },
@@ -122,7 +122,7 @@ async fn ws_replays_then_lives_without_gaps_or_duplicates() {
         &tidebreak_core::OwnerId::local(),
         parsed,
         1,
-        &tidebreak_core::CodeEvent::HarnessNotice {
+        &tidebreak_core::Event::HarnessNotice {
             level: tidebreak_core::HarnessNoticeLevel::Info,
             message: "gap-b".into(),
         },
@@ -131,9 +131,9 @@ async fn ws_replays_then_lives_without_gaps_or_duplicates() {
     .unwrap();
     runtime.bus.publish(
         parsed,
-        tidebreak_core::SequencedCodeEvent {
+        tidebreak_core::code::SequencedEvent {
             seq: seq_b,
-            event: tidebreak_core::CodeEvent::HarnessNotice {
+            event: tidebreak_core::Event::HarnessNotice {
                 level: tidebreak_core::HarnessNoticeLevel::Info,
                 message: "gap-b".into(),
             },
@@ -182,7 +182,7 @@ async fn ws_replay_emits_every_durable_sequence_after_the_cursor_in_order() {
         .await
         .unwrap();
     let session_id = json_id(&session).to_owned();
-    let parsed: CodeSessionId = session_id.parse().unwrap();
+    let parsed: SessionId = session_id.parse().unwrap();
     let replay_after_seq = journaled_events(&runtime.db, parsed)
         .await
         .last()
@@ -193,7 +193,7 @@ async fn ws_replay_emits_every_durable_sequence_after_the_cursor_in_order() {
         &tidebreak_core::OwnerId::local(),
         parsed,
         1,
-        &tidebreak_core::CodeEvent::AssistantDelta { text: "hel".into() },
+        &tidebreak_core::Event::AssistantDelta { text: "hel".into() },
     )
     .await
     .unwrap();
@@ -202,7 +202,7 @@ async fn ws_replay_emits_every_durable_sequence_after_the_cursor_in_order() {
         &tidebreak_core::OwnerId::local(),
         parsed,
         1,
-        &tidebreak_core::CodeEvent::AssistantDelta { text: "lo".into() },
+        &tidebreak_core::Event::AssistantDelta { text: "lo".into() },
     )
     .await
     .unwrap();
@@ -287,7 +287,7 @@ async fn a_turn_journals_its_message_and_none_of_the_deltas_that_built_it() {
         .await
         .unwrap();
     let session_id = json_id(&session).to_owned();
-    let parsed: CodeSessionId = session_id.parse().unwrap();
+    let parsed: SessionId = session_id.parse().unwrap();
 
     let mut request = format!("ws://{addr}/code/sessions/{session_id}/events?after=0")
         .into_client_request()
@@ -331,13 +331,13 @@ async fn a_turn_journals_its_message_and_none_of_the_deltas_that_built_it() {
     assert!(
         !journaled
             .iter()
-            .any(|framed| matches!(framed.event, CodeEvent::AssistantDelta { .. })),
+            .any(|framed| matches!(framed.event, Event::AssistantDelta { .. })),
         "a delta reached the journal: {journaled:?}"
     );
     let messages: Vec<&str> = journaled
         .iter()
         .filter_map(|framed| match &framed.event {
-            CodeEvent::AssistantMessage { text, .. } => Some(text.as_str()),
+            Event::AssistantMessage { text, .. } => Some(text.as_str()),
             _ => None,
         })
         .collect();
@@ -370,7 +370,7 @@ async fn reconnecting_mid_answer_replaces_with_the_complete_live_tail() {
         .await
         .unwrap();
     let session_id = json_id(&session).to_owned();
-    let parsed: CodeSessionId = session_id.parse().unwrap();
+    let parsed: SessionId = session_id.parse().unwrap();
 
     let mut request = format!("ws://{addr}/code/sessions/{session_id}/events?after=0")
         .into_client_request()
@@ -389,7 +389,7 @@ async fn reconnecting_mid_answer_replaces_with_the_complete_live_tail() {
     .unwrap()
     .unwrap()
     .spawn_epoch;
-    let marker = CodeEvent::HarnessNotice {
+    let marker = Event::HarnessNotice {
         level: tidebreak_core::HarnessNoticeLevel::Info,
         message: "reconnect cursor".into(),
     };
@@ -404,7 +404,7 @@ async fn reconnecting_mid_answer_replaces_with_the_complete_live_tail() {
     .unwrap();
     runtime.bus.publish(
         parsed,
-        tidebreak_core::SequencedCodeEvent {
+        tidebreak_core::code::SequencedEvent {
             seq: cursor,
             event: marker,
         },
@@ -426,13 +426,13 @@ async fn reconnecting_mid_answer_replaces_with_the_complete_live_tail() {
 
     runtime.bus.publish_transient(
         parsed,
-        CodeEvent::AssistantDelta {
+        Event::AssistantDelta {
             text: "first ".into(),
         },
     );
     runtime.bus.publish_transient(
         parsed,
-        CodeEvent::AssistantDelta {
+        Event::AssistantDelta {
             text: "second ".into(),
         },
     );
@@ -457,7 +457,7 @@ async fn reconnecting_mid_answer_replaces_with_the_complete_live_tail() {
 
     runtime.bus.publish_transient(
         parsed,
-        CodeEvent::AssistantDelta {
+        Event::AssistantDelta {
             text: "third".into(),
         },
     );
@@ -488,7 +488,7 @@ async fn reconnecting_mid_answer_replaces_with_the_complete_live_tail() {
 
     runtime.bus.publish_transient(
         parsed,
-        CodeEvent::AssistantDelta {
+        Event::AssistantDelta {
             text: " fourth".into(),
         },
     );
@@ -531,7 +531,7 @@ async fn superseded_worker_cannot_append_to_the_journal() {
         .json::<serde_json::Value>()
         .await
         .unwrap();
-    let session_id: CodeSessionId = json_id(&session).parse().unwrap();
+    let session_id: SessionId = json_id(&session).parse().unwrap();
     let current = session["lifecycle"].as_str().unwrap().to_owned();
     assert_eq!(current, "idle");
     let bumped = tidebreak_core::db::code::bump_spawn_epoch(&runtime.db, session_id, None)
@@ -542,12 +542,12 @@ async fn superseded_worker_cannot_append_to_the_journal() {
         &tidebreak_core::OwnerId::local(),
         session_id,
         bumped - 1,
-        &tidebreak_core::CodeEvent::TurnInterrupted { usage: None },
+        &tidebreak_core::Event::TurnInterrupted { usage: None },
     )
     .await
     .unwrap_err();
     match err {
-        tidebreak_core::db::code::CodeJournalError::StaleSpawnEpoch {
+        tidebreak_core::db::code::JournalError::StaleSpawnEpoch {
             attempted, current, ..
         } => {
             assert_eq!(attempted, bumped - 1);

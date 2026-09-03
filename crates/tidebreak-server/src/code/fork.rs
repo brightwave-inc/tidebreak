@@ -23,9 +23,10 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
+use tidebreak_core::code::SequencedEvent;
 use tidebreak_core::{
-    BlobStore, CodeEvent, CodeSession, CodeTurn, CodeTurnId, CodeTurnStatus, DocumentBlob,
-    HarnessKind, HarnessNoticeLevel, SequencedCodeEvent, ToolDetail, ToolOutcome,
+    BlobStore, DocumentBlob, Event, HarnessKind, HarnessNoticeLevel, Session, ToolDetail,
+    ToolOutcome, Turn, TurnId, TurnStatus,
 };
 
 /// Directory holding fork transcripts below the workspace's private root.
@@ -59,10 +60,7 @@ const MAX_RECORD_TOTAL_BYTES: usize = 8 * 1024 * 1024;
 const MAX_FORK_ATTACHMENT_BYTES: u64 = 20 * 1024 * 1024;
 
 type ForkLockRegistry = Mutex<
-    std::collections::HashMap<
-        (PathBuf, tidebreak_core::CodeSessionId),
-        Weak<tokio::sync::Mutex<()>>,
-    >,
+    std::collections::HashMap<(PathBuf, tidebreak_core::SessionId), Weak<tokio::sync::Mutex<()>>>,
 >;
 
 fn fork_lock_registry() -> &'static ForkLockRegistry {
@@ -72,7 +70,7 @@ fn fork_lock_registry() -> &'static ForkLockRegistry {
 
 fn fork_lock(
     private_root: &Path,
-    session_id: tidebreak_core::CodeSessionId,
+    session_id: tidebreak_core::SessionId,
 ) -> Arc<tokio::sync::Mutex<()>> {
     let key = (private_root.to_path_buf(), session_id);
     let mut registry = fork_lock_registry().lock().expect("fork write registry");
@@ -88,7 +86,7 @@ fn fork_lock(
 /// A session's turns sliced at a fork point.
 pub(crate) struct ForkCut<'a> {
     /// The turns the fork covers, oldest first, ending at the fork point.
-    pub(crate) turns: &'a [CodeTurn],
+    pub(crate) turns: &'a [Turn],
     /// Turns of the session that ran after the fork point.
     pub(crate) excluded: usize,
 }
@@ -150,7 +148,7 @@ impl ForkBoundaryError {
 /// `None` forks at the newest turn. Returns `None` when `at_turn` names a
 /// turn that is not part of this session, which the route reports rather
 /// than silently forking the whole conversation.
-pub(crate) fn cut_at(turns: &[CodeTurn], at_turn: Option<CodeTurnId>) -> Option<ForkCut<'_>> {
+pub(crate) fn cut_at(turns: &[Turn], at_turn: Option<TurnId>) -> Option<ForkCut<'_>> {
     let Some(at) = at_turn else {
         return Some(ForkCut { turns, excluded: 0 });
     };
@@ -167,11 +165,11 @@ pub(crate) fn cut_at(turns: &[CodeTurn], at_turn: Option<CodeTurnId>) -> Option<
 /// follow-up blocks it. An explicit turn fork may leave later running or
 /// queued work behind because the reader selected that earlier seam.
 pub(crate) fn cut_at_settled_boundary<'a>(
-    turns: &'a [CodeTurn],
-    boundary_status: Option<CodeTurnStatus>,
-    pending_approval_turns: &HashSet<CodeTurnId>,
+    turns: &'a [Turn],
+    boundary_status: Option<TurnStatus>,
+    pending_approval_turns: &HashSet<TurnId>,
     has_queued_follow_up: bool,
-    at_turn: Option<CodeTurnId>,
+    at_turn: Option<TurnId>,
 ) -> Result<ForkCut<'a>, ForkBoundaryError> {
     let Some(cut) = cut_at(turns, at_turn) else {
         return Err(ForkBoundaryError::UnknownTurn);
@@ -179,7 +177,7 @@ pub(crate) fn cut_at_settled_boundary<'a>(
     let Some(boundary) = cut.turns.last() else {
         return Err(ForkBoundaryError::NoTurns);
     };
-    if boundary.status == CodeTurnStatus::Running {
+    if boundary.status == TurnStatus::Running {
         return Err(ForkBoundaryError::Running {
             ordinal: boundary.ordinal,
         });
@@ -239,10 +237,10 @@ pub(crate) struct WrittenTranscript {
 pub(crate) async fn write_transcript(
     private_root: &super::scratch::ScratchRoot,
     blobs: &dyn BlobStore,
-    session: &CodeSession,
+    session: &Session,
     cut: ForkCut<'_>,
-    events: &[SequencedCodeEvent],
-    complete_turns: &HashSet<CodeTurnId>,
+    events: &[SequencedEvent],
+    complete_turns: &HashSet<TurnId>,
 ) -> std::io::Result<WrittenTranscript> {
     let private_path = private_root.path();
     let write_lock = fork_lock(private_path, session.id);
@@ -333,14 +331,14 @@ struct RenderedTranscript {
 #[allow(clippy::too_many_arguments)]
 fn render_transcript_with_generation(
     private_root: &Path,
-    session: &CodeSession,
-    turns: &[CodeTurn],
+    session: &Session,
+    turns: &[Turn],
     excluded: usize,
-    events: &[SequencedCodeEvent],
+    events: &[SequencedEvent],
     generation: uuid::Uuid,
     record_ordinals: &HashSet<i64>,
-    retained_images: &HashSet<CodeTurnId>,
-    complete_turns: &HashSet<CodeTurnId>,
+    retained_images: &HashSet<TurnId>,
+    complete_turns: &HashSet<TurnId>,
 ) -> RenderedTranscript {
     let engine = harness_label(session.harness_kind);
     let mut sections: Vec<String> = Vec::with_capacity(turns.len());
@@ -453,7 +451,7 @@ fn render_transcript_with_generation(
 /// never names half of what a message attached. The first turn that would
 /// overflow the budget stops retention: everything older is dropped with it,
 /// and the transcript says so per turn.
-fn plan_attachment_retention(turns: &[CodeTurn]) -> HashSet<CodeTurnId> {
+fn plan_attachment_retention(turns: &[Turn]) -> HashSet<TurnId> {
     let mut retained = HashSet::new();
     let mut total: u64 = 0;
     for turn in turns.iter().rev() {
@@ -480,8 +478,8 @@ fn plan_attachment_retention(turns: &[CodeTurn]) -> HashSet<CodeTurnId> {
 async fn materialize_attachments(
     scope: &super::scratch::ScratchScope,
     blobs: &dyn BlobStore,
-    turns: &[CodeTurn],
-    retained: &HashSet<CodeTurnId>,
+    turns: &[Turn],
+    retained: &HashSet<TurnId>,
 ) -> std::io::Result<()> {
     for turn in turns {
         if !retained.contains(&turn.id) {
@@ -516,11 +514,7 @@ async fn materialize_attachments(
     Ok(())
 }
 
-fn fork_attachment_name(
-    turn: &CodeTurn,
-    ordinal: usize,
-    image: &tidebreak_core::ImageRef,
-) -> String {
+fn fork_attachment_name(turn: &Turn, ordinal: usize, image: &tidebreak_core::ImageRef) -> String {
     format!(
         "turn-{}-{}-{}.{}",
         turn.ordinal,
@@ -532,9 +526,9 @@ fn fork_attachment_name(
 
 fn fork_attachment_path(
     private_root: &Path,
-    session_id: tidebreak_core::CodeSessionId,
+    session_id: tidebreak_core::SessionId,
     generation: uuid::Uuid,
-    turn: &CodeTurn,
+    turn: &Turn,
     ordinal: usize,
     image: &tidebreak_core::ImageRef,
 ) -> String {
@@ -550,13 +544,13 @@ fn fork_attachment_path(
 /// The file's opening: where the transcript came from, what it condenses,
 /// and where the full records are.
 fn header(
-    session: &CodeSession,
-    turns: &[CodeTurn],
+    session: &Session,
+    turns: &[Turn],
     excluded: usize,
     reduced: usize,
     record_ordinals: &HashSet<i64>,
     engine: &str,
-    complete_turns: &HashSet<CodeTurnId>,
+    complete_turns: &HashSet<TurnId>,
 ) -> String {
     let total = turns.len();
     let mut out = String::new();
@@ -655,7 +649,7 @@ fn clip(section: &mut String, budget: usize) {
 ///
 /// The heading deliberately differs from a full section's `— you`, so the
 /// child can tell a stub from a turn it can read here.
-fn render_stub(turn: &CodeTurn, has_record: bool, events_complete: bool) -> String {
+fn render_stub(turn: &Turn, has_record: bool, events_complete: bool) -> String {
     let asked = turn.user_input.trim();
     let asked = if asked.is_empty() {
         "_(empty)_".to_owned()
@@ -686,9 +680,9 @@ fn render_stub(turn: &CodeTurn, has_record: bool, events_complete: bool) -> Stri
 #[allow(clippy::too_many_arguments)]
 fn render_turn(
     private_root: &Path,
-    session_id: tidebreak_core::CodeSessionId,
-    turn: &CodeTurn,
-    events: &[SequencedCodeEvent],
+    session_id: tidebreak_core::SessionId,
+    turn: &Turn,
+    events: &[SequencedEvent],
     engine: &str,
     generation: uuid::Uuid,
     images_retained: bool,
@@ -734,8 +728,8 @@ fn render_turn(
 fn render_attachment_list(
     out: &mut String,
     private_root: &Path,
-    session_id: tidebreak_core::CodeSessionId,
-    turn: &CodeTurn,
+    session_id: tidebreak_core::SessionId,
+    turn: &Turn,
     generation: uuid::Uuid,
     images_retained: bool,
 ) {
@@ -770,7 +764,7 @@ fn render_attachment_list(
 ///
 /// Scoped by walking from this turn's `TurnStarted` to the next one: a turn
 /// id appears on the boundary events, not on every event inside it.
-fn turn_lines(turn_id: CodeTurnId, events: &[SequencedCodeEvent]) -> Vec<String> {
+fn turn_lines(turn_id: TurnId, events: &[SequencedEvent]) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     let mut inside = false;
     // A tool call opens and closes on separate events, and the closing one
@@ -780,14 +774,14 @@ fn turn_lines(turn_id: CodeTurnId, events: &[SequencedCodeEvent]) -> Vec<String>
 
     for entry in events {
         match &entry.event {
-            CodeEvent::TurnStarted { turn_id: started } => {
+            Event::TurnStarted { turn_id: started } => {
                 if inside {
                     break;
                 }
                 inside = *started == turn_id;
             }
             _ if !inside => {}
-            CodeEvent::AssistantMessage {
+            Event::AssistantMessage {
                 text,
                 parent_call_id,
             } => {
@@ -795,12 +789,12 @@ fn turn_lines(turn_id: CodeTurnId, events: &[SequencedCodeEvent]) -> Vec<String>
                     lines.push(text.trim().to_owned());
                 }
             }
-            CodeEvent::UserSteered { text, .. } => {
+            Event::UserSteered { text, .. } => {
                 if !text.trim().is_empty() {
                     lines.push(format!("**You, mid-turn:** {}", text.trim()));
                 }
             }
-            CodeEvent::ToolStarted {
+            Event::ToolStarted {
                 call_id,
                 name,
                 detail,
@@ -812,7 +806,7 @@ fn turn_lines(turn_id: CodeTurnId, events: &[SequencedCodeEvent]) -> Vec<String>
                 open.push((call_id.clone(), lines.len(), name.clone(), detail.clone()));
                 lines.push(tool_line(name, detail, None));
             }
-            CodeEvent::ToolCompleted {
+            Event::ToolCompleted {
                 call_id,
                 outcome,
                 detail,
@@ -835,16 +829,14 @@ fn turn_lines(turn_id: CodeTurnId, events: &[SequencedCodeEvent]) -> Vec<String>
                     outcome_suffix(outcome)
                 );
             }
-            CodeEvent::TurnFailed { error, .. } => {
+            Event::TurnFailed { error, .. } => {
                 lines.push(format!("**The turn failed:** {}", error.message.trim()));
             }
-            CodeEvent::TurnInterrupted { .. } => {
-                lines.push("**The turn was interrupted.**".to_owned())
-            }
-            CodeEvent::TurnResumed { .. } => {
+            Event::TurnInterrupted { .. } => lines.push("**The turn was interrupted.**".to_owned()),
+            Event::TurnResumed { .. } => {
                 lines.push("**The turn resumed after the worker restarted.**".to_owned())
             }
-            CodeEvent::TurnRefused { .. } => {
+            Event::TurnRefused { .. } => {
                 lines.push("**The model declined to continue.**".to_owned())
             }
             _ => {}
@@ -866,13 +858,13 @@ struct RenderedRecords {
 #[allow(clippy::too_many_arguments)]
 fn render_turn_records(
     private_root: &Path,
-    session: &CodeSession,
-    turns: &[CodeTurn],
-    events: &[SequencedCodeEvent],
+    session: &Session,
+    turns: &[Turn],
+    events: &[SequencedEvent],
     engine: &str,
     generation: uuid::Uuid,
-    retained_images: &HashSet<CodeTurnId>,
-    complete_turns: &HashSet<CodeTurnId>,
+    retained_images: &HashSet<TurnId>,
+    complete_turns: &HashSet<TurnId>,
 ) -> RenderedRecords {
     let mut files: Vec<(i64, String)> = Vec::with_capacity(turns.len());
     let mut total = 0usize;
@@ -905,9 +897,9 @@ fn render_turn_records(
 #[allow(clippy::too_many_arguments)]
 fn render_turn_record(
     private_root: &Path,
-    session: &CodeSession,
-    turn: &CodeTurn,
-    events: &[SequencedCodeEvent],
+    session: &Session,
+    turn: &Turn,
+    events: &[SequencedEvent],
     engine: &str,
     generation: uuid::Uuid,
     images_retained: bool,
@@ -959,7 +951,7 @@ fn render_turn_record(
 /// Unlike [`turn_lines`], subagent events stay — indented under their `Task`
 /// call — tool previews ride their call, and reasoning runs are kept as
 /// quoted blocks.
-fn record_blocks(turn_id: CodeTurnId, events: &[SequencedCodeEvent]) -> Vec<String> {
+fn record_blocks(turn_id: TurnId, events: &[SequencedEvent]) -> Vec<String> {
     let mut blocks: Vec<String> = Vec::new();
     let mut inside = false;
     let mut reasoning: Vec<&str> = Vec::new();
@@ -985,7 +977,7 @@ fn record_blocks(turn_id: CodeTurnId, events: &[SequencedCodeEvent]) -> Vec<Stri
     }
 
     for entry in events {
-        if let CodeEvent::TurnStarted { turn_id: started } = &entry.event {
+        if let Event::TurnStarted { turn_id: started } = &entry.event {
             if inside {
                 break;
             }
@@ -995,13 +987,13 @@ fn record_blocks(turn_id: CodeTurnId, events: &[SequencedCodeEvent]) -> Vec<Stri
         if !inside {
             continue;
         }
-        if let CodeEvent::ReasoningDelta { text } = &entry.event {
+        if let Event::ReasoningDelta { text } = &entry.event {
             reasoning.push(text);
             continue;
         }
         flush_reasoning(&mut blocks, &mut reasoning);
         match &entry.event {
-            CodeEvent::AssistantMessage {
+            Event::AssistantMessage {
                 text,
                 parent_call_id,
             } => {
@@ -1017,12 +1009,12 @@ fn record_blocks(turn_id: CodeTurnId, events: &[SequencedCodeEvent]) -> Vec<Stri
                     ));
                 }
             }
-            CodeEvent::UserSteered { text, .. } => {
+            Event::UserSteered { text, .. } => {
                 if !text.trim().is_empty() {
                     blocks.push(format!("**You, mid-turn:** {}", text.trim()));
                 }
             }
-            CodeEvent::ToolStarted {
+            Event::ToolStarted {
                 call_id,
                 name,
                 detail,
@@ -1039,7 +1031,7 @@ fn record_blocks(turn_id: CodeTurnId, events: &[SequencedCodeEvent]) -> Vec<Stri
                 let line = tool_line(name, detail, None);
                 blocks.push(if nested { format!("  {line}") } else { line });
             }
-            CodeEvent::ToolCompleted {
+            Event::ToolCompleted {
                 call_id,
                 outcome,
                 preview,
@@ -1065,23 +1057,23 @@ fn record_blocks(turn_id: CodeTurnId, events: &[SequencedCodeEvent]) -> Vec<Stri
                 }
                 *block = line;
             }
-            CodeEvent::HarnessNotice { level, message } => {
+            Event::HarnessNotice { level, message } => {
                 blocks.push(format!(
                     "**Engine notice ({}):** {}",
                     notice_level(*level),
                     message.trim()
                 ));
             }
-            CodeEvent::TurnFailed { error, .. } => {
+            Event::TurnFailed { error, .. } => {
                 blocks.push(format!("**The turn failed:** {}", error.message.trim()));
             }
-            CodeEvent::TurnInterrupted { .. } => {
+            Event::TurnInterrupted { .. } => {
                 blocks.push("**The turn was interrupted.**".to_owned());
             }
-            CodeEvent::TurnResumed { .. } => {
+            Event::TurnResumed { .. } => {
                 blocks.push("**The turn resumed after the worker restarted.**".to_owned());
             }
-            CodeEvent::TurnRefused { .. } => {
+            Event::TurnRefused { .. } => {
                 blocks.push("**The model declined to continue.**".to_owned());
             }
             _ => {}
@@ -1178,17 +1170,16 @@ fn harness_label(kind: HarnessKind) -> &'static str {
 mod tests {
     use super::*;
     use tidebreak_core::{
-        Attention, AttentionSource, BoundedError, CodeSessionId, CodeSessionKind,
-        CodeSessionLifecycle, CodeTurnStatus, FsBlobStore, ImageMediaType, ImageRef, OwnerId,
-        PermissionMode, WorkspaceId,
+        Attention, AttentionSource, BoundedError, FsBlobStore, ImageMediaType, ImageRef, OwnerId,
+        PermissionMode, SessionId, SessionKind, SessionLifecycle, TurnStatus, WorkspaceId,
     };
 
-    fn session() -> CodeSession {
-        CodeSession {
-            id: CodeSessionId::new(),
+    fn session() -> Session {
+        Session {
+            id: SessionId::new(),
             owner: OwnerId::local(),
             workspace_id: Some(WorkspaceId::new()),
-            kind: CodeSessionKind::Interactive,
+            kind: SessionKind::Interactive,
             harness_kind: HarnessKind::ClaudeCode,
             harness_version: None,
             harness_resume_ref: None,
@@ -1196,7 +1187,7 @@ mod tests {
             model: None,
             reasoning_effort: None,
             fast_mode: false,
-            lifecycle: CodeSessionLifecycle::Idle,
+            lifecycle: SessionLifecycle::Idle,
             fence_reason: None,
             child_pid: None,
             child_process_identity: None,
@@ -1208,12 +1199,12 @@ mod tests {
         }
     }
 
-    fn turn(session_id: CodeSessionId, ordinal: i64, asked: &str) -> CodeTurn {
-        CodeTurn {
-            id: CodeTurnId::new(),
+    fn turn(session_id: SessionId, ordinal: i64, asked: &str) -> Turn {
+        Turn {
+            id: TurnId::new(),
             session_id,
             ordinal,
-            status: CodeTurnStatus::Completed,
+            status: TurnStatus::Completed,
             model: None,
             fast_mode: false,
             user_input: asked.to_owned(),
@@ -1231,18 +1222,18 @@ mod tests {
         }
     }
 
-    fn seq(events: Vec<CodeEvent>) -> Vec<SequencedCodeEvent> {
+    fn seq(events: Vec<Event>) -> Vec<SequencedEvent> {
         events
             .into_iter()
             .enumerate()
-            .map(|(at, event)| SequencedCodeEvent {
+            .map(|(at, event)| SequencedEvent {
                 seq: at as i64 + 1,
                 event,
             })
             .collect()
     }
 
-    fn all_turn_ids(turns: &[CodeTurn]) -> HashSet<CodeTurnId> {
+    fn all_turn_ids(turns: &[Turn]) -> HashSet<TurnId> {
         turns.iter().map(|turn| turn.id).collect()
     }
 
@@ -1253,12 +1244,12 @@ mod tests {
     /// Render the condensed transcript as if every turn had a record file and
     /// every image was retained, which is what most summary tests care about.
     fn render_transcript(
-        session: &CodeSession,
-        turns: &[CodeTurn],
-        events: &[SequencedCodeEvent],
+        session: &Session,
+        turns: &[Turn],
+        events: &[SequencedEvent],
     ) -> RenderedTranscript {
         let records: HashSet<i64> = turns.iter().map(|turn| turn.ordinal).collect();
-        let retained: HashSet<CodeTurnId> = turns.iter().map(|turn| turn.id).collect();
+        let retained: HashSet<TurnId> = turns.iter().map(|turn| turn.id).collect();
         render_transcript_with_generation(
             Path::new("/private"),
             session,
@@ -1281,12 +1272,12 @@ mod tests {
         let first = turn(session.id, 1, "fix the failing auth test");
         let second = turn(session.id, 2, "now push it");
         let events = seq(vec![
-            CodeEvent::TurnStarted { turn_id: first.id },
-            CodeEvent::AssistantMessage {
+            Event::TurnStarted { turn_id: first.id },
+            Event::AssistantMessage {
                 text: "Looking at the test now.".to_owned(),
                 parent_call_id: None,
             },
-            CodeEvent::ToolStarted {
+            Event::ToolStarted {
                 call_id: "call-1".to_owned(),
                 name: "Bash".to_owned(),
                 detail: ToolDetail::Other {
@@ -1294,7 +1285,7 @@ mod tests {
                 },
                 parent_call_id: None,
             },
-            CodeEvent::ToolCompleted {
+            Event::ToolCompleted {
                 call_id: "call-1".to_owned(),
                 outcome: ToolOutcome::Failed,
                 preview: "1 failed".to_owned(),
@@ -1307,8 +1298,8 @@ mod tests {
                 }),
                 parent_call_id: None,
             },
-            CodeEvent::TurnStarted { turn_id: second.id },
-            CodeEvent::AssistantMessage {
+            Event::TurnStarted { turn_id: second.id },
+            Event::AssistantMessage {
                 text: "Pushed.".to_owned(),
                 parent_call_id: None,
             },
@@ -1339,8 +1330,8 @@ mod tests {
         let session = session();
         let only = turn(session.id, 1, "audit the crate");
         let events = seq(vec![
-            CodeEvent::TurnStarted { turn_id: only.id },
-            CodeEvent::ToolStarted {
+            Event::TurnStarted { turn_id: only.id },
+            Event::ToolStarted {
                 call_id: "task-1".to_owned(),
                 name: "Task".to_owned(),
                 detail: ToolDetail::Other {
@@ -1348,11 +1339,11 @@ mod tests {
                 },
                 parent_call_id: None,
             },
-            CodeEvent::AssistantMessage {
+            Event::AssistantMessage {
                 text: "subagent thinking out loud".to_owned(),
                 parent_call_id: Some("task-1".to_owned()),
             },
-            CodeEvent::ToolCompleted {
+            Event::ToolCompleted {
                 call_id: "task-1".to_owned(),
                 outcome: ToolOutcome::Succeeded,
                 preview: "done".to_owned(),
@@ -1376,8 +1367,8 @@ mod tests {
         let session = session();
         let only = turn(session.id, 1, "deploy it");
         let events = seq(vec![
-            CodeEvent::TurnStarted { turn_id: only.id },
-            CodeEvent::TurnFailed {
+            Event::TurnStarted { turn_id: only.id },
+            Event::TurnFailed {
                 error: BoundedError {
                     message: "the engine exited".to_owned(),
                 },
@@ -1394,7 +1385,7 @@ mod tests {
     #[test]
     fn cuts_at_a_turn_and_counts_the_excluded_tail() {
         let session = session();
-        let turns: Vec<CodeTurn> = (1..=5)
+        let turns: Vec<Turn> = (1..=5)
             .map(|ordinal| turn(session.id, ordinal, "work"))
             .collect();
 
@@ -1406,7 +1397,7 @@ mod tests {
         assert_eq!(whole.turns.len(), 5);
         assert_eq!(whole.excluded, 0);
 
-        assert!(cut_at(&turns, Some(CodeTurnId::new())).is_none());
+        assert!(cut_at(&turns, Some(TurnId::new())).is_none());
     }
 
     /// A session-level fork must not turn the partial journal prefix of the
@@ -1416,7 +1407,7 @@ mod tests {
         let session = session();
         let completed = turn(session.id, 1, "first");
         let mut running = turn(session.id, 2, "keep working");
-        running.status = CodeTurnStatus::Running;
+        running.status = TurnStatus::Running;
         let turns = [completed.clone(), running];
 
         let result = cut_at_settled_boundary(&turns, None, &HashSet::new(), false, None);
@@ -1428,7 +1419,7 @@ mod tests {
 
         let earlier = cut_at_settled_boundary(
             &turns,
-            Some(CodeTurnStatus::Completed),
+            Some(TurnStatus::Completed),
             &HashSet::new(),
             false,
             Some(completed.id),
@@ -1447,13 +1438,8 @@ mod tests {
         let pending = HashSet::from([completed.id]);
         let turns = [completed];
 
-        let result = cut_at_settled_boundary(
-            &turns,
-            Some(CodeTurnStatus::Completed),
-            &pending,
-            false,
-            None,
-        );
+        let result =
+            cut_at_settled_boundary(&turns, Some(TurnStatus::Completed), &pending, false, None);
 
         assert!(matches!(
             result,
@@ -1470,7 +1456,7 @@ mod tests {
         let completed = turn(session.id, 1, "first");
         let ordinary = cut_at_settled_boundary(
             std::slice::from_ref(&completed),
-            Some(CodeTurnStatus::Completed),
+            Some(TurnStatus::Completed),
             &HashSet::new(),
             true,
             None,
@@ -1479,7 +1465,7 @@ mod tests {
 
         let explicit = cut_at_settled_boundary(
             std::slice::from_ref(&completed),
-            Some(CodeTurnStatus::Completed),
+            Some(TurnStatus::Completed),
             &HashSet::new(),
             true,
             Some(completed.id),
@@ -1495,10 +1481,10 @@ mod tests {
     fn retries_after_a_turn_finishes_during_preparation() {
         let session = session();
         let mut stale = turn(session.id, 1, "finish while forking");
-        stale.status = CodeTurnStatus::Running;
+        stale.status = TurnStatus::Running;
         let mixed = cut_at_settled_boundary(
             std::slice::from_ref(&stale),
-            Some(CodeTurnStatus::Completed),
+            Some(TurnStatus::Completed),
             &HashSet::new(),
             false,
             None,
@@ -1509,7 +1495,7 @@ mod tests {
         ));
 
         let mut settled = stale;
-        settled.status = CodeTurnStatus::Completed;
+        settled.status = TurnStatus::Completed;
         let settled_turns = [settled];
         let row_ahead = cut_at_settled_boundary(&settled_turns, None, &HashSet::new(), false, None);
         assert!(matches!(
@@ -1519,7 +1505,7 @@ mod tests {
 
         let retry = cut_at_settled_boundary(
             &settled_turns,
-            Some(CodeTurnStatus::Completed),
+            Some(TurnStatus::Completed),
             &HashSet::new(),
             false,
             None,
@@ -1534,7 +1520,7 @@ mod tests {
     #[test]
     fn says_when_the_conversation_continued_past_the_fork_point() {
         let session = session();
-        let turns: Vec<CodeTurn> = (1..=2)
+        let turns: Vec<Turn> = (1..=2)
             .map(|ordinal| turn(session.id, ordinal, "work"))
             .collect();
         let records: HashSet<i64> = turns.iter().map(|turn| turn.ordinal).collect();
@@ -1565,7 +1551,7 @@ mod tests {
     fn reduces_the_oldest_turns_to_stubs_and_says_so() {
         let session = session();
         let bulk = "x".repeat(200 * 1024);
-        let turns: Vec<CodeTurn> = (1..=5)
+        let turns: Vec<Turn> = (1..=5)
             .map(|ordinal| turn(session.id, ordinal, &bulk))
             .collect();
 
@@ -1586,7 +1572,7 @@ mod tests {
     fn a_stub_says_when_its_record_was_dropped() {
         let session = session();
         let bulk = "x".repeat(300 * 1024);
-        let turns: Vec<CodeTurn> = (1..=3)
+        let turns: Vec<Turn> = (1..=3)
             .map(|ordinal| turn(session.id, ordinal, &bulk))
             .collect();
         let records: HashSet<i64> = [3].into_iter().collect();
@@ -1617,7 +1603,7 @@ mod tests {
     fn counts_the_header_against_the_cap() {
         let session = session();
         let bulk = "x".repeat(MAX_TRANSCRIPT_BYTES / 2 - 40);
-        let turns: Vec<CodeTurn> = (1..=2)
+        let turns: Vec<Turn> = (1..=2)
             .map(|ordinal| turn(session.id, ordinal, &bulk))
             .collect();
 
@@ -1679,14 +1665,14 @@ mod tests {
         let session = session();
         let only = turn(session.id, 1, "audit the crate");
         let events = seq(vec![
-            CodeEvent::TurnStarted { turn_id: only.id },
-            CodeEvent::ReasoningDelta {
+            Event::TurnStarted { turn_id: only.id },
+            Event::ReasoningDelta {
                 text: "the tests look".to_owned(),
             },
-            CodeEvent::ReasoningDelta {
+            Event::ReasoningDelta {
                 text: " flaky".to_owned(),
             },
-            CodeEvent::ToolStarted {
+            Event::ToolStarted {
                 call_id: "task-1".to_owned(),
                 name: "Task".to_owned(),
                 detail: ToolDetail::Other {
@@ -1694,7 +1680,7 @@ mod tests {
                 },
                 parent_call_id: None,
             },
-            CodeEvent::ToolStarted {
+            Event::ToolStarted {
                 call_id: "sub-1".to_owned(),
                 name: "Bash".to_owned(),
                 detail: ToolDetail::Command {
@@ -1703,7 +1689,7 @@ mod tests {
                 },
                 parent_call_id: Some("task-1".to_owned()),
             },
-            CodeEvent::ToolCompleted {
+            Event::ToolCompleted {
                 call_id: "sub-1".to_owned(),
                 outcome: ToolOutcome::Succeeded,
                 preview: "tidebreak-core v0.1.0".to_owned(),
@@ -1713,11 +1699,11 @@ mod tests {
                 detail: None,
                 parent_call_id: Some("task-1".to_owned()),
             },
-            CodeEvent::AssistantMessage {
+            Event::AssistantMessage {
                 text: "two crates look unused".to_owned(),
                 parent_call_id: Some("task-1".to_owned()),
             },
-            CodeEvent::ToolCompleted {
+            Event::ToolCompleted {
                 call_id: "task-1".to_owned(),
                 outcome: ToolOutcome::Succeeded,
                 preview: "audit done".to_owned(),
@@ -1727,7 +1713,7 @@ mod tests {
                 detail: None,
                 parent_call_id: None,
             },
-            CodeEvent::UserSteered {
+            Event::UserSteered {
                 text: "skip the benches".to_owned(),
                 message_id: None,
             },
@@ -1760,8 +1746,8 @@ mod tests {
         let session = session();
         let only = turn(session.id, 1, "show me");
         let events = seq(vec![
-            CodeEvent::TurnStarted { turn_id: only.id },
-            CodeEvent::ToolStarted {
+            Event::TurnStarted { turn_id: only.id },
+            Event::ToolStarted {
                 call_id: "call-1".to_owned(),
                 name: "Read".to_owned(),
                 detail: ToolDetail::Other {
@@ -1769,7 +1755,7 @@ mod tests {
                 },
                 parent_call_id: None,
             },
-            CodeEvent::ToolCompleted {
+            Event::ToolCompleted {
                 call_id: "call-1".to_owned(),
                 outcome: ToolOutcome::Succeeded,
                 preview: "````\nfour ticks\n````".to_owned(),
@@ -1854,7 +1840,7 @@ mod tests {
     fn drops_the_oldest_records_over_the_total_budget() {
         let session = session();
         let bulk = "x".repeat(MAX_RECORD_FILE_BYTES * 2);
-        let turns: Vec<CodeTurn> = (1..=40)
+        let turns: Vec<Turn> = (1..=40)
             .map(|ordinal| turn(session.id, ordinal, &bulk))
             .collect();
         let complete = all_turn_ids(&turns);
@@ -1931,7 +1917,7 @@ mod tests {
         let blob_root = tempfile::tempdir().expect("blob tempdir");
         let blobs = FsBlobStore::new(blob_root.path());
         let session = session();
-        let turns: Vec<CodeTurn> = (1..=3)
+        let turns: Vec<Turn> = (1..=3)
             .map(|ordinal| turn(session.id, ordinal, "work"))
             .collect();
         let cut = cut_at(&turns, Some(turns[0].id)).expect("known turn");
@@ -2014,7 +2000,7 @@ mod tests {
         let blob_root = tempfile::tempdir().unwrap();
         let blobs: Arc<dyn BlobStore> = Arc::new(FsBlobStore::new(blob_root.path()));
         let mut session = session();
-        session.lifecycle = CodeSessionLifecycle::Ended;
+        session.lifecycle = SessionLifecycle::Ended;
         let mut only = turn(session.id, 1, "compare these screenshots");
         let first_bytes = b"\x89PNG\r\n\x1a\nfirst".to_vec();
         let second_bytes = b"GIF89asecond".to_vec();

@@ -3,8 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 use tidebreak_core::{
-    ChatId, CodeSessionId, Notification, NotificationContext, NotificationId, NotificationKind,
-    NotificationListCursor, WorkspaceId,
+    Notification, NotificationContext, NotificationId, NotificationKind, NotificationListCursor,
+    SessionId, WorkspaceId,
 };
 
 use crate::error::ServerError;
@@ -35,10 +35,10 @@ impl From<NotificationKind> for NotificationKindSnapshot {
 #[serde(tag = "surface", rename_all = "snake_case")]
 pub enum NotificationContextSnapshot {
     Chat {
-        chat_id: ChatId,
+        chat_id: SessionId,
     },
     Code {
-        session_id: CodeSessionId,
+        session_id: SessionId,
         workspace_id: WorkspaceId,
     },
 }

@@ -21,9 +21,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use tidebreak_core::{
-    ChatId, MemoryAuthor, MemoryBackend, MemoryEvidence, MemoryKind, MemoryListFilter,
-    MemoryOrigin, MemoryProvenance, MemoryRecord, MemoryRecordId, MemoryRecordUpdate, MemoryScope,
-    MemoryStatus, MemoryStatusChange, OwnerId, Result, Role, Store, TurnId, MAX_MEMORY_BODY_BYTES,
+    MemoryAuthor, MemoryBackend, MemoryEvidence, MemoryKind, MemoryListFilter, MemoryOrigin,
+    MemoryProvenance, MemoryRecord, MemoryRecordId, MemoryRecordUpdate, MemoryScope, MemoryStatus,
+    MemoryStatusChange, OwnerId, Result, Role, SessionId, Store, TurnId, MAX_MEMORY_BODY_BYTES,
     MAX_MEMORY_TITLE_CHARS,
 };
 
@@ -149,7 +149,7 @@ pub(crate) struct MemoryCapture {
     /// completion that landed while that call was running. Only the newest
     /// queued turn is kept: capture judges one turn's material, and the
     /// newest completed turn is the one still worth judging.
-    in_flight: Arc<Mutex<HashMap<ChatId, Option<TurnId>>>>,
+    in_flight: Arc<Mutex<HashMap<SessionId, Option<TurnId>>>>,
 }
 
 impl MemoryCapture {
@@ -189,7 +189,7 @@ impl MemoryCapture {
     /// Returns immediately. Nothing waits on the result and nothing fails
     /// when it does not arrive, which is what lets the turn worker call this
     /// from its one completion seam without touching the turn's outcome.
-    pub(crate) fn spawn(&self, chat_id: ChatId, turn_id: TurnId) {
+    pub(crate) fn spawn(&self, chat_id: SessionId, turn_id: TurnId) {
         let Some((mut claim, mut turn_id)) =
             CaptureClaim::acquire(&self.in_flight, chat_id, turn_id)
         else {
@@ -241,7 +241,7 @@ impl MemoryCapture {
     ///
     /// The awaitable form of [`MemoryCapture::spawn`], which is what a test
     /// asserts on.
-    pub(crate) async fn derive(&self, chat_id: ChatId, turn_id: TurnId) -> Result<Outcome> {
+    pub(crate) async fn derive(&self, chat_id: SessionId, turn_id: TurnId) -> Result<Outcome> {
         if !capture_enabled(&*self.store).await? {
             return Ok(Outcome::NotApplicable);
         }
@@ -310,7 +310,7 @@ impl MemoryCapture {
     pub(crate) async fn store_candidate(
         &self,
         owner: &OwnerId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         turn_id: TurnId,
         evidence: MemoryEvidence,
         candidate: MemoryCandidate,
@@ -395,7 +395,7 @@ impl MemoryCapture {
     async fn observe_hypothesis(
         &self,
         owner: &OwnerId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         turn_id: TurnId,
         evidence: MemoryEvidence,
         tracked: &MemoryRecord,
@@ -453,7 +453,7 @@ impl MemoryCapture {
     async fn material(
         &self,
         owner: &OwnerId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         turn_id: TurnId,
     ) -> Result<Option<(String, MemoryEvidence)>> {
         let messages = self.store.list_messages(chat_id).await?;
@@ -590,8 +590,8 @@ pub(crate) async fn capture_enabled(store: &dyn Store) -> Result<bool> {
 
 /// A chat's place in [`MemoryCapture::in_flight`], released on drop.
 struct CaptureClaim {
-    in_flight: Arc<Mutex<HashMap<ChatId, Option<TurnId>>>>,
-    chat_id: ChatId,
+    in_flight: Arc<Mutex<HashMap<SessionId, Option<TurnId>>>>,
+    chat_id: SessionId,
     released: bool,
 }
 
@@ -599,8 +599,8 @@ impl CaptureClaim {
     /// Claim `chat_id`, or queue `turn_id` behind the call already running
     /// for it.
     fn acquire(
-        in_flight: &Arc<Mutex<HashMap<ChatId, Option<TurnId>>>>,
-        chat_id: ChatId,
+        in_flight: &Arc<Mutex<HashMap<SessionId, Option<TurnId>>>>,
+        chat_id: SessionId,
         turn_id: TurnId,
     ) -> Option<(Self, TurnId)> {
         let in_flight = in_flight.clone();

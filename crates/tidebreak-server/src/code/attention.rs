@@ -16,10 +16,9 @@ use tidebreak_core::db::code::{
     list_sessions_for_workspace, list_turns, replace_session_attention, save_session,
 };
 use tidebreak_core::{
-    preview_formatting_character, Attention, AttentionSource, AttentionState, CodeApprovalState,
-    CodeEvent, CodeSession, CodeSessionActivity, CodeSessionId, CodeSessionKind,
-    CodeSessionLifecycle, CodeSubagentStatus, CodeTurnStatus, DbStore, OwnerId, ToolDetail,
-    WorkspaceId,
+    preview_formatting_character, ApprovalState, Attention, AttentionSource, AttentionState,
+    CodeSubagentStatus, DbStore, Event, OwnerId, Session, SessionActivity, SessionId, SessionKind,
+    SessionLifecycle, ToolDetail, TurnStatus, WorkspaceId,
 };
 
 use super::bus::{CodeEventBus, CodeLiveUpdate, SessionDigest};
@@ -42,11 +41,7 @@ pub(crate) const ACTIVITY_DETAIL_MAX_CHARS: usize = 120;
 /// `from_user` is the explicit pin/clear path: it may replace anything,
 /// including [`AttentionState::Manual`]. Automatic writes still go through
 /// [`tidebreak_core::should_replace`].
-pub(crate) fn replace_attention(
-    session: &mut CodeSession,
-    next: Attention,
-    from_user: bool,
-) -> bool {
+pub(crate) fn replace_attention(session: &mut Session, next: Attention, from_user: bool) -> bool {
     if !from_user && !tidebreak_core::should_replace(&session.attention, &next) {
         return false;
     }
@@ -62,7 +57,7 @@ pub(crate) fn replace_attention(
 pub(crate) async fn persist_session(
     db: &DbStore,
     bus: &CodeEventBus,
-    session: &CodeSession,
+    session: &Session,
 ) -> Result<bool, tidebreak_core::AgentError> {
     let ok = save_session(db, session).await?;
     if ok {
@@ -87,7 +82,7 @@ pub(crate) async fn apply_attention(
     db: &DbStore,
     bus: &CodeEventBus,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     next: Attention,
     from_user: bool,
 ) -> Result<Option<Attention>, tidebreak_core::AgentError> {
@@ -111,7 +106,7 @@ pub(crate) async fn apply_trigger_attention(
     db: &DbStore,
     bus: &CodeEventBus,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     delivery_id: tidebreak_core::CodeTriggerDeliveryId,
     lease_token: uuid::Uuid,
     next: Attention,
@@ -161,10 +156,10 @@ impl Default for ComputeOpts {
 pub(crate) async fn compute_attention(
     db: &DbStore,
     bus: &CodeEventBus,
-    session: &CodeSession,
+    session: &Session,
     opts: ComputeOpts,
 ) -> Result<Attention, tidebreak_core::AgentError> {
-    if session.lifecycle == CodeSessionLifecycle::Fenced {
+    if session.lifecycle == SessionLifecycle::Fenced {
         if let Some(reason) = session.fence_reason.clone() {
             return Ok(Attention::new(
                 AttentionState::Fenced { reason },
@@ -175,7 +170,7 @@ pub(crate) async fn compute_attention(
     let pending = list_approvals(
         db,
         &session.owner,
-        Some(CodeApprovalState::Pending),
+        Some(ApprovalState::Pending),
         Some(session.id),
     )
     .await?;
@@ -185,7 +180,7 @@ pub(crate) async fn compute_attention(
             AttentionSource::Structured,
         ));
     }
-    if session.lifecycle == CodeSessionLifecycle::Running {
+    if session.lifecycle == SessionLifecycle::Running {
         let last = last_activity_at(db, bus, session).await?;
         let idle = opts.now.signed_duration_since(last).num_seconds().max(0) as u32;
         if idle >= opts.stall_idle_secs && !parked_on_background(db, session).await? {
@@ -197,17 +192,18 @@ pub(crate) async fn compute_attention(
         return Ok(Attention::working(AttentionSource::Lifecycle));
     }
     match latest_turn(db, &session.owner, session.id).await? {
-        Some(turn) if turn.status == CodeTurnStatus::Failed => Ok(Attention::needs_you(
+        Some(turn) if turn.status == TurnStatus::Failed => Ok(Attention::needs_you(
             "the engine turn failed",
             AttentionSource::Lifecycle,
         )),
-        Some(turn) if turn.status == CodeTurnStatus::Interrupted => Ok(Attention::needs_you(
+        Some(turn) if turn.status == TurnStatus::Interrupted => Ok(Attention::needs_you(
             "the turn was interrupted",
             AttentionSource::Lifecycle,
         )),
-        Some(turn) if turn.status == CodeTurnStatus::Completed && !opts.reviewed => Ok(
-            Attention::new(AttentionState::DoneUnreviewed, AttentionSource::Lifecycle),
-        ),
+        Some(turn) if turn.status == TurnStatus::Completed && !opts.reviewed => Ok(Attention::new(
+            AttentionState::DoneUnreviewed,
+            AttentionSource::Lifecycle,
+        )),
         // Nothing running, nothing waiting, nothing unreviewed. Reporting
         // `Working` here — as this arm used to — claims an engine is busy
         // when none is, and a session with no turns yet has never been busy
@@ -225,7 +221,7 @@ pub(crate) async fn mark_viewed(
     db: &DbStore,
     bus: &CodeEventBus,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
 ) -> Result<(), tidebreak_core::AgentError> {
     let Some(session) = get_session(db, owner, session_id).await? else {
         return Ok(());
@@ -255,10 +251,10 @@ pub(crate) async fn user_set_attention(
     db: &DbStore,
     bus: &CodeEventBus,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     clear: bool,
     note: Option<String>,
-) -> Result<CodeSession, tidebreak_core::AgentError> {
+) -> Result<Session, tidebreak_core::AgentError> {
     let Some(session) = get_session(db, owner, session_id).await? else {
         return Err(tidebreak_core::AgentError::Store(format!(
             "session {session_id} not found"
@@ -291,7 +287,7 @@ pub(crate) async fn sweep_stalled(
     idle_secs: u32,
 ) -> Result<(), tidebreak_core::AgentError> {
     let now = Utc::now();
-    let running = list_sessions_by_lifecycle_all_owners(db, CodeSessionLifecycle::Running).await?;
+    let running = list_sessions_by_lifecycle_all_owners(db, SessionLifecycle::Running).await?;
     for session in running {
         let last = last_activity_at(db, bus, &session).await?;
         let idle = now.signed_duration_since(last).num_seconds().max(0) as u32;
@@ -324,7 +320,7 @@ pub(crate) async fn note_activity(
     db: &DbStore,
     bus: &CodeEventBus,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
 ) -> Result<(), tidebreak_core::AgentError> {
     if !bus.maybe_stalled(session_id) {
         return Ok(());
@@ -334,7 +330,7 @@ pub(crate) async fn note_activity(
     };
     let stalled = matches!(session.attention.state, AttentionState::Stalled { .. });
     bus.set_maybe_stalled(session_id, stalled);
-    if session.lifecycle != CodeSessionLifecycle::Running {
+    if session.lifecycle != SessionLifecycle::Running {
         return Ok(());
     }
     if !stalled {
@@ -352,7 +348,7 @@ pub(crate) async fn note_activity(
     Ok(())
 }
 
-pub(crate) async fn emit_digest(db: &DbStore, bus: &CodeEventBus, session: &CodeSession) {
+pub(crate) async fn emit_digest(db: &DbStore, bus: &CodeEventBus, session: &Session) {
     match build_digest(db, session).await {
         Ok(digest) => {
             bus.publish_update(&session.owner, CodeLiveUpdate::Digest(Box::new(digest)));
@@ -385,8 +381,8 @@ pub(crate) async fn emit_workspace_digests(
     }
 }
 
-/// The owner's live session digests, restated on every `/code/updates`
-/// connect. Scoped: a subscriber never learns that another owner's session
+/// The owner's live session digests, restated on every `/updates`
+/// connection. Scoped: a subscriber never learns that another owner's session
 /// exists.
 pub(crate) async fn list_digests(
     db: &DbStore,
@@ -394,7 +390,7 @@ pub(crate) async fn list_digests(
 ) -> Result<Vec<SessionDigest>, tidebreak_core::AgentError> {
     let mut out = Vec::new();
     for session in list_sessions(db, owner).await? {
-        if session.lifecycle == CodeSessionLifecycle::Ended {
+        if session.lifecycle == SessionLifecycle::Ended {
             continue;
         }
         out.push(build_digest(db, &session).await?);
@@ -404,7 +400,7 @@ pub(crate) async fn list_digests(
 
 async fn build_digest(
     db: &DbStore,
-    session: &CodeSession,
+    session: &Session,
 ) -> Result<SessionDigest, tidebreak_core::AgentError> {
     let workspace = match session.workspace_id {
         Some(workspace_id) => Some(
@@ -423,12 +419,12 @@ async fn build_digest(
     // A watch session's lifecycle undersells it ("running" for hours), so its
     // digest carries the watch's own state. The row is small and local — this
     // never reaches the host the way the PR snapshot does.
-    let watch = if session.kind == CodeSessionKind::Watch {
+    let watch = if session.kind == SessionKind::Watch {
         latest_watch_for_session(db, &session.owner, session.id).await?
     } else {
         None
     };
-    let (activity, activity_detail) = if session.lifecycle == CodeSessionLifecycle::Running {
+    let (activity, activity_detail) = if session.lifecycle == SessionLifecycle::Running {
         let events =
             list_recent_events(db, &session.owner, session.id, ACTIVITY_EVENT_WINDOW).await?;
         let (activity, detail) = session_activity(session, &events);
@@ -492,7 +488,7 @@ async fn build_digest(
     })
 }
 
-async fn memory_proposal_count(db: &DbStore, session: &CodeSession) -> Option<u64> {
+async fn memory_proposal_count(db: &DbStore, session: &Session) -> Option<u64> {
     use tidebreak_core::{MemoryBackend, MemoryEvidence, MemoryListFilter, MemoryStatus};
     let records = db
         .list(
@@ -515,7 +511,7 @@ async fn memory_proposal_count(db: &DbStore, session: &CodeSession) -> Option<u6
                 && record.provenance.evidence.iter().any(|evidence| {
                     matches!(
                         evidence,
-                        MemoryEvidence::CodeEvent { session_id, .. } if *session_id == session.id
+                        MemoryEvidence::Event { session_id, .. } if *session_id == session.id
                     )
                 })
         })
@@ -527,40 +523,40 @@ async fn memory_proposal_count(db: &DbStore, session: &CodeSession) -> Option<u6
 /// monitor tool, or one or more harness subagents.
 async fn parked_on_background(
     db: &DbStore,
-    session: &CodeSession,
+    session: &Session,
 ) -> Result<bool, tidebreak_core::AgentError> {
     let events = list_recent_events(db, &session.owner, session.id, ACTIVITY_EVENT_WINDOW).await?;
     Ok(matches!(
         session_activity(session, &events).0,
-        CodeSessionActivity::Monitor | CodeSessionActivity::Subagents
+        SessionActivity::Monitor | SessionActivity::Subagents
     ))
 }
 
 /// What the live turn is occupied with, and the subject of the tool it is
 /// waiting on when that tool named one.
 fn session_activity(
-    session: &CodeSession,
-    events: &[tidebreak_core::SequencedCodeEvent],
-) -> (CodeSessionActivity, Option<String>) {
+    session: &Session,
+    events: &[tidebreak_core::code::SequencedEvent],
+) -> (SessionActivity, Option<String>) {
     if session
         .subagents
         .iter()
         .any(|entry| entry.status == CodeSubagentStatus::Running)
     {
-        return (CodeSessionActivity::Subagents, None);
+        return (SessionActivity::Subagents, None);
     }
 
     let mut completed = HashSet::new();
     for sequenced in events {
         match &sequenced.event {
-            CodeEvent::ToolCompleted {
+            Event::ToolCompleted {
                 call_id,
                 parent_call_id: None,
                 ..
             } => {
                 completed.insert(call_id.as_str());
             }
-            CodeEvent::ToolStarted {
+            Event::ToolStarted {
                 call_id,
                 name,
                 detail,
@@ -568,15 +564,15 @@ fn session_activity(
             } if !completed.contains(call_id.as_str()) => {
                 return (classify_activity(name, detail), activity_detail(detail));
             }
-            CodeEvent::TurnStarted { .. }
-            | CodeEvent::TurnCompleted { .. }
-            | CodeEvent::TurnRefused { .. }
-            | CodeEvent::TurnFailed { .. }
-            | CodeEvent::TurnInterrupted { .. } => break,
+            Event::TurnStarted { .. }
+            | Event::TurnCompleted { .. }
+            | Event::TurnRefused { .. }
+            | Event::TurnFailed { .. }
+            | Event::TurnInterrupted { .. } => break,
             _ => {}
         }
     }
-    (CodeSessionActivity::Agent, None)
+    (SessionActivity::Agent, None)
 }
 
 /// One line naming what the tool is doing, or nothing when the detail has no
@@ -609,22 +605,22 @@ fn activity_detail(detail: &ToolDetail) -> Option<String> {
     })
 }
 
-fn classify_activity(name: &str, detail: &ToolDetail) -> CodeSessionActivity {
+fn classify_activity(name: &str, detail: &ToolDetail) -> SessionActivity {
     let normalized = name.to_ascii_lowercase().replace(['_', '-'], "");
     if normalized == "task" {
-        return CodeSessionActivity::Subagents;
+        return SessionActivity::Subagents;
     }
     if normalized.contains("output")
         || normalized.contains("monitor")
         || normalized.starts_with("wait")
     {
-        return CodeSessionActivity::Monitor;
+        return SessionActivity::Monitor;
     }
     match detail {
-        ToolDetail::Command { .. } => CodeSessionActivity::Shell,
-        ToolDetail::FileEdit { .. } | ToolDetail::FileRead { .. } => CodeSessionActivity::File,
-        ToolDetail::Search { .. } => CodeSessionActivity::Search,
-        ToolDetail::Other { .. } => CodeSessionActivity::Tool,
+        ToolDetail::Command { .. } => SessionActivity::Shell,
+        ToolDetail::FileEdit { .. } | ToolDetail::FileRead { .. } => SessionActivity::File,
+        ToolDetail::Search { .. } => SessionActivity::Search,
+        ToolDetail::Other { .. } => SessionActivity::Tool,
     }
 }
 
@@ -637,7 +633,7 @@ fn classify_activity(name: &str, detail: &ToolDetail) -> CodeSessionActivity {
 async fn last_activity_at(
     db: &DbStore,
     bus: &CodeEventBus,
-    session: &CodeSession,
+    session: &Session,
 ) -> Result<DateTime<Utc>, tidebreak_core::AgentError> {
     let journaled = match latest_event_created_at(db, &session.owner, session.id).await? {
         Some(at) => at,
@@ -682,9 +678,9 @@ impl Drop for StallSweepGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tidebreak_core::code::SequencedEvent;
     use tidebreak_core::{
-        should_replace, CodeSessionKind, CodeSubagentSummary, FenceReason, SequencedCodeEvent,
-        ToolOutcome, WorkspaceId,
+        should_replace, CodeSubagentSummary, FenceReason, SessionKind, ToolOutcome, WorkspaceId,
     };
 
     fn auto_working() -> Attention {
@@ -702,12 +698,12 @@ mod tests {
         )
     }
 
-    fn session_with(attention: Attention) -> CodeSession {
-        CodeSession {
-            id: CodeSessionId::new(),
+    fn session_with(attention: Attention) -> Session {
+        Session {
+            id: SessionId::new(),
             owner: tidebreak_core::OwnerId::local(),
             workspace_id: Some(WorkspaceId::new()),
-            kind: CodeSessionKind::Interactive,
+            kind: SessionKind::Interactive,
             harness_kind: tidebreak_core::HarnessKind::ClaudeCode,
             harness_version: None,
             harness_resume_ref: None,
@@ -715,7 +711,7 @@ mod tests {
             model: None,
             reasoning_effort: None,
             fast_mode: false,
-            lifecycle: CodeSessionLifecycle::Idle,
+            lifecycle: SessionLifecycle::Idle,
             fence_reason: None,
             child_pid: None,
             child_process_identity: None,
@@ -727,12 +723,12 @@ mod tests {
         }
     }
 
-    fn sequenced(seq: i64, event: CodeEvent) -> SequencedCodeEvent {
-        SequencedCodeEvent { seq, event }
+    fn sequenced(seq: i64, event: Event) -> SequencedEvent {
+        SequencedEvent { seq, event }
     }
 
-    fn started(name: &str, detail: ToolDetail) -> CodeEvent {
-        CodeEvent::ToolStarted {
+    fn started(name: &str, detail: ToolDetail) -> Event {
+        Event::ToolStarted {
             call_id: "tool-1".into(),
             name: name.into(),
             detail,
@@ -829,7 +825,7 @@ mod tests {
 
         assert_eq!(
             session_activity(&session, &events),
-            (CodeSessionActivity::Shell, Some("cargo test".to_owned()))
+            (SessionActivity::Shell, Some("cargo test".to_owned()))
         );
     }
 
@@ -890,7 +886,7 @@ mod tests {
         assert_eq!(
             session_activity(&session, &events),
             (
-                CodeSessionActivity::Monitor,
+                SessionActivity::Monitor,
                 Some("waiting for a background command".to_owned())
             )
         );
@@ -907,7 +903,7 @@ mod tests {
 
         assert_eq!(
             session_activity(&session, &[]),
-            (CodeSessionActivity::Subagents, None)
+            (SessionActivity::Subagents, None)
         );
     }
 
@@ -917,7 +913,7 @@ mod tests {
         let events = [
             sequenced(
                 3,
-                CodeEvent::ToolCompleted {
+                Event::ToolCompleted {
                     call_id: "tool-1".into(),
                     outcome: ToolOutcome::Succeeded,
                     preview: "done".into(),
@@ -942,7 +938,7 @@ mod tests {
 
         assert_eq!(
             session_activity(&session, &events),
-            (CodeSessionActivity::Agent, None)
+            (SessionActivity::Agent, None)
         );
     }
 }

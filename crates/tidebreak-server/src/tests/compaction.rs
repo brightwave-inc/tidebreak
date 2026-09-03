@@ -78,7 +78,7 @@ async fn compact_everything_but_the_last_message(router: &Router, bearer: &str) 
 /// `wait_for_turn` scans the journal from the start, so on a chat that has
 /// already finished one turn it returns on that turn's terminal event rather
 /// than the one just sent.
-async fn wait_until_idle(store: &Arc<dyn Store>, chat: ChatId) {
+async fn wait_until_idle(store: &Arc<dyn Store>, chat: SessionId) {
     for _ in 0..500 {
         let runs = store.list_turns(chat).await.unwrap();
         if !runs.is_empty() && runs.iter().all(|turn| turn.status.is_terminal()) {
@@ -383,7 +383,7 @@ async fn compaction_focus_is_bounded_and_the_chat_must_exist() {
     let response = post_json(
         &router,
         &bearer,
-        &format!("/chats/{}/compact", ChatId::new()),
+        &format!("/chats/{}/compact", SessionId::new()),
         serde_json::json!({}),
     )
     .await;

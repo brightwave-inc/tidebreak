@@ -25,7 +25,7 @@ impl CodeRuntime {
     /// to the caller: a worker that outlived its grace still holds this
     /// workspace's turn lock, so anything keyed on "the checkout is now
     /// unowned" has to stay put.
-    pub(super) async fn shut_down_worker(id: CodeSessionId, handle: WorkerHandle) -> bool {
+    pub(super) async fn shut_down_worker(id: SessionId, handle: WorkerHandle) -> bool {
         const GRACE: std::time::Duration = std::time::Duration::from_secs(5);
         let commands = handle.commands.clone();
         drop(handle);
@@ -49,8 +49,8 @@ impl CodeRuntime {
 
     pub(crate) async fn attach_and_spawn_worker(
         &self,
-        session: CodeSession,
-    ) -> Result<CodeSession, ServerError> {
+        session: Session,
+    ) -> Result<Session, ServerError> {
         let mut session = session;
         let workspace = self.session_workspace(&session).await?;
         let adapter = self.adapter(session.harness_kind)?;
@@ -72,9 +72,9 @@ impl CodeRuntime {
                     session.model.as_deref(),
                 )
                 .await;
-            let mut next = CodeSessionExecutionSettings::from(&session);
+            let mut next = SessionExecutionSettings::from(&session);
             selected.deactivate_unsupported(&mut next);
-            if next != CodeSessionExecutionSettings::from(&session) {
+            if next != SessionExecutionSettings::from(&session) {
                 session =
                     replace_session_execution_settings(&self.db, &session.owner, &session, &next)
                         .await?
@@ -295,7 +295,7 @@ impl CodeRuntime {
         let pending = list_approvals(
             &self.db,
             &attached.owner,
-            Some(CodeApprovalState::Pending),
+            Some(ApprovalState::Pending),
             Some(attached.id),
         )
         .await?;
@@ -311,7 +311,7 @@ impl CodeRuntime {
     }
 
     /// Whether a worker is attached to the session right now.
-    pub(crate) fn has_worker(&self, id: CodeSessionId) -> bool {
+    pub(crate) fn has_worker(&self, id: SessionId) -> bool {
         self.workers.lock().expect("code workers").contains_key(&id)
     }
 
@@ -333,7 +333,7 @@ impl CodeRuntime {
     pub(crate) async fn resync_workers_to_selected_binaries(
         self: &Arc<Self>,
         kinds: &[HarnessKind],
-    ) -> Vec<CodeSessionId> {
+    ) -> Vec<SessionId> {
         let mut moved = Vec::new();
         for kind in kinds {
             // A declared binary never moves, and a host with no data
@@ -347,7 +347,7 @@ impl CodeRuntime {
             let Some(selected) = self.selected_harness(*kind).await else {
                 continue;
             };
-            let stale: Vec<(CodeSessionId, i64, OwnerId)> = self
+            let stale: Vec<(SessionId, i64, OwnerId)> = self
                 .workers
                 .lock()
                 .expect("code workers")
@@ -367,7 +367,7 @@ impl CodeRuntime {
                 if session.harness_kind != *kind || session.spawn_epoch != spawn_epoch {
                     continue;
                 }
-                if session.lifecycle == CodeSessionLifecycle::Running {
+                if session.lifecycle == SessionLifecycle::Running {
                     self.defer_worker_resync(*kind, id, owner);
                     continue;
                 }
@@ -402,7 +402,7 @@ impl CodeRuntime {
     /// the moment it is no longer running. One watcher per session: a second
     /// install or channel flip while one is pending changes what the resync
     /// will select, not whether it runs.
-    fn defer_worker_resync(self: &Arc<Self>, kind: HarnessKind, id: CodeSessionId, owner: OwnerId) {
+    fn defer_worker_resync(self: &Arc<Self>, kind: HarnessKind, id: SessionId, owner: OwnerId) {
         if !self
             .deferred_resyncs
             .lock()
@@ -422,7 +422,7 @@ impl CodeRuntime {
             let outcome = loop {
                 tokio::time::sleep(DEFERRED_RESYNC_POLL).await;
                 match runtime.get_session(&owner, id).await {
-                    Ok(session) if session.lifecycle != CodeSessionLifecycle::Running => {
+                    Ok(session) if session.lifecycle != SessionLifecycle::Running => {
                         break Ok(());
                     }
                     Ok(_) if TokioInstant::now() < deadline => continue,
@@ -449,7 +449,7 @@ impl CodeRuntime {
         });
     }
 
-    pub(super) fn require_worker(&self, id: CodeSessionId) -> Result<WorkerHandle, ServerError> {
+    pub(super) fn require_worker(&self, id: SessionId) -> Result<WorkerHandle, ServerError> {
         self.workers
             .lock()
             .expect("code workers")
@@ -496,12 +496,12 @@ mod tests {
         runtime
     }
 
-    fn workspaceless_session(owner: &OwnerId, harness: HarnessKind) -> CodeSession {
-        CodeSession {
-            id: CodeSessionId::new(),
+    fn workspaceless_session(owner: &OwnerId, harness: HarnessKind) -> Session {
+        Session {
+            id: SessionId::new(),
             owner: owner.clone(),
             workspace_id: None,
-            kind: CodeSessionKind::Interactive,
+            kind: SessionKind::Interactive,
             harness_kind: harness,
             harness_version: None,
             harness_resume_ref: None,
@@ -509,7 +509,7 @@ mod tests {
             model: None,
             reasoning_effort: None,
             fast_mode: false,
-            lifecycle: CodeSessionLifecycle::Created,
+            lifecycle: SessionLifecycle::Created,
             fence_reason: None,
             child_pid: None,
             child_process_identity: None,
@@ -547,7 +547,7 @@ mod tests {
         assert!(runtime.require_worker(attached.id).is_ok());
 
         let mut running = session.clone();
-        running.lifecycle = CodeSessionLifecycle::Running;
+        running.lifecycle = SessionLifecycle::Running;
         crate::code::attention::persist_session(&runtime.db, &runtime.bus, &running)
             .await
             .unwrap();
@@ -566,7 +566,7 @@ mod tests {
 
         // Once the turn ends, the deferred pass makes the swap on its own.
         let mut idle = running.clone();
-        idle.lifecycle = CodeSessionLifecycle::Idle;
+        idle.lifecycle = SessionLifecycle::Idle;
         crate::code::attention::persist_session(&runtime.db, &runtime.bus, &idle)
             .await
             .unwrap();

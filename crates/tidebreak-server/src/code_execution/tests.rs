@@ -12,8 +12,8 @@ use tidebreak_code_execution::{
     PACKAGE_MANAGER_DOMAINS,
 };
 use tidebreak_core::{
-    exec_attachment_file_name, BlobStore, Chat, ChatId, HostRootId, NetworkPolicy, Result,
-    SecretProvider, Store, TurnId, MAX_EXEC_WORKSPACE_FILE_BYTES,
+    exec_attachment_file_name, BlobStore, Chat, HostRootId, NetworkPolicy, Result, SecretProvider,
+    SessionId, Store, TurnId, MAX_EXEC_WORKSPACE_FILE_BYTES,
 };
 use tidebreak_egress::EgressPolicy;
 
@@ -184,7 +184,7 @@ async fn folder_resolution_is_fenced_to_the_chat_projection() {
     )
     .with_folder_grant_resolver(Some(resolver.clone()));
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -251,7 +251,7 @@ async fn a_folder_that_cannot_be_staged_fails_closed_and_stays_visible() {
     }];
 
     provider
-        .open_write_overlay(ChatId::new(), TurnId::new(), &mut grants)
+        .open_write_overlay(SessionId::new(), TurnId::new(), &mut grants)
         .await;
 
     assert!(!grants[0].writable);
@@ -274,7 +274,7 @@ async fn output_files_publish_as_turn_attributed_outputs() {
     let store = Arc::new(store);
     let scratch_root = tempfile::tempdir().unwrap();
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -395,7 +395,7 @@ async fn attached_documents_backfill_lazily_with_collision_and_size_limits() {
     let (store, database) = test_store().await;
     let blobs = FsBlobStore::new(database.path().join("blobs"));
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -637,7 +637,7 @@ async fn turn_start_staging_makes_skills_readable_before_any_exec() {
         ConfiguredExecProvider::new(store.clone(), Arc::new(NoSecrets), scratch_root.path())
             .with_skills(Some(source.path().to_owned()))
             .with_user_skills(Some(scratch_root.path().join("user-skills")));
-    let chat_id = ChatId::new();
+    let chat_id = SessionId::new();
 
     provider.stage_turn_workspace(chat_id).await;
 
@@ -706,7 +706,7 @@ async fn turn_start_staging_makes_skills_readable_before_any_exec() {
 
     // A skill-less configuration (headless embeddings) stages nothing.
     let bare = ConfiguredExecProvider::new(store, Arc::new(NoSecrets), scratch_root.path());
-    let bare_chat = ChatId::new();
+    let bare_chat = SessionId::new();
     bare.stage_turn_workspace(bare_chat).await;
     assert!(!scratch_root.path().join(bare_chat.to_string()).exists());
 }
@@ -744,7 +744,7 @@ async fn disabling_drops_a_component_from_staging_and_the_catalog() {
         ConfiguredExecProvider::new(store.clone(), Arc::new(NoSecrets), scratch_root.path())
             .with_skills(Some(skills_dir.path().to_owned()))
             .with_plugins(Some(plugins_dir.path().to_owned()));
-    let chat_id = ChatId::new();
+    let chat_id = SessionId::new();
     let staged = |name: &str| {
         scratch_root
             .path()
@@ -853,7 +853,7 @@ async fn staged_skills_warm_their_host_tools_and_gate_the_capability_lines() {
             .with_skills(Some(source.path().to_owned()))
             .with_host_tool_broker(Some(broker.clone()));
 
-    provider.stage_turn_workspace(ChatId::new()).await;
+    provider.stage_turn_workspace(SessionId::new()).await;
     assert_eq!(
         *broker.ensured.lock().expect("ensured tools"),
         [

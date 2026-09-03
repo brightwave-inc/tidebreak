@@ -12,7 +12,7 @@
 //! the text streamed so far so a reader who connects mid-answer is not shown
 //! a sentence that starts in the middle.
 //!
-//! `/code/updates` is unsequenced: a dropped notice costs nothing because the
+//! The `/updates` stream is unsequenced: a dropped notice costs nothing because the
 //! full digest is restated on every connect.
 //!
 //! Updates are keyed by owner rather than filtered on the way out. There is
@@ -27,27 +27,28 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
+use tidebreak_core::code::SequencedEvent;
 use tidebreak_core::{
-    Attention, CodeEvent, CodeSessionActivity, CodeSessionId, CodeSessionKind,
-    CodeSessionLifecycle, CodeSubagentSummary, CodeTurnId, CodeWatchState, HarnessKind, OwnerId,
-    PullRequestDigest, RepoId, SequencedCodeEvent, WorkspaceId, MAX_EVENT_TEXT_CHARS,
+    Attention, CodeSubagentSummary, CodeWatchState, Event, HarnessKind, OwnerId, PullRequestDigest,
+    RepoId, SessionActivity, SessionId, SessionKind, SessionLifecycle, TurnId, WorkspaceId,
+    MAX_EVENT_TEXT_CHARS,
 };
 use tokio::sync::{broadcast, Notify};
 
 const LIVE_BUFFER: usize = 256;
 const UPDATES_BUFFER: usize = 256;
 
-/// Cheap per-session digest published on `/code/updates`.
+/// Cheap per-session digest published on `/updates`.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SessionDigest {
     /// `None` for a session that binds no workspace.
     pub workspace: Option<WorkspaceId>,
-    pub session: CodeSessionId,
-    pub kind: CodeSessionKind,
+    pub session: SessionId,
+    pub kind: SessionKind,
     /// Engine identity for list surfaces that collapse several sessions into
     /// one workspace row.
     pub harness_kind: HarnessKind,
-    pub lifecycle: CodeSessionLifecycle,
+    pub lifecycle: SessionLifecycle,
     pub attention: Attention,
     pub title: String,
     pub turn_count: i64,
@@ -56,7 +57,7 @@ pub(crate) struct SessionDigest {
     pub trigger_target_at: DateTime<Utc>,
     /// What the live turn is occupied with. Set only while lifecycle is
     /// running; older clients safely fall back to a generic running label.
-    pub activity: Option<CodeSessionActivity>,
+    pub activity: Option<SessionActivity>,
     /// The subject of the tool the live turn is waiting on: the command,
     /// path, query, or task description. Set only while `activity` names a
     /// tool; bounded so a digest never carries a whole script.
@@ -125,8 +126,8 @@ pub(crate) enum CodeLiveUpdate {
 /// Progress of one background rewrite of a completed turn's closing message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TurnRewriteNotice {
-    pub session: CodeSessionId,
-    pub turn_id: CodeTurnId,
+    pub session: SessionId,
+    pub turn_id: TurnId,
     pub state: TurnRewriteState,
     pub rewrite: Option<String>,
 }
@@ -142,9 +143,9 @@ pub(crate) enum TurnRewriteState {
 /// Per-session broadcast channels for live journal events, plus one digest
 /// channel per owner.
 pub(crate) struct CodeEventBus {
-    channels: Mutex<HashMap<CodeSessionId, LiveSession>>,
+    channels: Mutex<HashMap<SessionId, LiveSession>>,
     updates: Mutex<HashMap<OwnerId, broadcast::Sender<CodeLiveUpdate>>>,
-    /// Fires when a `/code/updates` socket subscribes, so background work
+    /// Fires when a client subscribes to `/updates`, so background work
     /// that slows down while nobody is looking can speed back up at once.
     updates_attached: Notify,
 }
@@ -199,7 +200,7 @@ pub(crate) struct CodeLiveEvent {
     /// the turn's end) restates or discards this text, and a reader whose
     /// replay already read that far must not be handed the fragment as well.
     pub cursor: i64,
-    pub event: CodeEvent,
+    pub event: Event,
 }
 
 /// What a freshly attached reader needs to catch up on the live tail.
@@ -222,11 +223,7 @@ impl Default for CodeEventBus {
 }
 
 impl CodeEventBus {
-    fn with_session<T>(
-        &self,
-        session: CodeSessionId,
-        act: impl FnOnce(&mut LiveSession) -> T,
-    ) -> T {
+    fn with_session<T>(&self, session: SessionId, act: impl FnOnce(&mut LiveSession) -> T) -> T {
         let mut channels = self.channels.lock().expect("code event bus lock");
         act(channels.entry(session).or_default())
     }
@@ -239,7 +236,7 @@ impl CodeEventBus {
     /// same lock, so nothing lands between these two lines.
     pub(crate) fn attach(
         &self,
-        session: CodeSessionId,
+        session: SessionId,
     ) -> (broadcast::Receiver<CodeLiveEvent>, LiveTail) {
         self.with_session(session, |live| {
             (
@@ -257,7 +254,7 @@ impl CodeEventBus {
     /// Journaled events are what the tail is measured against: an event that
     /// finishes the assistant's turn of speech retires the buffered text
     /// rather than leaving a stale copy for the next reconnect to replay.
-    pub(crate) fn publish(&self, session: CodeSessionId, event: SequencedCodeEvent) {
+    pub(crate) fn publish(&self, session: SessionId, event: SequencedEvent) {
         self.with_session(session, |live| {
             live.cursor = live.cursor.max(event.seq);
             live.last_activity = Utc::now();
@@ -278,10 +275,10 @@ impl CodeEventBus {
     /// reader watches an answer arrive, and the `assistant_message` that
     /// follows carries the same bytes, so the durable copy would say nothing
     /// new (record 57).
-    pub(crate) fn publish_transient(&self, session: CodeSessionId, event: CodeEvent) {
+    pub(crate) fn publish_transient(&self, session: SessionId, event: Event) {
         self.with_session(session, |live| {
             live.last_activity = Utc::now();
-            if let CodeEvent::AssistantDelta { text } = &event {
+            if let Event::AssistantDelta { text } = &event {
                 append_bounded(&mut live.assistant, text);
             }
             let _ = live.sender.send(CodeLiveEvent {
@@ -296,7 +293,7 @@ impl CodeEventBus {
     ///
     /// Empty once the message lands. Taking it clears it, which is what the
     /// journal path wants: it is about to write the text down.
-    pub(crate) fn take_assistant_tail(&self, session: CodeSessionId) -> String {
+    pub(crate) fn take_assistant_tail(&self, session: SessionId) -> String {
         self.with_session(session, |live| std::mem::take(&mut live.assistant))
     }
 
@@ -305,7 +302,7 @@ impl CodeEventBus {
     /// The stall sweep reads it. Without it a session streaming a long answer
     /// and nothing else would look silent, because the deltas carrying that
     /// answer no longer touch a row's `created_at`.
-    pub(crate) fn last_activity(&self, session: CodeSessionId) -> Option<DateTime<Utc>> {
+    pub(crate) fn last_activity(&self, session: SessionId) -> Option<DateTime<Utc>> {
         self.channels
             .lock()
             .expect("code event bus lock")
@@ -318,7 +315,7 @@ impl CodeEventBus {
     /// A hint, not an answer: it starts pessimistic and is corrected by the
     /// first caller that reads the row. Its job is to spare the common path —
     /// a running session that is not stalled — a `get_session` per event.
-    pub(crate) fn maybe_stalled(&self, session: CodeSessionId) -> bool {
+    pub(crate) fn maybe_stalled(&self, session: SessionId) -> bool {
         self.channels
             .lock()
             .expect("code event bus lock")
@@ -328,7 +325,7 @@ impl CodeEventBus {
 
     /// Record what the session row actually says, so the next event can skip
     /// the read.
-    pub(crate) fn set_maybe_stalled(&self, session: CodeSessionId, stalled: bool) {
+    pub(crate) fn set_maybe_stalled(&self, session: SessionId, stalled: bool) {
         self.with_session(session, |live| live.maybe_stalled = stalled);
     }
 
@@ -342,19 +339,19 @@ impl CodeEventBus {
     }
 
     /// Subscribe to one owner's updates. The receiver is the only view of the
-    /// channel a `/code/updates` socket gets, and it carries nothing else.
+    /// channel available to an `/updates` socket, and it carries nothing else.
     ///
     /// Subscribing also wakes [`Self::updates_attached`] waiters. A
-    /// `/code/updates` socket is how a client says it is looking, and sweeps
-    /// that back off while nobody is use that moment to return to their fast
-    /// cadence.
+    /// A client says it is looking by opening an `/updates` socket. Sweeps
+    /// that back off while nobody is looking use that moment to return to
+    /// their fast cadence.
     pub(crate) fn subscribe_updates(&self, owner: &OwnerId) -> broadcast::Receiver<CodeLiveUpdate> {
         let receiver = self.updates_sender(owner).subscribe();
         self.updates_attached.notify_one();
         receiver
     }
 
-    /// Whether any client currently holds a `/code/updates` subscription.
+    /// Whether any client currently holds an `/updates` subscription.
     ///
     /// This is the server's "someone is looking" signal for code mode: the
     /// desktop keeps that socket open for as long as it runs, and the CLI
@@ -368,7 +365,7 @@ impl CodeEventBus {
             .any(|sender| sender.receiver_count() > 0)
     }
 
-    /// Resolve the next time a `/code/updates` socket subscribes.
+    /// Resolve when a client next subscribes to `/updates`.
     ///
     /// One pending wake is retained if nobody is waiting when a subscription
     /// lands, so a caller that checks [`Self::has_updates_subscribers`] and
@@ -392,21 +389,21 @@ impl CodeEventBus {
 /// a turn boundary closes it the same way the renderer's reducer does. Child
 /// (subagent) messages and calls are excluded: they never owned the parent's
 /// buffer.
-fn ends_assistant_text(event: &CodeEvent) -> bool {
+fn ends_assistant_text(event: &Event) -> bool {
     matches!(
         event,
-        CodeEvent::AssistantMessage {
+        Event::AssistantMessage {
             parent_call_id: None,
             ..
-        } | CodeEvent::ToolStarted {
+        } | Event::ToolStarted {
             parent_call_id: None,
             ..
-        } | CodeEvent::TurnStarted { .. }
-            | CodeEvent::TurnResumed { .. }
-            | CodeEvent::TurnCompleted { .. }
-            | CodeEvent::TurnRefused { .. }
-            | CodeEvent::TurnFailed { .. }
-            | CodeEvent::TurnInterrupted { .. }
+        } | Event::TurnStarted { .. }
+            | Event::TurnResumed { .. }
+            | Event::TurnCompleted { .. }
+            | Event::TurnRefused { .. }
+            | Event::TurnFailed { .. }
+            | Event::TurnInterrupted { .. }
     )
 }
 

@@ -62,7 +62,7 @@ impl CodeRuntime {
         // Past every turn boundary; now wait for the workers to park their
         // engine children and for the stored rows to agree.
         loop {
-            let ids: Vec<CodeSessionId> = self
+            let ids: Vec<SessionId> = self
                 .workers
                 .lock()
                 .expect("code workers")
@@ -73,7 +73,7 @@ impl CodeRuntime {
             for id in ids {
                 match tidebreak_core::db::code::get_session_all_owners(&self.db, id).await {
                     Ok(Some(session)) => {
-                        if session.lifecycle == CodeSessionLifecycle::Running
+                        if session.lifecycle == SessionLifecycle::Running
                             || session.child_pid.is_some()
                         {
                             busy += 1;
@@ -109,7 +109,7 @@ impl CodeRuntime {
     pub(crate) async fn submit_turn(
         &self,
         owner: &OwnerId,
-        id: CodeSessionId,
+        id: SessionId,
         message: String,
         model: Option<String>,
         reasoning_effort: Option<Option<ReasoningEffort>>,
@@ -132,7 +132,7 @@ impl CodeRuntime {
     pub(super) async fn submit_turn_inner(
         &self,
         owner: &OwnerId,
-        id: CodeSessionId,
+        id: SessionId,
         message: String,
         model: Option<String>,
         reasoning_effort: Option<Option<ReasoningEffort>>,
@@ -161,13 +161,13 @@ impl CodeRuntime {
                 ));
             }
         }
-        if session.lifecycle == CodeSessionLifecycle::Fenced {
+        if session.lifecycle == SessionLifecycle::Fenced {
             return Err(ServerError::conflict_kind(
                 "session_fenced",
                 "session is fenced until it is reaped",
             ));
         }
-        if session.lifecycle == CodeSessionLifecycle::Ended {
+        if session.lifecycle == SessionLifecycle::Ended {
             return Err(ServerError::conflict_kind(
                 "session_ended",
                 "session has ended",
@@ -204,7 +204,7 @@ impl CodeRuntime {
             .as_deref()
             .is_some_and(|model| session.model.as_deref() != Some(model));
         let requested_effort = reasoning_effort;
-        let mut next = CodeSessionExecutionSettings::from(&session);
+        let mut next = SessionExecutionSettings::from(&session);
         if let Some(model) = requested_model {
             next.model = Some(model);
         }
@@ -227,7 +227,7 @@ impl CodeRuntime {
                 )
                 .await;
             if requested_effort.is_some() {
-                let requested = CodeSessionExecutionSettings {
+                let requested = SessionExecutionSettings {
                     model: next.model.clone(),
                     reasoning_effort: next.reasoning_effort,
                     fast_mode: false,
@@ -236,7 +236,7 @@ impl CodeRuntime {
             }
             selected.deactivate_unsupported(&mut next);
         }
-        if next != CodeSessionExecutionSettings::from(&session) {
+        if next != SessionExecutionSettings::from(&session) {
             session = self
                 .commit_execution_settings(&session, &next, "the turn could reserve them")
                 .await?;
@@ -263,7 +263,7 @@ impl CodeRuntime {
         // send even with no open turn: rows ahead of this message must run
         // first (FIFO), and the worker may already be holding the head while
         // it waits on a sibling's worktree turn.
-        let in_flight = session.lifecycle == CodeSessionLifecycle::Running
+        let in_flight = session.lifecycle == SessionLifecycle::Running
             || get_open_turn(&self.db, owner, id).await?.is_some();
         let backlog = !tidebreak_core::db::code::list_queued_turns(&self.db, owner, id)
             .await?
@@ -340,7 +340,7 @@ impl CodeRuntime {
     pub(crate) async fn submit_trigger_turn(
         &self,
         owner: &OwnerId,
-        id: CodeSessionId,
+        id: SessionId,
         message: String,
         delivery_id: tidebreak_core::CodeTriggerDeliveryId,
         lease_token: uuid::Uuid,
@@ -371,19 +371,19 @@ impl CodeRuntime {
         &self,
         owner: &OwnerId,
         handle: &WorkerHandle,
-        session: &CodeSession,
+        session: &Session,
         message: String,
         attachments: Vec<tidebreak_core::ImageRef>,
     ) -> Result<SubmitTurnOutcome, ServerError> {
         let queued = tidebreak_core::db::code::list_queued_turns(&self.db, owner, session.id)
             .await
             .map_err(ServerError::from)?;
-        if queued.len() >= CodeQueuedTurn::MAX_PER_SESSION {
+        if queued.len() >= QueuedTurn::MAX_PER_SESSION {
             return Err(ServerError::conflict_kind(
                 "queue_full",
                 format!(
                     "this session may queue at most {} messages",
-                    CodeQueuedTurn::MAX_PER_SESSION
+                    QueuedTurn::MAX_PER_SESSION
                 ),
             ));
         }
@@ -391,8 +391,8 @@ impl CodeRuntime {
         let row = tidebreak_core::db::code::enqueue_queued_turn(
             &self.db,
             owner,
-            &CodeQueuedTurn {
-                id: CodeTurnId::new(),
+            &QueuedTurn {
+                id: TurnId::new(),
                 session_id: session.id,
                 message,
                 attachments,
@@ -411,8 +411,8 @@ impl CodeRuntime {
     pub(crate) async fn list_queued_turns(
         &self,
         owner: &OwnerId,
-        id: CodeSessionId,
-    ) -> Result<(Vec<CodeQueuedTurn>, bool), ServerError> {
+        id: SessionId,
+    ) -> Result<(Vec<QueuedTurn>, bool), ServerError> {
         let _ = self.get_session(owner, id).await?;
         let queued = tidebreak_core::db::code::list_queued_turns(&self.db, owner, id).await?;
         let paused = tidebreak_core::db::code::queue_paused(&self.db, owner, id).await?;
@@ -423,11 +423,11 @@ impl CodeRuntime {
     pub(crate) async fn update_queued_turn(
         &self,
         owner: &OwnerId,
-        id: CodeSessionId,
-        queued_id: CodeTurnId,
+        id: SessionId,
+        queued_id: TurnId,
         message: Option<&str>,
         position: Option<i32>,
-    ) -> Result<Option<CodeQueuedTurn>, ServerError> {
+    ) -> Result<Option<QueuedTurn>, ServerError> {
         let _ = self.get_session(owner, id).await?;
         Ok(tidebreak_core::db::code::update_queued_turn(
             &self.db, owner, id, queued_id, message, position,
@@ -435,7 +435,7 @@ impl CodeRuntime {
         .await?)
     }
 
-    pub(crate) async fn interrupt(&self, id: CodeSessionId) -> Result<(), ServerError> {
+    pub(crate) async fn interrupt(&self, id: SessionId) -> Result<(), ServerError> {
         // Interrupt stops only the active turn. The worker and logical code
         // session continue, so its browser capfile and native capability must
         // remain live for later turns.
@@ -474,8 +474,8 @@ impl CodeRuntime {
     pub(crate) async fn delete_queued_turn(
         &self,
         owner: &OwnerId,
-        id: CodeSessionId,
-        queued_id: CodeTurnId,
+        id: SessionId,
+        queued_id: TurnId,
     ) -> Result<bool, ServerError> {
         let _ = self.get_session(owner, id).await?;
         Ok(tidebreak_core::db::code::delete_queued_turn(&self.db, owner, id, queued_id).await?)
@@ -486,7 +486,7 @@ impl CodeRuntime {
     pub(crate) async fn set_queue_paused(
         &self,
         owner: &OwnerId,
-        id: CodeSessionId,
+        id: SessionId,
         paused: bool,
     ) -> Result<(), ServerError> {
         let _ = self.get_session(owner, id).await?;
@@ -503,7 +503,7 @@ impl CodeRuntime {
     pub(crate) async fn send_queued_now(
         &self,
         owner: &OwnerId,
-        id: CodeSessionId,
+        id: SessionId,
     ) -> Result<(), ServerError> {
         let _ = self.get_session(owner, id).await?;
         tidebreak_core::db::code::set_queue_paused(&self.db, owner, id, false).await?;
@@ -513,7 +513,7 @@ impl CodeRuntime {
 
     /// Nudge a live worker to re-read its queue. A session with no worker has
     /// nothing to wake; its next spawn drains the queue first thing.
-    pub(super) fn wake_session_queue(&self, id: CodeSessionId) {
+    pub(super) fn wake_session_queue(&self, id: SessionId) {
         if let Ok(handle) = self.require_worker(id) {
             wake_queue(&handle);
         }
@@ -530,7 +530,7 @@ impl CodeRuntime {
     pub(super) async fn workspace_fence_reason(
         &self,
         owner: &OwnerId,
-        session: &CodeSession,
+        session: &Session,
     ) -> Result<Option<String>, ServerError> {
         let Some(workspace_id) = session.workspace_id else {
             return Ok(None);
@@ -540,7 +540,7 @@ impl CodeRuntime {
             .iter()
             .find(|other| {
                 other.id != session.id
-                    && other.lifecycle == CodeSessionLifecycle::Fenced
+                    && other.lifecycle == SessionLifecycle::Fenced
                     // Only a fence that implies an unaccounted engine process
                     // stops the workspace. A sibling fenced for repeated turn
                     // failures answered every time; its worktree is not at
@@ -561,8 +561,8 @@ impl CodeRuntime {
     pub(crate) async fn steer(
         &self,
         owner: &OwnerId,
-        id: CodeSessionId,
-        expected_turn_id: CodeTurnId,
+        id: SessionId,
+        expected_turn_id: TurnId,
         message: String,
     ) -> Result<(), ServerError> {
         self.steer_inner(owner, id, expected_turn_id, message, None)
@@ -572,8 +572,8 @@ impl CodeRuntime {
     pub(super) async fn steer_inner(
         &self,
         owner: &OwnerId,
-        id: CodeSessionId,
-        expected_turn_id: CodeTurnId,
+        id: SessionId,
+        expected_turn_id: TurnId,
         message: String,
         trigger_delivery: Option<TriggerDeliveryClaim>,
     ) -> Result<(), ServerError> {
@@ -589,7 +589,7 @@ impl CodeRuntime {
             }
         }
         let session = self.get_session(owner, id).await?;
-        if session.lifecycle != CodeSessionLifecycle::Running {
+        if session.lifecycle != SessionLifecycle::Running {
             return Err(ServerError::conflict_kind(
                 "no_active_turn",
                 "there is no active turn to steer; the message was not queued",
@@ -681,8 +681,8 @@ impl CodeRuntime {
     pub(crate) async fn steer_trigger(
         &self,
         owner: &OwnerId,
-        id: CodeSessionId,
-        expected_turn_id: CodeTurnId,
+        id: SessionId,
+        expected_turn_id: TurnId,
         message: String,
         delivery_id: tidebreak_core::CodeTriggerDeliveryId,
         lease_token: uuid::Uuid,
@@ -703,10 +703,10 @@ impl CodeRuntime {
     pub(crate) async fn reap(
         &self,
         owner: &OwnerId,
-        id: CodeSessionId,
-    ) -> Result<CodeSession, ServerError> {
+        id: SessionId,
+    ) -> Result<Session, ServerError> {
         let session = self.get_session(owner, id).await?;
-        if session.lifecycle != CodeSessionLifecycle::Fenced {
+        if session.lifecycle != SessionLifecycle::Fenced {
             return Err(ServerError::conflict_kind(
                 "not_fenced",
                 "only a fenced session can be reaped",

@@ -39,10 +39,8 @@ mod ingest;
 pub mod wire;
 
 use async_trait::async_trait;
-use tidebreak_core::{
-    Attention, CodeEvent, CodeSession, CodeSessionId, DbStore, FenceReason, OwnerId,
-    SequencedCodeEvent,
-};
+use tidebreak_core::code::SequencedEvent;
+use tidebreak_core::{Attention, DbStore, Event, FenceReason, OwnerId, Session, SessionId};
 
 use wire::{
     EventCursor, MessageReceipt, SandboxEvents, SandboxLease, SandboxMessage, SandboxStatus,
@@ -179,13 +177,13 @@ pub trait SandboxProvisioner: Send + Sync {
 #[async_trait]
 pub trait RemoteSessionHost: Send + Sync {
     /// Publish one event after its journal row commits.
-    fn publish(&self, session: CodeSessionId, event: SequencedCodeEvent);
+    fn publish(&self, session: SessionId, event: SequencedEvent);
 
     /// Persist the session and publish its derived state.
     async fn persist_session(
         &self,
         store: &DbStore,
-        session: &CodeSession,
+        session: &Session,
     ) -> Result<bool, tidebreak_core::AgentError>;
 
     /// Apply one attention transition and publish its derived state.
@@ -193,7 +191,7 @@ pub trait RemoteSessionHost: Send + Sync {
         &self,
         store: &DbStore,
         owner: &OwnerId,
-        session_id: CodeSessionId,
+        session_id: SessionId,
         next: Attention,
     ) -> Result<(), tidebreak_core::AgentError>;
 
@@ -202,16 +200,16 @@ pub trait RemoteSessionHost: Send + Sync {
         &self,
         store: &DbStore,
         owner: &OwnerId,
-        session_id: CodeSessionId,
+        session_id: SessionId,
         spawn_epoch: i64,
-        event: CodeEvent,
+        event: Event,
     );
 
     /// Fence one live session and publish the resulting state.
     async fn fence_session(
         &self,
         store: &DbStore,
-        session: &mut CodeSession,
+        session: &mut Session,
         reason: FenceReason,
     ) -> Result<(), tidebreak_core::AgentError>;
 
@@ -219,15 +217,15 @@ pub trait RemoteSessionHost: Send + Sync {
     async fn recover_dead_worker(
         &self,
         store: &DbStore,
-        session: &CodeSession,
-    ) -> Result<Option<CodeSession>, tidebreak_core::AgentError>;
+        session: &Session,
+    ) -> Result<Option<Session>, tidebreak_core::AgentError>;
 
     /// Resolve a fenced remote session after its sandbox stops.
     async fn reap_session(
         &self,
         store: &DbStore,
-        session: CodeSession,
-    ) -> Result<CodeSession, RemoteReapError>;
+        session: Session,
+    ) -> Result<Session, RemoteReapError>;
 }
 
 /// Why a fenced remote session could not be reaped.
@@ -241,11 +239,7 @@ pub enum RemoteReapError {
     Host(String),
 }
 
-pub(crate) fn replace_attention(
-    session: &mut CodeSession,
-    next: Attention,
-    from_user: bool,
-) -> bool {
+pub(crate) fn replace_attention(session: &mut Session, next: Attention, from_user: bool) -> bool {
     if !from_user && !tidebreak_core::should_replace(&session.attention, &next) {
         return false;
     }
@@ -259,7 +253,7 @@ pub(crate) fn replace_attention(
 pub(crate) async fn persist_session(
     store: &DbStore,
     host: &dyn RemoteSessionHost,
-    session: &CodeSession,
+    session: &Session,
 ) -> Result<bool, tidebreak_core::AgentError> {
     host.persist_session(store, session).await
 }
@@ -268,7 +262,7 @@ pub(crate) async fn apply_attention(
     store: &DbStore,
     host: &dyn RemoteSessionHost,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     next: Attention,
 ) -> Result<(), tidebreak_core::AgentError> {
     host.apply_attention(store, owner, session_id, next).await
@@ -278,9 +272,9 @@ pub(crate) async fn journal_event(
     store: &DbStore,
     host: &dyn RemoteSessionHost,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     spawn_epoch: i64,
-    event: CodeEvent,
+    event: Event,
 ) {
     host.journal_event(store, owner, session_id, spawn_epoch, event)
         .await;
@@ -289,7 +283,7 @@ pub(crate) async fn journal_event(
 pub(crate) async fn fence_session(
     store: &DbStore,
     host: &dyn RemoteSessionHost,
-    session: &mut CodeSession,
+    session: &mut Session,
     reason: FenceReason,
 ) -> Result<(), tidebreak_core::AgentError> {
     host.fence_session(store, session, reason).await
@@ -298,15 +292,15 @@ pub(crate) async fn fence_session(
 pub(crate) async fn recover_dead_worker(
     store: &DbStore,
     host: &dyn RemoteSessionHost,
-    session: &CodeSession,
-) -> Result<Option<CodeSession>, tidebreak_core::AgentError> {
+    session: &Session,
+) -> Result<Option<Session>, tidebreak_core::AgentError> {
     host.recover_dead_worker(store, session).await
 }
 
 pub(crate) async fn reap_session(
     store: &DbStore,
     host: &dyn RemoteSessionHost,
-    session: CodeSession,
-) -> Result<CodeSession, RemoteReapError> {
+    session: Session,
+) -> Result<Session, RemoteReapError> {
     host.reap_session(store, session).await
 }

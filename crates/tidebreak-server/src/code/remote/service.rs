@@ -20,7 +20,7 @@ use tokio::sync::Notify;
 use tracing::{debug, warn};
 
 use tidebreak_core::db::code::{get_session, latest_incarnations_of_live_sessions_all_owners};
-use tidebreak_core::{CodeSessionId, CodeSessionLifecycle, DbStore, IncarnationState, OwnerId};
+use tidebreak_core::{DbStore, IncarnationState, OwnerId, SessionId, SessionLifecycle};
 
 use super::super::runtime::CodeRuntime;
 use super::driver::{sweep_stale_intents, RemoteDriver, RemoteSpawnSettings};
@@ -79,11 +79,11 @@ pub(crate) struct RemoteSessions {
     /// Live pump tasks by session. The sweep prunes finished entries and
     /// spawns missing ones; a pump task removes its own entry on the way out
     /// so the pass it wakes sees the slot free.
-    pumps: Mutex<HashMap<CodeSessionId, tokio::task::JoinHandle<()>>>,
+    pumps: Mutex<HashMap<SessionId, tokio::task::JoinHandle<()>>>,
     /// Sessions whose queue promotion is on hold until the given instant,
     /// after a machine-side refusal. In-memory on purpose: a restart retries
     /// once and re-arms the hold from the fresh refusal.
-    promotion_holds: Mutex<HashMap<CodeSessionId, std::time::Instant>>,
+    promotion_holds: Mutex<HashMap<SessionId, std::time::Instant>>,
     /// Wakes the sweep for an immediate pass. A wake with no waiter is kept
     /// until the sweep next listens, so none is lost between passes.
     sweep_wake: Notify,
@@ -123,7 +123,7 @@ impl RemoteSessions {
     }
 
     /// Whether promotion for `session` is inside a refusal hold.
-    pub(crate) fn promotion_held(&self, session: CodeSessionId) -> bool {
+    pub(crate) fn promotion_held(&self, session: SessionId) -> bool {
         let mut holds = self.promotion_holds.lock().expect("promotion holds");
         match holds.get(&session) {
             Some(until) if *until > std::time::Instant::now() => true,
@@ -136,7 +136,7 @@ impl RemoteSessions {
     }
 
     /// Hold promotion for `session` for [`PROMOTION_RETRY_HOLD`].
-    pub(crate) fn hold_promotion(&self, session: CodeSessionId) {
+    pub(crate) fn hold_promotion(&self, session: SessionId) {
         self.promotion_holds
             .lock()
             .expect("promotion holds")
@@ -144,7 +144,7 @@ impl RemoteSessions {
     }
 
     /// Clear a hold after a promotion that went through.
-    pub(crate) fn clear_promotion_hold(&self, session: CodeSessionId) {
+    pub(crate) fn clear_promotion_hold(&self, session: SessionId) {
         self.promotion_holds
             .lock()
             .expect("promotion holds")
@@ -156,7 +156,7 @@ impl RemoteSessions {
         self: &Arc<Self>,
         runtime: &Arc<CodeRuntime>,
         owner: OwnerId,
-        session: CodeSessionId,
+        session: SessionId,
     ) {
         let mut pumps = self.pumps.lock().expect("remote pumps");
         pumps.retain(|_, handle| !handle.is_finished());
@@ -208,7 +208,7 @@ async fn pump_session(
     runtime: Weak<CodeRuntime>,
     remote: Arc<RemoteSessions>,
     owner: OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     mut backoff: LaneBackoff,
 ) -> bool {
     loop {
@@ -220,7 +220,7 @@ async fn pump_session(
         };
         if matches!(
             session.lifecycle,
-            CodeSessionLifecycle::Fenced | CodeSessionLifecycle::Ended
+            SessionLifecycle::Fenced | SessionLifecycle::Ended
         ) {
             return false;
         }
@@ -359,8 +359,8 @@ mod tests {
 
     use tidebreak_core::db::code::{insert_repo, latest_turn};
     use tidebreak_core::{
-        CodeRepo, CodeSessionLifecycle, CodeTurnStatus, CodeWorkspaceStatus, FenceReason,
-        HarnessKind, OwnerId, PermissionMode, RepoId,
+        CodeRepo, CodeWorkspaceStatus, FenceReason, HarnessKind, OwnerId, PermissionMode, RepoId,
+        SessionLifecycle, TurnStatus,
     };
 
     use super::super::super::runtime::{
@@ -578,7 +578,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(session.lifecycle, CodeSessionLifecycle::Idle);
+        assert_eq!(session.lifecycle, SessionLifecycle::Idle);
 
         let outcome = runtime
             .submit_turn(&owner, session.id, "start".into(), None, None, Vec::new())
@@ -638,7 +638,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(turn.ordinal, 2);
-        assert_eq!(turn.status, CodeTurnStatus::Running);
+        assert_eq!(turn.status, TurnStatus::Running);
         assert_eq!(
             fake.sends.lock().unwrap().as_slice(),
             &["and then".to_owned()]
@@ -868,8 +868,8 @@ mod tests {
         tidebreak_core::db::code::enqueue_queued_turn(
             &runtime.db,
             &owner,
-            &tidebreak_core::CodeQueuedTurn {
-                id: tidebreak_core::CodeTurnId::new(),
+            &tidebreak_core::code::QueuedTurn {
+                id: tidebreak_core::TurnId::new(),
                 session_id: blocked.id,
                 message: "waiting".into(),
                 attachments: Vec::new(),
@@ -883,10 +883,10 @@ mod tests {
 
         runtime.promote_remote_queue_heads().await.unwrap();
         assert!(remote.promotion_held(blocked.id));
-        let notices = |events: &[tidebreak_core::SequencedCodeEvent]| {
+        let notices = |events: &[tidebreak_core::code::SequencedEvent]| {
             events
                 .iter()
-                .filter(|row| matches!(row.event, tidebreak_core::CodeEvent::HarnessNotice { .. }))
+                .filter(|row| matches!(row.event, tidebreak_core::Event::HarnessNotice { .. }))
                 .count()
         };
         let events = tidebreak_core::db::code::list_events(&runtime.db, &owner, blocked.id, 0, 50)
@@ -974,8 +974,8 @@ mod tests {
         tidebreak_core::db::code::enqueue_queued_turn(
             &runtime.db,
             &owner,
-            &tidebreak_core::CodeQueuedTurn {
-                id: tidebreak_core::CodeTurnId::new(),
+            &tidebreak_core::code::QueuedTurn {
+                id: tidebreak_core::TurnId::new(),
                 session_id: session.id,
                 message: "one more".into(),
                 attachments: Vec::new(),
@@ -1093,7 +1093,7 @@ mod tests {
         .unwrap();
 
         let reaped = runtime.reap(&owner, session.id).await.unwrap();
-        assert_eq!(reaped.lifecycle, CodeSessionLifecycle::Idle);
+        assert_eq!(reaped.lifecycle, SessionLifecycle::Idle);
         assert!(reaped.fence_reason.is_none());
         assert_eq!(
             fake.cancels.lock().unwrap().as_slice(),
@@ -1305,7 +1305,7 @@ mod tests {
             .get_session(&owner, binding.session_id)
             .await
             .unwrap();
-        assert_eq!(session.lifecycle, CodeSessionLifecycle::Idle);
+        assert_eq!(session.lifecycle, SessionLifecycle::Idle);
         let workspace = runtime
             .get_workspace(&owner, session.workspace_id.expect("workspace"))
             .await
@@ -1355,7 +1355,7 @@ mod tests {
             .get_session(&owner, binding.session_id)
             .await
             .unwrap();
-        stored.lifecycle = CodeSessionLifecycle::Ended;
+        stored.lifecycle = SessionLifecycle::Ended;
         assert!(tidebreak_core::db::code::save_session(&runtime.db, &stored)
             .await
             .unwrap());
@@ -1489,7 +1489,7 @@ mod tests {
 
         // An ended session refuses instead of queueing into the void.
         let mut stored = runtime.get_session(&owner, session_id).await.unwrap();
-        stored.lifecycle = CodeSessionLifecycle::Ended;
+        stored.lifecycle = SessionLifecycle::Ended;
         assert!(tidebreak_core::db::code::save_session(&runtime.db, &stored)
             .await
             .unwrap());

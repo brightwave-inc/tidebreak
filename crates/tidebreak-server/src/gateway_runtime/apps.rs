@@ -33,7 +33,7 @@ impl crate::mcp_config::GatewayEndpoints for GatewayRuntime {
     /// carry — so an attested endpoint can match the call against the
     /// observation that inference recorded. Direct endpoints ignore the
     /// context, so every gateway mount dispatches this way.
-    async fn call_bearer(&self, slug: &str, chat: tidebreak_core::id::ChatId) -> Result<String> {
+    async fn call_bearer(&self, slug: &str, chat: tidebreak_core::id::SessionId) -> Result<String> {
         let connection = self
             .connection()
             .await?

@@ -152,7 +152,7 @@ pub(crate) fn workspace_root(
 /// and no other session shares it.
 pub(crate) fn session_root(
     data_dir: &Path,
-    session_id: tidebreak_core::CodeSessionId,
+    session_id: tidebreak_core::SessionId,
 ) -> io::Result<ScratchRoot> {
     let data_dir = absolute_path(data_dir)?;
     let root = open_root(&data_dir)?;

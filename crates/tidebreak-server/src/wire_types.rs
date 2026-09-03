@@ -389,7 +389,7 @@ mod tests {
         // types with the conversation path, but one generated module keeps the
         // renderer importing from a single place.
         generate::collect_from::<crate::routes::Settings>(&cfg, &mut out);
-        generate::collect_from::<tidebreak_core::QueuedTurn>(&cfg, &mut out);
+        generate::collect_from::<tidebreak_core::QueuedAgentTurn>(&cfg, &mut out);
         generate::collect_from::<crate::routes::ModelInfo>(&cfg, &mut out);
         generate::collect_from::<crate::routes::ModelRoleInfo>(&cfg, &mut out);
         // Memory: backend capabilities, records, search, context, revisions,
@@ -468,11 +468,11 @@ mod tests {
         generate::collect_from::<crate::routes::code::WorkspaceTitleProposal>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeConnectPage>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeGrantSnapshot>(&cfg, &mut out);
-        generate::collect_from::<crate::routes::code::CodeSessionSnapshot>(&cfg, &mut out);
-        generate::collect_from::<crate::routes::code::CodeTurnSnapshot>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::SessionSnapshot>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::TurnSnapshot>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeAnalyticsSnapshot>(&cfg, &mut out);
-        generate::collect_from::<crate::routes::code::QueuedCodeTurn>(&cfg, &mut out);
-        generate::collect_from::<crate::routes::code::SequencedCodeEventFrame>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::QueuedTurn>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::SequencedEventFrame>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::HarnessDoctorReport>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::HarnessModelList>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeWorkspaceFiles>(&cfg, &mut out);
@@ -482,10 +482,11 @@ mod tests {
         generate::collect_from::<crate::routes::code::CodeWorkspaceDiff>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeTerminalSnapshot>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeTerminalRead>(&cfg, &mut out);
-        generate::collect_from::<crate::routes::code::CodeSessionDigest>(&cfg, &mut out);
-        generate::collect_from::<crate::routes::code::CodeUpdateNotice>(&cfg, &mut out);
-        generate::collect_from::<crate::routes::code::CodeApprovalSnapshot>(&cfg, &mut out);
-        generate::collect_from::<crate::routes::code::CodeApprovalDecisionBody>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::CodeTerminalActivityNotice>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::SessionDigest>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::UpdateNotice>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::ApprovalSnapshot>(&cfg, &mut out);
+        generate::collect_from::<crate::routes::code::ApprovalDecisionBody>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeCommitSnapshot>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodePushSnapshot>(&cfg, &mut out);
         generate::collect_from::<crate::routes::code::CodeWorkspacePrSnapshot>(&cfg, &mut out);
@@ -541,7 +542,20 @@ mod tests {
     }
 
     fn rendered_bindings() -> String {
-        let declarations = event_declarations();
+        let mut declarations = event_declarations();
+        let queued_turn = declarations
+            .remove("QueuedTurn")
+            .expect("the code queue row is a generated root");
+        let queued_code_turn = queued_turn.replacen(
+            "export type QueuedTurn =",
+            "export type QueuedCodeTurn =",
+            1,
+        );
+        assert_ne!(
+            queued_code_turn, queued_turn,
+            "the code queue declaration keeps its expected shape"
+        );
+        declarations.insert("QueuedCodeTurn".to_owned(), queued_code_turn);
         let union = declarations
             .get("RendererToolName")
             .expect("the vocabulary is reachable from the event root");
@@ -561,18 +575,28 @@ mod tests {
     fn conversation_compatibility_aliases() -> String {
         "// Compatibility aliases for clients that still use the earlier conversation names.\n\
          export type ChatId = SessionId;\n\
+         export type CodeApprovalDecision = ApprovalDecision;\n\
+         export type CodeApprovalDecisionBody = ApprovalDecisionBody;\n\
          export type CodeApprovalId = ApprovalId;\n\
          export type CodeApprovalKind = ApprovalKind;\n\
+         export type CodeApprovalSnapshot = ApprovalSnapshot;\n\
          export type CodeApprovalState = ApprovalState;\n\
          export type CodeEvent = Event;\n\
          export type CodeSessionActivity = SessionActivity;\n\
+         export type CodeSessionDigest = SessionDigest;\n\
+         export type CodeSessionExternalOrigin = SessionExternalOrigin;\n\
          export type CodeSessionId = SessionId;\n\
          export type CodeSessionKind = SessionKind;\n\
          export type CodeSessionLifecycle = SessionLifecycle;\n\
+         export type CodeSessionSnapshot = SessionSnapshot;\n\
          export type CodeTurnId = TurnId;\n\
+         export type CodeTurnRewriteState = TurnRewriteState;\n\
+         export type CodeTurnSnapshot = TurnSnapshot;\n\
          export type CodeTurnStatus = TurnStatus;\n\
+         export type CodeUpdateNotice = UpdateNotice;\n\
          export type CodeUsage = TurnUsage;\n\
-         export type QueuedTurn = QueuedAgentTurn;\n"
+         export type QueuedTurn = QueuedAgentTurn;\n\
+         export type SequencedCodeEventFrame = SequencedEventFrame;\n"
             .to_owned()
     }
 

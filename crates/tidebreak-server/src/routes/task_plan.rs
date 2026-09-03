@@ -1,6 +1,6 @@
 //! Renderer-safe recovery of a conversation's task plan.
 
-use tidebreak_core::{ChatId, TaskPlan};
+use tidebreak_core::{SessionId, TaskPlan};
 
 use crate::error::ServerError;
 use crate::extract::{Json, Path};
@@ -13,7 +13,7 @@ use crate::scoped_store::ScopedStore;
 /// error; it answers `null`.
 pub async fn get_task_plan(
     store: ScopedStore,
-    Path(chat_id): Path<ChatId>,
+    Path(chat_id): Path<SessionId>,
 ) -> Result<Json<Option<TaskPlan>>, ServerError> {
     store.require_chat(chat_id).await?;
     Ok(Json(store.get_task_plan(chat_id).await?))

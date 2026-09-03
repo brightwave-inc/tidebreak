@@ -29,7 +29,7 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use tidebreak_core::{
-    ChatId, DocumentBlob, ImageMediaType, ImageRef, MAX_IMAGE_BYTES, MAX_IMAGE_DIMENSION,
+    DocumentBlob, ImageMediaType, ImageRef, SessionId, MAX_IMAGE_BYTES, MAX_IMAGE_DIMENSION,
 };
 
 use crate::error::ServerError;
@@ -84,7 +84,7 @@ impl From<ImageRef> for PublishedImageAttachment {
 pub async fn publish_chat_image_attachment(
     State(state): State<AppState>,
     store: ScopedStore,
-    Path(chat_id): Path<ChatId>,
+    Path(chat_id): Path<SessionId>,
     headers: HeaderMap,
     RawBytes(bytes): RawBytes,
 ) -> Result<impl IntoResponse, ServerError> {
@@ -120,7 +120,7 @@ pub async fn publish_chat_image_attachment(
 pub async fn get_chat_image_attachment(
     State(state): State<AppState>,
     store: ScopedStore,
-    Path((chat_id, attachment_id)): Path<(ChatId, Uuid)>,
+    Path((chat_id, attachment_id)): Path<(SessionId, Uuid)>,
 ) -> Result<Response, ServerError> {
     store.require_chat(chat_id).await?;
     let message_image = store

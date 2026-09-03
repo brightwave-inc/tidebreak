@@ -28,7 +28,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use futures::stream::{self, BoxStream};
 use tidebreak_core::{
-    Chat, ChatId, DbStore, ProviderId, ReasoningEffort, TurnCheckpointProgress, TurnId,
+    Chat, DbStore, ProviderId, ReasoningEffort, SessionId, TurnCheckpointProgress, TurnId,
     TurnRunStatus, Usage,
 };
 
@@ -526,7 +526,7 @@ where
 
 async fn admit_sandbox(
     store: &Arc<dyn Store>,
-    chat_id: tidebreak_core::ChatId,
+    chat_id: tidebreak_core::SessionId,
     call: CallId,
     input: &str,
 ) -> tidebreak_core::AgentRun {
@@ -635,7 +635,7 @@ async fn park_wait_set(
 
 async fn ready_wait_set_for_test(
     store: &Arc<dyn Store>,
-    chat_id: tidebreak_core::ChatId,
+    chat_id: tidebreak_core::SessionId,
 ) -> (TurnId, CallId) {
     let turn_id = TurnId::new();
     store
@@ -3092,7 +3092,7 @@ async fn delegated_file_advertisement_requires_exact_current_attachment() {
         });
     assert!(delegated_file_admission_matches(&run, &admission, &chat));
 
-    admission.chat_id = ChatId::new();
+    admission.chat_id = SessionId::new();
     assert!(!delegated_file_admission_matches(&run, &admission, &chat));
 }
 
@@ -3289,7 +3289,7 @@ async fn set_web_search_mode(store: &Arc<dyn Store>, mode: &str) {
 
 /// Freeze the origin turn on an exact model so admission carries it to the
 /// child, the way a real conversation's selection does.
-async fn running_turn_on_model(store: &Arc<dyn Store>, chat_id: ChatId, model: &str) {
+async fn running_turn_on_model(store: &Arc<dyn Store>, chat_id: SessionId, model: &str) {
     let turn_id = TurnId::new();
     store
         .accept_turn(turn_id, chat_id, model, "delegate this")
@@ -3509,7 +3509,7 @@ fn tool_capable_sandbox_prompt_includes_host_skills_summary() {
 
 fn sandbox_chat() -> Chat {
     Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: Some("sandbox".into()),
         model: Some("model".into()),
@@ -3814,7 +3814,7 @@ async fn a_run_at_its_last_step_submits_rather_than_being_reminded() {
 async fn spend_the_cadence(
     store: &Arc<dyn Store>,
     id: tidebreak_core::AgentRunId,
-    chat_id: ChatId,
+    chat_id: SessionId,
     steps: usize,
 ) {
     for step in 0..steps {

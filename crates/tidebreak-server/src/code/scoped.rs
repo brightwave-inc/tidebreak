@@ -21,11 +21,11 @@ use std::sync::Arc;
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 
+use tidebreak_core::code::{QueuedTurn, SequencedEvent};
 use tidebreak_core::{
-    CodeApproval, CodeApprovalId, CodeApprovalState, CodeRepo, CodeSession, CodeSessionId,
-    CodeTrigger, CodeTriggerAction, CodeTriggerCondition, CodeTriggerId, CodeTurn, CodeTurnId,
-    CodeWorkspace, Diffstat, HarnessKind, OwnerId, PermissionMode, ReasoningEffort, RepoId,
-    SequencedCodeEvent, WorkspaceId,
+    Approval, ApprovalId, ApprovalState, CodeRepo, CodeTrigger, CodeTriggerAction,
+    CodeTriggerCondition, CodeTriggerId, CodeWorkspace, Diffstat, HarnessKind, OwnerId,
+    PermissionMode, ReasoningEffort, RepoId, Session, SessionId, Turn, TurnId, WorkspaceId,
 };
 
 use super::checkpoint::ChangedFile;
@@ -412,17 +412,17 @@ impl ScopedCode {
     pub(crate) async fn workspace_files(
         &self,
         id: WorkspaceId,
-        turn_id: Option<CodeTurnId>,
-    ) -> Result<(Vec<ChangedFile>, bool, Diffstat, Option<CodeTurnId>), ServerError> {
+        turn_id: Option<TurnId>,
+    ) -> Result<(Vec<ChangedFile>, bool, Diffstat, Option<TurnId>), ServerError> {
         self.runtime.workspace_files(&self.owner, id, turn_id).await
     }
 
     pub(crate) async fn workspace_diff(
         &self,
         id: WorkspaceId,
-        turn_id: Option<CodeTurnId>,
+        turn_id: Option<TurnId>,
         file: Option<&str>,
-    ) -> Result<(String, bool, Diffstat, Option<CodeTurnId>), ServerError> {
+    ) -> Result<(String, bool, Diffstat, Option<TurnId>), ServerError> {
         self.runtime
             .workspace_diff(&self.owner, id, turn_id, file)
             .await
@@ -598,7 +598,7 @@ impl ScopedCode {
         workspace_id: WorkspaceId,
         harness: HarnessKind,
         settings: NewSessionSettings,
-    ) -> Result<CodeSession, ServerError> {
+    ) -> Result<Session, ServerError> {
         self.runtime
             .create_session(&self.owner, workspace_id, harness, settings)
             .await
@@ -607,7 +607,7 @@ impl ScopedCode {
     pub(crate) async fn create_internal_session(
         &self,
         settings: NewSessionSettings,
-    ) -> Result<CodeSession, ServerError> {
+    ) -> Result<Session, ServerError> {
         self.runtime
             .create_internal_session(&self.owner, settings)
             .await
@@ -618,24 +618,24 @@ impl ScopedCode {
         workspace_id: WorkspaceId,
         harness: HarnessKind,
         settings: NewSessionSettings,
-    ) -> Result<CodeSession, ServerError> {
+    ) -> Result<Session, ServerError> {
         self.runtime
             .create_remote_session(&self.owner, workspace_id, harness, settings)
             .await
     }
 
-    pub(crate) async fn get_session(&self, id: CodeSessionId) -> Result<CodeSession, ServerError> {
+    pub(crate) async fn get_session(&self, id: SessionId) -> Result<Session, ServerError> {
         self.runtime.get_session(&self.owner, id).await
     }
 
-    pub(crate) async fn list_internal_sessions(&self) -> Result<Vec<CodeSession>, ServerError> {
+    pub(crate) async fn list_internal_sessions(&self) -> Result<Vec<Session>, ServerError> {
         self.runtime.list_internal_sessions(&self.owner).await
     }
 
     pub(crate) async fn list_workspace_sessions(
         &self,
         workspace_id: WorkspaceId,
-    ) -> Result<Vec<CodeSession>, ServerError> {
+    ) -> Result<Vec<Session>, ServerError> {
         self.runtime
             .list_workspace_sessions(&self.owner, workspace_id)
             .await
@@ -643,23 +643,20 @@ impl ScopedCode {
 
     pub(crate) async fn external_bindings_for_sessions(
         &self,
-        session_ids: &[CodeSessionId],
+        session_ids: &[SessionId],
     ) -> Result<Vec<tidebreak_core::CodeExternalBinding>, ServerError> {
         self.runtime
             .external_bindings_for_sessions(&self.owner, session_ids)
             .await
     }
 
-    pub(crate) async fn list_session_turns(
-        &self,
-        id: CodeSessionId,
-    ) -> Result<Vec<CodeTurn>, ServerError> {
+    pub(crate) async fn list_session_turns(&self, id: SessionId) -> Result<Vec<Turn>, ServerError> {
         self.runtime.list_session_turns(&self.owner, id).await
     }
 
     pub(crate) async fn list_turn_metrics(
         &self,
-    ) -> Result<Vec<tidebreak_core::db::code::CodeTurnMetric>, ServerError> {
+    ) -> Result<Vec<tidebreak_core::db::code::TurnMetric>, ServerError> {
         self.runtime.list_turn_metrics(&self.owner).await
     }
 
@@ -679,22 +676,22 @@ impl ScopedCode {
 
     pub(crate) async fn fork_transcript(
         &self,
-        id: CodeSessionId,
-        at_turn: Option<tidebreak_core::CodeTurnId>,
+        id: SessionId,
+        at_turn: Option<tidebreak_core::TurnId>,
     ) -> Result<super::fork::WrittenTranscript, ServerError> {
         self.runtime.fork_transcript(&self.owner, id, at_turn).await
     }
 
     pub(crate) async fn session_debug(
         &self,
-        id: CodeSessionId,
-    ) -> Result<(CodeSession, Vec<CodeTurn>, Vec<SequencedCodeEvent>), ServerError> {
+        id: SessionId,
+    ) -> Result<(Session, Vec<Turn>, Vec<SequencedEvent>), ServerError> {
         self.runtime.session_debug(&self.owner, id).await
     }
 
     pub(crate) async fn resolve_turn_attachments(
         &self,
-        session_id: CodeSessionId,
+        session_id: SessionId,
         requested: &[(uuid::Uuid, String)],
     ) -> Result<Vec<tidebreak_core::ImageRef>, ServerError> {
         self.runtime
@@ -704,7 +701,7 @@ impl ScopedCode {
 
     pub(crate) async fn submit_turn(
         &self,
-        id: CodeSessionId,
+        id: SessionId,
         message: String,
         model: Option<String>,
         reasoning_effort: Option<Option<ReasoningEffort>>,
@@ -724,18 +721,18 @@ impl ScopedCode {
 
     pub(crate) async fn list_queued_turns(
         &self,
-        id: CodeSessionId,
-    ) -> Result<(Vec<tidebreak_core::CodeQueuedTurn>, bool), ServerError> {
+        id: SessionId,
+    ) -> Result<(Vec<QueuedTurn>, bool), ServerError> {
         self.runtime.list_queued_turns(&self.owner, id).await
     }
 
     pub(crate) async fn update_queued_turn(
         &self,
-        id: CodeSessionId,
-        queued_id: CodeTurnId,
+        id: SessionId,
+        queued_id: TurnId,
         message: Option<&str>,
         position: Option<i32>,
-    ) -> Result<Option<tidebreak_core::CodeQueuedTurn>, ServerError> {
+    ) -> Result<Option<QueuedTurn>, ServerError> {
         self.runtime
             .update_queued_turn(&self.owner, id, queued_id, message, position)
             .await
@@ -743,8 +740,8 @@ impl ScopedCode {
 
     pub(crate) async fn delete_queued_turn(
         &self,
-        id: CodeSessionId,
-        queued_id: CodeTurnId,
+        id: SessionId,
+        queued_id: TurnId,
     ) -> Result<bool, ServerError> {
         self.runtime
             .delete_queued_turn(&self.owner, id, queued_id)
@@ -753,21 +750,21 @@ impl ScopedCode {
 
     pub(crate) async fn set_queue_paused(
         &self,
-        id: CodeSessionId,
+        id: SessionId,
         paused: bool,
     ) -> Result<(), ServerError> {
         self.runtime.set_queue_paused(&self.owner, id, paused).await
     }
 
-    pub(crate) async fn send_queued_now(&self, id: CodeSessionId) -> Result<(), ServerError> {
+    pub(crate) async fn send_queued_now(&self, id: SessionId) -> Result<(), ServerError> {
         self.runtime.send_queued_now(&self.owner, id).await
     }
 
     pub(crate) async fn set_reasoning_effort(
         &self,
-        id: CodeSessionId,
+        id: SessionId,
         effort: Option<ReasoningEffort>,
-    ) -> Result<CodeSession, ServerError> {
+    ) -> Result<Session, ServerError> {
         self.runtime
             .set_reasoning_effort(&self.owner, id, effort)
             .await
@@ -775,13 +772,13 @@ impl ScopedCode {
 
     pub(crate) async fn set_fast_mode(
         &self,
-        id: CodeSessionId,
+        id: SessionId,
         fast_mode: bool,
-    ) -> Result<CodeSession, ServerError> {
+    ) -> Result<Session, ServerError> {
         self.runtime.set_fast_mode(&self.owner, id, fast_mode).await
     }
 
-    pub(crate) async fn interrupt(&self, id: CodeSessionId) -> Result<(), ServerError> {
+    pub(crate) async fn interrupt(&self, id: SessionId) -> Result<(), ServerError> {
         // Authorize the session first: without this the worker registry would
         // answer for a session id whatever owner holds it.
         let _ = self.get_session(id).await?;
@@ -790,8 +787,8 @@ impl ScopedCode {
 
     pub(crate) async fn steer(
         &self,
-        id: CodeSessionId,
-        expected_turn_id: CodeTurnId,
+        id: SessionId,
+        expected_turn_id: TurnId,
         message: String,
     ) -> Result<(), ServerError> {
         self.runtime
@@ -799,7 +796,7 @@ impl ScopedCode {
             .await
     }
 
-    pub(crate) async fn reap(&self, id: CodeSessionId) -> Result<CodeSession, ServerError> {
+    pub(crate) async fn reap(&self, id: SessionId) -> Result<Session, ServerError> {
         self.runtime.reap(&self.owner, id).await
     }
 
@@ -861,9 +858,9 @@ impl ScopedCode {
 
     pub(crate) async fn set_permission_mode(
         &self,
-        id: CodeSessionId,
+        id: SessionId,
         mode: PermissionMode,
-    ) -> Result<CodeSession, ServerError> {
+    ) -> Result<Session, ServerError> {
         self.runtime
             .set_permission_mode(&self.owner, id, mode)
             .await
@@ -871,10 +868,10 @@ impl ScopedCode {
 
     pub(crate) async fn set_attention(
         &self,
-        id: CodeSessionId,
+        id: SessionId,
         clear: bool,
         note: Option<String>,
-    ) -> Result<CodeSession, ServerError> {
+    ) -> Result<Session, ServerError> {
         self.runtime
             .set_attention(&self.owner, id, clear, note)
             .await
@@ -886,9 +883,9 @@ impl ScopedCode {
 
     pub(crate) async fn list_approvals(
         &self,
-        state: Option<CodeApprovalState>,
-        session_id: Option<CodeSessionId>,
-    ) -> Result<Vec<CodeApproval>, ServerError> {
+        state: Option<ApprovalState>,
+        session_id: Option<SessionId>,
+    ) -> Result<Vec<Approval>, ServerError> {
         self.runtime
             .list_approvals(&self.owner, state, session_id)
             .await
@@ -896,9 +893,9 @@ impl ScopedCode {
 
     pub(crate) async fn decide_approval(
         &self,
-        id: CodeApprovalId,
+        id: ApprovalId,
         decision: super::runtime::ApprovalDecisionRequest,
-    ) -> Result<CodeApproval, ServerError> {
+    ) -> Result<Approval, ServerError> {
         self.runtime
             .decide_approval(&self.owner, id, decision)
             .await
@@ -914,7 +911,7 @@ impl ScopedCode {
     /// Reserve a validated image for one of the principal's sessions.
     pub(crate) async fn publish_session_image(
         &self,
-        session_id: CodeSessionId,
+        session_id: SessionId,
         image: &tidebreak_core::ImageRef,
     ) -> Result<bool, ServerError> {
         Ok(tidebreak_core::db::code::publish_session_image(
@@ -927,7 +924,7 @@ impl ScopedCode {
         .await?)
     }
 
-    pub(crate) async fn list_sessions(&self) -> Result<Vec<CodeSession>, ServerError> {
+    pub(crate) async fn list_sessions(&self) -> Result<Vec<Session>, ServerError> {
         self.runtime.list_sessions(&self.owner).await
     }
 
@@ -980,7 +977,7 @@ impl ScopedCode {
     /// Warm the pinned install of one engine. See
     /// [`CodeRuntime::start_harness_install`].
     ///
-    /// Progress reaches this principal's `/code/updates` socket; the binary it
+    /// Progress reaches this principal's `/updates` socket; the binary it
     /// writes belongs to the machine, which is why the route sits on the
     /// deployment plane beside the doctor's refresh.
     pub(crate) async fn start_harness_install(

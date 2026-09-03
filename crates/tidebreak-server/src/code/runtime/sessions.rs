@@ -9,11 +9,11 @@ impl CodeRuntime {
         workspace_id: WorkspaceId,
         harness: HarnessKind,
         settings: NewSessionSettings,
-    ) -> Result<CodeSession, ServerError> {
+    ) -> Result<Session, ServerError> {
         self.create_session_of_kind(
             owner,
             workspace_id,
-            CodeSessionKind::Interactive,
+            SessionKind::Interactive,
             harness,
             settings,
         )
@@ -30,7 +30,7 @@ impl CodeRuntime {
         &self,
         owner: &OwnerId,
         workspace_id: WorkspaceId,
-        kind: CodeSessionKind,
+        kind: SessionKind,
         harness: HarnessKind,
         NewSessionSettings {
             permission_mode,
@@ -39,7 +39,7 @@ impl CodeRuntime {
             fast_mode,
             permission_mode_ceiling,
         }: NewSessionSettings,
-    ) -> Result<CodeSession, ServerError> {
+    ) -> Result<Session, ServerError> {
         if harness.is_in_process() {
             return Err(ServerError::conflict_kind(
                 "harness_needs_no_workspace",
@@ -61,11 +61,10 @@ impl CodeRuntime {
                 "this workspace's engine runs in a remote sandbox; create a remote session on it",
             ));
         }
-        if kind == CodeSessionKind::Watch {
+        if kind == SessionKind::Watch {
             let existing = list_sessions_for_workspace(&self.db, owner, workspace_id).await?;
             if existing.iter().any(|session| {
-                session.lifecycle != CodeSessionLifecycle::Ended
-                    && session.kind == CodeSessionKind::Watch
+                session.lifecycle != SessionLifecycle::Ended && session.kind == SessionKind::Watch
             }) {
                 return Err(ServerError::conflict_kind(
                     "session_exists",
@@ -144,7 +143,7 @@ impl CodeRuntime {
             ));
         }
         self.refuse_signed_out_harness(harness, &probe)?;
-        let execution_settings = CodeSessionExecutionSettings {
+        let execution_settings = SessionExecutionSettings {
             model: normalize_model(model),
             reasoning_effort,
             fast_mode,
@@ -160,8 +159,8 @@ impl CodeRuntime {
                 .await;
             Self::validate_execution_settings(harness, &execution_settings, &selected)?;
         }
-        let session = CodeSession {
-            id: CodeSessionId::new(),
+        let session = Session {
+            id: SessionId::new(),
             owner: owner.clone(),
             workspace_id: Some(workspace_id),
             kind,
@@ -172,7 +171,7 @@ impl CodeRuntime {
             model: execution_settings.model,
             reasoning_effort: execution_settings.reasoning_effort,
             fast_mode: execution_settings.fast_mode,
-            lifecycle: CodeSessionLifecycle::Created,
+            lifecycle: SessionLifecycle::Created,
             fence_reason: None,
             child_pid: None,
             child_process_identity: None,
@@ -220,7 +219,7 @@ impl CodeRuntime {
             fast_mode,
             permission_mode_ceiling,
         }: NewSessionSettings,
-    ) -> Result<CodeSession, ServerError> {
+    ) -> Result<Session, ServerError> {
         let harness = HarnessKind::Internal;
         let adapter = self.adapter(harness)?;
         let probe = self.probe_for_session_create(adapter.as_ref()).await;
@@ -239,7 +238,7 @@ impl CodeRuntime {
             }
         }
         refuse_unhonored_mode(harness, permission_mode, &caps)?;
-        let execution_settings = CodeSessionExecutionSettings {
+        let execution_settings = SessionExecutionSettings {
             model: normalize_model(model),
             reasoning_effort,
             fast_mode,
@@ -250,11 +249,11 @@ impl CodeRuntime {
                 "the internal engine has no fast mode",
             ));
         }
-        let session = CodeSession {
-            id: CodeSessionId::new(),
+        let session = Session {
+            id: SessionId::new(),
             owner: owner.clone(),
             workspace_id: None,
-            kind: CodeSessionKind::Interactive,
+            kind: SessionKind::Interactive,
             harness_kind: harness,
             harness_version: probe.version.clone(),
             harness_resume_ref: None,
@@ -262,7 +261,7 @@ impl CodeRuntime {
             model: execution_settings.model,
             reasoning_effort: execution_settings.reasoning_effort,
             fast_mode: false,
-            lifecycle: CodeSessionLifecycle::Created,
+            lifecycle: SessionLifecycle::Created,
             fence_reason: None,
             child_pid: None,
             child_process_identity: None,
@@ -279,8 +278,8 @@ impl CodeRuntime {
     pub(crate) async fn get_session(
         &self,
         owner: &OwnerId,
-        id: CodeSessionId,
-    ) -> Result<CodeSession, ServerError> {
+        id: SessionId,
+    ) -> Result<Session, ServerError> {
         get_session(&self.db, owner, id)
             .await?
             .ok_or_else(|| ServerError::not_found(format!("session {id} not found")))
@@ -294,7 +293,7 @@ impl CodeRuntime {
     pub(crate) async fn resolve_turn_attachments(
         &self,
         owner: &OwnerId,
-        session_id: CodeSessionId,
+        session_id: SessionId,
         requested: &[(uuid::Uuid, String)],
     ) -> Result<Vec<tidebreak_core::ImageRef>, ServerError> {
         if requested.len() > tidebreak_core::context::MAX_HYDRATED_IMAGES {
@@ -368,10 +367,10 @@ impl CodeRuntime {
     pub(crate) async fn set_attention(
         &self,
         owner: &OwnerId,
-        id: CodeSessionId,
+        id: SessionId,
         clear: bool,
         note: Option<String>,
-    ) -> Result<CodeSession, ServerError> {
+    ) -> Result<Session, ServerError> {
         let _ = self.get_session(owner, id).await?;
         crate::code::attention::user_set_attention(&self.db, &self.bus, owner, id, clear, note)
             .await
@@ -381,7 +380,7 @@ impl CodeRuntime {
     pub(crate) async fn mark_session_viewed(
         &self,
         owner: &OwnerId,
-        id: CodeSessionId,
+        id: SessionId,
     ) -> Result<(), ServerError> {
         crate::code::attention::mark_viewed(&self.db, &self.bus, owner, id)
             .await
@@ -396,12 +395,12 @@ impl CodeRuntime {
     pub(in crate::code) async fn end_session_row(
         &self,
         owner: &OwnerId,
-        session_id: CodeSessionId,
+        session_id: SessionId,
     ) -> Result<(), ServerError> {
         let Some(mut session) = get_session(&self.db, owner, session_id).await? else {
             return Ok(());
         };
-        if session.lifecycle == CodeSessionLifecycle::Ended {
+        if session.lifecycle == SessionLifecycle::Ended {
             return Ok(());
         }
         if let Ok(Some(workspace)) = self.session_workspace(&session).await {
@@ -422,7 +421,7 @@ impl CodeRuntime {
             None => None,
         };
         self.revoke_browser_session(&session);
-        session.lifecycle = CodeSessionLifecycle::Ended;
+        session.lifecycle = SessionLifecycle::Ended;
         session.child_pid = None;
         session.child_process_identity = None;
         session.fence_reason = None;
@@ -432,7 +431,7 @@ impl CodeRuntime {
             None => true,
         };
         let mut current = self.get_session(owner, session.id).await?;
-        current.lifecycle = CodeSessionLifecycle::Ended;
+        current.lifecycle = SessionLifecycle::Ended;
         current.child_pid = None;
         current.child_process_identity = None;
         current.fence_reason = None;
@@ -475,10 +474,7 @@ impl CodeRuntime {
         Ok(())
     }
 
-    pub(crate) async fn list_sessions(
-        &self,
-        owner: &OwnerId,
-    ) -> Result<Vec<CodeSession>, ServerError> {
+    pub(crate) async fn list_sessions(&self, owner: &OwnerId) -> Result<Vec<Session>, ServerError> {
         Ok(list_sessions(&self.db, owner).await?)
     }
 
@@ -486,7 +482,7 @@ impl CodeRuntime {
         &self,
         owner: &OwnerId,
         workspace_id: WorkspaceId,
-    ) -> Result<Vec<CodeSession>, ServerError> {
+    ) -> Result<Vec<Session>, ServerError> {
         let _ = self.get_workspace(owner, workspace_id).await?;
         Ok(list_sessions_for_workspace(&self.db, owner, workspace_id).await?)
     }
@@ -495,7 +491,7 @@ impl CodeRuntime {
     pub(crate) async fn list_internal_sessions(
         &self,
         owner: &OwnerId,
-    ) -> Result<Vec<CodeSession>, ServerError> {
+    ) -> Result<Vec<Session>, ServerError> {
         Ok(tidebreak_core::db::code::list_sessions(&self.db, owner)
             .await?
             .into_iter()
@@ -508,7 +504,7 @@ impl CodeRuntime {
     pub(crate) async fn external_bindings_for_sessions(
         &self,
         owner: &OwnerId,
-        session_ids: &[CodeSessionId],
+        session_ids: &[SessionId],
     ) -> Result<Vec<tidebreak_core::CodeExternalBinding>, ServerError> {
         Ok(
             tidebreak_core::db::code::list_external_bindings_for_sessions(
@@ -523,8 +519,8 @@ impl CodeRuntime {
     pub(crate) async fn list_session_turns(
         &self,
         owner: &OwnerId,
-        session_id: CodeSessionId,
-    ) -> Result<Vec<CodeTurn>, ServerError> {
+        session_id: SessionId,
+    ) -> Result<Vec<Turn>, ServerError> {
         let _ = self.get_session(owner, session_id).await?;
         Ok(list_turns(&self.db, owner, session_id).await?)
     }
@@ -532,7 +528,7 @@ impl CodeRuntime {
     pub(crate) async fn list_turn_metrics(
         &self,
         owner: &OwnerId,
-    ) -> Result<Vec<tidebreak_core::db::code::CodeTurnMetric>, ServerError> {
+    ) -> Result<Vec<tidebreak_core::db::code::TurnMetric>, ServerError> {
         Ok(tidebreak_core::db::code::list_turn_metrics(&self.db, owner).await?)
     }
 
@@ -553,12 +549,12 @@ impl CodeRuntime {
     pub(crate) async fn session_debug(
         &self,
         owner: &OwnerId,
-        session_id: CodeSessionId,
+        session_id: SessionId,
     ) -> Result<
         (
-            CodeSession,
-            Vec<CodeTurn>,
-            Vec<tidebreak_core::SequencedCodeEvent>,
+            Session,
+            Vec<Turn>,
+            Vec<tidebreak_core::code::SequencedEvent>,
         ),
         ServerError,
     > {
@@ -577,8 +573,8 @@ impl CodeRuntime {
     pub(crate) async fn fork_transcript(
         &self,
         owner: &OwnerId,
-        session_id: CodeSessionId,
-        at_turn: Option<tidebreak_core::CodeTurnId>,
+        session_id: SessionId,
+        at_turn: Option<tidebreak_core::TurnId>,
     ) -> Result<fork::WrittenTranscript, ServerError> {
         let session = self.get_session(owner, session_id).await?;
         let workspace = self
@@ -610,10 +606,10 @@ impl CodeRuntime {
             .transpose()?;
 
         let turns = list_turns(&self.db, owner, session_id).await?;
-        let pending_approval_turns: HashSet<CodeTurnId> = list_approvals(
+        let pending_approval_turns: HashSet<TurnId> = list_approvals(
             &self.db,
             owner,
-            Some(CodeApprovalState::Pending),
+            Some(ApprovalState::Pending),
             Some(session_id),
         )
         .await?

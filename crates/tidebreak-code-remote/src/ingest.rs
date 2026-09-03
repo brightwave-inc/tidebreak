@@ -20,13 +20,14 @@ use std::sync::Arc;
 use serde_json::Value;
 use tracing::warn;
 
+use tidebreak_core::code::SequencedEvent;
 use tidebreak_core::db::code::{
     ingest_incarnation_event, latest_incarnation, IncarnationSideEffects,
 };
 use tidebreak_core::{
-    Attention, AttentionSource, AttentionState, BoundedError, CodeEvent, CodeIncarnationId,
-    CodeSessionId, CodeTurnId, CodeUsage, DbStore, FenceReason, HarnessKind, HarnessNoticeLevel,
-    OwnerId, SequencedCodeEvent, MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS,
+    Attention, AttentionSource, AttentionState, BoundedError, CodeIncarnationId, DbStore, Event,
+    FenceReason, HarnessKind, HarnessNoticeLevel, OwnerId, SessionId, TurnId, TurnUsage,
+    MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS,
 };
 
 use super::wire::{SandboxEvent, SandboxEvents, SandboxState};
@@ -38,7 +39,7 @@ pub(crate) struct IngestBinding {
     /// Owner of the session and the incarnation.
     pub owner: OwnerId,
     /// The remote session being projected into.
-    pub session_id: CodeSessionId,
+    pub session_id: SessionId,
     /// The session's spawn epoch, fencing a superseded worker's writes.
     pub spawn_epoch: i64,
     /// The incarnation whose sandbox produced this stream.
@@ -46,14 +47,14 @@ pub(crate) struct IngestBinding {
     /// The session's engine, for the started marker.
     pub harness_kind: HarnessKind,
     /// The turn the driver is servicing, when one is running.
-    pub turn_id: Option<CodeTurnId>,
+    pub turn_id: Option<TurnId>,
 }
 
 /// What one sandbox event becomes on the session.
 #[derive(Debug, Default, PartialEq)]
 struct Projection {
     /// Journal rows to append, in order.
-    pub journal: Vec<CodeEvent>,
+    pub journal: Vec<Event>,
     /// Attention to apply after the journal commit.
     pub attention: Option<Attention>,
     /// The terminal deliverable to retain on the incarnation.
@@ -90,8 +91,8 @@ fn bound(text: &str, max_chars: usize) -> String {
     text.chars().take(max_chars).collect()
 }
 
-fn notice(level: HarnessNoticeLevel, message: String) -> CodeEvent {
-    CodeEvent::HarnessNotice {
+fn notice(level: HarnessNoticeLevel, message: String) -> Event {
+    Event::HarnessNotice {
         level,
         message: bound(&message, MAX_NOTICE_CHARS),
     }
@@ -112,7 +113,7 @@ fn project_event(binding: &IngestBinding, kind: &str, payload: &Value) -> Projec
     let mut out = Projection::default();
     match kind {
         "supervisor_started" => {
-            out.journal.push(CodeEvent::SessionStarted {
+            out.journal.push(Event::SessionStarted {
                 harness_kind: binding.harness_kind,
                 harness_version: payload_str(payload, "agent").unwrap_or("remote").to_owned(),
                 resume_ref: None,
@@ -120,14 +121,14 @@ fn project_event(binding: &IngestBinding, kind: &str, payload: &Value) -> Projec
         }
         "turn_started" => {
             if let Some(turn_id) = binding.turn_id {
-                out.journal.push(CodeEvent::TurnStarted { turn_id });
+                out.journal.push(Event::TurnStarted { turn_id });
             }
             out.attention = Some(Attention::working(AttentionSource::Lifecycle));
         }
         "assistant_record" => {
             let body = payload_str(payload, "body").unwrap_or_default();
             if !body.is_empty() {
-                out.journal.push(CodeEvent::AssistantMessage {
+                out.journal.push(Event::AssistantMessage {
                     text: bound(body, MAX_EVENT_TEXT_CHARS),
                     parent_call_id: None,
                 });
@@ -144,8 +145,8 @@ fn project_event(binding: &IngestBinding, kind: &str, payload: &Value) -> Projec
         "turn_completed" => {
             let success = payload.get("exit_code").and_then(Value::as_i64) == Some(0);
             if success {
-                out.journal.push(CodeEvent::TurnCompleted {
-                    usage: CodeUsage::default(),
+                out.journal.push(Event::TurnCompleted {
+                    usage: TurnUsage::default(),
                     checkpoint: None,
                     stop_reason: None,
                 });
@@ -154,7 +155,7 @@ fn project_event(binding: &IngestBinding, kind: &str, payload: &Value) -> Projec
                     AttentionSource::Lifecycle,
                 ));
             } else {
-                out.journal.push(CodeEvent::TurnFailed {
+                out.journal.push(Event::TurnFailed {
                     error: BoundedError {
                         message: "the engine turn failed".to_owned(),
                     },
@@ -167,7 +168,7 @@ fn project_event(binding: &IngestBinding, kind: &str, payload: &Value) -> Projec
             }
         }
         "turn_interrupted" => {
-            out.journal.push(CodeEvent::TurnInterrupted { usage: None });
+            out.journal.push(Event::TurnInterrupted { usage: None });
             out.attention = Some(Attention::needs_you(
                 "the turn was interrupted",
                 AttentionSource::Lifecycle,
@@ -328,7 +329,7 @@ async fn apply_one(
         for (seq, journal_event) in seqs.iter().zip(&projection.journal) {
             bus.publish(
                 binding.session_id,
-                SequencedCodeEvent {
+                SequencedEvent {
                     seq: *seq,
                     event: journal_event.clone(),
                 },
@@ -353,19 +354,19 @@ mod tests {
     use tidebreak_core::db::code::{
         get_session, latest_incarnation, list_events, replace_session_attention,
     };
-    use tidebreak_core::CodeSession;
+    use tidebreak_core::Session;
 
     use super::super::fixtures::{seed, seeded_incarnation, session_value};
     use super::*;
 
-    fn binding(session: &CodeSession, incarnation: CodeIncarnationId) -> IngestBinding {
+    fn binding(session: &Session, incarnation: CodeIncarnationId) -> IngestBinding {
         IngestBinding {
             owner: session.owner.clone(),
             session_id: session.id,
             spawn_epoch: session.spawn_epoch,
             incarnation,
             harness_kind: session.harness_kind,
-            turn_id: Some(CodeTurnId::new()),
+            turn_id: Some(TurnId::new()),
         }
     }
 
@@ -393,7 +394,7 @@ mod tests {
         let b = binding(&session, CodeIncarnationId::new());
 
         let started = project_event(&b, "turn_started", &json!({ "turn": 3 }));
-        assert!(matches!(started.journal[0], CodeEvent::TurnStarted { .. }));
+        assert!(matches!(started.journal[0], Event::TurnStarted { .. }));
         assert_eq!(
             started.attention,
             Some(Attention::working(AttentionSource::Lifecycle))
@@ -406,18 +407,18 @@ mod tests {
         );
         assert!(matches!(
             &record.journal[0],
-            CodeEvent::AssistantMessage { text, parent_call_id: None } if text == "the answer"
+            Event::AssistantMessage { text, parent_call_id: None } if text == "the answer"
         ));
         assert!(matches!(
             &record.journal[1],
-            CodeEvent::HarnessNotice {
+            Event::HarnessNotice {
                 level: HarnessNoticeLevel::Warning,
                 ..
             }
         ));
 
         let failed = project_event(&b, "turn_completed", &json!({ "turn": 3, "exit_code": 1 }));
-        assert!(matches!(&failed.journal[0], CodeEvent::TurnFailed { .. }));
+        assert!(matches!(&failed.journal[0], Event::TurnFailed { .. }));
         assert!(matches!(
             failed.attention,
             Some(Attention {
@@ -497,11 +498,11 @@ mod tests {
             .events
             .iter()
             .map(|row| match &row.event {
-                CodeEvent::SessionStarted { .. } => "session_started",
-                CodeEvent::TurnStarted { .. } => "turn_started",
-                CodeEvent::AssistantMessage { .. } => "assistant_message",
-                CodeEvent::TurnCompleted { .. } => "turn_completed",
-                CodeEvent::HarnessNotice { .. } => "notice",
+                Event::SessionStarted { .. } => "session_started",
+                Event::TurnStarted { .. } => "turn_started",
+                Event::AssistantMessage { .. } => "assistant_message",
+                Event::TurnCompleted { .. } => "turn_completed",
+                Event::HarnessNotice { .. } => "notice",
                 other => panic!("unexpected journal row {other:?}"),
             })
             .collect();

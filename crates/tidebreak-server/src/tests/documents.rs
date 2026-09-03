@@ -1993,7 +1993,7 @@ async fn promoting_a_document_shares_it_with_the_project_and_keeps_the_original(
     let attached_id: tidebreak_core::DocumentId =
         attached["document_id"].as_str().unwrap().parse().unwrap();
 
-    let promote = |project_id: tidebreak_core::ProjectId, chat_id: tidebreak_core::ChatId| {
+    let promote = |project_id: tidebreak_core::ProjectId, chat_id: tidebreak_core::SessionId| {
         let router = router.clone();
         let bearer = bearer.clone();
         async move {

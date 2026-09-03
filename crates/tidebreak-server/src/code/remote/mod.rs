@@ -13,8 +13,8 @@ pub(crate) use tidebreak_code_remote::{
 impl tidebreak_code_remote::RemoteSessionHost for super::bus::CodeEventBus {
     fn publish(
         &self,
-        session: tidebreak_core::CodeSessionId,
-        event: tidebreak_core::SequencedCodeEvent,
+        session: tidebreak_core::SessionId,
+        event: tidebreak_core::code::SequencedEvent,
     ) {
         super::bus::CodeEventBus::publish(self, session, event);
     }
@@ -22,7 +22,7 @@ impl tidebreak_code_remote::RemoteSessionHost for super::bus::CodeEventBus {
     async fn persist_session(
         &self,
         store: &tidebreak_core::DbStore,
-        session: &tidebreak_core::CodeSession,
+        session: &tidebreak_core::Session,
     ) -> Result<bool, tidebreak_core::AgentError> {
         super::attention::persist_session(store, self, session).await
     }
@@ -31,7 +31,7 @@ impl tidebreak_code_remote::RemoteSessionHost for super::bus::CodeEventBus {
         &self,
         store: &tidebreak_core::DbStore,
         owner: &tidebreak_core::OwnerId,
-        session_id: tidebreak_core::CodeSessionId,
+        session_id: tidebreak_core::SessionId,
         next: tidebreak_core::Attention,
     ) -> Result<(), tidebreak_core::AgentError> {
         let _ =
@@ -43,9 +43,9 @@ impl tidebreak_code_remote::RemoteSessionHost for super::bus::CodeEventBus {
         &self,
         store: &tidebreak_core::DbStore,
         owner: &tidebreak_core::OwnerId,
-        session_id: tidebreak_core::CodeSessionId,
+        session_id: tidebreak_core::SessionId,
         spawn_epoch: i64,
-        event: tidebreak_core::CodeEvent,
+        event: tidebreak_core::Event,
     ) {
         let _ = super::session_worker::journal_event(
             store,
@@ -61,7 +61,7 @@ impl tidebreak_code_remote::RemoteSessionHost for super::bus::CodeEventBus {
     async fn fence_session(
         &self,
         store: &tidebreak_core::DbStore,
-        session: &mut tidebreak_core::CodeSession,
+        session: &mut tidebreak_core::Session,
         reason: tidebreak_core::FenceReason,
     ) -> Result<(), tidebreak_core::AgentError> {
         super::recovery::fence_session(store, self, session, reason).await
@@ -70,16 +70,16 @@ impl tidebreak_code_remote::RemoteSessionHost for super::bus::CodeEventBus {
     async fn recover_dead_worker(
         &self,
         store: &tidebreak_core::DbStore,
-        session: &tidebreak_core::CodeSession,
-    ) -> Result<Option<tidebreak_core::CodeSession>, tidebreak_core::AgentError> {
+        session: &tidebreak_core::Session,
+    ) -> Result<Option<tidebreak_core::Session>, tidebreak_core::AgentError> {
         super::recovery::recover_dead_worker(store, self, session).await
     }
 
     async fn reap_session(
         &self,
         store: &tidebreak_core::DbStore,
-        session: tidebreak_core::CodeSession,
-    ) -> Result<tidebreak_core::CodeSession, tidebreak_code_remote::RemoteReapError> {
+        session: tidebreak_core::Session,
+    ) -> Result<tidebreak_core::Session, tidebreak_code_remote::RemoteReapError> {
         super::recovery::reap_session(store, self, session)
             .await
             .map_err(|error| match error {

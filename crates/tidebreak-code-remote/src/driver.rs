@@ -23,9 +23,9 @@ use tidebreak_core::db::code::{
     session_spend_microusd, stale_incarnation_intents_all_owners, stop_incarnation,
 };
 use tidebreak_core::{
-    Attention, AttentionSource, CodeRepo, CodeSession, CodeSessionId, CodeSessionIncarnation,
-    CodeSessionLifecycle, CodeTurn, CodeTurnId, CodeTurnStatus, CodeWorkspace, DbStore,
-    FenceReason, IncarnationAdmission, IncarnationState, OwnerId,
+    Attention, AttentionSource, CodeRepo, CodeSessionIncarnation, CodeWorkspace, DbStore,
+    FenceReason, IncarnationAdmission, IncarnationState, OwnerId, Session, SessionId,
+    SessionLifecycle, Turn, TurnId, TurnStatus,
 };
 
 use super::ingest::{ingest_events, IngestBinding, IngestOutcome};
@@ -61,12 +61,12 @@ pub enum RemoteTurnOutcome {
     /// The turn reached the live sandbox's inbox.
     Delivered {
         /// The turn row, running. Boxed: the rows dwarf the refusals.
-        turn: Box<CodeTurn>,
+        turn: Box<Turn>,
     },
     /// No sandbox was live; one was provisioned to carry this turn.
     Reincarnated {
         /// The turn row, running.
-        turn: Box<CodeTurn>,
+        turn: Box<Turn>,
         /// The incarnation now active.
         #[cfg_attr(not(test), allow(dead_code))]
         incarnation: Box<CodeSessionIncarnation>,
@@ -74,7 +74,7 @@ pub enum RemoteTurnOutcome {
     /// The owner's concurrency cap refused, naming what runs.
     CapExhausted {
         /// Sessions holding the live incarnations.
-        running: Vec<CodeSessionId>,
+        running: Vec<SessionId>,
     },
     /// The predecessor stopped but its terminal events are not journaled
     /// yet. Retry after a pump; resuming now would miss its last output.
@@ -116,7 +116,7 @@ pub struct RemoteDriver<'a> {
 async fn sign_in_needed(
     db: &Arc<DbStore>,
     bus: &dyn RemoteSessionHost,
-    session: &CodeSession,
+    session: &Session,
 ) -> Result<(), tidebreak_core::AgentError> {
     apply_attention(
         db,
@@ -141,7 +141,7 @@ async fn sign_in_needed(
 async fn refusal_notice(
     db: &Arc<DbStore>,
     bus: &dyn RemoteSessionHost,
-    session: &CodeSession,
+    session: &Session,
     message: String,
     attention: &str,
 ) -> Result<(), tidebreak_core::AgentError> {
@@ -151,7 +151,7 @@ async fn refusal_notice(
         &session.owner,
         session.id,
         session.spawn_epoch,
-        tidebreak_core::CodeEvent::HarnessNotice {
+        tidebreak_core::Event::HarnessNotice {
             level: tidebreak_core::HarnessNoticeLevel::Warning,
             message,
         },
@@ -172,11 +172,7 @@ async fn refusal_notice(
 /// workspace titles. The owner knows workspaces, not session ids; a title
 /// that is empty falls back to the branch, and a row that vanished mid-read
 /// falls back to the id rather than failing the refusal.
-async fn occupying_names(
-    db: &Arc<DbStore>,
-    owner: &OwnerId,
-    running: &[CodeSessionId],
-) -> Vec<String> {
+async fn occupying_names(db: &Arc<DbStore>, owner: &OwnerId, running: &[SessionId]) -> Vec<String> {
     let mut names = Vec::new();
     for id in running {
         let name = match tidebreak_core::db::code::get_session(db, owner, *id).await {
@@ -256,7 +252,7 @@ async fn settle_turn_rows(
     db: &Arc<DbStore>,
     owner: &OwnerId,
     starting_turn: i32,
-    running_turn: Option<CodeTurn>,
+    running_turn: Option<Turn>,
     events: &[super::wire::SandboxEvent],
 ) -> Result<bool, tidebreak_core::AgentError> {
     let Some(mut turn) = running_turn else {
@@ -271,12 +267,12 @@ async fn settle_turn_rows(
                     .and_then(serde_json::Value::as_i64)
                     == Some(0);
                 if success {
-                    CodeTurnStatus::Completed
+                    TurnStatus::Completed
                 } else {
-                    CodeTurnStatus::Failed
+                    TurnStatus::Failed
                 }
             }
-            "turn_interrupted" => CodeTurnStatus::Interrupted,
+            "turn_interrupted" => TurnStatus::Interrupted,
             _ => continue,
         };
         let mapped_ordinal = event
@@ -303,7 +299,7 @@ impl RemoteDriver<'_> {
     /// rows — the caller owns loading and authorization.
     pub async fn submit_turn(
         &self,
-        session: &mut CodeSession,
+        session: &mut Session,
         workspace: &CodeWorkspace,
         repo: &CodeRepo,
         text: &str,
@@ -321,18 +317,18 @@ impl RemoteDriver<'_> {
     /// [`start_turn_row`] for what a stale claim does.
     pub async fn submit_turn_from(
         &self,
-        session: &mut CodeSession,
+        session: &mut Session,
         workspace: &CodeWorkspace,
         repo: &CodeRepo,
         text: &str,
-        promoted: Option<&tidebreak_core::CodeQueuedTurn>,
+        promoted: Option<&tidebreak_core::code::QueuedTurn>,
     ) -> Result<RemoteTurnOutcome, tidebreak_core::AgentError> {
         let (db, bus, provisioner, settings) = (self.db, self.bus, self.provisioner, self.settings);
         let owner = session.owner.clone();
         let last = latest_turn(db, &owner, session.id).await?;
         if last
             .as_ref()
-            .is_some_and(|turn| turn.status == CodeTurnStatus::Running)
+            .is_some_and(|turn| turn.status == TurnStatus::Running)
         {
             return Ok(RemoteTurnOutcome::TurnInFlight);
         }
@@ -584,7 +580,7 @@ impl RemoteDriver<'_> {
     /// and replays are no-ops.
     pub async fn pump(
         &self,
-        session: &mut CodeSession,
+        session: &mut Session,
         wait_seconds: u16,
     ) -> Result<PumpReport, tidebreak_core::AgentError> {
         let (db, bus, provisioner) = (self.db, self.bus, self.provisioner);
@@ -675,7 +671,7 @@ impl RemoteDriver<'_> {
 
         let running_turn = latest_turn(db, &owner, session.id)
             .await?
-            .filter(|turn| turn.status == CodeTurnStatus::Running);
+            .filter(|turn| turn.status == TurnStatus::Running);
         let binding = IngestBinding {
             owner: owner.clone(),
             session_id: session.id,
@@ -711,7 +707,7 @@ impl RemoteDriver<'_> {
             // while this read was in flight.
             let open = latest_turn(db, &owner, session.id)
                 .await?
-                .filter(|turn| turn.status == CodeTurnStatus::Running);
+                .filter(|turn| turn.status == TurnStatus::Running);
             if open.is_some() {
                 if let Some(recovered) = recover_dead_worker(db, bus, session).await? {
                     *session = recovered;
@@ -723,7 +719,7 @@ impl RemoteDriver<'_> {
         // sandbox stays live, and leaving the session Running would let the
         // stall sweep overwrite the turn's done verdict with a stall.
         if (turn_settled || read.state.is_terminal())
-            && session.lifecycle == CodeSessionLifecycle::Running
+            && session.lifecycle == SessionLifecycle::Running
         {
             // The ingest just wrote this turn's verdict (DoneUnreviewed,
             // needs-you) onto the stored row. Refresh this snapshot
@@ -734,7 +730,7 @@ impl RemoteDriver<'_> {
             {
                 *session = stored;
             }
-            session.lifecycle = CodeSessionLifecycle::Idle;
+            session.lifecycle = SessionLifecycle::Idle;
             let _ = persist_session(db, bus, session).await?;
         }
         if let Some(reason) = outcome.fence {
@@ -749,7 +745,7 @@ impl RemoteDriver<'_> {
     ///
     /// Unlike a local reap, nothing is relaunched — the next turn reincarnates
     /// on demand.
-    pub async fn reap(&self, session: CodeSession) -> Result<CodeSession, RemoteReapError> {
+    pub async fn reap(&self, session: Session) -> Result<Session, RemoteReapError> {
         let (db, bus, provisioner) = (self.db, self.bus, self.provisioner);
         let owner = session.owner.clone();
         if let Ok(Some(row)) = latest_incarnation(db, &owner, session.id).await {
@@ -832,16 +828,16 @@ fn repository_url(repo: &CodeRepo) -> Result<String, tidebreak_core::AgentError>
 async fn start_turn_row(
     db: &Arc<DbStore>,
     bus: &dyn RemoteSessionHost,
-    session: &mut CodeSession,
+    session: &mut Session,
     ordinal: i64,
     text: &str,
-    promoted: Option<&tidebreak_core::CodeQueuedTurn>,
-) -> Result<CodeTurn, tidebreak_core::AgentError> {
-    let mut turn = CodeTurn {
-        id: promoted.map_or_else(CodeTurnId::new, |row| row.id),
+    promoted: Option<&tidebreak_core::code::QueuedTurn>,
+) -> Result<Turn, tidebreak_core::AgentError> {
+    let mut turn = Turn {
+        id: promoted.map_or_else(TurnId::new, |row| row.id),
         session_id: session.id,
         ordinal,
-        status: CodeTurnStatus::Running,
+        status: TurnStatus::Running,
         model: session.model.clone(),
         fast_mode: session.fast_mode,
         user_input: text.to_owned(),
@@ -883,13 +879,13 @@ async fn start_turn_row(
                     session = %session.id,
                     "a queued message changed under its promotion; recording the delivered turn separately"
                 );
-                turn.id = CodeTurnId::new();
+                turn.id = TurnId::new();
                 insert_turn(db, &session.owner, &turn).await?;
             }
         }
         None => insert_turn(db, &session.owner, &turn).await?,
     }
-    session.lifecycle = CodeSessionLifecycle::Running;
+    session.lifecycle = SessionLifecycle::Running;
     replace_attention(
         session,
         Attention::working(AttentionSource::Lifecycle),
@@ -1088,7 +1084,7 @@ mod tests {
             panic!("expected a reincarnation");
         };
         assert_eq!(turn.ordinal, 1);
-        assert_eq!(turn.status, CodeTurnStatus::Running);
+        assert_eq!(turn.status, TurnStatus::Running);
         assert_eq!(incarnation.incarnation, 1);
         assert_eq!(incarnation.state, IncarnationState::Active);
         assert_eq!(incarnation.sandbox_id.as_deref(), Some("sb-next"));
@@ -1103,7 +1099,7 @@ mod tests {
         assert_eq!(spawns[0].task, "build it");
         assert_eq!(spawns[0].mode.as_deref(), Some("turn"));
         assert_eq!(spawns[0].spend_ceiling_microusd, Some(5_000_000));
-        assert_eq!(session.lifecycle, CodeSessionLifecycle::Running);
+        assert_eq!(session.lifecycle, SessionLifecycle::Running);
     }
 
     /// A turn while the sandbox lives is an inbox message, not a spawn.
@@ -1149,7 +1145,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(live.lifecycle, CodeSessionLifecycle::Idle);
+        assert_eq!(live.lifecycle, SessionLifecycle::Idle);
         assert_eq!(
             live.attention.state,
             tidebreak_core::AttentionState::DoneUnreviewed
@@ -1197,12 +1193,12 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(turn.status, CodeTurnStatus::Interrupted);
+        assert_eq!(turn.status, TurnStatus::Interrupted);
         let live = get_session(&db, &session.owner, session.id)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(live.lifecycle, CodeSessionLifecycle::Idle);
+        assert_eq!(live.lifecycle, SessionLifecycle::Idle);
         // The interrupt surfaces: the session must not keep showing work in
         // progress for a message the dead incarnation never ran.
         assert!(matches!(
@@ -1255,7 +1251,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(turn.status, CodeTurnStatus::Completed);
+        assert_eq!(turn.status, TurnStatus::Completed);
         // The persist after the sandbox stop must not write the snapshot's
         // stale Working back over the verdict the ingest just journaled.
         let live = tidebreak_core::db::code::get_session(&db, &session.owner, session.id)
@@ -1266,7 +1262,7 @@ mod tests {
             live.attention.state,
             tidebreak_core::AttentionState::DoneUnreviewed
         );
-        assert_eq!(live.lifecycle, CodeSessionLifecycle::Idle);
+        assert_eq!(live.lifecycle, SessionLifecycle::Idle);
 
         // Turn 2 reincarnates from the pushed ref, starting at turn 2.
         let outcome = driver
@@ -1304,14 +1300,14 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(settled.ordinal, 2);
-        assert_eq!(settled.status, CodeTurnStatus::Completed);
+        assert_eq!(settled.status, TurnStatus::Completed);
         // The settlement ends the Running lifecycle even though the
         // successor sandbox stays live.
         let after = get_session(&db, &session.owner, session.id)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(after.lifecycle, CodeSessionLifecycle::Idle);
+        assert_eq!(after.lifecycle, SessionLifecycle::Idle);
     }
 
     /// A stopped predecessor whose terminal events are not journaled yet
@@ -1376,7 +1372,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(live.lifecycle, CodeSessionLifecycle::Fenced);
+        assert_eq!(live.lifecycle, SessionLifecycle::Fenced);
         assert!(matches!(
             live.fence_reason,
             Some(FenceReason::ResumeLost { .. })
@@ -1425,7 +1421,7 @@ mod tests {
         let driver = driver!(&db, &bus, &fake, &settings);
 
         let recovered = driver.reap(session.clone()).await.unwrap();
-        assert_eq!(recovered.lifecycle, CodeSessionLifecycle::Idle);
+        assert_eq!(recovered.lifecycle, SessionLifecycle::Idle);
         assert!(recovered.fence_reason.is_none());
         assert_eq!(
             fake.cancels.lock().unwrap().as_slice(),
@@ -1486,7 +1482,7 @@ mod tests {
         let notice = events
             .iter()
             .find_map(|row| match &row.event {
-                tidebreak_core::CodeEvent::HarnessNotice { message, .. } => Some(message.clone()),
+                tidebreak_core::Event::HarnessNotice { message, .. } => Some(message.clone()),
                 _ => None,
             })
             .expect("expected a refusal notice");
@@ -1549,7 +1545,7 @@ mod tests {
         let notice = events
             .iter()
             .find_map(|row| match &row.event {
-                tidebreak_core::CodeEvent::HarnessNotice { message, .. } => Some(message.clone()),
+                tidebreak_core::Event::HarnessNotice { message, .. } => Some(message.clone()),
                 _ => None,
             })
             .expect("expected a refusal notice");
@@ -1722,11 +1718,11 @@ mod tests {
     async fn an_earlier_turns_ending_does_not_settle_the_running_turn() {
         let dir = tempfile::tempdir().unwrap();
         let (db, _bus, session, _workspace, _repo) = seed(dir.path()).await;
-        let running = CodeTurn {
-            id: CodeTurnId::new(),
+        let running = Turn {
+            id: TurnId::new(),
             session_id: session.id,
             ordinal: 2,
-            status: CodeTurnStatus::Running,
+            status: TurnStatus::Running,
             model: None,
             fast_mode: false,
             user_input: "second".to_owned(),
@@ -1756,7 +1752,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(row.status, CodeTurnStatus::Running);
+        assert_eq!(row.status, TurnStatus::Running);
 
         let own = [event(
             10,
@@ -1770,7 +1766,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(row.status, CodeTurnStatus::Completed);
+        assert_eq!(row.status, TurnStatus::Completed);
     }
 
     /// A lease whose activation loses to the protocol is cancelled, not
