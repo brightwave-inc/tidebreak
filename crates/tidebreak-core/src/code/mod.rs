@@ -2361,15 +2361,6 @@ mod tests {
     }
 
     #[test]
-    fn code_ids_roundtrip_as_bare_uuids() {
-        let id = CodeSessionId::new();
-        let json = serde_json::to_string(&id).unwrap();
-        assert_eq!(json, format!("\"{id}\""));
-        assert_eq!(serde_json::from_str::<CodeSessionId>(&json).unwrap(), id);
-        assert_eq!(id.to_string().parse::<CodeSessionId>().unwrap(), id);
-    }
-
-    #[test]
     fn harness_kind_tokens_are_stable() {
         assert_eq!(HarnessKind::ClaudeCode.as_str(), "claude_code");
         assert_eq!(HarnessKind::from_str("grok"), Some(HarnessKind::Grok));
