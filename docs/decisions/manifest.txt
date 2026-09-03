@@ -93,3 +93,4 @@
 0082  0082-the-hosted-machine-serves-the-renderer.md
 0083  0083-portable-workspace-configuration-export.md
 0084  0084-the-server-image-carries-github-build-provenance.md
+0085  0085-the-server-honors-the-model-gateway-add-on-plane-s-environment-contract.md

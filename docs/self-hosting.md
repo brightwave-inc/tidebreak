@@ -255,10 +255,11 @@ aspirational.
 | Variable | Required | Default | What it does |
 | --- | --- | --- | --- |
 | `TIDEBREAK_PROFILE` | yes | `desktop` | `self_host` (or `selfhost`) selects this profile. Anything else is desktop or a config error. |
-| `TIDEBREAK_DATABASE_URL` | yes (self-host) | — | PostgreSQL connection string for the shared store. |
+| `TIDEBREAK_DATABASE_URL` | yes (self-host) | `DATABASE_URL` | PostgreSQL connection string for the shared store. On a Model Gateway managed machine the plane's `DATABASE_URL` stands in when this is unset. |
 | `TIDEBREAK_BLOB_STORE_URL` | yes (self-host) | — | S3 bucket and optional prefix, for example `s3://company-tidebreak/production`. Credentials, region, and an optional compatible endpoint come from standard `AWS_*` variables. |
 | `AWS_DEFAULT_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_ENDPOINT_URL_S3`, `AWS_ALLOW_HTTP` | depends on provider | AWS defaults | Configure AWS S3 or an S3-compatible endpoint. Keep `AWS_ALLOW_HTTP=false` outside isolated development networks. Role, web-identity, and container credential variables are also accepted. |
-| `TIDEBREAK_AUTH_GATEWAY_URL` | one auth mode required | — | Public Model Gateway identity URL exposed to clients and, by default, used for live validation. HTTPS required except for loopback development. |
+| `TIDEBREAK_AUTH_GATEWAY_URL` | one auth mode required | `GATEWAY_BASE_URL` | Public Model Gateway identity URL exposed to clients and, by default, used for live validation. HTTPS required except for loopback development. |
+| `TIDEBREAK_PUBLIC_URL` | with Gateway auth | `ADD_ON_PUBLIC_URL` | The machine's own public URL, which user credentials are bound to. On a Model Gateway managed machine the plane's `ADD_ON_PUBLIC_URL` stands in when this is unset (decision 0085). |
 | `TIDEBREAK_AUTH_GATEWAY_VERIFIER_URL` | no | `TIDEBREAK_AUTH_GATEWAY_URL` | Optional server-to-server Gateway URL for principal validation when the public origin is not cluster-routable. Requires Gateway auth. |
 | `TIDEBREAK_AUTH_TOKENS_FILE` | one auth mode required | — | Standalone compatibility: path to the static token file above. Mutually exclusive with Gateway auth. |
 | `TIDEBREAK_ADAPTER_BOOTSTRAP_TOKENS` | no | unset | Comma-separated service bearers allowed to start an external channel connect handshake. Each value must be 32–512 header-safe characters. Leave unset to disable connect start. To rotate without downtime, add the new value, move the adapter, then remove the old value. |

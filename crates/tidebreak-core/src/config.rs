@@ -384,7 +384,10 @@ impl Config {
     /// `./.tidebreak` under the current directory — desktop/CLI clients should set
     /// this to the platform's app-data location),
     /// `TIDEBREAK_BLOB_STORE_URL` (required for self-host; an S3 bucket and
-    /// optional prefix),
+    /// optional prefix), with the Model Gateway add-on plane's
+    /// `GATEWAY_BASE_URL`, `DATABASE_URL`, and `ADD_ON_PUBLIC_URL` standing in
+    /// for `TIDEBREAK_AUTH_GATEWAY_URL`, `TIDEBREAK_DATABASE_URL`, and
+    /// `TIDEBREAK_PUBLIC_URL` when those are unset (decision 0085),
     /// `TIDEBREAK_CONTAINER_EXECUTION_ENABLED` (default `false`),
     /// `TIDEBREAK_CONTAINER_IMAGE` (defaulting to the server's default agent
     /// image), `TIDEBREAK_AUTH_TOKENS_FILE` or `TIDEBREAK_AUTH_GATEWAY_URL`
@@ -416,9 +419,15 @@ impl Config {
             std::env::var("TIDEBREAK_CONTAINER_EXECUTION_ENABLED").ok(),
             std::env::var("TIDEBREAK_CONTAINER_IMAGE").ok(),
             std::env::var_os("TIDEBREAK_AUTH_TOKENS_FILE"),
-            std::env::var("TIDEBREAK_AUTH_GATEWAY_URL").ok(),
+            plane_fallback(
+                std::env::var("TIDEBREAK_AUTH_GATEWAY_URL").ok(),
+                std::env::var("GATEWAY_BASE_URL").ok(),
+            ),
             std::env::var("TIDEBREAK_AUTH_GATEWAY_VERIFIER_URL").ok(),
-            std::env::var("TIDEBREAK_PUBLIC_URL").ok(),
+            plane_fallback(
+                std::env::var("TIDEBREAK_PUBLIC_URL").ok(),
+                std::env::var("ADD_ON_PUBLIC_URL").ok(),
+            ),
             std::env::var("TIDEBREAK_LISTEN_ADDR").ok(),
             std::env::var("TIDEBREAK_RUNTIME_ENDPOINT").ok(),
             std::env::var("TIDEBREAK_RUNTIME_PROFILE").ok(),
@@ -621,11 +630,24 @@ impl Config {
                 "sqlite://{}?mode=rwc",
                 self.data_dir.join("tidebreak.db").display()
             )),
-            Profile::SelfHost => std::env::var("TIDEBREAK_DATABASE_URL").map_err(|_| {
-                AgentError::config("TIDEBREAK_DATABASE_URL is required for self-host")
-            }),
+            Profile::SelfHost => plane_fallback(
+                std::env::var("TIDEBREAK_DATABASE_URL").ok(),
+                std::env::var("DATABASE_URL").ok(),
+            )
+            .ok_or_else(|| AgentError::config("TIDEBREAK_DATABASE_URL is required for self-host")),
         }
     }
+}
+
+/// The Model Gateway add-on plane's environment contract, honored when the
+/// server's own variable is unset (decision 0085). A managed machine is
+/// handed `GATEWAY_BASE_URL`, `DATABASE_URL`, and `ADD_ON_PUBLIC_URL` by the
+/// plane; the `TIDEBREAK_*` name always wins when both are set, and an empty
+/// value counts as unset on either side, so a blank override never hides the
+/// plane's value.
+fn plane_fallback(own: Option<String>, plane: Option<String>) -> Option<String> {
+    own.filter(|value| !value.trim().is_empty())
+        .or_else(|| plane.filter(|value| !value.trim().is_empty()))
 }
 
 /// OAuth resource bound to one exact, already-canonical Tidebreak public URL.
@@ -716,6 +738,26 @@ fn parse_spend_ceiling(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_plane_contract_stands_in_only_when_the_own_variable_is_unset() {
+        // Decision 0085: the plane's name fills an unset or blank own
+        // variable and never overrides a set one.
+        assert_eq!(
+            super::plane_fallback(None, Some("https://gateway.example".into())),
+            Some("https://gateway.example".into())
+        );
+        assert_eq!(
+            super::plane_fallback(Some("  ".into()), Some("postgres://plane".into())),
+            Some("postgres://plane".into())
+        );
+        assert_eq!(
+            super::plane_fallback(Some("https://own".into()), Some("https://plane".into())),
+            Some("https://own".into())
+        );
+        assert_eq!(super::plane_fallback(None, Some(String::new())), None);
+        assert_eq!(super::plane_fallback(None, None), None);
+    }
+
     use super::*;
 
     #[test]
