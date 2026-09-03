@@ -28,14 +28,13 @@ use tokio::{
 };
 
 use crate::{
-    events::{EventPayload, SandboxEvent},
+    events::{EmitError, EventPayload, SandboxEvent},
     ids::{EventCursor, OperationId, RequestId, Sequence},
     protocol::{
         handshake, AttachAccepted, HandshakeResponse, Response, MAX_BUFFERED_EVENTS,
         MAX_INFLIGHT_REQUESTS, PROTOCOL_VERSION,
     },
     provisioning::TransportSecret,
-    reference::EmitError,
     reverse::{
         Capability, ControlFrame, RequestFrame, ReverseEnvelope, ReverseRequest, ReverseResult,
     },

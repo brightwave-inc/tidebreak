@@ -101,7 +101,7 @@ pub(crate) use types::{
     CodeForkBody, CodeForkTranscript, CodeGithubRepositories, CodeGithubRepository,
     CodeGrantSnapshot, CodeHarnessInstallSnapshot, CodePrCommentsSnapshot, CodePushSnapshot,
     CodeRepoSnapshot, CodeRepoSource, CodeRepoSources, CodeSessionDebug, CodeSessionDigest,
-    CodeSessionSnapshot, CodeTerminalActivityNotice, CodeTerminalRead, CodeTerminalSnapshot,
+    CodeSessionSnapshot, CodeTerminalRead, CodeTerminalSnapshot,
     CodeTriggerSnapshot, CodeTurnSnapshot, CodeUpdateNotice, CodeWorkspaceBlob, CodeWorkspaceDiff,
     CodeWorkspaceFiles, CodeWorkspaceHistorySearchMatch, CodeWorkspaceHistorySearchSource,
     CodeWorkspacePrSnapshot, CodeWorkspacePullRequests, CodeWorkspaceSearch,

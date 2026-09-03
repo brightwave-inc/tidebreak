@@ -157,7 +157,10 @@ impl super::runtime::CodeRuntime {
     /// Mint the grant a connect approval produces. Refuses an identity that
     /// already holds a live grant — revoke first, so a re-link is an
     /// explicit replacement.
-    #[cfg_attr(not(test), allow(dead_code))]
+    ///
+    /// The connect-approval route that would call this is not built yet; the
+    /// adapter-grant tests are its only callers today.
+    #[cfg(test)]
     pub(crate) async fn mint_adapter_grant(
         &self,
         owner: &OwnerId,

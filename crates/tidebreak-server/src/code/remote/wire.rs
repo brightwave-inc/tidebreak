@@ -94,12 +94,21 @@ pub(crate) struct SandboxLease {
     /// Sandbox identifier every other call takes. Opaque here.
     pub sandbox_id: String,
     /// Lifecycle state at the moment the row committed.
+    /// Read today only by the contract-pinning tests; kept because it is
+    /// part of the pinned runtime API response.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub state: SandboxState,
     /// Highest event sequence already persisted; resume after this.
+    /// Read today only by the contract-pinning tests; kept because it is
+    /// part of the pinned runtime API response.
+    #[cfg_attr(not(test), allow(dead_code))]
     #[serde(default)]
     pub latest_event_seq: i64,
     /// Wall-clock ceiling in seconds. A duration whose clock starts at pod
     /// start, not a deadline.
+    /// Read today only by the contract-pinning tests; kept because it is
+    /// part of the pinned runtime API response.
+    #[cfg_attr(not(test), allow(dead_code))]
     #[serde(default)]
     pub expires_in_seconds: i64,
 }
@@ -154,34 +163,64 @@ impl SandboxState {
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct SandboxStatus {
     /// Sandbox identifier.
+    /// Read today only by the contract-pinning tests; kept because it is
+    /// part of the pinned runtime API response.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub sandbox_id: String,
     /// Current lifecycle state.
+    /// Read today only by the contract-pinning tests; kept because it is
+    /// part of the pinned runtime API response.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub state: SandboxState,
     /// Stable classification for a failed or expired sandbox.
+    /// Read today only by the contract-pinning tests; kept because it is
+    /// part of the pinned runtime API response.
+    #[cfg_attr(not(test), allow(dead_code))]
     #[serde(default)]
     pub failure_reason: Option<String>,
     /// Why the sandbox was asked to stop, when something asked.
+    /// Read today only by the contract-pinning tests; kept because it is
+    /// part of the pinned runtime API response.
+    #[cfg_attr(not(test), allow(dead_code))]
     #[serde(default)]
     pub termination_reason: Option<String>,
     /// Highest event sequence persisted, or zero for a silent sandbox.
+    /// Read today only by the contract-pinning tests; kept because it is
+    /// part of the pinned runtime API response.
+    #[cfg_attr(not(test), allow(dead_code))]
     #[serde(default)]
     pub latest_event_seq: i64,
     /// Messages appended but not yet acknowledged as delivered.
+    /// Read today only by the contract-pinning tests; kept because it is
+    /// part of the pinned runtime API response.
+    #[cfg_attr(not(test), allow(dead_code))]
     #[serde(default)]
     pub pending_messages: i64,
     /// Primary repository the spawn pinned, absent for a research sandbox.
+    /// Read today only by the contract-pinning tests; kept because it is
+    /// part of the pinned runtime API response.
+    #[cfg_attr(not(test), allow(dead_code))]
     #[serde(default)]
     pub repository_url: Option<String>,
     /// Consumed inference spend in micro-USD of shadow model cost.
     #[serde(default)]
     pub spend_microusd: Option<i64>,
     /// Spend ceiling in micro-USD, resolved at spawn.
+    /// Read today only by the contract-pinning tests; kept because it is
+    /// part of the pinned runtime API response.
+    #[cfg_attr(not(test), allow(dead_code))]
     #[serde(default)]
     pub spend_ceiling_microusd: Option<i64>,
     /// Advisory derivation that the run is busy and producing nothing.
+    /// Read today only by the contract-pinning tests; kept because it is
+    /// part of the pinned runtime API response.
+    #[cfg_attr(not(test), allow(dead_code))]
     #[serde(default)]
     pub possibly_stalled: bool,
     /// UTC completion timestamp, present exactly for terminal states.
+    /// Read today only by the contract-pinning tests; kept because it is
+    /// part of the pinned runtime API response.
+    #[cfg_attr(not(test), allow(dead_code))]
     #[serde(default)]
     pub completed_at: Option<String>,
 }
@@ -205,6 +244,9 @@ pub(crate) struct EventCursor {
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct SandboxEvents {
     /// Sandbox identifier.
+    /// Read today only by the contract-pinning tests; kept because it is
+    /// part of the pinned runtime API response.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub sandbox_id: String,
     /// State at read time, so an event poll need not also poll status.
     pub state: SandboxState,
@@ -227,6 +269,9 @@ pub(crate) struct SandboxEvent {
     #[serde(default)]
     pub payload: serde_json::Value,
     /// UTC event timestamp.
+    /// Read today only by the contract-pinning tests; kept because it is
+    /// part of the pinned runtime API response.
+    #[cfg_attr(not(test), allow(dead_code))]
     #[serde(default)]
     pub created_at: String,
 }
@@ -263,11 +308,20 @@ impl SandboxMessage {
 #[derive(Clone, Copy, Debug, Deserialize)]
 pub(crate) struct MessageReceipt {
     /// Per-sandbox monotonic sequence this message was recorded at.
+    /// Read today only by the contract-pinning tests; kept because it is
+    /// part of the pinned runtime API response.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub seq: i64,
     /// Whether it will preempt the turn in flight.
+    /// Read today only by the contract-pinning tests; kept because it is
+    /// part of the pinned runtime API response.
+    #[cfg_attr(not(test), allow(dead_code))]
     #[serde(default)]
     pub interrupt: bool,
     /// Messages ahead of this one still waiting to be delivered.
+    /// Read today only by the contract-pinning tests; kept because it is
+    /// part of the pinned runtime API response.
+    #[cfg_attr(not(test), allow(dead_code))]
     #[serde(default)]
     pub pending_messages: i64,
 }

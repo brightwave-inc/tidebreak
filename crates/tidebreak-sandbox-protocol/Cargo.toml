@@ -9,6 +9,12 @@ homepage.workspace = true
 authors.workspace = true
 publish = false
 
+[features]
+# Compile the in-process reference backend and the conformance scenarios. Off by
+# default so neither ships in the server or the sandbox-agent container binary;
+# the crate's own integration tests turn it on via the dev-dependency below.
+conformance = []
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -20,6 +26,9 @@ async-trait = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "macros", "time", "io-util"] }
 
 [dev-dependencies]
+# The integration tests exercise the reference backend and conformance
+# scenarios, which only compile under the `conformance` feature.
+tidebreak-sandbox-protocol = { path = ".", features = ["conformance"] }
 # `test-util` pauses the clock so the handshake deadline can be exercised without
 # the suite waiting on it.
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "macros", "time", "io-util", "net", "test-util"] }

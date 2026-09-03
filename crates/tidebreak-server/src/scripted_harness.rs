@@ -2,9 +2,6 @@
 //!
 //! Compiled only under the `scripted-harness` feature or in this crate's
 //! tests, matching [`scripted_provider`]: a released binary never contains it.
-//! Test-only helpers stay compiled under the feature so CLI e2e can load the
-//! adapter; they are unused outside this crate's tests.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -83,7 +80,6 @@ impl ApprovalCompleter for ScriptedApprover {
 /// Environment variable carrying a scripted-engine script for CLI e2e tests.
 const SCRIPT_VAR: &str = "TIDEBREAK_SCRIPTED_HARNESS";
 
-#[cfg_attr(test, allow(dead_code))]
 pub(crate) fn env_is_set() -> bool {
     std::env::var_os(SCRIPT_VAR).is_some()
 }
@@ -209,13 +205,11 @@ impl ScriptedAdapter {
 
     /// How many times this adapter has been probed. The runtime memoizes
     /// probes, so this is how a test sees a cache hit from a cold read.
-    #[allow(dead_code)]
     pub(crate) fn probe_count(&self) -> u64 {
         self.probes.load(Ordering::SeqCst)
     }
 
     /// The approval endpoint each launched session was given, in order.
-    #[allow(dead_code)]
     pub(crate) fn launched_approvals(&self) -> Vec<Option<String>> {
         self.launched_approvals
             .lock()
@@ -239,7 +233,6 @@ impl ScriptedAdapter {
     }
 
     /// Make the native approval channel reject every decision.
-    #[allow(dead_code)]
     pub(crate) fn with_approval_delivery_error(self, detail: impl Into<String>) -> Self {
         *self
             .approver
@@ -250,7 +243,6 @@ impl ScriptedAdapter {
     }
 
     /// Accept the approval, then delay the native acknowledgement.
-    #[allow(dead_code)]
     pub(crate) fn with_approval_ack_delay(mut self, delay: Duration) -> Self {
         self.approval_ack_delay = delay;
         self
@@ -284,7 +276,6 @@ impl ScriptedAdapter {
     /// Declares the durable-park capability and, when parking, where the
     /// script splits: `run_turn` plays `events[..split]` and parks with this
     /// ref and wait; `resume_turn` plays the rest.
-    #[allow(dead_code)]
     pub(crate) fn with_parked_turn(
         mut self,
         split: usize,
@@ -297,21 +288,18 @@ impl ScriptedAdapter {
     }
 
     /// Declares the structured user-questions capability.
-    #[allow(dead_code)]
     pub(crate) fn with_user_questions(mut self, level: CapLevel) -> Self {
         self.user_questions = level;
         self
     }
 
     /// Declares the standing-grant decision capability.
-    #[allow(dead_code)]
     pub(crate) fn with_standing_grants(mut self, level: CapLevel) -> Self {
         self.standing_grants = level;
         self
     }
 
     /// Every `resume_turn` the sessions were handed, in order.
-    #[allow(dead_code)]
     pub(crate) fn resumes(&self) -> Vec<(String, ResumeInput)> {
         self.resumes.lock().expect("scripted resumes").clone()
     }
@@ -364,7 +352,6 @@ impl ScriptedAdapter {
         self.modes.lock().expect("scripted modes").clone()
     }
 
-    #[allow(dead_code)]
     pub(crate) fn observed_decisions(&self) -> Vec<(String, ApprovalDecision)> {
         self.approver.observed()
     }
@@ -393,7 +380,6 @@ impl ScriptedAdapter {
 
     /// Publish this pid for the duration of each turn, the way an adapter
     /// that spawns one child per turn does.
-    #[allow(dead_code)]
     pub(crate) fn with_child_pid(mut self, pid: i64) -> Self {
         self.child_pid = Some(pid);
         self
@@ -433,7 +419,6 @@ impl ScriptedAdapter {
 
     /// Model an engine that dies without saying anything — a SIGKILLed child
     /// reaches EOF exactly like a finished one.
-    #[allow(dead_code)]
     pub(crate) fn with_silent_interrupt(mut self) -> Self {
         self.silent_interrupt = true;
         self
@@ -441,7 +426,6 @@ impl ScriptedAdapter {
 
     /// Report this local sign-in state from the probe, for surfaces that
     /// branch on it — the doctor's hosted report among them.
-    #[allow(dead_code)]
     pub(crate) fn with_authenticated(self, authenticated: Option<bool>) -> Self {
         self.set_authenticated(authenticated);
         self
@@ -449,7 +433,6 @@ impl ScriptedAdapter {
 
     /// Flip the sign-in state the next probe reports. Tests use this to
     /// model a user signing in after the doctor has already cached signed-out.
-    #[allow(dead_code)]
     pub(crate) fn set_authenticated(&self, authenticated: Option<bool>) {
         *self.authenticated.lock().expect("scripted auth") = authenticated;
     }
@@ -859,7 +842,6 @@ fn apply_scripted_writes(worktree: &Path, writes: &[ScriptedWrite]) -> Result<()
 /// Object form of [`SCRIPT_VAR`]: events plus optional delay, writes, and
 /// approval-channel flags. A bare JSON array of [`HarnessEvent`]s is also
 /// accepted so a short successful turn stays one line.
-#[cfg_attr(test, allow(dead_code))]
 #[derive(Debug, Deserialize)]
 struct ScriptedHarnessScript {
     events: Vec<HarnessEvent>,
@@ -878,7 +860,6 @@ struct ScriptedHarnessScript {
 /// A malformed script is an error rather than a silent fall-through to the
 /// real engines: a CLI e2e whose script did not parse would otherwise try to
 /// install pinned harness binaries.
-#[cfg_attr(test, allow(dead_code))]
 pub(crate) fn adapter_from_env() -> Result<Option<ScriptedAdapter>> {
     let Ok(script) = std::env::var(SCRIPT_VAR) else {
         return Ok(None);
@@ -908,7 +889,6 @@ pub(crate) fn adapter_from_env() -> Result<Option<ScriptedAdapter>> {
 /// Install the env-driven scripted engine in place of the matching built-in,
 /// so a spawned `tidebreak serve` can drive code-mode turns without a real
 /// harness binary.
-#[cfg_attr(test, allow(dead_code))]
 pub(crate) fn install_from_env(registry: &mut AdapterRegistry) -> Result<()> {
     if let Some(adapter) = adapter_from_env()? {
         registry.register(Arc::new(adapter));
@@ -916,7 +896,6 @@ pub(crate) fn install_from_env(registry: &mut AdapterRegistry) -> Result<()> {
     Ok(())
 }
 
-#[cfg_attr(test, allow(dead_code))]
 fn parse_script(script: &str) -> std::result::Result<ScriptedHarnessScript, serde_json::Error> {
     if let Ok(events) = serde_json::from_str::<Vec<HarnessEvent>>(script) {
         return Ok(ScriptedHarnessScript {
