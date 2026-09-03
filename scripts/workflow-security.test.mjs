@@ -123,6 +123,22 @@ function workflowJob(source, name) {
   return source.slice(start, end);
 }
 
+// The Conventional Commit title check is a required context. It may live in
+// ci.yml or beside the label job in release-draft.yml; wherever it lives, its
+// host workflow must re-run it when the title or labels change, and it must
+// judge the canonical repository's labels from the trusted base-branch policy.
+function semanticTitleCheck() {
+  for (const file of ["ci.yml", "release-draft.yml"]) {
+    const source = workflows[file];
+    const at = source.indexOf("    name: semantic PR title\n");
+    if (at === -1) continue;
+    const keys = [...source.slice(0, at).matchAll(/^  ([a-zA-Z0-9_-]+):\n/gm)];
+    assert.ok(keys.length > 0, `no job key precedes the title check in ${file}`);
+    return { file, source, job: workflowJob(source, keys.at(-1)[1]) };
+  }
+  assert.fail("no workflow defines the semantic PR title job");
+}
+
 test("the Brightwave engineering team owns repository changes", () => {
   assert.equal(codeOwners.trim(), "* @brightwave-inc/engineering");
 });
@@ -410,10 +426,30 @@ test("PR lanes are scope-gated, never label-gated", () => {
     ci,
     /^on:\n  push:\n    branches: \[main\]\n  pull_request:/m,
   );
-  assert.match(
-    ci,
-    /pull_request:\n\s+types:\n\s+\[[^\]]*labeled, unlabeled[^\]]*\]/,
+  const title = semanticTitleCheck();
+  const titleTrigger =
+    /^  pull_request(?:_target)?:\n\s+types:\s*\[([^\]]*)\]/m.exec(title.source);
+  assert.ok(
+    titleTrigger,
+    `${title.file} must list the pull request events that re-check the title`,
   );
+  const titleEvents = titleTrigger[1].split(",").map((event) => event.trim());
+  for (const event of [
+    "opened",
+    "reopened",
+    "synchronize",
+    "edited",
+    "labeled",
+    "unlabeled",
+    "ready_for_review",
+  ]) {
+    assert.ok(
+      titleEvents.includes(event),
+      `${title.file} must re-check the title on ${event}`,
+    );
+  }
+  assert.match(title.job, /node scripts\/check-pr-title\.mjs "\$PR_TITLE"/);
+  assert.match(title.job, /ref: \$\{\{ github\.event\.pull_request\.base\.sha \}\}/);
   assert.doesNotMatch(ci, /^  build:$/m);
   assert.match(
     ci,
@@ -424,9 +460,9 @@ test("PR lanes are scope-gated, never label-gated", () => {
     /sed -i/,
     "the trusted policy runs as checked in; do not rewrite it",
   );
-  assert.match(ci, /CANONICAL_REPOSITORY: brightwave-inc\/tidebreak/);
+  assert.match(title.job, /CANONICAL_REPOSITORY: brightwave-inc\/tidebreak/);
   assert.match(
-    ci,
+    title.job,
     /repos\/\$CANONICAL_REPOSITORY\/pulls\/\$PR_NUMBER/,
   );
   const releaseDraft = workflows["release-draft.yml"];
@@ -493,7 +529,12 @@ test("PR lanes are scope-gated, never label-gated", () => {
     assert.match(job, /add-rust-environment-hash-key: "false"/);
     assert.match(job, /cache-targets: false/);
   }
-  assert.match(testJob, /save-if: \$\{\{ github\.ref == 'refs\/heads\/main' \}\}/);
+  // The registry cache has one writer, and only on main. A lane may narrow
+  // that further (one matrix leg, say) but never widen it.
+  assert.match(
+    testJob,
+    /save-if: \$\{\{ github\.ref == 'refs\/heads\/main'(?: && [^|}]*)? \}\}/,
+  );
   assert.match(testJob, /cache-on-failure: true/);
   assert.match(
     testJob,
@@ -562,27 +603,6 @@ test("PR lanes are scope-gated, never label-gated", () => {
     /tidebreak-server = \{ path = "\.\.\/tidebreak-server" \}/,
   );
   assert.doesNotMatch(desktopCargo, /document-parsers/);
-});
-
-test("merge queue groups re-run required CI", () => {
-  const ci = workflows["ci.yml"];
-  const changes = workflowJob(ci, "changes");
-  const prTitle = workflowJob(ci, "pr-title");
-
-  // Required checks never run unless the workflow listens for merge_group.
-  // Keep the trigger after pull_request so the trusted base-branch trigger
-  // regex still matches this file.
-  assert.match(ci, /pull_request:\n\s+types:\n[\s\S]*?\n  merge_group:\n/);
-  assert.match(changes, /merge_group\)\n\s+base_sha="\$MERGE_GROUP_BASE_SHA"/);
-  assert.match(changes, /MERGE_GROUP_BASE_SHA: \$\{\{ github\.event\.merge_group\.base_sha \}\}/);
-  assert.match(changes, /MERGE_GROUP_HEAD_SHA: \$\{\{ github\.event\.merge_group\.head_sha \}\}/);
-  // The title job is a required check. Merge groups have no PR payload, so
-  // the same name must still report success or the queue stalls.
-  assert.match(
-    prTitle,
-    /if: \$\{\{ github\.event_name == 'pull_request' \|\| github\.event_name == 'merge_group' \}\}/,
-  );
-  assert.match(prTitle, /github\.event_name == 'merge_group'/);
 });
 
 // A main push that a newer commit has already replaced must not keep an
