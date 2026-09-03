@@ -541,9 +541,12 @@ export function workspaceCardLabel(input: {
   };
   terminalOpen?: boolean;
   workspaceStatus?: CodeWorkspaceStatus;
+  creationLabel?: string;
 }): string {
   const parts = [input.title];
-  if (input.workspaceStatus === "creating") parts.push("Creating workspace");
+  if (input.workspaceStatus === "creating") {
+    parts.push(input.creationLabel ?? "Creating workspace");
+  }
   if (input.workspaceStatus === "setup_failed") parts.push("Setup failed");
   const mergeNotice = readyToMergeNotice(input.attention, input.pr);
   if (

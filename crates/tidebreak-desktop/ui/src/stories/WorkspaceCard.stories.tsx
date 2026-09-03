@@ -83,8 +83,8 @@ export const SelectedAndActive: Story = {
   args: { selected: true, active: true },
 };
 
-/** The rail hands off from the composer while the server creates the worktree. */
-export const Creating: Story = {
+/** The first message is being turned into the branch and folder name. */
+export const Naming: Story = {
   args: {
     workspace: {
       ...codeWorkspace,
@@ -94,6 +94,25 @@ export const Creating: Story = {
       worktree_path: "",
       status: "creating",
       created_at: "2026-08-24T12:00:00.000Z",
+      optimistic_creation_phase: "naming",
+    },
+    visibleMeta: { repoChip: true, branch: false },
+    commands: [],
+  },
+};
+
+/** The derived title lands before Git creates the branch and folder. */
+export const Creating: Story = {
+  args: {
+    workspace: {
+      ...codeWorkspace,
+      id: "optimistic-workspace:storybook",
+      title: "Apply workspace names before creation",
+      branch_name: "",
+      worktree_path: "",
+      status: "creating",
+      created_at: "2026-08-24T12:00:00.000Z",
+      optimistic_creation_phase: "creating",
     },
     visibleMeta: { repoChip: true, branch: false },
     commands: [],

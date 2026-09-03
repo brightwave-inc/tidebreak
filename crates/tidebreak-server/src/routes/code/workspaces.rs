@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -13,9 +15,14 @@ use super::types::{
     CodeWorkspaceSearchMatch, CodeWorkspaceSnapshot, CodeWorkspaceTree, CodeWorktreeRoot,
     CreateRemoteWorkspaceBody, CreateWorkspaceBody, ListWorkspacesQuery, PatchWorkspaceBody,
     SetCodeWorktreeRootBody, WorkspaceBlobQuery, WorkspaceDiffQuery, WorkspaceFilesQuery,
-    WorkspaceSearchQuery, WorkspaceTreeQuery,
+    WorkspaceSearchQuery, WorkspaceTitleBody, WorkspaceTitleProposal, WorkspaceTreeQuery,
 };
 use tidebreak_core::WorkspaceId;
+
+/// Naming improves the checkout but must never hold workspace creation behind
+/// a slow provider stream. A later first turn can still update the display
+/// title when this foreground attempt falls back.
+const WORKSPACE_TITLE_DEADLINE: Duration = Duration::from_secs(10);
 
 /// `GET /code/worktree-root`: where the next workspace's worktree lands.
 pub async fn get_worktree_root(code: ScopedCode) -> Result<Json<CodeWorktreeRoot>, ServerError> {
@@ -39,12 +46,42 @@ pub async fn create_workspace(
     Json(body): Json<CreateWorkspaceBody>,
 ) -> Result<impl IntoResponse, ServerError> {
     let workspace = code
-        .create_workspace(body.repo_id, body.title, body.base_ref)
+        .create_workspace(
+            body.repo_id,
+            body.title,
+            body.suggested_title,
+            body.base_ref,
+        )
         .await?;
     Ok((
         StatusCode::CREATED,
         Json(CodeWorkspaceSnapshot::from(workspace)),
     ))
+}
+
+/// `POST /code/workspace-title` — name a workspace before its checkout exists.
+pub async fn propose_workspace_title(
+    State(state): State<AppState>,
+    code: ScopedCode,
+    Json(body): Json<WorkspaceTitleBody>,
+) -> Result<Json<WorkspaceTitleProposal>, ServerError> {
+    let title = match tokio::time::timeout(
+        WORKSPACE_TITLE_DEADLINE,
+        crate::code::titling::propose_for_creation(&state, code.owner(), &body.message),
+    )
+    .await
+    {
+        Ok(Ok(title)) => title,
+        Ok(Err(error)) => {
+            tracing::warn!(?error, "could not name workspace before creation");
+            None
+        }
+        Err(_) => {
+            tracing::warn!("workspace naming timed out before creation");
+            None
+        }
+    };
+    Ok(Json(WorkspaceTitleProposal { title }))
 }
 
 /// `POST /code/remote/workspaces` — create a workspace whose checkout lives

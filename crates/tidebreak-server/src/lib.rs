@@ -1017,6 +1017,10 @@ pub fn app(state: AppState) -> Router {
             post(routes::code::create_workspace).get(routes::code::list_workspaces),
         )
         .route(
+            "/code/workspace-title",
+            post(routes::code::propose_workspace_title),
+        )
+        .route(
             "/code/remote/workspaces",
             post(routes::code::create_remote_workspace),
         )

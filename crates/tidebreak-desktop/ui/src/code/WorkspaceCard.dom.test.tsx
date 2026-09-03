@@ -11,6 +11,7 @@ import type {
   CodeWorkspaceSnapshot,
   PullRequestDigest,
 } from "../api/types";
+import type { OptimisticCodeWorkspaceSnapshot } from "./CodeCatalogStore";
 
 const workspace: CodeWorkspaceSnapshot = {
   id: "ws-1",
@@ -33,7 +34,7 @@ const pr: PullRequestDigest = {
 afterEach(cleanup);
 
 function renderCard(overrides?: {
-  workspace?: Partial<CodeWorkspaceSnapshot>;
+  workspace?: Partial<OptimisticCodeWorkspaceSnapshot>;
   pr?: PullRequestDigest;
   digest?: CodeSessionDigest;
   session?: CodeSessionSnapshot;
@@ -107,13 +108,13 @@ describe("WorkspaceCard", () => {
     });
 
     const row = screen.getByRole("button", {
-      name: "Fix login · Creating workspace · app",
+      name: "Fix login · Creating branch and folder · app",
     });
     const progress = screen.getByRole("status", {
-      name: "Creating workspace",
+      name: "Creating branch and folder",
     });
     expect(row).toBeDisabled();
-    expect(progress).toHaveTextContent("Creating workspace");
+    expect(progress).toHaveTextContent("Creating branch and folder");
     expect(progress.querySelector(".live-label-shimmer")).not.toBeNull();
     expect(
       progress.querySelector(".workspace-creation-progress"),
@@ -133,8 +134,28 @@ describe("WorkspaceCard", () => {
     });
 
     expect(
-      screen.getByRole("status", { name: "Creating workspace" }),
+      screen.getByRole("status", { name: "Creating branch and folder" }),
     ).toBeInTheDocument();
+  });
+
+  it("shows naming before the derived title lands", () => {
+    renderCard({
+      workspace: {
+        status: "creating",
+        branch_name: "",
+        worktree_path: "",
+        optimistic_creation_phase: "naming",
+      },
+    });
+
+    expect(
+      screen.getByRole("button", {
+        name: "Fix login · Naming workspace · app",
+      }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("status", { name: "Naming workspace" }),
+    ).toHaveTextContent("Naming workspace");
   });
 
   it("keeps one menu: right-click carries every command", async () => {

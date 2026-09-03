@@ -304,6 +304,7 @@ async fn legacy_managed_repo_and_worktree_paths_remain_accessible() {
             repo.id,
             Some("New owner namespace".to_owned()),
             None,
+            None,
         )
         .await
         .unwrap();

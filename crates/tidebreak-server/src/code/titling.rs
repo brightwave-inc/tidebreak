@@ -1,11 +1,11 @@
 //! Naming a workspace the user has not named.
 //!
-//! A workspace created without a title gets a generated two-word placeholder
-//! (`worktree::two_word_name`) so it always has something to show and slug.
-//! This derives a real name from the first thing the user asked the engine to
-//! do, the same way chats are named ([`crate::chat_titling`]): off to the side
-//! of a turn, on the utility model, with every failure leaving the placeholder
-//! in place so the next turn can try again.
+//! The desktop asks for a title before it creates a workspace whose composer
+//! already has a first message. That lets the branch and worktree folder start
+//! with the same name without moving a live checkout. A workspace created
+//! without a first message still gets a generated two-word placeholder
+//! (`worktree::two_word_name`). Its first later turn can update the display
+//! title, but the branch and path stay fixed.
 //!
 //! The write is a compare-and-swap against the placeholder, which is
 //! deterministic from the workspace id. A rename — through `PATCH
@@ -14,9 +14,7 @@
 //! one, no matter when it lands. The placeholder never changes for the life of
 //! the workspace, so the swap stays valid on retries.
 //!
-//! The worktree path keeps its two-word slug. When the user's Git settings
-//! allow it, the generated local branch follows the derived title only while
-//! it is still local-only and untouched.
+//! The worktree path and branch never change after creation.
 
 use std::sync::Arc;
 
@@ -56,6 +54,24 @@ enum Outcome {
     Declined,
     /// Nothing to do — already named, already running, or no model to run on.
     NotApplicable,
+}
+
+enum ProposalOutcome {
+    Proposed(String),
+    Declined,
+    NotApplicable,
+}
+
+/// Derive the name that a new workspace should use before checkout creation.
+pub(crate) async fn propose_for_creation(
+    state: &AppState,
+    owner: &OwnerId,
+    message: &str,
+) -> Result<Option<String>> {
+    Ok(match propose_from_message(state, owner, message).await? {
+        ProposalOutcome::Proposed(title) => Some(title),
+        ProposalOutcome::Declined | ProposalOutcome::NotApplicable => None,
+    })
 }
 
 /// Derive a title for the workspace behind `session_id` in the background,
@@ -120,18 +136,40 @@ async fn derive_workspace_title(
     let Some(workspace) = get_workspace(&code.db, owner, workspace_id).await? else {
         return Ok(Outcome::NotApplicable);
     };
-    let placeholder = worktree::two_word_name(workspace.id.0.as_u128());
+    let placeholder = worktree::two_word_name(workspace.id.as_uuid().as_u128());
     if workspace.title != placeholder || workspace.status != CodeWorkspaceStatus::Active {
         return Ok(Outcome::NotApplicable);
     }
-    let material = head(message.trim(), MAX_TITLE_SOURCE_MESSAGE_BYTES);
-    if material.is_empty() {
+    let title = match propose_from_message(state, owner, message).await? {
+        ProposalOutcome::Proposed(title) => title,
+        ProposalOutcome::Declined => return Ok(Outcome::Declined),
+        ProposalOutcome::NotApplicable => return Ok(Outcome::NotApplicable),
+    };
+    if !set_workspace_title_if(&code.db, owner, workspace.id, &placeholder, &title).await? {
+        // Renamed while the call ran; the chosen name has the floor.
         return Ok(Outcome::NotApplicable);
     }
+    // Announced only once the write applied, on the digest channel every list
+    // surface already watches.
+    super::attention::emit_workspace_digests(&code.db, &code.bus, owner, workspace.id).await;
+    Ok(Outcome::Named(title))
+}
+
+async fn propose_from_message(
+    state: &AppState,
+    owner: &OwnerId,
+    message: &str,
+) -> Result<ProposalOutcome> {
+    if !state.resolver.enforces_model_registry() {
+        return Ok(ProposalOutcome::NotApplicable);
+    }
+    let material = head(message.trim(), MAX_TITLE_SOURCE_MESSAGE_BYTES);
+    if material.is_empty() {
+        return Ok(ProposalOutcome::NotApplicable);
+    }
     // Resolved per call, like every consumer of the utility role: `None` means
-    // this install has no model for background work, and the placeholder stays.
-    // On a hosted machine both the role and the provider resolve as the
-    // workspace's owner (decision 62).
+    // this install has no model for background work. On a hosted machine both
+    // the role and the provider resolve as the workspace's owner (decision 62).
     let caller_gateway = state.caller_gateway_snapshot(owner).await.ok().flatten();
     let Some(utility) = crate::model_roles::resolve_utility_model(
         &*state.store,
@@ -142,7 +180,7 @@ async fn derive_workspace_title(
     )
     .await?
     else {
-        return Ok(Outcome::NotApplicable);
+        return Ok(ProposalOutcome::NotApplicable);
     };
     let provider = state.resolver.resolve_for(Some(owner)).await;
     let title = derive_text_with_retries::<TitleProposal>(
@@ -151,26 +189,13 @@ async fn derive_workspace_title(
         &system_prompt(),
         WORKSPACE_TITLE_SCHEMA_NAME,
         material,
-        &format!("workspace {}", workspace.id),
+        "new workspace",
     )
     .await?;
-    let Some(title) = title else {
-        return Ok(Outcome::Declined);
-    };
-    if !set_workspace_title_if(&code.db, owner, workspace.id, &placeholder, &title).await? {
-        // Renamed while the call ran; the chosen name has the floor.
-        return Ok(Outcome::NotApplicable);
-    }
-    if let Err(error) = code
-        .rename_generated_workspace_branch(owner, workspace.id, &title)
-        .await
-    {
-        tracing::debug!(workspace = %workspace.id, error = ?error, "the generated branch was not renamed");
-    }
-    // Announced only once the write applied, on the digest channel every list
-    // surface already watches.
-    super::attention::emit_workspace_digests(&code.db, &code.bus, owner, workspace.id).await;
-    Ok(Outcome::Named(title))
+    Ok(match title {
+        Some(title) => ProposalOutcome::Proposed(title),
+        None => ProposalOutcome::Declined,
+    })
 }
 
 /// A workspace's place in [`CodeRuntime::titling_in_flight`], released on drop.

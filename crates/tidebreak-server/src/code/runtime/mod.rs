@@ -38,9 +38,9 @@ use tidebreak_core::db::code::{
     list_sessions_for_workspace, list_triggers_for_repo, list_turns, list_workspaces,
     list_workspaces_by_status_all_owners, mark_repo_removed, queued_turn_head,
     replace_session_execution_settings, save_repo, save_workspace,
-    set_active_workspace_pull_request, set_workspace_branch_if, settle_approval_claim,
-    update_trigger_enabled, ClaimedApprovalSettlement, CodeSessionExecutionSettings,
-    PermissionModeChangeIntent, MAX_REPLAY_EVENTS,
+    set_active_workspace_pull_request, settle_approval_claim, update_trigger_enabled,
+    ClaimedApprovalSettlement, CodeSessionExecutionSettings, PermissionModeChangeIntent,
+    MAX_REPLAY_EVENTS,
 };
 use tidebreak_core::{
     ApprovalDecisionKind, Attention, AttentionSource, CapLevel, CodeApproval, CodeApprovalId,
@@ -78,8 +78,8 @@ use super::session_worker::{
 #[cfg(windows)]
 use super::worktree::repo_paths_equivalent;
 use super::worktree::{
-    self, archive_blockers, branch_name, create_worktree, prune_worktrees, remove_worktree,
-    rename_local_only_branch, run_archive_script, run_setup_script, slugify, validate_repo_path,
+    self, archive_blockers, branch_name, branch_name_from_slug, create_worktree, prune_worktrees,
+    remove_worktree, run_archive_script, run_setup_script, slugify, validate_repo_path,
     worktree_dir, WorktreeError,
 };
 use crate::error::ServerError;
@@ -206,6 +206,8 @@ pub(crate) struct CodeRuntime {
     update_quiesce: watch::Sender<bool>,
     /// Serializes writer admission with workspace lifecycle transitions.
     workspace_lifecycles: Mutex<HashMap<WorkspaceId, Arc<tokio::sync::Mutex<()>>>>,
+    /// Serializes branch and folder allocation per repository.
+    workspace_creations: Mutex<HashMap<RepoId, Arc<tokio::sync::Mutex<()>>>>,
     /// One turn at a time per worktree, shared by every session in it.
     ///
     /// Sessions in a workspace share one checkout, so their turns cannot
@@ -438,6 +440,7 @@ impl CodeRuntime {
             deferred_resyncs: Mutex::new(HashSet::new()),
             update_quiesce: watch::channel(false).0,
             workspace_lifecycles: Mutex::new(HashMap::new()),
+            workspace_creations: Mutex::new(HashMap::new()),
             worktree_turns: Mutex::new(HashMap::new()),
             hot_prs: super::pr_refresh::HotPullRequests::default(),
             delivery_nudges: DeliveryNudgeDebounce::default(),
@@ -596,6 +599,7 @@ impl CodeRuntime {
             deferred_resyncs: Mutex::new(HashSet::new()),
             update_quiesce: watch::channel(false).0,
             workspace_lifecycles: Mutex::new(HashMap::new()),
+            workspace_creations: Mutex::new(HashMap::new()),
             worktree_turns: Mutex::new(HashMap::new()),
             hot_prs: super::pr_refresh::HotPullRequests::default(),
             delivery_nudges: DeliveryNudgeDebounce::default(),

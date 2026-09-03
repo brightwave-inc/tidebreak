@@ -847,8 +847,25 @@ pub struct CreateWorkspaceBody {
     pub repo_id: RepoId,
     #[serde(default)]
     pub title: Option<String>,
+    /// A utility-model title proposed from the first message before creation.
+    #[serde(default)]
+    pub suggested_title: Option<String>,
     #[serde(default)]
     pub base_ref: Option<String>,
+}
+
+/// Body of `POST /code/workspace-title`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceTitleBody {
+    pub message: String,
+}
+
+/// Suggested display title for a workspace that has not been created yet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceTitleProposal {
+    pub title: Option<String>,
 }
 
 /// Body of `POST /code/remote/workspaces`.

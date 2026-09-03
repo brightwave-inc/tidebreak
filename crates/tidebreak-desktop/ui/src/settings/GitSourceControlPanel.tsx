@@ -139,7 +139,7 @@ export function GitSourceControlPanel({
   return (
     <SettingsPanel
       title="Git & source control"
-      description="Choose how Tidebreak names branches for new code workspaces."
+      description="Choose how Tidebreak names branches and worktree folders for new code workspaces."
       busy={loading || saving}
     >
       {error && <SettingsError>{error}</SettingsError>}
@@ -152,8 +152,8 @@ export function GitSourceControlPanel({
             description="These defaults apply when you add a repository. Existing repositories keep their own branch prefix."
           >
             <SettingsField
-              label="Rename generated branches automatically"
-              hint="After Tidebreak names an untitled workspace, it updates the generated local branch. Pushed, remote, user-renamed, and pull request branches stay unchanged."
+              label="Name generated branches and folders automatically"
+              hint="When a new workspace starts with a message, Tidebreak names its local branch and worktree folder before creating them. Existing paths never move."
             >
               <Switch
                 checked={settings.auto_rename_branches}
@@ -163,7 +163,7 @@ export function GitSourceControlPanel({
                   setSettings({ ...settings, auto_rename_branches: enabled });
                   void save({ auto_rename_branches: enabled }, rollback);
                 }}
-                aria-label="Rename generated branches automatically"
+                aria-label="Name generated branches and folders automatically"
               />
             </SettingsField>
             <SettingsField

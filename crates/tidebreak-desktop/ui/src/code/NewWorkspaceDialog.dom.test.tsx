@@ -183,7 +183,10 @@ function claudeModels() {
 
 function app(client: Partial<AppContextValue["client"]>): AppContextValue {
   return {
-    client: client as never,
+    client: {
+      proposeCodeWorkspaceTitle: vi.fn(async () => null),
+      ...client,
+    } as never,
     models: [],
     defaultModelKey: null,
     providers: [],
@@ -306,6 +309,7 @@ describe("NewWorkspaceDialog", () => {
         id: expect.stringMatching(`^${OPTIMISTIC_WORKSPACE_ID_PREFIX}`),
         status: "creating",
         title: "New workspace",
+        optimistic_creation_phase: "creating",
       }),
     ]);
 
@@ -314,6 +318,113 @@ describe("NewWorkspaceDialog", () => {
       expect(router.state.location.pathname).toBe("/code/w/ws-created"),
     );
     expect(useCodeCatalogStore.getState().workspaces).toEqual([created]);
+  });
+
+  it("updates the pending card when precreation naming finishes", async () => {
+    const repos = [repo("repo-new", "tidebreak")];
+    useCodeCatalogStore.setState({
+      repos,
+      doctor: {
+        harnesses: [harness("claude_code")],
+        notices: [],
+      } as never,
+    });
+    const proposal = deferred<string | null>();
+    const creation = deferred<CodeWorkspaceSnapshot>();
+    const createCodeWorkspace = vi.fn(() => creation.promise);
+    await renderWithRouter(
+      <AppContextProvider
+        value={app({
+          proposeCodeWorkspaceTitle: vi.fn(() => proposal.promise),
+          createCodeWorkspace,
+          listCodeHarnessModels: claudeModels(),
+        })}
+      >
+        <NewWorkspaceDialog open onOpenChange={vi.fn()} repos={repos} />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+
+    fireEvent.change(screen.getByRole("textbox", { name: "First message" }), {
+      target: { value: "Fix the flaky auth retry test" },
+    });
+    fireEvent.keyDown(screen.getByRole("dialog"), {
+      key: "Enter",
+      metaKey: true,
+    });
+
+    expect(useCodeCatalogStore.getState().workspaces).toEqual([
+      expect.objectContaining({
+        title: "New workspace",
+        optimistic_creation_phase: "naming",
+      }),
+    ]);
+    expect(createCodeWorkspace).not.toHaveBeenCalled();
+
+    proposal.resolve("Fix the flaky auth retry test");
+    await waitFor(() =>
+      expect(useCodeCatalogStore.getState().workspaces).toEqual([
+        expect.objectContaining({
+          title: "Fix the flaky auth retry test",
+          optimistic_creation_phase: "creating",
+        }),
+      ]),
+    );
+    expect(createCodeWorkspace).toHaveBeenCalledWith({
+      repo_id: "repo-new",
+      title: undefined,
+      suggested_title: "Fix the flaky auth retry test",
+      base_ref: "main",
+    });
+  });
+
+  it("falls back to creation when precreation naming is unavailable", async () => {
+    const repos = [repo("repo-new", "tidebreak")];
+    useCodeCatalogStore.setState({
+      repos,
+      doctor: {
+        harnesses: [harness("claude_code")],
+        notices: [],
+      } as never,
+    });
+    const creation = deferred<CodeWorkspaceSnapshot>();
+    const createCodeWorkspace = vi.fn(() => creation.promise);
+    await renderWithRouter(
+      <AppContextProvider
+        value={app({
+          proposeCodeWorkspaceTitle: vi.fn(async () => {
+            throw new Error("utility model unavailable");
+          }),
+          createCodeWorkspace,
+          listCodeHarnessModels: claudeModels(),
+        })}
+      >
+        <NewWorkspaceDialog open onOpenChange={vi.fn()} repos={repos} />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+
+    fireEvent.change(screen.getByRole("textbox", { name: "First message" }), {
+      target: { value: "Fix the flaky auth retry test" },
+    });
+    fireEvent.keyDown(screen.getByRole("dialog"), {
+      key: "Enter",
+      metaKey: true,
+    });
+
+    await waitFor(() =>
+      expect(createCodeWorkspace).toHaveBeenCalledWith({
+        repo_id: "repo-new",
+        title: undefined,
+        base_ref: "main",
+      }),
+    );
+    expect(useCodeCatalogStore.getState().workspaces).toEqual([
+      expect.objectContaining({
+        title: "New workspace",
+        optimistic_creation_phase: "creating",
+      }),
+    ]);
   });
 
   it("opens the workspace as soon as it exists, before the session starts", async () => {

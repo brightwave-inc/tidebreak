@@ -53,6 +53,98 @@ async fn untitled_workspace_branch_includes_the_workspace_id() {
     assert!(branch_exists_in(&repo_root, branch));
 }
 
+#[tokio::test]
+async fn duplicate_workspace_names_resolve_one_slug_for_branch_and_folder() {
+    let (router, token, _runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let registered = client
+        .post(format!("http://{addr}/code/repos"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "path": repo }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(registered.status(), reqwest::StatusCode::CREATED);
+    let registered: serde_json::Value = registered.json().await.unwrap();
+
+    let mut created = Vec::new();
+    for _ in 0..2 {
+        let response = client
+            .post(format!("http://{addr}/code/workspaces"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({
+                "repo_id": registered["id"],
+                "title": "Fix login",
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+        created.push(response.json::<serde_json::Value>().await.unwrap());
+    }
+
+    assert_eq!(created[0]["branch_name"], "tidebreak/fix-login");
+    assert_eq!(created[1]["branch_name"], "tidebreak/fix-login-2");
+    for (workspace, slug) in created.iter().zip(["fix-login", "fix-login-2"]) {
+        let id = workspace["id"].as_str().unwrap();
+        assert!(workspace["worktree_path"]
+            .as_str()
+            .unwrap()
+            .ends_with(&format!("{slug}-{}", &id[..8])));
+    }
+}
+
+#[tokio::test]
+async fn suggested_names_leave_checkout_names_generated_when_automatic_naming_is_off() {
+    let (router, token, runtime, dir) = code_app(plain_text_script()).await;
+    crate::code::naming_settings::write_auto_rename_branches(
+        &*runtime.db,
+        &tidebreak_core::OwnerId::local(),
+        false,
+    )
+    .await
+    .unwrap();
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let registered = client
+        .post(format!("http://{addr}/code/repos"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "path": repo }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(registered.status(), reqwest::StatusCode::CREATED);
+    let registered: serde_json::Value = registered.json().await.unwrap();
+
+    let response = client
+        .post(format!("http://{addr}/code/workspaces"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "repo_id": registered["id"],
+            "suggested_title": "Fix login",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+    let workspace: serde_json::Value = response.json().await.unwrap();
+    let id = workspace["id"].as_str().unwrap();
+    let fallback =
+        crate::code::worktree::two_word_name(uuid::Uuid::parse_str(id).unwrap().as_u128());
+    assert_eq!(workspace["title"], "Fix login");
+    assert_eq!(
+        workspace["branch_name"],
+        format!("tidebreak/{fallback}-{}", &id[..8])
+    );
+    assert!(workspace["worktree_path"]
+        .as_str()
+        .unwrap()
+        .ends_with(&format!("{fallback}-{}", &id[..8])));
+}
+
 /// The worktree root is a setting, and moving it moves only what comes next.
 ///
 /// The two halves are one test because the second is meaningless without the
