@@ -39,16 +39,15 @@ use tidebreak_core::db::code::{
     list_workspaces_by_status_all_owners, mark_repo_removed, queued_turn_head,
     replace_session_execution_settings, save_repo, save_workspace,
     set_active_workspace_pull_request, settle_approval_claim, update_trigger_enabled,
-    ClaimedApprovalSettlement, CodeSessionExecutionSettings, PermissionModeChangeIntent,
+    ClaimedApprovalSettlement, PermissionModeChangeIntent, SessionExecutionSettings,
     MAX_REPLAY_EVENTS,
 };
 use tidebreak_core::{
-    ApprovalDecisionKind, Attention, AttentionSource, CapLevel, CodeApproval, CodeApprovalId,
-    CodeApprovalState, CodeEvent, CodeQueuedTurn, CodeRepo, CodeSession, CodeSessionId,
-    CodeSessionKind, CodeSessionLifecycle, CodeTrigger, CodeTriggerAction, CodeTriggerCondition,
-    CodeTriggerId, CodeTurn, CodeTurnId, CodeWorkspace, CodeWorkspaceStatus, DbStore, Diffstat,
-    FenceReason, HarnessKind, OwnerId, PermissionMode, PullRequestDigest, QuickAction,
-    ReasoningEffort, RepoId, WorkspaceId,
+    Approval, ApprovalDecisionKind, ApprovalId, ApprovalState, Attention, AttentionSource,
+    CapLevel, CodeRepo, CodeTrigger, CodeTriggerAction, CodeTriggerCondition, CodeTriggerId,
+    CodeWorkspace, CodeWorkspaceStatus, DbStore, Diffstat, Event, FenceReason, HarnessKind,
+    OwnerId, PermissionMode, PullRequestDigest, QueuedTurn, QuickAction, ReasoningEffort, RepoId,
+    Session, SessionId, SessionKind, SessionLifecycle, Turn, TurnId, WorkspaceId,
 };
 use tidebreak_harness::{
     builtin_registry, AdapterRegistry, ApprovalChannelSpec, ApprovalDecision, HarnessAdapter,
@@ -117,13 +116,13 @@ pub(crate) struct RepoRegistration {
     pub quick_actions: Vec<QuickAction>,
 }
 
-/// Result of `POST /code/sessions/{id}/turns`.
+/// Result of `POST /sessions/{id}/turns`.
 pub(crate) enum SubmitTurnOutcome {
     /// The session was idle; the turn ran to a terminal event.
-    Ran(Box<CodeTurn>),
+    Ran(Box<Turn>),
     /// The session or its workspace was busy; the message parked as a
     /// durable queue row (decision 69).
-    Queued(Box<CodeQueuedTurn>),
+    Queued(Box<QueuedTurn>),
     /// The durable trigger delivery behind this submit was already accepted
     /// by an earlier attempt; nothing new was written.
     AlreadyDelivered,
@@ -135,9 +134,9 @@ pub(crate) enum SubmitTurnOutcome {
 #[derive(Debug)]
 pub(crate) enum ExternalMessageOutcome {
     /// The message became a running turn.
-    NewTurn(Box<CodeTurn>),
+    NewTurn(Box<Turn>),
     /// The session was busy; the message sits as a durable queue row.
-    Queued(Box<CodeQueuedTurn>),
+    Queued(Box<QueuedTurn>),
     /// The row the first delivery caused was retracted before it could
     /// run; the replay has nothing to point at.
     Dropped,
@@ -195,10 +194,10 @@ pub(crate) struct CodeRuntime {
     probes: Mutex<HashMap<HarnessKind, HarnessProbe>>,
     /// Last pin-install failure per kind. Cleared on a successful install.
     pin_install_errors: Mutex<HashMap<HarnessKind, String>>,
-    workers: Mutex<HashMap<CodeSessionId, WorkerHandle>>,
+    workers: Mutex<HashMap<SessionId, WorkerHandle>>,
     /// Sessions whose worker must move to the selected engine binary once
     /// their turn in flight ends. See `resync_workers_to_selected_binaries`.
-    deferred_resyncs: Mutex<HashSet<CodeSessionId>>,
+    deferred_resyncs: Mutex<HashSet<SessionId>>,
     /// Flips true while the process quiesces for a restart-to-update. Every
     /// session worker subscribes: the flag holds queue drains, refuses new
     /// turn starts at the worktree boundary, and parks idle engine children

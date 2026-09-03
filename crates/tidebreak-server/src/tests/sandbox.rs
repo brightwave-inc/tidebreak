@@ -723,7 +723,7 @@ async fn delegated_file_routes_are_native_only_and_expose_only_exact_broker_auth
         relative_path: "reports/private-summary.md".into(),
     };
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: Some("delegated read".into()),
         model: None,

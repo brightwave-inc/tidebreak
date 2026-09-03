@@ -282,7 +282,7 @@ describe("mobile supervision API contracts", () => {
     });
     expect(requestJson).toHaveBeenNthCalledWith(
       2,
-      "/code/sessions/session-2/turns",
+      "/sessions/session-2/turns",
       {
         method: "POST",
         body: { message: "Fix the launch flow." },
@@ -301,7 +301,7 @@ describe("mobile supervision API contracts", () => {
       submitCodeTurn(running.client, "session/1", "Continue"),
     ).resolves.toMatchObject({ kind: "ran" });
     expect(running.requestJson).toHaveBeenCalledWith(
-      "/code/sessions/session%2F1/turns",
+      "/sessions/session%2F1/turns",
       {
         method: "POST",
         body: { message: "Continue" },
@@ -356,7 +356,7 @@ describe("mobile supervision API contracts", () => {
       listCodeApprovals(listed.client, "session/1"),
     ).resolves.toHaveLength(1);
     expect(listed.getJson).toHaveBeenCalledWith(
-      "/code/approvals?state=pending&session_id=session%2F1",
+      "/approvals?state=pending&session_id=session%2F1",
     );
 
     const denied = fakeClient({
@@ -372,7 +372,7 @@ describe("mobile supervision API contracts", () => {
       "  Use the focused test.  ",
     );
     expect(denied.requestJson).toHaveBeenCalledWith(
-      "/code/approvals/approval%2F1/decision",
+      "/approvals/approval%2F1/decision",
       {
         method: "POST",
         body: { decision: "deny", feedback: "Use the focused test." },
@@ -393,7 +393,7 @@ describe("mobile supervision API contracts", () => {
     });
     await decideCodeApproval(approved.client, "approval-1", "approve");
     expect(approved.requestJson).toHaveBeenCalledWith(
-      "/code/approvals/approval-1/decision",
+      "/approvals/approval-1/decision",
       {
         method: "POST",
         body: { decision: "approve" },
@@ -407,7 +407,7 @@ describe("mobile supervision API contracts", () => {
     await steerCodeSession(client.client, "session/1", "turn-1", "Try again");
     expect(client.requestJson).toHaveBeenNthCalledWith(
       1,
-      "/code/sessions/session%2F1/steer",
+      "/sessions/session%2F1/steer",
       {
         method: "POST",
         body: { expected_turn_id: "turn-1", guidance: "Try again" },
@@ -418,7 +418,7 @@ describe("mobile supervision API contracts", () => {
     await interruptCodeSession(client.client, "session/1");
     expect(client.requestJson).toHaveBeenNthCalledWith(
       2,
-      "/code/sessions/session%2F1/interrupt",
+      "/sessions/session%2F1/interrupt",
       { method: "POST", expectedStatus: 202 },
     );
   });

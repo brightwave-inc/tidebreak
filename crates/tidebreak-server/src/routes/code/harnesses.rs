@@ -37,7 +37,7 @@ pub async fn refresh_harnesses(code: ScopedCode) -> Result<Json<HarnessDoctorRep
 /// Every surface that picks an engine calls this when it opens and when the
 /// engine changes. A cold pin is minutes of `npm install`; on the create path
 /// that is a silent stall, so it runs here instead and reports on
-/// `WS /code/updates`. Answers immediately in every case — already installed,
+/// `WS /updates`. Answers immediately in every case — already installed,
 /// already running, or now started — and never installs twice for one pin.
 ///
 /// `?deliberate=true` marks a reader who pressed Download rather than a picker

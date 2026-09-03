@@ -26,9 +26,9 @@ async fn park_wait_set_for_test(
         .get_turn(turn_id)
         .await?
         .ok_or_else(|| crate::AgentError::Store("test turn disappeared".into()))?;
-    let existing = crate::db::entities::code_event::Entity::find()
-        .filter(crate::db::entities::code_event::Column::LeaseToken.eq(lease_token))
-        .filter(crate::db::entities::code_event::Column::AttemptEventOrdinal.eq(1))
+    let existing = crate::db::entities::event::Entity::find()
+        .filter(crate::db::entities::event::Column::LeaseToken.eq(lease_token))
+        .filter(crate::db::entities::event::Column::AttemptEventOrdinal.eq(1))
         .one(&store.conn)
         .await
         .map_err(crate::db::store_err)?;
@@ -70,6 +70,220 @@ async fn park_wait_set_for_test(
         .await
 }
 
+#[tokio::test]
+async fn adapter_agent_wait_resolves_from_the_generic_park() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (running, lease) = live_turn_for_sandbox_test(&store, chat.id).await;
+    let child = admit_sandbox_call_for_test(&store, chat.id, CallId::new(), "child").await;
+    let wait_id = CallId::new();
+    park_wait_set_for_test(
+        &store,
+        wait_id,
+        running.id,
+        &[child.id],
+        AgentRunWaitCondition::All,
+        lease,
+        running.steer_revision,
+        test_checkpoint_progress(),
+        Utc::now(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let park_ref = wait_id.to_string();
+    let wait = crate::TurnParkWait::AgentRuns {
+        run_ids: vec![child.id.to_string()],
+    };
+    assert_eq!(
+        crate::db::code::store_turn_park(
+            &store,
+            &crate::OwnerId::local(),
+            crate::TurnId(running.id.0),
+            &park_ref,
+            &wait,
+        )
+        .await
+        .unwrap(),
+        Some(crate::TurnStatus::Waiting)
+    );
+    assert_eq!(complete_next_child(&store, "done").await, child.id);
+    assert_eq!(
+        store
+            .list_ready_agent_run_wait_set_candidates(8)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|candidate| candidate.wait_id)
+            .collect::<Vec<_>>(),
+        vec![wait_id]
+    );
+
+    let resumed = store
+        .resume_turn_for_agent_run_wait_set(wait_id, uuid::Uuid::new_v4())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        resumed,
+        ResumeTurnForAgentRunWaitSetOutcome::Resumed { .. }
+    ));
+    let turn = crate::db::code::get_turn(
+        &store,
+        &crate::OwnerId::local(),
+        crate::TurnId(running.id.0),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(turn.status, crate::TurnStatus::Resuming);
+    assert_eq!(turn.park_ref.as_deref(), Some(park_ref.as_str()));
+    assert_eq!(turn.park_wait, Some(wait));
+}
+
+#[tokio::test]
+async fn adapter_agent_park_preserves_a_resolution_that_won_first() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (running, lease) = live_turn_for_sandbox_test(&store, chat.id).await;
+    let child = admit_sandbox_call_for_test(&store, chat.id, CallId::new(), "child").await;
+    let wait_id = CallId::new();
+    park_wait_set_for_test(
+        &store,
+        wait_id,
+        running.id,
+        &[child.id],
+        AgentRunWaitCondition::All,
+        lease,
+        running.steer_revision,
+        test_checkpoint_progress(),
+        Utc::now(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(complete_next_child(&store, "done").await, child.id);
+    assert!(matches!(
+        store
+            .resume_turn_for_agent_run_wait_set(wait_id, uuid::Uuid::new_v4())
+            .await
+            .unwrap(),
+        Some(ResumeTurnForAgentRunWaitSetOutcome::Resumed { .. })
+    ));
+    let park_ref = wait_id.to_string();
+    let wait = crate::TurnParkWait::AgentRuns {
+        run_ids: vec![child.id.to_string()],
+    };
+
+    assert_eq!(
+        crate::db::code::store_turn_park(
+            &store,
+            &crate::OwnerId::local(),
+            crate::TurnId(running.id.0),
+            &park_ref,
+            &wait,
+        )
+        .await
+        .unwrap(),
+        Some(crate::TurnStatus::Resuming)
+    );
+    assert_eq!(
+        crate::db::code::clear_turn_park(
+            &store,
+            &crate::OwnerId::local(),
+            crate::TurnId(running.id.0),
+            &park_ref,
+            &wait,
+        )
+        .await
+        .unwrap(),
+        Some(crate::TurnStatus::Resuming)
+    );
+    let turn = crate::db::code::get_turn(
+        &store,
+        &crate::OwnerId::local(),
+        crate::TurnId(running.id.0),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(turn.status, crate::TurnStatus::Resuming);
+    assert_eq!(turn.park_ref, None);
+    assert_eq!(turn.park_wait, None);
+}
+
+#[tokio::test]
+async fn adapter_agent_park_cancels_with_its_wait_receipt() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (running, lease) = live_turn_for_sandbox_test(&store, chat.id).await;
+    let child = admit_sandbox_call_for_test(&store, chat.id, CallId::new(), "child").await;
+    let wait_id = CallId::new();
+    park_wait_set_for_test(
+        &store,
+        wait_id,
+        running.id,
+        &[child.id],
+        AgentRunWaitCondition::All,
+        lease,
+        running.steer_revision,
+        test_checkpoint_progress(),
+        Utc::now(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let park_ref = wait_id.to_string();
+    let park_wait = crate::TurnParkWait::AgentRuns {
+        run_ids: vec![child.id.to_string()],
+    };
+    assert_eq!(
+        crate::db::code::store_turn_park(
+            &store,
+            &crate::OwnerId::local(),
+            crate::TurnId(running.id.0),
+            &park_ref,
+            &park_wait,
+        )
+        .await
+        .unwrap(),
+        Some(crate::TurnStatus::Waiting)
+    );
+
+    assert!(matches!(
+        store
+            .request_turn_cancellation(running.id, Utc::now())
+            .await
+            .unwrap(),
+        Some(RequestTurnCancellationOutcome::Cancelled(turn))
+            if turn.status == TurnRunStatus::Cancelled
+    ));
+    let turn = crate::db::code::get_turn(
+        &store,
+        &crate::OwnerId::local(),
+        crate::TurnId(running.id.0),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(turn.status, crate::TurnStatus::Interrupted);
+    assert_eq!(turn.park_ref.as_deref(), Some(park_ref.as_str()));
+    assert_eq!(turn.park_wait, Some(park_wait));
+    assert_cancelled_wait_shape(
+        &store,
+        wait_id,
+        crate::agent_tools::WAIT_CANCELLED_WITH_TURN_RESULT,
+    )
+    .await;
+    assert_eq!(
+        store.get_agent_run(child.id).await.unwrap().unwrap().status,
+        AgentRunStatus::Cancelled
+    );
+}
+
 async fn assert_cancelled_wait_shape(
     store: &crate::DbStore,
     wait_id: CallId,
@@ -91,7 +305,7 @@ async fn assert_cancelled_wait_shape(
     assert!(!members.is_empty());
     assert!(members.iter().all(|member| !member.open));
     let call = store
-        .list_tool_calls(crate::ChatId(wait.session_id))
+        .list_tool_calls(crate::SessionId(wait.session_id))
         .await
         .unwrap()
         .into_iter()
@@ -99,7 +313,7 @@ async fn assert_cancelled_wait_shape(
         .unwrap();
     assert_eq!(call.status, ToolCallStatus::Cancelled);
     assert_eq!(call.result.as_deref(), Some(expected_result));
-    let event = crate::db::entities::code_event::Entity::find_by_id((wait.session_id, event_seq))
+    let event = crate::db::entities::event::Entity::find_by_id((wait.session_id, event_seq))
         .one(&store.conn)
         .await
         .unwrap()

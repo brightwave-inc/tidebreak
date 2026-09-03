@@ -70,7 +70,7 @@ async fn drive_provider_search_with_standalone_control(
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -521,7 +521,7 @@ async fn a_provider_executed_search_replaces_the_host_tool_and_is_kept_like_one(
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -623,7 +623,7 @@ async fn foreground_vendor_search_budget_is_offered_to_only_one_model_request() 
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -680,7 +680,7 @@ async fn unused_vendor_search_stays_offered_across_a_host_tool_follow_up() {
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -742,7 +742,7 @@ async fn interleaved_host_calls_and_provider_search_keep_one_order_everywhere() 
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -856,7 +856,7 @@ async fn malformed_provider_browsing_actions_are_never_persisted_as_host_searche
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,

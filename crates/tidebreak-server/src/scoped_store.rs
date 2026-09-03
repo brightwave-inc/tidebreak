@@ -31,15 +31,16 @@ use tidebreak_core::local_app::{AppGrant, AppRecord, AppRevision};
 use tidebreak_core::storage::DecidePlanOutcome;
 use tidebreak_core::{
     AcceptTurnSteerOutcome, AgentRun, AgentRunId, AgentRunResult, AnswerUserQuestionsOutcome,
-    AnswerUserQuestionsRequest, CallId, Chat, ChatId, ChatTranscriptSnapshot,
-    ClaimClientToolCallOutcome, DecidePlanRequest, DeleteChatOutcome, DeleteProjectOutcome,
-    DocumentId, DocumentListCursor, DocumentRecord, DocumentScope, DocumentSourceUpsert,
-    DocumentSummaryRecord, HeartbeatClientToolCallOutcome, ImageRef,
-    JournaledClientToolCallOutcome, JournaledTurnOutcome, MessageAttachment, MoveChatOutcome,
-    NetworkPolicy, OwnerId, PendingPlanApproval, PendingUserQuestions, PermissionMode, Project,
-    ProjectId, ReasoningEffort, RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome,
-    Result, SandboxAgentAdmission, SandboxToolCall, SandboxToolCallReceipt, SequencedEvent, Store,
-    TaskPlan, ToolApproval, ToolCallRecord, ToolCallResolution, TurnId, TurnRun, TurnSteerId,
+    AnswerUserQuestionsRequest, CallId, Chat, ChatTranscriptSnapshot, ClaimClientToolCallOutcome,
+    DecidePlanRequest, DeleteChatOutcome, DeleteProjectOutcome, DocumentId, DocumentListCursor,
+    DocumentRecord, DocumentScope, DocumentSourceUpsert, DocumentSummaryRecord,
+    HeartbeatClientToolCallOutcome, ImageRef, JournaledClientToolCallOutcome, JournaledTurnOutcome,
+    MessageAttachment, MoveChatOutcome, NetworkPolicy, OwnerId, PendingPlanApproval,
+    PendingUserQuestions, PermissionMode, Project, ProjectId, ReasoningEffort,
+    RequestAgentRunCancellationOutcome, RequestTurnCancellationOutcome, Result,
+    SandboxAgentAdmission, SandboxToolCall, SandboxToolCallReceipt, SequencedAgentEvent, SessionId,
+    Store, TaskPlan, ToolApproval, ToolCallRecord, ToolCallResolution, TurnId, TurnRun,
+    TurnSteerId,
 };
 
 use crate::error::ServerError;
@@ -78,13 +79,13 @@ impl ScopedStore {
     // ------------------------------------------------------------------
 
     /// Fetch the principal's chat by id.
-    pub async fn get_chat(&self, id: ChatId) -> Result<Option<Chat>> {
+    pub async fn get_chat(&self, id: SessionId) -> Result<Option<Chat>> {
         self.store.get_chat_scoped(&self.owner, id).await
     }
 
     /// The recurring route gate: the principal's chat, or a `404` that does
     /// not reveal whether someone else's chat exists under that id.
-    pub async fn require_chat(&self, id: ChatId) -> std::result::Result<Chat, ServerError> {
+    pub async fn require_chat(&self, id: SessionId) -> std::result::Result<Chat, ServerError> {
         self.get_chat(id)
             .await?
             .ok_or_else(|| ServerError::not_found(format!("chat {id} not found")))
@@ -108,12 +109,15 @@ impl ScopedStore {
     }
 
     /// Delete the principal's chat.
-    pub async fn delete_chat(&self, id: ChatId) -> Result<DeleteChatOutcome> {
+    pub async fn delete_chat(&self, id: SessionId) -> Result<DeleteChatOutcome> {
         self.store.delete_chat_scoped(&self.owner, id).await
     }
 
     /// The principal's chat transcript snapshot.
-    pub async fn get_chat_transcript(&self, id: ChatId) -> Result<Option<ChatTranscriptSnapshot>> {
+    pub async fn get_chat_transcript(
+        &self,
+        id: SessionId,
+    ) -> Result<Option<ChatTranscriptSnapshot>> {
         self.store.get_chat_transcript_scoped(&self.owner, id).await
     }
 
@@ -121,7 +125,7 @@ impl ScopedStore {
     #[allow(clippy::too_many_arguments)]
     pub async fn update_chat_metadata(
         &self,
-        id: ChatId,
+        id: SessionId,
         title: Option<Option<String>>,
         model: Option<Option<String>>,
         reasoning_effort: Option<Option<ReasoningEffort>>,
@@ -144,7 +148,7 @@ impl ScopedStore {
     /// Flip the memory-incognito switch on the principal's chat.
     pub async fn set_chat_memory_incognito(
         &self,
-        id: ChatId,
+        id: SessionId,
         memory_incognito: bool,
     ) -> Result<bool> {
         self.store
@@ -193,7 +197,7 @@ impl ScopedStore {
     /// it back out with `None`.
     pub async fn move_chat_to_project(
         &self,
-        id: ChatId,
+        id: SessionId,
         project_id: Option<ProjectId>,
     ) -> Result<MoveChatOutcome> {
         self.store
@@ -300,7 +304,7 @@ impl ScopedStore {
         &self,
         id: TurnSteerId,
         turn_id: TurnId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         content: &str,
         invoked_skills: &[String],
         interrupt: bool,
@@ -331,7 +335,7 @@ impl ScopedStore {
     }
 
     /// [`Store::list_agent_runs`].
-    pub async fn list_agent_runs(&self, chat_id: ChatId) -> Result<Vec<AgentRun>> {
+    pub async fn list_agent_runs(&self, chat_id: SessionId) -> Result<Vec<AgentRun>> {
         self.store.list_agent_runs(chat_id).await
     }
 
@@ -411,7 +415,7 @@ impl ScopedStore {
     /// [`Store::list_pending_client_tool_calls`].
     pub async fn list_pending_client_tool_calls(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
     ) -> Result<Vec<ToolCallRecord>> {
         self.store.list_pending_client_tool_calls(chat_id).await
     }
@@ -419,7 +423,7 @@ impl ScopedStore {
     /// [`Store::list_pending_tool_call_approvals`].
     pub async fn list_pending_tool_call_approvals(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         limit: u64,
     ) -> Result<Vec<ToolApproval>> {
         self.store
@@ -478,7 +482,8 @@ impl ScopedStore {
     pub async fn chat_attention(
         &self,
         items: &[tidebreak_core::InboxItem],
-    ) -> Result<std::collections::HashMap<tidebreak_core::ChatId, tidebreak_core::Attention>> {
+    ) -> Result<std::collections::HashMap<tidebreak_core::SessionId, tidebreak_core::Attention>>
+    {
         self.store.chat_attention_scoped(&self.owner, items).await
     }
 
@@ -514,21 +519,21 @@ impl ScopedStore {
     /// [`Store::list_events_for_call`].
     pub async fn list_events_for_call(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         call_id: CallId,
-    ) -> Result<Vec<SequencedEvent>> {
+    ) -> Result<Vec<SequencedAgentEvent>> {
         self.store.list_events_for_call(chat_id, call_id).await
     }
 
     /// [`Store::get_task_plan`].
-    pub async fn get_task_plan(&self, chat_id: ChatId) -> Result<Option<TaskPlan>> {
+    pub async fn get_task_plan(&self, chat_id: SessionId) -> Result<Option<TaskPlan>> {
         self.store.get_task_plan(chat_id).await
     }
 
     /// [`Store::list_pending_plan_approvals`].
     pub async fn list_pending_plan_approvals(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
     ) -> Result<Vec<PendingPlanApproval>> {
         self.store.list_pending_plan_approvals(chat_id).await
     }
@@ -545,7 +550,7 @@ impl ScopedStore {
     /// [`Store::list_pending_user_questions`].
     pub async fn list_pending_user_questions(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
     ) -> Result<Vec<PendingUserQuestions>> {
         self.store.list_pending_user_questions(chat_id).await
     }
@@ -562,20 +567,20 @@ impl ScopedStore {
     /// [`Store::list_message_attachments`].
     pub async fn list_message_attachments(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
     ) -> Result<Vec<MessageAttachment>> {
         self.store.list_message_attachments(chat_id).await
     }
 
     /// Durably authorize this principal's chat to attach `image`.
-    pub async fn publish_chat_image(&self, chat_id: ChatId, image: &ImageRef) -> Result<bool> {
+    pub async fn publish_chat_image(&self, chat_id: SessionId, image: &ImageRef) -> Result<bool> {
         self.store
             .publish_chat_image_scoped(&self.owner, chat_id, image)
             .await
     }
 
     /// [`Store::list_tool_calls`].
-    pub async fn list_tool_calls(&self, chat_id: ChatId) -> Result<Vec<ToolCallRecord>> {
+    pub async fn list_tool_calls(&self, chat_id: SessionId) -> Result<Vec<ToolCallRecord>> {
         self.store.list_tool_calls(chat_id).await
     }
 
@@ -583,7 +588,7 @@ impl ScopedStore {
     pub async fn claim_client_tool_call(
         &self,
         id: CallId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         executor_id: uuid::Uuid,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
@@ -598,7 +603,7 @@ impl ScopedStore {
     pub async fn heartbeat_client_tool_call(
         &self,
         id: CallId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
         lease_expires_at: chrono::DateTime<chrono::Utc>,
@@ -613,7 +618,7 @@ impl ScopedStore {
     pub async fn resolve_client_tool_call_and_append_event_with_rows(
         &self,
         id: CallId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
         resolution: &ToolCallResolution,
@@ -640,7 +645,7 @@ impl ScopedStore {
     pub async fn resolve_expired_client_tool_call_and_append_event_with_rows(
         &self,
         id: CallId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
         resolution: &ToolCallResolution,

@@ -5,7 +5,7 @@ use sea_orm::sea_query::{Alias, Expr, ExprTrait, Func, LikeExpr};
 use sea_orm::{ColumnTrait, Condition, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 
 use crate::code::{
-    ApprovalDecisionKind, CodeEvent, CodeSessionId, CodeTurnId, RepoId, ToolDetail, WorkspaceId,
+    ApprovalDecisionKind, Event, RepoId, SessionId, ToolDetail, TurnId, WorkspaceId,
 };
 use crate::error::Result;
 use crate::OwnerId;
@@ -37,8 +37,8 @@ pub enum CodeTranscriptSearchSource {
 pub struct CodeTranscriptSearchMatch {
     pub workspace_id: WorkspaceId,
     pub workspace_title: String,
-    pub session_id: CodeSessionId,
-    pub turn_id: Option<CodeTurnId>,
+    pub session_id: SessionId,
+    pub turn_id: Option<TurnId>,
     pub source: CodeTranscriptSearchSource,
     pub preview: String,
     pub created_at: DateTime<Utc>,
@@ -88,14 +88,12 @@ pub async fn search_repo_transcripts(
 
     let mut session_workspaces = HashMap::new();
     for workspace_chunk in workspace_ids.chunks(ID_QUERY_CHUNK) {
-        let rows = entities::code_session::Entity::find()
+        let rows = entities::session::Entity::find()
             .select_only()
-            .column(entities::code_session::Column::Id)
-            .column(entities::code_session::Column::WorkspaceId)
-            .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
-            .filter(
-                entities::code_session::Column::WorkspaceId.is_in(workspace_chunk.iter().copied()),
-            )
+            .column(entities::session::Column::Id)
+            .column(entities::session::Column::WorkspaceId)
+            .filter(entities::session::Column::Owner.eq(owner.as_str()))
+            .filter(entities::session::Column::WorkspaceId.is_in(workspace_chunk.iter().copied()))
             .into_tuple::<(uuid::Uuid, uuid::Uuid)>()
             .all(&store.conn)
             .await
@@ -117,18 +115,18 @@ pub async fn search_repo_transcripts(
     for session_chunk in session_ids.chunks(ID_QUERY_CHUNK) {
         let turn_condition = Condition::any()
             .add(
-                Func::lower(Expr::col(entities::code_turn::Column::UserInput))
+                Func::lower(Expr::col(entities::turn::Column::UserInput))
                     .like(LikeExpr::new(pattern.clone()).escape('\\')),
             )
             .add(
-                Func::lower(Expr::col(entities::code_turn::Column::Narrative))
+                Func::lower(Expr::col(entities::turn::Column::Narrative))
                     .like(LikeExpr::new(pattern.clone()).escape('\\')),
             );
-        let turns = entities::code_turn::Entity::find()
-            .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
-            .filter(entities::code_turn::Column::SessionId.is_in(session_chunk.iter().copied()))
+        let turns = entities::turn::Entity::find()
+            .filter(entities::turn::Column::Owner.eq(owner.as_str()))
+            .filter(entities::turn::Column::SessionId.is_in(session_chunk.iter().copied()))
             .filter(turn_condition)
-            .order_by_desc(entities::code_turn::Column::StartedAt)
+            .order_by_desc(entities::turn::Column::StartedAt)
             .limit(probe)
             .all(&store.conn)
             .await
@@ -160,19 +158,19 @@ pub async fn search_repo_transcripts(
             );
         }
 
-        let event_text = Expr::col(entities::code_event::Column::Event).cast_as(Alias::new("text"));
-        let events = entities::code_event::Entity::find()
-            .filter(entities::code_event::Column::Owner.eq(owner.as_str()))
-            .filter(entities::code_event::Column::SessionId.is_in(session_chunk.iter().copied()))
+        let event_text = Expr::col(entities::event::Column::Event).cast_as(Alias::new("text"));
+        let events = entities::event::Entity::find()
+            .filter(entities::event::Column::Owner.eq(owner.as_str()))
+            .filter(entities::event::Column::SessionId.is_in(session_chunk.iter().copied()))
             .filter(Func::lower(event_text).like(LikeExpr::new(pattern.clone()).escape('\\')))
-            .order_by_desc(entities::code_event::Column::CreatedAt)
+            .order_by_desc(entities::event::Column::CreatedAt)
             .limit(event_probe)
             .all(&store.conn)
             .await
             .map_err(store_err)?;
         source_truncated |= events.len() as u64 >= event_probe;
         for row in events {
-            let event: CodeEvent = serde_json::from_value(row.event)?;
+            let event: Event = serde_json::from_value(row.event)?;
             let Some(preview) = event_search_text(&event)
                 .into_iter()
                 .find_map(|text| matching_excerpt(text, query))
@@ -229,8 +227,8 @@ fn push_match(
     matches.push(CodeTranscriptSearchMatch {
         workspace_id: WorkspaceId(workspace_id),
         workspace_title: workspace_title.clone(),
-        session_id: CodeSessionId(session_id),
-        turn_id: turn_id.map(CodeTurnId),
+        session_id: SessionId(session_id),
+        turn_id: turn_id.map(TurnId),
         source,
         preview,
         created_at,
@@ -283,18 +281,18 @@ fn case_insensitive_char_range(text: &str, query: &str) -> Option<(usize, usize)
     Some((start, end))
 }
 
-fn event_search_text(event: &CodeEvent) -> Vec<&str> {
+fn event_search_text(event: &Event) -> Vec<&str> {
     match event {
-        CodeEvent::AssistantDelta { text }
-        | CodeEvent::AssistantMessage { text, .. }
-        | CodeEvent::ReasoningDelta { text }
-        | CodeEvent::UserSteered { text, .. } => vec![text],
-        CodeEvent::ToolStarted { name, detail, .. } => {
+        Event::AssistantDelta { text }
+        | Event::AssistantMessage { text, .. }
+        | Event::ReasoningDelta { text }
+        | Event::UserSteered { text, .. } => vec![text],
+        Event::ToolStarted { name, detail, .. } => {
             let mut text = vec![name.as_str()];
             text.extend(tool_detail_text(detail));
             text
         }
-        CodeEvent::ToolCompleted {
+        Event::ToolCompleted {
             preview, detail, ..
         } => {
             let mut text = vec![preview.as_str()];
@@ -303,16 +301,16 @@ fn event_search_text(event: &CodeEvent) -> Vec<&str> {
             }
             text
         }
-        CodeEvent::FileChanged { path, .. } => vec![path],
-        CodeEvent::ApprovalResolved {
+        Event::FileChanged { path, .. } => vec![path],
+        Event::ApprovalResolved {
             decision:
                 ApprovalDecisionKind::Deny {
                     feedback: Some(text),
                 },
             ..
         } => vec![text],
-        CodeEvent::TurnFailed { error, .. } => vec![&error.message],
-        CodeEvent::HarnessNotice { message, .. } => vec![message],
+        Event::TurnFailed { error, .. } => vec![&error.message],
+        Event::HarnessNotice { message, .. } => vec![message],
         _ => Vec::new(),
     }
 }

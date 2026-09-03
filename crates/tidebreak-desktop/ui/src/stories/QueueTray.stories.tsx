@@ -9,7 +9,7 @@ import { QueueTray, type QueueTrayApi, type QueueTrayRow } from "@/QueueTray";
  * Every row is a server-owned queued turn: edit, reorder, delete, and
  * send-now are real API calls behind the adapter, and the tray only observes.
  * Chat backs it with `/chats/{id}/queued`, a code session with
- * `/code/sessions/{id}/queued`; the rows render identically, which is the
+ * `/sessions/{id}/queued`; the rows render identically, which is the
  * point — a reader who learned the queue in one mode already knows the other.
  */
 const meta = {

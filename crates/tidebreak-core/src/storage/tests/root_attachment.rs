@@ -10,7 +10,7 @@ fn mem_attachment_chat(
     attachment_revision: i64,
 ) -> Chat {
     Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id,
         title: None,
         model: None,

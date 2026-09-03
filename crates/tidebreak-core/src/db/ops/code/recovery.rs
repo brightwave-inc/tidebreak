@@ -2,8 +2,8 @@ use chrono::Utc;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, TransactionTrait};
 
 use crate::code::{
-    ApprovalDecisionKind, CapLevel, CodeApprovalId, CodeApprovalState, CodeEvent, CodeSession,
-    CodeSessionId, CodeSessionLifecycle, CodeSubagentStatus, CodeTurnStatus, SequencedCodeEvent,
+    ApprovalDecisionKind, ApprovalId, ApprovalState, CapLevel, CodeSubagentStatus, Event,
+    SequencedEvent, Session, SessionId, SessionLifecycle, TurnStatus,
 };
 use crate::error::{AgentError, Result};
 use crate::{Attention, AttentionSource, AttentionState, OwnerId};
@@ -14,8 +14,8 @@ use super::{acquire_code_session_write_lock, append_event_on_locked};
 /// One dead-worker recovery committed as a single database transition.
 #[derive(Debug)]
 pub struct InterruptedSessionRecovery {
-    pub session: CodeSession,
-    pub events: Vec<SequencedCodeEvent>,
+    pub session: Session,
+    pub events: Vec<SequencedEvent>,
 }
 
 /// Return whether you keep this turn waiting so a restarted worker can
@@ -26,11 +26,11 @@ pub struct InterruptedSessionRecovery {
 /// so you still close those turns as interrupted.
 #[must_use]
 pub fn resumes_parked_turn_after_restart(
-    status: CodeTurnStatus,
+    status: TurnStatus,
     park_ref: Option<&str>,
     durable_parks: CapLevel,
 ) -> bool {
-    durable_parks == CapLevel::Supported && status == CodeTurnStatus::Waiting && park_ref.is_some()
+    durable_parks == CapLevel::Supported && status == TurnStatus::Waiting && park_ref.is_some()
 }
 
 /// Settle a dead running worker without exposing a partial recovery state.
@@ -46,7 +46,7 @@ pub fn resumes_parked_turn_after_restart(
 pub async fn recover_interrupted_session(
     store: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     expected_spawn_epoch: i64,
     durable_parks: CapLevel,
 ) -> Result<Option<InterruptedSessionRecovery>> {
@@ -70,7 +70,7 @@ pub async fn recover_interrupted_session(
 pub async fn reap_fenced_session(
     store: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     expected_spawn_epoch: i64,
     expected_child_pid: Option<i64>,
     expected_child_process_identity: Option<&str>,
@@ -100,10 +100,10 @@ enum RecoveryExpectation<'a> {
 }
 
 impl RecoveryExpectation<'_> {
-    fn lifecycle(&self) -> CodeSessionLifecycle {
+    fn lifecycle(&self) -> SessionLifecycle {
         match self {
-            Self::Running => CodeSessionLifecycle::Running,
-            Self::Fenced { .. } => CodeSessionLifecycle::Fenced,
+            Self::Running => SessionLifecycle::Running,
+            Self::Fenced { .. } => SessionLifecycle::Fenced,
         }
     }
 
@@ -115,7 +115,7 @@ impl RecoveryExpectation<'_> {
 async fn settle_interrupted_session(
     store: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     expected_spawn_epoch: i64,
     expectation: RecoveryExpectation<'_>,
     durable_parks: CapLevel,
@@ -124,8 +124,8 @@ async fn settle_interrupted_session(
     if !acquire_code_session_write_lock(&transaction, session_id).await? {
         return Ok(None);
     }
-    let Some(row) = entities::code_session::Entity::find_by_id(session_id.0)
-        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+    let Some(row) = entities::session::Entity::find_by_id(session_id.0)
+        .filter(entities::session::Column::Owner.eq(owner.as_str()))
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -149,18 +149,18 @@ async fn settle_interrupted_session(
     }
     let mut session = super::session::session_from_row(row)?;
     let now = Utc::now();
-    let running_turns = entities::code_turn::Entity::find()
-        .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
-        .filter(entities::code_turn::Column::SessionId.eq(session_id.0))
+    let running_turns = entities::turn::Entity::find()
+        .filter(entities::turn::Column::Owner.eq(owner.as_str()))
+        .filter(entities::turn::Column::SessionId.eq(session_id.0))
         // Waiting counts as open. An engine that declares `durable_parks`
         // keeps a checkpoint you can resume; recovery then leaves that turn
         // waiting. Other engines lose the in-memory wait with the worker,
         // so you still close those turns as interrupted.
-        .filter(entities::code_turn::Column::Status.is_in([
-            CodeTurnStatus::Running.as_str(),
-            CodeTurnStatus::Waiting.as_str(),
-        ]))
-        .order_by_desc(entities::code_turn::Column::Ordinal)
+        .filter(
+            entities::turn::Column::Status
+                .is_in([TurnStatus::Running.as_str(), TurnStatus::Waiting.as_str()]),
+        )
+        .order_by_desc(entities::turn::Column::Ordinal)
         .limit(2)
         .all(&transaction)
         .await
@@ -173,7 +173,7 @@ async fn settle_interrupted_session(
 
     let resume_park = running_turns.first().is_some_and(|turn| {
         resumes_parked_turn_after_restart(
-            CodeTurnStatus::from_str(&turn.status).unwrap_or(CodeTurnStatus::Running),
+            TurnStatus::from_str(&turn.status).unwrap_or(TurnStatus::Running),
             turn.park_ref.as_deref(),
             durable_parks,
         )
@@ -182,11 +182,11 @@ async fn settle_interrupted_session(
     let approvals = if resume_park {
         Vec::new()
     } else {
-        entities::code_approval::Entity::find()
-            .filter(entities::code_approval::Column::Owner.eq(owner.as_str()))
-            .filter(entities::code_approval::Column::SessionId.eq(session_id.0))
-            .filter(entities::code_approval::Column::State.eq(CodeApprovalState::Pending.as_str()))
-            .order_by_asc(entities::code_approval::Column::RequestedAt)
+        entities::approval::Entity::find()
+            .filter(entities::approval::Column::Owner.eq(owner.as_str()))
+            .filter(entities::approval::Column::SessionId.eq(session_id.0))
+            .filter(entities::approval::Column::State.eq(ApprovalState::Pending.as_str()))
+            .order_by_asc(entities::approval::Column::RequestedAt)
             .all(&transaction)
             .await
             .map_err(store_err)?
@@ -196,40 +196,38 @@ async fn settle_interrupted_session(
         if resume_park {
             // The native waiter died with the worker. Drop any in-flight
             // claim so you can decide the park again on the new worker.
-            entities::code_approval::Entity::update_many()
+            entities::approval::Entity::update_many()
                 .col_expr(
-                    entities::code_approval::Column::DecisionClaim,
+                    entities::approval::Column::DecisionClaim,
                     sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
                 )
                 .col_expr(
-                    entities::code_approval::Column::ClaimedAt,
+                    entities::approval::Column::ClaimedAt,
                     sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<chrono::Utc>>::None),
                 )
-                .filter(entities::code_approval::Column::Owner.eq(owner.as_str()))
-                .filter(entities::code_approval::Column::SessionId.eq(session_id.0))
-                .filter(entities::code_approval::Column::TurnId.eq(turn.id))
-                .filter(
-                    entities::code_approval::Column::State.eq(CodeApprovalState::Pending.as_str()),
-                )
+                .filter(entities::approval::Column::Owner.eq(owner.as_str()))
+                .filter(entities::approval::Column::SessionId.eq(session_id.0))
+                .filter(entities::approval::Column::TurnId.eq(turn.id))
+                .filter(entities::approval::Column::State.eq(ApprovalState::Pending.as_str()))
                 .exec(&transaction)
                 .await
                 .map_err(store_err)?;
         } else {
-            let updated = entities::code_turn::Entity::update_many()
+            let updated = entities::turn::Entity::update_many()
                 .col_expr(
-                    entities::code_turn::Column::Status,
-                    sea_orm::sea_query::Expr::value(CodeTurnStatus::Interrupted.as_str()),
+                    entities::turn::Column::Status,
+                    sea_orm::sea_query::Expr::value(TurnStatus::Interrupted.as_str()),
                 )
                 .col_expr(
-                    entities::code_turn::Column::EndedAt,
+                    entities::turn::Column::EndedAt,
                     sea_orm::sea_query::Expr::value(Some(now)),
                 )
-                .filter(entities::code_turn::Column::Id.eq(turn.id))
-                .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
-                .filter(entities::code_turn::Column::Status.is_in([
-                    CodeTurnStatus::Running.as_str(),
-                    CodeTurnStatus::Waiting.as_str(),
-                ]))
+                .filter(entities::turn::Column::Id.eq(turn.id))
+                .filter(entities::turn::Column::Owner.eq(owner.as_str()))
+                .filter(
+                    entities::turn::Column::Status
+                        .is_in([TurnStatus::Running.as_str(), TurnStatus::Waiting.as_str()]),
+                )
                 .exec(&transaction)
                 .await
                 .map_err(store_err)?;
@@ -243,26 +241,26 @@ async fn settle_interrupted_session(
     }
 
     if !approvals.is_empty() {
-        let updated = entities::code_approval::Entity::update_many()
+        let updated = entities::approval::Entity::update_many()
             .col_expr(
-                entities::code_approval::Column::State,
-                sea_orm::sea_query::Expr::value(CodeApprovalState::Abandoned.as_str()),
+                entities::approval::Column::State,
+                sea_orm::sea_query::Expr::value(ApprovalState::Abandoned.as_str()),
             )
             .col_expr(
-                entities::code_approval::Column::DecidedAt,
+                entities::approval::Column::DecidedAt,
                 sea_orm::sea_query::Expr::value(Some(now)),
             )
             .col_expr(
-                entities::code_approval::Column::DecisionClaim,
+                entities::approval::Column::DecisionClaim,
                 sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
             )
             .col_expr(
-                entities::code_approval::Column::ClaimedAt,
+                entities::approval::Column::ClaimedAt,
                 sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<chrono::Utc>>::None),
             )
-            .filter(entities::code_approval::Column::Owner.eq(owner.as_str()))
-            .filter(entities::code_approval::Column::SessionId.eq(session_id.0))
-            .filter(entities::code_approval::Column::State.eq(CodeApprovalState::Pending.as_str()))
+            .filter(entities::approval::Column::Owner.eq(owner.as_str()))
+            .filter(entities::approval::Column::SessionId.eq(session_id.0))
+            .filter(entities::approval::Column::State.eq(ApprovalState::Pending.as_str()))
             .exec(&transaction)
             .await
             .map_err(store_err)?;
@@ -283,7 +281,7 @@ async fn settle_interrupted_session(
             subagent.status = CodeSubagentStatus::Failed;
         }
     }
-    session.lifecycle = CodeSessionLifecycle::Idle;
+    session.lifecycle = SessionLifecycle::Idle;
     session.child_pid = None;
     session.child_process_identity = None;
     session.fence_reason = None;
@@ -313,47 +311,47 @@ async fn settle_interrupted_session(
     if crate::attention::should_replace(&session.attention, &recovered_attention) {
         session.attention = recovered_attention;
     }
-    let updated = entities::code_session::Entity::update_many()
+    let updated = entities::session::Entity::update_many()
         .col_expr(
-            entities::code_session::Column::Lifecycle,
+            entities::session::Column::Lifecycle,
             sea_orm::sea_query::Expr::value(session.lifecycle.as_str()),
         )
         .col_expr(
-            entities::code_session::Column::ChildPid,
+            entities::session::Column::ChildPid,
             sea_orm::sea_query::Expr::value(Option::<i64>::None),
         )
         .col_expr(
-            entities::code_session::Column::ChildProcessIdentity,
+            entities::session::Column::ChildProcessIdentity,
             sea_orm::sea_query::Expr::value(Option::<String>::None),
         )
         .col_expr(
-            entities::code_session::Column::SpawnEpoch,
+            entities::session::Column::SpawnEpoch,
             sea_orm::sea_query::Expr::value(session.spawn_epoch),
         )
         .col_expr(
-            entities::code_session::Column::FenceReason,
+            entities::session::Column::FenceReason,
             sea_orm::sea_query::Expr::value(Option::<serde_json::Value>::None),
         )
         .col_expr(
-            entities::code_session::Column::AttentionState,
+            entities::session::Column::AttentionState,
             sea_orm::sea_query::Expr::value(serde_json::to_value(&session.attention.state)?),
         )
         .col_expr(
-            entities::code_session::Column::AttentionSource,
+            entities::session::Column::AttentionSource,
             sea_orm::sea_query::Expr::value(session.attention.source.as_str()),
         )
         .col_expr(
-            entities::code_session::Column::Subagents,
+            entities::session::Column::Subagents,
             sea_orm::sea_query::Expr::value(if session.subagents.is_empty() {
                 None
             } else {
                 Some(serde_json::to_value(&session.subagents)?)
             }),
         )
-        .filter(entities::code_session::Column::Id.eq(session_id.0))
-        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
-        .filter(entities::code_session::Column::SpawnEpoch.eq(expected_spawn_epoch))
-        .filter(entities::code_session::Column::Lifecycle.eq(expectation.lifecycle().as_str()))
+        .filter(entities::session::Column::Id.eq(session_id.0))
+        .filter(entities::session::Column::Owner.eq(owner.as_str()))
+        .filter(entities::session::Column::SpawnEpoch.eq(expected_spawn_epoch))
+        .filter(entities::session::Column::Lifecycle.eq(expectation.lifecycle().as_str()))
         .exec(&transaction)
         .await
         .map_err(store_err)?;
@@ -370,17 +368,17 @@ async fn settle_interrupted_session(
     };
     let mut events = Vec::with_capacity(turn_event_count + approvals.len());
     if !running_turns.is_empty() && !resume_park {
-        let event = CodeEvent::TurnInterrupted { usage: None };
+        let event = Event::TurnInterrupted { usage: None };
         let seq = append_event_on_locked(&transaction, owner, session_id, &event).await?;
-        events.push(SequencedCodeEvent { seq, event });
+        events.push(SequencedEvent { seq, event });
     }
     for approval in approvals {
-        let event = CodeEvent::ApprovalResolved {
-            approval_id: CodeApprovalId(approval.id),
+        let event = Event::ApprovalResolved {
+            approval_id: ApprovalId(approval.id),
             decision: ApprovalDecisionKind::Abandoned,
         };
         let seq = append_event_on_locked(&transaction, owner, session_id, &event).await?;
-        events.push(SequencedCodeEvent { seq, event });
+        events.push(SequencedEvent { seq, event });
     }
 
     transaction.commit().await.map_err(store_err)?;
@@ -394,13 +392,13 @@ mod tests {
     #[test]
     fn resumes_parked_turn_after_restart_requires_durable_parks() {
         assert!(resumes_parked_turn_after_restart(
-            CodeTurnStatus::Waiting,
+            TurnStatus::Waiting,
             Some("cp-1"),
             CapLevel::Supported,
         ));
         assert!(
             !resumes_parked_turn_after_restart(
-                CodeTurnStatus::Waiting,
+                TurnStatus::Waiting,
                 Some("cp-1"),
                 CapLevel::Unsupported,
             ),
@@ -408,19 +406,19 @@ mod tests {
         );
         assert!(
             !resumes_parked_turn_after_restart(
-                CodeTurnStatus::Waiting,
+                TurnStatus::Waiting,
                 Some("cp-1"),
                 CapLevel::Unknown,
             ),
             "an unverified flag must not resume"
         );
         assert!(!resumes_parked_turn_after_restart(
-            CodeTurnStatus::Running,
+            TurnStatus::Running,
             Some("cp-1"),
             CapLevel::Supported,
         ));
         assert!(!resumes_parked_turn_after_restart(
-            CodeTurnStatus::Waiting,
+            TurnStatus::Waiting,
             None,
             CapLevel::Supported,
         ));

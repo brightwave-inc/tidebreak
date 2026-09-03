@@ -8,7 +8,7 @@ use crate::citation::{
     MAX_ASSISTANT_CITATIONS,
 };
 use crate::error::{AgentError, Result};
-use crate::id::{AssistantCitationId, ChatId, MessageId};
+use crate::id::{AssistantCitationId, MessageId, SessionId};
 use crate::model::{Message, Role};
 use crate::storage::{AppendClaimedMessageOutcome, ChatCitationSnapshot, TurnLeaseFence};
 
@@ -268,7 +268,7 @@ where
 
 pub(in crate::db) async fn list_snapshots_on<C>(
     conn: &C,
-    chat_id: ChatId,
+    chat_id: SessionId,
 ) -> Result<Vec<ChatCitationSnapshot>>
 where
     C: ConnectionTrait,

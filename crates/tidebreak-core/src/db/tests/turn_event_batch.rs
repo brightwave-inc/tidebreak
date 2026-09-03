@@ -139,7 +139,7 @@ async fn batched_turn_events_keep_single_append_identity() {
         .collect();
     assert_eq!(replayed, "Hello, world!");
     for (seq, ordinal) in [(2, 2), (3, 3), (4, 4), (5, 5)] {
-        let stored = entities::code_event::Entity::find_by_id((chat.id.0, seq))
+        let stored = entities::event::Entity::find_by_id((chat.id.0, seq))
             .one(&store.conn)
             .await
             .unwrap()

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use tidebreak_core::id::{AppId, AppRevisionId};
 use tidebreak_core::local_app::app_revision_relative_path;
-use tidebreak_core::{AgentError, CallId, ChatId, SequencedEvent};
+use tidebreak_core::{AgentError, CallId, SequencedAgentEvent, SessionId};
 
 use crate::error::ServerError;
 use crate::extract::{Json, Path};
@@ -107,7 +107,7 @@ pub async fn put_mcp_servers(
 /// sandboxed frame — the transcript presentation itself never reads it.
 pub async fn get_mcp_app_payload(
     store: ScopedStore,
-    Path((chat_id, call_id)): Path<(ChatId, CallId)>,
+    Path((chat_id, call_id)): Path<(SessionId, CallId)>,
 ) -> Result<Json<McpAppPayload>, ServerError> {
     store.require_chat(chat_id).await?;
     let events = store.list_events_for_call(chat_id, call_id).await?;
@@ -135,7 +135,7 @@ pub struct McpAppPayload {
 }
 
 fn mcp_app_payload_from_events(
-    events: &[SequencedEvent],
+    events: &[SequencedAgentEvent],
     call_id: CallId,
 ) -> Option<McpAppPayload> {
     let mut fragments = String::new();
@@ -489,8 +489,8 @@ mod mcp_app_payload_tests {
 
     use super::*;
 
-    fn sequenced(seq: i64, event: AgentEvent) -> SequencedEvent {
-        SequencedEvent { seq, event }
+    fn sequenced(seq: i64, event: AgentEvent) -> SequencedAgentEvent {
+        SequencedAgentEvent { seq, event }
     }
 
     #[test]

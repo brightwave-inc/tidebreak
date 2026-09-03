@@ -21,14 +21,14 @@ use sea_orm::ConnectionTrait;
 use serde::de::DeserializeOwned;
 use tidebreak_core::{
     AgentConfig, AgentErrorInfo, AgentEvent, AgentRunInboxStatus, AgentRunStatus, ApprovalClass,
-    BeginRootAttachmentChange, BlobMetadata, BlobStore, BlobStream, CallId, Chat, ChatId,
-    ChatRequest, ChatRootAttachment, ClientToolCallRequest, ContentBlock, DeleteProjectOutcome,
-    HostRootId, Message, MessageId, ModelProvider, ParkSandboxToolCallOutcome,
-    ParkTurnForClientCallOutcome, Project, ProjectId, ProviderEvent, ProviderId, Role,
-    RootAttachmentChangeAction, RootAttachmentChangeId, RootAttachmentOrigin,
-    SandboxToolCallRequest, SecretProvider, SequencedEvent, StopReason, Tool, ToolCallExecution,
-    ToolCallRecord, ToolCallResolution, ToolCallStatus, ToolCtx, ToolOutput, ToolRegistry,
-    ToolSpec, TurnCheckpointProgress, TurnId, TurnRunStatus, TurnSteerId, Usage,
+    BeginRootAttachmentChange, BlobMetadata, BlobStore, BlobStream, CallId, Chat, ChatRequest,
+    ChatRootAttachment, ClientToolCallRequest, ContentBlock, DeleteProjectOutcome, HostRootId,
+    Message, MessageId, ModelProvider, ParkSandboxToolCallOutcome, ParkTurnForClientCallOutcome,
+    Project, ProjectId, ProviderEvent, ProviderId, Role, RootAttachmentChangeAction,
+    RootAttachmentChangeId, RootAttachmentOrigin, SandboxToolCallRequest, SecretProvider,
+    SequencedAgentEvent, SessionId, StopReason, Tool, ToolCallExecution, ToolCallRecord,
+    ToolCallResolution, ToolCallStatus, ToolCtx, ToolOutput, ToolRegistry, ToolSpec,
+    TurnCheckpointProgress, TurnId, TurnRunStatus, TurnSteerId, Usage,
 };
 use tokio::sync::Notify;
 use tower::ServiceExt;
@@ -1016,7 +1016,7 @@ impl Store for PauseTerminalStore {
             .create_chat_with_project_defaults_and_settings_scoped(owner, chat, settings)
             .await
     }
-    async fn get_chat(&self, id: ChatId) -> Result<Option<Chat>> {
+    async fn get_chat(&self, id: SessionId) -> Result<Option<Chat>> {
         self.inner.get_chat(id).await
     }
     async fn list_chats(&self) -> Result<Vec<Chat>> {
@@ -1024,22 +1024,22 @@ impl Store for PauseTerminalStore {
     }
     async fn get_chat_transcript(
         &self,
-        id: ChatId,
+        id: SessionId,
     ) -> Result<Option<tidebreak_core::ChatTranscriptSnapshot>> {
         self.inner.get_chat_transcript(id).await
     }
-    async fn set_chat_model(&self, id: ChatId, model: Option<String>) -> Result<()> {
+    async fn set_chat_model(&self, id: SessionId, model: Option<String>) -> Result<()> {
         self.inner.set_chat_model(id, model).await
     }
-    async fn set_chat_title(&self, id: ChatId, title: Option<String>) -> Result<()> {
+    async fn set_chat_title(&self, id: SessionId, title: Option<String>) -> Result<()> {
         self.inner.set_chat_title(id, title).await
     }
-    async fn set_chat_title_if_unset(&self, id: ChatId, title: &str) -> Result<bool> {
+    async fn set_chat_title_if_unset(&self, id: SessionId, title: &str) -> Result<bool> {
         self.inner.set_chat_title_if_unset(id, title).await
     }
     async fn update_chat_metadata(
         &self,
-        id: ChatId,
+        id: SessionId,
         title: Option<Option<String>>,
         model: Option<Option<String>>,
         reasoning_effort: Option<Option<tidebreak_core::ReasoningEffort>>,
@@ -1057,7 +1057,11 @@ impl Store for PauseTerminalStore {
             )
             .await
     }
-    async fn set_chat_memory_incognito(&self, id: ChatId, memory_incognito: bool) -> Result<bool> {
+    async fn set_chat_memory_incognito(
+        &self,
+        id: SessionId,
+        memory_incognito: bool,
+    ) -> Result<bool> {
         self.inner
             .set_chat_memory_incognito(id, memory_incognito)
             .await
@@ -1065,7 +1069,7 @@ impl Store for PauseTerminalStore {
     async fn get_turn(&self, id: TurnId) -> Result<Option<tidebreak_core::TurnRun>> {
         self.inner.get_turn(id).await
     }
-    async fn list_turns(&self, chat_id: ChatId) -> Result<Vec<tidebreak_core::TurnRun>> {
+    async fn list_turns(&self, chat_id: SessionId) -> Result<Vec<tidebreak_core::TurnRun>> {
         self.inner.list_turns(chat_id).await
     }
     async fn begin_turn_admission(
@@ -1084,7 +1088,10 @@ impl Store for PauseTerminalStore {
     ) -> Result<bool> {
         self.inner.release_turn_admission(lease).await
     }
-    async fn list_queued_turns(&self, chat_id: ChatId) -> Result<Vec<tidebreak_core::QueuedTurn>> {
+    async fn list_queued_turns(
+        &self,
+        chat_id: SessionId,
+    ) -> Result<Vec<tidebreak_core::QueuedAgentTurn>> {
         self.inner.list_queued_turns(chat_id).await
     }
     // Hooked here rather than on `accept_turn`, because the trait's plain
@@ -1093,7 +1100,7 @@ impl Store for PauseTerminalStore {
     async fn accept_turn_with_attachments(
         &self,
         id: TurnId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         model: &str,
         content: &str,
         images: &[tidebreak_core::ImageRef],
@@ -1119,7 +1126,7 @@ impl Store for PauseTerminalStore {
     async fn accept_reserved_turn_with_message_context(
         &self,
         lease: tidebreak_core::TurnAdmissionLease,
-        chat_id: ChatId,
+        chat_id: SessionId,
         model: &str,
         content: &str,
         images: &[tidebreak_core::ImageRef],
@@ -1147,7 +1154,7 @@ impl Store for PauseTerminalStore {
     async fn enqueue_reserved_turn(
         &self,
         lease: tidebreak_core::TurnAdmissionLease,
-        queued: &tidebreak_core::QueuedTurn,
+        queued: &tidebreak_core::QueuedAgentTurn,
     ) -> Result<tidebreak_core::ReservedQueuedTurnOutcome> {
         self.inner.enqueue_reserved_turn(lease, queued).await
     }
@@ -1155,7 +1162,7 @@ impl Store for PauseTerminalStore {
         &self,
         id: TurnSteerId,
         turn_id: TurnId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         content: &str,
         interrupt: bool,
     ) -> Result<tidebreak_core::AcceptTurnSteerOutcome> {
@@ -1500,7 +1507,7 @@ impl Store for PauseTerminalStore {
     }
     async fn append_turn_event(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         turn_id: TurnId,
         lease_token: uuid::Uuid,
         attempt_event_ordinal: i32,
@@ -1527,7 +1534,7 @@ impl Store for PauseTerminalStore {
         turn_id: TurnId,
         lease_token: uuid::Uuid,
         event: &AgentEvent,
-    ) -> Result<Option<SequencedEvent>> {
+    ) -> Result<Option<SequencedAgentEvent>> {
         self.terminal_recovery_calls.fetch_add(1, Ordering::SeqCst);
         if self.fail_terminal_recovery.swap(false, Ordering::SeqCst) {
             return Err(AgentError::Store(
@@ -1545,7 +1552,7 @@ impl Store for PauseTerminalStore {
         output: &Message,
         citations: &[tidebreak_core::AssistantCitationInput],
         event: &AgentEvent,
-    ) -> Result<Option<SequencedEvent>> {
+    ) -> Result<Option<SequencedAgentEvent>> {
         self.terminal_recovery_calls.fetch_add(1, Ordering::SeqCst);
         if self.fail_terminal_recovery.swap(false, Ordering::SeqCst) {
             return Err(AgentError::Store(
@@ -1579,7 +1586,7 @@ impl Store for PauseTerminalStore {
             .append_claimed_assistant_message_with_citations(message, citations, lease_token, now)
             .await
     }
-    async fn list_messages(&self, chat_id: ChatId) -> Result<Vec<Message>> {
+    async fn list_messages(&self, chat_id: SessionId) -> Result<Vec<Message>> {
         self.inner.list_messages(chat_id).await
     }
     async fn accept_tool_call(
@@ -1625,7 +1632,7 @@ impl Store for PauseTerminalStore {
     }
     async fn decide_tool_call_approval(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         call_id: CallId,
         decision: &tidebreak_core::ApprovalDecision,
         decided_at: chrono::DateTime<chrono::Utc>,
@@ -1636,7 +1643,7 @@ impl Store for PauseTerminalStore {
     }
     async fn decide_tool_call_approval_with_grant(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         call_id: CallId,
         decision: &tidebreak_core::ApprovalDecision,
         grant: &tidebreak_core::StandingGrant,
@@ -1655,7 +1662,7 @@ impl Store for PauseTerminalStore {
     async fn claim_client_tool_call(
         &self,
         id: tidebreak_core::CallId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         executor_id: uuid::Uuid,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
@@ -1668,7 +1675,7 @@ impl Store for PauseTerminalStore {
     async fn heartbeat_client_tool_call(
         &self,
         id: tidebreak_core::CallId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
         lease_expires_at: chrono::DateTime<chrono::Utc>,
@@ -1691,7 +1698,7 @@ impl Store for PauseTerminalStore {
     async fn abandon_inherited_server_tool_call(
         &self,
         id: tidebreak_core::CallId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         turn_id: TurnId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
@@ -1713,7 +1720,7 @@ impl Store for PauseTerminalStore {
     async fn resolve_client_tool_call_and_append_event(
         &self,
         id: tidebreak_core::CallId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
         resolution: &tidebreak_core::ToolCallResolution,
@@ -1733,7 +1740,7 @@ impl Store for PauseTerminalStore {
     async fn resolve_expired_client_tool_call_and_append_event(
         &self,
         id: tidebreak_core::CallId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
         resolution: &tidebreak_core::ToolCallResolution,
@@ -1752,13 +1759,13 @@ impl Store for PauseTerminalStore {
     }
     async fn list_pending_client_tool_calls(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
     ) -> Result<Vec<tidebreak_core::ToolCallRecord>> {
         self.inner.list_pending_client_tool_calls(chat_id).await
     }
     async fn list_tool_calls(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
     ) -> Result<Vec<tidebreak_core::ToolCallRecord>> {
         self.inner.list_tool_calls(chat_id).await
     }
@@ -1771,7 +1778,7 @@ impl Store for PauseTerminalStore {
     async fn delete_setting(&self, key: &str) -> Result<()> {
         self.inner.delete_setting(key).await
     }
-    async fn append_event(&self, chat_id: ChatId, event: &AgentEvent) -> Result<i64> {
+    async fn append_event(&self, chat_id: SessionId, event: &AgentEvent) -> Result<i64> {
         if matches!(
             event,
             AgentEvent::TurnCompleted { .. }
@@ -1787,7 +1794,11 @@ impl Store for PauseTerminalStore {
         }
         self.inner.append_event(chat_id, event).await
     }
-    async fn list_events(&self, chat_id: ChatId, after: i64) -> Result<Vec<SequencedEvent>> {
+    async fn list_events(
+        &self,
+        chat_id: SessionId,
+        after: i64,
+    ) -> Result<Vec<SequencedAgentEvent>> {
         self.inner.list_events(chat_id, after).await
     }
 }
@@ -1968,7 +1979,7 @@ async fn test_app_with_state() -> (
 /// a turn worker — see `test_app_without_turn_worker`.
 async fn admit_sandbox_for_test(
     store: &Arc<dyn Store>,
-    chat_id: ChatId,
+    chat_id: SessionId,
     input: &str,
 ) -> tidebreak_core::AgentRun {
     let turn_id = TurnId::new();
@@ -2156,14 +2167,14 @@ async fn make_chat(router: &Router, bearer: &str) -> Chat {
 }
 
 /// POST a message to a chat, returning the response status.
-async fn send_message(router: &Router, bearer: &str, chat: ChatId, content: &str) -> StatusCode {
+async fn send_message(router: &Router, bearer: &str, chat: SessionId, content: &str) -> StatusCode {
     send_message_with_id(router, bearer, chat, TurnId::new(), content).await
 }
 
 async fn send_message_with_id(
     router: &Router,
     bearer: &str,
-    chat: ChatId,
+    chat: SessionId,
     turn_id: TurnId,
     content: &str,
 ) -> StatusCode {
@@ -2186,7 +2197,12 @@ async fn send_message_with_id(
 }
 
 /// POST `/chats/{id}/cancel`, returning the response status.
-async fn cancel_turn(router: &Router, bearer: &str, chat: ChatId, turn_id: TurnId) -> StatusCode {
+async fn cancel_turn(
+    router: &Router,
+    bearer: &str,
+    chat: SessionId,
+    turn_id: TurnId,
+) -> StatusCode {
     router
         .clone()
         .oneshot(
@@ -2207,7 +2223,7 @@ async fn cancel_turn(router: &Router, bearer: &str, chat: ChatId, turn_id: TurnI
 
 /// Poll the journal until the turn terminates (or time out), returning its
 /// events in sequence order.
-async fn wait_for_turn(store: &Arc<dyn Store>, chat: ChatId) -> Vec<SequencedEvent> {
+async fn wait_for_turn(store: &Arc<dyn Store>, chat: SessionId) -> Vec<SequencedAgentEvent> {
     for _ in 0..500 {
         let events = store.list_events(chat, 0).await.unwrap();
         if events.iter().any(|e| {

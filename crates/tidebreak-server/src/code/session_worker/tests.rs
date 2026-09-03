@@ -7,8 +7,8 @@ use tidebreak_core::db::code::{
     replace_session_execution_settings, MAX_REPLAY_EVENTS,
 };
 use tidebreak_core::{
-    AttentionState, CodeRepo, CodeSessionKind, CodeUsage, CodeWorkspace, CodeWorkspaceStatus,
-    HarnessKind, ImageMediaType, ImageRef, PermissionMode, ReasoningEffort, RepoId, ToolDetail,
+    AttentionState, CodeRepo, CodeWorkspace, CodeWorkspaceStatus, HarnessKind, ImageMediaType,
+    ImageRef, PermissionMode, ReasoningEffort, RepoId, SessionKind, ToolDetail, TurnUsage,
     WorkspaceId,
 };
 use tidebreak_harness::{HarnessAdapter as _, SessionSpec};
@@ -83,7 +83,7 @@ async fn seeded_session(
     tempfile::TempDir,
     Arc<DbStore>,
     Arc<CodeEventBus>,
-    CodeSessionId,
+    SessionId,
 ) {
     let directory = tempfile::tempdir().unwrap();
     let store = Arc::new(
@@ -140,14 +140,14 @@ async fn seeded_session(
     )
     .await
     .unwrap();
-    let session_id = CodeSessionId::new();
+    let session_id = SessionId::new();
     insert_session(
         &store,
-        &CodeSession {
+        &Session {
             id: session_id,
             owner: owner.clone(),
             workspace_id: Some(workspace_id),
-            kind: CodeSessionKind::Interactive,
+            kind: SessionKind::Interactive,
             harness_kind,
             harness_version: harness_version.map(str::to_owned),
             harness_resume_ref: None,
@@ -155,7 +155,7 @@ async fn seeded_session(
             model: None,
             reasoning_effort: None,
             fast_mode: false,
-            lifecycle: CodeSessionLifecycle::Running,
+            lifecycle: SessionLifecycle::Running,
             fence_reason: None,
             child_pid: None,
             child_process_identity: None,
@@ -176,12 +176,7 @@ async fn seeded_session(
     )
 }
 
-async fn seeded_sink() -> (
-    tempfile::TempDir,
-    Arc<DbStore>,
-    Arc<LiveSink>,
-    CodeSessionId,
-) {
+async fn seeded_sink() -> (tempfile::TempDir, Arc<DbStore>, Arc<LiveSink>, SessionId) {
     let (directory, store, bus, session_id) =
         seeded_session(HarnessKind::ClaudeCode, Some("2.1.237")).await;
     let sink = sink_for(
@@ -214,7 +209,7 @@ async fn an_engine_observed_decision_settles_its_own_approval_row() {
         .await
         .unwrap()
         .unwrap();
-    session.lifecycle = CodeSessionLifecycle::Idle;
+    session.lifecycle = SessionLifecycle::Idle;
     assert!(save_session(&store, &session).await.unwrap());
 
     let worktree = directory.path().join("wt");
@@ -228,7 +223,7 @@ async fn an_engine_observed_decision_settles_its_own_approval_row() {
         HarnessEvent::ApprovalRequested {
             harness_ref: tidebreak_harness::HarnessApprovalRef::engine("call-1"),
             raw: serde_json::Value::Null,
-            kind: Some(tidebreak_core::CodeApprovalKind::Other {
+            kind: Some(tidebreak_core::ApprovalKind::Other {
                 summary: "exec".into(),
             }),
         },
@@ -241,14 +236,14 @@ async fn an_engine_observed_decision_settles_its_own_approval_row() {
             parent_call_id: None,
         },
         HarnessEvent::TurnCompleted {
-            usage: CodeUsage::default(),
+            usage: TurnUsage::default(),
         },
     ];
     let adapter = ScriptedAdapter::new(script).with_unattended_approvals();
     let engine = adapter
         .launch(SessionSpec {
             owner: tidebreak_core::OwnerId::local(),
-            session_id: tidebreak_core::CodeSessionId::new(),
+            session_id: tidebreak_core::SessionId::new(),
             worktree,
             allowed_read_roots: Vec::new(),
             permission_mode: session.permission_mode,
@@ -296,13 +291,13 @@ async fn an_engine_observed_decision_settles_its_own_approval_row() {
         .expect("the turn completes")
         .unwrap()
         .unwrap();
-    assert_eq!(turn.status, CodeTurnStatus::Completed);
+    assert_eq!(turn.status, TurnStatus::Completed);
 
     let approvals = list_approvals(&store, &owner, None, Some(session_id))
         .await
         .unwrap();
     assert_eq!(approvals.len(), 1);
-    assert_eq!(approvals[0].state, CodeApprovalState::Approved);
+    assert_eq!(approvals[0].state, ApprovalState::Approved);
     assert_eq!(approvals[0].native_call_id.as_deref(), Some("call-1"));
     let events = list_events(&store, &owner, session_id, 0, MAX_REPLAY_EVENTS)
         .await
@@ -310,7 +305,7 @@ async fn an_engine_observed_decision_settles_its_own_approval_row() {
     assert!(
         events.events.iter().any(|event| matches!(
             &event.event,
-            CodeEvent::ApprovalResolved {
+            Event::ApprovalResolved {
                 approval_id,
                 decision: tidebreak_core::ApprovalDecisionKind::Approve,
             } if *approval_id == approvals[0].id
@@ -348,13 +343,13 @@ async fn a_send_over_an_internal_turn_waiting_on_a_client_is_refused() {
         .await
         .unwrap()
         .unwrap();
-    session.lifecycle = CodeSessionLifecycle::Idle;
+    session.lifecycle = SessionLifecycle::Idle;
     assert!(save_session(&store, &session).await.unwrap());
-    let waiting = CodeTurn {
-        id: CodeTurnId::new(),
+    let waiting = Turn {
+        id: TurnId::new(),
         session_id,
         ordinal: 1,
-        status: CodeTurnStatus::WaitingForClient,
+        status: TurnStatus::WaitingForClient,
         model: None,
         fast_mode: false,
         user_input: "needs the client".into(),
@@ -381,7 +376,7 @@ async fn a_send_over_an_internal_turn_waiting_on_a_client_is_refused() {
     let adapter = ScriptedAdapter::new(vec![
         HarnessEvent::TurnStarted,
         HarnessEvent::TurnCompleted {
-            usage: CodeUsage::default(),
+            usage: TurnUsage::default(),
         },
     ]);
     let engine = adapter
@@ -447,7 +442,7 @@ async fn a_send_over_an_internal_turn_waiting_on_a_client_is_refused() {
     }
     let turns = list_turns(&store, &owner, session_id).await.unwrap();
     assert_eq!(turns.len(), 1, "no second row was inserted: {turns:?}");
-    assert_eq!(turns[0].status, CodeTurnStatus::WaitingForClient);
+    assert_eq!(turns[0].status, TurnStatus::WaitingForClient);
     let _ = handle.commands.send(WorkerCommand::Shutdown).await;
 }
 
@@ -459,7 +454,7 @@ async fn a_parked_turn_waits_durably_and_resumes_on_the_awaited_decision() {
         .await
         .unwrap()
         .unwrap();
-    session.lifecycle = CodeSessionLifecycle::Idle;
+    session.lifecycle = SessionLifecycle::Idle;
     assert!(save_session(&store, &session).await.unwrap());
 
     let worktree = directory.path().join("wt");
@@ -480,7 +475,7 @@ async fn a_parked_turn_waits_durably_and_resumes_on_the_awaited_decision() {
             parent_call_id: None,
         },
         HarnessEvent::TurnCompleted {
-            usage: CodeUsage::default(),
+            usage: TurnUsage::default(),
         },
     ];
     // The engine checkpoints after the request instead of blocking on it.
@@ -496,7 +491,7 @@ async fn a_parked_turn_waits_durably_and_resumes_on_the_awaited_decision() {
     let engine = adapter
         .launch(SessionSpec {
             owner: tidebreak_core::OwnerId::local(),
-            session_id: tidebreak_core::CodeSessionId::new(),
+            session_id: tidebreak_core::SessionId::new(),
             worktree,
             allowed_read_roots: Vec::new(),
             permission_mode: session.permission_mode,
@@ -544,7 +539,7 @@ async fn a_parked_turn_waits_durably_and_resumes_on_the_awaited_decision() {
     let parked = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let turns = list_turns(&store, &owner, session_id).await.unwrap();
-            if let Some(turn) = turns.iter().find(|t| t.status == CodeTurnStatus::Waiting) {
+            if let Some(turn) = turns.iter().find(|t| t.status == TurnStatus::Waiting) {
                 break turn.clone();
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -577,7 +572,7 @@ async fn a_parked_turn_waits_durably_and_resumes_on_the_awaited_decision() {
         .expect("the turn completes after the resume")
         .unwrap()
         .unwrap();
-    assert_eq!(turn.status, CodeTurnStatus::Completed);
+    assert_eq!(turn.status, TurnStatus::Completed);
     assert_eq!(turn.park_ref, None, "the resume clears the park");
     assert_eq!(turn.park_wait, None);
     assert_eq!(adapter.resumes().len(), 1, "one resume for one park");
@@ -588,10 +583,200 @@ async fn a_parked_turn_waits_durably_and_resumes_on_the_awaited_decision() {
         events
             .events
             .iter()
-            .any(|event| matches!(event.event, CodeEvent::TurnCompleted { .. })),
+            .any(|event| matches!(event.event, Event::TurnCompleted { .. })),
         "the resumed leg reaches the journal"
     );
     let _ = handle.commands.send(WorkerCommand::Shutdown).await;
+}
+
+#[tokio::test]
+async fn client_and_agent_run_parks_resume_after_a_worker_restart() {
+    let client_call = tidebreak_core::CallId::new().to_string();
+    let agent_wait = tidebreak_core::CallId::new().to_string();
+    let run_ids = vec![
+        tidebreak_core::AgentRunId::new().to_string(),
+        tidebreak_core::AgentRunId::new().to_string(),
+    ];
+    let cases = vec![
+        (
+            client_call.clone(),
+            tidebreak_harness::ParkWait::ClientToolCall {
+                call_id: client_call.clone(),
+            },
+            tidebreak_harness::ResumeInput::ClientToolCompleted {
+                call_id: client_call,
+            },
+        ),
+        (
+            agent_wait.clone(),
+            tidebreak_harness::ParkWait::AgentRuns {
+                run_ids: run_ids.clone(),
+            },
+            tidebreak_harness::ResumeInput::AgentRunsSettled { run_ids },
+        ),
+    ];
+
+    for (park_ref, waiting_on, expected_resume) in cases {
+        let (directory, store, sink, session_id) = seeded_sink().await;
+        let owner = OwnerId::local();
+        let mut session = get_session(&store, &owner, session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        session.lifecycle = SessionLifecycle::Idle;
+        assert!(save_session(&store, &session).await.unwrap());
+
+        let worktree = directory.path().join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let private = directory.path().join("private");
+        std::fs::create_dir(&private).unwrap();
+        let adapter = ScriptedAdapter::new(vec![
+            HarnessEvent::TurnStarted,
+            HarnessEvent::AssistantMessage {
+                text: "resumed after the restart".into(),
+                parent_call_id: None,
+            },
+            HarnessEvent::TurnCompleted {
+                usage: TurnUsage::default(),
+            },
+        ])
+        .with_parked_turn(1, park_ref.clone(), waiting_on.clone());
+        let first_engine = adapter
+            .launch(SessionSpec {
+                owner: owner.clone(),
+                session_id,
+                worktree: worktree.clone(),
+                allowed_read_roots: Vec::new(),
+                permission_mode: session.permission_mode,
+                model: session.model.clone(),
+                reasoning_effort: session.reasoning_effort,
+                fast_mode: session.fast_mode,
+                resume_ref: None,
+                extra_argv: Vec::new(),
+                extra_env: Vec::new(),
+                relay_key_env: None,
+                env: Vec::new(),
+                approval: None,
+                binary: Some(std::path::PathBuf::from("/scripted/engine")),
+                sink: sink.clone() as Arc<dyn tidebreak_harness::HarnessEventSink>,
+                browser: None,
+            })
+            .await
+            .unwrap();
+        let first_private_root =
+            super::super::scratch::ScratchRoot::open_for_test(&private).expect("scratch root");
+        let first = spawn_session_worker(
+            session.clone(),
+            first_engine,
+            sink.clone(),
+            AttachmentStore {
+                blobs: None,
+                private_root: first_private_root,
+                engine_reads_images: false,
+            },
+            Arc::new(tokio::sync::Mutex::new(())),
+            tokio::sync::watch::channel(false).1,
+        );
+        let (turn_reply, _turn_response) = oneshot::channel();
+        first
+            .commands
+            .send(WorkerCommand::RunTurn {
+                message: "park across a restart".into(),
+                attachments: Vec::new(),
+                trigger_delivery: None,
+                reply: turn_reply,
+            })
+            .await
+            .unwrap();
+        let parked = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(turn) = get_open_turn(&store, &owner, session_id).await.unwrap() {
+                    if turn.status == TurnStatus::Waiting {
+                        break turn;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the first worker stores the park");
+        assert_eq!(parked.park_ref.as_deref(), Some(park_ref.as_str()));
+        first.abort.abort();
+        tokio::time::timeout(Duration::from_secs(5), first.commands.closed())
+            .await
+            .expect("the crashed worker releases its command channel");
+
+        session = get_session(&store, &owner, session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let second_engine = adapter
+            .launch(SessionSpec {
+                owner: owner.clone(),
+                session_id,
+                worktree,
+                allowed_read_roots: Vec::new(),
+                permission_mode: session.permission_mode,
+                model: session.model.clone(),
+                reasoning_effort: session.reasoning_effort,
+                fast_mode: session.fast_mode,
+                resume_ref: None,
+                extra_argv: Vec::new(),
+                extra_env: Vec::new(),
+                relay_key_env: None,
+                env: Vec::new(),
+                approval: None,
+                binary: Some(std::path::PathBuf::from("/scripted/engine")),
+                sink: sink.clone() as Arc<dyn tidebreak_harness::HarnessEventSink>,
+                browser: None,
+            })
+            .await
+            .unwrap();
+        let second_private_root =
+            super::super::scratch::ScratchRoot::open_for_test(&private).expect("scratch root");
+        let second = spawn_session_worker(
+            session,
+            second_engine,
+            sink,
+            AttachmentStore {
+                blobs: None,
+                private_root: second_private_root,
+                engine_reads_images: false,
+            },
+            Arc::new(tokio::sync::Mutex::new(())),
+            tokio::sync::watch::channel(false).1,
+        );
+
+        let mut resolved = tidebreak_core::db::code::get_turn(&store, &owner, parked.id)
+            .await
+            .unwrap()
+            .unwrap();
+        resolved.status = TurnStatus::Resuming;
+        assert!(save_turn(&store, &owner, &resolved).await.unwrap());
+
+        let completed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let turn = tidebreak_core::db::code::get_turn(&store, &owner, parked.id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if turn.status == TurnStatus::Completed {
+                    break turn;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the relaunched worker resumes the park");
+        assert_eq!(completed.park_ref, None);
+        assert_eq!(completed.park_wait, None);
+        assert_eq!(
+            adapter.resumes(),
+            vec![(park_ref, expected_resume)],
+            "the recovered park resumes once with its exact dependency"
+        );
+        let _ = second.commands.send(WorkerCommand::Shutdown).await;
+    }
 }
 
 #[tokio::test]
@@ -602,7 +787,7 @@ async fn a_decision_on_the_running_leg_resumes_the_park() {
         .await
         .unwrap()
         .unwrap();
-    session.lifecycle = CodeSessionLifecycle::Idle;
+    session.lifecycle = SessionLifecycle::Idle;
     assert!(save_session(&store, &session).await.unwrap());
 
     let worktree = directory.path().join("wt");
@@ -628,7 +813,7 @@ async fn a_decision_on_the_running_leg_resumes_the_park() {
             parent_call_id: None,
         },
         HarnessEvent::TurnCompleted {
-            usage: CodeUsage::default(),
+            usage: TurnUsage::default(),
         },
     ];
     let adapter = ScriptedAdapter::new(script)
@@ -645,7 +830,7 @@ async fn a_decision_on_the_running_leg_resumes_the_park() {
     let engine = adapter
         .launch(SessionSpec {
             owner: tidebreak_core::OwnerId::local(),
-            session_id: tidebreak_core::CodeSessionId::new(),
+            session_id: tidebreak_core::SessionId::new(),
             worktree,
             allowed_read_roots: Vec::new(),
             permission_mode: session.permission_mode,
@@ -694,7 +879,7 @@ async fn a_decision_on_the_running_leg_resumes_the_park() {
             let pending = list_approvals(
                 &store,
                 &owner,
-                Some(CodeApprovalState::Pending),
+                Some(ApprovalState::Pending),
                 Some(session_id),
             )
             .await
@@ -709,9 +894,7 @@ async fn a_decision_on_the_running_leg_resumes_the_park() {
     .expect("the approval is published");
     let turns = list_turns(&store, &owner, session_id).await.unwrap();
     assert!(
-        turns
-            .iter()
-            .any(|turn| turn.status == CodeTurnStatus::Running),
+        turns.iter().any(|turn| turn.status == TurnStatus::Running),
         "Decide must reach the opening leg while the turn is still running"
     );
 
@@ -732,7 +915,7 @@ async fn a_decision_on_the_running_leg_resumes_the_park() {
         .expect("the turn completes from the already-delivered decision")
         .unwrap()
         .unwrap();
-    assert_eq!(turn.status, CodeTurnStatus::Completed);
+    assert_eq!(turn.status, TurnStatus::Completed);
     assert_eq!(turn.park_ref, None, "the resume clears the park");
     assert_eq!(turn.park_wait, None);
     assert_eq!(adapter.resumes().len(), 1, "one resume for one park");
@@ -747,7 +930,7 @@ async fn an_interrupt_closes_a_parked_turn() {
         .await
         .unwrap()
         .unwrap();
-    session.lifecycle = CodeSessionLifecycle::Idle;
+    session.lifecycle = SessionLifecycle::Idle;
     assert!(save_session(&store, &session).await.unwrap());
     let worktree = directory.path().join("wt");
     std::fs::create_dir_all(&worktree).unwrap();
@@ -765,7 +948,7 @@ async fn an_interrupt_closes_a_parked_turn() {
     let engine = adapter
         .launch(SessionSpec {
             owner: tidebreak_core::OwnerId::local(),
-            session_id: tidebreak_core::CodeSessionId::new(),
+            session_id: tidebreak_core::SessionId::new(),
             worktree,
             allowed_read_roots: Vec::new(),
             permission_mode: session.permission_mode,
@@ -810,7 +993,7 @@ async fn an_interrupt_closes_a_parked_turn() {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if let Some(turn) = get_open_turn(&store, &owner, session_id).await.unwrap() {
-                if turn.status == CodeTurnStatus::Waiting {
+                if turn.status == TurnStatus::Waiting {
                     break;
                 }
             }
@@ -831,7 +1014,7 @@ async fn an_interrupt_closes_a_parked_turn() {
         .expect("the parked turn closes")
         .unwrap()
         .unwrap();
-    assert_eq!(turn.status, CodeTurnStatus::Interrupted);
+    assert_eq!(turn.status, TurnStatus::Interrupted);
     let _ = handle.commands.send(WorkerCommand::Shutdown).await;
 }
 
@@ -843,9 +1026,9 @@ async fn a_confirmed_setting_reservation_wins_over_an_already_queued_idle_turn()
         .await
         .unwrap()
         .unwrap();
-    session.lifecycle = CodeSessionLifecycle::Idle;
+    session.lifecycle = SessionLifecycle::Idle;
     assert!(save_session(&store, &session).await.unwrap());
-    let stale = CodeSessionExecutionSettings {
+    let stale = SessionExecutionSettings {
         model: Some("stale".into()),
         reasoning_effort: Some(ReasoningEffort::High),
         fast_mode: true,
@@ -865,7 +1048,7 @@ async fn a_confirmed_setting_reservation_wins_over_an_already_queued_idle_turn()
     let engine = adapter
         .launch(SessionSpec {
             owner: tidebreak_core::OwnerId::local(),
-            session_id: tidebreak_core::CodeSessionId::new(),
+            session_id: tidebreak_core::SessionId::new(),
             worktree,
             allowed_read_roots: Vec::new(),
             permission_mode: session.permission_mode,
@@ -897,7 +1080,7 @@ async fn a_confirmed_setting_reservation_wins_over_an_already_queued_idle_turn()
         tokio::sync::watch::channel(false).1,
     );
 
-    let committed = CodeSessionExecutionSettings {
+    let committed = SessionExecutionSettings {
         model: Some("committed".into()),
         reasoning_effort: None,
         fast_mode: false,
@@ -957,9 +1140,9 @@ async fn a_queued_turn_uses_a_later_setting_committed_before_promotion() {
         .await
         .unwrap()
         .unwrap();
-    session.lifecycle = CodeSessionLifecycle::Idle;
+    session.lifecycle = SessionLifecycle::Idle;
     assert!(save_session(&store, &session).await.unwrap());
-    let held = CodeSessionExecutionSettings {
+    let held = SessionExecutionSettings {
         model: Some("held".into()),
         reasoning_effort: Some(ReasoningEffort::High),
         fast_mode: true,
@@ -979,7 +1162,7 @@ async fn a_queued_turn_uses_a_later_setting_committed_before_promotion() {
     let engine = adapter
         .launch(SessionSpec {
             owner: tidebreak_core::OwnerId::local(),
-            session_id: tidebreak_core::CodeSessionId::new(),
+            session_id: tidebreak_core::SessionId::new(),
             worktree,
             allowed_read_roots: Vec::new(),
             permission_mode: session.permission_mode,
@@ -1002,8 +1185,8 @@ async fn a_queued_turn_uses_a_later_setting_committed_before_promotion() {
     enqueue_queued_turn(
         &store,
         &owner,
-        &CodeQueuedTurn {
-            id: CodeTurnId::new(),
+        &QueuedTurn {
+            id: TurnId::new(),
             session_id,
             message: "use the held settings".into(),
             attachments: Vec::new(),
@@ -1029,7 +1212,7 @@ async fn a_queued_turn_uses_a_later_setting_committed_before_promotion() {
         tokio::sync::watch::channel(false).1,
     );
 
-    let later = CodeSessionExecutionSettings {
+    let later = SessionExecutionSettings {
         model: Some("later".into()),
         reasoning_effort: None,
         fast_mode: false,
@@ -1060,7 +1243,7 @@ async fn a_queued_turn_uses_a_later_setting_committed_before_promotion() {
             let turns = list_turns(&store, &owner, session_id).await.unwrap();
             if let Some(turn) = turns
                 .into_iter()
-                .find(|turn| turn.status != CodeTurnStatus::Running && !turn.user_input.is_empty())
+                .find(|turn| turn.status != TurnStatus::Running && !turn.user_input.is_empty())
             {
                 return turn;
             }
@@ -1094,7 +1277,7 @@ async fn codex_attachment_journals_one_start_after_the_thread_is_known() {
     .unwrap();
     let owner = OwnerId::local();
     assert_eq!(attached.harness_version.as_deref(), Some("0.147.0"));
-    assert_eq!(attached.lifecycle, CodeSessionLifecycle::Idle);
+    assert_eq!(attached.lifecycle, SessionLifecycle::Idle);
     assert_eq!(attached.attention.state, AttentionState::Idle);
     assert_eq!(
         get_session(&store, &owner, session_id)
@@ -1112,7 +1295,7 @@ async fn codex_attachment_journals_one_start_after_the_thread_is_known() {
             .unwrap()
             .events
             .iter()
-            .all(|event| !matches!(&event.event, CodeEvent::SessionStarted { .. }))
+            .all(|event| !matches!(&event.event, Event::SessionStarted { .. }))
     );
 
     let sink = sink_for(
@@ -1144,7 +1327,7 @@ async fn codex_attachment_journals_one_start_after_the_thread_is_known() {
         .events
         .into_iter()
         .filter_map(|event| match event.event {
-            CodeEvent::SessionStarted {
+            Event::SessionStarted {
                 harness_kind,
                 harness_version,
                 resume_ref,
@@ -1183,7 +1366,7 @@ async fn engine_attachment_preserves_unreviewed_work() {
     .await
     .unwrap();
 
-    assert_eq!(attached.lifecycle, CodeSessionLifecycle::Idle);
+    assert_eq!(attached.lifecycle, SessionLifecycle::Idle);
     assert_eq!(attached.attention, unreviewed);
     assert_eq!(
         get_session(&store, &owner, session_id)
@@ -1218,7 +1401,7 @@ async fn non_codex_attachment_keeps_the_eager_session_start() {
     assert_eq!(
         events
             .iter()
-            .filter(|event| matches!(&event.event, CodeEvent::SessionStarted { .. }))
+            .filter(|event| matches!(&event.event, Event::SessionStarted { .. }))
             .count(),
         1
     );
@@ -1231,7 +1414,7 @@ async fn sink_settles_unclosed_tasks_at_each_terminal_parent_boundary() {
         (
             "completed",
             HarnessEvent::TurnCompleted {
-                usage: CodeUsage::default(),
+                usage: TurnUsage::default(),
             },
             CodeSubagentStatus::Done,
         ),
@@ -1386,7 +1569,7 @@ async fn a_failed_pre_turn_attachment_sweep_fences_the_session() {
     let private_root =
         super::super::scratch::ScratchRoot::open_for_test(&private_path).expect("scratch root");
     let attachment_root = private_root.path().join(ATTACHMENTS_DIR);
-    let leftover = attachment_root.join(CodeSessionId::new().to_string());
+    let leftover = attachment_root.join(SessionId::new().to_string());
     std::fs::create_dir_all(&leftover).unwrap();
     std::fs::write(leftover.join("private.png"), b"private").unwrap();
     std::fs::set_permissions(&attachment_root, std::fs::Permissions::from_mode(0o500)).unwrap();
@@ -1404,7 +1587,7 @@ async fn a_failed_pre_turn_attachment_sweep_fences_the_session() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(stored.lifecycle, CodeSessionLifecycle::Fenced);
+    assert_eq!(stored.lifecycle, SessionLifecycle::Fenced);
     assert!(matches!(
         stored.fence_reason,
         Some(FenceReason::ProbeAmbiguous { ref detail })
@@ -1449,7 +1632,7 @@ fn kind_from_raw_reads_codex_and_opencode_payloads() {
             "command": "/bin/zsh -lc rg foo",
             "cwd": "/workspace",
         })),
-        CodeApprovalKind::Command {
+        ApprovalKind::Command {
             cmd: "/bin/zsh -lc rg foo".into(),
             cwd: Some("/workspace".into()),
         }
@@ -1459,7 +1642,7 @@ fn kind_from_raw_reads_codex_and_opencode_payloads() {
             "permission": "bash",
             "metadata": { "command": "rg foo" },
         })),
-        CodeApprovalKind::Command {
+        ApprovalKind::Command {
             cmd: "rg foo".into(),
             cwd: None,
         }
@@ -1473,7 +1656,7 @@ fn kind_from_raw_reads_codex_and_opencode_payloads() {
             },
             "patterns": ["docs/approval.md", "*.md"]
         })),
-        CodeApprovalKind::FileWrite {
+        ApprovalKind::FileWrite {
             paths: vec!["/worktree/docs/approval.md".into()],
         }
     );
@@ -1483,7 +1666,7 @@ fn kind_from_raw_reads_codex_and_opencode_payloads() {
             "cwd": "/worktree",
             "patterns": ["docs/fallback.md", "*"]
         })),
-        CodeApprovalKind::FileWrite {
+        ApprovalKind::FileWrite {
             paths: vec!["/worktree/docs/fallback.md".into()],
         }
     );
@@ -1492,20 +1675,20 @@ fn kind_from_raw_reads_codex_and_opencode_payloads() {
             "permission": "edit",
             "patterns": ["*"]
         })),
-        CodeApprovalKind::FileWrite { paths: Vec::new() }
+        ApprovalKind::FileWrite { paths: Vec::new() }
     );
     assert_eq!(
         kind_from_raw(&serde_json::json!({
             "tool_name": "Read",
             "input": { "file_path": "/workspace/README.md" },
         })),
-        CodeApprovalKind::Other {
+        ApprovalKind::Other {
             summary: "Read /workspace/README.md".into(),
         }
     );
     assert_eq!(
         kind_from_raw(&serde_json::Value::Null),
-        CodeApprovalKind::Other {
+        ApprovalKind::Other {
             summary: "The engine needs approval".into(),
         }
     );
@@ -1516,8 +1699,8 @@ async fn fallback_images_live_only_in_the_session_turn_scope() {
     let private = tempfile::tempdir().unwrap();
     let private_root =
         super::super::scratch::ScratchRoot::open_for_test(private.path()).expect("scratch root");
-    let session_id = CodeSessionId::new();
-    let turn_id = CodeTurnId::new();
+    let session_id = SessionId::new();
+    let turn_id = TurnId::new();
     let attachment = ImageRef {
         blob_id: uuid::Uuid::new_v4(),
         media_type: ImageMediaType::Png,
@@ -1639,7 +1822,7 @@ async fn an_update_quiesce_refuses_new_turns_until_resumed() {
         .await
         .unwrap()
         .unwrap();
-    session.lifecycle = CodeSessionLifecycle::Idle;
+    session.lifecycle = SessionLifecycle::Idle;
     assert!(save_session(&store, &session).await.unwrap());
 
     let worktree = directory.path().join("wt");
@@ -1652,7 +1835,7 @@ async fn an_update_quiesce_refuses_new_turns_until_resumed() {
     let engine = adapter
         .launch(SessionSpec {
             owner: tidebreak_core::OwnerId::local(),
-            session_id: tidebreak_core::CodeSessionId::new(),
+            session_id: tidebreak_core::SessionId::new(),
             worktree,
             allowed_read_roots: Vec::new(),
             permission_mode: session.permission_mode,

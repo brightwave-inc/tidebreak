@@ -13,8 +13,7 @@ use axum::http::HeaderMap;
 use tidebreak_core::{
     db, BrowserActArgs, BrowserActResult, BrowserListResult, BrowserNavigateArgs,
     BrowserNavigateResult, BrowserPageSnapshot, BrowserScreenshotArgs, BrowserScreenshotResult,
-    BrowserSnapshotArgs, BrowserWaitArgs, BrowserWaitResult, CodeSessionLifecycle,
-    CodeWorkspaceStatus,
+    BrowserSnapshotArgs, BrowserWaitArgs, BrowserWaitResult, CodeWorkspaceStatus, SessionLifecycle,
 };
 
 use crate::code::browser_channel::BrowserSubject;
@@ -136,7 +135,7 @@ async fn authorize(state: &AppState, headers: &HeaderMap) -> Result<BrowserSubje
         .ok_or_else(|| ServerError::forbidden("the browser session has ended"))?;
     if matches!(
         session.lifecycle,
-        CodeSessionLifecycle::Ended | CodeSessionLifecycle::Fenced
+        SessionLifecycle::Ended | SessionLifecycle::Fenced
     ) {
         return Err(ServerError::forbidden("the browser session has ended"));
     }

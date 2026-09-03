@@ -493,7 +493,7 @@ mod tests {
     use serde_json::json;
 
     use crate::db::DbStore;
-    use crate::id::{CallId, ChatId, ConnectedAppId, TurnId};
+    use crate::id::{CallId, ConnectedAppId, SessionId, TurnId};
     use crate::local_app::app_revision_relative_path;
     use crate::model::{Chat, ToolCallExecution, ToolCallRecord, ToolCallStatus};
     use crate::preview::ToolResultPreview;
@@ -504,7 +504,7 @@ mod tests {
         _directory: tempfile::TempDir,
         store: Arc<DbStore>,
         tool: CreateAppTool,
-        chat_id: ChatId,
+        chat_id: SessionId,
         turn_id: TurnId,
         profile_dir: PathBuf,
         sentry: ConnectedAppId,
@@ -561,7 +561,7 @@ mod tests {
             .await
             .unwrap();
         let chat = Chat {
-            id: ChatId::new(),
+            id: SessionId::new(),
             project_id: None,
             title: None,
             model: None,

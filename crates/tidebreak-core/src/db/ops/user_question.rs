@@ -1,7 +1,7 @@
 //! The questions card as an approval row (decision 0048 step 5).
 //!
-//! `ask_user_questions` parks its turn on a `code_approval` row whose kind is
-//! [`CodeApprovalKind::Questions`] and whose id is the call id. The answers
+//! `ask_user_questions` parks its turn on an `approval` row whose kind is
+//! [`ApprovalKind::Questions`] and whose id is the call id. The answers
 //! settle the row as [`ApprovalDecisionKind::Answered`] and complete the
 //! call, so the chat's answer route and the session decision route land on
 //! the same row and the same journal rows.
@@ -11,17 +11,14 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use sea_orm::{ActiveModelTrait, ConnectionTrait, EntityTrait, Set, TransactionTrait};
 
-use crate::code::{
-    ApprovalDecisionKind, CodeApproval, CodeApprovalId, CodeApprovalKind, CodeApprovalState,
-    CodeSessionId, CodeTurnId,
-};
+use crate::code::{Approval, ApprovalDecisionKind, ApprovalId, ApprovalKind, ApprovalState};
 use crate::error::{AgentError, Result};
-use crate::event::{AgentEvent, SequencedEvent};
+use crate::event::{AgentEvent, SequencedAgentEvent};
 use crate::model::{OwnerId, ToolCallExecution, ToolCallStatus, TurnRunStatus};
 use crate::storage::AnswerUserQuestionsOutcome;
 use crate::{
-    AnswerUserQuestionsRequest, AskUserQuestionsArgs, CallId, ChatId, PendingUserQuestions, TurnId,
-    UserQuestion, ASK_USER_QUESTIONS_TOOL,
+    AnswerUserQuestionsRequest, AskUserQuestionsArgs, CallId, PendingUserQuestions, SessionId,
+    TurnId, UserQuestion, ASK_USER_QUESTIONS_TOOL,
 };
 
 use super::super::{entities, store_err, DbStore};
@@ -36,7 +33,7 @@ pub(in crate::db) async fn checkpoint_on<C>(
     conn: &C,
     call: &crate::ClientToolCallRequest,
     asked_at: DateTime<Utc>,
-) -> Result<Option<SequencedEvent>>
+) -> Result<Option<SequencedAgentEvent>>
 where
     C: ConnectionTrait,
 {
@@ -56,11 +53,11 @@ where
     insert_approval_on(
         conn,
         &owner,
-        &CodeApproval {
-            id: CodeApprovalId(call.id.0),
-            session_id: CodeSessionId(call.chat_id.0),
-            turn_id: CodeTurnId(call.turn_id.0),
-            kind: CodeApprovalKind::Questions {
+        &Approval {
+            id: ApprovalId(call.id.0),
+            session_id: SessionId(call.chat_id.0),
+            turn_id: TurnId(call.turn_id.0),
+            kind: ApprovalKind::Questions {
                 questions: arguments.questions,
             },
             harness_raw: serde_json::Value::Null,
@@ -70,7 +67,7 @@ where
             worker_epoch: Some(session.spawn_epoch),
             decision_claim: None,
             claimed_at: None,
-            state: CodeApprovalState::Pending,
+            state: ApprovalState::Pending,
             feedback: None,
             requested_at: asked_at,
             decided_at: None,
@@ -78,7 +75,7 @@ where
         },
     )
     .await?;
-    Ok(Some(SequencedEvent { seq, event }))
+    Ok(Some(SequencedAgentEvent { seq, event }))
 }
 
 /// Recover and validate the exact committed park for an ambiguous checkpoint
@@ -87,7 +84,7 @@ where
 pub(in crate::db) async fn recover_checkpoint_on<C>(
     conn: &C,
     call: &crate::ClientToolCallRequest,
-) -> Result<Option<SequencedEvent>>
+) -> Result<Option<SequencedAgentEvent>>
 where
     C: ConnectionTrait,
 {
@@ -95,7 +92,7 @@ where
         return Ok(None);
     }
     let expected = parse_arguments(&call.arguments)?;
-    let row = find_approval_row_on(conn, CodeApprovalId(call.id.0))
+    let row = find_approval_row_on(conn, ApprovalId(call.id.0))
         .await?
         .ok_or_else(|| {
             AgentError::Store(format!(
@@ -115,7 +112,7 @@ where
             call.id
         )));
     }
-    if row.state != CodeApprovalState::Pending.as_str() {
+    if row.state != ApprovalState::Pending.as_str() {
         return Ok(None);
     }
     let expected_event = AgentEvent::UserQuestionsAsked {
@@ -127,7 +124,7 @@ where
 
 pub(in crate::db) async fn list_pending(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
 ) -> Result<Vec<PendingUserQuestions>> {
     let transaction = store.conn.begin().await.map_err(store_err)?;
     if !acquire_chat_write_lock(&transaction, chat_id).await? {
@@ -150,7 +147,7 @@ pub(in crate::db) async fn list_pending(
             .await
             .map_err(store_err)?
             .ok_or_else(|| AgentError::Store("pending question wait is missing".into()))?;
-        let turn = entities::code_turn::Entity::find_by_id(row.turn_id)
+        let turn = entities::turn::Entity::find_by_id(row.turn_id)
             .one(&transaction)
             .await
             .map_err(store_err)?
@@ -198,7 +195,7 @@ pub(in crate::db) async fn answer(
         return Ok(AnswerUserQuestionsOutcome::InvalidAnswer);
     }
     let requested_at = canonical_db_timestamp(answered_at)?;
-    let Some(scope) = find_approval_row_on(&store.conn, CodeApprovalId(request.call_id.0)).await?
+    let Some(scope) = find_approval_row_on(&store.conn, ApprovalId(request.call_id.0)).await?
     else {
         return Ok(AnswerUserQuestionsOutcome::Unavailable);
     };
@@ -225,7 +222,7 @@ pub(in crate::db) async fn answer(
         transaction.commit().await.map_err(store_err)?;
         return Ok(AnswerUserQuestionsOutcome::Unavailable);
     }
-    let row = find_approval_row_on(&transaction, CodeApprovalId(request.call_id.0))
+    let row = find_approval_row_on(&transaction, ApprovalId(request.call_id.0))
         .await?
         .ok_or_else(|| {
             AgentError::Store(format!(
@@ -247,7 +244,7 @@ pub(in crate::db) async fn answer(
     };
     let result = serde_json::to_string(&canonical)?;
 
-    if row.state == CodeApprovalState::Approved.as_str() {
+    if row.state == ApprovalState::Approved.as_str() {
         let exact = call.status == ToolCallStatus::Completed.as_str()
             && call.result.as_deref() == Some(result.as_str());
         if !exact {
@@ -265,7 +262,7 @@ pub(in crate::db) async fn answer(
         transaction.commit().await.map_err(store_err)?;
         return Ok(AnswerUserQuestionsOutcome::Existing(transition.turn));
     }
-    if row.state != CodeApprovalState::Pending.as_str()
+    if row.state != ApprovalState::Pending.as_str()
         || call.status != ToolCallStatus::Pending.as_str()
         || call.client_executor_id.is_some()
         || call.client_lease_token.is_some()
@@ -274,7 +271,7 @@ pub(in crate::db) async fn answer(
         transaction.commit().await.map_err(store_err)?;
         return Ok(AnswerUserQuestionsOutcome::Unavailable);
     }
-    let turn = entities::code_turn::Entity::find_by_id(call.turn_id)
+    let turn = entities::turn::Entity::find_by_id(call.turn_id)
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -343,7 +340,7 @@ pub(in crate::db) async fn answer(
     };
     let seq = super::conversation::append_event_on(
         &transaction,
-        ChatId(resolved.chat_id),
+        SessionId(resolved.chat_id),
         None,
         None,
         None,
@@ -363,7 +360,7 @@ pub(in crate::db) async fn answer(
     transaction.commit().await.map_err(store_err)?;
     Ok(AnswerUserQuestionsOutcome::Answered {
         turn: transition.turn,
-        completion_event: Box::new(SequencedEvent {
+        completion_event: Box::new(SequencedAgentEvent {
             seq,
             event: completion_event,
         }),
@@ -382,9 +379,9 @@ fn parse_arguments(value: &serde_json::Value) -> Result<AskUserQuestionsArgs> {
 }
 
 /// The questions a row carries, or an error for a row of another kind.
-fn questions_of(row: &entities::code_approval::Model) -> Result<Vec<UserQuestion>> {
-    match serde_json::from_value::<CodeApprovalKind>(row.kind.clone())? {
-        CodeApprovalKind::Questions { questions } => {
+fn questions_of(row: &entities::approval::Model) -> Result<Vec<UserQuestion>> {
+    match serde_json::from_value::<ApprovalKind>(row.kind.clone())? {
+        ApprovalKind::Questions { questions } => {
             if questions.is_empty()
                 || questions.len() > crate::MAX_USER_QUESTIONS
                 || !questions.iter().all(UserQuestion::is_well_formed)

@@ -6,15 +6,12 @@ use sea_orm::{
     QuerySelect, Set, TransactionTrait,
 };
 
-use crate::code::{
-    CodeEvent, CodeSessionId, CodeSessionKind, CodeTurnId, CodeTurnStatus, SequencedCodeEvent,
-    WorkspaceId,
-};
+use crate::code::{Event, SequencedEvent, SessionId, SessionKind, TurnId, TurnStatus, WorkspaceId};
 use crate::error::{AgentError, Result};
 use crate::{NotificationKind, OwnerId};
 
 use super::super::super::{entities, store_err, DbStore};
-use super::{acquire_code_session_write_lock, CodeJournalError};
+use super::{acquire_code_session_write_lock, JournalError};
 
 /// Append one journal event under the session's spawn-epoch fence.
 ///
@@ -25,10 +22,10 @@ use super::{acquire_code_session_write_lock, CodeJournalError};
 pub async fn append_event(
     store: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     spawn_epoch: i64,
-    event: &CodeEvent,
-) -> std::result::Result<i64, CodeJournalError> {
+    event: &Event,
+) -> std::result::Result<i64, JournalError> {
     append_event_inner(store, owner, session_id, spawn_epoch, event, None).await
 }
 
@@ -36,36 +33,36 @@ pub async fn append_event(
 pub async fn append_event_with_notification(
     store: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     spawn_epoch: i64,
-    turn_id: CodeTurnId,
-    event: &CodeEvent,
-) -> std::result::Result<i64, CodeJournalError> {
+    turn_id: TurnId,
+    event: &Event,
+) -> std::result::Result<i64, JournalError> {
     append_event_inner(store, owner, session_id, spawn_epoch, event, Some(turn_id)).await
 }
 
 async fn append_event_inner(
     store: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     spawn_epoch: i64,
-    event: &CodeEvent,
-    notification_turn_id: Option<CodeTurnId>,
-) -> std::result::Result<i64, CodeJournalError> {
+    event: &Event,
+    notification_turn_id: Option<TurnId>,
+) -> std::result::Result<i64, JournalError> {
     let transaction = store.conn.begin().await.map_err(store_err)?;
     if !acquire_code_session_write_lock(&transaction, session_id).await? {
-        return Err(CodeJournalError::SessionNotFound { session_id });
+        return Err(JournalError::SessionNotFound { session_id });
     }
-    let Some(session) = entities::code_session::Entity::find_by_id(session_id.0)
-        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+    let Some(session) = entities::session::Entity::find_by_id(session_id.0)
+        .filter(entities::session::Column::Owner.eq(owner.as_str()))
         .one(&transaction)
         .await
         .map_err(store_err)?
     else {
-        return Err(CodeJournalError::SessionNotFound { session_id });
+        return Err(JournalError::SessionNotFound { session_id });
     };
     if session.spawn_epoch != spawn_epoch {
-        return Err(CodeJournalError::StaleSpawnEpoch {
+        return Err(JournalError::StaleSpawnEpoch {
             session_id,
             attempted: spawn_epoch,
             current: session.spawn_epoch,
@@ -74,8 +71,8 @@ async fn append_event_inner(
     let seq = append_event_on_locked(&transaction, owner, session_id, event).await?;
     if let Some(turn_id) = notification_turn_id {
         let kind = match event {
-            CodeEvent::TurnCompleted { .. } => NotificationKind::AgentCompleted,
-            CodeEvent::TurnFailed { .. } => NotificationKind::AgentFailed,
+            Event::TurnCompleted { .. } => NotificationKind::AgentCompleted,
+            Event::TurnFailed { .. } => NotificationKind::AgentFailed,
             _ => {
                 return Err(AgentError::Store(
                     "only completed or failed Code turns mint notifications".into(),
@@ -83,9 +80,9 @@ async fn append_event_inner(
                 .into())
             }
         };
-        let turn_exists = entities::code_turn::Entity::find_by_id(turn_id.0)
-            .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
-            .filter(entities::code_turn::Column::SessionId.eq(session_id.0))
+        let turn_exists = entities::turn::Entity::find_by_id(turn_id.0)
+            .filter(entities::turn::Column::Owner.eq(owner.as_str()))
+            .filter(entities::turn::Column::SessionId.eq(session_id.0))
             .one(&transaction)
             .await
             .map_err(store_err)?
@@ -96,9 +93,9 @@ async fn append_event_inner(
             ))
             .into());
         }
-        let session_kind = CodeSessionKind::from_str(&session.kind).ok_or_else(|| {
+        let session_kind = SessionKind::from_str(&session.kind).ok_or_else(|| {
             AgentError::Store(format!(
-                "code_session {} has unknown kind {}",
+                "session {} has unknown kind {}",
                 session.id, session.kind
             ))
         })?;
@@ -136,16 +133,16 @@ async fn append_event_inner(
 pub(in crate::db) async fn append_event_on_locked<C>(
     conn: &C,
     owner: &OwnerId,
-    session_id: CodeSessionId,
-    event: &CodeEvent,
+    session_id: SessionId,
+    event: &Event,
 ) -> Result<i64>
 where
     C: ConnectionTrait,
 {
-    let last = entities::code_event::Entity::find()
-        .filter(entities::code_event::Column::Owner.eq(owner.as_str()))
-        .filter(entities::code_event::Column::SessionId.eq(session_id.0))
-        .order_by_desc(entities::code_event::Column::Seq)
+    let last = entities::event::Entity::find()
+        .filter(entities::event::Column::Owner.eq(owner.as_str()))
+        .filter(entities::event::Column::SessionId.eq(session_id.0))
+        .order_by_desc(entities::event::Column::Seq)
         .one(conn)
         .await
         .map_err(store_err)?;
@@ -156,7 +153,7 @@ where
                 "event sequence exhausted for code session {session_id}"
             ))
         })?;
-    entities::code_event::ActiveModel {
+    entities::event::ActiveModel {
         owner: Set(owner.as_str().to_owned()),
         session_id: Set(session_id.0),
         seq: Set(seq),
@@ -180,12 +177,12 @@ where
 pub async fn latest_event_created_at(
     store: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
 ) -> Result<Option<chrono::DateTime<Utc>>> {
-    Ok(entities::code_event::Entity::find()
-        .filter(entities::code_event::Column::Owner.eq(owner.as_str()))
-        .filter(entities::code_event::Column::SessionId.eq(session_id.0))
-        .order_by_desc(entities::code_event::Column::Seq)
+    Ok(entities::event::Entity::find()
+        .filter(entities::event::Column::Owner.eq(owner.as_str()))
+        .filter(entities::event::Column::SessionId.eq(session_id.0))
+        .order_by_desc(entities::event::Column::Seq)
         .one(&store.conn)
         .await
         .map_err(store_err)?
@@ -202,9 +199,9 @@ pub const MAX_REPLAY_EVENTS: u64 = 2_000;
 
 /// One bounded window of a session journal.
 #[derive(Debug, Clone, PartialEq, Default)]
-pub struct CodeEventPage {
+pub struct EventPage {
     /// Events in ascending sequence order.
-    pub events: Vec<SequencedCodeEvent>,
+    pub events: Vec<SequencedEvent>,
     /// True when older events above the cursor were dropped to honor the cap.
     ///
     /// The window keeps the newest events, so a truncated page leaves a hole
@@ -215,16 +212,16 @@ pub struct CodeEventPage {
 
 /// A fork-specific journal window made only of complete reconstructable turns.
 #[derive(Debug, Clone, PartialEq, Default)]
-pub struct CodeForkEventPage {
+pub struct ForkEventPage {
     /// Kept turn events in ascending sequence order.
-    pub events: Vec<SequencedCodeEvent>,
+    pub events: Vec<SequencedEvent>,
     /// Turn ids whose complete event records fit in [`events`].
-    pub complete_turns: HashSet<CodeTurnId>,
+    pub complete_turns: HashSet<TurnId>,
     /// Terminal status observed for the requested fork boundary.
     ///
     /// This remains present when that turn is too large to retain, so fork
     /// settlement does not depend on returning a partial event window.
-    pub boundary_status: Option<CodeTurnStatus>,
+    pub boundary_status: Option<TurnStatus>,
     /// True when one or more whole turns were omitted at the replay boundary.
     pub truncated: bool,
 }
@@ -238,18 +235,18 @@ pub struct CodeForkEventPage {
 pub async fn list_events(
     store: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     after: i64,
     limit: u64,
-) -> Result<CodeEventPage> {
+) -> Result<EventPage> {
     // Read one past the cap so a full window is distinguishable from a window
     // that happens to end exactly on it.
     let probe = limit.saturating_add(1);
-    let mut rows = entities::code_event::Entity::find()
-        .filter(entities::code_event::Column::Owner.eq(owner.as_str()))
-        .filter(entities::code_event::Column::SessionId.eq(session_id.0))
-        .filter(entities::code_event::Column::Seq.gt(after))
-        .order_by_desc(entities::code_event::Column::Seq)
+    let mut rows = entities::event::Entity::find()
+        .filter(entities::event::Column::Owner.eq(owner.as_str()))
+        .filter(entities::event::Column::SessionId.eq(session_id.0))
+        .filter(entities::event::Column::Seq.gt(after))
+        .order_by_desc(entities::event::Column::Seq)
         .limit(probe)
         .all(&store.conn)
         .await
@@ -260,13 +257,13 @@ pub async fn list_events(
     let events = rows
         .into_iter()
         .map(|model| {
-            Ok(SequencedCodeEvent {
+            Ok(SequencedEvent {
                 seq: model.seq,
                 event: serde_json::from_value(model.event)?,
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    Ok(CodeEventPage { events, truncated })
+    Ok(EventPage { events, truncated })
 }
 
 /// The oldest events for one of the owner's sessions with `seq > after`, in
@@ -280,22 +277,22 @@ pub async fn list_events(
 pub async fn list_events_from(
     store: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     after: i64,
     limit: u64,
-) -> Result<Vec<SequencedCodeEvent>> {
-    entities::code_event::Entity::find()
-        .filter(entities::code_event::Column::Owner.eq(owner.as_str()))
-        .filter(entities::code_event::Column::SessionId.eq(session_id.0))
-        .filter(entities::code_event::Column::Seq.gt(after))
-        .order_by_asc(entities::code_event::Column::Seq)
+) -> Result<Vec<SequencedEvent>> {
+    entities::event::Entity::find()
+        .filter(entities::event::Column::Owner.eq(owner.as_str()))
+        .filter(entities::event::Column::SessionId.eq(session_id.0))
+        .filter(entities::event::Column::Seq.gt(after))
+        .order_by_asc(entities::event::Column::Seq)
         .limit(limit)
         .all(&store.conn)
         .await
         .map_err(store_err)?
         .into_iter()
         .map(|model| {
-            Ok(SequencedCodeEvent {
+            Ok(SequencedEvent {
                 seq: model.seq,
                 event: serde_json::from_value(model.event)?,
             })
@@ -315,10 +312,10 @@ pub async fn list_events_from(
 pub async fn list_fork_events(
     store: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
-    through_turn: CodeTurnId,
+    session_id: SessionId,
+    through_turn: TurnId,
     limit: u64,
-) -> Result<CodeForkEventPage> {
+) -> Result<ForkEventPage> {
     const MIN_SCAN_BATCH: u64 = 128;
 
     let mut builder =
@@ -327,13 +324,13 @@ pub async fn list_fork_events(
     let mut before = None;
 
     loop {
-        let mut query = entities::code_event::Entity::find()
-            .filter(entities::code_event::Column::Owner.eq(owner.as_str()))
-            .filter(entities::code_event::Column::SessionId.eq(session_id.0))
-            .order_by_desc(entities::code_event::Column::Seq)
+        let mut query = entities::event::Entity::find()
+            .filter(entities::event::Column::Owner.eq(owner.as_str()))
+            .filter(entities::event::Column::SessionId.eq(session_id.0))
+            .order_by_desc(entities::event::Column::Seq)
             .limit(batch);
         if let Some(seq) = before {
-            query = query.filter(entities::code_event::Column::Seq.lt(seq));
+            query = query.filter(entities::event::Column::Seq.lt(seq));
         }
         let rows = query.all(&store.conn).await.map_err(store_err)?;
         if rows.is_empty() {
@@ -342,7 +339,7 @@ pub async fn list_fork_events(
         before = rows.last().map(|row| row.seq);
         let short_batch = rows.len() < usize::try_from(batch).unwrap_or(usize::MAX);
         for model in rows {
-            builder.push(SequencedCodeEvent {
+            builder.push(SequencedEvent {
                 seq: model.seq,
                 event: serde_json::from_value(model.event)?,
             });
@@ -361,23 +358,23 @@ pub async fn list_fork_events(
 /// Incrementally selects a newest contiguous suffix of complete turns while
 /// the database scan moves from newest events to oldest events.
 struct ForkEventPageBuilder {
-    through_turn: CodeTurnId,
+    through_turn: TurnId,
     limit: usize,
     used: usize,
     target_found: bool,
     done: bool,
     truncated: bool,
-    boundary_status: Option<CodeTurnStatus>,
-    terminal_status: Option<CodeTurnStatus>,
+    boundary_status: Option<TurnStatus>,
+    terminal_status: Option<TurnStatus>,
     terminal_count: usize,
-    segment_rev: Vec<SequencedCodeEvent>,
+    segment_rev: Vec<SequencedEvent>,
     segment_oversized: bool,
-    kept_rev: Vec<Vec<SequencedCodeEvent>>,
-    complete_turns: HashSet<CodeTurnId>,
+    kept_rev: Vec<Vec<SequencedEvent>>,
+    complete_turns: HashSet<TurnId>,
 }
 
 impl ForkEventPageBuilder {
-    fn new(through_turn: CodeTurnId, limit: usize) -> Self {
+    fn new(through_turn: TurnId, limit: usize) -> Self {
         Self {
             through_turn,
             limit,
@@ -395,11 +392,11 @@ impl ForkEventPageBuilder {
         }
     }
 
-    fn push(&mut self, entry: SequencedCodeEvent) {
+    fn push(&mut self, entry: SequencedEvent) {
         if self.done {
             return;
         }
-        if let CodeEvent::TurnStarted { turn_id } = &entry.event {
+        if let Event::TurnStarted { turn_id } = &entry.event {
             self.finish_segment(*turn_id, entry.seq);
             return;
         }
@@ -424,7 +421,7 @@ impl ForkEventPageBuilder {
         }
     }
 
-    fn finish_segment(&mut self, turn_id: CodeTurnId, start_seq: i64) {
+    fn finish_segment(&mut self, turn_id: TurnId, start_seq: i64) {
         let is_target = turn_id == self.through_turn;
         if !self.target_found {
             if !is_target {
@@ -452,9 +449,9 @@ impl ForkEventPageBuilder {
         }
 
         let mut events = Vec::with_capacity(self.segment_rev.len() + 1);
-        events.push(SequencedCodeEvent {
+        events.push(SequencedEvent {
             seq: start_seq,
-            event: CodeEvent::TurnStarted { turn_id },
+            event: Event::TurnStarted { turn_id },
         });
         events.extend(self.segment_rev.drain(..).rev());
         if !turn_is_reconstructable(turn_id, &events) {
@@ -481,9 +478,9 @@ impl ForkEventPageBuilder {
         self.done
     }
 
-    fn finish(mut self) -> CodeForkEventPage {
+    fn finish(mut self) -> ForkEventPage {
         self.kept_rev.reverse();
-        CodeForkEventPage {
+        ForkEventPage {
             events: self.kept_rev.into_iter().flatten().collect(),
             complete_turns: self.complete_turns,
             boundary_status: self.boundary_status,
@@ -492,24 +489,22 @@ impl ForkEventPageBuilder {
     }
 }
 
-fn terminal_status(event: &CodeEvent) -> Option<CodeTurnStatus> {
+fn terminal_status(event: &Event) -> Option<TurnStatus> {
     match event {
-        CodeEvent::TurnCompleted { .. } | CodeEvent::TurnRefused { .. } => {
-            Some(CodeTurnStatus::Completed)
-        }
-        CodeEvent::TurnFailed { .. } => Some(CodeTurnStatus::Failed),
-        CodeEvent::TurnInterrupted { .. } => Some(CodeTurnStatus::Interrupted),
+        Event::TurnCompleted { .. } | Event::TurnRefused { .. } => Some(TurnStatus::Completed),
+        Event::TurnFailed { .. } => Some(TurnStatus::Failed),
+        Event::TurnInterrupted { .. } => Some(TurnStatus::Interrupted),
         _ => None,
     }
 }
 
 /// Confirm that every retained child and completion still has the start and
 /// parent frame that gives it meaning.
-fn turn_is_reconstructable(turn_id: CodeTurnId, events: &[SequencedCodeEvent]) -> bool {
+fn turn_is_reconstructable(turn_id: TurnId, events: &[SequencedEvent]) -> bool {
     let Some((first, rest)) = events.split_first() else {
         return false;
     };
-    if !matches!(&first.event, CodeEvent::TurnStarted { turn_id: id } if *id == turn_id)
+    if !matches!(&first.event, Event::TurnStarted { turn_id: id } if *id == turn_id)
         || rest
             .last()
             .and_then(|entry| terminal_status(&entry.event))
@@ -522,8 +517,8 @@ fn turn_is_reconstructable(turn_id: CodeTurnId, events: &[SequencedCodeEvent]) -
     let mut completed = HashSet::new();
     for entry in rest {
         match &entry.event {
-            CodeEvent::TurnStarted { .. } => return false,
-            CodeEvent::ToolStarted {
+            Event::TurnStarted { .. } => return false,
+            Event::ToolStarted {
                 call_id,
                 parent_call_id,
                 ..
@@ -537,7 +532,7 @@ fn turn_is_reconstructable(turn_id: CodeTurnId, events: &[SequencedCodeEvent]) -
                 }
                 calls.insert(call_id, parent_call_id.as_deref());
             }
-            CodeEvent::ToolCompleted {
+            Event::ToolCompleted {
                 call_id,
                 parent_call_id,
                 ..
@@ -548,7 +543,7 @@ fn turn_is_reconstructable(turn_id: CodeTurnId, events: &[SequencedCodeEvent]) -
                     return false;
                 }
             }
-            CodeEvent::AssistantMessage {
+            Event::AssistantMessage {
                 parent_call_id: Some(parent),
                 ..
             } if !calls.contains_key(parent.as_str()) => return false,
@@ -564,20 +559,20 @@ fn turn_is_reconstructable(turn_id: CodeTurnId, events: &[SequencedCodeEvent]) -
 pub async fn list_recent_events(
     store: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     limit: u64,
-) -> Result<Vec<SequencedCodeEvent>> {
-    entities::code_event::Entity::find()
-        .filter(entities::code_event::Column::Owner.eq(owner.as_str()))
-        .filter(entities::code_event::Column::SessionId.eq(session_id.0))
-        .order_by_desc(entities::code_event::Column::Seq)
+) -> Result<Vec<SequencedEvent>> {
+    entities::event::Entity::find()
+        .filter(entities::event::Column::Owner.eq(owner.as_str()))
+        .filter(entities::event::Column::SessionId.eq(session_id.0))
+        .order_by_desc(entities::event::Column::Seq)
         .limit(limit)
         .all(&store.conn)
         .await
         .map_err(store_err)?
         .into_iter()
         .map(|model| {
-            Ok(SequencedCodeEvent {
+            Ok(SequencedEvent {
                 seq: model.seq,
                 event: serde_json::from_value(model.event)?,
             })
@@ -590,22 +585,22 @@ mod fork_replay_tests {
     use super::*;
     use crate::code::{Diffstat, HarnessNoticeLevel, ToolDetail, ToolOutcome};
 
-    fn sequenced(events: Vec<CodeEvent>) -> Vec<SequencedCodeEvent> {
+    fn sequenced(events: Vec<Event>) -> Vec<SequencedEvent> {
         events
             .into_iter()
             .enumerate()
-            .map(|(index, event)| SequencedCodeEvent {
+            .map(|(index, event)| SequencedEvent {
                 seq: index as i64 + 1,
                 event,
             })
             .collect()
     }
 
-    fn completed_turn(turn_id: CodeTurnId, middle: Vec<CodeEvent>) -> Vec<CodeEvent> {
+    fn completed_turn(turn_id: TurnId, middle: Vec<Event>) -> Vec<Event> {
         let mut events = Vec::with_capacity(middle.len() + 2);
-        events.push(CodeEvent::TurnStarted { turn_id });
+        events.push(Event::TurnStarted { turn_id });
         events.extend(middle);
-        events.push(CodeEvent::TurnCompleted {
+        events.push(Event::TurnCompleted {
             usage: Default::default(),
             checkpoint: None,
             stop_reason: None,
@@ -613,7 +608,7 @@ mod fork_replay_tests {
         events
     }
 
-    fn select(events: Vec<CodeEvent>, through_turn: CodeTurnId, limit: usize) -> CodeForkEventPage {
+    fn select(events: Vec<Event>, through_turn: TurnId, limit: usize) -> ForkEventPage {
         let mut builder = ForkEventPageBuilder::new(through_turn, limit);
         for entry in sequenced(events).into_iter().rev() {
             builder.push(entry);
@@ -623,11 +618,11 @@ mod fork_replay_tests {
 
     #[test]
     fn omits_one_oversized_newest_turn_as_a_whole() {
-        let newest = CodeTurnId::new();
+        let newest = TurnId::new();
         let events = completed_turn(
             newest,
             (0..5)
-                .map(|index| CodeEvent::ReasoningDelta {
+                .map(|index| Event::ReasoningDelta {
                     text: format!("step {index}"),
                 })
                 .collect(),
@@ -635,7 +630,7 @@ mod fork_replay_tests {
 
         let page = select(events, newest, 4);
 
-        assert_eq!(page.boundary_status, Some(CodeTurnStatus::Completed));
+        assert_eq!(page.boundary_status, Some(TurnStatus::Completed));
         assert!(page.events.is_empty());
         assert!(page.complete_turns.is_empty());
         assert!(page.truncated);
@@ -643,11 +638,11 @@ mod fork_replay_tests {
 
     #[test]
     fn keeps_nested_tool_events_with_their_parent_and_start_frames() {
-        let newest = CodeTurnId::new();
+        let newest = TurnId::new();
         let events = completed_turn(
             newest,
             vec![
-                CodeEvent::ToolStarted {
+                Event::ToolStarted {
                     call_id: "task-1".to_owned(),
                     name: "Task".to_owned(),
                     detail: ToolDetail::Other {
@@ -655,7 +650,7 @@ mod fork_replay_tests {
                     },
                     parent_call_id: None,
                 },
-                CodeEvent::ToolStarted {
+                Event::ToolStarted {
                     call_id: "read-1".to_owned(),
                     name: "Read".to_owned(),
                     detail: ToolDetail::Other {
@@ -663,11 +658,11 @@ mod fork_replay_tests {
                     },
                     parent_call_id: Some("task-1".to_owned()),
                 },
-                CodeEvent::AssistantMessage {
+                Event::AssistantMessage {
                     text: "found the boundary".to_owned(),
                     parent_call_id: Some("task-1".to_owned()),
                 },
-                CodeEvent::ToolCompleted {
+                Event::ToolCompleted {
                     call_id: "read-1".to_owned(),
                     outcome: ToolOutcome::Succeeded,
                     preview: "contents".to_owned(),
@@ -677,7 +672,7 @@ mod fork_replay_tests {
                     detail: None,
                     parent_call_id: Some("task-1".to_owned()),
                 },
-                CodeEvent::ToolCompleted {
+                Event::ToolCompleted {
                     call_id: "task-1".to_owned(),
                     outcome: ToolOutcome::Succeeded,
                     preview: "done".to_owned(),
@@ -701,8 +696,8 @@ mod fork_replay_tests {
     #[test]
     fn keeps_a_complete_turn_when_checkpoint_work_follows_its_terminal_event() {
         for checkpoint_event in [
-            CodeEvent::CheckpointRecorded {
-                turn_id: CodeTurnId::new(),
+            Event::CheckpointRecorded {
+                turn_id: TurnId::new(),
                 diffstat: Diffstat {
                     files: 1,
                     insertions: 2,
@@ -710,18 +705,18 @@ mod fork_replay_tests {
                     truncated: false,
                 },
             },
-            CodeEvent::HarnessNotice {
+            Event::HarnessNotice {
                 level: HarnessNoticeLevel::Warning,
                 message: "checkpoint failed".to_owned(),
             },
         ] {
             let turn_id = match &checkpoint_event {
-                CodeEvent::CheckpointRecorded { turn_id, .. } => *turn_id,
-                _ => CodeTurnId::new(),
+                Event::CheckpointRecorded { turn_id, .. } => *turn_id,
+                _ => TurnId::new(),
             };
             let mut events = completed_turn(
                 turn_id,
-                vec![CodeEvent::AssistantMessage {
+                vec![Event::AssistantMessage {
                     text: "done".to_owned(),
                     parent_call_id: None,
                 }],
@@ -732,17 +727,17 @@ mod fork_replay_tests {
 
             assert_eq!(page.events.len(), 3);
             assert_eq!(page.complete_turns, HashSet::from([turn_id]));
-            assert_eq!(page.boundary_status, Some(CodeTurnStatus::Completed));
+            assert_eq!(page.boundary_status, Some(TurnStatus::Completed));
             assert!(!page.truncated);
         }
     }
 
     #[test]
     fn omits_a_turn_whose_nested_event_has_no_parent_frame() {
-        let newest = CodeTurnId::new();
+        let newest = TurnId::new();
         let events = completed_turn(
             newest,
-            vec![CodeEvent::ToolStarted {
+            vec![Event::ToolStarted {
                 call_id: "read-1".to_owned(),
                 name: "Read".to_owned(),
                 detail: ToolDetail::Other {
@@ -754,7 +749,7 @@ mod fork_replay_tests {
 
         let page = select(events, newest, 3);
 
-        assert_eq!(page.boundary_status, Some(CodeTurnStatus::Completed));
+        assert_eq!(page.boundary_status, Some(TurnStatus::Completed));
         assert!(page.events.is_empty());
         assert!(page.complete_turns.is_empty());
         assert!(page.truncated);
@@ -762,14 +757,14 @@ mod fork_replay_tests {
 
     #[test]
     fn keeps_only_complete_turns_that_fit_around_the_cap() {
-        let oldest = CodeTurnId::new();
-        let middle = CodeTurnId::new();
-        let newest = CodeTurnId::new();
+        let oldest = TurnId::new();
+        let middle = TurnId::new();
+        let newest = TurnId::new();
         let mut events = Vec::new();
         for (turn_id, text) in [(oldest, "oldest"), (middle, "middle"), (newest, "newest")] {
             events.extend(completed_turn(
                 turn_id,
-                vec![CodeEvent::AssistantMessage {
+                vec![Event::AssistantMessage {
                     text: text.to_owned(),
                     parent_call_id: None,
                 }],

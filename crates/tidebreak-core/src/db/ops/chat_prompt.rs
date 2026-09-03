@@ -11,7 +11,7 @@ use crate::model::{
 use crate::storage::{InboxItemKind, PendingChatPrompt};
 use crate::{
     validate_request_folder_access_arguments, validate_write_output_to_connected_folder_arguments,
-    CallId, ChatId, TurnId, ASK_USER_QUESTIONS_TOOL, EXIT_PLAN_MODE_TOOL,
+    CallId, SessionId, TurnId, ASK_USER_QUESTIONS_TOOL, EXIT_PLAN_MODE_TOOL,
     REQUEST_FOLDER_ACCESS_TOOL, WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL,
 };
 
@@ -21,7 +21,7 @@ use super::conversation::internal_sessions;
 /// One renderer-owned prompt that is parked, before it is projected for a
 /// particular caller. Rows arrive grouped by kind and ordered within each.
 pub(in crate::db) struct PendingPromptRow {
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     pub turn_id: TurnId,
     pub call_id: CallId,
     pub kind: InboxItemKind,
@@ -40,8 +40,8 @@ pub(in crate::db) async fn list_pending_chat_prompts(
 ) -> Result<Vec<PendingChatPrompt>> {
     let visible = match owner {
         Some(owner) => Some(
-            entities::code_session::Entity::find()
-                .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+            entities::session::Entity::find()
+                .filter(entities::session::Column::Owner.eq(owner.as_str()))
                 .filter(internal_sessions())
                 .all(&store.conn)
                 .await
@@ -92,23 +92,20 @@ pub(in crate::db) async fn list_pending_prompt_rows(
     // Every pending park is an approval row; its kind says which card it is
     // (decision 0048 step 5). Consent cards carry the engine's tool request
     // instead and belong to the inbox's approval projection.
-    let parks = entities::code_approval::Entity::find()
-        .filter(
-            entities::code_approval::Column::State
-                .eq(crate::code::CodeApprovalState::Pending.as_str()),
-        )
-        .order_by_asc(entities::code_approval::Column::SessionId)
-        .order_by_asc(entities::code_approval::Column::RequestedAt)
-        .order_by_asc(entities::code_approval::Column::Id)
+    let parks = entities::approval::Entity::find()
+        .filter(entities::approval::Column::State.eq(crate::code::ApprovalState::Pending.as_str()))
+        .order_by_asc(entities::approval::Column::SessionId)
+        .order_by_asc(entities::approval::Column::RequestedAt)
+        .order_by_asc(entities::approval::Column::Id)
         .all(&store.conn)
         .await
         .map_err(store_err)?;
     let mut question_requests = Vec::new();
     let mut plan_requests = Vec::new();
     for row in parks {
-        match serde_json::from_value::<crate::code::CodeApprovalKind>(row.kind.clone()) {
-            Ok(crate::code::CodeApprovalKind::Questions { .. }) => question_requests.push(row),
-            Ok(crate::code::CodeApprovalKind::Plan { .. }) => plan_requests.push(row),
+        match serde_json::from_value::<crate::code::ApprovalKind>(row.kind.clone()) {
+            Ok(crate::code::ApprovalKind::Questions { .. }) => question_requests.push(row),
+            Ok(crate::code::ApprovalKind::Plan { .. }) => plan_requests.push(row),
             _ => {}
         }
     }
@@ -138,8 +135,8 @@ pub(in crate::db) async fn list_pending_prompt_rows(
         .into_iter()
         .map(|wait| (wait.call_id, wait))
         .collect::<HashMap<_, _>>();
-    let turns = entities::code_turn::Entity::find()
-        .filter(entities::code_turn::Column::Status.eq(TurnRunStatus::WaitingForClient.as_str()))
+    let turns = entities::turn::Entity::find()
+        .filter(entities::turn::Column::Status.eq(TurnRunStatus::WaitingForClient.as_str()))
         .all(&store.conn)
         .await
         .map_err(store_err)?
@@ -170,7 +167,7 @@ pub(in crate::db) async fn list_pending_prompt_rows(
             continue;
         }
         rows.push(PendingPromptRow {
-            chat_id: ChatId(request.session_id),
+            chat_id: SessionId(request.session_id),
             turn_id: TurnId(request.turn_id),
             call_id: CallId(request.id),
             kind: InboxItemKind::Question,
@@ -212,7 +209,7 @@ pub(in crate::db) async fn list_pending_prompt_rows(
             continue;
         }
         rows.push(PendingPromptRow {
-            chat_id: ChatId(request.session_id),
+            chat_id: SessionId(request.session_id),
             turn_id: TurnId(request.turn_id),
             call_id: CallId(request.id),
             kind: InboxItemKind::PlanReview,
@@ -234,7 +231,7 @@ pub(in crate::db) async fn list_pending_prompt_rows(
             continue;
         }
         rows.push(PendingPromptRow {
-            chat_id: ChatId(call.chat_id),
+            chat_id: SessionId(call.chat_id),
             turn_id: TurnId(call.turn_id),
             call_id: CallId(call.id),
             kind: InboxItemKind::FolderAccess,
@@ -256,7 +253,7 @@ pub(in crate::db) async fn list_pending_prompt_rows(
             continue;
         }
         rows.push(PendingPromptRow {
-            chat_id: ChatId(call.chat_id),
+            chat_id: SessionId(call.chat_id),
             turn_id: TurnId(call.turn_id),
             call_id: CallId(call.id),
             kind: InboxItemKind::OutputWriteback,

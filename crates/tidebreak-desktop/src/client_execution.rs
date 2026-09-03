@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use serde::Deserialize;
 use tauri::{AppHandle, Manager, State};
 use tidebreak_core::{
-    validate_request_folder_access_arguments, CallId, ChatId, RequestFolderAccessArgs,
-    RequestFolderAccessResult, RequestedFolderHint, ToolCallExecution, ToolCallRecord,
+    validate_request_folder_access_arguments, CallId, RequestFolderAccessArgs,
+    RequestFolderAccessResult, RequestedFolderHint, SessionId, ToolCallExecution, ToolCallRecord,
     ToolCallStatus, REQUEST_FOLDER_ACCESS_TOOL,
 };
 use tidebreak_host_broker::{
@@ -91,7 +91,7 @@ pub(crate) async fn resolve_folder_access_request(
         .picker
         .try_lock()
         .map_err(|_| "another native folder request is already active".to_owned())?;
-    let chat_id = ChatId::from(request.chat_id);
+    let chat_id = SessionId::from(request.chat_id);
     let call_id = CallId::from(request.call_id);
     if let Some(receipt) = state
         .receipts
@@ -485,7 +485,7 @@ async fn publish_resolution(
 
 fn validate_canonical_call(
     call: &ToolCallRecord,
-    chat_id: ChatId,
+    chat_id: SessionId,
     call_id: CallId,
 ) -> Result<RequestFolderAccessArgs, String> {
     if call.id != call_id
@@ -611,7 +611,7 @@ mod tests {
 
     #[test]
     fn canonical_folder_request_rejects_identity_and_contract_changes() {
-        let chat_id = ChatId::new();
+        let chat_id = SessionId::new();
         let call_id = CallId::new();
         let mut call = ToolCallRecord {
             id: call_id,
@@ -644,7 +644,7 @@ mod tests {
             "reason": "Read reports",
             "requested_capabilities": ["read_files"]
         });
-        assert!(validate_canonical_call(&call, ChatId::new(), call_id).is_err());
+        assert!(validate_canonical_call(&call, SessionId::new(), call_id).is_err());
     }
 
     #[test]
@@ -695,7 +695,7 @@ mod tests {
 
     #[test]
     fn product_attachment_validation_fences_identity_authority_and_broker_state() {
-        let chat_id = ChatId::new();
+        let chat_id = SessionId::new();
         let call_id = CallId::new();
         let mut receipt = FolderAccessReceipt::new(
             chat_id,

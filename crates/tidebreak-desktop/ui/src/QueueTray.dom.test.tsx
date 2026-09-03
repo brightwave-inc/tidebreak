@@ -11,12 +11,8 @@ afterEach(cleanup);
 
 const first: QueuedTurn = {
   id: "turn-queued",
-  chat_id: "chat-1",
-  content: "Use the shorter introduction",
-  attachments: [],
-  file_attachments: [],
-  invoked_skills: [],
-  voice_input_used: false,
+  session_id: "chat-1",
+  message: "Use the shorter introduction",
   position: 1,
   created_at: "2026-08-13T12:00:00Z",
   updated_at: "2026-08-13T12:00:00Z",

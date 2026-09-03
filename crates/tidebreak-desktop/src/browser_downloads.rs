@@ -31,7 +31,7 @@ use tauri::{AppHandle, Manager as _};
 use tidebreak_core::{
     accept_workspace_artifact, binary_media_type_for_extension, deliverable_media_type,
     sync_directory, validate_binary_deliverable, validate_portable_filename, AgentError,
-    BrowserControllerKind, ChatId, OutputId, OutputRevisionId, RevisionProducer,
+    BrowserControllerKind, OutputId, OutputRevisionId, RevisionProducer, SessionId,
     WorkspaceArtifactProposal, CHART_FILENAME_SUFFIX, MAX_BINARY_DELIVERABLE_BYTES,
     MAX_DELIVERABLE_BYTES, MAX_DELIVERABLE_NAME_CHARS,
 };
@@ -77,7 +77,7 @@ pub(crate) struct BrowserDownloadReceipt {
     version: u32,
     operation_id: Uuid,
     launch_id: Uuid,
-    chat_id: ChatId,
+    chat_id: SessionId,
     browser_id: String,
     request_url_sha256: [u8; 32],
     requested_filename: String,
@@ -132,7 +132,7 @@ enum PublishOutcome {
 impl BrowserDownloadReceipt {
     fn new(
         launch_id: Uuid,
-        chat_id: ChatId,
+        chat_id: SessionId,
         browser_id: &str,
         url: &Url,
         filename: String,
@@ -627,7 +627,7 @@ async fn publish_browser_download(
 
 async fn available_download_filename(
     store: &dyn tidebreak_core::Store,
-    chat_id: ChatId,
+    chat_id: SessionId,
     requested: &str,
 ) -> Result<String, String> {
     for copy in 1..=999 {
@@ -684,7 +684,7 @@ fn authorized_chat_download(
     browser_id: &str,
     workspace_id: &str,
     url: &Url,
-) -> Result<ChatId, String> {
+) -> Result<SessionId, String> {
     if !matches!(url.scheme(), "http" | "https")
         || !url.username().is_empty()
         || url.password().is_some()
@@ -694,7 +694,7 @@ fn authorized_chat_download(
     let chat_id = workspace_id
         .strip_prefix(FOREGROUND_SCOPE_PREFIX)
         .ok_or_else(|| "Downloads can only be saved from a conversation browser".to_owned())?
-        .parse::<ChatId>()
+        .parse::<SessionId>()
         .map_err(|_| "The browser conversation is not valid".to_owned())?;
     if workspace_id != format!("{FOREGROUND_SCOPE_PREFIX}{chat_id}") {
         return Err("The browser conversation is not valid".to_owned());
@@ -1066,7 +1066,7 @@ mod tests {
     fn durable_receipts_recover_completed_downloads_and_drop_interrupted_ones() {
         let temp = tempfile::tempdir().unwrap();
         let store = BrowserDownloadStore::open(temp.path()).unwrap();
-        let chat_id = ChatId::new();
+        let chat_id = SessionId::new();
         let url = Url::parse("https://example.com/report.pdf").unwrap();
         let mut interrupted = BrowserDownloadReceipt::new(
             Uuid::new_v4(),
@@ -1115,7 +1115,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = BrowserDownloadStore::open(temp.path()).unwrap();
         let registry = BrowserRegistry::default();
-        let chat_id = ChatId::new();
+        let chat_id = SessionId::new();
         let workspace_id = format!("{FOREGROUND_SCOPE_PREFIX}{chat_id}");
         registry
             .register(
@@ -1154,7 +1154,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = BrowserDownloadStore::open(temp.path()).unwrap();
         let registry = BrowserRegistry::default();
-        let chat_id = ChatId::new();
+        let chat_id = SessionId::new();
         let workspace_id = format!("{FOREGROUND_SCOPE_PREFIX}{chat_id}");
         registry
             .register(
@@ -1190,7 +1190,7 @@ mod tests {
         let url = Url::parse("https://example.com/report.pdf").unwrap();
         let mut receipt = BrowserDownloadReceipt::new(
             store.inner.launch_id,
-            ChatId::new(),
+            SessionId::new(),
             "browser-1",
             &url,
             "report.pdf".to_owned(),
@@ -1223,7 +1223,7 @@ mod tests {
         let url = Url::parse("https://example.com/report.pdf").unwrap();
         let mut receipt = BrowserDownloadReceipt::new(
             store.inner.launch_id,
-            ChatId::new(),
+            SessionId::new(),
             "browser-1",
             &url,
             "report.pdf".to_owned(),
@@ -1248,7 +1248,7 @@ mod tests {
     #[test]
     fn download_authority_requires_a_visible_human_controlled_foreground_browser() {
         let registry = BrowserRegistry::default();
-        let chat_id = ChatId::new();
+        let chat_id = SessionId::new();
         let workspace_id = format!("{FOREGROUND_SCOPE_PREFIX}{chat_id}");
         registry
             .register(

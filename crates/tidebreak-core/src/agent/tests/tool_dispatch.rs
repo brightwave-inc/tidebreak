@@ -291,7 +291,7 @@ async fn large_tool_results_are_truncated() {
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -478,7 +478,7 @@ async fn registry_dispatch_rejects_schema_mismatches_and_preserves_valid_argumen
     }));
     let tool = registry.get("schema_recorder").unwrap();
     let context = ToolCtx::new_legacy_workspace(
-        ChatId::new(),
+        SessionId::new(),
         None,
         std::path::PathBuf::from("unused-by-schema-recorder"),
     );
@@ -639,7 +639,7 @@ async fn registry_fails_closed_for_every_consumer_when_a_tool_schema_is_unusable
         .any(|spec| spec.name == "invalid_server_schema"));
 
     let context = ToolCtx::new_legacy_workspace(
-        ChatId::new(),
+        SessionId::new(),
         None,
         std::path::PathBuf::from("unused-by-invalid-schema-tool"),
     );
@@ -669,7 +669,7 @@ async fn arguments_violating_the_advertised_schema_are_refused_before_the_tool_r
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -798,7 +798,7 @@ async fn malformed_arguments_go_back_to_the_model_instead_of_running_the_tool() 
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,

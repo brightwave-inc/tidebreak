@@ -8,7 +8,7 @@ use axum::Router;
 
 use crate::code::CodeRuntime;
 use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
-use tidebreak_core::{CapLevel, CodeSessionId, CodeSessionLifecycle, Store};
+use tidebreak_core::{CapLevel, SessionId, SessionLifecycle, Store};
 
 async fn code_app_with_put_gate(
     adapter: ScriptedAdapter,
@@ -362,7 +362,7 @@ async fn a_live_session_image_upload_is_idempotently_published() {
         assert_eq!(body["attachment_id"], expected.blob_id.to_string());
     }
 
-    let session_id: CodeSessionId = session.parse().unwrap();
+    let session_id: SessionId = session.parse().unwrap();
     assert_eq!(
         runtime
             .db
@@ -392,7 +392,7 @@ async fn an_image_upload_losing_the_session_end_race_conflicts_and_queues_retire
     let session = create_sibling_sessions(&client, addr, &token, &workspace, 1)
         .await
         .remove(0);
-    let session_id: CodeSessionId = session.parse().unwrap();
+    let session_id: SessionId = session.parse().unwrap();
     let pixels = one_pixel_png();
     let image = crate::routes::image_attachment::inspect_image_bytes(&pixels).unwrap();
     let upload = tokio::spawn({
@@ -422,7 +422,7 @@ async fn an_image_upload_losing_the_session_end_race_conflicts_and_queues_retire
     .await
     .unwrap()
     .unwrap();
-    row.lifecycle = CodeSessionLifecycle::Ended;
+    row.lifecycle = SessionLifecycle::Ended;
     row.child_pid = None;
     assert!(tidebreak_core::db::code::save_session(&runtime.db, &row)
         .await

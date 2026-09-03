@@ -38,7 +38,7 @@
 
 use std::path::PathBuf;
 
-use tidebreak_core::{ChatId, ToolCtx, ToolRegistry};
+use tidebreak_core::{SessionId, ToolCtx, ToolRegistry};
 use tidebreak_sandbox_protocol::{ids::OperationId, SandboxRun};
 
 use crate::model::{HostModel, ModelError};
@@ -111,7 +111,7 @@ async fn run_loop(
     let model = HostModel::new(run.clone());
     // The sandbox loop has no host chat identity or filesystem scratch; a fresh
     // chat id and no private scratch keep the tool context self-contained.
-    let ctx = ToolCtx::without_private_scratch(ChatId::new(), None);
+    let ctx = ToolCtx::without_private_scratch(SessionId::new(), None);
 
     let _ = run
         .emit_progress("sandbox agent attached; starting run")

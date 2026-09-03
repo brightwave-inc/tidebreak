@@ -1,16 +1,16 @@
 //! Shared event-socket follow: subscribe, reconnect, durable fallback.
 //!
 //! Print mode and `agent-mcp` watch a chat turn over `/chats/{id}/events`.
-//! Code-mode tools watch `/code/sessions/{id}/events`. The reconnect ladder
+//! Code-mode tools watch `/sessions/{id}/events`. The reconnect ladder
 //! lives here so those surfaces stay in lockstep; each caller decides what a
 //! frame *means*.
 
 use futures::StreamExt as _;
-use tidebreak_core::{AgentError, ChatId, CodeSessionId, Result, TurnId};
+use tidebreak_core::{AgentError, Result, SessionId, TurnId};
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::api::client::{Client, DurableTurn, EventSocket};
-use crate::api::code::{decode_event_frame, SequencedCodeEventFrame};
+use crate::api::code::{decode_event_frame, SequencedEventFrame};
 use crate::api::wire::{RendererAgentEvent, RendererChatFrame};
 
 /// Attempts to re-open the event socket after it closes mid-turn before giving
@@ -41,11 +41,11 @@ pub(crate) enum StreamNext {
 }
 
 impl EventStream {
-    pub(crate) async fn open(client: &Client, chat: ChatId) -> Result<Self> {
+    pub(crate) async fn open(client: &Client, chat: SessionId) -> Result<Self> {
         Self::open_after(client, chat, 0).await
     }
 
-    pub(crate) async fn open_after(client: &Client, chat: ChatId, after: i64) -> Result<Self> {
+    pub(crate) async fn open_after(client: &Client, chat: SessionId, after: i64) -> Result<Self> {
         Ok(Self {
             socket: client.open_events(chat, after).await?,
             last_seq: after,
@@ -79,7 +79,7 @@ impl EventStream {
     pub(crate) async fn next(
         &mut self,
         client: &mut Client,
-        chat: ChatId,
+        chat: SessionId,
         turn_id: TurnId,
     ) -> Result<StreamNext> {
         match self.socket.next().await {
@@ -103,7 +103,7 @@ impl EventStream {
     async fn reconnect(
         &mut self,
         client: &mut Client,
-        chat: ChatId,
+        chat: SessionId,
         turn_id: TurnId,
     ) -> Result<Option<DurableTurn>> {
         let mut last = None;
@@ -142,18 +142,18 @@ pub(crate) struct CodeEventStream {
 }
 
 pub(crate) enum CodeStreamNext {
-    Frame(Box<SequencedCodeEventFrame>),
+    Frame(Box<SequencedEventFrame>),
     Ignore,
 }
 
 impl CodeEventStream {
-    pub(crate) async fn open(client: &Client, session: CodeSessionId) -> Result<Self> {
+    pub(crate) async fn open(client: &Client, session: SessionId) -> Result<Self> {
         Self::open_after(client, session, 0).await
     }
 
     pub(crate) async fn open_after(
         client: &Client,
-        session: CodeSessionId,
+        session: SessionId,
         after: i64,
     ) -> Result<Self> {
         Ok(Self {
@@ -172,7 +172,7 @@ impl CodeEventStream {
     pub(crate) async fn next(
         &mut self,
         client: &mut Client,
-        session: CodeSessionId,
+        session: SessionId,
     ) -> Result<CodeStreamNext> {
         match self.socket.next().await {
             Some(Ok(Message::Text(text))) => match decode_event_frame(&text) {
@@ -190,7 +190,7 @@ impl CodeEventStream {
         }
     }
 
-    async fn reconnect(&mut self, client: &mut Client, session: CodeSessionId) -> Result<()> {
+    async fn reconnect(&mut self, client: &mut Client, session: SessionId) -> Result<()> {
         let mut last = None;
         for delay in RECONNECT_DELAYS {
             tokio::time::sleep(delay).await;

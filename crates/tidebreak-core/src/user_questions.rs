@@ -12,7 +12,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{CallId, ChatId, ToolSpec, TurnId};
+use crate::{CallId, SessionId, ToolSpec, TurnId};
 
 /// Stable foreground-only tool name.
 pub const ASK_USER_QUESTIONS_TOOL: &str = "ask_user_questions";
@@ -225,7 +225,7 @@ impl UserQuestionRequestStatus {
 /// Exact storage command with its conversation scope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnswerUserQuestionsRequest {
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     pub call_id: CallId,
     pub answers: AnswerUserQuestions,
 }

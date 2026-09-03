@@ -1,7 +1,7 @@
 //! Strongly-typed identifiers.
 //!
 //! Every entity gets its own newtype over a UUID so the compiler stops us from,
-//! say, passing a [`TurnId`] where a [`ChatId`] is expected. All ids
+//! say, passing a [`TurnId`] where a [`SessionId`] is expected. All ids
 //! serialize transparently (as the bare UUID string), so on the wire and in the
 //! `Store` they are indistinguishable from a plain UUID.
 //!
@@ -217,7 +217,7 @@ impl DocumentId {
 
     /// Derive a stable id from a conversation and source URI.
     #[must_use]
-    pub fn derive_for_chat(chat_id: ChatId, uri: &str) -> Self {
+    pub fn derive_for_chat(chat_id: SessionId, uri: &str) -> Self {
         let chat_namespace = Uuid::new_v5(&Self::NAMESPACE, chat_id.as_uuid().as_bytes());
         Self(Uuid::new_v5(&chat_namespace, uri.as_bytes()))
     }
@@ -227,14 +227,14 @@ impl DocumentId {
     /// This keeps a content re-import idempotent without making one chat's
     /// document record own the same source in every other conversation.
     #[must_use]
-    pub fn derive_for_chat_content(chat_id: ChatId, sha256: [u8; 32]) -> Self {
+    pub fn derive_for_chat_content(chat_id: SessionId, sha256: [u8; 32]) -> Self {
         let chat_namespace = Uuid::new_v5(&Self::CONTENT_NAMESPACE, chat_id.as_uuid().as_bytes());
         Self(Uuid::new_v5(&chat_namespace, &sha256))
     }
 }
 id_type!(
     /// Identifies a persistent conversation.
-    ChatId
+    SessionId
 );
 id_type!(
     /// Identifies one durable foreground or sandboxed background agent run.
@@ -250,7 +250,7 @@ impl AgentRunId {
 
     /// Derive the stable foreground coordinator identity for a chat.
     #[must_use]
-    pub fn foreground_for_chat(chat_id: ChatId) -> Self {
+    pub fn foreground_for_chat(chat_id: SessionId) -> Self {
         Self(Uuid::new_v5(
             &Self::FOREGROUND_NAMESPACE,
             chat_id.as_uuid().as_bytes(),
@@ -377,6 +377,10 @@ id_type!(
 id_type!(
     /// Identifies one tool call, stable across its request/approval/result.
     CallId
+);
+id_type!(
+    /// Identifies one parked approval belonging to a session.
+    ApprovalId
 );
 id_type!(
     /// Identifies one conversation-owned output across all of its revisions.
@@ -582,8 +586,8 @@ mod tests {
 
     #[test]
     fn foreground_agent_run_ids_are_stable_and_chat_scoped() {
-        let first_chat = ChatId::new();
-        let second_chat = ChatId::new();
+        let first_chat = SessionId::new();
+        let second_chat = SessionId::new();
         assert_eq!(
             AgentRunId::foreground_for_chat(first_chat),
             AgentRunId::foreground_for_chat(first_chat)
@@ -596,13 +600,13 @@ mod tests {
 
     #[test]
     fn roundtrips_through_string_and_json() {
-        let id = ChatId::new();
-        assert_eq!(id.to_string().parse::<ChatId>().unwrap(), id);
+        let id = SessionId::new();
+        assert_eq!(id.to_string().parse::<SessionId>().unwrap(), id);
 
         let json = serde_json::to_string(&id).unwrap();
         // Transparent: serializes as the bare quoted UUID, no wrapper.
         assert_eq!(json, format!("\"{id}\""));
-        assert_eq!(serde_json::from_str::<ChatId>(&json).unwrap(), id);
+        assert_eq!(serde_json::from_str::<SessionId>(&json).unwrap(), id);
     }
 
     #[test]
@@ -659,8 +663,8 @@ mod tests {
             DocumentId::derive("file:///a.txt")
         );
 
-        let chat_a = ChatId::new();
-        let chat_b = ChatId::new();
+        let chat_a = SessionId::new();
+        let chat_b = SessionId::new();
         assert_eq!(
             DocumentId::derive_for_chat(chat_a, "file:///a.txt"),
             DocumentId::derive_for_chat(chat_a, "file:///a.txt")

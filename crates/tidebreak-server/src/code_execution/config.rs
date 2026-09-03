@@ -13,7 +13,9 @@ use tidebreak_code_execution::{
     LocalExecutionProvider, RemoteSessionPool, DAYTONA_CREDENTIAL_KEY, E2B_CREDENTIAL_KEY,
     PACKAGE_MANAGER_DOMAINS,
 };
-use tidebreak_core::{ChatId, HostRootId, NetworkPolicy, ProjectId, Result, SecretProvider, Store};
+use tidebreak_core::{
+    HostRootId, NetworkPolicy, ProjectId, Result, SecretProvider, SessionId, Store,
+};
 use tidebreak_egress::{
     CidrBlock, DomainPattern, EgressAllowlist, EgressEnforcement, EgressError, EgressPolicy,
 };
@@ -116,7 +118,7 @@ pub(super) fn network_egress_config(policy: &NetworkPolicy) -> EgressConfig {
 /// Exact product attachment projection sent to the trusted desktop host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecFolderGrantQuery {
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     pub project_id: Option<ProjectId>,
     pub root_ids: Vec<HostRootId>,
 }

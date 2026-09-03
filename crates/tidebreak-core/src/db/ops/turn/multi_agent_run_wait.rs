@@ -11,7 +11,7 @@ use crate::agent_tools::{
     WAIT_FOR_AGENTS_TOOL, WAIT_INTERRUPTED_BY_STEER_RESULT,
 };
 use crate::error::{AgentError, Result};
-use crate::event::{AgentEvent, SequencedEvent};
+use crate::event::{AgentEvent, SequencedAgentEvent};
 use crate::model::{
     AgentRunInboxStatus, AgentRunTier, AgentRunWaitCondition, AgentRunWaitSetCandidate,
     AgentRunWaitSetCheckpointRequest, ToolCallExecution, ToolCallRecord, ToolCallStatus,
@@ -59,7 +59,7 @@ pub(in crate::db) fn ready_agent_run_wait_set_candidates_sql(limit: u64) -> Stri
         r#"
 SELECT w.id AS wait_id, MAX(i.delivered_at) AS ready_at
 FROM turn_agent_run_wait_set w
-JOIN code_turn t
+JOIN "turn" t
   ON t.id = w.turn_id AND t.session_id = w.session_id
 JOIN tool_call tc
   ON tc.id = w.id AND tc.chat_id = w.session_id AND tc.turn_id = w.turn_id
@@ -86,7 +86,7 @@ WHERE w.status = 'waiting' AND w.condition = 'all'
   AND w.claim_count >= w.attempt_count AND w.model_steps > 0
   AND w.input_tokens >= 0 AND w.output_tokens >= 0
   AND w.cache_read_input_tokens >= 0 AND w.cache_creation_input_tokens >= 0
-  AND t.status = 'waiting_for_agent_run'
+  AND t.status IN ('waiting_for_agent_run', 'waiting')
   AND t.attempt_count = w.attempt_count AND t.claim_count = w.claim_count
   AND t.lease_token IS NULL AND t.lease_expires_at IS NULL
   AND t.steer_revision = w.expected_steer_revision AND t.updated_at >= w.parked_at
@@ -161,7 +161,7 @@ pub(in crate::db) async fn park_turn_for_agent_run_wait_set(
     let lease_token = request.lease_token;
     let expected_steer_revision = request.expected_steer_revision;
     let progress = request.progress;
-    let Some(scope) = entities::code_turn::Entity::find_by_id(turn_id.0)
+    let Some(scope) = entities::turn::Entity::find_by_id(turn_id.0)
         .one(&store.conn)
         .await
         .map_err(store_err)?
@@ -170,7 +170,7 @@ pub(in crate::db) async fn park_turn_for_agent_run_wait_set(
     };
     let transaction = store.conn.begin().await.map_err(store_err)?;
     acquire_wait_set_lock(&transaction).await?;
-    if !acquire_chat_write_lock(&transaction, crate::ChatId(scope.session_id)).await?
+    if !acquire_chat_write_lock(&transaction, crate::SessionId(scope.session_id)).await?
         || !acquire_turn_write_lock(&transaction, turn_id).await?
     {
         transaction.commit().await.map_err(store_err)?;
@@ -197,14 +197,17 @@ pub(in crate::db) async fn park_turn_for_agent_run_wait_set(
             .ok_or_else(|| {
                 AgentError::Store(format!("wait set {wait_id} is missing its tool call"))
             })?;
-        let turn = entities::code_turn::Entity::find_by_id(stored.turn_id)
+        let turn = entities::turn::Entity::find_by_id(stored.turn_id)
             .one(&transaction)
             .await
             .map_err(store_err)?
             .ok_or_else(|| AgentError::Store(format!("wait set {wait_id} is missing its turn")))?;
         let exact = stored.turn_id == turn_id.0
             && stored.parent_run_id
-                == crate::id::AgentRunId::foreground_for_chat(crate::id::ChatId(turn.session_id)).0
+                == crate::id::AgentRunId::foreground_for_chat(crate::id::SessionId(
+                    turn.session_id,
+                ))
+                .0
             && stored.session_id == turn.session_id
             && stored.condition == condition.as_str()
             && stored.park_lease_token == lease_token
@@ -266,7 +269,7 @@ pub(in crate::db) async fn park_turn_for_agent_run_wait_set(
         return Ok(Some(ParkTurnForAgentRunWaitSetOutcome::IdentityConflict));
     }
 
-    let turn = entities::code_turn::Entity::find_by_id(turn_id.0)
+    let turn = entities::turn::Entity::find_by_id(turn_id.0)
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -308,7 +311,7 @@ pub(in crate::db) async fn park_turn_for_agent_run_wait_set(
                 && child.origin_turn_id == Some(turn_id.0)
                 && child.parent_id
                     == Some(
-                        crate::id::AgentRunId::foreground_for_chat(crate::id::ChatId(
+                        crate::id::AgentRunId::foreground_for_chat(crate::id::SessionId(
                             turn.session_id,
                         ))
                         .0,
@@ -327,7 +330,10 @@ pub(in crate::db) async fn park_turn_for_agent_run_wait_set(
             .map_err(store_err)?
         {
             let pending_unclaimed = inbox.parent_run_id
-                == crate::id::AgentRunId::foreground_for_chat(crate::id::ChatId(turn.session_id)).0
+                == crate::id::AgentRunId::foreground_for_chat(crate::id::SessionId(
+                    turn.session_id,
+                ))
+                .0
                 && inbox.chat_id == turn.session_id
                 && inbox.status == AgentRunInboxStatus::Pending.as_str()
                 && inbox.claim_count == 0
@@ -342,9 +348,9 @@ pub(in crate::db) async fn park_turn_for_agent_run_wait_set(
         }
     }
 
-    let last_attempt_event = entities::code_event::Entity::find()
-        .filter(entities::code_event::Column::LeaseToken.eq(lease_token))
-        .order_by_desc(entities::code_event::Column::AttemptEventOrdinal)
+    let last_attempt_event = entities::event::Entity::find()
+        .filter(entities::event::Column::LeaseToken.eq(lease_token))
+        .order_by_desc(entities::event::Column::AttemptEventOrdinal)
         .one(&transaction)
         .await
         .map_err(store_err)?;
@@ -360,7 +366,7 @@ pub(in crate::db) async fn park_turn_for_agent_run_wait_set(
 
     let totals = checked_checkpoint_totals(&turn, progress)?;
     let history_order =
-        next_tool_history_order_on(&transaction, crate::ChatId(turn.session_id)).await?;
+        next_tool_history_order_on(&transaction, crate::SessionId(turn.session_id)).await?;
     let call_model = entities::tool_call::ActiveModel {
         id: Set(wait_id.0),
         chat_id: Set(turn.session_id),
@@ -391,7 +397,7 @@ pub(in crate::db) async fn park_turn_for_agent_run_wait_set(
     let stored = entities::turn_agent_run_wait_set::ActiveModel {
         id: Set(wait_id.0),
         parent_run_id: Set(
-            crate::id::AgentRunId::foreground_for_chat(crate::id::ChatId(turn.session_id)).0,
+            crate::id::AgentRunId::foreground_for_chat(crate::id::SessionId(turn.session_id)).0,
         ),
         turn_id: Set(turn.id),
         session_id: Set(turn.session_id),
@@ -422,7 +428,7 @@ pub(in crate::db) async fn park_turn_for_agent_run_wait_set(
                 .map_err(|_| AgentError::Store("agent wait position exceeds i16".into()))?),
             child_run_id: Set(child_run_id.0),
             parent_run_id: Set(
-                crate::id::AgentRunId::foreground_for_chat(crate::id::ChatId(turn.session_id)).0,
+                crate::id::AgentRunId::foreground_for_chat(crate::id::SessionId(turn.session_id)).0,
             ),
             origin_turn_id: Set(turn.id),
             chat_id: Set(turn.session_id),
@@ -432,50 +438,50 @@ pub(in crate::db) async fn park_turn_for_agent_run_wait_set(
         .await
         .map_err(store_err)?;
     }
-    let parked = entities::code_turn::Entity::update_many()
+    let parked = entities::turn::Entity::update_many()
         .col_expr(
-            entities::code_turn::Column::Status,
+            entities::turn::Column::Status,
             sea_orm::sea_query::Expr::value(TurnRunStatus::WaitingForAgentRun.as_str()),
         )
         .col_expr(
-            entities::code_turn::Column::LeaseToken,
+            entities::turn::Column::LeaseToken,
             sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
         )
         .col_expr(
-            entities::code_turn::Column::LeaseExpiresAt,
+            entities::turn::Column::LeaseExpiresAt,
             sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
         )
         .col_expr(
-            entities::code_turn::Column::ModelSteps,
+            entities::turn::Column::ModelSteps,
             sea_orm::sea_query::Expr::value(totals.0),
         )
         .col_expr(
-            entities::code_turn::Column::InputTokens,
+            entities::turn::Column::InputTokens,
             sea_orm::sea_query::Expr::value(totals.1),
         )
         .col_expr(
-            entities::code_turn::Column::OutputTokens,
+            entities::turn::Column::OutputTokens,
             sea_orm::sea_query::Expr::value(totals.2),
         )
         .col_expr(
-            entities::code_turn::Column::CacheReadInputTokens,
+            entities::turn::Column::CacheReadInputTokens,
             sea_orm::sea_query::Expr::value(totals.3),
         )
         .col_expr(
-            entities::code_turn::Column::CacheCreationInputTokens,
+            entities::turn::Column::CacheCreationInputTokens,
             sea_orm::sea_query::Expr::value(totals.4),
         )
         .col_expr(
-            entities::code_turn::Column::UpdatedAt,
+            entities::turn::Column::UpdatedAt,
             sea_orm::sea_query::Expr::value(now),
         )
-        .filter(entities::code_turn::Column::Id.eq(turn.id))
-        .filter(entities::code_turn::Column::Status.eq(TurnRunStatus::Running.as_str()))
-        .filter(entities::code_turn::Column::LeaseToken.eq(lease_token))
-        .filter(entities::code_turn::Column::LeaseExpiresAt.eq(turn.lease_expires_at))
-        .filter(entities::code_turn::Column::LeaseExpiresAt.gt(now))
-        .filter(entities::code_turn::Column::SteerRevision.eq(expected_steer_revision))
-        .filter(entities::code_turn::Column::UpdatedAt.eq(turn.updated_at))
+        .filter(entities::turn::Column::Id.eq(turn.id))
+        .filter(entities::turn::Column::Status.eq(TurnRunStatus::Running.as_str()))
+        .filter(entities::turn::Column::LeaseToken.eq(lease_token))
+        .filter(entities::turn::Column::LeaseExpiresAt.eq(turn.lease_expires_at))
+        .filter(entities::turn::Column::LeaseExpiresAt.gt(now))
+        .filter(entities::turn::Column::SteerRevision.eq(expected_steer_revision))
+        .filter(entities::turn::Column::UpdatedAt.eq(turn.updated_at))
         .exec(&transaction)
         .await
         .map_err(store_err)?;
@@ -483,7 +489,7 @@ pub(in crate::db) async fn park_turn_for_agent_run_wait_set(
         transaction.rollback().await.map_err(store_err)?;
         return Ok(None);
     }
-    let turn = entities::code_turn::Entity::find_by_id(turn.id)
+    let turn = entities::turn::Entity::find_by_id(turn.id)
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -517,7 +523,7 @@ pub(in crate::db) async fn resume_turn_for_agent_run_wait_set(
     };
     let transaction = store.conn.begin().await.map_err(store_err)?;
     acquire_wait_set_lock(&transaction).await?;
-    if !acquire_chat_write_lock(&transaction, crate::ChatId(scope.session_id)).await?
+    if !acquire_chat_write_lock(&transaction, crate::SessionId(scope.session_id)).await?
         || !acquire_turn_write_lock(&transaction, TurnId(scope.turn_id)).await?
     {
         transaction.commit().await.map_err(store_err)?;
@@ -530,7 +536,7 @@ pub(in crate::db) async fn resume_turn_for_agent_run_wait_set(
         .map_err(store_err)?
         .expect("locked wait set exists");
     let members = load_members(&transaction, wait_id).await?;
-    let turn = entities::code_turn::Entity::find_by_id(stored.turn_id)
+    let turn = entities::turn::Entity::find_by_id(stored.turn_id)
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -542,7 +548,7 @@ pub(in crate::db) async fn resume_turn_for_agent_run_wait_set(
         if stored.resume_token != Some(resume_token)
             || turn.id != stored.turn_id
             || turn.session_id != stored.session_id
-            || crate::id::AgentRunId::foreground_for_chat(crate::id::ChatId(turn.session_id)).0
+            || crate::id::AgentRunId::foreground_for_chat(crate::id::SessionId(turn.session_id)).0
                 != stored.parent_run_id
         {
             transaction.commit().await.map_err(store_err)?;
@@ -584,7 +590,7 @@ pub(in crate::db) async fn resume_turn_for_agent_run_wait_set(
                 "resumed wait {wait_id} has an inconsistent tool receipt"
             )));
         }
-        let event_model = entities::code_event::Entity::find_by_id((
+        let event_model = entities::event::Entity::find_by_id((
             stored.session_id,
             stored.event_seq.ok_or_else(|| {
                 AgentError::Store(format!("resumed wait {wait_id} lost its event receipt"))
@@ -616,7 +622,7 @@ pub(in crate::db) async fn resume_turn_for_agent_run_wait_set(
             call: tool_call_from_model(call_model)?,
             wait: wait_from_models(stored, members)?,
             results,
-            event: SequencedEvent {
+            event: SequencedAgentEvent {
                 seq: event_model.seq,
                 event: stored_event,
             },
@@ -624,8 +630,9 @@ pub(in crate::db) async fn resume_turn_for_agent_run_wait_set(
         transaction.commit().await.map_err(store_err)?;
         return Ok(Some(outcome));
     }
+    let adapter_park = adapter_agent_run_park_matches(&turn, &stored, &members)?;
     if stored.status != TurnAgentRunWaitStatus::Waiting.as_str()
-        || turn.status != TurnRunStatus::WaitingForAgentRun.as_str()
+        || (turn.status != TurnRunStatus::WaitingForAgentRun.as_str() && !adapter_park)
         || turn.parent_shape_mismatch(&stored)
     {
         transaction.commit().await.map_err(store_err)?;
@@ -755,7 +762,7 @@ pub(in crate::db) async fn resume_turn_for_agent_run_wait_set(
     };
     let event_seq = append_event_on(
         &transaction,
-        crate::ChatId(stored.session_id),
+        crate::SessionId(stored.session_id),
         Some(TurnId(stored.turn_id)),
         Some(stored.park_lease_token),
         Some(stored.event_ordinal),
@@ -798,23 +805,26 @@ pub(in crate::db) async fn resume_turn_for_agent_run_wait_set(
         .exec(&transaction)
         .await
         .map_err(store_err)?;
-    let resumed = entities::code_turn::Entity::update_many()
+    let resumed = entities::turn::Entity::update_many()
         .col_expr(
-            entities::code_turn::Column::Status,
+            entities::turn::Column::Status,
             sea_orm::sea_query::Expr::value(TurnRunStatus::Resuming.as_str()),
         )
         .col_expr(
-            entities::code_turn::Column::AvailableAt,
+            entities::turn::Column::AvailableAt,
             sea_orm::sea_query::Expr::value(transition_at),
         )
         .col_expr(
-            entities::code_turn::Column::UpdatedAt,
+            entities::turn::Column::UpdatedAt,
             sea_orm::sea_query::Expr::value(transition_at),
         )
-        .filter(entities::code_turn::Column::Id.eq(turn.id))
-        .filter(entities::code_turn::Column::Status.eq(TurnRunStatus::WaitingForAgentRun.as_str()))
-        .filter(entities::code_turn::Column::AttemptCount.eq(stored.attempt_count))
-        .filter(entities::code_turn::Column::ClaimCount.eq(stored.claim_count))
+        .filter(entities::turn::Column::Id.eq(turn.id))
+        .filter(entities::turn::Column::Status.is_in([
+            TurnRunStatus::WaitingForAgentRun.as_str(),
+            crate::TurnStatus::Waiting.as_str(),
+        ]))
+        .filter(entities::turn::Column::AttemptCount.eq(stored.attempt_count))
+        .filter(entities::turn::Column::ClaimCount.eq(stored.claim_count))
         .exec(&transaction)
         .await
         .map_err(store_err)?;
@@ -825,7 +835,7 @@ pub(in crate::db) async fn resume_turn_for_agent_run_wait_set(
         transaction.rollback().await.map_err(store_err)?;
         return Ok(None);
     }
-    let turn = entities::code_turn::Entity::find_by_id(turn.id)
+    let turn = entities::turn::Entity::find_by_id(turn.id)
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -858,7 +868,7 @@ pub(in crate::db) async fn resume_turn_for_agent_run_wait_set(
         call: tool_call_from_model(call_model)?,
         wait: wait_from_models(stored, members)?,
         results: consumed_results,
-        event: SequencedEvent {
+        event: SequencedAgentEvent {
             seq: event_seq,
             event: payload,
         },
@@ -872,7 +882,7 @@ pub(in crate::db) async fn resume_turn_for_agent_run_wait_set(
 pub(in crate::db) async fn cancel_wait_set_for_turn_on<C>(
     conn: &C,
     turn_id: TurnId,
-    turn: &entities::code_turn::Model,
+    turn: &entities::turn::Model,
     now: chrono::DateTime<Utc>,
 ) -> Result<bool>
 where
@@ -894,7 +904,7 @@ where
     };
     if wait.session_id != turn.session_id
         || wait.parent_run_id
-            != crate::id::AgentRunId::foreground_for_chat(crate::id::ChatId(turn.session_id)).0
+            != crate::id::AgentRunId::foreground_for_chat(crate::id::SessionId(turn.session_id)).0
         || wait.attempt_count != turn.attempt_count
         || wait.claim_count != turn.claim_count
         || wait.closed_at.is_some()
@@ -914,7 +924,7 @@ where
 /// model call may wait on the same still-owned children again.
 pub(in crate::db) async fn interrupt_wait_set_for_steer_on<C>(
     conn: &C,
-    turn: &entities::code_turn::Model,
+    turn: &entities::turn::Model,
     now: chrono::DateTime<Utc>,
 ) -> Result<bool>
 where
@@ -934,7 +944,7 @@ where
     };
     if wait.session_id != turn.session_id
         || wait.parent_run_id
-            != crate::id::AgentRunId::foreground_for_chat(crate::id::ChatId(turn.session_id)).0
+            != crate::id::AgentRunId::foreground_for_chat(crate::id::SessionId(turn.session_id)).0
         || wait.attempt_count != turn.attempt_count
         || wait.claim_count != turn.claim_count
         || wait.closed_at.is_some()
@@ -1002,7 +1012,7 @@ where
     };
     let event_seq = append_event_on(
         conn,
-        crate::ChatId(wait.session_id),
+        crate::SessionId(wait.session_id),
         Some(TurnId(wait.turn_id)),
         Some(wait.park_lease_token),
         Some(wait.event_ordinal),
@@ -1059,7 +1069,30 @@ trait TurnShape {
     fn parent_shape_mismatch(&self, wait: &entities::turn_agent_run_wait_set::Model) -> bool;
 }
 
-impl TurnShape for entities::code_turn::Model {
+fn adapter_agent_run_park_matches(
+    turn: &entities::turn::Model,
+    wait: &entities::turn_agent_run_wait_set::Model,
+    members: &[entities::turn_agent_run_wait_member::Model],
+) -> Result<bool> {
+    let Some(crate::TurnParkWait::AgentRuns { run_ids }) =
+        super::client_wait::adapter_park_wait(turn)?
+    else {
+        return Ok(false);
+    };
+    let Some(park_ref) = turn.park_ref.as_deref() else {
+        return Ok(false);
+    };
+    let Ok(park_wait_id) = park_ref.parse::<CallId>() else {
+        return Ok(false);
+    };
+    let parsed_runs = run_ids
+        .iter()
+        .map(|id| id.parse::<AgentRunId>())
+        .collect::<std::result::Result<Vec<_>, _>>();
+    Ok(park_wait_id.0 == wait.id && parsed_runs.is_ok_and(|runs| runs == member_ids(members)))
+}
+
+impl TurnShape for entities::turn::Model {
     fn parent_shape_mismatch(&self, wait: &entities::turn_agent_run_wait_set::Model) -> bool {
         self.id != wait.turn_id
             || self.session_id != wait.session_id
@@ -1198,7 +1231,7 @@ fn wait_from_models(
         id: CallId(wait.id),
         parent_run_id: AgentRunId(wait.parent_run_id),
         turn_id: TurnId(wait.turn_id),
-        chat_id: crate::ChatId(wait.session_id),
+        chat_id: crate::SessionId(wait.session_id),
         child_run_ids: member_ids(&members),
         condition,
         park_lease_token: wait.park_lease_token,
@@ -1216,7 +1249,7 @@ fn wait_from_models(
 }
 
 fn checked_checkpoint_totals(
-    turn: &entities::code_turn::Model,
+    turn: &entities::turn::Model,
     progress: TurnCheckpointProgress,
 ) -> Result<(i32, i64, i64, i64, i64)> {
     let model_steps = turn

@@ -5,8 +5,8 @@ use chrono::Utc;
 use serde::Serialize;
 use tidebreak_core::storage::DecidePlanOutcome;
 use tidebreak_core::{
-    CallId, ChatId, CodeApprovalId, CodeSessionId, DecidePlanRequest, PendingPlanApproval,
-    PlanDecision, PlanDecisionChoice, TurnRunStatus, DEFAULT_ACCEPTED_PLAN_MODE,
+    ApprovalId, CallId, DecidePlanRequest, PendingPlanApproval, PlanDecision, PlanDecisionChoice,
+    SessionId, TurnRunStatus, DEFAULT_ACCEPTED_PLAN_MODE,
 };
 
 use crate::error::ServerError;
@@ -19,7 +19,7 @@ pub const MAX_PLAN_DECISION_BODY_BYTES: usize = 16 * 1024;
 
 pub async fn list_pending_plan_approvals(
     store: ScopedStore,
-    Path(chat_id): Path<ChatId>,
+    Path(chat_id): Path<SessionId>,
 ) -> Result<Json<Vec<PendingPlanApproval>>, ServerError> {
     store.require_chat(chat_id).await?;
     Ok(Json(store.list_pending_plan_approvals(chat_id).await?))
@@ -40,7 +40,7 @@ pub struct DecidedPlan {
 pub async fn decide_plan(
     State(state): State<AppState>,
     store: ScopedStore,
-    Path((chat_id, call_id)): Path<(ChatId, CallId)>,
+    Path((chat_id, call_id)): Path<(SessionId, CallId)>,
     Json(decision): Json<PlanDecision>,
 ) -> Result<Json<DecidedPlan>, ServerError> {
     store.require_chat(chat_id).await?;
@@ -53,11 +53,11 @@ pub async fn decide_plan(
         let proposed_mode = decision
             .permission_mode
             .is_none_or(|mode| mode == DEFAULT_ACCEPTED_PLAN_MODE);
-        if proposed_mode && code.has_worker(CodeSessionId(chat_id.0)) {
+        if proposed_mode && code.has_worker(SessionId(chat_id.0)) {
             match code
                 .decide_approval(
                     &store.owner_id(),
-                    CodeApprovalId(call_id.0),
+                    ApprovalId(call_id.0),
                     crate::code::runtime::ApprovalDecisionRequest::PlanDecision {
                         approve: matches!(decision.decision, PlanDecisionChoice::Accept),
                         feedback: decision.feedback.clone(),

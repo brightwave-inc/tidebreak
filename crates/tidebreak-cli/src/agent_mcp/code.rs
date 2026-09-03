@@ -8,9 +8,8 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 use tidebreak_core::{
-    ApprovalClass, CapLevel, CodeApprovalId, CodeSessionId, CodeTurnId, HarnessKind,
-    PermissionMode, RepoId, Result, Tool, ToolCtx, ToolErrorCategory, ToolOutput, ToolRegistry,
-    ToolSpec, WorkspaceId,
+    ApprovalClass, ApprovalId, CapLevel, HarnessKind, PermissionMode, RepoId, Result, SessionId,
+    Tool, ToolCtx, ToolErrorCategory, ToolOutput, ToolRegistry, ToolSpec, TurnId, WorkspaceId,
 };
 use tokio::sync::Mutex;
 
@@ -23,7 +22,7 @@ const DEFAULT_TIMEOUT_SECS: u64 = 300;
 
 struct CodeTools {
     state: Arc<AgentMcp>,
-    follows: Mutex<HashMap<CodeSessionId, CodeFollowState>>,
+    follows: Mutex<HashMap<SessionId, CodeFollowState>>,
 }
 
 /// Register every code-mode tool on `registry`.
@@ -243,7 +242,7 @@ fn default_create_permission_mode(caps: Option<&tidebreak_core::HarnessCaps>) ->
     }
 }
 
-async fn remember(tools: &CodeTools, session: CodeSessionId, result: &CodeTurnResult) {
+async fn remember(tools: &CodeTools, session: SessionId, result: &CodeTurnResult) {
     let Some(turn_id) = result.turn_id else {
         return;
     };
@@ -260,7 +259,7 @@ async fn remember(tools: &CodeTools, session: CodeSessionId, result: &CodeTurnRe
 
 fn parse_decision(
     value: &Value,
-) -> std::result::Result<(Option<CodeApprovalId>, bool, Option<String>), ToolOutput> {
+) -> std::result::Result<(Option<ApprovalId>, bool, Option<String>), ToolOutput> {
     let approval_id = match value.get("approval_id") {
         None | Some(Value::Null) => None,
         Some(id) => {
@@ -270,7 +269,7 @@ fn parse_decision(
                     "approval_id must be a UUID",
                 ));
             };
-            Some(CodeApprovalId::from_str(text).map_err(|_| {
+            Some(ApprovalId::from_str(text).map_err(|_| {
                 ToolOutput::failed(
                     ToolErrorCategory::InvalidArguments,
                     "approval_id must be a UUID",
@@ -705,7 +704,7 @@ impl Tool for CodeSessionSetPermissionModeTool {
     }
 
     async fn execute(&self, _ctx: &ToolCtx, args: Value) -> Result<ToolOutput> {
-        let session_id = match required_uuid::<CodeSessionId>(&args, "session_id") {
+        let session_id = match required_uuid::<SessionId>(&args, "session_id") {
             Ok(id) => id,
             Err(output) => return Ok(output),
         };
@@ -766,7 +765,7 @@ impl Tool for CodeRunTurnTool {
     }
 
     async fn execute(&self, _ctx: &ToolCtx, args: Value) -> Result<ToolOutput> {
-        let session_id = match required_uuid::<CodeSessionId>(&args, "session_id") {
+        let session_id = match required_uuid::<SessionId>(&args, "session_id") {
             Ok(id) => id,
             Err(output) => return Ok(output),
         };
@@ -817,7 +816,7 @@ impl Tool for CodeWaitTool {
     }
 
     async fn execute(&self, _ctx: &ToolCtx, args: Value) -> Result<ToolOutput> {
-        let session_id = match required_uuid::<CodeSessionId>(&args, "session_id") {
+        let session_id = match required_uuid::<SessionId>(&args, "session_id") {
             Ok(id) => id,
             Err(output) => return Ok(output),
         };
@@ -867,7 +866,7 @@ impl Tool for CodeApprovalsTool {
     }
 
     async fn execute(&self, _ctx: &ToolCtx, args: Value) -> Result<ToolOutput> {
-        let session_id = match required_uuid::<CodeSessionId>(&args, "session_id") {
+        let session_id = match required_uuid::<SessionId>(&args, "session_id") {
             Ok(id) => id,
             Err(output) => return Ok(output),
         };
@@ -914,7 +913,7 @@ impl Tool for CodeDecideTool {
     }
 
     async fn execute(&self, _ctx: &ToolCtx, args: Value) -> Result<ToolOutput> {
-        let session_id = match required_uuid::<CodeSessionId>(&args, "session_id") {
+        let session_id = match required_uuid::<SessionId>(&args, "session_id") {
             Ok(id) => id,
             Err(output) => return Ok(output),
         };
@@ -994,7 +993,7 @@ impl Tool for CodeInterruptTool {
     }
 
     async fn execute(&self, _ctx: &ToolCtx, args: Value) -> Result<ToolOutput> {
-        let session_id = match required_uuid::<CodeSessionId>(&args, "session_id") {
+        let session_id = match required_uuid::<SessionId>(&args, "session_id") {
             Ok(id) => id,
             Err(output) => return Ok(output),
         };
@@ -1033,7 +1032,7 @@ impl Tool for CodeTurnsTool {
     }
 
     async fn execute(&self, _ctx: &ToolCtx, args: Value) -> Result<ToolOutput> {
-        let session_id = match required_uuid::<CodeSessionId>(&args, "session_id") {
+        let session_id = match required_uuid::<SessionId>(&args, "session_id") {
             Ok(id) => id,
             Err(output) => return Ok(output),
         };
@@ -1102,7 +1101,7 @@ impl Tool for CodeDiffTool {
         let path = args.get("path").and_then(Value::as_str);
         let client = self.tools.state.client.lock().await;
         match client
-            .workspace_diff(workspace_id, None::<CodeTurnId>, path)
+            .workspace_diff(workspace_id, None::<TurnId>, path)
             .await
         {
             Ok(diff) => Ok(ToolOutput::text(if diff.diff.is_empty() {

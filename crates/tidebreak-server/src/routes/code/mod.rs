@@ -1,4 +1,4 @@
-//! `/code/*` routes: repos, workspaces, sessions, doctor, event stream.
+//! Code workspace routes plus shared session, approval, and update handlers.
 //!
 //! App-token routes here are owner-scoped through `ScopedCode`. Three route
 //! families use narrower bearer capabilities instead. The `/code/browser/*`
@@ -89,20 +89,20 @@ pub(crate) use triggers::{
 };
 #[cfg(test)]
 pub(crate) use types::{
-    CodeActionSnapshot, CodeAnalyticsSnapshot, CodeApprovalDecisionBody, CodeApprovalSnapshot,
+    ApprovalDecisionBody, ApprovalSnapshot, CodeActionSnapshot, CodeAnalyticsSnapshot,
     CodeCheckLogsSnapshot, CodeCommitSnapshot, CodeConnectPage, CodeDeliveryActionResult,
     CodeDeliveryPullRequestActionBody, CodeDeliveryPullRequestDetail, CodeDeliveryPullRequestFile,
     CodeDeliveryPullRequestQuery, CodeDeliveryPullRequestTarget, CodeDeliveryPullRequestsPage,
     CodeDeliveryRepositoriesSnapshot, CodeDeliveryRunActionBody, CodeDeliveryRunDetail,
     CodeDeliveryRunQuery, CodeDeliveryRunTarget, CodeDeliveryRunsPage, CodeForkBody,
     CodeForkTranscript, CodeGrantSnapshot, CodePrCommentsSnapshot, CodePushSnapshot,
-    CodeRepoSnapshot, CodeSessionDigest, CodeSessionSnapshot, CodeTerminalRead,
-    CodeTerminalSnapshot, CodeTriggerSnapshot, CodeTurnSnapshot, CodeUpdateNotice,
-    CodeWorkspaceBlob, CodeWorkspaceDiff, CodeWorkspaceFiles, CodeWorkspacePrSnapshot,
-    CodeWorkspacePullRequests, CodeWorkspaceSearch, CodeWorkspaceSnapshot, CodeWorkspaceTree,
-    CreateCodeTriggerBody, HarnessDoctorReport, HarnessModelList, MergeCodePrBody, QueuedCodeTurn,
-    ResolveCodeDeliveryRepositoriesBody, SequencedCodeEventFrame, SetCodeWorktreeRootBody,
-    UpdateCodeTriggerBody, WorkspaceTitleProposal,
+    CodeRepoSnapshot, CodeTerminalActivityNotice, CodeTerminalRead, CodeTerminalSnapshot,
+    CodeTriggerSnapshot, CodeWorkspaceBlob, CodeWorkspaceDiff, CodeWorkspaceFiles,
+    CodeWorkspacePrSnapshot, CodeWorkspacePullRequests, CodeWorkspaceSearch, CodeWorkspaceSnapshot,
+    CodeWorkspaceTree, CreateCodeTriggerBody, HarnessDoctorReport, HarnessModelList,
+    MergeCodePrBody, QueuedTurn, ResolveCodeDeliveryRepositoriesBody, SequencedEventFrame,
+    SessionDigest, SessionSnapshot, SetCodeWorktreeRootBody, TurnSnapshot, UpdateCodeTriggerBody,
+    UpdateNotice, WorkspaceTitleProposal,
 };
 pub(crate) use types::{
     CodeCloneDefaults, CodeCloneJobSnapshot, CodeGithubRepositories, CodeGithubRepository,

@@ -39,7 +39,7 @@ use std::future::Future as _;
 use std::io::{IsTerminal as _, Write as _};
 
 use tidebreak_core::{
-    AgentError, CallId, ChatId, RequestFolderAccessResult, Result, TurnId,
+    AgentError, CallId, RequestFolderAccessResult, Result, SessionId, TurnId,
     REQUEST_FOLDER_ACCESS_TOOL,
 };
 
@@ -102,7 +102,7 @@ impl OutputFormat {
 /// Boot the engine, run one turn, and return the process exit status.
 pub async fn run(
     prompt: String,
-    chat: Option<ChatId>,
+    chat: Option<SessionId>,
     format: OutputFormat,
     permission_mode: Option<String>,
     model: Option<String>,
@@ -196,7 +196,7 @@ impl Drop for FolderExecutorTask {
 async fn one_turn(
     client: &mut Client,
     executor_token: Option<&str>,
-    chat: ChatId,
+    chat: SessionId,
     prompt: &str,
     format: OutputFormat,
     driver: &mut Driver<tokio::io::BufReader<tokio::io::Stdin>>,
@@ -400,7 +400,7 @@ async fn one_turn(
 /// leave killing the process as the only way out.
 async fn settle(
     client: &Client,
-    chat: ChatId,
+    chat: SessionId,
     interaction: &Interaction,
     driver: &mut Driver<tokio::io::BufReader<tokio::io::Stdin>>,
     interrupt: &mut Interrupt,
@@ -503,7 +503,7 @@ fn interrupted() -> Halt {
 /// rather than hanging.
 async fn apply(
     client: &Client,
-    chat: ChatId,
+    chat: SessionId,
     interaction: &Interaction,
     decision: Decision,
     printer: &mut Printer,
@@ -560,7 +560,7 @@ async fn apply(
 /// exit status it produces.
 async fn halted(
     client: &Client,
-    chat: ChatId,
+    chat: SessionId,
     turn_id: TurnId,
     halt: &Halt,
     printer: &mut Printer,
@@ -585,7 +585,7 @@ async fn halted(
 /// cannot see, so it halts instead of falling quiet and exiting zero.
 async fn pending_plan(
     client: &Client,
-    chat: ChatId,
+    chat: SessionId,
     call_id: Option<CallId>,
 ) -> std::result::Result<Option<Interaction>, Halt> {
     let pending = client
@@ -601,7 +601,7 @@ async fn pending_plan(
 /// The question block behind a `UserQuestionsAsked` event, on the same terms.
 async fn pending_questions(
     client: &Client,
-    chat: ChatId,
+    chat: SessionId,
     call_id: Option<CallId>,
 ) -> std::result::Result<Option<Interaction>, Halt> {
     let pending = client
@@ -680,7 +680,7 @@ impl FolderDeclines {
         &mut self,
         client: &Client,
         executor_token: Option<&str>,
-        chat: ChatId,
+        chat: SessionId,
         call_id: CallId,
         printer: &mut Printer,
     ) {
@@ -772,7 +772,7 @@ impl Drop for FolderDeclines {
 async fn decline(
     client: &Client,
     executor_token: &str,
-    chat: ChatId,
+    chat: SessionId,
     call_id: CallId,
 ) -> Option<FolderDecline> {
     let mut wait = FOLDER_REQUEST_POLL;
@@ -838,7 +838,7 @@ enum ResolveDeclined {
 async fn resolve_declined(
     client: &Client,
     executor_token: &str,
-    chat: ChatId,
+    chat: SessionId,
     call_id: CallId,
 ) -> ResolveDeclined {
     let executor_id = uuid::Uuid::new_v4();
@@ -1048,7 +1048,7 @@ mod tests {
         drop(listener);
         let client = Client::attach(format!("http://{address}"), "token").expect("a client");
 
-        let halt = pending_plan(&client, ChatId::new(), None)
+        let halt = pending_plan(&client, SessionId::new(), None)
             .await
             .expect_err("an unreachable server must not read as nothing pending");
 

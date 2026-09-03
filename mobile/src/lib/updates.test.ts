@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import type { Attention, CodeSessionDigest } from "../generated/wire";
+import type {
+  Attention,
+  SessionDigest as CodeSessionDigest,
+} from "../generated/wire";
 import {
   EMPTY_UPDATES,
   attentionBadgeLabel,

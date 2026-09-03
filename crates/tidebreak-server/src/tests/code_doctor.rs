@@ -11,8 +11,7 @@ use axum::Router;
 use crate::code::CodeRuntime;
 use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
 use tidebreak_core::{
-    AttentionState, CapLevel, CodeSessionId, CodeSessionLifecycle, HarnessKind, ReasoningEffort,
-    Store,
+    AttentionState, CapLevel, HarnessKind, ReasoningEffort, SessionId, SessionLifecycle, Store,
 };
 use tidebreak_harness::AdapterRegistry;
 
@@ -39,7 +38,7 @@ async fn stall_sweep_marks_a_silent_running_session() {
         .json::<serde_json::Value>()
         .await
         .unwrap();
-    let parsed: CodeSessionId = json_id(&session).parse().unwrap();
+    let parsed: SessionId = json_id(&session).parse().unwrap();
     let mut row = tidebreak_core::db::code::get_session(
         &runtime.db,
         &tidebreak_core::OwnerId::local(),
@@ -48,7 +47,7 @@ async fn stall_sweep_marks_a_silent_running_session() {
     .await
     .unwrap()
     .unwrap();
-    row.lifecycle = CodeSessionLifecycle::Running;
+    row.lifecycle = SessionLifecycle::Running;
     tidebreak_core::db::code::save_session(&runtime.db, &row)
         .await
         .unwrap();
@@ -97,13 +96,13 @@ async fn stall_sweep_leaves_a_monitoring_session_working() {
         .json::<serde_json::Value>()
         .await
         .unwrap();
-    let parsed: CodeSessionId = json_id(&session).parse().unwrap();
+    let parsed: SessionId = json_id(&session).parse().unwrap();
     let owner = tidebreak_core::OwnerId::local();
     let mut row = tidebreak_core::db::code::get_session(&runtime.db, &owner, parsed)
         .await
         .unwrap()
         .unwrap();
-    row.lifecycle = CodeSessionLifecycle::Running;
+    row.lifecycle = SessionLifecycle::Running;
     tidebreak_core::db::code::save_session(&runtime.db, &row)
         .await
         .unwrap();
@@ -121,7 +120,7 @@ async fn stall_sweep_leaves_a_monitoring_session_working() {
         &owner,
         parsed,
         row.spawn_epoch,
-        &tidebreak_core::CodeEvent::ToolStarted {
+        &tidebreak_core::Event::ToolStarted {
             call_id: "monitor-1".into(),
             name: "Monitor".into(),
             detail: tidebreak_core::ToolDetail::Other {
@@ -861,7 +860,7 @@ async fn a_lost_resume_fences_the_session_instead_of_failing_every_turn() {
         .await
         .unwrap();
     let session_id = json_id(&session).to_owned();
-    let parsed: CodeSessionId = session_id.parse().unwrap();
+    let parsed: SessionId = session_id.parse().unwrap();
 
     // The session carries a ref from an earlier engine process.
     let mut row = tidebreak_core::db::code::get_session(

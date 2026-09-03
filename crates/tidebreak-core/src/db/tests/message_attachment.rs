@@ -18,7 +18,7 @@ fn image_for(bytes: &[u8], width: u32, height: u32) -> ImageRef {
 
 async fn accept_turn_with_images(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
     content: &str,
     images: &[ImageRef],
 ) -> TurnRun {
@@ -41,7 +41,7 @@ async fn accept_turn_with_images(
 /// deletes a chat has to leave its turns quiesced first.
 async fn accept_quiesced_turn_with_images(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
     content: &str,
     images: &[ImageRef],
 ) -> TurnRun {
@@ -415,7 +415,7 @@ async fn attachments_join_the_turn_idempotency_proof() {
     assert_eq!(attachments[0].image, image);
 }
 
-async fn assert_rejected_attachment_left_no_turn_rows(store: &DbStore, chat_id: ChatId) {
+async fn assert_rejected_attachment_left_no_turn_rows(store: &DbStore, chat_id: SessionId) {
     assert!(store.list_messages(chat_id).await.unwrap().is_empty());
     assert!(store
         .list_message_attachments(chat_id)
@@ -709,9 +709,8 @@ impl ReferenceClass {
 
 async fn pin_code_turn_attachment(store: &DbStore, blob: &DocumentBlob) {
     use crate::code::{
-        CodeRepo, CodeSession, CodeSessionId, CodeSessionKind, CodeSessionLifecycle, CodeTurn,
-        CodeTurnId, CodeTurnStatus, CodeWorkspace, CodeWorkspaceStatus, HarnessKind, RepoId,
-        WorkspaceId,
+        CodeRepo, CodeWorkspace, CodeWorkspaceStatus, HarnessKind, RepoId, Session, SessionId,
+        SessionKind, SessionLifecycle, Turn, TurnId, TurnStatus, WorkspaceId,
     };
     use crate::db::code::{insert_repo, insert_session, insert_turn, insert_workspace};
     use crate::image::ImageRef;
@@ -762,14 +761,14 @@ async fn pin_code_turn_attachment(store: &DbStore, blob: &DocumentBlob) {
     )
     .await
     .unwrap();
-    let session_id = CodeSessionId::new();
+    let session_id = SessionId::new();
     insert_session(
         store,
-        &CodeSession {
+        &Session {
             id: session_id,
             owner: crate::OwnerId::local(),
             workspace_id: Some(workspace_id),
-            kind: CodeSessionKind::Interactive,
+            kind: SessionKind::Interactive,
             harness_kind: HarnessKind::ClaudeCode,
             harness_version: Some("scripted".into()),
             harness_resume_ref: None,
@@ -777,7 +776,7 @@ async fn pin_code_turn_attachment(store: &DbStore, blob: &DocumentBlob) {
             model: None,
             reasoning_effort: None,
             fast_mode: false,
-            lifecycle: CodeSessionLifecycle::Idle,
+            lifecycle: SessionLifecycle::Idle,
             fence_reason: None,
             child_pid: None,
             child_process_identity: None,
@@ -793,11 +792,11 @@ async fn pin_code_turn_attachment(store: &DbStore, blob: &DocumentBlob) {
     insert_turn(
         store,
         &crate::OwnerId::local(),
-        &CodeTurn {
-            id: CodeTurnId::new(),
+        &Turn {
+            id: TurnId::new(),
             session_id,
             ordinal: 1,
-            status: CodeTurnStatus::Completed,
+            status: TurnStatus::Completed,
             model: None,
             fast_mode: false,
             user_input: "look".into(),

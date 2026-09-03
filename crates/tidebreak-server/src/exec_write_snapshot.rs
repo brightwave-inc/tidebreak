@@ -26,9 +26,9 @@ use tidebreak_code_execution::{
     ScratchDir, StagedChange, WriteSnapshotSink,
 };
 use tidebreak_core::{
-    sha256_hex, BlobStore, ChatId, DocumentBlob, ExecFileChange, ExecFileRejectionReason,
-    ExecFileSnapshot, ExecFileSnapshotRecord, ExecUndoState, ImageMediaType, ScratchPriorContents,
-    Store, TurnId, MAX_EXEC_WORKSPACE_FILE_BYTES,
+    sha256_hex, BlobStore, DocumentBlob, ExecFileChange, ExecFileRejectionReason, ExecFileSnapshot,
+    ExecFileSnapshotRecord, ExecUndoState, ImageMediaType, ScratchPriorContents, SessionId, Store,
+    TurnId, MAX_EXEC_WORKSPACE_FILE_BYTES,
 };
 use ts_rs::TS;
 
@@ -59,7 +59,7 @@ impl TurnSnapshotSink {
     /// Commit the journal for `turn_id`, making its retained bytes live.
     pub(crate) async fn commit(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         turn_id: TurnId,
     ) -> tidebreak_core::Result<()> {
         let files = std::mem::take(
@@ -86,7 +86,7 @@ impl TurnSnapshotSink {
 pub(crate) struct TurnScratchJournal {
     sink: TurnSnapshotSink,
     folder: std::path::PathBuf,
-    chat_id: ChatId,
+    chat_id: SessionId,
     turn_id: TurnId,
 }
 
@@ -96,7 +96,7 @@ impl TurnScratchJournal {
         blobs: Arc<dyn BlobStore>,
         blob_writes: Arc<BlobWriteGuard>,
         folder: std::path::PathBuf,
-        chat_id: ChatId,
+        chat_id: SessionId,
         turn_id: TurnId,
     ) -> Self {
         Self {
@@ -223,7 +223,7 @@ impl WriteSnapshotSink for TurnSnapshotSink {
 /// Result of replaying one turn's durable file-change journal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ExecTurnUndoOutcome {
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     pub turn_id: TurnId,
     pub files: Vec<ExecFileUndoOutcome>,
 }
@@ -268,7 +268,7 @@ pub(crate) enum ExecFileUndoStatus {
 pub(crate) async fn undo_turn_file_changes(
     store: &dyn Store,
     blobs: &dyn BlobStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
     turn_id: TurnId,
 ) -> tidebreak_core::Result<ExecTurnUndoOutcome> {
     let snapshots = store.list_exec_file_snapshots(chat_id).await?;
@@ -296,7 +296,7 @@ pub(crate) async fn undo_turn_file_changes(
 pub(crate) async fn undo_one_file_change(
     store: &dyn Store,
     blobs: &dyn BlobStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
     turn_id: TurnId,
     snapshot_id: uuid::Uuid,
 ) -> tidebreak_core::Result<Option<ExecFileUndoOutcome>> {
@@ -428,7 +428,7 @@ const FILE_PREVIEW_TIMEOUT: Duration = Duration::from_secs(20);
 pub(crate) async fn list_file_change_summaries(
     store: &dyn Store,
     blobs: &dyn BlobStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
     scratch_folder: Option<&Path>,
 ) -> tidebreak_core::Result<std::collections::HashMap<TurnId, Vec<ExecFileChangeSummary>>> {
     let mut by_turn = std::collections::HashMap::<TurnId, Vec<_>>::new();
@@ -668,7 +668,7 @@ pub(crate) enum ExecFilePreviewError {
 }
 
 pub(crate) struct ExecFilePreviewRequest<'a> {
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     pub turn_id: TurnId,
     pub snapshot_id: uuid::Uuid,
     pub revision: ExecFilePreviewRevision,
@@ -1081,7 +1081,7 @@ mod tests {
 
         let store = Arc::new(DbStore::connect(&database_url).await.unwrap());
         let chat = Chat {
-            id: ChatId::new(),
+            id: SessionId::new(),
             project_id: None,
             title: None,
             model: None,
@@ -1222,7 +1222,7 @@ mod tests {
         );
         let store = Arc::new(DbStore::connect(&database_url).await.unwrap());
         let chat = Chat {
-            id: ChatId::new(),
+            id: SessionId::new(),
             project_id: None,
             title: None,
             model: None,
@@ -1326,7 +1326,7 @@ mod tests {
 
         let store = DbStore::connect(&database_url).await.unwrap();
         let chat = Chat {
-            id: ChatId::new(),
+            id: SessionId::new(),
             project_id: None,
             title: None,
             model: None,

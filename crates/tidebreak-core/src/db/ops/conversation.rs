@@ -9,10 +9,10 @@ use sea_orm::{
 use serde_json::Value;
 
 use crate::attention::{AttentionSource, AttentionState};
-use crate::code::{CodeSessionId, CodeSessionKind, CodeSessionLifecycle, HarnessKind};
+use crate::code::{HarnessKind, SessionKind, SessionLifecycle};
 use crate::error::{AgentError, Result};
-use crate::event::{AgentEvent, SequencedEvent};
-use crate::id::{AgentRunId, CallId, ChatId, HostRootId, MessageId, ProjectId, TurnId};
+use crate::event::{AgentEvent, SequencedAgentEvent};
+use crate::id::{AgentRunId, CallId, HostRootId, MessageId, ProjectId, SessionId, TurnId};
 use crate::model::{
     validate_chat_root_projection, validate_chat_root_projection_against_project, Chat,
     ChatRootAttachment, Message, OwnerId, ReasoningEffort, Role, RootAttachmentOrigin,
@@ -44,7 +44,7 @@ pub(in crate::db) const MESSAGE_IDENTITY_OWNER_STEER: &str = "turn_steer";
 pub(in crate::db) async fn reserve_message_identity_on<C>(
     conn: &C,
     id: MessageId,
-    chat_id: ChatId,
+    chat_id: SessionId,
     turn_id: TurnId,
     owner: &str,
 ) -> Result<bool>
@@ -73,7 +73,7 @@ where
 pub(in crate::db) async fn transfer_steer_message_identity_on<C>(
     conn: &C,
     id: MessageId,
-    chat_id: ChatId,
+    chat_id: SessionId,
     turn_id: TurnId,
 ) -> Result<bool>
 where
@@ -94,7 +94,7 @@ where
     Ok(transferred.rows_affected == 1)
 }
 
-pub(in crate::db) async fn next_message_seq_on<C>(conn: &C, chat_id: ChatId) -> Result<i64>
+pub(in crate::db) async fn next_message_seq_on<C>(conn: &C, chat_id: SessionId) -> Result<i64>
 where
     C: ConnectionTrait,
 {
@@ -117,8 +117,8 @@ where
 /// applies this and never sees one.
 pub(in crate::db) fn internal_sessions() -> sea_orm::Condition {
     sea_orm::Condition::all()
-        .add(entities::code_session::Column::WorkspaceId.is_null())
-        .add(entities::code_session::Column::HarnessKind.eq(HarnessKind::Internal.as_str()))
+        .add(entities::session::Column::WorkspaceId.is_null())
+        .add(entities::session::Column::HarnessKind.eq(HarnessKind::Internal.as_str()))
 }
 
 pub(in crate::db) async fn create_chat(
@@ -220,7 +220,7 @@ where
     // at rest until a session worker attaches. Attention stays derived from
     // `turn_run` (see `ops::chat_attention`); the idle state written here
     // only keeps the column well formed.
-    entities::code_session::ActiveModel {
+    entities::session::ActiveModel {
         id: Set(chat.id.0),
         // The local owner rides the column default (which also keeps this
         // insert valid against a pre-owner schema in the upgrade tests); only
@@ -230,7 +230,7 @@ where
             _ => sea_orm::ActiveValue::NotSet,
         },
         workspace_id: Set(None),
-        kind: Set(CodeSessionKind::Interactive.as_str().to_owned()),
+        kind: Set(SessionKind::Interactive.as_str().to_owned()),
         harness_kind: Set(HarnessKind::Internal.as_str().to_owned()),
         harness_version: Set(None),
         harness_resume_ref: Set(None),
@@ -251,7 +251,7 @@ where
             None => sea_orm::ActiveValue::NotSet,
         },
         fast_mode: Set(false),
-        lifecycle: Set(CodeSessionLifecycle::Idle.as_str().to_owned()),
+        lifecycle: Set(SessionLifecycle::Idle.as_str().to_owned()),
         fence_reason: Set(None),
         child_pid: Set(None),
         child_process_identity: Set(None),
@@ -304,7 +304,7 @@ where
 /// [`create_chat_with_project_defaults`] seeds a new conversation.
 pub(in crate::db) async fn move_chat_to_project(
     store: &DbStore,
-    id: ChatId,
+    id: SessionId,
     project_id: Option<ProjectId>,
     owner: Option<&OwnerId>,
 ) -> Result<MoveChatOutcome> {
@@ -325,10 +325,10 @@ pub(in crate::db) async fn move_chat_to_project(
     }
     // Someone else's conversation is indistinguishable from an absent one
     // (#853). The owner cannot change under the write lock above.
-    let mut query = entities::code_session::Entity::find_by_id(id.0);
+    let mut query = entities::session::Entity::find_by_id(id.0);
     if let Some(owner) = owner {
         query = query
-            .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+            .filter(entities::session::Column::Owner.eq(owner.as_str()))
             .filter(internal_sessions());
     }
     let Some(model) = query.one(&transaction).await.map_err(store_err)? else {
@@ -390,16 +390,16 @@ pub(in crate::db) async fn move_chat_to_project(
     validate_chat_root_projection_against_project(&chat, &project_roots)
         .map_err(|message| AgentError::Store(message.into()))?;
 
-    let updated = entities::code_session::Entity::update_many()
+    let updated = entities::session::Entity::update_many()
         .col_expr(
-            entities::code_session::Column::ProjectId,
+            entities::session::Column::ProjectId,
             sea_orm::sea_query::Expr::value(project_id.map(|project_id| project_id.0)),
         )
         .col_expr(
-            entities::code_session::Column::AttachmentRevision,
+            entities::session::Column::AttachmentRevision,
             sea_orm::sea_query::Expr::value(chat.attachment_revision),
         )
-        .filter(entities::code_session::Column::Id.eq(id.0))
+        .filter(entities::session::Column::Id.eq(id.0))
         .exec(&transaction)
         .await
         .map_err(store_err)?;
@@ -426,15 +426,15 @@ pub(in crate::db) async fn move_chat_to_project(
 
 pub(in crate::db) async fn set_chat_model(
     store: &DbStore,
-    id: ChatId,
+    id: SessionId,
     model: Option<String>,
 ) -> Result<()> {
-    entities::code_session::Entity::update_many()
+    entities::session::Entity::update_many()
         .col_expr(
-            entities::code_session::Column::Model,
+            entities::session::Column::Model,
             sea_orm::sea_query::Expr::value(model),
         )
-        .filter(entities::code_session::Column::Id.eq(id.0))
+        .filter(entities::session::Column::Id.eq(id.0))
         .exec(&store.conn)
         .await
         .map_err(store_err)?;
@@ -443,15 +443,15 @@ pub(in crate::db) async fn set_chat_model(
 
 pub(in crate::db) async fn set_chat_title(
     store: &DbStore,
-    id: ChatId,
+    id: SessionId,
     title: Option<String>,
 ) -> Result<()> {
-    entities::code_session::Entity::update_many()
+    entities::session::Entity::update_many()
         .col_expr(
-            entities::code_session::Column::Title,
+            entities::session::Column::Title,
             sea_orm::sea_query::Expr::value(title),
         )
-        .filter(entities::code_session::Column::Id.eq(id.0))
+        .filter(entities::session::Column::Id.eq(id.0))
         .exec(&store.conn)
         .await
         .map_err(store_err)?;
@@ -465,16 +465,16 @@ pub(in crate::db) async fn set_chat_title(
 /// in flight, and two derived writes cannot both apply.
 pub(in crate::db) async fn set_chat_title_if_unset(
     store: &DbStore,
-    id: ChatId,
+    id: SessionId,
     title: &str,
 ) -> Result<bool> {
-    let result = entities::code_session::Entity::update_many()
+    let result = entities::session::Entity::update_many()
         .col_expr(
-            entities::code_session::Column::Title,
+            entities::session::Column::Title,
             sea_orm::sea_query::Expr::value(title),
         )
-        .filter(entities::code_session::Column::Id.eq(id.0))
-        .filter(entities::code_session::Column::Title.is_null())
+        .filter(entities::session::Column::Id.eq(id.0))
+        .filter(entities::session::Column::Title.is_null())
         .exec(&store.conn)
         .await
         .map_err(store_err)?;
@@ -484,7 +484,7 @@ pub(in crate::db) async fn set_chat_title_if_unset(
 #[allow(clippy::too_many_arguments)]
 pub(in crate::db) async fn update_chat_metadata(
     store: &DbStore,
-    id: ChatId,
+    id: SessionId,
     title: Option<Option<String>>,
     model: Option<Option<String>>,
     reasoning_effort: Option<Option<ReasoningEffort>>,
@@ -498,31 +498,31 @@ pub(in crate::db) async fn update_chat_metadata(
         && permission_mode.is_none()
         && network_policy.is_none()
     {
-        let mut query = entities::code_session::Entity::find_by_id(id.0);
+        let mut query = entities::session::Entity::find_by_id(id.0);
         if let Some(owner) = owner {
             query = query
-                .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+                .filter(entities::session::Column::Owner.eq(owner.as_str()))
                 .filter(internal_sessions());
         }
         return Ok(query.one(&store.conn).await.map_err(store_err)?.is_some());
     }
 
-    let mut update = entities::code_session::Entity::update_many();
+    let mut update = entities::session::Entity::update_many();
     if let Some(title) = title {
         update = update.col_expr(
-            entities::code_session::Column::Title,
+            entities::session::Column::Title,
             sea_orm::sea_query::Expr::value(title),
         );
     }
     if let Some(model) = model {
         update = update.col_expr(
-            entities::code_session::Column::Model,
+            entities::session::Column::Model,
             sea_orm::sea_query::Expr::value(model),
         );
     }
     if let Some(reasoning_effort) = reasoning_effort {
         update = update.col_expr(
-            entities::code_session::Column::ReasoningEffort,
+            entities::session::Column::ReasoningEffort,
             sea_orm::sea_query::Expr::value(
                 reasoning_effort.map(|effort| effort.as_str().to_owned()),
             ),
@@ -530,7 +530,7 @@ pub(in crate::db) async fn update_chat_metadata(
     }
     if let Some(permission_mode) = permission_mode {
         update = update.col_expr(
-            entities::code_session::Column::PermissionMode,
+            entities::session::Column::PermissionMode,
             sea_orm::sea_query::Expr::value(permission_mode.map(|mode| mode.as_str().to_owned())),
         );
     }
@@ -539,14 +539,14 @@ pub(in crate::db) async fn update_chat_metadata(
             AgentError::Store(format!("could not encode chat network policy: {error}"))
         })?;
         update = update.col_expr(
-            entities::code_session::Column::NetworkPolicy,
+            entities::session::Column::NetworkPolicy,
             sea_orm::sea_query::Expr::value(encoded),
         );
     }
-    let mut update = update.filter(entities::code_session::Column::Id.eq(id.0));
+    let mut update = update.filter(entities::session::Column::Id.eq(id.0));
     if let Some(owner) = owner {
         update = update
-            .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+            .filter(entities::session::Column::Owner.eq(owner.as_str()))
             .filter(internal_sessions());
     }
     let result = update.exec(&store.conn).await.map_err(store_err)?;
@@ -560,19 +560,19 @@ pub(in crate::db) async fn update_chat_metadata(
 /// it out of that signature spares every caller a positional `None`.
 pub(in crate::db) async fn set_chat_memory_incognito(
     store: &DbStore,
-    id: ChatId,
+    id: SessionId,
     memory_incognito: bool,
     owner: Option<&OwnerId>,
 ) -> Result<bool> {
-    let mut update = entities::code_session::Entity::update_many()
+    let mut update = entities::session::Entity::update_many()
         .col_expr(
-            entities::code_session::Column::MemoryIncognito,
+            entities::session::Column::MemoryIncognito,
             sea_orm::sea_query::Expr::value(memory_incognito),
         )
-        .filter(entities::code_session::Column::Id.eq(id.0));
+        .filter(entities::session::Column::Id.eq(id.0));
     if let Some(owner) = owner {
         update = update
-            .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+            .filter(entities::session::Column::Owner.eq(owner.as_str()))
             .filter(internal_sessions());
     }
     let result = update.exec(&store.conn).await.map_err(store_err)?;
@@ -581,12 +581,12 @@ pub(in crate::db) async fn set_chat_memory_incognito(
 
 pub(in crate::db) async fn get_chat(
     store: &DbStore,
-    id: ChatId,
+    id: SessionId,
     owner: Option<&OwnerId>,
 ) -> Result<Option<Chat>> {
-    let mut query = entities::code_session::Entity::find_by_id(id.0).filter(internal_sessions());
+    let mut query = entities::session::Entity::find_by_id(id.0).filter(internal_sessions());
     if let Some(owner) = owner {
-        query = query.filter(entities::code_session::Column::Owner.eq(owner.as_str()));
+        query = query.filter(entities::session::Column::Owner.eq(owner.as_str()));
     }
     let mut rows = query
         .find_with_related(entities::chat_root_attachment::Entity)
@@ -599,8 +599,8 @@ pub(in crate::db) async fn get_chat(
         .transpose()
 }
 
-pub(in crate::db) async fn chat_owner(store: &DbStore, id: ChatId) -> Result<Option<OwnerId>> {
-    let Some(model) = entities::code_session::Entity::find_by_id(id.0)
+pub(in crate::db) async fn chat_owner(store: &DbStore, id: SessionId) -> Result<Option<OwnerId>> {
+    let Some(model) = entities::session::Entity::find_by_id(id.0)
         .one(&store.conn)
         .await
         .map_err(store_err)?
@@ -614,9 +614,9 @@ pub(in crate::db) async fn list_chats(
     store: &DbStore,
     owner: Option<&OwnerId>,
 ) -> Result<Vec<Chat>> {
-    let mut query = entities::code_session::Entity::find().filter(internal_sessions());
+    let mut query = entities::session::Entity::find().filter(internal_sessions());
     if let Some(owner) = owner {
-        query = query.filter(entities::code_session::Column::Owner.eq(owner.as_str()));
+        query = query.filter(entities::session::Column::Owner.eq(owner.as_str()));
     }
     let mut chats = query
         .find_with_related(entities::chat_root_attachment::Entity)
@@ -645,7 +645,7 @@ pub(in crate::db) async fn list_chats(
 /// deletion fail-closed.
 pub(in crate::db) async fn delete_chat(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
     owner: Option<&OwnerId>,
 ) -> Result<DeleteChatOutcome> {
     let transaction = store.conn.begin().await.map_err(store_err)?;
@@ -659,10 +659,9 @@ pub(in crate::db) async fn delete_chat(
     // and this cascade is the only deleter of a conversation row: it never
     // reaches one that has a workspace.
     let mut conversation =
-        entities::code_session::Entity::find_by_id(chat_id.0).filter(internal_sessions());
+        entities::session::Entity::find_by_id(chat_id.0).filter(internal_sessions());
     if let Some(owner) = owner {
-        conversation =
-            conversation.filter(entities::code_session::Column::Owner.eq(owner.as_str()));
+        conversation = conversation.filter(entities::session::Column::Owner.eq(owner.as_str()));
     }
     if conversation
         .one(&transaction)
@@ -708,9 +707,9 @@ pub(in crate::db) async fn delete_chat(
         return Ok(DeleteChatOutcome::RootAttachmentStateUnresolved);
     }
 
-    let active_turn = entities::code_turn::Entity::find()
-        .filter(entities::code_turn::Column::SessionId.eq(chat_id.0))
-        .filter(entities::code_turn::Column::Status.is_not_in([
+    let active_turn = entities::turn::Entity::find()
+        .filter(entities::turn::Column::SessionId.eq(chat_id.0))
+        .filter(entities::turn::Column::Status.is_not_in([
             "completed",
             "failed",
             "cancelled",
@@ -832,8 +831,8 @@ pub(in crate::db) async fn delete_chat(
         .map_err(store_err)?;
     // Approval-bearing tool calls own immutable receipts in the event journal.
     // Remove those references before deleting their journal rows.
-    entities::code_event::Entity::delete_many()
-        .filter(entities::code_event::Column::SessionId.eq(chat_id.0))
+    entities::event::Entity::delete_many()
+        .filter(entities::event::Column::SessionId.eq(chat_id.0))
         .exec(&transaction)
         .await
         .map_err(store_err)?;
@@ -894,10 +893,10 @@ pub(in crate::db) async fn delete_chat(
     entities::code_turn_failure::Entity::delete_many()
         .filter(
             entities::code_turn_failure::Column::TurnId.in_subquery(
-                entities::code_turn::Entity::find()
+                entities::turn::Entity::find()
                     .select_only()
-                    .column(entities::code_turn::Column::Id)
-                    .filter(entities::code_turn::Column::SessionId.eq(chat_id.0))
+                    .column(entities::turn::Column::Id)
+                    .filter(entities::turn::Column::SessionId.eq(chat_id.0))
                     .into_query(),
             ),
         )
@@ -907,18 +906,18 @@ pub(in crate::db) async fn delete_chat(
     entities::code_turn_claim::Entity::delete_many()
         .filter(
             entities::code_turn_claim::Column::TurnId.in_subquery(
-                entities::code_turn::Entity::find()
+                entities::turn::Entity::find()
                     .select_only()
-                    .column(entities::code_turn::Column::Id)
-                    .filter(entities::code_turn::Column::SessionId.eq(chat_id.0))
+                    .column(entities::turn::Column::Id)
+                    .filter(entities::turn::Column::SessionId.eq(chat_id.0))
                     .into_query(),
             ),
         )
         .exec(&transaction)
         .await
         .map_err(store_err)?;
-    entities::code_turn::Entity::delete_many()
-        .filter(entities::code_turn::Column::SessionId.eq(chat_id.0))
+    entities::turn::Entity::delete_many()
+        .filter(entities::turn::Column::SessionId.eq(chat_id.0))
         .exec(&transaction)
         .await
         .map_err(store_err)?;
@@ -967,12 +966,11 @@ pub(in crate::db) async fn delete_chat(
     // They key the session row, so they go first, and their image blobs join
     // the retirement candidates on the same terms as the chat-side ones.
     for blob_id in
-        code_session_ops::delete_session_dependents_on(&transaction, CodeSessionId(chat_id.0))
-            .await?
+        code_session_ops::delete_session_dependents_on(&transaction, SessionId(chat_id.0)).await?
     {
         blob_ops::enqueue_on(&transaction, blob_id).await?;
     }
-    entities::code_session::Entity::delete_by_id(chat_id.0)
+    entities::session::Entity::delete_by_id(chat_id.0)
         .exec(&transaction)
         .await
         .map_err(store_err)?;
@@ -988,7 +986,7 @@ pub(in crate::db) async fn delete_chat(
 /// must remain after the cursor for the renderer to reconstruct it on replay.
 pub(in crate::db) async fn get_chat_transcript(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
     owner: Option<&OwnerId>,
 ) -> Result<Option<ChatTranscriptSnapshot>> {
     let transaction = store.conn.begin().await.map_err(store_err)?;
@@ -998,8 +996,8 @@ pub(in crate::db) async fn get_chat_transcript(
     }
     // Someone else's transcript is indistinguishable from an absent one (#853).
     if let Some(owner) = owner {
-        let owned = entities::code_session::Entity::find_by_id(chat_id.0)
-            .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+        let owned = entities::session::Entity::find_by_id(chat_id.0)
+            .filter(entities::session::Column::Owner.eq(owner.as_str()))
             .filter(internal_sessions())
             .one(&transaction)
             .await
@@ -1042,13 +1040,13 @@ pub(in crate::db) async fn get_chat_transcript(
 /// given. A turn that invoked nothing contributes no entry.
 async fn list_message_invoked_skills_on<C>(
     conn: &C,
-    chat_id: ChatId,
+    chat_id: SessionId,
 ) -> Result<Vec<MessageInvokedSkills>>
 where
     C: ConnectionTrait,
 {
-    let turns = entities::code_turn::Entity::find()
-        .filter(entities::code_turn::Column::SessionId.eq(chat_id.0))
+    let turns = entities::turn::Entity::find()
+        .filter(entities::turn::Column::SessionId.eq(chat_id.0))
         .all(conn)
         .await
         .map_err(store_err)?;
@@ -1098,22 +1096,22 @@ where
 /// genuinely message-less terminal turn retains its streamed text here.
 async fn list_terminal_turns_on<C>(
     conn: &C,
-    chat_id: ChatId,
+    chat_id: SessionId,
     messages: &[Message],
 ) -> Result<Vec<ChatTerminalTurnSnapshot>>
 where
     C: ConnectionTrait,
 {
-    let turns = entities::code_turn::Entity::find()
-        .filter(entities::code_turn::Column::SessionId.eq(chat_id.0))
-        .filter(entities::code_turn::Column::Status.is_in([
+    let turns = entities::turn::Entity::find()
+        .filter(entities::turn::Column::SessionId.eq(chat_id.0))
+        .filter(entities::turn::Column::Status.is_in([
             "completed",
             "failed",
             "cancelled",
             "interrupted",
         ]))
-        .order_by_asc(entities::code_turn::Column::EndedAt)
-        .order_by_asc(entities::code_turn::Column::Id)
+        .order_by_asc(entities::turn::Column::EndedAt)
+        .order_by_asc(entities::turn::Column::Id)
         .all(conn)
         .await
         .map_err(store_err)?;
@@ -1191,10 +1189,10 @@ where
             "json_extract(event, '$.type') IN ('{TEXT_DELTA_TAG}', '{REASONING_DELTA_TAG}', '{TURN_REFUSED_TAG}')"
         ),
     };
-    let events = entities::code_event::Entity::find()
-        .filter(entities::code_event::Column::SessionId.eq(chat_id.0))
+    let events = entities::event::Entity::find()
+        .filter(entities::event::Column::SessionId.eq(chat_id.0))
         .filter(sea_orm::sea_query::Expr::cust(tag_matches))
-        .order_by_asc(entities::code_event::Column::Seq)
+        .order_by_asc(entities::event::Column::Seq)
         .all(conn)
         .await
         .map_err(store_err)?;
@@ -1218,7 +1216,7 @@ where
     Ok(snapshots)
 }
 
-/// Serialized `CodeEvent` tags of the chat rows that rebuild terminal turn
+/// Serialized `Event` tags of the chat rows that rebuild terminal turn
 /// presentation and tool-call bodies (`crate::chat_journal`).
 /// Journaled bytes are a persisted shape, so the transcript test pins them
 /// rather than trusting the enum names to stay in step by inspection.
@@ -1234,14 +1232,14 @@ const TOOL_CALL_COMPLETED_TAG: &str = "tool_completed";
 /// renderers duplicate or skip activity.
 async fn list_terminal_tool_activity_on<C>(
     conn: &C,
-    chat_id: ChatId,
+    chat_id: SessionId,
 ) -> Result<Vec<ChatToolActivitySnapshot>>
 where
     C: ConnectionTrait,
 {
-    let terminal_turn_ids: HashSet<_> = entities::code_turn::Entity::find()
-        .filter(entities::code_turn::Column::SessionId.eq(chat_id.0))
-        .filter(entities::code_turn::Column::Status.is_in([
+    let terminal_turn_ids: HashSet<_> = entities::turn::Entity::find()
+        .filter(entities::turn::Column::SessionId.eq(chat_id.0))
+        .filter(entities::turn::Column::Status.is_in([
             "completed",
             "failed",
             "cancelled",
@@ -1338,14 +1336,14 @@ fn tool_activity_from_call(
 /// owns the wording for a live call, so sending prose here meant maintaining a
 /// second copy of it plus an inverse lookup to get back to a name — and a copy
 /// change on either side silently broke hydration.
-async fn terminal_event_cursor_on<C>(conn: &C, chat_id: ChatId) -> Result<i64>
+async fn terminal_event_cursor_on<C>(conn: &C, chat_id: SessionId) -> Result<i64>
 where
     C: ConnectionTrait,
 {
-    entities::code_event::Entity::find()
-        .filter(entities::code_event::Column::SessionId.eq(chat_id.0))
-        .filter(entities::code_event::Column::Terminal.eq(true))
-        .order_by_desc(entities::code_event::Column::Seq)
+    entities::event::Entity::find()
+        .filter(entities::event::Column::SessionId.eq(chat_id.0))
+        .filter(entities::event::Column::Terminal.eq(true))
+        .order_by_desc(entities::event::Column::Seq)
         .one(conn)
         .await
         .map_err(store_err)?
@@ -1397,7 +1395,10 @@ pub(in crate::db) async fn append_message(store: &DbStore, message: &Message) ->
     Ok(())
 }
 
-pub(in crate::db) async fn list_messages(store: &DbStore, chat_id: ChatId) -> Result<Vec<Message>> {
+pub(in crate::db) async fn list_messages(
+    store: &DbStore,
+    chat_id: SessionId,
+) -> Result<Vec<Message>> {
     list_messages_on(&store.conn, chat_id).await
 }
 
@@ -1405,12 +1406,12 @@ pub(in crate::db) async fn list_messages(store: &DbStore, chat_id: ChatId) -> Re
 /// cancel committed (#1182), which context assembly annotates as interrupted.
 pub(in crate::db) async fn list_cancelled_output_message_ids(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
 ) -> Result<Vec<MessageId>> {
-    let turns = entities::code_turn::Entity::find()
-        .filter(entities::code_turn::Column::SessionId.eq(chat_id.0))
-        .filter(entities::code_turn::Column::Status.is_in(["cancelled", "interrupted"]))
-        .filter(entities::code_turn::Column::OutputMessageId.is_not_null())
+    let turns = entities::turn::Entity::find()
+        .filter(entities::turn::Column::SessionId.eq(chat_id.0))
+        .filter(entities::turn::Column::Status.is_in(["cancelled", "interrupted"]))
+        .filter(entities::turn::Column::OutputMessageId.is_not_null())
         .all(&store.conn)
         .await
         .map_err(store_err)?;
@@ -1420,7 +1421,7 @@ pub(in crate::db) async fn list_cancelled_output_message_ids(
         .collect())
 }
 
-async fn list_messages_on<C>(conn: &C, chat_id: ChatId) -> Result<Vec<Message>>
+async fn list_messages_on<C>(conn: &C, chat_id: SessionId) -> Result<Vec<Message>>
 where
     C: ConnectionTrait,
 {
@@ -1437,7 +1438,7 @@ where
 
 pub(in crate::db) async fn list_tool_calls(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
 ) -> Result<Vec<ToolCallRecord>> {
     entities::tool_call::Entity::find()
         .filter(entities::tool_call::Column::ChatId.eq(chat_id.0))
@@ -1452,7 +1453,7 @@ pub(in crate::db) async fn list_tool_calls(
 
 pub(in crate::db) async fn append_event(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
     event: &AgentEvent,
 ) -> Result<i64> {
     // Serialize sequence allocation on the durable chat row. This is also the
@@ -1462,8 +1463,8 @@ pub(in crate::db) async fn append_event(
     if !acquire_chat_write_lock(&transaction, chat_id).await? {
         return Err(AgentError::Store(format!("chat {chat_id} does not exist")));
     }
-    if entities::code_turn::Entity::find()
-        .filter(entities::code_turn::Column::SessionId.eq(chat_id.0))
+    if entities::turn::Entity::find()
+        .filter(entities::turn::Column::SessionId.eq(chat_id.0))
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -1487,7 +1488,7 @@ pub(in crate::db) async fn append_event(
 /// row could not name the one it resolved.
 pub(in crate::db) async fn append_chat_event(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
     event: &AgentEvent,
 ) -> Result<i64> {
     if is_terminal_event(event) {
@@ -1506,7 +1507,7 @@ pub(in crate::db) async fn append_chat_event(
 
 pub(in crate::db) async fn append_turn_event(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
     turn_id: TurnId,
     lease_token: uuid::Uuid,
     attempt_event_ordinal: i32,
@@ -1541,7 +1542,7 @@ pub(in crate::db) async fn append_turn_event(
 /// as a single append would.
 pub(in crate::db) async fn append_turn_events(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
     turn_id: TurnId,
     lease_token: uuid::Uuid,
     now: chrono::DateTime<Utc>,
@@ -1601,10 +1602,10 @@ pub(in crate::db) async fn append_turn_events(
         return Ok(None);
     }
 
-    let existing = entities::code_event::Entity::find()
-        .filter(entities::code_event::Column::LeaseToken.eq(lease_token))
+    let existing = entities::event::Entity::find()
+        .filter(entities::event::Column::LeaseToken.eq(lease_token))
         .filter(
-            entities::code_event::Column::AttemptEventOrdinal
+            entities::event::Column::AttemptEventOrdinal
                 .is_in(events.iter().map(|entry| entry.attempt_event_ordinal)),
         )
         .all(&transaction)
@@ -1652,7 +1653,7 @@ pub(in crate::db) async fn append_turn_events(
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     };
-    let Some(turn) = entities::code_turn::Entity::find_by_id(turn_id.0)
+    let Some(turn) = entities::turn::Entity::find_by_id(turn_id.0)
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -1708,7 +1709,7 @@ pub(in crate::db) async fn append_turn_events(
 
 pub(in crate::db::ops) async fn append_event_on<C>(
     conn: &C,
-    chat_id: ChatId,
+    chat_id: SessionId,
     turn_id: Option<TurnId>,
     lease_token: Option<uuid::Uuid>,
     attempt_event_ordinal: Option<i32>,
@@ -1734,13 +1735,13 @@ where
 }
 
 /// The sequence the next event appended to this chat takes.
-async fn next_event_seq<C>(conn: &C, chat_id: ChatId) -> Result<i64>
+async fn next_event_seq<C>(conn: &C, chat_id: SessionId) -> Result<i64>
 where
     C: ConnectionTrait,
 {
-    let last = entities::code_event::Entity::find()
-        .filter(entities::code_event::Column::SessionId.eq(chat_id.0))
-        .order_by_desc(entities::code_event::Column::Seq)
+    let last = entities::event::Entity::find()
+        .filter(entities::event::Column::SessionId.eq(chat_id.0))
+        .order_by_desc(entities::event::Column::Seq)
         .one(conn)
         .await
         .map_err(store_err)?;
@@ -1757,7 +1758,7 @@ where
 #[allow(clippy::too_many_arguments)]
 async fn insert_event_row<C>(
     conn: &C,
-    chat_id: ChatId,
+    chat_id: SessionId,
     seq: i64,
     turn_id: Option<TurnId>,
     lease_token: Option<uuid::Uuid>,
@@ -1768,15 +1769,15 @@ async fn insert_event_row<C>(
 where
     C: ConnectionTrait,
 {
-    let owner = entities::code_session::Entity::find_by_id(chat_id.0)
+    let owner = entities::session::Entity::find_by_id(chat_id.0)
         .select_only()
-        .column(entities::code_session::Column::Owner)
+        .column(entities::session::Column::Owner)
         .into_tuple::<String>()
         .one(conn)
         .await
         .map_err(store_err)?
         .ok_or_else(|| AgentError::Store(format!("chat {chat_id} does not exist")))?;
-    entities::code_event::ActiveModel {
+    entities::event::ActiveModel {
         session_id: Set(chat_id.0),
         seq: Set(seq),
         owner: Set(owner),
@@ -1808,14 +1809,14 @@ fn is_terminal_event(event: &AgentEvent) -> bool {
 
 pub(in crate::db) async fn list_events(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
     after: i64,
-) -> Result<Vec<SequencedEvent>> {
+) -> Result<Vec<SequencedAgentEvent>> {
     decode_sequenced_events(
-        entities::code_event::Entity::find()
-            .filter(entities::code_event::Column::SessionId.eq(chat_id.0))
-            .filter(entities::code_event::Column::Seq.gt(after))
-            .order_by_asc(entities::code_event::Column::Seq)
+        entities::event::Entity::find()
+            .filter(entities::event::Column::SessionId.eq(chat_id.0))
+            .filter(entities::event::Column::Seq.gt(after))
+            .order_by_asc(entities::event::Column::Seq)
             .all(&store.conn)
             .await
             .map_err(store_err)?,
@@ -1831,9 +1832,9 @@ pub(in crate::db) async fn list_events(
 /// `?` as a jsonb operator).
 pub(in crate::db) async fn list_events_for_call(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
     call_id: CallId,
-) -> Result<Vec<SequencedEvent>> {
+) -> Result<Vec<SequencedAgentEvent>> {
     let call_id = call_id.0;
     let matches = match store.conn.get_database_backend() {
         DatabaseBackend::Postgres => format!(
@@ -1846,10 +1847,10 @@ pub(in crate::db) async fn list_events_for_call(
         ),
     };
     decode_sequenced_events(
-        entities::code_event::Entity::find()
-            .filter(entities::code_event::Column::SessionId.eq(chat_id.0))
+        entities::event::Entity::find()
+            .filter(entities::event::Column::SessionId.eq(chat_id.0))
             .filter(sea_orm::sea_query::Expr::cust(matches))
-            .order_by_asc(entities::code_event::Column::Seq)
+            .order_by_asc(entities::event::Column::Seq)
             .all(&store.conn)
             .await
             .map_err(store_err)?,
@@ -1859,13 +1860,13 @@ pub(in crate::db) async fn list_events_for_call(
 /// The chat reading of journal rows. Rows only an external engine writes
 /// have none and are skipped, so a chat replay may show gaps in `seq`; the
 /// cursor contract only needs the numbers to ascend.
-fn decode_sequenced_events(rows: Vec<entities::code_event::Model>) -> Result<Vec<SequencedEvent>> {
+fn decode_sequenced_events(rows: Vec<entities::event::Model>) -> Result<Vec<SequencedAgentEvent>> {
     rows.into_iter()
         .filter_map(|model| {
             crate::chat_journal::decode_chat_event(model.event)
                 .transpose()
                 .map(|event| {
-                    Ok(SequencedEvent {
+                    Ok(SequencedAgentEvent {
                         seq: model.seq,
                         event: event?,
                     })
@@ -1875,7 +1876,7 @@ fn decode_sequenced_events(rows: Vec<entities::code_event::Model>) -> Result<Vec
 }
 
 fn chat_from_models(
-    model: entities::code_session::Model,
+    model: entities::session::Model,
     rows: Vec<entities::chat_root_attachment::Model>,
 ) -> Result<Chat> {
     if rows.len() > MAX_ROOT_ATTACHMENTS {
@@ -1903,7 +1904,7 @@ fn chat_from_models(
         })
         .collect::<Result<Vec<_>>>()?;
     let chat = Chat {
-        id: ChatId(model.id),
+        id: SessionId(model.id),
         project_id: model.project_id.map(ProjectId),
         title: model.title,
         model: model.model,
@@ -1955,7 +1956,7 @@ pub(in crate::db) fn attachment_origin_from_db(value: &str) -> Result<RootAttach
 fn message_from_model(model: entities::message::Model) -> Result<Message> {
     Ok(Message {
         id: MessageId(model.id),
-        chat_id: ChatId(model.chat_id),
+        chat_id: SessionId(model.chat_id),
         turn_id: TurnId(model.turn_id),
         role: role_from_db(&model.role)?,
         content: model.content,
@@ -2014,7 +2015,7 @@ mod tests {
     fn terminal_call(name: &str, error_code: Option<&str>) -> ToolCallRecord {
         ToolCallRecord {
             id: CallId::new(),
-            chat_id: ChatId::new(),
+            chat_id: SessionId::new(),
             turn_id: crate::TurnId::new(),
             provider_id: "provider".into(),
             name: name.into(),

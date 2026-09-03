@@ -15,12 +15,12 @@ use chrono::Utc;
 use futures::channel::mpsc::{unbounded, TryRecvError, UnboundedReceiver};
 use futures::StreamExt;
 use tidebreak_core::{
-    Agent, AgentConfig, AgentError, AgentEvent, AgentRunExecutionLocation, AgentRunWaitCondition,
-    AgentRunWaitSetCheckpointRequest, AgentTurnOutcome, BlobStore, CallId,
+    Agent, AgentConfig, AgentError, AgentEvent, AgentRunExecutionLocation, AgentRunId,
+    AgentRunWaitCondition, AgentRunWaitSetCheckpointRequest, AgentTurnOutcome, BlobStore, CallId,
     CheckpointSandboxSpawnOutcome, ClaimedAgentEvent, CompleteTurnRunOutcome,
     ForegroundAgentWaitRequest, MessageId, ParkTurnForAgentRunWaitSetOutcome,
     ParkTurnForClientCallOutcome, RecordTurnFailureOutcome, Result, SandboxAgentSpawnRequest,
-    SandboxSpawnCheckpointRequest, SecretProvider, SequencedEvent, Store, ToolRegistry,
+    SandboxSpawnCheckpointRequest, SecretProvider, SequencedAgentEvent, Store, ToolRegistry,
     ToolScratch, TurnCheckpointProgress, TurnEventAppend, TurnFailureRetry, TurnId, TurnRun,
     TurnRunStatus, SPAWN_SANDBOX_AGENT_TOOL, WAIT_FOR_AGENTS_TOOL,
 };
@@ -88,12 +88,22 @@ impl Default for LegDriverConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LegDriverOutcome {
     Completed(TurnId),
-    WaitingForApproval { turn_id: TurnId, call_id: CallId },
-    WaitingForClient(TurnId),
-    WaitingForAgentRun(TurnId),
+    WaitingForApproval {
+        turn_id: TurnId,
+        call_id: CallId,
+    },
+    WaitingForClient {
+        turn_id: TurnId,
+        call_id: CallId,
+    },
+    WaitingForAgentRun {
+        turn_id: TurnId,
+        call_id: CallId,
+        run_ids: Vec<AgentRunId>,
+    },
     Resuming(TurnId),
     Cancelled(TurnId),
     Failed(TurnId),
@@ -146,7 +156,7 @@ pub(crate) struct LegDriver {
     /// per turn would invalidate the conversation's prompt cache on every
     /// accepted record.
     pinned_memory_digests: Arc<
-        std::sync::Mutex<std::collections::HashMap<tidebreak_core::ChatId, PinnedMemoryDigest>>,
+        std::sync::Mutex<std::collections::HashMap<tidebreak_core::SessionId, PinnedMemoryDigest>>,
     >,
     diagnostics: Arc<crate::diagnostics::Diagnostics>,
     config: LegDriverConfig,
@@ -468,7 +478,7 @@ fn freeze_foreground_turn_surface_with_folders(
 /// the channel closes after its already-buffered emissions are consumed.
 async fn drain_committed_events(
     events: &EventBus,
-    chat_id: tidebreak_core::ChatId,
+    chat_id: tidebreak_core::SessionId,
     emissions: &mut EmissionBatcher,
 ) {
     // Pending events the batcher collected but never journaled are discarded
@@ -514,7 +524,7 @@ fn expect_ordinal_run(turn_id: TurnId, ordinal: i32, batch: &[TurnEventAppend]) 
 
 fn client_checkpoint_is_valid(
     tools: &ToolRegistry,
-    chat_id: tidebreak_core::ChatId,
+    chat_id: tidebreak_core::SessionId,
     turn_id: TurnId,
     request: &tidebreak_core::ClientToolCallRequest,
 ) -> bool {
@@ -567,7 +577,7 @@ enum ResolutionState {
     Retry,
     /// Boxed: an event carrying a tool's projected command output dwarfs the
     /// other variants, and this enum is returned on every resolution poll.
-    Resolved(Box<SequencedEvent>),
+    Resolved(Box<SequencedAgentEvent>),
     Cancelling,
     Lost,
 }
@@ -741,7 +751,7 @@ impl LegDriver {
         &self,
         scratch: ToolScratch,
         folder: PathBuf,
-        chat_id: tidebreak_core::ChatId,
+        chat_id: tidebreak_core::SessionId,
         turn_id: TurnId,
     ) -> ToolScratch {
         let Some((blobs, blob_writes)) = self.blobs.clone().zip(self.blob_writes.clone()) else {
@@ -2217,7 +2227,10 @@ impl LegDriver {
                                         call_id: request.id,
                                     });
                                 }
-                                return Ok(LegDriverOutcome::WaitingForClient(turn.id));
+                                return Ok(LegDriverOutcome::WaitingForClient {
+                                    turn_id: turn.id,
+                                    call_id: request.id,
+                                });
                             }
                             Ok(Some(ParkTurnForClientCallOutcome::SteerPending(_)))
                             | Ok(Some(ParkTurnForClientCallOutcome::OutputSuperseded(_))) => {
@@ -2714,7 +2727,11 @@ impl LegDriver {
                                 // This also drives the durable ready-set scan
                                 // when every child completed before the park.
                                 self.sandbox_agent_wake.notify_one();
-                                return Ok(LegDriverOutcome::WaitingForAgentRun(turn.id));
+                                return Ok(LegDriverOutcome::WaitingForAgentRun {
+                                    turn_id: turn.id,
+                                    call_id: checkpoint.call_id,
+                                    run_ids: checkpoint.child_run_ids.clone(),
+                                });
                             }
                             Ok(Some(ParkTurnForAgentRunWaitSetOutcome::SteerPending(_)))
                             | Ok(Some(ParkTurnForAgentRunWaitSetOutcome::OutputSuperseded(_))) => {
@@ -2929,7 +2946,7 @@ impl LegDriver {
                     for (entry, seq) in events.iter().zip(seqs) {
                         self.publish(
                             turn.chat_id,
-                            SequencedEvent {
+                            SequencedAgentEvent {
                                 seq,
                                 event: entry.event.clone(),
                             },
@@ -3365,7 +3382,7 @@ impl LegDriver {
         tokio::time::sleep(self.config.failure_delay).await;
     }
 
-    fn publish(&self, chat_id: tidebreak_core::ChatId, event: SequencedEvent) {
+    fn publish(&self, chat_id: tidebreak_core::SessionId, event: SequencedAgentEvent) {
         let _ = self.events.sender(chat_id).send(event);
     }
 }
@@ -3375,7 +3392,10 @@ impl LegDriver {
 /// The path is derived rather than stored, so the turn worker that journals a
 /// scratch write and the transcript that labels it later agree without either
 /// one persisting a host path.
-pub(crate) fn private_chat_scratch_path(root: &Path, chat_id: tidebreak_core::ChatId) -> PathBuf {
+pub(crate) fn private_chat_scratch_path(
+    root: &Path,
+    chat_id: tidebreak_core::SessionId,
+) -> PathBuf {
     root.join(chat_id.to_string())
 }
 
@@ -3383,7 +3403,7 @@ pub(crate) fn private_chat_scratch_path(root: &Path, chat_id: tidebreak_core::Ch
 /// data directory. Product records and API responses never receive this path.
 fn private_chat_scratch(
     root: &Path,
-    chat_id: tidebreak_core::ChatId,
+    chat_id: tidebreak_core::SessionId,
 ) -> std::io::Result<ToolScratch> {
     let mut root_builder = fs::DirBuilder::new();
     root_builder.recursive(true);
@@ -3563,8 +3583,8 @@ fn turn_worker_outcome_label(outcome: &Result<LegDriverOutcome>) -> &'static str
     match outcome {
         Ok(LegDriverOutcome::Completed(_)) => "completed",
         Ok(LegDriverOutcome::WaitingForApproval { .. }) => "waiting_for_approval",
-        Ok(LegDriverOutcome::WaitingForClient(_)) => "waiting_for_client",
-        Ok(LegDriverOutcome::WaitingForAgentRun(_)) => "waiting_for_agent_run",
+        Ok(LegDriverOutcome::WaitingForClient { .. }) => "waiting_for_client",
+        Ok(LegDriverOutcome::WaitingForAgentRun { .. }) => "waiting_for_agent_run",
         Ok(LegDriverOutcome::Resuming(_)) => "resuming",
         Ok(LegDriverOutcome::Cancelled(_)) => "cancelled",
         Ok(LegDriverOutcome::Failed(_)) => "failed",
@@ -3822,8 +3842,8 @@ mod committed_event_drain_tests {
     #[test]
     fn private_scratch_is_isolated_per_chat() {
         let root = tempfile::tempdir().unwrap();
-        let first_chat = tidebreak_core::ChatId::new();
-        let second_chat = tidebreak_core::ChatId::new();
+        let first_chat = tidebreak_core::SessionId::new();
+        let second_chat = tidebreak_core::SessionId::new();
 
         let _first = private_chat_scratch(root.path(), first_chat).unwrap();
         let _second = private_chat_scratch(root.path(), second_chat).unwrap();
@@ -3855,7 +3875,7 @@ mod committed_event_drain_tests {
 
         let root = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
-        let chat_id = tidebreak_core::ChatId::new();
+        let chat_id = tidebreak_core::SessionId::new();
         symlink(outside.path(), root.path().join(chat_id.to_string())).unwrap();
 
         let error = private_chat_scratch(root.path(), chat_id).unwrap_err();
@@ -3873,7 +3893,7 @@ mod committed_event_drain_tests {
         let root = parent.path().join("scratch");
         symlink(outside.path(), &root).unwrap();
 
-        let error = private_chat_scratch(&root, tidebreak_core::ChatId::new()).unwrap_err();
+        let error = private_chat_scratch(&root, tidebreak_core::SessionId::new()).unwrap_err();
 
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
@@ -3886,7 +3906,7 @@ mod committed_event_drain_tests {
 
         let root = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
-        let chat_id = tidebreak_core::ChatId::new();
+        let chat_id = tidebreak_core::SessionId::new();
         let original = root.path().join(chat_id.to_string());
         let moved = root.path().join("pinned");
         let scratch = private_chat_scratch(root.path(), chat_id).unwrap();
@@ -3913,7 +3933,7 @@ mod committed_event_drain_tests {
     #[tokio::test]
     async fn lease_loss_drain_discards_pending_and_publishes_committed_events() {
         let events = EventBus::default();
-        let chat_id = tidebreak_core::ChatId::new();
+        let chat_id = tidebreak_core::SessionId::new();
         let mut live = events.subscribe(chat_id);
         let (sender, receiver) = unbounded();
         sender
@@ -3924,7 +3944,7 @@ mod committed_event_drain_tests {
                 },
             })
             .unwrap();
-        let committed = SequencedEvent {
+        let committed = SequencedAgentEvent {
             seq: 7,
             event: AgentEvent::UserSteered {
                 message_id: MessageId::new(),
@@ -3989,7 +4009,7 @@ mod committed_event_drain_tests {
         for (ordinal, text) in [(2, "Hel"), (3, "lo"), (4, ", ")] {
             sender.unbounded_send(pending_delta(ordinal, text)).unwrap();
         }
-        let committed = SequencedEvent {
+        let committed = SequencedAgentEvent {
             seq: 9,
             event: AgentEvent::UserSteered {
                 message_id: MessageId::new(),
@@ -4179,7 +4199,7 @@ mod committed_event_drain_tests {
             tidebreak_core::ApprovalClass::ReadOnly,
             tidebreak_core::validate_request_folder_access_arguments,
         );
-        let chat_id = tidebreak_core::ChatId::new();
+        let chat_id = tidebreak_core::SessionId::new();
         let turn_id = TurnId::new();
         let mut request = tidebreak_core::ClientToolCallRequest {
             id: tidebreak_core::CallId::new(),

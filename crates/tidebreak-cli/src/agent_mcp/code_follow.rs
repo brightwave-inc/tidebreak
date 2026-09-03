@@ -12,13 +12,11 @@ use std::time::Duration;
 use serde::Serialize;
 use serde_json::{json, Value};
 use tidebreak_core::{
-    AgentError, CodeApprovalId, CodeEvent, CodeSessionId, CodeTurnId, CodeTurnStatus, Result,
+    AgentError, ApprovalId, Event, Result, SessionId, TurnId, TurnStatus as CoreTurnStatus,
 };
 
 use crate::api::client::Client;
-use crate::api::code::{
-    is_turn_terminal, CodeApprovalSnapshot, CodeTurnSnapshot, SubmitTurnResponse,
-};
+use crate::api::code::{is_turn_terminal, ApprovalSnapshot, SubmitTurnResponse, TurnSnapshot};
 use crate::event_stream::{CodeEventStream, CodeStreamNext};
 
 use super::TurnStatus;
@@ -29,7 +27,7 @@ pub(crate) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
 /// Per-session follow cursor so `code_wait` / `code_decide` resume the same turn.
 #[derive(Debug, Clone)]
 pub(crate) struct CodeFollowState {
-    pub turn_id: CodeTurnId,
+    pub turn_id: TurnId,
     pub last_seq: i64,
     pub assistant_text: String,
     pub queued: bool,
@@ -44,13 +42,13 @@ pub(crate) struct CodeTurnResult {
     pub pending: Option<Value>,
     pub events_cursor: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub turn_id: Option<CodeTurnId>,
+    pub turn_id: Option<TurnId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub queue_position: Option<i64>,
 }
 
 struct FollowGate {
-    expected: Option<CodeTurnId>,
+    expected: Option<TurnId>,
     ours: bool,
     seen_start: bool,
 }
@@ -64,7 +62,7 @@ impl FollowGate {
         }
     }
 
-    fn attach(turn: CodeTurnId) -> Self {
+    fn attach(turn: TurnId) -> Self {
         Self {
             expected: Some(turn),
             ours: true,
@@ -72,7 +70,7 @@ impl FollowGate {
         }
     }
 
-    fn waiting_for(turn: CodeTurnId) -> Self {
+    fn waiting_for(turn: TurnId) -> Self {
         Self {
             expected: Some(turn),
             ours: false,
@@ -80,11 +78,11 @@ impl FollowGate {
         }
     }
 
-    fn turn_id(&self) -> Option<CodeTurnId> {
+    fn turn_id(&self) -> Option<TurnId> {
         self.expected
     }
 
-    fn on_ran(&mut self, id: CodeTurnId) {
+    fn on_ran(&mut self, id: TurnId) {
         if self.ours && self.expected == Some(id) {
             return;
         }
@@ -95,8 +93,8 @@ impl FollowGate {
         self.expected = Some(id);
     }
 
-    fn on_frame(&mut self, replayed: bool, event: &CodeEvent) -> bool {
-        if let CodeEvent::TurnStarted { turn_id } = event {
+    fn on_frame(&mut self, replayed: bool, event: &Event) -> bool {
+        if let Event::TurnStarted { turn_id } = event {
             let matches_bound = self.expected == Some(*turn_id);
             let live_unbound = self.expected.is_none() && !replayed;
             if matches_bound || live_unbound {
@@ -112,11 +110,7 @@ impl FollowGate {
     }
 }
 
-fn running(
-    assistant_text: String,
-    events_cursor: i64,
-    turn_id: Option<CodeTurnId>,
-) -> CodeTurnResult {
+fn running(assistant_text: String, events_cursor: i64, turn_id: Option<TurnId>) -> CodeTurnResult {
     CodeTurnResult {
         status: TurnStatus::Running,
         assistant_text,
@@ -128,25 +122,25 @@ fn running(
 }
 
 fn from_turn_status(
-    status: CodeTurnStatus,
+    status: CoreTurnStatus,
     assistant_text: String,
     events_cursor: i64,
-    turn_id: CodeTurnId,
+    turn_id: TurnId,
 ) -> CodeTurnResult {
     let status = match status {
-        CodeTurnStatus::Completed => TurnStatus::Completed,
-        CodeTurnStatus::Failed => TurnStatus::Failed,
-        CodeTurnStatus::Interrupted => TurnStatus::Cancelled,
+        CoreTurnStatus::Completed => TurnStatus::Completed,
+        CoreTurnStatus::Failed => TurnStatus::Failed,
+        CoreTurnStatus::Interrupted => TurnStatus::Cancelled,
         // A parked turn is still in flight from a follower's seat.
-        CodeTurnStatus::Running
-        | CodeTurnStatus::Waiting
-        | CodeTurnStatus::Queued
-        | CodeTurnStatus::Cancelling
-        | CodeTurnStatus::WaitingForClient
-        | CodeTurnStatus::WaitingForAgentRun
-        | CodeTurnStatus::CancellingClient
-        | CodeTurnStatus::Resuming
-        | CodeTurnStatus::RetryWait => TurnStatus::Running,
+        CoreTurnStatus::Running
+        | CoreTurnStatus::Waiting
+        | CoreTurnStatus::Queued
+        | CoreTurnStatus::Cancelling
+        | CoreTurnStatus::WaitingForClient
+        | CoreTurnStatus::WaitingForAgentRun
+        | CoreTurnStatus::CancellingClient
+        | CoreTurnStatus::Resuming
+        | CoreTurnStatus::RetryWait => TurnStatus::Running,
     };
     CodeTurnResult {
         status,
@@ -158,7 +152,7 @@ fn from_turn_status(
     }
 }
 
-fn pending_approval(approval: &CodeApprovalSnapshot) -> Value {
+fn pending_approval(approval: &ApprovalSnapshot) -> Value {
     json!({
         "type": "approval",
         "approval_id": approval.id,
@@ -181,9 +175,9 @@ fn reconcile_assistant_text(streamed: &mut String, complete: &str) {
 
 async fn pending_for_turn(
     client: &Client,
-    session: CodeSessionId,
-    turn_id: Option<CodeTurnId>,
-) -> Result<Option<CodeApprovalSnapshot>> {
+    session: SessionId,
+    turn_id: Option<TurnId>,
+) -> Result<Option<ApprovalSnapshot>> {
     let pending = client.list_approvals(Some(session), true).await?;
     Ok(pending
         .into_iter()
@@ -192,25 +186,25 @@ async fn pending_for_turn(
 
 async fn turn_by_id(
     client: &Client,
-    session: CodeSessionId,
-    turn_id: CodeTurnId,
-) -> Result<Option<CodeTurnSnapshot>> {
+    session: SessionId,
+    turn_id: TurnId,
+) -> Result<Option<TurnSnapshot>> {
     let turns = client.list_session_turns(session).await?;
     Ok(turns.into_iter().find(|turn| turn.id == turn_id))
 }
 
-async fn running_turn_id(client: &Client, session: CodeSessionId) -> Result<Option<CodeTurnId>> {
+async fn running_turn_id(client: &Client, session: SessionId) -> Result<Option<TurnId>> {
     let turns = client.list_session_turns(session).await?;
     Ok(turns
         .into_iter()
         .rev()
-        .find(|turn| turn.status == CodeTurnStatus::Running)
+        .find(|turn| turn.status == CoreTurnStatus::Running)
         .map(|turn| turn.id))
 }
 
 async fn timeout_result(
     client: &Client,
-    session: CodeSessionId,
+    session: SessionId,
     gate: &FollowGate,
     assistant_text: String,
     events_cursor: i64,
@@ -224,8 +218,8 @@ async fn timeout_result(
 
 async fn reconcile_lost_socket(
     client: &Client,
-    session: CodeSessionId,
-    turn_id: Option<CodeTurnId>,
+    session: SessionId,
+    turn_id: Option<TurnId>,
     assistant_text: String,
     events_cursor: i64,
     stream_error: AgentError,
@@ -271,14 +265,14 @@ async fn reconcile_lost_socket(
 
 async fn apply_ours(
     client: &Client,
-    session: CodeSessionId,
+    session: SessionId,
     stream: &CodeEventStream,
     gate: &FollowGate,
     assistant_text: &mut String,
-    frame: &crate::api::code::SequencedCodeEventFrame,
+    frame: &crate::api::code::SequencedEventFrame,
 ) -> Result<Option<CodeTurnResult>> {
     match &frame.event {
-        CodeEvent::AssistantDelta { text } => {
+        Event::AssistantDelta { text } => {
             if frame.replacement == Some(true) {
                 reconcile_assistant_text(assistant_text, text);
             } else {
@@ -286,15 +280,15 @@ async fn apply_ours(
             }
             Ok(None)
         }
-        CodeEvent::AssistantMessage { text, .. } => {
+        Event::AssistantMessage { text, .. } => {
             reconcile_assistant_text(assistant_text, text);
             Ok(None)
         }
-        CodeEvent::TurnStarted { .. } => {
+        Event::TurnStarted { .. } => {
             assistant_text.clear();
             Ok(None)
         }
-        CodeEvent::ApprovalRequested { approval_id, .. } => {
+        Event::ApprovalRequested { approval_id, .. } => {
             let pending = match pending_for_turn(client, session, gate.turn_id()).await? {
                 Some(pending) => pending_approval(&pending),
                 None => json!({
@@ -314,8 +308,8 @@ async fn apply_ours(
         }
         event if is_turn_terminal(event) => {
             let status = match event {
-                CodeEvent::TurnCompleted { .. } => TurnStatus::Completed,
-                CodeEvent::TurnInterrupted { .. } => TurnStatus::Cancelled,
+                Event::TurnCompleted { .. } => TurnStatus::Completed,
+                Event::TurnInterrupted { .. } => TurnStatus::Cancelled,
                 _ => TurnStatus::Failed,
             };
             Ok(Some(CodeTurnResult {
@@ -335,7 +329,7 @@ async fn apply_ours(
 /// park, a queue receipt, or `timeout`.
 pub(crate) async fn run_turn(
     client: &mut Client,
-    session: CodeSessionId,
+    session: SessionId,
     message: &str,
     timeout: Duration,
 ) -> Result<CodeTurnResult> {
@@ -401,7 +395,7 @@ pub(crate) async fn run_turn(
 /// Re-follow an in-flight or queued turn.
 pub(crate) async fn wait_turn(
     client: &mut Client,
-    session: CodeSessionId,
+    session: SessionId,
     follow: CodeFollowState,
     timeout: Duration,
 ) -> Result<CodeTurnResult> {
@@ -428,8 +422,8 @@ pub(crate) async fn wait_turn(
 /// Apply an approval decision, then follow to the next settle point.
 pub(crate) async fn decide_and_follow(
     client: &mut Client,
-    session: CodeSessionId,
-    approval_id: CodeApprovalId,
+    session: SessionId,
+    approval_id: ApprovalId,
     approve: bool,
     feedback: Option<&str>,
     follow: Option<CodeFollowState>,
@@ -473,7 +467,7 @@ pub(crate) async fn decide_and_follow(
 
 async fn settled_or_parked(
     client: &Client,
-    session: CodeSessionId,
+    session: SessionId,
     follow: &CodeFollowState,
 ) -> Result<Option<CodeTurnResult>> {
     if let Some(turn) = turn_by_id(client, session, follow.turn_id).await? {
@@ -507,7 +501,7 @@ async fn settled_or_parked(
 async fn follow_open_stream(
     client: &mut Client,
     stream: &mut CodeEventStream,
-    session: CodeSessionId,
+    session: SessionId,
     gate: &mut FollowGate,
     mut assistant_text: String,
     timeout: Duration,
@@ -535,7 +529,7 @@ async fn follow_open_stream(
 
 async fn handle_frame(
     client: &mut Client,
-    session: CodeSessionId,
+    session: SessionId,
     stream: &mut CodeEventStream,
     gate: &mut FollowGate,
     assistant_text: &mut String,

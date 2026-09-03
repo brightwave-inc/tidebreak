@@ -111,7 +111,7 @@ async fn assert_sensitive_restart_recovery(
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -300,7 +300,7 @@ async fn pending_workspace_restart(
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,

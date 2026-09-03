@@ -44,8 +44,8 @@ use tidebreak_core::db::code::{
     append_event, get_session, get_turn, get_workspace, list_turns, save_turn,
 };
 use tidebreak_core::{
-    CodeEvent, CodeSession, CodeSessionId, CodeTurn, CodeTurnId, CodeTurnStatus, CodeWorkspace,
-    DbStore, Diffstat, FileChangeKind, HarnessNoticeLevel, SequencedCodeEvent, WorkspaceId,
+    CodeWorkspace, DbStore, Diffstat, Event, FileChangeKind, HarnessNoticeLevel, SequencedEvent,
+    Session, SessionId, Turn, TurnId, TurnStatus, WorkspaceId,
 };
 
 use super::bus::CodeEventBus;
@@ -263,14 +263,14 @@ impl SnapshotGit for ProcessSnapshotGit {
 /// [`delete_workspace_refs`] can match every session by prefix.
 pub(crate) fn checkpoint_ref(
     workspace_id: WorkspaceId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     ordinal: i64,
 ) -> String {
     format!("{REF_PREFIX}/{workspace_id}/{session_id}/{ordinal}")
 }
 
 /// Hidden ref for where one session started.
-pub(crate) fn session_baseline_ref(workspace_id: WorkspaceId, session_id: CodeSessionId) -> String {
+pub(crate) fn session_baseline_ref(workspace_id: WorkspaceId, session_id: SessionId) -> String {
     checkpoint_ref(workspace_id, session_id, BASELINE_ORDINAL)
 }
 
@@ -288,7 +288,7 @@ pub(crate) fn session_baseline_ref(workspace_id: WorkspaceId, session_id: CodeSe
 pub(crate) async fn record_session_baseline(
     worktree: &Path,
     workspace_id: WorkspaceId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
 ) -> Result<String, CheckpointError> {
     let r#ref = session_baseline_ref(workspace_id, session_id);
     write_snapshot_ref(worktree, &r#ref, None, "session baseline").await?;
@@ -304,17 +304,17 @@ pub(crate) async fn record_session_baseline(
 /// `Running` turn is skipped — the worktree is still moving — and a turn that
 /// already holds a ref is left alone.
 ///
-/// Checkpoint failure does not fail the turn: a [`CodeEvent::HarnessNotice`]
+/// Checkpoint failure does not fail the turn: a [`Event::HarnessNotice`]
 /// is journaled and the already-recorded work stands.
 pub(crate) async fn after_turn_ended(
     db: &Arc<DbStore>,
     bus: &Arc<CodeEventBus>,
-    session: &CodeSession,
-    turn: &mut CodeTurn,
+    session: &Session,
+    turn: &mut Turn,
 ) {
     let terminal = matches!(
         turn.status,
-        CodeTurnStatus::Completed | CodeTurnStatus::Failed | CodeTurnStatus::Interrupted
+        TurnStatus::Completed | TurnStatus::Failed | TurnStatus::Interrupted
     );
     if !terminal || turn.checkpoint_ref.is_some() {
         return;
@@ -339,7 +339,7 @@ pub(crate) async fn after_turn_ended(
                 db,
                 bus,
                 session,
-                CodeEvent::CheckpointRecorded {
+                Event::CheckpointRecorded {
                     turn_id: turn.id,
                     diffstat: recorded.diffstat,
                 },
@@ -358,7 +358,7 @@ pub(crate) async fn after_turn_ended(
                 db,
                 bus,
                 session,
-                CodeEvent::HarnessNotice {
+                Event::HarnessNotice {
                     level: HarnessNoticeLevel::Warning,
                     message,
                 },
@@ -370,8 +370,8 @@ pub(crate) async fn after_turn_ended(
 
 async fn record_for_turn(
     db: &DbStore,
-    session: &CodeSession,
-    turn: &CodeTurn,
+    session: &Session,
+    turn: &Turn,
 ) -> Result<RecordedCheckpoint, CheckpointError> {
     let workspace_id = session
         .workspace_id
@@ -401,9 +401,9 @@ async fn record_for_turn(
 pub(crate) async fn record_checkpoint(
     worktree: &Path,
     workspace_id: WorkspaceId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     ordinal: i64,
-    status: CodeTurnStatus,
+    status: TurnStatus,
     previous_oid: Option<&str>,
     base_ref: &str,
 ) -> Result<RecordedCheckpoint, CheckpointError> {
@@ -882,8 +882,8 @@ pub(crate) async fn list_checkpoint_refs(repo_root: &Path) -> Result<Vec<String>
 pub(crate) async fn resolve_diff_range(
     db: &DbStore,
     workspace: &CodeWorkspace,
-    turn_id: Option<CodeTurnId>,
-) -> Result<(PathBuf, String, String, Option<CodeTurnId>), CheckpointError> {
+    turn_id: Option<TurnId>,
+) -> Result<(PathBuf, String, String, Option<TurnId>), CheckpointError> {
     let worktree = PathBuf::from(&workspace.worktree_path);
     if !worktree.exists() {
         return Err(CheckpointError::user("workspace worktree is gone"));
@@ -946,7 +946,7 @@ async fn previous_checkpoint_oid(
     worktree: &Path,
     workspace: &CodeWorkspace,
     db: &DbStore,
-    turn: &CodeTurn,
+    turn: &Turn,
 ) -> Result<Option<String>, CheckpointError> {
     if turn.ordinal <= BASELINE_ORDINAL {
         return Ok(None);
@@ -1202,11 +1202,11 @@ async fn delete_ref(repo_root: &Path, r#ref: &str) -> Result<(), CheckpointError
 async fn journal(
     db: &DbStore,
     bus: &CodeEventBus,
-    session: &CodeSession,
-    event: CodeEvent,
-) -> Result<(), tidebreak_core::db::code::CodeJournalError> {
+    session: &Session,
+    event: Event,
+) -> Result<(), tidebreak_core::db::code::JournalError> {
     let seq = append_event(db, &session.owner, session.id, session.spawn_epoch, &event).await?;
-    bus.publish(session.id, SequencedCodeEvent { seq, event });
+    bus.publish(session.id, SequencedEvent { seq, event });
     Ok(())
 }
 
@@ -1488,8 +1488,8 @@ mod tests {
         insert_repo, insert_session, insert_turn, insert_workspace, list_events, MAX_REPLAY_EVENTS,
     };
     use tidebreak_core::{
-        Attention, AttentionSource, CodeRepo, CodeSessionKind, CodeSessionLifecycle, CodeTurnId,
-        CodeWorkspaceStatus, HarnessKind, OwnerId, PermissionMode, RepoId,
+        Attention, AttentionSource, CodeRepo, CodeWorkspaceStatus, HarnessKind, OwnerId,
+        PermissionMode, RepoId, SessionKind, SessionLifecycle, TurnId,
     };
     use tokio::sync::Notify;
 
@@ -1617,8 +1617,8 @@ mod tests {
         WorkspaceId::new()
     }
 
-    fn sess() -> CodeSessionId {
-        CodeSessionId::new()
+    fn sess() -> SessionId {
+        SessionId::new()
     }
 
     #[tokio::test]
@@ -1635,17 +1635,10 @@ mod tests {
         std::fs::set_permissions(tree.join("README.md"), perms).unwrap();
 
         let before = user_git_fingerprint(&tree).await.unwrap();
-        let recorded = record_checkpoint(
-            &tree,
-            ws(),
-            sess(),
-            1,
-            CodeTurnStatus::Completed,
-            None,
-            "main",
-        )
-        .await
-        .unwrap();
+        let recorded =
+            record_checkpoint(&tree, ws(), sess(), 1, TurnStatus::Completed, None, "main")
+                .await
+                .unwrap();
         let after = user_git_fingerprint(&tree).await.unwrap();
         assert_eq!(before, after, "user index and HEAD must be byte-identical");
         assert!(recorded.checkpoint_ref.starts_with(REF_PREFIX));
@@ -1731,17 +1724,10 @@ mod tests {
         std::fs::write(tree.join("src/beta.rs"), format!("{body}line 13\n")).unwrap();
         std::fs::write(tree.join("café.txt"), "un\ndeux\n").unwrap();
 
-        let recorded = record_checkpoint(
-            &tree,
-            ws(),
-            sess(),
-            1,
-            CodeTurnStatus::Completed,
-            None,
-            "main",
-        )
-        .await
-        .unwrap();
+        let recorded =
+            record_checkpoint(&tree, ws(), sess(), 1, TurnStatus::Completed, None, "main")
+                .await
+                .unwrap();
         let from = merge_base(&tree, "main").await.unwrap();
         let files = list_changed_files(
             &tree,
@@ -1845,17 +1831,10 @@ mod tests {
         )
         .unwrap();
 
-        let recorded = record_checkpoint(
-            &tree,
-            ws(),
-            sess(),
-            1,
-            CodeTurnStatus::Completed,
-            None,
-            "main",
-        )
-        .await
-        .unwrap();
+        let recorded =
+            record_checkpoint(&tree, ws(), sess(), 1, TurnStatus::Completed, None, "main")
+                .await
+                .unwrap();
         let from = merge_base(&tree, "main").await.unwrap();
         let files = list_changed_files(
             &tree,
@@ -1934,17 +1913,10 @@ mod tests {
         std::fs::write(tree.join(literal), "literal magic\n").unwrap();
         std::fs::write(tree.join("victim.txt"), "must stay out\n").unwrap();
 
-        let recorded = record_checkpoint(
-            &tree,
-            ws(),
-            sess(),
-            1,
-            CodeTurnStatus::Completed,
-            None,
-            "main",
-        )
-        .await
-        .unwrap();
+        let recorded =
+            record_checkpoint(&tree, ws(), sess(), 1, TurnStatus::Completed, None, "main")
+                .await
+                .unwrap();
         let from = merge_base(&tree, "main").await.unwrap();
         let diff = produce_diff(
             &tree,
@@ -1972,17 +1944,10 @@ mod tests {
         std::fs::write(tree.join("b-second.txt"), "second\n").unwrap();
         std::fs::write(tree.join("z-selected.txt"), "one\ntwo\n").unwrap();
 
-        let recorded = record_checkpoint(
-            &tree,
-            ws(),
-            sess(),
-            1,
-            CodeTurnStatus::Completed,
-            None,
-            "main",
-        )
-        .await
-        .unwrap();
+        let recorded =
+            record_checkpoint(&tree, ws(), sess(), 1, TurnStatus::Completed, None, "main")
+                .await
+                .unwrap();
         let from = merge_base(&tree, "main").await.unwrap();
         let bounds = DiffBounds {
             max_bytes: MAX_DIFF_BYTES,
@@ -2021,17 +1986,9 @@ mod tests {
         let id = ws();
         let session = sess();
         std::fs::write(tree.join("a.txt"), "one\n").unwrap();
-        let first = record_checkpoint(
-            &tree,
-            id,
-            session,
-            1,
-            CodeTurnStatus::Completed,
-            None,
-            "main",
-        )
-        .await
-        .unwrap();
+        let first = record_checkpoint(&tree, id, session, 1, TurnStatus::Completed, None, "main")
+            .await
+            .unwrap();
         std::fs::write(tree.join("b.txt"), "two\n").unwrap();
         let first_oid = git_text(&tree, &["rev-parse", &first.checkpoint_ref], GIT_TIMEOUT)
             .await
@@ -2041,7 +1998,7 @@ mod tests {
             id,
             session,
             2,
-            CodeTurnStatus::Completed,
+            TurnStatus::Completed,
             Some(&first_oid),
             "main",
         )
@@ -2088,17 +2045,10 @@ mod tests {
             )
             .unwrap();
         }
-        let recorded = record_checkpoint(
-            &tree,
-            ws(),
-            sess(),
-            1,
-            CodeTurnStatus::Completed,
-            None,
-            "main",
-        )
-        .await
-        .unwrap();
+        let recorded =
+            record_checkpoint(&tree, ws(), sess(), 1, TurnStatus::Completed, None, "main")
+                .await
+                .unwrap();
         let from = merge_base(&tree, "main").await.unwrap();
         let tight = DiffBounds {
             max_bytes: 40,
@@ -2164,28 +2114,12 @@ mod tests {
         let live = ws();
         let dead = ws();
         std::fs::write(tree.join("x.txt"), "x\n").unwrap();
-        record_checkpoint(
-            &tree,
-            live,
-            sess(),
-            1,
-            CodeTurnStatus::Completed,
-            None,
-            "main",
-        )
-        .await
-        .unwrap();
-        record_checkpoint(
-            &tree,
-            dead,
-            sess(),
-            1,
-            CodeTurnStatus::Completed,
-            None,
-            "main",
-        )
-        .await
-        .unwrap();
+        record_checkpoint(&tree, live, sess(), 1, TurnStatus::Completed, None, "main")
+            .await
+            .unwrap();
+        record_checkpoint(&tree, dead, sess(), 1, TurnStatus::Completed, None, "main")
+            .await
+            .unwrap();
         let listed = list_checkpoint_refs(&repo).await.unwrap();
         assert_eq!(listed.len(), 2, "{listed:?}");
 
@@ -2221,7 +2155,7 @@ mod tests {
             workspace,
             first_session,
             1,
-            CodeTurnStatus::Completed,
+            TurnStatus::Completed,
             None,
             "main",
         )
@@ -2233,7 +2167,7 @@ mod tests {
             workspace,
             second_session,
             1,
-            CodeTurnStatus::Completed,
+            TurnStatus::Completed,
             None,
             "main",
         )
@@ -2482,7 +2416,7 @@ mod tests {
     async fn seed_session(
         repo: &Path,
         worktree: &Path,
-    ) -> (Arc<DbStore>, Arc<CodeEventBus>, CodeSession) {
+    ) -> (Arc<DbStore>, Arc<CodeEventBus>, Session) {
         let db = Arc::new(
             DbStore::connect(&format!(
                 "sqlite://{}?mode=rwc",
@@ -2537,11 +2471,11 @@ mod tests {
         )
         .await
         .unwrap();
-        let session = CodeSession {
-            id: CodeSessionId::new(),
+        let session = Session {
+            id: SessionId::new(),
             owner,
             workspace_id: Some(workspace_id),
-            kind: CodeSessionKind::Interactive,
+            kind: SessionKind::Interactive,
             harness_kind: HarnessKind::ClaudeCode,
             harness_version: None,
             harness_resume_ref: None,
@@ -2549,7 +2483,7 @@ mod tests {
             model: None,
             reasoning_effort: None,
             fast_mode: false,
-            lifecycle: CodeSessionLifecycle::Running,
+            lifecycle: SessionLifecycle::Running,
             fence_reason: None,
             child_pid: None,
             child_process_identity: None,
@@ -2565,12 +2499,12 @@ mod tests {
 
     async fn seed_turn(
         db: &Arc<DbStore>,
-        session: &CodeSession,
+        session: &Session,
         ordinal: i64,
-        status: CodeTurnStatus,
-    ) -> CodeTurn {
-        let turn = CodeTurn {
-            id: CodeTurnId::new(),
+        status: TurnStatus,
+    ) -> Turn {
+        let turn = Turn {
+            id: TurnId::new(),
             session_id: session.id,
             ordinal,
             status,
@@ -2593,7 +2527,7 @@ mod tests {
         turn
     }
 
-    async fn recorded_events(db: &Arc<DbStore>, session: &CodeSession) -> Vec<CodeEvent> {
+    async fn recorded_events(db: &Arc<DbStore>, session: &Session) -> Vec<Event> {
         list_events(db, &session.owner, session.id, 0, MAX_REPLAY_EVENTS)
             .await
             .unwrap()
@@ -2612,7 +2546,7 @@ mod tests {
         let tree = add_worktree(&repo, "interrupted");
         std::fs::write(tree.join("half-done.txt"), "written before the stop\n").unwrap();
         let (db, bus, session) = seed_session(&repo, &tree).await;
-        let mut turn = seed_turn(&db, &session, 1, CodeTurnStatus::Interrupted).await;
+        let mut turn = seed_turn(&db, &session, 1, TurnStatus::Interrupted).await;
 
         after_turn_ended(&db, &bus, &session, &mut turn).await;
 
@@ -2635,7 +2569,7 @@ mod tests {
             recorded_events(&db, &session)
                 .await
                 .iter()
-                .any(|event| matches!(event, CodeEvent::CheckpointRecorded { .. })),
+                .any(|event| matches!(event, Event::CheckpointRecorded { .. })),
             "an interrupted turn must journal its checkpoint"
         );
 
@@ -2652,7 +2586,7 @@ mod tests {
         let tree = add_worktree(&repo, "failed");
         std::fs::write(tree.join("README.md"), "rewritten before the failure\n").unwrap();
         let (db, bus, session) = seed_session(&repo, &tree).await;
-        let mut turn = seed_turn(&db, &session, 1, CodeTurnStatus::Failed).await;
+        let mut turn = seed_turn(&db, &session, 1, TurnStatus::Failed).await;
 
         after_turn_ended(&db, &bus, &session, &mut turn).await;
 
@@ -2678,7 +2612,7 @@ mod tests {
             recorded_events(&db, &session)
                 .await
                 .iter()
-                .any(|event| matches!(event, CodeEvent::CheckpointRecorded { .. })),
+                .any(|event| matches!(event, Event::CheckpointRecorded { .. })),
             "a failed turn must journal its checkpoint"
         );
     }
@@ -2690,7 +2624,7 @@ mod tests {
         let tree = add_worktree(&repo, "running");
         std::fs::write(tree.join("in-flight.txt"), "mid-edit\n").unwrap();
         let (db, bus, session) = seed_session(&repo, &tree).await;
-        let mut turn = seed_turn(&db, &session, 1, CodeTurnStatus::Running).await;
+        let mut turn = seed_turn(&db, &session, 1, TurnStatus::Running).await;
 
         after_turn_ended(&db, &bus, &session, &mut turn).await;
 
@@ -2714,19 +2648,19 @@ mod tests {
         std::fs::remove_dir_all(&tree).unwrap();
         std::fs::create_dir_all(&tree).unwrap();
         std::fs::write(tree.join("orphan.txt"), "still here\n").unwrap();
-        let mut turn = seed_turn(&db, &session, 1, CodeTurnStatus::Failed).await;
+        let mut turn = seed_turn(&db, &session, 1, TurnStatus::Failed).await;
 
         after_turn_ended(&db, &bus, &session, &mut turn).await;
 
         assert!(turn.checkpoint_ref.is_none());
-        assert_eq!(turn.status, CodeTurnStatus::Failed);
+        assert_eq!(turn.status, TurnStatus::Failed);
         assert!(
             recorded_events(&db, &session)
                 .await
                 .iter()
                 .any(|event| matches!(
                     event,
-                    CodeEvent::HarnessNotice {
+                    Event::HarnessNotice {
                         level: HarnessNoticeLevel::Warning,
                         ..
                     }
@@ -2744,12 +2678,12 @@ mod tests {
         let (db, bus, session) = seed_session(&repo, &tree).await;
 
         std::fs::write(tree.join("from-failed.txt"), "one\n").unwrap();
-        let mut failed = seed_turn(&db, &session, 1, CodeTurnStatus::Failed).await;
+        let mut failed = seed_turn(&db, &session, 1, TurnStatus::Failed).await;
         after_turn_ended(&db, &bus, &session, &mut failed).await;
         let first = failed.checkpoint_ref.clone().unwrap();
 
         std::fs::write(tree.join("from-completed.txt"), "two\n").unwrap();
-        let mut completed = seed_turn(&db, &session, 2, CodeTurnStatus::Completed).await;
+        let mut completed = seed_turn(&db, &session, 2, TurnStatus::Completed).await;
         after_turn_ended(&db, &bus, &session, &mut completed).await;
         let second = completed.checkpoint_ref.clone().unwrap();
 
@@ -2774,9 +2708,9 @@ mod tests {
     }
 
     /// A second session over the same worktree, the shape record 55 allows.
-    async fn seed_sibling_session(db: &Arc<DbStore>, sibling: &CodeSession) -> CodeSession {
-        let session = CodeSession {
-            id: CodeSessionId::new(),
+    async fn seed_sibling_session(db: &Arc<DbStore>, sibling: &Session) -> Session {
+        let session = Session {
+            id: SessionId::new(),
             harness_kind: HarnessKind::Codex,
             created_at: chrono::Utc::now(),
             ..sibling.clone()
@@ -2820,7 +2754,7 @@ mod tests {
             "from .parser import parse\n",
         )
         .unwrap();
-        let mut theirs = seed_turn(&db, &earlier, 1, CodeTurnStatus::Completed).await;
+        let mut theirs = seed_turn(&db, &earlier, 1, TurnStatus::Completed).await;
         after_turn_ended(&db, &bus, &earlier, &mut theirs).await;
 
         // A second session starts on the worktree the first one has edited.
@@ -2836,7 +2770,7 @@ mod tests {
             format!("def parse(line):\n{body}"),
         )
         .unwrap();
-        let mut mine = seed_turn(&db, &later, 1, CodeTurnStatus::Completed).await;
+        let mut mine = seed_turn(&db, &later, 1, TurnStatus::Completed).await;
         after_turn_ended(&db, &bus, &later, &mut mine).await;
 
         let stat = mine.diffstat.clone().expect("turn 1 records a diffstat");
@@ -2883,7 +2817,7 @@ mod tests {
 
         std::fs::write(tree.join("README.md"), "hello world\n").unwrap();
         std::fs::write(tree.join("new.txt"), "untracked\n").unwrap();
-        let mut turn = seed_turn(&db, &session, 1, CodeTurnStatus::Completed).await;
+        let mut turn = seed_turn(&db, &session, 1, TurnStatus::Completed).await;
         after_turn_ended(&db, &bus, &session, &mut turn).await;
 
         let stat = turn.diffstat.clone().unwrap();
@@ -2908,7 +2842,7 @@ mod tests {
         let (db, bus, session) = seed_session(&repo, &tree).await;
 
         std::fs::write(tree.join("a.txt"), "one\n").unwrap();
-        let mut turn = seed_turn(&db, &session, 1, CodeTurnStatus::Completed).await;
+        let mut turn = seed_turn(&db, &session, 1, TurnStatus::Completed).await;
         after_turn_ended(&db, &bus, &session, &mut turn).await;
 
         let r#ref = turn.checkpoint_ref.clone().expect("turn 1 keeps its ref");
@@ -2940,12 +2874,12 @@ mod tests {
                 .unwrap();
 
         std::fs::write(tree.join("one.txt"), "one\n").unwrap();
-        let mut first = seed_turn(&db, &session, 1, CodeTurnStatus::Completed).await;
+        let mut first = seed_turn(&db, &session, 1, TurnStatus::Completed).await;
         after_turn_ended(&db, &bus, &session, &mut first).await;
         let first_ref = first.checkpoint_ref.clone().unwrap();
 
         std::fs::write(tree.join("two.txt"), "two\n").unwrap();
-        let mut second = seed_turn(&db, &session, 2, CodeTurnStatus::Completed).await;
+        let mut second = seed_turn(&db, &session, 2, TurnStatus::Completed).await;
         after_turn_ended(&db, &bus, &session, &mut second).await;
         let second_ref = second.checkpoint_ref.clone().unwrap();
 
@@ -2982,13 +2916,13 @@ mod tests {
                 .unwrap();
 
         std::fs::write(tree.join("one.txt"), "one\n").unwrap();
-        let mut first = seed_turn(&db, &session, 1, CodeTurnStatus::Completed).await;
+        let mut first = seed_turn(&db, &session, 1, TurnStatus::Completed).await;
         after_turn_ended(&db, &bus, &session, &mut first).await;
         let first_ref = first.checkpoint_ref.clone().unwrap();
         delete_ref(&repo, &first_ref).await.unwrap();
 
         std::fs::write(tree.join("two.txt"), "two\n").unwrap();
-        let mut second = seed_turn(&db, &session, 2, CodeTurnStatus::Completed).await;
+        let mut second = seed_turn(&db, &session, 2, TurnStatus::Completed).await;
         after_turn_ended(&db, &bus, &session, &mut second).await;
         let second_ref = second
             .checkpoint_ref
@@ -3011,7 +2945,7 @@ mod tests {
                 .iter()
                 .all(|event| !matches!(
                     event,
-                    CodeEvent::HarnessNotice {
+                    Event::HarnessNotice {
                         level: HarnessNoticeLevel::Warning,
                         ..
                     }
@@ -3030,7 +2964,7 @@ mod tests {
             ws(),
             sess(),
             1,
-            CodeTurnStatus::Completed,
+            TurnStatus::Completed,
             None,
             "main",
         )

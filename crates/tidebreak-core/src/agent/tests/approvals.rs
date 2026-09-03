@@ -14,7 +14,7 @@ async fn sensitive_tool_parks_until_approved() {
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -124,7 +124,7 @@ async fn sensitive_call_with_prose_keeps_the_preamble_and_parks() {
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -242,7 +242,7 @@ async fn a_second_sensitive_call_runs_once_the_first_is_terminal() {
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -382,7 +382,7 @@ type GateSnapshots = Arc<Mutex<Vec<Vec<(String, ToolCallStatus)>>>>;
 /// request is registered, then approves.
 struct RecordingGate {
     store: Arc<dyn Store>,
-    chat_id: ChatId,
+    chat_id: SessionId,
     observed: GateSnapshots,
 }
 
@@ -427,7 +427,7 @@ async fn a_sensitive_call_parks_only_after_its_plain_sibling_is_terminal() {
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -616,7 +616,7 @@ async fn standing_grant_for_another_chat_does_not_bypass_the_gate() {
     // A grant scoped to a different chat must not cover this chat's call.
     let grants = Arc::new(StandingGrants::from_grants(vec![StandingGrant::new(
         GrantLevel::Chat {
-            chat_id: ChatId::new(),
+            chat_id: SessionId::new(),
         },
         "search",
         ToolApprovalKind::for_tool_name("search"),
@@ -643,7 +643,7 @@ async fn standing_grant_for_another_chat_does_not_bypass_the_gate() {
 
 async fn permission_mode_chat(store: &Arc<dyn Store>, mode: Option<crate::PermissionMode>) -> Chat {
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -937,7 +937,7 @@ async fn plan_mode_does_not_run_ask_user_questions() {
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -1238,7 +1238,7 @@ async fn sensitive_tool_is_refused_without_a_gate() {
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,

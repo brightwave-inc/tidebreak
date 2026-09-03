@@ -281,7 +281,7 @@ pub(crate) trait GatewayEndpoints: Send + Sync {
     /// endpoints can match the call against the observation the chat's
     /// inference recorded; the default keeps the connect-time bearer for
     /// implementations that don't distinguish.
-    async fn call_bearer(&self, slug: &str, chat: tidebreak_core::id::ChatId) -> Result<String> {
+    async fn call_bearer(&self, slug: &str, chat: tidebreak_core::id::SessionId) -> Result<String> {
         let _ = chat;
         Ok(self.endpoint(slug).await?.bearer_token)
     }
@@ -307,7 +307,7 @@ pub(super) struct GatewayCallBearer {
 
 #[async_trait::async_trait]
 impl tidebreak_mcp::CallBearerSource for GatewayCallBearer {
-    async fn call_bearer(&self, chat: tidebreak_core::id::ChatId) -> Result<Option<String>> {
+    async fn call_bearer(&self, chat: tidebreak_core::id::SessionId) -> Result<Option<String>> {
         self.gateway.call_bearer(&self.slug, chat).await.map(Some)
     }
 }

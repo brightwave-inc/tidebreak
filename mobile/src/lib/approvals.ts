@@ -1,6 +1,6 @@
 import type {
-  CodeApprovalKind,
-  CodeApprovalSnapshot,
+  ApprovalKind as CodeApprovalKind,
+  ApprovalSnapshot as CodeApprovalSnapshot,
   NetworkPolicy,
   ToolActionPreview,
 } from "../generated/wire";

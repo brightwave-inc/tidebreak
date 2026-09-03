@@ -259,7 +259,7 @@ async fn task_plan_writes_are_fenced_on_the_turn_lease_and_recorded_once() {
         store.get_task_plan(chat.id).await.unwrap(),
         Some(recorded.clone())
     );
-    let hints = |events: Vec<crate::SequencedEvent>| {
+    let hints = |events: Vec<crate::SequencedAgentEvent>| {
         events
             .into_iter()
             .filter(|event| matches!(event.event, AgentEvent::TaskPlanUpdated { .. }))

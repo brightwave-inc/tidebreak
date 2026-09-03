@@ -5381,7 +5381,7 @@ async fn the_catalog_lists_prompts_and_serves_their_bodies() {
 async fn send_message_invoking(
     router: &Router,
     bearer: &str,
-    chat: ChatId,
+    chat: SessionId,
     invoked: &[&str],
 ) -> axum::response::Response {
     router
@@ -5468,7 +5468,7 @@ async fn an_invoked_skill_must_be_enabled_or_the_turn_is_refused() {
 async fn steer_invoking(
     router: &Router,
     bearer: &str,
-    chat: ChatId,
+    chat: SessionId,
     turn: TurnId,
     steer_id: TurnSteerId,
     invoked: &[&str],

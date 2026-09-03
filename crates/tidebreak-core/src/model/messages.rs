@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::id::{ChatId, DocumentId, MessageId, TurnId};
+use crate::id::{DocumentId, MessageId, SessionId, TurnId};
 use crate::image::ImageRef;
 use crate::provider::MessageReasoning;
 
@@ -18,7 +18,7 @@ pub struct Message {
     /// Stable identifier.
     pub id: MessageId,
     /// The chat this message belongs to.
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     /// The turn this message was produced in.
     pub turn_id: TurnId,
     /// Who authored it.
@@ -133,7 +133,7 @@ pub struct MessageAttachment {
     pub message_id: MessageId,
     /// The chat that owns the message, denormalized so conversation deletion
     /// and retention can scan attachments without joining through messages.
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     /// Zero-based position within the message, unique per message.
     pub ordinal: i32,
     /// Blob identity, media type, and bounded dimensions.
@@ -172,7 +172,7 @@ pub struct MessageDocumentAttachment {
     /// The message this document is attached to.
     pub message_id: MessageId,
     /// The chat that owns both the message and document.
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     /// Zero-based position among the message's file attachments.
     pub ordinal: i32,
     /// The attached document.
@@ -452,7 +452,7 @@ pub struct ToolCallRecord {
     /// Stable id (same as the live [`crate::id::CallId`] on the event stream).
     pub id: crate::id::CallId,
     /// Chat this call belongs to.
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     /// Turn that produced the call.
     pub turn_id: TurnId,
     /// Provider-facing tool-use id (Anthropic `tool_use.id`, OpenAI `tool_call_id`).

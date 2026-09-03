@@ -113,12 +113,12 @@ fn dispatchable(call: &crate::model::SandboxToolCallRequest) -> SandboxToolCallP
 }
 
 async fn set_turn_max_attempts(store: &DbStore, turn_id: TurnId, max_attempts: i32) {
-    entities::code_turn::Entity::update_many()
+    entities::turn::Entity::update_many()
         .col_expr(
-            entities::code_turn::Column::MaxAttempts,
+            entities::turn::Column::MaxAttempts,
             sea_orm::sea_query::Expr::value(max_attempts),
         )
-        .filter(entities::code_turn::Column::Id.eq(turn_id.0))
+        .filter(entities::turn::Column::Id.eq(turn_id.0))
         .exec(&store.conn)
         .await
         .unwrap();
@@ -126,7 +126,7 @@ async fn set_turn_max_attempts(store: &DbStore, turn_id: TurnId, max_attempts: i
 
 fn sample_chat() -> Chat {
     Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: Some("hello".into()),
         model: None,
@@ -194,7 +194,7 @@ fn sample_document(project_id: Option<ProjectId>) -> DocumentRecord {
 
 async fn park_test_plan(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
 ) -> (TurnId, crate::model::ClientToolCallRequest, DateTime<Utc>) {
     let turn_id = TurnId::new();
     let accepted = match store
@@ -240,7 +240,7 @@ async fn park_test_plan(
     match parked {
         ParkTurnForClientCallOutcome::Parked {
             renderer_event:
-                Some(SequencedEvent {
+                Some(SequencedAgentEvent {
                     event:
                         AgentEvent::PlanProposed {
                             call_id,

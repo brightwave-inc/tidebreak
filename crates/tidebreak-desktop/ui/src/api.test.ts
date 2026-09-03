@@ -196,8 +196,8 @@ describe("inbox entries", () => {
     action: "exec",
     requested_at: "2026-08-04T00:00:00Z",
   };
-  const chatEntry = {
-    conversation: { surface: "chat", chat_id: "chat-1" },
+  const internalEntry = {
+    conversation: { session_id: "session-1" },
     title: "Quarterly review",
     attention: {
       state: { type: "needs_you", prompt: "waiting", source: "structured" },
@@ -207,9 +207,9 @@ describe("inbox entries", () => {
     waiting_since: "2026-08-04T00:00:00Z",
   };
 
-  it("accepts a chat entry, with its optional fields absent", () => {
-    expect(parseInboxEntry(chatEntry)).toEqual({
-      conversation: { surface: "chat", chatId: "chat-1" },
+  it("accepts an internal session entry, with its optional fields absent", () => {
+    expect(parseInboxEntry(internalEntry)).toEqual({
+      conversation: { sessionId: "session-1", workspaceId: null },
       title: "Quarterly review",
       attention: {
         state: { type: "needs_you", prompt: "waiting", source: "structured" },
@@ -226,15 +226,14 @@ describe("inbox entries", () => {
       ],
       waitingSince: "2026-08-04T00:00:00Z",
     });
-    const { title: _title, ...untitled } = chatEntry;
+    const { title: _title, ...untitled } = internalEntry;
     expect(parseInboxEntry(untitled)).toMatchObject({ title: null });
   });
 
-  it("accepts a code entry, which carries its workspace and no items", () => {
+  it("accepts a workspace session entry, which carries no items", () => {
     expect(
       parseInboxEntry({
         conversation: {
-          surface: "code",
           session_id: "sess-1",
           workspace_id: "ws-1",
         },
@@ -248,7 +247,6 @@ describe("inbox entries", () => {
       }),
     ).toMatchObject({
       conversation: {
-        surface: "code",
         sessionId: "sess-1",
         workspaceId: "ws-1",
       },
@@ -256,29 +254,35 @@ describe("inbox entries", () => {
     });
   });
 
-  it("rejects an unknown surface, an unknown kind, and smuggled detail", () => {
+  it("rejects a legacy surface tag, an unknown kind, and smuggled detail", () => {
     expect(
       parseInboxEntry({
-        ...chatEntry,
-        conversation: { surface: "email", chat_id: "chat-1" },
+        ...internalEntry,
+        conversation: { surface: "chat", session_id: "session-1" },
       }),
     ).toBeNull();
     expect(
       parseInboxEntry({
-        ...chatEntry,
+        ...internalEntry,
         items: [{ ...item, kind: "everything" }],
       }),
     ).toBeNull();
     expect(
-      parseInboxEntry({ ...chatEntry, items: [{ ...item, action: "rm_rf" }] }),
+      parseInboxEntry({
+        ...internalEntry,
+        items: [{ ...item, action: "rm_rf" }],
+      }),
     ).toBeNull();
     // The entry stays opaque: no question prose, plan text, or arguments.
     expect(
-      parseInboxEntry({ ...chatEntry, questions: [{ question: "private" }] }),
+      parseInboxEntry({
+        ...internalEntry,
+        questions: [{ question: "private" }],
+      }),
     ).toBeNull();
     expect(
       parseInboxEntry({
-        ...chatEntry,
+        ...internalEntry,
         items: [{ ...item, questions: [{ question: "private" }] }],
       }),
     ).toBeNull();
@@ -1069,7 +1073,7 @@ describe("active turn steering", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe("http://127.0.0.1/code/sessions/session-1/steer");
+    expect(url).toBe("http://127.0.0.1/sessions/session-1/steer");
     expect(init.method).toBe("POST");
     expect(JSON.parse(String(init.body))).toEqual({
       expected_turn_id: "turn-1",
@@ -1855,7 +1859,7 @@ describe("code workspace sessions", () => {
     expect(init.method ?? "GET").toBe("GET");
   });
 
-  it("lists GET /code/sessions/{id}/turns", async () => {
+  it("lists GET /sessions/{id}/turns", async () => {
     const turn = {
       id: "turn-1",
       session_id: "sess-1",
@@ -1876,7 +1880,7 @@ describe("code workspace sessions", () => {
       turn,
     ]);
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
-      "http://127.0.0.1/code/sessions/sess-1/turns",
+      "http://127.0.0.1/sessions/sess-1/turns",
     );
   });
 });

@@ -26,8 +26,8 @@ use futures::StreamExt;
 use sea_orm::ConnectOptions;
 use tidebreak_core::{
     AdmitSandboxAgentRunOutcome, AgentConfig, AgentError, AgentRun, AgentRunExecutionLocation,
-    AgentRunId, AgentRunStatus, CallId, CancelToken, Chat, ChatId, ChatRequest, DbStore,
-    ModelProvider, ProviderEvent, ProviderId, Result, StopReason, Store,
+    AgentRunId, AgentRunStatus, CallId, CancelToken, Chat, ChatRequest, DbStore, ModelProvider,
+    ProviderEvent, ProviderId, Result, SessionId, StopReason, Store,
 };
 use tidebreak_sandbox_agent::{run_agent, STEERING_PREFIX};
 use tidebreak_sandbox_protocol::{
@@ -472,7 +472,7 @@ impl Store for TerminalFaultStore {
         self.inner.create_chat_with_project_defaults(chat).await
     }
 
-    async fn get_chat(&self, id: ChatId) -> Result<Option<Chat>> {
+    async fn get_chat(&self, id: SessionId) -> Result<Option<Chat>> {
         if self.setup_fault == Some(SetupFault::ModelResolution) {
             self.setup.enter_and_wait().await;
             return Err(AgentError::Store(
@@ -488,26 +488,26 @@ impl Store for TerminalFaultStore {
 
     async fn get_chat_transcript(
         &self,
-        id: ChatId,
+        id: SessionId,
     ) -> Result<Option<tidebreak_core::ChatTranscriptSnapshot>> {
         self.inner.get_chat_transcript(id).await
     }
 
-    async fn set_chat_model(&self, id: ChatId, model: Option<String>) -> Result<()> {
+    async fn set_chat_model(&self, id: SessionId, model: Option<String>) -> Result<()> {
         self.inner.set_chat_model(id, model).await
     }
 
-    async fn set_chat_title(&self, id: ChatId, title: Option<String>) -> Result<()> {
+    async fn set_chat_title(&self, id: SessionId, title: Option<String>) -> Result<()> {
         self.inner.set_chat_title(id, title).await
     }
 
-    async fn set_chat_title_if_unset(&self, id: ChatId, title: &str) -> Result<bool> {
+    async fn set_chat_title_if_unset(&self, id: SessionId, title: &str) -> Result<bool> {
         self.inner.set_chat_title_if_unset(id, title).await
     }
 
     async fn update_chat_metadata(
         &self,
-        id: ChatId,
+        id: SessionId,
         title: Option<Option<String>>,
         model: Option<Option<String>>,
         reasoning_effort: Option<Option<tidebreak_core::ReasoningEffort>>,
@@ -525,7 +525,11 @@ impl Store for TerminalFaultStore {
             )
             .await
     }
-    async fn set_chat_memory_incognito(&self, id: ChatId, memory_incognito: bool) -> Result<bool> {
+    async fn set_chat_memory_incognito(
+        &self,
+        id: SessionId,
+        memory_incognito: bool,
+    ) -> Result<bool> {
         self.inner
             .set_chat_memory_incognito(id, memory_incognito)
             .await
@@ -711,7 +715,7 @@ impl Store for TerminalFaultStore {
         self.inner.append_message(message).await
     }
 
-    async fn list_messages(&self, chat_id: ChatId) -> Result<Vec<tidebreak_core::Message>> {
+    async fn list_messages(&self, chat_id: SessionId) -> Result<Vec<tidebreak_core::Message>> {
         self.inner.list_messages(chat_id).await
     }
 
@@ -725,7 +729,7 @@ impl Store for TerminalFaultStore {
     async fn claim_client_tool_call(
         &self,
         id: CallId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         executor_id: Uuid,
         lease_token: Uuid,
         now: chrono::DateTime<chrono::Utc>,
@@ -739,7 +743,7 @@ impl Store for TerminalFaultStore {
     async fn heartbeat_client_tool_call(
         &self,
         id: CallId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         lease_token: Uuid,
         now: chrono::DateTime<chrono::Utc>,
         lease_expires_at: chrono::DateTime<chrono::Utc>,
@@ -763,7 +767,7 @@ impl Store for TerminalFaultStore {
     async fn resolve_client_tool_call_and_append_event(
         &self,
         id: CallId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         lease_token: Uuid,
         now: chrono::DateTime<chrono::Utc>,
         resolution: &tidebreak_core::ToolCallResolution,
@@ -784,7 +788,7 @@ impl Store for TerminalFaultStore {
     async fn resolve_expired_client_tool_call_and_append_event(
         &self,
         id: CallId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         lease_token: Uuid,
         now: chrono::DateTime<chrono::Utc>,
         resolution: &tidebreak_core::ToolCallResolution,
@@ -804,14 +808,14 @@ impl Store for TerminalFaultStore {
 
     async fn list_pending_client_tool_calls(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
     ) -> Result<Vec<tidebreak_core::ToolCallRecord>> {
         self.inner.list_pending_client_tool_calls(chat_id).await
     }
 
     async fn list_tool_calls(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
     ) -> Result<Vec<tidebreak_core::ToolCallRecord>> {
         self.inner.list_tool_calls(chat_id).await
     }
@@ -830,7 +834,7 @@ impl Store for TerminalFaultStore {
 
     async fn append_event(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         event: &tidebreak_core::AgentEvent,
     ) -> Result<i64> {
         self.inner.append_event(chat_id, event).await
@@ -838,9 +842,9 @@ impl Store for TerminalFaultStore {
 
     async fn list_events(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         after: i64,
-    ) -> Result<Vec<tidebreak_core::SequencedEvent>> {
+    ) -> Result<Vec<tidebreak_core::SequencedAgentEvent>> {
         self.inner.list_events(chat_id, after).await
     }
 }
@@ -1120,7 +1124,7 @@ async fn store_with_pool(
     }
     let store: Arc<dyn Store> = Arc::new(DbStore::connect_with_options(options).await.unwrap());
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: Some("container".into()),
         model: Some("host-model".into()),
@@ -1139,7 +1143,7 @@ async fn store_with_pool(
 /// Admit one container-located sandbox child under the chat's running turn,
 /// mirroring how a foreground turn admits a sandbox child — but at the container
 /// execution location.
-async fn admit_container_run(store: &Arc<dyn Store>, chat_id: ChatId, task: &str) -> AgentRunId {
+async fn admit_container_run(store: &Arc<dyn Store>, chat_id: SessionId, task: &str) -> AgentRunId {
     let turn_id = tidebreak_core::TurnId::new();
     store
         .accept_turn(turn_id, chat_id, "host-model", "delegate a container run")
@@ -2849,7 +2853,7 @@ async fn the_container_claim_refuses_past_the_concurrency_cap() {
     // The cap is global across chats, so give each run its own chat (a chat
     // runs one turn at a time, and the admit helper claims the chat's turn).
     let other = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         title: Some("second container chat".into()),
         ..chat.clone()
     };

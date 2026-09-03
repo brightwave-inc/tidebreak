@@ -355,7 +355,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
-    use tidebreak_core::{CallId, ChatId};
+    use tidebreak_core::{CallId, SessionId};
 
     #[derive(Default)]
     struct RecordingProvider {
@@ -387,7 +387,7 @@ mod tests {
     async fn tool_passes_stable_host_identities_and_structured_arguments() {
         let provider = Arc::new(RecordingProvider::default());
         let tool = ExecTool::new(provider.clone());
-        let chat_id = ChatId::new();
+        let chat_id = SessionId::new();
         let call_id = CallId::new();
         let ctx = ToolCtx::new_legacy_workspace(chat_id, None, PathBuf::from("/tmp/unused"))
             .with_call_id(call_id);
@@ -483,8 +483,12 @@ mod tests {
         let tool = ExecTool::new(Arc::new(TimedOutProvider));
         let output = tool
             .execute(
-                &ToolCtx::new_legacy_workspace(ChatId::new(), None, PathBuf::from("/tmp/unused"))
-                    .with_call_id(CallId::new()),
+                &ToolCtx::new_legacy_workspace(
+                    SessionId::new(),
+                    None,
+                    PathBuf::from("/tmp/unused"),
+                )
+                .with_call_id(CallId::new()),
                 json!({"command": "pip", "args": ["install", "python-docx"]}),
             )
             .await
@@ -651,8 +655,12 @@ mod tests {
         let tool = ExecTool::new(provider.clone());
         let output = tool
             .execute(
-                &ToolCtx::new_legacy_workspace(ChatId::new(), None, PathBuf::from("/tmp/unused"))
-                    .with_call_id(CallId::new()),
+                &ToolCtx::new_legacy_workspace(
+                    SessionId::new(),
+                    None,
+                    PathBuf::from("/tmp/unused"),
+                )
+                .with_call_id(CallId::new()),
                 json!({"command": "/bin/false"}),
             )
             .await
@@ -682,7 +690,7 @@ mod tests {
             let output = tool
                 .execute(
                     &ToolCtx::new_legacy_workspace(
-                        ChatId::new(),
+                        SessionId::new(),
                         None,
                         PathBuf::from("/tmp/unused"),
                     )

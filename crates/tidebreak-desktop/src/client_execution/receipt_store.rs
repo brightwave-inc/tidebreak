@@ -13,8 +13,8 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tidebreak_core::{
-    replace_file, sync_directory, validate_portable_filename, CallId, ChatId, HostRootId, OutputId,
-    OutputRevisionId, OutputWriteMode, RootAttachmentChangeId, MAX_ATTACHMENT_REVISION,
+    replace_file, sync_directory, validate_portable_filename, CallId, HostRootId, OutputId,
+    OutputRevisionId, OutputWriteMode, RootAttachmentChangeId, SessionId, MAX_ATTACHMENT_REVISION,
     MAX_BINARY_DELIVERABLE_BYTES, MAX_CONNECTED_FOLDER_PATH_BYTES,
 };
 use tidebreak_host_broker::GrantSubject;
@@ -48,7 +48,7 @@ pub(crate) struct ReceiptStore {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(super) struct FolderAccessReceipt {
     version: u32,
-    pub(super) chat_id: ChatId,
+    pub(super) chat_id: SessionId,
     pub(super) call_id: CallId,
     pub(super) executor_id: Uuid,
     pub(super) lease_token: Uuid,
@@ -71,7 +71,7 @@ pub(super) struct FolderAccessReceipt {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(super) struct FolderOperationReceipt {
     version: u32,
-    pub(super) chat_id: ChatId,
+    pub(super) chat_id: SessionId,
     pub(super) call_id: CallId,
     pub(super) executor_id: Uuid,
     pub(super) lease_token: Uuid,
@@ -121,7 +121,7 @@ pub(super) enum DispatchRecovery {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(super) struct ComputerUseReceipt {
     version: u32,
-    pub(super) chat_id: ChatId,
+    pub(super) chat_id: SessionId,
     pub(super) call_id: CallId,
     pub(super) executor_id: Uuid,
     pub(super) lease_token: Uuid,
@@ -142,7 +142,7 @@ pub(super) struct ComputerUseReceipt {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(super) struct ForegroundBrowserReceipt {
     version: u32,
-    pub(super) chat_id: ChatId,
+    pub(super) chat_id: SessionId,
     pub(super) call_id: CallId,
     pub(super) executor_id: Uuid,
     pub(super) lease_token: Uuid,
@@ -193,7 +193,7 @@ pub(super) enum DelegatedFileResolution {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(super) struct ManualFolderConnectReceipt {
     version: u32,
-    pub(super) chat_id: ChatId,
+    pub(super) chat_id: SessionId,
     pub(super) subject: GrantSubject,
     pub(super) path: PathBuf,
     pub(super) registration_operation_id: OperationId,
@@ -215,7 +215,7 @@ pub(super) struct ManualFolderConnectReceipt {
 pub(crate) struct OutputExportReceipt {
     version: u32,
     pub(crate) operation_id: Uuid,
-    pub(crate) chat_id: ChatId,
+    pub(crate) chat_id: SessionId,
     pub(crate) output_id: OutputId,
     pub(crate) revision_id: OutputRevisionId,
     pub(crate) filename: String,
@@ -233,7 +233,7 @@ pub(crate) struct OutputExportReceipt {
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) struct OutputWritebackReceipt {
     version: u32,
-    pub(super) chat_id: ChatId,
+    pub(super) chat_id: SessionId,
     pub(super) call_id: CallId,
     pub(super) executor_id: Uuid,
     pub(super) lease_token: Uuid,
@@ -535,7 +535,7 @@ impl std::fmt::Debug for FolderAccessIntent {
 
 impl FolderAccessReceipt {
     pub(super) fn new(
-        chat_id: ChatId,
+        chat_id: SessionId,
         call_id: CallId,
         executor_id: Uuid,
         intent: FolderAccessIntent,
@@ -593,7 +593,7 @@ impl FolderAccessReceipt {
 }
 
 impl ManualFolderConnectReceipt {
-    pub(super) fn new(chat_id: ChatId, subject: GrantSubject, path: PathBuf) -> Self {
+    pub(super) fn new(chat_id: SessionId, subject: GrantSubject, path: PathBuf) -> Self {
         let registration_operation_id = OperationId::new();
         let mut change_id = RootAttachmentChangeId::new();
         while *change_id.as_uuid() == registration_operation_id.as_uuid() {
@@ -656,7 +656,7 @@ impl ManualFolderConnectReceipt {
 impl OutputExportReceipt {
     pub(crate) fn new(
         operation_id: Uuid,
-        chat_id: ChatId,
+        chat_id: SessionId,
         output_id: OutputId,
         revision_id: OutputRevisionId,
         filename: String,
@@ -720,7 +720,7 @@ impl OutputExportReceipt {
 impl OutputWritebackReceipt {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
-        chat_id: ChatId,
+        chat_id: SessionId,
         call_id: CallId,
         executor_id: Uuid,
         output_id: OutputId,
@@ -790,7 +790,7 @@ impl OutputWritebackReceipt {
 
 impl FolderOperationReceipt {
     pub(super) fn new(
-        chat_id: ChatId,
+        chat_id: SessionId,
         call_id: CallId,
         executor_id: Uuid,
         recovery: DispatchRecovery,
@@ -821,7 +821,7 @@ impl FolderOperationReceipt {
 }
 
 impl ComputerUseReceipt {
-    pub(super) fn new(chat_id: ChatId, call_id: CallId, executor_id: Uuid) -> Self {
+    pub(super) fn new(chat_id: SessionId, call_id: CallId, executor_id: Uuid) -> Self {
         Self {
             version: RECEIPT_VERSION,
             chat_id,
@@ -849,7 +849,7 @@ impl ComputerUseReceipt {
 
 impl ForegroundBrowserReceipt {
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-    pub(super) fn new(chat_id: ChatId, call_id: CallId, executor_id: Uuid) -> Self {
+    pub(super) fn new(chat_id: SessionId, call_id: CallId, executor_id: Uuid) -> Self {
         Self {
             version: RECEIPT_VERSION,
             chat_id,
@@ -1674,7 +1674,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = ReceiptStore::open(temp.path()).unwrap();
         let mut receipt = OutputWritebackReceipt::new(
-            ChatId::new(),
+            SessionId::new(),
             CallId::new(),
             store.executor_id(),
             OutputId::new(),
@@ -1735,7 +1735,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = ReceiptStore::open(temp.path()).unwrap();
         let mut receipt = FolderAccessReceipt::new(
-            ChatId::new(),
+            SessionId::new(),
             CallId::new(),
             store.executor_id(),
             FolderAccessIntent::Selected {
@@ -1798,7 +1798,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = ReceiptStore::open(temp.path()).unwrap();
         let receipt = FolderOperationReceipt::new(
-            ChatId::new(),
+            SessionId::new(),
             CallId::new(),
             store.executor_id(),
             DispatchRecovery::Terminalize,
@@ -1816,7 +1816,7 @@ mod tests {
     fn manual_connect_receipts_keep_paths_private_and_identities_distinct() {
         let temp = tempfile::tempdir().unwrap();
         let store = ReceiptStore::open(temp.path()).unwrap();
-        let chat_id = ChatId::new();
+        let chat_id = SessionId::new();
         let subject = GrantSubject::conversation(chat_id.0).unwrap();
         let path = temp.path().join("Documents");
         let mut receipt = ManualFolderConnectReceipt::new(chat_id, subject, path.clone());
@@ -1857,7 +1857,7 @@ mod tests {
         let store = ReceiptStore::open(temp.path()).unwrap();
         let mut receipt = OutputExportReceipt::new(
             Uuid::new_v4(),
-            ChatId::new(),
+            SessionId::new(),
             OutputId::new(),
             OutputRevisionId::new(),
             "brief.md".to_owned(),
@@ -1895,7 +1895,7 @@ mod tests {
         let store = ReceiptStore::open(temp.path()).unwrap();
         let mut receipt = OutputExportReceipt::new(
             Uuid::new_v4(),
-            ChatId::new(),
+            SessionId::new(),
             OutputId::new(),
             OutputRevisionId::new(),
             "deck.pptx".to_owned(),
@@ -1928,7 +1928,7 @@ mod tests {
         let store = ReceiptStore::open(temp.path()).unwrap();
         assert_eq!(store.executor_id(), executor_id);
         let receipt = FolderAccessReceipt::new(
-            ChatId::new(),
+            SessionId::new(),
             CallId::new(),
             store.executor_id(),
             FolderAccessIntent::Decline,
@@ -1938,7 +1938,7 @@ mod tests {
         assert!(store.load_all().is_err());
 
         let mut invalid = FolderAccessReceipt::new(
-            ChatId::new(),
+            SessionId::new(),
             CallId::new(),
             store.executor_id(),
             FolderAccessIntent::Decline,
@@ -1963,7 +1963,7 @@ mod tests {
         std::fs::remove_file(receipt_directory.join(EXECUTOR_FILE)).unwrap();
         let store = ReceiptStore::open(temp.path()).unwrap();
         let receipt = FolderAccessReceipt::new(
-            ChatId::new(),
+            SessionId::new(),
             CallId::new(),
             store.executor_id(),
             FolderAccessIntent::Decline,

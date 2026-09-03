@@ -3,7 +3,7 @@ use crate::storage::{
     code_session_mints_notification, notification_kind_for_turn_status, NotificationContext,
     NotificationKind,
 };
-use crate::CodeSessionKind;
+use crate::SessionKind;
 use crate::TurnRunStatus;
 
 #[test]
@@ -28,10 +28,8 @@ fn cancel_and_retry_do_not_mint_a_notification() {
 
 #[test]
 fn a_watch_session_does_not_mint_a_notification() {
-    assert!(!code_session_mints_notification(CodeSessionKind::Watch));
-    assert!(code_session_mints_notification(
-        CodeSessionKind::Interactive
-    ));
+    assert!(!code_session_mints_notification(SessionKind::Watch));
+    assert!(code_session_mints_notification(SessionKind::Interactive));
 }
 
 #[tokio::test]
@@ -89,9 +87,9 @@ async fn a_work_turn_cannot_double_insert() {
 async fn a_code_turn_cannot_double_insert() {
     let (_dir, store) = temp_store().await;
     let owner = crate::OwnerId::local();
-    let session_id = crate::CodeSessionId::new();
+    let session_id = crate::SessionId::new();
     let workspace_id = crate::WorkspaceId::new();
-    let turn_id = crate::CodeTurnId::new();
+    let turn_id = crate::TurnId::new();
 
     let first = crate::db::code::record_code_turn_notification(
         &store,

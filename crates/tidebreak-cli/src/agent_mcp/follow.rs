@@ -12,7 +12,7 @@
 use std::time::Duration;
 
 use serde_json::json;
-use tidebreak_core::{AgentError, CallId, ChatId, Result, TurnId, REQUEST_FOLDER_ACCESS_TOOL};
+use tidebreak_core::{AgentError, CallId, Result, SessionId, TurnId, REQUEST_FOLDER_ACCESS_TOOL};
 
 use crate::api::client::{Client, DurableTurn, DurableTurnStatus};
 use crate::api::wire::{
@@ -37,7 +37,7 @@ const FOLDER_POLL: Duration = Duration::from_millis(100);
 /// circuits the socket.
 pub(crate) async fn follow_turn(
     client: &mut Client,
-    chat: ChatId,
+    chat: SessionId,
     turn_id: TurnId,
     after_seq: i64,
     assistant_text: String,
@@ -64,7 +64,7 @@ pub(crate) async fn follow_turn(
 pub(crate) async fn follow_open_stream(
     client: &mut Client,
     stream: &mut EventStream,
-    chat: ChatId,
+    chat: SessionId,
     turn_id: TurnId,
     mut ours: bool,
     mut assistant_text: String,
@@ -282,7 +282,7 @@ fn pending_from_interaction(interaction: &Interaction) -> serde_json::Value {
 
 async fn pending_plan(
     client: &Client,
-    chat: ChatId,
+    chat: SessionId,
     call_id: Option<CallId>,
 ) -> Result<Option<Interaction>> {
     let pending = client.list_pending_plans(chat).await?;
@@ -294,7 +294,7 @@ async fn pending_plan(
 
 async fn pending_questions(
     client: &Client,
-    chat: ChatId,
+    chat: SessionId,
     call_id: Option<CallId>,
 ) -> Result<Option<Interaction>> {
     let pending = client.list_pending_questions(chat).await?;
@@ -304,7 +304,7 @@ async fn pending_questions(
         .map(Interaction::from_questions))
 }
 
-async fn folder_access_parked(client: &Client, chat: ChatId, call_id: CallId) -> Result<bool> {
+async fn folder_access_parked(client: &Client, chat: SessionId, call_id: CallId) -> Result<bool> {
     let pending = client.list_pending_folder_access(chat).await?;
     let want = call_id.to_string();
     Ok(pending.iter().any(|row| {
@@ -321,7 +321,7 @@ async fn folder_access_parked(client: &Client, chat: ChatId, call_id: CallId) ->
 /// that closes mid-read returns whatever was collected.
 pub(crate) async fn collect_events(
     client: &mut Client,
-    chat: ChatId,
+    chat: SessionId,
     after_seq: i64,
     max_events: usize,
 ) -> Result<(Vec<serde_json::Value>, i64)> {
@@ -362,7 +362,7 @@ pub(crate) async fn collect_events(
 /// Apply a print-protocol decision over HTTP. The caller follows afterwards.
 pub(crate) async fn apply_decision(
     client: &Client,
-    chat: ChatId,
+    chat: SessionId,
     decision: &Decision,
 ) -> Result<()> {
     match decision {
@@ -525,7 +525,7 @@ fn parse_plan_accept(value: &serde_json::Value) -> std::result::Result<bool, Str
 /// followed it yet.
 pub(crate) async fn turn_id_for_decision(
     client: &Client,
-    chat: ChatId,
+    chat: SessionId,
     decision: &Decision,
 ) -> Result<TurnId> {
     let call_id = match decision {

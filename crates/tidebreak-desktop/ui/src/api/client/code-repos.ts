@@ -264,7 +264,7 @@ export function withCodeReposApi<TBase extends Constructor<HttpCore>>(
      * Warm the pinned install of one engine ahead of a session create.
      *
      * Answers as soon as the server knows where the install stands; the phases
-     * that follow arrive on `WS /code/updates`. Safe to call repeatedly — an
+     * that follow arrive on `WS /updates`. Safe to call repeatedly — an
      * installed pin answers `ready` and one already running is not restarted.
      */
     /**

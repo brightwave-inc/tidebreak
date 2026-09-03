@@ -14,7 +14,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{CallId, ChatId, PermissionMode, ToolSpec, TurnId};
+use crate::{CallId, PermissionMode, SessionId, ToolSpec, TurnId};
 
 /// Stable foreground-only tool name, advertised only to plan-mode turns.
 pub const EXIT_PLAN_MODE_TOOL: &str = "exit_plan_mode";
@@ -136,7 +136,7 @@ impl PlanProposalBody {
 /// Exact storage command with its conversation scope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecidePlanRequest {
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     pub call_id: CallId,
     pub decision: PlanDecision,
 }

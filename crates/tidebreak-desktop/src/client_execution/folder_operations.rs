@@ -354,7 +354,7 @@ async fn staged_outcome(
     let Ok(root) = tidebreak_core::HostRootId::from_uuid(root_id.as_uuid()) else {
         return StagedOutcome::Unstaged;
     };
-    let Some(overlay) = staged.staged_root(tidebreak_core::ChatId::from(context.chat_id), root)
+    let Some(overlay) = staged.staged_root(tidebreak_core::SessionId::from(context.chat_id), root)
     else {
         return StagedOutcome::Unstaged;
     };
@@ -670,13 +670,13 @@ fn read_file_name(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tidebreak_core::ChatId;
+    use tidebreak_core::SessionId;
 
     #[test]
     fn broker_capabilities_reach_the_model_facing_folder_listing() {
         let call = ToolCallRecord {
             id: CallId::new(),
-            chat_id: ChatId::new(),
+            chat_id: SessionId::new(),
             turn_id: tidebreak_core::TurnId::new(),
             provider_id: "tool-1".into(),
             name: LIST_CONNECTED_FOLDERS_TOOL.into(),
@@ -777,7 +777,7 @@ mod tests {
     fn results_are_bounded_and_do_not_include_host_error_detail() {
         let call = ToolCallRecord {
             id: CallId::new(),
-            chat_id: ChatId::new(),
+            chat_id: SessionId::new(),
             turn_id: tidebreak_core::TurnId::new(),
             provider_id: "tool-1".into(),
             name: READ_CONNECTED_FILE_TOOL.into(),
@@ -823,7 +823,7 @@ mod tests {
     fn native_executor_accepts_only_valid_foreground_folder_calls() {
         let call = ToolCallRecord {
             id: CallId::new(),
-            chat_id: ChatId::new(),
+            chat_id: SessionId::new(),
             turn_id: tidebreak_core::TurnId::new(),
             provider_id: "tool-1".into(),
             name: LIST_FOLDER_TOOL.into(),
@@ -852,7 +852,7 @@ mod tests {
     fn pending_discovery_never_replaces_a_recovered_operation_receipt() {
         let call = ToolCallRecord {
             id: CallId::new(),
-            chat_id: ChatId::new(),
+            chat_id: SessionId::new(),
             turn_id: tidebreak_core::TurnId::new(),
             provider_id: "tool-1".into(),
             name: LIST_CONNECTED_FOLDERS_TOOL.into(),
@@ -909,7 +909,7 @@ mod tests {
         );
 
         let mut import = FolderOperationReceipt::new(
-            ChatId::new(),
+            SessionId::new(),
             CallId::new(),
             uuid::Uuid::new_v4(),
             DispatchRecovery::Retry,
@@ -927,7 +927,7 @@ mod tests {
     fn the_executor_accepts_imports_under_the_same_path_rules_as_reads() {
         let call = ToolCallRecord {
             id: CallId::new(),
-            chat_id: ChatId::new(),
+            chat_id: SessionId::new(),
             turn_id: tidebreak_core::TurnId::new(),
             provider_id: "tool-1".into(),
             name: IMPORT_CONNECTED_FILE_TOOL.into(),
@@ -959,7 +959,7 @@ mod tests {
     #[test]
     fn dispatch_started_receipt_is_terminalized_even_with_a_live_lease() {
         let mut receipt = FolderOperationReceipt::new(
-            ChatId::new(),
+            SessionId::new(),
             CallId::new(),
             uuid::Uuid::new_v4(),
             DispatchRecovery::Terminalize,

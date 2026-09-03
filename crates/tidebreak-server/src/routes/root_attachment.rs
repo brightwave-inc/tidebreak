@@ -7,11 +7,11 @@ use axum::extract::State;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tidebreak_core::{
-    BeginRootAttachmentChange, BeginRootAttachmentChangeOutcome, ChatId,
-    FinishRootAttachmentChangeOutcome, HostRootId, RootAttachmentChange,
-    RootAttachmentChangeAction, RootAttachmentChangeFailure, RootAttachmentChangeId,
-    RootAttachmentChangePhase, RootAttachmentChangeTerminal, RootAttachmentOrigin,
-    RootAttachmentSubjectKind, MAX_PENDING_ROOT_ATTACHMENT_CHANGES,
+    BeginRootAttachmentChange, BeginRootAttachmentChangeOutcome, FinishRootAttachmentChangeOutcome,
+    HostRootId, RootAttachmentChange, RootAttachmentChangeAction, RootAttachmentChangeFailure,
+    RootAttachmentChangeId, RootAttachmentChangePhase, RootAttachmentChangeTerminal,
+    RootAttachmentOrigin, RootAttachmentSubjectKind, SessionId,
+    MAX_PENDING_ROOT_ATTACHMENT_CHANGES,
 };
 use uuid::Uuid;
 
@@ -65,7 +65,7 @@ pub enum FinishRootAttachmentChangeDisposition {
 #[derive(Debug, Serialize)]
 pub struct RootAttachmentChangeView {
     pub id: RootAttachmentChangeId,
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     pub root_id: HostRootId,
     pub action: RootAttachmentChangeAction,
     pub subject_kind: RootAttachmentSubjectKind,
@@ -134,7 +134,7 @@ pub struct PendingRootAttachmentChanges {
 pub async fn begin_root_attachment_change(
     State(state): State<AppState>,
     _executor: ClientExecutor,
-    Path((chat_id, change_id)): Path<(ChatId, RootAttachmentChangeId)>,
+    Path((chat_id, change_id)): Path<(SessionId, RootAttachmentChangeId)>,
     Json(body): Json<BeginRootAttachmentChangeBody>,
 ) -> Result<Json<BegunRootAttachmentChange>, ServerError> {
     if chat_id.as_uuid().is_nil() {

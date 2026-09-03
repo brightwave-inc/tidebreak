@@ -1290,7 +1290,7 @@ pub(crate) async fn run_browser_mcp() -> Result<()> {
     let tools = Arc::new(browser_tool_registry(&client, cap.semantic_actions));
 
     // No filesystem workspace: the tools reach the loopback server only.
-    let ctx = ToolCtx::without_private_scratch(tidebreak_core::ChatId::new(), None);
+    let ctx = ToolCtx::without_private_scratch(tidebreak_core::SessionId::new(), None);
 
     let server =
         tidebreak_mcp::McpServer::new(tools, ctx).with_approval_gate(Arc::new(AutoApproveGate));

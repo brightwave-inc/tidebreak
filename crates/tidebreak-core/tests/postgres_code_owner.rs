@@ -19,10 +19,10 @@ use tidebreak_core::db::code::{
     save_turn, set_workspace_title_if, MAX_REPLAY_EVENTS,
 };
 use tidebreak_core::{
-    Attention, AttentionSource, CodeApproval, CodeApprovalId, CodeApprovalKind, CodeApprovalState,
-    CodeEvent, CodeRepo, CodeSession, CodeSessionId, CodeSessionKind, CodeSessionLifecycle,
-    CodeTurn, CodeTurnId, CodeTurnStatus, CodeWorkspace, CodeWorkspaceStatus, DbStore, HarnessKind,
-    OwnerId, PermissionMode, RepoId, TurnParkWait, WorkspaceId,
+    Approval, ApprovalId, ApprovalKind, ApprovalState, Attention, AttentionSource, CodeRepo,
+    CodeWorkspace, CodeWorkspaceStatus, DbStore, Event, HarnessKind, OwnerId, PermissionMode,
+    RepoId, Session, SessionId, SessionKind, SessionLifecycle, Turn, TurnId, TurnParkWait,
+    TurnStatus, WorkspaceId,
 };
 
 static POSTGRES_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -32,7 +32,7 @@ async fn seed_owner(
     store: &DbStore,
     owner: &OwnerId,
     label: &str,
-) -> (RepoId, WorkspaceId, CodeSessionId, CodeTurnId) {
+) -> (RepoId, WorkspaceId, SessionId, TurnId) {
     let repo_id = RepoId::new();
     insert_repo(
         store,
@@ -78,14 +78,14 @@ async fn seed_owner(
     )
     .await
     .unwrap();
-    let session_id = CodeSessionId::new();
+    let session_id = SessionId::new();
     insert_session(
         store,
-        &CodeSession {
+        &Session {
             id: session_id,
             owner: owner.clone(),
             workspace_id: Some(workspace_id),
-            kind: CodeSessionKind::Interactive,
+            kind: SessionKind::Interactive,
             harness_kind: HarnessKind::ClaudeCode,
             harness_version: None,
             harness_resume_ref: None,
@@ -93,7 +93,7 @@ async fn seed_owner(
             model: None,
             reasoning_effort: None,
             fast_mode: false,
-            lifecycle: CodeSessionLifecycle::Idle,
+            lifecycle: SessionLifecycle::Idle,
             fence_reason: None,
             child_pid: None,
             child_process_identity: None,
@@ -106,15 +106,15 @@ async fn seed_owner(
     )
     .await
     .unwrap();
-    let turn_id = CodeTurnId::new();
+    let turn_id = TurnId::new();
     insert_turn(
         store,
         owner,
-        &CodeTurn {
+        &Turn {
             id: turn_id,
             session_id,
             ordinal: 1,
-            status: CodeTurnStatus::Running,
+            status: TurnStatus::Running,
             model: None,
             fast_mode: false,
             user_input: format!("{label} asked for something"),
@@ -188,7 +188,7 @@ async fn postgres_code_queries_partition_by_owner() {
         &alice,
         alice_session,
         0,
-        &CodeEvent::TurnInterrupted { usage: None },
+        &Event::TurnInterrupted { usage: None },
     )
     .await
     .unwrap();
@@ -209,15 +209,15 @@ async fn postgres_code_queries_partition_by_owner() {
     );
 
     // Approvals.
-    let approval_id = CodeApprovalId::new();
+    let approval_id = ApprovalId::new();
     insert_approval(
         &store,
         &alice,
-        &CodeApproval {
+        &Approval {
             id: approval_id,
             session_id: alice_session,
             turn_id: alice_turn,
-            kind: CodeApprovalKind::FileWrite {
+            kind: ApprovalKind::FileWrite {
                 paths: vec!["secret.txt".into()],
             },
             harness_raw: serde_json::json!({"tool":"Write"}),
@@ -227,7 +227,7 @@ async fn postgres_code_queries_partition_by_owner() {
             worker_epoch: Some(0),
             decision_claim: None,
             claimed_at: None,
-            state: CodeApprovalState::Pending,
+            state: ApprovalState::Pending,
             feedback: None,
             requested_at: Utc::now(),
             decided_at: None,
@@ -286,7 +286,7 @@ async fn postgres_stores_a_parked_turn_and_reads_its_wait_back() {
 
     let mut turn = get_turn(&store, &owner, turn_id).await.unwrap().unwrap();
     assert_eq!(turn.park_ref, None);
-    turn.status = CodeTurnStatus::Waiting;
+    turn.status = TurnStatus::Waiting;
     turn.park_ref = Some("cp-1".to_owned());
     turn.park_wait = Some(TurnParkWait::Approval {
         call_id: "call-1".to_owned(),
@@ -294,7 +294,7 @@ async fn postgres_stores_a_parked_turn_and_reads_its_wait_back() {
     assert!(save_turn(&store, &owner, &turn).await.unwrap());
 
     let parked = get_turn(&store, &owner, turn_id).await.unwrap().unwrap();
-    assert_eq!(parked.status, CodeTurnStatus::Waiting);
+    assert_eq!(parked.status, TurnStatus::Waiting);
     assert_eq!(parked.park_ref.as_deref(), Some("cp-1"));
     assert_eq!(
         parked.park_wait,

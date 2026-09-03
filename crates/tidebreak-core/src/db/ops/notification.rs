@@ -7,9 +7,9 @@ use sea_orm::{
     QuerySelect, Set,
 };
 
-use crate::code::{CodeSessionId, CodeTurnId, WorkspaceId};
+use crate::code::WorkspaceId;
 use crate::error::{AgentError, Result};
-use crate::id::{ChatId, NotificationId, TurnId};
+use crate::id::{NotificationId, SessionId, TurnId};
 use crate::model::OwnerId;
 use crate::storage::{
     code_notification_dedupe_key, notification_title, work_notification_dedupe_key, Notification,
@@ -23,7 +23,7 @@ const MAX_PAGE: u64 = 100;
 /// Insert one Work turn settlement. Idempotent on `(owner, dedupe_key)`.
 pub(in crate::db) async fn record_work_turn_notification(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
     turn_id: TurnId,
     kind: NotificationKind,
 ) -> Result<Option<Notification>> {
@@ -33,14 +33,14 @@ pub(in crate::db) async fn record_work_turn_notification(
 /// Insert one Work turn settlement on the caller's transaction.
 pub(in crate::db) async fn record_work_turn_notification_on<C>(
     conn: &C,
-    chat_id: ChatId,
+    chat_id: SessionId,
     turn_id: TurnId,
     kind: NotificationKind,
 ) -> Result<Option<Notification>>
 where
     C: ConnectionTrait,
 {
-    let Some(chat) = entities::code_session::Entity::find_by_id(chat_id.0)
+    let Some(chat) = entities::session::Entity::find_by_id(chat_id.0)
         .one(conn)
         .await
         .map_err(store_err)?
@@ -64,9 +64,9 @@ where
 pub(in crate::db) async fn record_code_turn_notification(
     store: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     workspace_id: WorkspaceId,
-    turn_id: CodeTurnId,
+    turn_id: TurnId,
     workspace_title: Option<&str>,
     kind: NotificationKind,
 ) -> Result<Notification> {
@@ -86,9 +86,9 @@ pub(in crate::db) async fn record_code_turn_notification(
 pub(in crate::db) async fn record_code_turn_notification_on<C>(
     conn: &C,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     workspace_id: WorkspaceId,
-    turn_id: CodeTurnId,
+    turn_id: TurnId,
     workspace_title: Option<&str>,
     kind: NotificationKind,
 ) -> Result<Notification>

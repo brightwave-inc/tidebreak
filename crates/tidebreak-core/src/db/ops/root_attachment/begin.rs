@@ -44,7 +44,7 @@ pub(in crate::db) async fn begin_root_attachment_change(
         return Ok(outcome);
     }
 
-    let chat = entities::code_session::Entity::find_by_id(request.chat_id.0)
+    let chat = entities::session::Entity::find_by_id(request.chat_id.0)
         .one(&transaction)
         .await
         .map_err(store_err)?

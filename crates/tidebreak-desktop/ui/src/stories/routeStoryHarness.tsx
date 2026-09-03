@@ -141,7 +141,10 @@ function waitingEntry(
 ): InboxEntry {
   const requestedAt = `2026-08-24T${String(12 - index).padStart(2, "0")}:00:00.000Z`;
   return {
-    conversation: { surface: "chat", chatId: `waiting-chat-${index}` },
+    conversation: {
+      sessionId: `waiting-chat-${index}`,
+      workspaceId: null,
+    },
     title,
     attention: {
       state: {
@@ -172,7 +175,6 @@ export const denseInboxEntries: InboxEntry[] = [
   waitingEntry(5, "output_writeback", "Save the launch brief"),
   {
     conversation: {
-      surface: "code",
       sessionId: "code-session-1",
       workspaceId: "workspace-1",
     },

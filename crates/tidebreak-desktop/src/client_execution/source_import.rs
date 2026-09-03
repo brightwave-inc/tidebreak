@@ -10,7 +10,7 @@ use std::{future::Future, path::PathBuf};
 
 use tidebreak_code_execution::host_paths::resolve_scratch_directory;
 use tidebreak_core::{
-    ChatId, HostRootId, ImportConnectedFileArgs, ImportConnectedFileResult, ToolCallRecord,
+    HostRootId, ImportConnectedFileArgs, ImportConnectedFileResult, SessionId, ToolCallRecord,
 };
 use tidebreak_host_broker::{
     OperationEnvelope, OperationRequest, OperationResult, PathRequest, RelativePath, RootId,
@@ -280,7 +280,7 @@ pub(super) fn current_staged_root(
     let root_id = HostRootId::from_uuid(root_id.as_uuid()).ok()?;
     state
         .staged_folders()?
-        .staged_root(ChatId::from(context.chat_id), root_id)
+        .staged_root(SessionId::from(context.chat_id), root_id)
 }
 
 pub(super) fn selected_staging_is_current(
@@ -315,7 +315,7 @@ async fn publish(
         local_client().post(format!(
             "{}{}",
             info.base_url,
-            raw_documents_path(ChatId::from(context.chat_id))
+            raw_documents_path(SessionId::from(context.chat_id))
         )),
         &info,
     )
@@ -402,7 +402,7 @@ mod tests {
     fn import_call(path: &str, root_id: uuid::Uuid) -> ToolCallRecord {
         ToolCallRecord {
             id: CallId::new(),
-            chat_id: ChatId::new(),
+            chat_id: SessionId::new(),
             turn_id: TurnId::new(),
             provider_id: "tool-1".into(),
             name: tidebreak_core::IMPORT_CONNECTED_FILE_TOOL.into(),

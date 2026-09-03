@@ -79,7 +79,7 @@ impl BearerTokenSource for GatewayTokenSource {
     async fn authorize_model_route(
         &self,
         route_model: &str,
-        conversation: Option<tidebreak_core::id::ChatId>,
+        conversation: Option<tidebreak_core::id::SessionId>,
     ) -> Result<(String, Option<ModelRouteLease>)> {
         let guard = self.model_sync.clone().read_owned().await;
         if self.resolve_model_route(route_model).await?.is_none() {
@@ -111,7 +111,7 @@ impl BearerTokenSource for GatewayTokenSource {
     /// the shared token: there is no chat for an observation to serve.
     async fn bearer_token_for(
         &self,
-        conversation: Option<tidebreak_core::id::ChatId>,
+        conversation: Option<tidebreak_core::id::SessionId>,
     ) -> Result<String> {
         match conversation {
             Some(chat) => {

@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::id::{ChatId, HostRootId, ProjectId, RootAttachmentChangeId};
+use crate::id::{HostRootId, ProjectId, RootAttachmentChangeId, SessionId};
 
 /// Maximum number of host roots projected onto one project or conversation.
 ///
@@ -193,7 +193,7 @@ pub struct BeginRootAttachmentChange {
     /// Stable idempotency identity, also used as the broker operation UUID.
     pub id: RootAttachmentChangeId,
     /// Conversation whose exact broker attachment changes.
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     /// Stable native reconciler allowed to finish this work.
     pub executor_id: Uuid,
     /// Opaque root identity; possession grants no authority.
@@ -265,7 +265,7 @@ impl RootAttachmentChangeTerminal {
 #[serde(deny_unknown_fields)]
 pub struct RootAttachmentChange {
     pub id: RootAttachmentChangeId,
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     pub executor_id: Uuid,
     pub root_id: HostRootId,
     pub action: RootAttachmentChangeAction,
@@ -470,11 +470,11 @@ mod tests {
     use chrono::Utc;
     use uuid::Uuid;
 
-    use crate::id::{ChatId, HostRootId, RootAttachmentChangeId};
+    use crate::id::{HostRootId, RootAttachmentChangeId, SessionId};
 
     #[test]
     fn root_attachment_change_validation_enforces_derived_and_terminal_shape() {
-        let chat_id = ChatId::new();
+        let chat_id = SessionId::new();
         let mut change = RootAttachmentChange {
             id: RootAttachmentChangeId::new(),
             chat_id,

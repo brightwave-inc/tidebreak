@@ -8,7 +8,7 @@
 //! `recover_exact_turn_terminal_event` keep the contract they had on `event`.
 //! Every `event` row is copied to `code_event` for its session with its
 //! sequence number preserved, its `AgentEvent` payload rewritten into the
-//! `CodeEvent` vocabulary (`crate::chat_journal::journal_row`), and the five
+//! `Event` vocabulary (`crate::chat_journal::journal_row`), and the five
 //! tables whose foreign keys named `event` are pointed at `code_event`. Then
 //! `event` is dropped.
 //!
@@ -24,10 +24,13 @@
 //! for every shape ever written, so an unreadable row is corruption to look
 //! at, not a row to drop.
 //!
-//! Idempotent on the absence of `event`, which is why `DROP TABLE event` is
-//! the last statement on both backends: the SQLite branch runs autocommit
-//! steps, each of which skips work an interrupted attempt already did, and
-//! nothing may come after the step that flips the marker.
+//! Idempotent on the absence of the legacy `event`, which is why `DROP TABLE
+//! event` is the last statement on both backends. The later universal-name
+//! migration renames `code_event` back to `event`, so a table with
+//! `session_id` and no `code_event` also means this migration has finished.
+//! The SQLite branch runs autocommit steps, each of which skips work an
+//! interrupted attempt already did, and nothing may come after the step that
+//! flips the marker.
 
 use std::collections::HashMap;
 
@@ -35,7 +38,6 @@ use sea_orm::{ConnectionTrait, DbBackend};
 use sea_orm_migration::prelude::*;
 
 use crate::chat_journal;
-use crate::db::entities;
 
 pub(super) struct OneJournal;
 
@@ -75,6 +77,11 @@ impl MigrationTrait for OneJournal {
 
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         if !manager.has_table("event").await? {
+            return Ok(());
+        }
+        if !manager.has_table("code_event").await?
+            && manager.has_column("event", "session_id").await?
+        {
             return Ok(());
         }
         match manager.get_database_backend() {
@@ -228,6 +235,54 @@ mod legacy_event {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
+/// The `code_session` columns this migration reads before the universal
+/// table rename runs.
+mod code_session {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "code_session")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub owner: String,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+/// The `code_event` row this migration writes before the universal table
+/// rename runs.
+mod code_event {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "code_event")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub session_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub seq: i64,
+        pub owner: String,
+        #[sea_orm(column_type = "JsonBinary")]
+        pub event: Json,
+        pub created_at: DateTimeUtc,
+        pub turn_id: Option<Uuid>,
+        pub lease_token: Option<Uuid>,
+        pub attempt_event_ordinal: Option<i32>,
+        pub scan_token: Option<Uuid>,
+        pub terminal: bool,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
 /// Copy every `event` row into `code_event`, sequence preserved, payload
 /// rewritten. Runs inside the caller's transaction.
 ///
@@ -278,11 +333,11 @@ where
             // migration is historical, and the entity's model grows with the
             // schema of the chain's end, which does not exist yet here.
             use sea_orm::QuerySelect;
-            for (id, owner) in entities::code_session::Entity::find()
+            for (id, owner) in code_session::Entity::find()
                 .select_only()
-                .column(entities::code_session::Column::Id)
-                .column(entities::code_session::Column::Owner)
-                .filter(entities::code_session::Column::Id.is_in(missing))
+                .column(code_session::Column::Id)
+                .column(code_session::Column::Owner)
+                .filter(code_session::Column::Id.is_in(missing))
                 .into_tuple::<(uuid::Uuid, String)>()
                 .all(conn)
                 .await?
@@ -311,7 +366,7 @@ where
                     DbErr::Custom(format!("event ({}, {}): {error}", row.chat_id, row.seq))
                 })?;
             after = Some((row.chat_id, row.seq));
-            inserts.push(entities::code_event::ActiveModel {
+            inserts.push(code_event::ActiveModel {
                 owner: Set(owner),
                 session_id: Set(row.chat_id),
                 seq: Set(row.seq),
@@ -324,9 +379,7 @@ where
                 terminal: Set(row.terminal),
             });
         }
-        entities::code_event::Entity::insert_many(inserts)
-            .exec(conn)
-            .await?;
+        code_event::Entity::insert_many(inserts).exec(conn).await?;
         if page < BACKFILL_PAGE {
             return Ok(());
         }

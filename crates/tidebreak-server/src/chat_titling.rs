@@ -42,9 +42,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use tidebreak_core::{
-    input_schema_for, strip_json_fence, AgentError, ChatId, ChatMessage, ChatRequest, Message,
-    ModelProvider, PromptCacheMode, ProviderEvent, ResponseFormat, Result, Role, StopReason, Store,
-    UtilityModel,
+    input_schema_for, strip_json_fence, AgentError, ChatMessage, ChatRequest, Message,
+    ModelProvider, PromptCacheMode, ProviderEvent, ResponseFormat, Result, Role, SessionId,
+    StopReason, Store, UtilityModel,
 };
 
 use crate::bus::{ChatMetadataNotice, EventBus};
@@ -170,7 +170,7 @@ pub(crate) struct ChatTitler {
     /// Every turn on an untitled chat would otherwise start another call: a
     /// conversation that stays untitled — because it is still small talk, or
     /// because the calls keep failing — would pay for one on every message.
-    in_flight: Mutex<HashMap<ChatId, Option<UtilityModel>>>,
+    in_flight: Mutex<HashMap<SessionId, Option<UtilityModel>>>,
 }
 
 impl ChatTitler {
@@ -194,7 +194,7 @@ impl ChatTitler {
     /// Returns immediately. Nothing waits on the result and nothing fails when
     /// it does not arrive, which is what lets this be called from the front of a
     /// turn rather than bolted onto each of its completion paths.
-    pub(crate) fn spawn(self: &Arc<Self>, chat_id: ChatId, utility: UtilityModel) {
+    pub(crate) fn spawn(self: &Arc<Self>, chat_id: SessionId, utility: UtilityModel) {
         let Some((mut claim, mut utility)) = TitlingClaim::acquire(self, chat_id, utility) else {
             return;
         };
@@ -245,7 +245,7 @@ impl ChatTitler {
     /// it has nothing to name yet, or another writer named it first.
     pub(crate) async fn derive_title(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         utility: &UtilityModel,
     ) -> Result<Option<String>> {
         // Re-read rather than trust the caller's snapshot: a turn can sit queued
@@ -293,7 +293,7 @@ impl ChatTitler {
 /// A conversation's place in [`ChatTitler::in_flight`], released on drop.
 struct TitlingClaim {
     titler: Arc<ChatTitler>,
-    chat_id: ChatId,
+    chat_id: SessionId,
     released: bool,
 }
 
@@ -301,7 +301,7 @@ impl TitlingClaim {
     /// Claim `chat_id`, or coalesce this trigger behind its running call.
     fn acquire(
         titler: &Arc<ChatTitler>,
-        chat_id: ChatId,
+        chat_id: SessionId,
         utility: UtilityModel,
     ) -> Option<(Self, UtilityModel)> {
         let mut in_flight = titler

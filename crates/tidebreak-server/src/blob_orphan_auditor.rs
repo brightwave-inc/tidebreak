@@ -350,7 +350,7 @@ mod tests {
         let root = dir.path().join("blobs");
         let store = store(&dir).await;
         let chat = tidebreak_core::Chat {
-            id: tidebreak_core::ChatId::new(),
+            id: tidebreak_core::SessionId::new(),
             project_id: None,
             title: None,
             model: None,

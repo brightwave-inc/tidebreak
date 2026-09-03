@@ -17,9 +17,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use tokio::sync::broadcast;
 
-use tidebreak_core::{
-    chat_journal, ChatId, CodeSessionId, SequencedCodeEvent, SequencedEvent, TurnId,
-};
+use tidebreak_core::{chat_journal, SequencedAgentEvent, SequencedEvent, SessionId, TurnId};
 
 use crate::code::bus::CodeEventBus;
 
@@ -38,7 +36,7 @@ const METADATA_BUFFER: usize = 8;
 
 /// Chat state that changed without being turn history.
 ///
-/// These are deliberately not [`SequencedEvent`]s. The journal records what
+/// These are deliberately not [`SequencedAgentEvent`]s. The journal records what
 /// happened inside a turn, in an order a client resumes from; a conversation's
 /// name is neither — it is written beside a turn, sometimes after it ends, by
 /// work that holds no lease. Carrying it here keeps chat metadata out of the
@@ -66,8 +64,8 @@ pub enum ChatMetadataNotice {
 /// Per-chat broadcast channels for live turn events and metadata notices.
 #[derive(Default)]
 pub struct EventBus {
-    channels: Mutex<HashMap<ChatId, broadcast::Sender<SequencedEvent>>>,
-    metadata: Mutex<HashMap<ChatId, broadcast::Sender<ChatMetadataNotice>>>,
+    channels: Mutex<HashMap<SessionId, broadcast::Sender<SequencedAgentEvent>>>,
+    metadata: Mutex<HashMap<SessionId, broadcast::Sender<ChatMetadataNotice>>>,
     /// The session-keyed bus every journaled chat event is mirrored onto.
     /// Installed once the code runtime exists; absent in tests that assemble
     /// state without one, where nothing follows the session channel.
@@ -79,8 +77,8 @@ pub struct EventBus {
 /// Sends the journaled event to the chat's subscribers and mirrors it, as the
 /// code journal row it was stored as, onto the session's channel.
 pub struct ChatEventSender {
-    chat: ChatId,
-    sender: broadcast::Sender<SequencedEvent>,
+    chat: SessionId,
+    sender: broadcast::Sender<SequencedAgentEvent>,
     mirror: Option<Arc<CodeEventBus>>,
 }
 
@@ -88,11 +86,11 @@ impl ChatEventSender {
     /// Publish one journaled event and say how many chat subscribers took
     /// it. Zero is not an error: the durable write already happened, and a
     /// chat nobody is watching streams to no one.
-    pub fn send(&self, event: SequencedEvent) -> usize {
+    pub fn send(&self, event: SequencedAgentEvent) -> usize {
         if let Some(mirror) = &self.mirror {
             mirror.publish(
-                CodeSessionId(self.chat.0),
-                SequencedCodeEvent {
+                SessionId(self.chat.0),
+                SequencedEvent {
                     seq: event.seq,
                     event: chat_journal::journal_row(&event.event),
                 },
@@ -106,16 +104,16 @@ impl ChatEventSender {
     /// one — to the chat's subscribers. An approval settlement carries more
     /// than its chat reading (a grant scope, denial feedback), so it is
     /// mirrored as stored rather than re-derived.
-    pub fn send_row(&self, row: SequencedCodeEvent) -> usize {
+    pub fn send_row(&self, row: SequencedEvent) -> usize {
         let chat_event = chat_journal::chat_event(row.event.clone())
             .ok()
             .flatten()
-            .map(|event| SequencedEvent {
+            .map(|event| SequencedAgentEvent {
                 seq: row.seq,
                 event,
             });
         if let Some(mirror) = &self.mirror {
-            mirror.publish(CodeSessionId(self.chat.0), row);
+            mirror.publish(SessionId(self.chat.0), row);
         }
         chat_event
             .map(|event| self.sender.send(event).unwrap_or(0))
@@ -124,7 +122,7 @@ impl ChatEventSender {
 
     /// Publish to the chat's subscribers only, for a row the session
     /// channel already carried.
-    pub fn send_unmirrored(&self, event: SequencedEvent) -> usize {
+    pub fn send_unmirrored(&self, event: SequencedAgentEvent) -> usize {
         self.sender.send(event).unwrap_or(0)
     }
 }
@@ -139,7 +137,7 @@ impl EventBus {
     /// The publisher for a chat's live channel, created on first use. The
     /// channel is kept in the map so it outlives any individual turn or
     /// subscriber.
-    pub fn sender(&self, chat: ChatId) -> ChatEventSender {
+    pub fn sender(&self, chat: SessionId) -> ChatEventSender {
         ChatEventSender {
             chat,
             sender: self.channel(chat),
@@ -147,7 +145,7 @@ impl EventBus {
         }
     }
 
-    fn channel(&self, chat: ChatId) -> broadcast::Sender<SequencedEvent> {
+    fn channel(&self, chat: SessionId) -> broadcast::Sender<SequencedAgentEvent> {
         self.channels
             .lock()
             .unwrap()
@@ -158,12 +156,12 @@ impl EventBus {
 
     /// Subscribe to a chat's live events. Events published after this call are
     /// delivered; a client pairs this with a journal replay to cover the past.
-    pub fn subscribe(&self, chat: ChatId) -> broadcast::Receiver<SequencedEvent> {
+    pub fn subscribe(&self, chat: SessionId) -> broadcast::Receiver<SequencedAgentEvent> {
         self.channel(chat).subscribe()
     }
 
     /// Subscribe to a chat's metadata notices.
-    pub fn subscribe_metadata(&self, chat: ChatId) -> broadcast::Receiver<ChatMetadataNotice> {
+    pub fn subscribe_metadata(&self, chat: SessionId) -> broadcast::Receiver<ChatMetadataNotice> {
         self.metadata_sender(chat).subscribe()
     }
 
@@ -172,11 +170,11 @@ impl EventBus {
     /// Nothing is retained for a client that connects later, and no caller checks
     /// the result: the durable write already happened, and this is only how an
     /// open window learns about it without asking.
-    pub fn publish_metadata(&self, chat: ChatId, notice: ChatMetadataNotice) {
+    pub fn publish_metadata(&self, chat: SessionId, notice: ChatMetadataNotice) {
         let _ = self.metadata_sender(chat).send(notice);
     }
 
-    fn metadata_sender(&self, chat: ChatId) -> broadcast::Sender<ChatMetadataNotice> {
+    fn metadata_sender(&self, chat: SessionId) -> broadcast::Sender<ChatMetadataNotice> {
         self.metadata
             .lock()
             .unwrap()

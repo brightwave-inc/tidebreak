@@ -374,7 +374,7 @@ export function useWorkspaceSessions({
                         onProgress: () => undefined,
                         signal: new AbortController().signal,
                         path: (id) =>
-                          `/code/sessions/${encodeURIComponent(id)}/attachments/images`,
+                          `/sessions/${encodeURIComponent(id)}/attachments/images`,
                       },
                     );
                 return {

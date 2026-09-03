@@ -559,6 +559,6 @@ mod tests {
     }
 
     fn ctx() -> ToolCtx {
-        ToolCtx::without_private_scratch(tidebreak_core::ChatId::new(), None)
+        ToolCtx::without_private_scratch(tidebreak_core::SessionId::new(), None)
     }
 }

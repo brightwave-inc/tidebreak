@@ -7,7 +7,7 @@
 
 use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter};
 
-use crate::code::CodeTurnStatus;
+use crate::code::TurnStatus;
 use crate::error::Result;
 use crate::model::{AgentRunStatus, AgentRunTier};
 use crate::storage::ActiveWorkSnapshot;
@@ -15,10 +15,10 @@ use crate::storage::ActiveWorkSnapshot;
 use super::super::{entities, store_err, DbStore};
 
 pub(in crate::db) async fn count_active_work(store: &DbStore) -> Result<ActiveWorkSnapshot> {
-    let active_turns = entities::code_turn::Entity::find()
+    let active_turns = entities::turn::Entity::find()
         .filter(
-            entities::code_turn::Column::Status
-                .is_in(CodeTurnStatus::LIVE.iter().map(|status| status.as_str())),
+            entities::turn::Column::Status
+                .is_in(TurnStatus::LIVE.iter().map(|status| status.as_str())),
         )
         .count(&store.conn)
         .await

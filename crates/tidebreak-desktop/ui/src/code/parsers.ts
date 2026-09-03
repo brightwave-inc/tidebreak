@@ -120,12 +120,12 @@ import type {
   CodeForkTranscript,
 } from "../api/types";
 import type {
-  CodeEvent as WireCodeEvent,
+  Event as WireCodeEvent,
   CodeRepoSnapshot as WireCodeRepoSnapshot,
-  CodeSessionSnapshot as WireCodeSessionSnapshot,
-  CodeSessionExternalOrigin,
-  CodeTurnSnapshot as WireCodeTurnSnapshot,
-  QueuedCodeTurn as WireQueuedCodeTurn,
+  SessionSnapshot as WireCodeSessionSnapshot,
+  SessionExternalOrigin as CodeSessionExternalOrigin,
+  TurnSnapshot as WireCodeTurnSnapshot,
+  QueuedTurn as WireQueuedCodeTurn,
   CodeTerminalRead as WireCodeTerminalRead,
   CodeTerminalSnapshot as WireCodeTerminalSnapshot,
   CodeWorkspaceDiff as WireCodeWorkspaceDiff,
@@ -155,11 +155,11 @@ import type {
   HarnessModelSource as WireHarnessModelSource,
   HarnessUpdateChannel as WireHarnessUpdateChannel,
   QuickAction as WireQuickAction,
-  SequencedCodeEventFrame as WireSequencedCodeEventFrame,
+  SequencedEventFrame as WireSequencedCodeEventFrame,
   ToolDetail as WireToolDetail,
-  CodeSessionDigest as WireCodeSessionDigest,
-  CodeUpdateNotice as WireCodeUpdateNotice,
-  CodeTurnRewriteState,
+  SessionDigest as WireCodeSessionDigest,
+  UpdateNotice as WireCodeUpdateNotice,
+  TurnRewriteState as CodeTurnRewriteState,
   CodeCloneDefaults as WireCodeCloneDefaults,
   CodeRepoSource as WireCodeRepoSource,
   CodeRepoSources as WireCodeRepoSources,
@@ -2834,7 +2834,7 @@ function parseCodeTurnAttachments(
 }
 
 /**
- * What `POST /code/sessions/{id}/turns` did with the message.
+ * What `POST /sessions/{id}/turns` did with the message.
  *
  * The route answers 202 for both outcomes: a turn that ran, or a follow-up
  * parked in the session's single queue slot while the current turn finishes.
@@ -3127,7 +3127,7 @@ export function parseDiffstat(value: unknown): Diffstat | null {
   };
 }
 
-/** `GET /code/sessions/{id}/turns` — oldest first. */
+/** `GET /sessions/{id}/turns` — oldest first. */
 export function parseCodeTurnList(value: unknown): CodeTurnSnapshot[] | null {
   if (!Array.isArray(value)) return null;
   const turns: CodeTurnSnapshot[] = [];

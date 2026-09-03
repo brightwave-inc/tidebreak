@@ -1227,7 +1227,7 @@ mod tests {
         AgentRunInboxEntry {
             parent_run_id: AgentRunId::new(),
             child_run_id: agent_id,
-            chat_id: crate::ChatId::new(),
+            chat_id: crate::SessionId::new(),
             result: crate::AgentRunResult {
                 agent_run_id: agent_id,
                 lease_token: uuid::Uuid::new_v4(),

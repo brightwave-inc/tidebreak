@@ -36,7 +36,7 @@ use axum::http::header::AUTHORIZATION;
 use axum::http::{HeaderMap, HeaderName, StatusCode};
 use axum::response::Response;
 
-use tidebreak_core::{AgentError, CodeSessionId, HarnessKind, OwnerId};
+use tidebreak_core::{AgentError, HarnessKind, OwnerId, SessionId};
 
 use crate::obo_gateway::{GatewayCompatModel, OboGateway};
 
@@ -44,7 +44,7 @@ use crate::obo_gateway::{GatewayCompatModel, OboGateway};
 #[derive(Clone)]
 pub(crate) struct HarnessLlmSubject {
     pub(crate) owner: OwnerId,
-    pub(crate) session: CodeSessionId,
+    pub(crate) session: SessionId,
 }
 
 /// The gateway compat endpoint one relay route forwards to.
@@ -97,7 +97,7 @@ pub(crate) struct HarnessLlmRelay {
 
 #[derive(Default)]
 struct RelayState {
-    by_session: HashMap<CodeSessionId, String>,
+    by_session: HashMap<SessionId, String>,
     keys: HashMap<String, HarnessLlmSubject>,
 }
 
@@ -154,7 +154,7 @@ impl HarnessLlmRelay {
     }
 
     /// Revoke the key for `session_id`. Idempotent.
-    pub(crate) fn revoke(&self, session_id: CodeSessionId) {
+    pub(crate) fn revoke(&self, session_id: SessionId) {
         let mut state = self.state.lock().expect("harness llm registry");
         if let Some(key) = state.by_session.remove(&session_id) {
             state.keys.remove(&key);
@@ -501,7 +501,7 @@ mod tests {
     fn subject_for(name: &str) -> HarnessLlmSubject {
         HarnessLlmSubject {
             owner: owner(name),
-            session: CodeSessionId::new(),
+            session: SessionId::new(),
         }
     }
 

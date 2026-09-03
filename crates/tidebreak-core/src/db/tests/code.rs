@@ -1,10 +1,10 @@
 use super::temp_store;
 use crate::attention::{Attention, AttentionSource, FenceReason};
 use crate::code::{
-    CapLevel, CodeApproval, CodeApprovalId, CodeApprovalKind, CodeApprovalState, CodeEvent,
-    CodeQueuedTurn, CodeRepo, CodeSession, CodeSessionId, CodeSessionKind, CodeSessionLifecycle,
-    CodeSubagentStatus, CodeSubagentSummary, CodeTurn, CodeTurnId, CodeTurnStatus, CodeWorkspace,
-    CodeWorkspaceStatus, HarnessKind, PullRequestDigest, RepoId, TurnParkWait, WorkspaceId,
+    Approval, ApprovalId, ApprovalKind, ApprovalState, CapLevel, CodeRepo, CodeSubagentStatus,
+    CodeSubagentSummary, CodeWorkspace, CodeWorkspaceStatus, Event, HarnessKind, PullRequestDigest,
+    QueuedTurn, RepoId, Session, SessionId, SessionKind, SessionLifecycle, Turn, TurnId,
+    TurnParkWait, TurnStatus, WorkspaceId,
 };
 use crate::db::code::{
     abandon_pending_approval, abandon_pending_approvals_for_stopped_session, append_event,
@@ -21,12 +21,11 @@ use crate::db::code::{
     save_workspace, search_repo_transcripts, set_active_workspace_pull_request, set_queue_paused,
     set_session_harness_resume_ref, set_session_subagents, set_turn_narrative, set_turn_rewrite,
     set_workspace_title_if, settle_approval_claim, update_queued_turn, ClaimedApprovalSettlement,
-    CodeJournalError, CodeSessionExecutionSettings, CodeTranscriptSearchSource, MAX_REPLAY_EVENTS,
+    CodeTranscriptSearchSource, JournalError, SessionExecutionSettings, MAX_REPLAY_EVENTS,
 };
 use crate::db::entities;
 use crate::{
-    BlobRetirementStatus, ChatId, ImageMediaType, ImageRef, OwnerId, PermissionMode,
-    ReasoningEffort, Store, TurnId,
+    BlobRetirementStatus, ImageMediaType, ImageRef, OwnerId, PermissionMode, ReasoningEffort, Store,
 };
 use chrono::Utc;
 use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter};
@@ -46,12 +45,7 @@ fn trigger_payload(
     }
 }
 
-async fn seeded_session() -> (
-    tempfile::TempDir,
-    crate::db::DbStore,
-    CodeSessionId,
-    CodeTurnId,
-) {
+async fn seeded_session() -> (tempfile::TempDir, crate::db::DbStore, SessionId, TurnId) {
     let (dir, store) = temp_store().await;
     let (session_id, turn_id) = seed_owner(&store, &OwnerId::local(), "example").await;
     (dir, store, session_id, turn_id)
@@ -77,7 +71,7 @@ async fn an_internal_turn_claim_backfills_its_input_message_once() {
         Some(())
     );
 
-    let first = entities::code_turn::Entity::find_by_id(code_turn_id.0)
+    let first = entities::turn::Entity::find_by_id(code_turn_id.0)
         .one(&store.conn)
         .await
         .unwrap()
@@ -125,6 +119,88 @@ async fn an_internal_turn_claim_backfills_its_input_message_once() {
 }
 
 #[tokio::test]
+async fn an_internal_resume_keeps_the_failure_attempt() {
+    let (_dir, store, _session_id, code_turn_id) = seeded_session().await;
+    let turn_id = TurnId(code_turn_id.0);
+    let claimed_at = now();
+    let first_token = uuid::Uuid::new_v4();
+    assert_eq!(
+        store
+            .take_lease_on_turn_with_input_message(
+                turn_id,
+                first_token,
+                claimed_at,
+                claimed_at + chrono::Duration::minutes(1),
+                "hello",
+            )
+            .await
+            .unwrap(),
+        Some(())
+    );
+    let resumed_at = claimed_at + chrono::Duration::seconds(1);
+    entities::turn::Entity::update_many()
+        .col_expr(
+            entities::turn::Column::Status,
+            sea_orm::sea_query::Expr::value(crate::TurnRunStatus::Resuming.as_str()),
+        )
+        .col_expr(
+            entities::turn::Column::LeaseToken,
+            sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
+        )
+        .col_expr(
+            entities::turn::Column::LeaseExpiresAt,
+            sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<Utc>>::None),
+        )
+        .col_expr(
+            entities::turn::Column::AvailableAt,
+            sea_orm::sea_query::Expr::value(resumed_at),
+        )
+        .col_expr(
+            entities::turn::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::value(resumed_at),
+        )
+        .filter(entities::turn::Column::Id.eq(code_turn_id.0))
+        .exec(&store.conn)
+        .await
+        .unwrap();
+
+    let second_token = uuid::Uuid::new_v4();
+    assert_eq!(
+        store
+            .take_lease_on_resuming_turn(
+                turn_id,
+                second_token,
+                resumed_at,
+                resumed_at + chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap(),
+        Some(())
+    );
+    let resumed = entities::turn::Entity::find_by_id(code_turn_id.0)
+        .one(&store.conn)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(resumed.attempt_count, 1);
+    assert_eq!(resumed.claim_count, 2);
+    assert_eq!(resumed.lease_token, Some(second_token));
+    assert_eq!(
+        store
+            .take_lease_on_resuming_turn(
+                turn_id,
+                uuid::Uuid::new_v4(),
+                resumed_at,
+                resumed_at + chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap(),
+        None,
+        "a live resumed segment cannot be claimed again"
+    );
+}
+
+#[tokio::test]
 async fn repository_transcript_search_survives_workspace_release() {
     let (_dir, store, session_id, turn_id) = seeded_session().await;
     let owner = OwnerId::local();
@@ -154,7 +230,7 @@ async fn repository_transcript_search_survives_workspace_release() {
         &owner,
         session_id,
         0,
-        &CodeEvent::AssistantMessage {
+        &Event::AssistantMessage {
             text: "The archived result contains Needle % literal too".into(),
             parent_call_id: None,
         },
@@ -168,7 +244,7 @@ async fn repository_transcript_search_survives_workspace_release() {
         &owner,
         other_session,
         0,
-        &CodeEvent::AssistantMessage {
+        &Event::AssistantMessage {
             text: "Needle % literal belongs to another repository".into(),
             parent_call_id: None,
         },
@@ -214,7 +290,7 @@ async fn seed_owner(
     store: &crate::db::DbStore,
     owner: &OwnerId,
     label: &str,
-) -> (CodeSessionId, CodeTurnId) {
+) -> (SessionId, TurnId) {
     let repo_id = RepoId::new();
     insert_repo(
         store,
@@ -260,14 +336,14 @@ async fn seed_owner(
     )
     .await
     .unwrap();
-    let session_id = CodeSessionId::new();
+    let session_id = SessionId::new();
     insert_session(
         store,
-        &CodeSession {
+        &Session {
             id: session_id,
             owner: owner.clone(),
             workspace_id: Some(workspace_id),
-            kind: CodeSessionKind::Interactive,
+            kind: SessionKind::Interactive,
             harness_kind: HarnessKind::ClaudeCode,
             harness_version: Some("2.1.233".into()),
             harness_resume_ref: None,
@@ -275,7 +351,7 @@ async fn seed_owner(
             model: None,
             reasoning_effort: None,
             fast_mode: false,
-            lifecycle: CodeSessionLifecycle::Idle,
+            lifecycle: SessionLifecycle::Idle,
             fence_reason: None,
             child_pid: None,
             child_process_identity: None,
@@ -288,15 +364,15 @@ async fn seed_owner(
     )
     .await
     .unwrap();
-    let turn_id = CodeTurnId::new();
+    let turn_id = TurnId::new();
     insert_turn(
         store,
         owner,
-        &CodeTurn {
+        &Turn {
             id: turn_id,
             session_id,
             ordinal: 1,
-            status: CodeTurnStatus::Running,
+            status: TurnStatus::Running,
             model: None,
             fast_mode: false,
             user_input: "hello".into(),
@@ -321,7 +397,7 @@ async fn seed_owner(
 async fn claimed_trigger_delivery(
     store: &crate::db::DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     condition: crate::code::CodeTriggerCondition,
     action: crate::code::CodeTriggerAction,
 ) -> (crate::code::CodeTriggerDeliveryId, uuid::Uuid) {
@@ -451,7 +527,7 @@ async fn stale_session_saves_preserve_resume_refs_until_an_explicit_clear() {
         .await
         .unwrap()
         .unwrap();
-    stale.lifecycle = CodeSessionLifecycle::Running;
+    stale.lifecycle = SessionLifecycle::Running;
     assert!(save_session(&store, &stale).await.unwrap());
     assert!(
         set_session_harness_resume_ref(&store, &owner, session_id, 0, "session-ref")
@@ -494,7 +570,7 @@ async fn execution_settings_replace_atomically_and_survive_stale_worker_saves() 
         .await
         .unwrap()
         .unwrap();
-    let next = CodeSessionExecutionSettings {
+    let next = SessionExecutionSettings {
         model: Some("claude-opus-5".into()),
         reasoning_effort: Some(ReasoningEffort::High),
         fast_mode: true,
@@ -503,9 +579,9 @@ async fn execution_settings_replace_atomically_and_survive_stale_worker_saves() 
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(CodeSessionExecutionSettings::from(&changed), next);
+    assert_eq!(SessionExecutionSettings::from(&changed), next);
 
-    let conflicting = CodeSessionExecutionSettings {
+    let conflicting = SessionExecutionSettings {
         model: Some("other".into()),
         reasoning_effort: None,
         fast_mode: false,
@@ -524,7 +600,7 @@ async fn execution_settings_replace_atomically_and_survive_stale_worker_saves() 
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(CodeSessionExecutionSettings::from(&stored), next);
+    assert_eq!(SessionExecutionSettings::from(&stored), next);
     assert_eq!(stored.child_pid, Some(4242));
 }
 
@@ -601,7 +677,7 @@ async fn a_concurrent_session_end_makes_permission_mode_confirmation_zero_rows()
         .unwrap()
         .unwrap();
 
-    session.lifecycle = CodeSessionLifecycle::Ended;
+    session.lifecycle = SessionLifecycle::Ended;
     assert!(save_session(&store, &session).await.unwrap());
     assert!(!confirm_permission_mode_change(&store, &owner, &intent)
         .await
@@ -610,7 +686,7 @@ async fn a_concurrent_session_end_makes_permission_mode_confirmation_zero_rows()
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(ended.lifecycle, CodeSessionLifecycle::Ended);
+    assert_eq!(ended.lifecycle, SessionLifecycle::Ended);
     assert_eq!(ended.permission_mode, PermissionMode::Ask);
     assert!(discard_permission_mode_change(&store, &owner, &intent)
         .await
@@ -712,7 +788,7 @@ async fn another_owner_cannot_see_or_settle_permission_mode_changes() {
         .unwrap()
         .unwrap();
     assert_eq!(unchanged.permission_mode, PermissionMode::Ask);
-    assert_eq!(unchanged.lifecycle, CodeSessionLifecycle::Idle);
+    assert_eq!(unchanged.lifecycle, SessionLifecycle::Idle);
     assert_eq!(
         list_pending_permission_mode_changes(&store, &alice)
             .await
@@ -902,15 +978,15 @@ async fn entity_graph_round_trips() {
         .unwrap();
     assert_eq!(repo.branch_prefix, "tidebreak/");
 
-    let approval_id = CodeApprovalId::new();
+    let approval_id = ApprovalId::new();
     insert_approval(
         &store,
         &OwnerId::local(),
-        &CodeApproval {
+        &Approval {
             id: approval_id,
             session_id,
             turn_id,
-            kind: CodeApprovalKind::FileWrite {
+            kind: ApprovalKind::FileWrite {
                 paths: vec!["probe.txt".into()],
             },
             harness_raw: serde_json::json!({"tool":"Write"}),
@@ -920,7 +996,7 @@ async fn entity_graph_round_trips() {
             worker_epoch: Some(0),
             decision_claim: None,
             claimed_at: None,
-            state: CodeApprovalState::Pending,
+            state: ApprovalState::Pending,
             feedback: None,
             requested_at: now(),
             decided_at: None,
@@ -933,7 +1009,7 @@ async fn entity_graph_round_trips() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(approval.state, CodeApprovalState::Pending);
+    assert_eq!(approval.state, ApprovalState::Pending);
 }
 
 #[tokio::test]
@@ -944,17 +1020,17 @@ async fn approval_claim_and_abandonment_have_one_winner() {
         .await
         .unwrap()
         .unwrap();
-    session.lifecycle = CodeSessionLifecycle::Running;
+    session.lifecycle = SessionLifecycle::Running;
     assert!(save_session(&store, &session).await.unwrap());
-    let approval_id = CodeApprovalId::new();
+    let approval_id = ApprovalId::new();
     insert_approval(
         &store,
         &owner,
-        &CodeApproval {
+        &Approval {
             id: approval_id,
             session_id,
             turn_id,
-            kind: CodeApprovalKind::Other {
+            kind: ApprovalKind::Other {
                 summary: "run command".into(),
             },
             harness_raw: serde_json::json!({"call_id":"toolu_claim"}),
@@ -964,7 +1040,7 @@ async fn approval_claim_and_abandonment_have_one_winner() {
             worker_epoch: Some(session.spawn_epoch),
             decision_claim: None,
             claimed_at: None,
-            state: CodeApprovalState::Pending,
+            state: ApprovalState::Pending,
             feedback: None,
             requested_at: now(),
             decided_at: None,
@@ -1024,7 +1100,7 @@ async fn approval_claim_and_abandonment_have_one_winner() {
                 .unwrap()
                 .unwrap()
                 .state,
-            CodeApprovalState::Approved
+            ApprovalState::Approved
         );
     } else {
         assert_eq!(
@@ -1033,7 +1109,7 @@ async fn approval_claim_and_abandonment_have_one_winner() {
                 .unwrap()
                 .unwrap()
                 .state,
-            CodeApprovalState::Abandoned
+            ApprovalState::Abandoned
         );
     }
 }
@@ -1046,14 +1122,14 @@ async fn approval_request_rolls_back_when_its_journal_event_fails() {
         .await
         .unwrap()
         .unwrap();
-    session.lifecycle = CodeSessionLifecycle::Running;
+    session.lifecycle = SessionLifecycle::Running;
     assert!(save_session(&store, &session).await.unwrap());
-    let approval_id = CodeApprovalId::new();
-    let approval = CodeApproval {
+    let approval_id = ApprovalId::new();
+    let approval = Approval {
         id: approval_id,
         session_id,
         turn_id,
-        kind: CodeApprovalKind::Other {
+        kind: ApprovalKind::Other {
             summary: "run command".into(),
         },
         harness_raw: serde_json::json!({"call_id":"toolu_request_rollback"}),
@@ -1063,7 +1139,7 @@ async fn approval_request_rolls_back_when_its_journal_event_fails() {
         worker_epoch: Some(session.spawn_epoch),
         decision_claim: None,
         claimed_at: None,
-        state: CodeApprovalState::Pending,
+        state: ApprovalState::Pending,
         feedback: None,
         requested_at: now(),
         decided_at: None,
@@ -1072,7 +1148,7 @@ async fn approval_request_rolls_back_when_its_journal_event_fails() {
     store
         .conn
         .execute_unprepared(
-            "CREATE TRIGGER fail_approval_request_event BEFORE INSERT ON code_event \
+            "CREATE TRIGGER fail_approval_request_event BEFORE INSERT ON event \
              BEGIN SELECT RAISE(ABORT, 'forced approval request journal failure'); END",
         )
         .await
@@ -1095,17 +1171,17 @@ async fn approval_settlement_rolls_back_when_its_journal_event_fails() {
         .await
         .unwrap()
         .unwrap();
-    session.lifecycle = CodeSessionLifecycle::Running;
+    session.lifecycle = SessionLifecycle::Running;
     assert!(save_session(&store, &session).await.unwrap());
-    let approval_id = CodeApprovalId::new();
+    let approval_id = ApprovalId::new();
     insert_approval(
         &store,
         &owner,
-        &CodeApproval {
+        &Approval {
             id: approval_id,
             session_id,
             turn_id,
-            kind: CodeApprovalKind::Other {
+            kind: ApprovalKind::Other {
                 summary: "run command".into(),
             },
             harness_raw: serde_json::json!({"call_id":"toolu_settle_rollback"}),
@@ -1115,7 +1191,7 @@ async fn approval_settlement_rolls_back_when_its_journal_event_fails() {
             worker_epoch: Some(session.spawn_epoch),
             decision_claim: None,
             claimed_at: None,
-            state: CodeApprovalState::Pending,
+            state: ApprovalState::Pending,
             feedback: None,
             requested_at: now(),
             decided_at: None,
@@ -1140,7 +1216,7 @@ async fn approval_settlement_rolls_back_when_its_journal_event_fails() {
     store
         .conn
         .execute_unprepared(
-            "CREATE TRIGGER fail_approval_resolution_event BEFORE INSERT ON code_event \
+            "CREATE TRIGGER fail_approval_resolution_event BEFORE INSERT ON event \
              BEGIN SELECT RAISE(ABORT, 'forced approval resolution journal failure'); END",
         )
         .await
@@ -1164,7 +1240,7 @@ async fn approval_settlement_rolls_back_when_its_journal_event_fails() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(approval.state, CodeApprovalState::Pending);
+    assert_eq!(approval.state, ApprovalState::Pending);
     assert_eq!(approval.decision_claim, Some(claim));
     assert!(
         list_events(&store, &owner, session_id, 0, MAX_REPLAY_EVENTS)
@@ -1183,16 +1259,16 @@ async fn a_replaced_worker_cannot_insert_a_late_approval() {
         .await
         .unwrap()
         .unwrap();
-    session.lifecycle = CodeSessionLifecycle::Running;
+    session.lifecycle = SessionLifecycle::Running;
     assert!(save_session(&store, &session).await.unwrap());
     let stale_epoch = session.spawn_epoch;
     assert_eq!(bump_spawn_epoch(&store, session_id, None).await.unwrap(), 1);
-    let approval_id = CodeApprovalId::new();
-    let approval = CodeApproval {
+    let approval_id = ApprovalId::new();
+    let approval = Approval {
         id: approval_id,
         session_id,
         turn_id,
-        kind: CodeApprovalKind::Other {
+        kind: ApprovalKind::Other {
             summary: "run command".into(),
         },
         harness_raw: serde_json::json!({"call_id":"toolu_stale"}),
@@ -1202,7 +1278,7 @@ async fn a_replaced_worker_cannot_insert_a_late_approval() {
         worker_epoch: Some(stale_epoch),
         decision_claim: None,
         claimed_at: None,
-        state: CodeApprovalState::Pending,
+        state: ApprovalState::Pending,
         feedback: None,
         requested_at: now(),
         decided_at: None,
@@ -1227,17 +1303,17 @@ async fn restart_abandons_claimed_and_unclaimed_approvals_for_the_stopped_worker
         .await
         .unwrap()
         .unwrap();
-    session.lifecycle = CodeSessionLifecycle::Running;
+    session.lifecycle = SessionLifecycle::Running;
     assert!(save_session(&store, &session).await.unwrap());
-    let claimed_id = CodeApprovalId::new();
+    let claimed_id = ApprovalId::new();
     insert_approval(
         &store,
         &owner,
-        &CodeApproval {
+        &Approval {
             id: claimed_id,
             session_id,
             turn_id,
-            kind: CodeApprovalKind::Other {
+            kind: ApprovalKind::Other {
                 summary: "run command".into(),
             },
             harness_raw: serde_json::json!({"call_id":"toolu_restart"}),
@@ -1247,7 +1323,7 @@ async fn restart_abandons_claimed_and_unclaimed_approvals_for_the_stopped_worker
             worker_epoch: Some(session.spawn_epoch),
             decision_claim: None,
             claimed_at: None,
-            state: CodeApprovalState::Pending,
+            state: ApprovalState::Pending,
             feedback: None,
             requested_at: now(),
             decided_at: None,
@@ -1270,15 +1346,15 @@ async fn restart_abandons_claimed_and_unclaimed_approvals_for_the_stopped_worker
     .unwrap()
     .is_some());
 
-    let unclaimed_id = CodeApprovalId::new();
+    let unclaimed_id = ApprovalId::new();
     insert_approval(
         &store,
         &owner,
-        &CodeApproval {
+        &Approval {
             id: unclaimed_id,
             session_id,
             turn_id,
-            kind: CodeApprovalKind::Other {
+            kind: ApprovalKind::Other {
                 summary: "edit file".into(),
             },
             harness_raw: serde_json::json!({"call_id":"toolu_restart_unclaimed"}),
@@ -1288,7 +1364,7 @@ async fn restart_abandons_claimed_and_unclaimed_approvals_for_the_stopped_worker
             worker_epoch: Some(session.spawn_epoch),
             decision_claim: None,
             claimed_at: None,
-            state: CodeApprovalState::Pending,
+            state: ApprovalState::Pending,
             feedback: None,
             requested_at: now(),
             decided_at: None,
@@ -1298,15 +1374,15 @@ async fn restart_abandons_claimed_and_unclaimed_approvals_for_the_stopped_worker
     .await
     .unwrap();
 
-    let stale_id = CodeApprovalId::new();
+    let stale_id = ApprovalId::new();
     insert_approval(
         &store,
         &owner,
-        &CodeApproval {
+        &Approval {
             id: stale_id,
             session_id,
             turn_id,
-            kind: CodeApprovalKind::Other {
+            kind: ApprovalKind::Other {
                 summary: "stale worker command".into(),
             },
             harness_raw: serde_json::json!({"call_id":"toolu_restart_stale"}),
@@ -1316,7 +1392,7 @@ async fn restart_abandons_claimed_and_unclaimed_approvals_for_the_stopped_worker
             worker_epoch: Some(session.spawn_epoch - 1),
             decision_claim: None,
             claimed_at: None,
-            state: CodeApprovalState::Pending,
+            state: ApprovalState::Pending,
             feedback: None,
             requested_at: now(),
             decided_at: None,
@@ -1340,7 +1416,7 @@ async fn restart_abandons_claimed_and_unclaimed_approvals_for_the_stopped_worker
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(still_claimed.state, CodeApprovalState::Pending);
+    assert_eq!(still_claimed.state, ApprovalState::Pending);
     assert_eq!(still_claimed.decision_claim, Some(claim));
     assert_eq!(
         get_approval(&store, &owner, unclaimed_id)
@@ -1348,10 +1424,10 @@ async fn restart_abandons_claimed_and_unclaimed_approvals_for_the_stopped_worker
             .unwrap()
             .unwrap()
             .state,
-        CodeApprovalState::Pending
+        ApprovalState::Pending
     );
 
-    session.lifecycle = CodeSessionLifecycle::Idle;
+    session.lifecycle = SessionLifecycle::Idle;
     assert!(save_session(&store, &session).await.unwrap());
 
     let abandoned = abandon_pending_approvals_for_stopped_session(
@@ -1370,7 +1446,7 @@ async fn restart_abandons_claimed_and_unclaimed_approvals_for_the_stopped_worker
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(approval.state, CodeApprovalState::Abandoned);
+    assert_eq!(approval.state, ApprovalState::Abandoned);
     assert!(approval.decision_claim.is_none());
     assert!(approval.decided_at.is_some());
     assert_eq!(
@@ -1379,7 +1455,7 @@ async fn restart_abandons_claimed_and_unclaimed_approvals_for_the_stopped_worker
             .unwrap()
             .unwrap()
             .state,
-        CodeApprovalState::Abandoned
+        ApprovalState::Abandoned
     );
     assert_eq!(
         get_approval(&store, &owner, stale_id)
@@ -1387,7 +1463,7 @@ async fn restart_abandons_claimed_and_unclaimed_approvals_for_the_stopped_worker
             .unwrap()
             .unwrap()
             .state,
-        CodeApprovalState::Pending,
+        ApprovalState::Pending,
         "restart cleanup must not cross worker epochs"
     );
 }
@@ -1400,7 +1476,7 @@ async fn interrupted_recovery_rolls_back_every_row_when_the_journal_fails() {
         .await
         .unwrap()
         .unwrap();
-    session.lifecycle = CodeSessionLifecycle::Running;
+    session.lifecycle = SessionLifecycle::Running;
     assert!(save_session(&store, &session).await.unwrap());
     set_session_subagents(
         &store,
@@ -1414,15 +1490,15 @@ async fn interrupted_recovery_rolls_back_every_row_when_the_journal_fails() {
     )
     .await
     .unwrap();
-    let approval_id = CodeApprovalId::new();
+    let approval_id = ApprovalId::new();
     insert_approval(
         &store,
         &owner,
-        &CodeApproval {
+        &Approval {
             id: approval_id,
             session_id,
             turn_id,
-            kind: CodeApprovalKind::Other {
+            kind: ApprovalKind::Other {
                 summary: "run command".into(),
             },
             harness_raw: serde_json::json!({"call_id":"toolu_rollback"}),
@@ -1432,7 +1508,7 @@ async fn interrupted_recovery_rolls_back_every_row_when_the_journal_fails() {
             worker_epoch: Some(session.spawn_epoch),
             decision_claim: None,
             claimed_at: None,
-            state: CodeApprovalState::Pending,
+            state: ApprovalState::Pending,
             feedback: None,
             requested_at: now(),
             decided_at: None,
@@ -1444,7 +1520,7 @@ async fn interrupted_recovery_rolls_back_every_row_when_the_journal_fails() {
     store
         .conn
         .execute_unprepared(
-            "CREATE TRIGGER fail_code_recovery_event BEFORE INSERT ON code_event \
+            "CREATE TRIGGER fail_code_recovery_event BEFORE INSERT ON event \
              BEGIN SELECT RAISE(ABORT, 'forced recovery journal failure'); END",
         )
         .await
@@ -1463,7 +1539,7 @@ async fn interrupted_recovery_rolls_back_every_row_when_the_journal_fails() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(session.lifecycle, CodeSessionLifecycle::Running);
+    assert_eq!(session.lifecycle, SessionLifecycle::Running);
     assert_eq!(session.subagents[0].status, CodeSubagentStatus::Running);
     assert_eq!(
         get_turn(&store, &owner, turn_id)
@@ -1471,7 +1547,7 @@ async fn interrupted_recovery_rolls_back_every_row_when_the_journal_fails() {
             .unwrap()
             .unwrap()
             .status,
-        CodeTurnStatus::Running
+        TurnStatus::Running
     );
     assert_eq!(
         get_approval(&store, &owner, approval_id)
@@ -1479,7 +1555,7 @@ async fn interrupted_recovery_rolls_back_every_row_when_the_journal_fails() {
             .unwrap()
             .unwrap()
             .state,
-        CodeApprovalState::Pending
+        ApprovalState::Pending
     );
     assert!(
         list_events(&store, &owner, session_id, 0, MAX_REPLAY_EVENTS)
@@ -1493,17 +1569,17 @@ async fn interrupted_recovery_rolls_back_every_row_when_the_journal_fails() {
 async fn park_waiting_turn(
     store: &crate::db::DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
-    turn_id: CodeTurnId,
+    session_id: SessionId,
+    turn_id: TurnId,
 ) {
     let mut session = get_session(store, owner, session_id)
         .await
         .unwrap()
         .unwrap();
-    session.lifecycle = CodeSessionLifecycle::Running;
+    session.lifecycle = SessionLifecycle::Running;
     assert!(save_session(store, &session).await.unwrap());
     let mut turn = get_turn(store, owner, turn_id).await.unwrap().unwrap();
-    turn.status = CodeTurnStatus::Waiting;
+    turn.status = TurnStatus::Waiting;
     turn.park_ref = Some("cp-1".into());
     turn.park_wait = Some(TurnParkWait::Approval {
         call_id: "call-1".into(),
@@ -1516,15 +1592,15 @@ async fn durable_park_recovery_leaves_a_waiting_turn_open() {
     let (_dir, store, session_id, turn_id) = seeded_session().await;
     let owner = OwnerId::local();
     park_waiting_turn(&store, &owner, session_id, turn_id).await;
-    let approval_id = CodeApprovalId::new();
+    let approval_id = ApprovalId::new();
     insert_approval(
         &store,
         &owner,
-        &CodeApproval {
+        &Approval {
             id: approval_id,
             session_id,
             turn_id,
-            kind: CodeApprovalKind::Other {
+            kind: ApprovalKind::Other {
                 summary: "run command".into(),
             },
             harness_raw: serde_json::json!({"call_id":"call-1"}),
@@ -1534,7 +1610,7 @@ async fn durable_park_recovery_leaves_a_waiting_turn_open() {
             worker_epoch: Some(0),
             decision_claim: Some(uuid::Uuid::new_v4()),
             claimed_at: Some(now()),
-            state: CodeApprovalState::Pending,
+            state: ApprovalState::Pending,
             feedback: None,
             requested_at: now(),
             decided_at: None,
@@ -1548,10 +1624,10 @@ async fn durable_park_recovery_leaves_a_waiting_turn_open() {
         .await
         .unwrap()
         .expect("recovery settles the dead worker");
-    assert_eq!(recovered.session.lifecycle, CodeSessionLifecycle::Idle);
+    assert_eq!(recovered.session.lifecycle, SessionLifecycle::Idle);
     assert!(recovered.events.is_empty(), "resume does not interrupt");
     let turn = get_turn(&store, &owner, turn_id).await.unwrap().unwrap();
-    assert_eq!(turn.status, CodeTurnStatus::Waiting);
+    assert_eq!(turn.status, TurnStatus::Waiting);
     assert_eq!(turn.park_ref.as_deref(), Some("cp-1"));
     assert_eq!(
         turn.park_wait,
@@ -1563,7 +1639,7 @@ async fn durable_park_recovery_leaves_a_waiting_turn_open() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(approval.state, CodeApprovalState::Pending);
+    assert_eq!(approval.state, ApprovalState::Pending);
     assert!(
         approval.decision_claim.is_none(),
         "a dead worker's claim cannot block the next decide"
@@ -1581,13 +1657,13 @@ async fn non_durable_park_recovery_closes_a_waiting_turn_as_interrupted() {
             .await
             .unwrap()
             .expect("recovery settles the dead worker");
-    assert_eq!(recovered.session.lifecycle, CodeSessionLifecycle::Idle);
+    assert_eq!(recovered.session.lifecycle, SessionLifecycle::Idle);
     assert!(matches!(
         recovered.events[0].event,
-        CodeEvent::TurnInterrupted { .. }
+        Event::TurnInterrupted { .. }
     ));
     let turn = get_turn(&store, &owner, turn_id).await.unwrap().unwrap();
-    assert_eq!(turn.status, CodeTurnStatus::Interrupted);
+    assert_eq!(turn.status, TurnStatus::Interrupted);
     assert_eq!(turn.park_ref.as_deref(), Some("cp-1"));
 }
 
@@ -1613,11 +1689,11 @@ async fn a_superseded_worker_cannot_regress_the_session_row() {
         .await
         .unwrap()
         .unwrap();
-    live.lifecycle = CodeSessionLifecycle::Running;
+    live.lifecycle = SessionLifecycle::Running;
     assert!(save_session(&store, &live).await.unwrap());
 
     let mut unwinding = outgoing;
-    unwinding.lifecycle = CodeSessionLifecycle::Ended;
+    unwinding.lifecycle = SessionLifecycle::Ended;
     unwinding.child_pid = None;
     assert!(!save_session(&store, &unwinding).await.unwrap());
 
@@ -1626,7 +1702,7 @@ async fn a_superseded_worker_cannot_regress_the_session_row() {
         .unwrap()
         .unwrap();
     assert_eq!(row.spawn_epoch, 1);
-    assert_eq!(row.lifecycle, CodeSessionLifecycle::Running);
+    assert_eq!(row.lifecycle, SessionLifecycle::Running);
     assert_eq!(row.child_pid, Some(99));
     // The live worker is still the one that owns the journal.
     append_event(
@@ -1634,7 +1710,7 @@ async fn a_superseded_worker_cannot_regress_the_session_row() {
         &OwnerId::local(),
         session_id,
         1,
-        &CodeEvent::TurnInterrupted { usage: None },
+        &Event::TurnInterrupted { usage: None },
     )
     .await
     .unwrap();
@@ -1644,7 +1720,7 @@ async fn a_superseded_worker_cannot_regress_the_session_row() {
 async fn a_terminal_code_event_mints_one_notification_in_its_transaction() {
     let (_dir, store, session_id, turn_id) = seeded_session().await;
     let owner = OwnerId::local();
-    let event = CodeEvent::TurnCompleted {
+    let event = Event::TurnCompleted {
         usage: Default::default(),
         checkpoint: None,
         stop_reason: None,
@@ -1684,17 +1760,17 @@ async fn an_ended_session_cannot_be_revived_by_a_same_epoch_persist() {
         .await
         .unwrap()
         .unwrap();
-    ended.lifecycle = CodeSessionLifecycle::Ended;
+    ended.lifecycle = SessionLifecycle::Ended;
     ended.child_pid = None;
     assert!(save_session(&store, &ended).await.unwrap());
 
     let mut running = ended.clone();
-    running.lifecycle = CodeSessionLifecycle::Running;
+    running.lifecycle = SessionLifecycle::Running;
     running.child_pid = Some(4242);
     assert!(!save_session(&store, &running).await.unwrap());
 
     let mut idle = ended.clone();
-    idle.lifecycle = CodeSessionLifecycle::Idle;
+    idle.lifecycle = SessionLifecycle::Idle;
     idle.child_pid = Some(7);
     assert!(!save_session(&store, &idle).await.unwrap());
 
@@ -1702,7 +1778,7 @@ async fn an_ended_session_cannot_be_revived_by_a_same_epoch_persist() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(row.lifecycle, CodeSessionLifecycle::Ended);
+    assert_eq!(row.lifecycle, SessionLifecycle::Ended);
     assert_eq!(row.child_pid, None);
     assert_eq!(row.spawn_epoch, 0);
 
@@ -1828,7 +1904,7 @@ async fn an_ended_session_cannot_publish_or_pin_a_new_image() {
         .await
         .unwrap()
         .unwrap();
-    session.lifecycle = CodeSessionLifecycle::Ended;
+    session.lifecycle = SessionLifecycle::Ended;
     assert!(save_session(&store, &session).await.unwrap());
     let image = published_image();
     assert!(store
@@ -1869,7 +1945,7 @@ async fn an_ended_session_does_not_pin_an_unsent_publication() {
         .await
         .unwrap()
         .unwrap();
-    session.lifecycle = CodeSessionLifecycle::Ended;
+    session.lifecycle = SessionLifecycle::Ended;
     assert!(save_session(&store, &session).await.unwrap());
 
     assert!(store
@@ -1889,11 +1965,11 @@ async fn a_turn_attachment_stays_live_after_its_session_ends() {
     insert_turn(
         &store,
         &OwnerId::local(),
-        &CodeTurn {
-            id: CodeTurnId::new(),
+        &Turn {
+            id: TurnId::new(),
             session_id,
             ordinal: 2,
-            status: CodeTurnStatus::Completed,
+            status: TurnStatus::Completed,
             model: None,
             fast_mode: false,
             user_input: "look at this".into(),
@@ -1916,7 +1992,7 @@ async fn a_turn_attachment_stays_live_after_its_session_ends() {
         .await
         .unwrap()
         .unwrap();
-    session.lifecycle = CodeSessionLifecycle::Ended;
+    session.lifecycle = SessionLifecycle::Ended;
     assert!(save_session(&store, &session).await.unwrap());
 
     assert!(!store
@@ -1928,7 +2004,7 @@ async fn a_turn_attachment_stays_live_after_its_session_ends() {
 #[tokio::test]
 async fn journal_rejects_stale_spawn_epoch() {
     let (_dir, store, session_id, _) = seeded_session().await;
-    let event = CodeEvent::TurnInterrupted { usage: None };
+    let event = Event::TurnInterrupted { usage: None };
     append_event(&store, &OwnerId::local(), session_id, 0, &event)
         .await
         .unwrap();
@@ -1940,7 +2016,7 @@ async fn journal_rejects_stale_spawn_epoch() {
         .await
         .unwrap_err();
     match err {
-        CodeJournalError::StaleSpawnEpoch {
+        JournalError::StaleSpawnEpoch {
             attempted, current, ..
         } => {
             assert_eq!(attempted, 0);
@@ -1996,7 +2072,7 @@ async fn journal_seq_is_monotonic_under_concurrent_appends() {
                 &OwnerId::local(),
                 session_id,
                 0,
-                &CodeEvent::AssistantDelta {
+                &Event::AssistantDelta {
                     text: format!("chunk-{i}"),
                 },
             )
@@ -2036,7 +2112,7 @@ async fn a_capped_replay_keeps_the_newest_events_and_admits_the_head_is_gone() {
             &owner,
             session_id,
             0,
-            &CodeEvent::HarnessNotice {
+            &Event::HarnessNotice {
                 level: crate::code::HarnessNoticeLevel::Info,
                 message: format!("notice {index}"),
             },
@@ -2083,13 +2159,13 @@ async fn deleting_a_chat_removes_the_code_side_rows_under_its_id() {
     let owner = OwnerId::local();
     let chat = super::sample_chat();
     store.create_chat(&chat).await.unwrap();
-    let session_id = CodeSessionId(chat.id.0);
+    let session_id = SessionId(chat.id.0);
     append_event(
         &store,
         &owner,
         session_id,
         0,
-        &CodeEvent::SessionStarted {
+        &Event::SessionStarted {
             harness_kind: HarnessKind::Internal,
             harness_version: "internal".into(),
             resume_ref: None,
@@ -2097,15 +2173,15 @@ async fn deleting_a_chat_removes_the_code_side_rows_under_its_id() {
     )
     .await
     .unwrap();
-    let turn_id = CodeTurnId::new();
+    let turn_id = TurnId::new();
     insert_turn(
         &store,
         &owner,
-        &CodeTurn {
+        &Turn {
             id: turn_id,
             session_id,
             ordinal: 1,
-            status: CodeTurnStatus::Completed,
+            status: TurnStatus::Completed,
             model: None,
             fast_mode: false,
             user_input: "hello".into(),
@@ -2155,27 +2231,27 @@ async fn one_id_resolves_in_one_space() {
 
     let chat = super::sample_chat();
     store.create_chat(&chat).await.unwrap();
-    let as_session = get_session(&store, &owner, CodeSessionId(chat.id.0))
+    let as_session = get_session(&store, &owner, SessionId(chat.id.0))
         .await
         .unwrap()
         .expect("a chat resolves as a session");
     assert_eq!(as_session.workspace_id, None);
     assert_eq!(as_session.harness_kind, HarnessKind::Internal);
-    assert_eq!(as_session.lifecycle, CodeSessionLifecycle::Idle);
+    assert_eq!(as_session.lifecycle, SessionLifecycle::Idle);
     assert_eq!(as_session.spawn_epoch, 0);
     assert!(
         list_sessions(&store, &owner).await.unwrap().is_empty(),
         "a chat the runtime never drove is not a runtime session"
     );
 
-    let session_id = CodeSessionId::new();
+    let session_id = SessionId::new();
     insert_session(
         &store,
-        &CodeSession {
+        &Session {
             id: session_id,
             owner: owner.clone(),
             workspace_id: None,
-            kind: CodeSessionKind::Interactive,
+            kind: SessionKind::Interactive,
             harness_kind: HarnessKind::Internal,
             harness_version: None,
             harness_resume_ref: None,
@@ -2183,7 +2259,7 @@ async fn one_id_resolves_in_one_space() {
             model: Some("scripted".into()),
             reasoning_effort: None,
             fast_mode: false,
-            lifecycle: CodeSessionLifecycle::Idle,
+            lifecycle: SessionLifecycle::Idle,
             fence_reason: None,
             child_pid: None,
             child_process_identity: None,
@@ -2197,7 +2273,7 @@ async fn one_id_resolves_in_one_space() {
     .await
     .unwrap();
     let as_chat = store
-        .get_chat(ChatId(session_id.0))
+        .get_chat(SessionId(session_id.0))
         .await
         .unwrap()
         .expect("an internal session resolves as a chat");
@@ -2218,146 +2294,46 @@ async fn one_id_resolves_in_one_space() {
 
     let (external, _turn) = seed_owner(&store, &owner, "example").await;
     assert!(
-        store.get_chat(ChatId(external.0)).await.unwrap().is_none(),
+        store
+            .get_chat(SessionId(external.0))
+            .await
+            .unwrap()
+            .is_none(),
         "a session an external engine drives is not a chat"
     );
 }
 
-/// Decision 0048 step 5: the session row is the conversation row, so a chat
-/// entity may name `code_session` and nothing else on the code side, no
-/// code-mode entity names a chat id, and the chat and code ops stay apart
-/// until the turn lane and journal merge.
+/// Decision 0048 step 5 gives chats and external harnesses the same session,
+/// turn, journal, approval, and attachment entities.
 #[test]
-fn chat_and_code_entities_do_not_cross_reference() {
-    fn without_comments(source: &str) -> String {
-        let mut stripped = String::with_capacity(source.len());
-        let mut chars = source.chars().peekable();
-        let mut block_depth = 0;
-        while let Some(character) = chars.next() {
-            if block_depth > 0 {
-                match (character, chars.peek().copied()) {
-                    ('/', Some('*')) => {
-                        chars.next();
-                        stripped.push_str("  ");
-                        block_depth += 1;
-                    }
-                    ('*', Some('/')) => {
-                        chars.next();
-                        stripped.push_str("  ");
-                        block_depth -= 1;
-                    }
-                    ('\n', _) => stripped.push('\n'),
-                    _ => stripped.push(' '),
-                }
-                continue;
-            }
-            match (character, chars.peek().copied()) {
-                ('/', Some('/')) => {
-                    chars.next();
-                    stripped.push_str("  ");
-                    for comment in chars.by_ref() {
-                        if comment == '\n' {
-                            stripped.push('\n');
-                            break;
-                        }
-                        stripped.push(' ');
-                    }
-                }
-                ('/', Some('*')) => {
-                    chars.next();
-                    stripped.push_str("  ");
-                    block_depth = 1;
-                }
-                _ => stripped.push(character),
-            }
-        }
-        stripped
+fn shared_entities_use_universal_names() {
+    let entities = include_str!("../entities.rs");
+    for name in ["session", "turn", "event", "approval", "turn_attachment"] {
+        assert!(
+            entities.contains(&format!("pub mod {name} {{")),
+            "the shared {name} entity module is missing"
+        );
+        assert!(
+            entities.contains(&format!("#[sea_orm(table_name = \"{name}\")]")),
+            "the shared {name} entity uses another table name"
+        );
     }
-
-    let sample = "/// ChatId in prose is allowed.\n\
-                  /* AgentEvent in a nested /* TurnId */ comment is allowed. */\n\
-                  pub use crate::id::ChatId as ConversationId;";
-    let stripped_sample = without_comments(sample);
-    assert!(!stripped_sample.contains("ChatId in prose"));
-    assert!(!stripped_sample.contains("AgentEvent in a nested"));
-    assert!(stripped_sample.contains("crate::id::ChatId as ConversationId"));
-
-    let entities = without_comments(include_str!("../entities.rs"));
-    let mut current_mod = "";
-    for line in entities.lines() {
-        if let Some(name) = line.strip_prefix("pub mod ") {
-            current_mod = name.trim_end_matches(" {").trim();
-            continue;
-        }
-        let is_code = current_mod.starts_with("code_");
-        if is_code {
-            assert!(
-                !line.contains("chat_id") && !line.contains("ChatId"),
-                "{current_mod} references a chat id: {line}"
-            );
-        } else if current_mod != "code_event" {
-            assert!(
-                !line.contains("code_workspace")
-                    && !line.contains("code_repo")
-                    && !line.contains("CodeSessionId")
-                    && !line.contains("RepoId")
-                    && !line.contains("WorkspaceId"),
-                "{current_mod} references a code-mode type: {line}"
-            );
-        }
+    for legacy in [
+        "code_session",
+        "code_turn",
+        "code_event",
+        "code_approval",
+        "code_turn_attachment",
+    ] {
+        assert!(
+            !entities.contains(&format!("pub mod {legacy} {{")),
+            "the shared entity module still uses {legacy}"
+        );
+        assert!(
+            !entities.contains(&format!("#[sea_orm(table_name = \"{legacy}\")]")),
+            "the shared entity table still uses {legacy}"
+        );
     }
-
-    fn walk_rs(dir: &std::path::Path, visit: &mut dyn FnMut(&std::path::Path, &str)) {
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let entry = entry.unwrap();
-            let path = entry.path();
-            if path.is_dir() {
-                walk_rs(&path, visit);
-            } else if path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
-                let text = std::fs::read_to_string(&path).unwrap();
-                visit(&path, &without_comments(&text));
-            }
-        }
-    }
-
-    let crate_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    walk_rs(&crate_src.join("db/ops/code"), &mut |path, text| {
-        for needle in ["ChatId", "MessageId", "AgentEvent"] {
-            assert!(
-                !text.contains(needle),
-                "{} references chat type {needle}",
-                path.display()
-            );
-        }
-        // `TurnId` is a suffix of `CodeTurnId`; require a word-ish boundary.
-        // `code_turn_attachment.turn_id` and `code_approval.turn_id` are
-        // code-mode FKs, not chat `TurnId`.
-        for line in text.lines() {
-            if line.contains("TurnId")
-                && !line.contains("CodeTurnId")
-                && !line.contains("code_turn_attachment")
-                && !line.contains("code_approval")
-                && !line.contains("code_turn_document_attachment")
-                && !line.contains("code_turn_claim")
-                && !line.contains("code_turn_steer")
-                && !line.contains("code_turn_failure")
-            {
-                panic!("{} references chat TurnId: {line}", path.display());
-            }
-        }
-    });
-    walk_rs(&crate_src.join("code"), &mut |path, text| {
-        if path.file_name().and_then(|name| name.to_str()) == Some("permission.rs") {
-            return;
-        }
-        for needle in ["ChatId", "MessageId", "AgentEvent"] {
-            assert!(
-                !text.contains(needle),
-                "{} references chat type {needle}",
-                path.display()
-            );
-        }
-    });
 }
 
 /// Decision 47's validation for code mode: on a shared store, a second user
@@ -2423,7 +2399,7 @@ async fn owner_scoped_code_queries_partition_every_table() {
         &alice,
         alice_session,
         0,
-        &CodeEvent::TurnInterrupted { usage: None },
+        &Event::TurnInterrupted { usage: None },
     )
     .await
     .unwrap();
@@ -2444,15 +2420,15 @@ async fn owner_scoped_code_queries_partition_every_table() {
     );
 
     // Approvals.
-    let approval_id = CodeApprovalId::new();
+    let approval_id = ApprovalId::new();
     insert_approval(
         &store,
         &alice,
-        &CodeApproval {
+        &Approval {
             id: approval_id,
             session_id: alice_session,
             turn_id: alice_turn,
-            kind: CodeApprovalKind::FileWrite {
+            kind: ApprovalKind::FileWrite {
                 paths: vec!["secret.txt".into()],
             },
             harness_raw: serde_json::json!({"tool":"Write"}),
@@ -2462,7 +2438,7 @@ async fn owner_scoped_code_queries_partition_every_table() {
             worker_epoch: Some(0),
             decision_claim: None,
             claimed_at: None,
-            state: CodeApprovalState::Pending,
+            state: ApprovalState::Pending,
             feedback: None,
             requested_at: now(),
             decided_at: None,
@@ -2677,14 +2653,14 @@ async fn latest_watch_for_session_matches_on_the_session_not_the_workspace() {
         .unwrap()
         .workspace_id
         .expect("session has a workspace");
-    let watch_session_id = CodeSessionId::new();
+    let watch_session_id = SessionId::new();
     insert_session(
         &store,
-        &CodeSession {
+        &Session {
             id: watch_session_id,
             owner: owner.clone(),
             workspace_id: Some(workspace_id),
-            kind: CodeSessionKind::Watch,
+            kind: SessionKind::Watch,
             harness_kind: HarnessKind::ClaudeCode,
             harness_version: None,
             harness_resume_ref: None,
@@ -2692,7 +2668,7 @@ async fn latest_watch_for_session_matches_on_the_session_not_the_workspace() {
             model: None,
             reasoning_effort: None,
             fast_mode: false,
-            lifecycle: CodeSessionLifecycle::Running,
+            lifecycle: SessionLifecycle::Running,
             fence_reason: None,
             child_pid: None,
             child_process_identity: None,
@@ -2749,12 +2725,10 @@ async fn latest_watch_for_session_matches_on_the_session_not_the_workspace() {
     assert_eq!(found.cycles, 3);
     assert_eq!(found.detail.as_deref(), Some("fixing failing checks"));
 
-    assert!(
-        latest_watch_for_session(&store, &owner, CodeSessionId::new())
-            .await
-            .unwrap()
-            .is_none()
-    );
+    assert!(latest_watch_for_session(&store, &owner, SessionId::new())
+        .await
+        .unwrap()
+        .is_none());
 }
 
 /// A failed detached submit releases only its own reservation. The retry can
@@ -3801,7 +3775,7 @@ async fn trigger_turn_acceptance_is_atomic_and_global() {
         .unwrap());
 
     let mut accepted_turn = duplicate;
-    accepted_turn.id = CodeTurnId::new();
+    accepted_turn.id = TurnId::new();
     assert!(accept_trigger_turn_delivery(
         &store,
         &owner,
@@ -3822,7 +3796,7 @@ async fn trigger_turn_acceptance_is_atomic_and_global() {
             .unwrap()
             .unwrap()
             .lifecycle,
-        CodeSessionLifecycle::Running
+        SessionLifecycle::Running
     );
 
     let (other_session_id, other_turn_id) = seed_owner(&store, &owner, "trigger-retry").await;
@@ -3867,7 +3841,7 @@ async fn trigger_attention_acceptance_is_atomic_and_global() {
         &owner,
         missing_delivery,
         missing_lease,
-        CodeSessionId::new(),
+        SessionId::new(),
         &next,
         now(),
     )
@@ -4378,7 +4352,7 @@ async fn late_304_cannot_restore_an_invalidated_pull_validator() {
 /// A whole-row turn save cannot blank a recap that landed while it was held.
 ///
 /// The two writers genuinely overlap. A recap is derived after the turn ends
-/// and takes seconds; `checkpoint::after_turn_ended` holds a `CodeTurn` read
+/// and takes seconds; `checkpoint::after_turn_ended` holds a `Turn` read
 /// before the turn was even terminal and saves it once the git work finishes.
 /// While `save_turn` still wrote `narrative`, whichever landed second won, so
 /// the recap survived or vanished depending on how long a checkpoint took.
@@ -4448,9 +4422,9 @@ async fn saving_a_turn_does_not_blank_its_rewrite() {
     );
 }
 
-fn queued_message(session_id: CodeSessionId, message: &str) -> CodeQueuedTurn {
-    CodeQueuedTurn {
-        id: CodeTurnId::new(),
+fn queued_message(session_id: SessionId, message: &str) -> QueuedTurn {
+    QueuedTurn {
+        id: TurnId::new(),
         session_id,
         message: message.to_owned(),
         attachments: Vec::new(),
@@ -4460,12 +4434,12 @@ fn queued_message(session_id: CodeSessionId, message: &str) -> CodeQueuedTurn {
     }
 }
 
-fn turn_for(row: &CodeQueuedTurn, ordinal: i64) -> CodeTurn {
-    CodeTurn {
+fn turn_for(row: &QueuedTurn, ordinal: i64) -> Turn {
+    Turn {
         id: row.id,
         session_id: row.session_id,
         ordinal,
-        status: CodeTurnStatus::Running,
+        status: TurnStatus::Running,
         model: None,
         fast_mode: false,
         user_input: row.message.clone(),
@@ -4603,7 +4577,7 @@ async fn code_queue_reorders_stay_dense_and_the_cap_holds() {
     assert!(delete_queued_turn(&store, &owner, session_id, a.id)
         .await
         .unwrap());
-    for index in 0..(CodeQueuedTurn::MAX_PER_SESSION - 2) {
+    for index in 0..(QueuedTurn::MAX_PER_SESSION - 2) {
         enqueue_queued_turn(
             &store,
             &owner,
@@ -4895,7 +4869,7 @@ async fn workflow_run_facts_drop_rows_that_left_the_host_page() {
 async fn admit(
     store: &crate::db::DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     starting_turn: i32,
     cap: usize,
 ) -> crate::code::IncarnationAdmission {
@@ -4940,7 +4914,7 @@ async fn the_incarnation_cap_refuses_and_names_the_running_sessions() {
 
 /// A remote workspace and session value pair for the binding tests,
 /// unsaved: `resolve_external_session` commits or discards them itself.
-fn external_pair(owner: &OwnerId, repo_id: RepoId, label: &str) -> (CodeWorkspace, CodeSession) {
+fn external_pair(owner: &OwnerId, repo_id: RepoId, label: &str) -> (CodeWorkspace, Session) {
     let workspace_id = WorkspaceId::new();
     let workspace = CodeWorkspace {
         id: workspace_id,
@@ -4958,11 +4932,11 @@ fn external_pair(owner: &OwnerId, repo_id: RepoId, label: &str) -> (CodeWorkspac
         released_tip: None,
         bundle_bytes: None,
     };
-    let session = CodeSession {
-        id: CodeSessionId::new(),
+    let session = Session {
+        id: SessionId::new(),
         owner: owner.clone(),
         workspace_id: Some(workspace_id),
-        kind: CodeSessionKind::Interactive,
+        kind: SessionKind::Interactive,
         harness_kind: HarnessKind::ClaudeCode,
         harness_version: None,
         harness_resume_ref: None,
@@ -4970,7 +4944,7 @@ fn external_pair(owner: &OwnerId, repo_id: RepoId, label: &str) -> (CodeWorkspac
         model: None,
         reasoning_effort: None,
         fast_mode: false,
-        lifecycle: CodeSessionLifecycle::Idle,
+        lifecycle: SessionLifecycle::Idle,
         fence_reason: None,
         child_pid: None,
         child_process_identity: None,
@@ -5106,7 +5080,7 @@ async fn a_binding_resolves_ends_and_scopes_by_grant() {
     let joined = crate::db::code::list_external_bindings_for_sessions(
         &store,
         &owner,
-        &[session.id, crate::code::CodeSessionId::new()],
+        &[session.id, crate::code::SessionId::new()],
     )
     .await
     .unwrap();
@@ -5163,7 +5137,7 @@ async fn a_binding_resolves_ends_and_scopes_by_grant() {
         .await
         .unwrap()
         .unwrap();
-    stored.lifecycle = CodeSessionLifecycle::Ended;
+    stored.lifecycle = SessionLifecycle::Ended;
     assert!(crate::db::code::save_session(&store, &stored)
         .await
         .unwrap());
@@ -5389,7 +5363,7 @@ async fn ingest_journals_once_per_sandbox_event_and_resumes_from_the_cursor() {
         .unwrap()
         .spawn_epoch;
 
-    let first = CodeEvent::AssistantMessage {
+    let first = Event::AssistantMessage {
         text: "the first answer".to_owned(),
         parent_call_id: None,
     };
@@ -5431,7 +5405,7 @@ async fn ingest_journals_once_per_sandbox_event_and_resumes_from_the_cursor() {
         .is_none());
     }
 
-    let second = CodeEvent::TurnInterrupted { usage: None };
+    let second = Event::TurnInterrupted { usage: None };
     crate::db::code::ingest_incarnation_event(
         &store,
         &owner,
@@ -5518,7 +5492,7 @@ async fn live_session_incarnations_match_the_per_session_read() {
         .await
         .unwrap();
     let mut ended_session = get_session(&store, &owner, ended).await.unwrap().unwrap();
-    ended_session.lifecycle = CodeSessionLifecycle::Ended;
+    ended_session.lifecycle = SessionLifecycle::Ended;
     assert!(save_session(&store, &ended_session).await.unwrap());
     let (fenced, _) = seed_owner(&store, &owner, "fenced").await;
     let fenced_row = admitted(admit(&store, &owner, fenced, 1, 8).await);
@@ -5526,7 +5500,7 @@ async fn live_session_incarnations_match_the_per_session_read() {
         .await
         .unwrap();
     let mut fenced_session = get_session(&store, &owner, fenced).await.unwrap().unwrap();
-    fenced_session.lifecycle = CodeSessionLifecycle::Fenced;
+    fenced_session.lifecycle = SessionLifecycle::Fenced;
     fenced_session.fence_reason = Some(FenceReason::OrphanAlive);
     assert!(save_session(&store, &fenced_session).await.unwrap());
 
@@ -5537,7 +5511,7 @@ async fn live_session_incarnations_match_the_per_session_read() {
     {
         if matches!(
             session.lifecycle,
-            CodeSessionLifecycle::Fenced | CodeSessionLifecycle::Ended
+            SessionLifecycle::Fenced | SessionLifecycle::Ended
         ) {
             continue;
         }
@@ -5596,7 +5570,7 @@ async fn seed_external_session(
     store: &crate::db::DbStore,
     owner: &OwnerId,
     label: &str,
-) -> CodeSessionId {
+) -> SessionId {
     let (session, _) = seed_owner(store, owner, label).await;
     let stored = crate::db::code::get_session(store, owner, session)
         .await

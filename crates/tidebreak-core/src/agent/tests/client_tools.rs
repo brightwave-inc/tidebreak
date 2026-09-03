@@ -12,7 +12,7 @@ async fn claimed_agent_returns_a_client_tool_checkpoint_without_executing_it() {
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -196,7 +196,7 @@ async fn user_questions_are_advertised_and_executable_only_in_the_foreground() {
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -246,7 +246,7 @@ async fn claimed_foreground_agent_returns_exact_ordered_wait_checkpoint() {
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -339,7 +339,7 @@ async fn a_mixed_batch_runs_the_server_call_then_checkpoints_the_client_one() {
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -452,7 +452,7 @@ async fn a_client_call_with_unparseable_arguments_is_answered_not_discarded() {
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -556,7 +556,7 @@ async fn client_call_with_prose_checkpoints_and_keeps_the_preamble() {
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,

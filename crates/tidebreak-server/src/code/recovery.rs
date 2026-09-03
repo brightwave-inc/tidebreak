@@ -15,8 +15,8 @@ use tidebreak_core::db::code::{
     set_session_subagents,
 };
 use tidebreak_core::{
-    Attention, AttentionSource, AttentionState, CapLevel, CodeSession, CodeSessionLifecycle,
-    CodeSubagentStatus, DbStore, FenceReason, HarnessKind, Store,
+    Attention, AttentionSource, AttentionState, CapLevel, CodeSubagentStatus, DbStore, FenceReason,
+    HarnessKind, Session, SessionLifecycle, Store,
 };
 
 use super::attention::{emit_digest, replace_attention};
@@ -80,10 +80,9 @@ pub(crate) async fn recover_running_sessions_with_caps(
     store: &DbStore,
     bus: &CodeEventBus,
     probe: impl Fn(i64, Option<&str>) -> PidLiveness,
-    durable_parks: impl Fn(&CodeSession) -> CapLevel,
+    durable_parks: impl Fn(&Session) -> CapLevel,
 ) -> Result<Vec<RecoveryAction>, tidebreak_core::AgentError> {
-    let running =
-        list_sessions_by_lifecycle_all_owners(store, CodeSessionLifecycle::Running).await?;
+    let running = list_sessions_by_lifecycle_all_owners(store, SessionLifecycle::Running).await?;
     let mut actions = Vec::new();
     for session in running {
         // A remote session's engine lives in a sandbox, not a local child:
@@ -111,7 +110,7 @@ pub(crate) async fn recover_running_sessions_with_caps(
 pub(crate) async fn fence_session(
     store: &DbStore,
     bus: &CodeEventBus,
-    session: &mut CodeSession,
+    session: &mut Session,
     reason: FenceReason,
 ) -> Result<(), tidebreak_core::AgentError> {
     if matches!(reason, FenceReason::ResumeLost { .. }) {
@@ -125,7 +124,7 @@ pub(crate) async fn fence_session(
             )));
         }
     }
-    session.lifecycle = CodeSessionLifecycle::Fenced;
+    session.lifecycle = SessionLifecycle::Fenced;
     settle_running_subagents(&mut session.subagents, CodeSubagentStatus::Failed);
     session.fence_reason = Some(reason.clone());
     replace_attention(
@@ -148,7 +147,7 @@ pub(crate) async fn fence_session(
 async fn persist_recovery_session(
     store: &DbStore,
     bus: &CodeEventBus,
-    session: &CodeSession,
+    session: &Session,
 ) -> Result<bool, tidebreak_core::AgentError> {
     if !save_session(store, session).await? {
         return Ok(false);
@@ -215,8 +214,8 @@ impl ProcessReaper for SystemProcessReaper {
 pub(crate) async fn reap_session(
     store: &DbStore,
     bus: &CodeEventBus,
-    session: CodeSession,
-) -> Result<CodeSession, ReapSessionError> {
+    session: Session,
+) -> Result<Session, ReapSessionError> {
     reap_session_with(
         store,
         bus,
@@ -230,10 +229,10 @@ pub(crate) async fn reap_session(
 async fn reap_session_with(
     store: &DbStore,
     bus: &CodeEventBus,
-    session: CodeSession,
+    session: Session,
     reaper: &(impl ProcessReaper + Sync),
     timeout: std::time::Duration,
-) -> Result<CodeSession, ReapSessionError> {
+) -> Result<Session, ReapSessionError> {
     match (session.child_pid, session.child_process_identity.as_deref()) {
         (Some(pid), Some(identity)) => match reaper.terminate(pid, identity, timeout).await {
             Ok(tidebreak_harness::RecordedProcessReap::Exited) => {}
@@ -283,7 +282,7 @@ async fn reap_session_with(
 async fn recover_one(
     store: &DbStore,
     bus: &CodeEventBus,
-    mut session: CodeSession,
+    mut session: Session,
     probe: &impl Fn(i64, Option<&str>) -> PidLiveness,
     durable_parks: CapLevel,
 ) -> Result<Option<RecoveryAction>, tidebreak_core::AgentError> {
@@ -304,7 +303,7 @@ async fn recover_one(
         PidLiveness::Dead => dead_worker_action(store, bus, &session, durable_parks).await,
         PidLiveness::Alive => {
             settle_running_subagents(&mut session.subagents, CodeSubagentStatus::Failed);
-            session.lifecycle = CodeSessionLifecycle::Fenced;
+            session.lifecycle = SessionLifecycle::Fenced;
             session.fence_reason = Some(FenceReason::OrphanAlive);
             replace_attention(
                 &mut session,
@@ -326,7 +325,7 @@ async fn recover_one(
 
 async fn expire_internal_turn_lease(
     store: &DbStore,
-    session: &CodeSession,
+    session: &Session,
 ) -> Result<(), tidebreak_core::AgentError> {
     let Some(open) = get_open_turn(store, &session.owner, session.id).await? else {
         return Ok(());
@@ -352,17 +351,17 @@ async fn expire_internal_turn_lease(
 pub(crate) async fn recover_dead_worker(
     store: &DbStore,
     bus: &CodeEventBus,
-    session: &CodeSession,
-) -> Result<Option<CodeSession>, tidebreak_core::AgentError> {
+    session: &Session,
+) -> Result<Option<Session>, tidebreak_core::AgentError> {
     recover_dead_worker_with(store, bus, session, durable_parks_for(session.harness_kind)).await
 }
 
 pub(crate) async fn recover_dead_worker_with(
     store: &DbStore,
     bus: &CodeEventBus,
-    session: &CodeSession,
+    session: &Session,
     durable_parks: CapLevel,
-) -> Result<Option<CodeSession>, tidebreak_core::AgentError> {
+) -> Result<Option<Session>, tidebreak_core::AgentError> {
     let Some(recovered) = recover_interrupted_session(
         store,
         &session.owner,
@@ -384,7 +383,7 @@ pub(crate) async fn recover_dead_worker_with(
 async fn dead_worker_action(
     store: &DbStore,
     bus: &CodeEventBus,
-    session: &CodeSession,
+    session: &Session,
     durable_parks: CapLevel,
 ) -> Result<Option<RecoveryAction>, tidebreak_core::AgentError> {
     let Some(recovered) = recover_dead_worker_with(store, bus, session, durable_parks).await?
@@ -393,7 +392,7 @@ async fn dead_worker_action(
     };
     let action =
         match tidebreak_core::db::code::get_open_turn(store, &session.owner, session.id).await? {
-            Some(turn) if turn.status == tidebreak_core::CodeTurnStatus::Waiting => {
+            Some(turn) if turn.status == tidebreak_core::TurnStatus::Waiting => {
                 RecoveryAction::ReattachedPark {
                     session: recovered.id.to_string(),
                 }
@@ -518,10 +517,10 @@ mod tests {
         MAX_REPLAY_EVENTS,
     };
     use tidebreak_core::{
-        ApprovalDecisionKind, Attention, CodeApproval, CodeApprovalId, CodeApprovalKind,
-        CodeApprovalState, CodeEvent, CodeRepo, CodeSession, CodeSessionId, CodeSessionKind,
-        CodeSubagentSummary, CodeTurn, CodeTurnId, CodeTurnStatus, CodeWorkspace,
-        CodeWorkspaceStatus, HarnessKind, PermissionMode, RepoId, TurnParkWait, WorkspaceId,
+        Approval, ApprovalDecisionKind, ApprovalId, ApprovalKind, ApprovalState, Attention,
+        CodeRepo, CodeSubagentSummary, CodeWorkspace, CodeWorkspaceStatus, Event, HarnessKind,
+        PermissionMode, RepoId, Session, SessionId, SessionKind, Turn, TurnId, TurnParkWait,
+        TurnStatus, WorkspaceId,
     };
     use tidebreak_harness::HarnessAdapter;
 
@@ -529,7 +528,7 @@ mod tests {
         Utc::now()
     }
 
-    async fn seed_running_subagent(store: &DbStore, session_id: CodeSessionId) {
+    async fn seed_running_subagent(store: &DbStore, session_id: SessionId) {
         set_session_subagents(
             store,
             &tidebreak_core::OwnerId::local(),
@@ -544,7 +543,7 @@ mod tests {
         .unwrap();
     }
 
-    async fn assert_subagent_failed(store: &DbStore, session_id: CodeSessionId) {
+    async fn assert_subagent_failed(store: &DbStore, session_id: SessionId) {
         let session = get_session(store, &tidebreak_core::OwnerId::local(), session_id)
             .await
             .unwrap()
@@ -554,18 +553,18 @@ mod tests {
 
     async fn seed_pending_approval(
         store: &DbStore,
-        session_id: CodeSessionId,
-        turn_id: CodeTurnId,
-    ) -> CodeApprovalId {
-        let approval_id = CodeApprovalId::new();
+        session_id: SessionId,
+        turn_id: TurnId,
+    ) -> ApprovalId {
+        let approval_id = ApprovalId::new();
         insert_approval(
             store,
             &tidebreak_core::OwnerId::local(),
-            &CodeApproval {
+            &Approval {
                 id: approval_id,
                 session_id,
                 turn_id,
-                kind: CodeApprovalKind::Other {
+                kind: ApprovalKind::Other {
                     summary: "run command".into(),
                 },
                 harness_raw: serde_json::json!({"call_id":"toolu_recovery"}),
@@ -575,7 +574,7 @@ mod tests {
                 worker_epoch: Some(1),
                 decision_claim: Some(uuid::Uuid::new_v4()),
                 claimed_at: Some(now()),
-                state: CodeApprovalState::Pending,
+                state: ApprovalState::Pending,
                 feedback: None,
                 requested_at: now(),
                 decided_at: None,
@@ -634,20 +633,17 @@ mod tests {
         }
     }
 
-    async fn seeded_running(
-        pid: Option<i64>,
-    ) -> (tempfile::TempDir, DbStore, CodeSessionId, CodeTurnId) {
-        let (directory, store, session_id) =
-            seeded_session(pid, CodeSessionLifecycle::Running).await;
-        let turn_id = CodeTurnId::new();
+    async fn seeded_running(pid: Option<i64>) -> (tempfile::TempDir, DbStore, SessionId, TurnId) {
+        let (directory, store, session_id) = seeded_session(pid, SessionLifecycle::Running).await;
+        let turn_id = TurnId::new();
         insert_turn(
             &store,
             &tidebreak_core::OwnerId::local(),
-            &CodeTurn {
+            &Turn {
                 id: turn_id,
                 session_id,
                 ordinal: 1,
-                status: CodeTurnStatus::Running,
+                status: TurnStatus::Running,
                 model: None,
                 fast_mode: false,
                 user_input: "hello".into(),
@@ -671,8 +667,8 @@ mod tests {
 
     async fn seeded_session(
         pid: Option<i64>,
-        lifecycle: CodeSessionLifecycle,
-    ) -> (tempfile::TempDir, DbStore, CodeSessionId) {
+        lifecycle: SessionLifecycle,
+    ) -> (tempfile::TempDir, DbStore, SessionId) {
         let directory = tempfile::tempdir().unwrap();
         let store = DbStore::connect(&format!(
             "sqlite://{}?mode=rwc",
@@ -725,14 +721,14 @@ mod tests {
         )
         .await
         .unwrap();
-        let session_id = CodeSessionId::new();
+        let session_id = SessionId::new();
         insert_session(
             &store,
-            &CodeSession {
+            &Session {
                 id: session_id,
                 owner: tidebreak_core::OwnerId::local(),
                 workspace_id: Some(workspace_id),
-                kind: CodeSessionKind::Interactive,
+                kind: SessionKind::Interactive,
                 harness_kind: HarnessKind::ClaudeCode,
                 harness_version: Some("2.1.233".into()),
                 harness_resume_ref: None,
@@ -789,7 +785,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(untouched.lifecycle, CodeSessionLifecycle::Running);
+        assert_eq!(untouched.lifecycle, SessionLifecycle::Running);
     }
 
     async fn seeded_fenced_orphan(
@@ -798,9 +794,9 @@ mod tests {
         tempfile::TempDir,
         DbStore,
         crate::code::bus::CodeEventBus,
-        CodeSession,
-        CodeTurnId,
-        CodeApprovalId,
+        Session,
+        TurnId,
+        ApprovalId,
     ) {
         let (directory, store, session_id, turn_id) = seeded_running(Some(pid)).await;
         let approval_id = seed_pending_approval(&store, session_id, turn_id).await;
@@ -824,17 +820,17 @@ mod tests {
         pid: i64,
         identity: &str,
         epoch: i64,
-        turn_id: CodeTurnId,
-        approval_id: CodeApprovalId,
+        turn_id: TurnId,
+        approval_id: ApprovalId,
     ) {
         let owner = tidebreak_core::OwnerId::local();
         let turn = get_turn(store, &owner, turn_id).await.unwrap().unwrap();
-        assert_eq!(turn.status, CodeTurnStatus::Running);
+        assert_eq!(turn.status, TurnStatus::Running);
         let session = get_session(store, &owner, turn.session_id)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(session.lifecycle, CodeSessionLifecycle::Fenced);
+        assert_eq!(session.lifecycle, SessionLifecycle::Fenced);
         assert_eq!(session.fence_reason, Some(FenceReason::OrphanAlive));
         assert_eq!(session.child_pid, Some(pid));
         assert_eq!(session.child_process_identity.as_deref(), Some(identity));
@@ -845,7 +841,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .state,
-            CodeApprovalState::Pending
+            ApprovalState::Pending
         );
     }
 
@@ -866,7 +862,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(session.lifecycle, CodeSessionLifecycle::Idle);
+        assert_eq!(session.lifecycle, SessionLifecycle::Idle);
         assert!(matches!(
             session.attention.state,
             AttentionState::NeedsYou {
@@ -878,12 +874,12 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(turn.status, CodeTurnStatus::Interrupted);
+        assert_eq!(turn.status, TurnStatus::Interrupted);
         let approval = get_approval(&store, &tidebreak_core::OwnerId::local(), approval_id)
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(approval.state, CodeApprovalState::Abandoned);
+        assert_eq!(approval.state, ApprovalState::Abandoned);
         assert!(approval.decision_claim.is_none());
         assert!(approval.decided_at.is_some());
         let events = list_events(
@@ -896,13 +892,10 @@ mod tests {
         .await
         .unwrap()
         .events;
-        assert!(matches!(
-            &events[0].event,
-            CodeEvent::TurnInterrupted { .. }
-        ));
+        assert!(matches!(&events[0].event, Event::TurnInterrupted { .. }));
         assert!(matches!(
             &events[1].event,
-            CodeEvent::ApprovalResolved {
+            Event::ApprovalResolved {
                 approval_id: resolved,
                 decision: ApprovalDecisionKind::Abandoned,
             } if *resolved == approval_id
@@ -930,7 +923,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .status,
-            CodeTurnStatus::Interrupted
+            TurnStatus::Interrupted
         );
         assert_subagent_failed(&store, session_id).await;
     }
@@ -966,7 +959,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(session.lifecycle, CodeSessionLifecycle::Fenced);
+        assert_eq!(session.lifecycle, SessionLifecycle::Fenced);
         assert_eq!(session.fence_reason, Some(FenceReason::OrphanAlive));
         assert!(matches!(
             session.attention.state,
@@ -978,7 +971,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(turn.status, CodeTurnStatus::Running);
+        assert_eq!(turn.status, TurnStatus::Running);
         assert_subagent_failed(&store, session_id).await;
         assert!(
             decoy.try_wait().ok().flatten().is_none(),
@@ -1008,7 +1001,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(reaper.calls.load(Ordering::SeqCst), 1);
-        assert_eq!(reaped.lifecycle, CodeSessionLifecycle::Idle);
+        assert_eq!(reaped.lifecycle, SessionLifecycle::Idle);
         assert_eq!(reaped.spawn_epoch, old_epoch + 1);
         assert_eq!(reaped.child_pid, None);
         assert_eq!(reaped.child_process_identity, None);
@@ -1019,7 +1012,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .status,
-            CodeTurnStatus::Interrupted
+            TurnStatus::Interrupted
         );
         assert_eq!(
             get_approval(&store, &tidebreak_core::OwnerId::local(), approval_id)
@@ -1027,7 +1020,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .state,
-            CodeApprovalState::Abandoned
+            ApprovalState::Abandoned
         );
     }
 
@@ -1116,7 +1109,7 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_fence_settles_running_subagents_as_failed() {
-        let (_dir, store, session_id) = seeded_session(None, CodeSessionLifecycle::Running).await;
+        let (_dir, store, session_id) = seeded_session(None, SessionLifecycle::Running).await;
         seed_running_subagent(&store, session_id).await;
         let mut session = get_session(&store, &tidebreak_core::OwnerId::local(), session_id)
             .await
@@ -1152,7 +1145,7 @@ mod tests {
         // one child per turn have no pid to report at turn boundaries, so this
         // drives a real worker turn and reads back what the worker itself
         // wrote — seeding a pid here would test nothing.
-        let (_dir, store, session_id) = seeded_session(None, CodeSessionLifecycle::Idle).await;
+        let (_dir, store, session_id) = seeded_session(None, SessionLifecycle::Idle).await;
         let store = Arc::new(store);
         let bus = Arc::new(crate::code::bus::CodeEventBus::default());
         let session = get_session(&store, &tidebreak_core::OwnerId::local(), session_id)
@@ -1192,7 +1185,7 @@ mod tests {
         .with_delay(std::time::Duration::from_secs(30))
         .launch(tidebreak_harness::SessionSpec {
             owner: tidebreak_core::OwnerId::local(),
-            session_id: tidebreak_core::CodeSessionId::new(),
+            session_id: tidebreak_core::SessionId::new(),
             worktree: _dir.path().join("wt"),
             allowed_read_roots: Vec::new(),
             permission_mode: PermissionMode::Plan,
@@ -1300,7 +1293,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(session.lifecycle, CodeSessionLifecycle::Fenced);
+        assert_eq!(session.lifecycle, SessionLifecycle::Fenced);
         assert!(
             matches!(session.attention.state, AttentionState::Manual { .. }),
             "Fenced recovery must go through should_replace: {:?}",
@@ -1323,7 +1316,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(session.lifecycle, CodeSessionLifecycle::Fenced);
+        assert_eq!(session.lifecycle, SessionLifecycle::Fenced);
     }
 
     #[tokio::test]
@@ -1336,14 +1329,14 @@ mod tests {
         .await
         .unwrap();
         let owner = tidebreak_core::OwnerId::local();
-        let session_id = CodeSessionId::new();
+        let session_id = SessionId::new();
         insert_session(
             &store,
-            &CodeSession {
+            &Session {
                 id: session_id,
                 owner: owner.clone(),
                 workspace_id: None,
-                kind: CodeSessionKind::Interactive,
+                kind: SessionKind::Interactive,
                 harness_kind: HarnessKind::Internal,
                 harness_version: Some("internal".into()),
                 harness_resume_ref: None,
@@ -1351,7 +1344,7 @@ mod tests {
                 model: Some("test".into()),
                 reasoning_effort: None,
                 fast_mode: false,
-                lifecycle: CodeSessionLifecycle::Running,
+                lifecycle: SessionLifecycle::Running,
                 fence_reason: None,
                 child_pid: None,
                 child_process_identity: None,
@@ -1364,15 +1357,15 @@ mod tests {
         )
         .await
         .unwrap();
-        let turn_id = CodeTurnId::new();
+        let turn_id = TurnId::new();
         insert_turn(
             &store,
             &owner,
-            &CodeTurn {
+            &Turn {
                 id: turn_id,
                 session_id,
                 ordinal: 1,
-                status: CodeTurnStatus::Running,
+                status: TurnStatus::Running,
                 model: Some("test".into()),
                 fast_mode: false,
                 user_input: "hello".into(),
@@ -1404,9 +1397,9 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(session.lifecycle, CodeSessionLifecycle::Running);
+        assert_eq!(session.lifecycle, SessionLifecycle::Running);
         let turn = get_turn(&store, &owner, turn_id).await.unwrap().unwrap();
-        assert_eq!(turn.status, CodeTurnStatus::Running);
+        assert_eq!(turn.status, TurnStatus::Running);
     }
 
     #[test]
@@ -1418,10 +1411,10 @@ mod tests {
         assert_eq!(probe_recorded_pid(0), PidLiveness::Dead);
     }
 
-    async fn park_waiting_turn(store: &DbStore, turn_id: CodeTurnId) {
+    async fn park_waiting_turn(store: &DbStore, turn_id: TurnId) {
         let owner = tidebreak_core::OwnerId::local();
         let mut turn = get_turn(store, &owner, turn_id).await.unwrap().unwrap();
-        turn.status = CodeTurnStatus::Waiting;
+        turn.status = TurnStatus::Waiting;
         turn.park_ref = Some("cp-1".into());
         turn.park_wait = Some(TurnParkWait::Approval {
             call_id: "call-1".into(),
@@ -1445,7 +1438,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(turn.status, CodeTurnStatus::Interrupted);
+        assert_eq!(turn.status, TurnStatus::Interrupted);
         let events = list_events(
             &store,
             &tidebreak_core::OwnerId::local(),
@@ -1456,10 +1449,7 @@ mod tests {
         .await
         .unwrap()
         .events;
-        assert!(matches!(
-            &events[0].event,
-            CodeEvent::TurnInterrupted { .. }
-        ));
+        assert!(matches!(&events[0].event, Event::TurnInterrupted { .. }));
     }
 
     #[tokio::test]
@@ -1482,7 +1472,7 @@ mod tests {
         ));
         let owner = tidebreak_core::OwnerId::local();
         let turn = get_turn(&store, &owner, turn_id).await.unwrap().unwrap();
-        assert_eq!(turn.status, CodeTurnStatus::Waiting);
+        assert_eq!(turn.status, TurnStatus::Waiting);
         assert_eq!(turn.park_ref.as_deref(), Some("cp-1"));
         assert_eq!(
             get_approval(&store, &owner, approval_id)
@@ -1490,7 +1480,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .state,
-            CodeApprovalState::Pending
+            ApprovalState::Pending
         );
         let events = list_events(&store, &owner, session_id, 0, MAX_REPLAY_EVENTS)
             .await
@@ -1499,7 +1489,7 @@ mod tests {
         assert!(
             events
                 .iter()
-                .all(|event| !matches!(event.event, CodeEvent::TurnInterrupted { .. })),
+                .all(|event| !matches!(event.event, Event::TurnInterrupted { .. })),
             "a durable park must not journal an interrupt"
         );
 
@@ -1543,7 +1533,7 @@ mod tests {
                 parent_call_id: None,
             },
             tidebreak_harness::HarnessEvent::TurnCompleted {
-                usage: tidebreak_core::CodeUsage::default(),
+                usage: tidebreak_core::TurnUsage::default(),
             },
         ])
         .with_unattended_approvals()
@@ -1557,7 +1547,7 @@ mod tests {
         let engine = adapter
             .launch(tidebreak_harness::SessionSpec {
                 owner: tidebreak_core::OwnerId::local(),
-                session_id: tidebreak_core::CodeSessionId::new(),
+                session_id: tidebreak_core::SessionId::new(),
                 worktree,
                 allowed_read_roots: Vec::new(),
                 permission_mode: session.permission_mode,
@@ -1595,7 +1585,7 @@ mod tests {
                     .await
                     .unwrap()
                     .unwrap();
-                if current.lifecycle == CodeSessionLifecycle::Running {
+                if current.lifecycle == SessionLifecycle::Running {
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -1619,7 +1609,7 @@ mod tests {
         let completed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 let turn = get_turn(&store, &owner, turn_id).await.unwrap().unwrap();
-                if turn.status == CodeTurnStatus::Completed {
+                if turn.status == TurnStatus::Completed {
                     break turn;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -1640,7 +1630,7 @@ mod tests {
         assert!(
             events
                 .iter()
-                .any(|event| matches!(event.event, CodeEvent::TurnResumed { .. })),
+                .any(|event| matches!(event.event, Event::TurnResumed { .. })),
             "the journal records the resume"
         );
         let _ = handle

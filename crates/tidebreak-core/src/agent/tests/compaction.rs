@@ -128,7 +128,7 @@ fn test_compaction_policy() -> CompactionPolicy {
 
 async fn append_semantic_checkpoint_history(
     store: &Arc<dyn Store>,
-    chat_id: ChatId,
+    chat_id: SessionId,
 ) -> Vec<Message> {
     let messages = vec![
         Message {
@@ -1090,7 +1090,7 @@ async fn checkpoint_fitting_preserves_tool_pairs_and_fails_closed_when_over_budg
 
 #[test]
 fn unsupported_or_foreign_checkpoints_are_not_projectable() {
-    let chat_id = ChatId::new();
+    let chat_id = SessionId::new();
     let checkpoint = ContextCheckpoint {
         chat_id,
         source_message_id: MessageId::new(),
@@ -1100,7 +1100,7 @@ fn unsupported_or_foreign_checkpoints_are_not_projectable() {
         created_at: Utc::now(),
     };
     assert!(checkpoint_is_projectable(&checkpoint, chat_id));
-    assert!(!checkpoint_is_projectable(&checkpoint, ChatId::new()));
+    assert!(!checkpoint_is_projectable(&checkpoint, SessionId::new()));
     assert!(checkpoint_is_projectable(
         &ContextCheckpoint {
             format_version: crate::CONTEXT_CHECKPOINT_FORMAT_V2,

@@ -24,12 +24,12 @@
 //!
 //! ```
 //! use std::sync::Arc;
-//! use tidebreak_core::{ChatId, ToolCtx, ToolRegistry};
+//! use tidebreak_core::{SessionId, ToolCtx, ToolRegistry};
 //! use tidebreak_mcp::McpServer;
 //!
 //! # fn demo() -> std::io::Result<()> {
 //! let tools = Arc::new(ToolRegistry::new());
-//! let ctx = ToolCtx::try_new_legacy_workspace(ChatId::new(), None, ".".into())?;
+//! let ctx = ToolCtx::try_new_legacy_workspace(SessionId::new(), None, ".".into())?;
 //! let server = McpServer::new(tools, ctx);
 //! // then: `tidebreak_mcp::serve_stdio(server).await` inside an async runtime.
 //! # let _ = server;

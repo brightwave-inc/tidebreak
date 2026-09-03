@@ -26,7 +26,7 @@ use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
 use serde::{Deserialize, Serialize};
 use tauri::State;
-use tidebreak_core::{ChatId, MAX_IMAGE_BYTES};
+use tidebreak_core::{SessionId, MAX_IMAGE_BYTES};
 use uuid::Uuid;
 
 use crate::documents::resolve_conversation_scope;
@@ -291,7 +291,7 @@ async fn publish_code_image_bytes(
 }
 
 fn code_image_attachments_path(session_id: Uuid) -> String {
-    format!("/code/sessions/{session_id}/attachments/images")
+    format!("/sessions/{session_id}/attachments/images")
 }
 
 /// Whether this file should be attached as an image rather than imported as a
@@ -338,7 +338,7 @@ pub(crate) fn is_attachable_image(path: &Path) -> bool {
     declared_media_type(&header[..read]).is_some()
 }
 
-fn image_attachments_path(chat_id: ChatId) -> String {
+fn image_attachments_path(chat_id: SessionId) -> String {
     format!("/chats/{chat_id}/attachments/images")
 }
 

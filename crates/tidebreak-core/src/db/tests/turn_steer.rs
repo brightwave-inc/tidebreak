@@ -635,7 +635,7 @@ async fn turn_steer_admission_validates_identity_payload_and_monotonic_time() {
     ));
     assert!(matches!(
         store
-            .accept_turn_steer(id, TurnId::new(), ChatId::new(), "exact", false,)
+            .accept_turn_steer(id, TurnId::new(), SessionId::new(), "exact", false,)
             .await
             .unwrap(),
         AcceptTurnSteerOutcome::IdentityConflict
@@ -667,12 +667,12 @@ async fn turn_steer_admission_validates_identity_payload_and_monotonic_time() {
         (Utc::now() + chrono::Duration::hours(1)).timestamp_micros(),
     )
     .unwrap();
-    entities::code_turn::Entity::update_many()
+    entities::turn::Entity::update_many()
         .col_expr(
-            entities::code_turn::Column::UpdatedAt,
+            entities::turn::Column::UpdatedAt,
             sea_orm::sea_query::Expr::value(future),
         )
-        .filter(entities::code_turn::Column::Id.eq(turn.id.0))
+        .filter(entities::turn::Column::Id.eq(turn.id.0))
         .exec(&store.conn)
         .await
         .unwrap();
@@ -1122,12 +1122,12 @@ async fn terminal_turn_paths_reject_pending_steers_but_retry_wait_preserves_them
         AcceptTurnOutcome::Accepted(turn) => turn,
         other => panic!("unexpected turn acceptance: {other:?}"),
     };
-    entities::code_turn::Entity::update_many()
+    entities::turn::Entity::update_many()
         .col_expr(
-            entities::code_turn::Column::MaxAttempts,
+            entities::turn::Column::MaxAttempts,
             sea_orm::sea_query::Expr::value(2),
         )
-        .filter(entities::code_turn::Column::Id.eq(retry_turn.id.0))
+        .filter(entities::turn::Column::Id.eq(retry_turn.id.0))
         .exec(&store.conn)
         .await
         .unwrap();
@@ -1399,7 +1399,7 @@ async fn failed_steer_event_insert_rolls_back_message_receipt_and_revision() {
     store
         .conn
         .execute_unprepared(
-            "CREATE TRIGGER fail_steer_event BEFORE INSERT ON code_event
+            "CREATE TRIGGER fail_steer_event BEFORE INSERT ON event
              BEGIN SELECT RAISE(FAIL, 'injected steer event failure'); END",
         )
         .await

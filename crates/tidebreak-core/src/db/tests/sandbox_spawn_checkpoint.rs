@@ -15,7 +15,7 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
 async fn running_turn(
     store: &crate::DbStore,
-    chat_id: crate::ChatId,
+    chat_id: crate::SessionId,
 ) -> (crate::TurnRun, uuid::Uuid) {
     store
         .accept_turn(
@@ -105,7 +105,7 @@ fn progress() -> TurnCheckpointProgress {
 
 async fn detach_conversation_root(
     store: &crate::DbStore,
-    chat_id: crate::ChatId,
+    chat_id: crate::SessionId,
     root_id: HostRootId,
 ) {
     let executor_id = uuid::Uuid::new_v4();
@@ -859,12 +859,12 @@ async fn accounting_overflow_and_event_ordinal_collision_roll_back_every_write()
     assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 0);
     assert!(store.list_tool_calls(chat.id).await.unwrap().is_empty());
 
-    crate::db::entities::code_turn::Entity::update_many()
+    crate::db::entities::turn::Entity::update_many()
         .col_expr(
-            crate::db::entities::code_turn::Column::ModelSteps,
+            crate::db::entities::turn::Column::ModelSteps,
             sea_orm::sea_query::Expr::value(i32::MAX),
         )
-        .filter(crate::db::entities::code_turn::Column::Id.eq(turn.id.0))
+        .filter(crate::db::entities::turn::Column::Id.eq(turn.id.0))
         .exec(&store.conn)
         .await
         .unwrap();
@@ -876,16 +876,16 @@ async fn accounting_overflow_and_event_ordinal_collision_roll_back_every_write()
     assert_eq!(store.list_agent_runs(chat.id).await.unwrap().len(), 0);
     assert!(store.list_tool_calls(chat.id).await.unwrap().is_empty());
 
-    crate::db::entities::code_turn::Entity::update_many()
+    crate::db::entities::turn::Entity::update_many()
         .col_expr(
-            crate::db::entities::code_turn::Column::ModelSteps,
+            crate::db::entities::turn::Column::ModelSteps,
             sea_orm::sea_query::Expr::value(0),
         )
         .col_expr(
-            crate::db::entities::code_turn::Column::InputTokens,
+            crate::db::entities::turn::Column::InputTokens,
             sea_orm::sea_query::Expr::value(i64::from(u32::MAX)),
         )
-        .filter(crate::db::entities::code_turn::Column::Id.eq(turn.id.0))
+        .filter(crate::db::entities::turn::Column::Id.eq(turn.id.0))
         .exec(&store.conn)
         .await
         .unwrap();

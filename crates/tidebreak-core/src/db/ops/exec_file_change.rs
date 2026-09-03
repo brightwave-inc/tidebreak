@@ -19,7 +19,7 @@ use sea_orm::{
 };
 
 use crate::error::{AgentError, Result};
-use crate::id::{ChatId, TurnId};
+use crate::id::{SessionId, TurnId};
 use crate::model::{
     ExecFileChange, ExecFileChangeClassification, ExecFileRejection, ExecFileRejectionReason,
     ExecFileRejectionRecord, ExecFileSnapshot, ExecFileSnapshotRecord, ExecUndoState,
@@ -39,7 +39,7 @@ use super::blob as blob_ops;
 /// prior copy this row now depends on.
 pub(in crate::db) async fn record_snapshots(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
     turn_id: TurnId,
     files: &[ExecFileSnapshotRecord],
 ) -> Result<()> {
@@ -99,7 +99,7 @@ pub(in crate::db) async fn record_snapshots(
 /// window. These rows hold no blob, so nothing is retained or freed by them.
 pub(in crate::db) async fn record_rejections(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
     turn_id: TurnId,
     files: &[ExecFileRejectionRecord],
 ) -> Result<()> {
@@ -136,7 +136,7 @@ pub(in crate::db) async fn record_rejections(
     Ok(())
 }
 
-async fn begin_locked(store: &DbStore, chat_id: ChatId) -> Result<sea_orm::DatabaseTransaction> {
+async fn begin_locked(store: &DbStore, chat_id: SessionId) -> Result<sea_orm::DatabaseTransaction> {
     let transaction = store.conn.begin().await.map_err(store_err)?;
     if !super::acquire_chat_write_lock(&transaction, chat_id).await? {
         transaction.rollback().await.map_err(store_err)?;
@@ -153,7 +153,7 @@ async fn begin_locked(store: &DbStore, chat_id: ChatId) -> Result<sea_orm::Datab
 /// its rejected rows in two transactions, so its rows carry two `recorded_at`
 /// values and a cutoff drawn from the newer one would take out the older half of
 /// a turn that is still inside the window.
-async fn prune_on<C>(conn: &C, chat_id: ChatId) -> Result<()>
+async fn prune_on<C>(conn: &C, chat_id: SessionId) -> Result<()>
 where
     C: ConnectionTrait,
 {
@@ -225,7 +225,7 @@ where
 /// This chat's applied changes, newest first.
 pub(in crate::db) async fn list_snapshots_for_chat(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
 ) -> Result<Vec<ExecFileSnapshot>> {
     list_classified(store, chat_id, ExecFileChangeClassification::Applied)
         .await?
@@ -237,7 +237,7 @@ pub(in crate::db) async fn list_snapshots_for_chat(
 /// This chat's rejected writes, newest first.
 pub(in crate::db) async fn list_rejections_for_chat(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
 ) -> Result<Vec<ExecFileRejection>> {
     list_classified(store, chat_id, ExecFileChangeClassification::Rejected)
         .await?
@@ -248,7 +248,7 @@ pub(in crate::db) async fn list_rejections_for_chat(
 
 async fn list_classified(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
     classification: ExecFileChangeClassification,
 ) -> Result<Vec<entities::exec_file_change::Model>> {
     entities::exec_file_change::Entity::find()
@@ -265,7 +265,7 @@ async fn list_classified(
 /// Distinct prior blobs referenced by this chat's journal, ascending.
 pub(in crate::db) async fn list_chat_blob_ids_on<C>(
     conn: &C,
-    chat_id: ChatId,
+    chat_id: SessionId,
 ) -> Result<Vec<uuid::Uuid>>
 where
     C: ConnectionTrait,
@@ -294,7 +294,7 @@ where
 /// The chat foreign key is `Restrict` rather than `Cascade` precisely so this
 /// runs: the rows hold the last reference to their prior-content blobs, and a
 /// cascade would drop them without anything retiring what they freed.
-pub(in crate::db) async fn delete_for_chat_on<C>(conn: &C, chat_id: ChatId) -> Result<()>
+pub(in crate::db) async fn delete_for_chat_on<C>(conn: &C, chat_id: SessionId) -> Result<()>
 where
     C: ConnectionTrait,
 {
@@ -319,7 +319,7 @@ fn snapshot_from_model(model: entities::exec_file_change::Model) -> Result<ExecF
         .ok_or_else(|| AgentError::Store(format!("unknown exec undo state: {undo_state}")))?;
     Ok(ExecFileSnapshot {
         id: model.id,
-        chat_id: ChatId(model.chat_id),
+        chat_id: SessionId(model.chat_id),
         turn_id: TurnId(model.turn_id),
         recorded_at: model.recorded_at,
         file: ExecFileSnapshotRecord {
@@ -348,7 +348,7 @@ fn rejection_from_model(model: entities::exec_file_change::Model) -> Result<Exec
         .ok_or_else(|| AgentError::Store(format!("unknown exec file rejection: {reason}")))?;
     Ok(ExecFileRejection {
         id: model.id,
-        chat_id: ChatId(model.chat_id),
+        chat_id: SessionId(model.chat_id),
         turn_id: TurnId(model.turn_id),
         recorded_at: model.recorded_at,
         file: ExecFileRejectionRecord {

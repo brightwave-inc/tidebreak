@@ -104,13 +104,13 @@ export function InboxView() {
             <InboxRow
               entry={entry}
               onOpen={() => {
-                if (entry.conversation.surface === "chat") {
+                if (entry.conversation.workspaceId === null) {
                   // The first item is the longest-waiting one, which is the
                   // card the reader is being sent to answer.
                   const focus = entry.items[0]?.callId;
                   void navigate({
                     to: "/c/$chatId",
-                    params: { chatId: entry.conversation.chatId },
+                    params: { chatId: entry.conversation.sessionId },
                     ...(focus ? { search: { focus } } : {}),
                   });
                   return;

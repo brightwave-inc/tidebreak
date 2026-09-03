@@ -47,7 +47,7 @@ export function chatQueueApi(client: ApiClient, chatId: string): QueueTrayApi {
       return {
         queued: snapshot.queued.map((row) => ({
           id: row.id,
-          content: row.content,
+          content: row.message,
         })),
         paused: snapshot.paused,
       };
@@ -59,7 +59,7 @@ export function chatQueueApi(client: ApiClient, chatId: string): QueueTrayApi {
   };
 }
 
-/** The code-session queue (`/code/sessions/{id}/queued`), decision 69. */
+/** The code-session queue (`/sessions/{id}/queued`), decision 69. */
 export function codeQueueApi(
   client: ApiClient,
   sessionId: string,

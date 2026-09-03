@@ -12,7 +12,7 @@ use futures::channel::mpsc;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
-use tidebreak_core::{Agent, ChatId, SequencedEvent, ToolRegistry};
+use tidebreak_core::{Agent, SequencedAgentEvent, SessionId, ToolRegistry};
 
 use crate::error::ServerError;
 use crate::extract::{Json, Path};
@@ -61,7 +61,7 @@ pub struct CompactionRun {
 pub async fn post_compact(
     State(state): State<AppState>,
     store: ScopedStore,
-    Path(id): Path<ChatId>,
+    Path(id): Path<SessionId>,
     Json(body): Json<CompactChat>,
 ) -> Result<Json<CompactionRun>, ServerError> {
     let chat = store.require_chat(id).await?;
@@ -130,7 +130,10 @@ pub async fn post_compact(
     // allocated, which is what the live stream reconciles against.
     while let Some(event) = receiver.next().await {
         let seq = state.store.append_chat_event(id, &event).await?;
-        let _ = state.events.sender(id).send(SequencedEvent { seq, event });
+        let _ = state
+            .events
+            .sender(id)
+            .send(SequencedAgentEvent { seq, event });
     }
 
     Ok(Json(CompactionRun {

@@ -1,4 +1,7 @@
-import type { CodeTurnSnapshot, QueuedCodeTurn } from "../generated/wire";
+import type {
+  QueuedTurn as QueuedCodeTurn,
+  TurnSnapshot as CodeTurnSnapshot,
+} from "../generated/wire";
 import { MachineRequestError } from "./machine";
 
 export type SubmissionFailure = {

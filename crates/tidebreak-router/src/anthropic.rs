@@ -274,7 +274,7 @@ impl AnthropicProvider {
         body: &Value,
         route_model: &str,
         wire_model: &str,
-        conversation: Option<tidebreak_core::id::ChatId>,
+        conversation: Option<tidebreak_core::id::SessionId>,
     ) -> Result<reqwest::Response> {
         match &self.token_source {
             Some(source) => {
@@ -300,7 +300,7 @@ impl AnthropicProvider {
         &self,
         body: &Value,
         api_key: &str,
-        conversation: Option<tidebreak_core::id::ChatId>,
+        conversation: Option<tidebreak_core::id::SessionId>,
     ) -> Result<reqwest::Response> {
         // The binding control is a beta field, and the header that admits it
         // is decided from the body so every leg of a paused turn agrees with

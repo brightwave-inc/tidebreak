@@ -15,14 +15,13 @@ use axum::http::{header, request::Parts, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 
 use super::types::{
-    CodeForkTranscript, CodeSessionExternalOrigin, CodeSessionSnapshot, CodeTurnSnapshot,
-    CreateInternalSessionBody, CreateRemoteSessionBody, CreateSessionBody, QueuePausedBody,
-    QueuedCodeTurn, QueuedCodeTurnUpdate, QueuedCodeTurnsSnapshot, SequencedCodeEventFrame,
-    SetAttentionBody, SetFastModeBody, SetPermissionModeBody, SetReasoningEffortBody, SteerBody,
-    SubmitTurnBody,
+    CodeForkTranscript, CreateInternalSessionBody, CreateRemoteSessionBody, CreateSessionBody,
+    QueuePausedBody, QueuedTurn, QueuedTurnUpdate, QueuedTurnsSnapshot, SequencedEventFrame,
+    SessionExternalOrigin, SessionSnapshot, SetAttentionBody, SetFastModeBody,
+    SetPermissionModeBody, SetReasoningEffortBody, SteerBody, SubmitTurnBody, TurnSnapshot,
 };
 use crate::code::runtime::{NewSessionSettings, SubmitTurnOutcome};
-use tidebreak_core::{CodeSessionId, PermissionMode, TurnSteer, WorkspaceId};
+use tidebreak_core::{PermissionMode, SessionId, TurnSteer, WorkspaceId};
 
 /// The managed ceiling remote session creation needs, resolved before the
 /// handler receives request fields.
@@ -71,13 +70,10 @@ pub async fn create_session(
             },
         )
         .await?;
-    Ok((
-        StatusCode::CREATED,
-        Json(CodeSessionSnapshot::from(session)),
-    ))
+    Ok((StatusCode::CREATED, Json(SessionSnapshot::from(session))))
 }
 
-/// `POST /code/sessions` — create a conversation with no workspace. The
+/// `POST /sessions` — create a conversation with no workspace. The
 /// in-process engine hosts it (decision 0048 step 5).
 pub async fn create_internal_session(
     State(state): State<AppState>,
@@ -94,10 +90,7 @@ pub async fn create_internal_session(
             permission_mode_ceiling,
         })
         .await?;
-    Ok((
-        StatusCode::CREATED,
-        Json(CodeSessionSnapshot::from(session)),
-    ))
+    Ok((StatusCode::CREATED, Json(SessionSnapshot::from(session))))
 }
 
 /// `POST /code/remote/workspaces/{id}/sessions` — create a session whose
@@ -123,10 +116,7 @@ pub async fn create_remote_session(
             },
         )
         .await?;
-    Ok((
-        StatusCode::CREATED,
-        Json(CodeSessionSnapshot::from(session)),
-    ))
+    Ok((StatusCode::CREATED, Json(SessionSnapshot::from(session))))
 }
 
 /// One session as a snapshot with its external origin attached.
@@ -137,18 +127,18 @@ pub async fn create_remote_session(
 /// next reap, mode change, or attention edit.
 async fn snapshot_with_origin(
     code: &ScopedCode,
-    session: tidebreak_core::CodeSession,
-) -> Result<CodeSessionSnapshot, ServerError> {
+    session: tidebreak_core::Session,
+) -> Result<SessionSnapshot, ServerError> {
     let origin = code
         .external_bindings_for_sessions(&[session.id])
         .await?
         .into_iter()
         .next()
-        .map(|binding| CodeSessionExternalOrigin {
+        .map(|binding| SessionExternalOrigin {
             channel_kind: binding.channel_kind,
             external_key: binding.external_key,
         });
-    let mut snapshot = CodeSessionSnapshot::from(session);
+    let mut snapshot = SessionSnapshot::from(session);
     snapshot.external_origin = origin;
     Ok(snapshot)
 }
@@ -156,17 +146,17 @@ async fn snapshot_with_origin(
 pub async fn list_workspace_sessions(
     code: ScopedCode,
     Path(workspace_id): Path<WorkspaceId>,
-) -> Result<Json<Vec<CodeSessionSnapshot>>, ServerError> {
+) -> Result<Json<Vec<SessionSnapshot>>, ServerError> {
     let sessions = code.list_workspace_sessions(workspace_id).await?;
-    let ids: Vec<CodeSessionId> = sessions.iter().map(|session| session.id).collect();
-    let origins: std::collections::HashMap<CodeSessionId, CodeSessionExternalOrigin> = code
+    let ids: Vec<SessionId> = sessions.iter().map(|session| session.id).collect();
+    let origins: std::collections::HashMap<SessionId, SessionExternalOrigin> = code
         .external_bindings_for_sessions(&ids)
         .await?
         .into_iter()
         .map(|binding| {
             (
                 binding.session_id,
-                CodeSessionExternalOrigin {
+                SessionExternalOrigin {
                     channel_kind: binding.channel_kind,
                     external_key: binding.external_key,
                 },
@@ -178,7 +168,7 @@ pub async fn list_workspace_sessions(
             .into_iter()
             .map(|session| {
                 let origin = origins.get(&session.id).cloned();
-                let mut snapshot = CodeSessionSnapshot::from(session);
+                let mut snapshot = SessionSnapshot::from(session);
                 snapshot.external_origin = origin;
                 snapshot
             })
@@ -186,36 +176,33 @@ pub async fn list_workspace_sessions(
     ))
 }
 
-/// `GET /code/sessions` — the owner's conversations that bind no
+/// `GET /sessions` — the owner's conversations that bind no
 /// workspace, newest first.
 pub async fn list_internal_sessions(
     code: ScopedCode,
-) -> Result<Json<Vec<CodeSessionSnapshot>>, ServerError> {
+) -> Result<Json<Vec<SessionSnapshot>>, ServerError> {
     let sessions = code.list_internal_sessions().await?;
     Ok(Json(
-        sessions
-            .into_iter()
-            .map(CodeSessionSnapshot::from)
-            .collect(),
+        sessions.into_iter().map(SessionSnapshot::from).collect(),
     ))
 }
 
-/// `GET /code/sessions/{id}` — one session by id, whatever it binds.
+/// `GET /sessions/{id}` — one session by id, whatever it binds.
 pub async fn get_session(
     code: ScopedCode,
-    Path(id): Path<CodeSessionId>,
-) -> Result<Json<CodeSessionSnapshot>, ServerError> {
+    Path(id): Path<SessionId>,
+) -> Result<Json<SessionSnapshot>, ServerError> {
     let session = code.get_session(id).await?;
     let origin = code
         .external_bindings_for_sessions(&[id])
         .await?
         .into_iter()
         .next()
-        .map(|binding| CodeSessionExternalOrigin {
+        .map(|binding| SessionExternalOrigin {
             channel_kind: binding.channel_kind,
             external_key: binding.external_key,
         });
-    let mut snapshot = CodeSessionSnapshot::from(session);
+    let mut snapshot = SessionSnapshot::from(session);
     snapshot.external_origin = origin;
     Ok(Json(snapshot))
 }
@@ -223,7 +210,7 @@ pub async fn get_session(
 pub async fn submit_turn(
     State(state): State<AppState>,
     code: ScopedCode,
-    Path(id): Path<CodeSessionId>,
+    Path(id): Path<SessionId>,
     Json(body): Json<SubmitTurnBody>,
 ) -> Result<impl IntoResponse, ServerError> {
     let message = body.message.trim().to_owned();
@@ -251,10 +238,10 @@ pub async fn submit_turn(
         .await?
     {
         SubmitTurnOutcome::Ran(turn) => {
-            Ok((StatusCode::ACCEPTED, Json(CodeTurnSnapshot::from(*turn))).into_response())
+            Ok((StatusCode::ACCEPTED, Json(TurnSnapshot::from(*turn))).into_response())
         }
         SubmitTurnOutcome::Queued(row) => {
-            Ok((StatusCode::ACCEPTED, Json(QueuedCodeTurn::from(*row))).into_response())
+            Ok((StatusCode::ACCEPTED, Json(QueuedTurn::from(*row))).into_response())
         }
         // Trigger submits never come through this route; the enum is shared
         // with the trigger sweep, which is the only caller that can see this.
@@ -264,26 +251,26 @@ pub async fn submit_turn(
     }
 }
 
-/// `GET /code/sessions/{id}/queued` — the session's queued messages, FIFO,
+/// `GET /sessions/{id}/queued` — the session's queued messages, FIFO,
 /// plus whether promotion is paused.
 pub async fn list_queued_turns(
     code: ScopedCode,
-    Path(id): Path<CodeSessionId>,
-) -> Result<Json<QueuedCodeTurnsSnapshot>, ServerError> {
+    Path(id): Path<SessionId>,
+) -> Result<Json<QueuedTurnsSnapshot>, ServerError> {
     let (queued, paused) = code.list_queued_turns(id).await?;
-    Ok(Json(QueuedCodeTurnsSnapshot {
-        queued: queued.into_iter().map(QueuedCodeTurn::from).collect(),
+    Ok(Json(QueuedTurnsSnapshot {
+        queued: queued.into_iter().map(QueuedTurn::from).collect(),
         paused,
     }))
 }
 
-/// `PATCH /code/sessions/{id}/queued/{queued_id}` — edit or reorder one
+/// `PATCH /sessions/{id}/queued/{queued_id}` — edit or reorder one
 /// queued message.
 pub async fn patch_queued_turn(
     code: ScopedCode,
-    Path((id, queued_id)): Path<(CodeSessionId, tidebreak_core::CodeTurnId)>,
-    Json(body): Json<QueuedCodeTurnUpdate>,
-) -> Result<Json<QueuedCodeTurn>, ServerError> {
+    Path((id, queued_id)): Path<(SessionId, tidebreak_core::TurnId)>,
+    Json(body): Json<QueuedTurnUpdate>,
+) -> Result<Json<QueuedTurn>, ServerError> {
     if let Some(message) = body.message.as_deref() {
         if message.trim().is_empty() || message.contains('\0') {
             return Err(ServerError::bad_request(
@@ -295,14 +282,14 @@ pub async fn patch_queued_turn(
         .update_queued_turn(id, queued_id, body.message.as_deref(), body.position)
         .await?
         .ok_or_else(|| ServerError::not_found(format!("queued turn {queued_id} not found")))?;
-    Ok(Json(QueuedCodeTurn::from(updated)))
+    Ok(Json(QueuedTurn::from(updated)))
 }
 
-/// `DELETE /code/sessions/{id}/queued/{queued_id}` — retract one queued
+/// `DELETE /sessions/{id}/queued/{queued_id}` — retract one queued
 /// message.
 pub async fn delete_queued_turn(
     code: ScopedCode,
-    Path((id, queued_id)): Path<(CodeSessionId, tidebreak_core::CodeTurnId)>,
+    Path((id, queued_id)): Path<(SessionId, tidebreak_core::TurnId)>,
 ) -> Result<StatusCode, ServerError> {
     if code.delete_queued_turn(id, queued_id).await? {
         Ok(StatusCode::NO_CONTENT)
@@ -313,31 +300,31 @@ pub async fn delete_queued_turn(
     }
 }
 
-/// `PUT /code/sessions/{id}/queue-paused` — pause or release promotion for
+/// `PUT /sessions/{id}/queue-paused` — pause or release promotion for
 /// this session; queued rows stay put while paused.
 pub async fn put_queue_paused(
     code: ScopedCode,
-    Path(id): Path<CodeSessionId>,
+    Path(id): Path<SessionId>,
     Json(body): Json<QueuePausedBody>,
 ) -> Result<StatusCode, ServerError> {
     code.set_queue_paused(id, body.paused).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `POST /code/sessions/{id}/queued/send-now` — clear this session's pause
+/// `POST /sessions/{id}/queued/send-now` — clear this session's pause
 /// and wake the worker so the head row starts.
 ///
 /// The tray composes the full gesture client-side exactly as chat's does:
 /// pause, move the row first, stop the live turn, then this.
 pub async fn post_queue_send_now(
     code: ScopedCode,
-    Path(id): Path<CodeSessionId>,
+    Path(id): Path<SessionId>,
 ) -> Result<StatusCode, ServerError> {
     code.send_queued_now(id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `POST /code/sessions/{id}/fork` — write this session's handoff into
+/// `POST /sessions/{id}/fork` — write this session's handoff into
 /// private storage and report where it landed.
 ///
 /// Creating the child session is a separate call: forking is a file, and the
@@ -346,7 +333,7 @@ pub async fn post_queue_send_now(
 /// the newest turn.
 pub async fn fork_session(
     code: ScopedCode,
-    Path(id): Path<CodeSessionId>,
+    Path(id): Path<SessionId>,
     body: axum::body::Bytes,
 ) -> Result<(StatusCode, Json<CodeForkTranscript>), ServerError> {
     let at_turn = if body.is_empty() {
@@ -373,15 +360,15 @@ pub async fn fork_session(
 
 pub async fn get_session_debug(
     code: ScopedCode,
-    Path(id): Path<CodeSessionId>,
-) -> Result<Json<super::types::CodeSessionDebug>, ServerError> {
+    Path(id): Path<SessionId>,
+) -> Result<Json<super::types::SessionDebug>, ServerError> {
     let (session, turns, events) = code.session_debug(id).await?;
-    Ok(Json(super::types::CodeSessionDebug {
-        session: CodeSessionSnapshot::from(session),
-        turns: turns.into_iter().map(CodeTurnSnapshot::from).collect(),
+    Ok(Json(super::types::SessionDebug {
+        session: SessionSnapshot::from(session),
+        turns: turns.into_iter().map(TurnSnapshot::from).collect(),
         events: events
             .into_iter()
-            .map(|item| SequencedCodeEventFrame {
+            .map(|item| SequencedEventFrame {
                 seq: item.seq,
                 event: item.event,
                 replayed: None,
@@ -395,17 +382,15 @@ pub async fn get_session_debug(
 
 pub async fn list_session_turns(
     code: ScopedCode,
-    Path(id): Path<CodeSessionId>,
-) -> Result<Json<Vec<CodeTurnSnapshot>>, ServerError> {
+    Path(id): Path<SessionId>,
+) -> Result<Json<Vec<TurnSnapshot>>, ServerError> {
     let turns = code.list_session_turns(id).await?;
-    Ok(Json(
-        turns.into_iter().map(CodeTurnSnapshot::from).collect(),
-    ))
+    Ok(Json(turns.into_iter().map(TurnSnapshot::from).collect()))
 }
 
 pub async fn steer_session(
     code: ScopedCode,
-    Path(id): Path<CodeSessionId>,
+    Path(id): Path<SessionId>,
     Json(body): Json<SteerBody>,
 ) -> Result<StatusCode, ServerError> {
     let guidance = body.guidance.trim().to_owned();
@@ -423,7 +408,7 @@ pub async fn steer_session(
 
 pub async fn interrupt_session(
     code: ScopedCode,
-    Path(id): Path<CodeSessionId>,
+    Path(id): Path<SessionId>,
 ) -> Result<StatusCode, ServerError> {
     code.interrupt(id).await?;
     Ok(StatusCode::ACCEPTED)
@@ -431,17 +416,17 @@ pub async fn interrupt_session(
 
 pub async fn set_attention(
     code: ScopedCode,
-    Path(id): Path<CodeSessionId>,
+    Path(id): Path<SessionId>,
     Json(body): Json<SetAttentionBody>,
-) -> Result<Json<CodeSessionSnapshot>, ServerError> {
+) -> Result<Json<SessionSnapshot>, ServerError> {
     let session = code.set_attention(id, body.clear, body.note).await?;
     Ok(Json(snapshot_with_origin(&code, session).await?))
 }
 
 pub async fn reap_session(
     code: ScopedCode,
-    Path(id): Path<CodeSessionId>,
-) -> Result<(StatusCode, Json<CodeSessionSnapshot>), ServerError> {
+    Path(id): Path<SessionId>,
+) -> Result<(StatusCode, Json<SessionSnapshot>), ServerError> {
     let session = code.reap(id).await?;
     Ok((
         StatusCode::OK,
@@ -449,7 +434,7 @@ pub async fn reap_session(
     ))
 }
 
-/// `POST /code/sessions/{id}/mode` — change a session's permission mode.
+/// `POST /sessions/{id}/mode` — change a session's permission mode.
 ///
 /// The engine is relaunched against the new posture, so this is refused
 /// while a turn is running and while the session has ended. A mode the
@@ -458,9 +443,9 @@ pub async fn reap_session(
 pub async fn set_session_permission_mode(
     State(state): State<AppState>,
     code: ScopedCode,
-    Path(id): Path<CodeSessionId>,
+    Path(id): Path<SessionId>,
     Json(body): Json<SetPermissionModeBody>,
-) -> Result<(StatusCode, Json<CodeSessionSnapshot>), ServerError> {
+) -> Result<(StatusCode, Json<SessionSnapshot>), ServerError> {
     refuse_permission_mode_over_ceiling(&state, Some(body.permission_mode)).await?;
     let session = code.set_permission_mode(id, body.permission_mode).await?;
     Ok((
@@ -469,16 +454,16 @@ pub async fn set_session_permission_mode(
     ))
 }
 
-/// `POST /code/sessions/{id}/effort` — change a session's reasoning effort.
+/// `POST /sessions/{id}/effort` — change a session's reasoning effort.
 ///
 /// No relaunch: every adapter reads the level off the turn, so the next turn
 /// carries it. Refused while a turn is running and after the session ends, on
 /// the same rule the mode route applies.
 pub async fn set_session_reasoning_effort(
     code: ScopedCode,
-    Path(id): Path<CodeSessionId>,
+    Path(id): Path<SessionId>,
     Json(body): Json<SetReasoningEffortBody>,
-) -> Result<(StatusCode, Json<CodeSessionSnapshot>), ServerError> {
+) -> Result<(StatusCode, Json<SessionSnapshot>), ServerError> {
     let session = code.set_reasoning_effort(id, body.reasoning_effort).await?;
     Ok((
         StatusCode::OK,
@@ -486,7 +471,7 @@ pub async fn set_session_reasoning_effort(
     ))
 }
 
-/// `POST /code/sessions/{id}/fast-mode` — arm or disarm the engine's fast mode.
+/// `POST /sessions/{id}/fast-mode` — arm or disarm the engine's fast mode.
 ///
 /// Fast mode buys output speed at a premium rate, so this is a spend switch
 /// rather than a quality one. Refused while a turn is running and after the
@@ -494,9 +479,9 @@ pub async fn set_session_reasoning_effort(
 /// when the session's model does not serve the tier.
 pub async fn set_session_fast_mode(
     code: ScopedCode,
-    Path(id): Path<CodeSessionId>,
+    Path(id): Path<SessionId>,
     Json(body): Json<SetFastModeBody>,
-) -> Result<(StatusCode, Json<CodeSessionSnapshot>), ServerError> {
+) -> Result<(StatusCode, Json<SessionSnapshot>), ServerError> {
     let session = code.set_fast_mode(id, body.fast_mode).await?;
     Ok((
         StatusCode::OK,
@@ -504,13 +489,13 @@ pub async fn set_session_fast_mode(
     ))
 }
 
-/// `POST /code/sessions/{id}/attachments/images` — publish pixels a later
+/// `POST /sessions/{id}/attachments/images` — publish pixels a later
 /// turn can reference. Same sniff-and-store path as chat; the turn row is
 /// what pins the blob.
 pub async fn publish_session_image(
     State(state): State<AppState>,
     code: ScopedCode,
-    Path(id): Path<CodeSessionId>,
+    Path(id): Path<SessionId>,
     headers: HeaderMap,
     RawBytes(bytes): RawBytes,
 ) -> Result<impl IntoResponse, ServerError> {
@@ -541,12 +526,12 @@ pub async fn publish_session_image(
     ))
 }
 
-/// `GET /code/sessions/{id}/attachments/images/{blob_id}` — pixels for an
+/// `GET /sessions/{id}/attachments/images/{blob_id}` — pixels for an
 /// image a turn on this session already referenced.
 pub async fn get_session_image(
     State(state): State<AppState>,
     code: ScopedCode,
-    Path((id, blob_id)): Path<(CodeSessionId, uuid::Uuid)>,
+    Path((id, blob_id)): Path<(SessionId, uuid::Uuid)>,
 ) -> Result<Response, ServerError> {
     let turns = code.list_session_turns(id).await?;
     let attachment = turns

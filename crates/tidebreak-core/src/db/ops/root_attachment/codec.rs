@@ -3,7 +3,7 @@ use sea_orm::Set;
 use uuid::Uuid;
 
 use crate::error::{AgentError, Result};
-use crate::id::{ChatId, HostRootId, RootAttachmentChangeId};
+use crate::id::{HostRootId, RootAttachmentChangeId, SessionId};
 use crate::model::{
     RootAttachmentChange, RootAttachmentChangeAction, RootAttachmentChangeFailure,
     RootAttachmentChangePhase, RootAttachmentChangeTerminal, RootAttachmentSubjectKind,
@@ -81,7 +81,7 @@ pub(super) fn change_from_model(
         id: RootAttachmentChangeId::from_uuid(model.id).map_err(|error| {
             AgentError::Store(format!("invalid root attachment change id: {error}"))
         })?,
-        chat_id: ChatId(model.chat_id),
+        chat_id: SessionId(model.chat_id),
         executor_id: model.executor_id,
         root_id: HostRootId::from_uuid(model.root_id).map_err(|error| {
             AgentError::Store(format!(

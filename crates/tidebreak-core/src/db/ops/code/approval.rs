@@ -4,8 +4,8 @@ use sea_orm::{
 };
 
 use crate::code::{
-    ApprovalDecisionKind, CodeApproval, CodeApprovalId, CodeApprovalKind, CodeApprovalState,
-    CodeEvent, CodeSessionId, CodeSessionLifecycle, CodeTurnId, CodeTurnStatus, SequencedCodeEvent,
+    Approval, ApprovalDecisionKind, ApprovalId, ApprovalKind, ApprovalState, Event, SequencedEvent,
+    SessionId, SessionLifecycle, TurnId, TurnStatus,
 };
 use crate::error::{AgentError, Result};
 use crate::OwnerId;
@@ -17,18 +17,18 @@ use super::{acquire_code_session_write_lock, append_event_on_locked};
 #[derive(Debug)]
 pub struct ApprovalSettlement {
     /// The terminal approval row.
-    pub approval: CodeApproval,
+    pub approval: Approval,
     /// The journal event committed beside that row.
-    pub event: SequencedCodeEvent,
+    pub event: SequencedEvent,
 }
 
 /// The exact durable claim and decision that settle one approval.
 #[derive(Debug)]
 pub struct ClaimedApprovalSettlement {
     /// Approval to settle.
-    pub approval_id: CodeApprovalId,
+    pub approval_id: ApprovalId,
     /// Session that owns the approval.
-    pub session_id: CodeSessionId,
+    pub session_id: SessionId,
     /// Worker epoch that created the approval.
     pub worker_epoch: i64,
     /// Claim token reserved before native delivery.
@@ -40,11 +40,7 @@ pub struct ClaimedApprovalSettlement {
 }
 
 /// Insert an approval row under its session's owner.
-pub async fn insert_approval(
-    store: &DbStore,
-    owner: &OwnerId,
-    approval: &CodeApproval,
-) -> Result<()> {
+pub async fn insert_approval(store: &DbStore, owner: &OwnerId, approval: &Approval) -> Result<()> {
     approval_active_model(owner, approval)?
         .insert(&store.conn)
         .await
@@ -60,8 +56,8 @@ pub async fn insert_approval(
 pub async fn insert_approval_for_worker(
     store: &DbStore,
     owner: &OwnerId,
-    approval: &CodeApproval,
-) -> Result<Option<SequencedCodeEvent>> {
+    approval: &Approval,
+) -> Result<Option<SequencedEvent>> {
     let worker_epoch = approval.worker_epoch.ok_or_else(|| {
         AgentError::Store(format!("approval {} has no worker epoch", approval.id))
     })?;
@@ -69,8 +65,8 @@ pub async fn insert_approval_for_worker(
     if !acquire_code_session_write_lock(&transaction, approval.session_id).await? {
         return Ok(None);
     }
-    let Some(session) = entities::code_session::Entity::find_by_id(approval.session_id.0)
-        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+    let Some(session) = entities::session::Entity::find_by_id(approval.session_id.0)
+        .filter(entities::session::Column::Owner.eq(owner.as_str()))
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -78,14 +74,14 @@ pub async fn insert_approval_for_worker(
         return Ok(None);
     };
     if session.spawn_epoch != worker_epoch
-        || session.lifecycle != CodeSessionLifecycle::Running.as_str()
+        || session.lifecycle != SessionLifecycle::Running.as_str()
     {
         return Ok(None);
     }
-    let turn_is_running = entities::code_turn::Entity::find_by_id(approval.turn_id.0)
-        .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
-        .filter(entities::code_turn::Column::SessionId.eq(approval.session_id.0))
-        .filter(entities::code_turn::Column::Status.eq(CodeTurnStatus::Running.as_str()))
+    let turn_is_running = entities::turn::Entity::find_by_id(approval.turn_id.0)
+        .filter(entities::turn::Column::Owner.eq(owner.as_str()))
+        .filter(entities::turn::Column::SessionId.eq(approval.session_id.0))
+        .filter(entities::turn::Column::Status.eq(TurnStatus::Running.as_str()))
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -97,20 +93,20 @@ pub async fn insert_approval_for_worker(
         .insert(&transaction)
         .await
         .map_err(store_err)?;
-    let event = CodeEvent::ApprovalRequested {
+    let event = Event::ApprovalRequested {
         approval_id: approval.id,
         request: None,
     };
     let seq = append_event_on_locked(&transaction, owner, approval.session_id, &event).await?;
     transaction.commit().await.map_err(store_err)?;
-    Ok(Some(SequencedCodeEvent { seq, event }))
+    Ok(Some(SequencedEvent { seq, event }))
 }
 
 fn approval_active_model(
     owner: &OwnerId,
-    approval: &CodeApproval,
-) -> Result<entities::code_approval::ActiveModel> {
-    Ok(entities::code_approval::ActiveModel {
+    approval: &Approval,
+) -> Result<entities::approval::ActiveModel> {
+    Ok(entities::approval::ActiveModel {
         id: Set(approval.id.0),
         owner: Set(owner.as_str().to_owned()),
         session_id: Set(approval.session_id.0),
@@ -139,7 +135,7 @@ fn approval_active_model(
 pub(in crate::db) async fn insert_approval_on<C>(
     conn: &C,
     owner: &OwnerId,
-    approval: &CodeApproval,
+    approval: &Approval,
 ) -> Result<()>
 where
     C: ConnectionTrait,
@@ -154,12 +150,12 @@ where
 /// Load one approval row inside the caller's transaction, whatever its owner.
 pub(in crate::db) async fn find_approval_row_on<C>(
     conn: &C,
-    id: CodeApprovalId,
-) -> Result<Option<entities::code_approval::Model>>
+    id: ApprovalId,
+) -> Result<Option<entities::approval::Model>>
 where
     C: ConnectionTrait,
 {
-    entities::code_approval::Entity::find_by_id(id.0)
+    entities::approval::Entity::find_by_id(id.0)
         .one(conn)
         .await
         .map_err(store_err)
@@ -170,18 +166,18 @@ where
 /// never decides the row by itself.
 pub(in crate::db) async fn set_auto_judge_status_on<C>(
     conn: &C,
-    id: CodeApprovalId,
+    id: ApprovalId,
     status: Option<crate::approval::AutoJudgeStatus>,
 ) -> Result<()>
 where
     C: ConnectionTrait,
 {
-    entities::code_approval::Entity::update_many()
+    entities::approval::Entity::update_many()
         .col_expr(
-            entities::code_approval::Column::AutoJudgeStatus,
+            entities::approval::Column::AutoJudgeStatus,
             sea_orm::sea_query::Expr::value(status.map(|status| status.as_str().to_owned())),
         )
-        .filter(entities::code_approval::Column::Id.eq(id.0))
+        .filter(entities::approval::Column::Id.eq(id.0))
         .exec(conn)
         .await
         .map_err(store_err)?;
@@ -192,10 +188,10 @@ where
 pub async fn get_approval(
     store: &DbStore,
     owner: &OwnerId,
-    id: CodeApprovalId,
-) -> Result<Option<CodeApproval>> {
-    let Some(row) = entities::code_approval::Entity::find_by_id(id.0)
-        .filter(entities::code_approval::Column::Owner.eq(owner.as_str()))
+    id: ApprovalId,
+) -> Result<Option<Approval>> {
+    let Some(row) = entities::approval::Entity::find_by_id(id.0)
+        .filter(entities::approval::Column::Owner.eq(owner.as_str()))
         .one(&store.conn)
         .await
         .map_err(store_err)?
@@ -213,18 +209,18 @@ pub async fn get_approval(
 pub async fn claim_approval(
     store: &DbStore,
     owner: &OwnerId,
-    id: CodeApprovalId,
-    session_id: CodeSessionId,
+    id: ApprovalId,
+    session_id: SessionId,
     worker_epoch: i64,
     claim: uuid::Uuid,
     claimed_at: chrono::DateTime<chrono::Utc>,
-) -> Result<Option<CodeApproval>> {
+) -> Result<Option<Approval>> {
     let transaction = store.conn.begin().await.map_err(store_err)?;
     if !acquire_code_session_write_lock(&transaction, session_id).await? {
         return Ok(None);
     }
-    let Some(session) = entities::code_session::Entity::find_by_id(session_id.0)
-        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+    let Some(session) = entities::session::Entity::find_by_id(session_id.0)
+        .filter(entities::session::Column::Owner.eq(owner.as_str()))
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -232,33 +228,33 @@ pub async fn claim_approval(
         return Ok(None);
     };
     if session.spawn_epoch != worker_epoch
-        || session.lifecycle != crate::code::CodeSessionLifecycle::Running.as_str()
+        || session.lifecycle != crate::code::SessionLifecycle::Running.as_str()
     {
         return Ok(None);
     }
-    let result = entities::code_approval::Entity::update_many()
+    let result = entities::approval::Entity::update_many()
         .col_expr(
-            entities::code_approval::Column::DecisionClaim,
+            entities::approval::Column::DecisionClaim,
             sea_orm::sea_query::Expr::value(Some(claim)),
         )
         .col_expr(
-            entities::code_approval::Column::ClaimedAt,
+            entities::approval::Column::ClaimedAt,
             sea_orm::sea_query::Expr::value(Some(claimed_at)),
         )
-        .filter(entities::code_approval::Column::Id.eq(id.0))
-        .filter(entities::code_approval::Column::Owner.eq(owner.as_str()))
-        .filter(entities::code_approval::Column::SessionId.eq(session_id.0))
-        .filter(entities::code_approval::Column::State.eq(CodeApprovalState::Pending.as_str()))
-        .filter(entities::code_approval::Column::DecisionClaim.is_null())
-        .filter(entities::code_approval::Column::WorkerEpoch.eq(worker_epoch))
+        .filter(entities::approval::Column::Id.eq(id.0))
+        .filter(entities::approval::Column::Owner.eq(owner.as_str()))
+        .filter(entities::approval::Column::SessionId.eq(session_id.0))
+        .filter(entities::approval::Column::State.eq(ApprovalState::Pending.as_str()))
+        .filter(entities::approval::Column::DecisionClaim.is_null())
+        .filter(entities::approval::Column::WorkerEpoch.eq(worker_epoch))
         .exec(&transaction)
         .await
         .map_err(store_err)?;
     if result.rows_affected != 1 {
         return Ok(None);
     }
-    let row = entities::code_approval::Entity::find_by_id(id.0)
-        .filter(entities::code_approval::Column::Owner.eq(owner.as_str()))
+    let row = entities::approval::Entity::find_by_id(id.0)
+        .filter(entities::approval::Column::Owner.eq(owner.as_str()))
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -296,18 +292,18 @@ pub async fn settle_approval_claim(
 pub async fn settle_engine_observed_approval(
     store: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     worker_epoch: i64,
     native_call_id: &str,
     decision: ApprovalDecisionKind,
     decided_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<Option<ApprovalSettlement>> {
-    let Some(row) = entities::code_approval::Entity::find()
-        .filter(entities::code_approval::Column::Owner.eq(owner.as_str()))
-        .filter(entities::code_approval::Column::SessionId.eq(session_id.0))
-        .filter(entities::code_approval::Column::NativeCallId.eq(native_call_id))
-        .filter(entities::code_approval::Column::State.eq(CodeApprovalState::Pending.as_str()))
-        .filter(entities::code_approval::Column::DecisionClaim.is_null())
+    let Some(row) = entities::approval::Entity::find()
+        .filter(entities::approval::Column::Owner.eq(owner.as_str()))
+        .filter(entities::approval::Column::SessionId.eq(session_id.0))
+        .filter(entities::approval::Column::NativeCallId.eq(native_call_id))
+        .filter(entities::approval::Column::State.eq(ApprovalState::Pending.as_str()))
+        .filter(entities::approval::Column::DecisionClaim.is_null())
         .one(&store.conn)
         .await
         .map_err(store_err)?
@@ -317,7 +313,7 @@ pub async fn settle_engine_observed_approval(
     settle_approval(
         store,
         owner,
-        CodeApprovalId(row.id),
+        ApprovalId(row.id),
         session_id,
         worker_epoch,
         ApprovalClaim::Unclaimed,
@@ -331,8 +327,8 @@ pub async fn settle_engine_observed_approval(
 pub async fn abandon_pending_approval(
     store: &DbStore,
     owner: &OwnerId,
-    id: CodeApprovalId,
-    session_id: CodeSessionId,
+    id: ApprovalId,
+    session_id: SessionId,
     worker_epoch: i64,
     decided_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<Option<ApprovalSettlement>> {
@@ -362,8 +358,8 @@ pub(in crate::db) enum ApprovalClaim {
 async fn settle_approval(
     store: &DbStore,
     owner: &OwnerId,
-    id: CodeApprovalId,
-    session_id: CodeSessionId,
+    id: ApprovalId,
+    session_id: SessionId,
     worker_epoch: i64,
     claim: ApprovalClaim,
     decision: ApprovalDecisionKind,
@@ -373,8 +369,8 @@ async fn settle_approval(
     if !acquire_code_session_write_lock(&transaction, session_id).await? {
         return Ok(None);
     }
-    let session_exists = entities::code_session::Entity::find_by_id(session_id.0)
-        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+    let session_exists = entities::session::Entity::find_by_id(session_id.0)
+        .filter(entities::session::Column::Owner.eq(owner.as_str()))
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -412,8 +408,8 @@ async fn settle_approval(
 pub(in crate::db) async fn settle_approval_on_locked<C>(
     conn: &C,
     owner: &OwnerId,
-    id: CodeApprovalId,
-    session_id: CodeSessionId,
+    id: ApprovalId,
+    session_id: SessionId,
     worker_epoch: i64,
     claim: ApprovalClaim,
     decision: ApprovalDecisionKind,
@@ -424,63 +420,63 @@ where
 {
     let (state, feedback) = match &decision {
         ApprovalDecisionKind::Approve | ApprovalDecisionKind::ApprovedWithGrant { .. } => {
-            (CodeApprovalState::Approved, None)
+            (ApprovalState::Approved, None)
         }
-        ApprovalDecisionKind::Deny { feedback } => (CodeApprovalState::Denied, feedback.clone()),
-        ApprovalDecisionKind::Abandoned => (CodeApprovalState::Abandoned, None),
+        ApprovalDecisionKind::Deny { feedback } => (ApprovalState::Denied, feedback.clone()),
+        ApprovalDecisionKind::Abandoned => (ApprovalState::Abandoned, None),
         // Structured resolutions settle the row as approved: the substance
         // (answers, plan verdict) rides the journal event and the engine's
         // own state, not this row.
-        ApprovalDecisionKind::Answered { .. } => (CodeApprovalState::Approved, None),
+        ApprovalDecisionKind::Answered { .. } => (ApprovalState::Approved, None),
         ApprovalDecisionKind::PlanDecided { approve, feedback } => (
             if *approve {
-                CodeApprovalState::Approved
+                ApprovalState::Approved
             } else {
-                CodeApprovalState::Denied
+                ApprovalState::Denied
             },
             feedback.clone(),
         ),
     };
-    let mut update = entities::code_approval::Entity::update_many()
+    let mut update = entities::approval::Entity::update_many()
         .col_expr(
-            entities::code_approval::Column::State,
+            entities::approval::Column::State,
             sea_orm::sea_query::Expr::value(state.as_str().to_owned()),
         )
         .col_expr(
-            entities::code_approval::Column::Feedback,
+            entities::approval::Column::Feedback,
             sea_orm::sea_query::Expr::value(feedback),
         )
         .col_expr(
-            entities::code_approval::Column::DecidedAt,
+            entities::approval::Column::DecidedAt,
             sea_orm::sea_query::Expr::value(Some(decided_at)),
         )
         .col_expr(
-            entities::code_approval::Column::DecisionClaim,
+            entities::approval::Column::DecisionClaim,
             sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
         )
         .col_expr(
-            entities::code_approval::Column::ClaimedAt,
+            entities::approval::Column::ClaimedAt,
             sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<chrono::Utc>>::None),
         )
-        .filter(entities::code_approval::Column::Id.eq(id.0))
-        .filter(entities::code_approval::Column::Owner.eq(owner.as_str()))
-        .filter(entities::code_approval::Column::SessionId.eq(session_id.0))
-        .filter(entities::code_approval::Column::WorkerEpoch.eq(worker_epoch))
-        .filter(entities::code_approval::Column::State.eq(CodeApprovalState::Pending.as_str()));
+        .filter(entities::approval::Column::Id.eq(id.0))
+        .filter(entities::approval::Column::Owner.eq(owner.as_str()))
+        .filter(entities::approval::Column::SessionId.eq(session_id.0))
+        .filter(entities::approval::Column::WorkerEpoch.eq(worker_epoch))
+        .filter(entities::approval::Column::State.eq(ApprovalState::Pending.as_str()));
     update = match claim {
         ApprovalClaim::Unclaimed => {
-            update.filter(entities::code_approval::Column::DecisionClaim.is_null())
+            update.filter(entities::approval::Column::DecisionClaim.is_null())
         }
         ApprovalClaim::Exact(claim) => {
-            update.filter(entities::code_approval::Column::DecisionClaim.eq(claim))
+            update.filter(entities::approval::Column::DecisionClaim.eq(claim))
         }
     };
     let result = update.exec(conn).await.map_err(store_err)?;
     if result.rows_affected != 1 {
         return Ok(None);
     }
-    let row = entities::code_approval::Entity::find_by_id(id.0)
-        .filter(entities::code_approval::Column::Owner.eq(owner.as_str()))
+    let row = entities::approval::Entity::find_by_id(id.0)
+        .filter(entities::approval::Column::Owner.eq(owner.as_str()))
         .one(conn)
         .await
         .map_err(store_err)?
@@ -491,7 +487,7 @@ where
     if let ApprovalDecisionKind::ApprovedWithGrant { scope } = &decision {
         mint_standing_grant_on(conn, &row, scope, decided_at).await?;
     }
-    let event = CodeEvent::ApprovalResolved {
+    let event = Event::ApprovalResolved {
         approval_id: id,
         decision,
     };
@@ -499,7 +495,7 @@ where
     let approval = approval_from_row(row)?;
     Ok(Some(ApprovalSettlement {
         approval,
-        event: SequencedCodeEvent { seq, event },
+        event: SequencedEvent { seq, event },
     }))
 }
 
@@ -514,7 +510,7 @@ where
 /// checks. A grant already written for this call (a retry) is left as is.
 async fn mint_standing_grant_on<C>(
     conn: &C,
-    row: &entities::code_approval::Model,
+    row: &entities::approval::Model,
     scope: &crate::GrantScope,
     granted_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<()>
@@ -556,7 +552,7 @@ where
             row.id
         )));
     }
-    let project_id = entities::code_session::Entity::find_by_id(row.session_id)
+    let project_id = entities::session::Entity::find_by_id(row.session_id)
         .one(conn)
         .await
         .map_err(store_err)?
@@ -585,7 +581,7 @@ where
 pub async fn abandon_pending_approvals_for_stopped_session(
     store: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     expected_spawn_epoch: i64,
     decided_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<Vec<ApprovalSettlement>> {
@@ -593,8 +589,8 @@ pub async fn abandon_pending_approvals_for_stopped_session(
     if !acquire_code_session_write_lock(&transaction, session_id).await? {
         return Ok(Vec::new());
     }
-    let Some(session) = entities::code_session::Entity::find_by_id(session_id.0)
-        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+    let Some(session) = entities::session::Entity::find_by_id(session_id.0)
+        .filter(entities::session::Column::Owner.eq(owner.as_str()))
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -602,27 +598,26 @@ pub async fn abandon_pending_approvals_for_stopped_session(
         return Ok(Vec::new());
     };
     if session.spawn_epoch != expected_spawn_epoch
-        || session.lifecycle == CodeSessionLifecycle::Running.as_str()
+        || session.lifecycle == SessionLifecycle::Running.as_str()
     {
         return Ok(Vec::new());
     }
-    let waiting_turn_ids: std::collections::HashSet<uuid::Uuid> =
-        entities::code_turn::Entity::find()
-            .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
-            .filter(entities::code_turn::Column::SessionId.eq(session_id.0))
-            .filter(entities::code_turn::Column::Status.eq(CodeTurnStatus::Waiting.as_str()))
-            .all(&transaction)
-            .await
-            .map_err(store_err)?
-            .into_iter()
-            .map(|row| row.id)
-            .collect();
-    let rows = entities::code_approval::Entity::find()
-        .filter(entities::code_approval::Column::Owner.eq(owner.as_str()))
-        .filter(entities::code_approval::Column::SessionId.eq(session_id.0))
-        .filter(entities::code_approval::Column::WorkerEpoch.eq(expected_spawn_epoch))
-        .filter(entities::code_approval::Column::State.eq(CodeApprovalState::Pending.as_str()))
-        .order_by_asc(entities::code_approval::Column::RequestedAt)
+    let waiting_turn_ids: std::collections::HashSet<uuid::Uuid> = entities::turn::Entity::find()
+        .filter(entities::turn::Column::Owner.eq(owner.as_str()))
+        .filter(entities::turn::Column::SessionId.eq(session_id.0))
+        .filter(entities::turn::Column::Status.eq(TurnStatus::Waiting.as_str()))
+        .all(&transaction)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .map(|row| row.id)
+        .collect();
+    let rows = entities::approval::Entity::find()
+        .filter(entities::approval::Column::Owner.eq(owner.as_str()))
+        .filter(entities::approval::Column::SessionId.eq(session_id.0))
+        .filter(entities::approval::Column::WorkerEpoch.eq(expected_spawn_epoch))
+        .filter(entities::approval::Column::State.eq(ApprovalState::Pending.as_str()))
+        .order_by_asc(entities::approval::Column::RequestedAt)
         .all(&transaction)
         .await
         .map_err(store_err)?
@@ -638,7 +633,7 @@ pub async fn abandon_pending_approvals_for_stopped_session(
         if let Some(settlement) = settle_approval_on_locked(
             &transaction,
             owner,
-            CodeApprovalId(row.id),
+            ApprovalId(row.id),
             session_id,
             expected_spawn_epoch,
             claim,
@@ -664,27 +659,27 @@ pub async fn abandon_pending_approvals_for_stopped_session(
 pub async fn rebind_pending_approvals_to_worker(
     store: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
-    turn_id: CodeTurnId,
+    session_id: SessionId,
+    turn_id: TurnId,
     to_epoch: i64,
 ) -> Result<u64> {
-    let result = entities::code_approval::Entity::update_many()
+    let result = entities::approval::Entity::update_many()
         .col_expr(
-            entities::code_approval::Column::WorkerEpoch,
+            entities::approval::Column::WorkerEpoch,
             sea_orm::sea_query::Expr::value(Some(to_epoch)),
         )
         .col_expr(
-            entities::code_approval::Column::DecisionClaim,
+            entities::approval::Column::DecisionClaim,
             sea_orm::sea_query::Expr::value(Option::<uuid::Uuid>::None),
         )
         .col_expr(
-            entities::code_approval::Column::ClaimedAt,
+            entities::approval::Column::ClaimedAt,
             sea_orm::sea_query::Expr::value(Option::<chrono::DateTime<chrono::Utc>>::None),
         )
-        .filter(entities::code_approval::Column::Owner.eq(owner.as_str()))
-        .filter(entities::code_approval::Column::SessionId.eq(session_id.0))
-        .filter(entities::code_approval::Column::TurnId.eq(turn_id.0))
-        .filter(entities::code_approval::Column::State.eq(CodeApprovalState::Pending.as_str()))
+        .filter(entities::approval::Column::Owner.eq(owner.as_str()))
+        .filter(entities::approval::Column::SessionId.eq(session_id.0))
+        .filter(entities::approval::Column::TurnId.eq(turn_id.0))
+        .filter(entities::approval::Column::State.eq(ApprovalState::Pending.as_str()))
         .exec(&store.conn)
         .await
         .map_err(store_err)?;
@@ -695,36 +690,34 @@ pub async fn rebind_pending_approvals_to_worker(
 pub async fn list_approvals(
     store: &DbStore,
     owner: &OwnerId,
-    state: Option<CodeApprovalState>,
-    session_id: Option<CodeSessionId>,
-) -> Result<Vec<CodeApproval>> {
-    let mut query = entities::code_approval::Entity::find()
-        .filter(entities::code_approval::Column::Owner.eq(owner.as_str()));
+    state: Option<ApprovalState>,
+    session_id: Option<SessionId>,
+) -> Result<Vec<Approval>> {
+    let mut query = entities::approval::Entity::find()
+        .filter(entities::approval::Column::Owner.eq(owner.as_str()));
     if let Some(state) = state {
-        query = query.filter(entities::code_approval::Column::State.eq(state.as_str().to_owned()));
+        query = query.filter(entities::approval::Column::State.eq(state.as_str().to_owned()));
     }
     if let Some(session_id) = session_id {
-        query = query.filter(entities::code_approval::Column::SessionId.eq(session_id.0));
+        query = query.filter(entities::approval::Column::SessionId.eq(session_id.0));
     }
     let rows = query.all(&store.conn).await.map_err(store_err)?;
     rows.into_iter().map(approval_from_row).collect()
 }
 
-pub(in crate::db) fn approval_from_row(
-    row: entities::code_approval::Model,
-) -> Result<CodeApproval> {
-    let state = CodeApprovalState::from_str(&row.state).ok_or_else(|| {
+pub(in crate::db) fn approval_from_row(row: entities::approval::Model) -> Result<Approval> {
+    let state = ApprovalState::from_str(&row.state).ok_or_else(|| {
         AgentError::Store(format!(
-            "code_approval {} has unknown state {}",
+            "approval {} has unknown state {}",
             row.id, row.state
         ))
     })?;
-    let kind = serde_json::from_value::<CodeApprovalKind>(row.kind)
-        .map_err(|err| AgentError::Store(format!("code_approval {} kind: {err}", row.id)))?;
-    Ok(CodeApproval {
-        id: CodeApprovalId(row.id),
-        session_id: CodeSessionId(row.session_id),
-        turn_id: CodeTurnId(row.turn_id),
+    let kind = serde_json::from_value::<ApprovalKind>(row.kind)
+        .map_err(|err| AgentError::Store(format!("approval {} kind: {err}", row.id)))?;
+    Ok(Approval {
+        id: ApprovalId(row.id),
+        session_id: SessionId(row.session_id),
+        turn_id: TurnId(row.turn_id),
         kind,
         harness_raw: row.harness_raw,
         native_call_id: row.native_call_id,
@@ -742,7 +735,7 @@ pub(in crate::db) fn approval_from_row(
             Some(token) => Some(
                 crate::approval::AutoJudgeStatus::from_str(token).ok_or_else(|| {
                     AgentError::Store(format!(
-                        "code_approval {} has unknown auto-judge status {token}",
+                        "approval {} has unknown auto-judge status {token}",
                         row.id
                     ))
                 })?,

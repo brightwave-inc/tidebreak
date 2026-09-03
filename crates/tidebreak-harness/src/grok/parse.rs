@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 use tidebreak_core::{
-    BoundedError, CodeUsage, HarnessKind, HarnessNoticeLevel, ToolDetail, ToolOutcome,
+    BoundedError, HarnessKind, HarnessNoticeLevel, ToolDetail, ToolOutcome, TurnUsage,
     MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS,
 };
 
@@ -30,7 +30,7 @@ pub struct GrokStreamParser {
     companion_calls: HashMap<String, Vec<CompanionTarget>>,
     settled_subagents: HashSet<String>,
     emitted_session: bool,
-    last_usage: CodeUsage,
+    last_usage: TurnUsage,
     /// Prompt tokens on the most recent `usage` event, which is one model
     /// call. Kept apart from `last_usage` because the closing `end` event
     /// overwrites that with the turn's cumulative total.
@@ -52,7 +52,7 @@ impl Default for GrokStreamParser {
             companion_calls: HashMap::new(),
             settled_subagents: HashSet::new(),
             emitted_session: false,
-            last_usage: CodeUsage::default(),
+            last_usage: TurnUsage::default(),
             last_call_context_tokens: None,
             first_call_context_tokens: None,
             pending_text: String::new(),
@@ -733,12 +733,12 @@ fn content_text(value: Option<&Value>) -> Option<String> {
     }
 }
 
-fn usage_from(value: Option<&Value>) -> CodeUsage {
+fn usage_from(value: Option<&Value>) -> TurnUsage {
     let Some(value) = value else {
-        return CodeUsage::default();
+        return TurnUsage::default();
     };
     let field = |name: &str| value.get(name).and_then(Value::as_u64).unwrap_or(0);
-    CodeUsage {
+    TurnUsage {
         input_tokens: value
             .get("input_tokens")
             .and_then(Value::as_u64)

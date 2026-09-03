@@ -27,7 +27,7 @@ import { applyLiveTurnRewrite } from "./CodeSessionRegistry";
 import { useCodeUiStore } from "./CodeUiStore";
 
 /**
- * Install-wide digest store fed by `WS /code/updates`.
+ * Install-wide digest store fed by `WS /updates`.
  *
  * List surfaces read lifecycle, attention, and PR state from here. The
  * socket restates a full snapshot on every connect, so a dropped notice is

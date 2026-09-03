@@ -626,7 +626,7 @@ mod tests {
         assert!(usage.context_tokens < spend);
     }
 
-    fn completed_usage(events: &[HarnessEvent]) -> tidebreak_core::CodeUsage {
+    fn completed_usage(events: &[HarnessEvent]) -> tidebreak_core::TurnUsage {
         events
             .iter()
             .find_map(|event| match event {
@@ -813,7 +813,7 @@ mod tests {
         assert!(!started.is_empty());
         assert_eq!(
             completed_usage(&events),
-            tidebreak_core::CodeUsage {
+            tidebreak_core::TurnUsage {
                 input_tokens: 1_272,
                 output_tokens: 6,
                 cache_read_input_tokens: 14_080,

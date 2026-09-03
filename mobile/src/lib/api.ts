@@ -1,9 +1,9 @@
 import type {
   CapLevel,
-  CodeApprovalKind,
-  CodeApprovalSnapshot,
-  CodeSessionLifecycle,
-  CodeTurnSnapshot,
+  ApprovalKind as CodeApprovalKind,
+  ApprovalSnapshot as CodeApprovalSnapshot,
+  SessionLifecycle as CodeSessionLifecycle,
+  TurnSnapshot as CodeTurnSnapshot,
   CodeWorkspaceStatus,
   HarnessAuthMode,
   HarnessCaps,
@@ -11,7 +11,7 @@ import type {
   HarnessModel,
   HarnessModelSource,
   PermissionMode,
-  QueuedCodeTurn,
+  QueuedTurn as QueuedCodeTurn,
   ReasoningEffort,
 } from "../generated/wire";
 import type { MachineClient } from "./machine";
@@ -598,7 +598,7 @@ export async function listCodeApprovals(
   const params = new URLSearchParams({ state: "pending" });
   if (sessionId) params.set("session_id", sessionId);
   return parseList(
-    await client.getJson(`/code/approvals?${params.toString()}`),
+    await client.getJson(`/approvals?${params.toString()}`),
     parseCodeApproval,
     "Code approvals",
   );
@@ -621,7 +621,7 @@ export async function decideCodeApproval(
   return required(
     parseCodeApproval(
       await client.requestJson(
-        `/code/approvals/${encodeURIComponent(approvalId)}/decision`,
+        `/approvals/${encodeURIComponent(approvalId)}/decision`,
         { method: "POST", body, expectedStatus: 200 },
       ),
     ),
@@ -635,7 +635,7 @@ export async function listCodeTurns(
 ): Promise<CodeTurnSnapshot[]> {
   return parseList(
     await client.getJson(
-      `/code/sessions/${encodeURIComponent(sessionId)}/turns`,
+      `/sessions/${encodeURIComponent(sessionId)}/turns`,
     ),
     parseCodeTurn,
     "Code turns",
@@ -648,7 +648,7 @@ export async function listCodeQueuedTurns(
 ): Promise<{ queued: QueuedCodeTurn[]; paused: boolean }> {
   const snapshot = record(
     await client.getJson(
-      `/code/sessions/${encodeURIComponent(sessionId)}/queued`,
+      `/sessions/${encodeURIComponent(sessionId)}/queued`,
     ),
   );
   if (
@@ -672,7 +672,7 @@ export async function submitCodeTurn(
   return required(
     parseCodeTurnSubmission(
       await client.requestJson(
-        `/code/sessions/${encodeURIComponent(sessionId)}/turns`,
+        `/sessions/${encodeURIComponent(sessionId)}/turns`,
         { method: "POST", body: { message }, expectedStatus: 202 },
       ),
     ),
@@ -687,7 +687,7 @@ export async function steerCodeSession(
   guidance: string,
 ): Promise<void> {
   await client.requestJson(
-    `/code/sessions/${encodeURIComponent(sessionId)}/steer`,
+    `/sessions/${encodeURIComponent(sessionId)}/steer`,
     {
       method: "POST",
       body: { expected_turn_id: expectedTurnId, guidance },
@@ -701,7 +701,7 @@ export async function interruptCodeSession(
   sessionId: string,
 ): Promise<void> {
   await client.requestJson(
-    `/code/sessions/${encodeURIComponent(sessionId)}/interrupt`,
+    `/sessions/${encodeURIComponent(sessionId)}/interrupt`,
     { method: "POST", expectedStatus: 202 },
   );
 }

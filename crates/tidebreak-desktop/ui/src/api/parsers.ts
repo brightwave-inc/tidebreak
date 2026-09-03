@@ -57,6 +57,7 @@ import {
   type InboxItemKind,
   type AgentNotification,
   type AgentNotificationPage,
+  type NotificationContext,
   type NotificationKind,
   type NetworkPolicy,
   type MemoryCaps,
@@ -178,7 +179,7 @@ function parseMemoryEvidence(value: unknown): MemoryEvidence | null {
       ? { kind: "message", message_id: value.message_id }
       : null;
   }
-  if (value.kind === "code_event") {
+  if (value.kind === "event") {
     return onlyKeys<{
       kind: string;
       session_id: string;
@@ -188,7 +189,7 @@ function parseMemoryEvidence(value: unknown): MemoryEvidence | null {
       typeof value.seq === "number" &&
       Number.isSafeInteger(value.seq) &&
       value.seq > 0
-      ? { kind: "code_event", session_id: value.session_id, seq: value.seq }
+      ? { kind: "event", session_id: value.session_id, seq: value.seq }
       : null;
   }
   return null;
@@ -645,36 +646,50 @@ export function parseInboxItem(value: unknown): InboxItem | null {
   };
 }
 
-/** The tagged conversation an entry belongs to. */
+/** The session an inbox entry belongs to. */
 function parseInboxConversation(value: unknown): InboxConversation | null {
+  if (
+    !isRecord(value) ||
+    !onlyKeys<{ session_id: string; workspace_id?: string }>(value, [
+      "session_id",
+      "workspace_id",
+    ]) ||
+    !nonEmptyBounded(value.session_id, MAX_WIRE_ID_CHARS) ||
+    (value.workspace_id !== undefined &&
+      !nonEmptyBounded(value.workspace_id, MAX_WIRE_ID_CHARS))
+  ) {
+    return null;
+  }
+  return {
+    sessionId: value.session_id,
+    workspaceId:
+      typeof value.workspace_id === "string" ? value.workspace_id : null,
+  };
+}
+
+function parseNotificationContext(value: unknown): NotificationContext | null {
   if (!isRecord(value)) return null;
   if (value.surface === "chat") {
     if (
       !onlyKeys<{ surface: string; chat_id: string }>(value, [
         "surface",
         "chat_id",
-      ])
+      ]) ||
+      !nonEmptyBounded(value.chat_id, MAX_WIRE_ID_CHARS)
     ) {
       return null;
     }
-    if (!nonEmptyBounded(value.chat_id, MAX_WIRE_ID_CHARS)) return null;
     return { surface: "chat", chatId: value.chat_id };
   }
-  if (value.surface === "code") {
-    if (
-      !onlyKeys<{ surface: string; session_id: string; workspace_id: string }>(
-        value,
-        ["surface", "session_id", "workspace_id"],
-      )
-    ) {
-      return null;
-    }
-    if (
-      !nonEmptyBounded(value.session_id, MAX_WIRE_ID_CHARS) ||
-      !nonEmptyBounded(value.workspace_id, MAX_WIRE_ID_CHARS)
-    ) {
-      return null;
-    }
+  if (
+    value.surface === "code" &&
+    onlyKeys<{ surface: string; session_id: string; workspace_id: string }>(
+      value,
+      ["surface", "session_id", "workspace_id"],
+    ) &&
+    nonEmptyBounded(value.session_id, MAX_WIRE_ID_CHARS) &&
+    nonEmptyBounded(value.workspace_id, MAX_WIRE_ID_CHARS)
+  ) {
     return {
       surface: "code",
       sessionId: value.session_id,
@@ -704,7 +719,7 @@ export function parseAgentNotification(
   ) {
     return null;
   }
-  const context = parseInboxConversation(value.context);
+  const context = parseNotificationContext(value.context);
   if (!context) return null;
   if (
     value.read_at !== undefined &&

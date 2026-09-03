@@ -21,7 +21,7 @@ use serde_json::Value;
 use ts_rs::TS;
 
 use crate::error::Result;
-use crate::id::{CallId, ChatId, ProjectId};
+use crate::id::{CallId, ProjectId, SessionId};
 
 /// A pinned runtime-only directory capability for legacy private-scratch tools.
 ///
@@ -613,7 +613,7 @@ impl ToolOutput {
 #[derive(Clone)]
 pub struct ToolCtx {
     /// The chat this call belongs to.
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     /// Project corpus inherited from the chat, or `None` for a loose chat.
     pub project_id: Option<ProjectId>,
     /// Stable identity of the canonical tool call, when execution came from an
@@ -649,7 +649,7 @@ impl ToolCtx {
     ///
     /// Product turns must use a pinned [`ToolScratch`] supplied by their runtime.
     pub fn new_legacy_workspace(
-        chat_id: ChatId,
+        chat_id: SessionId,
         project_id: Option<ProjectId>,
         workspace_dir: PathBuf,
     ) -> Self {
@@ -669,7 +669,7 @@ impl ToolCtx {
 
     /// Build a legacy CLI/MCP context, failing if its path cannot be pinned.
     pub fn try_new_legacy_workspace(
-        chat_id: ChatId,
+        chat_id: SessionId,
         project_id: Option<ProjectId>,
         workspace_dir: PathBuf,
     ) -> std::io::Result<Self> {
@@ -689,7 +689,7 @@ impl ToolCtx {
     /// Build a product execution context from an exact pinned scratch handle.
     #[must_use]
     pub fn with_private_scratch(
-        chat_id: ChatId,
+        chat_id: SessionId,
         project_id: Option<ProjectId>,
         scratch: ToolScratch,
     ) -> Self {
@@ -709,7 +709,7 @@ impl ToolCtx {
     /// Non-filesystem tools remain usable; a legacy filesystem tool fails
     /// closed instead of resolving an absent path against the process CWD.
     #[must_use]
-    pub fn without_private_scratch(chat_id: ChatId, project_id: Option<ProjectId>) -> Self {
+    pub fn without_private_scratch(chat_id: SessionId, project_id: Option<ProjectId>) -> Self {
         Self {
             chat_id,
             project_id,

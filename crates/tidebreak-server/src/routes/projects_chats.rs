@@ -10,9 +10,10 @@ use serde::{Deserialize, Serialize};
 use std::path::Path as FsPath;
 
 use tidebreak_core::{
-    AgentRunId, Chat, ChatId, DeleteChatOutcome, DeleteProjectOutcome, DocumentId,
+    AgentRunId, Chat, DeleteChatOutcome, DeleteProjectOutcome, DocumentId,
     Message as StoredMessage, MessageId, MoveChatOutcome, PermissionMode, Project, ProjectId,
-    ReasoningEffort, Role, TurnId, CONTEXT_CHECKPOINT_FORMAT_V1, CONTEXT_CHECKPOINT_FORMAT_V2,
+    ReasoningEffort, Role, SessionId, TurnId, CONTEXT_CHECKPOINT_FORMAT_V1,
+    CONTEXT_CHECKPOINT_FORMAT_V2,
 };
 
 use crate::error::ServerError;
@@ -304,7 +305,7 @@ pub async fn create_chat(
         ));
     }
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: body.project_id,
         title,
         model,
@@ -364,7 +365,7 @@ pub async fn patch_chat(
     State(state): State<AppState>,
     auth: AuthContext,
     store: ScopedStore,
-    Path(id): Path<ChatId>,
+    Path(id): Path<SessionId>,
     Json(mut body): Json<ChatUpdate>,
 ) -> Result<Json<Chat>, ServerError> {
     let owner = auth.principal.owner_id();
@@ -738,12 +739,12 @@ pub async fn list_chat_messages(
     State(state): State<AppState>,
     auth: AuthContext,
     store: ScopedStore,
-    Path(id): Path<ChatId>,
+    Path(id): Path<SessionId>,
 ) -> Result<Json<ChatTranscript>, ServerError> {
     if let Some(runtime) = state.code.as_ref() {
         if let Some(session) = tidebreak_core::db::code::get_session_all_owners(
             &runtime.db,
-            tidebreak_core::CodeSessionId(id.0),
+            tidebreak_core::SessionId(id.0),
         )
         .await?
         {
@@ -930,7 +931,7 @@ pub async fn list_chats(store: ScopedStore) -> Result<Json<Vec<Chat>>, ServerErr
 /// `GET /chats/{id}` — fetch one chat, or `404`.
 pub async fn get_chat(
     store: ScopedStore,
-    Path(id): Path<ChatId>,
+    Path(id): Path<SessionId>,
 ) -> Result<Json<Chat>, ServerError> {
     Ok(Json(store.require_chat(id).await?))
 }
@@ -941,7 +942,7 @@ pub async fn get_chat(
 pub async fn delete_chat(
     State(state): State<AppState>,
     store: ScopedStore,
-    Path(id): Path<ChatId>,
+    Path(id): Path<SessionId>,
 ) -> Result<StatusCode, ServerError> {
     match store.delete_chat(id).await? {
         DeleteChatOutcome::Deleted { background_run_ids } => {
@@ -992,7 +993,7 @@ pub async fn delete_chat(
 /// root or chat-directory symlink. Database deletion remains authoritative, so
 /// callers log cleanup failure rather than turning a committed delete into an
 /// ambiguous HTTP failure.
-fn remove_private_chat_scratch(root: &FsPath, id: ChatId) -> std::io::Result<()> {
+fn remove_private_chat_scratch(root: &FsPath, id: SessionId) -> std::io::Result<()> {
     let root_metadata = match std::fs::symlink_metadata(root) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -1040,7 +1041,7 @@ fn remove_private_chat_scratch(root: &FsPath, id: ChatId) -> std::io::Result<()>
 /// agent-run scratch reaper remains the backstop.
 async fn erase_deleted_chat_agent_run_workspaces(
     state: &AppState,
-    chat_id: ChatId,
+    chat_id: SessionId,
     run_ids: Vec<AgentRunId>,
 ) {
     let scratch_root = state.config.data_dir.join("scratch");

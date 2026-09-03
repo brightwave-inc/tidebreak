@@ -548,7 +548,7 @@ mod tests {
     use chrono::Utc;
     use serde_json::json;
     use tidebreak_core::{
-        Chat, ChatId, DbStore, DocumentUpsert, ReasoningEffort, Store, ToolCallRecord, TurnId,
+        Chat, DbStore, DocumentUpsert, ReasoningEffort, SessionId, Store, ToolCallRecord, TurnId,
     };
 
     use super::*;
@@ -564,7 +564,7 @@ mod tests {
             .unwrap(),
         );
         let chat = Chat {
-            id: ChatId::new(),
+            id: SessionId::new(),
             project_id: None,
             title: Some("Workspace".into()),
             model: None,
@@ -635,7 +635,7 @@ mod tests {
     async fn a_truncated_result_can_be_read_past_the_cut_but_only_in_its_own_chat() {
         let (_directory, store, chat, _document_id) = source_fixture().await;
         let other_chat = Chat {
-            id: ChatId::new(),
+            id: SessionId::new(),
             project_id: None,
             title: None,
             model: None,
@@ -843,7 +843,7 @@ mod tests {
     async fn tools_are_exactly_conversation_scoped_and_reads_show_line_locators() {
         let (_directory, store, chat, document_id) = source_fixture().await;
         let other_chat = Chat {
-            id: ChatId::new(),
+            id: SessionId::new(),
             project_id: None,
             title: None,
             model: None,

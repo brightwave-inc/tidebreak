@@ -17,8 +17,8 @@ use tidebreak_code_execution::{
     OutputArtifactStatus,
 };
 use tidebreak_core::{
-    AgentError, AgentRunId, CallId, ChatId, ClaimSandboxToolCallOutcome, Result, SandboxExecArgs,
-    SandboxToolCall, Store, ToolCallResolution, SANDBOX_EXEC_TOOL,
+    AgentError, AgentRunId, CallId, ClaimSandboxToolCallOutcome, Result, SandboxExecArgs,
+    SandboxToolCall, SessionId, Store, ToolCallResolution, SANDBOX_EXEC_TOOL,
 };
 use tokio::sync::Notify;
 
@@ -42,7 +42,7 @@ const TRUNCATION_MARKER: &str = "\n…[truncated]";
 pub(crate) struct SandboxExecJob {
     pub(crate) call_id: CallId,
     pub(crate) run_id: AgentRunId,
-    pub(crate) chat_id: ChatId,
+    pub(crate) chat_id: SessionId,
     pub(crate) arguments: SandboxExecArgs,
 }
 
@@ -626,7 +626,7 @@ mod tests {
     /// Park one exec checkpoint the way a background run's own loop does.
     async fn checkpoint(store: &Arc<DbStore>, arguments: serde_json::Value) -> CallId {
         let chat = Chat {
-            id: ChatId::new(),
+            id: SessionId::new(),
             project_id: None,
             title: Some("sandbox exec".into()),
             model: Some("model".into()),
