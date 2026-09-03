@@ -7161,6 +7161,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "tidebreak-code-delivery"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tidebreak-core",
+ "tokio",
+ "tracing",
+ "ts-rs",
+ "url",
+]
+
+[[package]]
 name = "tidebreak-code-execution"
 version = "0.0.0"
 dependencies = [
@@ -7435,6 +7452,7 @@ dependencies = [
  "tar",
  "tempfile",
  "thiserror 2.0.20",
+ "tidebreak-code-delivery",
  "tidebreak-code-execution",
  "tidebreak-code-remote",
  "tidebreak-core",

@@ -666,12 +666,16 @@ mod tests {
     fn generated_sources() -> Vec<(String, String)> {
         let crate_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut files = Vec::new();
-        for relative in ["src", "../tidebreak-core/src"] {
+        for relative in [
+            "src",
+            "../tidebreak-code-delivery/src",
+            "../tidebreak-core/src",
+        ] {
             collect_rust_files(&crate_root.join(relative), &mut files);
         }
         assert!(
             files.len() > 20,
-            "expected to scan the server and core sources, found {}",
+            "expected to scan the server, delivery, and core sources, found {}",
             files.len()
         );
         files

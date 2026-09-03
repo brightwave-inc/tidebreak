@@ -2,12 +2,12 @@
 
 use super::*;
 
-pub(crate) async fn discover_repositories(
-    runtime: &CodeRuntime,
+pub async fn discover_repositories(
+    runtime: &dyn DeliveryRuntime,
     owner: &OwnerId,
     refresh: bool,
 ) -> Result<CodeDeliveryRepositoriesSnapshot, ServerError> {
-    let access = delivery_access(runtime, owner, refresh).await;
+    let access = runtime.delivery_access(owner, refresh).await;
     let capability = access.capability.clone();
     let catalog = owner_repository_catalog(runtime, owner, refresh).await?;
     // Local-only Tidebreak checkouts are not Delivery sources. Keep them off
@@ -26,7 +26,6 @@ pub(crate) async fn discover_repositories(
                 async move {
                     resolve_repository_for_reader(
                         runtime,
-                        owner,
                         &reader,
                         &entry.target,
                         Some(entry.repo.id),
@@ -68,8 +67,8 @@ pub(crate) async fn discover_repositories(
     })
 }
 
-pub(crate) async fn resolve_repositories(
-    runtime: &CodeRuntime,
+pub async fn resolve_repositories(
+    runtime: &dyn DeliveryRuntime,
     owner: &OwnerId,
     allow_unscoped_delivery: bool,
     body: ResolveCodeDeliveryRepositoriesBody,
@@ -96,7 +95,7 @@ pub(crate) async fn resolve_repositories(
     targets = dedupe_targets(targets)?;
     ensure_delivery_targets(runtime, owner, allow_unscoped_delivery, &targets).await?;
 
-    let access = delivery_access(runtime, owner, false).await;
+    let access = runtime.delivery_access(owner, false).await;
     let capability = access.capability.clone();
 
     let mut repositories = Vec::new();
@@ -105,7 +104,7 @@ pub(crate) async fn resolve_repositories(
             .map(|target| {
                 let reader = reader.clone();
                 async move {
-                    resolve_repository_for_reader(runtime, owner, &reader, &target, None, false)
+                    resolve_repository_for_reader(runtime, &reader, &target, None, false)
                         .await
                         .map_err(|message| (target, message))
                 }
@@ -137,7 +136,7 @@ pub(crate) async fn resolve_repositories(
     })
 }
 
-pub(crate) async fn repository_target_from_local(
+pub async fn repository_target_from_local(
     repo: &CodeRepo,
 ) -> Result<CodeGitHubRepositoryTarget, String> {
     repository_target_from_path(Path::new(&repo.root_path)).await
@@ -148,7 +147,7 @@ pub(crate) async fn repository_target_from_local(
 /// The pull-request fact detector calls this on a command's recorded cwd,
 /// which may be a worktree or a clone the agent made outside every
 /// registered repository (decision 77).
-pub(crate) async fn repository_target_from_path(
+pub async fn repository_target_from_path(
     path: &Path,
 ) -> Result<CodeGitHubRepositoryTarget, String> {
     let remote = git_read(path, &["remote", "get-url", "origin"])
@@ -158,28 +157,28 @@ pub(crate) async fn repository_target_from_path(
 }
 
 pub(super) async fn owner_repository_catalog(
-    runtime: &CodeRuntime,
+    runtime: &dyn DeliveryRuntime,
     owner: &OwnerId,
     force_refresh: bool,
 ) -> Result<OwnerRepositoryCatalog, ServerError> {
     let key = owner.to_string();
     let request_started = Instant::now();
     if !force_refresh {
-        if let Some(cached) = runtime.delivery_cache.owner_repositories(&key) {
+        if let Some(cached) = runtime.delivery_cache().owner_repositories(&key) {
             return Ok(cached.value);
         }
     }
 
-    let read = runtime.delivery_cache.owner_repository_read(&key);
+    let read = runtime.delivery_cache().owner_repository_read(&key);
     let _guard = read.lock().await;
-    if let Some(cached) = runtime.delivery_cache.owner_repositories(&key) {
+    if let Some(cached) = runtime.delivery_cache().owner_repositories(&key) {
         if !force_refresh || cached.fetched_at >= request_started {
             return Ok(cached.value);
         }
     }
 
     loop {
-        let generation = runtime.delivery_cache.owner_cache_generation(&key);
+        let generation = runtime.delivery_cache().owner_cache_generation(&key);
         let results = stream::iter(runtime.list_repos(owner).await?)
             .map(|repo| async move {
                 match repository_target_from_local(&repo).await {
@@ -202,7 +201,7 @@ pub(super) async fn owner_repository_catalog(
                 Err(error) => catalog.errors.push(error),
             }
         }
-        if runtime.delivery_cache.put_owner_repositories_if_current(
+        if runtime.delivery_cache().put_owner_repositories_if_current(
             &key,
             generation,
             catalog.clone(),
@@ -213,7 +212,7 @@ pub(super) async fn owner_repository_catalog(
 }
 
 pub(super) async fn ensure_delivery_targets(
-    runtime: &CodeRuntime,
+    runtime: &dyn DeliveryRuntime,
     owner: &OwnerId,
     allow_unscoped_delivery: bool,
     targets: &[CodeGitHubRepositoryTarget],
@@ -256,7 +255,7 @@ pub(super) fn live_catalog_target_keys(
         .collect()
 }
 
-pub(crate) fn parse_repository_input(input: &str) -> Result<CodeGitHubRepositoryTarget, String> {
+pub fn parse_repository_input(input: &str) -> Result<CodeGitHubRepositoryTarget, String> {
     let value = input.trim().trim_end_matches('/').trim_end_matches(".git");
     if value.is_empty() {
         return Err("repository cannot be empty".into());
@@ -372,16 +371,6 @@ pub(super) fn dedupe_numbered_targets(
     Ok(grouped)
 }
 
-pub(super) async fn resolve_repository(
-    binary: &Path,
-    target: &CodeGitHubRepositoryTarget,
-    tidebreak_repo_id: Option<tidebreak_core::RepoId>,
-) -> Result<CodeGitHubRepositoryRef, String> {
-    let endpoint = format!("repos/{}/{}", target.owner, target.name);
-    let value = run_api_json(binary, &target.host, &endpoint).await?;
-    Ok(repository_ref_from_value(target, tidebreak_repo_id, &value))
-}
-
 pub(super) fn repository_ref_from_value(
     target: &CodeGitHubRepositoryTarget,
     tidebreak_repo_id: Option<tidebreak_core::RepoId>,
@@ -409,8 +398,8 @@ pub(super) fn repository_ref_from_value(
 }
 
 pub(super) async fn resolve_repository_cached(
-    runtime: &CodeRuntime,
-    binary: &Path,
+    runtime: &dyn DeliveryRuntime,
+    api: &dyn DeliveryApi,
     target: &CodeGitHubRepositoryTarget,
     tidebreak_repo_id: Option<tidebreak_core::RepoId>,
     force_refresh: bool,
@@ -418,92 +407,43 @@ pub(super) async fn resolve_repository_cached(
     let key = repository_key(target);
     let request_started = Instant::now();
     if !force_refresh {
-        if let Some(cached) = runtime.delivery_cache.repository(&key) {
+        if let Some(cached) = runtime.delivery_cache().repository(&key) {
             return Ok(repository_with_id(cached.value, tidebreak_repo_id));
         }
     }
 
-    let read = runtime.delivery_cache.repository_read(&key);
+    let read = runtime.delivery_cache().repository_read(&key);
     let _guard = read.lock().await;
-    if let Some(cached) = runtime.delivery_cache.repository(&key) {
+    if let Some(cached) = runtime.delivery_cache().repository(&key) {
         if !force_refresh || cached.fetched_at >= request_started {
             return Ok(repository_with_id(cached.value, tidebreak_repo_id));
         }
     }
 
-    let repository = resolve_repository(binary, target, None).await?;
+    let value = api.repository(target).await?;
+    let repository = repository_ref_from_value(target, None, &value);
     runtime
-        .delivery_cache
+        .delivery_cache()
         .put_repository(key, repository.clone());
     Ok(repository_with_id(repository, tidebreak_repo_id))
 }
 
 pub(super) async fn resolve_repository_for_reader(
-    runtime: &CodeRuntime,
-    owner: &OwnerId,
-    reader: &DeliveryReader,
+    runtime: &dyn DeliveryRuntime,
+    reader: &DeliveryReaderHandle,
     target: &CodeGitHubRepositoryTarget,
     tidebreak_repo_id: Option<tidebreak_core::RepoId>,
     force_refresh: bool,
 ) -> Result<CodeGitHubRepositoryRef, String> {
-    match reader {
-        DeliveryReader::Gh(observation) => {
-            resolve_repository_cached(
-                runtime,
-                observation
-                    .binary
-                    .as_deref()
-                    .expect("authenticated gh has a binary"),
-                target,
-                tidebreak_repo_id,
-                force_refresh,
-            )
-            .await
-        }
-        DeliveryReader::Forge => {
-            let credential = borrow_delivery_credential(runtime, owner, target).await?;
-            resolve_repository_rest_cached(
-                runtime,
-                target,
-                tidebreak_repo_id,
-                force_refresh,
-                &credential,
-            )
-            .await
-        }
-    }
-}
-
-pub(super) async fn resolve_repository_rest_cached(
-    runtime: &CodeRuntime,
-    target: &CodeGitHubRepositoryTarget,
-    tidebreak_repo_id: Option<tidebreak_core::RepoId>,
-    force_refresh: bool,
-    credential: &GitCredential,
-) -> Result<CodeGitHubRepositoryRef, String> {
-    let key = repository_key(target);
-    let request_started = Instant::now();
-    if !force_refresh {
-        if let Some(cached) = runtime.delivery_cache.repository(&key) {
-            return Ok(repository_with_id(cached.value, tidebreak_repo_id));
-        }
-    }
-
-    let read = runtime.delivery_cache.repository_read(&key);
-    let _guard = read.lock().await;
-    if let Some(cached) = runtime.delivery_cache.repository(&key) {
-        if !force_refresh || cached.fetched_at >= request_started {
-            return Ok(repository_with_id(cached.value, tidebreak_repo_id));
-        }
-    }
-
-    let api_base = runtime.forge_api_base_for(&target.host);
-    let value = crate::code::forge_rest::repository(&api_base, target, credential).await?;
-    let repository = repository_ref_from_value(target, None, &value);
-    runtime
-        .delivery_cache
-        .put_repository(key, repository.clone());
-    Ok(repository_with_id(repository, tidebreak_repo_id))
+    let api = reader.api(target).await?;
+    resolve_repository_cached(
+        runtime,
+        api.as_ref(),
+        target,
+        tidebreak_repo_id,
+        force_refresh,
+    )
+    .await
 }
 
 pub(super) fn repository_with_id(

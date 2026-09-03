@@ -87,12 +87,12 @@ pub(super) struct HostStackMembership {
 /// The trigger sweep uses this path instead of a bounded remote list. One
 /// owner-wide workspace index serves every read, and the shared concurrency
 /// limit bounds repository resolution and pull-request fetches separately.
-pub(crate) async fn query_pull_requests_by_number(
-    runtime: &CodeRuntime,
+pub async fn query_pull_requests_by_number(
+    runtime: &dyn DeliveryRuntime,
     owner: &OwnerId,
     repositories: Vec<(CodeGitHubRepositoryTarget, Vec<u64>)>,
 ) -> Result<CodeDeliveryPullRequestsPage, ServerError> {
-    let access = delivery_access(runtime, owner, false).await;
+    let access = runtime.delivery_access(owner, false).await;
     let capability = access.capability.clone();
     let repositories = dedupe_numbered_targets(repositories)?;
     let Some(reader) = access.reader.clone() else {
@@ -110,13 +110,15 @@ pub(crate) async fn query_pull_requests_by_number(
         .map(|(target, numbers)| {
             let reader = reader.clone();
             async move {
-                let api = delivery_api(runtime, owner, &reader, &target)
+                let api = reader
+                    .api(&target)
                     .await
                     .map_err(|message| (target.clone(), message))?;
-                let repository = resolve_repository_for_api(runtime, &api, &target, None, false)
-                    .await
-                    .map_err(|message| (target.clone(), message))?;
-                Ok((target, Arc::new(api), repository, numbers))
+                let repository =
+                    resolve_repository_cached(runtime, api.as_ref(), &target, None, false)
+                        .await
+                        .map_err(|message| (target.clone(), message))?;
+                Ok((target, api, repository, numbers))
             }
         })
         .buffer_unordered(DELIVERY_CONCURRENCY)
@@ -124,7 +126,7 @@ pub(crate) async fn query_pull_requests_by_number(
         .await;
 
     let mut reads = Vec::new();
-    let mut apis: HashMap<String, Arc<DeliveryApi>> = HashMap::new();
+    let mut apis: HashMap<String, DeliveryApiHandle> = HashMap::new();
     let mut errors = Vec::new();
     for result in resolved {
         match result {
@@ -140,20 +142,30 @@ pub(crate) async fn query_pull_requests_by_number(
         }
     }
 
-    let results = stream::iter(reads)
-        .map(|(target, api, repository, number)| {
-            let workspaces = Arc::clone(&workspaces);
-            async move {
-                with_transient_retry(|| {
-                    fetch_pull_request(&api, &target, &repository, number, &workspaces)
-                })
-                .await
-                .map_err(|message| (target, format!("pull request #{number}: {message}")))
-            }
-        })
-        .buffer_unordered(DELIVERY_CONCURRENCY)
-        .collect::<Vec<_>>()
-        .await;
+    let mut reads = reads.into_iter();
+    let mut pending = futures::stream::FuturesUnordered::new();
+    for (target, api, repository, number) in reads.by_ref().take(DELIVERY_CONCURRENCY) {
+        pending.push(fetch_pull_request_result(
+            api,
+            target,
+            repository,
+            number,
+            Arc::clone(&workspaces),
+        ));
+    }
+    let mut results = Vec::new();
+    while let Some(result) = pending.next().await {
+        results.push(result);
+        if let Some((target, api, repository, number)) = reads.next() {
+            pending.push(fetch_pull_request_result(
+                api,
+                target,
+                repository,
+                number,
+                Arc::clone(&workspaces),
+            ));
+        }
+    }
 
     let mut items = Vec::new();
     for result in results {
@@ -177,13 +189,7 @@ pub(crate) async fn query_pull_requests_by_number(
     let workspaces_gaining_links =
         persist_and_augment_pull_request_facts(runtime, owner, &workspaces, &mut items).await;
     for workspace_id in workspaces_gaining_links {
-        crate::code::attention::emit_workspace_digests(
-            &runtime.db,
-            &runtime.bus,
-            owner,
-            workspace_id,
-        )
-        .await;
+        runtime.emit_workspace_digests(owner, workspace_id).await;
     }
     let items = items.into_iter().map(|item| item.summary).collect();
     Ok(CodeDeliveryPullRequestsPage {
@@ -195,8 +201,8 @@ pub(crate) async fn query_pull_requests_by_number(
     })
 }
 
-pub(crate) async fn query_pull_requests(
-    runtime: &CodeRuntime,
+pub async fn query_pull_requests(
+    runtime: &dyn DeliveryRuntime,
     owner: &OwnerId,
     allow_unscoped_delivery: bool,
     query: CodeDeliveryPullRequestQuery,
@@ -204,7 +210,7 @@ pub(crate) async fn query_pull_requests(
     let force_refresh = query.refresh && query.cursor.is_none();
     let targets = dedupe_targets(query.repositories.clone())?;
     ensure_delivery_targets(runtime, owner, allow_unscoped_delivery, &targets).await?;
-    let access = delivery_access(runtime, owner, force_refresh).await;
+    let access = runtime.delivery_access(owner, force_refresh).await;
     let capability = access.capability.clone();
     let Some(reader) = access.reader.clone() else {
         return Ok(CodeDeliveryPullRequestsPage {
@@ -229,14 +235,14 @@ pub(crate) async fn query_pull_requests(
     let cached = if force_refresh {
         None
     } else {
-        runtime.delivery_cache.pull_requests(&cache_key)
+        runtime.delivery_cache().pull_requests(&cache_key)
     };
     let aggregate = match cached {
         Some(cached) => cached,
         None => {
-            let read = runtime.delivery_cache.pull_request_read(&cache_key);
+            let read = runtime.delivery_cache().pull_request_read(&cache_key);
             let _guard = read.lock().await;
-            if let Some(cached) = runtime.delivery_cache.pull_requests(&cache_key) {
+            if let Some(cached) = runtime.delivery_cache().pull_requests(&cache_key) {
                 if !force_refresh || cached.fetched_at >= request_started {
                     return pull_request_page(capability, cached, &query);
                 }
@@ -300,19 +306,13 @@ pub(crate) async fn query_pull_requests(
                 .into_iter()
                 .map(|item| item.summary)
                 .collect::<Vec<_>>();
-            runtime.delivery_cache.put_pull_requests(
+            runtime.delivery_cache().put_pull_requests(
                 cache_key.clone(),
                 items.clone(),
                 errors.clone(),
             );
             for workspace_id in workspaces_gaining_links {
-                crate::code::attention::emit_workspace_digests(
-                    &runtime.db,
-                    &runtime.bus,
-                    owner,
-                    workspace_id,
-                )
-                .await;
+                runtime.emit_workspace_digests(owner, workspace_id).await;
             }
             CachedAggregate {
                 fetched_at: Instant::now(),
@@ -344,8 +344,8 @@ pub(super) fn pull_request_page(
     })
 }
 
-pub(crate) async fn pull_request_detail(
-    runtime: &CodeRuntime,
+pub async fn pull_request_detail(
+    runtime: &dyn DeliveryRuntime,
     owner: &OwnerId,
     allow_unscoped_delivery: bool,
     target: CodeDeliveryPullRequestTarget,
@@ -357,17 +357,19 @@ pub(crate) async fn pull_request_detail(
         std::slice::from_ref(&target.repository),
     )
     .await?;
-    let access = delivery_access(runtime, owner, false).await;
+    let access = runtime.delivery_access(owner, false).await;
     let reader = access.require_reader()?;
-    let api = delivery_api(runtime, owner, &reader, &target.repository)
+    let api = reader
+        .api(&target.repository)
         .await
         .map_err(|message| ServerError::bad_request_kind("github", message))?;
-    let repository = resolve_repository_for_api(runtime, &api, &target.repository, None, false)
-        .await
-        .map_err(|message| ServerError::bad_request_kind("github", message))?;
+    let repository =
+        resolve_repository_cached(runtime, api.as_ref(), &target.repository, None, false)
+            .await
+            .map_err(|message| ServerError::bad_request_kind("github", message))?;
     let workspace_index = workspace_index(runtime, owner, false).await?;
     let mut observation = fetch_pull_request(
-        &api,
+        api.as_ref(),
         &target.repository,
         &repository,
         target.number,
@@ -383,13 +385,7 @@ pub(crate) async fn pull_request_detail(
     )
     .await;
     for workspace_id in minted {
-        crate::code::attention::emit_workspace_digests(
-            &runtime.db,
-            &runtime.bus,
-            owner,
-            workspace_id,
-        )
-        .await;
+        runtime.emit_workspace_digests(owner, workspace_id).await;
     }
     let mut summary = observation.summary;
 
@@ -567,8 +563,8 @@ pub(super) fn delivery_action_result(message: String) -> CodeDeliveryActionResul
     }
 }
 
-pub(crate) async fn act_on_pull_request(
-    runtime: &Arc<CodeRuntime>,
+pub async fn act_on_pull_request(
+    runtime: &dyn DeliveryRuntime,
     owner: &OwnerId,
     allow_unscoped_delivery: bool,
     body: CodeDeliveryPullRequestActionBody,
@@ -610,26 +606,10 @@ pub(crate) async fn act_on_pull_request(
         }
         _ => {}
     }
-    let access = delivery_access(runtime, owner, false).await;
+    let access = runtime.delivery_access(owner, false).await;
     let reader = access.require_reader()?;
-    if matches!(&reader, DeliveryReader::Forge) {
-        match &body.action {
-            CodeDeliveryPullRequestAction::MarkReady => {
-                return Err(ServerError::conflict_kind(
-                    "git_forge_mark_ready_unsupported",
-                    "This hosted machine cannot mark a draft pull request ready because GitHub's pinned REST API does not expose that transition. Open the pull request on GitHub to mark it ready.",
-                ));
-            }
-            CodeDeliveryPullRequestAction::Merge { admin: true, .. } => {
-                return Err(ServerError::conflict_kind(
-                    "git_forge_admin_merge_unsupported",
-                    "This hosted machine cannot request an admin branch-protection bypass through GitHub's stable REST API. Open the pull request on GitHub to merge with admin privileges.",
-                ));
-            }
-            _ => {}
-        }
-    }
-    let api = delivery_action_api(runtime, owner, &reader, &target.repository).await?;
+    reader.validate_pull_request_action(&body.action)?;
+    let api = reader.action_api(&target.repository).await?;
     // The canonical URL of the pull request being acted on: the key the
     // workspace-side digest refresh matches on (decision 66).
     let pull_request_url = format!(
@@ -640,7 +620,7 @@ pub(crate) async fn act_on_pull_request(
         CodeDeliveryPullRequestAction::MarkReady => {
             api.mark_pull_request_ready(&target.repository, target.number)
                 .await?;
-            runtime.delivery_cache.invalidate();
+            runtime.delivery_cache().invalidate();
             runtime.refresh_workspaces_for_pull_request(owner, &pull_request_url);
             Ok(delivery_action_result(format!(
                 "Pull request #{} is ready for review",
@@ -662,7 +642,7 @@ pub(crate) async fn act_on_pull_request(
                 &expected_head_sha,
             )
             .await?;
-            runtime.delivery_cache.invalidate();
+            runtime.delivery_cache().invalidate();
             runtime.refresh_workspaces_for_pull_request(owner, &pull_request_url);
             Ok(delivery_action_result(if auto {
                 format!("Auto-merge enabled for pull request #{}", target.number)
@@ -687,7 +667,7 @@ pub(crate) async fn act_on_pull_request(
             }
             let chain = numbers;
             api.create_stack(&target.repository, &chain).await?;
-            runtime.delivery_cache.invalidate();
+            runtime.delivery_cache().invalidate();
             runtime.refresh_workspaces_for_pull_request(owner, &pull_request_url);
             Ok(delivery_action_result(format!(
                 "Registered a stack of {} pull requests on GitHub",
@@ -707,7 +687,7 @@ pub(crate) async fn act_on_pull_request(
                 .await;
             let any_success = results.iter().any(|(_, result)| result.is_ok());
             if any_success {
-                runtime.delivery_cache.invalidate();
+                runtime.delivery_cache().invalidate();
                 runtime.refresh_workspaces_for_pull_request(owner, &pull_request_url);
             }
             let outcomes = results
@@ -737,7 +717,7 @@ pub(crate) async fn act_on_pull_request(
         CodeDeliveryPullRequestAction::Close => {
             api.update_pull_request_state(&target.repository, target.number, "closed")
                 .await?;
-            runtime.delivery_cache.invalidate();
+            runtime.delivery_cache().invalidate();
             runtime.refresh_workspaces_for_pull_request(owner, &pull_request_url);
             Ok(delivery_action_result(format!(
                 "Pull request #{} closed",
@@ -747,7 +727,7 @@ pub(crate) async fn act_on_pull_request(
         CodeDeliveryPullRequestAction::Reopen => {
             api.update_pull_request_state(&target.repository, target.number, "open")
                 .await?;
-            runtime.delivery_cache.invalidate();
+            runtime.delivery_cache().invalidate();
             runtime.refresh_workspaces_for_pull_request(owner, &pull_request_url);
             Ok(delivery_action_result(format!(
                 "Pull request #{} reopened",
@@ -758,7 +738,7 @@ pub(crate) async fn act_on_pull_request(
             let body = body.trim();
             api.comment_on_pull_request(&target.repository, target.number, body)
                 .await?;
-            runtime.delivery_cache.invalidate();
+            runtime.delivery_cache().invalidate();
             Ok(delivery_action_result(format!(
                 "Comment posted on pull request #{}",
                 target.number
@@ -775,7 +755,7 @@ pub(crate) async fn act_on_pull_request(
 /// answers 404, and that must never fail an otherwise good pull-request
 /// list. A failure logs at debug and the stack fields stay absent.
 pub(super) async fn fetch_stacks(
-    api: &DeliveryApi,
+    api: &dyn DeliveryApi,
     target: &CodeGitHubRepositoryTarget,
 ) -> Option<Value> {
     let endpoint = api_endpoint(target, "stacks?per_page=100");
@@ -798,7 +778,7 @@ pub(super) async fn fetch_stacks(
 /// Best-effort like the list read — a repository whose stacks cannot be read
 /// keeps its items as they came, and branch inference stays the fallback.
 pub(super) async fn attach_host_stacks(
-    apis: &HashMap<String, Arc<DeliveryApi>>,
+    apis: &HashMap<String, DeliveryApiHandle>,
     items: &mut [PullRequestObservation],
 ) {
     let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
@@ -818,7 +798,7 @@ pub(super) async fn attach_host_stacks(
             owner: repository.owner.clone(),
             name: repository.name.clone(),
         };
-        let Some(payload) = fetch_stacks(api, &target).await else {
+        let Some(payload) = fetch_stacks(api.as_ref(), &target).await else {
             continue;
         };
         let memberships = parse_stack_memberships(&payload);
@@ -830,9 +810,9 @@ pub(super) async fn attach_host_stacks(
 }
 
 pub(super) async fn fetch_pull_requests(
-    runtime: &CodeRuntime,
-    owner: &OwnerId,
-    reader: &DeliveryReader,
+    runtime: &dyn DeliveryRuntime,
+    _owner: &OwnerId,
+    reader: &DeliveryReaderHandle,
     target: &CodeGitHubRepositoryTarget,
     workspaces: &[WorkspaceIndexEntry],
     plan: &PullRequestRemotePlan,
@@ -841,80 +821,31 @@ pub(super) async fn fetch_pull_requests(
     // One borrowed transport per repository, shared by the pull-request list
     // and the stacks enrichment — the credential lender counts one borrow per
     // repository operation, and a second one here would double it.
-    let api = delivery_api(runtime, owner, reader, target).await?;
-    let (repository, values, stacks) = match &api {
-        DeliveryApi::Gh { observation, .. } => {
-            let binary = observation
-                .binary
-                .as_deref()
-                .expect("authenticated gh has a binary");
-            let repository =
-                resolve_repository_cached(runtime, binary, target, None, force_refresh).await?;
-            let cli_repository = gh::cli_repository(&target.host, &target.owner, &target.name);
-            let limit = MAX_REMOTE_ITEMS_PER_REPO.to_string();
-            let mut args = vec![
-                "pr",
-                "list",
-                "--repo",
-                cli_repository.as_str(),
-                "--state",
+    let api = reader.api(target).await?;
+    let repository =
+        resolve_repository_cached(runtime, api.as_ref(), target, None, force_refresh).await?;
+    let (values, stacks) = tokio::join!(
+        with_transient_retry(|| {
+            api.pull_requests(
+                target,
                 plan.state,
-                "--limit",
-                limit.as_str(),
-                "--json",
                 plan.fields,
-            ];
-            if let Some(author) = plan.author.as_deref() {
-                args.push("--author");
-                args.push(author);
-            }
-            let (raw, stacks) = tokio::join!(
-                with_transient_retry(|| {
-                    gh::run_gh(Path::new("."), binary, &args, GH_READ_TIMEOUT)
-                }),
-                fetch_stacks(&api, target),
-            );
-            let raw = raw?;
-            let value: Value = serde_json::from_str(&raw)
-                .map_err(|error| format!("could not parse pull requests: {error}"))?;
-            (
-                repository,
-                value.as_array().cloned().unwrap_or_default(),
-                stacks,
+                plan.checks_loaded,
+                plan.author.as_deref(),
             )
-        }
-        DeliveryApi::Rest {
-            api_base,
-            credential,
-        } => {
-            let repository =
-                resolve_repository_rest_cached(runtime, target, None, force_refresh, credential)
-                    .await?;
-            let (values, stacks) = tokio::join!(
-                with_transient_retry(|| {
-                    crate::code::forge_rest::delivery_pull_requests(
-                        api_base,
-                        target,
-                        credential,
-                        plan.state,
-                        plan.checks_loaded,
-                    )
-                }),
-                fetch_stacks(&api, target),
-            );
-            let values = values?;
-            (repository, values, stacks)
-        }
-    };
+        }),
+        fetch_stacks(api.as_ref(), target),
+    );
+    let values = values?;
     let mut values = values;
-    overlay_issue_comment_counts(&api, target, plan.state, &mut values).await;
+    overlay_issue_comment_counts(api.as_ref(), target, plan.state, &mut values).await;
     // Host stacks ride along as observations; the shared fact pass applies
     // them so host edges and branch inference meet in one place.
     let memberships = stacks
         .as_ref()
         .map(parse_stack_memberships)
         .unwrap_or_default();
-    attach_merge_queue_membership(&api, target, &mut values).await;
+    attach_merge_queue_membership(api.as_ref(), target, &mut values).await;
     Ok(values
         .iter()
         .filter_map(|value| parse_pull_request(&repository, value, workspaces))
@@ -933,14 +864,14 @@ pub(super) async fn fetch_pull_requests(
 /// not return becomes a stored row with empty heuristic links; attribution
 /// is applied in [`persist_and_augment_pull_request_facts`].
 pub(super) async fn fold_stored_pull_request_facts(
-    runtime: &CodeRuntime,
+    runtime: &dyn DeliveryRuntime,
     owner: &OwnerId,
     targets: &[CodeGitHubRepositoryTarget],
     items: &mut Vec<PullRequestObservation>,
 ) {
     for target in targets {
         let facts = match list_pull_request_facts_for_repo(
-            &runtime.db,
+            runtime.store(),
             owner,
             &target.host,
             &target.owner,
@@ -1099,7 +1030,7 @@ pub(super) fn pull_request_remote_plan(
 }
 
 pub(super) async fn fetch_pull_request(
-    api: &DeliveryApi,
+    api: &dyn DeliveryApi,
     target: &CodeGitHubRepositoryTarget,
     repository: &CodeGitHubRepositoryRef,
     number: u64,
@@ -1111,10 +1042,39 @@ pub(super) async fn fetch_pull_request(
         .ok_or_else(|| "GitHub returned an incomplete pull request".into())
 }
 
+async fn fetch_pull_request_with_retry(
+    api: DeliveryApiHandle,
+    target: CodeGitHubRepositoryTarget,
+    repository: CodeGitHubRepositoryRef,
+    number: u64,
+    workspaces: Arc<Vec<WorkspaceIndexEntry>>,
+) -> Result<PullRequestObservation, String> {
+    match fetch_pull_request(api.as_ref(), &target, &repository, number, &workspaces).await {
+        Ok(value) => Ok(value),
+        Err(message) if is_transient_github_error(&message) => {
+            tokio::time::sleep(TRANSIENT_RETRY_DELAY).await;
+            fetch_pull_request(api.as_ref(), &target, &repository, number, &workspaces).await
+        }
+        Err(message) => Err(message),
+    }
+}
+
+async fn fetch_pull_request_result(
+    api: DeliveryApiHandle,
+    target: CodeGitHubRepositoryTarget,
+    repository: CodeGitHubRepositoryRef,
+    number: u64,
+    workspaces: Arc<Vec<WorkspaceIndexEntry>>,
+) -> Result<PullRequestObservation, (CodeGitHubRepositoryTarget, String)> {
+    fetch_pull_request_with_retry(api, target.clone(), repository, number, workspaces)
+        .await
+        .map_err(|message| (target, format!("pull request #{number}: {message}")))
+}
+
 /// REST `mergeable_state` never reports `queued`. Membership comes from the
 /// issue timeline both readers already share.
 pub(super) async fn attach_merge_queue_membership(
-    api: &DeliveryApi,
+    api: &dyn DeliveryApi,
     target: &CodeGitHubRepositoryTarget,
     values: &mut [Value],
 ) {
@@ -1564,7 +1524,7 @@ pub(super) fn workspace_links(
 /// Project one delivery summary into the digest vocabulary (decision 66):
 /// the same shape a workspace read stores, so the live tier and its
 /// write-through take one path no matter who observed the pull request.
-pub(crate) fn digest_from_summary(item: &CodeDeliveryPullRequestSummary) -> PullRequestDigest {
+pub fn digest_from_summary(item: &CodeDeliveryPullRequestSummary) -> PullRequestDigest {
     PullRequestDigest {
         number: item.number,
         url: Some(item.url.clone()),
@@ -1608,12 +1568,12 @@ pub(crate) fn digest_from_summary(item: &CodeDeliveryPullRequestSummary) -> Pull
 /// restate their digests. Best-effort throughout: a store failure degrades
 /// to the live heuristic links.
 pub(super) async fn persist_and_augment_pull_request_facts(
-    runtime: &CodeRuntime,
+    runtime: &dyn DeliveryRuntime,
     owner: &OwnerId,
     workspaces: &[WorkspaceIndexEntry],
     items: &mut [PullRequestObservation],
 ) -> Vec<WorkspaceId> {
-    let db = &runtime.db;
+    let db = runtime.store();
     let mut minted = Vec::new();
     let now = Utc::now();
     let mut stack_candidates: HashMap<StackPullRequestIdentity, StackParentCandidate> = items
@@ -1708,7 +1668,7 @@ pub(super) async fn persist_and_augment_pull_request_facts(
                 }
                 continue;
             }
-            let Some(fact) = crate::code::reconcile::fact_from_summary(owner, item, now) else {
+            let Some(fact) = fact_from_summary(owner, item, now) else {
                 continue;
             };
             let id = match save_pull_request_fact(db, &fact).await {
@@ -2186,7 +2146,7 @@ pub(super) fn absorb_issue_comment_counts(
 }
 
 pub(super) async fn overlay_issue_comment_counts(
-    api: &DeliveryApi,
+    api: &dyn DeliveryApi,
     target: &CodeGitHubRepositoryTarget,
     state: &str,
     values: &mut [Value],
