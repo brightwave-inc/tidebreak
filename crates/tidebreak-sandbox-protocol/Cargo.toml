@@ -9,6 +9,9 @@ homepage.workspace = true
 authors.workspace = true
 publish = false
 
+[lib]
+doctest = false
+
 [features]
 # In-process reference backend and the conformance suite. Off in shipped
 # consumers (server, sandbox-agent); this crate's tests enable it.

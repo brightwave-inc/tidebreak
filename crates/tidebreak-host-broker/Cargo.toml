@@ -9,6 +9,9 @@ homepage.workspace = true
 authors.workspace = true
 publish = false
 
+[lib]
+doctest = false
+
 [[bin]]
 name = "tidebreak-host-broker"
 path = "src/bin/tidebreak-host-broker.rs"
