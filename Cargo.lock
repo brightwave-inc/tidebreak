@@ -7309,6 +7309,27 @@ name = "tidebreak-egress"
 version = "0.0.0"
 
 [[package]]
+name = "tidebreak-gateway-runtime"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64 0.23.1",
+ "futures",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.20",
+ "tidebreak-core",
+ "tidebreak-router",
+ "tokio",
+ "tracing",
+ "ts-rs",
+ "uuid",
+]
+
+[[package]]
 name = "tidebreak-harness"
 version = "0.0.0"
 dependencies = [
@@ -7457,6 +7478,7 @@ dependencies = [
  "tidebreak-code-remote",
  "tidebreak-core",
  "tidebreak-egress",
+ "tidebreak-gateway-runtime",
  "tidebreak-harness",
  "tidebreak-managed-node",
  "tidebreak-mcp",

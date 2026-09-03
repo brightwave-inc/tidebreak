@@ -386,37 +386,8 @@ pub(crate) fn gateway_apps_granted_by<'a>(
         .collect()
 }
 
-/// One gateway connected app's catalog as a live read describes it: the
-/// display name and the operation ids the gateway declares — the fingerprint
-/// input and the consent-sheet label, and nothing else. No URL, no credential
-/// material, and no upstream detail crosses this seam.
-pub(crate) struct GatewayAppCatalog {
-    pub(crate) name: String,
-    pub(crate) operation_ids: Vec<String>,
-}
-
-/// The live per-app gateway catalog read the fingerprint surface depends on.
-///
-/// A seam rather than a direct call into the gateway runtime for the reason
-/// [`RestOperationDispatcher`] is one: the grant, invoke, and library surfaces
-/// are driven end to end in tests, and they cannot each stand up an OAuth
-/// session against a fake deployment to do it. Production is the gateway
-/// runtime itself.
-#[async_trait]
-pub(crate) trait GatewayCatalogSource: Send + Sync {
-    /// The gateway's deployment URL and the catalog of each requested app
-    /// that is enabled, entitled, and catalog-readable.
-    ///
-    /// `None` means this profile has no gateway session to answer with at all
-    /// — unmanaged, misconfigured, signed out, or a gateway too old to serve
-    /// catalogs. A present pair with an id missing from the map means the
-    /// session answered and that app is not bindable, which reads the same way
-    /// downstream: fingerprints fail closed either way.
-    async fn gateway_app_catalogs(
-        &self,
-        needed: &BTreeSet<String>,
-    ) -> Option<(String, BTreeMap<String, GatewayAppCatalog>)>;
-}
+#[allow(unused_imports)]
+pub(crate) use tidebreak_gateway_runtime::{GatewayAppCatalog, GatewayCatalogSource};
 
 /// The current fingerprint of every readable gateway connected app among
 /// `needed`, by the gateway's app id.
@@ -510,132 +481,10 @@ pub(crate) fn governed_rest_dispatcher(
     ))
 }
 
-/// One shared-app operation call, as the invoke route assembled it.
-///
-/// The field names are the gateway's own invoke vocabulary rather than a
-/// second spelling of it: `gateway_app` is what crosses the wire as
-/// `connected_app_id`, and the three passthrough halves are opaque JSON the
-/// server never interprets — a bundle authored against a harness frame speaks
-/// exactly this shape to the gateway shell.
-pub(crate) struct GatewayOperationRequest {
-    /// The gateway connected app whose operation is being called.
-    pub gateway_app: String,
-    /// The operation id, as the app's catalog declares it.
-    pub operation_id: String,
-    /// Path-template values for the operation, when it takes any.
-    pub path_parameters: Option<serde_json::Value>,
-    /// Query values for the operation, when it takes any.
-    pub query: Option<serde_json::Value>,
-    /// JSON request body, when the operation declares one.
-    pub body: Option<serde_json::Value>,
-}
-
-/// Why a gateway relay could not happen at all — as distinct from a call the
-/// gateway answered, which is a [`GatewayInvokeOutcome`].
-///
-/// Closed on purpose: the invoke route turns each of these into a typed
-/// refusal, and a fourth reading would need its own refusal kind rather than a
-/// free-form message.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum GatewayDispatchError {
-    /// This profile has no gateway session to relay as — unmanaged, signed
-    /// out, or pointed at a deployment it never signed into.
-    NoSession,
-    /// Nothing at the gateway answers for this app: no draft is registered
-    /// for it, or the deployment predates the shared-app invoke route.
-    NotRegistered,
-    /// The gateway was reachable in principle but the call failed —
-    /// transport, protocol, or an answer this client could not read. The
-    /// message is host-authored and bounded; it carries no URL and no
-    /// credential material.
-    Unreachable(String),
-}
-
-/// Dispatch seam for one gateway shared-app relay, so the invoke route can be
-/// driven end to end in tests without an OAuth session against a fake
-/// deployment — the gateway twin of [`RestOperationDispatcher`]. Production is
-/// the relay over the one gateway runtime.
-#[async_trait]
-pub(crate) trait GatewayInvokeDispatcher: Send + Sync {
-    /// Relay `request` on behalf of the local app `app`, which the route has
-    /// already checked the pin, the grant, and the fingerprint currency of.
-    async fn dispatch(
-        &self,
-        owner: &tidebreak_core::OwnerId,
-        app: tidebreak_core::id::AppId,
-        request: &GatewayOperationRequest,
-    ) -> Result<crate::connectors::GatewayInvokeOutcome, GatewayDispatchError>;
-}
-
-/// The registration lifecycle of one local app at one gateway deployment.
-///
-/// A local app's gateway bindings are relayed to a shared app the gateway
-/// holds, so the app has to exist there before anything can be relayed. This
-/// seam is what establishes and advances that, keyed by the deployment as
-/// well as the app: a registration belongs to one gateway, so a re-paired
-/// profile has no registration there, exactly as it has no current gateway
-/// grant. Production is the store-backed
-/// [`crate::gateway_drafts::GatewayDraftRegistry`]; tests drive the whole
-/// ladder against a fake without an OAuth session.
-#[async_trait]
-pub(crate) trait GatewayDraftSource: Send + Sync {
-    /// Ensure `app` is registered at `gateway_base_url` and that the revision
-    /// the gateway serves is the app's current local one, registering or
-    /// appending as needed.
-    async fn ensure_registered(
-        &self,
-        owner: &tidebreak_core::OwnerId,
-        app: tidebreak_core::id::AppId,
-        gateway_base_url: &str,
-    ) -> tidebreak_core::Result<GatewayRegistration>;
-
-    /// Relay the author's consent for `app`'s registration, pinned to the
-    /// revision the gateway is serving.
-    ///
-    /// Safe to relay without asking again because the local grant ladder has
-    /// already run: the consent sheet displayed exactly the binding set this
-    /// names, and the gateway computes the consented bindings server-side
-    /// from the live revision, accepting only a revision pin from here.
-    async fn relay_consent(
-        &self,
-        owner: &tidebreak_core::OwnerId,
-        app: tidebreak_core::id::AppId,
-        gateway_base_url: &str,
-    ) -> tidebreak_core::Result<GatewayConsentRelay>;
-}
-
-/// Where a local app stands at one gateway deployment.
-///
-/// Closed on purpose, and deliberately not a `Result`: "this deployment does
-/// not hold shared apps" and "the gateway said no" are both answers, and the
-/// invoke ladder turns each into a different refusal. A gateway that could
-/// not be reached at all is the `Err` half.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum GatewayRegistration {
-    /// The gateway holds the app, serving `revision_id`.
-    Registered {
-        shared_app_id: String,
-        revision_id: String,
-    },
-    /// Nothing at this deployment holds the app and nothing there can: the
-    /// gateway predates shared-app registration, or it holds no app for this
-    /// user to append to.
-    NotRegistered,
-    /// The gateway refused to register or advance the app, in its own words.
-    Refused { message: String },
-}
-
-/// What relaying the author's consent came back as.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum GatewayConsentRelay {
-    /// The gateway recorded consent for the registered revision.
-    Consented,
-    /// Nothing at this deployment holds the app — see
-    /// [`GatewayRegistration::NotRegistered`].
-    NotRegistered,
-    /// The gateway refused the consent, in its own words.
-    Refused { message: String },
-}
+pub(crate) use tidebreak_gateway_runtime::{
+    GatewayConsentRelay, GatewayDispatchError, GatewayDraftSource, GatewayInvokeDispatcher,
+    GatewayOperationRequest, GatewayRegistration,
+};
 
 #[cfg(test)]
 mod tests {

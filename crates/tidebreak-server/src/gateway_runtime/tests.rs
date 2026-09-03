@@ -1209,7 +1209,7 @@ async fn a_304_sync_racing_a_policy_repoint_is_rejected() {
         crate::managed_policy::MemoryProvisionedPolicy::new(),
         os.clone(),
     );
-    let held = providers::GATEWAY_STATE_WRITES.lock().await;
+    let held = GATEWAY_STATE_WRITES.lock().await;
     let sync = tokio::spawn({
         let runtime = runtime.clone();
         async move { runtime.sync_models().await }
@@ -1655,6 +1655,14 @@ async fn the_route_token_source_mints_llm_tokens_per_rotation() {
     // A legacy provider row — even one pointing at a different deployment
     // — is never read, so it changes nothing about the composite route.
     runtime.sync_models().await.unwrap();
+    assert!(
+        source
+            .lease_model_route("sample-claude")
+            .await
+            .unwrap()
+            .is_none(),
+        "a bare gateway model id must not bypass the frozen route selector"
+    );
     providers::write_config(
         &*store,
         crate::providers::ProviderKind::ModelGateway,

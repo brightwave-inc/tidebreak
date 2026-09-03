@@ -626,12 +626,13 @@ mod tests {
             "src",
             "../tidebreak-code-delivery/src",
             "../tidebreak-core/src",
+            "../tidebreak-gateway-runtime/src",
         ] {
             collect_rust_files(&crate_root.join(relative), &mut files);
         }
         assert!(
             files.len() > 20,
-            "expected to scan the server, delivery, and core sources, found {}",
+            "expected to scan the server, delivery, gateway runtime, and core sources, found {}",
             files.len()
         );
         files

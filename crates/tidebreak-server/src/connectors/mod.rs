@@ -24,9 +24,7 @@
 //!
 //! [`SecretProvider`]: tidebreak_core::SecretProvider
 
-mod callback_page;
 mod chatgpt;
-mod gateway;
 
 pub use chatgpt::{
     has_stored_chatgpt_credentials, is_chatgpt_sign_in_required, ChatGptAuth, ChatGptAuthConfig,
@@ -34,13 +32,16 @@ pub use chatgpt::{
     ChatGptPendingSignIn, CALLBACK_PORT, CLIENT_ID, CODEX_BASE_URL, ORIGINATOR, REDIRECT_URI,
     SECRET_KEY as CHATGPT_SECRET_KEY,
 };
-pub use gateway::{
+pub use tidebreak_gateway_runtime::{
     has_stored_credentials, has_stored_credentials_for, is_sign_in_required,
     stored_installation_id_for, validate_mcp_endpoint_slug, AuthorizedSession, CredentialVault,
     GatewayApp, GatewayAuth, GatewayAuthConfig, GatewayCatalog, GatewayCatalogApp,
     GatewayCatalogFetch, GatewayCatalogModel, GatewayConnection, GatewayConsentOutcome,
     GatewayCredentials, GatewayIdentity, GatewayInvokeOutcome, GatewayMeta, GatewayModel,
     GatewayOperationSummary, GatewayRegistrationOutcome, GatewaySurfaces, PendingSignIn, TokenSet,
-    MEMBER_CATALOG_V1, RESOURCE_CONTROL, RESOURCE_LLM, RESOURCE_TIDEBREAK,
-    SECRET_KEY as GATEWAY_SECRET_KEY,
+    GATEWAY_SECRET_KEY, MEMBER_CATALOG_V1, RESOURCE_CONTROL, RESOURCE_LLM, RESOURCE_TIDEBREAK,
 };
+
+mod callback_page {
+    pub(crate) use tidebreak_gateway_runtime::callback_page::{callback_page, CallbackOutcome};
+}

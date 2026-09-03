@@ -35,11 +35,13 @@ use tidebreak_core::local_app::{
 };
 use tidebreak_core::{AgentError, OwnerId, Result, Store};
 
-use crate::connected_apps::{
-    GatewayConsentRelay, GatewayDispatchError, GatewayDraftSource, GatewayRegistration,
-};
-use crate::connectors::{GatewayConsentOutcome, GatewayInvokeOutcome, GatewayRegistrationOutcome};
+use crate::connected_apps::{GatewayConsentRelay, GatewayDraftSource, GatewayRegistration};
+#[cfg(test)]
+use crate::connectors::GatewayInvokeOutcome;
+use crate::connectors::{GatewayConsentOutcome, GatewayRegistrationOutcome};
 use crate::gateway_runtime::GatewayRuntime;
+#[cfg(test)]
+use tidebreak_gateway_runtime::relay_with_consent_self_heal;
 
 /// The client name every registration this host makes is stamped with, so a
 /// gateway operator can tell where a shared app came from.
@@ -531,54 +533,6 @@ impl GatewayDraftSource for GatewayDraftRegistry {
             }
         }
     }
-}
-
-/// Relay one shared-app call, healing the gateway's own consent gate at most
-/// once.
-///
-/// A local app reaches here only after the whole local ladder has passed: the
-/// manifest pins the operation, the grant covers it, and the bound gateway
-/// app still reads as it did at consent. So a `consent_required` from the
-/// gateway is not a second decision for the user to make — the consent sheet
-/// already displayed exactly the binding set the gateway consent names, and
-/// the gateway recomputes that set server-side from the live revision,
-/// accepting only a revision pin from here. Re-stating it and calling again
-/// is what keeps a granted app from dead-ending on an invisible second
-/// consent surface.
-///
-/// Exactly one retry, and only after a consent relay that actually succeeded.
-/// A second `consent_required` is the gateway's answer and is returned as
-/// such: a relay that kept re-consenting would spin against a deployment that
-/// has decided no.
-pub(crate) async fn relay_with_consent_self_heal<F, Fut>(
-    drafts: &dyn GatewayDraftSource,
-    owner: &OwnerId,
-    app: AppId,
-    gateway_base_url: &str,
-    relay: F,
-) -> std::result::Result<GatewayInvokeOutcome, GatewayDispatchError>
-where
-    F: Fn() -> Fut,
-    Fut: std::future::Future<
-        Output = std::result::Result<GatewayInvokeOutcome, GatewayDispatchError>,
-    >,
-{
-    let outcome = relay().await?;
-    if !matches!(outcome, GatewayInvokeOutcome::ConsentRequired { .. }) {
-        return Ok(outcome);
-    }
-    match drafts.relay_consent(owner, app, gateway_base_url).await {
-        Ok(GatewayConsentRelay::Consented) => {}
-        Ok(refused) => {
-            tracing::info!("this app's gateway consent could not be relayed: {refused:?}");
-            return Ok(outcome);
-        }
-        Err(error) => {
-            tracing::warn!("could not relay this app's gateway consent: {error}");
-            return Ok(outcome);
-        }
-    }
-    relay().await
 }
 
 /// The deployment a registration belongs to, when this profile is managed

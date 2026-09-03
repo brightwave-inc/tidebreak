@@ -29,23 +29,6 @@ const CREDENTIAL_SUFFIX: &str = ".credential";
 /// Legacy Anthropic API-key secret (pre-providers). Still read as a fallback.
 pub const LEGACY_ANTHROPIC_API_KEY: &str = "provider.anthropic.api_key";
 
-/// Serializes the writers of the entitled-model snapshot: model sync and
-/// sign-out.
-///
-/// Both read the resolved policy, decide what the snapshot should say, and
-/// write it, and the [`Store`] API has no cross-call transaction — so
-/// unserialized, a sign-out's clear could land inside a sync's
-/// recheck-and-write and be overwritten by the models it was clearing.
-/// Pairing deliberately does not take this lock: it writes only policy, and
-/// the snapshot's deployment stamp already makes a racing sync's write
-/// inert. Process-local for the same reason as pairing's own mutex: the
-/// server's instance lock guarantees one process owns the store, and a
-/// static cannot be accidentally wired into two instances that no longer
-/// exclude each other. Lock order: acquired after the gateway runtime's
-/// sign-in state lock, never before it, and never held across a network
-/// call.
-pub(crate) static GATEWAY_STATE_WRITES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
 /// Setting key for the entitled-model snapshot synced from the managed
 /// gateway. This replaces the retired `provider.model_gateway` row's model
 /// list: policy names the gateway, this key caches what it entitles, and no
@@ -208,8 +191,8 @@ fn gateway_selection_matches(selection: &str, id: &str) -> bool {
             .is_some_and(|(_, raw)| raw == id)
 }
 
-/// Persist the entitled-model snapshot. Callers hold
-/// [`GATEWAY_STATE_WRITES`] across their policy recheck and this write.
+/// Persist the entitled-model snapshot. The gateway runtime serializes its
+/// policy recheck and this write with its state-write lock.
 pub(crate) async fn write_gateway_snapshot(
     store: &dyn Store,
     snapshot: &GatewayModelSnapshot,

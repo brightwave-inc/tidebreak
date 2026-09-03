@@ -268,35 +268,9 @@ impl std::fmt::Debug for McpServerDefinition {
     }
 }
 
-/// Resolves gateway-managed MCP endpoints at the connection boundary: the
-/// endpoint URL and a fresh session bearer for `mcp:<slug>`. Implemented by
-/// the gateway runtime over the signed-in session; token renewal stays inside
-/// the connector's rotation lock and no token value is ever stored here.
-#[async_trait::async_trait]
-pub(crate) trait GatewayEndpoints: Send + Sync {
-    async fn endpoint(&self, slug: &str) -> Result<GatewayEndpointAccess>;
-
-    /// The bearer for one `tools/call` from `chat`. The gateway runtime
-    /// mints inside the chat's attestation context so gateway-attested
-    /// endpoints can match the call against the observation the chat's
-    /// inference recorded; the default keeps the connect-time bearer for
-    /// implementations that don't distinguish.
-    async fn call_bearer(&self, slug: &str, chat: tidebreak_core::id::SessionId) -> Result<String> {
-        let _ = chat;
-        Ok(self.endpoint(slug).await?.bearer_token)
-    }
-
-    /// The gateway connected apps this profile could bind, with the operation
-    /// ids the gateway declares for each — the `create_app` roster's gateway
-    /// section.
-    ///
-    /// Best-effort and never load-bearing: the default answers empty, which is
-    /// exactly what a profile with no gateway session should say. Implementors
-    /// degrade the same way rather than failing a registry rebuild.
-    async fn entitled_app_catalogs(&self) -> Vec<GatewayRosterApp> {
-        Vec::new()
-    }
-}
+#[cfg(test)]
+pub(crate) use tidebreak_gateway_runtime::GatewayEndpointAccess;
+pub(crate) use tidebreak_gateway_runtime::{GatewayEndpoints, GatewayRosterApp};
 
 /// [`tidebreak_mcp::CallBearerSource`] over the gateway resolver for one
 /// mounted endpoint: each `tools/call` presents the calling chat's token.
@@ -310,14 +284,6 @@ impl tidebreak_mcp::CallBearerSource for GatewayCallBearer {
     async fn call_bearer(&self, chat: tidebreak_core::id::SessionId) -> Result<Option<String>> {
         self.gateway.call_bearer(&self.slug, chat).await.map(Some)
     }
-}
-
-/// One resolved gateway endpoint: where to connect and the bearer to present.
-/// Deliberately no `Debug`/`Serialize`: the token exists only on the path
-/// from resolution into the transport's prebuilt header.
-pub(crate) struct GatewayEndpointAccess {
-    pub(crate) url: String,
-    pub(crate) bearer_token: String,
 }
 
 /// One prefetched MCP Apps view document, served to the renderer only through
@@ -825,14 +791,6 @@ pub(super) const ROSTER_OPERATION_IDS: usize = 20;
 /// binding names and the operation ids its catalog declares.
 pub(crate) struct RestRosterApp {
     pub(crate) id: ConnectedAppId,
-    pub(crate) name: String,
-    pub(crate) operation_ids: Vec<String>,
-}
-
-/// One gateway connected app's roster inputs: the gateway's own id a binding
-/// names and the operation ids the gateway declares for it.
-pub(crate) struct GatewayRosterApp {
-    pub(crate) id: String,
     pub(crate) name: String,
     pub(crate) operation_ids: Vec<String>,
 }

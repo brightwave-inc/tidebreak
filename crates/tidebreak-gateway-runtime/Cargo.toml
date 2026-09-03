@@ -1,0 +1,35 @@
+[package]
+name = "tidebreak-gateway-runtime"
+description = "Model-gateway connection, session, catalog, and relay runtime."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lib]
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+tidebreak-core = { path = "../tidebreak-core" }
+tidebreak-router = { path = "../tidebreak-router" }
+async-trait = { workspace = true }
+axum = { workspace = true }
+base64 = { workspace = true }
+futures = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+ts-rs = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tidebreak-core = { path = "../tidebreak-core", features = ["test-util"] }

@@ -26,9 +26,9 @@ use super::*;
 /// session under a managed policy with no usable URL — that is a
 /// misconfigured policy to repair, not a supersession, and the session may
 /// well match it once repaired.
-pub(crate) async fn retire_superseded_gateway_session(
+pub async fn retire_superseded_gateway_session(
     secrets: Arc<dyn SecretProvider>,
-    policy: &crate::managed_policy::ManagedPolicy,
+    policy: &GatewayPolicy,
 ) -> Result<()> {
     /// Long enough for a healthy gateway to answer a revoke, short enough
     /// that a dead one is a hiccup at boot rather than a hang.
@@ -76,11 +76,8 @@ pub(crate) async fn retire_superseded_gateway_session(
 /// session for the same user and installation must still invalidate a catalog
 /// response authorized by the old session. A concurrent token rotation may
 /// conservatively reject a sync; the next background tick retries safely.
-pub(super) fn same_gateway_session(
-    left: &crate::connectors::GatewayCredentials,
-    right: &crate::connectors::GatewayCredentials,
-) -> bool {
-    fn durable(credentials: &crate::connectors::GatewayCredentials) -> Option<serde_json::Value> {
+pub(super) fn same_gateway_session(left: &GatewayCredentials, right: &GatewayCredentials) -> bool {
+    fn durable(credentials: &GatewayCredentials) -> Option<serde_json::Value> {
         let mut value = serde_json::to_value(credentials).ok()?;
         value.as_object_mut()?.remove("access_tokens");
         Some(value)
@@ -92,7 +89,7 @@ pub(super) fn same_gateway_session(
 /// The one refusal for every managed-only gateway surface: unmanaged
 /// profiles have no gateway (policy is the only source), and a managed
 /// policy without a usable URL is misconfigured rather than open.
-pub(super) fn require_managed(policy: &crate::managed_policy::ManagedPolicy) -> Result<String> {
+pub(super) fn require_managed(policy: &GatewayPolicy) -> Result<String> {
     if !policy.managed {
         return Err(AgentError::config(
             "this profile is not connected to a model gateway; \
@@ -112,10 +109,11 @@ impl GatewayRuntime {
     /// on. Invalidate any in-flight browser flow the same way `sign_out`
     /// does: an exchange started against a replaced pairing must abandon
     /// rather than commit it.
-    pub(crate) async fn register_pending_pairing(
+    pub async fn register_pending_pairing(
         &self,
         base_url: String,
-        mcp: Arc<crate::mcp_config::McpRuntime>,
+        mcp: Arc<dyn GatewayMcpControl>,
+        commit: Arc<dyn GatewayPairingCommit>,
         replaces: Option<String>,
     ) {
         let mut sign_in = self.sign_in.lock().await;
@@ -125,12 +123,13 @@ impl GatewayRuntime {
         *self.pending_pairing.lock().await = Some(PendingPairing {
             base_url,
             mcp,
+            commit,
             replaces,
         });
     }
 
     /// The pending pairing's gateway URL, for the `/policy` projection.
-    pub(crate) async fn pending_pairing_url(&self) -> Option<String> {
+    pub async fn pending_pairing_url(&self) -> Option<String> {
         self.pending_pairing
             .lock()
             .await
@@ -143,7 +142,7 @@ impl GatewayRuntime {
     /// nothing durable, so the failure direction is safe. With nothing
     /// pending it is a strict no-op: the generation must not move, or a
     /// stray dismiss could abandon a legitimate managed sign-in mid-flight.
-    pub(crate) async fn dismiss_pending_pairing(&self) {
+    pub async fn dismiss_pending_pairing(&self) {
         let mut sign_in = self.sign_in.lock().await;
         let mut pending = self.pending_pairing.lock().await;
         if pending.is_none() {
@@ -160,16 +159,16 @@ impl GatewayRuntime {
     /// so an unmanaged profile reads no gateway whatever legacy rows
     /// persist, and a managed policy whose URL is missing (misconfigured)
     /// reads none, honestly.
-    pub(crate) async fn status(&self) -> Result<GatewayStatus> {
+    pub async fn status(&self) -> Result<GatewayStatus> {
         // One policy read for the whole projection: the renderer polls this
         // every couple of seconds while a sign-in is pending.
-        let policy = crate::managed_policy::resolve(&*self.provisioned_policy, &*self.os_policy)?;
+        let policy = self.policy()?;
         let base_url = policy.gateway_url.clone();
         let credentials = match self.connection_for(&policy).await? {
             Some(connection) => connection.stored_credentials().await?,
             None => None,
         };
-        let snapshot = providers::gateway_snapshot_for_policy(&*self.store, &policy).await?;
+        let snapshot = self.model_state.snapshot(&policy).await?;
         Ok(GatewayStatus {
             base_url,
             signed_in: credentials.is_some(),
@@ -200,7 +199,7 @@ impl GatewayRuntime {
     /// older than the field, a gateway that does not answer. The value is a
     /// hint for a text field and never authorization: attaching still runs
     /// discovery, which holds the machine to naming this same gateway.
-    pub(crate) async fn offered_machine(&self) -> GatewayMachineOffer {
+    pub async fn offered_machine(&self) -> GatewayMachineOffer {
         GatewayMachineOffer {
             url: self.read_offered_machine().await,
         }
@@ -252,9 +251,9 @@ impl GatewayRuntime {
     /// stored (after any pairing commit), the entitled models synced, and the
     /// entitled MCP endpoints auto-mounted into `mcp`; on failure the status
     /// surface carries the bounded error until the next attempt.
-    pub(crate) async fn begin_sign_in(
+    pub async fn begin_sign_in(
         self: &Arc<Self>,
-        mcp: Arc<crate::mcp_config::McpRuntime>,
+        mcp: Arc<dyn GatewayMcpControl>,
     ) -> Result<String> {
         let policy = self.policy()?;
         let pairing = self.pending_pairing.lock().await.clone();
@@ -264,6 +263,10 @@ impl GatewayRuntime {
         };
         let pending = connection.auth().start_sign_in().await?;
         let authorization_url = pending.authorization_url().to_string();
+        let mcp = pairing
+            .as_ref()
+            .map(|pending| pending.mcp.clone())
+            .unwrap_or(mcp);
         let generation = {
             let mut sign_in = self.sign_in.lock().await;
             let generation = self
@@ -304,7 +307,7 @@ impl GatewayRuntime {
             // pairing lock before sign-in state also matches registration and
             // deprovision, avoiding the former sign-in/pairing inversion.
             let _authority = runtime.lock_model_authority_mutation().await;
-            let _pairing = crate::pairing::lock_pairing_mutation().await;
+            let _pairing = GATEWAY_PAIRING_WRITES.lock().await;
             let mut sign_in = runtime.sign_in.lock().await;
             if runtime
                 .sign_in_generation
@@ -354,7 +357,7 @@ impl GatewayRuntime {
                     error.message()
                 );
             }
-            if let Err(error) = runtime.reconcile_endpoint_mounts(&mcp).await {
+            if let Err(error) = runtime.reconcile_endpoint_mounts(&*mcp).await {
                 tracing::warn!(
                     "gateway endpoint auto-mount after sign-in failed \
                      (the background sync will retry): {error}"
@@ -369,15 +372,10 @@ impl GatewayRuntime {
     /// Runs from the exchange task with the sign-in state lock held, so it
     /// cannot interleave with a dismissal or re-registration.
     pub(super) async fn commit_pairing_locked(&self, pending: &PendingPairing) -> Result<()> {
-        crate::pairing::commit_signed_in_pairing_locked(
-            &*self.provisioned_policy,
-            &*self.os_policy,
-            self.secrets.clone(),
-            &pending.mcp,
-            &pending.base_url,
-            pending.replaces.as_deref(),
-        )
-        .await?;
+        pending
+            .commit
+            .commit(&pending.base_url, pending.replaces.as_deref())
+            .await?;
         *self.pending_pairing.lock().await = None;
         Ok(())
     }
@@ -388,34 +386,26 @@ impl GatewayRuntime {
     /// after this guard, in that order. The owned guard lets pairing code hold
     /// the fence across its compare-and-swap and session retirement without
     /// exposing the lock itself.
-    pub(crate) async fn lock_model_authority_mutation(&self) -> OwnedRwLockWriteGuard<()> {
+    pub async fn lock_model_authority_mutation(&self) -> OwnedRwLockWriteGuard<()> {
         self.model_sync.clone().write_owned().await
     }
 
-    #[cfg(test)]
-    pub(crate) async fn commit_signed_in_pairing_for_test(
+    #[doc(hidden)]
+    pub async fn commit_signed_in_pairing_for_test(
         &self,
-        mcp: &crate::mcp_config::McpRuntime,
+        commit: Arc<dyn GatewayPairingCommit>,
         base_url: &str,
         replaces: Option<&str>,
     ) -> Result<()> {
         let _authority = self.lock_model_authority_mutation().await;
-        let _pairing = crate::pairing::lock_pairing_mutation().await;
+        let _pairing = GATEWAY_PAIRING_WRITES.lock().await;
         let _sign_in = self.sign_in.lock().await;
-        crate::pairing::commit_signed_in_pairing_locked(
-            &*self.provisioned_policy,
-            &*self.os_policy,
-            self.secrets.clone(),
-            mcp,
-            base_url,
-            replaces,
-        )
-        .await
+        commit.commit(base_url, replaces).await
     }
 
     /// Revoke the session (best-effort at the gateway), clear local state, and
     /// drop the synced model snapshot. Managed-only, like sign-in.
-    pub(crate) async fn sign_out(&self) -> Result<()> {
+    pub async fn sign_out(&self) -> Result<()> {
         // Authority is always outermost: an already-authorized request leg
         // dispatches before this writer proceeds, while a later leg observes
         // the cleared session and snapshot. The sign-in state lock nests
@@ -429,7 +419,7 @@ impl GatewayRuntime {
         let mut sign_in = self.sign_in.lock().await;
         self.sign_in_generation
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let policy = crate::managed_policy::resolve(&*self.provisioned_policy, &*self.os_policy)?;
+        let policy = self.policy()?;
         let base_url = require_managed(&policy)?;
         self.connection_at(base_url.clone())
             .await?
@@ -440,14 +430,15 @@ impl GatewayRuntime {
             // it cannot land inside one of their recheck-and-write windows.
             // Lock order matches the sign-in task's sync path: the sign-in
             // state lock is already held, the snapshot lock nests inside it.
-            let _lock = providers::GATEWAY_STATE_WRITES.lock().await;
-            if !providers::gateway_models(&*self.store, &policy, None)
+            let _lock = GATEWAY_STATE_WRITES.lock().await;
+            if self
+                .model_state
+                .snapshot(&policy)
                 .await?
-                .is_empty()
+                .is_some_and(|snapshot| !snapshot.models.is_empty())
             {
-                providers::write_gateway_snapshot(
-                    &*self.store,
-                    &providers::GatewayModelSnapshot {
+                self.model_state
+                    .write_snapshot(&GatewayModelSnapshot {
                         gateway_url: base_url,
                         installation_id: None,
                         models: Vec::new(),
@@ -455,9 +446,8 @@ impl GatewayRuntime {
                         model_reasoning_efforts: Default::default(),
                         member_catalog: None,
                         catalog_etag: None,
-                    },
-                )
-                .await?;
+                    })
+                    .await?;
             }
         }
         *sign_in = SignInProgress::Idle;
@@ -469,7 +459,7 @@ impl GatewayRuntime {
     /// that completes afterwards serializes behind the state lock, observes
     /// the generation bump, and abandons rather than re-saving the session
     /// it just minted.
-    pub(crate) async fn abandon_sign_in_and_pairing(&self) {
+    pub async fn abandon_sign_in_and_pairing(&self) {
         let mut sign_in = self.sign_in.lock().await;
         self.sign_in_generation
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -483,7 +473,7 @@ impl GatewayRuntime {
     /// revoked (best-effort) and cleared (unconditionally). Thin wrapper so
     /// callers without the secrets handle can reach
     /// [`retire_superseded_gateway_session`].
-    pub(crate) async fn retire_session_for_current_policy(
+    pub async fn retire_session_for_current_policy(
         &self,
         _authority: &OwnedRwLockWriteGuard<()>,
     ) -> Result<()> {
@@ -498,8 +488,8 @@ impl GatewayRuntime {
     /// retired provider row was renderer-writable while unmanaged, so
     /// honoring it here would let a pre-provisioning write redirect sign-in
     /// and every minted bearer; it is never read.
-    pub(crate) async fn connection(&self) -> Result<Option<Arc<GatewayConnection>>> {
-        let policy = crate::managed_policy::resolve(&*self.provisioned_policy, &*self.os_policy)?;
+    pub async fn connection(&self) -> Result<Option<Arc<GatewayConnection>>> {
+        let policy = self.policy()?;
         self.connection_for(&policy).await
     }
 
@@ -507,7 +497,7 @@ impl GatewayRuntime {
     /// callers that have one in hand.
     pub(super) async fn connection_for(
         &self,
-        policy: &crate::managed_policy::ManagedPolicy,
+        policy: &GatewayPolicy,
     ) -> Result<Option<Arc<GatewayConnection>>> {
         let Some(base_url) = policy.gateway_url.clone().filter(|_| policy.managed) else {
             return Ok(None);
@@ -519,7 +509,7 @@ impl GatewayRuntime {
     /// profile is unmanaged: the sign-in surface (sign-in, sign-out, apps,
     /// model sync) exists only under managed policy.
     pub(super) async fn managed_connection(&self) -> Result<Arc<GatewayConnection>> {
-        let policy = crate::managed_policy::resolve(&*self.provisioned_policy, &*self.os_policy)?;
+        let policy = self.policy()?;
         let base_url = require_managed(&policy)?;
         self.connection_at(base_url).await
     }
