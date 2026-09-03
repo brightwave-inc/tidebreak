@@ -1785,9 +1785,7 @@ async fn worker_renews_a_near_expiry_ambiguous_claim_before_execution() {
         send_message(&router, &bearer, chat.id, "renew before work").await,
         StatusCode::ACCEPTED
     );
-    tokio::time::timeout(Duration::from_secs(2), entered.notified())
-        .await
-        .expect("claim committed before its delayed response");
+    entered.notified().await;
     tokio::time::advance(Duration::from_millis(450)).await;
     release.notify_one();
     for _ in 0..100 {
@@ -1882,9 +1880,7 @@ async fn worker_heartbeats_while_event_journaling_is_blocked() {
         send_message(&router, &bearer, chat.id, "keep alive").await,
         StatusCode::ACCEPTED
     );
-    tokio::time::timeout(Duration::from_secs(2), entered.notified())
-        .await
-        .expect("worker reached the blocked event append");
+    entered.notified().await;
     tokio::time::advance(Duration::from_millis(400)).await;
     release.notify_one();
 

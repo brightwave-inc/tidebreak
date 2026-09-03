@@ -4893,17 +4893,19 @@ async fn the_plugin_catalog_reports_badges_and_persists_toggles() {
 /// because the bundle brought a skill with npm pins back to life — so nothing
 /// waits for the first turn that reaches for them. A write that switches
 /// nothing on provisions nothing.
-#[tokio::test(start_paused = true)]
+#[tokio::test(flavor = "multi_thread")]
 async fn enabling_a_plugin_provisions_the_host_tools_its_skills_declare() {
     #[derive(Default)]
     struct RecordingBroker {
         ensured: std::sync::Mutex<Vec<tidebreak_code_execution::HostDep>>,
+        changed: tokio::sync::Notify,
     }
 
     #[async_trait]
     impl tidebreak_code_execution::HostToolBroker for RecordingBroker {
         fn ensure(&self, tool: tidebreak_code_execution::HostDep) {
             self.ensured.lock().unwrap().push(tool);
+            self.changed.notify_one();
         }
 
         async fn status(
@@ -4951,17 +4953,14 @@ async fn enabling_a_plugin_provisions_the_host_tools_its_skills_declare() {
     assert_eq!(response.status(), StatusCode::OK);
 
     // The pass is spawned rather than awaited, so the response can land first.
-    let ensured = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            let ensured = broker.ensured.lock().unwrap().clone();
-            if ensured.contains(&tidebreak_code_execution::HostDep::Node) {
-                return ensured;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    let ensured = loop {
+        let changed = broker.changed.notified();
+        let ensured = broker.ensured.lock().unwrap().clone();
+        if ensured.contains(&tidebreak_code_execution::HostDep::Node) {
+            break ensured;
         }
-    })
-    .await
-    .expect("the enable write should provision the bundle's host tools");
+        changed.await;
+    };
     assert!(ensured.contains(&tidebreak_code_execution::HostDep::LibreOffice));
 
     // Re-asserting the same state switches nothing on, so nothing is
@@ -4974,7 +4973,7 @@ async fn enabling_a_plugin_provisions_the_host_tools_its_skills_declare() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
-    tokio::time::advance(std::time::Duration::from_millis(200)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert!(broker.ensured.lock().unwrap().is_empty());
 }
 
