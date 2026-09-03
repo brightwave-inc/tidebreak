@@ -27,7 +27,7 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 const EVENTS_TIMEOUT_SLACK: Duration = Duration::from_secs(15);
 
 /// The provisioning client for a gateway-confined sandbox.
-pub(crate) struct GatewayProvisioner {
+pub struct GatewayProvisioner {
     base_url: reqwest::Url,
     endpoint_slug: String,
     tokens: Arc<dyn RuntimeTokenSource>,
@@ -36,7 +36,7 @@ pub(crate) struct GatewayProvisioner {
 
 impl GatewayProvisioner {
     /// Builds a client against one gateway deployment and runtime endpoint.
-    pub(crate) fn new(
+    pub fn new(
         base_url: &str,
         endpoint_slug: &str,
         tokens: Arc<dyn RuntimeTokenSource>,

@@ -382,12 +382,8 @@ async fn expire_internal_turn_lease(
     Ok(())
 }
 
-/// Settle a session whose worker died with a turn still open: interrupt the
-/// turn, journal it, set needs-you, and go Idle, all in one fenced
-/// transaction — unless the engine declares durable parks and the open turn
-/// is waiting on a park, in which case the turn stays waiting so a restarted
-/// worker can resume it. Remote sessions reuse this when the sandbox ends
-/// beneath an unsettled turn.
+/// Settle a session whose worker died with a turn still open. Remote sessions
+/// use this when a sandbox ends beneath an unsettled turn.
 pub(crate) async fn recover_dead_worker(
     store: &DbStore,
     bus: &CodeEventBus,

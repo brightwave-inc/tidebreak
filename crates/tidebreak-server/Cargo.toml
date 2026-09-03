@@ -23,6 +23,7 @@ postgres = ["tidebreak-core/postgres", "sea-orm/sqlx-postgres", "tidebreak-core/
 [dependencies]
 tidebreak-shell-policy = { path = "../tidebreak-shell-policy" }
 tidebreak-code-execution = { path = "../tidebreak-code-execution" }
+tidebreak-code-remote = { path = "../tidebreak-code-remote" }
 tidebreak-harness = { path = "../tidebreak-harness" }
 tidebreak-managed-node = { path = "../tidebreak-managed-node" }
 # Default features on purpose: the server wants exactly core's default set

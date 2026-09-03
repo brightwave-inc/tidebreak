@@ -729,7 +729,7 @@ impl CodeRuntime {
             };
             let driver = remote.driver(&self.db, self.bus.as_ref());
             return driver.reap(session).await.map_err(|error| match error {
-                recovery::ReapSessionError::Store(error) => ServerError::from(error),
+                crate::code::remote::RemoteReapError::Store(error) => ServerError::from(error),
                 other => ServerError::conflict_kind("session_not_reaped", other.to_string()),
             });
         }
