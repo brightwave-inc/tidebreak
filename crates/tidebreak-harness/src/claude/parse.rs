@@ -338,7 +338,10 @@ impl ClaudeStreamParser {
                 }
                 Some("text") => {
                     let text = block.get("text").and_then(Value::as_str).unwrap_or("");
-                    if !text.is_empty() {
+                    // Claude presents a subagent's prompt as a nested user
+                    // message. It belongs to the parent Agent call; only a
+                    // top-level user message is steering from the person.
+                    if parent.is_none() && !text.is_empty() {
                         events.push(HarnessEvent::UserSteered {
                             text: bound(text, MAX_EVENT_TEXT_CHARS),
                         });

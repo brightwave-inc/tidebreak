@@ -692,6 +692,12 @@ mod tests {
             HarnessEvent::AssistantMessage { parent_call_id: Some(parent), .. }
                 if parent == "toolu_01TaskSpan"
         )));
+        assert!(
+            events
+                .iter()
+                .all(|event| !matches!(event, HarnessEvent::UserSteered { .. })),
+            "a subagent prompt must not read as user steering"
+        );
         // The Task's own result closes the span with no parent of its own.
         assert!(events.iter().any(|event| matches!(
             event,
