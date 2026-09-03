@@ -81,6 +81,7 @@ impl MigratorTrait for Migrator {
             Box::new(ReadyAgentRunWaitIndex),
             Box::new(ClientWaitVendorWebSearch),
             Box::new(RestoreTurnClaimIndexes),
+            Box::new(PendingPromptIndexes),
         ]
     }
 }
@@ -4592,6 +4593,44 @@ impl MigrationTrait for RestoreTurnClaimIndexes {
         // PostgreSQL already owns these indexes through the one-turn-lane
         // migration. A rollback must not remove required claim-path indexes
         // from either backend.
+        Ok(())
+    }
+}
+
+/// Keep the cross-chat pending-prompt projection on its unresolved rows.
+struct PendingPromptIndexes;
+
+impl MigrationName for PendingPromptIndexes {
+    fn name(&self) -> &str {
+        "m20260903_000005_pending_prompt_indexes"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for PendingPromptIndexes {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(
+                r#"CREATE INDEX IF NOT EXISTS "idx_tool_call_pending_prompt"
+                       ON "tool_call" ("execution", "name", "chat_id", "history_order", "id")
+                       WHERE "status" = 'pending';
+                   CREATE INDEX IF NOT EXISTS "idx_code_approval_pending_prompt"
+                       ON "code_approval" ("session_id", "requested_at", "id")
+                       WHERE "state" = 'pending'"#,
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(
+                r#"DROP INDEX IF EXISTS "idx_tool_call_pending_prompt";
+                   DROP INDEX IF EXISTS "idx_code_approval_pending_prompt""#,
+            )
+            .await?;
         Ok(())
     }
 }

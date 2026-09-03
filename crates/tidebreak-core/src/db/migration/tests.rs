@@ -85,6 +85,7 @@ async fn a_fresh_database_records_the_whole_chain() {
             "m20260903_000002_ready_agent_run_wait_index",
             "m20260903_000003_client_wait_vendor_web_search",
             "m20260903_000004_restore_turn_claim_indexes",
+            "m20260903_000005_pending_prompt_indexes",
         ]
     );
     assert!(db
@@ -154,6 +155,80 @@ async fn turn_claim_indexes_reach_existing_sqlite_databases() {
         assert!(
             plan.contains(index),
             "the turn claim scan must use {index}:\n{plan}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn pending_prompt_indexes_reach_existing_sqlite_databases() {
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    Migrator::up(
+        &db,
+        Some(steps_before("m20260903_000005_pending_prompt_indexes")),
+    )
+    .await
+    .unwrap();
+
+    for index in [
+        "idx_tool_call_pending_prompt",
+        "idx_code_approval_pending_prompt",
+    ] {
+        let missing = db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                format!(
+                    "SELECT 1 AS present FROM sqlite_master \
+                     WHERE type = 'index' AND name = '{index}'"
+                ),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            missing.is_none(),
+            "the pre-repair schema already has {index}"
+        );
+    }
+
+    Migrator::up(&db, None).await.unwrap();
+
+    for (index, query) in [
+        (
+            "idx_tool_call_pending_prompt",
+            "SELECT * FROM tool_call \
+             WHERE name = 'ask_user_questions' \
+               AND execution = 'orchestration' AND status = 'pending'",
+        ),
+        (
+            "idx_tool_call_pending_prompt",
+            "SELECT * FROM tool_call \
+             WHERE name = 'request_folder_access' \
+               AND execution = 'client' AND status = 'pending' \
+             ORDER BY chat_id, history_order",
+        ),
+        (
+            "idx_code_approval_pending_prompt",
+            "SELECT * FROM code_approval WHERE state = 'pending' \
+             ORDER BY session_id, requested_at, id",
+        ),
+    ] {
+        let plan = db
+            .query_all_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                format!("EXPLAIN QUERY PLAN {query}"),
+            ))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.try_get::<String>("", "detail").unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            plan.contains(index),
+            "the pending prompt projection must use {index}:\n{plan}"
+        );
+        assert!(
+            !plan.contains("USE TEMP B-TREE"),
+            "the pending prompt projection must preserve index order:\n{plan}"
         );
     }
 }
