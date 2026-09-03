@@ -687,12 +687,10 @@ test("Windows cargo check and native tests run in parallel scoped jobs", () => {
     /cancel-in-progress/,
     "cancelling this lane reddens a commit whose own checks all passed",
   );
-  assert.match(windowsCheck, /SCCACHE_GHA_ENABLED: "true"/);
-  assert.match(windowsCheck, /SCCACHE_GHA_RW_MODE: READ_WRITE/);
   assert.match(windowsCheck, /RUSTC_WRAPPER: sccache/);
   assert.match(
     windowsCheck,
-    /uses: mozilla-actions\/sccache-action@[0-9a-f]{40}/,
+    /uses: (?:mozilla-actions\/sccache-action@[0-9a-f]{40}|\.\/\.github\/actions\/setup-sccache-s3)/,
   );
 
   assert.match(windowsNative, /name: Windows native tests/);
@@ -702,12 +700,10 @@ test("Windows cargo check and native tests run in parallel scoped jobs", () => {
     /if: \$\{\{ needs\.changes\.outputs\.windows_native == 'true' \}\}/,
   );
   assert.match(windowsNative, /vars\.CI_WINDOWS_RUNNER \|\| 'windows-latest'/);
-  assert.match(windowsNative, /SCCACHE_GHA_ENABLED: "true"/);
-  assert.match(windowsNative, /SCCACHE_GHA_RW_MODE: READ_WRITE/);
   assert.match(windowsNative, /RUSTC_WRAPPER: sccache/);
   assert.match(
     windowsNative,
-    /uses: mozilla-actions\/sccache-action@[0-9a-f]{40}/,
+    /uses: (?:mozilla-actions\/sccache-action@[0-9a-f]{40}|\.\/\.github\/actions\/setup-sccache-s3)/,
   );
   assert.match(windowsNative, /uses: Swatinem\/rust-cache@[0-9a-f]{40}/);
   assert.match(windowsNative, /Host broker Windows tests/);
@@ -767,34 +763,61 @@ test("UI tests and production build each gate the UI lane", () => {
   assert.doesNotMatch(ci, /matrix\.task/);
 });
 
-test("PR compiler caches are writable, isolated, and deleted on close", () => {
+test("compiler caches use the approved GitHub or S3 backend", () => {
   const ci = workflows["ci.yml"];
-  for (const name of [
+  const compilerJobs = [
     "lint",
     "desktop",
     "windows-check",
+    "windows-native",
     "test",
     "postgres",
-  ]) {
-    assert.match(workflowJob(ci, name), /SCCACHE_GHA_RW_MODE: READ_WRITE/);
+    "self-host-build",
+  ];
+  const usesS3 = ci.includes("uses: ./.github/actions/setup-sccache-s3");
+
+  for (const name of compilerJobs) {
+    const job = workflowJob(ci, name);
+    assert.match(job, /RUSTC_WRAPPER: sccache/);
+    if (usesS3) {
+      assert.match(job, /permissions:\n      contents: read\n      id-token: write/);
+      assert.match(job, /uses: \.\/\.github\/actions\/setup-sccache-s3/);
+      assert.ok(
+        job.includes(
+          "access: ${{ github.event_name == 'pull_request' && 'read' || 'write' }}",
+        ),
+        `${name} must keep pull requests read-only`,
+      );
+      assert.ok(
+        job.includes(
+          "remote-cache-enabled: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}",
+        ),
+        `${name} must keep fork pull requests off the remote cache`,
+      );
+      assert.doesNotMatch(job, /SCCACHE_GHA_/);
+    } else {
+      assert.match(job, /SCCACHE_GHA_ENABLED: "true"/);
+      assert.match(job, /SCCACHE_GHA_RW_MODE: READ_WRITE/);
+      assert.match(job, /uses: mozilla-actions\/sccache-action@[0-9a-f]{40}/);
+    }
   }
-  assert.doesNotMatch(
-    ci,
-    /github\.event_name == 'pull_request' && 'READ_ONLY' \|\| 'READ_WRITE'/,
-  );
 
   const cleanup = workflows["cache-cleanup.yml"];
-  assert.ok(cleanup);
-  assert.match(
-    cleanup,
-    /^on:\n(?:  #.*\n)+  pull_request_target:\n    types: \[closed\]/m,
-  );
-  assert.match(cleanup, /^permissions:\n  actions: write\n  contents: read$/m);
-  assert.match(
-    cleanup,
-    /gh cache delete --repo "\$GITHUB_REPOSITORY"\n\s+--all --succeed-on-no-caches\n\s+--ref "refs\/pull\/\$\{PR_NUMBER\}\/merge"/,
-  );
-  assert.doesNotMatch(cleanup, /actions\/checkout|secrets\./);
+  if (usesS3) {
+    assert.equal(cleanup, undefined);
+  } else {
+    assert.ok(cleanup);
+    assert.match(
+      cleanup,
+      /^on:\n(?:  #.*\n)+  pull_request_target:\n    types: \[closed\]/m,
+    );
+    assert.match(cleanup, /^permissions:\n  actions: write\n  contents: read$/m);
+    assert.match(
+      cleanup,
+      /gh cache delete --repo "\$GITHUB_REPOSITORY"\n\s+--all --succeed-on-no-caches\n\s+--ref "refs\/pull\/\$\{PR_NUMBER\}\/merge"/,
+    );
+    assert.doesNotMatch(cleanup, /actions\/checkout|secrets\./);
+  }
 });
 
 test("production secrets remain isolated to the release workflow", () => {
