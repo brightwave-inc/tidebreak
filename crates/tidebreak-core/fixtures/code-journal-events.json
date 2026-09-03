@@ -136,9 +136,10 @@
     },
     "refusal": {
       "details": {
-        "category": "cyber"
+        "category": "blocked"
       },
-      "partial_output": true
+      "partial_output": true,
+      "source": "report_blocked"
     }
   },
   {

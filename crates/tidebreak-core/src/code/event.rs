@@ -773,10 +773,7 @@ mod tests {
                     context_tokens: 0,
                     first_call_context_tokens: None,
                 },
-                refusal: RefusalOutcome::new(
-                    crate::provider::RefusalDetails::from_category(Some("cyber")),
-                    true,
-                ),
+                refusal: RefusalOutcome::report_blocked(),
             },
             CodeEvent::StreamInterrupted,
             CodeEvent::ToolArgsDelta {

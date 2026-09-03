@@ -726,11 +726,26 @@ impl<'de> Deserialize<'de> for RefusalDetails {
     }
 }
 
+/// The Tidebreak-owned source of a refusal, when one exists.
+///
+/// Provider refusals leave this absent. Keeping the field optional preserves
+/// journal rows written before Tidebreak recorded its own terminal blockers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RefusalSource {
+    /// The foreground model ended the turn through `report_blocked`.
+    ReportBlocked,
+}
+
 /// Durable outcome metadata for a refused completion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 pub struct RefusalOutcome {
     details: RefusalDetails,
     partial_output: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    source: Option<RefusalSource>,
 }
 
 impl RefusalOutcome {
@@ -740,6 +755,17 @@ impl RefusalOutcome {
         Self {
             details,
             partial_output,
+            source: None,
+        }
+    }
+
+    /// Build the terminal refusal produced by a valid `report_blocked` call.
+    #[must_use]
+    pub fn report_blocked() -> Self {
+        Self {
+            details: RefusalDetails::from_category(Some("blocked")),
+            partial_output: true,
+            source: Some(RefusalSource::ReportBlocked),
         }
     }
 
@@ -753,6 +779,13 @@ impl RefusalOutcome {
     #[must_use]
     pub fn partial_output(&self) -> bool {
         self.partial_output
+    }
+
+    /// Return the Tidebreak-owned source, if this refusal did not come from
+    /// the provider.
+    #[must_use]
+    pub fn source(&self) -> Option<RefusalSource> {
+        self.source
     }
 }
 

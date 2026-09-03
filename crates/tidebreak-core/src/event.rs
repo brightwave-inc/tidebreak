@@ -407,10 +407,7 @@ mod tests {
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                 },
-                refusal: RefusalOutcome::new(
-                    crate::provider::RefusalDetails::from_category(Some("cyber")),
-                    true,
-                ),
+                refusal: RefusalOutcome::report_blocked(),
             },
             AgentEvent::TurnFailed {
                 error: (&AgentError::config("no provider")).into(),

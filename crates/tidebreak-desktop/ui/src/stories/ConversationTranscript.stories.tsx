@@ -248,6 +248,30 @@ const failureMessages: ChatMessage[] = [
   },
 ];
 
+const blockedMessages: ChatMessage[] = [
+  {
+    id: "blocked-user",
+    role: "user",
+    text: "Run the required browser smoke check and save the results.",
+    invokedSkills: ["browser"],
+    createdAt: "2026-09-03T04:44:00.000Z",
+  },
+  {
+    id: "blocked-assistant",
+    role: "assistant",
+    text: "No browser is connected to this Tidebreak profile, so I could not run the required smoke check or save its results.",
+    sources: [],
+    createdAt: "2026-09-03T04:45:00.000Z",
+  },
+  {
+    id: "blocked-refusal",
+    role: "refusal",
+    category: "blocked",
+    partialOutput: true,
+    source: "report_blocked",
+  },
+];
+
 const denseMessages: ChatMessage[] = [
   {
     id: "dense-user-1",
@@ -396,6 +420,11 @@ export const ToolHeavySession: Story = {};
 
 export const RetryableFailure: Story = {
   args: { messages: failureMessages },
+};
+
+/** An operational blocker stays distinct from a provider safety refusal. */
+export const BlockedTurn: Story = {
+  args: { messages: blockedMessages },
 };
 
 export const DenseLongRunningSession: Story = {

@@ -482,6 +482,7 @@ export function reduceChatSessionEvent(
               role: "refusal",
               category: event.refusal.category,
               partialOutput: event.refusal.partial_output,
+              source: event.refusal.source,
             },
           ],
         },

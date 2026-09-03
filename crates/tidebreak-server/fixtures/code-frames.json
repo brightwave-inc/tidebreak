@@ -1046,9 +1046,10 @@
       "event": {
         "refusal": {
           "details": {
-            "category": "safety"
+            "category": "blocked"
           },
-          "partial_output": true
+          "partial_output": true,
+          "source": "report_blocked"
         },
         "type": "turn_refused",
         "usage": {

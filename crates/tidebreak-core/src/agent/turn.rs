@@ -23,7 +23,7 @@ use crate::model::{
 use crate::preview::ToolResultPreview;
 use crate::provider::{
     ChatMessage, ChatRequest, ContentBlock, MessageReasoning, ModelProvider, ProviderEvent,
-    ReasoningOrigin, RefusalDetails, RefusalOutcome, StopReason, Usage,
+    ReasoningOrigin, RefusalOutcome, StopReason, Usage,
 };
 use crate::steer::SteerInbox;
 use crate::storage::{
@@ -893,10 +893,7 @@ impl Agent {
                     citations: Vec::new(),
                     usage: total_usage,
                     stop_reason: StopReason::Refusal,
-                    refusal: Some(RefusalOutcome::new(
-                        RefusalDetails::from_category(Some("blocked")),
-                        true,
-                    )),
+                    refusal: Some(RefusalOutcome::report_blocked()),
                     steer_revision: Some(steer_revision),
                     model_steps: steps_used,
                 });

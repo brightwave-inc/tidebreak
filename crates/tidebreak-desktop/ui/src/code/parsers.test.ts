@@ -1113,9 +1113,19 @@ describe("parseCodeEvent", () => {
     const refused = {
       type: "turn_refused",
       usage,
-      refusal: { details: { category: "cyber" }, partial_output: true },
+      refusal: {
+        details: { category: "blocked" },
+        partial_output: true,
+        source: "report_blocked",
+      },
     };
     expect(parseCodeEvent(refused)).toEqual(refused);
+    expect(
+      parseCodeEvent({
+        ...refused,
+        refusal: { ...refused.refusal, source: "provider" },
+      }),
+    ).toBeNull();
     expect(
       parseCodeEvent({
         ...refused,

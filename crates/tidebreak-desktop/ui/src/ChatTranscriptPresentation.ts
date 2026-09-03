@@ -148,6 +148,7 @@ export function presentChatTranscript(
             role: "refusal",
             category: entry.refusal.category,
             partialOutput: entry.refusal.partial_output,
+            source: entry.refusal.source,
           } satisfies ChatMessage,
         ];
       }

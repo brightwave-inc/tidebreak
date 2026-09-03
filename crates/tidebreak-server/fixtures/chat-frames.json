@@ -214,8 +214,9 @@
     "frame": {
       "event": {
         "refusal": {
-          "category": "safety",
-          "partial_output": true
+          "category": "blocked",
+          "partial_output": true,
+          "source": "report_blocked"
         },
         "type": "turn_refused",
         "usage": {
