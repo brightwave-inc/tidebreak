@@ -797,7 +797,20 @@ function main(argv) {
   );
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+// Run `main` only when this file is the entry point. Compare real paths so a
+// checkout reached through a symlink (hosted runners expose the workspace
+// under one) still matches the module's own resolved location.
+function isEntryPoint() {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isEntryPoint()) {
   try {
     main(process.argv.slice(2));
   } catch (error) {
