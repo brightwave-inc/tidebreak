@@ -1132,30 +1132,8 @@ pub(in crate::db) async fn list_sandbox_tool_call_candidates(
         ));
     }
     let now = database_now(&store.conn).await?;
-    entities::sandbox_tool_call::Entity::find()
-        .filter(
-            sea_orm::Condition::any()
-                .add(
-                    entities::sandbox_tool_call::Column::Status
-                        .eq(SandboxToolCallStatus::Accepted.as_str()),
-                )
-                .add(
-                    entities::sandbox_tool_call::Column::Status
-                        .eq(SandboxToolCallStatus::Claimed.as_str())
-                        .and(entities::sandbox_tool_call::Column::ExecutorLeaseExpiresAt.lte(now)),
-                )
-                .add(
-                    entities::sandbox_tool_call::Column::Status
-                        .eq(SandboxToolCallStatus::RetryWait.as_str())
-                        .and(entities::sandbox_tool_call::Column::RetryAt.lte(now)),
-                ),
-        )
-        .order_by_asc(entities::sandbox_tool_call::Column::CreatedAt)
-        .order_by_asc(entities::sandbox_tool_call::Column::Id)
-        .limit(limit)
-        .all(&store.conn)
-        .await
-        .map_err(store_err)?
+    list_sandbox_tool_call_candidate_models(store, None, now, limit)
+        .await?
         .into_iter()
         .map(call_from_model)
         .collect()
@@ -1175,34 +1153,63 @@ pub(in crate::db) async fn list_sandbox_tool_call_candidates_named(
         ));
     }
     let now = database_now(&store.conn).await?;
-    entities::sandbox_tool_call::Entity::find()
-        .filter(entities::sandbox_tool_call::Column::Name.eq(name))
-        .filter(
-            sea_orm::Condition::any()
-                .add(
-                    entities::sandbox_tool_call::Column::Status
-                        .eq(SandboxToolCallStatus::Accepted.as_str()),
-                )
-                .add(
-                    entities::sandbox_tool_call::Column::Status
-                        .eq(SandboxToolCallStatus::Claimed.as_str())
-                        .and(entities::sandbox_tool_call::Column::ExecutorLeaseExpiresAt.lte(now)),
-                )
-                .add(
-                    entities::sandbox_tool_call::Column::Status
-                        .eq(SandboxToolCallStatus::RetryWait.as_str())
-                        .and(entities::sandbox_tool_call::Column::RetryAt.lte(now)),
-                ),
-        )
-        .order_by_asc(entities::sandbox_tool_call::Column::CreatedAt)
-        .order_by_asc(entities::sandbox_tool_call::Column::Id)
-        .limit(limit)
-        .all(&store.conn)
-        .await
-        .map_err(store_err)?
+    list_sandbox_tool_call_candidate_models(store, Some(name), now, limit)
+        .await?
         .into_iter()
         .map(call_from_model)
         .collect()
+}
+
+/// Read each claimable state through its own index, then restore the one
+/// oldest-first order shared by all executor lanes. Fetching `limit` rows per
+/// state is sufficient: no row after a state's first `limit` can enter the
+/// first `limit` rows of the merged result.
+async fn list_sandbox_tool_call_candidate_models(
+    store: &DbStore,
+    name: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+    limit: u64,
+) -> Result<Vec<entities::sandbox_tool_call::Model>> {
+    let branch = |condition| {
+        let mut query = entities::sandbox_tool_call::Entity::find().filter(condition);
+        if let Some(name) = name {
+            query = query.filter(entities::sandbox_tool_call::Column::Name.eq(name));
+        }
+        query
+            .order_by_asc(entities::sandbox_tool_call::Column::CreatedAt)
+            .order_by_asc(entities::sandbox_tool_call::Column::Id)
+            .limit(limit)
+    };
+    let accepted = branch(
+        entities::sandbox_tool_call::Column::Status.eq(SandboxToolCallStatus::Accepted.as_str()),
+    )
+    .all(&store.conn);
+    let expired_claims = branch(
+        entities::sandbox_tool_call::Column::Status
+            .eq(SandboxToolCallStatus::Claimed.as_str())
+            .and(entities::sandbox_tool_call::Column::ExecutorLeaseExpiresAt.lte(now)),
+    )
+    .all(&store.conn);
+    let due_retries = branch(
+        entities::sandbox_tool_call::Column::Status
+            .eq(SandboxToolCallStatus::RetryWait.as_str())
+            .and(entities::sandbox_tool_call::Column::RetryAt.lte(now)),
+    )
+    .all(&store.conn);
+    let (accepted, expired_claims, due_retries) =
+        tokio::try_join!(accepted, expired_claims, due_retries).map_err(store_err)?;
+    let mut candidates =
+        Vec::with_capacity(accepted.len() + expired_claims.len() + due_retries.len());
+    candidates.extend(accepted);
+    candidates.extend(expired_claims);
+    candidates.extend(due_retries);
+    candidates.sort_unstable_by(|left, right| {
+        left.created_at
+            .cmp(&right.created_at)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    candidates.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+    Ok(candidates)
 }
 
 /// Terminalize accepted or expired claimed work in the same transaction that

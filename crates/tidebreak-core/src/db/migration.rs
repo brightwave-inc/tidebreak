@@ -82,6 +82,7 @@ impl MigratorTrait for Migrator {
             Box::new(ClientWaitVendorWebSearch),
             Box::new(RestoreTurnClaimIndexes),
             Box::new(PendingPromptIndexes),
+            Box::new(SandboxToolRecoveryIndexes),
         ]
     }
 }
@@ -4629,6 +4630,60 @@ impl MigrationTrait for PendingPromptIndexes {
             .execute_unprepared(
                 r#"DROP INDEX IF EXISTS "idx_tool_call_pending_prompt";
                    DROP INDEX IF EXISTS "idx_code_approval_pending_prompt""#,
+            )
+            .await?;
+        Ok(())
+    }
+}
+
+/// Keep each sandbox executor on the small branch it can claim.
+struct SandboxToolRecoveryIndexes;
+
+impl MigrationName for SandboxToolRecoveryIndexes {
+    fn name(&self) -> &str {
+        "m20260903_000006_sandbox_tool_recovery_indexes"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for SandboxToolRecoveryIndexes {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(
+                r#"CREATE INDEX IF NOT EXISTS "idx_sandbox_tool_call_accepted"
+                       ON "sandbox_tool_call" ("status", "created_at", "id")
+                       WHERE "status" = 'accepted';
+                   CREATE INDEX IF NOT EXISTS "idx_sandbox_tool_call_retry"
+                       ON "sandbox_tool_call" ("status", "retry_at", "created_at", "id")
+                       WHERE "status" = 'retry_wait';
+                   CREATE INDEX IF NOT EXISTS "idx_sandbox_tool_call_named_accepted"
+                       ON "sandbox_tool_call" ("name", "status", "created_at", "id")
+                       WHERE "status" = 'accepted';
+                   CREATE INDEX IF NOT EXISTS "idx_sandbox_tool_call_named_claim_recovery"
+                       ON "sandbox_tool_call" (
+                           "name", "status", "executor_lease_expires_at", "created_at", "id"
+                       )
+                       WHERE "status" = 'claimed';
+                   CREATE INDEX IF NOT EXISTS "idx_sandbox_tool_call_named_retry"
+                       ON "sandbox_tool_call" (
+                           "name", "status", "retry_at", "created_at", "id"
+                       )
+                       WHERE "status" = 'retry_wait'"#,
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(
+                r#"DROP INDEX IF EXISTS "idx_sandbox_tool_call_accepted";
+                   DROP INDEX IF EXISTS "idx_sandbox_tool_call_retry";
+                   DROP INDEX IF EXISTS "idx_sandbox_tool_call_named_accepted";
+                   DROP INDEX IF EXISTS "idx_sandbox_tool_call_named_claim_recovery";
+                   DROP INDEX IF EXISTS "idx_sandbox_tool_call_named_retry""#,
             )
             .await?;
         Ok(())
