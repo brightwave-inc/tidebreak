@@ -200,10 +200,11 @@ describe("consoleSignInUrl", () => {
   });
 
   it("asks for no return path from the root", () => {
-    const win = { location: { pathname: "/", search: "" } } as unknown as Window;
+    const win = {
+      location: { pathname: "/", search: "" },
+    } as unknown as Window;
     expect(consoleSignInUrl("https://gateway.example.test", win)).toBe(
       "https://gateway.example.test/tidebreak",
     );
   });
 });
-

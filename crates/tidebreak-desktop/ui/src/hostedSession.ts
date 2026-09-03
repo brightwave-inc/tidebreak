@@ -106,4 +106,3 @@ export function consoleSignInUrl(
     ? base
     : `${base}?return_to=${encodeURIComponent(here)}`;
 }
-
