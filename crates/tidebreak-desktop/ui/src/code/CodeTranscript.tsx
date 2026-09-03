@@ -197,7 +197,10 @@ export function CodeTranscript({
     const stored = item.turnId
       ? storedRecapsByTurn.get(item.turnId)
       : undefined;
-    const fallback = item.id === newestBoundaryId ? recap?.trim() : undefined;
+    const fallback =
+      item.id === newestBoundaryId && item.status !== "failed"
+        ? recap?.trim()
+        : undefined;
     const displayed = stored ?? fallback;
     if (displayed) recapByBoundary.set(item.id, displayed);
   }

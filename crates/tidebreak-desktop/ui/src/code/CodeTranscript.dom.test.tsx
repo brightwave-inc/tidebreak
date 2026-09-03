@@ -1215,6 +1215,33 @@ describe("CodeTranscript", () => {
     ).toBeInTheDocument();
   });
 
+  it("keeps the fallback recap off a failed turn", () => {
+    const recap = "Audit of UI refresh gaps is done and the socket moved.";
+    render(
+      <CodeTranscript
+        recap={recap}
+        items={[
+          {
+            kind: "turn_boundary",
+            id: "b1",
+            turnId: "t1",
+            status: "failed",
+            durationMs: 4_000,
+            usage: null,
+            error:
+              "Selected model is at capacity. Please try a different model.",
+            diffstat: null,
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Selected model is at capacity.",
+    );
+    expect(screen.queryByText(recap)).not.toBeInTheDocument();
+  });
+
   it("keeps the original closing message and shows the recap under the boundary", () => {
     const original = "Workspace switching now reuses recent transcript stores.";
     const rewrite =
