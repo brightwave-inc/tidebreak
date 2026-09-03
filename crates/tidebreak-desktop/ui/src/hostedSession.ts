@@ -88,3 +88,22 @@ export function resetHostedSessionForTests(): void {
   failure = null;
   session = null;
 }
+
+/**
+ * Where the console signs a reader in and sends them back to this page:
+ * the console's Tidebreak page with this page's path as `return_to`, which
+ * the hand-off carries through to the landing route. A connect card's
+ * approval page survives the round trip this way; the root asks for no
+ * return path at all.
+ */
+export function consoleSignInUrl(
+  gatewayUrl: string,
+  win: Pick<Window, "location"> = window,
+): string {
+  const base = `${gatewayUrl.replace(/\/+$/, "")}/tidebreak`;
+  const here = `${win.location.pathname}${win.location.search}`;
+  return here === "/" || here === ""
+    ? base
+    : `${base}?return_to=${encodeURIComponent(here)}`;
+}
+

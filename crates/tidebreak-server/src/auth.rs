@@ -226,6 +226,27 @@ pub(crate) async fn discovery(State(state): State<AppState>) -> Json<AuthDiscove
 pub(crate) struct HandoffQuery {
     #[serde(default)]
     code: String,
+    /// Where on this machine the page should land once signed in — the
+    /// path a connect card or a deep link brought the reader to before the
+    /// console signed them in. Optional; the root when absent or refused.
+    #[serde(default)]
+    return_to: Option<String>,
+}
+
+/// A return path is a same-origin path: it starts with one slash, carries no
+/// scheme or authority (so no `//host`), no fragment (the bearer rides
+/// there), and no control bytes. Anything else lands on the root instead of
+/// refusing the sign-in — the path is a convenience, the bearer is the point.
+fn handoff_return_path(raw: Option<&str>) -> &str {
+    raw.filter(|path| {
+        path.starts_with('/')
+            && !path.starts_with("//")
+            && !path.starts_with("/\\")
+            && path.len() <= 4096
+            && !path.contains('#')
+            && !path.bytes().any(|byte| byte.is_ascii_control())
+    })
+    .unwrap_or("/")
 }
 
 /// The URL-safe alphabet both a handoff code and a bearer are drawn from.
@@ -251,17 +272,17 @@ fn handoff_landing(state: &AppState) -> String {
         .unwrap_or_default()
 }
 
-/// A `302` to the landing page carrying `fragment` after `#`.
+/// A `302` to `path` on the landing origin carrying `fragment` after `#`.
 ///
 /// The fragment is the one carrier a bearer may ride in: a browser never
 /// sends it to a server, so it is in no access log, and the page clears it
 /// before the router sees it. `no-store` keeps the redirect itself out of a
 /// cache that could replay it.
-fn handoff_redirect(landing: &str, fragment: &str) -> Response {
+fn handoff_redirect(landing: &str, path: &str, fragment: &str) -> Response {
     (
         StatusCode::FOUND,
         [
-            (LOCATION, format!("{landing}/#{fragment}")),
+            (LOCATION, format!("{landing}{path}#{fragment}")),
             (CACHE_CONTROL, "no-store".to_owned()),
             (REFERRER_POLICY, "no-referrer".to_owned()),
         ],
@@ -291,12 +312,19 @@ pub(crate) async fn handoff(
     let landing = handoff_landing(&state);
     let code = query.code.trim();
     if !handoff_code_is_well_formed(code) {
-        return handoff_redirect(&landing, "handoff-failed=invalid");
+        return handoff_redirect(&landing, "/", "handoff-failed=invalid");
     }
+    // A granted bearer lands where the reader was headed; a failure lands
+    // on the root, where the sign-in screen words it.
+    let return_path = handoff_return_path(query.return_to.as_deref());
     match gateway.redeem_handoff(code).await {
-        HandoffOutcome::Granted(bearer) => handoff_redirect(&landing, &format!("handoff={bearer}")),
-        HandoffOutcome::Refused => handoff_redirect(&landing, "handoff-failed=expired"),
-        HandoffOutcome::Unavailable => handoff_redirect(&landing, "handoff-failed=unavailable"),
+        HandoffOutcome::Granted(bearer) => {
+            handoff_redirect(&landing, return_path, &format!("handoff={bearer}"))
+        }
+        HandoffOutcome::Refused => handoff_redirect(&landing, "/", "handoff-failed=expired"),
+        HandoffOutcome::Unavailable => {
+            handoff_redirect(&landing, "/", "handoff-failed=unavailable")
+        }
     }
 }
 

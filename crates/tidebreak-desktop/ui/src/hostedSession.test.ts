@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { HostedSignInRequired, hostedServerInfo } from "./boot";
 import {
   captureHandoffToken,
+  consoleSignInUrl,
   handoffBearer,
   handoffFailure,
   hostedSession,
@@ -187,3 +188,22 @@ describe("the hosted boot branch", () => {
     });
   });
 });
+
+describe("consoleSignInUrl", () => {
+  it("sends the reader to the console's Tidebreak page with this page as the return path", () => {
+    const win = {
+      location: { pathname: "/connect/nonce-1", search: "?source=slack" },
+    } as unknown as Window;
+    expect(consoleSignInUrl("https://gateway.example.test/", win)).toBe(
+      "https://gateway.example.test/tidebreak?return_to=%2Fconnect%2Fnonce-1%3Fsource%3Dslack",
+    );
+  });
+
+  it("asks for no return path from the root", () => {
+    const win = { location: { pathname: "/", search: "" } } as unknown as Window;
+    expect(consoleSignInUrl("https://gateway.example.test", win)).toBe(
+      "https://gateway.example.test/tidebreak",
+    );
+  });
+});
+

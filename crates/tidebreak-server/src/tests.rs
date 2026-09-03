@@ -2953,6 +2953,25 @@ async fn the_handoff_route_lands_the_page_with_the_bearer_in_the_fragment() {
         landed("?code=mg_ho_good").await,
         "https://machine.example.com/tidebreak/#handoff=mg_at_minted"
     );
+    // A return path lands the signed-in page where the reader was headed —
+    // a connect card's approval page — and only a same-origin path counts:
+    // an authority-shaped or fragment-carrying value falls back to the root.
+    assert_eq!(
+        landed("?code=mg_ho_good&return_to=%2Fconnect%2Fnonce-1%3Fsource%3Dslack").await,
+        "https://machine.example.com/tidebreak/connect/nonce-1?source=slack#handoff=mg_at_minted"
+    );
+    assert_eq!(
+        landed("?code=mg_ho_good&return_to=%2F%2Fevil.example%2F").await,
+        "https://machine.example.com/tidebreak/#handoff=mg_at_minted"
+    );
+    assert_eq!(
+        landed("?code=mg_ho_good&return_to=%2Fconnect%2Fn%23x").await,
+        "https://machine.example.com/tidebreak/#handoff=mg_at_minted"
+    );
+    assert_eq!(
+        landed("?code=mg_ho_stale&return_to=%2Fconnect%2Fnonce-1").await,
+        "https://machine.example.com/tidebreak/#handoff-failed=expired"
+    );
     assert_eq!(
         landed("?code=mg_ho_stale").await,
         "https://machine.example.com/tidebreak/#handoff-failed=expired"
@@ -2980,9 +2999,20 @@ async fn the_handoff_route_lands_the_page_with_the_bearer_in_the_fragment() {
         landed("?code=mg_ho_%3Cscript%3E").await,
         "https://machine.example.com/tidebreak/#handoff-failed=invalid"
     );
+    // Every well-formed code reached the gateway exactly once per landing,
+    // the return-path landings included; the malformed ones never did.
     assert_eq!(
         *seen.lock().unwrap(),
-        vec!["mg_ho_good", "mg_ho_stale", "mg_ho_down", "mg_ho_odd"]
+        vec![
+            "mg_ho_good",
+            "mg_ho_good",
+            "mg_ho_good",
+            "mg_ho_good",
+            "mg_ho_stale",
+            "mg_ho_stale",
+            "mg_ho_down",
+            "mg_ho_odd"
+        ]
     );
 
     // No gateway, no route.

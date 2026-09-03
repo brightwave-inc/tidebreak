@@ -1,7 +1,7 @@
 import { ExternalLink, RotateCw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import type { HandoffFailure } from "./hostedSession";
+import { consoleSignInUrl, type HandoffFailure } from "./hostedSession";
 import { Logomark } from "./Logomark";
 import { WindowDragStrip } from "./WindowDragStrip";
 
@@ -107,8 +107,8 @@ export function HostedSignIn({
         )}
         {gatewayUrl ? (
           <p>
-            Open the console and choose <strong>Manage Tidebreak</strong> to
-            come back here signed in.
+            Open the console: it signs you in and brings you straight back to
+            this page.
           </p>
         ) : (
           <p>
@@ -123,7 +123,7 @@ export function HostedSignIn({
       <div className="boot-actions">
         {gatewayUrl && (
           <Button size="sm" asChild>
-            <a href={gatewayUrl} rel="noreferrer">
+            <a href={consoleSignInUrl(gatewayUrl)} rel="noreferrer">
               <ExternalLink size={16} aria-hidden />
               Open the console
             </a>
