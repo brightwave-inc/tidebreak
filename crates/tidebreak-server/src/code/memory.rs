@@ -122,15 +122,6 @@ pub(crate) fn first_turn_memory_line(memory_dir: &Path) -> String {
     )
 }
 
-/// Visible refusal when the engine cannot mount the memory verb.
-#[must_use]
-pub(crate) fn memory_verb_unsupported_notice(kind: tidebreak_core::HarnessKind) -> String {
-    format!(
-        "{} cannot mount Tidebreak's loopback memory verb. Propose, search, and read run through the materialized files instead.",
-        crate::code::harness_label(kind)
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

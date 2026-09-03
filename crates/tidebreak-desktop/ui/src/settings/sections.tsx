@@ -4,6 +4,7 @@ import {
   Blocks,
   Bot,
   Cpu,
+  FlaskConical,
   Gauge,
   Globe,
   GitBranch,
@@ -17,7 +18,6 @@ import {
   Waypoints,
   Zap,
   MessagesSquare,
-  Brain,
 } from "lucide-react";
 
 import { useApp } from "@/AppContext";
@@ -206,7 +206,7 @@ function GitSourceControlSection() {
   return <GitSourceControlPanel client={client} />;
 }
 
-function MemorySection() {
+function ExperimentalSection() {
   const { client } = useApp();
   return <MemoryPanel client={client} />;
 }
@@ -336,14 +336,6 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     Component: ChannelsSection,
   },
   {
-    path: "memory",
-    label: "Memory",
-    group: "capabilities",
-    icon: Brain,
-    iconClass: "text-icon-violet",
-    Component: MemorySection,
-  },
-  {
     path: "connected-apps",
     label: "Connected apps",
     group: "capabilities",
@@ -382,6 +374,14 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     icon: RefreshCw,
     iconClass: "text-icon-green",
     Component: UpdatesSection,
+  },
+  {
+    path: "experimental",
+    label: "Experimental",
+    group: "application",
+    icon: FlaskConical,
+    iconClass: "text-icon-violet",
+    Component: ExperimentalSection,
   },
 ];
 

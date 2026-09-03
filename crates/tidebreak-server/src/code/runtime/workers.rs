@@ -278,8 +278,6 @@ impl CodeRuntime {
                 // its own protocol. The rest receive absolute private paths.
                 engine_reads_images: adapter.capabilities(&probe).image_input
                     == CapLevel::Supported,
-                memory_loopback: adapter.capabilities(&probe).memory_loopback
-                    == CapLevel::Supported,
             },
             // A session with no workspace shares its working directory with
             // nothing, so it takes a lock of its own.

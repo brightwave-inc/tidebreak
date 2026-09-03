@@ -547,7 +547,7 @@ async fn read_memory_settings(state: &AppState) -> Result<MemorySettings, Server
         .get_setting(crate::routes::MEMORY_ENABLED_SETTING)
         .await?
         .and_then(|value| value.as_bool())
-        .unwrap_or(true);
+        .unwrap_or(false);
     let capture_enabled = state
         .store
         .get_setting(crate::routes::MEMORY_CAPTURE_ENABLED_SETTING)

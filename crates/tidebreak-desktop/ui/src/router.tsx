@@ -346,23 +346,21 @@ const settingsMcpRedirectRoute = createRoute({
   component: McpSettingsRedirect,
 });
 
-/**
- * Code mode graduated from the Experimental panel. Preserve old bookmarks by
- * landing on the settings page that now owns its harness setup.
- */
-function ExperimentalSettingsRedirect() {
+/** Memory now lives under Experimental. Preserve old bookmarks and proposal
+ * links that still name its former standalone settings page. */
+function MemorySettingsRedirect() {
   const navigate = useNavigate();
   useEffect(() => {
-    const codingHarnessesPath: string = "/settings/coding-harnesses";
-    void navigate({ to: codingHarnessesPath, replace: true });
+    const experimentalPath: string = "/settings/experimental";
+    void navigate({ to: experimentalPath, replace: true });
   }, [navigate]);
   return <p className="text-muted-foreground p-6 text-sm">Opening settings…</p>;
 }
 
-const settingsExperimentalRedirectRoute = createRoute({
+const settingsMemoryRedirectRoute = createRoute({
   getParentRoute: () => settingsRoute,
-  path: "experimental",
-  component: ExperimentalSettingsRedirect,
+  path: "memory",
+  component: MemorySettingsRedirect,
 });
 
 const settingsSectionRoutes = SETTINGS_SECTIONS.map((section) =>
@@ -408,7 +406,7 @@ export const routeTree = rootRoute.addChildren([
   settingsRoute.addChildren([
     settingsIndexRoute,
     settingsMcpRedirectRoute,
-    settingsExperimentalRedirectRoute,
+    settingsMemoryRedirectRoute,
     ...settingsSectionRoutes,
   ]),
 ]);

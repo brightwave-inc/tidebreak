@@ -114,7 +114,7 @@ function stubClient(
 }
 
 const meta = {
-  title: "Settings/Memory",
+  title: "Settings/Experimental",
   component: MemoryPanel,
   parameters: { layout: "fullscreen" },
   args: { client: stubClient([proposal, active, hypothesis], { revisions }) },
@@ -125,6 +125,20 @@ type Story = StoryObj<typeof meta>;
 
 /** One model proposal waiting for review beside active and tracked records. */
 export const ReviewQueue: Story = {};
+
+/** The install default: memory has not been enabled. */
+export const MemoryDisabled: Story = {
+  args: {
+    client: stubClient([], {
+      revisions: [],
+      memory: {
+        enabled: false,
+        capture_enabled: false,
+        capture_ready: false,
+      },
+    }),
+  },
+};
 
 /** A first-run install: no records and no digest. */
 export const Empty: Story = {

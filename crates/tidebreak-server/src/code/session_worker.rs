@@ -37,7 +37,7 @@ use tidebreak_core::{
     CodeApprovalId, CodeApprovalKind, CodeApprovalState, CodeEvent, CodeQueuedTurn, CodeSession,
     CodeSessionId, CodeSessionLifecycle, CodeSubagentStatus, CodeSubagentSummary, CodeTurn,
     CodeTurnId, CodeTurnStatus, CodeWorkspaceStatus, DbStore, FenceReason, HarnessKind,
-    HarnessNoticeLevel, OwnerId, PermissionMode, ToolOutcome,
+    HarnessNoticeLevel, OwnerId, PermissionMode, Store, ToolOutcome,
 };
 use tidebreak_harness::{
     ApprovalDecision, HarnessApprovalRef, HarnessError, HarnessEvent, HarnessEventSink,
@@ -232,8 +232,6 @@ pub(crate) struct AttachmentStore {
     pub private_root: super::scratch::ScratchRoot,
     /// Whether this engine consumes images over its own protocol.
     pub engine_reads_images: bool,
-    /// Whether this engine mounts Tidebreak's loopback memory verb.
-    pub memory_loopback: bool,
 }
 
 pub(crate) struct QueuedFollowUp {
@@ -2711,75 +2709,43 @@ async fn drive_turn_inner(
     .await
     .map_err(|err| WorkerError::Failed(err.to_string()))?;
 
-    let repo_id = match session.workspace_id {
-        Some(workspace_id) => get_workspace(db, &session.owner, workspace_id)
-            .await
-            .map_err(|err| WorkerError::Failed(err.to_string()))?
-            .map(|workspace| workspace.repo_id),
-        None => None,
-    };
-    // Memory is an aid, not a precondition: a store or filesystem fault
-    // degrades the turn visibly instead of failing it after it started.
-    let memory_dir = match super::memory::materialize_session_memory(
-        db.as_ref(),
-        &session.owner,
-        repo_id,
-        &store.private_root,
-    )
-    .await
-    {
-        Ok(memory_dir) => Some(memory_dir),
-        Err(err) => {
-            tracing::warn!(
-                "tidebreak: could not materialize memory for code session {}: {err}",
-                session.id
-            );
-            // Worker-authored notices are never native journal rows, and a
-            // notice that fails to journal must not fail the turn it
-            // describes.
-            if let Err(err) = persist_and_publish(
-                db,
-                bus,
-                &session.owner,
-                session.id,
-                session.spawn_epoch,
-                CodeEvent::HarnessNotice {
-                    level: HarnessNoticeLevel::Warning,
-                    message: format!("Memory was not materialized for this turn: {err}"),
-                },
-                false,
-            )
-            .await
-            {
-                tracing::warn!(
-                    "tidebreak: could not journal the memory notice for code session {}: {err}",
-                    session.id
-                );
-            }
-            None
-        }
-    };
-    if ordinal == 1 && !store.memory_loopback {
-        if let Err(err) = persist_and_publish(
-            db,
-            bus,
+    let memory_enabled = db
+        .get_setting(crate::routes::MEMORY_ENABLED_SETTING)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let memory_dir = if memory_enabled {
+        let repo_id = match session.workspace_id {
+            Some(workspace_id) => get_workspace(db, &session.owner, workspace_id)
+                .await
+                .map_err(|err| WorkerError::Failed(err.to_string()))?
+                .map(|workspace| workspace.repo_id),
+            None => None,
+        };
+        // Memory is an aid, not a precondition. A store or filesystem fault
+        // stays in diagnostics and does not interrupt the turn or transcript.
+        match super::memory::materialize_session_memory(
+            db.as_ref(),
             &session.owner,
-            session.id,
-            session.spawn_epoch,
-            CodeEvent::HarnessNotice {
-                level: HarnessNoticeLevel::Info,
-                message: super::memory::memory_verb_unsupported_notice(session.harness_kind),
-            },
-            false,
+            repo_id,
+            &store.private_root,
         )
         .await
         {
-            tracing::warn!(
-                "tidebreak: could not journal the memory verb notice for code session {}: {err}",
-                session.id
-            );
+            Ok(memory_dir) => Some(memory_dir),
+            Err(err) => {
+                tracing::warn!(
+                    "tidebreak: could not materialize memory for code session {}: {err}",
+                    session.id
+                );
+                None
+            }
         }
-    }
+    } else {
+        None
+    };
 
     // What the engine is handed is not always what the person wrote: an engine
     // that cannot take images over its own protocol is given paths instead, and

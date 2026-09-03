@@ -573,14 +573,13 @@ fn capture_store_error(error: tidebreak_core::MemoryError) -> tidebreak_core::Ag
 }
 
 /// Whether post-turn capture may run at all: the memory master switch and the
-/// capture switch, both stored settings. Capture defaults off (decision 0067
-/// keeps model writes opt-in); the master switch defaults on.
+/// capture switch, both stored settings. Both switches default off.
 pub(crate) async fn capture_enabled(store: &dyn Store) -> Result<bool> {
     let enabled = store
         .get_setting(crate::routes::MEMORY_ENABLED_SETTING)
         .await?
         .and_then(|value| value.as_bool())
-        .unwrap_or(true);
+        .unwrap_or(false);
     let capture = store
         .get_setting(crate::routes::MEMORY_CAPTURE_ENABLED_SETTING)
         .await?

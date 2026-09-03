@@ -57,5 +57,11 @@ describe("SettingsSidebar", () => {
         name: "Git & source control",
       }),
     ).toBeVisible();
+    expect(
+      within(application).getByRole("button", { name: "Experimental" }),
+    ).toBeVisible();
+    expect(
+      within(capabilities).queryByRole("button", { name: "Memory" }),
+    ).toBeNull();
   });
 });
