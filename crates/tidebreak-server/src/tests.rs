@@ -100,12 +100,14 @@ async fn temp_db_store(database_name: &str) -> (tempfile::TempDir, DbStore) {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join(database_name);
     let url = format!("sqlite://{}?mode=rwc", database.display());
-    // Server fixtures commonly drive a request and its background worker at
-    // the same time. Two connections preserve that contract without restoring
-    // the production host pool's eight-connection fixed cost.
-    let store = DbStore::connect_test_sqlite_fixture_with_max_connections(&url, 2)
-        .await
-        .unwrap();
+    // Preserve the host's tested concurrency ceiling while the fixture keeps
+    // only one connection warm and avoids migration, WAL, and fsync costs.
+    let store = DbStore::connect_test_sqlite_fixture_with_max_connections(
+        &url,
+        super::HOST_MAX_CONNECTIONS,
+    )
+    .await
+    .unwrap();
     (directory, store)
 }
 
