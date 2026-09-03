@@ -86,6 +86,7 @@ async fn a_fresh_database_records_the_whole_chain() {
             "m20260903_000003_client_wait_vendor_web_search",
             "m20260903_000004_restore_turn_claim_indexes",
             "m20260903_000005_pending_prompt_indexes",
+            "m20260903_000006_sandbox_tool_recovery_indexes",
         ]
     );
     assert!(db
@@ -229,6 +230,102 @@ async fn pending_prompt_indexes_reach_existing_sqlite_databases() {
         assert!(
             !plan.contains("USE TEMP B-TREE"),
             "the pending prompt projection must preserve index order:\n{plan}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn sandbox_tool_recovery_indexes_reach_existing_sqlite_databases() {
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    Migrator::up(
+        &db,
+        Some(steps_before(
+            "m20260903_000006_sandbox_tool_recovery_indexes",
+        )),
+    )
+    .await
+    .unwrap();
+
+    let indexes = [
+        "idx_sandbox_tool_call_accepted",
+        "idx_sandbox_tool_call_retry",
+        "idx_sandbox_tool_call_named_accepted",
+        "idx_sandbox_tool_call_named_claim_recovery",
+        "idx_sandbox_tool_call_named_retry",
+    ];
+    for index in indexes {
+        let missing = db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                format!(
+                    "SELECT 1 AS present FROM sqlite_master \
+                     WHERE type = 'index' AND name = '{index}'"
+                ),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            missing.is_none(),
+            "the pre-repair schema already has {index}"
+        );
+    }
+
+    Migrator::up(&db, None).await.unwrap();
+
+    for (index, query) in [
+        (
+            "idx_sandbox_tool_call_accepted",
+            "SELECT * FROM sandbox_tool_call WHERE status = 'accepted' \
+             ORDER BY created_at, id LIMIT 16",
+        ),
+        (
+            "idx_sandbox_tool_call_recovery",
+            "SELECT * FROM sandbox_tool_call WHERE status = 'claimed' \
+             AND executor_lease_expires_at <= '2026-09-03T00:00:00Z' \
+             ORDER BY created_at, id LIMIT 16",
+        ),
+        (
+            "idx_sandbox_tool_call_retry",
+            "SELECT * FROM sandbox_tool_call WHERE status = 'retry_wait' \
+             AND retry_at <= '2026-09-03T00:00:00Z' \
+             ORDER BY created_at, id LIMIT 16",
+        ),
+        (
+            "idx_sandbox_tool_call_named_accepted",
+            "SELECT * FROM sandbox_tool_call WHERE status = 'accepted' \
+             AND name = 'web_search' ORDER BY created_at, id LIMIT 16",
+        ),
+        (
+            "idx_sandbox_tool_call_named_claim_recovery",
+            "SELECT * FROM sandbox_tool_call WHERE status = 'claimed' \
+             AND executor_lease_expires_at <= '2026-09-03T00:00:00Z' \
+             AND name = 'web_search' ORDER BY created_at, id LIMIT 16",
+        ),
+        (
+            "idx_sandbox_tool_call_named_retry",
+            "SELECT * FROM sandbox_tool_call WHERE status = 'retry_wait' \
+             AND retry_at <= '2026-09-03T00:00:00Z' \
+             AND name = 'web_search' ORDER BY created_at, id LIMIT 16",
+        ),
+    ] {
+        let plan = db
+            .query_all_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                format!("EXPLAIN QUERY PLAN {query}"),
+            ))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.try_get::<String>("", "detail").unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            plan.contains(index),
+            "the sandbox tool recovery branch must use {index}:\n{plan}"
+        );
+        assert!(
+            !plan.contains("MULTI-INDEX OR"),
+            "each sandbox tool recovery state must use one bounded scan:\n{plan}"
         );
     }
 }
