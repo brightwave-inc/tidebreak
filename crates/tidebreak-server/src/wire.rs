@@ -93,6 +93,16 @@ pub use crate::routes::code::types::{
     SessionExternalOrigin, SessionSnapshot, TurnRewriteState, TurnSnapshot, UpdateNotice,
 };
 
+// Keep the unchanged CLI compiling while the D6 rename lands in server and
+// client slices. The client slice removes these compatibility exports.
+pub use crate::routes::code::types::{
+    ApprovalSnapshot as CodeApprovalSnapshot, QueuedTurn as QueuedCodeTurn,
+    QueuedTurnsSnapshot as QueuedCodeTurnsSnapshot, SequencedEventFrame as SequencedCodeEventFrame,
+    SessionDigest as CodeSessionDigest, SessionExternalOrigin as CodeSessionExternalOrigin,
+    SessionSnapshot as CodeSessionSnapshot, TurnRewriteState as CodeTurnRewriteState,
+    TurnSnapshot as CodeTurnSnapshot, UpdateNotice as CodeUpdateNotice,
+};
+
 /// Guard sizes for the opaque strings a client draws from this surface.
 ///
 /// A renderer validates what it is about to draw rather than trusting that the
