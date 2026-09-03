@@ -241,6 +241,9 @@ jobs:
               # `test` lane already excludes it, so no edit to its own sources
               # can change that lane's result. The desktop lane still covers it.
               crates/tidebreak-desktop/Cargo.toml) notices=true; rust=true ;;
+              # The whisper helper is its own workspace: no lane compiles it,
+              # but its graph is an input to the notices.
+              crates/tidebreak-whisper/Cargo.lock) notices=true ;;
               crates/tidebreak-desktop/*) rust=true ;;
               Cargo.lock|Cargo.toml|crates/*/Cargo.toml)
                 notices=true; rust=true; workspace=true ;;
@@ -337,6 +340,13 @@ jobs:
       # optional dependencies that a default-feature graph would miss.
       - name: Check advisories, licenses, and dependency sources
         run: cargo deny --all-features --locked check advisories licenses sources
+      # The whisper helper is a separate workspace with its own lockfile; the
+      # root check above never sees it.
+      - name: Check the whisper helper's advisories, licenses, and sources
+        run: >-
+          cargo deny --manifest-path crates/tidebreak-whisper/Cargo.toml
+          --config deny.toml --all-features --locked
+          check advisories licenses sources
 
 
   unused-deps:
@@ -436,7 +446,6 @@ jobs:
         timeout-minutes: 8
         run: |
           scripts/install-linux-apt-packages.sh \
-            cmake \
             libwebkit2gtk-4.1-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
@@ -629,7 +638,7 @@ jobs:
       - name: Install headless system deps
         timeout-minutes: 8
         run: |
-          scripts/install-linux-apt-packages.sh cmake mold
+          scripts/install-linux-apt-packages.sh mold
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: cargo-registry-v3-${{ hashFiles('Cargo.lock') }}

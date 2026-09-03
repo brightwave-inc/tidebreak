@@ -28,6 +28,7 @@ import {
   firstDifference,
   installedPackages,
   licenseTextId,
+  mergeCargoMetadata,
   normalizeLicenseText,
   normalizeNoticesForComparison,
   parseSpdxIdentifiers,
@@ -537,4 +538,37 @@ test("the notices ship with the desktop app and are verified against drift", () 
     "utf8",
   );
   assert.ok(ci.includes(`${REGENERATE_COMMAND} --check`));
+});
+
+test("merging workspace metadata excludes every workspace's members and lists shared packages once", () => {
+  const merged = mergeCargoMetadata([
+    {
+      workspace_members: ["app 0.0.0 (path+file:///app)"],
+      packages: [
+        { id: "app 0.0.0 (path+file:///app)", name: "app" },
+        { id: "serde 1.0.0", name: "serde" },
+      ],
+    },
+    {
+      workspace_members: ["helper 0.1.0 (path+file:///helper)"],
+      packages: [
+        { id: "helper 0.1.0 (path+file:///helper)", name: "helper" },
+        { id: "serde 1.0.0", name: "serde" },
+        { id: "whisper-rs 0.16.0", name: "whisper-rs" },
+      ],
+    },
+  ]);
+  assert.deepEqual(merged.workspace_members.sort(), [
+    "app 0.0.0 (path+file:///app)",
+    "helper 0.1.0 (path+file:///helper)",
+  ]);
+  assert.deepEqual(
+    merged.packages.map((pkg) => pkg.id).sort(),
+    [
+      "app 0.0.0 (path+file:///app)",
+      "helper 0.1.0 (path+file:///helper)",
+      "serde 1.0.0",
+      "whisper-rs 0.16.0",
+    ],
+  );
 });

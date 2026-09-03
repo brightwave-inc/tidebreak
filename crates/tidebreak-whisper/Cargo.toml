@@ -1,23 +1,24 @@
 [package]
 name = "tidebreak-whisper"
 description = "Tidebreak's whisper.cpp transcription helper: a one-shot binary the desktop app downloads on demand, keeping the C++ inference build out of the app itself."
-# Versioned independently of the workspace: this binary is published to
-# downloads.brightwave.io and pinned by the desktop at runtime, not shipped
-# inside the app bundle. Bump this version, dispatch the "Publish whisper
-# helper" workflow, then move the desktop's pin.
 version = "0.1.0"
-edition.workspace = true
-license.workspace = true
-repository.workspace = true
-authors.workspace = true
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/brightwave-inc/tidebreak"
+authors = ["Brightwave, Inc."]
 publish = false
 
-[lints]
-workspace = true
+# A workspace of one. The root workspace excludes this crate so that no
+# `--workspace` build, lint, or test lane compiles whisper.cpp; build it with
+# `cargo build --release --manifest-path crates/tidebreak-whisper/Cargo.toml`.
+[workspace]
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
 
 [[bin]]
 name = "tidebreak-whisper"
 path = "src/main.rs"
 
 [dependencies]
-whisper-rs = { workspace = true }
+whisper-rs = "=0.16.0"
