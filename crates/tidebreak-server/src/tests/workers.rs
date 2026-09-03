@@ -1711,7 +1711,7 @@ async fn scanner_won_cancellation_does_not_wedge_the_only_worker_lane() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn worker_renews_a_near_expiry_ambiguous_claim_before_execution() {
     let dir = tempfile::tempdir().unwrap();
     let inner: Arc<dyn Store> = Arc::new(
@@ -1776,7 +1776,6 @@ async fn worker_renews_a_near_expiry_ambiguous_claim_before_execution() {
         },
     );
     let token = state.token.clone();
-    tokio::time::pause();
     tokio::spawn(worker.run());
     let router = app(state);
     let bearer = format!("Bearer {token}");
@@ -1786,8 +1785,10 @@ async fn worker_renews_a_near_expiry_ambiguous_claim_before_execution() {
         send_message(&router, &bearer, chat.id, "renew before work").await,
         StatusCode::ACCEPTED
     );
-    entered.notified().await;
-    tokio::time::advance(Duration::from_millis(450)).await;
+    tokio::time::timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .expect("claim committed before its delayed response");
+    tokio::time::sleep(Duration::from_millis(450)).await;
     release.notify_one();
     for _ in 0..100 {
         if store
@@ -1801,7 +1802,7 @@ async fn worker_renews_a_near_expiry_ambiguous_claim_before_execution() {
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    tokio::time::advance(Duration::from_millis(250)).await;
+    tokio::time::sleep(Duration::from_millis(250)).await;
     gate.notify_one();
 
     let events = wait_for_turn(&store, chat.id).await;
@@ -1811,7 +1812,7 @@ async fn worker_renews_a_near_expiry_ambiguous_claim_before_execution() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn worker_heartbeats_while_event_journaling_is_blocked() {
     let dir = tempfile::tempdir().unwrap();
     let inner: Arc<dyn Store> = Arc::new(
@@ -1872,7 +1873,6 @@ async fn worker_heartbeats_while_event_journaling_is_blocked() {
         },
     );
     let token = state.token.clone();
-    tokio::time::pause();
     tokio::spawn(worker.run());
     let router = app(state);
     let bearer = format!("Bearer {token}");
@@ -1882,8 +1882,10 @@ async fn worker_heartbeats_while_event_journaling_is_blocked() {
         send_message(&router, &bearer, chat.id, "keep alive").await,
         StatusCode::ACCEPTED
     );
-    entered.notified().await;
-    tokio::time::advance(Duration::from_millis(400)).await;
+    tokio::time::timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .expect("worker reached the blocked event append");
+    tokio::time::sleep(Duration::from_millis(400)).await;
     release.notify_one();
 
     let events = wait_for_turn(&store, chat.id).await;
