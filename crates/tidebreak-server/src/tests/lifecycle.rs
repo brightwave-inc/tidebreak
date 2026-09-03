@@ -3715,7 +3715,7 @@ async fn a_headless_folder_request_resumes_the_turn_with_the_declined_result() {
 
 /// `POST /chats/{id}/queued/send-now` releases a paused queue: the promoter
 /// runs the oldest message on its next sweep, and the row leaves the queue.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn send_now_releases_a_paused_queue() {
     // The first turn parks in the provider, keeping the chat busy so the
     // follow-ups park as queued rows instead of running immediately.
@@ -3794,7 +3794,7 @@ async fn send_now_releases_a_paused_queue() {
     // End the blocking turn. A paused promoter must leave both rows alone.
     gate.notify_one();
     wait_for_turn(&store, chat.id).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    tokio::time::advance(Duration::from_secs(2)).await;
     assert_eq!(
         store.list_queued_turns(chat.id).await.unwrap().len(),
         2,
