@@ -4365,8 +4365,12 @@ async fn steering_a_live_container_run_reaches_the_agents_next_model_step() {
         steering
             .steer(run_id, INSTRUCTION.to_owned())
             .expect("a live attached run accepts steering");
-        // The live connection owns the instruction now. Release the first
-        // model step; the later prompts prove when the sandbox applied it.
+        // Wait for the live connection to flush the frame while the sandbox is
+        // parked on its first model call, then release that call. The later
+        // prompts prove when the sandbox applied the instruction.
+        tokio::time::timeout(Duration::from_secs(5), steering.wait_for_steer_delivery())
+            .await
+            .expect("the live connection delivered the steering frame");
         gate.release();
 
         let outcome = drive

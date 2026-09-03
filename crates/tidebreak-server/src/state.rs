@@ -630,6 +630,8 @@ impl SandboxAttemptGuard {
 pub(crate) struct SandboxSteerGuard {
     attached: Mutex<HashMap<(AgentRunId, Uuid), mpsc::Sender<String>>>,
     container_drives: Mutex<HashMap<(AgentRunId, Uuid), CancelToken>>,
+    #[cfg(test)]
+    steer_delivered: tokio::sync::Notify,
 }
 
 /// Why one steering instruction could not be handed to a live run.
@@ -737,6 +739,18 @@ impl SandboxSteerGuard {
             mpsc::error::TrySendError::Full(_) => SandboxSteerRefusal::Backlogged,
             mpsc::error::TrySendError::Closed(_) => SandboxSteerRefusal::NotAttached,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_for_steer_delivery(&self) {
+        self.steer_delivered.notified().await;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_steer_delivery(&self) {
+        // `notify_one` retains a permit if the socket write wins the race with
+        // the test arming its wait.
+        self.steer_delivered.notify_one();
     }
 }
 

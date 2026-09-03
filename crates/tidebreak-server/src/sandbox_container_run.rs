@@ -2361,12 +2361,18 @@ impl SandboxContainerRunner {
                     }
                 }
                 Some(instruction) = steer_rx.recv() => {
-                    if let Err(error) = conn.send_steer(SteerMessage::new(instruction)).await {
-                        // The connection went away under the instruction. The
-                        // drive reattaches; the instruction is not re-sent,
-                        // because guidance the run never saw is the caller's to
-                        // repeat, not the host's to replay later out of context.
-                        tracing::warn!("tidebreak: a steering instruction was not delivered: {error}");
+                    match conn.send_steer(SteerMessage::new(instruction)).await {
+                        Ok(()) => {
+                            #[cfg(test)]
+                            self.steering.record_steer_delivery();
+                        }
+                        Err(error) => {
+                            // The connection went away under the instruction. The
+                            // drive reattaches; the instruction is not re-sent,
+                            // because guidance the run never saw is the caller's to
+                            // repeat, not the host's to replay later out of context.
+                            tracing::warn!("tidebreak: a steering instruction was not delivered: {error}");
+                        }
                     }
                 }
             }
