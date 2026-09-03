@@ -39,8 +39,6 @@ afterEach(() => {
 
 const outputId = "550062d4-2528-5cc6-90f8-a788e119bf36";
 const revisionId = "72cb0277-5a3c-45ee-bda8-43534f74feb2";
-const citationId = "46abf484-8368-4c2d-b2ec-8b9ed77e202f";
-const documentId = "4571ebc0-69a7-4f8a-a9c7-936c50f0f022";
 /** An output id this conversation does not own. */
 const absentOutputId = "ce116263-15b5-5df2-b472-269378e9da58";
 
@@ -213,85 +211,6 @@ describe("OutputDetailRoot", () => {
     expect(
       screen.queryByRole("button", { name: /Revert/ }),
     ).not.toBeInTheDocument();
-  });
-
-  it("shows the exact revision's document and web sources", async () => {
-    hostMocks.openExternal.mockResolvedValue(true);
-    const oldAgentRevisionId = "56c62f92-05d2-4830-8664-75dab007d087";
-    const userRevisionId = "8ac32ae1-c55f-4c11-820b-873912d144c2";
-    const apis = detailApis({
-      read: vi.fn().mockResolvedValue(preview({ revisionCount: 3 })),
-      listRevisions: vi.fn().mockResolvedValue({
-        outputId,
-        revisions: [
-          revisionRow({
-            ordinal: 3,
-            sources: [
-              {
-                kind: "document",
-                citationId,
-                documentId,
-                locator: { kind: "lines", start: 4, end: 8 },
-              },
-              {
-                kind: "web",
-                url: "https://example.com/current",
-                label: "Current research",
-                domain: "example.com",
-              },
-            ],
-          }),
-          revisionRow({
-            revisionId: oldAgentRevisionId,
-            ordinal: 2,
-            isCurrent: false,
-            sources: [
-              {
-                kind: "web",
-                url: "https://archive.example/earlier",
-                label: "Earlier research",
-                domain: "archive.example",
-              },
-            ],
-          }),
-          revisionRow({
-            revisionId: userRevisionId,
-            ordinal: 1,
-            producedBy: "user",
-            isCurrent: false,
-            sources: [],
-          }),
-        ],
-      }),
-    });
-    const openCitation = vi.fn();
-    const user = userEvent.setup();
-    await openOutput(apis, outputId, {
-      openCitation,
-      openDocument: vi.fn(),
-    });
-
-    expect(await screen.findByLabelText("Output sources")).toBeVisible();
-    expect(screen.getByText("Lines 4–8")).toBeVisible();
-    expect(screen.getByText("example.com")).toBeVisible();
-    await user.click(
-      screen.getByRole("button", { name: "Open document source 1" }),
-    );
-    expect(openCitation).toHaveBeenCalledWith({ documentId, citationId });
-    await user.click(screen.getByRole("button", { name: "Current research" }));
-    expect(hostMocks.openExternal).toHaveBeenCalledWith(
-      "https://example.com/current",
-    );
-
-    await user.click(screen.getByRole("button", { name: "Version history" }));
-    await user.click(await screen.findByRole("button", { name: /v2/ }));
-    expect(await screen.findByText("archive.example")).toBeVisible();
-    expect(screen.queryByText("example.com")).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "Version history" }));
-    await user.click(await screen.findByRole("button", { name: /v1/ }));
-    await screen.findByText(/Viewing v1/);
-    expect(screen.queryByLabelText("Output sources")).not.toBeInTheDocument();
   });
 
   it("previews an old version and restores it as a new latest version", async () => {

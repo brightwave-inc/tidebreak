@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { afterEach, expect, it, vi } from "vitest";
 
 const attachTrustedFolders = vi.hoisted(() => vi.fn());

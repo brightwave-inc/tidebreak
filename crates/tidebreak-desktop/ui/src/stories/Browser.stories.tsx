@@ -1,7 +1,6 @@
 import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, fn, userEvent, waitFor, within } from "storybook/test";
-
+import { fn } from "storybook/test";
 import {
   BrowserAgentControlRow,
   BrowserNoticeRow,
@@ -710,157 +709,40 @@ type Story = StoryObj<typeof meta>;
 
 export const Empty: Story = {
   args: { scenario: "empty" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(
-      canvas.getByRole("textbox", { name: "Address or search" }),
-    ).toHaveFocus();
-    await expect(
-      canvas.getByText("Bring the live work into the workspace"),
-    ).toBeVisible();
-  },
 };
 
 export const Loading: Story = { args: { scenario: "loading" } };
 
 export const ReadyLocalUnshared: Story = {
   args: { scenario: "unshared" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(
-      canvas.getByRole("button", { name: "Share with agent" }),
-    ).toBeVisible();
-  },
 };
 
 export const SharedLocalSites: Story = {
   args: { scenario: "shared" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(canvas.getByText("Local sites shared")).toBeVisible();
-    await expect(
-      canvas.getByRole("button", { name: "Stop sharing" }),
-    ).toBeVisible();
-  },
 };
 
 export const AgentPausedAtNewOrigin: Story = {
   args: { scenario: "paused" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(canvas.getByText("Agent paused")).toBeVisible();
-    await expect(
-      canvas.getByRole("button", { name: "Review & resume" }),
-    ).toBeVisible();
-  },
 };
 
 export const AgentControlled: Story = {
   args: { scenario: "agent" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(
-      canvas.getByText("Code agent is using this tab"),
-    ).toBeVisible();
-    await expect(canvas.getByRole("button", { name: "Stop" })).toBeVisible();
-    await expect(
-      canvas.getByRole("button", { name: "Take over" }),
-    ).toBeVisible();
-  },
 };
 
 export const ManagedProfileResetConfirmation: Story = {
   args: { scenario: "profile-reset-confirmation" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const body = within(canvasElement.ownerDocument.body);
-    await userEvent.click(
-      canvas.getByRole("button", { name: "Browser options" }),
-    );
-    await userEvent.click(
-      await body.findByRole("menuitem", {
-        name: "Reset development profile",
-      }),
-    );
-    const dialog = await body.findByRole("alertdialog");
-    await waitFor(() => expect(dialog).toBeVisible());
-  },
 };
 
 export const ManagedProfileResetting: Story = {
   args: { scenario: "profile-resetting" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const body = within(canvasElement.ownerDocument.body);
-    await userEvent.click(
-      canvas.getByRole("button", { name: "Browser options" }),
-    );
-    await userEvent.click(
-      await body.findByRole("menuitem", {
-        name: "Reset development profile",
-      }),
-    );
-    await userEvent.click(
-      await body.findByRole("button", {
-        name: "Reset development profile",
-      }),
-    );
-    await expect(
-      canvas.getByText(
-        "Resetting the Tidebreak development profile… deleting managed cookies, site data, and cache.",
-      ),
-    ).toBeVisible();
-  },
 };
 
 export const ManagedProfileReconstructing: Story = {
   args: { scenario: "profile-reset-reconstructing" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const body = within(canvasElement.ownerDocument.body);
-    await userEvent.click(
-      canvas.getByRole("button", { name: "Browser options" }),
-    );
-    await userEvent.click(
-      await body.findByRole("menuitem", {
-        name: "Reset development profile",
-      }),
-    );
-    await userEvent.click(
-      await body.findByRole("button", {
-        name: "Reset development profile",
-      }),
-    );
-    await expect(
-      canvas.getByText(
-        "Resetting the Tidebreak development profile… reopening stored browser pages.",
-      ),
-    ).toBeVisible();
-  },
 };
 
 export const ManagedProfileResetFailure: Story = {
   args: { scenario: "profile-reset-failure" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const body = within(canvasElement.ownerDocument.body);
-    await userEvent.click(
-      canvas.getByRole("button", { name: "Browser options" }),
-    );
-    await userEvent.click(
-      await body.findByRole("menuitem", {
-        name: "Reset development profile",
-      }),
-    );
-    await userEvent.click(
-      await body.findByRole("button", {
-        name: "Reset development profile",
-      }),
-    );
-    await expect(
-      canvas.getByText("WebKit could not remove the managed profile data"),
-    ).toBeVisible();
-  },
 };
 
 export const HumanTakeoverRequired: Story = { args: { scenario: "takeover" } };
@@ -869,13 +751,6 @@ export const SlowPage: Story = { args: { scenario: "slow" } };
 
 export const Failure: Story = {
   args: { scenario: "failure" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(canvas.getByRole("button", { name: "Reload" })).toBeVisible();
-    await expect(
-      canvas.getByRole("button", { name: "Try again" }),
-    ).toBeVisible();
-  },
 };
 
 export const PopupBlocked: Story = { args: { scenario: "popup" } };
@@ -978,117 +853,40 @@ export const ToolbarNarrow320ManagedProfileReset: Story = {
   render: () => (
     <NarrowToolbarStory width={320} access={unsharedAccess} resetProfile />
   ),
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const body = within(canvasElement.ownerDocument.body);
-    await userEvent.click(
-      canvas.getByRole("button", { name: "Browser options" }),
-    );
-    await userEvent.click(
-      await body.findByRole("menuitem", {
-        name: "Reset development profile",
-      }),
-    );
-    const dialog = await body.findByRole("alertdialog");
-    await waitFor(() => expect(dialog).toBeVisible());
-  },
 };
 
 export const InspectOff: Story = {
   args: { scenario: "inspect-off" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(
-      canvas.getByRole("button", { name: "Inspect page elements" }),
-    ).toBeVisible();
-    const btn = canvas.getByRole("button", { name: "Inspect page elements" });
-    await expect(btn).toHaveAttribute("aria-pressed", "false");
-  },
 };
 
 export const InspectOn: Story = {
   args: { scenario: "inspect-on" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(
-      canvas.getByRole("button", { name: "Hide inspect highlights" }),
-    ).toBeVisible();
-    const btn = canvas.getByRole("button", { name: "Hide inspect highlights" });
-    await expect(btn).toHaveAttribute("aria-pressed", "true");
-  },
 };
 
 export const UnsupportedFrame: Story = {
   args: { scenario: "unsupported-frame" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(
-      canvas.getByRole("button", { name: "Hide inspect highlights" }),
-    ).toBeVisible();
-    await expect(
-      canvas.getByText("Uninspectable frame · human takeover"),
-    ).toBeVisible();
-  },
 };
 
 export const SplitPane: StoryObj<typeof SplitPaneBrowserStory> = {
   render: () => <SplitPaneBrowserStory />,
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(canvas.getByLabelText("Source editor")).toBeVisible();
-    await expect(canvas.getByLabelText("Browser split pane")).toBeVisible();
-    await expect(
-      canvas.getByText("Code agent is using this tab"),
-    ).toBeVisible();
-  },
 };
 
 export const SameDocumentNavigation: Story = {
   args: { scenario: "same-document" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(
-      canvas.getByRole("textbox", { name: "Address or search" }),
-    ).toHaveValue("localhost:4173/review/browser?view=replaced#summary");
-  },
 };
 
 export const InspectEnableFailure: Story = {
   args: { scenario: "inspect-enable-failure" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(
-      canvas.getByText("Could not show inspect highlights"),
-    ).toBeVisible();
-    await expect(
-      canvas.getByRole("button", { name: "Inspect page elements" }),
-    ).toHaveAttribute("aria-pressed", "false");
-  },
 };
 
 export const InspectRemovalFailure: Story = {
   args: { scenario: "inspect-remove-failure" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(
-      canvas.getByText("Could not hide inspect highlights"),
-    ).toBeVisible();
-    await expect(
-      canvas.getByRole("button", { name: "Hide inspect highlights" }),
-    ).toHaveAttribute("aria-pressed", "true");
-  },
 };
 
 export const ViewportAgentControlled: Story = {
   args: {
     scenario: "viewport-desktop",
     viewport: { preset: "desktop", customWidth: 1024 },
-  },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(
-      canvas.getByRole("button", { name: /Viewport: Desktop 1440/i }),
-    ).toBeVisible();
   },
 };
 

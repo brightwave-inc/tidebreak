@@ -2,6 +2,7 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
+import fs from "node:fs";
 import path from "path";
 import { tidebreakDevListenPlugin } from "./vite-dev-listen";
 
@@ -25,6 +26,38 @@ function stubMonacoWorkersForVitest() {
     },
   };
 }
+
+
+function collectTestFiles(dir: string, acc: string[] = []): string[] {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (entry.name === "node_modules") continue;
+      collectTestFiles(full, acc);
+    } else if (/\.test\.(ts|tsx)$/.test(entry.name)) {
+      acc.push(full);
+    }
+  }
+  return acc;
+}
+
+function isJsdomTest(file: string): boolean {
+  if (file.includes(".dom.test.")) return true;
+  const head = fs.readFileSync(file, "utf8").slice(0, 800);
+  return head.includes("@vitest-environment jsdom");
+}
+
+const uiRoot = __dirname;
+const allTestFiles = [
+  ...collectTestFiles(path.join(uiRoot, "src")),
+  path.join(uiRoot, "vite-dev-listen.test.ts"),
+].filter((file) => fs.existsSync(file));
+const jsdomTestFiles = allTestFiles
+  .filter(isJsdomTest)
+  .map((file) => path.relative(uiRoot, file));
+const nodeTestFiles = allTestFiles
+  .filter((file) => !isJsdomTest(file))
+  .map((file) => path.relative(uiRoot, file));
 
 export default defineConfig(async () => ({
   plugins: [
@@ -58,16 +91,40 @@ export default defineConfig(async () => ({
     },
   },
   test: {
-    // Pure-logic and SSR-markup tests run in node; DOM interaction tests opt
-    // in per file with an `@vitest-environment jsdom` docblock.
-    environment: "node",
     setupFiles: ["./src/test/setup.ts"],
     // Vitest 4's restoreAllMocks only undoes spyOn; vi.fn() call history
     // otherwise leaks from one case into the next.
     clearMocks: true,
+    pool: "threads",
+    fileParallelism: true,
+    // Fail a slow test rather than letting waitFor hang the lane.
+    testTimeout: 4000,
     alias: {
       "monaco-editor/editor/editor.worker.js?worker": monacoWorkerStub,
     },
+    projects: [
+      {
+        extends: true,
+        test: {
+          name: "node",
+          environment: "node",
+          isolate: false,
+          pool: "threads",
+          include: nodeTestFiles,
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: "dom",
+          environment: "jsdom",
+          // jsdom is not thread-safe here; forks keep each file's document
+          // off the shared worker.
+          pool: "forks",
+          include: jsdomTestFiles,
+        },
+      },
+    ],
   },
   clearScreen: false,
   server: {

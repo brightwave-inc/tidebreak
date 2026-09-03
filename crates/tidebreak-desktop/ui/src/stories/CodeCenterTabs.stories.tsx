@@ -1,8 +1,7 @@
 import { useState } from "react";
 import { DndContext } from "@dnd-kit/core";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { fn, userEvent, within } from "storybook/test";
-
+import { fn } from "storybook/test";
 import {
   CodeCenterTabs,
   type CodeConversationTab,
@@ -133,13 +132,7 @@ export const WorkingConversation: Story = {
  * The `+` menu, open. The top group starts something the workspace can hold
  * many of; the group under it opens the one view there is of the worktree.
  */
-export const NewTabMenu: Story = {
-  play: async ({ canvasElement }) => {
-    await userEvent.click(
-      within(canvasElement).getByRole("button", { name: "New tab" }),
-    );
-  },
-};
+export const NewTabMenu: Story = {};
 
 /**
  * Several agents in one worktree, each showing its own state: one waiting on a

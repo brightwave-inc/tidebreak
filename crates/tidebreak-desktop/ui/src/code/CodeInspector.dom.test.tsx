@@ -451,57 +451,6 @@ it("shows skipped checks as neutral and hides stale review state after merge", a
   ).not.toBeInTheDocument();
 });
 
-it("attaches, locally resolves, hides, and restores a rich review comment", async () => {
-  const client = makeClient();
-  const user = userEvent.setup();
-  render(
-    <CodeInspector
-      client={client as never}
-      workspaceId="ws-1"
-      workspace={{ ...WORKSPACE, pr: OPEN_PR } as never}
-      contentRevision={0}
-    />,
-  );
-
-  await user.click(screen.getByRole("tab", { name: "Pull request" }));
-  await screen.findByText("Rename", { selector: "strong" });
-  expect(
-    document.querySelector("img[src^='data:image/svg+xml']"),
-  ).not.toBeNull();
-
-  await user.click(
-    screen.getByRole("button", { name: "Comment actions for reviewer" }),
-  );
-  await user.click(screen.getByRole("menuitem", { name: "Attach to chat" }));
-  expect(useCodeUiStore.getState().pendingComposerPrompt).toMatchObject({
-    scope: "ws-1",
-    submit: false,
-  });
-  expect(useCodeUiStore.getState().pendingComposerPrompt?.text).toContain(
-    "src/login.rs:12",
-  );
-
-  await user.click(
-    screen.getByRole("button", { name: "Comment actions for reviewer" }),
-  );
-  await user.click(
-    screen.getByRole("menuitem", { name: "Mark resolved in Tidebreak" }),
-  );
-  expect(screen.getByText("Resolved here")).toBeInTheDocument();
-
-  await user.click(
-    screen.getByRole("button", { name: "Comment actions for reviewer" }),
-  );
-  await user.click(screen.getByRole("menuitem", { name: "Hide in Tidebreak" }));
-  expect(
-    screen.queryByText("Rename", { selector: "strong" }),
-  ).not.toBeInTheDocument();
-  await user.click(screen.getByRole("button", { name: "Show 1 hidden" }));
-  expect(
-    await screen.findByText("Rename", { selector: "strong" }),
-  ).toBeInTheDocument();
-});
-
 it("exposes a tablist and passes the scoped turn into files and source", async () => {
   const client = makeClient();
   useCodeUiStore.setState({

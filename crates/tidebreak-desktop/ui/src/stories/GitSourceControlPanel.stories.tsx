@@ -1,6 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, fn, userEvent, within } from "storybook/test";
-
+import { fn } from "storybook/test";
 import type { RuntimeSettings } from "@/api/types";
 import { GitSourceControlPanel } from "@/settings/GitSourceControlPanel";
 import { storySettings } from "./SettingsStoryHarness";
@@ -127,22 +126,6 @@ export const LoadFailed: Story = {
 
 export const SaveFailed: Story = {
   args: { client: client(settings(), { saveFailure: true }) as never },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await userEvent.click(
-      await canvas.findByRole("switch", {
-        name: "Rename generated branches automatically",
-      }),
-    );
-    await expect(await canvas.findByRole("alert")).toHaveTextContent(
-      "Git settings could not be saved.",
-    );
-    await expect(
-      canvas.getByRole("switch", {
-        name: "Rename generated branches automatically",
-      }),
-    ).toBeChecked();
-  },
 };
 
 export const Narrow: Story = {

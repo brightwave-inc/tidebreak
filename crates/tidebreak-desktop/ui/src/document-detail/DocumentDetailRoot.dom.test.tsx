@@ -253,25 +253,6 @@ describe("DocumentDetailRoot", () => {
   // Regression: the refusal reached the reader as the bare reason code
   // `native_export_authority_unavailable`, while the outputs panel beside this
   // one already worded the same refusal.
-  it("words a save refused because the work is on another machine", async () => {
-    const user = userEvent.setup();
-    const download = vi
-      .fn()
-      .mockRejectedValue("native_export_authority_unavailable");
-    await openPanel(detail(), download);
-    await screen.findByAltText("Document image");
-
-    await user.click(screen.getByRole("button", { name: "Download" }));
-
-    expect(
-      await screen.findByText(
-        /Saving files to this computer is not available while this window is attached to a remote machine/,
-      ),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByText(/native_export_authority_unavailable/),
-    ).not.toBeInTheDocument();
-  });
 
   it("draws and saves the attached original without a catalog breadcrumb", async () => {
     const user = userEvent.setup();

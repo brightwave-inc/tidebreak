@@ -1,7 +1,6 @@
 import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, fn, userEvent, within } from "storybook/test";
-
+import { fn } from "storybook/test";
 import { HttpError, type CodeWorkspacePrSnapshot } from "@/api";
 import { WorkspaceWorkflowControl } from "@/code/WorkspaceWorkflowControl";
 import type {
@@ -117,18 +116,7 @@ export const ReadyForPullRequest: Story = {
   args: { snapshot: readyForPrGit },
 };
 
-export const PullRequestOpen: Story = {
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(
-      canvas.getByRole("button", { name: "Open pull request #41" }),
-    ).toBeVisible();
-    await expect(
-      canvas.getByRole("button", { name: "Open pull request #41 on GitHub" }),
-    ).toBeVisible();
-    await expect(canvas.getByText("Open")).toBeVisible();
-  },
-};
+export const PullRequestOpen: Story = {};
 
 /** The server rechecked the confirmed merge and found a replacement head. */
 export const MergePreconditionChanged: Story = {
@@ -148,17 +136,6 @@ export const MergePreconditionChanged: Story = {
       },
     },
     mergeConflict: true,
-  },
-  play: async ({ canvasElement }) => {
-    const body = within(canvasElement.ownerDocument.body);
-    await userEvent.click(
-      within(canvasElement).getByRole("button", { name: "Merge" }),
-    );
-    const dialog = await body.findByRole("alertdialog");
-    await userEvent.click(
-      within(dialog).getByRole("button", { name: "Merge" }),
-    );
-    await body.findByRole("button", { name: "Refresh workspace status" });
   },
 };
 
@@ -204,11 +181,4 @@ export const FailingChecks: Story = {
  */
 export const ReadingCheckLogs: Story = {
   args: { snapshot: failingChecksPrGit, checkLogsHang: true },
-  play: async ({ canvasElement }) => {
-    const button = within(canvasElement).getByRole("button", {
-      name: /fix ci/i,
-    });
-    await userEvent.click(button);
-    await within(canvasElement).findByText("Reading logs…");
-  },
 };

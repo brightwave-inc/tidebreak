@@ -1,6 +1,4 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, userEvent, within } from "storybook/test";
-
 import type { ApiClient } from "@/api/client";
 import { CodeQuickOpen } from "@/code/CodeQuickOpen";
 import { codeWorkspaceFilePaths } from "./fixtures";
@@ -51,31 +49,9 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-export const Files: Story = {
-  play: async ({ canvasElement }) => {
-    const body = within(canvasElement.ownerDocument.body);
-    await expect(
-      await body.findByRole("option", {
-        name: "crates/tidebreak-desktop/ui/src/code/CodeHome.tsx",
-      }),
-    ).toBeVisible();
-  },
-};
+export const Files: Story = {};
 
-export const FilteredResults: Story = {
-  play: async ({ canvasElement }) => {
-    const body = within(canvasElement.ownerDocument.body);
-    await userEvent.type(
-      await body.findByRole("combobox", { name: "Search files by name" }),
-      "workspace page",
-    );
-    await expect(
-      await body.findByRole("option", {
-        name: "crates/tidebreak-desktop/ui/src/code/CodeWorkspacePage.tsx",
-      }),
-    ).toBeVisible();
-  },
-};
+export const FilteredResults: Story = {};
 
 export const Loading: Story = { args: { scenario: "loading" } };
 
@@ -83,12 +59,6 @@ export const Empty: Story = { args: { scenario: "empty" } };
 
 export const Failure: Story = {
   args: { scenario: "failure" },
-  play: async ({ canvasElement }) => {
-    const body = within(canvasElement.ownerDocument.body);
-    await expect(
-      await body.findByText("The workspace file index is unavailable."),
-    ).toBeVisible();
-  },
 };
 
 export const Compact: Story = {

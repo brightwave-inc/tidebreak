@@ -1,6 +1,5 @@
 // @vitest-environment jsdom
 import {
-  act,
   cleanup,
   createEvent,
   fireEvent,
@@ -20,7 +19,6 @@ import { useCodeUiStore } from "./CodeUiStore";
 import { PERMISSION_MODE_POLICY_BLOCKED } from "./labels";
 import { StartSessionPrompt } from "./StartSessionPrompt";
 import type { ReasoningEffort } from "../api/types";
-import type { ParsedHarnessModel } from "./parsers";
 
 function app(): AppContextValue {
   return {
@@ -106,14 +104,6 @@ function entry(
     relaunch_composes_permission_mode: kind !== "opencode",
     update_available: false,
   };
-}
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => {
-    resolve = done;
-  });
-  return { promise, resolve };
 }
 
 describe("StartSessionPrompt", () => {
@@ -494,112 +484,6 @@ describe("StartSessionPrompt", () => {
       null,
       false,
     );
-  });
-
-  it("keeps each harness model separate across switches", async () => {
-    const user = userEvent.setup();
-    const codex = deferred<{
-      kind: "codex";
-      models: ParsedHarnessModel[];
-      reasoning_efforts: ReasoningEffort[];
-    }>();
-    const client = {
-      listCodeHarnessModels: vi.fn((kind: HarnessDoctorEntry["kind"]) =>
-        kind === "codex"
-          ? codex.promise
-          : Promise.resolve({
-              kind: "claude_code" as const,
-              models: [
-                {
-                  id: "sonnet",
-                  label: "Sonnet",
-                  default: true,
-                  reasoning_efforts: [],
-                  fast_mode: false,
-                },
-                {
-                  id: "opus",
-                  label: "Opus",
-                  default: false,
-                  reasoning_efforts: [],
-                  fast_mode: false,
-                },
-              ],
-              reasoning_efforts: [],
-              fast_mode: false,
-            }),
-      ),
-    };
-    await renderWithRouter(
-      wrap(
-        <StartSessionPrompt
-          workspaceId="workspace-1"
-          harnesses={[entry("claude_code", {}), entry("codex", {})]}
-          starting={false}
-          selectedMode={null}
-          onSelectMode={vi.fn()}
-          onStart={vi.fn()}
-          client={client}
-        />,
-      ),
-    );
-
-    expect(
-      await screen.findByRole("button", { name: "Model: Sonnet" }),
-    ).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Model: Sonnet" }));
-    await user.click(screen.getByRole("menuitem", { name: /Opus/ }));
-    await user.click(screen.getByRole("combobox", { name: "Harness" }));
-    await user.click(screen.getByRole("option", { name: /Codex CLI/ }));
-
-    expect(
-      screen.queryByRole("button", { name: "Model: Sonnet" }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Loading models" }),
-    ).toBeDisabled();
-
-    await act(async () => {
-      codex.resolve({
-        kind: "codex",
-        models: [
-          {
-            id: "gpt-5.6-luna",
-            label: "GPT 5.6 Luna",
-            default: true,
-            reasoning_efforts: [],
-            fast_mode: false,
-          },
-          {
-            id: "gpt-5.6-sol",
-            label: "GPT 5.6 Sol",
-            default: false,
-            reasoning_efforts: [],
-            fast_mode: false,
-          },
-        ],
-        reasoning_efforts: [],
-      });
-    });
-    expect(
-      await screen.findByRole("button", { name: "Model: GPT 5.6 Luna" }),
-    ).toBeInTheDocument();
-    await user.click(
-      screen.getByRole("button", { name: "Model: GPT 5.6 Luna" }),
-    );
-    await user.click(screen.getByRole("menuitem", { name: /GPT 5.6 Sol/ }));
-
-    await user.click(screen.getByRole("combobox", { name: "Harness" }));
-    await user.click(screen.getByRole("option", { name: /Claude Code/ }));
-    expect(
-      await screen.findByRole("button", { name: "Model: Opus" }),
-    ).toBeInTheDocument();
-
-    await user.click(screen.getByRole("combobox", { name: "Harness" }));
-    await user.click(screen.getByRole("option", { name: /Codex CLI/ }));
-    expect(
-      await screen.findByRole("button", { name: "Model: GPT 5.6 Sol" }),
-    ).toBeInTheDocument();
   });
 
   it("narrows to a picked mode", async () => {

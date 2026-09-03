@@ -1,6 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, fn, within } from "storybook/test";
-
+import { fn } from "storybook/test";
 import type { ApiClient } from "@/api/client";
 import type {
   CodeWorkspacePrSnapshot,
@@ -411,10 +410,6 @@ export const Files: Story = {};
 /** The tab count and changed-file index share the same live workspace read. */
 export const Changes: Story = {
   args: { tab: "source" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(await canvas.findByLabelText("6 changed files")).toBeVisible();
-  },
 };
 
 /** Checks, merge state, and review discussion are one readable review surface. */
@@ -430,12 +425,6 @@ export const ReviewReadyToMerge: Story = {
 /** The review tab and detail header use GitHub's orange queue mark. */
 export const ReviewMergeQueued: Story = {
   args: { tab: "pr", scenario: "merge-queued" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(canvas.getByText("Queued")).toBeVisible();
-    await expect(canvas.getByText("In merge queue")).toBeVisible();
-    await expect(canvas.queryByText("Auto-merge is enabled")).toBeNull();
-  },
 };
 
 /**

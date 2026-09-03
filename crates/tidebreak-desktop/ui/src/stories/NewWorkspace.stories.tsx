@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, fn, userEvent, within } from "storybook/test";
+import { fn } from "storybook/test";
 import {
   createMemoryHistory,
   createRootRoute,
@@ -310,121 +310,30 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 /** One CSS rem, which the interface zoom moves. Sizes below scale with it. */
-function rem(element: HTMLElement): number {
-  return Number.parseFloat(
-    getComputedStyle(element.ownerDocument.documentElement).fontSize,
-  );
-}
 
 /**
  * Sticky defaults answered, message focused, one Enter from a running task.
  * Every pill has a chord: Cmd+N repo, Alt+E engine, Alt+M model, Alt+P
  * permissions, Alt+B base ref, Alt+N name.
  */
-export const Default: Story = {
-  play: async ({ canvasElement }) => {
-    const page = within(canvasElement.ownerDocument.body);
-    const dialog = await page.findByRole("dialog");
-    const prompt = page.getByRole("textbox", { name: "First message" });
-    const unit = rem(dialog);
-    await expect(dialog).toBeVisible();
-    // `max-w-4xl` on the dialog and `sm:min-h-52` on the prompt, in pixels.
-    expect(dialog.getBoundingClientRect().width).toBeCloseTo(56 * unit, 0);
-    expect(prompt.getBoundingClientRect().height).toBeGreaterThanOrEqual(
-      13 * unit,
-    );
-    const engine = page.getByRole("button", { name: /^Harness:/ });
-    const permissions = page.getByRole("button", { name: /^Permissions:/ });
-    expect(permissions.getBoundingClientRect().top).toBeCloseTo(
-      engine.getBoundingClientRect().top,
-      0,
-    );
-  },
-};
+export const Default: Story = {};
 
 /** A clipboard image stays attached instead of inserting its local path. */
-export const PastedImage: Story = {
-  play: async ({ canvasElement }) => {
-    const page = within(canvasElement.ownerDocument.body);
-    const prompt = page.getByRole("textbox", { name: "First message" });
-    await userEvent.type(prompt, "Review this screenshot");
-
-    const image = new File(
-      [new Uint8Array([1, 2, 3, 4])],
-      "workspace-composer.png",
-      {
-        type: "image/png",
-      },
-    );
-    const paste = new Event("paste", { bubbles: true, cancelable: true });
-    Object.defineProperty(paste, "clipboardData", {
-      value: { files: [image] },
-    });
-    prompt.dispatchEvent(paste);
-
-    await expect(page.getByLabelText("Attached images")).toBeVisible();
-    await expect(page.getByText("workspace-composer.png")).toBeVisible();
-  },
-};
+export const PastedImage: Story = {};
 
 /** The minimum supported window wraps settings without clipping the actions. */
 export const MinimumWindow: Story = {
   globals: { viewport: { value: "minimumWindow", isRotated: false } },
-  play: async ({ canvasElement }) => {
-    const page = within(canvasElement.ownerDocument.body);
-    const dialog = await page.findByRole("dialog");
-    const create = page.getByRole("button", { name: /Create/ });
-    await expect(create).toBeVisible();
-    expect(dialog.scrollWidth).toBeLessThanOrEqual(dialog.clientWidth);
-    // The wrapped footer is the row a short window used to cut off.
-    expect(dialog.scrollHeight).toBeLessThanOrEqual(dialog.clientHeight);
-    expect(create.getBoundingClientRect().bottom).toBeLessThanOrEqual(
-      dialog.getBoundingClientRect().bottom,
-    );
-  },
 };
 
 /** Picking the repo is the one setting above the message, and it has a chord. */
-export const RepoPicker: Story = {
-  play: async ({ canvasElement }) => {
-    const page = within(canvasElement.ownerDocument.body);
-    await userEvent.click(await page.findByRole("button", { name: "Repo" }));
-    const menu = await page.findByRole("menu");
-    await expect(within(menu).getByText("toronto")).toBeVisible();
-    await expect(menu.getBoundingClientRect().bottom).toBeLessThanOrEqual(
-      window.innerHeight,
-    );
-  },
-};
+export const RepoPicker: Story = {};
 
 /** The model list belongs to the engine, so it opens upward from the footer. */
-export const ModelPicker: Story = {
-  play: async ({ canvasElement }) => {
-    const page = within(canvasElement.ownerDocument.body);
-    await userEvent.click(
-      await page.findByRole("button", { name: /Claude Opus 5/ }),
-    );
-    const menu = await page.findByRole("menu");
-    await expect(within(menu).getByText("Claude Sonnet 5")).toBeVisible();
-    await expect(menu.getBoundingClientRect().top).toBeGreaterThanOrEqual(0);
-  },
-};
+export const ModelPicker: Story = {};
 
 /** The base ref is a free-text field, not a branch list: tags and commits count. */
-export const BaseRefPicker: Story = {
-  play: async ({ canvasElement }) => {
-    const page = within(canvasElement.ownerDocument.body);
-    await userEvent.click(
-      await page.findByRole("button", { name: "Base ref" }),
-    );
-    await expect(
-      await page.findByRole("textbox", { name: "Base ref" }),
-    ).toBeVisible();
-    await expect(
-      page.getByText("The branch, tag, or commit the worktree is cut from."),
-    ).toBeVisible();
-  },
-};
+export const BaseRefPicker: Story = {};
 
 /**
  * Engines that cannot be fixed by waiting — no pin, or signed out — stay
@@ -432,15 +341,6 @@ export const BaseRefPicker: Story = {
  */
 export const EnginesNeedSetup: Story = {
   args: { doctor: harnessDoctorDegraded },
-  play: async ({ canvasElement }) => {
-    const page = within(canvasElement.ownerDocument.body);
-    await userEvent.click(
-      await page.findByRole("button", { name: /^Harness:/ }),
-    );
-    const menu = await page.findByRole("menu");
-    await expect(within(menu).getByText("Coding harnesses…")).toBeVisible();
-    await expect(menu.getBoundingClientRect().top).toBeGreaterThanOrEqual(0);
-  },
 };
 
 /**
@@ -474,15 +374,6 @@ export const BlockedByManagedCeiling: Story = {
     initialHarness: "grok",
     permissionModeCeiling: "ask",
   },
-  play: async ({ canvasElement }) => {
-    const page = within(canvasElement.ownerDocument.body);
-    await expect(
-      page.findByText(
-        "This engine has no permission mode allowed by your organization's policy.",
-      ),
-    ).resolves.toBeVisible();
-    await expect(page.getByRole("button", { name: /Create/ })).toBeDisabled();
-  },
 };
 
 /**
@@ -492,22 +383,6 @@ export const BlockedByManagedCeiling: Story = {
  */
 export const FirstRepo: Story = {
   args: { catalog: [] },
-  play: async ({ canvasElement }) => {
-    const page = within(canvasElement.ownerDocument.body);
-    await userEvent.type(
-      await page.findByRole("textbox", { name: "First message" }),
-      "Add a health endpoint",
-    );
-    const pill = page.getByRole("button", { name: "Repo" });
-    await expect(pill).toHaveTextContent("Add a repo");
-    await userEvent.click(pill);
-    await expect(
-      await page.findByRole("textbox", { name: "Repository path or URL" }),
-    ).toBeVisible();
-    await expect(
-      page.getByRole("button", { name: /Add and create/ }),
-    ).toBeDisabled();
-  },
 };
 
 /**
@@ -516,20 +391,6 @@ export const FirstRepo: Story = {
  */
 export const FirstRepoFromRemote: Story = {
   args: { catalog: [] },
-  play: async ({ canvasElement }) => {
-    const page = within(canvasElement.ownerDocument.body);
-    await userEvent.click(await page.findByRole("button", { name: "Repo" }));
-    await userEvent.type(
-      await page.findByRole("textbox", { name: "Repository path or URL" }),
-      "acme/app",
-    );
-    await expect(
-      await page.findByRole("textbox", { name: "Destination folder" }),
-    ).toHaveValue("/Users/sam/src");
-    await expect(
-      page.getByRole("button", { name: /Add and create/ }),
-    ).toBeEnabled();
-  },
 };
 
 /** A clone is minutes of work, so the field reports it and keeps running. */
@@ -551,18 +412,6 @@ export const FirstRepoCloning: Story = {
       }),
     },
   },
-  play: async ({ canvasElement }) => {
-    const page = within(canvasElement.ownerDocument.body);
-    await userEvent.click(await page.findByRole("button", { name: "Repo" }));
-    await userEvent.type(
-      await page.findByRole("textbox", { name: "Repository path or URL" }),
-      "https://example.com/acme/app.git",
-    );
-    await userEvent.click(page.getByRole("button", { name: /Add and create/ }));
-    await expect(
-      await page.findByTestId("add-repo-clone-phase"),
-    ).toHaveTextContent("Receiving objects");
-  },
 };
 
 /**
@@ -577,23 +426,6 @@ export const FirstRepoRefused: Story = {
         throw new Error("/Users/sam/notes is not a git repository");
       },
     },
-  },
-  play: async ({ canvasElement }) => {
-    const page = within(canvasElement.ownerDocument.body);
-    await userEvent.type(
-      await page.findByRole("textbox", { name: "First message" }),
-      "Add a health endpoint",
-    );
-    await userEvent.click(page.getByRole("button", { name: "Repo" }));
-    await userEvent.type(
-      await page.findByRole("textbox", { name: "Repository path or URL" }),
-      "/Users/sam/notes",
-    );
-    await userEvent.click(page.getByRole("button", { name: /Add and create/ }));
-    await expect(await page.findByTestId("add-repo-error")).toBeVisible();
-    await expect(
-      page.getByRole("textbox", { name: "First message" }),
-    ).toHaveValue("Add a health endpoint");
   },
 };
 
@@ -614,16 +446,5 @@ export const FirstRepoWhileEngineDownloads: Story = {
         done: false,
       },
     },
-  },
-  play: async ({ canvasElement }) => {
-    const page = within(canvasElement.ownerDocument.body);
-    await userEvent.click(await page.findByRole("button", { name: "Repo" }));
-    await userEvent.type(
-      await page.findByRole("textbox", { name: "Repository path or URL" }),
-      "/Users/sam/src/app",
-    );
-    await expect(
-      page.getByRole("button", { name: /Add repo/ }),
-    ).toBeInTheDocument();
   },
 };

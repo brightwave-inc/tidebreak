@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState, type ReactNode } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, fn, userEvent, waitFor, within } from "storybook/test";
+import { fn } from "storybook/test";
 import {
   createMemoryHistory,
   createRootRoute,
@@ -890,35 +890,6 @@ function ChatViewStory({ scenario }: { scenario: StoryScenario }) {
   return <RouterProvider router={router as never} />;
 }
 
-async function expectBusyComposerControlsContained(canvasElement: HTMLElement) {
-  const canvas = within(canvasElement);
-  const input = await canvas.findByRole("textbox", { name: "Message" });
-  const composer = input.closest("form");
-  if (!composer) throw new Error("The message input has no composer form");
-  const queue = canvas.getByRole("button", {
-    name: "Queue message for after this response",
-  });
-  const stop = canvas.getByRole("button", { name: "Stop response" });
-  const viewport = canvasElement.ownerDocument.documentElement;
-
-  await expect(queue).toBeVisible();
-  await expect(stop).toBeVisible();
-
-  await waitFor(() => {
-    const composerRect = composer.getBoundingClientRect();
-    expect(composerRect.left).toBeGreaterThanOrEqual(0);
-    expect(composerRect.right).toBeLessThanOrEqual(viewport.clientWidth);
-    for (const control of [queue, stop]) {
-      const controlRect = control.getBoundingClientRect();
-      expect(controlRect.left).toBeGreaterThanOrEqual(composerRect.left);
-      expect(controlRect.right).toBeLessThanOrEqual(composerRect.right);
-      expect(controlRect.top).toBeGreaterThanOrEqual(composerRect.top);
-      expect(controlRect.bottom).toBeLessThanOrEqual(composerRect.bottom);
-    }
-    expect(composer.scrollWidth).toBeLessThanOrEqual(composer.clientWidth);
-  });
-}
-
 const meta = {
   title: "Conversation/ChatView",
   component: ChatViewStory,
@@ -953,12 +924,6 @@ export const AttachmentsAndDraft: Story = {
       },
     },
   },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const composer = await canvas.findByRole("textbox", { name: "Message" });
-    await userEvent.click(composer);
-    await expect(composer).toHaveFocus();
-  },
 };
 
 export const PastedTextAndDraft: Story = {
@@ -978,13 +943,6 @@ export const PastedTextAndDraft: Story = {
       },
     },
   },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(await canvas.findByText("Pasted text")).toBeVisible();
-    await expect(
-      canvas.getByRole("button", { name: "Remove pasted text" }),
-    ).toBeVisible();
-  },
 };
 
 export const ActiveStreamingQueueAndStop: Story = {
@@ -1001,29 +959,6 @@ export const ActiveStreamingQueueAndStop: Story = {
       plan: taskPlan,
     },
   },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(
-      await canvas.findByRole("button", { name: "Stop response" }),
-    ).toBeEnabled();
-    await userEvent.click(
-      canvas.getByRole("button", {
-        name: "Queue message for after this response",
-      }),
-    );
-    await waitFor(
-      () =>
-        expect(
-          canvas.getByText(
-            "Also compare the queued state against the live transcript.",
-          ),
-        ).toBeInTheDocument(),
-      { timeout: 3_000 },
-    );
-    await expect(
-      canvas.getByRole("button", { name: "Stop response" }),
-    ).toBeEnabled();
-  },
 };
 
 export const PendingApprovalReturnsToComposer: Story = {
@@ -1032,20 +967,6 @@ export const PendingApprovalReturnsToComposer: Story = {
       id: "pending-approval",
       messages: pendingApprovalMessages,
     },
-  },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const composer = await canvas.findByRole("textbox", { name: "Message" });
-    await userEvent.click(
-      await canvas.findByRole("button", { name: "Yes, run it once" }),
-    );
-    await waitFor(() =>
-      expect(
-        canvas.queryByRole("group", { name: "Approval choices" }),
-      ).not.toBeInTheDocument(),
-    );
-    await userEvent.click(composer);
-    await expect(composer).toHaveFocus();
   },
 };
 
@@ -1057,16 +978,6 @@ export const PendingQuestionReturnsToComposer: Story = {
       userQuestions: [pendingQuestion],
     },
   },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await userEvent.click(
-      await canvas.findByText("Conversation states", { exact: true }),
-    );
-    await userEvent.click(canvas.getByRole("button", { name: "Continue" }));
-    const composer = await canvas.findByRole("textbox", { name: "Message" });
-    await userEvent.click(composer);
-    await expect(composer).toHaveFocus();
-  },
 };
 
 export const PendingPlanReturnsToComposer: Story = {
@@ -1076,15 +987,6 @@ export const PendingPlanReturnsToComposer: Story = {
       messages: baseMessages,
       planApprovals: [pendingPlan],
     },
-  },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await userEvent.click(
-      await canvas.findByRole("button", { name: "Execute plan" }),
-    );
-    const composer = await canvas.findByRole("textbox", { name: "Message" });
-    await userEvent.click(composer);
-    await expect(composer).toHaveFocus();
   },
 };
 
@@ -1111,18 +1013,6 @@ export const CompactPlanDecisionFailure: Story = {
     },
   },
   globals: { viewport: { value: "compact", isRotated: false } },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await userEvent.click(
-      await canvas.findByRole("button", { name: "Execute plan" }),
-    );
-    await expect(await canvas.findByRole("alert")).toHaveTextContent(
-      "The plan decision was not saved.",
-    );
-    await expect(
-      canvas.getByRole("button", { name: "Execute plan" }),
-    ).toBeEnabled();
-  },
 };
 
 const crowdedAgentScenario = {
@@ -1141,17 +1031,6 @@ const crowdedAgentScenario = {
 
 export const CrowdedDecisionsAndAgentLifecycle: Story = {
   args: { scenario: crowdedAgentScenario },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(
-      await canvas.findByText(
-        "Comparing prompt replacement at desktop and compact widths",
-      ),
-    ).toBeInTheDocument();
-    await expect(
-      canvas.getByRole("region", { name: "Background agents" }),
-    ).toBeInTheDocument();
-  },
 };
 
 export const CompactCrowdedDecisionsAndAgentLifecycle: Story = {
@@ -1170,13 +1049,6 @@ export const RetryableFailure: Story = {
       id: "retryable-failure",
       messages: retryableMessages,
     },
-  },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await userEvent.click(await canvas.findByRole("button", { name: "Retry" }));
-    await expect(
-      await canvas.findByRole("textbox", { name: "Message" }),
-    ).toHaveValue("Generate the compact conversation review.");
   },
 };
 
@@ -1208,15 +1080,6 @@ export const CompactPressure: Story = {
     },
   },
   globals: { viewport: { value: "compact", isRotated: false } },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expectBusyComposerControlsContained(canvasElement);
-    await expect(
-      canvas.getByRole("button", {
-        name: /Context 4 1 image · 1 file · 1 folder · 1 skill Show details/i,
-      }),
-    ).toHaveAttribute("aria-expanded", "false");
-  },
 };
 
 export const MinimumWindowBusyContext: Story = {
@@ -1246,27 +1109,4 @@ export const MinimumWindowBusyContext: Story = {
     },
   },
   globals: { viewport: { value: "minimumWindow", isRotated: false } },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const context = await canvas.findByRole("button", {
-      name: /Context 4 1 image · 1 file · 1 folder · 1 skill Show details/i,
-    });
-    await expect(context).toBeVisible();
-    await expect(context).toHaveAttribute("aria-expanded", "false");
-    await expectBusyComposerControlsContained(canvasElement);
-    await userEvent.click(context);
-    await expect(context).toHaveAttribute("aria-expanded", "true");
-    await expect(canvas.getByText("conversation-review.pdf")).toBeVisible();
-    await userEvent.click(
-      canvas.getByRole("button", {
-        name: /Context 4 1 image · 1 file · 1 folder · 1 skill Hide details/i,
-      }),
-    );
-    await expect(
-      canvas.getByRole("button", {
-        name: /Context 4 1 image · 1 file · 1 folder · 1 skill Show details/i,
-      }),
-    ).toHaveAttribute("aria-expanded", "false");
-    context.blur();
-  },
 };

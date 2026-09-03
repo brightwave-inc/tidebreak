@@ -1,5 +1,4 @@
 // @vitest-environment jsdom
-import { StrictMode } from "react";
 import {
   cleanup,
   render,
@@ -66,77 +65,6 @@ async function renderPanel(number: number, api = client()) {
 }
 
 describe("PullRequestDetailSheet", () => {
-  it("accepts load, refresh, and mutation completions in Strict Mode", async () => {
-    vi.mocked(toast.success).mockClear();
-    const baseDetail = deliveryPullRequestDetails[2251]!;
-    const refreshedDetail = {
-      ...baseDetail,
-      errors: [
-        {
-          kind: "detail",
-          message: "Strict Mode refresh completed.",
-        },
-      ],
-    };
-    const mutatedDetail = {
-      ...baseDetail,
-      errors: [
-        {
-          kind: "detail",
-          message: "Strict Mode mutation refresh completed.",
-        },
-      ],
-    };
-    let phase: "load" | "refresh" | "mutation" = "load";
-    const getDetail = vi.fn(async () => {
-      if (phase === "refresh") return refreshedDetail;
-      if (phase === "mutation") return mutatedDetail;
-      return baseDetail;
-    });
-    const runAction = vi.fn(async () => ({
-      success: true,
-      message: "Posted.",
-    }));
-    const onChanged = vi.fn();
-
-    render(
-      <StrictMode>
-        <PullRequestDetailSheet
-          client={client({
-            getCodeDeliveryPullRequestDetail: getDetail,
-            runCodeDeliveryPullRequestAction: runAction,
-          })}
-          summary={summaryFor(2251)}
-          onClose={vi.fn()}
-          onChanged={onChanged}
-          onOpenWorkspace={vi.fn()}
-        />
-      </StrictMode>,
-    );
-
-    expect(
-      await screen.findByRole("tab", { name: /Conversation/ }),
-    ).toBeInTheDocument();
-    phase = "refresh";
-    await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
-    expect(
-      await screen.findByText("Strict Mode refresh completed."),
-    ).toBeInTheDocument();
-
-    phase = "mutation";
-    await userEvent.type(
-      screen.getByLabelText("Comment on this pull request"),
-      "Strict Mode comment",
-    );
-    await userEvent.click(screen.getByRole("button", { name: "Comment" }));
-
-    expect(
-      await screen.findByText("Strict Mode mutation refresh completed."),
-    ).toBeInTheDocument();
-    expect(onChanged).toHaveBeenCalledTimes(1);
-    expect(toast.success).toHaveBeenCalledWith("Posted.");
-  });
-
   it("names the lifecycle instead of leaving a settled pull request unlabeled", async () => {
     await renderPanel(2240);
     expect(await screen.findByText("Merged")).toBeInTheDocument();

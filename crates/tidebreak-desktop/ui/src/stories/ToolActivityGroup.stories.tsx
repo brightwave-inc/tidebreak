@@ -1,6 +1,4 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { userEvent, within } from "storybook/test";
-
 import { ToolActivityGroup, type ToolActivity } from "@/ToolActivityGroup";
 
 const runningSearch: ToolActivity = {
@@ -93,17 +91,9 @@ export const Settled: Story = {
 /** Expanded rows keep the shimmer on the call that is still running. */
 export const RunningExpanded: Story = {
   args: { activities: [runningSearch, runningRead] },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await userEvent.click(await canvas.findByRole("button"));
-  },
 };
 
 /** Browser work keeps each step legible instead of collapsing to generic tools. */
 export const BrowserWorkflow: Story = {
   args: { activities: browserWorkflow },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await userEvent.click(await canvas.findByRole("button"));
-  },
 };

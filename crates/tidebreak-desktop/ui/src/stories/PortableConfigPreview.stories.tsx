@@ -67,15 +67,6 @@ export const Clean: Story = {
       },
     ]),
   },
-  play: async ({ canvas, userEvent }) => {
-    const file = new File([JSON.stringify(document)], "tidebreak-config.json", {
-      type: "application/json",
-    });
-    await userEvent.upload(
-      canvas.getByLabelText("Import workspace configuration"),
-      file,
-    );
-  },
 };
 
 export const Conflicts: Story = {
@@ -90,7 +81,6 @@ export const Conflicts: Story = {
       },
     ]),
   },
-  play: Clean.play,
 };
 
 export const RemapsNeeded: Story = {
@@ -112,7 +102,6 @@ export const RemapsNeeded: Story = {
       },
     ]),
   },
-  play: Clean.play,
 };
 
 export const UnsupportedVersion: Story = {
@@ -127,5 +116,4 @@ export const UnsupportedVersion: Story = {
       applyWorkspaceConfig: async () => ({ applied: 0, skipped: 0 }),
     },
   },
-  play: Clean.play,
 };

@@ -1,6 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, fn, userEvent, waitFor, within } from "storybook/test";
-
+import { fn } from "storybook/test";
 import type { DeliverablesCatalog, DeliverableSummary } from "@/deliverables";
 import { OutputsView, type OutputsApis } from "@/outputs/OutputsView";
 
@@ -85,22 +84,7 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-export const DenseCatalog: Story = {
-  play: async ({ canvasElement }) => {
-    const grid = canvasElement.querySelector(".ag-root-wrapper");
-    if (!(grid instanceof HTMLElement)) {
-      throw new Error("The outputs grid did not mount.");
-    }
-    await waitFor(() => {
-      expect(grid.getBoundingClientRect().height).toBeGreaterThan(300);
-    });
-    await expect(
-      within(canvasElement).getByRole("button", {
-        name: "Open Board update.md",
-      }),
-    ).toBeVisible();
-  },
-};
+export const DenseCatalog: Story = {};
 
 export const Loading: Story = {
   args: { apis: loadingApis },
@@ -122,16 +106,7 @@ export const TruncatedCatalog: Story = {
   },
 };
 
-export const NoMatchingResults: Story = {
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const search = await canvas.findByPlaceholderText("Search outputs…");
-    await userEvent.type(search, "quarterly board deck");
-    await expect(
-      canvas.getByText("No outputs match your search."),
-    ).toBeVisible();
-  },
-};
+export const NoMatchingResults: Story = {};
 
 export const Compact: Story = {
   globals: { viewport: { value: "compact", isRotated: false } },

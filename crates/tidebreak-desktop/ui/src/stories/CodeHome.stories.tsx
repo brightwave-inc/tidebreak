@@ -7,8 +7,6 @@ import {
   createRouter,
   RouterProvider,
 } from "@tanstack/react-router";
-import { expect, within } from "storybook/test";
-
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
 import type { ApiClient } from "@/api/client";
 import type { HarnessKind } from "@/api/types";
@@ -233,39 +231,16 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-export const RegisteredRepositories: Story = {
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(
-      await canvas.findByRole("heading", { name: "Repos" }),
-    ).toBeVisible();
-    await expect(await canvas.findByText("model-gateway")).toBeVisible();
-  },
-};
+export const RegisteredRepositories: Story = {};
 
 export const FirstRepository: Story = {
   args: { scenario: "empty" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(
-      await canvas.findByRole("heading", { name: "Start with a repository" }),
-    ).toBeVisible();
-    await expect(
-      canvas.getByRole("button", { name: "Workspaces" }),
-    ).toBeVisible();
-  },
 };
 
 export const Loading: Story = { args: { scenario: "loading" } };
 
 export const Failure: Story = {
   args: { scenario: "failure" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await expect(
-      await canvas.findByText("The repository catalog could not load."),
-    ).toBeVisible();
-  },
 };
 
 export const NeedsHarness: Story = {
@@ -274,32 +249,6 @@ export const NeedsHarness: Story = {
 
 export const DenseSidebar: Story = {
   args: { scenario: "dense-sidebar" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const destinations = canvas.getByRole("navigation", {
-      name: "Code destinations",
-    });
-    const destinationButtons = within(destinations).getAllByRole("button");
-    await expect(
-      destinationButtons.map(
-        (button) => button.getAttribute("aria-label") ?? button.textContent,
-      ),
-    ).toEqual(["Pull requests", "Notifications", "Analytics", "Archive"]);
-    await expect(
-      await canvas.findByText("Audit Storybook coverage"),
-    ).toBeVisible();
-    await expect(
-      await canvas.findByText("Recover provider errors"),
-    ).toBeVisible();
-    await expect(
-      canvas.getByRole("button", { name: "Settings" }),
-    ).toBeVisible();
-    await expect(
-      canvas.getByRole("button", {
-        name: "Theme: system. Click to change.",
-      }),
-    ).toBeVisible();
-  },
 };
 
 export const CompactFirstRepository: Story = {

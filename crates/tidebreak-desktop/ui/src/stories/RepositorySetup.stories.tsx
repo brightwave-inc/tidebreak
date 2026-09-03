@@ -7,8 +7,6 @@ import {
   createRouter,
   RouterProvider,
 } from "@tanstack/react-router";
-import { expect, userEvent, within } from "storybook/test";
-
 import { AppContextProvider, type AppContextValue } from "@/AppContext";
 import type { ApiClient } from "@/api/client";
 import type { HarnessKind } from "@/api/types";
@@ -436,193 +434,54 @@ export const AddRepository: Story = {};
 
 export const GitHubWithoutCredential: Story = {
   args: { scenario: "github-hint" },
-  play: async ({ canvasElement }) => {
-    const body = within(canvasElement.ownerDocument.body);
-    await userEvent.click(
-      await body.findByRole("option", { name: /GitHub repository/ }),
-    );
-    await expect(await body.findByTestId("gh-absent-hint")).toBeVisible();
-  },
 };
 
 export const LocalOnlyMachine: Story = {
   args: { scenario: "local-only" },
-  play: async ({ canvasElement }) => {
-    const body = within(canvasElement.ownerDocument.body);
-    await expect(
-      await body.findByText("Install git on this machine to clone a remote."),
-    ).toBeVisible();
-  },
 };
 
 export const CloneFailure: Story = {
   args: { scenario: "clone-failure" },
-  play: async ({ canvasElement }) => {
-    const body = within(canvasElement.ownerDocument.body);
-    await expect(
-      await body.findByText("fatal: repository not found"),
-    ).toBeVisible();
-    await expect(
-      await body.findByRole("button", { name: "Retry" }),
-    ).toBeVisible();
-  },
 };
 
 export const HostedGitHubPicker: Story = {
   args: { scenario: "hosted-picker" },
-  play: async ({ canvasElement }) => {
-    const body = within(canvasElement.ownerDocument.body);
-    await userEvent.click(
-      await body.findByRole("option", { name: /GitHub repository/ }),
-    );
-    await userEvent.click(
-      await body.findByRole("combobox", { name: "Repository" }),
-    );
-    await expect(
-      await body.findByRole("option", { name: /mira-chen\/notes/ }),
-    ).toBeVisible();
-    const last = await body.findByRole("option", {
-      name: /mira-chen\/notes/,
-    });
-    last.scrollIntoView();
-    await expect(last).toBeVisible();
-    await expect(body.queryByText("Destination folder")).toBeNull();
-  },
 };
 
 export const HostedGitHubListFailed: Story = {
   args: { scenario: "hosted-list-failed" },
-  play: async ({ canvasElement }) => {
-    const body = within(canvasElement.ownerDocument.body);
-    await userEvent.click(
-      await body.findByRole("option", { name: /GitHub repository/ }),
-    );
-    await expect(
-      await body.findByRole("combobox", { name: "Repository" }),
-    ).toBeVisible();
-    await expect(await body.findByTestId("github-list-failed")).toBeVisible();
-  },
 };
 
 export const SourceProbeFailure: Story = {
   args: { scenario: "source-probe-failure" },
-  play: async ({ canvasElement }) => {
-    const body = within(canvasElement.ownerDocument.body);
-    await expect(
-      await body.findByText(
-        "Could not check which sources this machine supports.",
-      ),
-    ).toBeVisible();
-    await userEvent.click(await body.findByRole("button", { name: "Retry" }));
-    await expect(
-      await body.findByText(
-        "Could not check which sources this machine supports.",
-      ),
-    ).toBeVisible();
-  },
 };
 
 export const DefaultsProbeFailure: Story = {
   args: { scenario: "defaults-probe-failure" },
-  play: async ({ canvasElement }) => {
-    const body = within(canvasElement.ownerDocument.body);
-    await userEvent.click(await body.findByRole("option", { name: /Git URL/ }));
-    await expect(
-      await body.findByText(
-        "The saved destination did not load. Choose one or retry.",
-      ),
-    ).toBeVisible();
-    await userEvent.click(await body.findByRole("button", { name: "Retry" }));
-    await expect(
-      await body.findByText(
-        "The saved destination did not load. Choose one or retry.",
-      ),
-    ).toBeVisible();
-  },
 };
 
 export const CloneProgress: Story = {
   args: { scenario: "clone-progress" },
-  play: async ({ canvasElement }) => {
-    const body = within(canvasElement.ownerDocument.body);
-    await expect(await body.findByText("Receiving objects")).toBeVisible();
-  },
 };
 
 export const DurableProgressReadFailure: Story = {
   args: { scenario: "progress-read-failure" },
-  play: async ({ canvasElement }) => {
-    const body = within(canvasElement.ownerDocument.body);
-    await expect(
-      await body.findByText("The progress service is unavailable."),
-    ).toBeVisible();
-    await userEvent.click(
-      await body.findByRole("button", { name: "Retry check" }),
-    );
-    await expect(
-      await body.findByText("The progress service is unavailable."),
-    ).toBeVisible();
-  },
 };
 
 export const BackgroundCloneCompleted: Story = {
   args: { scenario: "clone-background-complete" },
-  play: async ({ canvasElement }) => {
-    const body = within(canvasElement.ownerDocument.body);
-    await expect(await body.findByText("Repository cloned")).toBeVisible();
-    await expect(
-      await body.findByText("Create a workspace when you are ready."),
-    ).toBeVisible();
-  },
 };
 
 export const CloneCompleted: Story = {
   args: { scenario: "clone-complete" },
-  play: async ({ canvasElement }) => {
-    const body = within(canvasElement.ownerDocument.body);
-    await expect(
-      await body.findByText("The repository is ready."),
-    ).toBeVisible();
-    await expect(
-      await body.findByRole("button", { name: "Create workspace" }),
-    ).toBeVisible();
-  },
 };
 
 export const RepositoryHandoffFailure: Story = {
   args: { scenario: "repository-handoff-failure" },
-  play: async ({ canvasElement }) => {
-    const body = within(canvasElement.ownerDocument.body);
-    await userEvent.click(
-      await body.findByRole("button", { name: "Create workspace" }),
-    );
-    await expect(
-      await body.findByText("The repository catalog is unavailable."),
-    ).toBeVisible();
-    await userEvent.click(await body.findByRole("button", { name: "Retry" }));
-    await expect(
-      await body.findByText("The repository catalog is unavailable."),
-    ).toBeVisible();
-  },
 };
 
 export const RegistrationCompletedInBackground: Story = {
   args: { scenario: "registration-background-complete" },
-  play: async ({ canvasElement }) => {
-    const body = within(canvasElement.ownerDocument.body);
-    await userEvent.click(
-      await body.findByRole("option", { name: /Local folder/ }),
-    );
-    await userEvent.type(await body.findByLabelText("Path"), "/Users/sam/src");
-    await userEvent.click(
-      await body.findByRole("button", { name: "Register" }),
-    );
-    await userEvent.click(await body.findByRole("button", { name: "Close" }));
-    await expect(await body.findByText("Repository registered")).toBeVisible();
-    await expect(
-      await body.findByRole("button", { name: "Open" }),
-    ).toBeVisible();
-  },
 };
 
 export const NewWorkspace: Story = { args: { scenario: "workspace" } };

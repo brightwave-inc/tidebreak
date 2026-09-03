@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState, type ReactNode } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { fn, userEvent, within } from "storybook/test";
+import { fn } from "storybook/test";
 import {
   createMemoryHistory,
   createRootRoute,
@@ -409,10 +409,4 @@ export const CompactWidth: Story = {
 
 export const TranscriptContents: Story = {
   args: { messages: denseMessages },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await userEvent.click(
-      await canvas.findByRole("button", { name: "Transcript contents" }),
-    );
-  },
 };

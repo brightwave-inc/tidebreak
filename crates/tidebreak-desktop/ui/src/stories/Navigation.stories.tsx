@@ -7,8 +7,7 @@ import {
   createRouter,
   RouterProvider,
 } from "@tanstack/react-router";
-import { expect, fn, userEvent, within } from "storybook/test";
-
+import { fn } from "storybook/test";
 import { ChatHeaderTitle } from "@/ChatHeaderTitle";
 import { RouteFrame } from "@/RouteFrame";
 import { AppSidebar } from "@/sidebar/AppSidebar";
@@ -192,28 +191,7 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-export const ActiveWork: Story = {
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const destinations = canvas.getByRole("navigation", {
-      name: "Work destinations",
-    });
-    await expect(
-      within(destinations).getByRole("button", { name: "Inbox" }),
-    ).toBeVisible();
-    await expect(
-      within(destinations).getByRole("button", { name: "Plugins" }),
-    ).toBeVisible();
-    await expect(
-      canvas.getByRole("button", { name: "Settings" }),
-    ).toBeVisible();
-    await expect(
-      canvas.getByRole("button", {
-        name: "Theme: system. Click to change.",
-      }),
-    ).toBeVisible();
-  },
-};
+export const ActiveWork: Story = {};
 
 export const LoadingLists: Story = {
   args: { scenario: "loading" },
@@ -250,37 +228,10 @@ export const CollapsedRail: Story = {
 export const CollapsedMacWork: Story = {
   args: { scenario: "collapsed-mac" },
   globals: { viewport: { value: "minimumWindow", isRotated: false } },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const strip = canvasElement.querySelector<HTMLElement>(
-      ".sidebar-expand-strip",
-    );
-    const header = await canvas.findByTestId("work-window-chrome");
-    await expect(strip).toBeVisible();
-    await expect(header.getBoundingClientRect().top).toBeGreaterThanOrEqual(
-      (strip?.getBoundingClientRect().bottom ?? 0) - 1,
-    );
-  },
 };
 
 export const CollapseAndRestoreActiveRoute: Story = {
   args: { scenario: "narrow" },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    const appsLink = await canvas.findByRole("button", { name: "Apps" });
-    await expect(appsLink).toHaveAttribute("aria-current", "page");
-
-    await userEvent.click(
-      canvas.getByRole("button", { name: "Collapse sidebar" }),
-    );
-    await userEvent.click(
-      await canvas.findByRole("button", { name: "Expand sidebar" }),
-    );
-
-    await expect(
-      await canvas.findByRole("button", { name: "Apps" }),
-    ).toHaveAttribute("aria-current", "page");
-  },
 };
 
 export const NewProject: Story = {

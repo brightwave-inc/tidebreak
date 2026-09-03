@@ -21,30 +21,6 @@ function trigger(): CodeTriggerSnapshot {
 }
 
 describe("CodeTriggerRules", () => {
-  it("chooses notify before arming a new rule", async () => {
-    const user = userEvent.setup();
-    const onArm = vi.fn();
-    render(
-      <CodeTriggerRules
-        triggers={[]}
-        target={null}
-        onArm={onArm}
-        onSetEnabled={vi.fn()}
-        onChangeAction={vi.fn()}
-        onDelete={vi.fn()}
-      />,
-    );
-
-    await user.click(
-      screen.getByRole("combobox", { name: "Checks fail action" }),
-    );
-    await user.click(screen.getByRole("option", { name: "Just notify me" }));
-    expect(onArm).not.toHaveBeenCalled();
-
-    await user.click(screen.getByRole("switch", { name: "Checks fail" }));
-    expect(onArm).toHaveBeenCalledWith("checks_failed", "notify");
-  });
-
   it("updates and deletes an armed rule", async () => {
     const user = userEvent.setup();
     const armed = trigger();

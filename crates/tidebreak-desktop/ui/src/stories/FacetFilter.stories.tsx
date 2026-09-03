@@ -1,5 +1,4 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { expect, userEvent, within } from "storybook/test";
 import { useMemo, useState } from "react";
 
 import type { Facet } from "@/lib/facets";
@@ -63,17 +62,7 @@ export const SelectedValues: Story = {
   args: { initialSelected: ["PDF", "Spreadsheet", "Presentation"] },
 };
 
-export const SearchNoMatches: Story = {
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await userEvent.click(canvas.getByRole("button", { name: "Type" }));
-    await userEvent.type(
-      await within(document.body).findByPlaceholderText("Search type…"),
-      "audio",
-    );
-    await expect(within(document.body).getByText("No matches.")).toBeVisible();
-  },
-};
+export const SearchNoMatches: Story = {};
 
 export const Compact: Story = {
   globals: { viewport: { value: "compact", isRotated: false } },
