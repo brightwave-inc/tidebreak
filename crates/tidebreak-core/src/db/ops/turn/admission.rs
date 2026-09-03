@@ -1,11 +1,13 @@
 //! Request validation for turn identity. The admission ledger is retired;
 //! identity lives on `code_turn.fingerprint`.
 
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
 use crate::error::{AgentError, Result};
-use crate::model::{TurnAdmissionLease, TurnAdmissionRequest, TurnRun};
+use crate::model::{TurnAdmissionLease, TurnAdmissionRequest, TurnRun, TurnRunStatus};
 use crate::storage::BeginTurnAdmissionOutcome;
 
-use super::super::super::DbStore;
+use super::super::super::{entities, store_err, DbStore};
 
 pub(super) fn validate_request(request: &TurnAdmissionRequest) -> Result<()> {
     if request.id.0.is_nil()
@@ -34,7 +36,7 @@ pub(super) fn validate_request(request: &TurnAdmissionRequest) -> Result<()> {
 }
 
 pub(in crate::db) async fn begin(
-    _store: &DbStore,
+    store: &DbStore,
     request: &TurnAdmissionRequest,
     lease_token: uuid::Uuid,
     lease_ttl: chrono::Duration,
@@ -44,6 +46,34 @@ pub(in crate::db) async fn begin(
         return Err(AgentError::Store(
             "turn admission requires a non-nil token and a positive lease".into(),
         ));
+    }
+    // An exact retry must not consult the model catalog. The fingerprint is
+    // the caller request; if it already committed, the route returns Accepted
+    // before it tries to resolve a provider that may have gone away.
+    if let Some(existing) = entities::code_turn::Entity::find_by_id(request.id.0)
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+    {
+        if existing.session_id != request.chat_id.0
+            || existing.fingerprint.as_deref() != Some(request.fingerprint().as_slice())
+        {
+            return Ok(BeginTurnAdmissionOutcome::IdentityConflict);
+        }
+        return Ok(if existing.status == TurnRunStatus::Queued.as_str() {
+            BeginTurnAdmissionOutcome::Queued
+        } else {
+            BeginTurnAdmissionOutcome::Accepted
+        });
+    }
+    if entities::code_queued_turn::Entity::find_by_id(request.id.0)
+        .filter(entities::code_queued_turn::Column::SessionId.eq(request.chat_id.0))
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+        .is_some()
+    {
+        return Ok(BeginTurnAdmissionOutcome::Queued);
     }
     Ok(BeginTurnAdmissionOutcome::Acquired(TurnAdmissionLease {
         id: request.id,
