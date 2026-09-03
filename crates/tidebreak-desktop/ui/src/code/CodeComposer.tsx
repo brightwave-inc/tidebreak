@@ -1000,6 +1000,10 @@ export function CodeComposer({
     submitPendingRef.current = true;
     setSubmitPending(true);
     onSubmitStart?.(submittedDraft);
+    // Forget the draft as soon as this composer hands it to the send path. The
+    // send promise does not settle until the turn ends, so waiting for it
+    // leaves the last prompt in the persisted draft for a reload or turn
+    // boundary to throw back into the composer.
     draftRef.current = "";
     setDraft("");
     pastedTextsRef.current = [];
@@ -1017,32 +1021,36 @@ export function CodeComposer({
         await onSend(message);
       }
     } catch (err) {
+      if (mountedRef.current) {
+        images.restore(held);
+        updatePastedTexts((current) => [
+          ...submittedPastedTexts,
+          ...current.filter(
+            (item) =>
+              !submittedPastedTexts.some(
+                (submitted) => submitted.id === item.id,
+              ),
+          ),
+        ]);
+        setNotice({
+          text:
+            err instanceof HttpError && err.kind === "queue_full"
+              ? "The queue is full. Delete a queued message or wait for one to run."
+              : err instanceof Error
+                ? err.message
+                : "Could not send that turn",
+        });
+        setDraft((current) => {
+          if (current.length > 0) return current;
+          draftRef.current = submittedDraft;
+          return submittedDraft;
+        });
+      }
       // A refresh can replace this composer while the turn request is still
       // waiting for the engine to finish. The old response may then close
       // without proving that the server refused the turn. Do not let that
       // obsolete request repopulate the replacement composer's draft.
       if (!mountedRef.current) return;
-      images.restore(held);
-      updatePastedTexts((current) => [
-        ...submittedPastedTexts,
-        ...current.filter(
-          (item) =>
-            !submittedPastedTexts.some((submitted) => submitted.id === item.id),
-        ),
-      ]);
-      setNotice({
-        text:
-          err instanceof HttpError && err.kind === "queue_full"
-            ? "The queue is full. Delete a queued message or wait for one to run."
-            : err instanceof Error
-              ? err.message
-              : "Could not send that turn",
-      });
-      setDraft((current) => {
-        if (current.length > 0) return current;
-        draftRef.current = submittedDraft;
-        return submittedDraft;
-      });
     } finally {
       submitPendingRef.current = false;
       if (mountedRef.current) setSubmitPending(false);
