@@ -178,8 +178,7 @@ export function useImageAttachments(
         signal,
         path:
           scope === "code"
-            ? (id) =>
-                `/sessions/${encodeURIComponent(id)}/attachments/images`
+            ? (id) => `/sessions/${encodeURIComponent(id)}/attachments/images`
             : undefined,
       });
     }

@@ -62,12 +62,9 @@ export function withCodeSessionsApi<TBase extends Constructor<HttpCore>>(
     }
 
     async getCodeSessionDebug(sessionId: string): Promise<unknown> {
-      return this.json(
-        `/sessions/${encodeURIComponent(sessionId)}/debug`,
-        {
-          headers: this.headers(),
-        },
-      );
+      return this.json(`/sessions/${encodeURIComponent(sessionId)}/debug`, {
+        headers: this.headers(),
+      });
     }
 
     async listCodeSessionTurns(sessionId: string): Promise<CodeTurnSnapshot[]> {
@@ -100,23 +97,18 @@ export function withCodeSessionsApi<TBase extends Constructor<HttpCore>>(
     ): Promise<CodeTurnSubmission> {
       return requireParsed(
         parseCodeTurnSubmission(
-          await this.json(
-            `/sessions/${encodeURIComponent(sessionId)}/turns`,
-            {
-              method: "POST",
-              headers: this.headers(true),
-              body: JSON.stringify({
-                message,
-                ...(model ? { model } : {}),
-                ...(reasoningEffort !== undefined
-                  ? { reasoning_effort: reasoningEffort }
-                  : {}),
-                ...(attachments && attachments.length > 0
-                  ? { attachments }
-                  : {}),
-              }),
-            },
-          ),
+          await this.json(`/sessions/${encodeURIComponent(sessionId)}/turns`, {
+            method: "POST",
+            headers: this.headers(true),
+            body: JSON.stringify({
+              message,
+              ...(model ? { model } : {}),
+              ...(reasoningEffort !== undefined
+                ? { reasoning_effort: reasoningEffort }
+                : {}),
+              ...(attachments && attachments.length > 0 ? { attachments } : {}),
+            }),
+          }),
         ),
         "code turn",
       );
@@ -135,14 +127,11 @@ export function withCodeSessionsApi<TBase extends Constructor<HttpCore>>(
     ): Promise<CodeSessionSnapshot> {
       return requireParsed(
         parseCodeSession(
-          await this.json(
-            `/sessions/${encodeURIComponent(sessionId)}/mode`,
-            {
-              method: "POST",
-              headers: this.headers(true),
-              body: JSON.stringify({ permission_mode: permissionMode }),
-            },
-          ),
+          await this.json(`/sessions/${encodeURIComponent(sessionId)}/mode`, {
+            method: "POST",
+            headers: this.headers(true),
+            body: JSON.stringify({ permission_mode: permissionMode }),
+          }),
         ),
         "code session",
       );
@@ -155,14 +144,11 @@ export function withCodeSessionsApi<TBase extends Constructor<HttpCore>>(
     ): Promise<CodeSessionSnapshot> {
       return requireParsed(
         parseCodeSession(
-          await this.json(
-            `/sessions/${encodeURIComponent(sessionId)}/effort`,
-            {
-              method: "POST",
-              headers: this.headers(true),
-              body: JSON.stringify({ reasoning_effort: reasoningEffort }),
-            },
-          ),
+          await this.json(`/sessions/${encodeURIComponent(sessionId)}/effort`, {
+            method: "POST",
+            headers: this.headers(true),
+            body: JSON.stringify({ reasoning_effort: reasoningEffort }),
+          }),
         ),
         "code session",
       );
@@ -208,27 +194,21 @@ export function withCodeSessionsApi<TBase extends Constructor<HttpCore>>(
       expectedTurnId: string,
       guidance: string,
     ): Promise<void> {
-      return this.json(
-        `/sessions/${encodeURIComponent(sessionId)}/steer`,
-        {
-          method: "POST",
-          headers: this.headers(true),
-          body: JSON.stringify({
-            expected_turn_id: expectedTurnId,
-            guidance,
-          }),
-        },
-      );
+      return this.json(`/sessions/${encodeURIComponent(sessionId)}/steer`, {
+        method: "POST",
+        headers: this.headers(true),
+        body: JSON.stringify({
+          expected_turn_id: expectedTurnId,
+          guidance,
+        }),
+      });
     }
 
     interruptCodeSession(sessionId: string): Promise<void> {
-      return this.json(
-        `/sessions/${encodeURIComponent(sessionId)}/interrupt`,
-        {
-          method: "POST",
-          headers: this.headers(),
-        },
-      );
+      return this.json(`/sessions/${encodeURIComponent(sessionId)}/interrupt`, {
+        method: "POST",
+        headers: this.headers(),
+      });
     }
 
     /** The session's queued messages, FIFO, plus whether promotion is paused. */
@@ -317,14 +297,11 @@ export function withCodeSessionsApi<TBase extends Constructor<HttpCore>>(
     ): Promise<CodeForkTranscript> {
       return requireParsed(
         parseCodeForkTranscript(
-          await this.json(
-            `/sessions/${encodeURIComponent(sessionId)}/fork`,
-            {
-              method: "POST",
-              headers: this.headers(true),
-              body: JSON.stringify(atTurnId ? { at_turn: atTurnId } : {}),
-            },
-          ),
+          await this.json(`/sessions/${encodeURIComponent(sessionId)}/fork`, {
+            method: "POST",
+            headers: this.headers(true),
+            body: JSON.stringify(atTurnId ? { at_turn: atTurnId } : {}),
+          }),
         ),
         "code fork transcript",
       );
@@ -333,13 +310,10 @@ export function withCodeSessionsApi<TBase extends Constructor<HttpCore>>(
     async reapCodeSession(sessionId: string): Promise<CodeSessionSnapshot> {
       return requireParsed(
         parseCodeSession(
-          await this.json(
-            `/sessions/${encodeURIComponent(sessionId)}/reap`,
-            {
-              method: "POST",
-              headers: this.headers(),
-            },
-          ),
+          await this.json(`/sessions/${encodeURIComponent(sessionId)}/reap`, {
+            method: "POST",
+            headers: this.headers(),
+          }),
         ),
         "code session",
       );

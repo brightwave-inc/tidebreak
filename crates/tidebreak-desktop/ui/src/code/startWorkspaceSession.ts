@@ -210,8 +210,7 @@ async function publishFirstTurnImages(
       return uploadImageAttachment(client, sessionId, file, {
         onProgress: () => undefined,
         signal: new AbortController().signal,
-        path: (id) =>
-          `/sessions/${encodeURIComponent(id)}/attachments/images`,
+        path: (id) => `/sessions/${encodeURIComponent(id)}/attachments/images`,
       });
     }),
   );
