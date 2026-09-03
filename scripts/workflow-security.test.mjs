@@ -420,13 +420,24 @@ test("PR lanes are scope-gated, never label-gated", () => {
   const e2bCli = workflowJob(ci, "e2b-cli");
   const fmt = workflowJob(ci, "fmt");
   const postgres = workflowJob(ci, "postgres");
-  const testJob = workflowJob(ci, "test");
+  const testPartitions = workflowJob(ci, "test");
+  const testAggregate = workflowJob(ci, "test-aggregate");
 
   assert.match(
     ci,
     /^on:\n  push:\n    branches: \[main\]\n  pull_request:/m,
   );
+  const ciTrigger =
+    /^  pull_request:\n\s+types:\s*\[([^\]]*)\]/m.exec(ci);
+  assert.ok(ciTrigger, "ci.yml must list its pull request event types");
+  assert.deepEqual(
+    ciTrigger[1].split(",").map((event) => event.trim()),
+    ["opened", "reopened", "synchronize", "ready_for_review"],
+  );
+  assert.doesNotMatch(ci, /^  merge_group:/m);
+  assert.doesNotMatch(workflowJob(ci, "changes"), /MERGE_GROUP_|merge_group\)/);
   const title = semanticTitleCheck();
+  assert.equal(title.file, "release-draft.yml");
   const titleTrigger =
     /^  pull_request(?:_target)?:\n\s+types:\s*\[([^\]]*)\]/m.exec(title.source);
   assert.ok(
@@ -502,7 +513,8 @@ test("PR lanes are scope-gated, never label-gated", () => {
     [workflowJob(ci, "lint"), "rust"],
     [workflowJob(ci, "desktop"), "rust"],
     [workflowJob(ci, "windows-check"), "rust"],
-    [testJob, "workspace"],
+    [workflowJob(ci, "windows-native"), "windows_native"],
+    [testPartitions, "workspace"],
     [postgres, "workspace"],
     [workflowJob(ci, "ui"), "ui"],
     [docsSite, "docs_site"],
@@ -519,7 +531,7 @@ test("PR lanes are scope-gated, never label-gated", () => {
   for (const job of [
     workflowJob(ci, "lint"),
     workflowJob(ci, "desktop"),
-    testJob,
+    testPartitions,
     postgres,
   ]) {
     assert.match(
@@ -532,14 +544,25 @@ test("PR lanes are scope-gated, never label-gated", () => {
   // The registry cache has one writer, and only on main. A lane may narrow
   // that further (one matrix leg, say) but never widen it.
   assert.match(
-    testJob,
+    testPartitions,
     /save-if: \$\{\{ github\.ref == 'refs\/heads\/main'(?: && [^|}]*)? \}\}/,
   );
-  assert.match(testJob, /cache-on-failure: true/);
+  assert.match(testPartitions, /cache-on-failure: true/);
   assert.match(
-    testJob,
-    /cargo nextest run --workspace --exclude tidebreak-desktop\n\s+--locked --retries 2/,
+    testPartitions,
+    /strategy:\n\s+fail-fast: false\n\s+matrix:\n\s+part: \[1, 2, 3\]/,
   );
+  assert.match(
+    testPartitions,
+    /cargo nextest run --workspace --exclude tidebreak-desktop\n\s+--locked --retries 2 --partition count:\$\{\{ matrix\.part \}\}\/3/,
+  );
+  assert.match(testAggregate, /name: test\n/);
+  assert.match(testAggregate, /needs: \[changes, test\]/);
+  assert.match(testAggregate, /if: \$\{\{ always\(\) \}\}/);
+  assert.match(testAggregate, /CHANGE_SCOPE_RESULT: \$\{\{ needs\.changes\.result \}\}/);
+  assert.match(testAggregate, /PARTITION_RESULT: \$\{\{ needs\.test\.result \}\}/);
+  assert.match(testAggregate, /WORKSPACE_SCOPE: \$\{\{ needs\.changes\.outputs\.workspace \}\}/);
+  assert.match(testAggregate, /"\$PARTITION_RESULT" != success/);
   assert.doesNotMatch(ci, /^  parsers:$/m);
   assert.doesNotMatch(ci, /outputs\.parsers|echo "parsers=/);
   assert.match(changes, /\*\.md\|docs\/\*\|assets\/\*\|\.githooks\/\*/);
@@ -631,36 +654,99 @@ function skipsSupersededPush(job) {
   );
 }
 
-test("Windows cargo check is a compile-only installer gate", () => {
+test("Windows cargo check and native tests run in parallel scoped jobs", () => {
   const ci = workflows["ci.yml"];
-  const windows = workflowJob(ci, "windows-check");
+  const windowsCheck = workflowJob(ci, "windows-check");
+  const windowsNative = workflowJob(ci, "windows-native");
   const changes = workflowJob(ci, "changes");
-  assert.match(windows, /Check the Windows installer crates/);
-  assert.match(windows, /vars\.CI_WINDOWS_RUNNER \|\| 'windows-latest'/);
-  assert.match(windows, /Stage sidecar placeholders for cargo check/);
-  assert.doesNotMatch(windows, /prepare-sidecar\.mjs/);
-  assert.match(windows, /-p tidebreak-desktop/);
-  assert.match(windows, /-p tidebreak-cli/);
-  assert.match(windows, /-p tidebreak-host-broker/);
-  assert.match(windows, /cargo check --target x86_64-pc-windows-msvc/);
-  assert.doesNotMatch(windows, /cargo test/);
+  assert.match(windowsCheck, /name: Windows cargo check/);
+  assert.match(windowsCheck, /Check the Windows installer crates/);
+  assert.match(windowsCheck, /vars\.CI_WINDOWS_RUNNER \|\| 'windows-latest'/);
+  assert.match(windowsCheck, /Stage sidecar placeholders for cargo check/);
+  assert.doesNotMatch(windowsCheck, /prepare-sidecar\.mjs/);
+  for (const crate of [
+    "tidebreak-core",
+    "tidebreak-code-execution",
+    "tidebreak-cli",
+    "tidebreak-host-broker",
+    "tidebreak-server",
+    "tidebreak-desktop",
+  ]) {
+    assert.match(windowsCheck, new RegExp(`-p ${crate}`));
+  }
+  assert.match(windowsCheck, /cargo check --target x86_64-pc-windows-msvc/);
+  assert.doesNotMatch(windowsCheck, /cargo test/);
   assert.doesNotMatch(ci, /windows-ci/);
   assert.doesNotMatch(changes, /echo "windows=/);
   assert.ok(
-    skipsSupersededPush(windows),
+    skipsSupersededPush(windowsCheck),
     "a superseded main push must skip the Windows lane, not cancel it",
   );
   assert.doesNotMatch(
-    windows,
+    windowsCheck,
     /cancel-in-progress/,
     "cancelling this lane reddens a commit whose own checks all passed",
   );
-  assert.match(windows, /SCCACHE_GHA_ENABLED: "true"/);
-  assert.match(windows, /SCCACHE_GHA_RW_MODE: READ_WRITE/);
-  assert.match(windows, /RUSTC_WRAPPER: sccache/);
+  assert.match(windowsCheck, /SCCACHE_GHA_ENABLED: "true"/);
+  assert.match(windowsCheck, /SCCACHE_GHA_RW_MODE: READ_WRITE/);
+  assert.match(windowsCheck, /RUSTC_WRAPPER: sccache/);
   assert.match(
-    windows,
+    windowsCheck,
     /uses: mozilla-actions\/sccache-action@[0-9a-f]{40}/,
+  );
+
+  assert.match(windowsNative, /name: Windows native tests/);
+  assert.match(windowsNative, /needs: changes/);
+  assert.match(
+    windowsNative,
+    /if: \$\{\{ needs\.changes\.outputs\.windows_native == 'true' \}\}/,
+  );
+  assert.match(windowsNative, /vars\.CI_WINDOWS_RUNNER \|\| 'windows-latest'/);
+  assert.match(windowsNative, /SCCACHE_GHA_ENABLED: "true"/);
+  assert.match(windowsNative, /SCCACHE_GHA_RW_MODE: READ_WRITE/);
+  assert.match(windowsNative, /RUSTC_WRAPPER: sccache/);
+  assert.match(
+    windowsNative,
+    /uses: mozilla-actions\/sccache-action@[0-9a-f]{40}/,
+  );
+  assert.match(windowsNative, /uses: Swatinem\/rust-cache@[0-9a-f]{40}/);
+  assert.match(windowsNative, /Host broker Windows tests/);
+  assert.match(windowsNative, /Code mode Windows lifecycle tests/);
+  assert.match(windowsNative, /SQLite profile open and migrations/);
+  assert.match(windowsNative, /Credential Manager round trip/);
+  assert.match(windowsNative, /\$attempts = 3/);
+  assert.match(windowsNative, /tidebreak-server", "--lib", "code::"/);
+  assert.match(
+    windowsNative,
+    /cargo test --target x86_64-pc-windows-msvc -p tidebreak-host-broker --locked/,
+  );
+  assert.match(windowsNative, /-p tidebreak-server --lib desktop_schema --locked/);
+  assert.match(windowsNative, /-p tidebreak-core --lib keychain --locked -- --ignored/);
+  assert.match(
+    changes,
+    /windows_native: \$\{\{ steps\.scope\.outputs\.windows_native \}\}/,
+  );
+  assert.match(changes, /echo "windows_native=\$windows_native"/);
+  assert.match(
+    changes,
+    /if \[\[ "\$windows_native" == true && "\$rust" != true \]\]; then/,
+  );
+});
+
+test("PostgreSQL tests share one Cargo invocation per feature graph", () => {
+  const postgres = workflowJob(workflows["ci.yml"], "postgres");
+  assert.equal(postgres.match(/cargo test/g)?.length, 2);
+  for (const target of [
+    "postgres_turn_state",
+    "postgres_document_blob",
+    "postgres_code_owner",
+    "postgres_release_upgrade",
+  ]) {
+    assert.match(postgres, new RegExp(`--test ${target}`));
+  }
+  assert.match(
+    postgres,
+    /cargo test -p tidebreak-server --features postgres\n\s+--test postgres_store_ownership --locked/,
   );
 });
 
