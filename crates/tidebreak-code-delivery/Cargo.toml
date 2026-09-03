@@ -1,0 +1,31 @@
+[package]
+name = "tidebreak-code-delivery"
+description = "Install-wide GitHub delivery reads, caching, persistence, and guarded actions."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lib]
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+tidebreak-core = { path = "../tidebreak-core" }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+ts-rs = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+tidebreak-core = { path = "../tidebreak-core", features = ["test-util"] }

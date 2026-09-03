@@ -47,8 +47,8 @@ pub(super) fn workflow_run_count(count: usize) -> String {
     }
 }
 
-pub(crate) async fn query_runs(
-    runtime: &CodeRuntime,
+pub async fn query_runs(
+    runtime: &dyn DeliveryRuntime,
     owner: &OwnerId,
     allow_unscoped_delivery: bool,
     query: CodeDeliveryRunQuery,
@@ -56,7 +56,7 @@ pub(crate) async fn query_runs(
     let force_refresh = query.refresh && query.cursor.is_none();
     let targets = dedupe_targets(query.repositories.clone())?;
     ensure_delivery_targets(runtime, owner, allow_unscoped_delivery, &targets).await?;
-    let access = delivery_access(runtime, owner, force_refresh).await;
+    let access = runtime.delivery_access(owner, force_refresh).await;
     let capability = access.capability.clone();
     let Some(reader) = access.reader.clone() else {
         return Ok(CodeDeliveryRunsPage {
@@ -83,14 +83,14 @@ pub(crate) async fn query_runs(
     let cached = if force_refresh {
         None
     } else {
-        runtime.delivery_cache.runs(&cache_key)
+        runtime.delivery_cache().runs(&cache_key)
     };
     let aggregate = match cached {
         Some(cached) => cached,
         None => {
-            let read = runtime.delivery_cache.run_read(&cache_key);
+            let read = runtime.delivery_cache().run_read(&cache_key);
             let _guard = read.lock().await;
-            if let Some(cached) = runtime.delivery_cache.runs(&cache_key) {
+            if let Some(cached) = runtime.delivery_cache().runs(&cache_key) {
                 if !force_refresh || cached.fetched_at >= request_started {
                     return run_page(capability, cached, &query);
                 }
@@ -134,7 +134,7 @@ pub(crate) async fn query_runs(
                     .then_with(|| left.id.cmp(&right.id))
             });
             runtime
-                .delivery_cache
+                .delivery_cache()
                 .put_runs(cache_key.clone(), items.clone(), errors.clone());
             CachedAggregate {
                 fetched_at: Instant::now(),
@@ -166,8 +166,8 @@ pub(super) fn run_page(
     })
 }
 
-pub(crate) async fn run_detail(
-    runtime: &CodeRuntime,
+pub async fn run_detail(
+    runtime: &dyn DeliveryRuntime,
     owner: &OwnerId,
     allow_unscoped_delivery: bool,
     target: CodeDeliveryRunTarget,
@@ -179,14 +179,16 @@ pub(crate) async fn run_detail(
         std::slice::from_ref(&target.repository),
     )
     .await?;
-    let access = delivery_access(runtime, owner, false).await;
+    let access = runtime.delivery_access(owner, false).await;
     let reader = access.require_reader()?;
-    let api = delivery_api(runtime, owner, &reader, &target.repository)
+    let api = reader
+        .api(&target.repository)
         .await
         .map_err(|message| ServerError::bad_request_kind("github", message))?;
-    let repository = resolve_repository_for_api(runtime, &api, &target.repository, None, false)
-        .await
-        .map_err(|message| ServerError::bad_request_kind("github", message))?;
+    let repository =
+        resolve_repository_cached(runtime, api.as_ref(), &target.repository, None, false)
+            .await
+            .map_err(|message| ServerError::bad_request_kind("github", message))?;
     let workspace_index = workspace_index(runtime, owner, false).await?;
 
     match target.kind {
@@ -287,8 +289,8 @@ pub(crate) async fn run_detail(
     }
 }
 
-pub(crate) async fn act_on_run(
-    runtime: &CodeRuntime,
+pub async fn act_on_run(
+    runtime: &dyn DeliveryRuntime,
     owner: &OwnerId,
     allow_unscoped_delivery: bool,
     body: CodeDeliveryRunActionBody,
@@ -305,14 +307,14 @@ pub(crate) async fn act_on_run(
             "only GitHub Actions workflow runs can be rerun",
         ));
     }
-    let access = delivery_access(runtime, owner, false).await;
+    let access = runtime.delivery_access(owner, false).await;
     let reader = access.require_reader()?;
-    let api = delivery_action_api(runtime, owner, &reader, &body.target.repository).await?;
+    let api = reader.action_api(&body.target.repository).await?;
     match body.action {
         CodeDeliveryRunAction::Rerun => {
             api.rerun_workflow(&body.target.repository, body.target.id)
                 .await?;
-            runtime.delivery_cache.invalidate();
+            runtime.delivery_cache().invalidate();
             Ok(delivery_action_result(format!(
                 "Workflow run {} queued again",
                 body.target.id
@@ -321,7 +323,7 @@ pub(crate) async fn act_on_run(
         CodeDeliveryRunAction::RerunFailed => {
             api.rerun_failed_jobs(&body.target.repository, body.target.id)
                 .await?;
-            runtime.delivery_cache.invalidate();
+            runtime.delivery_cache().invalidate();
             Ok(rerun_action_result(vec![CodeDeliveryRerunOutcome {
                 workflow_run_id: body.target.id,
                 success: true,
@@ -332,59 +334,28 @@ pub(crate) async fn act_on_run(
 }
 
 pub(super) async fn fetch_runs(
-    runtime: &CodeRuntime,
+    runtime: &dyn DeliveryRuntime,
     owner: &OwnerId,
-    reader: &DeliveryReader,
+    reader: &DeliveryReaderHandle,
     target: &CodeGitHubRepositoryTarget,
     workspaces: &[WorkspaceIndexEntry],
     options: RunFetchOptions,
 ) -> Result<FetchedRuns, String> {
-    let (repository, deployments) = match reader {
-        DeliveryReader::Gh(observation) => {
-            let binary = observation
-                .binary
-                .as_deref()
-                .expect("authenticated gh has a binary");
-            let repository =
-                resolve_repository_cached(runtime, binary, target, None, options.force_refresh)
-                    .await?;
-            let deployments = if options.fetch_deployments {
-                let endpoint = api_endpoint(target, "deployments?per_page=100");
-                run_api_json(binary, &target.host, &endpoint)
-                    .await
-                    .map(Some)
-            } else {
-                Ok(None)
-            };
-            (repository, deployments)
-        }
-        DeliveryReader::Forge => {
-            let credential = borrow_delivery_credential(runtime, owner, target).await?;
-            let repository = resolve_repository_rest_cached(
-                runtime,
-                target,
-                None,
-                options.force_refresh,
-                &credential,
-            )
+    let api = reader.api(target).await?;
+    let repository =
+        resolve_repository_cached(runtime, api.as_ref(), target, None, options.force_refresh)
             .await?;
-            let api_base = runtime.forge_api_base_for(&target.host);
-            let deployments = if options.fetch_deployments {
-                crate::code::forge_rest::deployments(&api_base, target, &credential)
-                    .await
-                    .map(Some)
-            } else {
-                Ok(None)
-            };
-            (repository, deployments)
-        }
+    let deployments = if options.fetch_deployments {
+        api.deployments(target).await.map(Some)
+    } else {
+        Ok(None)
     };
     let mut fetched = collect_run_sources(target, &repository, workspaces, Ok(None), deployments);
     if options.fetch_workflows {
         match load_or_refresh_workflow_runs(
             runtime,
             owner,
-            reader,
+            api.as_ref(),
             target,
             &repository,
             workspaces,
@@ -407,13 +378,13 @@ pub(super) async fn fetch_runs(
 ///
 /// The reconcile sweep calls this instead of `query_runs` so deployments
 /// stay off the background path and every GitHub read goes through
-/// [`crate::code::pr_fetch::HostGate`].
-pub(crate) async fn refresh_workflow_runs(
-    runtime: &CodeRuntime,
+/// the server's conditional host gate.
+pub async fn refresh_workflow_runs(
+    runtime: &dyn DeliveryRuntime,
     owner: &OwnerId,
     targets: &[CodeGitHubRepositoryTarget],
 ) {
-    let access = delivery_access(runtime, owner, false).await;
+    let access = runtime.delivery_access(owner, false).await;
     let Some(reader) = access.reader.clone() else {
         return;
     };
@@ -421,11 +392,24 @@ pub(crate) async fn refresh_workflow_runs(
         return;
     };
     for target in targets {
+        let api = match reader.api(target).await {
+            Ok(api) => api,
+            Err(message) => {
+                tracing::debug!(
+                    host = target.host.as_str(),
+                    owner = target.owner.as_str(),
+                    name = target.name.as_str(),
+                    error = message.as_str(),
+                    "workflow-run transport failed"
+                );
+                continue;
+            }
+        };
         let repository = repository_ref_from_target(target, None);
         if let Err(message) = load_or_refresh_workflow_runs(
             runtime,
             owner,
-            &reader,
+            api.as_ref(),
             target,
             &repository,
             &workspaces,
@@ -445,16 +429,16 @@ pub(crate) async fn refresh_workflow_runs(
 }
 
 pub(super) async fn load_or_refresh_workflow_runs(
-    runtime: &CodeRuntime,
+    runtime: &dyn DeliveryRuntime,
     owner: &OwnerId,
-    reader: &DeliveryReader,
+    api: &dyn DeliveryApi,
     target: &CodeGitHubRepositoryTarget,
     repository: &CodeGitHubRepositoryRef,
     workspaces: &[WorkspaceIndexEntry],
     force_refresh: bool,
 ) -> Result<Vec<CodeDeliveryRunSummary>, String> {
     let stored = get_workflow_run_fetch_state(
-        &runtime.db,
+        runtime.store(),
         owner,
         &target.host,
         &target.owner,
@@ -468,46 +452,9 @@ pub(super) async fn load_or_refresh_workflow_runs(
 
     let etag = stored.as_ref().and_then(|state| state.list_etag.clone());
     let sent = etag.clone();
-    let read = match reader {
-        DeliveryReader::Gh(observation) => {
-            let binary = observation
-                .binary
-                .as_deref()
-                .expect("authenticated gh has a binary");
-            let transport = crate::code::pr_fetch::FetchTransport::Gh {
-                cwd: Path::new("."),
-                binary,
-            };
-            crate::code::pr_fetch::read_workflow_runs(
-                &runtime.host_gate,
-                transport,
-                &target.host,
-                &target.owner,
-                &target.name,
-                etag.as_deref(),
-            )
-            .await
-        }
-        DeliveryReader::Forge => {
-            let credential = borrow_delivery_credential(runtime, owner, target).await?;
-            let api_base = runtime.forge_api_base_for(&target.host);
-            let transport = crate::code::pr_fetch::FetchTransport::Rest {
-                api_base: &api_base,
-                credential: &credential,
-            };
-            crate::code::pr_fetch::read_workflow_runs(
-                &runtime.host_gate,
-                transport,
-                &target.host,
-                &target.owner,
-                &target.name,
-                etag.as_deref(),
-            )
-            .await
-        }
-    };
+    let read = api.workflow_runs(target, etag.as_deref()).await;
     match read {
-        Ok(crate::code::pr_fetch::EndpointRead::Fresh { value, etag }) => {
+        Ok(EndpointRead::Fresh { value, etag }) => {
             let summaries = persist_fresh_workflow_runs(
                 runtime,
                 owner,
@@ -520,10 +467,10 @@ pub(super) async fn load_or_refresh_workflow_runs(
             .await?;
             Ok(summaries)
         }
-        Ok(crate::code::pr_fetch::EndpointRead::NotModified) => {
+        Ok(EndpointRead::NotModified) => {
             let now = Utc::now();
             let _ = set_workflow_run_fetch_state(
-                &runtime.db,
+                runtime.store(),
                 owner,
                 &target.host,
                 &target.owner,
@@ -535,8 +482,8 @@ pub(super) async fn load_or_refresh_workflow_runs(
             .await;
             stored_workflow_run_summaries(runtime, owner, target, repository, workspaces).await
         }
-        Ok(crate::code::pr_fetch::EndpointRead::Missing) => Ok(Vec::new()),
-        Err(crate::code::pr_fetch::FetchFailure::Parked(_)) => {
+        Ok(EndpointRead::Missing) => Ok(Vec::new()),
+        Err(HostReadError::Parked(_)) => {
             stored_workflow_run_summaries(runtime, owner, target, repository, workspaces).await
         }
         Err(failure) => Err(failure.to_string()),
@@ -544,7 +491,7 @@ pub(super) async fn load_or_refresh_workflow_runs(
 }
 
 pub(super) async fn persist_fresh_workflow_runs(
-    runtime: &CodeRuntime,
+    runtime: &dyn DeliveryRuntime,
     owner: &OwnerId,
     target: &CodeGitHubRepositoryTarget,
     repository: &CodeGitHubRepositoryRef,
@@ -562,7 +509,7 @@ pub(super) async fn persist_fresh_workflow_runs(
         let Some(fact) = fact_from_run_summary(owner, &summary, now) else {
             continue;
         };
-        match save_workflow_run_fact(&runtime.db, &fact).await {
+        match save_workflow_run_fact(runtime.store(), &fact).await {
             Ok((_, moved)) => changed |= moved,
             Err(err) => tracing::debug!(error = %err, "workflow-run persist failed"),
         }
@@ -570,7 +517,7 @@ pub(super) async fn persist_fresh_workflow_runs(
     }
     let keep: Vec<u64> = summaries.iter().map(|summary| summary.github_id).collect();
     match delete_workflow_run_facts_absent_from(
-        &runtime.db,
+        runtime.store(),
         owner,
         &target.host,
         &target.owner,
@@ -583,7 +530,7 @@ pub(super) async fn persist_fresh_workflow_runs(
         Err(err) => tracing::debug!(error = %err, "workflow-run prune failed"),
     }
     let _ = set_workflow_run_fetch_state(
-        &runtime.db,
+        runtime.store(),
         owner,
         &target.host,
         &target.owner,
@@ -594,7 +541,7 @@ pub(super) async fn persist_fresh_workflow_runs(
     )
     .await;
     if changed {
-        runtime.delivery_cache.invalidate_owner(owner);
+        runtime.delivery_cache().invalidate_owner(owner);
         runtime.nudge_delivery_update(owner);
     }
     Ok(summaries)
@@ -602,14 +549,14 @@ pub(super) async fn persist_fresh_workflow_runs(
 
 /// Project stored facts for one repository, capped at GitHub's first page.
 pub(super) async fn stored_workflow_run_summaries(
-    runtime: &CodeRuntime,
+    runtime: &dyn DeliveryRuntime,
     owner: &OwnerId,
     target: &CodeGitHubRepositoryTarget,
     repository: &CodeGitHubRepositoryRef,
     workspaces: &[WorkspaceIndexEntry],
 ) -> Result<Vec<CodeDeliveryRunSummary>, String> {
     let facts = list_workflow_run_facts_for_repo(
-        &runtime.db,
+        runtime.store(),
         owner,
         &target.host,
         &target.owner,

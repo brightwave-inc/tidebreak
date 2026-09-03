@@ -29,7 +29,7 @@ pub(super) struct OwnerRepositoryCatalog {
 
 /// Short-lived owner/query caches. No GitHub response is durable.
 #[derive(Debug, Default)]
-pub(crate) struct DeliveryCache {
+pub struct DeliveryCache {
     pub(super) pull_requests:
         Mutex<HashMap<String, CachedAggregate<CodeDeliveryPullRequestSummary>>>,
     pub(super) runs: Mutex<HashMap<String, CachedAggregate<CodeDeliveryRunSummary>>>,
@@ -220,7 +220,7 @@ impl DeliveryCache {
         )
     }
 
-    pub(crate) fn invalidate(&self) {
+    pub fn invalidate(&self) {
         self.pull_requests
             .lock()
             .expect("delivery PR cache")
@@ -228,7 +228,7 @@ impl DeliveryCache {
         self.runs.lock().expect("delivery run cache").clear();
     }
 
-    pub(crate) fn invalidate_owner(&self, owner: &OwnerId) {
+    pub fn invalidate_owner(&self, owner: &OwnerId) {
         let owner_key = owner.to_string();
         let aggregate_prefix = format!("{owner_key}:");
         let mut generations = self
@@ -305,28 +305,28 @@ pub(super) struct WorkspaceIndexEntry {
 }
 
 pub(super) async fn workspace_index(
-    runtime: &CodeRuntime,
+    runtime: &dyn DeliveryRuntime,
     owner: &OwnerId,
     force_refresh: bool,
 ) -> Result<Vec<WorkspaceIndexEntry>, ServerError> {
     let key = owner.to_string();
     let request_started = Instant::now();
     if !force_refresh {
-        if let Some(cached) = runtime.delivery_cache.workspace_index(&key) {
+        if let Some(cached) = runtime.delivery_cache().workspace_index(&key) {
             return Ok(cached.value);
         }
     }
 
-    let read = runtime.delivery_cache.workspace_index_read(&key);
+    let read = runtime.delivery_cache().workspace_index_read(&key);
     let _guard = read.lock().await;
-    if let Some(cached) = runtime.delivery_cache.workspace_index(&key) {
+    if let Some(cached) = runtime.delivery_cache().workspace_index(&key) {
         if !force_refresh || cached.fetched_at >= request_started {
             return Ok(cached.value);
         }
     }
 
     loop {
-        let generation = runtime.delivery_cache.owner_cache_generation(&key);
+        let generation = runtime.delivery_cache().owner_cache_generation(&key);
         let catalog = owner_repository_catalog(runtime, owner, force_refresh).await?;
         let workspaces = runtime.list_workspaces(owner, None).await?;
         let mut repository_targets = HashMap::new();
@@ -361,7 +361,7 @@ pub(super) async fn workspace_index(
             .collect()
             .await;
         if runtime
-            .delivery_cache
+            .delivery_cache()
             .put_workspace_index_if_current(&key, generation, index.clone())
         {
             return Ok(index);
