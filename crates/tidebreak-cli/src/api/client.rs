@@ -103,8 +103,13 @@ struct DurableTerminalTurn {
 
 impl Client {
     /// A client for a server bound in this process.
+    ///
+    /// A server that listens on an unspecified address (`0.0.0.0` or `::`,
+    /// the self-host image's `TIDEBREAK_LISTEN_ADDR`) is reached from this
+    /// process over loopback: the unspecified address is not a host to dial,
+    /// and the plain-http rule (#2917) admits only a loopback host.
     pub fn new(addr: SocketAddr, token: &str) -> Result<Self> {
-        Self::attach(format!("http://{addr}"), token)
+        Self::attach(format!("http://{}", local_dial_addr(addr)), token)
     }
 
     /// A client for a server running somewhere else, named by its base URL.
@@ -1253,6 +1258,21 @@ fn server_url_is_loopback(base: &str) -> bool {
     reqwest::Url::parse(base).is_ok_and(|url| url_host_is_loopback(&url))
 }
 
+/// The address this process dials to reach a server it bound itself: the
+/// bound address, unless that is unspecified, in which case the loopback
+/// address of the same family and port.
+pub(crate) fn local_dial_addr(bound: SocketAddr) -> SocketAddr {
+    match bound {
+        SocketAddr::V4(v4) if v4.ip().is_unspecified() => {
+            SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, v4.port()))
+        }
+        SocketAddr::V6(v6) if v6.ip().is_unspecified() => {
+            SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, v6.port()))
+        }
+        other => other,
+    }
+}
+
 fn url_host_is_loopback(url: &reqwest::Url) -> bool {
     url.host_str().is_some_and(|host| {
         host.eq_ignore_ascii_case("localhost")
@@ -1336,6 +1356,20 @@ fn durable_turn_from_transcript(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_self_client_dials_loopback_for_an_unspecified_listen_address() {
+        use std::net::SocketAddr;
+        let v4: SocketAddr = "0.0.0.0:8080".parse().unwrap();
+        assert_eq!(super::local_dial_addr(v4).to_string(), "127.0.0.1:8080");
+        let v6: SocketAddr = "[::]:8080".parse().unwrap();
+        assert_eq!(super::local_dial_addr(v6).to_string(), "[::1]:8080");
+        let bound: SocketAddr = "127.0.0.1:4321".parse().unwrap();
+        assert_eq!(super::local_dial_addr(bound), bound);
+        // The whole point: the self-host image binds 0.0.0.0, and the server's
+        // own client must pass the plain-http loopback rule.
+        assert!(super::Client::new(v4, "token").is_ok());
+    }
+
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     use super::*;
