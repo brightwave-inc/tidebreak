@@ -195,11 +195,11 @@ const PUBLISHED_IMAGE_REPOSITORY: &str = "ghcr.io/brightwave-inc/tidebreak-sandb
 /// [`LOCAL_DEV_IMAGE`] — a ref that only exists after a local `docker build`
 /// and carries no digest verification, which
 /// [`SandboxBackend::verifies_image_integrity`] reports honestly.
-// Manifest-list digest of ghcr.io/brightwave-inc/tidebreak-sandbox-agent-documents:v0.26.0,
-// published by workflow run 30861671881 (tag push v0.26.0, 2026-08-03); the run's
+// Manifest-list digest of ghcr.io/brightwave-inc/tidebreak-sandbox-agent-documents:main-20260903-3e41563-r1212,
+// published by workflow run 33811428235 (push, 2026-09-03); the run's
 // step summary records the same value from a post-push `imagetools inspect`.
 const PUBLISHED_IMAGE_DIGEST: Option<&str> =
-    Some("sha256:dd22da7a3c5b1f315e888da902e7a46ae034585e2ab5c09c0ae4588a69f158a2");
+    Some("sha256:2126d0dd777afe5bb1f597a637535087a467df3d1a938f1497fabfca59e23f9d");
 /// The locally built development image, produced by the documented
 /// `docker build -f crates/tidebreak-sandbox-agent/Dockerfile -t tidebreak-sandbox-agent .`
 /// (whose default target is the documents variant). The fallback default while

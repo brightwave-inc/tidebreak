@@ -1,5 +1,5 @@
-template_id = "tidebreak-documents-v0-26-0"
-template_name = "tidebreak-documents-v0-26-0"
+template_id = "tidebreak-documents-main-20260903-3e41563-r1212"
+template_name = "tidebreak-documents-main-20260903-3e41563-r1212"
 dockerfile = "e2b.Dockerfile"
 cpu_count = 2
 # LibreOffice's headless renderers are the memory floor here; E2B's defaults
