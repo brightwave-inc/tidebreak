@@ -22,6 +22,8 @@ sqlite = [
     "sea-orm-migration/sqlx-sqlite",
     "dep:tokio",
 ]
+# Test-only SQLite setup shared with crates that exercise `DbStore` indirectly.
+test-util = []
 # PostgreSQL-backed Store for self-hosted deployments and cross-backend tests.
 postgres = [
     "dep:sea-orm",
