@@ -2689,7 +2689,7 @@ export type ExecProviderSnapshot = "local" | "e2b" | "daytona" | "docker" | "off
  * surface renders its own copy from the code. Reasons are what the user can
  * act on — install a key, switch provider — never an internal failure detail.
  */
-export type ExecUnavailableReason = "unsupported_platform" | "missing_sandbox_binary" | "missing_credential" | "missing_container_runtime" | "container_runtime_unreachable";
+export type ExecUnavailableReason = "unsupported_platform" | "missing_sandbox_binary" | "missing_credential" | "missing_container_runtime" | "container_runtime_unreachable" | "container_runtime_refused";
 
 /**
  * Portable code-repository registration.

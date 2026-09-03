@@ -28,6 +28,7 @@ export type SettingsStoryState =
   | "loading"
   | "managed"
   | "disabled"
+  | "docker-refused"
   | "empty"
   | "failed";
 
@@ -319,6 +320,23 @@ const disabledExec: ExecConfigInfo = {
   ],
 };
 
+const dockerRefusedExec: ExecConfigInfo = {
+  ...configuredExec,
+  provider: "docker",
+  available: false,
+  has_credential: false,
+  unavailable_reason: "container_runtime_refused",
+  providers: configuredExec.providers.map((row) =>
+    row.provider === "docker"
+      ? {
+          provider: "docker",
+          available: false,
+          unavailable_reason: "container_runtime_refused",
+        }
+      : row,
+  ),
+};
+
 const execCredentials: ExecCredentialReadiness[] = [
   { provider: "e2b", has_credential: true },
   { provider: "daytona", has_credential: true },
@@ -455,7 +473,12 @@ function createSettingsStoryClient(
   const models = state === "managed" ? managedModels : openModels;
   const roles = state === "managed" ? managedRoles : openRoles;
   const voice = state === "disabled" ? disabledVoice : readyVoice;
-  const exec = state === "disabled" ? disabledExec : configuredExec;
+  const exec =
+    state === "disabled"
+      ? disabledExec
+      : state === "docker-refused"
+        ? dockerRefusedExec
+        : configuredExec;
   const servers = state === "managed" ? [gatewayServer] : [docsServer];
 
   const methods: SettingsClientMethods = {

@@ -295,6 +295,7 @@ function providerUnavailableSentences(): Record<
     missing_credential: "Add an API key above to make this provider usable.",
     missing_container_runtime: `No container runtime was found. Install Docker (or a Docker-compatible runtime) on ${host} to run commands in a container there.`,
     container_runtime_unreachable: `A container runtime is installed but isn't responding. Start it on ${host} — Docker Desktop, or the daemon — and this becomes usable.`,
+    container_runtime_refused: `The container runtime on ${host} rejected Tidebreak's workspace container. Check its logs, image access, and resource limits, then retry a command.`,
   };
 }
 
