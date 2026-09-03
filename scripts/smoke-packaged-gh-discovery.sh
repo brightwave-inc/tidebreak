@@ -32,7 +32,7 @@ profile_home="$smoke_root/home"
 profile_data="$profile_home/Library/Application Support/$identifier"
 shell_config="$smoke_root/zsh"
 fake_bin="$smoke_root/login-bin"
-fake_log="$smoke_root/gh-invocations.log"
+fake_log="$smoke_root/gh-config/invocations.log"
 app_log="$smoke_root/app.log"
 response="$smoke_root/repositories.json"
 app_pid=""
@@ -60,14 +60,19 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-mkdir -p "$profile_home" "$shell_config" "$fake_bin" "$smoke_root/tmp"
+mkdir -p \
+  "$profile_home" \
+  "$shell_config" \
+  "$fake_bin" \
+  "$smoke_root/gh-config" \
+  "$smoke_root/tmp"
 
 cat > "$fake_bin/gh" <<'FAKE_GH'
 #!/bin/sh
 set -eu
 
-: "${GH_SMOKE_LOG:?}"
-printf '%s\n' "$*" >> "$GH_SMOKE_LOG"
+: "${GH_CONFIG_DIR:?}"
+printf '%s\n' "$*" >> "$GH_CONFIG_DIR/invocations.log"
 
 if [ "$#" -eq 4 ] \
   && [ "$1" = auth ] \
@@ -98,7 +103,6 @@ ZSHRC
   TMPDIR="$smoke_root/tmp" \
   GH_CONFIG_DIR="$smoke_root/gh-config" \
   GH_SMOKE_LOGIN_BIN="$fake_bin" \
-  GH_SMOKE_LOG="$fake_log" \
   "$app_executable" > "$app_log" 2>&1 &
 app_pid=$!
 
@@ -131,8 +135,18 @@ token="$(jq -er .token "$listen_path")"
   --header "Authorization: Bearer $token" \
   "$base_url/code/delivery/repositories" > "$response"
 
-jq -e '.capability.found == true' "$response" >/dev/null
-jq -e '.capability.authenticated == false' "$response" >/dev/null
+if ! jq -e '.capability.found == true' "$response" >/dev/null; then
+  echo "The packaged app did not discover gh through the login shell." >&2
+  jq '.capability' "$response" >&2 || cat "$response" >&2
+  sed -n '1,200p' "$app_log" >&2
+  exit 1
+fi
+if ! jq -e '.capability.authenticated == false' "$response" >/dev/null; then
+  echo "The packaged app did not report the fake gh account as signed out." >&2
+  jq '.capability' "$response" >&2 || cat "$response" >&2
+  sed -n '1,200p' "$app_log" >&2
+  exit 1
+fi
 
 [[ -s "$fake_log" ]] || {
   echo "The packaged app reported gh without invoking the login-shell binary." >&2

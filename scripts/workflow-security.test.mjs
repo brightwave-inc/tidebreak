@@ -1909,6 +1909,16 @@ test("macOS notarization happens after bundling and before artifact verification
         assert.ok(sKey <= sNotarize, "staging: the notary key must load before notarization");
       }
     }
+    const stagingNotarytoolIdx = staging.indexOf("notarytool submit");
+    const stagingStepStart = staging.lastIndexOf("- name:", stagingNotarytoolIdx);
+    const stagingStepEnd = staging.indexOf("\n      - name:", stagingNotarytoolIdx);
+    const stagingNotarizeStep = staging.slice(
+      stagingStepStart,
+      stagingStepEnd !== -1 ? stagingStepEnd : undefined,
+    );
+    assert.match(stagingNotarizeStep, /notarytool wait/);
+    assert.match(stagingNotarizeStep, /for attempt in 1 2 3/);
+    assert.match(stagingNotarizeStep, /Notary status check failed; retrying/);
   }
 });
 
@@ -2347,6 +2357,15 @@ test("staging smoke-tests packaged GitHub CLI discovery before upload", () => {
     packagedGhDiscoverySmoke,
     /export PATH="\$GH_SMOKE_LOGIN_BIN:\$PATH"/,
   );
+  assert.match(
+    packagedGhDiscoverySmoke,
+    /fake_log="\$smoke_root\/gh-config\/invocations\.log"/,
+  );
+  assert.match(
+    packagedGhDiscoverySmoke,
+    />> "\$GH_CONFIG_DIR\/invocations\.log"/,
+  );
+  assert.doesNotMatch(packagedGhDiscoverySmoke, /GH_SMOKE_LOG=/);
   assert.match(packagedGhDiscoverySmoke, /listen_path="\$profile_data\/listen\.json"/);
   assert.match(packagedGhDiscoverySmoke, /\/code\/delivery\/repositories/);
   assert.match(packagedGhDiscoverySmoke, /\.capability\.found == true/);
