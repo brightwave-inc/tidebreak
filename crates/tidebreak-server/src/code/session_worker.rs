@@ -2035,7 +2035,6 @@ async fn continue_parked_turn(
             if delivered_here {
                 apply_accepted_plan_mode(db, bus, session, engine, &input).await;
             }
-            turn.status = CodeTurnStatus::Running;
             turn.park_ref = None;
             turn.park_wait = None;
             let _ = save_turn(db, &session.owner, &turn).await;
@@ -2133,6 +2132,9 @@ async fn continue_parked_turn(
                 if delivered_here {
                     apply_accepted_plan_mode(db, bus, session, engine, &input).await;
                 }
+                turn.park_ref = None;
+                turn.park_wait = None;
+                let _ = save_turn(db, &session.owner, &turn).await;
                 next_resume = Some((park_ref, input));
             }
             None => break 'legs Ok(TurnOutcome::Clean),
@@ -2937,6 +2939,9 @@ async fn drive_turn_inner(
                 if delivered_here {
                     apply_accepted_plan_mode(db, bus, session, engine, &input).await;
                 }
+                turn.park_ref = None;
+                turn.park_wait = None;
+                let _ = save_turn(db, &session.owner, &turn).await;
                 next_resume = Some((park_ref, input));
             }
             // Interrupted or shut down while parked: fall through to the
