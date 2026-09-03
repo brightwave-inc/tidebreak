@@ -17,7 +17,7 @@ fn ctx(dir: &Path) -> ToolCtx {
 async fn output_fixture() -> (tempfile::TempDir, Arc<DbStore>, ChatId) {
     let directory = tempfile::tempdir().unwrap();
     let store = Arc::new(
-        DbStore::connect(&format!(
+        DbStore::connect_test_sqlite_fixture(&format!(
             "sqlite://{}?mode=rwc",
             directory.path().join("outputs.db").display()
         ))

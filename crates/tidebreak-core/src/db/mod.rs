@@ -144,6 +144,61 @@ impl DbStore {
         Self::connect_with_options(ConnectOptions::new(url)).await
     }
 
+    /// Open an already-migrated SQLite fixture with test-only durability policy.
+    ///
+    /// Ordinary fixtures use one connection so nextest does not create and tear
+    /// down an oversized pool per process. Tests that exercise concurrent
+    /// claims can request a larger pool explicitly.
+    #[cfg(any(test, feature = "test-util"))]
+    #[doc(hidden)]
+    pub async fn connect_test_sqlite(url: &str, max_connections: u32) -> Result<Self> {
+        let mut options = ConnectOptions::new(url);
+        options
+            .max_connections(max_connections.max(1))
+            .min_connections(1);
+        // A single connection never contends with itself, so the rollback
+        // journal is the cheapest choice. A pooled fixture mirrors production
+        // and uses WAL so readers and a writer interleave the way they do in
+        // the host. With synchronous off, WAL costs nothing extra here.
+        let journal_mode = if max_connections > 1 {
+            sea_orm::sqlx::sqlite::SqliteJournalMode::Wal
+        } else {
+            sea_orm::sqlx::sqlite::SqliteJournalMode::Delete
+        };
+        options.map_sqlx_sqlite_opts(move |sqlite| {
+            sqlite
+                .journal_mode(journal_mode)
+                .synchronous(sea_orm::sqlx::sqlite::SqliteSynchronous::Off)
+                .busy_timeout(SQLITE_BUSY_TIMEOUT)
+        });
+        let conn = Database::connect(options).await.map_err(store_err)?;
+        Ok(Self { conn })
+    }
+
+    /// Clone the migrated test template into `url` with one connection.
+    #[cfg(any(test, feature = "test-util"))]
+    #[doc(hidden)]
+    pub async fn connect_test_sqlite_fixture(url: &str) -> Result<Self> {
+        Self::connect_test_sqlite_fixture_with_max_connections(url, 1).await
+    }
+
+    /// Clone the migrated test template into `url`, then open it cheaply.
+    #[cfg(any(test, feature = "test-util"))]
+    #[doc(hidden)]
+    pub async fn connect_test_sqlite_fixture_with_max_connections(
+        url: &str,
+        max_connections: u32,
+    ) -> Result<Self> {
+        let database = url
+            .strip_prefix("sqlite://")
+            .and_then(|path| path.strip_suffix("?mode=rwc"))
+            .ok_or_else(|| store_err("test SQLite URL must end in ?mode=rwc"))?;
+        let template = migrated_sqlite_template_for_tests().await?;
+        std::fs::copy(template, database).map_err(store_err)?;
+        let read_write_url = format!("sqlite://{database}?mode=rw");
+        Self::connect_test_sqlite(&read_write_url, max_connections).await
+    }
+
     /// Connect with explicit SeaORM pool options and run migrations.
     ///
     /// Most callers should use [`Self::connect`]. This constructor is for
@@ -218,6 +273,103 @@ impl DbStore {
     ) -> Result<bool> {
         ops::turn::heartbeat_turn(self, id, lease_token, now, lease_expires_at).await
     }
+}
+
+/// Return one migrated SQLite template shared by every nextest process.
+///
+/// A Tokio `OnceCell` only caches within one process, while nextest starts a
+/// fresh process for each test. The migration names are the schema version:
+/// Tidebreak's baseline is frozen and every schema change appends a uniquely
+/// named migration. That makes this cache safe across recompiles and worktrees.
+#[cfg(any(test, feature = "test-util"))]
+#[doc(hidden)]
+pub async fn migrated_sqlite_template_for_tests() -> Result<std::path::PathBuf> {
+    let migrations = migration::Migrator::migrations();
+    let latest = migrations
+        .last()
+        .map(|migration| migration.name().to_owned())
+        .unwrap_or_else(|| "empty".to_owned());
+    let cache_directory = std::env::temp_dir().join("tidebreak-sqlite-test-templates");
+    std::fs::create_dir_all(&cache_directory).map_err(store_err)?;
+    let database = cache_directory.join(format!("{}-{latest}.db", migrations.len()));
+    if database.is_file() {
+        return Ok(database);
+    }
+
+    let lock = database.with_extension("lock");
+    let wait_started = std::time::Instant::now();
+    loop {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock)
+        {
+            Ok(file) => {
+                drop(file);
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if database.is_file() {
+                    return Ok(database);
+                }
+                let stale = std::fs::metadata(&lock)
+                    .and_then(|metadata| metadata.modified())
+                    .and_then(|modified| modified.elapsed().map_err(std::io::Error::other))
+                    .is_ok_and(|age| age > std::time::Duration::from_secs(30));
+                if stale {
+                    let _ = std::fs::remove_file(&lock);
+                    continue;
+                }
+                if wait_started.elapsed() > std::time::Duration::from_secs(120) {
+                    return Err(store_err(format!(
+                        "timed out waiting for SQLite test template {}",
+                        database.display()
+                    )));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) => return Err(store_err(error)),
+        }
+    }
+
+    struct BuildGuard {
+        lock: std::path::PathBuf,
+        partial: std::path::PathBuf,
+    }
+
+    impl Drop for BuildGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.partial);
+            let _ = std::fs::remove_file(&self.lock);
+        }
+    }
+
+    if database.is_file() {
+        let _ = std::fs::remove_file(&lock);
+        return Ok(database);
+    }
+    let partial = database.with_extension(format!("{}.tmp", std::process::id()));
+    let guard = BuildGuard {
+        lock,
+        partial: partial.clone(),
+    };
+    let _ = std::fs::remove_file(&partial);
+    let url = format!("sqlite://{}?mode=rwc", partial.display());
+    let store = DbStore::connect(&url).await?;
+    store
+        .conn
+        .execute_unprepared("PRAGMA wal_checkpoint(TRUNCATE);")
+        .await
+        .map_err(store_err)?;
+    store
+        .conn
+        .execute_unprepared("PRAGMA journal_mode=DELETE;")
+        .await
+        .map_err(store_err)?;
+    store.close().await?;
+    std::fs::rename(&partial, &database).map_err(store_err)?;
+    drop(guard);
+    Ok(database)
 }
 
 impl DbStore {

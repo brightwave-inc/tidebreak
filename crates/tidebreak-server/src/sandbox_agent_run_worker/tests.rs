@@ -2108,8 +2108,8 @@ async fn immediate_failures_release_capacity_then_deliver_a_terminal_parent_rece
 
     let terminal = child("terminal".into()).await;
     let terminal_worker = worker(RetrySchedule::new(
-        Duration::from_millis(100),
-        Duration::from_millis(200),
+        Duration::from_millis(10),
+        Duration::from_millis(10),
         Duration::from_secs(60),
     ));
     assert_eq!(
@@ -2120,7 +2120,7 @@ async fn immediate_failures_release_capacity_then_deliver_a_terminal_parent_rece
     // budget is spent and the run fails terminally.
     let mut outcome = SandboxAgentRunWorkerOutcome::RetryScheduled(terminal);
     for _ in 1..tidebreak_core::AgentRun::DEFAULT_MAX_ATTEMPTS {
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
         outcome = terminal_worker.run_once().await.unwrap();
     }
     assert_eq!(outcome, SandboxAgentRunWorkerOutcome::Failed(terminal));

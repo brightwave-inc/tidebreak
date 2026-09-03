@@ -4365,9 +4365,12 @@ async fn steering_a_live_container_run_reaches_the_agents_next_model_step() {
         steering
             .steer(run_id, INSTRUCTION.to_owned())
             .expect("a live attached run accepts steering");
-        // Let the frame cross the socket while the sandbox is parked on its
-        // model call, then release the step it was waiting on.
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Wait for the live connection to flush the frame while the sandbox is
+        // parked on its first model call, then release that call. The later
+        // prompts prove when the sandbox applied the instruction.
+        tokio::time::timeout(Duration::from_secs(5), steering.wait_for_steer_delivery())
+            .await
+            .expect("the live connection delivered the steering frame");
         gate.release();
 
         let outcome = drive
@@ -4589,7 +4592,7 @@ async fn dial_container(authority: &str) -> tokio::net::TcpStream {
         {
             return stream;
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
     panic!("could not dial the container at {authority}");
 }

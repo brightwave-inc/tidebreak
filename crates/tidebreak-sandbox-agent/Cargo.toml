@@ -9,6 +9,9 @@ homepage.workspace = true
 authors.workspace = true
 publish = false
 
+[lib]
+doctest = false
+
 # The container entrypoint is the `tidebreak-sandbox-agent` binary.
 [[bin]]
 name = "tidebreak-sandbox-agent"

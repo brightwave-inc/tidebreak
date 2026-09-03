@@ -3794,11 +3794,11 @@ async fn send_now_releases_a_paused_queue() {
     // End the blocking turn. A paused promoter must leave both rows alone.
     gate.notify_one();
     wait_for_turn(&store, chat.id).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    crate::routes::promote_queued_turns(&state).await.unwrap();
     assert_eq!(
         store.list_queued_turns(chat.id).await.unwrap().len(),
         2,
-        "a paused queue promoted a message"
+        "a paused queue promoted a message during an explicit sweep"
     );
 
     let send_now = router

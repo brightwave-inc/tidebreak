@@ -5,6 +5,13 @@
 //! lands (delivery-sequence step 7.1), the same scenarios re-point at it behind
 //! the protocol seam; the assertions do not change.
 
+#[path = "conformance/selfhost_conformance.rs"]
+mod selfhost_conformance;
+#[path = "conformance/wire_conformance.rs"]
+mod wire_conformance;
+#[path = "conformance/wire_format.rs"]
+mod wire_format;
+
 use tidebreak_sandbox_protocol::conformance;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

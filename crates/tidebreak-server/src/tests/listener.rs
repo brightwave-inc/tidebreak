@@ -1,5 +1,5 @@
+use crate::bind;
 use tidebreak_core::{Chat, Config, KeychainSecretProvider};
-use tidebreak_server::bind;
 
 async fn serve_test_server() -> (std::net::SocketAddr, String, tempfile::TempDir) {
     KeychainSecretProvider::use_mock();

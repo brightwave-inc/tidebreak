@@ -78,6 +78,7 @@ mod documents;
 mod gateway_drafts;
 mod image_attachment;
 mod lifecycle;
+mod listener;
 mod memory;
 mod outputs;
 mod root_attachment;
@@ -95,51 +96,19 @@ use lifecycle::{post_json, post_native_json, steer_turn, steer_turn_with_id};
 const ALICE_TOKEN: &str = "alice-token-padded-out-to-thirty-two";
 const BOB_TOKEN: &str = "bob-token-padded-out-to-thirty-two-x";
 
-struct MigratedSqliteTemplate {
-    _directory: tempfile::TempDir,
-    database: std::path::PathBuf,
-}
-
-static MIGRATED_SQLITE_TEMPLATE: tokio::sync::OnceCell<MigratedSqliteTemplate> =
-    tokio::sync::OnceCell::const_new();
-
-/// Build the current empty schema once, then copy it into isolated server tests.
-///
-/// Tests that exercise restart, locking, or unusual database setup keep their
-/// explicit connection path rather than using this helper.
-async fn migrated_sqlite_template() -> &'static MigratedSqliteTemplate {
-    MIGRATED_SQLITE_TEMPLATE
-        .get_or_init(|| async {
-            let directory = tempfile::tempdir().unwrap();
-            let database = directory.path().join("template.db");
-            let url = format!("sqlite://{}?mode=rwc", database.display());
-            let store = DbStore::connect(&url).await.unwrap();
-            drop(store);
-
-            let checkpoint = sea_orm::Database::connect(&url).await.unwrap();
-            checkpoint
-                .execute_unprepared("PRAGMA wal_checkpoint(TRUNCATE);")
-                .await
-                .unwrap();
-            checkpoint.close().await.unwrap();
-
-            MigratedSqliteTemplate {
-                _directory: directory,
-                database,
-            }
-        })
-        .await
-}
-
 async fn temp_db_store(database_name: &str) -> (tempfile::TempDir, DbStore) {
-    let template = migrated_sqlite_template().await;
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join(database_name);
-    std::fs::copy(&template.database, &database).unwrap();
-    let url = format!("sqlite://{}?mode=rw", database.display());
-    let store = DbStore::connect_with_options(crate::host_connect_options(&url))
-        .await
-        .unwrap();
+    let url = format!("sqlite://{}?mode=rwc", database.display());
+    // Preserve the host's tested concurrency ceiling (a pooled fixture uses
+    // WAL, as in production) while keeping only one connection warm and
+    // skipping migration and fsync costs.
+    let store = DbStore::connect_test_sqlite_fixture_with_max_connections(
+        &url,
+        super::HOST_MAX_CONNECTIONS,
+    )
+    .await
+    .unwrap();
     (directory, store)
 }
 

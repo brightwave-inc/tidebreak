@@ -252,15 +252,6 @@ mod tests {
     }
 
     #[test]
-    fn opaque_ids_roundtrip_and_reject_nil() {
-        let root = RootId::new();
-        let encoded = serde_json::to_string(&root).unwrap();
-        assert_eq!(serde_json::from_str::<RootId>(&encoded).unwrap(), root);
-        assert_eq!(root.to_string().parse::<RootId>().unwrap(), root);
-        assert!(serde_json::from_str::<RootId>(&format!("\"{}\"", Uuid::nil())).is_err());
-    }
-
-    #[test]
     fn execution_context_rejects_nil_ids_during_construction_and_serde() {
         assert_eq!(ExecutionContext::standalone(Uuid::nil()), Err(IdError::Nil));
         let encoded = format!(

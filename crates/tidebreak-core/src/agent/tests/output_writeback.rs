@@ -4,7 +4,7 @@ async fn output_writeback_fixture() -> (tempfile::TempDir, Arc<dyn Store>, Chat,
 {
     let db = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect(&format!(
+        DbStore::connect_test_sqlite_fixture(&format!(
             "sqlite://{}?mode=rwc",
             db.path().join("writeback.db").display()
         ))

@@ -44,63 +44,17 @@ mod turn_event_batch;
 mod turn_steer;
 mod turn_terminal_usage;
 
-struct MigratedSqliteTemplate {
-    _directory: tempfile::TempDir,
-    database: std::path::PathBuf,
-}
-
-static MIGRATED_SQLITE_TEMPLATE: tokio::sync::OnceCell<MigratedSqliteTemplate> =
-    tokio::sync::OnceCell::const_new();
-
-/// Build the current empty schema once, then clone it for ordinary store tests.
-///
-/// Every caller still owns a distinct writable file. Tests that exercise the
-/// migration chain itself create their historical/raw schemas directly and do
-/// not use this helper.
-async fn migrated_sqlite_template() -> &'static MigratedSqliteTemplate {
-    MIGRATED_SQLITE_TEMPLATE
-        .get_or_init(|| async {
-            let directory = tempfile::tempdir().unwrap();
-            let database = directory.path().join("template.db");
-            let url = format!("sqlite://{}?mode=rwc", database.display());
-            let store = DbStore::connect(&url).await.unwrap();
-            store
-                .conn
-                .execute_unprepared("PRAGMA wal_checkpoint(TRUNCATE);")
-                .await
-                .unwrap();
-            drop(store);
-            MigratedSqliteTemplate {
-                _directory: directory,
-                database,
-            }
-        })
-        .await
-}
-
 async fn temp_store() -> (tempfile::TempDir, DbStore) {
-    let template = migrated_sqlite_template().await;
-    let dir = tempfile::tempdir().unwrap();
-    let database = dir.path().join("test.db");
-    std::fs::copy(&template.database, &database).unwrap();
-    let url = format!("sqlite://{}?mode=rw", database.display());
-    let conn = Database::connect(&url).await.unwrap();
-    conn.execute_unprepared("PRAGMA journal_mode=WAL;")
-        .await
-        .unwrap();
-    let store = DbStore { conn };
-    (dir, store)
+    temp_store_with_max_connections(1).await
 }
 
 async fn temp_store_with_max_connections(max_connections: u32) -> (tempfile::TempDir, DbStore) {
-    let template = migrated_sqlite_template().await;
     let dir = tempfile::tempdir().unwrap();
     let database = dir.path().join("test.db");
-    std::fs::copy(&template.database, &database).unwrap();
-    let url = format!("sqlite://{}?mode=rw", database.display());
-    let mut options = sea_orm::ConnectOptions::new(url);
-    options.max_connections(max_connections);
-    let store = DbStore::connect_with_options(options).await.unwrap();
+    let url = format!("sqlite://{}?mode=rwc", database.display());
+    let store = DbStore::connect_test_sqlite_fixture_with_max_connections(&url, max_connections)
+        .await
+        .unwrap();
     (dir, store)
 }
 
