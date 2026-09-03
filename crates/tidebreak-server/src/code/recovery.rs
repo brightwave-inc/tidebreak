@@ -1,9 +1,12 @@
-//! Boot recovery for sessions recorded as running.
+//! Boot recovery for open local engine sessions.
 //!
 //! A recorded child pid is checked with the platform's non-mutating existence
 //! probe. Dead → the open turn closes as Interrupted (journaled) and the
 //! session is Idle. Alive → the session is fenced until an explicit reap. A
-//! pid that was not recorded at spawn is never probed or signaled.
+//! pid that was not recorded at spawn is never probed or signaled. A session
+//! already fenced for a live orphan is checked again on the next boot. If its
+//! exact recorded process has exited, recovery closes its open turn and clears
+//! the fence.
 
 #[cfg(unix)]
 use std::io::ErrorKind;
@@ -57,7 +60,7 @@ pub(crate) enum PidLiveness {
     Dead,
 }
 
-/// Scan every `Running` session and apply the conservative recovery rule.
+/// Recover each open local engine session without touching a live process.
 pub(crate) async fn recover_running_sessions(
     store: &DbStore,
     bus: &CodeEventBus,
@@ -84,6 +87,7 @@ pub(crate) async fn recover_running_sessions_with_caps(
 ) -> Result<Vec<RecoveryAction>, tidebreak_core::AgentError> {
     let running =
         list_sessions_by_lifecycle_all_owners(store, CodeSessionLifecycle::Running).await?;
+    let fenced = list_sessions_by_lifecycle_all_owners(store, CodeSessionLifecycle::Fenced).await?;
     let mut actions = Vec::new();
     for session in running {
         // A remote session's engine lives in a sandbox, not a local child:
@@ -99,6 +103,41 @@ pub(crate) async fn recover_running_sessions_with_caps(
         if let Some(action) = recover_one(store, bus, session, &probe, parks).await? {
             actions.push(action);
         }
+    }
+    for session in fenced {
+        if !matches!(session.fence_reason, Some(FenceReason::OrphanAlive)) {
+            continue;
+        }
+        if let Some(workspace) = super::session_workspace(store, &session).await? {
+            if workspace.is_remote() {
+                continue;
+            }
+        }
+        let Some(pid) = session.child_pid else {
+            continue;
+        };
+        if probe(pid, session.child_process_identity.as_deref()) == PidLiveness::Alive {
+            continue;
+        }
+        let Some(recovered) = reap_fenced_session(
+            store,
+            &session.owner,
+            session.id,
+            session.spawn_epoch,
+            session.child_pid,
+            session.child_process_identity.as_deref(),
+        )
+        .await?
+        else {
+            continue;
+        };
+        for event in recovered.events {
+            bus.publish(session.id, event);
+        }
+        emit_digest(store, bus, &recovered.session).await;
+        actions.push(RecoveryAction::Interrupted {
+            session: recovered.session.id.to_string(),
+        });
     }
     Ok(actions)
 }
@@ -987,6 +1026,51 @@ mod tests {
         assert!(signaled.load(Ordering::SeqCst));
         let _ = decoy.kill();
         let _ = decoy.wait();
+    }
+
+    #[tokio::test]
+    async fn boot_recovery_reaps_a_previously_fenced_orphan_after_it_exits() {
+        let pid = 4_241;
+        let identity = format!("test:{pid}");
+        let (_dir, store, bus, session, turn_id, approval_id) = seeded_fenced_orphan(pid).await;
+        let session_id = session.id;
+
+        let actions = recover_running_sessions_with(&store, &bus, |probed, observed_identity| {
+            assert_eq!(probed, pid);
+            assert_eq!(observed_identity, Some(identity.as_str()));
+            PidLiveness::Dead
+        })
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            actions.as_slice(),
+            [RecoveryAction::Interrupted { session }] if session == &session_id.to_string()
+        ));
+        let recovered = get_session(&store, &tidebreak_core::OwnerId::local(), session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.lifecycle, CodeSessionLifecycle::Idle);
+        assert_eq!(recovered.child_pid, None);
+        assert_eq!(recovered.child_process_identity, None);
+        assert_eq!(recovered.fence_reason, None);
+        assert_eq!(
+            get_turn(&store, &tidebreak_core::OwnerId::local(), turn_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            CodeTurnStatus::Interrupted
+        );
+        assert_eq!(
+            get_approval(&store, &tidebreak_core::OwnerId::local(), approval_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            CodeApprovalState::Abandoned
+        );
     }
 
     #[tokio::test]
