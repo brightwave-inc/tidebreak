@@ -269,6 +269,7 @@ aspirational.
 | `TIDEBREAK_VAULT_PATH` | no | `tidebreak` | Deployment-specific path below the mount. Tidebreak appends one encoded credential key. |
 | `TIDEBREAK_VAULT_NAMESPACE` | no | unset | Vault Enterprise or HCP namespace sent as `X-Vault-Namespace`. |
 | `TIDEBREAK_DATA_DIR` | no | `./.tidebreak` | Instance lock, logs, per-turn scratch. Durable state lives in PostgreSQL, not here. |
+| `HOME` | no | `/var/lib/tidebreak/home` in the image | Writable home for npm and the coding harnesses. The image keeps it on the data volume because a hosting plane may run the container as a uid with no passwd entry, which is otherwise handed `HOME=/`. The server creates it at boot. |
 | `TIDEBREAK_LOG` | no | built-in policy | `tracing` filter directives, e.g. `debug` or `warn,tidebreak_server=trace`. An invalid spec falls back to the default. |
 | `TIDEBREAK_DIAGNOSTICS_LOG` | no | `off,tidebreak_diagnostics=info` | `tracing` filter directives for the bounded structured JSONL log. See [Diagnostics](diagnostics.md). |
 | `TIDEBREAK_MODEL` | no | built-in default | Default model name; also settable at runtime through settings or per chat. |

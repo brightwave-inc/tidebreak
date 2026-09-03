@@ -125,7 +125,7 @@ mod workspace_config;
 
 use std::fs::{OpenOptions, TryLockError};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::extract::{DefaultBodyLimit, Request};
@@ -1565,6 +1565,41 @@ const DEFAULT_MODEL: &str = "gpt-5.6-sol";
 ///
 /// This generic embedding does not expose durable root-attachment mutations,
 /// because it has no restart-stable native executor identity.
+/// Make `$HOME` usable before anything spawns npm or a coding harness.
+///
+/// The self-host image points HOME under the data directory because a hosting
+/// plane may run the container as a uid with no passwd entry, and such a uid
+/// is handed `HOME=/`, which nothing can write. Create the directory so a
+/// fresh volume has it, and say so at boot when it is unusable: the failure
+/// otherwise surfaces later as every harness install dying inside npm.
+pub fn ensure_home_dir() {
+    let Some(home) = std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+    else {
+        tracing::warn!(
+            "HOME is unset; harness installs and the coding engines need a writable home"
+        );
+        return;
+    };
+    if let Err(error) = ensure_home_dir_at(&home) {
+        tracing::warn!(
+            home = %home.display(),
+            error,
+            "HOME is not writable; harness installs will fail until it is"
+        );
+    }
+}
+
+/// Create `home` if it is missing and prove it takes a file.
+fn ensure_home_dir_at(home: &Path) -> std::result::Result<(), String> {
+    std::fs::create_dir_all(home).map_err(|error| format!("could not create it: {error}"))?;
+    let probe = home.join(".tidebreak-write-probe");
+    std::fs::write(&probe, b"").map_err(|error| format!("could not write to it: {error}"))?;
+    let _ = std::fs::remove_file(&probe);
+    Ok(())
+}
+
 pub async fn bind(config: Config) -> Result<Server> {
     bind_inner(
         config,
@@ -3105,3 +3140,24 @@ pub(crate) fn desktop_connect_options(url: &str) -> sea_orm::ConnectOptions {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod home_dir_tests {
+    use super::ensure_home_dir_at;
+
+    /// A fresh data volume has no home directory yet; boot makes one. A home
+    /// that cannot take a file is reported, not silently accepted, because
+    /// npm would be the first thing to find out.
+    #[test]
+    fn boot_creates_a_missing_home_and_names_an_unusable_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("data").join("home");
+        ensure_home_dir_at(&home).expect("a missing home is created");
+        assert!(home.is_dir());
+
+        let blocker = tmp.path().join("blocker");
+        std::fs::write(&blocker, b"not a directory").unwrap();
+        let error = ensure_home_dir_at(&blocker.join("home")).unwrap_err();
+        assert!(error.contains("could not create it"), "{error}");
+    }
+}

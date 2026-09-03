@@ -193,6 +193,12 @@ ENV TIDEBREAK_PROFILE=self_host
 # only if you want the logs to outlive the container. The durable state is in
 # PostgreSQL.
 ENV TIDEBREAK_DATA_DIR=/var/lib/tidebreak
+# A writable home, on the data volume. The image's own user is below, but a
+# hosting plane may run the container as any non-root uid (Model Gateway
+# uses 65532), and a uid with no passwd entry is handed `HOME=/`, which
+# nothing can write: npm then fails before it fetches a byte, and every
+# harness install with it. The server creates this directory at boot.
+ENV HOME=/var/lib/tidebreak/home
 # All interfaces *of this container* — which is what makes it reachable at a
 # known port from outside its own network namespace. Exposure beyond the
 # container is the host's decision: docker-compose.yml publishes this to
