@@ -79,7 +79,9 @@ describe("a background run's task plan", () => {
     );
     // Named twice while live: once as the step in flight, once on the row.
     expect(screen.getAllByText("Write the summary")).toHaveLength(2);
-    expect(live.container.querySelector(".animate-spin")).not.toBeNull();
+    expect(
+      live.container.querySelector("[data-loader-variant='comet']"),
+    ).not.toBeNull();
     expect(
       live.container.querySelector("[data-slot='progress']"),
     ).not.toBeNull();
@@ -96,8 +98,10 @@ describe("a background run's task plan", () => {
     expect(screen.getByText("1/2 steps")).toBeInTheDocument();
     // ...but the row stops naming a current step, because there isn't one.
     expect(screen.getAllByText("Write the summary")).toHaveLength(1);
-    // ...without a spinner or a bar still tracking work that has stopped.
-    expect(settled.container.querySelector(".animate-spin")).toBeNull();
+    // ...without a loader or a bar still tracking work that has stopped.
+    expect(
+      settled.container.querySelector("[data-loader-variant='comet']"),
+    ).toBeNull();
     expect(
       settled.container.querySelector("[data-slot='progress']"),
     ).toBeNull();

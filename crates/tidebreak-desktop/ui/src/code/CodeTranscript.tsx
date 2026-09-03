@@ -3,7 +3,6 @@ import {
   CircleSlash,
   FileCode,
   FileSearch,
-  Loader2,
   Search,
   SquareTerminal,
   Wrench,
@@ -36,6 +35,7 @@ import { TranscriptSkeleton } from "@/TranscriptSkeleton";
 import { UserMessage } from "@/UserMessage";
 import { useApp } from "@/AppContext";
 import { TranscriptImageAttachments } from "@/TranscriptImageAttachments";
+import { Loader } from "@/components/motion/loader";
 import { cn } from "@/lib/utils";
 import type { CodeTranscriptItem } from "./CodeSessionReducer";
 import { FOCUS_RING_TIGHT, HOVER_TINT } from "./interactive";
@@ -1179,12 +1179,7 @@ function StatusGlyph({
   switch (status) {
     case "running":
       return (
-        // The one animation reduced motion keeps: it is the progress signal,
-        // and a frozen spinner reads as a hung call.
-        <Loader2
-          className="text-info-foreground size-3.5 animate-spin"
-          aria-hidden="true"
-        />
+        <Loader variant="comet" size={14} className="text-live" decorative />
       );
     case "succeeded":
       return (

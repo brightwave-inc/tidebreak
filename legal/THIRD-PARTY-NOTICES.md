@@ -28,8 +28,8 @@ a stale one.
 ## Summary
 
 - Rust crates: 861
-- Desktop UI production packages: 531
-- Distinct license texts: 591
+- Desktop UI production packages: 535
+- Distinct license texts: 593
 - Packages with no declared license: 0
 - Packages with a curated license: 28
 
@@ -7246,6 +7246,12 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/101arrowz/fflate
 - License text: `LICENSE` ([L-0a1df3a083d0](#l-0a1df3a083d0))
 
+### framer-motion 13.1.1
+
+- License: `MIT`
+- Repository: https://github.com/motiondivision/motion/
+- License text: `LICENSE.md` ([L-aac842346e33](#l-aac842346e33))
+
 ### franc-min 6.2.0
 
 - License: `MIT`
@@ -7809,6 +7815,24 @@ License identifiers named across all declared expressions:
 - License: `MIT`
 - Repository: https://github.com/microsoft/monaco-editor
 - License text: `LICENSE` ([L-806766baa900](#l-806766baa900))
+
+### motion 13.1.1
+
+- License: `MIT`
+- Repository: https://github.com/motiondivision/motion
+- License text: `LICENSE.md` ([L-bb59eb35f694](#l-bb59eb35f694))
+
+### motion-dom 13.1.1
+
+- License: `MIT`
+- Repository: https://github.com/motiondivision/motion
+- License text: `LICENSE.md` ([L-bb59eb35f694](#l-bb59eb35f694))
+
+### motion-utils 13.0.0
+
+- License: `MIT`
+- Repository: https://github.com/motiondivision/motion
+- License text: `LICENSE.md` ([L-bb59eb35f694](#l-bb59eb35f694))
 
 ### ms 2.1.3
 
@@ -30279,6 +30303,32 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
+### L-aac842346e33
+
+```
+The MIT License (MIT)
+
+Copyright (c) 2018 Framer B.V.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ### L-ab72d9e790f7
 
 ```
@@ -31933,6 +31983,32 @@ THIS SOFTWARE.
 MIT License
 
 Copyright (c) 2017 Photopea
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### L-bb59eb35f694
+
+```
+The MIT License (MIT)
+
+Copyright (c) 2024 [Motion](https://motion.dev) B.V.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

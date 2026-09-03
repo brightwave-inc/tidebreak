@@ -23,6 +23,7 @@ import {
   SquareTerminal,
 } from "lucide-react";
 
+import { Loader } from "@/components/motion/loader";
 import { Button } from "@/components/ui/button";
 import { LiveLabel } from "@/LiveLabel";
 import {
@@ -33,7 +34,6 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
-import { Spinner } from "@/components/ui/spinner";
 import {
   HoverCard,
   HoverCardContent,
@@ -116,7 +116,7 @@ export function WorkspaceStatusMark({
   if (creating) {
     return (
       <span role="img" aria-label="Creating workspace">
-        <Spinner className={cn("size-3", STATUS_MARK.running)} aria-hidden />
+        <Loader variant="comet" size={12} className="text-live" decorative />
       </span>
     );
   }
@@ -130,7 +130,7 @@ export function WorkspaceStatusMark({
       {rank === "needs_you" ? (
         <CircleAlert className={className} aria-hidden />
       ) : rank === "running" ? (
-        <Spinner className={className} aria-hidden />
+        <Loader variant="comet" size={12} className="text-live" decorative />
       ) : rank === "pr_open" ? (
         <GitPullRequest
           className={className}
@@ -521,7 +521,12 @@ function WorkspaceSubagentRows({
             ariaLabel={`Subagent for ${title}: ${subagent.name}, ${SUBAGENT_STATUS_LABELS[subagent.status]}`}
             icon={
               subagent.status === "running" ? (
-                <Spinner className={STATUS_MARK.running} />
+                <Loader
+                  variant="comet"
+                  size={12}
+                  className="text-live"
+                  decorative
+                />
               ) : subagent.status === "failed" ? (
                 <CircleAlert className={STATUS_MARK.critical} />
               ) : (
@@ -918,7 +923,7 @@ function WorkspaceActivityLine({
  * One glyph, one meaning, on the rail row.
  *
  * The same shapes the compact attention mark draws, so the row and the badge
- * never disagree: a spinner is work in motion, a circle-alert wants the
+ * never disagree: a comet is work in motion, a circle-alert wants the
  * reader, a clock went quiet, a ban is fenced, a check is finished and
  * unread, a pin was set by hand. Two shapes are the row's own, for a turn
  * that is alive but parked on something else: a bot for subagents and a
@@ -985,10 +990,12 @@ function SessionStateGlyph({
       );
     }
     return (
-      <Spinner
-        className={cn(className, STATUS_MARK.running)}
+      <Loader
+        variant="comet"
+        size={12}
+        className={cn(className, "text-live")}
         data-state-glyph="working"
-        aria-hidden
+        decorative
       />
     );
   }

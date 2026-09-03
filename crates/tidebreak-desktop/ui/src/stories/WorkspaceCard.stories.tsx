@@ -490,7 +490,7 @@ export const ParkedIdle: Story = {
   },
 };
 
-/** Spinner, activity, and the harness mark on the detailed status line. */
+/** Comet loader, activity, and the harness mark on the detailed status line. */
 export const RunningSession: Story = {
   args: {
     digest: runningDigest,

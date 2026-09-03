@@ -3,12 +3,6 @@ import { RefreshCw } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
-import { AttentionBadge } from "@/code/AttentionBadge";
-import { HARNESS_ICONS } from "@/code/HarnessPicker";
-
-import { attentionWorking } from "./fixtures";
-
-const ClaudeIcon = HARNESS_ICONS.claude_code;
 
 /**
  * Indeterminate progress. The arc is centred on the viewBox so it rotates
@@ -47,19 +41,6 @@ export const OnRefreshButton: Story = {
         <Spinner aria-hidden />
         Refresh
       </Button>
-    </div>
-  ),
-};
-
-/** The compact working mark as the Main agent tab wears it. */
-export const OnAgentTab: Story = {
-  render: () => (
-    <div className="flex h-8 w-fit items-center rounded-lg bg-background px-2.5 shadow-[0_1px_2px_color-mix(in_oklch,var(--foreground)_7%,transparent),inset_0_0_0_1px_var(--border-subtle)]">
-      <span className="flex items-center gap-1.5 text-xs font-medium">
-        <ClaudeIcon className="size-3.5 shrink-0" />
-        <span>Main agent</span>
-        <AttentionBadge attention={attentionWorking} compact />
-      </span>
     </div>
   ),
 };

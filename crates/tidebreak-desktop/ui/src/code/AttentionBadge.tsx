@@ -1,7 +1,7 @@
 import { Ban, CircleAlert, CircleCheck, Clock, Pin } from "lucide-react";
 
+import { Loader } from "@/components/motion/loader";
 import { Badge } from "@/components/ui/badge";
-import { Spinner } from "@/components/ui/spinner";
 import { cn } from "@/lib/utils";
 
 import type { Attention } from "../api/types";
@@ -18,10 +18,10 @@ import {
  * NeedsYou is strongest. Stalled and Fenced are distinct warnings.
  * DoneUnreviewed is a quiet mark.
  *
- * Working is a spinner but not a pill. Compact surfaces use a distinct glyph
- * for each state, so the shape still carries the meaning when color is subtle
- * or unavailable. The full badge always sits beside text that names the state
- * already, so a "Working" pill there would only repeat it.
+ * Working is a comet loader but not a pill. Compact surfaces use a distinct
+ * mark for each state, so the shape still carries the meaning when color is
+ * subtle or unavailable. The full badge always sits beside text that names
+ * the state already, so a "Working" pill there would only repeat it.
  */
 
 const BADGE_VARIANTS: Record<
@@ -92,7 +92,9 @@ function CompactAttentionMark({
   const className = cn("size-3", STATUS_MARK[tone]);
   switch (attention.state.type) {
     case "working":
-      return <Spinner className={className} aria-hidden="true" />;
+      return (
+        <Loader variant="comet" size={12} className="text-live" decorative />
+      );
     case "needs_you":
       return <CircleAlert className={className} aria-hidden="true" />;
     case "stalled":

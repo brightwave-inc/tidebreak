@@ -1,7 +1,7 @@
 import { Circle, CircleCheck, CircleDashed } from "lucide-react";
 
 import type { TaskPlanStep, TaskPlanStepStatus } from "./api";
-import { Spinner } from "@/components/ui/spinner";
+import { Loader } from "@/components/motion/loader";
 import { cn } from "@/lib/utils";
 
 /**
@@ -100,11 +100,11 @@ function StepGlyph({
     return <CircleCheck className="text-success size-4" />;
   }
   if (status === "in_progress") {
-    // A spinner on work that has stopped would animate a claim that nothing is
+    // A loader on work that has stopped would animate a claim that nothing is
     // making true. The step still reads as started rather than untouched, but
     // it reads as stopped.
     return live ? (
-      <Spinner className="text-foreground size-4" />
+      <Loader variant="comet" size={16} className="text-live" decorative />
     ) : (
       <CircleDashed className="text-muted-foreground size-4" />
     );

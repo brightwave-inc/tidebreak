@@ -23,13 +23,15 @@ describe("TaskPlanCard", () => {
       <TaskPlanCard plan={PLAN} live={true} />,
     );
 
-    // While the turn runs the plan is open and the current step spins.
+    // While the turn runs the plan is open and the current step uses a comet.
     expect(screen.getByRole("button", { name: /task plan/i })).toHaveAttribute(
       "aria-expanded",
       "true",
     );
     expect(screen.getByText("Draft the change")).toBeInTheDocument();
-    expect(container.querySelector(".animate-spin")).not.toBeNull();
+    expect(
+      container.querySelector("[data-loader-variant='comet']"),
+    ).not.toBeNull();
 
     rerender(<TaskPlanCard plan={PLAN} live={false} />);
 
@@ -39,6 +41,6 @@ describe("TaskPlanCard", () => {
       "false",
     );
     expect(screen.getByText("1/3")).toBeInTheDocument();
-    expect(container.querySelector(".animate-spin")).toBeNull();
+    expect(container.querySelector("[data-loader-variant='comet']")).toBeNull();
   });
 });

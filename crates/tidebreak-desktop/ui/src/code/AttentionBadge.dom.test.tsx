@@ -65,7 +65,7 @@ describe("AttentionBadge", () => {
 
   // A compact mark is often a row's only state. Working drawing as nothing here
   // made a busy agent look idle, which is the one confusion worth a test.
-  it("renders a spinner for Working when compact", () => {
+  it("renders a comet loader for Working when compact", () => {
     render(
       <AttentionBadge
         compact
@@ -74,7 +74,7 @@ describe("AttentionBadge", () => {
     );
     const mark = screen.getByLabelText("Working");
     expect(mark).toHaveAttribute("data-attention", "working");
-    expect(mark.querySelector(".animate-spin")).not.toBeNull();
+    expect(mark.querySelector("[data-loader-variant='comet']")).not.toBeNull();
   });
 
   it("renders no mark for Idle", () => {
