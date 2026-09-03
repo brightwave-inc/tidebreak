@@ -26,9 +26,9 @@ use tidebreak_core::db::code::{
     release_watch_submission, reserve_watch_submission, save_watch, WatchSubmissionClaim,
 };
 use tidebreak_core::{
-    Attention, AttentionSource, AttentionState, CodeSessionKind, CodeSessionLifecycle, CodeWatch,
-    CodeWatchId, CodeWatchState, CodeWorkspaceStatus, HarnessKind, OwnerId, PermissionMode,
-    PullRequestDigest, WorkspaceId,
+    Attention, AttentionSource, AttentionState, CodeSession, CodeSessionKind, CodeSessionLifecycle,
+    CodeWatch, CodeWatchId, CodeWatchState, CodeWorkspaceStatus, HarnessKind, OwnerId,
+    PermissionMode, PullRequestDigest, WorkspaceId,
 };
 
 use super::attention::{apply_attention, emit_workspace_digests};
@@ -257,17 +257,56 @@ pub(crate) fn fix_turn_instruction(reason: WatchReason, pr: &PullRequestDigest) 
     lines.join("\n")
 }
 
+fn watch_session_settings(
+    sessions: &[CodeSession],
+    permission_mode_ceiling: Option<PermissionMode>,
+) -> Result<(HarnessKind, NewSessionSettings), ServerError> {
+    let (harness, model, permission_mode) = sessions
+        .iter()
+        .find(|session| session.kind == CodeSessionKind::Interactive)
+        .map(|session| {
+            (
+                session.harness_kind,
+                session.model.clone(),
+                session.permission_mode,
+            )
+        })
+        .unwrap_or((HarnessKind::ClaudeCode, None, PermissionMode::Auto));
+    if let Some(ceiling) = permission_mode_ceiling {
+        if permission_mode > ceiling {
+            return Err(ServerError::conflict_kind(
+                "permission_mode_locked",
+                format!(
+                    "permission mode `{}` exceeds the maximum this managed profile allows (`{}`)",
+                    permission_mode.as_str(),
+                    ceiling.as_str()
+                ),
+            ));
+        }
+    }
+    Ok((
+        harness,
+        NewSessionSettings {
+            permission_mode,
+            model,
+            reasoning_effort: None,
+            fast_mode: false,
+            permission_mode_ceiling,
+        },
+    ))
+}
+
 impl CodeRuntime {
     /// Start a durable watch on the workspace's open pull request.
     ///
     /// Forks a dedicated watch session in the same worktree. The session
-    /// reuses the interactive session's engine and model when one exists and
-    /// always runs `auto`: a watch that must stop for every command approval
-    /// is a prompt in disguise.
+    /// reuses the newest interactive session's engine, model, and permission
+    /// mode when one exists. A workspace with no conversation uses `auto`.
     pub(crate) async fn start_watch(
         self: &Arc<Self>,
         owner: &OwnerId,
         workspace_id: WorkspaceId,
+        permission_mode_ceiling: Option<PermissionMode>,
     ) -> Result<CodeWatch, ServerError> {
         let workspace = self.get_workspace(owner, workspace_id).await?;
         if workspace.status != CodeWorkspaceStatus::Active {
@@ -284,6 +323,8 @@ impl CodeRuntime {
                 ));
             }
         }
+        let sessions = list_sessions_for_workspace(&self.db, owner, workspace_id).await?;
+        let (harness, settings) = watch_session_settings(&sessions, permission_mode_ceiling)?;
         let status = self.refresh_workspace_pr(owner, workspace_id).await?;
         let Some(pr) = status.pr else {
             return Err(ServerError::conflict_kind(
@@ -306,31 +347,13 @@ impl CodeRuntime {
             }
             _ => {}
         }
-        let sessions = list_sessions_for_workspace(&self.db, owner, workspace_id).await?;
-        let (harness, model) = sessions
-            .iter()
-            .find(|session| session.kind == CodeSessionKind::Interactive)
-            .map(|session| (session.harness_kind, session.model.clone()))
-            .unwrap_or((HarnessKind::ClaudeCode, None));
         let session = self
             .create_session_of_kind(
                 owner,
                 workspace_id,
                 CodeSessionKind::Watch,
                 harness,
-                NewSessionSettings {
-                    permission_mode: PermissionMode::Auto,
-                    model,
-                    // A watch task inherits the engine and model of the
-                    // session that spawned it, but not an effort a person
-                    // picked for their own conversation.
-                    reasoning_effort: None,
-                    // Nor the premium. Fast mode is a spend choice made for a
-                    // conversation someone is watching, and a watch task runs
-                    // unattended where nobody is waiting on the tokens.
-                    fast_mode: false,
-                    permission_mode_ceiling: None,
-                },
+                settings,
             )
             .await?;
         let now = Utc::now();
@@ -970,6 +993,62 @@ mod tests {
         CodePullRequestFact, CodePullRequestId, CodePullRequestLiveState, CodePullRequestState,
         PullRequestCheck, PullRequestCheckBucket,
     };
+
+    #[test]
+    fn watch_inherits_the_newest_interactive_session_settings() {
+        let mut watch = crate::code::remote::fixtures::session_value();
+        watch.kind = CodeSessionKind::Watch;
+        watch.harness_kind = HarnessKind::Grok;
+        watch.permission_mode = PermissionMode::Plan;
+        watch.model = Some("watch-model".to_owned());
+
+        let mut newest = crate::code::remote::fixtures::session_value();
+        newest.harness_kind = HarnessKind::Codex;
+        newest.permission_mode = PermissionMode::Allow;
+        newest.model = Some("gpt-5.6-sol".to_owned());
+
+        let mut older = crate::code::remote::fixtures::session_value();
+        older.permission_mode = PermissionMode::Ask;
+
+        let (harness, settings) =
+            watch_session_settings(&[watch, newest, older], Some(PermissionMode::Allow)).unwrap();
+
+        assert_eq!(harness, HarnessKind::Codex);
+        assert_eq!(settings.permission_mode, PermissionMode::Allow);
+        assert_eq!(settings.model.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(settings.reasoning_effort, None);
+        assert!(!settings.fast_mode);
+        assert_eq!(
+            settings.permission_mode_ceiling,
+            Some(PermissionMode::Allow)
+        );
+    }
+
+    #[test]
+    fn watch_without_an_interactive_session_uses_auto() {
+        let mut watch = crate::code::remote::fixtures::session_value();
+        watch.kind = CodeSessionKind::Watch;
+
+        let (harness, settings) =
+            watch_session_settings(&[watch], Some(PermissionMode::Auto)).unwrap();
+
+        assert_eq!(harness, HarnessKind::ClaudeCode);
+        assert_eq!(settings.permission_mode, PermissionMode::Auto);
+        assert_eq!(settings.model, None);
+    }
+
+    #[test]
+    fn inherited_permission_mode_obeys_the_managed_ceiling() {
+        let session = crate::code::remote::fixtures::session_value();
+
+        let error = watch_session_settings(&[session], Some(PermissionMode::Auto)).unwrap_err();
+
+        assert_eq!(error.kind(), "permission_mode_locked");
+        assert_eq!(
+            error.message(),
+            "permission mode `allow` exceeds the maximum this managed profile allows (`auto`)"
+        );
+    }
 
     fn base_pr() -> PullRequestDigest {
         PullRequestDigest {

@@ -513,8 +513,11 @@ impl ScopedCode {
     pub(crate) async fn start_watch(
         &self,
         id: WorkspaceId,
+        permission_mode_ceiling: Option<tidebreak_core::PermissionMode>,
     ) -> Result<tidebreak_core::CodeWatch, ServerError> {
-        self.runtime.start_watch(&self.owner, id).await
+        self.runtime
+            .start_watch(&self.owner, id, permission_mode_ceiling)
+            .await
     }
 
     pub(crate) async fn stop_watch(
