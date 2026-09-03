@@ -84,6 +84,12 @@ pub(crate) struct StreamAttempt {
     /// reported them. Argument deltas stay in this sequence for live event
     /// ordering while [`PendingCall`] keeps the accumulated argument string.
     items: Vec<StreamItem>,
+    /// Whether the provider reported running its web search, including a
+    /// malformed receipt that Tidebreak could not admit into the transcript.
+    vendor_web_search_seen: bool,
+    /// Whether the provider sent a terminal stop or refusal before the stream
+    /// closed. A stream that disappears without one has an uncertain outcome.
+    completion_seen: bool,
     reasoning: Vec<Value>,
     stop_reason: StopReason,
     refusal_details: Option<RefusalDetails>,

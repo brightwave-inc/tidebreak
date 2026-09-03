@@ -247,6 +247,13 @@ struct MultiStepVendorSearchBudgetProvider {
     seen: Arc<Mutex<Vec<ChatRequest>>>,
 }
 
+/// Runs one host tool without using the offered vendor search, then answers
+/// from the tool result on the next model step.
+struct HostToolWithoutVendorSearchProvider {
+    calls: AtomicUsize,
+    seen: Arc<Mutex<Vec<ChatRequest>>>,
+}
+
 /// Reports provider-native browsing actions through the shared search name.
 /// None of these inputs can be represented by Tidebreak's canonical
 /// `web_search` arguments, so they must remain transient provider state.
@@ -331,6 +338,43 @@ impl ModelProvider for MultiStepVendorSearchBudgetProvider {
                     is_error: false,
                     replay: None,
                 },
+                ProviderEvent::ToolCallStarted {
+                    index: 0,
+                    id: "checkpoint_noop_1".into(),
+                    name: "checkpoint_noop".into(),
+                },
+                ProviderEvent::ToolCallArgsDelta {
+                    index: 0,
+                    fragment: "{}".into(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::ToolUse,
+                },
+            ]
+        } else {
+            vec![
+                ProviderEvent::TextDelta {
+                    text: "done after the host-tool follow-up".into(),
+                },
+                ProviderEvent::Stop {
+                    reason: StopReason::EndTurn,
+                },
+            ]
+        };
+        Ok(stream::iter(events).boxed())
+    }
+}
+
+#[async_trait]
+impl ModelProvider for HostToolWithoutVendorSearchProvider {
+    fn id(&self) -> ProviderId {
+        ProviderId::new("host-tool-without-vendor-search")
+    }
+
+    async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
+        self.seen.lock().unwrap().push(req);
+        let events = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            vec![
                 ProviderEvent::ToolCallStarted {
                     index: 0,
                     id: "checkpoint_noop_1".into(),
@@ -621,6 +665,68 @@ async fn foreground_vendor_search_budget_is_offered_to_only_one_model_request() 
     assert_eq!(
         requests[1].vendor_web_search, None,
         "a later request cannot reopen any part of the per-turn allowance"
+    );
+}
+
+#[tokio::test]
+async fn unused_vendor_search_stays_offered_across_a_host_tool_follow_up() {
+    let db = tempfile::tempdir().unwrap();
+    let store: Arc<dyn Store> = Arc::new(
+        DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            db.path().join("unused-vendor-search.db").display()
+        ))
+        .await
+        .unwrap(),
+    );
+    let chat = Chat {
+        id: ChatId::new(),
+        project_id: None,
+        title: None,
+        model: None,
+        reasoning_effort: None,
+        permission_mode: None,
+        network_policy: Default::default(),
+        attachment_revision: 0,
+        root_attachments: Vec::new(),
+        memory_incognito: false,
+        created_at: Utc::now(),
+    };
+    store.create_chat(&chat).await.unwrap();
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let budget = VendorWebSearch { max_uses: 3 };
+    let agent = Agent::new(
+        Arc::new(HostToolWithoutVendorSearchProvider {
+            calls: AtomicUsize::new(0),
+            seen: seen.clone(),
+        }),
+        Arc::new(ToolRegistry::new().with(Box::new(CheckpointNoopTool))),
+        store,
+        AgentConfig {
+            model: "fake".into(),
+            web_search: TurnWebSearch::Vendor(budget),
+            ..Default::default()
+        },
+    );
+
+    let (tx, _rx) = unbounded();
+    agent
+        .run_turn(&chat, "read the host tool, then answer", &tx)
+        .await
+        .unwrap();
+
+    let requests = seen.lock().unwrap();
+    assert_eq!(requests.len(), 2, "expected one host-tool follow-up");
+    assert_eq!(requests[0].vendor_web_search, Some(budget));
+    assert_eq!(
+        requests[1].vendor_web_search,
+        Some(budget),
+        "a completed step that did not search must keep the vendor tool in the cached request prefix"
+    );
+    assert_eq!(
+        requests[1].tools, requests[0].tools,
+        "a host-tool continuation must keep the advertised tool prefix stable"
     );
 }
 

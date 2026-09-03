@@ -363,10 +363,12 @@ impl Agent {
         }
         let mut total_usage = Usage::default();
         // Provider adapters enforce vendor-search limits per request, while
-        // Tidebreak's contract is per turn. Offer the allowance to at most one
-        // foreground request: once an egress attempt receives the full cap,
-        // Tidebreak cannot prove how much it spent after a failed or partial
-        // stream, so every retry and later model step must fail closed to none.
+        // Tidebreak's contract is per turn. Keep offering the allowance across
+        // completed host-tool steps that report no provider execution. This
+        // preserves the request's tool prefix and its prompt cache. Once a
+        // provider reports executing a server tool, or an attempt ends with an
+        // error, cancellation, steer, or incomplete stream, Tidebreak cannot
+        // prove how much of the allowance remains and fails closed to none.
         let mut remaining_vendor_web_search = match self.config.web_search {
             super::types::TurnWebSearch::Vendor(vendor) if vendor.max_uses > 0 => Some(vendor),
             _ => None,
@@ -431,16 +433,21 @@ impl Agent {
             // step with tighter budgets on prompt-too-long errors. A provider
             // may report the overflow before returning a stream or after
             // streaming a partial candidate; both rejoin this attempt loop.
-            let StreamAttempt {
-                end: stream_end,
-                text,
-                mut calls,
-                items,
-                mut reasoning,
-                stop_reason,
-                refusal_details,
-            } = 'step_attempt: loop {
-                let stream = loop {
+            let (
+                StreamAttempt {
+                    end: stream_end,
+                    text,
+                    mut calls,
+                    items,
+                    vendor_web_search_seen,
+                    completion_seen,
+                    mut reasoning,
+                    stop_reason,
+                    refusal_details,
+                },
+                offered_vendor_web_search,
+            ) = 'step_attempt: loop {
+                let (stream, offered_vendor_web_search) = loop {
                     let mut prefix = self
                         .build_request_prefix(
                             chat,
@@ -577,7 +584,7 @@ impl Agent {
                                     fitted_tokens: fitted_tokens as u32,
                                 });
                             }
-                            break stream;
+                            break (stream, vendor_web_search);
                         }
                         Err(AgentError::PromptTooLong(_))
                             if reduction_level < context::MAX_REDUCTION_LEVEL =>
@@ -609,11 +616,14 @@ impl Agent {
                 // the left arm of the nested select). Also catch a cancel that raced
                 // the final stream event.
                 reduction_level = 0;
-                break 'step_attempt attempt;
+                break 'step_attempt (attempt, offered_vendor_web_search);
             };
             let has_provider_executed = items
                 .iter()
                 .any(|item| matches!(item, StreamItem::ProviderExecuted { .. }));
+            if matches!(stream_end, StreamEnd::Done) && completion_seen && !vendor_web_search_seen {
+                remaining_vendor_web_search = offered_vendor_web_search;
+            }
             if matches!(stream_end, StreamEnd::Cancelled) || self.cancel.is_cancelled() {
                 // Calls that started before the cancel were already journaled,
                 // so terminalizing silently would leave replay and live clients
@@ -1650,6 +1660,8 @@ impl Agent {
         let mut reasoning = Vec::new();
         let mut by_index = HashMap::new();
         let mut provider_seen = false;
+        let mut vendor_web_search_seen = false;
+        let mut completion_seen = false;
         let mut stop_reason = StopReason::EndTurn;
         let mut refusal_details = None;
         let mut streamed_events = AssistantStreamEventFilter::new(events);
@@ -1727,6 +1739,7 @@ impl Agent {
                     is_error,
                     replay,
                 } => {
+                    vendor_web_search_seen |= name == crate::WEB_SEARCH_TOOL;
                     let block = ContentBlock::ProviderExecutedToolCall {
                         name,
                         input,
@@ -1742,8 +1755,12 @@ impl Agent {
                         provider_seen = true;
                     }
                 }
-                ProviderEvent::Stop { reason } => stop_reason = reason,
+                ProviderEvent::Stop { reason } => {
+                    completion_seen = true;
+                    stop_reason = reason;
+                }
                 ProviderEvent::Refusal { details } => {
+                    completion_seen = true;
                     stop_reason = StopReason::Refusal;
                     refusal_details = Some(details);
                 }
@@ -1763,6 +1780,8 @@ impl Agent {
             text,
             calls,
             items,
+            vendor_web_search_seen,
+            completion_seen,
             reasoning,
             stop_reason,
             refusal_details,

@@ -288,15 +288,9 @@ async fn creates_projects_and_deduplicates_a_structured_semantic_checkpoint() {
         .iter()
         .filter(|request| !is_checkpoint_request(request))
         .collect::<Vec<_>>();
-    assert_eq!(
-        foreground.first().unwrap().vendor_web_search,
-        Some(vendor_search),
-        "the first foreground request receives the turn's search allowance"
-    );
     assert!(foreground
         .iter()
-        .skip(1)
-        .all(|request| request.vendor_web_search.is_none()));
+        .all(|request| request.vendor_web_search == Some(vendor_search)));
     assert!(foreground.iter().all(|request| request.messages.iter().any(
             |message| message.content.iter().any(
                 |block| matches!(block, ContentBlock::Text { text } if text.contains(CHECKPOINT_CONTEXT_PREFIX)),
