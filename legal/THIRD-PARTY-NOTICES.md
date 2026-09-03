@@ -27,9 +27,9 @@ a stale one.
 
 ## Summary
 
-- Rust crates: 861
+- Rust crates: 849
 - Desktop UI production packages: 535
-- Distinct license texts: 593
+- Distinct license texts: 589
 - Packages with no declared license: 0
 - Packages with a curated license: 28
 
@@ -536,24 +536,6 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/tokio-rs/bytes
 - License text: `LICENSE` ([L-51f778ffff2c](#l-51f778ffff2c))
 
-### cached 0.59.0
-
-- License: `MIT`
-- Repository: https://github.com/jaemk/cached
-- License text: `COPYRIGHT` ([L-dd6894cff550](#l-dd6894cff550)), `LICENSE` ([L-344eeea1e8b2](#l-344eeea1e8b2))
-
-### cached_proc_macro 0.27.0
-
-- License: `MIT`
-- Repository: https://github.com/jaemk/cached
-- License text: `LICENSE` ([L-344eeea1e8b2](#l-344eeea1e8b2))
-
-### cached_proc_macro_types 0.1.1
-
-- License: `MIT`
-- Repository: https://github.com/jaemk/cached
-- License text: `LICENSE` ([L-344eeea1e8b2](#l-344eeea1e8b2))
-
 ### cairo-rs 0.18.5
 
 - License: `MIT`
@@ -715,12 +697,6 @@ License identifiers named across all declared expressions:
 - License: `Apache-2.0 OR MIT`
 - Repository: https://github.com/smol-rs/concurrent-queue
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
-
-### console 0.16.4
-
-- License: `MIT`
-- Repository: https://github.com/console-rs/console
-- License text: `LICENSE` ([L-1c5ed1a530e6](#l-1c5ed1a530e6))
 
 ### const-oid 0.10.2
 
@@ -1159,12 +1135,6 @@ License identifiers named across all declared expressions:
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/nvzqz/embed-plist-rs
 - License text: `LICENSE-APACHE` ([L-58d1e17ffe51](#l-58d1e17ffe51)), `LICENSE-MIT` ([L-a29c4d8a8e7c](#l-a29c4d8a8e7c))
-
-### encode_unicode 1.0.0
-
-- License: `Apache-2.0 OR MIT`
-- Repository: https://github.com/tormol/encode_unicode
-- License text: `LICENSE-APACHE` ([L-58d1e17ffe51](#l-58d1e17ffe51)), `LICENSE-MIT` ([L-4f0fb104ff75](#l-4f0fb104ff75))
 
 ### encoding_rs 0.8.35
 
@@ -1867,12 +1837,6 @@ License identifiers named across all declared expressions:
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/RustCrypto/utils
 - License text: `LICENSE-APACHE` ([L-59013a5c8d3a](#l-59013a5c8d3a)), `LICENSE-MIT` ([L-71366a4092ad](#l-71366a4092ad))
-
-### insta 1.48.0
-
-- License: `Apache-2.0`
-- Repository: https://github.com/mitsuhiko/insta
-- License text: `LICENSE` ([L-769f80b5bcb4](#l-769f80b5bcb4))
 
 ### io-extras 0.19.0
 
@@ -2669,30 +2633,6 @@ License identifiers named across all declared expressions:
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/servo/rust-url/
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-7a8093fb4a93](#l-7a8093fb4a93))
-
-### pest 2.9.0
-
-- License: `MIT OR Apache-2.0`
-- Repository: https://github.com/pest-parser/pest
-- License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
-
-### pest_derive 2.9.0
-
-- License: `MIT OR Apache-2.0`
-- Repository: https://github.com/pest-parser/pest
-- License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
-
-### pest_generator 2.9.0
-
-- License: `MIT OR Apache-2.0`
-- Repository: https://github.com/pest-parser/pest
-- License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
-
-### pest_meta 2.9.0
-
-- License: `MIT OR Apache-2.0`
-- Repository: https://github.com/pest-parser/pest
-- License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
 
 ### pgvector 0.4.2
 
@@ -3558,12 +3498,6 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/rusticstuff/simdutf8
 - License text: `LICENSE-Apache` ([L-0cec06e0e55f](#l-0cec06e0e55f)), `LICENSE-MIT` ([L-1847e0e06981](#l-1847e0e06981))
 
-### similar 2.7.0
-
-- License: `Apache-2.0`
-- Repository: https://github.com/mitsuhiko/similar
-- License text: `LICENSE` ([L-769f80b5bcb4](#l-769f80b5bcb4))
-
 ### similar 3.2.0
 
 - License: `Apache-2.0`
@@ -4258,12 +4192,6 @@ License identifiers named across all declared expressions:
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/paholg/typenum
 - License text: `LICENSE` ([L-db11fec99467](#l-db11fec99467)), `LICENSE-APACHE` ([L-516b24e051bf](#l-516b24e051bf)), `LICENSE-MIT` ([L-87ebb37988ef](#l-87ebb37988ef))
-
-### ucd-trie 0.1.7
-
-- License: `MIT OR Apache-2.0`
-- Repository: https://github.com/BurntSushi/ucd-generate
-- License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-154c1af2b38e](#l-154c1af2b38e))
 
 ### uds_windows 1.2.1
 
@@ -10730,32 +10658,6 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
-### L-1c5ed1a530e6
-
-```
-The MIT License (MIT)
-
-Copyright (c) 2017 Armin Ronacher <armin.ronacher@active-4.com>
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-```
-
 ### L-1d5680a70055
 
 ```
@@ -13442,32 +13344,6 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
-```
-
-### L-344eeea1e8b2
-
-```
-MIT License
-
-Copyright (c) 2017 James Kominick
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
 ```
 
 ### L-3474bccef5e4
@@ -16439,28 +16315,6 @@ NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
 LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-```
-
-### L-4f0fb104ff75
-
-```
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE
 ```
 
 ### L-4f221aee6e07
@@ -36520,17 +36374,6 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
-```
-
-### L-dd6894cff550
-
-```
-Copyrights in the "cached" project are retained by their contributors. No
-copyright assignment is required to contribute to the "cached" project.
-
-Copyright attributions may be noted at the top of individual files.
-For full authorship information, see the version control history.
-https://github.com/jaemk/cached/graphs/contributors
 ```
 
 ### L-dd923de97698

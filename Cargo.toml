@@ -142,5 +142,9 @@ dom_smoothie = "=0.18.0"
 # Exact version dom_smoothie builds against; pins move together.
 dom_query = "=0.28.0"
 
+# brush-parser 0.4.0, still the newest release on 2026-09-03, ships `cached`
+# and `insta` in production. The vendor patch removes the three caches Tidebreak
+# does not use and keeps the snapshot library test-only.
 [patch.crates-io]
+brush-parser = { path = "vendor/brush-parser" }
 symphonia-format-mkv = { path = "vendor/symphonia-format-mkv" }
