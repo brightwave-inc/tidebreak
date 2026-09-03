@@ -291,29 +291,37 @@ fn attachment_context(images: &[ImageRef], documents: &[MessageDocumentAttachmen
 }
 
 fn attachment_route(document: &MessageDocumentAttachment) -> String {
+    let mut routes = Vec::with_capacity(2);
     if document.readable {
-        return format!(
+        routes.push(format!(
             "readable via read_document(document_id=\"{}\")",
             document.document_id
-        );
+        ));
     }
-    let Some(source_blob) = document.source_blob.as_ref() else {
-        return "raw bytes unavailable because no source blob is retained".to_owned();
-    };
-    if source_blob.byte_len > MAX_EXEC_WORKSPACE_FILE_BYTES as u64 {
-        return format!(
-            "raw bytes not materialized because the file exceeds the \
-             {MAX_EXEC_WORKSPACE_FILE_BYTES}-byte exec workspace limit"
-        );
+    match document.source_blob.as_ref() {
+        None if !document.readable => {
+            routes.push("raw bytes unavailable because no source blob is retained".to_owned());
+        }
+        Some(source_blob) if source_blob.byte_len > MAX_EXEC_WORKSPACE_FILE_BYTES as u64 => {
+            routes.push(format!(
+                "raw bytes not materialized because the file exceeds the \
+                 {MAX_EXEC_WORKSPACE_FILE_BYTES}-byte exec workspace limit"
+            ));
+        }
+        Some(_) => {
+            let path = format!(
+                "documents/{}",
+                exec_attachment_file_name(document.title.as_deref(), document.document_id)
+            );
+            let hint = attachment_script_hint(&document.media_type)
+                .map_or_else(String::new, |script| {
+                    format!("; helper: python3 .tidebreak/exec-scripts/{script} {path}")
+                });
+            routes.push(format!("raw bytes at {path} in the exec workspace{hint}"));
+        }
+        None => {}
     }
-    let path = format!(
-        "documents/{}",
-        exec_attachment_file_name(document.title.as_deref(), document.document_id)
-    );
-    let hint = attachment_script_hint(&document.media_type).map_or_else(String::new, |script| {
-        format!("; helper: python3 .tidebreak/exec-scripts/{script} {path}")
-    });
-    format!("raw bytes at {path} in the exec workspace{hint}")
+    routes.join("; ")
 }
 
 fn attachment_script_hint(media_type: &str) -> Option<&'static str> {

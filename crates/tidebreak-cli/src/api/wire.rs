@@ -19,7 +19,7 @@ pub use tidebreak_core::{
 };
 pub use tidebreak_server::wire::{
     AgentActivityHistoryItem, ApprovalGrantRung, RendererAgentEvent, RendererChatFrame,
-    RendererToolStatus,
+    RendererToolFailure, RendererToolFailureReason, RendererToolStatus,
 };
 // REST records.
 pub use tidebreak_server::wire::{

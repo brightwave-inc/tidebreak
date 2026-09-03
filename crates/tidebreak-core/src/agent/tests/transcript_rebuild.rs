@@ -223,8 +223,13 @@ fn rebuild_announces_file_routes_and_bounds_attachment_context() {
     assert!(text.starts_with("# Important context\n\n<attachments>"));
     assert!(text.contains(&text_id.to_string()));
     assert!(text.contains("\"title\":\"notes.txt\""));
+    let text_path = format!(
+        "documents/{}",
+        crate::model::exec_attachment_file_name(Some("notes.txt"), text_id)
+    );
     assert!(text.contains(&format!(
-        "route: readable via read_document(document_id=\"{text_id}\")"
+        "route: readable via read_document(document_id=\"{text_id}\"); raw bytes at \
+         {text_path} in the exec workspace"
     )));
     let pdf_path = format!(
         "documents/{}",
