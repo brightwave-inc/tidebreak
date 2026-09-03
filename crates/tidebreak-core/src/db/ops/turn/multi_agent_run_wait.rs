@@ -49,20 +49,13 @@ struct ReadyWaitSetRow {
     ready_at: chrono::DateTime<Utc>,
 }
 
-pub(in crate::db) async fn list_ready_agent_run_wait_set_candidates(
-    store: &DbStore,
-    limit: u64,
-) -> Result<Vec<AgentRunWaitSetCandidate>> {
-    if limit == 0 {
-        return Ok(Vec::new());
-    }
-    let now = database_now(&store.conn).await?;
+pub(in crate::db) fn ready_agent_run_wait_set_candidates_sql(limit: u64) -> String {
     // The joins are an intentionally strict prefilter: because the joined row
     // count must equal the complete member count, one missing, claimed, or
     // ownership-mismatched member excludes the set before LIMIT is applied.
     // This keeps the scan bounded without allowing corrupt historical rows to
     // starve a later coherent wait.
-    let sql = format!(
+    format!(
         r#"
 SELECT w.id AS wait_id, MAX(i.delivered_at) AS ready_at
 FROM turn_agent_run_wait_set w
@@ -122,7 +115,18 @@ LIMIT {limit}
 "#,
         max_children = TurnAgentRunWaitSet::MAX_CHILDREN,
         limit = limit.min(i64::MAX as u64),
-    );
+    )
+}
+
+pub(in crate::db) async fn list_ready_agent_run_wait_set_candidates(
+    store: &DbStore,
+    limit: u64,
+) -> Result<Vec<AgentRunWaitSetCandidate>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let now = database_now(&store.conn).await?;
+    let sql = ready_agent_run_wait_set_candidates_sql(limit);
     let rows = ReadyWaitSetRow::find_by_statement(Statement::from_string(
         store.conn.get_database_backend(),
         sql,

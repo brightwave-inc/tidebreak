@@ -78,6 +78,7 @@ impl MigratorTrait for Migrator {
             Box::new(MemorySweepState),
             Box::new(ChatMemoryIncognito),
             Box::new(one_turn_lane::OneTurnLane),
+            Box::new(ReadyAgentRunWaitIndex),
         ]
     }
 }
@@ -4487,6 +4488,40 @@ impl MigrationTrait for ChatMemoryIncognito {
         // `Baseline::down` drops that table outright. The frozen baseline
         // does not declare this column, so a rolled-back database gets it
         // again from this migration's `up` on the way back.
+        Ok(())
+    }
+}
+
+/// Start the background-agent wait resolver from its small open-wait set.
+struct ReadyAgentRunWaitIndex;
+
+impl MigrationName for ReadyAgentRunWaitIndex {
+    fn name(&self) -> &str {
+        "m20260903_000002_ready_agent_run_wait_index"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for ReadyAgentRunWaitIndex {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(
+                r#"CREATE INDEX IF NOT EXISTS "idx_turn_agent_run_wait_set_ready"
+                   ON "turn_agent_run_wait_set" ("status", "condition", "turn_id", "id")
+                   WHERE "closed_at" IS NULL
+                     AND "resume_token" IS NULL
+                     AND "event_seq" IS NULL"#,
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        manager
+            .get_connection()
+            .execute_unprepared(r#"DROP INDEX IF EXISTS "idx_turn_agent_run_wait_set_ready""#)
+            .await?;
         Ok(())
     }
 }

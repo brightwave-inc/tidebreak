@@ -42,6 +42,8 @@ pub(in crate::db) use client_wait::{
     advance_turn_after_client_resolution_on, approval_park_call_id, park_turn_for_client_tool_call,
     recover_turn_after_client_resolution_on,
 };
+#[cfg(test)]
+pub(in crate::db) use multi_agent_run_wait::ready_agent_run_wait_set_candidates_sql;
 pub(in crate::db) use multi_agent_run_wait::{
     list_ready_agent_run_wait_set_candidates, park_turn_for_agent_run_wait_set,
     resume_turn_for_agent_run_wait_set,
