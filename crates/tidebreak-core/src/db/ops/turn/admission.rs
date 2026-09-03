@@ -1,7 +1,7 @@
 //! Request validation for turn identity. The admission ledger is retired;
 //! identity lives on `code_turn.fingerprint`.
 
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+use sea_orm::EntityTrait;
 
 use crate::error::{AgentError, Result};
 use crate::model::{TurnAdmissionLease, TurnAdmissionRequest, TurnRun, TurnRunStatus};
@@ -66,13 +66,16 @@ pub(in crate::db) async fn begin(
             BeginTurnAdmissionOutcome::Accepted
         });
     }
-    if entities::code_queued_turn::Entity::find_by_id(request.id.0)
-        .filter(entities::code_queued_turn::Column::SessionId.eq(request.chat_id.0))
+    if let Some(queued) = entities::code_queued_turn::Entity::find_by_id(request.id.0)
         .one(&store.conn)
         .await
         .map_err(store_err)?
-        .is_some()
     {
+        if queued.session_id != request.chat_id.0
+            || queued.fingerprint.as_deref() != Some(request.fingerprint().as_slice())
+        {
+            return Ok(BeginTurnAdmissionOutcome::IdentityConflict);
+        }
         return Ok(BeginTurnAdmissionOutcome::Queued);
     }
     Ok(BeginTurnAdmissionOutcome::Acquired(TurnAdmissionLease {

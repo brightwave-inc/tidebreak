@@ -884,20 +884,6 @@ async fn cross_process_exact_retry_waits_for_durable_admission_without_revalidat
         )
         .await
         .unwrap();
-    let retry_router = router_b.clone();
-    let retry_bearer = bearer_b.clone();
-    let mut retry = tokio::spawn(async move {
-        post_message_body(&retry_router, &retry_bearer, chat.id, request)
-            .await
-            .status()
-    });
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), &mut retry)
-            .await
-            .is_err(),
-        "the second process must wait on durable pending ownership, not revalidate the disabled skill"
-    );
-
     release.notify_one();
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(2), first)
@@ -906,11 +892,13 @@ async fn cross_process_exact_retry_waits_for_durable_admission_without_revalidat
             .unwrap(),
         StatusCode::ACCEPTED
     );
+    // D4a retired the admission ledger. A concurrent in-flight retry is not
+    // fenced; once the first commit lands, the fingerprint on the turn row
+    // is enough and the route must not consult the skill catalog again.
     assert_eq!(
-        tokio::time::timeout(Duration::from_secs(2), retry)
+        post_message_body(&router_b, &bearer_b, chat.id, request)
             .await
-            .expect("second process converged on the durable decision")
-            .unwrap(),
+            .status(),
         StatusCode::ACCEPTED
     );
     assert_eq!(store.list_turns(chat.id).await.unwrap().len(), 1);
