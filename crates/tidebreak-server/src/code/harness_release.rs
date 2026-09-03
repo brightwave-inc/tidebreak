@@ -398,7 +398,7 @@ mod tests {
         let kind = HarnessKind::ClaudeCode;
         let pin = tidebreak_harness::pin_for(kind).unwrap();
         let pinned = write_install(tmp.path(), kind, pin.version);
-        let newer = write_install(tmp.path(), kind, "2.1.251");
+        let newer = write_install(tmp.path(), kind, "2.1.300");
         let runtime = runtime(tmp.path()).await;
 
         // Default channel: the pin, and the newer install is invisible.
@@ -421,7 +421,7 @@ mod tests {
 
         set_channel(&runtime, HarnessUpdateChannel::Latest).await;
         let selected = runtime.selected_harness(kind).await.unwrap();
-        assert_eq!(selected.version, "2.1.251");
+        assert_eq!(selected.version, "2.1.300");
         assert_eq!(selected.binary, newer);
         assert!(
             !runtime
@@ -435,7 +435,7 @@ mod tests {
         );
         assert_eq!(
             runtime.selected_harness_versions().await,
-            vec![(kind, "2.1.251".to_owned())]
+            vec![(kind, "2.1.300".to_owned())]
         );
     }
 
@@ -448,10 +448,10 @@ mod tests {
         let pin = tidebreak_harness::pin_for(kind).unwrap();
         write_install(tmp.path(), kind, pin.version);
         let runtime = runtime(tmp.path()).await;
-        runtime.harness_releases.record(kind, "0.150.0".to_owned());
+        runtime.harness_releases.record(kind, "0.160.0".to_owned());
 
         let status = runtime.harness_release_status(kind).await;
-        assert_eq!(status.latest_version.as_deref(), Some("0.150.0"));
+        assert_eq!(status.latest_version.as_deref(), Some("0.160.0"));
         assert!(!status.update_available, "pinned channel never offers one");
 
         set_channel(&runtime, HarnessUpdateChannel::Latest).await;
@@ -459,9 +459,9 @@ mod tests {
         assert!(status.update_available);
         assert_eq!(status.managed_version.as_deref(), Some(pin.version));
 
-        write_install(tmp.path(), kind, "0.150.0");
+        write_install(tmp.path(), kind, "0.160.0");
         let status = runtime.harness_release_status(kind).await;
-        assert_eq!(status.managed_version.as_deref(), Some("0.150.0"));
+        assert_eq!(status.managed_version.as_deref(), Some("0.160.0"));
         assert!(!status.update_available);
     }
 
