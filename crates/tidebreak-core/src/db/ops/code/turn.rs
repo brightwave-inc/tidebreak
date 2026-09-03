@@ -10,12 +10,12 @@ use crate::error::{AgentError, Result};
 use crate::image::ImageMediaType;
 use crate::image::ImageRef;
 use crate::model::{TurnAgentRunWaitStatus, TurnClientWaitStatus, MAX_MESSAGE_ATTACHMENTS};
-use crate::{AgentRunId, CallId, ChatId, OwnerId};
+use crate::{AgentRunId, CallId, OwnerId};
 
 use super::super::super::{entities, store_err, DbStore};
 use super::super::blob as blob_ops;
 use super::super::{
-    acquire_advisory_lock, acquire_chat_write_lock, acquire_turn_write_lock, AdvisoryLockName,
+    acquire_advisory_lock, acquire_session_write_lock, acquire_turn_write_lock, AdvisoryLockName,
 };
 
 /// The fields analytics needs from one turn.
@@ -451,7 +451,7 @@ pub async fn store_turn_park(
     if matches!(wait, TurnParkWait::AgentRuns { .. }) {
         acquire_advisory_lock(&transaction, AdvisoryLockName::TurnAgentRunWait).await?;
     }
-    if !acquire_chat_write_lock(&transaction, ChatId(scope.session_id)).await?
+    if !acquire_session_write_lock(&transaction, scope.session_id).await?
         || !acquire_turn_write_lock(&transaction, crate::TurnId(id.0)).await?
     {
         transaction.commit().await.map_err(store_err)?;
@@ -581,7 +581,7 @@ pub async fn clear_turn_park(
         return Ok(None);
     };
     let transaction = store.conn.begin().await.map_err(store_err)?;
-    if !acquire_chat_write_lock(&transaction, ChatId(scope.session_id)).await?
+    if !acquire_session_write_lock(&transaction, scope.session_id).await?
         || !acquire_turn_write_lock(&transaction, crate::TurnId(id.0)).await?
     {
         transaction.commit().await.map_err(store_err)?;

@@ -483,7 +483,7 @@ impl InternalSession {
             let now = Utc::now();
             match self
                 .db
-                .take_lease_on_turn(
+                .take_lease_on_resuming_turn(
                     turn_id,
                     lease_token,
                     now,

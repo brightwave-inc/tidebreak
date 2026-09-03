@@ -173,7 +173,7 @@ async fn an_internal_resume_keeps_the_failure_attempt() {
     let second_token = uuid::Uuid::new_v4();
     assert_eq!(
         store
-            .take_lease_on_turn(
+            .take_lease_on_resuming_turn(
                 turn_id,
                 second_token,
                 resumed_at,
@@ -191,6 +191,19 @@ async fn an_internal_resume_keeps_the_failure_attempt() {
     assert_eq!(resumed.attempt_count, 1);
     assert_eq!(resumed.claim_count, 2);
     assert_eq!(resumed.lease_token, Some(second_token));
+    assert_eq!(
+        store
+            .take_lease_on_resuming_turn(
+                turn_id,
+                uuid::Uuid::new_v4(),
+                resumed_at,
+                resumed_at + chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap(),
+        None,
+        "a live resumed segment cannot be claimed again"
+    );
 }
 
 #[tokio::test]

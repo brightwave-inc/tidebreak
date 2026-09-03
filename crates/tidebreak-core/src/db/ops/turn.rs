@@ -70,7 +70,27 @@ pub(in crate::db) async fn take_lease_on_turn(
     now: chrono::DateTime<Utc>,
     lease_expires_at: chrono::DateTime<Utc>,
 ) -> Result<Option<()>> {
-    take_lease_on_turn_inner(store, id, lease_token, now, lease_expires_at, None).await
+    take_lease_on_turn_inner(store, id, lease_token, now, lease_expires_at, None, None).await
+}
+
+/// Take a fresh lease only while one exact turn is ready to resume.
+pub(in crate::db) async fn take_lease_on_resuming_turn(
+    store: &DbStore,
+    id: TurnId,
+    lease_token: uuid::Uuid,
+    now: chrono::DateTime<Utc>,
+    lease_expires_at: chrono::DateTime<Utc>,
+) -> Result<Option<()>> {
+    take_lease_on_turn_inner(
+        store,
+        id,
+        lease_token,
+        now,
+        lease_expires_at,
+        None,
+        Some(TurnRunStatus::Resuming),
+    )
+    .await
 }
 
 /// Claim one inserted turn and add its missing user transcript row atomically.
@@ -82,7 +102,16 @@ pub(in crate::db) async fn take_lease_on_turn_with_input_message(
     lease_expires_at: chrono::DateTime<Utc>,
     content: &str,
 ) -> Result<Option<()>> {
-    take_lease_on_turn_inner(store, id, lease_token, now, lease_expires_at, Some(content)).await
+    take_lease_on_turn_inner(
+        store,
+        id,
+        lease_token,
+        now,
+        lease_expires_at,
+        Some(content),
+        None,
+    )
+    .await
 }
 
 async fn take_lease_on_turn_inner(
@@ -92,6 +121,7 @@ async fn take_lease_on_turn_inner(
     now: chrono::DateTime<Utc>,
     lease_expires_at: chrono::DateTime<Utc>,
     input: Option<&str>,
+    required_status: Option<TurnRunStatus>,
 ) -> Result<Option<()>> {
     let now = canonical_db_timestamp(now)?;
     let lease_expires_at = canonical_db_timestamp(lease_expires_at)?;
@@ -126,6 +156,10 @@ async fn take_lease_on_turn_inner(
         transaction.rollback().await.map_err(store_err)?;
         return Ok(None);
     };
+    if required_status.is_some_and(|required| existing.status != required.as_str()) {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
     if existing.lease_token.is_some()
         && existing.status == TurnRunStatus::Running.as_str()
         && existing

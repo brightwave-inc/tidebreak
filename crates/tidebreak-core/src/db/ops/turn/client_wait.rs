@@ -31,7 +31,7 @@ pub(in crate::db) fn adapter_park_wait(
     if turn.status != CodeTurnStatus::Waiting.as_str() {
         return Ok(None);
     }
-    let (Some(_park_ref), Some(raw_wait)) = (turn.park_ref.as_deref(), turn.park_wait.as_ref())
+    let (Some(park_ref), Some(raw_wait)) = (turn.park_ref.as_deref(), turn.park_wait.as_ref())
     else {
         return Ok(None);
     };
@@ -41,6 +41,14 @@ pub(in crate::db) fn adapter_park_wait(
             turn.id
         ))
     })?;
+    if let TurnParkWait::Approval { call_id } = &wait {
+        if call_id != park_ref {
+            return Err(AgentError::Store(format!(
+                "turn {} approval park has mismatched call ids",
+                turn.id
+            )));
+        }
+    }
     Ok(Some(wait))
 }
 

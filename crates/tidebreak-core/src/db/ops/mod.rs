@@ -105,12 +105,23 @@ pub(in crate::db) async fn acquire_chat_write_lock<C>(conn: &C, chat_id: ChatId)
 where
     C: ConnectionTrait,
 {
+    acquire_session_write_lock(conn, chat_id.0).await
+}
+
+/// Acquire the shared cross-backend write lock for one universal session row.
+pub(in crate::db) async fn acquire_session_write_lock<C>(
+    conn: &C,
+    session_id: uuid::Uuid,
+) -> Result<bool>
+where
+    C: ConnectionTrait,
+{
     let locked = entities::code_session::Entity::update_many()
         .col_expr(
             entities::code_session::Column::Title,
             sea_orm::sea_query::Expr::col(entities::code_session::Column::Title),
         )
-        .filter(entities::code_session::Column::Id.eq(chat_id.0))
+        .filter(entities::code_session::Column::Id.eq(session_id))
         .exec(conn)
         .await
         .map_err(store_err)?;

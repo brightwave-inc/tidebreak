@@ -1360,11 +1360,13 @@ async fn clear_persisted_turn_park(
     park_ref: &str,
     wait: &tidebreak_core::TurnParkWait,
 ) -> Result<(), String> {
-    let status = clear_turn_park(db, &session.owner, turn.id, park_ref, wait)
+    clear_turn_park(db, &session.owner, turn.id, park_ref, wait)
         .await
         .map_err(|err| format!("clearing the parked turn failed: {err}"))?
         .ok_or_else(|| format!("clearing the parked turn {} lost its row", turn.id))?;
-    turn.status = status;
+    // The worker is about to start the resumed leg. Do not restore the
+    // transient `waiting` or `resuming` database status in its live snapshot.
+    turn.status = CodeTurnStatus::Running;
     turn.park_ref = None;
     turn.park_wait = None;
     Ok(())
@@ -1632,10 +1634,9 @@ async fn durable_park_state(
     ) {
         Ok(DurableParkState::Pending)
     } else {
-        Err(WorkerError::Failed(format!(
-            "turn {turn_id} has status {} while its durable park is unresolved",
-            turn.status.as_str()
-        )))
+        // A legacy or damaged wait cannot resume safely. Close it through the
+        // normal turn path so one bad row cannot keep the session worker live.
+        Ok(DurableParkState::Closed)
     }
 }
 
