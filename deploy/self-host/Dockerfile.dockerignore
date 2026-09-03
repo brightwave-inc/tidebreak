@@ -21,6 +21,17 @@
 !crates/tidebreak-code-execution/baseline_python_deps.txt
 !crates/tidebreak-sandbox-agent/documents-requirements.txt
 
+# Vendored crates named by `[patch.crates-io]` in the workspace manifest.
+# Cargo resolves the patch by path, so a missing manifest fails the build
+# before it compiles a line. The same shape as `crates/`: manifests and
+# source trees only, never the crate's docs, lock, or hidden files.
+!vendor/
+!vendor/*/
+!vendor/*/Cargo.toml
+!vendor/*/build.rs
+!vendor/*/src/
+!vendor/*/src/**
+
 # The desktop renderer, which the image builds and the server serves to
 # browsers. The whole package directory, because Vite's inputs are its
 # manifests, `index.html`, `public/`, and `src/` together. The deny rules
@@ -93,3 +104,4 @@
 # the context. This wins because it is last; every non-source file the block
 # above denies stays denied.
 !crates/*/src/**/*.rs
+!vendor/*/src/**/*.rs

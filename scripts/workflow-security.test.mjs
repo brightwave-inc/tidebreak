@@ -1074,6 +1074,11 @@ test("the self-host Docker context is allowlisted and denies hidden credentials"
     "!skills/*/SKILL.md",
     "!plugins/*/PLUGIN.md",
     "!crates/*/src/**/*.rs",
+    // Crates named by `[patch.crates-io]` resolve by path; a missing manifest
+    // fails the build before it compiles a line (v0.87.1's image did).
+    "!vendor/*/Cargo.toml",
+    "!vendor/*/src/**",
+    "!vendor/*/src/**/*.rs",
   ]) {
     assert.ok(dockerIgnore.includes(`${required}\n`), `missing allow rule ${required}`);
   }
@@ -1156,6 +1161,12 @@ test(
       "crates/tidebreak-sandbox-agent/documents-requirements.txt",
       "skills/demo/SKILL.md",
       "plugins/demo/PLUGIN.md",
+      // A vendored crate the workspace patches in by path: its manifest and
+      // sources, like any workspace member.
+      "vendor/demo/Cargo.toml",
+      "vendor/demo/build.rs",
+      "vendor/demo/src/lib.rs",
+      "vendor/demo/src/web/credentials.rs",
       // The renderer the image builds: manifests, the page, and sources.
       "crates/tidebreak-desktop/ui/package.json",
       "crates/tidebreak-desktop/ui/pnpm-lock.yaml",
@@ -1181,6 +1192,9 @@ test(
       "skills/demo/.draft",
       "plugins/demo/credentials.json",
       "crates/demo/src/credentials.json",
+      // Hidden files beside a vendored crate stay denied, as under crates/.
+      "vendor/demo/.cargo/credentials",
+      "vendor/demo/src/.netrc",
       "outside/secret.txt",
     ];
 
