@@ -34,6 +34,10 @@ concurrency:
 jobs:
   pr-title:
     name: semantic PR title
+    # The label job below applies the managed semver and release-note labels
+    # this check compares against; running after it avoids judging a pull
+    # request before its labels exist.
+    needs: label
     if: ${{ github.event_name == 'pull_request_target' }}
     runs-on: ubuntu-latest
     permissions:
