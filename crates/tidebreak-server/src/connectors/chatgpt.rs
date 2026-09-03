@@ -551,6 +551,19 @@ impl ChatGptConnection {
         self.vault.load().await
     }
 
+    /// Whether `candidate` is still the stored access token.
+    ///
+    /// A provider rejection can arrive after a completed sign-in replaced the
+    /// credential that sent the request. Callers compare before recording a
+    /// reconnect need so that a stale response cannot disable the new session.
+    pub async fn stored_access_token_matches(&self, candidate: &str) -> Result<bool> {
+        Ok(self
+            .vault
+            .load()
+            .await?
+            .is_some_and(|credentials| credentials.access_token == candidate))
+    }
+
     /// A currently valid access token, refreshing near expiry.
     pub async fn access_token(&self) -> Result<String> {
         let _guard = self.token_motion.lock().await;

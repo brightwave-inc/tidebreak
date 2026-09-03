@@ -19,6 +19,8 @@ use crate::error::ServerError;
 use crate::providers::{self, ProviderCredential, ProviderKind};
 
 const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
+const RECONNECT_REQUIRED_MESSAGE: &str =
+    "Your ChatGPT session is no longer valid. Sign in with ChatGPT again.";
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 enum SignInProgress {
@@ -43,6 +45,7 @@ pub struct ChatGptRuntime {
     connection: Arc<ChatGptConnection>,
     store: Arc<dyn Store>,
     secrets: Arc<dyn SecretProvider>,
+    credential_motion: Arc<Mutex<()>>,
     sign_in: Mutex<SignInState>,
     sign_in_generation: AtomicU64,
 }
@@ -55,6 +58,7 @@ impl ChatGptRuntime {
             connection: Arc::new(ChatGptConnection::new(auth, vault)),
             store,
             secrets,
+            credential_motion: Arc::new(Mutex::new(())),
             sign_in: Mutex::new(SignInState::default()),
             sign_in_generation: AtomicU64::new(0),
         })
@@ -69,9 +73,20 @@ impl ChatGptRuntime {
     /// refresh token at OpenAI or resurrect a session that sign-out just
     /// cleared.
     pub async fn route_auth(&self) -> Option<(Arc<dyn BearerTokenSource>, String)> {
+        match providers::chatgpt_reconnect_required(&*self.store).await {
+            Ok(false) => {}
+            Ok(true) => return None,
+            Err(error) => {
+                tracing::warn!(%error, "could not read ChatGPT credential health");
+                return None;
+            }
+        }
         let account_id = self.connection.account_id().await.ok().flatten()?;
-        let source: Arc<dyn BearerTokenSource> =
-            Arc::new(ChatGptTokenSource(self.connection.clone()));
+        let source: Arc<dyn BearerTokenSource> = Arc::new(ChatGptTokenSource {
+            connection: self.connection.clone(),
+            store: self.store.clone(),
+            credential_motion: self.credential_motion.clone(),
+        });
         Some((source, account_id))
     }
 
@@ -136,6 +151,7 @@ impl ChatGptRuntime {
         &self,
         session: &crate::connectors::ChatGptAuthorizedSession,
     ) -> Result<(), ServerError> {
+        let _guard = self.credential_motion.lock().await;
         self.connection
             .store_session(session)
             .await
@@ -160,12 +176,14 @@ impl ChatGptRuntime {
         let mut config = providers::read_config(&*self.store, ProviderKind::Openai).await?;
         config.enabled = true;
         providers::write_config(&*self.store, ProviderKind::Openai, &config).await?;
+        providers::clear_chatgpt_reconnect_required(&*self.store).await?;
         Ok(())
     }
 
     /// Revoke best-effort, clear vault and Oauth marker.
     pub async fn sign_out(&self) -> Result<(), ServerError> {
         self.cancel_pending().await;
+        let _guard = self.credential_motion.lock().await;
         self.connection
             .sign_out()
             .await
@@ -176,12 +194,20 @@ impl ChatGptRuntime {
         ) {
             providers::delete_credential(&*self.secrets, ProviderKind::Openai).await?;
         }
+        providers::clear_chatgpt_reconnect_required(&*self.store).await?;
         Ok(())
     }
 
     /// Pending / failed status for the OpenAI Providers row.
     pub async fn status(&self) -> ChatGptSignInStatus {
         let progress = self.sign_in.lock().await.progress.clone();
+        let reconnect_required = match providers::chatgpt_reconnect_required(&*self.store).await {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(%error, "could not read ChatGPT credential health");
+                true
+            }
+        };
         // Same bar as routing: vault tokens alone are not a usable session.
         let signed_in = matches!(
             providers::read_credential(&*self.secrets, ProviderKind::Openai)
@@ -190,7 +216,8 @@ impl ChatGptRuntime {
                 .flatten(),
             Some(ProviderCredential::Oauth {})
         ) && crate::connectors::has_stored_chatgpt_credentials(&*self.secrets)
-            .await;
+            .await
+            && !reconnect_required;
         match progress {
             SignInProgress::Pending { authorization_url } => ChatGptSignInStatus {
                 signed_in,
@@ -205,7 +232,7 @@ impl ChatGptRuntime {
             SignInProgress::Idle => ChatGptSignInStatus {
                 signed_in,
                 pending_authorization_url: None,
-                error: None,
+                error: reconnect_required.then(|| RECONNECT_REQUIRED_MESSAGE.to_owned()),
             },
         }
     }
@@ -222,11 +249,186 @@ pub struct ChatGptSignInStatus {
     pub error: Option<String>,
 }
 
-struct ChatGptTokenSource(Arc<ChatGptConnection>);
+struct ChatGptTokenSource {
+    connection: Arc<ChatGptConnection>,
+    store: Arc<dyn Store>,
+    credential_motion: Arc<Mutex<()>>,
+}
 
 #[async_trait::async_trait]
 impl BearerTokenSource for ChatGptTokenSource {
     async fn bearer_token(&self) -> tidebreak_core::Result<String> {
-        self.0.access_token().await
+        let _guard = self.credential_motion.lock().await;
+        if providers::chatgpt_reconnect_required(&*self.store).await? {
+            return Err(tidebreak_core::AgentError::SignInRequired(
+                RECONNECT_REQUIRED_MESSAGE.to_owned(),
+            ));
+        }
+        self.connection.access_token().await
+    }
+
+    async fn authentication_rejected(&self, bearer: &str) {
+        let _guard = self.credential_motion.lock().await;
+        match self.connection.stored_access_token_matches(bearer).await {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(error) => {
+                tracing::warn!(%error, "could not compare the rejected ChatGPT credential");
+                return;
+            }
+        }
+        if let Err(error) = providers::mark_chatgpt_reconnect_required(&*self.store).await {
+            tracing::warn!(%error, "could not mark the ChatGPT credential for reconnection");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    use tidebreak_core::{DbStore, SecretProvider};
+
+    use super::*;
+
+    #[derive(Default)]
+    struct TestSecrets(StdMutex<HashMap<String, String>>);
+
+    #[async_trait::async_trait]
+    impl SecretProvider for TestSecrets {
+        async fn get_secret(&self, key: &str) -> tidebreak_core::Result<Option<String>> {
+            Ok(self.0.lock().unwrap().get(key).cloned())
+        }
+
+        async fn set_secret(&self, key: &str, value: &str) -> tidebreak_core::Result<()> {
+            self.0
+                .lock()
+                .unwrap()
+                .insert(key.to_owned(), value.to_owned());
+            Ok(())
+        }
+
+        async fn delete_secret(&self, key: &str) -> tidebreak_core::Result<()> {
+            self.0.lock().unwrap().remove(key);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_provider_rejection_requires_reconnect_without_deleting_the_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                directory.path().join("chatgpt-health.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let secrets = Arc::new(TestSecrets::default());
+        providers::write_credential(
+            &*secrets,
+            ProviderKind::Openai,
+            &ProviderCredential::Oauth {},
+        )
+        .await
+        .unwrap();
+        secrets
+            .set_secret(
+                crate::connectors::CHATGPT_SECRET_KEY,
+                &serde_json::json!({
+                    "access_token": "access",
+                    "refresh_token": "refresh",
+                    "account_id": "acct-test",
+                    "expires_at_unix": 4_102_444_800_u64,
+                })
+                .to_string(),
+            )
+            .await
+            .unwrap();
+        providers::write_config(
+            &*store,
+            ProviderKind::Openai,
+            &providers::ProviderConfig {
+                enabled: true,
+                base_url: None,
+                models: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+        let runtime = ChatGptRuntime::new(store.clone(), secrets.clone()).unwrap();
+        let (source, _) = runtime
+            .route_auth()
+            .await
+            .expect("the session routes first");
+
+        source.authentication_rejected("access").await;
+
+        assert!(runtime.route_auth().await.is_none());
+        let status = runtime.status().await;
+        assert!(!status.signed_in);
+        assert_eq!(status.error.as_deref(), Some(RECONNECT_REQUIRED_MESSAGE));
+        assert!(crate::connectors::has_stored_chatgpt_credentials(&*secrets).await);
+        assert!(matches!(
+            providers::read_credential(&*secrets, ProviderKind::Openai)
+                .await
+                .unwrap(),
+            Some(ProviderCredential::Oauth {})
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_stale_rejection_cannot_disable_a_replacement_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                directory.path().join("chatgpt-stale-health.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let secrets = Arc::new(TestSecrets::default());
+        providers::write_credential(
+            &*secrets,
+            ProviderKind::Openai,
+            &ProviderCredential::Oauth {},
+        )
+        .await
+        .unwrap();
+        let credentials = |access_token: &str| {
+            serde_json::json!({
+                "access_token": access_token,
+                "refresh_token": "refresh",
+                "account_id": "acct-test",
+                "expires_at_unix": 4_102_444_800_u64,
+            })
+            .to_string()
+        };
+        secrets
+            .set_secret(
+                crate::connectors::CHATGPT_SECRET_KEY,
+                &credentials("old-access"),
+            )
+            .await
+            .unwrap();
+        let runtime = ChatGptRuntime::new(store.clone(), secrets.clone()).unwrap();
+        let (source, _) = runtime.route_auth().await.expect("the old session routes");
+        secrets
+            .set_secret(
+                crate::connectors::CHATGPT_SECRET_KEY,
+                &credentials("new-access"),
+            )
+            .await
+            .unwrap();
+
+        source.authentication_rejected("old-access").await;
+
+        assert!(!providers::chatgpt_reconnect_required(&*store)
+            .await
+            .unwrap());
+        assert!(runtime.route_auth().await.is_some());
     }
 }

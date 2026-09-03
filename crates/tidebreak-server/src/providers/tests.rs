@@ -228,6 +228,80 @@ async fn upgrade_enables_missing_provider_rows_for_existing_authentication() {
 }
 
 #[tokio::test]
+async fn a_rejected_chatgpt_session_stays_stored_but_is_not_routable() {
+    let (store, _directory) = provider_test_store().await;
+    let secrets = TestSecrets::default();
+    store_chatgpt_session(&secrets).await;
+    write_config(
+        &store,
+        ProviderKind::Openai,
+        &ProviderConfig {
+            enabled: true,
+            base_url: None,
+            models: Vec::new(),
+        },
+    )
+    .await
+    .unwrap();
+    mark_chatgpt_reconnect_required(&store).await.unwrap();
+    let policy = crate::managed_policy::resolve(
+        &*crate::managed_policy::MemoryProvisionedPolicy::new(),
+        &crate::managed_policy::NoOsPolicy,
+    )
+    .unwrap();
+
+    assert!(has_credential(&secrets, ProviderKind::Openai).await);
+    assert!(
+        !provider_is_usable(&store, &secrets, ProviderKind::Openai, &policy, None)
+            .await
+            .unwrap()
+    );
+    let openai = list_providers(&store, &secrets, &policy, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|provider| provider.kind == ProviderKind::Openai)
+        .unwrap();
+    assert!(!openai.has_credential);
+    assert_eq!(openai.auth_mode, Some(ProviderAuthMode::Chatgpt));
+    assert!(catalog_models(&store, &secrets, &policy, None)
+        .await
+        .unwrap()
+        .iter()
+        .filter(|model| model.policy.provider == ProviderKind::Openai)
+        .all(|model| !model.available));
+}
+
+#[tokio::test]
+async fn replacing_a_rejected_chatgpt_session_with_an_api_key_restores_routing() {
+    let (store, _directory) = provider_test_store().await;
+    let secrets = TestSecrets::default();
+    store_chatgpt_session(&secrets).await;
+    mark_chatgpt_reconnect_required(&store).await.unwrap();
+    let provisioned = crate::managed_policy::MemoryProvisionedPolicy::new();
+
+    let info = update_provider(
+        &store,
+        &secrets,
+        ProviderKind::Openai,
+        ProviderUpdate {
+            enabled: None,
+            base_url: None,
+            credential: Some(ProviderCredential::api_key("replacement")),
+            models: None,
+        },
+        &*provisioned,
+        &crate::managed_policy::NoOsPolicy,
+    )
+    .await
+    .unwrap();
+
+    assert!(info.has_credential);
+    assert_eq!(info.auth_mode, Some(ProviderAuthMode::ApiKey));
+    assert!(!chatgpt_reconnect_required(&store).await.unwrap());
+}
+
+#[tokio::test]
 async fn upgrade_preserves_an_explicitly_disabled_openai_provider() {
     let (store, _directory) = provider_test_store().await;
     let secrets = TestSecrets::default();

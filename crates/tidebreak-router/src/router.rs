@@ -92,6 +92,12 @@ pub trait BearerTokenSource: Send + Sync {
         let _ = conversation;
         self.bearer_token().await
     }
+
+    /// Record that the provider rejected this source's bearer as
+    /// authentication. Static and short-lived gateway sources need no local
+    /// action. A stored OAuth session can override this to stop later requests
+    /// from routing through a credential that now requires reconnection.
+    async fn authentication_rejected(&self, _bearer: &str) {}
 }
 
 /// A live claim that one host execution selector still maps to one wire model.
