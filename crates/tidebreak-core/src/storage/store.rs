@@ -24,7 +24,7 @@ use crate::model::{
     RootAttachmentChange, RootAttachmentChangeTerminal, ToolCallRecord, ToolCallResolution,
     TurnAdmissionLease, TurnCheckpointProgress, TurnFailureRetry, TurnRun, TurnSteer,
 };
-use crate::provider::{RefusalOutcome, StopReason, Usage};
+use crate::provider::{RefusalOutcome, StopReason, Usage, VendorWebSearch};
 use crate::semantic_checkpoint::{ContextCheckpoint, SaveContextCheckpointOutcome};
 use crate::PermissionMode;
 use crate::{AnswerUserQuestionsRequest, PendingUserQuestions};
@@ -2464,14 +2464,50 @@ pub trait Store: Send + Sync {
     /// worker can apply that instruction first.
     async fn park_turn_for_client_tool_call(
         &self,
+        turn_id: TurnId,
+        lease_token: uuid::Uuid,
+        expected_steer_revision: i64,
+        progress: TurnCheckpointProgress,
+        now: chrono::DateTime<chrono::Utc>,
+        call: &ClientToolCallRequest,
+    ) -> Result<Option<ParkTurnForClientCallOutcome>> {
+        self.park_turn_for_client_tool_call_with_search_state(
+            turn_id,
+            lease_token,
+            expected_steer_revision,
+            progress,
+            None,
+            now,
+            call,
+        )
+        .await
+    }
+
+    /// Park a client tool call with the provider search allowance that remains
+    /// after its producing model step.
+    #[allow(clippy::too_many_arguments)]
+    async fn park_turn_for_client_tool_call_with_search_state(
+        &self,
         _turn_id: TurnId,
         _lease_token: uuid::Uuid,
         _expected_steer_revision: i64,
         _progress: TurnCheckpointProgress,
+        _remaining_vendor_web_search: Option<VendorWebSearch>,
         _now: chrono::DateTime<chrono::Utc>,
         _call: &ClientToolCallRequest,
     ) -> Result<Option<ParkTurnForClientCallOutcome>> {
         turn_storage_unavailable()
+    }
+
+    /// Return the provider search allowance recorded by the client wait that
+    /// immediately preceded this claimed segment.
+    async fn resumed_client_vendor_web_search(
+        &self,
+        _turn_id: TurnId,
+        _attempt_count: i32,
+        _claim_count: i32,
+    ) -> Result<Option<VendorWebSearch>> {
+        Ok(None)
     }
 
     /// Persist an ordered, unique, bounded child set and release a claimed

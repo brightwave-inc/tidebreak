@@ -1401,6 +1401,7 @@ impl Agent {
                                         Ok((request, steer_revision)) => {
                                             return Ok(AgentTurnOutcome::ClientToolCall {
                                                 request,
+                                                remaining_vendor_web_search,
                                                 usage: total_usage,
                                                 steer_revision,
                                                 model_steps: steps_used,

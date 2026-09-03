@@ -79,6 +79,7 @@ impl MigratorTrait for Migrator {
             Box::new(ChatMemoryIncognito),
             Box::new(one_turn_lane::OneTurnLane),
             Box::new(ReadyAgentRunWaitIndex),
+            Box::new(ClientWaitVendorWebSearch),
         ]
     }
 }
@@ -4522,6 +4523,42 @@ impl MigrationTrait for ReadyAgentRunWaitIndex {
             .get_connection()
             .execute_unprepared(r#"DROP INDEX IF EXISTS "idx_turn_agent_run_wait_set_ready""#)
             .await?;
+        Ok(())
+    }
+}
+
+/// Preserve an unused provider search allowance across a client-tool wait.
+struct ClientWaitVendorWebSearch;
+
+impl MigrationName for ClientWaitVendorWebSearch {
+    fn name(&self) -> &str {
+        "m20260903_000003_client_wait_vendor_web_search"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for ClientWaitVendorWebSearch {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        if !manager
+            .has_column("turn_client_wait", "vendor_web_search_max_uses")
+            .await?
+        {
+            manager
+                .get_connection()
+                .execute_unprepared(
+                    r#"ALTER TABLE "turn_client_wait"
+                       ADD COLUMN "vendor_web_search_max_uses" bigint
+                       CHECK ("vendor_web_search_max_uses" IS NULL OR
+                              "vendor_web_search_max_uses" BETWEEN 1 AND 4294967295)"#,
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn down(&self, _manager: &SchemaManager) -> Result<(), DbErr> {
+        // A downgrade keeps the checkpoint state so it cannot accidentally
+        // reopen a provider search allowance after the migration runs again.
         Ok(())
     }
 }

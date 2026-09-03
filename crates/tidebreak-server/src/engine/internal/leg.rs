@@ -1233,6 +1233,13 @@ impl LegDriver {
             .await?;
         let mut pending_sandbox_spawn_steer_revision =
             (!pending_sandbox_spawns.is_empty()).then_some(turn.steer_revision);
+        let mut resumed_client_vendor_web_search = if total_model_steps > 0 {
+            self.store
+                .resumed_client_vendor_web_search(turn.id, turn.attempt_count, turn.claim_count)
+                .await?
+        } else {
+            None
+        };
         // A segment arriving with zero remaining steps is not refused: the
         // budget was spent by earlier segments — a checkpoint parked on the
         // last budgeted step, or a wrap-up whose provider call failed
@@ -1523,13 +1530,15 @@ impl LegDriver {
             config.prompt_cache_retention =
                 crate::routes::read_prompt_cache_retention(&*self.store).await?;
             config.max_steps = remaining_steps;
-            // A parked segment belongs to the same Tidebreak turn. The first
-            // segment may already have offered the provider its complete
-            // request-scoped search allowance, so a resumed segment must not
-            // recreate it even when no accepted search receipt was durable.
-            if total_model_steps > 0 {
-                config.web_search = tidebreak_core::TurnWebSearch::Off;
-            }
+            // A parked segment belongs to the same Tidebreak turn. Restore an
+            // unused allowance only from the exact client wait that preceded
+            // this claim. Every later loop or retry fails closed to no vendor
+            // search because its prior provider outcome is not durable here.
+            config.web_search = claimed_segment_web_search(
+                config.web_search,
+                total_model_steps,
+                &mut resumed_client_vendor_web_search,
+            );
             config.tool_scratch = self.private_scratch_root.as_deref().and_then(|root| {
                 match private_chat_scratch(root, chat.id) {
                     Ok(scratch) => Some(self.with_scratch_write_journal(
@@ -2073,6 +2082,7 @@ impl LegDriver {
                 }
                 Ok(AgentTurnOutcome::ClientToolCall {
                     request,
+                    remaining_vendor_web_search,
                     usage,
                     steer_revision,
                     model_steps,
@@ -2158,11 +2168,12 @@ impl LegDriver {
                     ));
                     loop {
                         let park_result = tokio::select! {
-                            result = self.store.park_turn_for_client_tool_call(
+                            result = self.store.park_turn_for_client_tool_call_with_search_state(
                                 turn.id,
                                 lease_token,
                                 steer_revision,
                                 progress,
+                                remaining_vendor_web_search,
                                 Utc::now(),
                                 &request,
                             ) => result,
@@ -3438,6 +3449,21 @@ fn checked_usage_sum(
         .ok_or_else(|| AgentError::msg("provider usage exceeded the supported turn total"))
 }
 
+fn claimed_segment_web_search(
+    configured: tidebreak_core::TurnWebSearch,
+    total_model_steps: i32,
+    resumed_client_vendor_web_search: &mut Option<tidebreak_core::VendorWebSearch>,
+) -> tidebreak_core::TurnWebSearch {
+    if total_model_steps == 0 {
+        return configured;
+    }
+    resumed_client_vendor_web_search
+        .take()
+        .map_or(tidebreak_core::TurnWebSearch::Off, |search| {
+            tidebreak_core::TurnWebSearch::Vendor(search)
+        })
+}
+
 fn cancellation_race_accounting(
     turn_id: TurnId,
     drive_result: &Result<AgentTurnOutcome>,
@@ -3554,6 +3580,24 @@ fn turn_worker_outcome_is_error(outcome: &Result<LegDriverOutcome>) -> bool {
 #[cfg(test)]
 mod committed_event_drain_tests {
     use super::*;
+
+    #[test]
+    fn resumed_client_wait_restores_vendor_search_once() {
+        let search = tidebreak_core::VendorWebSearch { max_uses: 3 };
+        let mut resumed = Some(search);
+        assert_eq!(
+            claimed_segment_web_search(tidebreak_core::TurnWebSearch::Off, 1, &mut resumed,),
+            tidebreak_core::TurnWebSearch::Vendor(search)
+        );
+        assert_eq!(
+            claimed_segment_web_search(
+                tidebreak_core::TurnWebSearch::Vendor(search),
+                1,
+                &mut resumed,
+            ),
+            tidebreak_core::TurnWebSearch::Off
+        );
+    }
 
     #[test]
     fn chat_only_surface_freezes_matching_empty_tools_and_prompt() {

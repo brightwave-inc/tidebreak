@@ -10,7 +10,7 @@ use crate::citation::AssistantCitationInput;
 use crate::compaction::CompactionPolicy;
 use crate::id::{AgentRunId, CallId};
 use crate::model::{Message, ToolCallRecord};
-use crate::provider::{RefusalOutcome, StopReason, Usage};
+use crate::provider::{RefusalOutcome, StopReason, Usage, VendorWebSearch};
 use crate::tool::ToolScratch;
 
 /// Default cap on a single tool result fed back to the model: 64 KiB (~16k
@@ -251,6 +251,8 @@ pub enum AgentTurnOutcome {
     ClientToolCall {
         /// Immutable call identity and canonical arguments to checkpoint.
         request: crate::model::ClientToolCallRequest,
+        /// Vendor search allowance that remains after the producing step.
+        remaining_vendor_web_search: Option<VendorWebSearch>,
         /// Provider usage incurred in this agent invocation.
         usage: Usage,
         /// Durable steering epoch captured before the producing model call.
