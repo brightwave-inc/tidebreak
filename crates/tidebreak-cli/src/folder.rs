@@ -45,10 +45,10 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Timelike, Utc};
 use tidebreak_core::{
-    AgentError, BeginRootAttachmentChange, BeginRootAttachmentChangeOutcome, Chat, ChatId, Config,
-    DbStore, FinishRootAttachmentChangeOutcome, HostRootId, Profile, Result, RootAttachmentChange,
+    AgentError, BeginRootAttachmentChange, BeginRootAttachmentChangeOutcome, Chat, Config, DbStore,
+    FinishRootAttachmentChangeOutcome, HostRootId, Profile, Result, RootAttachmentChange,
     RootAttachmentChangeAction, RootAttachmentChangeId, RootAttachmentChangePhase,
-    RootAttachmentChangeTerminal, Store, MAX_PENDING_ROOT_ATTACHMENT_CHANGES,
+    RootAttachmentChangeTerminal, SessionId, Store, MAX_PENDING_ROOT_ATTACHMENT_CHANGES,
 };
 use tidebreak_host_broker::{
     Broker, BrokerError, Capability, ConsentMethod, ControlEnvelope, ControlRequest, ControlResult,
@@ -66,18 +66,18 @@ use crate::print::OutputFormat;
 pub enum Command {
     /// Record standing operator consent for one folder, in one chat.
     Connect {
-        chat: ChatId,
+        chat: SessionId,
         path: PathBuf,
         format: OutputFormat,
     },
     /// Report every capability grant the broker holds, with its provenance.
     List {
-        chat: Option<ChatId>,
+        chat: Option<SessionId>,
         format: OutputFormat,
     },
     /// Withdraw one folder from one chat, and the approval it created.
     Disconnect {
-        chat: ChatId,
+        chat: SessionId,
         target: OsString,
         format: OutputFormat,
     },
@@ -185,8 +185,9 @@ fn starts_with_dash(argument: &OsStr) -> bool {
     argument.to_string_lossy().starts_with('-')
 }
 
-fn parse_chat(value: &OsStr) -> std::result::Result<ChatId, String> {
-    ChatId::from_str(&value.to_string_lossy()).map_err(|_| "--chat expects a chat UUID".to_owned())
+fn parse_chat(value: &OsStr) -> std::result::Result<SessionId, String> {
+    SessionId::from_str(&value.to_string_lossy())
+        .map_err(|_| "--chat expects a chat UUID".to_owned())
 }
 
 fn parse_format(value: &OsStr) -> std::result::Result<OutputFormat, String> {
@@ -326,7 +327,7 @@ fn subject_for(chat: &Chat) -> Result<GrantSubject> {
     .map_err(|_| AgentError::msg("chat has an invalid conversation identity"))
 }
 
-async fn load_chat(store: &Arc<dyn Store>, chat: ChatId) -> Result<Chat> {
+async fn load_chat(store: &Arc<dyn Store>, chat: SessionId) -> Result<Chat> {
     store
         .get_chat(chat)
         .await?
@@ -383,7 +384,7 @@ fn canonical_folder(path: &Path) -> Result<PathBuf> {
 async fn connect(
     store: &Arc<dyn Store>,
     data_dir: &Path,
-    chat_id: ChatId,
+    chat_id: SessionId,
     path: PathBuf,
     format: OutputFormat,
 ) -> Result<()> {
@@ -500,7 +501,7 @@ fn lookup_registration(
 async fn list(
     store: &Arc<dyn Store>,
     data_dir: &Path,
-    chat: Option<ChatId>,
+    chat: Option<SessionId>,
     format: OutputFormat,
 ) -> Result<()> {
     // `ListGrantStatements` is the same query the desktop's Permissions surface
@@ -672,7 +673,7 @@ fn consent_label(method: ConsentMethod) -> &'static str {
 async fn disconnect(
     store: &Arc<dyn Store>,
     data_dir: &Path,
-    chat_id: ChatId,
+    chat_id: SessionId,
     target: &OsStr,
     format: OutputFormat,
 ) -> Result<()> {
@@ -1257,7 +1258,7 @@ mod tests {
     /// door. A path that looks like a flag must not be swallowed as one either.
     #[test]
     fn mutating_commands_require_an_explicit_chat() {
-        let chat = ChatId::new();
+        let chat = SessionId::new();
         assert_eq!(
             parse(args(&["connect", "/srv/data", "--chat", &chat.to_string()])).unwrap(),
             Command::Connect {
@@ -1285,7 +1286,7 @@ mod tests {
     /// the other flags, once.
     #[test]
     fn folder_commands_accept_output_format() {
-        let chat = ChatId::new();
+        let chat = SessionId::new();
         let chat_s = chat.to_string();
         assert_eq!(
             parse(args(&[

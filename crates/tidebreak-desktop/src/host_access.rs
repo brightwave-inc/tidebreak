@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
-use tidebreak_core::{ChatId, Store};
+use tidebreak_core::{SessionId, Store};
 use tidebreak_host_broker::{
     AppFolderPathRequest, AppFolderWriteRequest, Capability, ControlRequest, ControlResult,
     ExecutionContext, GrantSubject, RelativePath, ResolveExecRootsRequest, RootId, RootSummary,
@@ -220,7 +220,7 @@ impl HostAccess {
             .get()
             .ok_or_else(|| "Tidebreak is still starting".to_owned())?;
         let chat = store
-            .get_chat(ChatId::from(chat_id))
+            .get_chat(SessionId::from(chat_id))
             .await
             .map_err(|_| "could not load the conversation".to_owned())?
             .ok_or_else(|| "conversation not found".to_owned())?;
@@ -686,7 +686,7 @@ async fn connected_folders(
         .store()
         .ok_or_else(|| "Tidebreak is still starting".to_owned())?;
     let chat = store
-        .get_chat(ChatId::from(chat_id))
+        .get_chat(SessionId::from(chat_id))
         .await
         .map_err(|_| "could not load connected folders".to_owned())?
         .ok_or_else(|| "conversation not found".to_owned())?;
@@ -816,7 +816,7 @@ async fn capability_statement(
     };
     let (level, level_title) = match grant.subject.kind() {
         SubjectKind::Conversation => {
-            let chat_id = ChatId::from(grant.subject.id());
+            let chat_id = SessionId::from(grant.subject.id());
             let title = store
                 .get_chat(chat_id)
                 .await
@@ -1229,7 +1229,7 @@ pub(crate) async fn purge_deleted_conversation_subject(
     // shortcut around disconnect.
     if let Some(store) = state.store() {
         if store
-            .get_chat(ChatId::from(request.chat_id))
+            .get_chat(SessionId::from(request.chat_id))
             .await
             .map_err(|error| error.to_string())?
             .is_some()
@@ -1296,7 +1296,7 @@ async fn conversation_label(state: &HostAccess, chat_id: Uuid) -> Result<String,
         .store()
         .ok_or_else(|| "Tidebreak is still starting".to_owned())?;
     let chat = store
-        .get_chat(ChatId::from(chat_id))
+        .get_chat(SessionId::from(chat_id))
         .await
         .map_err(|_| "could not load the conversation".to_owned())?
         .ok_or_else(|| "conversation not found".to_owned())?;

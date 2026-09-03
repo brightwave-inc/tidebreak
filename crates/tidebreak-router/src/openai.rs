@@ -1185,7 +1185,7 @@ mod tests {
         assert!(body.get("messages").is_none());
         assert!(body.get("prompt_cache_key").is_none());
 
-        let conversation = tidebreak_core::id::ChatId::new();
+        let conversation = tidebreak_core::id::SessionId::new();
         let with_conversation = ChatRequest {
             conversation: Some(conversation),
             ..req

@@ -213,7 +213,7 @@ impl HarnessEngine {
             .adapter
             .launch(SessionSpec {
                 owner: tidebreak_core::OwnerId::local(),
-                session_id: tidebreak_core::CodeSessionId::new(),
+                session_id: tidebreak_core::SessionId::new(),
                 worktree: self.spec.worktree.clone(),
                 allowed_read_roots: self.spec.allowed_read_roots.clone(),
                 permission_mode: PermissionMode::Allow,
@@ -493,7 +493,7 @@ mod tests {
     use std::path::Path;
     use std::time::Duration;
 
-    use tidebreak_core::{CapLevel, CodeUsage, HarnessCaps};
+    use tidebreak_core::{CapLevel, HarnessCaps, TurnUsage};
     use tidebreak_harness::{ApprovalDecision, HarnessApprovalRef, HostEnv};
 
     use super::*;
@@ -689,7 +689,7 @@ mod tests {
 
     fn completed_event() -> HarnessEvent {
         HarnessEvent::TurnCompleted {
-            usage: CodeUsage::default(),
+            usage: TurnUsage::default(),
         }
     }
 

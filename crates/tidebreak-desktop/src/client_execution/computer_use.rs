@@ -33,10 +33,10 @@ use tidebreak_core::{
     validate_computer_focus_window_arguments, validate_computer_key_press_arguments,
     validate_computer_list_windows_arguments, validate_computer_read_app_content_arguments,
     validate_computer_return_to_tidebreak_arguments, validate_computer_scroll_arguments,
-    validate_computer_type_text_arguments, validate_computer_wait_arguments, CallId, ChatId,
+    validate_computer_type_text_arguments, validate_computer_wait_arguments, CallId,
     ComputerCaptureScreenArgs, ComputerClickArgs, ComputerFocusWindowArgs, ComputerKeyPressArgs,
     ComputerListWindowsArgs, ComputerReadAppContentArgs, ComputerScrollArgs, ComputerTypeTextArgs,
-    ComputerWaitArgs, ImageRef, ToolCallExecution, ToolCallRecord, ToolCallStatus,
+    ComputerWaitArgs, ImageRef, SessionId, ToolCallExecution, ToolCallRecord, ToolCallStatus,
     COMPUTER_CAPTURE_SCREEN_TOOL, COMPUTER_CLICK_TOOL, COMPUTER_FOCUS_WINDOW_TOOL,
     COMPUTER_KEY_PRESS_TOOL, COMPUTER_LIST_WINDOWS_TOOL, COMPUTER_READ_APP_CONTENT_TOOL,
     COMPUTER_RETURN_TO_TIDEBREAK_TOOL, COMPUTER_SCROLL_TOOL, COMPUTER_TYPE_TEXT_TOOL,
@@ -112,7 +112,7 @@ enum ConsentDecision {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ConsentPromptView {
     call_id: CallId,
-    chat_id: ChatId,
+    chat_id: SessionId,
     bundle_id: String,
     app_name: Option<String>,
     capability: ConsentCapability,
@@ -132,7 +132,7 @@ pub(crate) enum ConsentGrantScope {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ConfirmationPromptView {
     call_id: CallId,
-    chat_id: ChatId,
+    chat_id: SessionId,
     bundle_id: String,
     app_name: Option<String>,
     target_label: Option<String>,
@@ -946,7 +946,7 @@ fn build_action(
 /// resolving a `mark` against this chat's latest marks for the app.
 fn resolve_target(
     cu: &ComputerUseState,
-    chat_id: ChatId,
+    chat_id: SessionId,
     bundle_id: &str,
     target: &tidebreak_core::ElementTargetArgs,
 ) -> Result<ElementTargetWire, StoredResolution> {
@@ -1658,7 +1658,7 @@ mod tests {
 
         let wire = resolve_target(
             &cu,
-            ChatId::from(chat),
+            SessionId::from(chat),
             "com.example.app",
             &target_with_mark(2),
         )
@@ -1677,7 +1677,7 @@ mod tests {
 
         let wire = resolve_target(
             &cu,
-            ChatId::from(chat),
+            SessionId::from(chat),
             "com.example.app",
             &target_with_mark(1),
         )
@@ -1694,7 +1694,7 @@ mod tests {
         // A mark the latest capture does not have…
         let missing = resolve_target(
             &cu,
-            ChatId::from(chat),
+            SessionId::from(chat),
             "com.example.app",
             &target_with_mark(7),
         )
@@ -1711,7 +1711,8 @@ mod tests {
         // …and a mark from another app or chat is equally not a target here.
         for (other_chat, app) in [(chat, "com.other.app"), (Uuid::new_v4(), "com.example.app")] {
             assert!(
-                resolve_target(&cu, ChatId::from(other_chat), app, &target_with_mark(1)).is_err(),
+                resolve_target(&cu, SessionId::from(other_chat), app, &target_with_mark(1))
+                    .is_err(),
                 "marks are scoped to one conversation and app"
             );
         }
@@ -1725,7 +1726,7 @@ mod tests {
             element_fingerprint: Some("abc".to_owned()),
             ..Default::default()
         };
-        let wire = resolve_target(&cu, ChatId::new(), "com.example.app", &target)
+        let wire = resolve_target(&cu, SessionId::new(), "com.example.app", &target)
             .expect("an explicit element needs no marks");
         assert_eq!(wire.element_id.as_deref(), Some("0.3.1"));
         assert_eq!(wire.element_fingerprint.as_deref(), Some("abc"));
@@ -1935,7 +1936,7 @@ mod tests {
         let cu = ComputerUseState::default();
         let call = |name: &str, arguments: serde_json::Value| ToolCallRecord {
             id: CallId::new(),
-            chat_id: ChatId::new(),
+            chat_id: SessionId::new(),
             turn_id: tidebreak_core::TurnId::new(),
             provider_id: "tool-1".into(),
             name: name.into(),
@@ -2059,7 +2060,7 @@ mod tests {
     fn cu_receipts_round_trip_through_the_store() {
         let temp = tempfile::tempdir().unwrap();
         let store = super::super::receipt_store::ReceiptStore::open(temp.path()).unwrap();
-        let receipt = ComputerUseReceipt::new(ChatId::new(), CallId::new(), Uuid::new_v4());
+        let receipt = ComputerUseReceipt::new(SessionId::new(), CallId::new(), Uuid::new_v4());
         store.save_computer_use(&receipt).unwrap();
         let loaded = store.load_computer_uses().unwrap();
         assert_eq!(loaded, vec![receipt.clone()]);

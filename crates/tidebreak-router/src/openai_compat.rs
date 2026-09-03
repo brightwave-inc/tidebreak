@@ -885,7 +885,7 @@ mod tests {
         assert!(body.get("reasoning_effort").is_none());
         assert!(body.get("prompt_cache_key").is_none());
 
-        let conversation = tidebreak_core::id::ChatId::new();
+        let conversation = tidebreak_core::id::SessionId::new();
         let with_conversation = ChatRequest {
             conversation: Some(conversation),
             ..req
@@ -1850,7 +1850,7 @@ mod tests {
             )
         }
 
-        struct RecordingTokenSource(Mutex<Vec<Option<tidebreak_core::id::ChatId>>>);
+        struct RecordingTokenSource(Mutex<Vec<Option<tidebreak_core::id::SessionId>>>);
 
         #[async_trait::async_trait]
         impl crate::BearerTokenSource for RecordingTokenSource {
@@ -1860,7 +1860,7 @@ mod tests {
 
             async fn bearer_token_for(
                 &self,
-                conversation: Option<tidebreak_core::id::ChatId>,
+                conversation: Option<tidebreak_core::id::SessionId>,
             ) -> tidebreak_core::Result<String> {
                 self.0.lock().unwrap().push(conversation);
                 Ok("mg_at_rotating".to_string())
@@ -1885,7 +1885,7 @@ mod tests {
             token_source: Some(source.clone()),
             chatgpt_account_id: None,
         }]);
-        let conversation = tidebreak_core::id::ChatId::new();
+        let conversation = tidebreak_core::id::SessionId::new();
         let stream = provider
             .stream(ChatRequest {
                 provider: Some(ProviderId::new("model_gateway")),

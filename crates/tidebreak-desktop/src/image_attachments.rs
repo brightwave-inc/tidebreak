@@ -26,7 +26,7 @@ use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
 use serde::{Deserialize, Serialize};
 use tauri::State;
-use tidebreak_core::{ChatId, MAX_IMAGE_BYTES};
+use tidebreak_core::{SessionId, MAX_IMAGE_BYTES};
 use uuid::Uuid;
 
 use crate::documents::resolve_conversation_scope;
@@ -338,7 +338,7 @@ pub(crate) fn is_attachable_image(path: &Path) -> bool {
     declared_media_type(&header[..read]).is_some()
 }
 
-fn image_attachments_path(chat_id: ChatId) -> String {
+fn image_attachments_path(chat_id: SessionId) -> String {
     format!("/chats/{chat_id}/attachments/images")
 }
 

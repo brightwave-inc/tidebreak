@@ -9,7 +9,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use serde_json::{json, Value};
 use tidebreak_core::{
-    media_type_is_text, AgentRunId, ApprovalClass, ChatId, OutputId, OutputRevisionId, Result,
+    media_type_is_text, AgentRunId, ApprovalClass, OutputId, OutputRevisionId, Result, SessionId,
     Tool, ToolCtx, ToolErrorCategory, ToolOutput, ToolRegistry, ToolSpec,
 };
 
@@ -65,14 +65,14 @@ fn fail_args(message: impl Into<String>) -> Result<ToolOutput> {
     ))
 }
 
-fn required_chat_id(args: &Value) -> std::result::Result<ChatId, ToolOutput> {
+fn required_chat_id(args: &Value) -> std::result::Result<SessionId, ToolOutput> {
     let Some(value) = args.get("chat_id").and_then(Value::as_str) else {
         return Err(ToolOutput::failed(
             ToolErrorCategory::InvalidArguments,
             "chat_id is required",
         ));
     };
-    ChatId::from_str(value).map_err(|_| {
+    SessionId::from_str(value).map_err(|_| {
         ToolOutput::failed(
             ToolErrorCategory::InvalidArguments,
             "chat_id must be a UUID",

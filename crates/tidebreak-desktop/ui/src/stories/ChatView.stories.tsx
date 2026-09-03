@@ -227,12 +227,8 @@ const pendingApprovalMessages: ChatMessage[] = [
 
 const queuedTurn: QueuedTurn = {
   id: "queued-storybook",
-  chat_id: CHAT_ID,
-  content: "After this response, verify the 420-pixel layout.",
-  attachments: [],
-  file_attachments: [],
-  invoked_skills: [],
-  voice_input_used: false,
+  session_id: CHAT_ID,
+  message: "After this response, verify the 420-pixel layout.",
   position: 1,
   created_at: "2026-08-24T13:05:00Z",
   updated_at: "2026-08-24T13:05:00Z",
@@ -492,7 +488,7 @@ class StoryApiClient extends ApiClient {
     this.queued.push({
       ...queuedTurn,
       id: `queued-${this.queued.length + 1}`,
-      content,
+      message: content,
       position: this.queued.length + 1,
     });
   }
@@ -552,7 +548,11 @@ class StoryApiClient extends ApiClient {
     update: { content?: string; position?: number },
   ): Promise<QueuedTurn> {
     const current = this.queued.find((turn) => turn.id === turnId)!;
-    const next = { ...current, ...update };
+    const next = {
+      ...current,
+      ...(update.content !== undefined ? { message: update.content } : {}),
+      ...(update.position !== undefined ? { position: update.position } : {}),
+    };
     this.queued = this.queued.map((turn) => (turn.id === turnId ? next : turn));
     return Promise.resolve(next);
   }

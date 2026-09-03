@@ -47,7 +47,7 @@ export function chatQueueApi(client: ApiClient, chatId: string): QueueTrayApi {
       return {
         queued: snapshot.queued.map((row) => ({
           id: row.id,
-          content: row.content,
+          content: row.message,
         })),
         paused: snapshot.paused,
       };

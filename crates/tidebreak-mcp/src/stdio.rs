@@ -147,10 +147,10 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    use tidebreak_core::{ChatId, ToolCtx, ToolRegistry};
+    use tidebreak_core::{SessionId, ToolCtx, ToolRegistry};
 
     fn empty_server() -> McpServer {
-        let ctx = ToolCtx::new_legacy_workspace(ChatId::new(), None, PathBuf::from("/tmp/ws"));
+        let ctx = ToolCtx::new_legacy_workspace(SessionId::new(), None, PathBuf::from("/tmp/ws"));
         McpServer::new(Arc::new(ToolRegistry::new()), ctx)
     }
 

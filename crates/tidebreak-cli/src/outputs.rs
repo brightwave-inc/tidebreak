@@ -11,7 +11,7 @@
 use std::path::{Path, PathBuf};
 
 use tidebreak_core::{
-    AgentError, ChatId, DocumentId, OutputId, OutputRevisionId, Result, MAX_MESSAGE_ATTACHMENTS,
+    AgentError, DocumentId, OutputId, OutputRevisionId, Result, SessionId, MAX_MESSAGE_ATTACHMENTS,
 };
 use uuid::Uuid;
 
@@ -23,19 +23,19 @@ use crate::print::OutputFormat;
 /// What `tidebreak output` was asked to do.
 pub enum Command {
     List {
-        chat: ChatId,
+        chat: SessionId,
     },
     Show {
-        chat: ChatId,
+        chat: SessionId,
         output: OutputId,
         revision: Option<OutputRevisionId>,
     },
     Revisions {
-        chat: ChatId,
+        chat: SessionId,
         output: OutputId,
     },
     Export {
-        chat: ChatId,
+        chat: SessionId,
         output: OutputId,
         revision: Option<OutputRevisionId>,
         destination: PathBuf,
@@ -240,7 +240,7 @@ fn temporary_suffix() -> String {
 /// Images are published as image attachments and everything else is ingested as
 /// a source document — the same split the desktop's single attach gesture makes,
 /// decided from the bytes rather than from the file's name.
-pub async fn attach(chat: ChatId, path: PathBuf, server: Server) -> Result<()> {
+pub async fn attach(chat: SessionId, path: PathBuf, server: Server) -> Result<()> {
     let bytes = std::fs::read(&path)
         .map_err(|error| AgentError::msg(format!("could not read {}: {error}", path.display())))?;
     if bytes.is_empty() {
@@ -288,7 +288,7 @@ fn local_import_error(client: &Client, error: AgentError) -> AgentError {
 
 /// Image ids `tidebreak attach` published for `chat` that the next `-p` turn
 /// has not yet submitted.
-pub(crate) fn pending_image_attachments(chat: ChatId) -> Result<Vec<Uuid>> {
+pub(crate) fn pending_image_attachments(chat: SessionId) -> Result<Vec<Uuid>> {
     let path = pending_images_path(chat)?;
     let Some(bytes) = std::fs::read(&path).ok() else {
         return Ok(Vec::new());
@@ -301,7 +301,7 @@ pub(crate) fn pending_image_attachments(chat: ChatId) -> Result<Vec<Uuid>> {
     Ok(ids.into_iter().take(MAX_MESSAGE_ATTACHMENTS).collect())
 }
 
-pub(crate) fn clear_pending_image_attachments(chat: ChatId) -> Result<()> {
+pub(crate) fn clear_pending_image_attachments(chat: SessionId) -> Result<()> {
     let path = pending_images_path(chat)?;
     match std::fs::remove_file(&path) {
         Ok(()) => Ok(()),
@@ -314,15 +314,15 @@ pub(crate) fn clear_pending_image_attachments(chat: ChatId) -> Result<()> {
 
 /// Document ids `tidebreak attach` published for `chat` that the next `-p`
 /// turn has not yet submitted.
-pub(crate) fn pending_document_attachments(chat: ChatId) -> Result<Vec<DocumentId>> {
+pub(crate) fn pending_document_attachments(chat: SessionId) -> Result<Vec<DocumentId>> {
     read_pending_ids(&pending_documents_path(chat)?, "document", chat)
 }
 
-pub(crate) fn clear_pending_document_attachments(chat: ChatId) -> Result<()> {
+pub(crate) fn clear_pending_document_attachments(chat: SessionId) -> Result<()> {
     clear_pending_ids(&pending_documents_path(chat)?, "document", chat)
 }
 
-fn record_pending_image(chat: ChatId, attachment_id: &Uuid) -> Result<()> {
+fn record_pending_image(chat: SessionId, attachment_id: &Uuid) -> Result<()> {
     let mut ids = pending_image_attachments(chat)?;
     if ids.contains(attachment_id) {
         return Ok(());
@@ -340,7 +340,7 @@ fn record_pending_image(chat: ChatId, attachment_id: &Uuid) -> Result<()> {
     write_pending_images(chat, &ids)
 }
 
-fn record_pending_document(chat: ChatId, document_id: DocumentId) -> Result<()> {
+fn record_pending_document(chat: SessionId, document_id: DocumentId) -> Result<()> {
     let mut ids = pending_document_attachments(chat)?;
     if ids.contains(&document_id) {
         return Ok(());
@@ -358,7 +358,7 @@ fn record_pending_document(chat: ChatId, document_id: DocumentId) -> Result<()> 
     write_pending_ids(&pending_documents_path(chat)?, &ids, "document", chat)
 }
 
-fn write_pending_images(chat: ChatId, ids: &[Uuid]) -> Result<()> {
+fn write_pending_images(chat: SessionId, ids: &[Uuid]) -> Result<()> {
     let path = pending_images_path(chat)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {
@@ -385,14 +385,14 @@ fn write_pending_images(chat: ChatId, ids: &[Uuid]) -> Result<()> {
     })
 }
 
-fn pending_images_path(chat: ChatId) -> Result<PathBuf> {
+fn pending_images_path(chat: SessionId) -> Result<PathBuf> {
     Ok(crate::profile_config()?
         .data_dir
         .join("pending-image-attachments")
         .join(chat.to_string()))
 }
 
-fn pending_documents_path(chat: ChatId) -> Result<PathBuf> {
+fn pending_documents_path(chat: SessionId) -> Result<PathBuf> {
     Ok(crate::profile_config()?
         .data_dir
         .join("pending-document-attachments")
@@ -402,7 +402,7 @@ fn pending_documents_path(chat: ChatId) -> Result<PathBuf> {
 fn read_pending_ids<T: serde::de::DeserializeOwned>(
     path: &Path,
     kind: &str,
-    chat: ChatId,
+    chat: SessionId,
 ) -> Result<Vec<T>> {
     let Some(bytes) = std::fs::read(path).ok() else {
         return Ok(Vec::new());
@@ -414,7 +414,7 @@ fn read_pending_ids<T: serde::de::DeserializeOwned>(
     })
 }
 
-fn clear_pending_ids(path: &Path, kind: &str, chat: ChatId) -> Result<()> {
+fn clear_pending_ids(path: &Path, kind: &str, chat: SessionId) -> Result<()> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -428,7 +428,7 @@ fn write_pending_ids<T: serde::Serialize>(
     path: &Path,
     ids: &[T],
     kind: &str,
-    chat: ChatId,
+    chat: SessionId,
 ) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| {

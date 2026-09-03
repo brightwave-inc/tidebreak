@@ -1354,7 +1354,7 @@ exit 0
             GrokSession::new(
                 SessionSpec {
                     owner: tidebreak_core::OwnerId::local(),
-                    session_id: tidebreak_core::CodeSessionId::new(),
+                    session_id: tidebreak_core::SessionId::new(),
                     worktree: worktree.to_path_buf(),
                     allowed_read_roots: Vec::new(),
                     permission_mode: PermissionMode::Auto,

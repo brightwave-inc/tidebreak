@@ -14,7 +14,7 @@ use tauri::AppHandle;
 use tidebreak_core::{
     BrowserActArgs, BrowserActResult, BrowserListResult, BrowserNavigateArgs,
     BrowserNavigateResult, BrowserPageSnapshot, BrowserScreenshotArgs, BrowserScreenshotResult,
-    BrowserSnapshotArgs, BrowserWaitArgs, BrowserWaitResult, CodeSessionId, OwnerId, WorkspaceId,
+    BrowserSnapshotArgs, BrowserWaitArgs, BrowserWaitResult, OwnerId, SessionId, WorkspaceId,
 };
 use tidebreak_server::{BrowserRuntime, BrowserRuntimeError, BrowserRuntimeScope};
 use uuid::Uuid;
@@ -142,7 +142,7 @@ impl BrowserRuntime for DesktopBrowserRuntime {
 
 #[derive(Clone, Default)]
 struct SessionCapabilities {
-    states: std::sync::Arc<Mutex<HashMap<CodeSessionId, SessionCapabilityState>>>,
+    states: std::sync::Arc<Mutex<HashMap<SessionId, SessionCapabilityState>>>,
 }
 
 enum SessionCapabilityState {
@@ -256,7 +256,7 @@ impl SessionCapabilities {
         }
     }
 
-    fn lock(&self) -> MutexGuard<'_, HashMap<CodeSessionId, SessionCapabilityState>> {
+    fn lock(&self) -> MutexGuard<'_, HashMap<SessionId, SessionCapabilityState>> {
         self.states
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -326,7 +326,7 @@ fn map_native_error(browser_id: Option<&str>, error: String) -> BrowserRuntimeEr
 mod tests {
     use super::*;
 
-    fn scope(session: CodeSessionId, workspace: WorkspaceId) -> BrowserRuntimeScope {
+    fn scope(session: SessionId, workspace: WorkspaceId) -> BrowserRuntimeScope {
         BrowserRuntimeScope {
             owner: OwnerId::local(),
             workspace,
@@ -338,7 +338,7 @@ mod tests {
     fn revoke_before_first_use_is_an_enduring_tombstone() {
         let registry = BrowserRegistry::default();
         let sessions = SessionCapabilities::default();
-        let scope = scope(CodeSessionId::new(), WorkspaceId::new());
+        let scope = scope(SessionId::new(), WorkspaceId::new());
 
         sessions.revoke(&registry, &scope);
 
@@ -352,7 +352,7 @@ mod tests {
     fn revoked_session_never_reissues_a_native_capability() {
         let registry = BrowserRegistry::default();
         let sessions = SessionCapabilities::default();
-        let scope = scope(CodeSessionId::new(), WorkspaceId::new());
+        let scope = scope(SessionId::new(), WorkspaceId::new());
         let capability_id = sessions.capability_for(&registry, &scope).unwrap();
 
         sessions.revoke(&registry, &scope);
@@ -370,7 +370,7 @@ mod tests {
     fn a_live_session_reuses_its_native_capability_across_channel_reissue() {
         let registry = BrowserRegistry::default();
         let sessions = SessionCapabilities::default();
-        let scope = scope(CodeSessionId::new(), WorkspaceId::new());
+        let scope = scope(SessionId::new(), WorkspaceId::new());
         let workspace = scope.workspace.to_string();
 
         let first = sessions.capability_for(&registry, &scope).unwrap();
@@ -386,7 +386,7 @@ mod tests {
     fn reused_session_id_with_another_scope_fails_closed() {
         let registry = BrowserRegistry::default();
         let sessions = SessionCapabilities::default();
-        let session = CodeSessionId::new();
+        let session = SessionId::new();
         let original = scope(session, WorkspaceId::new());
         let capability_id = sessions.capability_for(&registry, &original).unwrap();
         let replacement_scope = scope(session, WorkspaceId::new());
@@ -410,7 +410,7 @@ mod tests {
 
         let registry = BrowserRegistry::default();
         let sessions = SessionCapabilities::default();
-        let scope = scope(CodeSessionId::new(), WorkspaceId::new());
+        let scope = scope(SessionId::new(), WorkspaceId::new());
         let workspace = scope.workspace.to_string();
         registry
             .register(

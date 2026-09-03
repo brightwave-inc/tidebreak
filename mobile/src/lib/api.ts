@@ -1,9 +1,9 @@
 import type {
   CapLevel,
-  CodeApprovalKind,
-  CodeApprovalSnapshot,
-  CodeSessionLifecycle,
-  CodeTurnSnapshot,
+  ApprovalKind as CodeApprovalKind,
+  ApprovalSnapshot as CodeApprovalSnapshot,
+  SessionLifecycle as CodeSessionLifecycle,
+  TurnSnapshot as CodeTurnSnapshot,
   CodeWorkspaceStatus,
   HarnessAuthMode,
   HarnessCaps,
@@ -11,7 +11,7 @@ import type {
   HarnessModel,
   HarnessModelSource,
   PermissionMode,
-  QueuedCodeTurn,
+  QueuedTurn as QueuedCodeTurn,
   ReasoningEffort,
 } from "../generated/wire";
 import type { MachineClient } from "./machine";

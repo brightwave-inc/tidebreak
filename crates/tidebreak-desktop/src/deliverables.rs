@@ -21,7 +21,7 @@ use cap_std::fs::{Dir, OpenOptions};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, State};
-use tidebreak_core::{ChatId, OutputId, OutputRevisionId, MAX_BINARY_DELIVERABLE_BYTES};
+use tidebreak_core::{OutputId, OutputRevisionId, SessionId, MAX_BINARY_DELIVERABLE_BYTES};
 use uuid::Uuid;
 
 use crate::client_execution::{
@@ -88,7 +88,7 @@ pub(crate) async fn export_deliverable(
         return recover_output_export_receipt(&host_access.receipts, &mut receipt);
     }
 
-    let chat_id = ChatId::from(request.chat_id);
+    let chat_id = SessionId::from(request.chat_id);
     let info = wait_server_info(app_state.inner()).await?;
     let identity = output_identity(&info, chat_id, request.output_id)
         .await
@@ -203,14 +203,14 @@ fn destination_unavailable() -> OutputExportTerminal {
     }
 }
 
-fn outputs_path(chat_id: ChatId, output_id: OutputId) -> String {
+fn outputs_path(chat_id: SessionId, output_id: OutputId) -> String {
     format!("/chats/{chat_id}/outputs/{output_id}")
 }
 
 /// Which revision the output is on right now, and what to call its file.
 async fn output_identity(
     info: &crate::NativeServerInfo,
-    chat_id: ChatId,
+    chat_id: SessionId,
     output_id: OutputId,
 ) -> Option<OutputIdentity> {
     let response = native_auth(
@@ -234,7 +234,7 @@ async fn output_identity(
 /// other client.
 async fn output_bytes(
     info: &crate::NativeServerInfo,
-    chat_id: ChatId,
+    chat_id: SessionId,
     output_id: OutputId,
     revision_id: OutputRevisionId,
 ) -> Option<Vec<u8>> {
@@ -411,7 +411,7 @@ mod tests {
         let receipts = ReceiptStore::open(private.path()).unwrap();
         let destination_root = tempfile::tempdir().unwrap();
         let content = b"exact";
-        let chat_id = ChatId::new();
+        let chat_id = SessionId::new();
         let output_id = OutputId::new();
         let revision_id = OutputRevisionId::new();
         let sha256: [u8; 32] = Sha256::digest(content).into();

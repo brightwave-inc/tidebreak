@@ -11,9 +11,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use chrono::{DateTime, Timelike, Utc};
 use tauri::Manager;
 use tidebreak_core::{
-    ChatId, HostRootId, RootAttachmentChangeAction, RootAttachmentChangeFailure,
-    RootAttachmentChangeId, RootAttachmentChangePhase, RootAttachmentChangeTerminal,
-    RootAttachmentSubjectKind, MAX_PENDING_ROOT_ATTACHMENT_CHANGES,
+    HostRootId, RootAttachmentChangeAction, RootAttachmentChangeFailure, RootAttachmentChangeId,
+    RootAttachmentChangePhase, RootAttachmentChangeTerminal, RootAttachmentSubjectKind, SessionId,
+    MAX_PENDING_ROOT_ATTACHMENT_CHANGES,
 };
 use tidebreak_host_broker::{
     ConsentMethod, ControlRequest, ControlResult, ExecutionContext,
@@ -37,7 +37,7 @@ static PRODUCT_RECOVERY_CURSOR: AtomicUsize = AtomicUsize::new(0);
 #[derive(Clone, Copy)]
 struct BeginFingerprint {
     id: RootAttachmentChangeId,
-    chat_id: ChatId,
+    chat_id: SessionId,
     root_id: HostRootId,
     action: RootAttachmentChangeAction,
     expected_revision: i64,
@@ -58,7 +58,7 @@ pub(crate) async fn connect_selected_folder(
     path: PathBuf,
 ) -> Result<ConnectedFolder, String> {
     let mut receipt =
-        ManualFolderConnectReceipt::new(ChatId::from(context.chat_id), context.subject, path);
+        ManualFolderConnectReceipt::new(SessionId::from(context.chat_id), context.subject, path);
     state
         .receipts
         .save_manual_connect(&receipt)
@@ -81,7 +81,7 @@ pub(crate) async fn connect_existing_root(
         .store()
         .ok_or_else(|| "Tidebreak is still starting".to_owned())?;
     let chat = store
-        .get_chat(ChatId::from(context.chat_id))
+        .get_chat(SessionId::from(context.chat_id))
         .await
         .map_err(|_| "could not load connected folders".to_owned())?
         .ok_or_else(|| "conversation not found".to_owned())?;
@@ -131,7 +131,7 @@ pub(crate) async fn disconnect_root(
         .store()
         .ok_or_else(|| "Tidebreak is still starting".to_owned())?;
     let chat = store
-        .get_chat(ChatId::from(context.chat_id))
+        .get_chat(SessionId::from(context.chat_id))
         .await
         .map_err(|_| "could not load connected folders".to_owned())?
         .ok_or_else(|| "conversation not found".to_owned())?;
@@ -845,7 +845,7 @@ async fn verify_product_terminal(
 
 async fn product_contains_root(
     state: &HostAccess,
-    chat_id: ChatId,
+    chat_id: SessionId,
     root_id: HostRootId,
 ) -> Result<bool, String> {
     let store = state

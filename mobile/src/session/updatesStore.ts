@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { CodeSessionDigest } from "../generated/wire";
+import type { SessionDigest as CodeSessionDigest } from "../generated/wire";
 import {
   EMPTY_UPDATES,
   listedSessions,

@@ -236,8 +236,6 @@ id_type!(
     /// Identifies a persistent conversation.
     SessionId
 );
-#[doc(hidden)]
-pub use SessionId as ChatId;
 id_type!(
     /// Identifies one durable foreground or sandboxed background agent run.
     AgentRunId

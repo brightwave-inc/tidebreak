@@ -217,9 +217,6 @@ pub struct SequencedAgentEvent {
     pub event: AgentEvent,
 }
 
-#[doc(hidden)]
-pub use SequencedAgentEvent as SequencedEvent;
-
 #[cfg(test)]
 mod tests {
     use super::*;

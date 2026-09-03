@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { CodeApprovalSnapshot } from "../generated/wire";
+import type { ApprovalSnapshot as CodeApprovalSnapshot } from "../generated/wire";
 import {
   approvalSummary,
   approvalTitle,

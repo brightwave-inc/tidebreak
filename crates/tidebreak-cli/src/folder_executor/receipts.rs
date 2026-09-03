@@ -17,7 +17,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use tidebreak_core::{AgentError, CallId, ChatId, Result};
+use tidebreak_core::{AgentError, CallId, Result, SessionId};
 use uuid::Uuid;
 
 use crate::api::client::ClientExecutionOutcome;
@@ -38,7 +38,7 @@ pub(super) enum DispatchRecovery {
 /// One claim this executor owns, as much of it as must survive a crash.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct Receipt {
-    pub(super) chat_id: ChatId,
+    pub(super) chat_id: SessionId,
     pub(super) call_id: CallId,
     pub(super) executor_id: Uuid,
     /// Chosen before the claim and never regenerated: it is the only key that
@@ -58,7 +58,7 @@ pub(super) struct Receipt {
 
 impl Receipt {
     pub(super) fn new(
-        chat_id: ChatId,
+        chat_id: SessionId,
         call_id: CallId,
         executor_id: Uuid,
         recovery: DispatchRecovery,
@@ -209,7 +209,7 @@ mod tests {
         assert!(store.load().unwrap().is_empty());
 
         let mut receipt = Receipt::new(
-            ChatId::new(),
+            SessionId::new(),
             CallId::new(),
             Uuid::new_v4(),
             DispatchRecovery::Terminalize,

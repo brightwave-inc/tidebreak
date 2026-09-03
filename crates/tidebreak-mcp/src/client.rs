@@ -88,7 +88,7 @@ pub struct McpServerInfo {
 pub trait CallBearerSource: Send + Sync {
     /// The bearer for a call from `chat`, or `None` to keep the connection's
     /// own bearer. Implementations must never log or echo the token.
-    async fn call_bearer(&self, chat: tidebreak_core::id::ChatId) -> Result<Option<String>>;
+    async fn call_bearer(&self, chat: tidebreak_core::id::SessionId) -> Result<Option<String>>;
 }
 
 /// A connected external MCP server whose tools can be mounted into Tidebreak.
@@ -1355,7 +1355,7 @@ async fn stdio_connect_failure(
 mod tests {
     use std::path::PathBuf;
 
-    use tidebreak_core::{ChatId, ToolCallExecution, ToolErrorCategory};
+    use tidebreak_core::{SessionId, ToolCallExecution, ToolErrorCategory};
     use tokio::io::{duplex, split, AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     use super::*;
@@ -1395,7 +1395,11 @@ mod tests {
         assert_eq!(tool.approval_class(), ApprovalClass::Sensitive);
         let output = tool
             .execute(
-                &ToolCtx::new_legacy_workspace(ChatId::new(), None, PathBuf::from("unused-by-mcp")),
+                &ToolCtx::new_legacy_workspace(
+                    SessionId::new(),
+                    None,
+                    PathBuf::from("unused-by-mcp"),
+                ),
                 json!({"query": "waves"}),
             )
             .await
@@ -1516,7 +1520,7 @@ mod tests {
         client.mount(&mut registry);
         let tool = registry.get("mcp__schema__search").unwrap();
         let context =
-            ToolCtx::new_legacy_workspace(ChatId::new(), None, PathBuf::from("unused-by-mcp"));
+            ToolCtx::new_legacy_workspace(SessionId::new(), None, PathBuf::from("unused-by-mcp"));
 
         let refused = tool.execute(&context, json!({"query": 42})).await.unwrap();
         assert!(refused.is_error);
@@ -1796,7 +1800,7 @@ mod tests {
                 .unwrap()
                 .execute(
                     &ToolCtx::new_legacy_workspace(
-                        ChatId::new(),
+                        SessionId::new(),
                         None,
                         PathBuf::from("unused-by-mcp"),
                     ),
@@ -2158,7 +2162,7 @@ mod tests {
                 .unwrap()
                 .execute(
                     &ToolCtx::new_legacy_workspace(
-                        ChatId::new(),
+                        SessionId::new(),
                         None,
                         PathBuf::from("unused-by-mcp"),
                     ),
@@ -2319,7 +2323,7 @@ mod tests {
                 .unwrap()
                 .execute(
                     &ToolCtx::new_legacy_workspace(
-                        ChatId::new(),
+                        SessionId::new(),
                         None,
                         PathBuf::from("unused-by-mcp"),
                     ),

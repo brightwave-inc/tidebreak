@@ -84,10 +84,10 @@ use tidebreak_core::{
     truncate_utf8, validate_import_connected_file_arguments,
     validate_list_connected_folders_arguments, validate_list_folder_arguments,
     validate_read_connected_file_arguments, validate_request_folder_access_arguments,
-    validate_write_output_to_connected_folder_arguments, AgentError, CallId, ChatId,
+    validate_write_output_to_connected_folder_arguments, AgentError, CallId,
     GrantedFolderCapability, ImportConnectedFileArgs, ImportConnectedFileResult, ListFolderArgs,
     ReadConnectedFileArgs, RequestFolderAccessResult, Result, ResultEntry, ResultEntryKind,
-    ToolCallExecution, ToolCallRecord, ToolCallStatus, IMPORT_CONNECTED_FILE_TOOL,
+    SessionId, ToolCallExecution, ToolCallRecord, ToolCallStatus, IMPORT_CONNECTED_FILE_TOOL,
     LIST_CONNECTED_FOLDERS_TOOL, LIST_FOLDER_TOOL, READ_CONNECTED_FILE_TOOL,
     REQUEST_FOLDER_ACCESS_TOOL, WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL,
 };
@@ -130,7 +130,7 @@ const CONNECTED_FOLDER_URI_SCHEME: &str = "connected-folder";
 /// Which conversations this executor answers for.
 pub enum Scope {
     /// The one chat a print-mode run is driving.
-    Chat(ChatId),
+    Chat(SessionId),
     /// Every conversation the daemon's own credential can see.
     AllChats,
 }
@@ -231,7 +231,7 @@ impl FolderExecutor {
     }
 
     /// Claim and run the folder calls parked on one chat.
-    async fn discover(&self, chat: ChatId, covered: &HashSet<CallId>) -> Result<()> {
+    async fn discover(&self, chat: SessionId, covered: &HashSet<CallId>) -> Result<()> {
         let pending = self
             .client
             .pending_client_executions(&self.executor_token, chat)
@@ -244,7 +244,7 @@ impl FolderExecutor {
 
     async fn discover_call(
         &self,
-        chat: ChatId,
+        chat: SessionId,
         call: crate::api::client::PendingClientCall,
         covered: &HashSet<CallId>,
     ) -> Result<()> {
@@ -415,7 +415,7 @@ impl FolderExecutor {
     }
 
     /// Run one claimed call, returning the model-facing terminal outcome.
-    async fn run_call(&self, chat: ChatId, call: &ToolCallRecord) -> ClientExecutionOutcome {
+    async fn run_call(&self, chat: SessionId, call: &ToolCallRecord) -> ClientExecutionOutcome {
         // New folder consent is operator work (`tidebreak folder connect`), not
         // something a headless executor can grant. Resolve the parked call with
         // the same typed Declined the desktop produces when the picker is
@@ -465,7 +465,7 @@ impl FolderExecutor {
     /// which is what makes a repeated import recover the one source.
     async fn import(
         &self,
-        chat: ChatId,
+        chat: SessionId,
         context: ExecutionContext,
         call: &ToolCallRecord,
     ) -> ClientExecutionOutcome {
@@ -585,7 +585,7 @@ impl FolderExecutor {
     /// chat reads on its own. This is the desktop's derivation, read live from
     /// the chat rather than remembered, so a chat moved between projects cannot
     /// carry the old authority into a later call.
-    async fn execution_context(&self, chat: ChatId) -> Result<ExecutionContext> {
+    async fn execution_context(&self, chat: SessionId) -> Result<ExecutionContext> {
         let summary = self.client.get_chat(chat).await?;
         match summary.project_id {
             Some(project) => ExecutionContext::project_chat(chat.0, project.0),
@@ -876,7 +876,7 @@ mod tests {
     fn call(name: &str, arguments: serde_json::Value) -> ToolCallRecord {
         ToolCallRecord {
             id: CallId::new(),
-            chat_id: ChatId::new(),
+            chat_id: SessionId::new(),
             turn_id: TurnId::new(),
             provider_id: "tool-1".into(),
             name: name.into(),

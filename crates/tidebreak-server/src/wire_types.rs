@@ -542,20 +542,7 @@ mod tests {
     }
 
     fn rendered_bindings() -> String {
-        let mut declarations = event_declarations();
-        let queued_turn = declarations
-            .remove("QueuedTurn")
-            .expect("the code queue row is a generated root");
-        let queued_code_turn = queued_turn.replacen(
-            "export type QueuedTurn =",
-            "export type QueuedCodeTurn =",
-            1,
-        );
-        assert_ne!(
-            queued_code_turn, queued_turn,
-            "the code queue declaration keeps its expected shape"
-        );
-        declarations.insert("QueuedCodeTurn".to_owned(), queued_code_turn);
+        let declarations = event_declarations();
         let union = declarations
             .get("RendererToolName")
             .expect("the vocabulary is reachable from the event root");
@@ -565,39 +552,8 @@ mod tests {
             &[
                 generate::render_tool_name_list(&names),
                 generate::render_wire_limits(),
-                conversation_compatibility_aliases(),
             ],
         )
-    }
-
-    /// Keep clients on the earlier names while the conversation rename lands
-    /// in separate server and client changes.
-    fn conversation_compatibility_aliases() -> String {
-        "// Compatibility aliases for clients that still use the earlier conversation names.\n\
-         export type ChatId = SessionId;\n\
-         export type CodeApprovalDecision = ApprovalDecision;\n\
-         export type CodeApprovalDecisionBody = ApprovalDecisionBody;\n\
-         export type CodeApprovalId = ApprovalId;\n\
-         export type CodeApprovalKind = ApprovalKind;\n\
-         export type CodeApprovalSnapshot = ApprovalSnapshot;\n\
-         export type CodeApprovalState = ApprovalState;\n\
-         export type CodeEvent = Event;\n\
-         export type CodeSessionActivity = SessionActivity;\n\
-         export type CodeSessionDigest = SessionDigest;\n\
-         export type CodeSessionExternalOrigin = SessionExternalOrigin;\n\
-         export type CodeSessionId = SessionId;\n\
-         export type CodeSessionKind = SessionKind;\n\
-         export type CodeSessionLifecycle = SessionLifecycle;\n\
-         export type CodeSessionSnapshot = SessionSnapshot;\n\
-         export type CodeTurnId = TurnId;\n\
-         export type CodeTurnRewriteState = TurnRewriteState;\n\
-         export type CodeTurnSnapshot = TurnSnapshot;\n\
-         export type CodeTurnStatus = TurnStatus;\n\
-         export type CodeUpdateNotice = UpdateNotice;\n\
-         export type CodeUsage = TurnUsage;\n\
-         export type QueuedTurn = QueuedAgentTurn;\n\
-         export type SequencedCodeEventFrame = SequencedEventFrame;\n"
-            .to_owned()
     }
 
     /// The WebSocket frame types, which until now had no contract at all: the

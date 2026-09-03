@@ -13,8 +13,8 @@ use tidebreak_code_execution::{
     MaterializationPrecondition, MaterializedChangeKind, RejectedChangeReason,
 };
 use tidebreak_core::{
-    CallId, ChatId, HostRootId, OutputWriteMode, ToolCallRecord, WriteOutputToConnectedFolderArgs,
-    WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL,
+    CallId, HostRootId, OutputWriteMode, SessionId, ToolCallRecord,
+    WriteOutputToConnectedFolderArgs, WRITE_OUTPUT_TO_CONNECTED_FOLDER_TOOL,
 };
 use tidebreak_host_broker::RelativePath;
 use uuid::Uuid;
@@ -60,7 +60,7 @@ pub(crate) async fn resolve_output_writeback_request(
         return Err("invalid output write-back request identity".to_owned());
     }
     let _exclusive = state.output_writebacks.lock().await;
-    let chat_id = ChatId::from(request.chat_id);
+    let chat_id = SessionId::from(request.chat_id);
     let call_id = CallId::from(request.call_id);
     let client = control_plane(&state)?;
     let call = client
@@ -235,7 +235,7 @@ async fn recover_once(app: &AppHandle) -> bool {
 /// unattended, under the chat's current permission mode.
 async fn requires_user_decision(
     state: &HostAccess,
-    chat_id: ChatId,
+    chat_id: SessionId,
     mode: OutputWriteMode,
 ) -> Result<bool, String> {
     let store = state
@@ -497,7 +497,7 @@ async fn publish_resolution(
 
 fn canonical_arguments(
     call: &ToolCallRecord,
-    chat_id: ChatId,
+    chat_id: SessionId,
     call_id: CallId,
 ) -> Result<WriteOutputToConnectedFolderArgs, String> {
     if call.id != call_id

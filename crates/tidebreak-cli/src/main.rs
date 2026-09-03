@@ -97,7 +97,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use tidebreak_core::{
-    AgentError, ChatId, Config, ListDir, Profile, ReadFile, Result, ToolCtx, ToolRegistry, TurnId,
+    AgentError, Config, ListDir, Profile, ReadFile, Result, SessionId, ToolCtx, ToolRegistry,
+    TurnId,
 };
 
 mod agent_mcp;
@@ -304,7 +305,7 @@ async fn run() -> Result<i32> {
             let Some(chat) = args.next() else {
                 usage_error("attach requires a chat id");
             };
-            let Ok(chat) = ChatId::from_str(&chat.to_string_lossy()) else {
+            let Ok(chat) = SessionId::from_str(&chat.to_string_lossy()) else {
                 usage_error("attach expects a chat UUID");
             };
             let Some(file) = args.next() else {
@@ -333,7 +334,7 @@ async fn run() -> Result<i32> {
                     let Some(id) = args.next() else {
                         usage_error("--chat requires a chat id");
                     };
-                    match ChatId::from_str(&id.to_string_lossy()) {
+                    match SessionId::from_str(&id.to_string_lossy()) {
                         Ok(id) => chat = Some(id),
                         Err(_) => usage_error("--chat expects a chat UUID"),
                     }
@@ -776,8 +777,8 @@ fn parse_format(value: String) -> OutputFormat {
     }
 }
 
-fn parse_chat_id(value: &str) -> ChatId {
-    ChatId::from_str(value).unwrap_or_else(|_| usage_error("expected a chat UUID"))
+fn parse_chat_id(value: &str) -> SessionId {
+    SessionId::from_str(value).unwrap_or_else(|_| usage_error("expected a chat UUID"))
 }
 
 fn parse_turn_id(value: &str) -> TurnId {
@@ -857,7 +858,7 @@ async fn output_command(
 ) -> Result<()> {
     let subcommand = args.next().unwrap_or_default();
     let chat = match args.next() {
-        Some(chat) => match ChatId::from_str(&chat.to_string_lossy()) {
+        Some(chat) => match SessionId::from_str(&chat.to_string_lossy()) {
             Ok(chat) => chat,
             Err(_) => usage_error("output commands expect a chat UUID"),
         },
@@ -1076,14 +1077,13 @@ async fn rehome_secrets() -> Result<()> {
 
 /// Serve the built-in read-only filesystem tools over MCP stdio.
 async fn serve_mcp(workspace: PathBuf) -> Result<()> {
-    let ctx = ToolCtx::try_new_legacy_workspace(ChatId::new(), None, workspace.clone()).map_err(
-        |error| {
+    let ctx = ToolCtx::try_new_legacy_workspace(SessionId::new(), None, workspace.clone())
+        .map_err(|error| {
             AgentError::config(format!(
                 "could not open MCP workspace {}: {error}",
                 workspace.display()
             ))
-        },
-    )?;
+        })?;
 
     let tools = Arc::new(
         ToolRegistry::new()

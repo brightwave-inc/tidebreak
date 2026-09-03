@@ -71,13 +71,13 @@ export function useChatPromptWatcher(
         if (cancelled || seq !== summarySeq) return;
 
         inboxActions.setEntries(pending);
-        // The rail marks chats, so only chat-surface entries reach it. A code
-        // conversation is marked on its own rail by its session digest.
+        // The rail marks sessions without a repo-backed workspace. Workspace
+        // sessions are marked on the code rail by their digest.
         attentionActions.setChatIdsWithPendingPrompts(
           pending
             .map((entry) => entry.conversation)
-            .filter((conversation) => conversation.surface === "chat")
-            .map((conversation) => conversation.chatId),
+            .filter((conversation) => conversation.workspaceId === null)
+            .map((conversation) => conversation.sessionId),
         );
         const pendingPromptIds = new Set(
           pending.flatMap((entry) => entry.items.map((item) => item.callId)),

@@ -324,7 +324,7 @@ mod tests {
         );
     }
 
-    fn completed_usage(events: &[HarnessEvent]) -> tidebreak_core::CodeUsage {
+    fn completed_usage(events: &[HarnessEvent]) -> tidebreak_core::TurnUsage {
         events
             .iter()
             .find_map(|event| match event {

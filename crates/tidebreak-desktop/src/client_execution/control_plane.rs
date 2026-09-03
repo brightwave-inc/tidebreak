@@ -5,9 +5,9 @@ use reqwest::StatusCode;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use thiserror::Error;
 use tidebreak_core::{
-    CallId, ChatId, HostRootId, RootAttachmentChangeAction, RootAttachmentChangeFailure,
+    CallId, HostRootId, RootAttachmentChangeAction, RootAttachmentChangeFailure,
     RootAttachmentChangeId, RootAttachmentChangePhase, RootAttachmentChangeTerminal,
-    RootAttachmentSubjectKind, ToolCallRecord,
+    RootAttachmentSubjectKind, SessionId, ToolCallRecord,
 };
 use uuid::Uuid;
 
@@ -92,7 +92,7 @@ pub(super) struct PendingDelegatedFileRead {
 
 #[derive(Debug, Clone, Deserialize)]
 pub(super) struct PendingChatPrompt {
-    pub(super) chat_id: ChatId,
+    pub(super) chat_id: SessionId,
     #[serde(default)]
     pub(super) output_writeback_call_ids: Vec<CallId>,
 }
@@ -108,7 +108,7 @@ pub(super) enum DelegatedFileClaimDisposition {
 pub(super) struct ClaimedDelegatedFileRead {
     pub(super) disposition: DelegatedFileClaimDisposition,
     pub(super) call_id: CallId,
-    pub(super) chat_id: ChatId,
+    pub(super) chat_id: SessionId,
     pub(super) root_id: HostRootId,
     pub(super) relative_path: String,
 }
@@ -156,7 +156,7 @@ struct PendingRootAttachmentChanges {
 #[derive(Debug, Deserialize)]
 pub(super) struct RootAttachmentChangeView {
     pub(super) id: RootAttachmentChangeId,
-    pub(super) chat_id: ChatId,
+    pub(super) chat_id: SessionId,
     pub(super) root_id: HostRootId,
     pub(super) action: RootAttachmentChangeAction,
     pub(super) subject_kind: RootAttachmentSubjectKind,
@@ -219,7 +219,7 @@ impl ControlPlaneClient {
 
     pub(super) async fn claim(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         call_id: CallId,
         executor_id: Uuid,
         lease_token: Uuid,
@@ -236,7 +236,7 @@ impl ControlPlaneClient {
 
     pub(super) async fn pending(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
     ) -> Result<Vec<ToolCallRecord>, ControlPlaneError> {
         self.get(&format!("/chats/{chat_id}/client-executions/pending/raw"))
             .await
@@ -306,7 +306,7 @@ impl ControlPlaneClient {
 
     pub(super) async fn heartbeat(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         call_id: CallId,
         lease_token: Uuid,
     ) -> Result<(), ControlPlaneError> {
@@ -321,7 +321,7 @@ impl ControlPlaneClient {
 
     pub(super) async fn resolve(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         call_id: CallId,
         lease_token: Uuid,
         resolution: &StoredResolution,
@@ -340,7 +340,7 @@ impl ControlPlaneClient {
 
     pub(super) async fn begin_root_attachment_change(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         change_id: RootAttachmentChangeId,
         root_id: HostRootId,
         action: RootAttachmentChangeAction,

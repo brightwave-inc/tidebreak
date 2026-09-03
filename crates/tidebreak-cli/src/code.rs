@@ -13,17 +13,17 @@ use std::str::FromStr;
 
 use futures::StreamExt as _;
 use tidebreak_core::{
-    AgentError, ApprovalDecisionKind, Attention, AttentionState, CapLevel, CodeApprovalId,
-    CodeApprovalKind, CodeEvent, CodeSessionId, CodeSessionLifecycle, CodeTurnId, HarnessCaps,
-    HarnessKind, PermissionMode, RepoId, Result, WorkspaceId,
+    AgentError, ApprovalDecisionKind, ApprovalId, ApprovalKind, Attention, AttentionState,
+    CapLevel, Event, HarnessCaps, HarnessKind, PermissionMode, RepoId, Result, SessionId,
+    SessionLifecycle, TurnId, WorkspaceId,
 };
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::api::client::Client;
 use crate::api::code::{
     decode_event_frame, decode_update_notice, is_turn_terminal, supported_caps_summary,
-    turn_exit_code, CodeApprovalSnapshot, CodeSessionDigest, CodeSessionSnapshot, CodeTurnSnapshot,
-    CodeUpdateNotice, CodeWorkspaceSnapshot, HarnessAuthMode, SubmitTurnResponse,
+    turn_exit_code, ApprovalSnapshot, CodeWorkspaceSnapshot, HarnessAuthMode, SessionDigest,
+    SessionSnapshot, SubmitTurnResponse, TurnSnapshot, UpdateNotice,
 };
 use crate::connect::Server;
 use crate::print::OutputFormat;
@@ -89,7 +89,7 @@ pub enum OnApproval {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TurnRef {
     Ordinal(i64),
-    Id(CodeTurnId),
+    Id(TurnId),
 }
 
 /// One parsed `tidebreak code` invocation.
@@ -142,20 +142,20 @@ pub enum Command {
         format: OutputFormat,
     },
     SessionShow {
-        id: CodeSessionId,
+        id: SessionId,
         format: OutputFormat,
     },
     SessionMode {
-        id: CodeSessionId,
+        id: SessionId,
         mode: PermissionMode,
         format: OutputFormat,
     },
     SessionReap {
-        id: CodeSessionId,
+        id: SessionId,
         format: OutputFormat,
     },
     Run {
-        session: Option<CodeSessionId>,
+        session: Option<SessionId>,
         workspace: Option<WorkspaceId>,
         message: String,
         on_approval: OnApproval,
@@ -163,24 +163,24 @@ pub enum Command {
         format: OutputFormat,
     },
     Approvals {
-        session: Option<CodeSessionId>,
+        session: Option<SessionId>,
         format: OutputFormat,
     },
     Approve {
-        id: CodeApprovalId,
+        id: ApprovalId,
         format: OutputFormat,
     },
     Deny {
-        id: CodeApprovalId,
+        id: ApprovalId,
         feedback: Option<String>,
         format: OutputFormat,
     },
     Interrupt {
-        session: CodeSessionId,
+        session: SessionId,
         format: OutputFormat,
     },
     Turns {
-        session: CodeSessionId,
+        session: SessionId,
         format: OutputFormat,
     },
     Diff {
@@ -714,29 +714,13 @@ async fn execute(client: &Client, command: Command) -> Result<i32> {
     }
 }
 
-/// There is no `GET /sessions/{id}`. Walk workspaces to recover the row,
-/// then load its turns. A missing session 404s the same way a dedicated
-/// route would.
 async fn load_session(
     client: &Client,
-    id: CodeSessionId,
-) -> Result<(CodeSessionSnapshot, Vec<CodeTurnSnapshot>)> {
-    let session = find_session(client, id).await?;
+    id: SessionId,
+) -> Result<(SessionSnapshot, Vec<TurnSnapshot>)> {
+    let session = client.get_session(id).await?;
     let turns = client.list_session_turns(id).await?;
     Ok((session, turns))
-}
-
-async fn find_session(client: &Client, id: CodeSessionId) -> Result<CodeSessionSnapshot> {
-    let workspaces = client.list_workspaces(None).await?;
-    for workspace in workspaces {
-        let sessions = client.list_workspace_sessions(workspace.id).await?;
-        if let Some(session) = sessions.into_iter().find(|session| session.id == id) {
-            return Ok(session);
-        }
-    }
-    Err(AgentError::msg(format!(
-        "not_found: session {id} not found"
-    )))
 }
 
 async fn resolve_repo(client: &Client, repo: &str) -> Result<RepoId> {
@@ -774,9 +758,9 @@ fn canonicalize_path(path: &str) -> String {
 
 async fn resolve_run_session(
     client: &Client,
-    session: Option<CodeSessionId>,
+    session: Option<SessionId>,
     workspace: Option<WorkspaceId>,
-) -> Result<CodeSessionId> {
+) -> Result<SessionId> {
     if let Some(session) = session {
         return Ok(session);
     }
@@ -829,18 +813,18 @@ async fn resolve_start_mode(
     Ok((mode, note))
 }
 
-fn pick_active_session(sessions: &[CodeSessionSnapshot]) -> Option<CodeSessionId> {
-    let usable = |session: &&CodeSessionSnapshot| {
-        session.kind == tidebreak_core::CodeSessionKind::Interactive
+fn pick_active_session(sessions: &[SessionSnapshot]) -> Option<SessionId> {
+    let usable = |session: &&SessionSnapshot| {
+        session.kind == tidebreak_core::SessionKind::Interactive
             && !matches!(
                 session.lifecycle,
-                CodeSessionLifecycle::Ended | CodeSessionLifecycle::Fenced
+                SessionLifecycle::Ended | SessionLifecycle::Fenced
             )
     };
     sessions
         .iter()
         .filter(usable)
-        .find(|session| session.lifecycle == CodeSessionLifecycle::Running)
+        .find(|session| session.lifecycle == SessionLifecycle::Running)
         .or_else(|| {
             sessions
                 .iter()
@@ -854,7 +838,7 @@ async fn resolve_turn(
     client: &Client,
     workspace: WorkspaceId,
     turn: Option<TurnRef>,
-) -> Result<Option<CodeTurnId>> {
+) -> Result<Option<TurnId>> {
     let Some(turn) = turn else {
         return Ok(None);
     };
@@ -879,7 +863,7 @@ async fn resolve_turn(
 /// fixtures that do not need a live server.
 #[derive(Debug)]
 struct TurnGate {
-    expected: Option<CodeTurnId>,
+    expected: Option<TurnId>,
     ours: bool,
     /// True after we have seen `TurnStarted` for `expected`. Replayed
     /// history of earlier turns is ignored until then; live frames of an
@@ -906,7 +890,7 @@ impl TurnGate {
     /// Attach to a turn that is already running. Own it immediately so live
     /// mid-turn frames are accepted; `TurnStarted` for that id already
     /// happened and only arrives `replayed: true`.
-    fn attach(turn: CodeTurnId) -> Self {
+    fn attach(turn: TurnId) -> Self {
         Self {
             expected: Some(turn),
             ours: true,
@@ -919,11 +903,11 @@ impl TurnGate {
     }
 
     /// The turn this submit owns, once bound.
-    fn bound_turn(&self) -> Option<CodeTurnId> {
+    fn bound_turn(&self) -> Option<TurnId> {
         self.ours.then_some(self.expected).flatten()
     }
 
-    fn on_ran(&mut self, id: CodeTurnId) {
+    fn on_ran(&mut self, id: TurnId) {
         if self.ours && self.expected == Some(id) {
             return;
         }
@@ -941,7 +925,7 @@ impl TurnGate {
         self.seen_start = false;
     }
 
-    fn will_claim(&self, turn_id: CodeTurnId, replayed: bool) -> bool {
+    fn will_claim(&self, turn_id: TurnId, replayed: bool) -> bool {
         match self.expected {
             Some(id) if id == turn_id => !self.seen_start,
             None => !replayed,
@@ -949,8 +933,8 @@ impl TurnGate {
         }
     }
 
-    fn on_frame(&mut self, replayed: bool, event: &CodeEvent) -> FrameAction {
-        if let CodeEvent::TurnStarted { turn_id } = event {
+    fn on_frame(&mut self, replayed: bool, event: &Event) -> FrameAction {
+        if let Event::TurnStarted { turn_id } = event {
             let matches_bound = self.expected == Some(*turn_id);
             let live_unbound = self.expected.is_none() && !replayed;
             if matches_bound || live_unbound {
@@ -993,9 +977,9 @@ const CHECKPOINT_TAIL_WAIT: std::time::Duration = std::time::Duration::from_secs
 /// missing checkpoint must never fail a turn that already succeeded.
 async fn drain_checkpoint(
     client: &Client,
-    session: CodeSessionId,
+    session: SessionId,
     stream: &mut CodeStream,
-    turn_id: CodeTurnId,
+    turn_id: TurnId,
     format: OutputFormat,
     mut dangling: bool,
     streamed_text: &mut String,
@@ -1010,8 +994,8 @@ async fn drain_checkpoint(
             return dangling;
         };
         let done = match &decoded.event {
-            CodeEvent::CheckpointRecorded { turn_id: id, .. } => *id == turn_id,
-            CodeEvent::HarnessNotice { .. } => true,
+            Event::CheckpointRecorded { turn_id: id, .. } => *id == turn_id,
+            Event::HarnessNotice { .. } => true,
             _ => continue,
         };
         if format == OutputFormat::Json {
@@ -1032,7 +1016,7 @@ async fn drain_checkpoint(
 
 async fn run_turn(
     client: &Client,
-    session: CodeSessionId,
+    session: SessionId,
     message: &str,
     on_approval: OnApproval,
     timeout: Option<u64>,
@@ -1049,7 +1033,7 @@ async fn run_turn(
             .await?
             .into_iter()
             .rev()
-            .find(|turn| turn.status == tidebreak_core::CodeTurnStatus::Running);
+            .find(|turn| turn.status == tidebreak_core::TurnStatus::Running);
         match running {
             Some(turn) => {
                 eprintln!("tidebreak: attaching to turn {}", turn.id);
@@ -1119,7 +1103,7 @@ async fn run_turn(
         let Some((raw, decoded)) = frame else {
             continue;
         };
-        if let CodeEvent::TurnStarted { turn_id } = &decoded.event {
+        if let Event::TurnStarted { turn_id } = &decoded.event {
             if gate.will_claim(*turn_id, decoded.replayed == Some(true)) && !gate.ours() {
                 eprintln!("tidebreak: turn {turn_id}");
             }
@@ -1143,7 +1127,7 @@ async fn run_turn(
                 // diffstat never reached a caller reading this stream, and a
                 // script that acted on our exit raced a checkpoint that was
                 // not durable yet.
-                if let CodeEvent::TurnCompleted { .. } = &decoded.event {
+                if let Event::TurnCompleted { .. } = &decoded.event {
                     if let Some(turn_id) = gate.bound_turn() {
                         dangling = drain_checkpoint(
                             client,
@@ -1170,7 +1154,7 @@ async fn run_turn(
                 &mut streamed_text,
             );
         }
-        if let CodeEvent::ApprovalRequested { approval_id, .. } = &decoded.event {
+        if let Event::ApprovalRequested { approval_id, .. } = &decoded.event {
             print_approval_prompt(*approval_id);
             if on_approval == OnApproval::Fail {
                 break Ok(EXIT_APPROVAL_PARKED);
@@ -1227,13 +1211,13 @@ async fn sleep_until(deadline: Option<tokio::time::Instant>) {
 }
 
 fn render_event(
-    event: &CodeEvent,
+    event: &Event,
     replacement: bool,
     dangling: bool,
     streamed_text: &mut String,
 ) -> bool {
     match event {
-        CodeEvent::AssistantDelta { text } => {
+        Event::AssistantDelta { text } => {
             let text = if replacement {
                 reconcile_assistant_text(streamed_text, text)
             } else {
@@ -1248,7 +1232,7 @@ fn render_event(
             let _ = stdout.flush();
             return !text.ends_with('\n');
         }
-        CodeEvent::AssistantMessage { text, .. } => {
+        Event::AssistantMessage { text, .. } => {
             let text = reconcile_assistant_text(streamed_text, text);
             streamed_text.clear();
             if text.is_empty() {
@@ -1259,12 +1243,12 @@ fn render_event(
             let _ = stdout.flush();
             return !text.ends_with('\n');
         }
-        CodeEvent::ReasoningDelta { text } => {
+        Event::ReasoningDelta { text } => {
             if !text.is_empty() {
                 eprint!("{text}");
             }
         }
-        CodeEvent::ToolStarted {
+        Event::ToolStarted {
             name,
             detail,
             parent_call_id,
@@ -1277,7 +1261,7 @@ fn render_event(
             eprintln!("tidebreak: tool {name}  {}", tool_detail(detail));
             return false;
         }
-        CodeEvent::ToolCompleted {
+        Event::ToolCompleted {
             outcome, preview, ..
         } => {
             finish_line(dangling);
@@ -1289,34 +1273,34 @@ fn render_event(
             eprintln!("tidebreak: tool {}{preview}", outcome_label(*outcome));
             return false;
         }
-        CodeEvent::HarnessNotice { level, message } => {
+        Event::HarnessNotice { level, message } => {
             finish_line(dangling);
             eprintln!("tidebreak: {}: {message}", level_label(*level));
             return false;
         }
-        CodeEvent::FileChanged { path, kind, .. } => {
+        Event::FileChanged { path, kind, .. } => {
             finish_line(dangling);
             eprintln!("tidebreak: file {} {path}", kind.as_str_display());
             return false;
         }
-        CodeEvent::TurnFailed { error, .. } => {
+        Event::TurnFailed { error, .. } => {
             streamed_text.clear();
             finish_line(dangling);
             eprintln!("tidebreak: turn failed: {}", error.message);
             return false;
         }
-        CodeEvent::TurnInterrupted { .. } => {
+        Event::TurnInterrupted { .. } => {
             streamed_text.clear();
             finish_line(dangling);
             eprintln!("tidebreak: turn interrupted");
             return false;
         }
-        CodeEvent::TurnResumed { .. } => {
+        Event::TurnResumed { .. } => {
             finish_line(dangling);
             eprintln!("tidebreak: turn resumed");
             return false;
         }
-        CodeEvent::TurnRefused { refusal, .. } => {
+        Event::TurnRefused { refusal, .. } => {
             streamed_text.clear();
             finish_line(dangling);
             eprintln!(
@@ -1327,7 +1311,7 @@ fn render_event(
         }
         // `code run` already told the user to decide this one. Say when the
         // window closes, or the prompt is the last thing they ever hear.
-        CodeEvent::ApprovalResolved {
+        Event::ApprovalResolved {
             approval_id,
             decision: ApprovalDecisionKind::Abandoned,
         } => {
@@ -1337,14 +1321,14 @@ fn render_event(
             );
             return false;
         }
-        CodeEvent::TurnStarted { .. } => streamed_text.clear(),
-        CodeEvent::TurnCompleted { .. } => streamed_text.clear(),
-        CodeEvent::SessionStarted { .. }
-        | CodeEvent::ApprovalRequested { .. }
-        | CodeEvent::ApprovalResolved { .. }
-        | CodeEvent::UserSteered { .. }
-        | CodeEvent::CheckpointRecorded { .. }
-        | CodeEvent::AttentionChanged { .. }
+        Event::TurnStarted { .. } => streamed_text.clear(),
+        Event::TurnCompleted { .. } => streamed_text.clear(),
+        Event::SessionStarted { .. }
+        | Event::ApprovalRequested { .. }
+        | Event::ApprovalResolved { .. }
+        | Event::UserSteered { .. }
+        | Event::CheckpointRecorded { .. }
+        | Event::AttentionChanged { .. }
         | _ => {}
     }
     dangling
@@ -1372,7 +1356,7 @@ fn finish_line(dangling: bool) {
     }
 }
 
-fn print_approval_prompt(id: CodeApprovalId) {
+fn print_approval_prompt(id: ApprovalId) {
     eprintln!();
     eprintln!("tidebreak: approval requested  {id}");
     eprintln!("           decide with:  tidebreak code approve {id}");
@@ -1380,15 +1364,15 @@ fn print_approval_prompt(id: CodeApprovalId) {
     eprintln!();
 }
 
-fn render_update(notice: &CodeUpdateNotice) {
+fn render_update(notice: &UpdateNotice) {
     match notice {
-        CodeUpdateNotice::Snapshot { sessions } => {
+        UpdateNotice::Snapshot { sessions } => {
             eprintln!("tidebreak: watch snapshot  {} session(s)", sessions.len());
             for digest in sessions {
                 eprintln!("  {}", digest_line(digest));
             }
         }
-        CodeUpdateNotice::Digest {
+        UpdateNotice::Digest {
             workspace,
             session,
             lifecycle,
@@ -1411,11 +1395,11 @@ fn render_update(notice: &CodeUpdateNotice) {
         }
         // Progress, delivery, and rewrite notices drive desktop surfaces the
         // watch does not render. Terminal activity is coalesced noise here.
-        CodeUpdateNotice::TerminalActivity { .. }
-        | CodeUpdateNotice::CloneProgress { .. }
-        | CodeUpdateNotice::HarnessInstall { .. }
-        | CodeUpdateNotice::Delivery
-        | CodeUpdateNotice::TurnRewrite { .. } => {}
+        UpdateNotice::TerminalActivity { .. }
+        | UpdateNotice::CloneProgress { .. }
+        | UpdateNotice::HarnessInstall { .. }
+        | UpdateNotice::Delivery
+        | UpdateNotice::TurnRewrite { .. } => {}
     }
 }
 
@@ -1424,7 +1408,7 @@ fn workspace_label(workspace: Option<&WorkspaceId>) -> String {
     workspace.map_or_else(|| "-".to_owned(), ToString::to_string)
 }
 
-fn digest_line(digest: &CodeSessionDigest) -> String {
+fn digest_line(digest: &SessionDigest) -> String {
     let pr = digest
         .pr_state
         .as_ref()
@@ -1462,7 +1446,7 @@ fn print_workspace(workspace: &CodeWorkspaceSnapshot) {
     }
 }
 
-fn print_session(session: &CodeSessionSnapshot) {
+fn print_session(session: &SessionSnapshot) {
     println!("id                   {}", session.id);
     println!(
         "workspace            {}",
@@ -1481,7 +1465,7 @@ fn print_session(session: &CodeSessionSnapshot) {
     );
 }
 
-fn print_turn_line(turn: &CodeTurnSnapshot) {
+fn print_turn_line(turn: &TurnSnapshot) {
     let stat = turn
         .diffstat
         .as_ref()
@@ -1521,7 +1505,7 @@ fn print_turn_line(turn: &CodeTurnSnapshot) {
     );
 }
 
-fn print_approval(approval: &CodeApprovalSnapshot) {
+fn print_approval(approval: &ApprovalSnapshot) {
     println!(
         "{}\t{}\t{}\t{}",
         approval.id,
@@ -1574,17 +1558,17 @@ fn attention_label(attention: &Attention) -> String {
     }
 }
 
-fn approval_kind(kind: &CodeApprovalKind) -> String {
+fn approval_kind(kind: &ApprovalKind) -> String {
     match kind {
-        CodeApprovalKind::Command { cmd, .. } => format!("command {cmd}"),
-        CodeApprovalKind::FileWrite { paths } => format!("write {}", paths.join(",")),
-        CodeApprovalKind::Network { summary } => format!("network {summary}"),
-        CodeApprovalKind::Other { summary } => summary.clone(),
+        ApprovalKind::Command { cmd, .. } => format!("command {cmd}"),
+        ApprovalKind::FileWrite { paths } => format!("write {}", paths.join(",")),
+        ApprovalKind::Network { summary } => format!("network {summary}"),
+        ApprovalKind::Other { summary } => summary.clone(),
         // Decision 0018: the listing shows the literal action, never the
         // call's own display-only narration.
-        CodeApprovalKind::ToolUse { preview, .. } => format!("tool {}", tool_action_line(preview)),
-        CodeApprovalKind::Questions { questions } => format!("questions ({})", questions.len()),
-        CodeApprovalKind::Plan { proposed_mode } => format!("plan -> {proposed_mode}"),
+        ApprovalKind::ToolUse { preview, .. } => format!("tool {}", tool_action_line(preview)),
+        ApprovalKind::Questions { questions } => format!("questions ({})", questions.len()),
+        ApprovalKind::Plan { proposed_mode } => format!("plan -> {proposed_mode}"),
     }
 }
 
@@ -1736,7 +1720,7 @@ struct CodeStream {
 }
 
 impl CodeStream {
-    async fn open_session(client: &Client, session: CodeSessionId) -> Result<Self> {
+    async fn open_session(client: &Client, session: SessionId) -> Result<Self> {
         Ok(Self {
             socket: client.open_code_events(session, 0).await?,
             last_seq: 0,
@@ -1753,8 +1737,8 @@ impl CodeStream {
     async fn next_session(
         &mut self,
         client: &Client,
-        session: CodeSessionId,
-    ) -> Result<Option<(String, crate::api::code::SequencedCodeEventFrame)>> {
+        session: SessionId,
+    ) -> Result<Option<(String, crate::api::code::SequencedEventFrame)>> {
         match self.socket.next().await {
             Some(Ok(Message::Text(text))) => match decode_event_frame(&text) {
                 Ok(frame) => {
@@ -1771,10 +1755,7 @@ impl CodeStream {
         }
     }
 
-    async fn next_updates(
-        &mut self,
-        client: &Client,
-    ) -> Result<Option<(String, CodeUpdateNotice)>> {
+    async fn next_updates(&mut self, client: &Client) -> Result<Option<(String, UpdateNotice)>> {
         match self.socket.next().await {
             Some(Ok(Message::Text(text))) => match decode_update_notice(&text) {
                 Ok(notice) => Ok(Some((text.to_string(), notice))),
@@ -1788,7 +1769,7 @@ impl CodeStream {
         }
     }
 
-    async fn reconnect_session(&mut self, client: &Client, session: CodeSessionId) -> Result<()> {
+    async fn reconnect_session(&mut self, client: &Client, session: SessionId) -> Result<()> {
         let mut last = None;
         for _ in 0..RECONNECT_ATTEMPTS {
             tokio::time::sleep(RECONNECT_DELAY).await;
@@ -2466,16 +2447,16 @@ fn parse_workspace_id(value: &str) -> std::result::Result<WorkspaceId, String> {
     WorkspaceId::from_str(value).map_err(|_| "expected a workspace UUID".to_owned())
 }
 
-fn parse_session_id(value: &str) -> std::result::Result<CodeSessionId, String> {
-    CodeSessionId::from_str(value).map_err(|_| "expected a session UUID".to_owned())
+fn parse_session_id(value: &str) -> std::result::Result<SessionId, String> {
+    SessionId::from_str(value).map_err(|_| "expected a session UUID".to_owned())
 }
 
-fn parse_approval_id(value: &str) -> std::result::Result<CodeApprovalId, String> {
-    CodeApprovalId::from_str(value).map_err(|_| "expected an approval UUID".to_owned())
+fn parse_approval_id(value: &str) -> std::result::Result<ApprovalId, String> {
+    ApprovalId::from_str(value).map_err(|_| "expected an approval UUID".to_owned())
 }
 
 fn parse_turn_ref(value: &str) -> std::result::Result<TurnRef, String> {
-    if let Ok(id) = CodeTurnId::from_str(value) {
+    if let Ok(id) = TurnId::from_str(value) {
         return Ok(TurnRef::Id(id));
     }
     value
@@ -2519,7 +2500,7 @@ mod tests {
 
     #[test]
     fn a_tool_use_listing_shows_the_literal_action_not_the_narration() {
-        let kind = CodeApprovalKind::ToolUse {
+        let kind = ApprovalKind::ToolUse {
             preview: tidebreak_core::ToolActionPreview::Exec {
                 command: "rm".into(),
                 args: vec!["-rf".into(), "two words".into()],
@@ -2880,12 +2861,12 @@ mod tests {
         assert_eq!(default_create_permission_mode(None), PermissionMode::Plan);
     }
 
-    fn turn(n: u128) -> CodeTurnId {
-        CodeTurnId::from(uuid::Uuid::from_u128(n))
+    fn turn(n: u128) -> TurnId {
+        TurnId::from(uuid::Uuid::from_u128(n))
     }
 
-    fn completed() -> CodeEvent {
-        CodeEvent::TurnCompleted {
+    fn completed() -> Event {
+        Event::TurnCompleted {
             usage: Default::default(),
             checkpoint: None,
             stop_reason: None,
@@ -2900,12 +2881,12 @@ mod tests {
         assert_eq!(gate.on_frame(false, &completed()), FrameAction::Skip);
         let ours = turn(2);
         assert_eq!(
-            gate.on_frame(true, &CodeEvent::TurnStarted { turn_id: ours }),
+            gate.on_frame(true, &Event::TurnStarted { turn_id: ours }),
             FrameAction::Skip,
             "replayed TurnStarted after Queued is not a later live start"
         );
         assert_eq!(
-            gate.on_frame(false, &CodeEvent::TurnStarted { turn_id: ours }),
+            gate.on_frame(false, &Event::TurnStarted { turn_id: ours }),
             FrameAction::Render
         );
         assert_eq!(gate.on_frame(false, &completed()), FrameAction::Terminal(0));
@@ -2928,7 +2909,7 @@ mod tests {
             "named but not started: no tail to wait for yet"
         );
         assert_eq!(
-            gate.on_frame(false, &CodeEvent::TurnStarted { turn_id: ours }),
+            gate.on_frame(false, &Event::TurnStarted { turn_id: ours }),
             FrameAction::Render
         );
         assert_eq!(gate.bound_turn(), Some(ours));
@@ -2954,7 +2935,7 @@ mod tests {
             "replayed terminal of an earlier turn is not this attach"
         );
         assert_eq!(
-            gate.on_frame(false, &CodeEvent::AssistantDelta { text: "hi".into() }),
+            gate.on_frame(false, &Event::AssistantDelta { text: "hi".into() }),
             FrameAction::Render
         );
         assert_eq!(gate.on_frame(false, &completed()), FrameAction::Terminal(0));

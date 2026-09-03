@@ -167,24 +167,24 @@ import {
   type CodeAnalyticsRepository as WireCodeAnalyticsRepository,
   type CodeAnalyticsSnapshot as WireCodeAnalyticsSnapshot,
   type CodeAnalyticsTotals as WireCodeAnalyticsTotals,
-  type CodeApprovalSnapshot as WireCodeApprovalSnapshot,
-  type CodeApprovalState as WireCodeApprovalState,
-  type CodeEvent as WireCodeEvent,
+  type ApprovalSnapshot as WireCodeApprovalSnapshot,
+  type ApprovalState as WireCodeApprovalState,
+  type Event as WireCodeEvent,
   type CodeRepoSnapshot as WireCodeRepoSnapshot,
   type QuickAction as WireQuickAction,
-  type CodeSessionId as WireCodeSessionId,
-  type CodeSessionKind as WireCodeSessionKind,
-  type CodeSessionLifecycle as WireCodeSessionLifecycle,
-  type CodeSessionActivity as WireCodeSessionActivity,
-  type CodeSessionSnapshot as WireCodeSessionSnapshot,
+  type SessionId as WireCodeSessionId,
+  type SessionKind as WireCodeSessionKind,
+  type SessionLifecycle as WireCodeSessionLifecycle,
+  type SessionActivity as WireCodeSessionActivity,
+  type SessionSnapshot as WireCodeSessionSnapshot,
   type CodeSubagentStatus as WireCodeSubagentStatus,
   type CodeSubagentSummary as WireCodeSubagentSummary,
-  type CodeTurnId as WireCodeTurnId,
-  type CodeTurnSnapshot as WireCodeTurnSnapshot,
-  type QueuedCodeTurn as WireQueuedCodeTurn,
-  type CodeTurnStatus as WireCodeTurnStatus,
-  type CodeTurnRewriteState as WireCodeTurnRewriteState,
-  type CodeUsage as WireCodeUsage,
+  type TurnId as WireCodeTurnId,
+  type TurnSnapshot as WireCodeTurnSnapshot,
+  type QueuedTurn as WireQueuedCodeTurn,
+  type TurnStatus as WireCodeTurnStatus,
+  type TurnRewriteState as WireCodeTurnRewriteState,
+  type TurnUsage as WireCodeUsage,
   type CodeWorkspaceDiff as WireCodeWorkspaceDiff,
   type CodeWorkspaceFiles as WireCodeWorkspaceFiles,
   type CodeWorkspaceHistorySearchMatch as WireCodeWorkspaceHistorySearchMatch,
@@ -203,8 +203,8 @@ import {
   type CodeCommitSnapshot as WireCodeCommitSnapshot,
   type CodePushSnapshot as WireCodePushSnapshot,
   type CodeFileChange as WireCodeFileChange,
-  type CodeSessionDigest as WireCodeSessionDigest,
-  type CodeUpdateNotice as WireCodeUpdateNotice,
+  type SessionDigest as WireCodeSessionDigest,
+  type UpdateNotice as WireCodeUpdateNotice,
   type CodeCloneDefaults as WireCodeCloneDefaults,
   type CodeRepoSource as WireCodeRepoSource,
   type CodeRepoSources as WireCodeRepoSources,
@@ -244,7 +244,7 @@ import {
   type HarnessTier as WireHarnessTier,
   type HarnessUpdateChannel as WireHarnessUpdateChannel,
   type RepoId as WireRepoId,
-  type SequencedCodeEventFrame as WireSequencedCodeEventFrame,
+  type SequencedEventFrame as WireSequencedCodeEventFrame,
   type ToolDetail as WireToolDetail,
   type ToolOutcome as WireToolOutcome,
   type WorkspaceId as WireWorkspaceId,
@@ -1066,16 +1066,11 @@ export type PendingOutputWritebackRequest = {
  * are read from the conversation the item points at, by the card that owns
  * them — which is also the only place the item can be answered.
  */
-/**
- * Which conversation an inbox entry belongs to.
- *
- * Tagged because chat and code still have separate id spaces. Decision 48
- * step 5 collapses this to one id when the entities merge; until then the tag
- * is the only place either surface's shape shows through.
- */
-export type InboxConversation =
-  | { surface: "chat"; chatId: string }
-  | { surface: "code"; sessionId: string; workspaceId: string };
+/** Which session an inbox entry belongs to. */
+export type InboxConversation = {
+  sessionId: string;
+  workspaceId: string | null;
+};
 
 /** One parked call behind an entry's attention. */
 export type InboxItem = {
@@ -1100,7 +1095,9 @@ export type InboxEntry = {
 export type NotificationKind = "agent_completed" | "agent_failed";
 
 /** Where opening a notification takes the reader. */
-export type NotificationContext = InboxConversation;
+export type NotificationContext =
+  | { surface: "chat"; chatId: string }
+  | { surface: "code"; sessionId: string; workspaceId: string };
 
 /** One agent-finished row from GET /notifications. */
 export type AgentNotification = {
@@ -1117,11 +1114,9 @@ export type AgentNotificationPage = {
   nextCursor: string | null;
 };
 
-/** A stable key for an entry, whichever surface it lives on. */
+/** A stable key for an entry. */
 export function inboxConversationKey(conversation: InboxConversation): string {
-  return conversation.surface === "chat"
-    ? `chat:${conversation.chatId}`
-    : `code:${conversation.sessionId}`;
+  return conversation.sessionId;
 }
 
 /** Opaque prompt state used to mark another chat as needing attention. */
@@ -1276,7 +1271,7 @@ export type CodeWorkspaceStatus = WireCodeWorkspaceStatus;
 export type CodeSessionSnapshot = WireCodeSessionSnapshot;
 export type CodeGrantSnapshot = WireCodeGrantSnapshot;
 export type CodeConnectPage = WireCodeConnectPage;
-export type CodeSessionId = WireCodeSessionId;
+export type SessionId = WireCodeSessionId;
 export type CodeSessionKind = WireCodeSessionKind;
 export type CodeSessionLifecycle = WireCodeSessionLifecycle;
 export type FenceReason = WireFenceReason;
@@ -1288,7 +1283,7 @@ export type AttentionSource = WireAttentionSource;
 export type CodeTurnSnapshot = WireCodeTurnSnapshot;
 /** A queued follow-up row; its id becomes the promoted turn's id. */
 export type QueuedCodeTurn = WireQueuedCodeTurn;
-export type CodeTurnId = WireCodeTurnId;
+export type TurnId = WireCodeTurnId;
 export type CodeTurnStatus = WireCodeTurnStatus;
 export type CodeTurnRewriteState = WireCodeTurnRewriteState;
 export type CodeUsage = WireCodeUsage;

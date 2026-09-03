@@ -1,7 +1,7 @@
 import type {
-  CodeEvent,
-  CodeTurnSnapshot,
-  SequencedCodeEventFrame,
+  Event as CodeEvent,
+  SequencedEventFrame as SequencedCodeEventFrame,
+  TurnSnapshot as CodeTurnSnapshot,
 } from "../generated/wire";
 import { resumeAfter, shouldApplyDurable } from "./cursor";
 
