@@ -612,6 +612,13 @@ const CHILD_ENV_ALLOWED_NAMES: &[&str] = &[
     "CURL_CA_BUNDLE",
     "GIT_SSL_CAINFO",
     "NODE_EXTRA_CA_CERTS",
+    // The user's SSH agent socket: a path, not a secret. `git commit` with
+    // `commit.gpgsign` and `gpg.format = ssh` signs through the agent, and
+    // `git push` over SSH authenticates through it. Without the socket,
+    // `ssh-keygen -Y sign` falls back to the on-disk key and, when that key
+    // has a passphrase, blocks reading it from a stdin that never answers,
+    // so the child's commit hangs until the tool times out.
+    "SSH_AUTH_SOCK",
     // Windows children cannot start, resolve commands, or write temp files
     // without these; on Unix they are simply absent.
     "SYSTEMROOT",

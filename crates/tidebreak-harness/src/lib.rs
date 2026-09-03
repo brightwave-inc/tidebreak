@@ -1216,6 +1216,21 @@ mod tests {
             .any(|(key, value)| { key == "HOME" && value == "/home/probe" }));
     }
 
+    /// A signing-key passphrase prompt in a headless child never returns, so
+    /// the agent socket must reach the child or every signed `git commit`
+    /// hangs until the tool times out.
+    #[test]
+    fn filter_child_env_keeps_the_ssh_agent_socket() {
+        let snapshot = vec![(
+            std::ffi::OsString::from("SSH_AUTH_SOCK"),
+            std::ffi::OsString::from("/run/user/1000/agent.sock"),
+        )];
+        let env = filter_child_env(snapshot);
+        assert!(env.iter().any(|(key, value)| {
+            key == "SSH_AUTH_SOCK" && value == "/run/user/1000/agent.sock"
+        }));
+    }
+
     #[test]
     fn no_adapter_declares_image_input_without_an_image_fixture() {
         use tidebreak_core::CapLevel;
