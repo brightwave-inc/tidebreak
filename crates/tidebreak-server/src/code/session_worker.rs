@@ -3449,11 +3449,29 @@ pub(crate) async fn attach_engine(
     session.child_process_identity = None;
     session.harness_version = version.or(session.harness_version);
     session.lifecycle = CodeSessionLifecycle::Idle;
-    super::attention::replace_attention(
-        &mut session,
-        Attention::working(AttentionSource::Lifecycle),
-        false,
-    );
+    // Attaching an engine makes it ready for a turn, not active. Restore
+    // automatic active attention left by an earlier attachment. Preserve
+    // unread work and user pins.
+    if session.attention.source.is_automatic()
+        && matches!(
+            session.attention.state,
+            tidebreak_core::AttentionState::Working
+                | tidebreak_core::AttentionState::Stalled { .. }
+        )
+    {
+        let restored = super::attention::compute_attention(
+            db,
+            bus,
+            &session,
+            super::attention::ComputeOpts {
+                reviewed: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|err| WorkerError::Failed(err.to_string()))?;
+        super::attention::replace_attention(&mut session, restored, false);
+    }
     super::attention::persist_session(db, bus, &session)
         .await
         .map_err(|err| WorkerError::Failed(err.to_string()))?;

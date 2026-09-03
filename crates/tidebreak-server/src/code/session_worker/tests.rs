@@ -3,11 +3,13 @@ use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
 use chrono::Utc;
 use tidebreak_core::db::code::{
     enqueue_queued_turn, get_session, insert_repo, insert_session, insert_workspace,
-    list_approvals, list_events, list_turns, replace_session_execution_settings, MAX_REPLAY_EVENTS,
+    list_approvals, list_events, list_turns, replace_session_attention,
+    replace_session_execution_settings, MAX_REPLAY_EVENTS,
 };
 use tidebreak_core::{
-    CodeRepo, CodeSessionKind, CodeUsage, CodeWorkspace, CodeWorkspaceStatus, HarnessKind,
-    ImageMediaType, ImageRef, PermissionMode, ReasoningEffort, RepoId, ToolDetail, WorkspaceId,
+    AttentionState, CodeRepo, CodeSessionKind, CodeUsage, CodeWorkspace, CodeWorkspaceStatus,
+    HarnessKind, ImageMediaType, ImageRef, PermissionMode, ReasoningEffort, RepoId, ToolDetail,
+    WorkspaceId,
 };
 use tidebreak_harness::{HarnessAdapter as _, SessionSpec};
 
@@ -1092,6 +1094,17 @@ async fn codex_attachment_journals_one_start_after_the_thread_is_known() {
     .unwrap();
     let owner = OwnerId::local();
     assert_eq!(attached.harness_version.as_deref(), Some("0.147.0"));
+    assert_eq!(attached.lifecycle, CodeSessionLifecycle::Idle);
+    assert_eq!(attached.attention.state, AttentionState::Idle);
+    assert_eq!(
+        get_session(&store, &owner, session_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .attention
+            .state,
+        AttentionState::Idle
+    );
 
     assert!(
         list_events(&store, &owner, session_id, 0, MAX_REPLAY_EVENTS)
@@ -1146,6 +1159,39 @@ async fn codex_attachment_journals_one_start_after_the_thread_is_known() {
             "0.147.0".into(),
             Some("thread-1".into())
         )]
+    );
+}
+
+#[tokio::test]
+async fn engine_attachment_preserves_unreviewed_work() {
+    let (_directory, store, bus, session_id) =
+        seeded_session(HarnessKind::ClaudeCode, Some("2.1.237")).await;
+    let owner = OwnerId::local();
+    let unreviewed = Attention::new(AttentionState::DoneUnreviewed, AttentionSource::Lifecycle);
+    replace_session_attention(&store, &owner, session_id, &unreviewed, false)
+        .await
+        .unwrap();
+
+    let attached = attach_engine(
+        &store,
+        &bus,
+        session_id,
+        HarnessKind::ClaudeCode,
+        Some("2.1.237".into()),
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(attached.lifecycle, CodeSessionLifecycle::Idle);
+    assert_eq!(attached.attention, unreviewed);
+    assert_eq!(
+        get_session(&store, &owner, session_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .attention,
+        unreviewed
     );
 }
 
