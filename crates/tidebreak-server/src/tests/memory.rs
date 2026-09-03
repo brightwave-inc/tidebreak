@@ -388,6 +388,9 @@ async fn memory_turn_app(
 ) {
     let (dir, store) = temp_db_store("memory-turns.db").await;
     let db = Arc::new(store);
+    db.set_setting(crate::routes::MEMORY_ENABLED_SETTING, &json!(true))
+        .await
+        .unwrap();
     let store: Arc<dyn Store> = db.clone();
     let mut state = AppState::new(
         Config::desktop(dir.path()),

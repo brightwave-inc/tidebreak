@@ -52,7 +52,6 @@ import {
 } from "./workspace/layout";
 import { MarkdownLinkProvider } from "@/MessageMarkdown";
 import { PanelLayout } from "@/panel/PanelLayout";
-import { MemoryProposalChip } from "./MemoryProposalChip";
 import {
   PendingApprovalBadge,
   SessionAttentionBadge,
@@ -868,7 +867,6 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
                 fallback={digest?.attention ?? session.attention}
               />
               <PendingApprovalBadge sessionId={session.id} client={client} />
-              <MemoryProposalChip count={digest?.memory_proposal_count ?? 0} />
               <SessionLifecycleIndicator
                 lifecycle={digest?.lifecycle ?? session.lifecycle}
                 harness={session.harness_kind}

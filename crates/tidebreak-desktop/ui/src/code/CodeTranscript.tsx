@@ -274,6 +274,12 @@ export function codeTranscriptPresentationItems(
   items: readonly CodeTranscriptItem[],
 ): CodeTranscriptItem[] {
   return items.filter((item, index) => {
+    // Older servers journaled memory transport details as transcript cards.
+    // Keep those stored rows out of the UI after the source stopped emitting
+    // them; they describe implementation limits rather than user work.
+    if (item.kind === "notice" && isMemoryTransportNotice(item.message)) {
+      return false;
+    }
     if (
       item.kind !== "notice" ||
       item.level !== "error" ||
@@ -291,6 +297,13 @@ export function codeTranscriptPresentationItems(
 
     return true;
   });
+}
+
+function isMemoryTransportNotice(message: string): boolean {
+  return (
+    message.includes("cannot mount Tidebreak's loopback memory verb") ||
+    message.startsWith("Memory was not materialized for this turn:")
+  );
 }
 
 /** Whether the failed-turn card answers this message with recovery steps. */

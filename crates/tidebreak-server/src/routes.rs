@@ -16,8 +16,8 @@ pub(crate) const PROMPT_CACHE_RETENTION_SETTING: &str = "models.prompt_cache_ret
 /// Master switch for the computer-use capability (screen capture + app
 /// control). Default on; setting it false unregisters the tools at boot.
 pub(crate) const COMPUTER_USE_ENABLED_SETTING: &str = "computer_use.enabled";
-/// Master switch for durable memory. Default on; explicit reads and writes
-/// stay available even when no utility model is configured.
+/// Master switch for experimental durable memory. Default off; an explicit
+/// opt-in enables records, digests, and the foreground memory tool.
 pub(crate) const MEMORY_ENABLED_SETTING: &str = "memory.enabled";
 /// Master switch for post-turn memory capture. Capture also requires a
 /// resolvable utility model.

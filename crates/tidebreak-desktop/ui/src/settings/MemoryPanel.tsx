@@ -175,8 +175,8 @@ export function MemoryPanel({ client }: { client: ApiClient }) {
 
   return (
     <SettingsPanel
-      title="Memory"
-      description="Review durable records before they gain authority, inspect their evidence, and see the digest conversations receive."
+      title="Experimental"
+      description="Try features that are still changing. Experimental features are off by default."
       busy={loading || working}
     >
       {loading && records == null ? (
@@ -192,7 +192,13 @@ export function MemoryPanel({ client }: { client: ApiClient }) {
         </div>
       ) : (
         <>
-          {digest.record_count === 0 ? (
+          {settings?.enabled === false ? (
+            <SettingsStatus
+              tone="disabled"
+              label="Memory is off"
+              description="Conversations do not receive memory records or memory tools."
+            />
+          ) : digest.record_count === 0 ? (
             <SettingsStatus
               tone="disabled"
               label="No active memory"
@@ -205,13 +211,15 @@ export function MemoryPanel({ client }: { client: ApiClient }) {
               description="Personal memory is injected as dated claims; the current conversation always overrides it."
             />
           )}
-          <p className="text-sm text-muted-foreground" role="status">
-            {sweepSummary(sweep)}
-          </p>
+          {settings?.enabled && (
+            <p className="text-sm text-muted-foreground" role="status">
+              {sweepSummary(sweep)}
+            </p>
+          )}
 
           <SettingsSection
-            title="Memory settings"
-            description="Explicit records and digests stay available even when capture is off."
+            title="Memory"
+            description="Use reviewed records across conversations. Memory stays off until you enable it."
           >
             {settings == null ? (
               <p className="text-sm text-muted-foreground">Loading…</p>
@@ -219,7 +227,7 @@ export function MemoryPanel({ client }: { client: ApiClient }) {
               <>
                 <SettingsField
                   label="Enable memory"
-                  hint="Turn off to stop records and digests without deleting anything."
+                  hint="Allow Tidebreak to use reviewed records and expose memory tools. Turning this off does not delete records."
                 >
                   <Switch
                     checked={settings.enabled}

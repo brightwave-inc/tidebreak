@@ -134,6 +134,43 @@ describe("CodeTranscript", () => {
     expect(screen.getByText("unrecognized event dropped")).toBeInTheDocument();
   });
 
+  it("hides stored memory transport notices", () => {
+    render(
+      <CodeTranscript
+        items={[
+          {
+            kind: "notice",
+            id: "memory-verb",
+            level: "info",
+            message:
+              "Codex CLI cannot mount Tidebreak's loopback memory verb. Propose, search, and read run through the materialized files instead.",
+          },
+          {
+            kind: "notice",
+            id: "memory-files",
+            level: "warning",
+            message:
+              "Memory was not materialized for this turn: the store is unavailable",
+          },
+          {
+            kind: "notice",
+            id: "kept",
+            level: "warning",
+            message: "The engine is slow to answer.",
+          },
+        ]}
+      />,
+    );
+
+    expect(
+      screen.queryByText(/cannot mount Tidebreak's loopback memory verb/),
+    ).toBeNull();
+    expect(
+      screen.queryByText(/Memory was not materialized for this turn/),
+    ).toBeNull();
+    expect(screen.getByText("The engine is slow to answer.")).toBeVisible();
+  });
+
   it("puts one copy action on the turn's closing assistant message", () => {
     const progressTurn: CodeTranscriptItem[] = [
       items[0],

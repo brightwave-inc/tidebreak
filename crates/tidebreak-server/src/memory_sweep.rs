@@ -233,7 +233,7 @@ impl MemorySweep {
             .ok()
             .flatten()
             .and_then(|value| value.as_bool())
-            .unwrap_or(true);
+            .unwrap_or(false);
         if !enabled {
             return;
         }
