@@ -86,6 +86,12 @@ jobs:
             crates/tidebreak-desktop/binaries/tidebreak-${{ matrix.target }}
           key: macos-release-target-v5-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ github.sha }}
 
+      - name: Enable compiler cache write diagnostics
+        if: ${{ matrix.target == 'x86_64-apple-darwin' }}
+        run: |
+          echo "SCCACHE_ERROR_LOG=$RUNNER_TEMP/sccache-error.log" >> "$GITHUB_ENV"
+          echo "SCCACHE_LOG=sccache::server=debug" >> "$GITHUB_ENV"
+
       - name: Set up compiler cache
         uses: ./.github/actions/setup-sccache-s3
         with:
@@ -150,6 +156,13 @@ jobs:
             crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}
             crates/tidebreak-desktop/binaries/tidebreak-${{ matrix.target }}
           key: ${{ steps.rust-build-cache.outputs.cache-primary-key }}
+
+      - name: Report compiler cache write diagnostics
+        if: ${{ always() && matrix.target == 'x86_64-apple-darwin' }}
+        run: |
+          if [[ -f "$SCCACHE_ERROR_LOG" ]]; then
+            grep -F "Error executing cache write" "$SCCACHE_ERROR_LOG" || true
+          fi
 
       - name: Require a successful cache-warm compilation
         if: ${{ steps.compile.outcome != 'success' }}
