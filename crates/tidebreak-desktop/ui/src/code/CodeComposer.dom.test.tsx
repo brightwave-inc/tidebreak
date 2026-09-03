@@ -1144,6 +1144,51 @@ describe("CodeComposer", () => {
     expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("");
   });
 
+  it("does not restore a submitted prompt after the composer remounts", async () => {
+    let rejectSend!: (error: Error) => void;
+    const onSend = vi.fn(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectSend = reject;
+        }),
+    );
+    const first = renderComposer(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        sessionId="sess-1"
+        onSend={onSend}
+        onInterrupt={vi.fn()}
+      />,
+    );
+
+    const box = screen.getByRole("textbox", { name: "Message" });
+    fireEvent.change(box, { target: { value: "already accepted" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(onSend).toHaveBeenCalledOnce());
+    expect(box).toHaveValue("");
+
+    first.unmount();
+    renderComposer(
+      <CodeComposer
+        running
+        permissionMode="ask"
+        sessionId="sess-1"
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("");
+
+    await act(async () => {
+      rejectSend(new Error("the old response closed"));
+      await Promise.resolve();
+    });
+
+    expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("");
+    expect(useComposerDrafts.getState().drafts["sess-1"]).toBeFalsy();
+  });
+
   it("does not re-append first-turn recovery after a Settings remount", async () => {
     const user = userEvent.setup();
     const recovery = {

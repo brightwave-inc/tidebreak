@@ -17,7 +17,7 @@ impl CodeRuntime {
             .filter(|value| !value.is_empty())
             .unwrap_or_default();
         let id = WorkspaceId::new();
-        let branch = branch_name(&repo.branch_prefix, &title, id.0.as_u128());
+        let branch = branch_name(&repo.branch_prefix, &title, id.as_uuid());
         let existing = list_workspaces(&self.db, owner, Some(repo_id)).await?;
         if existing
             .iter()
@@ -242,11 +242,11 @@ impl CodeRuntime {
             return Ok(false);
         }
         let repo = self.get_repo(owner, workspace.repo_id).await?;
-        let expected = branch_name(&repo.branch_prefix, "", id.0.as_u128());
+        let expected = branch_name(&repo.branch_prefix, "", id.as_uuid());
         if workspace.branch_name != expected {
             return Ok(false);
         }
-        let next = branch_name(&repo.branch_prefix, title, id.0.as_u128());
+        let next = branch_name(&repo.branch_prefix, title, id.as_uuid());
         if next == expected {
             return Ok(false);
         }

@@ -1,6 +1,6 @@
 import { useState, type ComponentProps, type ReactNode } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { fn } from "storybook/test";
+import { expect, fn, within } from "storybook/test";
 import { toast } from "sonner";
 
 import { setEditorPreference } from "@/code/editorPreference";
@@ -33,6 +33,7 @@ import {
   queuedPrDigest,
   runningDigest,
   shellDigest,
+  attentionStalled,
   stalledDigest,
   settledSubagentsDigest,
   subagentsDigest,
@@ -603,6 +604,51 @@ export const Stalled: Story = {
       archived: false,
       hasSession: true,
     }),
+  },
+};
+
+/** A long-running command stays with Running while its row shows the warning. */
+export const SilentRunningCommand: Story = {
+  render: (args) => (
+    <StatusGroup rank="running" count={1}>
+      <WorkspaceCard
+        {...args}
+        workspace={{
+          ...codeWorkspace,
+          id: "ws-silent-command",
+          title: "Uneff: hidden-thicket",
+        }}
+        digest={{
+          ...shellDigest,
+          workspace: "ws-silent-command",
+          title: "Uneff: hidden-thicket",
+          attention: attentionStalled,
+          activity_detail: "git commit -m \"$(cat <<'EOF'\"",
+        }}
+        session={{
+          ...codeSession,
+          workspace_id: "ws-silent-command",
+          attention: attentionStalled,
+          created_at: new Date(Date.now() - 19 * 60_000).toISOString(),
+        }}
+        commands={workspaceCommands({
+          hasPr: false,
+          archived: false,
+          hasSession: true,
+        })}
+      />
+    </StatusGroup>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(canvas.getByText("Running · 1")).toBeVisible();
+    await expect(canvas.queryByText("Needs you · 1")).not.toBeInTheDocument();
+    await expect(
+      canvas.getByText("git commit -m \"$(cat <<'EOF'\""),
+    ).toBeVisible();
+    await expect(
+      canvasElement.querySelector('[data-state-glyph="stalled"]'),
+    ).not.toBeNull();
   },
 };
 

@@ -413,6 +413,24 @@ describe("CodeTranscript", () => {
     ).toHaveAttribute("datetime", "2026-08-15T12:00:00.000Z");
   });
 
+  it("hides internal trigger-fire notices", () => {
+    render(
+      <CodeTranscript
+        items={[
+          {
+            kind: "notice",
+            id: "trigger-fire",
+            level: "info",
+            message:
+              "trigger d655b722-50c4-4560-b09b-991a56182771 fired: changes requested on #3105",
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.queryByText(/trigger d655b722/)).not.toBeInTheDocument();
+  });
+
   it("closes a completed turn with its duration, diffstat, and usage", () => {
     render(<CodeTranscript items={items} />);
     const seam = screen.getByRole("group", { name: "Turn finished" });

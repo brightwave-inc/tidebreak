@@ -26,6 +26,33 @@ async fn two_repos_with_the_same_name_get_distinct_worktrees() {
     assert!(std::path::Path::new(path_b).join("README.md").is_file());
 }
 
+#[tokio::test]
+async fn untitled_workspace_branch_includes_the_workspace_id() {
+    let (router, token, _runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo_root = init_git_repo(dir.path());
+    let (repo, _first) = register_and_workspace(&client, addr, &token, &repo_root).await;
+
+    let created = client
+        .post(format!("http://{addr}/code/workspaces"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "repo_id": json_id(&repo) }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let workspace: serde_json::Value = created.json().await.unwrap();
+    let title = workspace["title"].as_str().unwrap();
+    let branch = workspace["branch_name"].as_str().unwrap();
+
+    assert_eq!(
+        branch,
+        format!("tidebreak/{title}-{}", &json_id(&workspace)[..8])
+    );
+    assert!(branch_exists_in(&repo_root, branch));
+}
+
 /// The worktree root is a setting, and moving it moves only what comes next.
 ///
 /// The two halves are one test because the second is meaningless without the

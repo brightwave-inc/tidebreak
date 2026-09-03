@@ -35,6 +35,8 @@ afterEach(cleanup);
 function renderCard(overrides?: {
   workspace?: Partial<CodeWorkspaceSnapshot>;
   pr?: PullRequestDigest;
+  digest?: CodeSessionDigest;
+  session?: CodeSessionSnapshot;
   density?: "compact" | "detailed";
   visibleMeta?: { repoChip: boolean; branch: boolean };
   detailDefaultOpen?: boolean;
@@ -55,8 +57,8 @@ function renderCard(overrides?: {
   render(
     <WorkspaceCard
       workspace={merged}
-      digest={undefined}
-      session={undefined}
+      digest={overrides?.digest}
+      session={overrides?.session}
       repoName="app"
       active={overrides?.active ?? false}
       selected={overrides?.selected}
@@ -300,6 +302,46 @@ describe("WorkspaceCard", () => {
     expect(screen.queryByText("Idle")).not.toBeInTheDocument();
     expect(screen.queryByText("Done")).not.toBeInTheDocument();
     expect(screen.queryByTitle("Claude Code")).not.toBeInTheDocument();
+  });
+
+  it("keeps a silent running command out of needs-you", () => {
+    const digest: CodeSessionDigest = {
+      workspace: workspace.id,
+      session: "sess-1",
+      kind: "interactive",
+      harness_kind: "claude_code",
+      lifecycle: "running",
+      attention: {
+        state: { type: "stalled", idle_secs: 1_140 },
+        source: "heuristic",
+      },
+      title: workspace.title,
+      turn_count: 3,
+      activity: "shell",
+      activity_detail: "git commit -m release-notes",
+    };
+    renderCard({
+      digest,
+      session: {
+        id: "sess-1",
+        workspace_id: workspace.id,
+        kind: "interactive",
+        harness_kind: "claude_code",
+        permission_mode: "plan",
+        fast_mode: false,
+        lifecycle: "running",
+        attention: digest.attention,
+        unrecognized_event_count: 0,
+        created_at: "2026-08-15T00:00:00.000Z",
+      },
+    });
+
+    expect(screen.getByLabelText("Running")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Needs you")).not.toBeInTheDocument();
+    expect(screen.getByText("git commit -m release-notes")).toBeInTheDocument();
+    expect(
+      document.querySelector('[data-state-glyph="stalled"]'),
+    ).toBeInTheDocument();
   });
 
   it("does not open on a modifier click so the rail can select", async () => {

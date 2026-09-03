@@ -186,14 +186,16 @@ export function readyToMergeNotice(
 }
 
 /**
- * Rank a workspace for the by-status rail. Needs-you wins, then a running
+ * Rank a workspace for the by-status rail. A direct need wins, then a running
  * engine, then an open PR, then done-unreviewed, then a workspace whose setup
  * script failed, then idle. Archived is last. A digest may change the rank;
  * viewing or selecting never does.
  *
- * Stalled and fenced join needs-you so the card mark and the group agree.
- * Ready-to-merge does not: notify and watch store it as needs-you, but it is
- * a successful pull-request state, and a merged or closed pull request makes
+ * A stalled state is only a silence heuristic. While the lifecycle still says
+ * running, the workspace stays with live work and the session row carries the
+ * warning. A stale stalled state and a fenced session join needs-you. Ready to
+ * merge does not: notify and watch store it as needs-you, but it is a
+ * successful pull-request state, and a merged or closed pull request makes
  * that prompt stale. Idle or ended sessions with turns join Done, matching
  * `attentionMarkForDigest`. A failed setup ranks below live work because the
  * checkout survives — but above idle, because nothing else on the card says
@@ -209,12 +211,12 @@ export function workspaceStatusRank(
   if (
     (attentionType === "needs_you" &&
       !isReadyToMergeAttention(digest?.attention)) ||
-    attentionType === "stalled" ||
     attentionType === "fenced"
   ) {
     return "needs_you";
   }
   if (digest?.lifecycle === "running") return "running";
+  if (attentionType === "stalled") return "needs_you";
   if (pr) {
     const lifecycle = pullRequestLifecycle(pr);
     if (lifecycle === "open" || lifecycle === "draft") return "pr_open";
