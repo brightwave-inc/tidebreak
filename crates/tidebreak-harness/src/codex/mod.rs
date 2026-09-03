@@ -87,8 +87,8 @@ impl HarnessAdapter for CodexAdapter {
             resume: CapLevel::Supported,
             streaming_deltas: CapLevel::Supported,
             structured_approvals: CapLevel::Supported,
-            // The non-experimental `turn/steer` contract is verified for the
-            // 0.147 line. Keep newer and older installations honest until
+            // The non-experimental `turn/steer` contract is verified from the
+            // 0.147 line onward. Keep older installations honest until
             // their generated schema is checked too.
             mid_turn_steering: if supports_native_steering(probe.version.as_deref()) {
                 CapLevel::Supported
@@ -166,7 +166,7 @@ fn supports_native_steering(version: Option<&str>) -> bool {
             parts.next().is_none().then_some((major, minor, patch))
         })
         .next()
-        .is_some_and(|(major, minor, _)| major == 0 && minor == 147)
+        .is_some_and(|(major, minor, _)| major == 0 && minor >= 147)
 }
 
 /// Ask the same app-server protocol a real session uses. Codex has no
@@ -1152,7 +1152,7 @@ requires_openai_auth = true
     }
 
     #[test]
-    fn steering_capability_is_gated_to_the_verified_0_147_line() {
+    fn steering_capability_is_gated_to_0_147_and_above() {
         let caps_for = |version: Option<&str>| {
             CodexAdapter::new()
                 .capabilities(&HarnessProbe {
@@ -1169,8 +1169,8 @@ requires_openai_auth = true
 
         assert_eq!(caps_for(Some("codex-cli 0.147.0")), CapLevel::Supported);
         assert_eq!(caps_for(Some("0.147.9")), CapLevel::Supported);
+        assert_eq!(caps_for(Some("codex-cli 0.153.0")), CapLevel::Supported);
         assert_eq!(caps_for(Some("codex-cli 0.146.3")), CapLevel::Unknown);
-        assert_eq!(caps_for(Some("codex-cli 0.148.0")), CapLevel::Unknown);
         assert_eq!(
             caps_for(Some("codex-cli 0.147.0-alpha.1")),
             CapLevel::Unknown
