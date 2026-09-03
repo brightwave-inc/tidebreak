@@ -24,10 +24,11 @@ import { execFileSync } from "node:child_process";
 import {
   copyFileSync,
   existsSync,
-  mkdtempSync,
   lstatSync,
+  mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
