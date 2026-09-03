@@ -51,6 +51,10 @@ pub const MAX_SCHEMA_SUBTREE_BYTES: usize = 16 * 1024;
 /// Deepest `$ref` chain followed during resolution. Caps work on cyclic or
 /// adversarially nested reference graphs.
 pub const MAX_REF_RESOLUTION_DEPTH: usize = 8;
+/// Most entries a specification index may carry. A Fern-style index
+/// typically lists 2–5 child documents; the bound prevents an
+/// adversarial array from minting unbounded output.
+pub const MAX_SPEC_INDEX_ENTRIES: usize = 32;
 
 /// HTTP methods an operation may declare — the standard OpenAPI path-item set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -167,6 +171,16 @@ pub struct OperationCatalog {
     pub operations: BTreeMap<String, CatalogOperation>,
 }
 
+/// One entry extracted from a specification index — a top-level JSON array
+/// whose elements point to individual OpenAPI documents.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SpecIndexEntry {
+    /// Relative or absolute path to the child document.
+    pub path: String,
+    /// Display title when the index carries one.
+    pub title: Option<String>,
+}
+
 /// Why an OpenAPI document was refused.
 ///
 /// The enum is closed and never echoes unbounded document text: an
@@ -194,6 +208,8 @@ pub enum OpenApiIngestError {
         "only JSON OpenAPI documents are supported; the document is a JSON {found}, not an object"
     )]
     NotAnObject { found: &'static str },
+    #[error("this URL is a specification index pointing to {} child document{}; use one of the child documents instead", entries.len(), if entries.len() == 1 { "" } else { "s" })]
+    SpecIndex { entries: Vec<SpecIndexEntry> },
     #[error(
         "only JSON OpenAPI documents are supported; the first non-whitespace byte is not '{{' or '[' (YAML and other formats are not accepted)"
     )]
@@ -486,6 +502,12 @@ fn parse_openapi_root(document: &[u8]) -> Result<Value, OpenApiIngestError> {
         .find(|byte| !byte.is_ascii_whitespace());
     match first {
         Some(b'{') => {}
+        Some(b'[') => {
+            return match try_parse_spec_index(without_bom) {
+                Some(entries) => Err(OpenApiIngestError::SpecIndex { entries }),
+                None => Err(OpenApiIngestError::NotAnObject { found: "array" }),
+            };
+        }
         Some(byte) => return Err(leading_byte_refusal(byte)),
         None => return Err(OpenApiIngestError::NotJsonDocument),
     }
@@ -518,7 +540,6 @@ fn strip_utf8_bom(bytes: &[u8]) -> &[u8] {
 
 fn leading_byte_refusal(byte: u8) -> OpenApiIngestError {
     let found = match byte {
-        b'[' => "array",
         b'"' => "string",
         b't' | b'f' => "boolean",
         b'n' => "null",
@@ -528,6 +549,54 @@ fn leading_byte_refusal(byte: u8) -> OpenApiIngestError {
         }
     };
     OpenApiIngestError::NotAnObject { found }
+}
+
+/// Try to interpret a JSON array as a specification index — a top-level
+/// array of objects where each element points to an individual OpenAPI
+/// document. Returns `None` when the array does not look like an index,
+/// letting the caller fall through to the generic `NotAnObject` refusal.
+fn try_parse_spec_index(bytes: &[u8]) -> Option<Vec<SpecIndexEntry>> {
+    let array: Vec<Value> = serde_json::from_slice(bytes).ok()?;
+    if array.is_empty() || array.len() > MAX_SPEC_INDEX_ENTRIES {
+        return None;
+    }
+    let mut entries = Vec::with_capacity(array.len());
+    for element in &array {
+        let object = element.as_object()?;
+        let path = extract_document_path(object)?;
+        if path.is_empty() || path.len() > MAX_PATH_TEMPLATE_BYTES {
+            return None;
+        }
+        let title = object
+            .get("title")
+            .or_else(|| object.get("name"))
+            .or_else(|| object.get("description"))
+            .and_then(Value::as_str)
+            .map(truncate_to_display_prefix);
+        entries.push(SpecIndexEntry { path, title });
+    }
+    Some(entries)
+}
+
+const SPEC_INDEX_PATH_KEYS: &[&str] = &["path", "url", "href", "source"];
+
+fn extract_document_path(object: &Map<String, Value>) -> Option<String> {
+    for key in SPEC_INDEX_PATH_KEYS {
+        if let Some(value) = object.get(*key).and_then(Value::as_str) {
+            if looks_like_document_path(value) {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn looks_like_document_path(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower.ends_with(".json")
+        || lower.ends_with(".yaml")
+        || lower.ends_with(".yml")
+        || value.contains('/')
 }
 
 fn json_value_kind(value: &Value) -> &'static str {
@@ -1348,6 +1417,66 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("array"));
+    }
+
+    #[test]
+    fn a_spec_index_array_returns_spec_index_error() {
+        let index = serde_json::to_vec(&serde_json::json!([
+            { "path": "openapi/webhooks.json", "title": "Webhooks" },
+            { "path": "openapi/api-reference.json", "title": "API Reference" },
+        ]))
+        .unwrap();
+        let err = parse_openapi_root(&index).unwrap_err();
+        match &err {
+            OpenApiIngestError::SpecIndex { entries } => {
+                assert_eq!(entries.len(), 2);
+                assert_eq!(entries[0].path, "openapi/webhooks.json");
+                assert_eq!(entries[0].title.as_deref(), Some("Webhooks"));
+                assert_eq!(entries[1].path, "openapi/api-reference.json");
+                assert_eq!(entries[1].title.as_deref(), Some("API Reference"));
+            }
+            other => panic!("expected SpecIndex, got {other:?}"),
+        }
+        let text = err.to_string();
+        assert!(text.contains("2 child documents"), "{text}");
+        assert!(text.contains("specification index"), "{text}");
+    }
+
+    #[test]
+    fn a_spec_index_uses_url_key_and_name_fallback() {
+        let index = serde_json::to_vec(&serde_json::json!([
+            { "url": "/specs/v1.json", "name": "V1" },
+        ]))
+        .unwrap();
+        match parse_openapi_root(&index).unwrap_err() {
+            OpenApiIngestError::SpecIndex { entries } => {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].path, "/specs/v1.json");
+                assert_eq!(entries[0].title.as_deref(), Some("V1"));
+            }
+            other => panic!("expected SpecIndex, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_plain_json_array_is_not_a_spec_index() {
+        assert_eq!(
+            parse_openapi_root(b"[1, 2, 3]").unwrap_err(),
+            OpenApiIngestError::NotAnObject { found: "array" }
+        );
+        let strings = serde_json::to_vec(&serde_json::json!(["a", "b"])).unwrap();
+        assert_eq!(
+            parse_openapi_root(&strings).unwrap_err(),
+            OpenApiIngestError::NotAnObject { found: "array" }
+        );
+        let no_path = serde_json::to_vec(&serde_json::json!([
+            { "name": "test" },
+        ]))
+        .unwrap();
+        assert_eq!(
+            parse_openapi_root(&no_path).unwrap_err(),
+            OpenApiIngestError::NotAnObject { found: "array" }
+        );
     }
 
     #[test]

@@ -766,6 +766,99 @@ async fn spec_discovery_refuses_a_denied_address() {
     );
 }
 
+#[tokio::test]
+async fn spec_discovery_detects_spec_index_and_probes_children() {
+    let _guard = discovery_mock_lock().await;
+    let index = json!([
+        { "path": "openapi/webhooks.json", "title": "Webhooks" },
+        { "path": "openapi/api-reference.json", "title": "API Reference" },
+    ])
+    .to_string();
+    let child_spec = json!({
+        "openapi": "3.0.3",
+        "info": { "title": "API Reference", "version": "1" },
+        "paths": {
+            "/items": { "get": { "operationId": "listItems" } }
+        }
+    })
+    .to_string();
+    let child_bytes = child_spec.into_bytes();
+    let index_bytes = index.into_bytes();
+    crate::rest_executor::spec_fetch_mock::install(std::sync::Arc::new(move |url: &str| {
+        let path = reqwest::Url::parse(url)
+            .ok()
+            .map(|parsed| parsed.path().to_owned())
+            .unwrap_or_default();
+        if path == "/openapi.json" {
+            Ok(crate::rest_executor::FetchedSpecDocument {
+                body: index_bytes.clone(),
+                content_type: Some("application/json".to_owned()),
+            })
+        } else if path == "/openapi/api-reference.json" {
+            Ok(crate::rest_executor::FetchedSpecDocument {
+                body: child_bytes.clone(),
+                content_type: Some("application/json".to_owned()),
+            })
+        } else {
+            Err(crate::rest_executor::SpecFetchError::HttpStatus { status: 404 })
+        }
+    }));
+    let (router, bearer, _state, _dir) = connected_apps_test_app().await;
+    let response = post_discovery(&router, &bearer, "https://api.example.com").await;
+    crate::rest_executor::spec_fetch_mock::clear();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_str(&raw_body(response).await).unwrap();
+    let candidates = body["candidates"].as_array().expect("candidates");
+    let index_hit = candidates
+        .iter()
+        .find(|c| c["url"].as_str().unwrap().ends_with("/openapi.json"))
+        .expect("index candidate");
+    assert!(
+        index_hit["unsupported_reason"]
+            .as_str()
+            .unwrap()
+            .contains("specification index"),
+        "{index_hit}"
+    );
+    let child_urls = index_hit["child_urls"].as_array().expect("child_urls");
+    assert_eq!(child_urls.len(), 2);
+    let child_hit = candidates
+        .iter()
+        .find(|c| {
+            c["url"]
+                .as_str()
+                .unwrap()
+                .ends_with("/openapi/api-reference.json")
+        })
+        .expect("child candidate should be probed");
+    assert_eq!(child_hit["operation_count"], json!(1));
+    assert!(child_hit["unsupported_reason"].is_null());
+}
+
+#[tokio::test]
+async fn spec_discovery_yaml_url_serving_json_classifies_by_content() {
+    let _guard = discovery_mock_lock().await;
+    let spec = issues_spec();
+    install_mock_origin("/openapi.yaml", spec.into_bytes(), "application/json");
+    let (router, bearer, _state, _dir) = connected_apps_test_app().await;
+    let response = post_discovery(&router, &bearer, "https://api.example.com").await;
+    crate::rest_executor::spec_fetch_mock::clear();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_str(&raw_body(response).await).unwrap();
+    let hit = body["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["url"].as_str().unwrap().ends_with("/openapi.yaml"))
+        .expect("yaml url candidate");
+    assert_eq!(
+        hit["operation_count"],
+        json!(2),
+        "should classify by JSON content, not .yaml extension"
+    );
+    assert!(hit["unsupported_reason"].is_null(), "{hit}");
+}
+
 /// A local app with one `rest_api` binding, created straight through the
 /// store so grant tests don't route through the authoring surface.
 fn bound_app(name: &str, connected: ConnectedAppId) -> CreateApp {

@@ -5098,7 +5098,12 @@ operation_count: number | null,
 /**
  * Why the document cannot be used, when it cannot.
  */
-unsupported_reason: string | null, };
+unsupported_reason: string | null,
+/**
+ * Resolved child document URLs when the response was a specification
+ * index rather than a single OpenAPI document.
+ */
+child_urls?: Array<string>, };
 
 /**
  * What probing one origin found.

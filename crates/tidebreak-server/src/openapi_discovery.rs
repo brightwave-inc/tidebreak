@@ -58,6 +58,10 @@ pub struct SpecDiscoveryCandidate {
     pub operation_count: Option<usize>,
     /// Why the document cannot be used, when it cannot.
     pub unsupported_reason: Option<String>,
+    /// Resolved child document URLs when the response was a specification
+    /// index rather than a single OpenAPI document.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub child_urls: Vec<String>,
 }
 
 /// Why discovery refused the origin before probing.
@@ -136,6 +140,8 @@ fn admit_discovery_origin(origin: &str) -> Result<Url, SpecDiscoveryError> {
 /// Probe well-known locations. Hits that enumerate as OpenAPI 3 JSON are
 /// usable; YAML, HTML, and Swagger 2.0 are reported as found-but-unsupported.
 /// The first usable document cancels probes that have not started yet.
+/// When a probed URL turns out to be a specification index, its child
+/// document URLs are probed automatically within the same deadline.
 pub async fn discover_openapi_documents(
     origin: &str,
 ) -> Result<SpecDiscoveryInfo, SpecDiscoveryError> {
@@ -175,6 +181,30 @@ pub async fn discover_openapi_documents(
                 candidates.push(candidate);
             }
         }
+
+        // Second pass: probe child URLs from any spec-index candidates.
+        let child_urls: Vec<String> = candidates
+            .iter()
+            .flat_map(|c| c.child_urls.iter().cloned())
+            .collect();
+        if !child_urls.is_empty() {
+            let mut child_tasks = Vec::new();
+            for url in child_urls {
+                let permit = Arc::clone(&permit);
+                child_tasks.push(tokio::spawn(async move {
+                    let Ok(_guard) = permit.acquire().await else {
+                        return None;
+                    };
+                    probe_location(&url).await
+                }));
+            }
+            for task in child_tasks {
+                if let Ok(Some(candidate)) = task.await {
+                    candidates.push(candidate);
+                }
+            }
+        }
+
         candidates
     };
     let candidates = tokio::time::timeout(DISCOVERY_DEADLINE, collect)
@@ -201,16 +231,19 @@ async fn probe_location(url: &str) -> Option<SpecDiscoveryCandidate> {
             url: url.to_owned(),
             operation_count: None,
             unsupported_reason: Some(format!("document URL is inadmissible: {reason}")),
+            child_urls: Vec::new(),
         }),
         Err(SpecFetchError::DeniedAddress) => Some(SpecDiscoveryCandidate {
             url: url.to_owned(),
             operation_count: None,
             unsupported_reason: Some("document URL resolves into a denied network range".into()),
+            child_urls: Vec::new(),
         }),
         Err(SpecFetchError::DocumentTooLarge) => Some(SpecDiscoveryCandidate {
             url: url.to_owned(),
             operation_count: None,
             unsupported_reason: Some(SpecFetchError::DocumentTooLarge.to_string()),
+            child_urls: Vec::new(),
         }),
     }
 }
@@ -224,19 +257,21 @@ fn classify_document(url: &str, content_type: Option<&str>, body: &[u8]) -> Spec
             unsupported_reason: Some(
                 "this URL returned an HTML page, not a JSON OpenAPI document".into(),
             ),
+            child_urls: Vec::new(),
         };
     }
-    let path_yaml = url.rsplit('/').next().is_some_and(|name| {
-        let lower = name.to_ascii_lowercase();
-        lower.ends_with(".yaml") || lower.ends_with(".yml")
-    });
-    if path_yaml || media.contains("yaml") || looks_like_yaml(body) {
+    // Inspect the actual content before considering the URL suffix: a
+    // `.yaml` URL that serves JSON should classify by content.
+    let first_byte = body.iter().copied().find(|b| !b.is_ascii_whitespace());
+    let body_is_json = matches!(first_byte, Some(b'{') | Some(b'['));
+    if !body_is_json && (media.contains("yaml") || looks_like_yaml(body) || path_looks_yaml(url)) {
         return SpecDiscoveryCandidate {
             url: url.to_owned(),
             operation_count: None,
             unsupported_reason: Some(
                 "YAML OpenAPI documents are not supported; convert to JSON".into(),
             ),
+            child_urls: Vec::new(),
         };
     }
     match enumerate_openapi_operations(body) {
@@ -244,18 +279,56 @@ fn classify_document(url: &str, content_type: Option<&str>, body: &[u8]) -> Spec
             url: url.to_owned(),
             operation_count: Some(inventory.operations.len()),
             unsupported_reason: None,
+            child_urls: Vec::new(),
         },
+        Err(OpenApiIngestError::SpecIndex { entries }) => {
+            let child_urls = resolve_index_children(url, &entries);
+            SpecDiscoveryCandidate {
+                url: url.to_owned(),
+                operation_count: None,
+                unsupported_reason: Some(format!(
+                    "this URL is a specification index pointing to {} child document{}; \
+                     use one of the child documents instead",
+                    entries.len(),
+                    if entries.len() == 1 { "" } else { "s" },
+                )),
+                child_urls,
+            }
+        }
         Err(OpenApiIngestError::SwaggerNotSupported) => SpecDiscoveryCandidate {
             url: url.to_owned(),
             operation_count: None,
             unsupported_reason: Some(OpenApiIngestError::SwaggerNotSupported.to_string()),
+            child_urls: Vec::new(),
         },
         Err(error) => SpecDiscoveryCandidate {
             url: url.to_owned(),
             operation_count: None,
             unsupported_reason: Some(error.to_string()),
+            child_urls: Vec::new(),
         },
     }
+}
+
+fn path_looks_yaml(url: &str) -> bool {
+    url.rsplit('/').next().is_some_and(|name| {
+        let lower = name.to_ascii_lowercase();
+        lower.ends_with(".yaml") || lower.ends_with(".yml")
+    })
+}
+
+fn resolve_index_children(
+    parent_url: &str,
+    entries: &[crate::openapi_catalog::SpecIndexEntry],
+) -> Vec<String> {
+    let Ok(base) = Url::parse(parent_url) else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter_map(|entry| base.join(&entry.path).ok())
+        .map(|url| url.to_string())
+        .collect()
 }
 
 fn looks_like_yaml(body: &[u8]) -> bool {
@@ -282,5 +355,74 @@ mod tests {
         assert!(bare
             .iter()
             .all(|url| url.starts_with("https://api.example.com/")));
+    }
+
+    #[test]
+    fn classify_document_detects_spec_index_and_resolves_children() {
+        let index = serde_json::to_vec(&serde_json::json!([
+            { "path": "openapi/webhooks.json", "title": "Webhooks" },
+            { "path": "openapi/api-reference.json", "title": "API Reference" },
+        ]))
+        .unwrap();
+        let candidate = classify_document(
+            "https://developers.beehiiv.com/openapi.json",
+            Some("application/json"),
+            &index,
+        );
+        assert!(candidate.unsupported_reason.is_some());
+        assert!(candidate
+            .unsupported_reason
+            .as_ref()
+            .unwrap()
+            .contains("specification index"));
+        assert_eq!(candidate.child_urls.len(), 2);
+        assert_eq!(
+            candidate.child_urls[0],
+            "https://developers.beehiiv.com/openapi/webhooks.json"
+        );
+        assert_eq!(
+            candidate.child_urls[1],
+            "https://developers.beehiiv.com/openapi/api-reference.json"
+        );
+        assert!(candidate.operation_count.is_none());
+    }
+
+    #[test]
+    fn classify_document_yaml_url_serving_json_classifies_by_content() {
+        let spec = serde_json::to_vec(&serde_json::json!({
+            "openapi": "3.0.3",
+            "info": { "title": "Test", "version": "1" },
+            "paths": {
+                "/items": { "get": { "operationId": "listItems" } }
+            }
+        }))
+        .unwrap();
+        let candidate = classify_document(
+            "https://api.example.com/openapi.yaml",
+            Some("application/json"),
+            &spec,
+        );
+        assert!(
+            candidate.operation_count.is_some(),
+            "should classify by content, not extension"
+        );
+        assert_eq!(candidate.operation_count, Some(1));
+        assert!(candidate.unsupported_reason.is_none());
+    }
+
+    #[test]
+    fn classify_document_actual_yaml_body_with_yaml_url_reports_yaml() {
+        let yaml_body = b"openapi: '3.0.3'\ninfo:\n  title: T\n  version: '1'\npaths: {}";
+        let candidate = classify_document(
+            "https://api.example.com/openapi.yaml",
+            Some("text/yaml"),
+            yaml_body,
+        );
+        assert!(candidate.unsupported_reason.is_some());
+        assert!(candidate
+            .unsupported_reason
+            .as_ref()
+            .unwrap()
+            .contains("YAML"));
     }
 }
