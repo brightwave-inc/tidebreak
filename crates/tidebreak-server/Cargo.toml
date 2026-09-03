@@ -36,6 +36,7 @@ tidebreak-managed-node = { path = "../tidebreak-managed-node" }
 # whenever the server is in the graph.
 tidebreak-core = { path = "../tidebreak-core" }
 tidebreak-egress = { path = "../tidebreak-egress" }
+tidebreak-gateway-runtime = { path = "../tidebreak-gateway-runtime" }
 tidebreak-mcp = { path = "../tidebreak-mcp" }
 tidebreak-router = { path = "../tidebreak-router" }
 tidebreak-sandbox-protocol = { path = "../tidebreak-sandbox-protocol" }

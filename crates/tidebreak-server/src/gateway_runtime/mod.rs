@@ -1,249 +1,503 @@
-//! The server's handle on a signed-in model-gateway session.
-//!
-//! Owns the [`GatewayConnection`] built from the resolved managed policy —
-//! the only gateway source in either direction — hands the router a
-//! per-request token source for the gateway's short-lived `llm` tokens, and
-//! syncs the entitled model list into the stored snapshot so the picker and
-//! model policy work from durable local state while the gateway stays the
-//! live authority at inference time. On an unmanaged profile every surface
-//! here is inert: no connection, no routes, and the sign-in endpoints refuse
-//! with a pointer at the pairing flow.
-//!
-//! This file holds the [`GatewayRuntime`] handle, its types, and its
-//! construction. Each concern extends the same `impl GatewayRuntime` from
-//! its own file:
-//!
-//! - [`session`]: pairing, sign-in, sign-out, status, and the connection.
-//! - [`apps`]: entitled apps, endpoint mounts, and the MCP catalog.
-//! - [`models`]: the model snapshot, catalog sync, and the route token source.
-//! - [`relay`]: the shared-app invoke relay.
+//! Server adapters for the extracted model-gateway runtime.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
+
+use async_trait::async_trait;
+use tidebreak_core::{AgentError, OwnerId, Result, SecretProvider, Store};
+use tidebreak_gateway_runtime as runtime;
+use tidebreak_router::BearerTokenSource;
+
+use crate::managed_policy::{OsPolicySource, ProvisionedPolicySource};
+use crate::providers;
+
+pub(crate) use runtime::{GatewayApps, GatewayMachineOffer, GatewayStatus};
+#[cfg(test)]
+pub(crate) use runtime::{SignInProgress, GATEWAY_STATE_WRITES};
+
+#[cfg(test)]
+use crate::providers::CustomModelConfig;
+#[cfg(test)]
+pub(super) use runtime::{
+    CredentialVault, GatewayAuth, GatewayAuthConfig, GatewayConnection,
+    SyncCommitPause as MigrationPause,
+};
+#[cfg(test)]
 use std::time::Duration;
 
-use crate::connectors::{
-    is_sign_in_required, CredentialVault, GatewayApp, GatewayAuth, GatewayAuthConfig,
-    GatewayCatalogFetch, GatewayConnection, GatewayOperationSummary, MEMBER_CATALOG_V1,
-    RESOURCE_CONTROL, RESOURCE_LLM,
-};
-use async_trait::async_trait;
-use serde::Serialize;
-use tidebreak_core::{AgentError, Result, SecretProvider, Store};
-use tidebreak_router::{BearerTokenSource, ModelRouteLease};
-use tokio::sync::{Mutex, OwnedRwLockWriteGuard, RwLock};
-
-use crate::providers::{self, CustomModelConfig};
-
-mod apps;
-mod models;
-mod relay;
-mod session;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use relay::gateway_relay_dispatcher;
-pub(crate) use session::retire_superseded_gateway_session;
+struct PolicyAdapter {
+    provisioned: Arc<dyn ProvisionedPolicySource>,
+    os: Arc<dyn OsPolicySource>,
+}
 
-use session::*;
+impl runtime::GatewayPolicySource for PolicyAdapter {
+    fn resolve(&self) -> Result<runtime::GatewayPolicy> {
+        let policy = crate::managed_policy::resolve(&*self.provisioned, &*self.os)?;
+        Ok(runtime::GatewayPolicy {
+            managed: policy.managed,
+            gateway_url: policy.gateway_url,
+        })
+    }
+}
 
-/// How long a browser sign-in may stay pending before it fails.
-const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
+struct ModelStateAdapter {
+    store: Arc<dyn Store>,
+}
 
-/// How often the background loop refreshes the entitled-model snapshot while
-/// a session is connected. A sync is one small GET against the org's own
-/// gateway, so a tight cadence is cheap — this is what bounds how quickly an
-/// admin's entitlement change reaches the picker without a manual refresh.
-const MODEL_SYNC_INTERVAL: Duration = Duration::from_secs(5 * 60);
+impl ModelStateAdapter {
+    fn model(model: &runtime::SyncedGatewayModel) -> providers::CustomModelConfig {
+        providers::CustomModelConfig {
+            id: model.id.clone(),
+            display_name: model.display_name.clone(),
+            upstream_id: model.upstream_id.clone(),
+            aliases: model.aliases.clone(),
+            context_window: model.context_window,
+            max_output_tokens: model.max_output_tokens,
+            input_modalities: vec![crate::model_registry::InputModality::Text],
+            supports_reasoning: false,
+            reasoning_efforts: Vec::new(),
+        }
+    }
 
-/// Retry cadence after a failed background sync — short enough that a boot
-/// racing the network coming up doesn't stay stale for a whole interval,
-/// long enough not to hammer an unreachable gateway.
-const MODEL_SYNC_RETRY: Duration = Duration::from_secs(60);
+    fn protocol(protocol: runtime::GatewayModelProtocol) -> providers::GatewayModelProtocol {
+        match protocol {
+            runtime::GatewayModelProtocol::AnthropicMessages => {
+                providers::GatewayModelProtocol::AnthropicMessages
+            }
+            runtime::GatewayModelProtocol::OpenaiResponses => {
+                providers::GatewayModelProtocol::OpenaiResponses
+            }
+        }
+    }
+
+    fn snapshot(snapshot: &runtime::GatewayModelSnapshot) -> providers::GatewayModelSnapshot {
+        providers::GatewayModelSnapshot {
+            gateway_url: snapshot.gateway_url.clone(),
+            installation_id: snapshot.installation_id.clone(),
+            models: snapshot.models.iter().map(Self::model).collect(),
+            model_protocols: snapshot
+                .model_protocols
+                .iter()
+                .map(|(id, protocol)| (id.clone(), Self::protocol(*protocol)))
+                .collect(),
+            model_reasoning_efforts: snapshot.model_reasoning_efforts.clone(),
+            member_catalog: snapshot.member_catalog.clone(),
+            catalog_etag: snapshot.catalog_etag.clone(),
+        }
+    }
+
+    fn runtime_protocol(
+        protocol: providers::GatewayModelProtocol,
+    ) -> runtime::GatewayModelProtocol {
+        match protocol {
+            providers::GatewayModelProtocol::AnthropicMessages => {
+                runtime::GatewayModelProtocol::AnthropicMessages
+            }
+            providers::GatewayModelProtocol::OpenaiResponses => {
+                runtime::GatewayModelProtocol::OpenaiResponses
+            }
+        }
+    }
+
+    fn runtime_snapshot(
+        snapshot: providers::GatewayModelSnapshot,
+    ) -> runtime::GatewayModelSnapshot {
+        runtime::GatewayModelSnapshot {
+            gateway_url: snapshot.gateway_url,
+            installation_id: snapshot.installation_id,
+            models: snapshot
+                .models
+                .into_iter()
+                .map(|model| runtime::SyncedGatewayModel {
+                    id: model.id,
+                    display_name: model.display_name,
+                    upstream_id: model.upstream_id,
+                    aliases: model.aliases,
+                    context_window: model.context_window,
+                    max_output_tokens: model.max_output_tokens,
+                })
+                .collect(),
+            model_protocols: snapshot
+                .model_protocols
+                .into_iter()
+                .map(|(id, protocol)| (id, Self::runtime_protocol(protocol)))
+                .collect(),
+            model_reasoning_efforts: snapshot.model_reasoning_efforts,
+            member_catalog: snapshot.member_catalog,
+            catalog_etag: snapshot.catalog_etag,
+        }
+    }
+}
+
+#[async_trait]
+impl runtime::GatewayModelState for ModelStateAdapter {
+    async fn snapshot(
+        &self,
+        policy: &runtime::GatewayPolicy,
+    ) -> Result<Option<runtime::GatewayModelSnapshot>> {
+        let Some(gateway_url) = policy.gateway_url.as_deref().filter(|_| policy.managed) else {
+            return Ok(None);
+        };
+        Ok(providers::read_gateway_snapshot(&*self.store)
+            .await?
+            .filter(|snapshot| snapshot.gateway_url == gateway_url)
+            .map(Self::runtime_snapshot))
+    }
+
+    async fn resolve_route(
+        &self,
+        snapshot: &runtime::GatewayModelSnapshot,
+        route_model: &str,
+    ) -> Result<Option<runtime::GatewayRoute>> {
+        let snapshot = Self::snapshot(snapshot);
+        let selection = crate::model_registry::selection_key(
+            providers::ProviderKind::ModelGateway,
+            route_model,
+        );
+        Ok(
+            providers::gateway_execution_policy(&snapshot, &selection).map(|resolved| {
+                runtime::GatewayRoute {
+                    id: resolved.id,
+                    route_model: resolved.route_model,
+                    request_shaping_model: resolved.request_shaping_model,
+                }
+            }),
+        )
+    }
+
+    async fn write_snapshot(&self, snapshot: &runtime::GatewayModelSnapshot) -> Result<()> {
+        let snapshot = Self::snapshot(snapshot);
+        providers::validate_custom_models(&snapshot.models).map_err(|error| {
+            AgentError::config(format!("gateway model sync rejected: {error:?}"))
+        })?;
+        providers::write_gateway_snapshot(&*self.store, &snapshot).await
+    }
+}
+
+struct AppUsageAdapter {
+    store: Arc<dyn Store>,
+}
+
+#[async_trait]
+impl runtime::GatewayAppUsageSource for AppUsageAdapter {
+    async fn used_by_app_counts(&self, owner: &OwnerId) -> Result<BTreeMap<String, usize>> {
+        let mut counts = BTreeMap::new();
+        for grant in self.store.list_live_app_grants_scoped(owner).await? {
+            for binding in &grant.bindings {
+                if let Some(gateway_app) = binding.gateway_app() {
+                    *counts.entry(gateway_app.to_owned()).or_default() += 1;
+                }
+            }
+        }
+        Ok(counts)
+    }
+}
+
+struct McpControlAdapter(Arc<crate::mcp_config::McpRuntime>);
+
+#[async_trait]
+impl runtime::GatewayMcpControl for McpControlAdapter {
+    async fn auto_mount_gateway_endpoints(&self, entitled: &[String]) -> Result<bool> {
+        self.0.auto_mount_gateway_endpoints(entitled).await
+    }
+
+    async fn refresh_connected_app_roster(&self) {
+        self.0.refresh_connected_app_roster().await;
+    }
+}
+
+struct PairingCommitAdapter {
+    provisioned: Arc<dyn ProvisionedPolicySource>,
+    os: Arc<dyn OsPolicySource>,
+    secrets: Arc<dyn SecretProvider>,
+    mcp: Arc<crate::mcp_config::McpRuntime>,
+}
+
+#[async_trait]
+impl runtime::GatewayPairingCommit for PairingCommitAdapter {
+    async fn commit(&self, base_url: &str, replaces: Option<&str>) -> Result<()> {
+        crate::pairing::commit_signed_in_pairing_locked(
+            &*self.provisioned,
+            &*self.os,
+            self.secrets.clone(),
+            &self.mcp,
+            base_url,
+            replaces,
+        )
+        .await
+    }
+}
 
 pub(crate) struct GatewayRuntime {
+    inner: Arc<runtime::GatewayRuntime>,
     store: Arc<dyn Store>,
-    secrets: Arc<dyn SecretProvider>,
-    /// The provisioned-policy home for managed-mode resolution: the sticky
-    /// pairing record, durable beside (not inside) the SQLite profile.
-    provisioned_policy: Arc<dyn crate::managed_policy::ProvisionedPolicySource>,
-    /// The OS authority for managed-mode resolution: a managed profile's
-    /// deployment URL comes from the resolved policy, not the stored row.
-    os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
-    /// One connection per configured base URL; rebuilt when the URL changes.
-    cached: Mutex<Option<(String, Arc<GatewayConnection>)>>,
-    /// Shared by every request-leg route lease and every local mutation of
-    /// gateway execution authority. Request setup takes a read lease through
-    /// dispatch; catalog sync, sign-out, deprovision, and session replacement
-    /// take the write side. A writer therefore runs either before a leg
-    /// validates and mints its bearer or after that leg has dispatched, never
-    /// in the security-sensitive gap between them. Catalog sync deliberately
-    /// keeps the write side across its fetch so older responses cannot commit
-    /// after newer ones.
-    model_sync: Arc<RwLock<()>>,
-    /// The one in-flight browser sign-in, if any.
-    sign_in: Mutex<SignInProgress>,
-    /// Bumped by every `begin_sign_in` and `sign_out` — and by every pending-
-    /// pairing registration or dismissal; a background exchange task may only
-    /// act while its own generation is still current, so a stale attempt can
-    /// neither clobber a newer one's status, resurrect a signed-out session,
-    /// nor commit a pairing that was dismissed or replaced under it.
-    sign_in_generation: std::sync::atomic::AtomicU64,
-    /// The machine offer last read from the gateway's `/api/v1/meta`, keyed
-    /// by the gateway it was read from so a re-pair reads the new one.
-    /// Only a present offer is cached. An older gateway or a deployment that
-    /// has not published its machine yet is retried while the process runs.
-    machine_offer: Mutex<Option<(String, String)>>,
-    /// A deep-link pairing awaiting the sign-in that is its consent.
-    ///
-    /// Process-ephemeral on purpose: nothing durable exists until the user
-    /// completes a sign-in against this gateway, so an unwanted provision
-    /// link dies with a dismissal or the process. Set only by the desktop
-    /// shell through [`crate::register_pending_pairing`] — the renderer can
-    /// read and dismiss it, never set it or choose its URL.
-    pending_pairing: Mutex<Option<PendingPairing>>,
+    pub(super) secrets: Arc<dyn SecretProvider>,
+    provisioned_policy: Arc<dyn ProvisionedPolicySource>,
+    os_policy: Arc<dyn OsPolicySource>,
     #[cfg(test)]
-    sync_commit_pause: Mutex<Option<Arc<MigrationPause>>>,
-}
-
-#[cfg(test)]
-#[derive(Default)]
-struct MigrationPause {
-    arrived: tokio::sync::Notify,
-    release: tokio::sync::Notify,
-}
-
-/// The shell-registered pairing a sign-in may commit.
-#[derive(Clone)]
-struct PendingPairing {
-    /// Normalized gateway base URL, already held to the connectors contract.
-    base_url: String,
-    /// Carried from the shell's [`crate::PairingHandle`] at registration so
-    /// the commit cannot run without also applying what it decides to the
-    /// MCP servers this process is running.
-    mcp: Arc<crate::mcp_config::McpRuntime>,
-    /// For a re-pairing the user confirmed: the provisioned URL the
-    /// confirmation named, which the commit's compare-and-swap holds the row
-    /// to. `None` for a plain first-time pairing.
-    replaces: Option<String>,
-}
-
-/// Renderer-safe progress of the current sign-in attempt.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub(crate) enum SignInProgress {
-    /// No sign-in is running.
-    Idle,
-    /// The browser flow is open; the renderer should offer this URL.
-    Pending { authorization_url: String },
-    /// The last attempt failed with a bounded, secret-free message.
-    Failed { message: String },
-}
-
-/// Renderer-safe projection of the gateway connection state. Never carries
-/// token material — only what the settings surface displays. `base_url` is
-/// the policy's gateway origin: present exactly when the profile is managed
-/// with a usable URL (the retired `configured`/`enabled` bits collapsed into
-/// its presence).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
-pub(crate) struct GatewayStatus {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub(crate) base_url: Option<String>,
-    pub(crate) signed_in: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub(crate) account_hint: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub(crate) installation_id: Option<String>,
-    pub(crate) model_count: usize,
-    /// The member-catalog contract revision the last model sync read, or
-    /// `None` while unsynced or against a gateway that predates
-    /// `/api/v1/me/catalog`. The settings panel uses its absence (while
-    /// signed in with models) to note that the deployment is older than
-    /// this Tidebreak.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub(crate) member_catalog: Option<String>,
-    pub(crate) sign_in: SignInProgress,
-}
-
-/// The hosted Tidebreak machine this profile's gateway offers, if it offers
-/// one. Absent means the address field stays empty — a gateway that hosts no
-/// machine and a gateway older than the field are the same thing here.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct GatewayMachineOffer {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) url: Option<String>,
-}
-
-/// Renderer-safe list of the connected apps the signed-in user is entitled
-/// to, fetched live from the gateway (never cached: a revoked grant is gone
-/// on the next request).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
-pub(crate) struct GatewayApps {
-    /// False when the connected gateway predates the JSON apps surface; the
-    /// renderer hides the section instead of showing an empty list as "none".
-    pub(crate) supported: bool,
-    pub(crate) apps: Vec<GatewayAppInfo>,
-}
-
-/// One entitled connected app, with the slugs of the MCP endpoints that
-/// aggregate it — the `mcp:<slug>` resources a mount would request.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
-pub(crate) struct GatewayAppInfo {
-    pub(crate) id: String,
-    pub(crate) name: String,
-    pub(crate) app_kind: String,
-    pub(crate) enabled: bool,
-    pub(crate) mcp_endpoint_slugs: Vec<String>,
-    /// The gateway's readiness for this app when the member catalog reports
-    /// one: `ready`, `not_connected`, or `authorization_required`. `None`
-    /// against a gateway that predates the catalog — the panel then shows
-    /// no readiness rather than guessing. An unfamiliar value renders as
-    /// not-ready copy, never an error: the set is the gateway's to grow.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub(crate) connection: Option<String>,
-    /// How many live local-app grants bind this gateway app — the same
-    /// "Used by N local apps" line the connected-apps page carries per record,
-    /// so a user can see what a revocation here would break.
-    pub(crate) used_by_app_count: usize,
+    pub(super) sync_commit_pause: tokio::sync::Mutex<Option<Arc<MigrationPause>>>,
 }
 
 impl GatewayRuntime {
     pub(crate) fn new(
         store: Arc<dyn Store>,
         secrets: Arc<dyn SecretProvider>,
-        provisioned_policy: Arc<dyn crate::managed_policy::ProvisionedPolicySource>,
-        os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
+        provisioned_policy: Arc<dyn ProvisionedPolicySource>,
+        os_policy: Arc<dyn OsPolicySource>,
     ) -> Arc<Self> {
+        let policy = Arc::new(PolicyAdapter {
+            provisioned: provisioned_policy.clone(),
+            os: os_policy.clone(),
+        });
+        let models = Arc::new(ModelStateAdapter {
+            store: store.clone(),
+        });
+        let usage = Arc::new(AppUsageAdapter {
+            store: store.clone(),
+        });
         Arc::new(Self {
+            inner: runtime::GatewayRuntime::new(secrets.clone(), policy, models, usage),
             store,
             secrets,
             provisioned_policy,
             os_policy,
-            cached: Mutex::new(None),
-            model_sync: Arc::new(RwLock::new(())),
-            sign_in: Mutex::new(SignInProgress::Idle),
-            sign_in_generation: std::sync::atomic::AtomicU64::new(0),
-            machine_offer: Mutex::new(None),
-            pending_pairing: Mutex::new(None),
             #[cfg(test)]
-            sync_commit_pause: Mutex::new(None),
+            sync_commit_pause: tokio::sync::Mutex::new(None),
         })
     }
 
-    /// The provisioned-policy home this runtime resolves against — the
-    /// pairing write path must commit through the same instance.
-    pub(crate) fn provisioned_policy(
-        &self,
-    ) -> &Arc<dyn crate::managed_policy::ProvisionedPolicySource> {
+    pub(crate) fn provisioned_policy(&self) -> &Arc<dyn ProvisionedPolicySource> {
         &self.provisioned_policy
     }
 
-    /// The one policy read every surface here shares.
     pub(crate) fn policy(&self) -> Result<crate::managed_policy::ManagedPolicy> {
         crate::managed_policy::resolve(&*self.provisioned_policy, &*self.os_policy)
     }
+
+    fn mcp_adapter(mcp: Arc<crate::mcp_config::McpRuntime>) -> Arc<dyn runtime::GatewayMcpControl> {
+        Arc::new(McpControlAdapter(mcp))
+    }
+
+    fn pairing_adapter(
+        &self,
+        mcp: Arc<crate::mcp_config::McpRuntime>,
+    ) -> Arc<dyn runtime::GatewayPairingCommit> {
+        Arc::new(PairingCommitAdapter {
+            provisioned: self.provisioned_policy.clone(),
+            os: self.os_policy.clone(),
+            secrets: self.secrets.clone(),
+            mcp,
+        })
+    }
+
+    #[cfg(test)]
+    async fn install_sync_pause(&self) {
+        if let Some(pause) = self.sync_commit_pause.lock().await.take() {
+            self.inner.pause_next_sync_commit(pause).await;
+        }
+    }
+
+    #[cfg(not(test))]
+    async fn install_sync_pause(&self) {}
+
+    pub(crate) async fn register_pending_pairing(
+        &self,
+        base_url: String,
+        mcp: Arc<crate::mcp_config::McpRuntime>,
+        replaces: Option<String>,
+    ) {
+        self.inner
+            .register_pending_pairing(
+                base_url,
+                Self::mcp_adapter(mcp.clone()),
+                self.pairing_adapter(mcp),
+                replaces,
+            )
+            .await;
+    }
+
+    pub(crate) async fn pending_pairing_url(&self) -> Option<String> {
+        self.inner.pending_pairing_url().await
+    }
+
+    pub(crate) async fn dismiss_pending_pairing(&self) {
+        self.inner.dismiss_pending_pairing().await;
+    }
+
+    pub(crate) async fn status(&self) -> Result<GatewayStatus> {
+        self.inner.status().await
+    }
+
+    pub(crate) async fn offered_machine(&self) -> GatewayMachineOffer {
+        self.inner.offered_machine().await
+    }
+
+    pub(crate) async fn begin_sign_in(
+        self: &Arc<Self>,
+        mcp: Arc<crate::mcp_config::McpRuntime>,
+    ) -> Result<String> {
+        self.inner.begin_sign_in(Self::mcp_adapter(mcp)).await
+    }
+
+    pub(crate) async fn lock_model_authority_mutation(
+        &self,
+    ) -> tokio::sync::OwnedRwLockWriteGuard<()> {
+        self.inner.lock_model_authority_mutation().await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn commit_signed_in_pairing_for_test(
+        &self,
+        mcp: &Arc<crate::mcp_config::McpRuntime>,
+        base_url: &str,
+        replaces: Option<&str>,
+    ) -> Result<()> {
+        self.inner
+            .commit_signed_in_pairing_for_test(
+                self.pairing_adapter(mcp.clone()),
+                base_url,
+                replaces,
+            )
+            .await
+    }
+
+    pub(crate) async fn sign_out(&self) -> Result<()> {
+        self.inner.sign_out().await
+    }
+
+    pub(crate) async fn abandon_sign_in_and_pairing(&self) {
+        self.inner.abandon_sign_in_and_pairing().await;
+    }
+
+    pub(crate) async fn retire_session_for_current_policy(
+        &self,
+        authority: &tokio::sync::OwnedRwLockWriteGuard<()>,
+    ) -> Result<()> {
+        self.inner
+            .retire_session_for_current_policy(authority)
+            .await
+    }
+
+    pub(crate) async fn connection(&self) -> Result<Option<Arc<runtime::GatewayConnection>>> {
+        self.inner.connection().await
+    }
+
+    pub(crate) async fn model_snapshot(&self) -> Result<Option<providers::GatewayModelSnapshot>> {
+        providers::gateway_snapshot_for_policy(&*self.store, &self.policy()?).await
+    }
+
+    pub(crate) async fn route_token_source(self: &Arc<Self>) -> Option<Arc<dyn BearerTokenSource>> {
+        self.inner.route_token_source().await
+    }
+
+    pub(crate) async fn sync_models(
+        &self,
+    ) -> std::result::Result<usize, crate::error::ServerError> {
+        self.install_sync_pause().await;
+        self.inner.sync_models().await.map_err(map_sync_error)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn sync_models_if_connected(
+        &self,
+    ) -> std::result::Result<Option<usize>, crate::error::ServerError> {
+        self.install_sync_pause().await;
+        self.inner
+            .sync_models_if_connected()
+            .await
+            .map_err(map_sync_error)
+    }
+
+    pub(crate) async fn sync_models_periodically(
+        self: Arc<Self>,
+        mcp: Arc<crate::mcp_config::McpRuntime>,
+    ) {
+        self.inner
+            .clone()
+            .sync_models_periodically(Self::mcp_adapter(mcp))
+            .await;
+    }
+
+    pub(crate) async fn apps(&self, owner: &OwnerId) -> Result<GatewayApps> {
+        self.inner.apps(owner).await
+    }
+
+    pub(crate) async fn reconcile_endpoint_mounts(
+        &self,
+        mcp: &Arc<crate::mcp_config::McpRuntime>,
+    ) -> Result<()> {
+        self.inner
+            .reconcile_endpoint_mounts(&*Self::mcp_adapter(mcp.clone()))
+            .await
+    }
+
+    pub(crate) async fn app_roster(&self) -> Option<Vec<runtime::GatewayRosterApp>> {
+        self.inner.app_roster().await
+    }
+}
+
+fn map_sync_error(error: runtime::GatewaySyncError) -> crate::error::ServerError {
+    match error {
+        runtime::GatewaySyncError::Agent(error) => error.into(),
+        runtime::GatewaySyncError::Conflict { kind, message } => {
+            crate::error::ServerError::conflict_kind(kind, message)
+        }
+    }
+}
+
+pub(crate) async fn retire_superseded_gateway_session(
+    secrets: Arc<dyn SecretProvider>,
+    policy: &crate::managed_policy::ManagedPolicy,
+) -> Result<()> {
+    runtime::retire_superseded_gateway_session(
+        secrets,
+        &runtime::GatewayPolicy {
+            managed: policy.managed,
+            gateway_url: policy.gateway_url.clone(),
+        },
+    )
+    .await
+}
+
+pub(crate) fn gateway_relay_dispatcher(
+    runtime: Arc<GatewayRuntime>,
+    drafts: Arc<dyn runtime::GatewayDraftSource>,
+) -> Arc<dyn runtime::GatewayInvokeDispatcher> {
+    runtime::gateway_relay_dispatcher(runtime.inner.clone(), drafts)
+}
+
+#[async_trait]
+impl runtime::GatewayEndpoints for GatewayRuntime {
+    async fn endpoint(&self, slug: &str) -> Result<runtime::GatewayEndpointAccess> {
+        runtime::GatewayEndpoints::endpoint(&*self.inner, slug).await
+    }
+
+    async fn call_bearer(&self, slug: &str, chat: tidebreak_core::id::SessionId) -> Result<String> {
+        runtime::GatewayEndpoints::call_bearer(&*self.inner, slug, chat).await
+    }
+
+    async fn entitled_app_catalogs(&self) -> Vec<runtime::GatewayRosterApp> {
+        runtime::GatewayEndpoints::entitled_app_catalogs(&*self.inner).await
+    }
+}
+
+#[async_trait]
+impl runtime::GatewayCatalogSource for GatewayRuntime {
+    async fn gateway_app_catalogs(
+        &self,
+        needed: &std::collections::BTreeSet<String>,
+    ) -> Option<(
+        String,
+        std::collections::BTreeMap<String, runtime::GatewayAppCatalog>,
+    )> {
+        runtime::GatewayCatalogSource::gateway_app_catalogs(&*self.inner, needed).await
+    }
+}
+
+#[cfg(test)]
+pub(super) mod relay {
+    pub(super) use tidebreak_gateway_runtime::shared_app_invoke_body;
 }

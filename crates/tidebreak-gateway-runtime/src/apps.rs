@@ -9,18 +9,18 @@ use super::*;
 pub(super) const MCP_CONNECT_CONTEXT_KEY: &str = "mcp:connect";
 
 #[async_trait]
-impl crate::mcp_config::GatewayEndpoints for GatewayRuntime {
+impl GatewayEndpoints for GatewayRuntime {
     /// Resolve a gateway MCP endpoint from the signed-in session: its URL
     /// under the configured base, and a fresh `mcp:<slug>` bearer minted (or
     /// served from cache) inside the connector's rotation lock. The bearer
     /// carries the shared connect context, which is what lets an attested
     /// endpoint accept the handshake and list its tools.
-    async fn endpoint(&self, slug: &str) -> Result<crate::mcp_config::GatewayEndpointAccess> {
+    async fn endpoint(&self, slug: &str) -> Result<GatewayEndpointAccess> {
         let connection = self
             .connection()
             .await?
             .ok_or_else(|| AgentError::config("no model gateway is configured"))?;
-        Ok(crate::mcp_config::GatewayEndpointAccess {
+        Ok(GatewayEndpointAccess {
             url: connection.mcp_endpoint_url(slug)?,
             bearer_token: connection
                 .attested_mcp_access_token(slug, MCP_CONNECT_CONTEXT_KEY)
@@ -48,13 +48,13 @@ impl crate::mcp_config::GatewayEndpoints for GatewayRuntime {
     /// gateway, or a gateway predating either read all answer empty, which
     /// renders as an absent roster section rather than a failed registry
     /// rebuild.
-    async fn entitled_app_catalogs(&self) -> Vec<crate::mcp_config::GatewayRosterApp> {
+    async fn entitled_app_catalogs(&self) -> Vec<GatewayRosterApp> {
         self.app_roster().await.unwrap_or_default()
     }
 }
 
 #[async_trait]
-impl crate::connected_apps::GatewayCatalogSource for GatewayRuntime {
+impl GatewayCatalogSource for GatewayRuntime {
     /// Resolve the requested gateway apps against the live session: one
     /// entitled-apps read, then one catalog read per requested id that the
     /// session actually reaches.
@@ -69,7 +69,7 @@ impl crate::connected_apps::GatewayCatalogSource for GatewayRuntime {
         needed: &std::collections::BTreeSet<String>,
     ) -> Option<(
         String,
-        std::collections::BTreeMap<String, crate::connected_apps::GatewayAppCatalog>,
+        std::collections::BTreeMap<String, GatewayAppCatalog>,
     )> {
         let (base_url, entitled) = match self.entitled_apps_if_signed_in().await {
             Ok(Some(answered)) => answered,
@@ -88,7 +88,7 @@ impl crate::connected_apps::GatewayCatalogSource for GatewayRuntime {
                 Ok(Some(operations)) => {
                     catalogs.insert(
                         app.id,
-                        crate::connected_apps::GatewayAppCatalog {
+                        GatewayAppCatalog {
                             name: app.name,
                             operation_ids: operations
                                 .into_iter()
@@ -114,7 +114,7 @@ impl GatewayRuntime {
     /// The entitled connected apps, fetched live from the gateway with the
     /// stored session. Managed-only, like the whole sign-in surface; a
     /// gateway without the JSON apps surface reports `supported: false`.
-    pub(crate) async fn apps(&self, owner: &tidebreak_core::OwnerId) -> Result<GatewayApps> {
+    pub async fn apps(&self, owner: &tidebreak_core::OwnerId) -> Result<GatewayApps> {
         let connection = self.managed_connection().await?;
         let Some(apps) = Self::entitled_apps(&connection).await? else {
             return Ok(GatewayApps {
@@ -129,16 +129,8 @@ impl GatewayRuntime {
         // grant table leaves the counts at zero rather than failing the list.
         let mut used_by: std::collections::BTreeMap<String, usize> =
             std::collections::BTreeMap::new();
-        match self.store.list_live_app_grants_scoped(owner).await {
-            Ok(grants) => {
-                for grant in grants {
-                    for binding in &grant.bindings {
-                        if let Some(gateway_app) = binding.gateway_app() {
-                            *used_by.entry(gateway_app.to_owned()).or_default() += 1;
-                        }
-                    }
-                }
-            }
+        match self.app_usage.used_by_app_counts(owner).await {
+            Ok(counts) => used_by = counts,
             Err(error) => {
                 tracing::warn!("could not count local apps bound to gateway apps: {error}");
             }
@@ -214,10 +206,7 @@ impl GatewayRuntime {
     /// session for the policy's deployment, a gateway predating the apps
     /// surface — is "nothing to do", not an error, so callers may run this on
     /// every trigger without gating.
-    pub(crate) async fn reconcile_endpoint_mounts(
-        &self,
-        mcp: &crate::mcp_config::McpRuntime,
-    ) -> Result<()> {
+    pub async fn reconcile_endpoint_mounts(&self, mcp: &dyn GatewayMcpControl) -> Result<()> {
         let policy = self.policy()?;
         let Some(connection) = self.connection_for(&policy).await? else {
             return Ok(());
@@ -258,9 +247,7 @@ impl GatewayRuntime {
     /// The URL is the resolved policy's, the same string every other gateway
     /// identity is stamped with — so a fingerprint taken from it moves when
     /// and only when the profile is re-paired.
-    pub(crate) async fn entitled_apps_if_signed_in(
-        &self,
-    ) -> Result<Option<(String, Vec<GatewayApp>)>> {
+    async fn entitled_apps_if_signed_in(&self) -> Result<Option<(String, Vec<GatewayApp>)>> {
         let policy = self.policy()?;
         let Some(base_url) = policy.gateway_url.clone().filter(|_| policy.managed) else {
             return Ok(None);
@@ -284,10 +271,7 @@ impl GatewayRuntime {
     /// One entitled app's declared operation catalog, under the same gating as
     /// [`entitled_apps_if_signed_in`](Self::entitled_apps_if_signed_in): a
     /// profile that cannot read it answers `None`, never an error.
-    pub(crate) async fn app_catalog(
-        &self,
-        app_id: &str,
-    ) -> Result<Option<Vec<GatewayOperationSummary>>> {
+    async fn app_catalog(&self, app_id: &str) -> Result<Option<Vec<GatewayOperationSummary>>> {
         let policy = self.policy()?;
         let Some(connection) = self.connection_for(&policy).await? else {
             return Ok(None);
@@ -311,7 +295,7 @@ impl GatewayRuntime {
     /// answered with nothing bindable. An app whose catalog cannot be read is
     /// left out: nothing about it could be pinned, so listing it would only
     /// invite a refusal one step later.
-    pub(crate) async fn app_roster(&self) -> Option<Vec<crate::mcp_config::GatewayRosterApp>> {
+    pub async fn app_roster(&self) -> Option<Vec<GatewayRosterApp>> {
         let entitled = match self.entitled_apps_if_signed_in().await {
             Ok(Some((_, entitled))) => entitled,
             Ok(None) => return None,
@@ -323,7 +307,7 @@ impl GatewayRuntime {
         let mut roster = Vec::new();
         for app in entitled.into_iter().filter(|app| app.enabled) {
             match self.app_catalog(&app.id).await {
-                Ok(Some(operations)) => roster.push(crate::mcp_config::GatewayRosterApp {
+                Ok(Some(operations)) => roster.push(GatewayRosterApp {
                     id: app.id,
                     name: app.name,
                     operation_ids: operations

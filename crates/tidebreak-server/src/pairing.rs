@@ -16,19 +16,10 @@ use std::sync::Arc;
 
 use crate::connectors::GatewayAuthConfig;
 use tidebreak_core::{AgentError, Result, SecretProvider, Store};
-use tokio::sync::{Mutex, MutexGuard};
+use tokio::sync::MutexGuard;
 
 use crate::managed_policy;
 use crate::mcp_config::McpRuntime;
-
-/// Serializes pairing end to end. [`managed_policy::provision`] is a
-/// check-then-write over the policy file, and the filesystem offers no
-/// cross-call transaction to make it atomic; two links decoded concurrently
-/// could otherwise both pass the conflict check and the second would
-/// overwrite the first. One desktop process owns the data directory (the
-/// server's instance lock guarantees it), so a process-local mutex is
-/// enough to make the check-then-write effectively atomic.
-static PAIRING: Mutex<()> = Mutex::const_new(());
 
 /// Take the process-wide pairing mutation lock.
 ///
@@ -37,7 +28,9 @@ static PAIRING: Mutex<()> = Mutex::const_new(());
 /// by re-pair and deprovision prevents the old pairing/sign-in inversion while
 /// ensuring a policy change cannot land inside an authorized request leg.
 pub(crate) async fn lock_pairing_mutation() -> MutexGuard<'static, ()> {
-    PAIRING.lock().await
+    tidebreak_gateway_runtime::GATEWAY_PAIRING_WRITES
+        .lock()
+        .await
 }
 
 /// The process-local handles pairing needs.
@@ -200,7 +193,7 @@ pub async fn register_pending_pairing(
 ) -> Result<PendingRegistration, PairingError> {
     let config = GatewayAuthConfig::new(gateway_url)?;
     let base_url = config.base_url().to_string();
-    let _guard = PAIRING.lock().await;
+    let _guard = lock_pairing_mutation().await;
     let policy = handle.gateway.policy()?;
     if policy.managed {
         let replaceable = policy.source == crate::managed_policy::ManagedPolicySource::Provisioned;
@@ -242,7 +235,7 @@ pub async fn register_replacing_pairing(
 ) -> Result<PendingRegistration, PairingError> {
     let config = GatewayAuthConfig::new(gateway_url)?;
     let base_url = config.base_url().to_string();
-    let _guard = PAIRING.lock().await;
+    let _guard = lock_pairing_mutation().await;
     let policy = handle.gateway.policy()?;
     if policy.managed {
         let replaceable = policy.source == crate::managed_policy::ManagedPolicySource::Provisioned;
@@ -421,7 +414,8 @@ pub(crate) async fn commit_signed_in_pairing_locked(
     base_url: &str,
     replaces: Option<&str>,
 ) -> tidebreak_core::Result<()> {
-    // The caller holds the model-authority writer and PAIRING, in that order.
+    // The caller holds the model-authority writer and the shared pairing lock,
+    // in that order.
     // The policy re-read and write are therefore atomic against every local
     // pairing path, and any request leg authorized under the old policy has
     // already dispatched before a re-pair can retire its session.

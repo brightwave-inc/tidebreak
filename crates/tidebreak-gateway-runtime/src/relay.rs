@@ -10,17 +10,17 @@ use super::*;
 /// registered there — which the registration seam establishes on the spot
 /// when it is not, so a granted app self-heals into a servable one on its
 /// first call.
-pub(crate) struct GatewayRelayDispatcher {
+struct GatewayRelayDispatcher {
     runtime: Arc<GatewayRuntime>,
-    drafts: Arc<dyn crate::connected_apps::GatewayDraftSource>,
+    drafts: Arc<dyn GatewayDraftSource>,
 }
 
 /// The relay as production assembles it: over the process's one gateway
 /// runtime and the store-backed registration registry.
-pub(crate) fn gateway_relay_dispatcher(
+pub fn gateway_relay_dispatcher(
     runtime: Arc<GatewayRuntime>,
-    drafts: Arc<dyn crate::connected_apps::GatewayDraftSource>,
-) -> Arc<dyn crate::connected_apps::GatewayInvokeDispatcher> {
+    drafts: Arc<dyn GatewayDraftSource>,
+) -> Arc<dyn GatewayInvokeDispatcher> {
     Arc::new(GatewayRelayDispatcher { runtime, drafts })
 }
 
@@ -28,15 +28,10 @@ impl GatewayRelayDispatcher {
     /// One relay attempt against an already-resolved shared app.
     pub(super) async fn relay(
         &self,
-        connection: &crate::connectors::GatewayConnection,
+        connection: &GatewayConnection,
         shared_app_id: &str,
         body: &serde_json::Value,
-    ) -> std::result::Result<
-        crate::connectors::GatewayInvokeOutcome,
-        crate::connected_apps::GatewayDispatchError,
-    > {
-        use crate::connected_apps::GatewayDispatchError;
-
+    ) -> std::result::Result<GatewayInvokeOutcome, GatewayDispatchError> {
         match connection.invoke_shared_app(shared_app_id, body).await {
             Ok(Some(outcome)) => Ok(outcome),
             Ok(None) => Err(GatewayDispatchError::NotRegistered),
@@ -54,18 +49,13 @@ impl GatewayRelayDispatcher {
 }
 
 #[async_trait]
-impl crate::connected_apps::GatewayInvokeDispatcher for GatewayRelayDispatcher {
+impl GatewayInvokeDispatcher for GatewayRelayDispatcher {
     async fn dispatch(
         &self,
         owner: &tidebreak_core::OwnerId,
         app: tidebreak_core::id::AppId,
-        request: &crate::connected_apps::GatewayOperationRequest,
-    ) -> std::result::Result<
-        crate::connectors::GatewayInvokeOutcome,
-        crate::connected_apps::GatewayDispatchError,
-    > {
-        use crate::connected_apps::GatewayDispatchError;
-
+        request: &GatewayOperationRequest,
+    ) -> std::result::Result<GatewayInvokeOutcome, GatewayDispatchError> {
         // A read that faults is reported as unreachable rather than as "no
         // session": the distinction the route draws is whether a session
         // exists, and a failed policy or vault read does not answer that.
@@ -106,24 +96,16 @@ impl crate::connected_apps::GatewayInvokeDispatcher for GatewayRelayDispatcher {
             .await
             .map_err(unreachable("register this app at the gateway"))?
         {
-            crate::connected_apps::GatewayRegistration::Registered { shared_app_id, .. } => {
-                shared_app_id
-            }
-            crate::connected_apps::GatewayRegistration::NotRegistered => {
-                return Err(GatewayDispatchError::NotRegistered)
-            }
-            crate::connected_apps::GatewayRegistration::Refused { message } => {
+            GatewayRegistration::Registered { shared_app_id, .. } => shared_app_id,
+            GatewayRegistration::NotRegistered => return Err(GatewayDispatchError::NotRegistered),
+            GatewayRegistration::Refused { message } => {
                 return Err(GatewayDispatchError::Unreachable(message))
             }
         };
         let body = shared_app_invoke_body(request);
-        crate::gateway_drafts::relay_with_consent_self_heal(
-            &*self.drafts,
-            owner,
-            app,
-            &base_url,
-            || self.relay(&connection, &shared_app_id, &body),
-        )
+        relay_with_consent_self_heal(&*self.drafts, owner, app, &base_url, || {
+            self.relay(&connection, &shared_app_id, &body)
+        })
         .await
     }
 }
@@ -132,9 +114,8 @@ impl crate::connected_apps::GatewayInvokeDispatcher for GatewayRelayDispatcher {
 /// rather than sent as null: the gateway's argument fields default when
 /// missing but refuse an explicit null, matching its `proxy_api` tool's
 /// schema — a null here makes every relayed call an `invalid_request`.
-pub(super) fn shared_app_invoke_body(
-    request: &crate::connected_apps::GatewayOperationRequest,
-) -> serde_json::Value {
+#[doc(hidden)]
+pub fn shared_app_invoke_body(request: &GatewayOperationRequest) -> serde_json::Value {
     let mut body = serde_json::Map::new();
     body.insert(
         "connected_app_id".into(),
@@ -154,4 +135,36 @@ pub(super) fn shared_app_invoke_body(
         body.insert("body".into(), request_body.clone());
     }
     serde_json::Value::Object(body)
+}
+
+#[doc(hidden)]
+pub async fn relay_with_consent_self_heal<F, Fut>(
+    drafts: &dyn GatewayDraftSource,
+    owner: &tidebreak_core::OwnerId,
+    app: tidebreak_core::id::AppId,
+    gateway_base_url: &str,
+    relay: F,
+) -> std::result::Result<GatewayInvokeOutcome, GatewayDispatchError>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<
+        Output = std::result::Result<GatewayInvokeOutcome, GatewayDispatchError>,
+    >,
+{
+    let outcome = relay().await?;
+    if !matches!(outcome, GatewayInvokeOutcome::ConsentRequired { .. }) {
+        return Ok(outcome);
+    }
+    match drafts.relay_consent(owner, app, gateway_base_url).await {
+        Ok(GatewayConsentRelay::Consented) => {}
+        Ok(refused) => {
+            tracing::info!("this app's gateway consent could not be relayed: {refused:?}");
+            return Ok(outcome);
+        }
+        Err(error) => {
+            tracing::warn!("could not relay this app's gateway consent: {error}");
+            return Ok(outcome);
+        }
+    }
+    relay().await
 }

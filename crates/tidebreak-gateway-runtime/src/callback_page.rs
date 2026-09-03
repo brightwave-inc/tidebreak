@@ -7,14 +7,14 @@
 
 /// Kind of outcome the loopback page is reporting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CallbackOutcome {
+pub enum CallbackOutcome {
     Success,
     Denied,
     Failed,
 }
 
 /// Fully self-contained HTML for the browser tab the OAuth redirect lands on.
-pub(crate) fn callback_page(outcome: CallbackOutcome, heading: &str, message: &str) -> String {
+pub fn callback_page(outcome: CallbackOutcome, heading: &str, message: &str) -> String {
     let (status_label, icon_svg, tone) = match outcome {
         CallbackOutcome::Success => (
             "Connected",
