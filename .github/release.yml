@@ -8,6 +8,9 @@ changelog:
     - title: "✨ New Features"
       labels:
         - "release-note:feature"
+    - title: "🌟 Improvements"
+      labels:
+        - "release-note:improvement"
     - title: "🐛 Bug Fixes"
       labels:
         - "release-note:fix"

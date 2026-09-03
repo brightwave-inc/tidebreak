@@ -10,6 +10,7 @@ import {
 
 for (const [title, label] of [
   ["feat: add search", "semver:minor"],
+  ["improve(desktop): simplify navigation", "semver:patch"],
   ["fix(core): prevent a race", "semver:patch"],
   ["perf: reduce startup time", "semver:patch"],
   ["deps(cargo): update sqlite", "semver:patch"],
@@ -29,6 +30,7 @@ test("rejects an invalid title instead of guessing its impact", () => {
 
 for (const [title, label] of [
   ["feat: add search", "release-note:feature"],
+  ["improve(desktop): simplify navigation", "release-note:improvement"],
   ["fix(core): prevent a race", "release-note:fix"],
   ["perf: reduce startup time", "release-note:performance"],
   ["deps(cargo): update sqlite", "release-note:dependencies"],
@@ -45,6 +47,10 @@ test("returns the exact managed labels expected on a pull request", () => {
   assert.deepEqual(releaseLabels("feat: add search"), [
     "semver:minor",
     "release-note:feature",
+  ]);
+  assert.deepEqual(releaseLabels("improve: simplify navigation"), [
+    "semver:patch",
+    "release-note:improvement",
   ]);
   assert.deepEqual(releaseLabels("fix(core)!: replace the API"), [
     "semver:breaking",

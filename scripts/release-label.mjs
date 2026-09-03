@@ -10,15 +10,17 @@ export const MANAGED_RELEASE_LABELS = [
   "semver:patch",
   "semver:none",
   "release-note:feature",
+  "release-note:improvement",
   "release-note:fix",
   "release-note:performance",
   "release-note:dependencies",
   "release-note:revert",
 ];
 
-const PATCH_TYPES = new Set(["fix", "perf", "deps", "revert"]);
+const PATCH_TYPES = new Set(["improve", "fix", "perf", "deps", "revert"]);
 const RELEASE_NOTE_LABELS = new Map([
   ["feat", "release-note:feature"],
+  ["improve", "release-note:improvement"],
   ["fix", "release-note:fix"],
   ["perf", "release-note:performance"],
   ["deps", "release-note:dependencies"],

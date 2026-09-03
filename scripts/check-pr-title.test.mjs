@@ -5,6 +5,7 @@ import { parsePrTitle, validatePrTitle } from "./check-pr-title.mjs";
 
 for (const title of [
   "feat: add document search",
+  "improve(desktop): simplify settings navigation",
   "fix(core): prevent duplicate turns",
   "feat(core)!: replace the storage format",
   "deps(cargo): update database dependencies",
@@ -39,11 +40,11 @@ test("rejects a hidden breaking-change footer", () => {
 });
 
 test("parses the release-relevant parts of a title", () => {
-  assert.deepEqual(parsePrTitle("feat(core)!: replace the API"), {
-    type: "feat",
-    scope: "core",
+  assert.deepEqual(parsePrTitle("improve(desktop)!: replace navigation"), {
+    type: "improve",
+    scope: "desktop",
     breaking: true,
-    description: "replace the API",
+    description: "replace navigation",
   });
 });
 

@@ -11,6 +11,10 @@ categories:
     exclusive: true
     when:
       label: "release-note:feature"
+  - title: "🌟 Improvements"
+    exclusive: true
+    when:
+      label: "release-note:improvement"
   - title: "🐛 Bug Fixes"
     exclusive: true
     when:
@@ -27,7 +31,7 @@ categories:
     exclusive: true
     when:
       label: "release-note:revert"
-  # Maintenance changes carry no user-facing feature or fix, but they are not
+  # Maintenance changes carry no user-facing release note, but they are not
   # invisible: a refactor can rebuild the local database or change build
   # requirements. Every merged PR is accounted for in the notes — nothing is
   # pre-excluded — with maintenance listed after the user-facing sections.

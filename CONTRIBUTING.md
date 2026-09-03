@@ -126,13 +126,15 @@ dev`, or run the React UI in a browser against `tidebreak serve` via
   [Conventional Commits](https://www.conventionalcommits.org/) header. CI checks
   the title because squash merge makes it the release commit on `main`:
   `type(optional-scope)[!]: description`.
-- Allowed types are `feat`, `fix`, `perf`, `deps`, `revert`, `docs`, `refactor`,
-  `chore`, `build`, `ci`, and `test`. Use `!` only with a release-driving type
-  (`feat`, `fix`, `perf`, `deps`, or `revert`) and only for an intentionally
-  breaking product, API, data, or configuration change.
-- `feat` drives a minor release; `fix`, `perf`, shipped `deps`, and `revert`
-  changes drive a patch; maintenance-only types do not release. Before 1.0,
-  breaking changes drive a minor release. See the
+- Allowed types are `feat`, `improve`, `fix`, `perf`, `deps`, `revert`, `docs`,
+  `refactor`, `chore`, `build`, `ci`, and `test`. Use `improve` for user-visible
+  polish or behavior changes that add no capability and correct no defect. Use
+  `!` only with a release-driving type (`feat`, `improve`, `fix`, `perf`, `deps`,
+  or `revert`) and only for an intentionally breaking product, API, data, or
+  configuration change.
+- `feat` drives a minor release; `improve`, `fix`, `perf`, shipped `deps`, and
+  `revert` changes drive a patch; maintenance-only types do not release. Before
+  1.0, breaking changes drive a minor release. See the
   [release guide](docs/releases.md) for the full policy and the deliberate
   `1.0.0` procedure.
 - Individual commits on a PR may use the same convention, but only the PR title

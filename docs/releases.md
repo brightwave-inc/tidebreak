@@ -24,17 +24,19 @@ Scopes are optional and descriptive; common examples are `core`, `server`,
 | Title type                                          | Use for                                              | Release effect |
 | --------------------------------------------------- | ---------------------------------------------------- | -------------- |
 | `feat`                                              | New user-visible capability                          | Minor          |
+| `improve`                                           | User-visible polish or behavior improvement          | Patch          |
 | `fix`                                               | User-visible defect correction                       | Patch          |
 | `perf`                                              | User-visible performance improvement                 | Patch          |
 | `deps`                                              | Shipped runtime dependency update                    | Patch          |
 | `revert`                                            | Reversal of a previously shipped change              | Patch          |
 | `docs`, `refactor`, `test`, `build`, `ci`, `chore`  | Non-user-facing maintenance                          | None           |
-| `feat`, `fix`, `perf`, `deps`, or `revert` with `!` | Breaking product, API, data, or configuration change | Breaking       |
+| `feat`, `improve`, `fix`, `perf`, `deps`, or `revert` with `!` | Breaking product, API, data, or configuration change | Breaking       |
 
 Examples:
 
 ```text
 feat(desktop): add document search
+improve(desktop): simplify settings navigation
 fix(core): prevent duplicate turn completion
 deps(cargo): update the database stack
 revert: restore the previous storage behavior
@@ -42,12 +44,13 @@ feat(core)!: replace the persisted conversation format
 docs: explain local model configuration
 ```
 
-Choose the type based on user impact, not the files changed. A refactor that
-fixes observable behavior is `fix`; a build change that adds a shipped
-capability is `feat`. A breaking refactor is normally `feat!` or `fix!`, based
-on its user impact. CI rejects `!` on maintenance-only types. If the PR body has
-a `BREAKING CHANGE:` footer, its title must also carry `!` so the impact is
-visible during review.
+Choose the type based on user impact, not the files changed. Use `improve` when
+the product works but the change makes an existing experience better. A
+refactor that fixes observable behavior is `fix`; a build change that adds a
+shipped capability is `feat`. Classify a breaking refactor as `feat!`,
+`improve!`, or `fix!` based on its user impact. CI rejects `!` on
+maintenance-only types. If the PR body has a `BREAKING CHANGE:` footer, its
+title must also carry `!` so the impact is visible during review.
 
 GitHub Actions dependency updates remain `ci(deps)` and do not release the
 product. Cargo Dependabot updates use `deps` because those dependencies ship in
@@ -60,6 +63,7 @@ without asking authors to classify a PR twice:
 | Title type | Release-notes section          |
 | ---------- | ------------------------------ |
 | `feat`     | ✨ New Features                |
+| `improve`  | 🌟 Improvements                |
 | `fix`      | 🐛 Bug Fixes                   |
 | `perf`     | ⚡ Performance Improvements    |
 | `deps`     | 📦 Dependency Updates          |
@@ -615,13 +619,13 @@ see exactly what a change to either lockfile adds to the product's obligations.
 
 ## Before 1.0
 
-While the latest published version is below `1.0.0`, fixes increment patch,
-features increment minor, and breaking changes also increment minor. The
-`semver:breaking` version-resolver entry in `.github/release-drafter.yml`
-encodes that pre-1.0 behavior.
+While the latest published version is below `1.0.0`, improvements and fixes
+increment patch, features increment minor, and breaking changes also increment
+minor. The `semver:breaking` version-resolver entry in
+`.github/release-drafter.yml` encodes that pre-1.0 behavior.
 
-For example, `0.3.2` becomes `0.3.3` for a fix and `0.4.0` for either a feature
-or a breaking pre-1.0 change.
+For example, `0.3.2` becomes `0.3.3` for an improvement or fix and `0.4.0` for
+either a feature or a breaking pre-1.0 change.
 
 Desktop upgrades from **v0.61.0** onward keep local data. Schema changes after
 that pin are appended migrations
@@ -667,8 +671,8 @@ its local profile until this checklist is complete:
    upgrade behavior, and every reported application/protocol version.
 
 After `1.0.0`, breaking changes increment major, features increment minor, and
-fixes increment patch. Add supported release branches only if the project later
-commits to maintaining multiple release lines.
+improvements and fixes increment patch. Add supported release branches only if
+the project later commits to maintaining multiple release lines.
 
 ## Required repository settings
 

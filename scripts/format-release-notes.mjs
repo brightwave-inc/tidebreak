@@ -22,6 +22,11 @@ const CATEGORIES = [
     scoped: true,
   },
   {
+    key: "Improvements",
+    title: "🌟 Improvements",
+    scoped: true,
+  },
+  {
     key: "Bug Fixes",
     title: "🐛 Bug Fixes",
     scoped: true,

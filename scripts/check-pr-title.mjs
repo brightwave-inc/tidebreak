@@ -4,6 +4,7 @@ import { pathToFileURL } from "node:url";
 
 export const ALLOWED_TYPES = [
   "feat",
+  "improve",
   "fix",
   "perf",
   "deps",
@@ -16,7 +17,14 @@ export const ALLOWED_TYPES = [
   "test",
 ];
 
-const RELEASING_TYPES = new Set(["feat", "fix", "perf", "deps", "revert"]);
+const RELEASING_TYPES = new Set([
+  "feat",
+  "improve",
+  "fix",
+  "perf",
+  "deps",
+  "revert",
+]);
 
 const TITLE_PATTERN = new RegExp(
   `^(${ALLOWED_TYPES.join("|")})(?:\\(([a-z0-9]+(?:[._/-][a-z0-9]+)*)\\))?(!)?: (\\S.*)$`,
@@ -45,7 +53,7 @@ export function validatePrTitle(title, body = "") {
       `invalid pull request title: ${JSON.stringify(title)}`,
       "expected: type(optional-scope)[!]: description",
       `allowed types: ${ALLOWED_TYPES.join(", ")}`,
-      "examples: feat(desktop): add search, fix(core): prevent a race, feat(core)!: replace the storage format",
+      "examples: feat(desktop): add search, improve(desktop): simplify navigation, fix(core): prevent a race",
     ].join("\n");
   }
 
@@ -53,8 +61,8 @@ export function validatePrTitle(title, body = "") {
   if (breaking && !RELEASING_TYPES.has(type)) {
     return [
       `invalid breaking pull request title: ${JSON.stringify(title)}`,
-      "the ! marker must use a release-driving type: feat, fix, perf, deps, or revert",
-      "classify a breaking refactor or build change by its user impact, usually feat! or fix!",
+      "the ! marker must use a release-driving type: feat, improve, fix, perf, deps, or revert",
+      "classify a breaking refactor or build change by its user impact, usually feat!, improve!, or fix!",
     ].join("\n");
   }
 
