@@ -7,8 +7,9 @@ file is generated; do not edit it by hand. Regenerate it with:
 node scripts/generate-third-party-notices.mjs
 ```
 
-It covers every package in the resolved Cargo workspace graph that is not
-a Tidebreak crate, and every package in the desktop UI's production
+It covers every package in the resolved Cargo workspace graphs (the root
+workspace and the separately published whisper helper) that is not a
+Tidebreak crate, and every package in the desktop UI's production
 dependency graph, on every platform either graph can be built for.
 Development-only dependencies are excluded because they are not
 distributed.

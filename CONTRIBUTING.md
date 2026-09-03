@@ -15,8 +15,10 @@ changes.
 
 Local voice transcription runs in a separately published `tidebreak-whisper`
 helper the desktop downloads on demand, so building the desktop app itself no
-longer requires CMake. Building the helper (`cargo build -p tidebreak-whisper`)
-does, and so does the `Publish whisper helper` workflow.
+longer requires CMake. The helper is its own Cargo workspace, excluded from
+the root one so that no `--workspace` command compiles whisper.cpp. Building
+it (`cargo build --release --manifest-path crates/tidebreak-whisper/Cargo.toml`)
+does need CMake, and so does the `Publish whisper helper` workflow.
 
 ```sh
 # Run the desktop app: installs the UI dependencies, then opens the window.

@@ -44,6 +44,10 @@ const repositoryRoot = path.resolve(
 export const NOTICES_RELATIVE_PATH = "legal/THIRD-PARTY-NOTICES.md";
 export const UI_RELATIVE_PATH = "crates/tidebreak-desktop/ui";
 export const REGENERATE_COMMAND = "node scripts/generate-third-party-notices.mjs";
+// Cargo workspaces the root one excludes but Tidebreak still distributes. The
+// whisper.cpp helper is published from its own workspace so that no
+// `--workspace` lane compiles it; its dependency graph still ships to users.
+export const EXCLUDED_CARGO_WORKSPACES = ["crates/tidebreak-whisper"];
 
 // Files a package may distribute its license or notice text in. Matched
 // case-insensitively against the top level of the package directory only:
@@ -495,8 +499,9 @@ export function renderNotices({ rustPackages, nodePackages }) {
     REGENERATE_COMMAND,
     "```",
     "",
-    "It covers every package in the resolved Cargo workspace graph that is not",
-    "a Tidebreak crate, and every package in the desktop UI's production",
+    "It covers every package in the resolved Cargo workspace graphs (the root",
+    "workspace and the separately published whisper helper) that is not a",
+    "Tidebreak crate, and every package in the desktop UI's production",
     "dependency graph, on every platform either graph can be built for.",
     "Development-only dependencies are excluded because they are not",
     "distributed.",
@@ -536,6 +541,26 @@ export function renderNotices({ rustPackages, nodePackages }) {
   }
 
   return `${[...header, ...body, ...appendix].join("\n").replace(/\n+$/, "")}\n`;
+}
+
+// Combine the metadata of several Cargo workspaces into one graph: every
+// workspace's own members are excluded and a package that appears in more
+// than one graph is listed once.
+export function mergeCargoMetadata(metadatas) {
+  const workspaceMembers = new Set();
+  const packages = new Map();
+  for (const metadata of metadatas) {
+    for (const member of metadata.workspace_members ?? []) {
+      workspaceMembers.add(member);
+    }
+    for (const pkg of metadata.packages ?? []) {
+      if (!packages.has(pkg.id)) packages.set(pkg.id, pkg);
+    }
+  }
+  return {
+    workspace_members: [...workspaceMembers],
+    packages: [...packages.values()],
+  };
 }
 
 function runCargoMetadata(root) {
@@ -702,7 +727,13 @@ export function generateNotices({ root = repositoryRoot } = {}) {
   const uiManifest = JSON.parse(
     readFileSync(path.join(uiDirectory, "package.json"), "utf8"),
   );
-  const rustPackages = collectRustPackages(runCargoMetadata(root));
+  const rustPackages = collectRustPackages(
+    mergeCargoMetadata(
+      [root, ...EXCLUDED_CARGO_WORKSPACES.map((dir) => path.join(root, dir))].map(
+        runCargoMetadata,
+      ),
+    ),
+  );
   const nodePackages = withProductionClosure(uiDirectory, (installed) =>
     collectNodePackages(installed, {
       root,

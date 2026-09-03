@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
+# The whisper.cpp transcription helper is its own workspace. It is published
+# separately (publish-whisper-helper.yml) and downloaded on demand, so keeping
+# it out of this graph keeps cmake, bindgen, and the C++ build out of every
+# `--workspace` lane.
+exclude = ["crates/tidebreak-whisper"]
 
 [workspace.package]
 version = "0.0.0"
@@ -78,7 +83,6 @@ reqwest = { version = "=0.12.28", default-features = false, features = ["json", 
 sha2 = "=0.11.0"
 symphonia = { version = "=0.6.0", default-features = false, features = ["aac", "alac", "isomp4", "mkv"] }
 opus-decoder = "=0.1.1"
-whisper-rs = "=0.16.0"
 base64 = "=0.23.1"
 minisign-verify = "=0.2.5"
 libc = "=0.2.189"
