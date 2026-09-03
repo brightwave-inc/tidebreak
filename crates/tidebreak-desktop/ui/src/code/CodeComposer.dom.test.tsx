@@ -123,6 +123,43 @@ describe("CodeComposer", () => {
     expect(screen.queryByText("Pasted text")).toBeNull();
   });
 
+  it("attaches a long first-session paste before sending it", async () => {
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    renderComposer(
+      <CodeComposer
+        running={false}
+        permissionMode="ask"
+        onSend={onSend}
+        onInterrupt={vi.fn()}
+      />,
+    );
+    const box = screen.getByRole("textbox", { name: "Message" });
+    const pasted = `{
+  "message": "<pasted_text>\\ninner paste\\n</pasted_text>",
+  "payload": "${"x".repeat(1_000)}"
+}`;
+    const event = createEvent.paste(box, {
+      clipboardData: {
+        files: [],
+        getData: (type: string) => (type === "text/plain" ? pasted : ""),
+      },
+    });
+
+    fireEvent(box, event);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(box).toHaveValue("");
+    expect(screen.getByText("Pasted text")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    await waitFor(() =>
+      expect(onSend).toHaveBeenCalledWith(
+        `<pasted_text>\n${pasted}\n</pasted_text>`,
+      ),
+    );
+  });
+
   it("inserts a pending inspector prompt into the draft", async () => {
     useCodeUiStore
       .getState()
