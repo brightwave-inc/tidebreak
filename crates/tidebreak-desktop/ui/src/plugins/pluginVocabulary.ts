@@ -24,22 +24,6 @@ export function capabilityLabel(capability: PluginCapability): string {
   return CAPABILITY_LABELS[capability];
 }
 
-/**
- * The short form for a list row, where a badge sits beside a name rather than
- * on a detail page with room to explain itself.
- */
-const CAPABILITY_SHORT_LABELS: Record<PluginCapability, string> = {
-  "write-files": "Files",
-  network: "Network",
-  "host-install": "Host install",
-  "live-control": "Live control",
-  mcp: "MCP",
-};
-
-export function capabilityShortLabel(capability: PluginCapability): string {
-  return CAPABILITY_SHORT_LABELS[capability];
-}
-
 const CATEGORY_LABELS: Record<PluginCategory, string> = {
   documents: "Documents",
   data: "Data",

@@ -1,5 +1,12 @@
 import { FileOutputIcon, RotateCwIcon } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { toast } from "sonner";
 
 import { PanelSecondaryHeader } from "@/components/PanelHeader";
@@ -28,7 +35,9 @@ import {
 } from "@/NativePickerLatch";
 import { useRefreshSignals } from "@/RefreshSignals";
 import { hostErrorMessage } from "@/remoteMachine";
-import { OutputsTable } from "./OutputsTable";
+const OutputsTable = lazy(() =>
+  import("./OutputsTable").then((module) => ({ default: module.OutputsTable })),
+);
 
 export type OutputsApis = {
   list: (chatId: string) => Promise<DeliverablesCatalog>;
@@ -250,14 +259,22 @@ export function OutputsView({
             </EmptyHeader>
           </Empty>
         ) : (
-          <OutputsTable
-            outputs={catalog.deliverables}
-            busyOutputId={busyOutputId}
-            onOpen={onOpen}
-            onSave={(output) => void onSave(output)}
-            onDelete={(output) => void onDelete(output)}
-            onCountChange={setCountSuffix}
-          />
+          <Suspense
+            fallback={
+              <p className="px-4 text-sm text-muted-foreground" role="status">
+                Loading outputs for this conversation…
+              </p>
+            }
+          >
+            <OutputsTable
+              outputs={catalog.deliverables}
+              busyOutputId={busyOutputId}
+              onOpen={onOpen}
+              onSave={(output) => void onSave(output)}
+              onDelete={(output) => void onDelete(output)}
+              onCountChange={setCountSuffix}
+            />
+          </Suspense>
         )}
       </div>
     </div>

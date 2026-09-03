@@ -214,13 +214,6 @@ function recentBonus(id: string, recents: readonly string[]): number {
   return index < 0 ? 0 : (recents.length - index) * 40;
 }
 
-/** Every row in the groups, flattened into the order they are drawn. */
-export function flattenPaletteGroups(
-  groups: readonly PaletteGroup[],
-): PaletteRow[] {
-  return groups.flatMap((group) => group.rows);
-}
-
 const RECENTS_KEY = "tidebreak.command-palette-recents";
 /** Long enough to cover a working session's habits, short enough to turn over. */
 const RECENTS_LIMIT = 24;

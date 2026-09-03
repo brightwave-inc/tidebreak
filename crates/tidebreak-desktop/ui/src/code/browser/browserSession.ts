@@ -158,26 +158,6 @@ export function moveBrowserHistory(
   };
 }
 
-export function selectBrowserHistory(
-  session: BrowserSession,
-  index: number,
-  now = Date.now(),
-): BrowserSession {
-  const target = session.history[index];
-  if (!target) return session;
-  return {
-    ...session,
-    historyIndex: index,
-    url: target.url,
-    address: browserDisplayAddress(target.url),
-    title: target.title || "Browser",
-    loadState: "loading",
-    error: null,
-    notice: null,
-    updatedAt: now,
-  };
-}
-
 export function failBrowserSession(
   session: BrowserSession,
   error: string,

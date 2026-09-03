@@ -8,10 +8,8 @@ import type {
   CodeCloneJobSnapshot,
   CodeHarnessInstallSnapshot,
   CodeSessionDigest,
-  CodeSessionLifecycle,
   CodeUpdateNotice,
   HarnessKind,
-  PullRequestDigest,
 } from "../api/types";
 import {
   codeClientGeneration,
@@ -995,18 +993,6 @@ function reconcileTrackedClones(
       void reconcileCodeClone(client, jobId);
     }
   }
-}
-
-export function digestLifecycle(
-  digest: CodeSessionDigest | undefined,
-): CodeSessionLifecycle | undefined {
-  return digest?.lifecycle;
-}
-
-export function digestPr(
-  digest: CodeSessionDigest | undefined,
-): PullRequestDigest | undefined {
-  return digest?.pr_state;
 }
 
 export { MAX_RECONNECT_DELAY_MS };

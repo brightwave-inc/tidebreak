@@ -1,4 +1,4 @@
-import { renderToStaticMarkup } from "react-dom/server";
+import { renderToReadableStream, renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { stripCitationDirectives } from "./citationDirectives";
 import {
@@ -8,6 +8,14 @@ import {
   preserveLineBreaks,
   safeMarkdownUrl,
 } from "./MessageMarkdown";
+
+async function renderMarkdownHtml(source: string): Promise<string> {
+  const stream = await renderToReadableStream(
+    <MessageMarkdown>{source}</MessageMarkdown>,
+  );
+  await stream.allReady;
+  return new Response(stream).text();
+}
 
 describe("citation directives", () => {
   const id = "0b2b1f2c-9d3e-4a5b-8c7d-6e5f4a3b2c1d";
@@ -136,20 +144,20 @@ describe("MessageMarkdown", () => {
     expect(markup).toContain('aria-label="Copy table"');
   });
 
-  it("renders display math through KaTeX rather than as literal source", () => {
-    const markup = renderToStaticMarkup(
-      <MessageMarkdown>{"$$E = mc^2$$"}</MessageMarkdown>,
-    );
+  it("renders display math through KaTeX rather than as literal source", {
+    timeout: 15_000,
+  }, async () => {
+    const markup = await renderMarkdownHtml("$$E = mc^2$$");
 
     // KaTeX emits its own markup; the raw delimiters must not survive.
     expect(markup).toContain("katex");
     expect(markup).not.toContain("$$E = mc^2$$");
   });
 
-  it("normalizes bracketed LaTeX delimiters into rendered math", () => {
-    const markup = renderToStaticMarkup(
-      <MessageMarkdown>{"\\[a^2 + b^2 = c^2\\]"}</MessageMarkdown>,
-    );
+  it("normalizes bracketed LaTeX delimiters into rendered math", {
+    timeout: 15_000,
+  }, async () => {
+    const markup = await renderMarkdownHtml("\\[a^2 + b^2 = c^2\\]");
 
     expect(markup).toContain("katex");
     expect(markup).not.toContain("\\[");

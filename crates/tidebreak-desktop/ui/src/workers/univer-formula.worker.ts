@@ -1,11 +1,19 @@
-import sheetsCoreEnUS from "@univerjs/preset-sheets-core/locales/en-US";
-import { UniverSheetsCoreWorkerPreset } from "@univerjs/preset-sheets-core/worker";
-import { createUniver, LocaleType } from "@univerjs/presets";
+import { LocaleType, Univer } from "@univerjs/core";
+import { UniverFormulaEnginePlugin } from "@univerjs/engine-formula";
+import { UniverRPCWorkerThreadPlugin } from "@univerjs/rpc";
+import { UniverSheetsPlugin } from "@univerjs/sheets";
+import { UniverRemoteSheetsFormulaPlugin } from "@univerjs/sheets-formula";
 
-createUniver({
+const univer = new Univer({
   locale: LocaleType.EN_US,
   locales: {
-    [LocaleType.EN_US]: sheetsCoreEnUS,
+    [LocaleType.EN_US]: {},
   },
-  presets: [UniverSheetsCoreWorkerPreset()],
 });
+
+univer.registerPlugin(UniverSheetsPlugin, {
+  onlyRegisterFormulaRelatedMutations: true,
+});
+univer.registerPlugin(UniverFormulaEnginePlugin);
+univer.registerPlugin(UniverRPCWorkerThreadPlugin);
+univer.registerPlugin(UniverRemoteSheetsFormulaPlugin);

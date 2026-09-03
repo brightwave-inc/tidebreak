@@ -27,7 +27,6 @@ function stubMonacoWorkersForVitest() {
   };
 }
 
-
 function collectTestFiles(dir: string, acc: string[] = []): string[] {
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, entry.name);
@@ -59,9 +58,70 @@ const nodeTestFiles = allTestFiles
   .filter((file) => !isJsdomTest(file))
   .map((file) => path.relative(uiRoot, file));
 
+function katexWoff2Only() {
+  const isKatexFont = (fileName: string) =>
+    fileName.includes("KaTeX_") &&
+    (fileName.endsWith(".ttf") ||
+      (fileName.endsWith(".woff") && !fileName.endsWith(".woff2")));
+
+  return {
+    name: "katex-woff2-only",
+    enforce: "pre" as const,
+    transform(code: string, id: string) {
+      if (!id.includes("katex") || !id.includes(".css")) {
+        return undefined;
+      }
+      return {
+        code: code
+          .replace(/,url\([^)]+\.woff\) format\("woff"\)/g, "")
+          .replace(/,url\([^)]+\.ttf\) format\("truetype"\)/g, ""),
+        map: null,
+      };
+    },
+    generateBundle(
+      _options: unknown,
+      bundle: Record<
+        string,
+        { type: string; source?: string | Uint8Array; fileName: string }
+      >,
+    ) {
+      for (const [fileName, file] of Object.entries(bundle)) {
+        if (isKatexFont(fileName)) {
+          delete bundle[fileName];
+          continue;
+        }
+        if (
+          file.type === "asset" &&
+          fileName.endsWith(".css") &&
+          typeof file.source === "string" &&
+          file.source.includes("KaTeX_")
+        ) {
+          file.source = file.source
+            .replace(/url\([^)]+\.woff\) format\("woff"\),?/g, "")
+            .replace(/url\([^)]+\.ttf\) format\("truetype"\),?/g, "")
+            .replace(/,,/g, ",")
+            .replace(/,\s*}/g, "}");
+        }
+      }
+    },
+  };
+}
+
+function stubUniverEngineRenderInWorkers() {
+  const stub = path.resolve(__dirname, "./src/workers/engine-render-stub.ts");
+  return {
+    name: "stub-univer-engine-render-in-workers",
+    enforce: "pre" as const,
+    resolveId(id: string) {
+      return id === "@univerjs/engine-render" ? stub : undefined;
+    },
+  };
+}
+
 export default defineConfig(async () => ({
   plugins: [
     stubMonacoWorkersForVitest(),
+    katexWoff2Only(),
     react(),
     tailwindcss(),
     tidebreakDevListenPlugin(),
@@ -84,7 +144,10 @@ export default defineConfig(async () => ({
   // The spreadsheet viewer parses and calculates off the main thread. Those
   // workers are large enough to be split into chunks themselves, which the
   // default IIFE worker format cannot express.
-  worker: { format: "es" as const },
+  worker: {
+    format: "es" as const,
+    plugins: () => [stubUniverEngineRenderInWorkers()],
+  },
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),

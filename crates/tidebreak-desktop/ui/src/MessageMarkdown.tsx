@@ -2,6 +2,8 @@ import {
   createContext,
   isValidElement,
   memo,
+  Suspense,
+  use,
   useContext,
   useMemo,
   useRef,
@@ -14,7 +16,6 @@ import ReactMarkdown, { type Components, type Options } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeHighlight from "rehype-highlight";
-import rehypeKatex from "rehype-katex";
 import { ClipboardCopyButton, copyRichText } from "./ClipboardCopyButton";
 import {
   Table,
@@ -39,6 +40,7 @@ import {
   type HighlightRange,
 } from "./components/document/citationMark";
 import { InlineCitation } from "./InlineCitation";
+import { highlightRehypeOptions } from "./highlightLanguages";
 import { splitMarkdownBlocks } from "./markdownBlocks";
 import { escapeLatexText } from "./markdownLatex";
 import { slugify } from "./markdownHeadings";
@@ -431,15 +433,34 @@ const remarkPlugins: Options["remarkPlugins"] = [
   [remarkMath, { singleDollarTextMath: false }],
 ];
 
-const rehypePlugins: NonNullable<Options["rehypePlugins"]> = [
-  // Before anything rewrites the tree: the citations are read out of text nodes
-  // as the parser left them, which highlighting and math no longer are.
-  rehypeCitationDirectives,
-  // Highlight only fence-tagged languages; auto-detection on unlabeled blocks
-  // guesses wrong too often to be worth it.
-  [rehypeHighlight, { detect: false }],
-  rehypeKatex,
-];
+type RehypeKatex = typeof import("./markdownKatex").default;
+
+let katexModulePromise: Promise<typeof import("./markdownKatex")> | null = null;
+
+function loadMarkdownKatex() {
+  katexModulePromise ??= import("./markdownKatex");
+  return katexModulePromise;
+}
+
+/** KaTeX is needed for `$` math and for the `\[ \]` / `\(` forms models emit. */
+function needsKatex(block: string): boolean {
+  return block.includes("$") || block.includes("\\[") || block.includes("\\(");
+}
+
+function baseRehypePlugins(
+  rehypeKatex?: RehypeKatex,
+): NonNullable<Options["rehypePlugins"]> {
+  return [
+    // Before anything rewrites the tree: the citations are read out of text nodes
+    // as the parser left them, which highlighting and math no longer are.
+    rehypeCitationDirectives,
+    // Highlight only fence-tagged languages; auto-detection on unlabeled blocks
+    // guesses wrong too often to be worth it. The language list is a subset of
+    // highlight.js's common grammars so the chat route does not ship all 37.
+    [rehypeHighlight, highlightRehypeOptions],
+    ...(rehypeKatex ? [rehypeKatex] : []),
+  ];
+}
 
 /**
  * Normalize raw model output before the parser sees it: rewrite LaTeX
@@ -480,10 +501,84 @@ const MarkdownBlock = memo(function MarkdownBlock({
   /** Stable across renders, or every block re-parses on every tick. */
   wrapBlock?: WrapMarkdownBlock;
 }) {
+  if (needsKatex(block)) {
+    const parsed = (
+      <ParsedMarkdownBlock
+        block={block}
+        headingIds={headingIds}
+        highlightStart={highlightStart}
+        highlightEnd={highlightEnd}
+        wrapBlock={wrapBlock}
+      />
+    );
+    return (
+      <Suspense fallback={parsed}>
+        <KatexMarkdownBlock
+          block={block}
+          headingIds={headingIds}
+          highlightStart={highlightStart}
+          highlightEnd={highlightEnd}
+          wrapBlock={wrapBlock}
+        />
+      </Suspense>
+    );
+  }
+  return (
+    <ParsedMarkdownBlock
+      block={block}
+      headingIds={headingIds}
+      highlightStart={highlightStart}
+      highlightEnd={highlightEnd}
+      wrapBlock={wrapBlock}
+    />
+  );
+});
+
+function KatexMarkdownBlock({
+  block,
+  headingIds,
+  highlightStart,
+  highlightEnd,
+  wrapBlock,
+}: {
+  block: string;
+  headingIds: boolean;
+  highlightStart?: number;
+  highlightEnd?: number;
+  wrapBlock?: WrapMarkdownBlock;
+}) {
+  const { default: rehypeKatex } = use(loadMarkdownKatex());
+  return (
+    <ParsedMarkdownBlock
+      block={block}
+      headingIds={headingIds}
+      highlightStart={highlightStart}
+      highlightEnd={highlightEnd}
+      wrapBlock={wrapBlock}
+      rehypeKatex={rehypeKatex}
+    />
+  );
+}
+
+function ParsedMarkdownBlock({
+  block,
+  headingIds,
+  highlightStart,
+  highlightEnd,
+  wrapBlock,
+  rehypeKatex,
+}: {
+  block: string;
+  headingIds: boolean;
+  highlightStart?: number;
+  highlightEnd?: number;
+  wrapBlock?: WrapMarkdownBlock;
+  rehypeKatex?: RehypeKatex;
+}) {
   const processed = useMemo(() => processMarkdownContent(block), [block]);
   const plugins = useMemo(
-    () => blockRehypePlugins(block, highlightStart, highlightEnd),
-    [block, highlightStart, highlightEnd],
+    () => blockRehypePlugins(block, highlightStart, highlightEnd, rehypeKatex),
+    [block, highlightStart, highlightEnd, rehypeKatex],
   );
   const blockComponents = useMemo(() => {
     const base = headingIds ? componentsWithHeadingIds : components;
@@ -501,7 +596,7 @@ const MarkdownBlock = memo(function MarkdownBlock({
       {processed}
     </ReactMarkdown>
   );
-});
+}
 
 /**
  * The pipeline for one block, with the citation's mark added when the block
@@ -520,15 +615,17 @@ function blockRehypePlugins(
   block: string,
   start: number | undefined,
   end: number | undefined,
+  rehypeKatex?: RehypeKatex,
 ): NonNullable<Options["rehypePlugins"]> {
-  if (start == null || end == null || end <= start) return rehypePlugins;
-  if (decodeUnicodeEscapes(block) !== block) return rehypePlugins;
-  if (joinWrappedMarkdownUrls(block) !== block) return rehypePlugins;
-  if (escapeLatexText(block) !== block) return rehypePlugins;
+  const plugins = baseRehypePlugins(rehypeKatex);
+  if (start == null || end == null || end <= start) return plugins;
+  if (decodeUnicodeEscapes(block) !== block) return plugins;
+  if (joinWrappedMarkdownUrls(block) !== block) return plugins;
+  if (escapeLatexText(block) !== block) return plugins;
   // A block carrying a citation is left alone too: the mark would split the
   // text the citation is read out of, leaving the two passes to argue over the
   // same nodes for a passage that is already marked by the citation itself.
-  if (hasCitationDirective(block)) return rehypePlugins;
+  if (hasCitationDirective(block)) return plugins;
   return [
     [
       rehypeHighlightRange,
@@ -539,7 +636,7 @@ function blockRehypePlugins(
         },
       },
     ],
-    ...rehypePlugins,
+    ...plugins,
   ];
 }
 
