@@ -1,5 +1,314 @@
 use super::*;
 
+async fn parked_client_call_for_adapter_test(
+    store: &DbStore,
+    chat_id: ChatId,
+) -> (TurnId, crate::model::ClientToolCallRequest) {
+    let turn_id = TurnId::new();
+    assert!(matches!(
+        store
+            .accept_turn(turn_id, chat_id, "gpt-5", "connect a folder")
+            .await
+            .unwrap(),
+        AcceptTurnOutcome::Accepted(_)
+    ));
+    let claimed_at = Utc::now();
+    let turn_lease = uuid::Uuid::new_v4();
+    let claimed = store
+        .claim_turn(
+            turn_lease,
+            claimed_at,
+            claimed_at + chrono::Duration::minutes(1),
+        )
+        .await
+        .unwrap()
+        .turn
+        .unwrap();
+    assert_eq!(claimed.id, turn_id);
+    let request = crate::model::ClientToolCallRequest {
+        id: CallId::new(),
+        chat_id,
+        turn_id,
+        provider_id: "native".into(),
+        name: "connect_folder".into(),
+        arguments: serde_json::json!({"suggested_name": "Documents"}),
+    };
+    assert!(matches!(
+        store
+            .park_turn_for_client_tool_call(
+                turn_id,
+                turn_lease,
+                0,
+                test_checkpoint_progress(),
+                Utc::now(),
+                &request,
+            )
+            .await
+            .unwrap(),
+        Some(ParkTurnForClientCallOutcome::Parked { .. })
+    ));
+    (turn_id, request)
+}
+
+async fn resolve_adapter_client_call(store: &DbStore, chat_id: ChatId, call_id: CallId) {
+    let claimed_at = Utc::now();
+    let client_lease = uuid::Uuid::new_v4();
+    assert!(matches!(
+        store
+            .claim_client_tool_call(
+                call_id,
+                chat_id,
+                uuid::Uuid::new_v4(),
+                client_lease,
+                claimed_at,
+                claimed_at + chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap(),
+        ClaimClientToolCallOutcome::Claimed(_)
+    ));
+    let resolved_at = claimed_at + chrono::Duration::seconds(1);
+    assert_eq!(
+        store
+            .resolve_client_tool_call_and_append_event(
+                call_id,
+                chat_id,
+                client_lease,
+                resolved_at,
+                &ToolCallResolution::Completed {
+                    result: "root-1".into(),
+                },
+                resolved_at,
+            )
+            .await
+            .unwrap()
+            .outcome,
+        ResolveToolCallOutcome::Resolved
+    );
+}
+
+#[tokio::test]
+async fn adapter_client_wait_resolves_from_the_generic_park() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (turn_id, request) = parked_client_call_for_adapter_test(&store, chat.id).await;
+    let park_ref = request.id.to_string();
+    let wait = crate::TurnParkWait::ClientToolCall {
+        call_id: park_ref.clone(),
+    };
+    assert_eq!(
+        crate::db::code::store_turn_park(
+            &store,
+            &OwnerId::local(),
+            crate::CodeTurnId(turn_id.0),
+            &park_ref,
+            &wait,
+        )
+        .await
+        .unwrap(),
+        Some(crate::CodeTurnStatus::Waiting)
+    );
+
+    resolve_adapter_client_call(&store, chat.id, request.id).await;
+
+    let turn = crate::db::code::get_turn(&store, &OwnerId::local(), crate::CodeTurnId(turn_id.0))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(turn.status, crate::CodeTurnStatus::Resuming);
+    assert_eq!(turn.park_ref.as_deref(), Some(park_ref.as_str()));
+    assert_eq!(turn.park_wait, Some(wait));
+}
+
+#[tokio::test]
+async fn adapter_client_park_preserves_a_resolution_that_won_first() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (turn_id, request) = parked_client_call_for_adapter_test(&store, chat.id).await;
+    resolve_adapter_client_call(&store, chat.id, request.id).await;
+    let park_ref = request.id.to_string();
+    let wait = crate::TurnParkWait::ClientToolCall {
+        call_id: park_ref.clone(),
+    };
+
+    assert_eq!(
+        crate::db::code::store_turn_park(
+            &store,
+            &OwnerId::local(),
+            crate::CodeTurnId(turn_id.0),
+            &park_ref,
+            &wait,
+        )
+        .await
+        .unwrap(),
+        Some(crate::CodeTurnStatus::Resuming)
+    );
+    assert_eq!(
+        crate::db::code::clear_turn_park(
+            &store,
+            &OwnerId::local(),
+            crate::CodeTurnId(turn_id.0),
+            &park_ref,
+            &wait,
+        )
+        .await
+        .unwrap(),
+        Some(crate::CodeTurnStatus::Resuming)
+    );
+    let turn = crate::db::code::get_turn(&store, &OwnerId::local(), crate::CodeTurnId(turn_id.0))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(turn.status, crate::CodeTurnStatus::Resuming);
+    assert_eq!(turn.park_ref, None);
+    assert_eq!(turn.park_wait, None);
+}
+
+#[tokio::test]
+async fn an_approval_park_rejects_mismatched_call_ids() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (turn_id, request) = parked_client_call_for_adapter_test(&store, chat.id).await;
+    let park_ref = CallId::new().to_string();
+    let wait = crate::TurnParkWait::Approval {
+        call_id: request.id.to_string(),
+    };
+    assert_eq!(
+        crate::db::code::store_turn_park(
+            &store,
+            &OwnerId::local(),
+            crate::CodeTurnId(turn_id.0),
+            &park_ref,
+            &wait,
+        )
+        .await
+        .unwrap(),
+        Some(crate::CodeTurnStatus::Waiting)
+    );
+    let turn = entities::code_turn::Entity::find_by_id(turn_id.0)
+        .one(&store.conn)
+        .await
+        .unwrap()
+        .unwrap();
+    let error = crate::db::ops::turn::approval_park_call_id(&turn).unwrap_err();
+    assert!(error.to_string().contains("mismatched call ids"), "{error}");
+}
+
+#[tokio::test]
+async fn cancelling_a_resuming_adapter_park_keeps_the_resolved_receipt() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (turn_id, request) = parked_client_call_for_adapter_test(&store, chat.id).await;
+    let park_ref = request.id.to_string();
+    let wait = crate::TurnParkWait::ClientToolCall {
+        call_id: park_ref.clone(),
+    };
+    assert_eq!(
+        crate::db::code::store_turn_park(
+            &store,
+            &OwnerId::local(),
+            crate::CodeTurnId(turn_id.0),
+            &park_ref,
+            &wait,
+        )
+        .await
+        .unwrap(),
+        Some(crate::CodeTurnStatus::Waiting)
+    );
+    resolve_adapter_client_call(&store, chat.id, request.id).await;
+
+    assert!(matches!(
+        store
+            .request_turn_cancellation(turn_id, Utc::now() + chrono::Duration::seconds(2))
+            .await
+            .unwrap(),
+        Some(RequestTurnCancellationOutcome::Cancelled(turn))
+            if turn.status == TurnRunStatus::Cancelled
+    ));
+    let receipt = entities::turn_client_wait::Entity::find_by_id(request.id.0)
+        .one(&store.conn)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        receipt.status,
+        crate::model::TurnClientWaitStatus::Resumed.as_str()
+    );
+    let call = store
+        .list_tool_calls(chat.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|call| call.id == request.id)
+        .unwrap();
+    assert_eq!(call.status, ToolCallStatus::Completed);
+}
+
+#[tokio::test]
+async fn adapter_client_park_cancels_with_its_client_receipt() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (turn_id, request) = parked_client_call_for_adapter_test(&store, chat.id).await;
+    let park_ref = request.id.to_string();
+    let wait = crate::TurnParkWait::ClientToolCall {
+        call_id: park_ref.clone(),
+    };
+    assert_eq!(
+        crate::db::code::store_turn_park(
+            &store,
+            &OwnerId::local(),
+            crate::CodeTurnId(turn_id.0),
+            &park_ref,
+            &wait,
+        )
+        .await
+        .unwrap(),
+        Some(crate::CodeTurnStatus::Waiting)
+    );
+
+    assert!(matches!(
+        store
+            .request_turn_cancellation(turn_id, Utc::now())
+            .await
+            .unwrap(),
+        Some(RequestTurnCancellationOutcome::Cancelled(turn))
+            if turn.status == TurnRunStatus::Cancelled
+    ));
+    let turn = crate::db::code::get_turn(&store, &OwnerId::local(), crate::CodeTurnId(turn_id.0))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(turn.status, crate::CodeTurnStatus::Interrupted);
+    assert_eq!(turn.park_ref.as_deref(), Some(park_ref.as_str()));
+    assert_eq!(turn.park_wait, Some(wait));
+    let call = store
+        .list_tool_calls(chat.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|call| call.id == request.id)
+        .unwrap();
+    assert_eq!(call.status, ToolCallStatus::Cancelled);
+    assert_eq!(
+        call.result.as_deref(),
+        Some("cancelled before client execution")
+    );
+    let receipt = entities::turn_client_wait::Entity::find_by_id(request.id.0)
+        .one(&store.conn)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        receipt.status,
+        crate::model::TurnClientWaitStatus::Cancelled.as_str()
+    );
+}
+
 #[tokio::test]
 async fn client_wait_parks_resolves_and_recovers_exactly() {
     let (_dir, store) = temp_store().await;

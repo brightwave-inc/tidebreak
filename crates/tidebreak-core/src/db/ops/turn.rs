@@ -16,6 +16,7 @@ use crate::provider::Usage;
 use crate::storage::{
     AcceptTurnOutcome, ClaimScanTerminalEvent, ClaimTurnRunOutcome, ReservedTurnAcceptanceOutcome,
 };
+use crate::CodeTurnStatus;
 
 use super::super::{entities, store_err, DbStore};
 use super::chat_image_publication as chat_image_publication_ops;
@@ -39,8 +40,9 @@ mod sandbox_spawn;
 pub(in crate::db) mod steer;
 
 pub(in crate::db) use client_wait::{
-    advance_turn_after_client_resolution_on, approval_park_call_id, park_turn_for_client_tool_call,
-    recover_turn_after_client_resolution_on, resumed_client_vendor_web_search,
+    adapter_client_park_call_id, adapter_park_wait, advance_turn_after_client_resolution_on,
+    approval_park_call_id, park_turn_for_client_tool_call, recover_turn_after_client_resolution_on,
+    resumed_client_vendor_web_search,
 };
 #[cfg(test)]
 pub(in crate::db) use multi_agent_run_wait::ready_agent_run_wait_set_candidates_sql;
@@ -68,7 +70,27 @@ pub(in crate::db) async fn take_lease_on_turn(
     now: chrono::DateTime<Utc>,
     lease_expires_at: chrono::DateTime<Utc>,
 ) -> Result<Option<()>> {
-    take_lease_on_turn_inner(store, id, lease_token, now, lease_expires_at, None).await
+    take_lease_on_turn_inner(store, id, lease_token, now, lease_expires_at, None, None).await
+}
+
+/// Take a fresh lease only while one exact turn is ready to resume.
+pub(in crate::db) async fn take_lease_on_resuming_turn(
+    store: &DbStore,
+    id: TurnId,
+    lease_token: uuid::Uuid,
+    now: chrono::DateTime<Utc>,
+    lease_expires_at: chrono::DateTime<Utc>,
+) -> Result<Option<()>> {
+    take_lease_on_turn_inner(
+        store,
+        id,
+        lease_token,
+        now,
+        lease_expires_at,
+        None,
+        Some(TurnRunStatus::Resuming),
+    )
+    .await
 }
 
 /// Claim one inserted turn and add its missing user transcript row atomically.
@@ -80,7 +102,16 @@ pub(in crate::db) async fn take_lease_on_turn_with_input_message(
     lease_expires_at: chrono::DateTime<Utc>,
     content: &str,
 ) -> Result<Option<()>> {
-    take_lease_on_turn_inner(store, id, lease_token, now, lease_expires_at, Some(content)).await
+    take_lease_on_turn_inner(
+        store,
+        id,
+        lease_token,
+        now,
+        lease_expires_at,
+        Some(content),
+        None,
+    )
+    .await
 }
 
 async fn take_lease_on_turn_inner(
@@ -90,6 +121,7 @@ async fn take_lease_on_turn_inner(
     now: chrono::DateTime<Utc>,
     lease_expires_at: chrono::DateTime<Utc>,
     input: Option<&str>,
+    required_status: Option<TurnRunStatus>,
 ) -> Result<Option<()>> {
     let now = canonical_db_timestamp(now)?;
     let lease_expires_at = canonical_db_timestamp(lease_expires_at)?;
@@ -124,6 +156,10 @@ async fn take_lease_on_turn_inner(
         transaction.rollback().await.map_err(store_err)?;
         return Ok(None);
     };
+    if required_status.is_some_and(|required| existing.status != required.as_str()) {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
     if existing.lease_token.is_some()
         && existing.status == TurnRunStatus::Running.as_str()
         && existing
@@ -133,7 +169,11 @@ async fn take_lease_on_turn_inner(
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     }
-    let next_attempt = std::cmp::Ord::max(existing.attempt_count.saturating_add(1), 1);
+    let next_attempt = if existing.status == TurnRunStatus::Resuming.as_str() {
+        std::cmp::Ord::max(existing.attempt_count, 1)
+    } else {
+        std::cmp::Ord::max(existing.attempt_count.saturating_add(1), 1)
+    };
     let next_claim = std::cmp::Ord::max(existing.claim_count.saturating_add(1), 1);
     let inserted =
         entities::code_turn_claim::Entity::insert(entities::code_turn_claim::ActiveModel {
@@ -1531,6 +1571,7 @@ where
             TurnRunStatus::Queued.as_str(),
             TurnRunStatus::Running.as_str(),
             TurnRunStatus::Cancelling.as_str(),
+            CodeTurnStatus::Waiting.as_str(),
             TurnRunStatus::WaitingForClient.as_str(),
             TurnRunStatus::WaitingForAgentRun.as_str(),
             TurnRunStatus::CancellingClient.as_str(),

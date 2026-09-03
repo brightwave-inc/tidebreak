@@ -24,13 +24,13 @@ use tracing::{warn, Instrument as _};
 
 use tidebreak_core::db::code::{
     accept_trigger_turn_delivery, append_event, append_event_with_notification,
-    begin_permission_mode_change, bump_spawn_epoch, cancel_permission_mode_change,
+    begin_permission_mode_change, bump_spawn_epoch, cancel_permission_mode_change, clear_turn_park,
     confirm_permission_mode_change, delete_queued_turn, get_open_turn, get_session,
     get_session_all_owners, get_workspace, insert_approval_for_worker, insert_turn, list_approvals,
     next_turn_ordinal, promote_queued_turn, queue_paused, queued_turn_head,
     rebind_pending_approvals_to_worker, save_session, save_turn, set_queue_paused,
     set_session_harness_resume_ref, set_session_subagents, settle_engine_observed_approval,
-    CodeJournalError, CodeSessionExecutionSettings,
+    store_turn_park, CodeJournalError, CodeSessionExecutionSettings,
 };
 use tidebreak_core::{
     bound_subagents, Attention, AttentionSource, BlobStore, BoundedError, CodeApproval,
@@ -866,8 +866,10 @@ async fn run_worker(
     }
 
     if let Ok(Some(open)) = get_open_turn(&sink.db, &session.owner, session.id).await {
-        if open.status == CodeTurnStatus::Waiting
-            && open.park_ref.is_some()
+        if matches!(
+            open.status,
+            CodeTurnStatus::Waiting | CodeTurnStatus::Resuming
+        ) && open.park_ref.is_some()
             && open.park_wait.is_some()
         {
             if let Err(error) = continue_parked_turn(
@@ -1341,13 +1343,33 @@ async fn persist_turn_park(
             }
         }
     };
-    turn.status = CodeTurnStatus::Waiting;
+    let status = store_turn_park(db, &session.owner, turn.id, park_ref, &wait)
+        .await
+        .map_err(|err| format!("persisting the parked turn failed: {err}"))?
+        .ok_or_else(|| format!("persisting the parked turn {} lost its row", turn.id))?;
+    turn.status = status;
     turn.park_ref = Some(park_ref.to_owned());
     turn.park_wait = Some(wait.clone());
-    save_turn(db, &session.owner, turn)
-        .await
-        .map_err(|err| format!("persisting the parked turn failed: {err}"))?;
     Ok(wait)
+}
+
+async fn clear_persisted_turn_park(
+    db: &DbStore,
+    session: &CodeSession,
+    turn: &mut CodeTurn,
+    park_ref: &str,
+    wait: &tidebreak_core::TurnParkWait,
+) -> Result<(), String> {
+    clear_turn_park(db, &session.owner, turn.id, park_ref, wait)
+        .await
+        .map_err(|err| format!("clearing the parked turn failed: {err}"))?
+        .ok_or_else(|| format!("clearing the parked turn {} lost its row", turn.id))?;
+    // The worker is about to start the resumed leg. Do not restore the
+    // transient `waiting` or `resuming` database status in its live snapshot.
+    turn.status = CodeTurnStatus::Running;
+    turn.park_ref = None;
+    turn.park_wait = None;
+    Ok(())
 }
 
 /// Hold a parked turn until its wait resolves, the worker is interrupted, or
@@ -1478,6 +1500,12 @@ struct ParkResolution {
     delivered_here: bool,
 }
 
+enum DurableParkState {
+    Pending,
+    Resolved(ParkResolution),
+    Closed,
+}
+
 /// The engine-channel decision a settled row's resolution carries.
 fn resume_decision(decision: tidebreak_core::ApprovalDecisionKind) -> ApprovalDecision {
     use tidebreak_core::ApprovalDecisionKind as Kind;
@@ -1506,18 +1534,21 @@ async fn resume_from_settled_row(
     owner: &OwnerId,
     session_id: CodeSessionId,
     call_id: &str,
-) -> Option<tidebreak_harness::ResumeInput> {
+) -> Result<Option<tidebreak_harness::ResumeInput>, WorkerError> {
     let approval = list_approvals(db, owner, None, Some(session_id))
         .await
-        .ok()?
+        .map_err(|error| WorkerError::Failed(error.to_string()))?
         .into_iter()
-        .find(|approval| approval.native_call_id.as_deref() == Some(call_id))?;
+        .find(|approval| approval.native_call_id.as_deref() == Some(call_id));
+    let Some(approval) = approval else {
+        return Ok(None);
+    };
     if approval.state.is_pending() {
-        return None;
+        return Ok(None);
     }
     let journaled = tidebreak_core::db::code::list_recent_events(db, owner, session_id, 256)
         .await
-        .ok()?
+        .map_err(|error| WorkerError::Failed(error.to_string()))?
         .into_iter()
         .find_map(|row| match row.event {
             CodeEvent::ApprovalResolved {
@@ -1538,10 +1569,75 @@ async fn resume_from_settled_row(
             }
         },
     };
-    Some(tidebreak_harness::ResumeInput::ApprovalDecided {
+    Ok(Some(tidebreak_harness::ResumeInput::ApprovalDecided {
         call_id: call_id.to_owned(),
         decision: resume_decision(decision),
-    })
+    }))
+}
+
+async fn durable_park_state(
+    db: &DbStore,
+    session: &CodeSession,
+    park_ref: &str,
+    wait: &tidebreak_core::TurnParkWait,
+    turn_id: CodeTurnId,
+    delivered: &DeliveredDecisions,
+) -> Result<DurableParkState, WorkerError> {
+    if let Some(input) = resume_if_already_delivered(wait, delivered) {
+        return Ok(DurableParkState::Resolved(ParkResolution {
+            input,
+            delivered_here: true,
+        }));
+    }
+    let turn = tidebreak_core::db::code::get_turn(db, &session.owner, turn_id)
+        .await
+        .map_err(|error| WorkerError::Failed(error.to_string()))?
+        .ok_or_else(|| WorkerError::Failed(format!("parked turn {turn_id} disappeared")))?;
+    if !turn.status.is_open() {
+        return Ok(DurableParkState::Closed);
+    }
+    if turn.park_ref.as_deref() != Some(park_ref) || turn.park_wait.as_ref() != Some(wait) {
+        return Err(WorkerError::Failed(format!(
+            "turn {turn_id} changed its durable park while the worker waited"
+        )));
+    }
+    let input = match wait {
+        tidebreak_core::TurnParkWait::Approval { call_id } => {
+            resume_from_settled_row(db, &session.owner, session.id, call_id).await?
+        }
+        tidebreak_core::TurnParkWait::ClientToolCall { call_id }
+            if turn.status == CodeTurnStatus::Resuming =>
+        {
+            Some(tidebreak_harness::ResumeInput::ClientToolCompleted {
+                call_id: call_id.clone(),
+            })
+        }
+        tidebreak_core::TurnParkWait::AgentRuns { run_ids }
+            if turn.status == CodeTurnStatus::Resuming =>
+        {
+            Some(tidebreak_harness::ResumeInput::AgentRunsSettled {
+                run_ids: run_ids.clone(),
+            })
+        }
+        tidebreak_core::TurnParkWait::ClientToolCall { .. }
+        | tidebreak_core::TurnParkWait::AgentRuns { .. } => None,
+    };
+    if let Some(input) = input {
+        return Ok(DurableParkState::Resolved(ParkResolution {
+            input,
+            delivered_here: false,
+        }));
+    }
+    if matches!(
+        turn.status,
+        CodeTurnStatus::Waiting | CodeTurnStatus::CancellingClient
+    ) {
+        Ok(DurableParkState::Pending)
+    } else {
+        // A legacy or damaged wait cannot resume safely. Close it through the
+        // normal turn path so one bad row cannot keep the session worker live.
+        Ok(DurableParkState::Closed)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1554,76 +1650,57 @@ async fn await_park_resolution<'a>(
     controls: &mut FuturesUnordered<BoxFuture<'a, ControlFlow>>,
     interrupted: &mut bool,
     commands_closed: &mut bool,
+    park_ref: &str,
     wait: &tidebreak_core::TurnParkWait,
     turn_id: CodeTurnId,
     delivered: &DeliveredDecisions,
-) -> Option<ParkResolution> {
-    if let Some(input) = resume_if_already_delivered(wait, delivered) {
-        return Some(ParkResolution {
-            input,
-            delivered_here: true,
-        });
-    }
+) -> Result<Option<ParkResolution>, WorkerError> {
     // Subscribe before the read below, so a settlement between the two
     // cannot slip past both.
     let (mut live, _tail) = bus.attach(session.id);
-    let waited_call = match wait {
-        tidebreak_core::TurnParkWait::Approval { call_id } => Some(call_id.clone()),
-        _ => None,
-    };
-    if let Some(call_id) = waited_call.as_deref() {
-        if let Some(input) = resume_from_settled_row(db, &session.owner, session.id, call_id).await
-        {
-            return Some(ParkResolution {
-                input,
-                delivered_here: false,
-            });
-        }
+    match durable_park_state(db, session, park_ref, wait, turn_id, delivered).await? {
+        DurableParkState::Pending => {}
+        DurableParkState::Resolved(resolution) => return Ok(Some(resolution)),
+        DurableParkState::Closed => return Ok(None),
     }
+    let mut durable_poll = tokio::time::interval(Duration::from_millis(100));
+    durable_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    durable_poll.tick().await;
     loop {
         tokio::select! {
             biased;
             Some(flow) = controls.next(), if !controls.is_empty() => {
                 if flow == ControlFlow::Shutdown {
                     *interrupted = true;
-                    return None;
+                    return Ok(None);
                 }
-                // The opening leg may still be delivering the awaited
-                // decision when the engine parks. That future lives in
-                // `controls`; once it finishes, resume from the record.
-                if let Some(input) = resume_if_already_delivered(wait, delivered) {
-                    return Some(ParkResolution {
-                        input,
-                        delivered_here: true,
-                    });
+                match durable_park_state(db, session, park_ref, wait, turn_id, delivered).await? {
+                    DurableParkState::Pending => {}
+                    DurableParkState::Resolved(resolution) => return Ok(Some(resolution)),
+                    DurableParkState::Closed => return Ok(None),
                 }
             }
-            published = live.recv(), if waited_call.is_some() => {
-                let call_id = waited_call.as_deref().unwrap_or_default();
-                let settled = match published {
-                    Ok(CodeLiveEvent {
-                        event: CodeEvent::ApprovalResolved { approval_id, .. },
-                        ..
-                    }) => {
-                        // The row the resolution names must be the one this
-                        // park waits on; another card's decision is not it.
-                        matches!(
-                            tidebreak_core::db::code::get_approval(db, &session.owner, approval_id).await,
-                            Ok(Some(approval)) if approval.native_call_id.as_deref() == Some(call_id)
-                        )
+            published = live.recv() => {
+                match published {
+                    Ok(CodeLiveEvent { .. })
+                    | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        return Err(WorkerError::Failed(
+                            "the live event channel closed while a turn was parked".into(),
+                        ));
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true,
-                    _ => false,
-                };
-                if settled {
-                    if let Some(input) =
-                        resume_from_settled_row(db, &session.owner, session.id, call_id).await
-                    {
-                        return Some(ParkResolution {
-                            input,
-                            delivered_here: false,
-                        });
-                    }
+                }
+                match durable_park_state(db, session, park_ref, wait, turn_id, delivered).await? {
+                    DurableParkState::Pending => {}
+                    DurableParkState::Resolved(resolution) => return Ok(Some(resolution)),
+                    DurableParkState::Closed => return Ok(None),
+                }
+            }
+            _ = durable_poll.tick() => {
+                match durable_park_state(db, session, park_ref, wait, turn_id, delivered).await? {
+                    DurableParkState::Pending => {}
+                    DurableParkState::Resolved(resolution) => return Ok(Some(resolution)),
+                    DurableParkState::Closed => return Ok(None),
                 }
             }
             command = commands.recv(), if !*commands_closed => match command {
@@ -1640,13 +1717,13 @@ async fn await_park_resolution<'a>(
                             if *waited == call_id
                     );
                     if delivered && awaited {
-                        return Some(ParkResolution {
+                        return Ok(Some(ParkResolution {
                             input: tidebreak_harness::ResumeInput::ApprovalDecided {
                                 call_id,
                                 decision: decided,
                             },
                             delivered_here: true,
-                        });
+                        }));
                     }
                 }
                 Some(WorkerCommand::Interrupt { reply }) => {
@@ -1656,11 +1733,11 @@ async fn await_park_resolution<'a>(
                         .await
                         .map_err(|err| WorkerError::Failed(err.to_string()));
                     let _ = reply.send(result);
-                    return None;
+                    return Ok(None);
                 }
                 Some(WorkerCommand::Shutdown) => {
                     *interrupted = true;
-                    return None;
+                    return Ok(None);
                 }
                 Some(other) => {
                     controls.push(Box::pin(apply_control(
@@ -1673,7 +1750,7 @@ async fn await_park_resolution<'a>(
                 None => {
                     *commands_closed = true;
                     *interrupted = true;
-                    return None;
+                    return Ok(None);
                 }
             },
         }
@@ -2020,25 +2097,26 @@ async fn continue_parked_turn(
         &mut controls,
         &mut interrupted,
         &mut commands_closed,
+        &park_ref,
         &wait,
         turn.id,
         &delivered,
     )
     .await
     {
-        Some(ParkResolution {
+        Ok(Some(ParkResolution {
             input,
             delivered_here,
-        }) => {
+        })) => {
             if delivered_here {
                 apply_accepted_plan_mode(db, bus, session, engine, &input).await;
             }
-            turn.park_ref = None;
-            turn.park_wait = None;
-            let _ = save_turn(db, &session.owner, &turn).await;
+            clear_persisted_turn_park(db, session, &mut turn, &park_ref, &wait)
+                .await
+                .map_err(WorkerError::Failed)?;
             next_resume = Some((park_ref, input));
         }
-        None => {
+        Ok(None) => {
             while controls.next().await.is_some() {}
             return close_open_turn(
                 session,
@@ -2051,6 +2129,7 @@ async fn continue_parked_turn(
             )
             .await;
         }
+        Err(error) => return Err(error),
     }
 
     let run = 'legs: loop {
@@ -2117,25 +2196,29 @@ async fn continue_parked_turn(
             &mut controls,
             &mut interrupted,
             &mut commands_closed,
+            &park_ref,
             &wait,
             turn.id,
             &delivered,
         )
         .await
         {
-            Some(ParkResolution {
+            Ok(Some(ParkResolution {
                 input,
                 delivered_here,
-            }) => {
+            })) => {
                 if delivered_here {
                     apply_accepted_plan_mode(db, bus, session, engine, &input).await;
                 }
-                turn.park_ref = None;
-                turn.park_wait = None;
-                let _ = save_turn(db, &session.owner, &turn).await;
+                if let Err(error) =
+                    clear_persisted_turn_park(db, session, &mut turn, &park_ref, &wait).await
+                {
+                    break 'legs Err(HarnessError::Other(error));
+                }
                 next_resume = Some((park_ref, input));
             }
-            None => break 'legs Ok(TurnOutcome::Clean),
+            Ok(None) => break 'legs Ok(TurnOutcome::Clean),
+            Err(error) => break 'legs Err(HarnessError::Other(error.to_string())),
         }
     };
     while controls.next().await.is_some() {}
@@ -2888,16 +2971,17 @@ async fn drive_turn_inner(
             &mut controls,
             &mut interrupted,
             &mut commands_closed,
+            &park_ref,
             &wait,
             turn.id,
             &delivered,
         )
         .await
         {
-            Some(ParkResolution {
+            Ok(Some(ParkResolution {
                 input,
                 delivered_here,
-            }) => {
+            })) => {
                 // An accepted plan re-postures the session before the turn
                 // continues: the decision itself never changes the mode, the
                 // engine's own channel does, and the row must say so too. A
@@ -2905,14 +2989,17 @@ async fn drive_turn_inner(
                 if delivered_here {
                     apply_accepted_plan_mode(db, bus, session, engine, &input).await;
                 }
-                turn.park_ref = None;
-                turn.park_wait = None;
-                let _ = save_turn(db, &session.owner, &turn).await;
+                if let Err(error) =
+                    clear_persisted_turn_park(db, session, &mut turn, &park_ref, &wait).await
+                {
+                    break 'legs Err(HarnessError::Other(error));
+                }
                 next_resume = Some((park_ref, input));
             }
             // Interrupted or shut down while parked: fall through to the
             // shared closing code, which closes an open turn as interrupted.
-            None => break 'legs Ok(TurnOutcome::Clean),
+            Ok(None) => break 'legs Ok(TurnOutcome::Clean),
+            Err(error) => break 'legs Err(HarnessError::Other(error.to_string())),
         }
     };
     // A control command still in flight has a caller waiting on its reply.

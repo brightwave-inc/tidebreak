@@ -2,8 +2,8 @@
 //! turn lease.
 //!
 //! `run_turn` drives [`LegDriver::run_turn`] for the row the session worker
-//! already inserted and claimed. Client waits still end the leg and drop the
-//! lease so the claim scan can pick the turn up again.
+//! already inserted and claimed. Every durable wait returns through the
+//! adapter park contract, so the session worker stays attached until resume.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -18,7 +18,7 @@ use tidebreak_core::{
     chat_journal, AcceptTurnSteerOutcome, AnswerUserQuestions, AnswerUserQuestionsOutcome,
     AnswerUserQuestionsRequest, CallId, ChatId, CodeApprovalKind, CodeSessionId, CodeTurnStatus,
     DecidePlanRequest, OwnerId, PermissionMode, PlanDecision, PlanDecisionChoice,
-    ToolApprovalStatus, TurnId, TurnSteerId, DEFAULT_ACCEPTED_PLAN_MODE,
+    ToolApprovalStatus, TurnId, TurnParkWait, TurnSteerId, DEFAULT_ACCEPTED_PLAN_MODE,
 };
 use tidebreak_harness::{
     ApprovalDecision, HarnessApprovalRef, HarnessError, HarnessSession, ParkWait, ResumeInput,
@@ -40,9 +40,21 @@ pub(super) struct InternalSession {
     #[allow(dead_code)]
     session_id: CodeSessionId,
     chat_id: ChatId,
-    active: Mutex<Option<TurnId>>,
+    active: Mutex<Option<ActiveTurn>>,
     /// Tool approvals acknowledged through [`HarnessSession::decide`].
     decided: Mutex<HashSet<CallId>>,
+}
+
+#[derive(Clone)]
+struct ActiveTurn {
+    turn_id: TurnId,
+    park: Option<ActivePark>,
+}
+
+#[derive(Clone)]
+struct ActivePark {
+    park_ref: String,
+    waiting_on: ParkWait,
 }
 
 fn store_error(error: tidebreak_core::AgentError) -> HarnessError {
@@ -128,27 +140,61 @@ impl InternalSession {
         else {
             return Ok(());
         };
-        if turn.park_ref.is_none()
-            || !matches!(
-                turn.status,
-                CodeTurnStatus::Waiting | CodeTurnStatus::Resuming
-            )
-        {
+        if !matches!(
+            turn.status,
+            CodeTurnStatus::Waiting | CodeTurnStatus::Resuming
+        ) {
             return Ok(());
         }
-        *self.active.lock().expect("active turn") = Some(TurnId(turn.id.0));
+        let (Some(park_ref), Some(wait)) = (turn.park_ref, turn.park_wait) else {
+            return Ok(());
+        };
+        let waiting_on = match wait {
+            TurnParkWait::Approval { call_id } => ParkWait::Approval { call_id },
+            TurnParkWait::ClientToolCall { call_id } => ParkWait::ClientToolCall { call_id },
+            TurnParkWait::AgentRuns { run_ids } => ParkWait::AgentRuns { run_ids },
+        };
+        *self.active.lock().expect("active turn") = Some(ActiveTurn {
+            turn_id: TurnId(turn.id.0),
+            park: Some(ActivePark {
+                park_ref,
+                waiting_on,
+            }),
+        });
         Ok(())
     }
 
     fn active_turn(&self) -> Option<TurnId> {
-        *self.active.lock().expect("active turn")
+        self.active
+            .lock()
+            .expect("active turn")
+            .as_ref()
+            .map(|active| active.turn_id)
+    }
+
+    fn active_park(&self) -> Option<ActivePark> {
+        self.active
+            .lock()
+            .expect("active turn")
+            .as_ref()
+            .and_then(|active| active.park.clone())
     }
 
     fn map_and_release(&self, turn_id: TurnId, outcome: LegDriverOutcome) -> TurnOutcome {
         let mapped = Self::map_leg_outcome(turn_id, outcome);
-        if !matches!(mapped, TurnOutcome::Parked { .. }) {
-            *self.active.lock().expect("active turn") = None;
-        }
+        *self.active.lock().expect("active turn") = match &mapped {
+            TurnOutcome::Parked {
+                park_ref,
+                waiting_on,
+            } => Some(ActiveTurn {
+                turn_id,
+                park: Some(ActivePark {
+                    park_ref: park_ref.clone(),
+                    waiting_on: waiting_on.clone(),
+                }),
+            }),
+            TurnOutcome::Clean | TurnOutcome::Incomplete { .. } => None,
+        };
         mapped
     }
 
@@ -162,12 +208,21 @@ impl InternalSession {
                     waiting_on: ParkWait::Approval { call_id },
                 }
             }
-            LegDriverOutcome::WaitingForClient(_) | LegDriverOutcome::WaitingForAgentRun(_) => {
-                // Client waits keep the lease-release shape until D4b: the
-                // leg ends, the lease drops, and the turn returns to the
-                // claim scan. Do not pin the worker on the wait.
-                TurnOutcome::Clean
+            LegDriverOutcome::WaitingForClient { call_id, .. } => {
+                let call_id = call_id.to_string();
+                TurnOutcome::Parked {
+                    park_ref: call_id.clone(),
+                    waiting_on: ParkWait::ClientToolCall { call_id },
+                }
             }
+            LegDriverOutcome::WaitingForAgentRun {
+                call_id, run_ids, ..
+            } => TurnOutcome::Parked {
+                park_ref: call_id.to_string(),
+                waiting_on: ParkWait::AgentRuns {
+                    run_ids: run_ids.into_iter().map(|id| id.to_string()).collect(),
+                },
+            },
             LegDriverOutcome::Resuming(_) => TurnOutcome::Clean,
             LegDriverOutcome::Failed(_) | LegDriverOutcome::LeaseLost(_) => {
                 TurnOutcome::Incomplete {
@@ -374,6 +429,139 @@ impl InternalSession {
             HarnessError::ApprovalBindingMismatch(format!("{raw} is not an engine call id"))
         })
     }
+
+    fn validate_resume(
+        park: &ActivePark,
+        park_ref: &str,
+        input: &ResumeInput,
+    ) -> Result<(), HarnessError> {
+        if park.park_ref != park_ref {
+            return Err(HarnessError::Other(format!(
+                "park {park_ref} does not match the active park {}",
+                park.park_ref
+            )));
+        }
+        match (&park.waiting_on, input) {
+            (
+                ParkWait::Approval { call_id: waiting },
+                ResumeInput::ApprovalDecided {
+                    call_id: decided, ..
+                },
+            ) if waiting == decided => Ok(()),
+            (
+                ParkWait::ClientToolCall { call_id: waiting },
+                ResumeInput::ClientToolCompleted { call_id: completed },
+            ) if waiting == completed => Ok(()),
+            (
+                ParkWait::AgentRuns { run_ids: waiting },
+                ResumeInput::AgentRunsSettled { run_ids: settled },
+            ) if waiting == settled => Ok(()),
+            (ParkWait::Approval { call_id }, _) => Err(HarnessError::ApprovalBindingMismatch(
+                format!("park {park_ref} waited on approval {call_id}"),
+            )),
+            (ParkWait::ClientToolCall { call_id }, _) => Err(HarnessError::Other(format!(
+                "park {park_ref} waited on client tool call {call_id}"
+            ))),
+            (ParkWait::AgentRuns { run_ids }, _) => Err(HarnessError::Other(format!(
+                "park {park_ref} waited on agent runs {}",
+                run_ids.join(", ")
+            ))),
+        }
+    }
+
+    async fn claim_resuming_turn(
+        &self,
+        turn_id: TurnId,
+    ) -> Result<(tidebreak_core::TurnRun, uuid::Uuid), HarnessError> {
+        // The checkpoint drops the lease before it returns. Yield so its
+        // transaction releases SQLite's write lock before this claim starts.
+        tokio::task::yield_now().await;
+        let mut claimed = None;
+        let mut lease_token = uuid::Uuid::nil();
+        for _ in 0..40 {
+            lease_token = uuid::Uuid::new_v4();
+            let now = Utc::now();
+            match self
+                .db
+                .take_lease_on_resuming_turn(
+                    turn_id,
+                    lease_token,
+                    now,
+                    now + chrono::Duration::seconds(60),
+                )
+                .await
+            {
+                Ok(value) => {
+                    claimed = Some(value);
+                    break;
+                }
+                Err(error) if error.to_string().contains("database is locked") => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Err(error) => return Err(store_error(error)),
+            }
+        }
+        let Some(Some(())) = claimed else {
+            return Err(HarnessError::Other(format!(
+                "could not claim a lease on turn {turn_id} before resume"
+            )));
+        };
+        let mut turn = None;
+        for _ in 0..40 {
+            match self.state.store.get_turn(turn_id).await {
+                Ok(Some(loaded)) => {
+                    turn = Some(loaded);
+                    break;
+                }
+                Ok(None) => {
+                    return Err(HarnessError::Other(format!(
+                        "turn {turn_id} was not claimed before the resume"
+                    )));
+                }
+                Err(error) if error.to_string().contains("database is locked") => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Err(error) => return Err(store_error(error)),
+            }
+        }
+        let Some(turn) = turn else {
+            return Err(HarnessError::Other(format!(
+                "turn {turn_id} was not readable after the resume claim"
+            )));
+        };
+        if turn.lease_token != Some(lease_token) {
+            return Err(HarnessError::Other(format!(
+                "turn {turn_id} reclaimed a different lease"
+            )));
+        }
+        Ok((turn, lease_token))
+    }
+
+    async fn drive_claimed_turn(
+        &self,
+        turn_id: TurnId,
+        mut turn: tidebreak_core::TurnRun,
+        mut lease_token: uuid::Uuid,
+    ) -> Result<LegDriverOutcome, HarnessError> {
+        loop {
+            let outcome = self
+                .driver
+                .run_turn(turn, lease_token)
+                .await
+                .map_err(|error| HarnessError::Other(error.to_string()))?;
+            match outcome {
+                LegDriverOutcome::Resuming(resuming_id) if resuming_id == turn_id => {
+                    (turn, lease_token) = self.claim_resuming_turn(turn_id).await?;
+                }
+                LegDriverOutcome::Resuming(resuming_id) => {
+                    return Err(HarnessError::Other(format!(
+                        "turn {turn_id} returned a resume for {resuming_id}"
+                    )));
+                }
+                outcome => return Ok(outcome),
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -418,12 +606,11 @@ impl HarnessSession for InternalSession {
         let Some(lease_token) = turn.lease_token else {
             return Err(HarnessError::Other(format!("turn {turn_id} has no lease")));
         };
-        *self.active.lock().expect("active turn") = Some(turn_id);
-        let outcome = self
-            .driver
-            .run_turn(turn, lease_token)
-            .await
-            .map_err(|error| HarnessError::Other(error.to_string()))?;
+        *self.active.lock().expect("active turn") = Some(ActiveTurn {
+            turn_id,
+            park: None,
+        });
+        let outcome = self.drive_claimed_turn(turn_id, turn, lease_token).await?;
         Ok(self.map_and_release(turn_id, outcome))
     }
 
@@ -440,78 +627,17 @@ impl HarnessSession for InternalSession {
                 "no parked turn to resume for {park_ref}"
             )));
         };
-        let _call_id = Self::parse_call_id(&park_ref)?;
-        let ResumeInput::ApprovalDecided {
-            call_id: decided, ..
-        } = input
-        else {
-            return Err(HarnessError::ParkResumeUnsupported);
-        };
-        if decided != park_ref {
-            return Err(HarnessError::ApprovalBindingMismatch(format!(
-                "park {park_ref} did not wait on {decided}"
-            )));
-        }
-        // The chat route or `decide` already settled the row. Client-wait
-        // parks drop the lease; a live running claim is reused. Yield so the
-        // settling request can drop its SQLite write lock before we claim.
-        tokio::task::yield_now().await;
-        let mut lease_token = None;
-        let mut turn = None;
-        for _ in 0..40 {
-            let token = uuid::Uuid::new_v4();
-            let now = Utc::now();
-            let claimed = match self
-                .db
-                .take_lease_on_turn(turn_id, token, now, now + chrono::Duration::seconds(60))
-                .await
-            {
-                Ok(value) => value,
-                Err(error) if error.to_string().contains("database is locked") => {
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                    continue;
-                }
-                Err(error) => return Err(store_error(error)),
-            };
-            let loaded = match self.state.store.get_turn(turn_id).await {
-                Ok(value) => value,
-                Err(error) if error.to_string().contains("database is locked") => {
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                    continue;
-                }
-                Err(error) => return Err(store_error(error)),
-            };
-            let Some(loaded) = loaded else {
-                return Err(HarnessError::Other(format!(
-                    "turn {turn_id} was not claimed before the resume"
-                )));
-            };
-            match (claimed, loaded.lease_token) {
-                (Some(()), _) => {
-                    lease_token = Some(token);
-                    turn = Some(loaded);
-                    break;
-                }
-                (None, Some(existing)) => {
-                    lease_token = Some(existing);
-                    turn = Some(loaded);
-                    break;
-                }
-                (None, None) => {
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                }
-            }
-        }
-        let (Some(lease_token), Some(turn)) = (lease_token, turn) else {
+        let Some(active_park) = self.active_park() else {
             return Err(HarnessError::Other(format!(
-                "could not claim a lease on turn {turn_id} before resume"
+                "turn {turn_id} has no active park for {park_ref}"
             )));
         };
-        let outcome = self
-            .driver
-            .run_turn(turn, lease_token)
-            .await
-            .map_err(|error| HarnessError::Other(error.to_string()))?;
+        let _call_id = Self::parse_call_id(&park_ref)?;
+        Self::validate_resume(&active_park, &park_ref, &input)?;
+        // The dependency settled the row and dropped the lease. This worker
+        // takes a fresh claim before it resumes the internal lane.
+        let (turn, lease_token) = self.claim_resuming_turn(turn_id).await?;
+        let outcome = self.drive_claimed_turn(turn_id, turn, lease_token).await?;
         Ok(self.map_and_release(turn_id, outcome))
     }
 
@@ -632,5 +758,115 @@ impl HarnessSession for InternalSession {
 
     async fn shutdown(self: Box<Self>) -> Result<(), HarnessError> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tidebreak_core::AgentRunId;
+
+    #[test]
+    fn client_and_agent_waits_map_to_adapter_parks() {
+        let turn_id = TurnId::new();
+        let client_call = CallId::new();
+        assert_eq!(
+            InternalSession::map_leg_outcome(
+                turn_id,
+                LegDriverOutcome::WaitingForClient {
+                    turn_id,
+                    call_id: client_call,
+                },
+            ),
+            TurnOutcome::Parked {
+                park_ref: client_call.to_string(),
+                waiting_on: ParkWait::ClientToolCall {
+                    call_id: client_call.to_string(),
+                },
+            }
+        );
+
+        let wait_call = CallId::new();
+        let run_a = AgentRunId::new();
+        let run_b = AgentRunId::new();
+        assert_eq!(
+            InternalSession::map_leg_outcome(
+                turn_id,
+                LegDriverOutcome::WaitingForAgentRun {
+                    turn_id,
+                    call_id: wait_call,
+                    run_ids: vec![run_a, run_b],
+                },
+            ),
+            TurnOutcome::Parked {
+                park_ref: wait_call.to_string(),
+                waiting_on: ParkWait::AgentRuns {
+                    run_ids: vec![run_a.to_string(), run_b.to_string()],
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn resume_input_must_match_the_active_park() {
+        let call_id = CallId::new().to_string();
+        let client = ActivePark {
+            park_ref: call_id.clone(),
+            waiting_on: ParkWait::ClientToolCall {
+                call_id: call_id.clone(),
+            },
+        };
+        assert!(InternalSession::validate_resume(
+            &client,
+            &call_id,
+            &ResumeInput::ClientToolCompleted {
+                call_id: call_id.clone(),
+            },
+        )
+        .is_ok());
+        assert!(InternalSession::validate_resume(
+            &client,
+            &call_id,
+            &ResumeInput::ClientToolCompleted {
+                call_id: CallId::new().to_string(),
+            },
+        )
+        .is_err());
+
+        let run_a = AgentRunId::new().to_string();
+        let run_b = AgentRunId::new().to_string();
+        let agents = ActivePark {
+            park_ref: CallId::new().to_string(),
+            waiting_on: ParkWait::AgentRuns {
+                run_ids: vec![run_a.clone(), run_b.clone()],
+            },
+        };
+        assert!(InternalSession::validate_resume(
+            &agents,
+            &agents.park_ref,
+            &ResumeInput::AgentRunsSettled {
+                run_ids: vec![run_a.clone(), run_b.clone()],
+            },
+        )
+        .is_ok());
+        assert!(InternalSession::validate_resume(
+            &agents,
+            &agents.park_ref,
+            &ResumeInput::AgentRunsSettled {
+                run_ids: vec![run_b, run_a],
+            },
+        )
+        .is_err());
+        assert!(InternalSession::validate_resume(
+            &agents,
+            &call_id,
+            &ResumeInput::AgentRunsSettled {
+                run_ids: match agents.waiting_on.clone() {
+                    ParkWait::AgentRuns { run_ids } => run_ids,
+                    _ => unreachable!(),
+                },
+            },
+        )
+        .is_err());
     }
 }

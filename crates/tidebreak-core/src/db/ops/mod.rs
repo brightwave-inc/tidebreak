@@ -1,5 +1,6 @@
 use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder};
 
+use crate::code::CodeTurnId;
 use crate::error::{AgentError, Result};
 use crate::id::{CallId, ChatId, ProjectId, TurnId};
 
@@ -105,12 +106,23 @@ pub(in crate::db) async fn acquire_chat_write_lock<C>(conn: &C, chat_id: ChatId)
 where
     C: ConnectionTrait,
 {
+    acquire_session_write_lock(conn, chat_id.0).await
+}
+
+/// Acquire the shared cross-backend write lock for one universal session row.
+pub(in crate::db) async fn acquire_session_write_lock<C>(
+    conn: &C,
+    session_id: uuid::Uuid,
+) -> Result<bool>
+where
+    C: ConnectionTrait,
+{
     let locked = entities::code_session::Entity::update_many()
         .col_expr(
             entities::code_session::Column::Title,
             sea_orm::sea_query::Expr::col(entities::code_session::Column::Title),
         )
-        .filter(entities::code_session::Column::Id.eq(chat_id.0))
+        .filter(entities::code_session::Column::Id.eq(session_id))
         .exec(conn)
         .await
         .map_err(store_err)?;
@@ -230,4 +242,15 @@ where
         .await
         .map_err(store_err)?;
     Ok(locked.rows_affected == 1)
+}
+
+/// Acquire the same durable-turn lock using the code-mode turn identifier.
+pub(in crate::db) async fn acquire_code_turn_write_lock<C>(
+    conn: &C,
+    turn_id: CodeTurnId,
+) -> Result<bool>
+where
+    C: ConnectionTrait,
+{
+    acquire_turn_write_lock(conn, TurnId(turn_id.0)).await
 }

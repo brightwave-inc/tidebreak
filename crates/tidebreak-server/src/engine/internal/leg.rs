@@ -15,8 +15,8 @@ use chrono::Utc;
 use futures::channel::mpsc::{unbounded, TryRecvError, UnboundedReceiver};
 use futures::StreamExt;
 use tidebreak_core::{
-    Agent, AgentConfig, AgentError, AgentEvent, AgentRunExecutionLocation, AgentRunWaitCondition,
-    AgentRunWaitSetCheckpointRequest, AgentTurnOutcome, BlobStore, CallId,
+    Agent, AgentConfig, AgentError, AgentEvent, AgentRunExecutionLocation, AgentRunId,
+    AgentRunWaitCondition, AgentRunWaitSetCheckpointRequest, AgentTurnOutcome, BlobStore, CallId,
     CheckpointSandboxSpawnOutcome, ClaimedAgentEvent, CompleteTurnRunOutcome,
     ForegroundAgentWaitRequest, MessageId, ParkTurnForAgentRunWaitSetOutcome,
     ParkTurnForClientCallOutcome, RecordTurnFailureOutcome, Result, SandboxAgentSpawnRequest,
@@ -88,12 +88,22 @@ impl Default for LegDriverConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LegDriverOutcome {
     Completed(TurnId),
-    WaitingForApproval { turn_id: TurnId, call_id: CallId },
-    WaitingForClient(TurnId),
-    WaitingForAgentRun(TurnId),
+    WaitingForApproval {
+        turn_id: TurnId,
+        call_id: CallId,
+    },
+    WaitingForClient {
+        turn_id: TurnId,
+        call_id: CallId,
+    },
+    WaitingForAgentRun {
+        turn_id: TurnId,
+        call_id: CallId,
+        run_ids: Vec<AgentRunId>,
+    },
     Resuming(TurnId),
     Cancelled(TurnId),
     Failed(TurnId),
@@ -2217,7 +2227,10 @@ impl LegDriver {
                                         call_id: request.id,
                                     });
                                 }
-                                return Ok(LegDriverOutcome::WaitingForClient(turn.id));
+                                return Ok(LegDriverOutcome::WaitingForClient {
+                                    turn_id: turn.id,
+                                    call_id: request.id,
+                                });
                             }
                             Ok(Some(ParkTurnForClientCallOutcome::SteerPending(_)))
                             | Ok(Some(ParkTurnForClientCallOutcome::OutputSuperseded(_))) => {
@@ -2714,7 +2727,11 @@ impl LegDriver {
                                 // This also drives the durable ready-set scan
                                 // when every child completed before the park.
                                 self.sandbox_agent_wake.notify_one();
-                                return Ok(LegDriverOutcome::WaitingForAgentRun(turn.id));
+                                return Ok(LegDriverOutcome::WaitingForAgentRun {
+                                    turn_id: turn.id,
+                                    call_id: checkpoint.call_id,
+                                    run_ids: checkpoint.child_run_ids.clone(),
+                                });
                             }
                             Ok(Some(ParkTurnForAgentRunWaitSetOutcome::SteerPending(_)))
                             | Ok(Some(ParkTurnForAgentRunWaitSetOutcome::OutputSuperseded(_))) => {
@@ -3563,8 +3580,8 @@ fn turn_worker_outcome_label(outcome: &Result<LegDriverOutcome>) -> &'static str
     match outcome {
         Ok(LegDriverOutcome::Completed(_)) => "completed",
         Ok(LegDriverOutcome::WaitingForApproval { .. }) => "waiting_for_approval",
-        Ok(LegDriverOutcome::WaitingForClient(_)) => "waiting_for_client",
-        Ok(LegDriverOutcome::WaitingForAgentRun(_)) => "waiting_for_agent_run",
+        Ok(LegDriverOutcome::WaitingForClient { .. }) => "waiting_for_client",
+        Ok(LegDriverOutcome::WaitingForAgentRun { .. }) => "waiting_for_agent_run",
         Ok(LegDriverOutcome::Resuming(_)) => "resuming",
         Ok(LegDriverOutcome::Cancelled(_)) => "cancelled",
         Ok(LegDriverOutcome::Failed(_)) => "failed",

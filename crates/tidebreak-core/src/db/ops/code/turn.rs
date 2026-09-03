@@ -3,15 +3,21 @@ use sea_orm::{
     QueryOrder, QuerySelect, Set, TransactionTrait,
 };
 
-use crate::code::{CodeSessionId, CodeTurn, CodeTurnId, CodeTurnStatus, CodeUsage, Diffstat};
+use crate::code::{
+    CodeSessionId, CodeTurn, CodeTurnId, CodeTurnStatus, CodeUsage, Diffstat, TurnParkWait,
+};
 use crate::error::{AgentError, Result};
 use crate::image::ImageMediaType;
 use crate::image::ImageRef;
-use crate::model::MAX_MESSAGE_ATTACHMENTS;
-use crate::OwnerId;
+use crate::model::{TurnAgentRunWaitStatus, TurnClientWaitStatus, MAX_MESSAGE_ATTACHMENTS};
+use crate::{AgentRunId, CallId, OwnerId};
 
 use super::super::super::{entities, store_err, DbStore};
 use super::super::blob as blob_ops;
+use super::super::{
+    acquire_advisory_lock, acquire_code_turn_write_lock, acquire_session_write_lock,
+    AdvisoryLockName,
+};
 
 /// The fields analytics needs from one turn.
 ///
@@ -417,6 +423,383 @@ pub async fn save_turn(store: &DbStore, owner: &OwnerId, turn: &CodeTurn) -> Res
         .await
         .map_err(store_err)?;
     Ok(result.rows_affected == 1)
+}
+
+/// Attach one durable adapter park without overwriting a resolution that won
+/// after the engine released its turn lease.
+///
+/// Internal-engine client and agent-run waits first checkpoint through the
+/// turn store, which leaves the row in a legacy wait status. The adapter then
+/// records its opaque resume ref and changes that status to `waiting`. If the
+/// dependency resolves between those two writes, the row is already
+/// `resuming`; this operation keeps that status and only attaches the park.
+pub async fn store_turn_park(
+    store: &DbStore,
+    owner: &OwnerId,
+    id: CodeTurnId,
+    park_ref: &str,
+    wait: &TurnParkWait,
+) -> Result<Option<CodeTurnStatus>> {
+    let Some(scope) = entities::code_turn::Entity::find_by_id(id.0)
+        .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+    else {
+        return Ok(None);
+    };
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    if matches!(wait, TurnParkWait::AgentRuns { .. }) {
+        acquire_advisory_lock(&transaction, AdvisoryLockName::TurnAgentRunWait).await?;
+    }
+    if !acquire_session_write_lock(&transaction, scope.session_id).await?
+        || !acquire_code_turn_write_lock(&transaction, id).await?
+    {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    let Some(turn) = entities::code_turn::Entity::find_by_id(id.0)
+        .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+    else {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    };
+    let status = CodeTurnStatus::from_str(&turn.status).ok_or_else(|| {
+        AgentError::Store(format!("turn {} has unknown status {}", id, turn.status))
+    })?;
+    let raw_wait = serde_json::to_value(wait)?;
+    match (turn.park_ref.as_deref(), turn.park_wait.as_ref()) {
+        (Some(stored_ref), Some(stored_wait))
+            if stored_ref == park_ref && stored_wait == &raw_wait =>
+        {
+            transaction.commit().await.map_err(store_err)?;
+            return Ok(Some(status));
+        }
+        (None, None) => {}
+        _ => {
+            return Err(AgentError::Store(format!(
+                "turn {id} already carries a different durable park"
+            )));
+        }
+    }
+
+    let next_status = match status {
+        CodeTurnStatus::Running => CodeTurnStatus::Waiting,
+        CodeTurnStatus::WaitingForClient
+            if matches!(
+                wait,
+                TurnParkWait::Approval { .. } | TurnParkWait::ClientToolCall { .. }
+            ) =>
+        {
+            require_client_park_receipt(&transaction, &turn, wait, TurnClientWaitStatus::Waiting)
+                .await?;
+            CodeTurnStatus::Waiting
+        }
+        CodeTurnStatus::WaitingForAgentRun if matches!(wait, TurnParkWait::AgentRuns { .. }) => {
+            require_agent_run_park_receipt(
+                &transaction,
+                &turn,
+                park_ref,
+                wait,
+                TurnAgentRunWaitStatus::Waiting,
+            )
+            .await?;
+            CodeTurnStatus::Waiting
+        }
+        CodeTurnStatus::Resuming => {
+            require_resolved_park_receipt(&transaction, &turn, park_ref, wait).await?;
+            CodeTurnStatus::Resuming
+        }
+        CodeTurnStatus::CancellingClient
+            if matches!(
+                wait,
+                TurnParkWait::Approval { .. } | TurnParkWait::ClientToolCall { .. }
+            ) =>
+        {
+            require_client_park_receipt(&transaction, &turn, wait, TurnClientWaitStatus::Waiting)
+                .await?;
+            CodeTurnStatus::CancellingClient
+        }
+        CodeTurnStatus::Interrupted => {
+            require_cancelled_park_receipt(&transaction, &turn, park_ref, wait).await?;
+            CodeTurnStatus::Interrupted
+        }
+        _ => {
+            return Err(AgentError::Store(format!(
+                "turn {id} cannot store a durable park from status {}",
+                status.as_str()
+            )));
+        }
+    };
+    let updated = entities::code_turn::Entity::update_many()
+        .col_expr(
+            entities::code_turn::Column::Status,
+            sea_orm::sea_query::Expr::value(next_status.as_str()),
+        )
+        .col_expr(
+            entities::code_turn::Column::ParkRef,
+            sea_orm::sea_query::Expr::value(Some(park_ref.to_owned())),
+        )
+        .col_expr(
+            entities::code_turn::Column::ParkWait,
+            sea_orm::sea_query::Expr::value(Some(raw_wait)),
+        )
+        .filter(entities::code_turn::Column::Id.eq(turn.id))
+        .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_turn::Column::Status.eq(&turn.status))
+        .filter(entities::code_turn::Column::AttemptCount.eq(turn.attempt_count))
+        .filter(entities::code_turn::Column::ClaimCount.eq(turn.claim_count))
+        .filter(entities::code_turn::Column::ParkRef.is_null())
+        .filter(entities::code_turn::Column::ParkWait.is_null())
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    if updated.rows_affected != 1 {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    transaction.commit().await.map_err(store_err)?;
+    Ok(Some(next_status))
+}
+
+/// Clear one exact durable adapter park without writing any other turn field.
+pub async fn clear_turn_park(
+    store: &DbStore,
+    owner: &OwnerId,
+    id: CodeTurnId,
+    park_ref: &str,
+    wait: &TurnParkWait,
+) -> Result<Option<CodeTurnStatus>> {
+    let Some(scope) = entities::code_turn::Entity::find_by_id(id.0)
+        .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+    else {
+        return Ok(None);
+    };
+    let transaction = store.conn.begin().await.map_err(store_err)?;
+    if !acquire_session_write_lock(&transaction, scope.session_id).await?
+        || !acquire_code_turn_write_lock(&transaction, id).await?
+    {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    let Some(turn) = entities::code_turn::Entity::find_by_id(id.0)
+        .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
+        .one(&transaction)
+        .await
+        .map_err(store_err)?
+    else {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(None);
+    };
+    let status = CodeTurnStatus::from_str(&turn.status).ok_or_else(|| {
+        AgentError::Store(format!("turn {} has unknown status {}", id, turn.status))
+    })?;
+    let raw_wait = serde_json::to_value(wait)?;
+    if turn.park_ref.is_none() && turn.park_wait.is_none() {
+        transaction.commit().await.map_err(store_err)?;
+        return Ok(Some(status));
+    }
+    if turn.park_ref.as_deref() != Some(park_ref) || turn.park_wait.as_ref() != Some(&raw_wait) {
+        return Err(AgentError::Store(format!(
+            "turn {id} carries a different durable park"
+        )));
+    }
+    let updated = entities::code_turn::Entity::update_many()
+        .col_expr(
+            entities::code_turn::Column::ParkRef,
+            sea_orm::sea_query::Expr::value(Option::<String>::None),
+        )
+        .col_expr(
+            entities::code_turn::Column::ParkWait,
+            sea_orm::sea_query::Expr::value(Option::<serde_json::Value>::None),
+        )
+        .filter(entities::code_turn::Column::Id.eq(turn.id))
+        .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_turn::Column::ParkRef.eq(park_ref))
+        .filter(entities::code_turn::Column::ParkWait.eq(raw_wait))
+        .exec(&transaction)
+        .await
+        .map_err(store_err)?;
+    if updated.rows_affected != 1 {
+        transaction.rollback().await.map_err(store_err)?;
+        return Ok(None);
+    }
+    transaction.commit().await.map_err(store_err)?;
+    Ok(Some(status))
+}
+
+async fn require_resolved_park_receipt<C>(
+    conn: &C,
+    turn: &entities::code_turn::Model,
+    park_ref: &str,
+    wait: &TurnParkWait,
+) -> Result<()>
+where
+    C: ConnectionTrait,
+{
+    match wait {
+        TurnParkWait::Approval { .. } | TurnParkWait::ClientToolCall { .. } => {
+            require_client_park_receipt(conn, turn, wait, TurnClientWaitStatus::Resumed).await
+        }
+        TurnParkWait::AgentRuns { .. } => {
+            require_agent_run_park_receipt(
+                conn,
+                turn,
+                park_ref,
+                wait,
+                TurnAgentRunWaitStatus::Resumed,
+            )
+            .await
+        }
+    }
+}
+
+async fn require_cancelled_park_receipt<C>(
+    conn: &C,
+    turn: &entities::code_turn::Model,
+    park_ref: &str,
+    wait: &TurnParkWait,
+) -> Result<()>
+where
+    C: ConnectionTrait,
+{
+    match wait {
+        TurnParkWait::Approval { .. } | TurnParkWait::ClientToolCall { .. } => {
+            require_client_park_receipt(conn, turn, wait, TurnClientWaitStatus::Cancelled).await
+        }
+        TurnParkWait::AgentRuns { .. } => {
+            require_agent_run_park_receipt(
+                conn,
+                turn,
+                park_ref,
+                wait,
+                TurnAgentRunWaitStatus::Cancelled,
+            )
+            .await
+        }
+    }
+}
+
+async fn require_client_park_receipt<C>(
+    conn: &C,
+    turn: &entities::code_turn::Model,
+    wait: &TurnParkWait,
+    expected_status: TurnClientWaitStatus,
+) -> Result<()>
+where
+    C: ConnectionTrait,
+{
+    let call_id = match wait {
+        TurnParkWait::Approval { call_id } | TurnParkWait::ClientToolCall { call_id } => call_id,
+        TurnParkWait::AgentRuns { .. } => {
+            return Err(AgentError::Store(format!(
+                "turn {} client park has an agent-run wait",
+                CodeTurnId(turn.id)
+            )));
+        }
+    };
+    let call_id = call_id.parse::<CallId>().map_err(|_| {
+        AgentError::Store(format!(
+            "turn {} client park has an invalid call id",
+            CodeTurnId(turn.id)
+        ))
+    })?;
+    let receipt = entities::turn_client_wait::Entity::find_by_id(call_id.0)
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .ok_or_else(|| {
+            AgentError::Store(format!(
+                "turn {} client park is missing wait {call_id}",
+                CodeTurnId(turn.id)
+            ))
+        })?;
+    if receipt.turn_id != turn.id
+        || receipt.session_id != turn.session_id
+        || receipt.attempt_count != turn.attempt_count
+        || receipt.claim_count != turn.claim_count
+        || receipt.status != expected_status.as_str()
+    {
+        return Err(AgentError::Store(format!(
+            "turn {} client park has a mismatched wait {call_id}",
+            CodeTurnId(turn.id)
+        )));
+    }
+    Ok(())
+}
+
+async fn require_agent_run_park_receipt<C>(
+    conn: &C,
+    turn: &entities::code_turn::Model,
+    park_ref: &str,
+    wait: &TurnParkWait,
+    expected_status: TurnAgentRunWaitStatus,
+) -> Result<()>
+where
+    C: ConnectionTrait,
+{
+    let TurnParkWait::AgentRuns { run_ids } = wait else {
+        return Err(AgentError::Store(format!(
+            "turn {} agent-run park has a different wait kind",
+            CodeTurnId(turn.id)
+        )));
+    };
+    let wait_id = park_ref.parse::<CallId>().map_err(|_| {
+        AgentError::Store(format!(
+            "turn {} agent-run park has an invalid wait id",
+            CodeTurnId(turn.id)
+        ))
+    })?;
+    let expected_runs = run_ids
+        .iter()
+        .map(|id| {
+            id.parse::<AgentRunId>().map_err(|_| {
+                AgentError::Store(format!(
+                    "turn {} agent-run park has an invalid run id",
+                    CodeTurnId(turn.id)
+                ))
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let receipt = entities::turn_agent_run_wait_set::Entity::find_by_id(wait_id.0)
+        .one(conn)
+        .await
+        .map_err(store_err)?
+        .ok_or_else(|| {
+            AgentError::Store(format!(
+                "turn {} agent-run park is missing wait {wait_id}",
+                CodeTurnId(turn.id)
+            ))
+        })?;
+    let members = entities::turn_agent_run_wait_member::Entity::find()
+        .filter(entities::turn_agent_run_wait_member::Column::WaitId.eq(wait_id.0))
+        .order_by_asc(entities::turn_agent_run_wait_member::Column::Position)
+        .all(conn)
+        .await
+        .map_err(store_err)?;
+    let stored_runs = members
+        .iter()
+        .map(|member| AgentRunId(member.child_run_id))
+        .collect::<Vec<_>>();
+    if receipt.turn_id != turn.id
+        || receipt.session_id != turn.session_id
+        || receipt.attempt_count != turn.attempt_count
+        || receipt.claim_count != turn.claim_count
+        || receipt.status != expected_status.as_str()
+        || stored_runs != expected_runs
+    {
+        return Err(AgentError::Store(format!(
+            "turn {} agent-run park has a mismatched wait {wait_id}",
+            CodeTurnId(turn.id)
+        )));
+    }
+    Ok(())
 }
 
 /// Store one turn's derived narrative, touching no other column.

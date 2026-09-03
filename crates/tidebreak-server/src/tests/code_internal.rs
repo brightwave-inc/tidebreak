@@ -17,8 +17,10 @@ use axum::http::{header, Request, StatusCode};
 use tower::ServiceExt;
 
 use tidebreak_core::{
-    ApprovalClass, ChatRequest, CodeSessionId, ContentBlock, DbStore, ModelProvider, ProviderEvent,
-    ProviderId, StopReason, Tool, ToolCtx, ToolOutput, ToolRegistry, ToolSpec,
+    ApprovalClass, ChatRequest, CodeSessionId, CodeTurnStatus, ContentBlock, DbStore,
+    ModelProvider, OwnerId, ProviderEvent, ProviderId, StopReason, Store,
+    SubmitAgentRunResultOutcome, Tool, ToolCtx, ToolOutput, ToolRegistry, ToolSpec, TurnId,
+    TurnParkWait, TurnRunStatus,
 };
 use tidebreak_harness::AdapterRegistry;
 
@@ -31,6 +33,7 @@ enum Step {
         name: &'static str,
         input: serde_json::Value,
     },
+    WaitForSpawnedAgent,
     Text(&'static str),
 }
 
@@ -51,6 +54,7 @@ impl ModelProvider for ScriptedProvider {
         &self,
         request: ChatRequest,
     ) -> tidebreak_core::Result<BoxStream<'static, ProviderEvent>> {
+        let request_for_step = request.clone();
         self.requests.lock().unwrap().push(request);
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         let step = {
@@ -76,6 +80,36 @@ impl ModelProvider for ScriptedProvider {
                     reason: StopReason::ToolUse,
                 },
             ],
+            Some(Step::WaitForSpawnedAgent) => {
+                let agent_id = request_for_step
+                    .messages
+                    .iter()
+                    .rev()
+                    .flat_map(|message| message.content.iter().rev())
+                    .find_map(|block| match block {
+                        ContentBlock::ToolResult { content, .. } => {
+                            serde_json::from_str::<serde_json::Value>(content)
+                                .ok()
+                                .and_then(|value| value["agent_id"].as_str().map(str::to_owned))
+                        }
+                        _ => None,
+                    })
+                    .expect("the spawn result names its child");
+                vec![
+                    ProviderEvent::ToolCallStarted {
+                        index: 0,
+                        id: format!("scripted_{call}"),
+                        name: tidebreak_core::WAIT_FOR_AGENTS_TOOL.to_owned(),
+                    },
+                    ProviderEvent::ToolCallArgsDelta {
+                        index: 0,
+                        fragment: serde_json::json!({ "agent_ids": [agent_id] }).to_string(),
+                    },
+                    ProviderEvent::Stop {
+                        reason: StopReason::ToolUse,
+                    },
+                ]
+            }
             Some(Step::Text(text)) => vec![
                 ProviderEvent::TextDelta {
                     text: text.to_owned(),
@@ -138,7 +172,8 @@ async fn internal_engine_app(
     Arc<AtomicUsize>,
     tempfile::TempDir,
 ) {
-    let (router, token, runtime, ran, dir, _provider) = internal_engine_app_capturing(steps).await;
+    let (router, token, runtime, ran, dir, _provider, _state) =
+        internal_engine_app_capturing(steps).await;
     let addr = super::code::serve(router).await;
     (addr, token, runtime, ran, dir)
 }
@@ -152,6 +187,7 @@ async fn internal_engine_app_capturing(
     Arc<AtomicUsize>,
     tempfile::TempDir,
     Arc<ScriptedProvider>,
+    AppState,
 ) {
     let (dir, store) = temp_db_store("internal.db").await;
     let db = Arc::new(store);
@@ -168,6 +204,15 @@ async fn internal_engine_app_capturing(
         tidebreak_core::exit_plan_mode_tool_spec(),
         ApprovalClass::ReadOnly,
         tidebreak_core::validate_exit_plan_mode_arguments,
+    );
+    tools.register_validated_foreground_client(
+        ToolSpec {
+            name: "connect_folder".into(),
+            description: "Connect one folder through the trusted client".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+        },
+        ApprovalClass::ReadOnly,
+        serde_json::Value::is_object,
     );
     tools.register_foreground_agent_orchestration();
     let provider = Arc::new(ScriptedProvider {
@@ -200,7 +245,15 @@ async fn internal_engine_app_capturing(
     let runtime = Arc::new(runtime);
     state.code = Some(runtime.clone());
     let token = state.token.clone();
-    (app(state), token, runtime, ran, dir, provider)
+    (
+        app(state.clone()),
+        token,
+        runtime,
+        ran,
+        dir,
+        provider,
+        state,
+    )
 }
 
 fn spawn_turn_worker_with_blobs(state: &AppState) {
@@ -342,6 +395,107 @@ fn position(types: &[String], wanted: &str, after: usize) -> usize {
         .find(|(_, kind)| kind.as_str() == wanted)
         .map(|(index, _)| index)
         .unwrap_or_else(|| panic!("{wanted} after {after} in {types:?}"))
+}
+
+async fn create_internal_session(
+    router: &axum::Router,
+    bearer: &str,
+    permission_mode: &str,
+) -> CodeSessionId {
+    let created = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/code/sessions")
+                .header(header::AUTHORIZATION, bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "permission_mode": permission_mode }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let session: serde_json::Value = super::json_body(created).await;
+    session["id"].as_str().unwrap().parse().unwrap()
+}
+
+fn submit_internal_turn(
+    router: &axum::Router,
+    bearer: &str,
+    session_id: CodeSessionId,
+    message: &str,
+) -> tokio::task::JoinHandle<axum::response::Response> {
+    let router = router.clone();
+    let bearer = bearer.to_owned();
+    let message = message.to_owned();
+    tokio::spawn(async move {
+        router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/code/sessions/{session_id}/turns"))
+                    .header(header::AUTHORIZATION, bearer)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "message": message }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    })
+}
+
+async fn wait_for_durable_park(
+    runtime: &CodeRuntime,
+    session_id: CodeSessionId,
+) -> tidebreak_core::CodeTurn {
+    let parked = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(turn) =
+                tidebreak_core::db::code::get_open_turn(&runtime.db, &OwnerId::local(), session_id)
+                    .await
+                    .unwrap()
+            {
+                if turn.status == CodeTurnStatus::Waiting
+                    && turn.park_ref.is_some()
+                    && turn.park_wait.is_some()
+                {
+                    break turn;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    match parked {
+        Ok(turn) => turn,
+        Err(_) => {
+            let turns =
+                tidebreak_core::db::code::list_turns(&runtime.db, &OwnerId::local(), session_id)
+                    .await
+                    .unwrap();
+            let runs = runtime
+                .db
+                .list_agent_runs(tidebreak_core::ChatId(session_id.0))
+                .await
+                .unwrap();
+            let events = tidebreak_core::db::code::list_recent_events(
+                &runtime.db,
+                &OwnerId::local(),
+                session_id,
+                32,
+            )
+            .await
+            .unwrap();
+            panic!(
+                "the internal turn did not store its adapter park; turns={turns:?} runs={runs:?} events={events:?}"
+            );
+        }
+    }
 }
 
 /// The whole chat interaction model, reached only through `/code/*`: a plan
@@ -861,6 +1015,281 @@ async fn a_plan_accepted_from_the_chat_route_resumes_the_session() {
     }
 }
 
+#[tokio::test]
+async fn an_internal_client_wait_resumes_through_one_adapter_park() {
+    let (router, token, runtime, _ran, _dir, provider, _state) =
+        internal_engine_app_capturing(vec![
+            Step::Tool {
+                name: "connect_folder",
+                input: serde_json::json!({ "suggested_name": "Documents" }),
+            },
+            Step::Text("folder connected"),
+        ])
+        .await;
+    let bearer = format!("Bearer {token}");
+    let session_id = create_internal_session(&router, &bearer, "ask").await;
+    let response = submit_internal_turn(&router, &bearer, session_id, "connect documents");
+
+    let parked = wait_for_durable_park(&runtime, session_id).await;
+    let call_id = match parked.park_wait.as_ref().unwrap() {
+        TurnParkWait::ClientToolCall { call_id } => call_id.clone(),
+        other => panic!("the turn parked on the wrong dependency: {other:?}"),
+    };
+    assert_eq!(parked.park_ref.as_deref(), Some(call_id.as_str()));
+    let call_id: tidebreak_core::CallId = call_id.parse().unwrap();
+    let pending = runtime
+        .db
+        .list_pending_client_tool_calls(tidebreak_core::ChatId(session_id.0))
+        .await
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, call_id);
+    assert_eq!(pending[0].name, "connect_folder");
+    let before_resume = runtime
+        .db
+        .get_turn(TurnId(parked.id.0))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (before_resume.attempt_count, before_resume.claim_count),
+        (1, 1)
+    );
+
+    let lease_token = uuid::Uuid::new_v4();
+    let claim = super::lifecycle::post_native_json(
+        &router,
+        &bearer,
+        &format!("/chats/{session_id}/client-executions/{call_id}/claim"),
+        serde_json::json!({
+            "executor_id": uuid::Uuid::new_v4(),
+            "lease_token": lease_token,
+        }),
+    )
+    .await;
+    assert_eq!(claim.status(), StatusCode::OK);
+    let resolved = super::lifecycle::post_native_json(
+        &router,
+        &bearer,
+        &format!("/chats/{session_id}/client-executions/{call_id}/resolve"),
+        serde_json::json!({
+            "lease_token": lease_token,
+            "resolution": {
+                "status": "completed",
+                "result": "connected-root",
+            },
+        }),
+    )
+    .await;
+    assert_eq!(resolved.status(), StatusCode::OK);
+
+    let response = match tokio::time::timeout(Duration::from_secs(20), response).await {
+        Ok(response) => response.unwrap(),
+        Err(_) => {
+            let code_turn =
+                tidebreak_core::db::code::get_turn(&runtime.db, &OwnerId::local(), parked.id)
+                    .await
+                    .unwrap();
+            let run = runtime.db.get_turn(TurnId(parked.id.0)).await.unwrap();
+            let events = tidebreak_core::db::code::list_recent_events(
+                &runtime.db,
+                &OwnerId::local(),
+                session_id,
+                32,
+            )
+            .await
+            .unwrap();
+            let requests = provider.requests.lock().unwrap().len();
+            panic!(
+                "the client result did not resume the turn; code_turn={code_turn:?} run={run:?} requests={requests} events={events:?}"
+            );
+        }
+    };
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let completed = tidebreak_core::db::code::get_turn(&runtime.db, &OwnerId::local(), parked.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(completed.status, CodeTurnStatus::Completed);
+    assert_eq!(completed.park_ref, None);
+    assert_eq!(completed.park_wait, None);
+    let after_resume = runtime
+        .db
+        .get_turn(TurnId(parked.id.0))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after_resume.status, TurnRunStatus::Completed);
+    assert_eq!(
+        (after_resume.attempt_count, after_resume.claim_count),
+        (1, 2)
+    );
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].messages.iter().any(|message| {
+        message.content.iter().any(|block| {
+            matches!(
+                block,
+                ContentBlock::ToolResult { content, .. } if content == "connected-root"
+            )
+        })
+    }));
+}
+
+#[tokio::test]
+async fn an_internal_agent_wait_resumes_through_one_adapter_park() {
+    let (router, token, runtime, _ran, _dir, _provider, state) =
+        internal_engine_app_capturing(vec![
+            Step::Tool {
+                name: tidebreak_core::SPAWN_SANDBOX_AGENT_TOOL,
+                input: serde_json::json!({ "task": "research the answer" }),
+            },
+            Step::WaitForSpawnedAgent,
+            Step::Text("child result received"),
+        ])
+        .await;
+    let bearer = format!("Bearer {token}");
+    let session_id = create_internal_session(&router, &bearer, "allow").await;
+    let response = submit_internal_turn(&router, &bearer, session_id, "delegate this");
+
+    let parked = wait_for_durable_park(&runtime, session_id).await;
+    let run_ids = match parked.park_wait.as_ref().unwrap() {
+        TurnParkWait::AgentRuns { run_ids } => run_ids.clone(),
+        other => panic!("the turn parked on the wrong dependency: {other:?}"),
+    };
+    assert_eq!(run_ids.len(), 1);
+    let child_id: tidebreak_core::AgentRunId = run_ids[0].parse().unwrap();
+    let children = runtime
+        .db
+        .list_agent_runs(tidebreak_core::ChatId(session_id.0))
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|run| run.parent_id.is_some())
+        .collect::<Vec<_>>();
+    assert_eq!(children.len(), 1);
+    assert_eq!(children[0].id, child_id);
+    let before_resume = runtime
+        .db
+        .get_turn(TurnId(parked.id.0))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (before_resume.attempt_count, before_resume.claim_count),
+        (1, 2)
+    );
+
+    let child_lease = uuid::Uuid::new_v4();
+    let claimed = runtime
+        .db
+        .claim_agent_run(child_lease, chrono::Duration::minutes(5), 4, 4)
+        .await
+        .unwrap()
+        .expect("the sandbox child is claimable");
+    assert_eq!(claimed.id, child_id);
+    assert!(matches!(
+        runtime
+            .db
+            .submit_agent_run_result(child_id, child_lease, "research complete")
+            .await
+            .unwrap(),
+        Some(SubmitAgentRunResultOutcome::Completed(_))
+    ));
+    let wait_id: tidebreak_core::CallId = parked.park_ref.as_deref().unwrap().parse().unwrap();
+    let resumed = runtime
+        .db
+        .resume_turn_for_agent_run_wait_set(wait_id, uuid::Uuid::new_v4())
+        .await
+        .unwrap()
+        .unwrap();
+    let event = match resumed {
+        tidebreak_core::ResumeTurnForAgentRunWaitSetOutcome::Resumed { event, .. } => event,
+        other => panic!("the ready wait did not resume: {other:?}"),
+    };
+    let _ = state
+        .events
+        .sender(tidebreak_core::ChatId(session_id.0))
+        .send(event);
+    state.turn_job_wake.notify_one();
+
+    let response = tokio::time::timeout(Duration::from_secs(20), response)
+        .await
+        .expect("the child result resumes the turn")
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let completed = tidebreak_core::db::code::get_turn(&runtime.db, &OwnerId::local(), parked.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(completed.status, CodeTurnStatus::Completed);
+    assert_eq!(completed.park_ref, None);
+    assert_eq!(completed.park_wait, None);
+    let after_resume = runtime
+        .db
+        .get_turn(TurnId(parked.id.0))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after_resume.status, TurnRunStatus::Completed);
+    assert_eq!(
+        (after_resume.attempt_count, after_resume.claim_count),
+        (1, 3)
+    );
+}
+
+#[tokio::test]
+async fn interrupting_an_internal_client_park_closes_the_turn() {
+    let (router, token, runtime, _ran, _dir, _provider, _state) =
+        internal_engine_app_capturing(vec![Step::Tool {
+            name: "connect_folder",
+            input: serde_json::json!({ "suggested_name": "Documents" }),
+        }])
+        .await;
+    let bearer = format!("Bearer {token}");
+    let session_id = create_internal_session(&router, &bearer, "ask").await;
+    let response = submit_internal_turn(&router, &bearer, session_id, "connect documents");
+    let parked = wait_for_durable_park(&runtime, session_id).await;
+    let call_id = match parked.park_wait.as_ref().unwrap() {
+        TurnParkWait::ClientToolCall { call_id } => call_id.clone(),
+        other => panic!("the turn parked on the wrong dependency: {other:?}"),
+    };
+
+    let interrupted = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/code/sessions/{session_id}/interrupt"))
+                .header(header::AUTHORIZATION, &bearer)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(interrupted.status(), StatusCode::ACCEPTED);
+    let response = tokio::time::timeout(Duration::from_secs(20), response)
+        .await
+        .expect("the interrupt closes the parked turn")
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let closed = tidebreak_core::db::code::get_turn(&runtime.db, &OwnerId::local(), parked.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(closed.status, CodeTurnStatus::Interrupted);
+    let call_id: tidebreak_core::CallId = call_id.parse().unwrap();
+    let call = runtime
+        .db
+        .list_tool_calls(tidebreak_core::ChatId(session_id.0))
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|call| call.id == call_id)
+        .unwrap();
+    assert_eq!(call.status, tidebreak_core::ToolCallStatus::Cancelled);
+}
+
 /// The plainest turn on the internal engine — one answer, no tools — is in
 /// the journal once: the lane's rows, and nothing the worker wrote beside
 /// them.
@@ -1059,7 +1488,7 @@ async fn the_internal_engine_is_only_reachable_without_a_workspace() {
 /// model, and the lane's existing resolution puts them on the request.
 #[tokio::test]
 async fn an_internal_turn_with_an_image_reaches_the_model_with_the_bytes() {
-    let (router, token, _runtime, _ran, _dir, provider) =
+    let (router, token, _runtime, _ran, _dir, provider, _state) =
         internal_engine_app_capturing(vec![Step::Text("i see it")]).await;
     let bearer = format!("Bearer {token}");
     let created = router
