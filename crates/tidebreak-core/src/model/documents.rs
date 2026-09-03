@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::id::{ChatId, DocumentId, ProjectId, TurnId};
+use crate::id::{DocumentId, ProjectId, SessionId, TurnId};
 
 /// What a caller can actually do with a source right now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,7 +84,7 @@ pub struct DocumentSourceUpsert {
     /// Stable document identifier.
     pub id: DocumentId,
     /// Owning conversation for conversation-scoped sources.
-    pub chat_id: Option<ChatId>,
+    pub chat_id: Option<SessionId>,
     /// Owning project, or `None` for a legacy unscoped document.
     pub project_id: Option<ProjectId>,
     /// Source path or URL, when known.
@@ -107,7 +107,7 @@ pub struct DocumentRecord {
     /// Stable document identifier.
     pub id: DocumentId,
     /// Owning conversation for conversation-scoped sources.
-    pub chat_id: Option<ChatId>,
+    pub chat_id: Option<SessionId>,
     /// Owning project, or `None` for a legacy unscoped document.
     pub project_id: Option<ProjectId>,
     /// Source path or URL, or `None` for content supplied inline.
@@ -414,7 +414,7 @@ pub struct ExecFileSnapshot {
     /// Row identity.
     pub id: Uuid,
     /// Conversation whose turn made the change.
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     /// Turn that made the change.
     pub turn_id: TurnId,
     /// When the write-back journaled it.
@@ -440,7 +440,7 @@ pub struct ExecFileRejection {
     /// Row identity.
     pub id: Uuid,
     /// Conversation whose turn attempted the change.
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     /// Turn that attempted the change.
     pub turn_id: TurnId,
     /// When the rejected write was journaled.
@@ -458,7 +458,7 @@ pub struct DocumentSummaryRecord {
     /// Stable document identifier.
     pub id: DocumentId,
     /// Owning conversation for conversation-scoped sources.
-    pub chat_id: Option<ChatId>,
+    pub chat_id: Option<SessionId>,
     /// Owning project, or `None` for a legacy unscoped document.
     pub project_id: Option<ProjectId>,
     /// Source path or URL, or `None` for content supplied inline.
@@ -506,7 +506,7 @@ pub struct DocumentUpsert {
     /// Stable document identifier.
     pub id: DocumentId,
     /// Owning conversation for conversation-scoped sources.
-    pub chat_id: Option<ChatId>,
+    pub chat_id: Option<SessionId>,
     /// Owning project, or `None` for a legacy unscoped document.
     pub project_id: Option<ProjectId>,
     /// Source path or URL, or `None` for content supplied inline.
@@ -532,7 +532,7 @@ pub enum DocumentScope {
     /// Only documents owned by this project.
     Project(ProjectId),
     /// Only documents owned by this conversation.
-    Chat(ChatId),
+    Chat(SessionId),
 }
 
 #[cfg(test)]

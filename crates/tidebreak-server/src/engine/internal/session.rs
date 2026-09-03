@@ -16,9 +16,9 @@ use tidebreak_core::db::DbStore;
 use tidebreak_core::storage::DecidePlanOutcome;
 use tidebreak_core::{
     chat_journal, AcceptTurnSteerOutcome, AnswerUserQuestions, AnswerUserQuestionsOutcome,
-    AnswerUserQuestionsRequest, CallId, ChatId, CodeApprovalKind, CodeSessionId, CodeTurnStatus,
-    DecidePlanRequest, OwnerId, PermissionMode, PlanDecision, PlanDecisionChoice,
-    ToolApprovalStatus, TurnId, TurnParkWait, TurnSteerId, DEFAULT_ACCEPTED_PLAN_MODE,
+    AnswerUserQuestionsRequest, ApprovalKind, CallId, DecidePlanRequest, OwnerId, PermissionMode,
+    PlanDecision, PlanDecisionChoice, SessionId, ToolApprovalStatus, TurnId, TurnParkWait,
+    TurnStatus, TurnSteerId, DEFAULT_ACCEPTED_PLAN_MODE,
 };
 use tidebreak_harness::{
     ApprovalDecision, HarnessApprovalRef, HarnessError, HarnessSession, ParkWait, ResumeInput,
@@ -38,8 +38,8 @@ pub(super) struct InternalSession {
     driver: LegDriver,
     owner: OwnerId,
     #[allow(dead_code)]
-    session_id: CodeSessionId,
-    chat_id: ChatId,
+    session_id: SessionId,
+    chat_id: SessionId,
     active: Mutex<Option<ActiveTurn>>,
     /// Tool approvals acknowledged through [`HarnessSession::decide`].
     decided: Mutex<HashSet<CallId>>,
@@ -73,7 +73,7 @@ impl InternalSession {
         // The session row is the conversation row (decision 0048 step 5):
         // the runtime created it, and the engine follows the spec's posture
         // and model on every launch.
-        let chat_id = ChatId(spec.session_id.0);
+        let chat_id = SessionId(spec.session_id.0);
         if state
             .store
             .get_chat(chat_id)
@@ -140,10 +140,7 @@ impl InternalSession {
         else {
             return Ok(());
         };
-        if !matches!(
-            turn.status,
-            CodeTurnStatus::Waiting | CodeTurnStatus::Resuming
-        ) {
+        if !matches!(turn.status, TurnStatus::Waiting | TurnStatus::Resuming) {
             return Ok(());
         }
         let (Some(park_ref), Some(wait)) = (turn.park_ref, turn.park_wait) else {
@@ -404,7 +401,7 @@ impl InternalSession {
                 .await
                 .map_err(store_error)?
                 .map(|approval| match approval.kind {
-                    CodeApprovalKind::ToolUse { offered_grants, .. } => offered_grants,
+                    ApprovalKind::ToolUse { offered_grants, .. } => offered_grants,
                     _ => Vec::new(),
                 })
                 .unwrap_or_default();

@@ -33,7 +33,7 @@ use crate::deliverable::{
     MAX_BINARY_DELIVERABLE_BYTES, MAX_DELIVERABLE_BYTES,
 };
 use crate::error::{AgentError, Result};
-use crate::id::{CallId, ChatId, OutputId, OutputRevisionId};
+use crate::id::{CallId, OutputId, OutputRevisionId, SessionId};
 use crate::storage::Store;
 use crate::OutputRecord;
 
@@ -99,7 +99,7 @@ pub async fn sync_output_directory(
     store: &dyn Store,
     workspace: &Dir,
     publication: &Dir,
-    chat_id: ChatId,
+    chat_id: SessionId,
     call_id: CallId,
     producer: RevisionProducer,
     now: DateTime<Utc>,
@@ -152,7 +152,7 @@ pub async fn sync_output_directory(
 async fn record_candidate(
     store: &dyn Store,
     publication: &Dir,
-    chat_id: ChatId,
+    chat_id: SessionId,
     call_id: CallId,
     producer: RevisionProducer,
     now: DateTime<Utc>,

@@ -146,7 +146,7 @@ async fn cancel_without_a_running_turn_is_a_conflict_and_unknown_chat_is_404() {
     );
     // Unknown chat → 404.
     assert_eq!(
-        cancel_turn(&router, &bearer, ChatId::new(), TurnId::new()).await,
+        cancel_turn(&router, &bearer, SessionId::new(), TurnId::new()).await,
         StatusCode::NOT_FOUND
     );
 }
@@ -183,7 +183,7 @@ async fn cancel_cannot_target_a_turn_through_another_chat() {
 pub(super) async fn steer_turn(
     router: &Router,
     bearer: &str,
-    chat: ChatId,
+    chat: SessionId,
     turn_id: TurnId,
     content: &str,
     interrupt: bool,
@@ -203,7 +203,7 @@ pub(super) async fn steer_turn(
 pub(super) async fn steer_turn_with_id(
     router: &Router,
     bearer: &str,
-    chat: ChatId,
+    chat: SessionId,
     steer_id: TurnSteerId,
     turn_id: TurnId,
     content: &str,
@@ -219,7 +219,7 @@ pub(super) async fn steer_turn_with_id(
 async fn steer_turn_with_id_and_voice(
     router: &Router,
     bearer: &str,
-    chat: ChatId,
+    chat: SessionId,
     steer_id: TurnSteerId,
     turn_id: TurnId,
     content: &str,
@@ -262,7 +262,15 @@ async fn steer_without_a_running_turn_is_a_conflict_and_unknown_chat_is_404() {
         StatusCode::CONFLICT
     );
     assert_eq!(
-        steer_turn(&router, &bearer, ChatId::new(), TurnId::new(), "hi", false,).await,
+        steer_turn(
+            &router,
+            &bearer,
+            SessionId::new(),
+            TurnId::new(),
+            "hi",
+            false,
+        )
+        .await,
         StatusCode::NOT_FOUND
     );
     assert_eq!(
@@ -1077,7 +1085,7 @@ pub(super) async fn post_native_json(
 async fn accept_and_claim_turn_for_route_test(
     store: &dyn Store,
     turn_id: TurnId,
-    chat_id: ChatId,
+    chat_id: SessionId,
     content: &str,
 ) -> (uuid::Uuid, chrono::DateTime<chrono::Utc>) {
     let accepted = match store
@@ -1107,7 +1115,7 @@ async fn accept_and_claim_turn_for_route_test(
 
 async fn park_client_wait_for_route_test(
     store: &dyn Store,
-    chat_id: ChatId,
+    chat_id: SessionId,
     progress: TurnCheckpointProgress,
 ) -> (TurnId, ClientToolCallRequest) {
     let turn_id = TurnId::new();
@@ -1134,7 +1142,7 @@ async fn park_client_wait_for_route_test(
 
 async fn park_user_questions_for_route_test(
     store: &dyn Store,
-    chat_id: ChatId,
+    chat_id: SessionId,
 ) -> (TurnId, ClientToolCallRequest) {
     let turn_id = TurnId::new();
     let (turn_token, claimed_at) =
@@ -1201,7 +1209,7 @@ fn test_client_checkpoint_progress(model_steps: i32) -> TurnCheckpointProgress {
 
 async fn resolve_parked_client_call(
     store: &dyn Store,
-    chat_id: ChatId,
+    chat_id: SessionId,
     call: &ClientToolCallRequest,
 ) {
     let lease_token = uuid::Uuid::new_v4();
@@ -1974,13 +1982,12 @@ async fn the_inbox_lists_parked_work_until_its_own_route_resolves_it() {
 
     // An entry carries its conversation and the parked call, which is what a
     // deep link needs to reopen the transcript where it stopped. The
-    // conversation is tagged because chat and code ids are still separate
-    // spaces; step 5 collapses that.
+    // conversation uses the one session identity shared by chat and code.
     let approval_entry = listed
         .iter()
-        .find(|entry| entry["conversation"]["chat_id"] == approval_chat.id.to_string())
+        .find(|entry| entry["conversation"]["session_id"] == approval_chat.id.to_string())
         .expect("the parked approval is listed");
-    assert_eq!(approval_entry["conversation"]["surface"], "chat");
+    assert!(approval_entry["conversation"].get("surface").is_none());
     assert_eq!(
         approval_entry["items"][0]["call_id"],
         approval_call.to_string()
@@ -2088,7 +2095,7 @@ async fn list_inbox(router: &Router, bearer: &str) -> Vec<serde_json::Value> {
 
 async fn park_plan_for_route_test(
     store: &dyn Store,
-    chat_id: ChatId,
+    chat_id: SessionId,
 ) -> (TurnId, ClientToolCallRequest) {
     let turn_id = TurnId::new();
     let (turn_token, claimed_at) =
@@ -2121,7 +2128,7 @@ async fn park_plan_for_route_test(
 
 async fn park_folder_access_for_route_test(
     store: &dyn Store,
-    chat_id: ChatId,
+    chat_id: SessionId,
 ) -> ClientToolCallRequest {
     let turn_id = TurnId::new();
     let (turn_token, claimed_at) =
@@ -2153,7 +2160,7 @@ async fn park_folder_access_for_route_test(
     call
 }
 
-async fn park_tool_approval_for_route_test(store: &dyn Store, chat_id: ChatId) -> CallId {
+async fn park_tool_approval_for_route_test(store: &dyn Store, chat_id: SessionId) -> CallId {
     let turn_id = TurnId::new();
     store
         .accept_turn(turn_id, chat_id, "fake", "search the filings")
@@ -2185,7 +2192,7 @@ async fn park_tool_approval_for_route_test(store: &dyn Store, chat_id: ChatId) -
 
 async fn accept_server_tool_call_for_route_test(
     store: &dyn Store,
-    chat_id: ChatId,
+    chat_id: SessionId,
     turn_id: TurnId,
     call_id: CallId,
 ) {
@@ -2219,7 +2226,7 @@ async fn accept_server_tool_call_for_route_test(
 async fn answer_questions(
     router: &Router,
     bearer: &str,
-    chat_id: ChatId,
+    chat_id: SessionId,
     call_id: CallId,
 ) -> StatusCode {
     post_json(
@@ -2240,7 +2247,7 @@ async fn answer_questions(
 async fn decide_plan_request(
     router: &Router,
     bearer: &str,
-    chat_id: ChatId,
+    chat_id: SessionId,
     call_id: CallId,
 ) -> StatusCode {
     post_json(
@@ -2256,7 +2263,7 @@ async fn decide_plan_request(
 async fn decide_approval(
     router: &Router,
     bearer: &str,
-    chat_id: ChatId,
+    chat_id: SessionId,
     call_id: CallId,
     decision: &str,
 ) -> StatusCode {
@@ -2995,7 +3002,7 @@ async fn client_execution_api_validates_scope_identity_and_terminal_payloads() {
     let (router, token, store, _dir) = test_app().await;
     let bearer = format!("Bearer {token}");
     let chat = make_chat(&router, &bearer).await;
-    let missing_chat = ChatId::new();
+    let missing_chat = SessionId::new();
     let missing = router
         .clone()
         .oneshot(
@@ -3497,7 +3504,7 @@ async fn a_turn_replaces_its_task_plan_and_journals_only_a_refresh_hint() {
     );
 
     let events = wait_for_turn(&store, chat.id).await;
-    let hints: Vec<&SequencedEvent> = events
+    let hints: Vec<&SequencedAgentEvent> = events
         .iter()
         .filter(|event| matches!(event.event, AgentEvent::TaskPlanUpdated { .. }))
         .collect();
@@ -3757,7 +3764,7 @@ async fn send_now_releases_a_paused_queue() {
     // promoter claiming that same turn and read as a leak below.
     store
         .set_setting(
-            &format!("chats.{}.queue_paused", chat.id),
+            &format!("sessions.{}.queue_paused", chat.id),
             &serde_json::json!(true),
         )
         .await
@@ -3794,11 +3801,11 @@ async fn send_now_releases_a_paused_queue() {
     // End the blocking turn. A paused promoter must leave both rows alone.
     gate.notify_one();
     wait_for_turn(&store, chat.id).await;
-    crate::routes::promote_queued_turns(&state).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
     assert_eq!(
         store.list_queued_turns(chat.id).await.unwrap().len(),
         2,
-        "a paused queue promoted a message during an explicit sweep"
+        "a paused queue promoted a message"
     );
 
     let send_now = router

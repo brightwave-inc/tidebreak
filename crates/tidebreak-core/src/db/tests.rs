@@ -44,17 +44,63 @@ mod turn_event_batch;
 mod turn_steer;
 mod turn_terminal_usage;
 
+struct MigratedSqliteTemplate {
+    _directory: tempfile::TempDir,
+    database: std::path::PathBuf,
+}
+
+static MIGRATED_SQLITE_TEMPLATE: tokio::sync::OnceCell<MigratedSqliteTemplate> =
+    tokio::sync::OnceCell::const_new();
+
+/// Build the current empty schema once, then clone it for ordinary store tests.
+///
+/// Every caller still owns a distinct writable file. Tests that exercise the
+/// migration chain itself create their historical/raw schemas directly and do
+/// not use this helper.
+async fn migrated_sqlite_template() -> &'static MigratedSqliteTemplate {
+    MIGRATED_SQLITE_TEMPLATE
+        .get_or_init(|| async {
+            let directory = tempfile::tempdir().unwrap();
+            let database = directory.path().join("template.db");
+            let url = format!("sqlite://{}?mode=rwc", database.display());
+            let store = DbStore::connect(&url).await.unwrap();
+            store
+                .conn
+                .execute_unprepared("PRAGMA wal_checkpoint(TRUNCATE);")
+                .await
+                .unwrap();
+            drop(store);
+            MigratedSqliteTemplate {
+                _directory: directory,
+                database,
+            }
+        })
+        .await
+}
+
 async fn temp_store() -> (tempfile::TempDir, DbStore) {
-    temp_store_with_max_connections(1).await
+    let template = migrated_sqlite_template().await;
+    let dir = tempfile::tempdir().unwrap();
+    let database = dir.path().join("test.db");
+    std::fs::copy(&template.database, &database).unwrap();
+    let url = format!("sqlite://{}?mode=rw", database.display());
+    let conn = Database::connect(&url).await.unwrap();
+    conn.execute_unprepared("PRAGMA journal_mode=WAL;")
+        .await
+        .unwrap();
+    let store = DbStore { conn };
+    (dir, store)
 }
 
 async fn temp_store_with_max_connections(max_connections: u32) -> (tempfile::TempDir, DbStore) {
+    let template = migrated_sqlite_template().await;
     let dir = tempfile::tempdir().unwrap();
     let database = dir.path().join("test.db");
-    let url = format!("sqlite://{}?mode=rwc", database.display());
-    let store = DbStore::connect_test_sqlite_fixture_with_max_connections(&url, max_connections)
-        .await
-        .unwrap();
+    std::fs::copy(&template.database, &database).unwrap();
+    let url = format!("sqlite://{}?mode=rw", database.display());
+    let mut options = sea_orm::ConnectOptions::new(url);
+    options.max_connections(max_connections);
+    let store = DbStore::connect_with_options(options).await.unwrap();
     (dir, store)
 }
 
@@ -67,12 +113,12 @@ fn dispatchable(call: &crate::model::SandboxToolCallRequest) -> SandboxToolCallP
 }
 
 async fn set_turn_max_attempts(store: &DbStore, turn_id: TurnId, max_attempts: i32) {
-    entities::code_turn::Entity::update_many()
+    entities::turn::Entity::update_many()
         .col_expr(
-            entities::code_turn::Column::MaxAttempts,
+            entities::turn::Column::MaxAttempts,
             sea_orm::sea_query::Expr::value(max_attempts),
         )
-        .filter(entities::code_turn::Column::Id.eq(turn_id.0))
+        .filter(entities::turn::Column::Id.eq(turn_id.0))
         .exec(&store.conn)
         .await
         .unwrap();
@@ -80,7 +126,7 @@ async fn set_turn_max_attempts(store: &DbStore, turn_id: TurnId, max_attempts: i
 
 fn sample_chat() -> Chat {
     Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: Some("hello".into()),
         model: None,
@@ -148,7 +194,7 @@ fn sample_document(project_id: Option<ProjectId>) -> DocumentRecord {
 
 async fn park_test_plan(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
 ) -> (TurnId, crate::model::ClientToolCallRequest, DateTime<Utc>) {
     let turn_id = TurnId::new();
     let accepted = match store
@@ -194,7 +240,7 @@ async fn park_test_plan(
     match parked {
         ParkTurnForClientCallOutcome::Parked {
             renderer_event:
-                Some(SequencedEvent {
+                Some(SequencedAgentEvent {
                     event:
                         AgentEvent::PlanProposed {
                             call_id,

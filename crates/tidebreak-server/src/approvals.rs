@@ -13,9 +13,10 @@ use tokio::sync::Notify;
 
 use tidebreak_core::{
     ApprovalDecision, ApprovalFuture, ApprovalGate, ApprovalJournalIdentity, ApprovalRegistration,
-    ApprovalRegistrationFuture, ApprovalRequest, ApprovalRequiredPublication, CallId, ChatId,
+    ApprovalRegistrationFuture, ApprovalRequest, ApprovalRequiredPublication, CallId,
     DecideToolApprovalOutcome, GrantLevel, GrantScope, JudgeVerdictOutcome,
-    RequestToolApprovalOutcome, Result, SequencedCodeEvent, StandingGrant, StandingGrants, Store,
+    RequestToolApprovalOutcome, Result, SequencedEvent, SessionId, StandingGrant, StandingGrants,
+    Store,
 };
 
 /// Coordinates durable approval state with local low-latency waiters.
@@ -51,7 +52,7 @@ impl ApprovalBroker {
 
     /// Deliver a journaled decision live. The durable write already
     /// happened; a chat nobody is watching streams to no one.
-    fn publish(&self, chat_id: ChatId, resolution: SequencedCodeEvent) {
+    fn publish(&self, chat_id: SessionId, resolution: SequencedEvent) {
         if let Some(events) = self.events.get() {
             let _ = events.sender(chat_id).send_row(resolution);
         }
@@ -67,7 +68,7 @@ impl ApprovalBroker {
     /// an opposite decision is a conflict.
     pub async fn resolve(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         call_id: CallId,
         decision: ApprovalDecision,
     ) -> Result<ResolveApprovalOutcome> {
@@ -79,7 +80,7 @@ impl ApprovalBroker {
     /// matching calls in the same chat.
     pub async fn resolve_with_grant(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         call_id: CallId,
         decision: ApprovalDecision,
         rung: Option<crate::routes::ApprovalGrantRung>,
@@ -175,12 +176,78 @@ impl ApprovalBroker {
 }
 
 impl ApprovalBroker {
+    /// Land the Auto-mode judge's verdict on one parked call.
+    ///
+    /// Approve a parked call and mint a standing grant at an exact scope the
+    /// call already offered.
+    ///
+    /// The in-process engine's path: the adapter contract carries the chosen
+    /// [`GrantScope`] itself rather than a rung name, because the route layer
+    /// picked it from the ladder the approval published.
+    pub async fn resolve_with_scope(
+        &self,
+        chat_id: SessionId,
+        call_id: CallId,
+        scope: GrantScope,
+    ) -> Result<ResolveApprovalOutcome> {
+        let Some(current) = self.store.get_tool_call_approval(call_id).await? else {
+            return Ok(ResolveApprovalOutcome::NotPending);
+        };
+        if current.chat_id != chat_id {
+            return Ok(ResolveApprovalOutcome::WrongChat);
+        }
+        if !current.kind.is_approvable() {
+            return Ok(ResolveApprovalOutcome::NotApprovable);
+        }
+        let chat_project_id = self
+            .store
+            .get_chat(chat_id)
+            .await?
+            .and_then(|chat| chat.project_id);
+        let Some(grant) = StandingGrant::scoped(
+            GrantLevel::for_chat(current.chat_id, chat_project_id),
+            current.tool_name.clone(),
+            current.kind,
+            scope,
+            Utc::now(),
+        ) else {
+            return Ok(ResolveApprovalOutcome::GrantNotAvailable);
+        };
+        let outcome = self
+            .store
+            .decide_tool_call_approval_with_grant(
+                chat_id,
+                call_id,
+                &ApprovalDecision::Approve,
+                &grant,
+                Utc::now(),
+            )
+            .await?;
+        match outcome {
+            DecideToolApprovalOutcome::Decided { resolution, .. } => {
+                self.standing_grants.record(grant);
+                self.publish(chat_id, *resolution);
+                self.wake.notify_waiters();
+                Ok(ResolveApprovalOutcome::Resolved)
+            }
+            DecideToolApprovalOutcome::Existing(_) => {
+                self.standing_grants.record(grant);
+                self.wake.notify_waiters();
+                Ok(ResolveApprovalOutcome::Resolved)
+            }
+            DecideToolApprovalOutcome::DecisionConflict => {
+                Ok(ResolveApprovalOutcome::DecisionConflict)
+            }
+            DecideToolApprovalOutcome::Unavailable => Ok(ResolveApprovalOutcome::NotPending),
+        }
+    }
+
     /// A pure compare-and-set against durable state: a human decision that
     /// already landed wins, and `false` reports the judge no longer owned the
     /// call. An approval wakes the parked waiter exactly like a human click.
     pub async fn resolve_from_judge(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         call_id: CallId,
         approved: bool,
     ) -> Result<bool> {
@@ -463,7 +530,7 @@ mod tests {
         // its open connection after this setup.
         std::mem::forget(db);
         let chat = Chat {
-            id: ChatId::new(),
+            id: SessionId::new(),
             project_id: None,
             title: Some("Approval test".into()),
             model: None,
@@ -522,7 +589,7 @@ mod tests {
 
     async fn request_for(
         store: &Arc<dyn Store>,
-        chat_id: ChatId,
+        chat_id: SessionId,
         tool_name: &str,
         arguments: serde_json::Value,
     ) -> ApprovalRequest {
@@ -669,7 +736,7 @@ mod tests {
         };
         store.create_project(&project).await.unwrap();
         let chat = Chat {
-            id: ChatId::new(),
+            id: SessionId::new(),
             project_id: Some(project.id),
             title: Some("First".into()),
             model: None,
@@ -715,7 +782,7 @@ mod tests {
 
         // A different chat in the same project is covered without asking.
         let sibling = Chat {
-            id: ChatId::new(),
+            id: SessionId::new(),
             project_id: Some(project_id),
             title: Some("Second".into()),
             model: None,
@@ -739,7 +806,7 @@ mod tests {
         // A chat outside the project is not. A project grant must widen to
         // its project and no further.
         let outsider = Chat {
-            id: ChatId::new(),
+            id: SessionId::new(),
             project_id: None,
             title: Some("Loose".into()),
             model: None,
@@ -1055,7 +1122,7 @@ mod tests {
         );
 
         let other_chat = Chat {
-            id: ChatId::new(),
+            id: SessionId::new(),
             project_id: None,
             title: Some("Other approval test".into()),
             model: None,
@@ -1545,7 +1612,7 @@ mod tests {
             .unwrap(),
         );
         let chat = Chat {
-            id: ChatId::new(),
+            id: SessionId::new(),
             project_id: None,
             title: Some("Approval journal test".into()),
             model: None,

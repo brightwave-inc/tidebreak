@@ -1889,7 +1889,7 @@ async fn a_conversation_is_declared_to_a_gateway_and_withheld_from_anthropic() {
     });
     let base_url = format!("http://{address}");
 
-    let conversation = tidebreak_core::id::ChatId::new();
+    let conversation = tidebreak_core::id::SessionId::new();
     let request = || ChatRequest {
         model: "claude-opus-4-8".into(),
         conversation: Some(conversation),
@@ -1929,7 +1929,7 @@ async fn the_token_source_is_asked_for_the_request_conversation() {
     // a gateway source mints inside the chat's attestation context, and a
     // token fetched without the conversation would record no observations
     // for the chat's tool calls.
-    struct Recording(std::sync::Mutex<Vec<Option<tidebreak_core::id::ChatId>>>);
+    struct Recording(std::sync::Mutex<Vec<Option<tidebreak_core::id::SessionId>>>);
 
     #[async_trait::async_trait]
     impl crate::BearerTokenSource for Recording {
@@ -1939,7 +1939,7 @@ async fn the_token_source_is_asked_for_the_request_conversation() {
 
         async fn bearer_token_for(
             &self,
-            conversation: Option<tidebreak_core::id::ChatId>,
+            conversation: Option<tidebreak_core::id::SessionId>,
         ) -> tidebreak_core::Result<String> {
             self.0.lock().unwrap().push(conversation);
             Ok("mg_at_test".into())
@@ -1950,7 +1950,7 @@ async fn the_token_source_is_asked_for_the_request_conversation() {
     let provider = AnthropicProvider::new("unused")
         .with_base_url("http://127.0.0.1:9")
         .with_token_source(source.clone());
-    let conversation = tidebreak_core::id::ChatId::new();
+    let conversation = tidebreak_core::id::SessionId::new();
     // The request itself fails (nothing listens); the token exchange has
     // already happened by then, which is all this asserts.
     let _ = provider

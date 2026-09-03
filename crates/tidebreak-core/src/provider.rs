@@ -513,7 +513,7 @@ pub struct ChatRequest {
     /// Absent, the gateway records the inference without a conversation, which
     /// is what every request did before this existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub conversation: Option<crate::id::ChatId>,
+    pub conversation: Option<crate::id::SessionId>,
     /// Provider-specific model identifier (e.g. `claude-opus-4-8`).
     ///
     /// This is the host execution identity used to gate native replay. A

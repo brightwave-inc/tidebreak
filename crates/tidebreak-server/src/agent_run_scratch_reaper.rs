@@ -409,7 +409,7 @@ mod tests {
 
     use async_trait::async_trait;
     use tidebreak_core::{
-        AdmitSandboxAgentRunOutcome, AgentError, CallId, Chat, ChatId, DbStore, SecretProvider,
+        AdmitSandboxAgentRunOutcome, AgentError, CallId, Chat, DbStore, SecretProvider, SessionId,
         TurnId,
     };
 
@@ -479,7 +479,7 @@ mod tests {
     /// run that finished normally would settle. Returns the run id.
     async fn completed_run(store: &Arc<DbStore>) -> AgentRunId {
         let chat = Chat {
-            id: ChatId::new(),
+            id: SessionId::new(),
             project_id: None,
             title: Some("scratch reaper".into()),
             model: Some("model".into()),
@@ -577,7 +577,7 @@ mod tests {
 
         // Still running: never touched, no matter how old its directory looks.
         let chat = Chat {
-            id: ChatId::new(),
+            id: SessionId::new(),
             project_id: None,
             title: None,
             model: None,

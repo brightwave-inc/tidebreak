@@ -37,10 +37,9 @@ use sea_orm_migration::prelude::*;
 
 use crate::approval::{GrantScope, InternalToolApprovalRequest, ToolApprovalKind};
 use crate::code::{
-    ApprovalDecisionKind, CodeApprovalKind, CodeApprovalState, CodeEvent, CodeTurnId,
-    InternalApprovalRequest, MAX_TOOL_SUMMARY_CHARS,
+    ApprovalDecisionKind, ApprovalKind, ApprovalState, Event, InternalApprovalRequest, TurnId,
+    MAX_TOOL_SUMMARY_CHARS,
 };
-use crate::db::entities;
 use crate::preview::ToolActionPreview;
 
 pub(super) struct OneApprovalSurface;
@@ -265,6 +264,93 @@ mod legacy {
 
         impl ActiveModelBehavior for ActiveModel {}
     }
+
+    /// The `code_session` columns this migration reads before the universal
+    /// table rename runs.
+    pub mod code_session {
+        use sea_orm::entity::prelude::*;
+
+        #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+        #[sea_orm(table_name = "code_session")]
+        pub struct Model {
+            #[sea_orm(primary_key, auto_increment = false)]
+            pub id: Uuid,
+            pub owner: String,
+            pub workspace_id: Option<Uuid>,
+            pub harness_kind: String,
+            pub spawn_epoch: i64,
+        }
+
+        #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+        pub enum Relation {}
+
+        impl ActiveModelBehavior for ActiveModel {}
+    }
+
+    /// The `code_event` row this migration reads and rewrites before the
+    /// universal table rename runs.
+    pub mod code_event {
+        use sea_orm::entity::prelude::*;
+
+        #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+        #[sea_orm(table_name = "code_event")]
+        pub struct Model {
+            #[sea_orm(primary_key, auto_increment = false)]
+            pub session_id: Uuid,
+            #[sea_orm(primary_key, auto_increment = false)]
+            pub seq: i64,
+            pub owner: String,
+            #[sea_orm(column_type = "JsonBinary")]
+            pub event: Json,
+            pub created_at: DateTimeUtc,
+            pub turn_id: Option<Uuid>,
+            pub lease_token: Option<Uuid>,
+            pub attempt_event_ordinal: Option<i32>,
+            pub scan_token: Option<Uuid>,
+            pub terminal: bool,
+        }
+
+        #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+        pub enum Relation {}
+
+        impl ActiveModelBehavior for ActiveModel {}
+    }
+
+    /// The `code_approval` row this migration reads and writes before the
+    /// universal table rename runs.
+    pub mod code_approval {
+        use sea_orm::entity::prelude::*;
+
+        #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+        #[sea_orm(table_name = "code_approval")]
+        pub struct Model {
+            #[sea_orm(primary_key, auto_increment = false)]
+            pub id: Uuid,
+            pub owner: String,
+            pub session_id: Uuid,
+            pub turn_id: Uuid,
+            #[sea_orm(column_type = "JsonBinary")]
+            pub kind: Json,
+            #[sea_orm(column_type = "JsonBinary")]
+            pub harness_raw: Json,
+            pub native_call_id: Option<String>,
+            pub server_capability: Option<String>,
+            pub request_sha256: Option<String>,
+            pub worker_epoch: Option<i64>,
+            pub decision_claim: Option<Uuid>,
+            pub claimed_at: Option<DateTimeUtc>,
+            pub state: String,
+            pub feedback: Option<String>,
+            pub requested_at: DateTimeUtc,
+            pub decided_at: Option<DateTimeUtc>,
+            pub auto_judge_status: Option<String>,
+        }
+
+        #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+        pub enum Relation {}
+
+        impl ActiveModelBehavior for ActiveModel {}
+    }
 }
 
 /// The owner and worker epoch of the conversations the backfill mints rows
@@ -297,10 +383,10 @@ impl Sessions {
         // Name the columns rather than reading the live entity: this
         // migration is historical, and the entity's model grows with the
         // schema of the chain's end, which does not exist yet here.
-        let found = entities::code_session::Entity::find_by_id(chat_id)
+        let found = legacy::code_session::Entity::find_by_id(chat_id)
             .select_only()
-            .column(entities::code_session::Column::Owner)
-            .column(entities::code_session::Column::SpawnEpoch)
+            .column(legacy::code_session::Column::Owner)
+            .column(legacy::code_session::Column::SpawnEpoch)
             .into_tuple::<(String, i64)>()
             .one(conn)
             .await?
@@ -341,11 +427,11 @@ where
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 
     // Columns by name, not the live entity, for the same reason as above.
-    let internal = entities::code_session::Entity::find()
+    let internal = legacy::code_session::Entity::find()
         .select_only()
-        .column(entities::code_session::Column::Id)
-        .filter(entities::code_session::Column::WorkspaceId.is_null())
-        .filter(entities::code_session::Column::HarnessKind.eq("internal"))
+        .column(legacy::code_session::Column::Id)
+        .filter(legacy::code_session::Column::WorkspaceId.is_null())
+        .filter(legacy::code_session::Column::HarnessKind.eq("internal"))
         .into_tuple::<uuid::Uuid>()
         .all(conn)
         .await?;
@@ -355,23 +441,23 @@ where
     // A bridge row is keyed by an id of its own; a card's row is keyed by
     // its call. Rows an interrupted attempt already minted are therefore
     // kept, and only the bridge's copies go.
-    let bridge_rows = entities::code_approval::Entity::find()
-        .filter(entities::code_approval::Column::SessionId.is_in(internal.clone()))
+    let bridge_rows = legacy::code_approval::Entity::find()
+        .filter(legacy::code_approval::Column::SessionId.is_in(internal.clone()))
         .all(conn)
         .await?;
     for row in bridge_rows {
         if !is_call(conn, row.id).await? {
-            entities::code_approval::Entity::delete_by_id(row.id)
+            legacy::code_approval::Entity::delete_by_id(row.id)
                 .exec(conn)
                 .await?;
         }
     }
     let mut after: Option<(uuid::Uuid, i64)> = None;
     loop {
-        let mut query = entities::code_event::Entity::find()
-            .filter(entities::code_event::Column::SessionId.is_in(internal.clone()))
-            .order_by_asc(entities::code_event::Column::SessionId)
-            .order_by_asc(entities::code_event::Column::Seq)
+        let mut query = legacy::code_event::Entity::find()
+            .filter(legacy::code_event::Column::SessionId.is_in(internal.clone()))
+            .order_by_asc(legacy::code_event::Column::SessionId)
+            .order_by_asc(legacy::code_event::Column::Seq)
             .limit(BACKFILL_PAGE as u64);
         if let Some((session_id, seq)) = after {
             query = query.filter(page_after(session_id, seq));
@@ -401,7 +487,7 @@ where
             if names_a_call {
                 continue;
             }
-            entities::code_event::Entity::delete_by_id((row.session_id, row.seq))
+            legacy::code_event::Entity::delete_by_id((row.session_id, row.seq))
                 .exec(conn)
                 .await?;
         }
@@ -427,11 +513,11 @@ where
 fn page_after(session_id: uuid::Uuid, seq: i64) -> sea_orm::Condition {
     use sea_orm::{ColumnTrait, Condition};
     Condition::any()
-        .add(entities::code_event::Column::SessionId.gt(session_id))
+        .add(legacy::code_event::Column::SessionId.gt(session_id))
         .add(
             Condition::all()
-                .add(entities::code_event::Column::SessionId.eq(session_id))
-                .add(entities::code_event::Column::Seq.gt(seq)),
+                .add(legacy::code_event::Column::SessionId.eq(session_id))
+                .add(legacy::code_event::Column::Seq.gt(seq)),
         )
 }
 
@@ -447,9 +533,9 @@ where
 
     let mut after: Option<(uuid::Uuid, i64)> = None;
     loop {
-        let mut query = entities::code_event::Entity::find()
-            .order_by_asc(entities::code_event::Column::SessionId)
-            .order_by_asc(entities::code_event::Column::Seq)
+        let mut query = legacy::code_event::Entity::find()
+            .order_by_asc(legacy::code_event::Column::SessionId)
+            .order_by_asc(legacy::code_event::Column::Seq)
             .limit(BACKFILL_PAGE as u64);
         if let Some((session_id, seq)) = after {
             query = query.filter(page_after(session_id, seq));
@@ -473,7 +559,7 @@ where
             let event = serde_json::to_value(&rewritten).map_err(|error| {
                 DbErr::Custom(format!("event ({}, {}): {error}", row.session_id, row.seq))
             })?;
-            entities::code_event::ActiveModel {
+            legacy::code_event::ActiveModel {
                 session_id: Set(row.session_id),
                 seq: Set(row.seq),
                 event: Set(event),
@@ -489,7 +575,7 @@ where
 }
 
 /// One retired journal payload as the row it is now.
-fn rewrite_event(payload: &serde_json::Value) -> Result<CodeEvent, String> {
+fn rewrite_event(payload: &serde_json::Value) -> Result<Event, String> {
     fn field<'a>(
         payload: &'a serde_json::Value,
         name: &str,
@@ -521,10 +607,10 @@ fn rewrite_event(payload: &serde_json::Value) -> Result<CodeEvent, String> {
         .ok_or_else(|| "call_id is not a string".to_owned())?
         .parse()
         .map_err(|error| format!("call_id: {error}"))?;
-    let approval_id = crate::code::CodeApprovalId(call_id);
+    let approval_id = crate::code::ApprovalId(call_id);
     let kind = field(payload, "type")?.as_str().unwrap_or_default();
     Ok(match kind {
-        "tool_approval_required" => CodeEvent::ApprovalRequested {
+        "tool_approval_required" => Event::ApprovalRequested {
             approval_id,
             request: Some(InternalApprovalRequest::ToolUse {
                 auto_judging: parse_optional::<bool>(payload, "auto_judging")?.unwrap_or(false),
@@ -536,7 +622,7 @@ fn rewrite_event(payload: &serde_json::Value) -> Result<CodeEvent, String> {
                 preview: parse_optional::<ToolActionPreview>(payload, "preview")?,
             }),
         },
-        "tool_approval_decided" => CodeEvent::ApprovalResolved {
+        "tool_approval_decided" => Event::ApprovalResolved {
             approval_id,
             decision: if parse::<bool>(payload, "approved")? {
                 ApprovalDecisionKind::Approve
@@ -544,16 +630,16 @@ fn rewrite_event(payload: &serde_json::Value) -> Result<CodeEvent, String> {
                 ApprovalDecisionKind::Deny { feedback: None }
             },
         },
-        "questions_asked" => CodeEvent::ApprovalRequested {
+        "questions_asked" => Event::ApprovalRequested {
             approval_id,
             request: Some(InternalApprovalRequest::Questions {
-                turn_id: parse::<CodeTurnId>(payload, "turn_id")?,
+                turn_id: parse::<TurnId>(payload, "turn_id")?,
             }),
         },
-        "plan_proposed" => CodeEvent::ApprovalRequested {
+        "plan_proposed" => Event::ApprovalRequested {
             approval_id,
             request: Some(InternalApprovalRequest::Plan {
-                turn_id: parse::<CodeTurnId>(payload, "turn_id")?,
+                turn_id: parse::<TurnId>(payload, "turn_id")?,
             }),
         },
         other => return Err(format!("unexpected type {other}")),
@@ -603,7 +689,7 @@ where
     C: ConnectionTrait,
 {
     use sea_orm::EntityTrait;
-    Ok(entities::code_approval::Entity::find_by_id(id)
+    Ok(legacy::code_approval::Entity::find_by_id(id)
         .one(conn)
         .await?
         .is_some())
@@ -617,19 +703,19 @@ struct CardRow<'a> {
     turn_id: uuid::Uuid,
     worker_epoch: i64,
     id: uuid::Uuid,
-    kind: &'a CodeApprovalKind,
+    kind: &'a ApprovalKind,
     raw: serde_json::Value,
-    state: CodeApprovalState,
+    state: ApprovalState,
     feedback: Option<String>,
     requested_at: chrono::DateTime<chrono::Utc>,
     decided_at: Option<chrono::DateTime<chrono::Utc>>,
     auto_judge_status: Option<String>,
 }
 
-fn approval_row(card: CardRow<'_>) -> Result<entities::code_approval::ActiveModel, DbErr> {
+fn approval_row(card: CardRow<'_>) -> Result<legacy::code_approval::ActiveModel, DbErr> {
     use sea_orm::Set;
     let id = card.id;
-    Ok(entities::code_approval::ActiveModel {
+    Ok(legacy::code_approval::ActiveModel {
         id: Set(id),
         owner: Set(card.owner),
         session_id: Set(card.session_id),
@@ -680,9 +766,9 @@ where
                 .await?;
             let kind = stored_tool_approval_kind(call.approval_kind.as_deref(), &call.name)?;
             let state = match call.approval_status.as_deref() {
-                Some("pending") => CodeApprovalState::Pending,
-                Some("approved") => CodeApprovalState::Approved,
-                Some("rejected") => CodeApprovalState::Denied,
+                Some("pending") => ApprovalState::Pending,
+                Some("approved") => ApprovalState::Approved,
+                Some("rejected") => ApprovalState::Denied,
                 other => {
                     return Err(DbErr::Custom(format!(
                         "tool_call {} has an unknown approval status {other:?}",
@@ -697,7 +783,7 @@ where
                 ))
             })?;
             let row_kind = match ToolActionPreview::build(&call.name, &call.arguments) {
-                Some(preview) => CodeApprovalKind::ToolUse {
+                Some(preview) => ApprovalKind::ToolUse {
                     preview: preview.without_summary(),
                     offered_grants: GrantScope::mintable_ladder_for(
                         kind,
@@ -705,7 +791,7 @@ where
                         &call.arguments,
                     ),
                 },
-                None => CodeApprovalKind::Other {
+                None => ApprovalKind::Other {
                     summary: crate::chat_journal::bounded(&call.name, MAX_TOOL_SUMMARY_CHARS),
                 },
             };
@@ -797,9 +883,9 @@ where
                 })
                 .collect::<Result<Vec<_>, DbErr>>()?;
             let state = match request.status.as_str() {
-                "pending" => CodeApprovalState::Pending,
-                "answered" => CodeApprovalState::Approved,
-                "cancelled" => CodeApprovalState::Abandoned,
+                "pending" => ApprovalState::Pending,
+                "answered" => ApprovalState::Approved,
+                "cancelled" => ApprovalState::Abandoned,
                 other => {
                     return Err(DbErr::Custom(format!(
                         "user_question_request {} has an unknown status {other}",
@@ -813,7 +899,7 @@ where
                 turn_id: request.turn_id,
                 worker_epoch: epoch,
                 id: request.call_id,
-                kind: &CodeApprovalKind::Questions { questions },
+                kind: &ApprovalKind::Questions { questions },
                 raw: serde_json::Value::Null,
                 state,
                 feedback: None,
@@ -857,10 +943,10 @@ where
                 .owner_and_epoch(conn, request.chat_id, "plan_request")
                 .await?;
             let state = match request.status.as_str() {
-                "pending" => CodeApprovalState::Pending,
-                "accepted" => CodeApprovalState::Approved,
-                "rejected" => CodeApprovalState::Denied,
-                "cancelled" => CodeApprovalState::Abandoned,
+                "pending" => ApprovalState::Pending,
+                "accepted" => ApprovalState::Approved,
+                "rejected" => ApprovalState::Denied,
+                "cancelled" => ApprovalState::Abandoned,
                 other => {
                     return Err(DbErr::Custom(format!(
                         "plan_request {} has an unknown status {other}",
@@ -880,7 +966,7 @@ where
                 turn_id: request.turn_id,
                 worker_epoch: epoch,
                 id: request.call_id,
-                kind: &CodeApprovalKind::Plan {
+                kind: &ApprovalKind::Plan {
                     proposed_mode: crate::DEFAULT_ACCEPTED_PLAN_MODE,
                 },
                 raw,

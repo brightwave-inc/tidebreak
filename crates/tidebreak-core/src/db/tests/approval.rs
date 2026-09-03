@@ -36,12 +36,12 @@ async fn claimed_sensitive_call_with(
         AcceptTurnOutcome::Accepted(turn) => turn,
         outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
     };
-    entities::code_turn::Entity::update_many()
+    entities::turn::Entity::update_many()
         .col_expr(
-            entities::code_turn::Column::MaxAttempts,
+            entities::turn::Column::MaxAttempts,
             sea_orm::sea_query::Expr::value(2),
         )
-        .filter(entities::code_turn::Column::Id.eq(turn_id.0))
+        .filter(entities::turn::Column::Id.eq(turn_id.0))
         .exec(&store.conn)
         .await
         .unwrap();
@@ -118,7 +118,7 @@ async fn workspace_approval_folds_storage_but_recovers_class_and_kind() {
     // The card is one approval row whose id is the call id, carrying the
     // engine's own request; the read model recovers the class from the
     // kind, so a workspace card parked across a restart stays approvable.
-    let row = entities::code_approval::Entity::find_by_id(call.id.0)
+    let row = entities::approval::Entity::find_by_id(call.id.0)
         .one(&store.conn)
         .await
         .unwrap()
@@ -771,7 +771,7 @@ async fn a_standing_grant_is_written_by_the_settlement_alone() {
     let chat = sample_chat();
     store.create_chat(&chat).await.unwrap();
     let owner = crate::OwnerId::local();
-    let session_id = crate::CodeSessionId(chat.id.0);
+    let session_id = crate::SessionId(chat.id.0);
 
     let (_turn, _lease, granted_call, request) = claimed_sensitive_call(&store, &chat).await;
     store
@@ -793,10 +793,7 @@ async fn a_standing_grant_is_written_by_the_settlement_alone() {
     .await
     .unwrap()
     .expect("the card settles");
-    assert_eq!(
-        settlement.approval.state,
-        crate::CodeApprovalState::Approved
-    );
+    assert_eq!(settlement.approval.state, crate::ApprovalState::Approved);
     let grants = store.list_standing_tool_grants().await.unwrap();
     assert_eq!(grants.len(), 1);
     assert_eq!(grants[0].source_call_id, granted_call.id);
@@ -823,18 +820,15 @@ async fn a_standing_grant_is_written_by_the_settlement_alone() {
     let abandoned = crate::db::code::abandon_pending_approval(
         &store,
         &owner,
-        crate::CodeApprovalId(doomed_call.id.0),
-        crate::CodeSessionId(other.id.0),
+        crate::ApprovalId(doomed_call.id.0),
+        crate::SessionId(other.id.0),
         0,
         Utc::now(),
     )
     .await
     .unwrap()
     .expect("the card abandons");
-    assert_eq!(
-        abandoned.approval.state,
-        crate::CodeApprovalState::Abandoned
-    );
+    assert_eq!(abandoned.approval.state, crate::ApprovalState::Abandoned);
     assert_eq!(store.list_standing_tool_grants().await.unwrap().len(), 1);
     assert_eq!(
         store

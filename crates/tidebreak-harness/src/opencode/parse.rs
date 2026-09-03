@@ -17,7 +17,7 @@ use std::collections::HashSet;
 
 use serde_json::Value;
 use tidebreak_core::{
-    BoundedError, CodeUsage, Diffstat, FileChangeKind, HarnessKind, ToolDetail, ToolOutcome,
+    BoundedError, Diffstat, FileChangeKind, HarnessKind, ToolDetail, ToolOutcome, TurnUsage,
     MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS,
 };
 
@@ -39,7 +39,7 @@ pub struct OpencodeStreamParser {
     completed_tools: HashSet<String>,
     resolved_approvals: HashSet<String>,
     changed_files: HashSet<String>,
-    last_usage: CodeUsage,
+    last_usage: TurnUsage,
     first_call_context_tokens: Option<u64>,
 }
 
@@ -123,7 +123,7 @@ impl OpencodeStreamParser {
         if method == "POST" && path.contains("/prompt_async") {
             self.turn_terminal = false;
             self.changed_files.clear();
-            self.last_usage = CodeUsage::default();
+            self.last_usage = TurnUsage::default();
             self.first_call_context_tokens = None;
             return Vec::new();
         }
@@ -253,7 +253,7 @@ impl OpencodeStreamParser {
                 self.turn_open = true;
                 self.turn_terminal = false;
                 self.changed_files.clear();
-                self.last_usage = CodeUsage::default();
+                self.last_usage = TurnUsage::default();
                 self.first_call_context_tokens = None;
                 vec![HarnessEvent::TurnStarted]
             }
@@ -636,7 +636,7 @@ impl OpencodeStreamParser {
         if self.first_call_context_tokens.is_none() && context_tokens > 0 {
             self.first_call_context_tokens = Some(context_tokens);
         }
-        self.last_usage = CodeUsage {
+        self.last_usage = TurnUsage {
             input_tokens,
             output_tokens: tokens.get("output").and_then(Value::as_u64).unwrap_or(0),
             cache_read_input_tokens,
@@ -928,6 +928,6 @@ mod tests {
 
         assert_eq!(completed.len(), 2);
         assert_eq!(completed[0].context_tokens, 6_000);
-        assert_eq!(completed[1], &CodeUsage::default());
+        assert_eq!(completed[1], &TurnUsage::default());
     }
 }

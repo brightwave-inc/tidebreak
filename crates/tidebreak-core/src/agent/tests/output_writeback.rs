@@ -4,7 +4,7 @@ async fn output_writeback_fixture() -> (tempfile::TempDir, Arc<dyn Store>, Chat,
 {
     let db = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect_test_sqlite_fixture(&format!(
+        DbStore::connect(&format!(
             "sqlite://{}?mode=rwc",
             db.path().join("writeback.db").display()
         ))
@@ -12,7 +12,7 @@ async fn output_writeback_fixture() -> (tempfile::TempDir, Arc<dyn Store>, Chat,
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -45,7 +45,7 @@ async fn output_writeback_fixture() -> (tempfile::TempDir, Arc<dyn Store>, Chat,
 
 async fn create_named_output(
     store: &Arc<dyn Store>,
-    chat_id: ChatId,
+    chat_id: SessionId,
     filename: &str,
     created_at: chrono::DateTime<Utc>,
 ) -> crate::OutputId {

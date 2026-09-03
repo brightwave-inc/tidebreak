@@ -24,7 +24,7 @@ fn revision(seed: u8, second: i64) -> NewOutputRevision {
     }
 }
 
-fn create_request(chat_id: ChatId, filename: &str, seed: u8) -> CreateOutput {
+fn create_request(chat_id: SessionId, filename: &str, seed: u8) -> CreateOutput {
     CreateOutput {
         id: OutputId::new(),
         chat_id,
@@ -352,7 +352,7 @@ async fn an_output_requires_an_existing_conversation() {
     let (_dir, store) = temp_store().await;
 
     assert!(store
-        .create_output(&create_request(ChatId::new(), "brief.md", 1))
+        .create_output(&create_request(SessionId::new(), "brief.md", 1))
         .await
         .is_err());
 }
@@ -597,7 +597,7 @@ mod output_scan {
     async fn sync(
         store: &DbStore,
         scratch: &cap_std::fs::Dir,
-        chat_id: ChatId,
+        chat_id: SessionId,
         call_id: CallId,
         second: i64,
     ) -> crate::output_scan::OutputDirectorySync {
@@ -1034,7 +1034,7 @@ mod restore {
     async fn output_with_history(
         store: &DbStore,
         scratch: &std::path::Path,
-        chat_id: ChatId,
+        chat_id: SessionId,
     ) -> OutputRecord {
         let dir = open_scratch(scratch);
         for (second, content) in [(0, "# Draft"), (30, "# Final")] {

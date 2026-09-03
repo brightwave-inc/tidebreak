@@ -11,8 +11,8 @@ use axum::Router;
 use crate::code::CodeRuntime;
 use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
 use tidebreak_core::{
-    Attention, AttentionSource, AttentionState, CapLevel, CodeEvent, CodeSession, CodeSessionId,
-    CodeSessionLifecycle, CodeTurnStatus, FenceReason, HarnessKind, PermissionMode, WorkspaceId,
+    Attention, AttentionSource, AttentionState, CapLevel, Event, FenceReason, HarnessKind,
+    PermissionMode, Session, SessionId, SessionLifecycle, TurnStatus, WorkspaceId,
 };
 use tidebreak_harness::HarnessEvent;
 
@@ -23,7 +23,7 @@ async fn code_app_with_browser(
     code_app_with_optional_browser(adapter, Some(browser_runtime)).await
 }
 
-fn browser_token_for_session(runtime: &CodeRuntime, session_id: CodeSessionId) -> String {
+fn browser_token_for_session(runtime: &CodeRuntime, session_id: SessionId) -> String {
     for entry in std::fs::read_dir(runtime.browser_tokens.capfile_dir()).unwrap() {
         let path = entry.unwrap().path();
         if path.extension().and_then(|value| value.to_str()) != Some("json") {
@@ -43,8 +43,8 @@ fn browser_token_for_session(runtime: &CodeRuntime, session_id: CodeSessionId) -
     panic!("browser token for session {session_id} was not found")
 }
 
-fn mark_as_exited_orphan(session: &mut CodeSession) {
-    session.lifecycle = CodeSessionLifecycle::Fenced;
+fn mark_as_exited_orphan(session: &mut Session) {
+    session.lifecycle = SessionLifecycle::Fenced;
     session.fence_reason = Some(FenceReason::OrphanAlive);
     // A stale identity on a live PID models PID reuse. Reap treats that as
     // proof that the recorded process exited and never signals the new owner.
@@ -96,7 +96,7 @@ async fn interrupt_stops_a_running_turn_without_ending_its_browser_channel() {
         .await
         .unwrap();
 
-    let session_id: CodeSessionId = json_id(&session).parse().unwrap();
+    let session_id: SessionId = json_id(&session).parse().unwrap();
     let browser_token = browser_token_for_session(&runtime, session_id);
     let (mut events, _) = runtime.bus.attach(session_id);
 
@@ -113,7 +113,7 @@ async fn interrupt_stops_a_running_turn_without_ending_its_browser_channel() {
         // queuing on a slow CI runner.
         loop {
             let event = events.recv().await.unwrap();
-            if matches!(event.event, CodeEvent::TurnStarted { .. }) {
+            if matches!(event.event, Event::TurnStarted { .. }) {
                 break;
             }
         }
@@ -175,7 +175,7 @@ async fn reap_replaces_browser_authority_without_tombstoning_the_session() {
         .json::<serde_json::Value>()
         .await
         .unwrap();
-    let session_id: CodeSessionId = json_id(&session).parse().unwrap();
+    let session_id: SessionId = json_id(&session).parse().unwrap();
     let old_browser_token = browser_token_for_session(&runtime, session_id);
 
     let initial_list = client
@@ -287,7 +287,7 @@ async fn an_engine_that_dies_without_saying_so_journals_an_interrupted_turn() {
         .await
         .unwrap();
 
-    let session_id: CodeSessionId = json_id(&session).parse().unwrap();
+    let session_id: SessionId = json_id(&session).parse().unwrap();
     let (mut events, _) = runtime.bus.attach(session_id);
 
     let turn_req = client
@@ -303,7 +303,7 @@ async fn an_engine_that_dies_without_saying_so_journals_an_interrupted_turn() {
         // queuing on a slow CI runner.
         loop {
             let event = events.recv().await.unwrap();
-            if matches!(event.event, CodeEvent::TurnStarted { .. }) {
+            if matches!(event.event, Event::TurnStarted { .. }) {
                 break;
             }
         }
@@ -391,7 +391,7 @@ async fn a_mid_turn_send_queues_and_runs_after_the_current_turn() {
         .await
         .unwrap();
     let session_id = json_id(&session).to_owned();
-    let parsed: CodeSessionId = session_id.parse().unwrap();
+    let parsed: SessionId = session_id.parse().unwrap();
 
     let first = tokio::spawn({
         let client = client.clone();
@@ -418,7 +418,7 @@ async fn a_mid_turn_send_queues_and_runs_after_the_current_turn() {
             .await
             .unwrap()
             .unwrap();
-            if row.lifecycle == CodeSessionLifecycle::Running {
+            if row.lifecycle == SessionLifecycle::Running {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -517,11 +517,11 @@ async fn a_mid_turn_send_queues_and_runs_after_the_current_turn() {
             .await
             .unwrap();
             if turns.len() >= 2
-                && turns[1].status == CodeTurnStatus::Completed
+                && turns[1].status == TurnStatus::Completed
                 && turns[1].user_input == "follow-up"
             {
                 assert_eq!(turns[0].user_input, "first");
-                assert_eq!(turns[0].status, CodeTurnStatus::Completed);
+                assert_eq!(turns[0].status, TurnStatus::Completed);
                 let first_end = turns[0].ended_at.expect("first turn ended");
                 assert!(
                     turns[1].started_at >= first_end,
@@ -657,7 +657,7 @@ async fn a_fenced_session_closes_its_whole_workspace_to_turns() {
     let ids = create_sibling_sessions(&client, addr, &token, &workspace, 2).await;
 
     let owner = tidebreak_core::OwnerId::local();
-    let fenced_id: CodeSessionId = ids[0].parse().unwrap();
+    let fenced_id: SessionId = ids[0].parse().unwrap();
     let mut row = tidebreak_core::db::code::get_session(&runtime.db, &owner, fenced_id)
         .await
         .unwrap()
@@ -718,7 +718,7 @@ async fn a_sibling_fenced_for_repeated_failures_does_not_close_the_workspace() {
     let ids = create_sibling_sessions(&client, addr, &token, &workspace, 2).await;
 
     let owner = tidebreak_core::OwnerId::local();
-    let fenced_id: CodeSessionId = ids[0].parse().unwrap();
+    let fenced_id: SessionId = ids[0].parse().unwrap();
     let reason = FenceReason::RepeatedTurnFailures {
         count: 3,
         detail: "the provider refused three turns in a row".into(),
@@ -727,7 +727,7 @@ async fn a_sibling_fenced_for_repeated_failures_does_not_close_the_workspace() {
         .await
         .unwrap()
         .unwrap();
-    row.lifecycle = CodeSessionLifecycle::Fenced;
+    row.lifecycle = SessionLifecycle::Fenced;
     row.fence_reason = Some(reason.clone());
     row.attention = Attention::new(
         AttentionState::Fenced { reason },
@@ -769,7 +769,7 @@ async fn a_workspace_still_holds_only_one_watch_session() {
         runtime.create_session_of_kind(
             &owner,
             workspace_id,
-            tidebreak_core::CodeSessionKind::Watch,
+            tidebreak_core::SessionKind::Watch,
             HarnessKind::ClaudeCode,
             crate::code::runtime::NewSessionSettings {
                 permission_mode: PermissionMode::Plan,
@@ -848,7 +848,7 @@ async fn a_recovered_session_accepts_a_turn() {
     assert_eq!(body["status"], "completed");
     assert_eq!(body["user_input"], "after restart");
 
-    let parsed: CodeSessionId = session_id.parse().unwrap();
+    let parsed: SessionId = session_id.parse().unwrap();
     let mut row = tidebreak_core::db::code::get_session(
         &runtime.db,
         &tidebreak_core::OwnerId::local(),
@@ -884,22 +884,45 @@ async fn a_recovered_session_accepts_a_turn() {
     let addr3 = serve(app(fenced_state)).await;
     let client3 = reqwest::Client::new();
 
-    let after_orphan_exit = client3
+    let stuck = client3
         .post(format!("http://{addr3}/code/sessions/{session_id}/turns"))
         .bearer_auth(&token3)
-        .json(&serde_json::json!({ "message": "after orphan exit" }))
+        .json(&serde_json::json!({ "message": "while fenced" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stuck.status(), reqwest::StatusCode::CONFLICT);
+    let stuck_body: serde_json::Value = stuck.json().await.unwrap();
+    assert_eq!(stuck_body["kind"], "session_fenced");
+
+    let reaped = client3
+        .post(format!("http://{addr3}/code/sessions/{session_id}/reap"))
+        .bearer_auth(&token3)
+        .send()
+        .await
+        .unwrap();
+    let status = reaped.status();
+    let body = reaped.text().await.unwrap();
+    assert_eq!(status, reqwest::StatusCode::OK, "reap failed: {body}");
+    let after_reap: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(after_reap["lifecycle"], "idle");
+
+    let after = client3
+        .post(format!("http://{addr3}/code/sessions/{session_id}/turns"))
+        .bearer_auth(&token3)
+        .json(&serde_json::json!({ "message": "after reap" }))
         .send()
         .await
         .unwrap();
     assert_eq!(
-        after_orphan_exit.status(),
+        after.status(),
         reqwest::StatusCode::ACCEPTED,
-        "boot recovery must attach a worker after the orphan exits: {}",
-        after_orphan_exit.text().await.unwrap()
+        "reap must attach a worker: {}",
+        after.text().await.unwrap()
     );
-    let after_body: serde_json::Value = after_orphan_exit.json().await.unwrap();
+    let after_body: serde_json::Value = after.json().await.unwrap();
     assert_eq!(after_body["status"], "completed");
-    assert_eq!(after_body["user_input"], "after orphan exit");
+    assert_eq!(after_body["user_input"], "after reap");
 }
 
 #[tokio::test]
@@ -955,7 +978,7 @@ async fn a_failed_checkpoint_does_not_fail_the_turn() {
         events.iter().any(|framed| {
             matches!(
                 framed.event,
-                tidebreak_core::CodeEvent::HarnessNotice {
+                tidebreak_core::Event::HarnessNotice {
                     level: tidebreak_core::HarnessNoticeLevel::Warning,
                     ..
                 }

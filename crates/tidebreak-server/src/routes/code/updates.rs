@@ -1,4 +1,4 @@
-//! `WS /code/updates` — the principal's digest channel, restated on connect.
+//! `WS /updates` — the principal's digest channel, restated on connect.
 //!
 //! The channel is partitioned by owner in the bus rather than filtered here:
 //! [`ScopedCode`] resolves the requesting principal before the upgrade, and
@@ -24,7 +24,7 @@ use crate::error::ServerError;
 use crate::routes::events::{gateway_auth_revalidation_timer, wait_for_gateway_auth_revalidation};
 use crate::state::AppState;
 
-use super::types::{CodeSessionDigest, CodeUpdateNotice};
+use super::types::{SessionDigest, UpdateNotice};
 
 pub async fn code_updates(
     State(state): State<AppState>,
@@ -57,8 +57,8 @@ async fn stream_updates(
     let mut terminals = state.terminals.subscribe(&owner);
     match list_digests(&runtime.db, &owner).await {
         Ok(sessions) => {
-            let notice = CodeUpdateNotice::Snapshot {
-                sessions: sessions.into_iter().map(CodeSessionDigest::from).collect(),
+            let notice = UpdateNotice::Snapshot {
+                sessions: sessions.into_iter().map(SessionDigest::from).collect(),
             };
             if send_notice(&mut socket, &notice).await.is_err() {
                 return;
@@ -84,7 +84,7 @@ async fn stream_updates(
             },
             update = live.recv() => match update {
                 Ok(CodeLiveUpdate::Digest(digest)) => {
-                    if send_notice(&mut socket, &CodeUpdateNotice::digest(*digest))
+                    if send_notice(&mut socket, &UpdateNotice::digest(*digest))
                         .await
                         .is_err()
                     {
@@ -92,7 +92,7 @@ async fn stream_updates(
                     }
                 }
                 Ok(CodeLiveUpdate::CloneProgress(progress)) => {
-                    if send_notice(&mut socket, &CodeUpdateNotice::clone_progress(progress))
+                    if send_notice(&mut socket, &UpdateNotice::clone_progress(progress))
                         .await
                         .is_err()
                     {
@@ -100,7 +100,7 @@ async fn stream_updates(
                     }
                 }
                 Ok(CodeLiveUpdate::HarnessInstall(progress)) => {
-                    if send_notice(&mut socket, &CodeUpdateNotice::harness_install(progress))
+                    if send_notice(&mut socket, &UpdateNotice::harness_install(progress))
                         .await
                         .is_err()
                     {
@@ -108,7 +108,7 @@ async fn stream_updates(
                     }
                 }
                 Ok(CodeLiveUpdate::Delivery) => {
-                    if send_notice(&mut socket, &CodeUpdateNotice::Delivery)
+                    if send_notice(&mut socket, &UpdateNotice::Delivery)
                         .await
                         .is_err()
                     {
@@ -116,7 +116,7 @@ async fn stream_updates(
                     }
                 }
                 Ok(CodeLiveUpdate::TurnRewrite(notice)) => {
-                    if send_notice(&mut socket, &CodeUpdateNotice::turn_rewrite(notice))
+                    if send_notice(&mut socket, &UpdateNotice::turn_rewrite(notice))
                         .await
                         .is_err()
                     {
@@ -126,10 +126,10 @@ async fn stream_updates(
                 Err(RecvError::Lagged(_)) => {
                     match list_digests(&runtime.db, &owner).await {
                         Ok(sessions) => {
-                            let notice = CodeUpdateNotice::Snapshot {
+                            let notice = UpdateNotice::Snapshot {
                                 sessions: sessions
                                     .into_iter()
-                                    .map(CodeSessionDigest::from)
+                                    .map(SessionDigest::from)
                                     .collect(),
                             };
                             if send_notice(&mut socket, &notice).await.is_err() {
@@ -145,7 +145,7 @@ async fn stream_updates(
                 Ok(notice) => {
                     if send_notice(
                         &mut socket,
-                        &CodeUpdateNotice::TerminalActivity {
+                        &UpdateNotice::TerminalActivity {
                             workspace_id: notice.workspace_id,
                             terminal_id: notice.terminal_id,
                         },
@@ -163,7 +163,7 @@ async fn stream_updates(
     }
 }
 
-async fn send_notice(socket: &mut WebSocket, notice: &CodeUpdateNotice) -> Result<(), axum::Error> {
+async fn send_notice(socket: &mut WebSocket, notice: &UpdateNotice) -> Result<(), axum::Error> {
     let Ok(json) = serde_json::to_string(notice) else {
         return Ok(());
     };

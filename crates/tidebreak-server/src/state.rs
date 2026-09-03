@@ -8,8 +8,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Weak};
 
 use tidebreak_core::{
-    AgentConfig, AgentError, AgentRunId, BlobStore, CallId, CancelToken, ChatId, Config, DbStore,
-    FsBlobStore, Profile, Result, SecretProvider, SteerInbox, Store, ToolRegistry, TurnId,
+    AgentConfig, AgentError, AgentRunId, BlobStore, CallId, CancelToken, Config, DbStore,
+    FsBlobStore, Profile, Result, SecretProvider, SessionId, SteerInbox, Store, ToolRegistry,
+    TurnId,
 };
 use tokio::sync::{mpsc, Notify, Semaphore};
 use uuid::Uuid;
@@ -630,8 +631,6 @@ impl SandboxAttemptGuard {
 pub(crate) struct SandboxSteerGuard {
     attached: Mutex<HashMap<(AgentRunId, Uuid), mpsc::Sender<String>>>,
     container_drives: Mutex<HashMap<(AgentRunId, Uuid), CancelToken>>,
-    #[cfg(test)]
-    steer_delivered: tokio::sync::Notify,
 }
 
 /// Why one steering instruction could not be handed to a live run.
@@ -739,18 +738,6 @@ impl SandboxSteerGuard {
             mpsc::error::TrySendError::Full(_) => SandboxSteerRefusal::Backlogged,
             mpsc::error::TrySendError::Closed(_) => SandboxSteerRefusal::NotAttached,
         })
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn wait_for_steer_delivery(&self) {
-        self.steer_delivered.notified().await;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn record_steer_delivery(&self) {
-        // `notify_one` retains a permit if the socket write wins the race with
-        // the test arming its wait.
-        self.steer_delivered.notify_one();
     }
 }
 
@@ -922,7 +909,7 @@ struct TurnHandles {
 /// `(chat, turn, lease)` identity in this process.
 #[derive(Default)]
 pub struct TurnGuard {
-    active: Mutex<HashMap<ChatId, TurnHandles>>,
+    active: Mutex<HashMap<SessionId, TurnHandles>>,
     admissions: Mutex<HashMap<TurnId, Weak<tokio::sync::Mutex<()>>>>,
     released: tokio::sync::Notify,
 }
@@ -950,7 +937,7 @@ impl TurnGuard {
     /// Register one exact local attempt, or refuse a conflicting local worker.
     pub fn register(
         self: &Arc<Self>,
-        chat_id: ChatId,
+        chat_id: SessionId,
         turn_id: TurnId,
         lease_token: Uuid,
     ) -> Option<ActiveTurn> {
@@ -980,7 +967,7 @@ impl TurnGuard {
     }
 
     /// Wait until no local worker owns this chat.
-    pub async fn wait_until_vacant(&self, chat_id: ChatId) {
+    pub async fn wait_until_vacant(&self, chat_id: SessionId) {
         loop {
             let released = self.released.notified();
             if !self.active.lock().unwrap().contains_key(&chat_id) {
@@ -991,7 +978,7 @@ impl TurnGuard {
     }
 
     /// Trip cancellation only for the exact turn currently executing locally.
-    pub fn cancel(&self, chat_id: ChatId, turn_id: TurnId) -> bool {
+    pub fn cancel(&self, chat_id: SessionId, turn_id: TurnId) -> bool {
         match self.active.lock().unwrap().get(&chat_id) {
             Some(handles) if handles.turn_id == turn_id => {
                 handles.cancel.cancel();
@@ -1005,7 +992,7 @@ impl TurnGuard {
     ///
     /// The instruction remains in the store; this process-local signal only
     /// reduces delivery latency and optionally preempts the provider stream.
-    pub fn signal_steer(&self, chat_id: ChatId, turn_id: TurnId, interrupt: bool) -> bool {
+    pub fn signal_steer(&self, chat_id: SessionId, turn_id: TurnId, interrupt: bool) -> bool {
         match self.active.lock().unwrap().get(&chat_id) {
             Some(handles) if handles.turn_id == turn_id => handles.steer.signal_durable(interrupt),
             _ => false,
@@ -1016,7 +1003,7 @@ impl TurnGuard {
 /// A held turn slot; releases the chat on drop.
 pub struct ActiveTurn {
     guard: Arc<TurnGuard>,
-    chat_id: ChatId,
+    chat_id: SessionId,
     turn_id: TurnId,
     lease_token: Uuid,
     cancel: CancelToken,
@@ -1056,7 +1043,7 @@ mod tests {
     #[test]
     fn one_local_attempt_per_chat_then_released_on_drop() {
         let guard = Arc::new(TurnGuard::default());
-        let chat = ChatId::new();
+        let chat = SessionId::new();
         let turn = TurnId::new();
 
         let held = guard
@@ -1069,7 +1056,7 @@ mod tests {
             "a conflicting local attempt is refused"
         );
         assert!(guard
-            .register(ChatId::new(), TurnId::new(), Uuid::new_v4())
+            .register(SessionId::new(), TurnId::new(), Uuid::new_v4())
             .is_some());
 
         drop(held);
@@ -1084,7 +1071,7 @@ mod tests {
     #[test]
     fn cancel_trips_the_held_token() {
         let guard = Arc::new(TurnGuard::default());
-        let chat = ChatId::new();
+        let chat = SessionId::new();
         let turn = TurnId::new();
 
         assert!(!guard.cancel(chat, turn), "nothing to cancel yet");
@@ -1101,7 +1088,7 @@ mod tests {
     #[test]
     fn stale_permit_cannot_remove_a_newer_attempt() {
         let guard = Arc::new(TurnGuard::default());
-        let chat = ChatId::new();
+        let chat = SessionId::new();
         let old_turn = TurnId::new();
         let old_token = Uuid::new_v4();
         let held = guard.register(chat, old_turn, old_token).expect("register");
@@ -1123,7 +1110,7 @@ mod tests {
     #[test]
     fn steer_signal_wakes_the_held_inbox() {
         let guard = Arc::new(TurnGuard::default());
-        let chat = ChatId::new();
+        let chat = SessionId::new();
         let turn = TurnId::new();
 
         assert!(!guard.signal_steer(chat, turn, false));

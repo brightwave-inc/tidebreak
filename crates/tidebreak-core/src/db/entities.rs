@@ -135,16 +135,16 @@ pub mod chat_root_attachment {
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
     pub enum Relation {
         #[sea_orm(
-            belongs_to = "super::code_session::Entity",
+            belongs_to = "super::session::Entity",
             from = "Column::ChatId",
-            to = "super::code_session::Column::Id",
+            to = "super::session::Column::Id",
             on_update = "NoAction",
             on_delete = "Cascade"
         )]
         Chat,
     }
 
-    impl Related<super::code_session::Entity> for Entity {
+    impl Related<super::session::Entity> for Entity {
         fn to() -> RelationDef {
             Relation::Chat.def()
         }
@@ -188,16 +188,16 @@ pub mod root_attachment_change {
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
     pub enum Relation {
         #[sea_orm(
-            belongs_to = "super::code_session::Entity",
+            belongs_to = "super::session::Entity",
             from = "Column::ChatId",
-            to = "super::code_session::Column::Id",
+            to = "super::session::Column::Id",
             on_update = "NoAction",
             on_delete = "Restrict"
         )]
         Chat,
     }
 
-    impl Related<super::code_session::Entity> for Entity {
+    impl Related<super::session::Entity> for Entity {
         fn to() -> RelationDef {
             Relation::Chat.def()
         }
@@ -394,16 +394,16 @@ pub mod chat_image_publication {
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
     pub enum Relation {
         #[sea_orm(
-            belongs_to = "super::code_session::Entity",
+            belongs_to = "super::session::Entity",
             from = "Column::ChatId",
-            to = "super::code_session::Column::Id",
+            to = "super::session::Column::Id",
             on_update = "NoAction",
             on_delete = "Restrict"
         )]
         Chat,
     }
 
-    impl Related<super::code_session::Entity> for Entity {
+    impl Related<super::session::Entity> for Entity {
         fn to() -> RelationDef {
             Relation::Chat.def()
         }
@@ -437,16 +437,16 @@ pub mod exec_file_change {
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
     pub enum Relation {
         #[sea_orm(
-            belongs_to = "super::code_session::Entity",
+            belongs_to = "super::session::Entity",
             from = "Column::ChatId",
-            to = "super::code_session::Column::Id",
+            to = "super::session::Column::Id",
             on_update = "NoAction",
             on_delete = "Restrict"
         )]
         Chat,
     }
 
-    impl Related<super::code_session::Entity> for Entity {
+    impl Related<super::session::Entity> for Entity {
         fn to() -> RelationDef {
             Relation::Chat.def()
         }
@@ -1527,11 +1527,11 @@ pub mod code_workspace {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
-pub mod code_session {
+pub mod session {
     use sea_orm::entity::prelude::*;
 
     #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-    #[sea_orm(table_name = "code_session")]
+    #[sea_orm(table_name = "session")]
     pub struct Model {
         #[sea_orm(primary_key, auto_increment = false)]
         pub id: Uuid,
@@ -1603,11 +1603,11 @@ pub mod code_session {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
-pub mod code_turn {
+pub mod turn {
     use sea_orm::entity::prelude::*;
 
     #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-    #[sea_orm(table_name = "code_turn")]
+    #[sea_orm(table_name = "turn")]
     pub struct Model {
         #[sea_orm(primary_key, auto_increment = false)]
         pub id: Uuid,
@@ -1662,11 +1662,11 @@ pub mod code_turn {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
-pub mod code_turn_attachment {
+pub mod turn_attachment {
     use sea_orm::entity::prelude::*;
 
     #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-    #[sea_orm(table_name = "code_turn_attachment")]
+    #[sea_orm(table_name = "turn_attachment")]
     pub struct Model {
         #[sea_orm(primary_key, auto_increment = false)]
         pub turn_id: Uuid,
@@ -1913,7 +1913,7 @@ pub mod code_session_image {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
-pub mod code_event {
+pub mod event {
     use sea_orm::entity::prelude::*;
 
     // Composite primary key `(session_id, seq)`: `seq` is monotonic *per
@@ -1929,7 +1929,7 @@ pub mod code_event {
     // `terminal` marks the one row that resolves a turn. External engines
     // fence with the spawn epoch instead and leave all five at rest.
     #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-    #[sea_orm(table_name = "code_event")]
+    #[sea_orm(table_name = "event")]
     pub struct Model {
         #[sea_orm(primary_key, auto_increment = false)]
         pub session_id: Uuid,
@@ -1952,11 +1952,11 @@ pub mod code_event {
     impl ActiveModelBehavior for ActiveModel {}
 }
 
-pub mod code_approval {
+pub mod approval {
     use sea_orm::entity::prelude::*;
 
     #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-    #[sea_orm(table_name = "code_approval")]
+    #[sea_orm(table_name = "approval")]
     pub struct Model {
         #[sea_orm(primary_key, auto_increment = false)]
         pub id: Uuid,

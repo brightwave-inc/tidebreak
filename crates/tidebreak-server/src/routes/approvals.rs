@@ -5,7 +5,7 @@ use axum::http::StatusCode;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
-use tidebreak_core::{ApprovalDecision, CallId, ChatId, ProjectId, TurnId};
+use tidebreak_core::{ApprovalDecision, CallId, ProjectId, SessionId, TurnId};
 
 use crate::error::ServerError;
 use crate::extract::{Json, Path, Query};
@@ -177,7 +177,7 @@ pub(crate) fn grant_rungs_from_scopes(
 /// `GET /chats/{id}/approvals` — recover a bounded page of pending cards.
 pub(crate) async fn list_pending_approvals(
     store: ScopedStore,
-    Path(chat_id): Path<ChatId>,
+    Path(chat_id): Path<SessionId>,
     Query(query): Query<PendingApprovalsQuery>,
 ) -> Result<Json<Vec<PendingApprovalSnapshot>>, ServerError> {
     if !(1..=100).contains(&query.limit) {
@@ -234,7 +234,7 @@ async fn standing_grant_snapshots(
     store: &ScopedStore,
 ) -> Result<Vec<StandingGrantSnapshot>, ServerError> {
     let grants = store.list_standing_tool_grants().await?;
-    let chat_titles: std::collections::HashMap<ChatId, Option<String>> = store
+    let chat_titles: std::collections::HashMap<SessionId, Option<String>> = store
         .list_chats()
         .await?
         .into_iter()
@@ -325,7 +325,7 @@ pub(crate) async fn delete_standing_grant(
 pub async fn post_approval(
     State(state): State<AppState>,
     store: ScopedStore,
-    Path((chat_id, call_id)): Path<(ChatId, CallId)>,
+    Path((chat_id, call_id)): Path<(SessionId, CallId)>,
     Json(body): Json<ApprovalBody>,
 ) -> Result<StatusCode, ServerError> {
     // Confirm the chat exists so a typo'd id doesn't look like "not pending".

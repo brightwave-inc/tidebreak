@@ -391,7 +391,7 @@ fn write_current_marker_inner(data_dir: &Path, failure: MarkerWriteFailure) -> R
 mod tests {
     use chrono::Utc;
     use tidebreak_core::{
-        db, Chat, ChatId, CodeRepo, CodeWorkspace, CodeWorkspaceStatus, OwnerId, RepoId, Store,
+        db, Chat, CodeRepo, CodeWorkspace, CodeWorkspaceStatus, OwnerId, RepoId, SessionId, Store,
         WorkspaceId,
     };
 
@@ -400,7 +400,7 @@ mod tests {
 
     fn chat() -> Chat {
         Chat {
-            id: ChatId::new(),
+            id: SessionId::new(),
             project_id: None,
             title: Some("preservation probe".to_owned()),
             model: None,

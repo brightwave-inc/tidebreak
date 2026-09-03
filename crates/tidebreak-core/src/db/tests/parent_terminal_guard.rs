@@ -9,7 +9,11 @@ use crate::{
 use chrono::{Duration, Utc};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
-async fn complete_child(store: &crate::DbStore, chat_id: crate::ChatId, task: &str) -> AgentRunId {
+async fn complete_child(
+    store: &crate::DbStore,
+    chat_id: crate::SessionId,
+    task: &str,
+) -> AgentRunId {
     let child = admit_sandbox_call_for_test(store, chat_id, CallId::new(), task).await;
     let lease = uuid::Uuid::new_v4();
     let claimed = store
@@ -28,7 +32,7 @@ async fn complete_child(store: &crate::DbStore, chat_id: crate::ChatId, task: &s
     child.id
 }
 
-async fn consume_child(store: &crate::DbStore, chat_id: crate::ChatId, child: AgentRunId) {
+async fn consume_child(store: &crate::DbStore, chat_id: crate::SessionId, child: AgentRunId) {
     let parent = AgentRunId::foreground_for_chat(chat_id);
     let lease = uuid::Uuid::new_v4();
     let delivered = store
@@ -63,7 +67,7 @@ async fn consume_child(store: &crate::DbStore, chat_id: crate::ChatId, child: Ag
     assert_eq!(updated.rows_affected, 1);
 }
 
-fn output_for(turn: &crate::TurnRun, chat_id: crate::ChatId) -> Message {
+fn output_for(turn: &crate::TurnRun, chat_id: crate::SessionId) -> Message {
     Message {
         id: MessageId::new(),
         chat_id,

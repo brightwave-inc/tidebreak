@@ -1,8 +1,7 @@
 use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder};
 
-use crate::code::CodeTurnId;
 use crate::error::{AgentError, Result};
-use crate::id::{CallId, ChatId, ProjectId, TurnId};
+use crate::id::{CallId, ProjectId, SessionId, TurnId};
 
 use super::{entities, store_err};
 
@@ -102,27 +101,16 @@ where
 ///
 /// Turn admission and per-chat event sequence allocation use the same lock so
 /// their read-then-write decisions remain serialized across server processes.
-pub(in crate::db) async fn acquire_chat_write_lock<C>(conn: &C, chat_id: ChatId) -> Result<bool>
+pub(in crate::db) async fn acquire_chat_write_lock<C>(conn: &C, chat_id: SessionId) -> Result<bool>
 where
     C: ConnectionTrait,
 {
-    acquire_session_write_lock(conn, chat_id.0).await
-}
-
-/// Acquire the shared cross-backend write lock for one universal session row.
-pub(in crate::db) async fn acquire_session_write_lock<C>(
-    conn: &C,
-    session_id: uuid::Uuid,
-) -> Result<bool>
-where
-    C: ConnectionTrait,
-{
-    let locked = entities::code_session::Entity::update_many()
+    let locked = entities::session::Entity::update_many()
         .col_expr(
-            entities::code_session::Column::Title,
-            sea_orm::sea_query::Expr::col(entities::code_session::Column::Title),
+            entities::session::Column::Title,
+            sea_orm::sea_query::Expr::col(entities::session::Column::Title),
         )
-        .filter(entities::code_session::Column::Id.eq(session_id))
+        .filter(entities::session::Column::Id.eq(chat_id.0))
         .exec(conn)
         .await
         .map_err(store_err)?;
@@ -175,7 +163,7 @@ where
 /// chat id. A document may never simultaneously belong to a chat and project.
 pub(in crate::db) async fn require_document_scope_write_lock<C>(
     conn: &C,
-    chat_id: Option<ChatId>,
+    chat_id: Option<SessionId>,
     project_id: Option<ProjectId>,
 ) -> Result<()>
 where
@@ -196,7 +184,10 @@ where
 
 /// Allocate the next stable tool-history position while the caller owns the
 /// chat write lock.
-pub(in crate::db) async fn next_tool_history_order_on<C>(conn: &C, chat_id: ChatId) -> Result<i64>
+pub(in crate::db) async fn next_tool_history_order_on<C>(
+    conn: &C,
+    chat_id: SessionId,
+) -> Result<i64>
 where
     C: ConnectionTrait,
 {
@@ -232,25 +223,14 @@ pub(in crate::db) async fn acquire_turn_write_lock<C>(conn: &C, turn_id: TurnId)
 where
     C: ConnectionTrait,
 {
-    let locked = entities::code_turn::Entity::update_many()
+    let locked = entities::turn::Entity::update_many()
         .col_expr(
-            entities::code_turn::Column::UpdatedAt,
-            sea_orm::sea_query::Expr::col(entities::code_turn::Column::UpdatedAt),
+            entities::turn::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::col(entities::turn::Column::UpdatedAt),
         )
-        .filter(entities::code_turn::Column::Id.eq(turn_id.0))
+        .filter(entities::turn::Column::Id.eq(turn_id.0))
         .exec(conn)
         .await
         .map_err(store_err)?;
     Ok(locked.rows_affected == 1)
-}
-
-/// Acquire the same durable-turn lock using the code-mode turn identifier.
-pub(in crate::db) async fn acquire_code_turn_write_lock<C>(
-    conn: &C,
-    turn_id: CodeTurnId,
-) -> Result<bool>
-where
-    C: ConnectionTrait,
-{
-    acquire_turn_write_lock(conn, TurnId(turn_id.0)).await
 }

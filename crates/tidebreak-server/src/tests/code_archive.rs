@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use crate::code::CodeRuntime;
 use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
-use tidebreak_core::{CodeSessionId, CodeSessionLifecycle, CodeWorkspaceStatus, WorkspaceId};
+use tidebreak_core::{CodeWorkspaceStatus, SessionId, SessionLifecycle, WorkspaceId};
 use tidebreak_harness::HarnessEvent;
 
 #[tokio::test]
@@ -123,7 +123,7 @@ async fn no_force_archive_of_a_dirty_workspace_leaves_an_idle_session() {
     let body: serde_json::Value = refused.json().await.unwrap();
     assert_eq!(body["kind"], "uncommitted");
 
-    let parsed: CodeSessionId = json_id(&session).parse().unwrap();
+    let parsed: SessionId = json_id(&session).parse().unwrap();
     let row = tidebreak_core::db::code::get_session(
         &runtime.db,
         &tidebreak_core::OwnerId::local(),
@@ -132,7 +132,7 @@ async fn no_force_archive_of_a_dirty_workspace_leaves_an_idle_session() {
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(row.lifecycle, CodeSessionLifecycle::Idle);
+    assert_eq!(row.lifecycle, SessionLifecycle::Idle);
     assert!(std::path::Path::new(path).exists());
 
     let turn = client
@@ -565,7 +565,7 @@ async fn archive_ends_the_session_before_removing_the_worktree() {
         .unwrap();
     assert_eq!(archived.status(), reqwest::StatusCode::OK);
     assert!(!std::path::Path::new(&path).exists());
-    let parsed: CodeSessionId = json_id(&session).parse().unwrap();
+    let parsed: SessionId = json_id(&session).parse().unwrap();
     let row = tidebreak_core::db::code::get_session(
         &runtime.db,
         &tidebreak_core::OwnerId::local(),
@@ -574,7 +574,7 @@ async fn archive_ends_the_session_before_removing_the_worktree() {
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(row.lifecycle, CodeSessionLifecycle::Ended);
+    assert_eq!(row.lifecycle, SessionLifecycle::Ended);
 
     let again = client
         .post(format!(
@@ -632,7 +632,7 @@ async fn archive_refuses_a_running_session_without_force() {
         .await
         .unwrap();
     let session_id = json_id(&session).to_owned();
-    let parsed: CodeSessionId = session_id.parse().unwrap();
+    let parsed: SessionId = session_id.parse().unwrap();
     let turn = tokio::spawn({
         let client = client.clone();
         let token = token.clone();
@@ -656,7 +656,7 @@ async fn archive_refuses_a_running_session_without_force() {
             .await
             .unwrap()
             .unwrap();
-            if row.lifecycle == CodeSessionLifecycle::Running {
+            if row.lifecycle == SessionLifecycle::Running {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -699,7 +699,7 @@ async fn archive_refuses_a_running_session_without_force() {
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(row.lifecycle, CodeSessionLifecycle::Ended);
+    assert_eq!(row.lifecycle, SessionLifecycle::Ended);
 }
 
 /// A freshly created workspace has a branch with no commits past its base.

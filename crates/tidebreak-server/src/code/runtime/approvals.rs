@@ -6,11 +6,11 @@ use super::*;
 /// anything the approval's kind or the engine's capability vector cannot
 /// carry. One approval surface, capability-gated decisions (decision 0048).
 pub(super) fn resolve_decision_request(
-    approval: &CodeApproval,
+    approval: &Approval,
     caps: &tidebreak_core::HarnessCaps,
     request: ApprovalDecisionRequest,
 ) -> Result<ApprovalDecision, ServerError> {
-    use tidebreak_core::CodeApprovalKind as Kind;
+    use tidebreak_core::ApprovalKind as Kind;
     let structured_mismatch = |wanted: &str| {
         ServerError::unprocessable_kind(
             "approval_decision_mismatch",
@@ -89,7 +89,7 @@ impl CodeRuntime {
     pub(super) fn approval_channel(
         &self,
         owner: &OwnerId,
-        session_id: CodeSessionId,
+        session_id: SessionId,
         spawn_epoch: i64,
         mode: PermissionMode,
     ) -> Option<ApprovalChannelSpec> {
@@ -109,17 +109,17 @@ impl CodeRuntime {
     pub(crate) async fn list_approvals(
         &self,
         owner: &OwnerId,
-        state: Option<CodeApprovalState>,
-        session_id: Option<CodeSessionId>,
-    ) -> Result<Vec<CodeApproval>, ServerError> {
+        state: Option<ApprovalState>,
+        session_id: Option<SessionId>,
+    ) -> Result<Vec<Approval>, ServerError> {
         Ok(list_approvals(&self.db, owner, state, session_id).await?)
     }
 
     pub(crate) async fn get_approval(
         &self,
         owner: &OwnerId,
-        id: CodeApprovalId,
-    ) -> Result<CodeApproval, ServerError> {
+        id: ApprovalId,
+    ) -> Result<Approval, ServerError> {
         get_approval(&self.db, owner, id)
             .await?
             .ok_or_else(|| ServerError::not_found(format!("approval {id} not found")))
@@ -127,11 +127,11 @@ impl CodeRuntime {
 
     pub(crate) async fn record_external_approval(
         &self,
-        session_id: CodeSessionId,
-        approval_id: CodeApprovalId,
+        session_id: SessionId,
+        approval_id: ApprovalId,
         approval: &HarnessApprovalRef,
         raw: &serde_json::Value,
-    ) -> Result<CodeApproval, ServerError> {
+    ) -> Result<Approval, ServerError> {
         let capability = approval.capability.as_ref().ok_or_else(|| {
             ServerError::internal("external approval is missing its server capability")
         })?;
@@ -151,8 +151,8 @@ impl CodeRuntime {
 
     pub(crate) async fn abandon_external_approval(
         &self,
-        session_id: CodeSessionId,
-        approval_id: CodeApprovalId,
+        session_id: SessionId,
+        approval_id: ApprovalId,
     ) -> Result<(), ServerError> {
         let session = tidebreak_core::db::code::get_session_all_owners(&self.db, session_id)
             .await?
@@ -187,11 +187,7 @@ impl CodeRuntime {
         Ok(())
     }
 
-    pub(super) async fn refresh_approval_attention(
-        &self,
-        owner: &OwnerId,
-        session_id: CodeSessionId,
-    ) {
+    pub(super) async fn refresh_approval_attention(&self, owner: &OwnerId, session_id: SessionId) {
         let Ok(Some(session)) = get_session(&self.db, owner, session_id).await else {
             return;
         };
@@ -213,7 +209,7 @@ impl CodeRuntime {
 
     pub(super) fn native_approval_ref(
         owner: &OwnerId,
-        approval: &CodeApproval,
+        approval: &Approval,
     ) -> Result<HarnessApprovalRef, ServerError> {
         let call_id = approval.native_call_id.clone().ok_or_else(|| {
             ServerError::internal(format!("approval {} has no native call ID", approval.id))
@@ -261,8 +257,8 @@ impl CodeRuntime {
     pub(super) async fn abandon_claim_after_delivery_failure(
         &self,
         owner: &OwnerId,
-        session_id: CodeSessionId,
-        approval_id: CodeApprovalId,
+        session_id: SessionId,
+        approval_id: ApprovalId,
         worker_epoch: i64,
         claim: uuid::Uuid,
     ) -> Result<(), ServerError> {
@@ -289,9 +285,9 @@ impl CodeRuntime {
     pub(crate) async fn decide_approval(
         &self,
         owner: &OwnerId,
-        id: CodeApprovalId,
+        id: ApprovalId,
         request: ApprovalDecisionRequest,
-    ) -> Result<CodeApproval, ServerError> {
+    ) -> Result<Approval, ServerError> {
         let initial = self.get_approval(owner, id).await?;
         if !initial.state.is_pending() {
             return Err(ServerError::conflict_kind(
@@ -332,7 +328,7 @@ impl CodeRuntime {
             .worker_epoch
             .ok_or_else(|| ServerError::internal(format!("approval {id} has no worker epoch")))?;
         let session = self.get_session(owner, approval.session_id).await?;
-        if session.lifecycle != CodeSessionLifecycle::Running {
+        if session.lifecycle != SessionLifecycle::Running {
             return Err(ServerError::conflict_kind(
                 "approval_worker_inactive",
                 format!(

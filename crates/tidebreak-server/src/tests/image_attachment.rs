@@ -4,11 +4,11 @@ use super::*;
 
 use crate::routes::image_attachment::{gif_with_screen_size, png_header};
 
-fn image_attachments_uri(chat: ChatId) -> String {
+fn image_attachments_uri(chat: SessionId) -> String {
     format!("/chats/{chat}/attachments/images")
 }
 
-fn transcript_image_uri(chat: ChatId, attachment_id: uuid::Uuid) -> String {
+fn transcript_image_uri(chat: SessionId, attachment_id: uuid::Uuid) -> String {
     format!("/chats/{chat}/attachments/images/{attachment_id}")
 }
 
@@ -16,7 +16,7 @@ fn transcript_image_uri(chat: ChatId, attachment_id: uuid::Uuid) -> String {
 async fn publish_image(
     router: &Router,
     bearer: &str,
-    chat: ChatId,
+    chat: SessionId,
     declared: &str,
     bytes: Vec<u8>,
 ) -> axum::response::Response {
@@ -35,7 +35,7 @@ async fn publish_image(
         .unwrap()
 }
 
-async fn publish_png(router: &Router, bearer: &str, chat: ChatId, bytes: Vec<u8>) -> uuid::Uuid {
+async fn publish_png(router: &Router, bearer: &str, chat: SessionId, bytes: Vec<u8>) -> uuid::Uuid {
     let response = publish_image(router, bearer, chat, "image/png", bytes).await;
     assert_eq!(response.status(), StatusCode::CREATED);
     let published: serde_json::Value = json_body(response).await;
@@ -50,7 +50,7 @@ async fn publish_png(router: &Router, bearer: &str, chat: ChatId, bytes: Vec<u8>
 async fn send_message_with_attachments(
     router: &Router,
     bearer: &str,
-    chat: ChatId,
+    chat: SessionId,
     turn_id: TurnId,
     content: &str,
     attachments: &[uuid::Uuid],
@@ -195,7 +195,7 @@ async fn publishing_returns_opaque_identity_and_bounded_metadata_only() {
     let missing = publish_image(
         &router,
         &bearer,
-        ChatId::new(),
+        SessionId::new(),
         "image/png",
         png_header(8, 8),
     )
@@ -388,7 +388,7 @@ async fn a_known_blob_id_requires_a_separate_publication_in_each_chat() {
     // row cannot bypass publication merely because it was already durable.
     let now = chrono::Utc::now();
     store
-        .enqueue_queued_turn(&tidebreak_core::QueuedTurn {
+        .enqueue_queued_turn(&tidebreak_core::QueuedAgentTurn {
             id: TurnId::new(),
             chat_id: second_chat.id,
             content: "queued cross-chat rebind".into(),

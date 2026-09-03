@@ -75,7 +75,7 @@ fn image_ref(blob_id: uuid::Uuid, bytes: &[u8]) -> ImageRef {
 async fn store_with_chat(name: &str) -> (Arc<DbStore>, Chat, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(
-        DbStore::connect_test_sqlite_fixture(&format!(
+        DbStore::connect(&format!(
             "sqlite://{}?mode=rwc",
             dir.path().join(name).display()
         ))
@@ -83,7 +83,7 @@ async fn store_with_chat(name: &str) -> (Arc<DbStore>, Chat, tempfile::TempDir) 
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,

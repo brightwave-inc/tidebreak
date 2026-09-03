@@ -4,7 +4,7 @@ use sea_orm::{
 };
 
 use crate::error::{AgentError, Result};
-use crate::id::{AgentRunId, ChatId};
+use crate::id::{AgentRunId, SessionId};
 use crate::model::{
     AgentRunCancellationReason, AgentRunCancellationSignal, AgentRunInboxStatus,
     AgentRunResultPayload, AgentRunStatus, AgentRunTier,
@@ -353,7 +353,7 @@ pub(in crate::db) async fn finish_agent_run_cancellation(
 /// states it instead of validating it afterwards.
 async fn admitted_children_of_origin_turn_on<C>(
     conn: &C,
-    turn: &entities::code_turn::Model,
+    turn: &entities::turn::Model,
 ) -> Result<Vec<entities::agent_run::Model>>
 where
     C: sea_orm::ConnectionTrait,
@@ -361,12 +361,9 @@ where
     entities::agent_run::Entity::find()
         .filter(entities::agent_run::Column::OriginTurnId.eq(turn.id))
         .filter(entities::agent_run::Column::AdmittedAt.is_not_null())
-        .filter(
-            entities::agent_run::Column::ParentId.eq(crate::id::AgentRunId::foreground_for_chat(
-                crate::id::ChatId(turn.session_id),
-            )
-            .0),
-        )
+        .filter(entities::agent_run::Column::ParentId.eq(
+            crate::id::AgentRunId::foreground_for_chat(crate::id::SessionId(turn.session_id)).0,
+        ))
         .filter(entities::agent_run::Column::ChatId.eq(turn.session_id))
         .order_by_asc(entities::agent_run::Column::AdmittedAt)
         .order_by_asc(entities::agent_run::Column::Id)
@@ -377,7 +374,7 @@ where
 
 pub(in crate::db) async fn cancel_sandbox_children_for_origin_turn_on<C>(
     conn: &C,
-    turn: &entities::code_turn::Model,
+    turn: &entities::turn::Model,
     now: chrono::DateTime<Utc>,
     reason: AgentRunCancellationReason,
 ) -> Result<bool>
@@ -397,8 +394,10 @@ where
             AgentRunStatus::Completed | AgentRunStatus::Failed => {
                 retire_inbox_on(
                     conn,
-                    crate::id::AgentRunId::foreground_for_chat(crate::id::ChatId(turn.session_id))
-                        .0,
+                    crate::id::AgentRunId::foreground_for_chat(crate::id::SessionId(
+                        turn.session_id,
+                    ))
+                    .0,
                     &child,
                 )
                 .await?;
@@ -407,8 +406,10 @@ where
                 validate_cancellation_delivery_on(conn, &child, None).await?;
                 retire_inbox_on(
                     conn,
-                    crate::id::AgentRunId::foreground_for_chat(crate::id::ChatId(turn.session_id))
-                        .0,
+                    crate::id::AgentRunId::foreground_for_chat(crate::id::SessionId(
+                        turn.session_id,
+                    ))
+                    .0,
                     &child,
                 )
                 .await?;
@@ -471,13 +472,13 @@ where
 /// retries and database backends.
 pub(in crate::db) async fn unsettled_sandbox_children_for_origin_turn_on<C>(
     conn: &C,
-    turn: &entities::code_turn::Model,
+    turn: &entities::turn::Model,
 ) -> Result<Vec<AgentRunId>>
 where
     C: sea_orm::ConnectionTrait,
 {
     let parent_id = AgentRunId(
-        crate::id::AgentRunId::foreground_for_chat(crate::id::ChatId(turn.session_id)).0,
+        crate::id::AgentRunId::foreground_for_chat(crate::id::SessionId(turn.session_id)).0,
     );
     let parent = find_by_id_on(conn, parent_id).await?.ok_or_else(|| {
         AgentError::Store(format!(
@@ -485,7 +486,8 @@ where
             turn.id
         ))
     })?;
-    if parent.id != crate::id::AgentRunId::foreground_for_chat(crate::id::ChatId(turn.session_id)).0
+    if parent.id
+        != crate::id::AgentRunId::foreground_for_chat(crate::id::SessionId(turn.session_id)).0
         || parent.chat_id != turn.session_id
         || parent.tier != AgentRunTier::Foreground.as_str()
         || parent.depth != 0
@@ -543,7 +545,7 @@ where
                             "needs_input sandbox child {child_id} check-in is missing claim provenance",
                         ))
                     })?;
-                if inbox.chat_id != ChatId(turn.session_id)
+                if inbox.chat_id != SessionId(turn.session_id)
                     || inbox.result.agent_run_id != child_id
                     || !matches!(inbox.result.payload, AgentRunResultPayload::CheckIn { .. })
                     || inbox.result.attempt_count != child.attempt_count
@@ -590,7 +592,7 @@ where
                     "terminal sandbox child {child_id} result is missing claim provenance"
                 ))
             })?;
-        if inbox.chat_id != ChatId(turn.session_id)
+        if inbox.chat_id != SessionId(turn.session_id)
             || inbox.result.agent_run_id != child_id
             || (status != AgentRunStatus::Cancelled
                 && (inbox.result.attempt_count != child.attempt_count
@@ -935,7 +937,7 @@ where
     C: sea_orm::ConnectionTrait,
 {
     let admission = super::sandbox_agent_admission_from_model(run)?;
-    let turn = entities::code_turn::Entity::find_by_id(admission.origin_turn_id.0)
+    let turn = entities::turn::Entity::find_by_id(admission.origin_turn_id.0)
         .one(conn)
         .await
         .map_err(store_err)?
@@ -945,7 +947,7 @@ where
                 run.id
             ))
         })?;
-    if crate::id::AgentRunId::foreground_for_chat(crate::id::ChatId(turn.session_id)).0
+    if crate::id::AgentRunId::foreground_for_chat(crate::id::SessionId(turn.session_id)).0
         != admission.parent_run_id.0
         || turn.session_id != admission.chat_id.0
     {
@@ -1006,7 +1008,7 @@ where
         })?;
     if inbox.parent_run_id != AgentRunId(parent_id)
         || inbox.child_run_id != child_id
-        || inbox.chat_id != ChatId(child.chat_id)
+        || inbox.chat_id != SessionId(child.chat_id)
         || inbox.result.agent_run_id != child_id
         || (child.status != AgentRunStatus::Cancelled.as_str()
             && (inbox.result.attempt_count != child.attempt_count
@@ -1162,7 +1164,7 @@ where
                 run.id
             ))
         })?;
-    let origin_turn = entities::code_turn::Entity::find_by_id(admission.origin_turn_id.0)
+    let origin_turn = entities::turn::Entity::find_by_id(admission.origin_turn_id.0)
         .one(conn)
         .await
         .map_err(store_err)?
@@ -1221,7 +1223,8 @@ where
         && inbox.result == result
         && inbox.parent_run_id == admission.parent_run_id
         && inbox.chat_id == admission.chat_id
-        && crate::id::AgentRunId::foreground_for_chat(crate::id::ChatId(origin_turn.session_id)).0
+        && crate::id::AgentRunId::foreground_for_chat(crate::id::SessionId(origin_turn.session_id))
+            .0
             == admission.parent_run_id.0
         && origin_turn.session_id == admission.chat_id.0
         && inbox_lifecycle_valid;

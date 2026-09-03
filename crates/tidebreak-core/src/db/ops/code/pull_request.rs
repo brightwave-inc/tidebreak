@@ -651,7 +651,7 @@ fn attribution_from_row(
         workspace_id: WorkspaceId(row.workspace_id),
         relation,
         discovered_via,
-        session_id: row.session_id.map(crate::code::CodeSessionId),
+        session_id: row.session_id.map(crate::code::SessionId),
         parent_call_id: row.parent_call_id,
         created_at: row.created_at,
     })

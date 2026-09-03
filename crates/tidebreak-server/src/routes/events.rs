@@ -12,7 +12,7 @@ use serde::Deserialize;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::time::{Instant, Interval, MissedTickBehavior};
 
-use tidebreak_core::{AgentEvent, ChatId, SequencedEvent, Store, TurnId};
+use tidebreak_core::{AgentEvent, SequencedAgentEvent, SessionId, Store, TurnId};
 
 use crate::auth::{offered_handshake_subprotocol, GatewayAuthLease, WS_HANDSHAKE_SUBPROTOCOL};
 use crate::error::ServerError;
@@ -70,7 +70,7 @@ pub struct EventsQuery {
 pub async fn chat_events(
     State(state): State<AppState>,
     store: ScopedStore,
-    Path(id): Path<ChatId>,
+    Path(id): Path<SessionId>,
     Query(query): Query<EventsQuery>,
     headers: axum::http::HeaderMap,
     auth_lease: Option<Extension<GatewayAuthLease>>,
@@ -90,7 +90,7 @@ pub async fn chat_events(
 async fn stream_events(
     mut socket: WebSocket,
     state: AppState,
-    chat: ChatId,
+    chat: SessionId,
     after: i64,
     auth_lease: Option<GatewayAuthLease>,
 ) {
@@ -234,7 +234,7 @@ async fn stream_events(
 async fn replay_after(
     socket: &mut WebSocket,
     store: &dyn Store,
-    chat: ChatId,
+    chat: SessionId,
     last_seq: &mut i64,
     turn_models: &mut TurnModelCache,
 ) -> Result<(), ()> {
@@ -301,7 +301,7 @@ impl TurnModelCache {
         }
     }
 
-    async fn refresh(&mut self, store: &dyn Store, chat: ChatId) -> Result<(), ()> {
+    async fn refresh(&mut self, store: &dyn Store, chat: SessionId) -> Result<(), ()> {
         let turns = store.list_turns(chat).await.map_err(|_| ())?;
         self.replace_from_turns(
             turns
@@ -326,7 +326,7 @@ fn is_turn_boundary(event: &AgentEvent) -> bool {
 /// Send one journaled event as a frame.
 async fn send_event(
     socket: &mut WebSocket,
-    event: &SequencedEvent,
+    event: &SequencedAgentEvent,
     model: Option<&str>,
     replayed: bool,
 ) -> Result<(), axum::Error> {

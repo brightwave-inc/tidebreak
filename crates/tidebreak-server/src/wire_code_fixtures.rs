@@ -1,7 +1,7 @@
 //! Shared fixtures for the code-mode wire surface.
 //!
 //! `fixtures/code-frames.json` holds one real value of every snapshot the code
-//! routes return, every notice on `/code/updates`, and every event the
+//! routes return, every notice on `/updates`, and every event the
 //! per-session socket can carry, serialized from the server's own types. Three
 //! decoders read the file: this crate's round trip, the CLI's
 //! `api::code` tests, and the renderer's `code/parsers.test.ts`. A shape
@@ -11,24 +11,23 @@
 //! same switch that rewrites `wire.ts`.
 
 use crate::wire::{
-    CodeActionSnapshot, CodeApprovalSnapshot, CodeCommitSnapshot, CodeFileChange, CodePushSnapshot,
-    CodeRepoSnapshot, CodeSessionDigest, CodeSessionExternalOrigin, CodeSessionSnapshot,
-    CodeTurnRewriteState, CodeTurnSnapshot, CodeUpdateNotice, CodeWatchSnapshot, CodeWorkspaceDiff,
-    CodeWorkspaceFiles, CodeWorkspacePrSnapshot, CodeWorkspaceSnapshot, HarnessAuthMode,
-    HarnessDoctorEntry, HarnessDoctorReport, QueuedCodeTurn, QueuedCodeTurnsSnapshot,
-    SequencedCodeEventFrame,
+    ApprovalSnapshot, CodeActionSnapshot, CodeCommitSnapshot, CodeFileChange, CodePushSnapshot,
+    CodeRepoSnapshot, CodeWatchSnapshot, CodeWorkspaceDiff, CodeWorkspaceFiles,
+    CodeWorkspacePrSnapshot, CodeWorkspaceSnapshot, HarnessAuthMode, HarnessDoctorEntry,
+    HarnessDoctorReport, QueuedTurn, QueuedTurnsSnapshot, SequencedEventFrame, SessionDigest,
+    SessionExternalOrigin, SessionSnapshot, TurnRewriteState, TurnSnapshot, UpdateNotice,
 };
 use crate::wire_types::generate;
 use tidebreak_core::{
-    ApprovalClass, ApprovalDecisionKind, Attention, AttentionSource, AttentionState, BoundedError,
-    CapLevel, CheckpointHint, CodeApprovalId, CodeApprovalKind, CodeApprovalState, CodeEvent,
-    CodeSessionActivity, CodeSessionId, CodeSessionKind, CodeSessionLifecycle, CodeSubagentStatus,
-    CodeSubagentSummary, CodeTerminalId, CodeTurnId, CodeTurnStatus, CodeUsage, CodeWatchId,
-    CodeWatchState, CodeWorkspaceStatus, Diffstat, FenceReason, FileChangeKind, GrantScope,
-    HarnessCaps, HarnessCommand, HarnessKind, HarnessNoticeLevel, HarnessTier, ImageMediaType,
-    ImageRef, InternalApprovalRequest, PermissionMode, PullRequestCheckCounts, PullRequestDigest,
-    QuickAction, ReasoningEffort, RefusalOutcome, RepoId, ToolApprovalKind, ToolDetail,
-    ToolOutcome, WorkspaceId,
+    ApprovalClass, ApprovalDecisionKind, ApprovalId, ApprovalKind, ApprovalState, Attention,
+    AttentionSource, AttentionState, BoundedError, CapLevel, CheckpointHint, CodeSubagentStatus,
+    CodeSubagentSummary, CodeTerminalId, CodeWatchId, CodeWatchState, CodeWorkspaceStatus,
+    Diffstat, Event, FenceReason, FileChangeKind, GrantScope, HarnessCaps, HarnessCommand,
+    HarnessKind, HarnessNoticeLevel, HarnessTier, ImageMediaType, ImageRef,
+    InternalApprovalRequest, PermissionMode, PullRequestCheckCounts, PullRequestDigest,
+    QuickAction, ReasoningEffort, RefusalOutcome, RepoId, SessionActivity, SessionId, SessionKind,
+    SessionLifecycle, ToolApprovalKind, ToolDetail, ToolOutcome, TurnId, TurnStatus, TurnUsage,
+    WorkspaceId,
 };
 
 /// Path of the shared code-mode fixtures, relative to this crate.
@@ -68,16 +67,16 @@ fn workspace_id() -> WorkspaceId {
     WorkspaceId(id(0x02))
 }
 
-fn session_id() -> CodeSessionId {
-    CodeSessionId(id(0x03))
+fn session_id() -> SessionId {
+    SessionId(id(0x03))
 }
 
-fn turn_id() -> CodeTurnId {
-    CodeTurnId(id(0x04))
+fn turn_id() -> TurnId {
+    TurnId(id(0x04))
 }
 
-fn approval_id() -> CodeApprovalId {
-    CodeApprovalId(id(0x05))
+fn approval_id() -> ApprovalId {
+    ApprovalId(id(0x05))
 }
 
 fn diffstat() -> Diffstat {
@@ -89,8 +88,8 @@ fn diffstat() -> Diffstat {
     }
 }
 
-fn usage() -> CodeUsage {
-    CodeUsage {
+fn usage() -> TurnUsage {
+    TurnUsage {
         input_tokens: 1_200,
         output_tokens: 340,
         cache_read_input_tokens: 900,
@@ -157,11 +156,11 @@ fn caps() -> HarnessCaps {
     }
 }
 
-fn session() -> CodeSessionSnapshot {
-    CodeSessionSnapshot {
+fn session() -> SessionSnapshot {
+    SessionSnapshot {
         id: session_id(),
         workspace_id: Some(workspace_id()),
-        kind: CodeSessionKind::Interactive,
+        kind: SessionKind::Interactive,
         harness_kind: HarnessKind::ClaudeCode,
         harness_version: Some("2.0.14".to_owned()),
         harness_resume_ref: Some("9f2c1d4e-resume".to_owned()),
@@ -169,24 +168,24 @@ fn session() -> CodeSessionSnapshot {
         model: Some("claude-opus-5".to_owned()),
         reasoning_effort: Some(ReasoningEffort::High),
         fast_mode: false,
-        lifecycle: CodeSessionLifecycle::Running,
+        lifecycle: SessionLifecycle::Running,
         fence_reason: None,
         attention: attention(),
         unrecognized_event_count: 0,
         created_at: at(1_756_700_000),
-        external_origin: Some(CodeSessionExternalOrigin {
+        external_origin: Some(SessionExternalOrigin {
             channel_kind: "slack".to_owned(),
             external_key: "T0/C1/1756700000.000100".to_owned(),
         }),
     }
 }
 
-fn turn() -> CodeTurnSnapshot {
-    CodeTurnSnapshot {
+fn turn() -> TurnSnapshot {
+    TurnSnapshot {
         id: turn_id(),
         session_id: session_id(),
         ordinal: 3,
-        status: CodeTurnStatus::Completed,
+        status: TurnStatus::Completed,
         model: Some("claude-opus-5".to_owned()),
         fast_mode: false,
         user_input: "Bound every string the code parser draws.".to_owned(),
@@ -206,9 +205,9 @@ fn turn() -> CodeTurnSnapshot {
     }
 }
 
-fn queued_turn() -> QueuedCodeTurn {
-    QueuedCodeTurn {
-        id: CodeTurnId(id(0x06)),
+fn queued_turn() -> QueuedTurn {
+    QueuedTurn {
+        id: TurnId(id(0x06)),
         session_id: session_id(),
         message: "Then add the fixture test.".to_owned(),
         position: 0,
@@ -217,18 +216,18 @@ fn queued_turn() -> QueuedCodeTurn {
     }
 }
 
-fn digest() -> CodeSessionDigest {
-    CodeSessionDigest {
+fn digest() -> SessionDigest {
+    SessionDigest {
         workspace: Some(workspace_id()),
         session: session_id(),
-        kind: CodeSessionKind::Interactive,
+        kind: SessionKind::Interactive,
         harness_kind: Some(HarnessKind::ClaudeCode),
-        lifecycle: CodeSessionLifecycle::Running,
+        lifecycle: SessionLifecycle::Running,
         attention: attention(),
         title: "Bound the code parser".to_owned(),
         turn_count: 3,
         trigger_target_at: Some(at(1_756_700_100)),
-        activity: Some(CodeSessionActivity::Shell),
+        activity: Some(SessionActivity::Shell),
         activity_detail: Some("cargo test -p tidebreak-server code_parser".to_owned()),
         pr_state: Some(pull_request()),
         pr_count: Some(1),
@@ -246,14 +245,14 @@ fn digest() -> CodeSessionDigest {
 }
 
 /// The in-process engine's session binds no workspace (decision 0048 step 5).
-fn internal_digest() -> CodeSessionDigest {
-    CodeSessionDigest {
+fn internal_digest() -> SessionDigest {
+    SessionDigest {
         workspace: None,
-        session: CodeSessionId(id(0x22)),
+        session: SessionId(id(0x22)),
         harness_kind: Some(HarnessKind::Internal),
         title: "Plan the memory substrate".to_owned(),
         turn_count: 1,
-        activity: Some(CodeSessionActivity::Agent),
+        activity: Some(SessionActivity::Agent),
         activity_detail: None,
         pr_state: None,
         pr_count: None,
@@ -263,8 +262,8 @@ fn internal_digest() -> CodeSessionDigest {
     }
 }
 
-fn digest_notice(d: CodeSessionDigest) -> CodeUpdateNotice {
-    CodeUpdateNotice::Digest {
+fn digest_notice(d: SessionDigest) -> UpdateNotice {
+    UpdateNotice::Digest {
         workspace: d.workspace,
         session: d.session,
         kind: d.kind,
@@ -287,8 +286,8 @@ fn digest_notice(d: CodeSessionDigest) -> CodeUpdateNotice {
     }
 }
 
-fn frame(seq: i64, event: CodeEvent) -> SequencedCodeEventFrame {
-    SequencedCodeEventFrame {
+fn frame(seq: i64, event: Event) -> SequencedEventFrame {
+    SequencedEventFrame {
         seq,
         event,
         replayed: None,
@@ -365,10 +364,10 @@ pub(crate) fn code_frame_fixtures() -> Vec<Fixture> {
         fixture(
             "fenced session",
             "session",
-            &CodeSessionSnapshot {
+            &SessionSnapshot {
                 workspace_id: None,
                 harness_kind: HarnessKind::Internal,
-                lifecycle: CodeSessionLifecycle::Fenced,
+                lifecycle: SessionLifecycle::Fenced,
                 fence_reason: Some(FenceReason::ResumeLost {
                     detail: "the engine forgot the resume ref".to_owned(),
                 }),
@@ -389,7 +388,7 @@ pub(crate) fn code_frame_fixtures() -> Vec<Fixture> {
         fixture(
             "queued turns",
             "queued_turns",
-            &QueuedCodeTurnsSnapshot {
+            &QueuedTurnsSnapshot {
                 queued: vec![queued_turn()],
                 paused: true,
             },
@@ -492,17 +491,17 @@ pub(crate) fn code_frame_fixtures() -> Vec<Fixture> {
         fixture(
             "pending approval",
             "approval",
-            &CodeApprovalSnapshot {
+            &ApprovalSnapshot {
                 id: approval_id(),
                 session_id: session_id(),
                 turn_id: turn_id(),
-                kind: CodeApprovalKind::Command {
+                kind: ApprovalKind::Command {
                     cmd: "cargo test -p tidebreak-cli".to_owned(),
                     cwd: Some("/Users/mara/code/tidebreak".to_owned()),
                 },
                 harness_raw_json: r#"{"tool":"Bash","command":"cargo test -p tidebreak-cli"}"#
                     .to_owned(),
-                state: CodeApprovalState::Pending,
+                state: ApprovalState::Pending,
                 feedback: None,
                 requested_at: at(1_756_700_120),
                 decided_at: None,
@@ -511,15 +510,15 @@ pub(crate) fn code_frame_fixtures() -> Vec<Fixture> {
         fixture(
             "denied approval",
             "approval",
-            &CodeApprovalSnapshot {
-                id: CodeApprovalId(id(0x15)),
+            &ApprovalSnapshot {
+                id: ApprovalId(id(0x15)),
                 session_id: session_id(),
                 turn_id: turn_id(),
-                kind: CodeApprovalKind::FileWrite {
+                kind: ApprovalKind::FileWrite {
                     paths: vec!["/etc/hosts".to_owned()],
                 },
                 harness_raw_json: r#"{"tool":"Write","path":"/etc/hosts"}"#.to_owned(),
-                state: CodeApprovalState::Denied,
+                state: ApprovalState::Denied,
                 feedback: Some("Not that file.".to_owned()),
                 requested_at: at(1_756_700_130),
                 decided_at: Some(at(1_756_700_140)),
@@ -560,7 +559,7 @@ pub(crate) fn code_frame_fixtures() -> Vec<Fixture> {
                 watch: Some(CodeWatchSnapshot {
                     id: CodeWatchId(id(0x20)),
                     workspace_id: workspace_id(),
-                    session_id: CodeSessionId(id(0x21)),
+                    session_id: SessionId(id(0x21)),
                     pr_number: 3006,
                     state: CodeWatchState::Watching,
                     detail: Some("waiting on the desktop UI lane".to_owned()),
@@ -586,9 +585,9 @@ pub(crate) fn code_frame_fixtures() -> Vec<Fixture> {
         fixture(
             "watch digest",
             "session_digest",
-            &CodeSessionDigest {
-                session: CodeSessionId(id(0x21)),
-                kind: CodeSessionKind::Watch,
+            &SessionDigest {
+                session: SessionId(id(0x21)),
+                kind: SessionKind::Watch,
                 title: "Watch #3006".to_owned(),
                 activity: None,
                 activity_detail: None,
@@ -612,13 +611,13 @@ pub(crate) fn code_frame_fixtures() -> Vec<Fixture> {
     out
 }
 
-/// One notice per variant of [`CodeUpdateNotice`].
+/// One notice per variant of [`UpdateNotice`].
 fn update_notices() -> Vec<Fixture> {
     vec![
         fixture(
             "updates: snapshot",
             "update_notice",
-            &CodeUpdateNotice::Snapshot {
+            &UpdateNotice::Snapshot {
                 sessions: vec![digest(), internal_digest()],
             },
         ),
@@ -631,7 +630,7 @@ fn update_notices() -> Vec<Fixture> {
         fixture(
             "updates: terminal activity",
             "update_notice",
-            &CodeUpdateNotice::TerminalActivity {
+            &UpdateNotice::TerminalActivity {
                 workspace_id: workspace_id(),
                 terminal_id: CodeTerminalId(id(0x40)),
             },
@@ -639,7 +638,7 @@ fn update_notices() -> Vec<Fixture> {
         fixture(
             "updates: clone progress",
             "update_notice",
-            &CodeUpdateNotice::CloneProgress {
+            &UpdateNotice::CloneProgress {
                 job: "clone-7".to_owned(),
                 phase: "receiving objects".to_owned(),
                 percent: Some(62),
@@ -651,7 +650,7 @@ fn update_notices() -> Vec<Fixture> {
         fixture(
             "updates: harness install",
             "update_notice",
-            &CodeUpdateNotice::HarnessInstall {
+            &UpdateNotice::HarnessInstall {
                 kind: HarnessKind::Codex,
                 version: Some("0.42.0".to_owned()),
                 phase: "failed".to_owned(),
@@ -662,25 +661,25 @@ fn update_notices() -> Vec<Fixture> {
         fixture(
             "updates: delivery",
             "update_notice",
-            &CodeUpdateNotice::Delivery,
+            &UpdateNotice::Delivery,
         ),
         fixture(
             "updates: turn rewrite",
             "update_notice",
-            &CodeUpdateNotice::TurnRewrite {
+            &UpdateNotice::TurnRewrite {
                 session: session_id(),
                 turn_id: turn_id(),
-                state: CodeTurnRewriteState::Rewritten,
+                state: TurnRewriteState::Rewritten,
                 rewrite: Some("Every code-mode string now has a bound.".to_owned()),
             },
         ),
     ]
 }
 
-/// One frame per variant of [`CodeEvent`], plus the frame flags a reader
+/// One frame per variant of [`Event`], plus the frame flags a reader
 /// has to honor: `replayed`, `transient` with `replacement`, and `truncated`.
 fn event_frames() -> Vec<Fixture> {
-    let started = CodeEvent::SessionStarted {
+    let started = Event::SessionStarted {
         harness_kind: HarnessKind::ClaudeCode,
         harness_version: "2.0.14".to_owned(),
         resume_ref: Some("9f2c1d4e-resume".to_owned()),
@@ -688,7 +687,7 @@ fn event_frames() -> Vec<Fixture> {
     let frames = vec![
         (
             "event: session_started (replayed, truncated)",
-            SequencedCodeEventFrame {
+            SequencedEventFrame {
                 replayed: Some(true),
                 truncated: Some(true),
                 ..frame(40, started)
@@ -696,23 +695,23 @@ fn event_frames() -> Vec<Fixture> {
         ),
         (
             "event: turn_started",
-            SequencedCodeEventFrame {
+            SequencedEventFrame {
                 replayed: Some(true),
-                ..frame(41, CodeEvent::TurnStarted { turn_id: turn_id() })
+                ..frame(41, Event::TurnStarted { turn_id: turn_id() })
             },
         ),
         (
             "event: turn_resumed",
-            frame(42, CodeEvent::TurnResumed { turn_id: turn_id() }),
+            frame(42, Event::TurnResumed { turn_id: turn_id() }),
         ),
         (
             "event: assistant_delta (transient replacement)",
-            SequencedCodeEventFrame {
+            SequencedEventFrame {
                 transient: Some(true),
                 replacement: Some(true),
                 ..frame(
                     41,
-                    CodeEvent::AssistantDelta {
+                    Event::AssistantDelta {
                         text: "Reading the parser".to_owned(),
                     },
                 )
@@ -722,7 +721,7 @@ fn event_frames() -> Vec<Fixture> {
             "event: assistant_message",
             frame(
                 42,
-                CodeEvent::AssistantMessage {
+                Event::AssistantMessage {
                     text: "The parser checks presence only.".to_owned(),
                     parent_call_id: None,
                 },
@@ -732,7 +731,7 @@ fn event_frames() -> Vec<Fixture> {
             "event: reasoning_delta",
             frame(
                 43,
-                CodeEvent::ReasoningDelta {
+                Event::ReasoningDelta {
                     text: "Which fields are drawn on one line?".to_owned(),
                 },
             ),
@@ -741,7 +740,7 @@ fn event_frames() -> Vec<Fixture> {
             "event: tool_started",
             frame(
                 44,
-                CodeEvent::ToolStarted {
+                Event::ToolStarted {
                     call_id: "call-1".to_owned(),
                     name: "Bash".to_owned(),
                     detail: ToolDetail::Command {
@@ -756,7 +755,7 @@ fn event_frames() -> Vec<Fixture> {
             "event: tool_completed",
             frame(
                 45,
-                CodeEvent::ToolCompleted {
+                Event::ToolCompleted {
                     call_id: "call-2".to_owned(),
                     outcome: ToolOutcome::Succeeded,
                     preview: "1 file changed".to_owned(),
@@ -774,7 +773,7 @@ fn event_frames() -> Vec<Fixture> {
             "event: file_changed",
             frame(
                 46,
-                CodeEvent::FileChanged {
+                Event::FileChanged {
                     path: "crates/tidebreak-cli/src/api/code.rs".to_owned(),
                     kind: FileChangeKind::Modified,
                     diffstat: diffstat(),
@@ -785,7 +784,7 @@ fn event_frames() -> Vec<Fixture> {
             "event: approval_requested",
             frame(
                 47,
-                CodeEvent::ApprovalRequested {
+                Event::ApprovalRequested {
                     approval_id: approval_id(),
                     request: None,
                 },
@@ -795,7 +794,7 @@ fn event_frames() -> Vec<Fixture> {
             "event: approval_resolved",
             frame(
                 48,
-                CodeEvent::ApprovalResolved {
+                Event::ApprovalResolved {
                     approval_id: approval_id(),
                     decision: ApprovalDecisionKind::Deny {
                         feedback: Some("Not that file.".to_owned()),
@@ -807,7 +806,7 @@ fn event_frames() -> Vec<Fixture> {
             "event: user_steered",
             frame(
                 49,
-                CodeEvent::UserSteered {
+                Event::UserSteered {
                     text: "Keep the raw tier for diffs.".to_owned(),
                     message_id: None,
                 },
@@ -817,7 +816,7 @@ fn event_frames() -> Vec<Fixture> {
             "event: turn_completed",
             frame(
                 50,
-                CodeEvent::TurnCompleted {
+                Event::TurnCompleted {
                     usage: usage(),
                     checkpoint: Some(CheckpointHint {
                         checkpoint_ref: Some("refs/tidebreak/checkpoints/3".to_owned()),
@@ -831,7 +830,7 @@ fn event_frames() -> Vec<Fixture> {
             "event: turn_failed",
             frame(
                 51,
-                CodeEvent::TurnFailed {
+                Event::TurnFailed {
                     error: BoundedError {
                         message: "the engine exited with status 1".to_owned(),
                     },
@@ -841,13 +840,13 @@ fn event_frames() -> Vec<Fixture> {
         ),
         (
             "event: turn_interrupted",
-            frame(52, CodeEvent::TurnInterrupted { usage: None }),
+            frame(52, Event::TurnInterrupted { usage: None }),
         ),
         (
             "event: checkpoint_recorded",
             frame(
                 53,
-                CodeEvent::CheckpointRecorded {
+                Event::CheckpointRecorded {
                     turn_id: turn_id(),
                     diffstat: diffstat(),
                 },
@@ -857,7 +856,7 @@ fn event_frames() -> Vec<Fixture> {
             "event: harness_notice",
             frame(
                 54,
-                CodeEvent::HarnessNotice {
+                Event::HarnessNotice {
                     level: HarnessNoticeLevel::Warning,
                     message: "context is 80% full".to_owned(),
                 },
@@ -867,7 +866,7 @@ fn event_frames() -> Vec<Fixture> {
             "event: attention_changed",
             frame(
                 55,
-                CodeEvent::AttentionChanged {
+                Event::AttentionChanged {
                     state: AttentionState::NeedsYou {
                         prompt: "Approve the write to /etc/hosts?".to_owned(),
                         source: AttentionSource::Structured,
@@ -882,7 +881,7 @@ fn event_frames() -> Vec<Fixture> {
             "event: turn_refused (internal engine)",
             frame(
                 56,
-                CodeEvent::TurnRefused {
+                Event::TurnRefused {
                     usage: usage(),
                     refusal: RefusalOutcome::report_blocked(),
                 },
@@ -890,18 +889,18 @@ fn event_frames() -> Vec<Fixture> {
         ),
         (
             "event: stream_interrupted (internal engine)",
-            SequencedCodeEventFrame {
+            SequencedEventFrame {
                 transient: Some(true),
-                ..frame(57, CodeEvent::StreamInterrupted)
+                ..frame(57, Event::StreamInterrupted)
             },
         ),
         (
             "event: tool_args_delta (internal engine, transient)",
-            SequencedCodeEventFrame {
+            SequencedEventFrame {
                 transient: Some(true),
                 ..frame(
                     57,
-                    CodeEvent::ToolArgsDelta {
+                    Event::ToolArgsDelta {
                         call_id: "call_01".to_owned(),
                         fragment: "{\"command\":\"cargo\",".to_owned(),
                     },
@@ -912,7 +911,7 @@ fn event_frames() -> Vec<Fixture> {
             "event: approval_requested (internal engine consent card)",
             frame(
                 58,
-                CodeEvent::ApprovalRequested {
+                Event::ApprovalRequested {
                     approval_id: approval_id(),
                     request: Some(InternalApprovalRequest::ToolUse {
                         auto_judging: false,
@@ -931,7 +930,7 @@ fn event_frames() -> Vec<Fixture> {
             "event: approval_requested (internal engine questions park)",
             frame(
                 59,
-                CodeEvent::ApprovalRequested {
+                Event::ApprovalRequested {
                     approval_id: approval_id(),
                     request: Some(InternalApprovalRequest::Questions { turn_id: turn_id() }),
                 },
@@ -941,7 +940,7 @@ fn event_frames() -> Vec<Fixture> {
             "event: approval_requested (internal engine plan park)",
             frame(
                 60,
-                CodeEvent::ApprovalRequested {
+                Event::ApprovalRequested {
                     approval_id: approval_id(),
                     request: Some(InternalApprovalRequest::Plan { turn_id: turn_id() }),
                 },
@@ -951,7 +950,7 @@ fn event_frames() -> Vec<Fixture> {
             "event: task_plan_updated (internal engine)",
             frame(
                 62,
-                CodeEvent::TaskPlanUpdated {
+                Event::TaskPlanUpdated {
                     call_id: "call_04".to_owned(),
                     turn_id: turn_id(),
                 },
@@ -961,7 +960,7 @@ fn event_frames() -> Vec<Fixture> {
             "event: context_truncated (internal engine)",
             frame(
                 63,
-                CodeEvent::ContextTruncated {
+                Event::ContextTruncated {
                     original_tokens: 210_000,
                     fitted_tokens: 180_000,
                 },
@@ -969,11 +968,11 @@ fn event_frames() -> Vec<Fixture> {
         ),
         (
             "event: compaction_started (internal engine)",
-            frame(64, CodeEvent::CompactionStarted),
+            frame(64, Event::CompactionStarted),
         ),
         (
             "event: compaction_finished (internal engine)",
-            frame(65, CodeEvent::CompactionFinished { compacted: true }),
+            frame(65, Event::CompactionFinished { compacted: true }),
         ),
     ];
     frames
@@ -1050,7 +1049,7 @@ fn the_code_frame_fixtures_are_current() {
 /// new variant fails here until it has one.
 #[test]
 fn the_code_frame_fixtures_cover_every_event() {
-    let declared = declared_tags::<CodeEvent>("CodeEvent");
+    let declared = declared_tags::<Event>("Event");
     let covered = fixture_tags("event_frame", |value| value.get("event")?.get("type"));
     let missing: Vec<_> = declared.difference(&covered).collect();
     assert!(
@@ -1058,7 +1057,7 @@ fn the_code_frame_fixtures_cover_every_event() {
         "event types without a code-frame fixture: {missing:?}"
     );
 
-    let declared = declared_tags::<CodeUpdateNotice>("CodeUpdateNotice");
+    let declared = declared_tags::<UpdateNotice>("UpdateNotice");
     let covered = fixture_tags("update_notice", |value| value.get("type"));
     let missing: Vec<_> = declared.difference(&covered).collect();
     assert!(
@@ -1075,21 +1074,21 @@ fn every_code_frame_fixture_round_trips() {
         match entry.kind {
             "repo" => round_trip::<CodeRepoSnapshot>(entry),
             "workspace" => round_trip::<CodeWorkspaceSnapshot>(entry),
-            "session" => round_trip::<CodeSessionSnapshot>(entry),
-            "turn" => round_trip::<CodeTurnSnapshot>(entry),
-            "queued_turn" => round_trip::<QueuedCodeTurn>(entry),
-            "queued_turns" => round_trip::<QueuedCodeTurnsSnapshot>(entry),
+            "session" => round_trip::<SessionSnapshot>(entry),
+            "turn" => round_trip::<TurnSnapshot>(entry),
+            "queued_turn" => round_trip::<QueuedTurn>(entry),
+            "queued_turns" => round_trip::<QueuedTurnsSnapshot>(entry),
             "harness_doctor" => round_trip::<HarnessDoctorReport>(entry),
             "workspace_files" => round_trip::<CodeWorkspaceFiles>(entry),
             "workspace_diff" => round_trip::<CodeWorkspaceDiff>(entry),
-            "approval" => round_trip::<CodeApprovalSnapshot>(entry),
+            "approval" => round_trip::<ApprovalSnapshot>(entry),
             "commit" => round_trip::<CodeCommitSnapshot>(entry),
             "push" => round_trip::<CodePushSnapshot>(entry),
             "workspace_pr" => round_trip::<CodeWorkspacePrSnapshot>(entry),
             "action" => round_trip::<CodeActionSnapshot>(entry),
-            "session_digest" => round_trip::<CodeSessionDigest>(entry),
-            "update_notice" => round_trip::<CodeUpdateNotice>(entry),
-            "event_frame" => round_trip::<SequencedCodeEventFrame>(entry),
+            "session_digest" => round_trip::<SessionDigest>(entry),
+            "update_notice" => round_trip::<UpdateNotice>(entry),
+            "event_frame" => round_trip::<SequencedEventFrame>(entry),
             other => panic!("fixture {} has no decoder for kind {other}", entry.name),
         }
     }
@@ -1119,26 +1118,26 @@ fn code_values_reject_unknown_keys() {
         let rejected = match entry.kind {
             "repo" => serde_json::from_value::<CodeRepoSnapshot>(value).is_err(),
             "workspace" => serde_json::from_value::<CodeWorkspaceSnapshot>(value).is_err(),
-            "session" => serde_json::from_value::<CodeSessionSnapshot>(value).is_err(),
-            "turn" => serde_json::from_value::<CodeTurnSnapshot>(value).is_err(),
-            "queued_turn" => serde_json::from_value::<QueuedCodeTurn>(value).is_err(),
-            "queued_turns" => serde_json::from_value::<QueuedCodeTurnsSnapshot>(value).is_err(),
+            "session" => serde_json::from_value::<SessionSnapshot>(value).is_err(),
+            "turn" => serde_json::from_value::<TurnSnapshot>(value).is_err(),
+            "queued_turn" => serde_json::from_value::<QueuedTurn>(value).is_err(),
+            "queued_turns" => serde_json::from_value::<QueuedTurnsSnapshot>(value).is_err(),
             "harness_doctor" => serde_json::from_value::<HarnessDoctorReport>(value).is_err(),
             "workspace_files" => serde_json::from_value::<CodeWorkspaceFiles>(value).is_err(),
             "workspace_diff" => serde_json::from_value::<CodeWorkspaceDiff>(value).is_err(),
-            "approval" => serde_json::from_value::<CodeApprovalSnapshot>(value).is_err(),
+            "approval" => serde_json::from_value::<ApprovalSnapshot>(value).is_err(),
             "commit" => serde_json::from_value::<CodeCommitSnapshot>(value).is_err(),
             "push" => serde_json::from_value::<CodePushSnapshot>(value).is_err(),
             "workspace_pr" => serde_json::from_value::<CodeWorkspacePrSnapshot>(value).is_err(),
             "action" => serde_json::from_value::<CodeActionSnapshot>(value).is_err(),
-            "session_digest" => serde_json::from_value::<CodeSessionDigest>(value).is_err(),
-            "update_notice" => serde_json::from_value::<CodeUpdateNotice>(value).is_err(),
+            "session_digest" => serde_json::from_value::<SessionDigest>(value).is_err(),
+            "update_notice" => serde_json::from_value::<UpdateNotice>(value).is_err(),
             // The event union is `tidebreak_core`'s and tolerates extra keys
             // inside a variant; the frame around it does not.
             "event_frame" => {
                 let mut frame = entry.value.clone();
                 frame["extra"] = serde_json::Value::Bool(true);
-                serde_json::from_value::<SequencedCodeEventFrame>(frame).is_err()
+                serde_json::from_value::<SequencedEventFrame>(frame).is_err()
             }
             other => panic!("fixture {} has no decoder for kind {other}", entry.name),
         };
@@ -1151,7 +1150,7 @@ fn code_values_reject_unknown_keys() {
 #[test]
 fn unknown_update_notices_fail() {
     let unknown = r#"{"type":"some_future_notice","extra":true}"#;
-    assert!(serde_json::from_str::<CodeUpdateNotice>(unknown).is_err());
+    assert!(serde_json::from_str::<UpdateNotice>(unknown).is_err());
     let unknown_event = r#"{"seq":9,"event":{"type":"some_future_event"}}"#;
-    assert!(serde_json::from_str::<SequencedCodeEventFrame>(unknown_event).is_err());
+    assert!(serde_json::from_str::<SequencedEventFrame>(unknown_event).is_err());
 }

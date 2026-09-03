@@ -28,7 +28,7 @@ use crate::routes::code::types::{
 
 /// Coprime with the 47s watch and 53s trigger sweeps, so three GitHub-reading
 /// sweeps never land on the same tick. This is the cadence while a client
-/// holds a `/code/updates` socket, meaning someone can see the result.
+/// holds an `/updates` socket, meaning someone can see the result.
 pub(crate) const RECONCILE_SWEEP_INTERVAL: Duration = Duration::from_secs(61);
 
 /// The cadence while no client is attached.
@@ -36,7 +36,7 @@ pub(crate) const RECONCILE_SWEEP_INTERVAL: Duration = Duration::from_secs(61);
 /// Idle sweeps are mostly conditional 304s, but any repository that moved
 /// pays real per-pull-request reads, and with nobody looking the answer only
 /// has to be current by the time a window opens again. Subscribing to
-/// `/code/updates` wakes the sweep, so reopening the app does not wait this
+/// `/updates` wakes the sweep, so reopening the app does not wait this
 /// long. Prime, like the others, so the idle sweep does not fall into step
 /// with the watch and trigger sweeps.
 pub(crate) const RECONCILE_DETACHED_INTERVAL: Duration = Duration::from_secs(421);

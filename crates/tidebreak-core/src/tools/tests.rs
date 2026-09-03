@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use super::private_scratch::{read_utf8_file, write_utf8_file, MAX_READ_FILE_BYTES};
 use super::{ListDir, ReadFile, WriteFile};
-use crate::id::ChatId;
+use crate::id::SessionId;
 use crate::model::Chat;
 use crate::storage::Store;
 use crate::tool::{Tool, ToolCtx};
@@ -11,13 +11,13 @@ use crate::DbStore;
 use serde_json::json;
 
 fn ctx(dir: &Path) -> ToolCtx {
-    ToolCtx::try_new_legacy_workspace(ChatId::new(), None, dir.to_path_buf()).unwrap()
+    ToolCtx::try_new_legacy_workspace(SessionId::new(), None, dir.to_path_buf()).unwrap()
 }
 
-async fn output_fixture() -> (tempfile::TempDir, Arc<DbStore>, ChatId) {
+async fn output_fixture() -> (tempfile::TempDir, Arc<DbStore>, SessionId) {
     let directory = tempfile::tempdir().unwrap();
     let store = Arc::new(
-        DbStore::connect_test_sqlite_fixture(&format!(
+        DbStore::connect(&format!(
             "sqlite://{}?mode=rwc",
             directory.path().join("outputs.db").display()
         ))
@@ -25,7 +25,7 @@ async fn output_fixture() -> (tempfile::TempDir, Arc<DbStore>, ChatId) {
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -122,7 +122,7 @@ async fn built_in_tool_schemas_preserve_their_provider_contracts() {
 async fn unknown_arguments_are_refused_not_ignored() {
     let output = ReadFile
         .execute(
-            &ToolCtx::without_private_scratch(ChatId::new(), None),
+            &ToolCtx::without_private_scratch(SessionId::new(), None),
             json!({"path": "note.txt", "encoding": "utf-8"}),
         )
         .await
@@ -137,7 +137,7 @@ async fn unknown_arguments_are_refused_not_ignored() {
 async fn malformed_arguments_include_the_typed_schema() {
     let output = ReadFile
         .execute(
-            &ToolCtx::without_private_scratch(ChatId::new(), None),
+            &ToolCtx::without_private_scratch(SessionId::new(), None),
             json!({"path": 42}),
         )
         .await

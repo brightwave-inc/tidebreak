@@ -1,25 +1,22 @@
-//! Domain types for an external agent-engine session.
+//! Domain types for an agent-engine session.
 //!
-//! These types are engine-neutral: they describe a supervised conversation
-//! with an external agent engine, not a coding CLI specifically. Tidebreak's
-//! own internal loop is a future implementor of the same contract.
-//!
-//! Id types are structurally identical to chat ids (UUID newtypes, transparent
-//! serde) but distinct so the two surfaces cannot be confused at compile time.
+//! These types are engine-neutral. They describe a supervised conversation
+//! with Tidebreak's internal engine or an external harness.
 
 mod caps;
 mod event;
 
 pub use caps::{CapLevel, HarnessCaps, HarnessCommand, HarnessTier};
 pub use event::{
-    ApprovalDecisionKind, BoundedError, CheckpointHint, CodeEvent, CodeUsage, Diffstat,
-    FileChangeKind, HarnessNoticeLevel, InternalApprovalRequest, SequencedCodeEvent, ToolDetail,
-    ToolOutcome, MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS, MAX_TOOL_SUMMARY_CHARS,
+    ApprovalDecisionKind, BoundedError, CheckpointHint, Diffstat, Event, FileChangeKind,
+    HarnessNoticeLevel, InternalApprovalRequest, SequencedEvent, ToolDetail, ToolOutcome,
+    TurnUsage, MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS, MAX_TOOL_SUMMARY_CHARS,
 };
 
 use crate::attention::{Attention, FenceReason};
 use crate::image::ImageRef;
 use crate::PermissionMode;
+pub use crate::{ApprovalId, SessionId, TurnId};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use uuid::Uuid;
@@ -81,30 +78,6 @@ code_id_type!(
 code_id_type!(
     /// Identifies one isolated workspace (worktree + branch) on a repo.
     WorkspaceId
-);
-code_id_type!(
-    /// Identifies one durable conversation with an external agent engine.
-    CodeSessionId
-);
-code_id_type!(
-    /// Identifies one user→engine cycle inside a code session.
-    CodeTurnId
-);
-
-impl From<crate::TurnId> for CodeTurnId {
-    fn from(id: crate::TurnId) -> Self {
-        Self(id.0)
-    }
-}
-
-impl From<CodeTurnId> for crate::TurnId {
-    fn from(id: CodeTurnId) -> Self {
-        Self(id.0)
-    }
-}
-code_id_type!(
-    /// Identifies one parked approval belonging to a code session.
-    CodeApprovalId
 );
 code_id_type!(
     /// Identifies one auxiliary terminal attached to a workspace.
@@ -257,7 +230,7 @@ impl std::fmt::Display for HarnessKind {
 /// Lifecycle of a persisted code session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
-pub enum CodeSessionLifecycle {
+pub enum SessionLifecycle {
     /// Row exists; no engine child has been launched.
     Created,
     /// No turn is running.
@@ -270,7 +243,7 @@ pub enum CodeSessionLifecycle {
     Ended,
 }
 
-impl CodeSessionLifecycle {
+impl SessionLifecycle {
     /// Stable database and wire token.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -301,14 +274,14 @@ impl CodeSessionLifecycle {
 /// Why a session exists: the user's conversation, or an automation task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
-pub enum CodeSessionKind {
+pub enum SessionKind {
     /// The user's conversation with the engine.
     Interactive,
     /// A watch task's session; it runs fix turns, never user input.
     Watch,
 }
 
-impl CodeSessionKind {
+impl SessionKind {
     /// Stable database and wire token.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -385,7 +358,7 @@ impl CodeWorkspaceStatus {
 /// thing and is on the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
-pub enum CodeTurnStatus {
+pub enum TurnStatus {
     /// Accepted durably and eligible to be claimed at `available_at`.
     Queued,
     /// The engine is still working this turn.
@@ -419,7 +392,7 @@ pub enum CodeTurnStatus {
     Interrupted,
 }
 
-impl CodeTurnStatus {
+impl TurnStatus {
     /// Every status that means the conversation is still working.
     ///
     /// One definition, because "busy" must mean the same thing to the host's
@@ -491,7 +464,7 @@ impl CodeTurnStatus {
     }
 }
 
-impl From<crate::model::TurnRunStatus> for CodeTurnStatus {
+impl From<crate::model::TurnRunStatus> for TurnStatus {
     fn from(status: crate::model::TurnRunStatus) -> Self {
         match status {
             crate::model::TurnRunStatus::Queued => Self::Queued,
@@ -538,7 +511,7 @@ pub enum TurnParkWait {
 /// State of a persisted approval.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
-pub enum CodeApprovalState {
+pub enum ApprovalState {
     /// Waiting on a decision.
     Pending,
     /// The user approved.
@@ -552,7 +525,7 @@ pub enum CodeApprovalState {
     Abandoned,
 }
 
-impl CodeApprovalState {
+impl ApprovalState {
     /// Stable database and wire token.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -806,7 +779,7 @@ pub enum PullRequestCommentKind {
 /// Best-effort classification of what an approval is asking.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum CodeApprovalKind {
+pub enum ApprovalKind {
     /// A command the engine wants to run.
     Command {
         /// Command string.
@@ -1276,7 +1249,7 @@ pub struct CodePullRequestAttribution {
     /// Which observer minted the row.
     pub discovered_via: CodePullRequestDiscovery,
     /// Session whose act minted the row, when the detector minted it.
-    pub session_id: Option<CodeSessionId>,
+    pub session_id: Option<SessionId>,
     /// The subagent `Task` span the minting command ran inside, when one did
     /// (decision 52). Absent when the parent session acted itself.
     pub parent_call_id: Option<String>,
@@ -1307,7 +1280,7 @@ pub enum CodeSubagentStatus {
 /// work without leaking command text into every digest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
-pub enum CodeSessionActivity {
+pub enum SessionActivity {
     /// The model is reasoning or composing its next response.
     Agent,
     /// A command process is still running.
@@ -1351,16 +1324,16 @@ pub fn bound_subagents(subagents: &mut Vec<CodeSubagentSummary>) {
 
 /// Persisted session record.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CodeSession {
+pub struct Session {
     /// Stable id.
-    pub id: CodeSessionId,
+    pub id: SessionId,
     /// Principal this session belongs to.
     pub owner: crate::OwnerId,
     /// Owning workspace, or `None` for a conversation with no repo-backed
     /// workspace: one the in-process engine hosts (decision 0048 step 5).
     pub workspace_id: Option<WorkspaceId>,
     /// Why the session exists: user conversation or watch task.
-    pub kind: CodeSessionKind,
+    pub kind: SessionKind,
     /// Engine this session is bound to.
     pub harness_kind: HarnessKind,
     /// Version observed at last launch, when known.
@@ -1386,7 +1359,7 @@ pub struct CodeSession {
     #[serde(default)]
     pub fast_mode: bool,
     /// Session lifecycle.
-    pub lifecycle: CodeSessionLifecycle,
+    pub lifecycle: SessionLifecycle,
     /// Why the session is fenced, when it is.
     pub fence_reason: Option<FenceReason>,
     /// Child pid recorded at spawn, when a child is live.
@@ -1412,15 +1385,15 @@ pub struct CodeSession {
 
 /// Persisted turn record.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CodeTurn {
+pub struct Turn {
     /// Stable id.
-    pub id: CodeTurnId,
+    pub id: TurnId,
     /// Owning session.
-    pub session_id: CodeSessionId,
+    pub session_id: SessionId,
     /// 1-based ordinal within the session.
     pub ordinal: i64,
     /// Turn status.
-    pub status: CodeTurnStatus,
+    pub status: TurnStatus,
     /// Engine model selected when this turn started.
     ///
     /// A session may change models between turns, so analytics cannot recover
@@ -1445,7 +1418,7 @@ pub struct CodeTurn {
     /// Diffstat of the turn's checkpoint, when recorded.
     pub diffstat: Option<Diffstat>,
     /// Token usage as reported by the engine.
-    pub usage: Option<CodeUsage>,
+    pub usage: Option<TurnUsage>,
     /// Asynchronous narrative; never blocks lifecycle.
     ///
     /// Derived after the turn ends and written only by
@@ -1465,7 +1438,7 @@ pub struct CodeTurn {
     /// End time, when terminal.
     pub ended_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Engine-owned checkpoint token while the turn is
-    /// [`CodeTurnStatus::Waiting`]; handed back verbatim on resume.
+    /// [`TurnStatus::Waiting`]; handed back verbatim on resume.
     #[serde(default)]
     pub park_ref: Option<String>,
     /// What a waiting turn is parked on.
@@ -1482,11 +1455,11 @@ pub struct CodeTurn {
 /// never run one message twice. Mirrors the chat queue contract (decision 9)
 /// onto code sessions.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CodeQueuedTurn {
+pub struct QueuedTurn {
     /// The turn id this row becomes when promoted.
-    pub id: CodeTurnId,
+    pub id: TurnId,
     /// Owning session.
-    pub session_id: CodeSessionId,
+    pub session_id: SessionId,
     /// Byte-exact user message.
     pub message: String,
     /// Bounded image references carried into the promoted turn.
@@ -1500,7 +1473,7 @@ pub struct CodeQueuedTurn {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
-impl CodeQueuedTurn {
+impl QueuedTurn {
     /// Queue depth cap per session, matching the chat queue's per-chat cap.
     pub const MAX_PER_SESSION: usize = 32;
 }
@@ -1554,7 +1527,7 @@ pub struct CodeSessionIncarnation {
     /// Owner, carried so machine-wide sweeps can act on what they find.
     pub owner: crate::OwnerId,
     /// Owning session.
-    pub session_id: CodeSessionId,
+    pub session_id: SessionId,
     /// 1-based counter within the session; the agent names WIP refs with it.
     pub incarnation: i32,
     /// Where in the protocol this row is.
@@ -1611,7 +1584,7 @@ pub struct CodeExternalBinding {
     /// The grant whose call created the binding.
     pub grant_id: CodeGrantId,
     /// The bound session.
-    pub session_id: CodeSessionId,
+    pub session_id: SessionId,
     /// Creation time.
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
@@ -1763,7 +1736,7 @@ pub enum ExternalSessionResolution {
     /// the machine never resurrects.
     Ended {
         /// The ended session.
-        session_id: CodeSessionId,
+        session_id: SessionId,
     },
     /// The conversation is bound under a different grant. Refused: one
     /// grant must never reach another grant's sessions.
@@ -1780,12 +1753,12 @@ pub enum ExternalSessionResolution {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExternalMessageRecord {
     /// First delivery: the queue row and event row committed together.
-    Recorded(Box<CodeQueuedTurn>),
+    Recorded(Box<QueuedTurn>),
     /// The event was already recorded. `turn_id` names the row the first
     /// delivery caused — still queued, promoted into a turn, or retracted.
     Replay {
         /// The id shared by the queue row and the turn it promotes into.
-        turn_id: CodeTurnId,
+        turn_id: TurnId,
     },
 }
 
@@ -1806,7 +1779,7 @@ pub enum IncarnationAdmission {
     CapExhausted {
         /// Sessions holding the live incarnations, so the refusal can name
         /// what is running instead of only a number.
-        running: Vec<CodeSessionId>,
+        running: Vec<SessionId>,
     },
 }
 
@@ -1869,7 +1842,7 @@ impl CodeWatchState {
 /// Persisted watch task: a durable background loop that keeps one
 /// workspace's pull request moving until it merges or needs the user.
 ///
-/// The watch owns a dedicated [`CodeSessionKind::Watch`] session in the same
+/// The watch owns a dedicated [`SessionKind::Watch`] session in the same
 /// worktree. It never merges or arms auto-merge — decision 42 reserves those
 /// for the user.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1881,7 +1854,7 @@ pub struct CodeWatch {
     /// Workspace whose pull request is watched.
     pub workspace_id: WorkspaceId,
     /// The watch's dedicated session.
-    pub session_id: CodeSessionId,
+    pub session_id: SessionId,
     /// Pull request number at watch start.
     pub pr_number: u64,
     /// Watch state.
@@ -1900,15 +1873,15 @@ pub struct CodeWatch {
 
 /// Persisted approval record.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CodeApproval {
+pub struct Approval {
     /// Stable id.
-    pub id: CodeApprovalId,
+    pub id: ApprovalId,
     /// Owning session.
-    pub session_id: CodeSessionId,
+    pub session_id: SessionId,
     /// Turn that requested it.
-    pub turn_id: CodeTurnId,
+    pub turn_id: TurnId,
     /// Display-oriented classification.
-    pub kind: CodeApprovalKind,
+    pub kind: ApprovalKind,
     /// Size-capped raw engine payload.
     pub harness_raw: serde_json::Value,
     /// Engine-native call ID. Older rows may predate the binding migration.
@@ -1930,7 +1903,7 @@ pub struct CodeApproval {
     #[serde(default, skip_serializing)]
     pub claimed_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Decision state.
-    pub state: CodeApprovalState,
+    pub state: ApprovalState,
     /// Denial feedback, when denied with a reason.
     pub feedback: Option<String>,
     /// When the engine asked.
@@ -2345,19 +2318,28 @@ mod tests {
                 token => token,
             })
             .collect();
-        let code: std::collections::HashSet<&str> = CodeTurnStatus::LIVE
+        let code: std::collections::HashSet<&str> = TurnStatus::LIVE
             .iter()
             .map(|status| status.as_str())
             .collect();
         assert!(
             chat.is_subset(&code),
-            "CodeTurnStatus::LIVE is missing chat live tokens: {:?}",
+            "TurnStatus::LIVE is missing chat live tokens: {:?}",
             chat.difference(&code).collect::<Vec<_>>()
         );
         assert!(
             code.contains("waiting"),
-            "CodeTurnStatus::LIVE must include waiting, the durable park"
+            "TurnStatus::LIVE must include waiting, the durable park"
         );
+    }
+
+    #[test]
+    fn code_ids_roundtrip_as_bare_uuids() {
+        let id = SessionId::new();
+        let json = serde_json::to_string(&id).unwrap();
+        assert_eq!(json, format!("\"{id}\""));
+        assert_eq!(serde_json::from_str::<SessionId>(&json).unwrap(), id);
+        assert_eq!(id.to_string().parse::<SessionId>().unwrap(), id);
     }
 
     #[test]

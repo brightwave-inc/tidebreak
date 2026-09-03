@@ -10,7 +10,7 @@ use crate::agent_tools::{
     SANDBOX_READ_DELEGATED_FILE_TOOL,
 };
 use crate::error::{AgentError, Result};
-use crate::id::{AgentRunId, CallId, ChatId, HostRootId};
+use crate::id::{AgentRunId, CallId, HostRootId, SessionId};
 use crate::model::{
     AgentRunStatus, AgentRunTier, DelegatedFileReadClaim, SandboxToolCall,
     SandboxToolCallParkEntry, SandboxToolCallReceipt, SandboxToolCallRequest,
@@ -379,7 +379,7 @@ pub(in crate::db) async fn claim_delegated_file_read(
     let transaction = store.conn.begin().await.map_err(store_err)?;
     // Attachment mutation and sandbox scheduling share this established order.
     acquire_agent_run_claim_lock(&transaction).await?;
-    if !acquire_chat_write_lock(&transaction, ChatId(initial.chat_id)).await? {
+    if !acquire_chat_write_lock(&transaction, SessionId(initial.chat_id)).await? {
         if let Some(current) = entities::sandbox_tool_call::Entity::find_by_id(id.0)
             .one(&transaction)
             .await
@@ -415,7 +415,7 @@ pub(in crate::db) async fn claim_delegated_file_read(
     let Some(resource) = delegated_file_resource_on(
         &transaction,
         AgentRunId(existing.agent_run_id),
-        ChatId(existing.chat_id),
+        SessionId(existing.chat_id),
     )
     .await?
     .filter(|_| validate_sandbox_read_delegated_file_arguments(&existing.arguments)) else {
@@ -660,7 +660,7 @@ pub(in crate::db) async fn heartbeat_delegated_file_read(
     }
     let transaction = store.conn.begin().await.map_err(store_err)?;
     acquire_agent_run_claim_lock(&transaction).await?;
-    if !acquire_chat_write_lock(&transaction, ChatId(initial.chat_id)).await? {
+    if !acquire_chat_write_lock(&transaction, SessionId(initial.chat_id)).await? {
         if let Some(current) = entities::sandbox_tool_call::Entity::find_by_id(id.0)
             .one(&transaction)
             .await
@@ -696,7 +696,7 @@ pub(in crate::db) async fn heartbeat_delegated_file_read(
     if delegated_file_resource_on(
         &transaction,
         AgentRunId(call.agent_run_id),
-        ChatId(call.chat_id),
+        SessionId(call.chat_id),
     )
     .await?
     .filter(|_| validate_sandbox_read_delegated_file_arguments(&call.arguments))
@@ -975,7 +975,7 @@ pub(in crate::db) async fn resolve_delegated_file_read(
             ResolveSandboxToolCallOutcome::AlreadyTerminal
         });
     }
-    if !acquire_chat_write_lock(&transaction, ChatId(scope.chat_id)).await? {
+    if !acquire_chat_write_lock(&transaction, SessionId(scope.chat_id)).await? {
         if let Some(current) = entities::sandbox_tool_call::Entity::find_by_id(id.0)
             .one(&transaction)
             .await
@@ -1018,7 +1018,7 @@ pub(in crate::db) async fn resolve_delegated_file_read(
     if delegated_file_resource_on(
         &transaction,
         AgentRunId(call.agent_run_id),
-        ChatId(call.chat_id),
+        SessionId(call.chat_id),
     )
     .await?
     .filter(|_| validate_sandbox_read_delegated_file_arguments(&call.arguments))
@@ -1132,8 +1132,30 @@ pub(in crate::db) async fn list_sandbox_tool_call_candidates(
         ));
     }
     let now = database_now(&store.conn).await?;
-    list_sandbox_tool_call_candidate_models(store, None, now, limit)
-        .await?
+    entities::sandbox_tool_call::Entity::find()
+        .filter(
+            sea_orm::Condition::any()
+                .add(
+                    entities::sandbox_tool_call::Column::Status
+                        .eq(SandboxToolCallStatus::Accepted.as_str()),
+                )
+                .add(
+                    entities::sandbox_tool_call::Column::Status
+                        .eq(SandboxToolCallStatus::Claimed.as_str())
+                        .and(entities::sandbox_tool_call::Column::ExecutorLeaseExpiresAt.lte(now)),
+                )
+                .add(
+                    entities::sandbox_tool_call::Column::Status
+                        .eq(SandboxToolCallStatus::RetryWait.as_str())
+                        .and(entities::sandbox_tool_call::Column::RetryAt.lte(now)),
+                ),
+        )
+        .order_by_asc(entities::sandbox_tool_call::Column::CreatedAt)
+        .order_by_asc(entities::sandbox_tool_call::Column::Id)
+        .limit(limit)
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?
         .into_iter()
         .map(call_from_model)
         .collect()
@@ -1153,63 +1175,34 @@ pub(in crate::db) async fn list_sandbox_tool_call_candidates_named(
         ));
     }
     let now = database_now(&store.conn).await?;
-    list_sandbox_tool_call_candidate_models(store, Some(name), now, limit)
-        .await?
+    entities::sandbox_tool_call::Entity::find()
+        .filter(entities::sandbox_tool_call::Column::Name.eq(name))
+        .filter(
+            sea_orm::Condition::any()
+                .add(
+                    entities::sandbox_tool_call::Column::Status
+                        .eq(SandboxToolCallStatus::Accepted.as_str()),
+                )
+                .add(
+                    entities::sandbox_tool_call::Column::Status
+                        .eq(SandboxToolCallStatus::Claimed.as_str())
+                        .and(entities::sandbox_tool_call::Column::ExecutorLeaseExpiresAt.lte(now)),
+                )
+                .add(
+                    entities::sandbox_tool_call::Column::Status
+                        .eq(SandboxToolCallStatus::RetryWait.as_str())
+                        .and(entities::sandbox_tool_call::Column::RetryAt.lte(now)),
+                ),
+        )
+        .order_by_asc(entities::sandbox_tool_call::Column::CreatedAt)
+        .order_by_asc(entities::sandbox_tool_call::Column::Id)
+        .limit(limit)
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?
         .into_iter()
         .map(call_from_model)
         .collect()
-}
-
-/// Read each claimable state through its own index, then restore the one
-/// oldest-first order shared by all executor lanes. Fetching `limit` rows per
-/// state is sufficient: no row after a state's first `limit` can enter the
-/// first `limit` rows of the merged result.
-async fn list_sandbox_tool_call_candidate_models(
-    store: &DbStore,
-    name: Option<&str>,
-    now: chrono::DateTime<chrono::Utc>,
-    limit: u64,
-) -> Result<Vec<entities::sandbox_tool_call::Model>> {
-    let branch = |condition| {
-        let mut query = entities::sandbox_tool_call::Entity::find().filter(condition);
-        if let Some(name) = name {
-            query = query.filter(entities::sandbox_tool_call::Column::Name.eq(name));
-        }
-        query
-            .order_by_asc(entities::sandbox_tool_call::Column::CreatedAt)
-            .order_by_asc(entities::sandbox_tool_call::Column::Id)
-            .limit(limit)
-    };
-    let accepted = branch(
-        entities::sandbox_tool_call::Column::Status.eq(SandboxToolCallStatus::Accepted.as_str()),
-    )
-    .all(&store.conn);
-    let expired_claims = branch(
-        entities::sandbox_tool_call::Column::Status
-            .eq(SandboxToolCallStatus::Claimed.as_str())
-            .and(entities::sandbox_tool_call::Column::ExecutorLeaseExpiresAt.lte(now)),
-    )
-    .all(&store.conn);
-    let due_retries = branch(
-        entities::sandbox_tool_call::Column::Status
-            .eq(SandboxToolCallStatus::RetryWait.as_str())
-            .and(entities::sandbox_tool_call::Column::RetryAt.lte(now)),
-    )
-    .all(&store.conn);
-    let (accepted, expired_claims, due_retries) =
-        tokio::try_join!(accepted, expired_claims, due_retries).map_err(store_err)?;
-    let mut candidates =
-        Vec::with_capacity(accepted.len() + expired_claims.len() + due_retries.len());
-    candidates.extend(accepted);
-    candidates.extend(expired_claims);
-    candidates.extend(due_retries);
-    candidates.sort_unstable_by(|left, right| {
-        left.created_at
-            .cmp(&right.created_at)
-            .then_with(|| left.id.cmp(&right.id))
-    });
-    candidates.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
-    Ok(candidates)
 }
 
 /// Terminalize accepted or expired claimed work in the same transaction that
@@ -1424,7 +1417,7 @@ where
 async fn delegated_file_resource_on<C>(
     conn: &C,
     agent_run_id: AgentRunId,
-    chat_id: ChatId,
+    chat_id: SessionId,
 ) -> Result<Option<SandboxAgentFileResource>>
 where
     C: ConnectionTrait,
@@ -1551,7 +1544,7 @@ fn call_from_model(model: entities::sandbox_tool_call::Model) -> Result<SandboxT
     Ok(SandboxToolCall {
         id: CallId(model.id),
         agent_run_id: AgentRunId(model.agent_run_id),
-        chat_id: crate::id::ChatId(model.chat_id),
+        chat_id: crate::id::SessionId(model.chat_id),
         provider_id: model.provider_id,
         name: model.name,
         arguments: model.arguments,

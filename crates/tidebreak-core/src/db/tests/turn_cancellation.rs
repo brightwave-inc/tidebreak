@@ -83,12 +83,12 @@ async fn queued_and_retry_wait_turns_cancel_immediately_and_idempotently() {
         AcceptTurnOutcome::Accepted(turn) => turn,
         outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
     };
-    entities::code_turn::Entity::update_many()
+    entities::turn::Entity::update_many()
         .col_expr(
-            entities::code_turn::Column::MaxAttempts,
+            entities::turn::Column::MaxAttempts,
             sea_orm::sea_query::Expr::value(2),
         )
-        .filter(entities::code_turn::Column::Id.eq(retry_turn.id.0))
+        .filter(entities::turn::Column::Id.eq(retry_turn.id.0))
         .exec(&store.conn)
         .await
         .unwrap();
@@ -130,7 +130,7 @@ async fn queued_and_retry_wait_turns_cancel_immediately_and_idempotently() {
     };
     assert!(matches!(
         journaled.terminal_event,
-        Some(SequencedEvent {
+        Some(SequencedAgentEvent {
             event: AgentEvent::TurnCancelled { .. },
             ..
         })
@@ -170,7 +170,7 @@ async fn immediate_cancellation_rolls_back_when_terminal_event_fails() {
         AcceptTurnOutcome::Accepted(turn) => turn,
         outcome => panic!("unexpected acceptance outcome: {outcome:?}"),
     };
-    entities::code_event::ActiveModel {
+    entities::event::ActiveModel {
         session_id: Set(chat.id.0),
         owner: Set("local".to_owned()),
         seq: Set(1),

@@ -17,9 +17,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use tidebreak_core::db::code::{get_turn, list_recent_events, set_turn_rewrite};
-use tidebreak_core::{
-    CodeEvent, CodeSessionId, CodeTurnId, CodeTurnStatus, DbStore, OwnerId, Result,
-};
+use tidebreak_core::{DbStore, Event, OwnerId, Result, SessionId, TurnId, TurnStatus};
 
 use crate::chat_titling::{derive_text_with_retries, head, Proposal};
 use crate::resolver::ProviderResolver;
@@ -100,7 +98,7 @@ pub(crate) enum Outcome {
 pub(crate) trait TurnRewrite: Send + Sync {
     /// Derive and store the rewrite for `turn_id`. Returns immediately; nothing
     /// waits on the result and a lost rewrite costs nothing.
-    fn spawn(&self, owner: OwnerId, session_id: CodeSessionId, turn_id: CodeTurnId);
+    fn spawn(&self, owner: OwnerId, session_id: SessionId, turn_id: TurnId);
 }
 
 /// Derives rewrites on the utility role, one at a time per session.
@@ -118,7 +116,7 @@ pub(crate) struct TurnRewriter {
     os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
     /// Sessions with a rewrite call in flight, and at most one turn queued by
     /// a completion that landed while that call was running.
-    in_flight: Arc<Mutex<HashMap<CodeSessionId, Option<CodeTurnId>>>>,
+    in_flight: Arc<Mutex<HashMap<SessionId, Option<TurnId>>>>,
 }
 
 impl TurnRewriter {
@@ -159,13 +157,13 @@ impl TurnRewriter {
     pub(crate) async fn derive(
         &self,
         owner: &OwnerId,
-        session_id: CodeSessionId,
-        turn_id: CodeTurnId,
+        session_id: SessionId,
+        turn_id: TurnId,
     ) -> Result<Outcome> {
         let Some(turn) = get_turn(&self.db, owner, turn_id).await? else {
             return Ok(Outcome::NotApplicable);
         };
-        if turn.status != CodeTurnStatus::Completed || turn.rewrite.is_some() {
+        if turn.status != TurnStatus::Completed || turn.rewrite.is_some() {
             return Ok(Outcome::NotApplicable);
         }
         if !rewrite_closing_enabled(&*self.store).await? {
@@ -259,15 +257,15 @@ impl TurnRewriter {
     async fn closing_message(
         &self,
         owner: &OwnerId,
-        session_id: CodeSessionId,
-        turn_id: CodeTurnId,
+        session_id: SessionId,
+        turn_id: TurnId,
     ) -> Result<Option<String>> {
         let events = list_recent_events(&self.db, owner, session_id, REWRITE_EVENT_WINDOW).await?;
         let mut closing = None;
         for sequenced in &events {
             match &sequenced.event {
-                CodeEvent::TurnStarted { turn_id: started } if *started == turn_id => break,
-                CodeEvent::AssistantMessage {
+                Event::TurnStarted { turn_id: started } if *started == turn_id => break,
+                Event::AssistantMessage {
                     text,
                     parent_call_id: None,
                 } if closing.is_none() => closing = Some(text.clone()),
@@ -280,8 +278,8 @@ impl TurnRewriter {
     fn announce(
         &self,
         owner: &OwnerId,
-        session_id: CodeSessionId,
-        turn_id: CodeTurnId,
+        session_id: SessionId,
+        turn_id: TurnId,
         state: TurnRewriteState,
         rewrite: Option<String>,
     ) {
@@ -298,7 +296,7 @@ impl TurnRewriter {
 }
 
 impl TurnRewrite for TurnRewriter {
-    fn spawn(&self, owner: OwnerId, session_id: CodeSessionId, turn_id: CodeTurnId) {
+    fn spawn(&self, owner: OwnerId, session_id: SessionId, turn_id: TurnId) {
         let Some((mut claim, mut turn_id)) =
             RewriteClaim::acquire(&self.in_flight, session_id, turn_id)
         else {
@@ -343,17 +341,17 @@ pub(crate) async fn rewrite_closing_enabled(
 
 /// A session's place in [`TurnRewriter::in_flight`], released on drop.
 struct RewriteClaim {
-    in_flight: Arc<Mutex<HashMap<CodeSessionId, Option<CodeTurnId>>>>,
-    session_id: CodeSessionId,
+    in_flight: Arc<Mutex<HashMap<SessionId, Option<TurnId>>>>,
+    session_id: SessionId,
     released: bool,
 }
 
 impl RewriteClaim {
     fn acquire(
-        in_flight: &Arc<Mutex<HashMap<CodeSessionId, Option<CodeTurnId>>>>,
-        session_id: CodeSessionId,
-        turn_id: CodeTurnId,
-    ) -> Option<(Self, CodeTurnId)> {
+        in_flight: &Arc<Mutex<HashMap<SessionId, Option<TurnId>>>>,
+        session_id: SessionId,
+        turn_id: TurnId,
+    ) -> Option<(Self, TurnId)> {
         let in_flight = in_flight.clone();
         let mut guard = in_flight
             .lock()
@@ -378,7 +376,7 @@ impl RewriteClaim {
         }
     }
 
-    fn take_pending_or_release(&mut self) -> Option<CodeTurnId> {
+    fn take_pending_or_release(&mut self) -> Option<TurnId> {
         let mut in_flight = self
             .in_flight
             .lock()
@@ -407,16 +405,16 @@ impl Drop for RewriteClaim {
 mod tests {
     use super::*;
 
-    fn claims() -> Arc<Mutex<HashMap<CodeSessionId, Option<CodeTurnId>>>> {
+    fn claims() -> Arc<Mutex<HashMap<SessionId, Option<TurnId>>>> {
         Arc::new(Mutex::new(HashMap::new()))
     }
 
-    fn session() -> CodeSessionId {
-        CodeSessionId(uuid::Uuid::new_v4())
+    fn session() -> SessionId {
+        SessionId(uuid::Uuid::new_v4())
     }
 
-    fn turn() -> CodeTurnId {
-        CodeTurnId(uuid::Uuid::new_v4())
+    fn turn() -> TurnId {
+        TurnId(uuid::Uuid::new_v4())
     }
 
     #[test]

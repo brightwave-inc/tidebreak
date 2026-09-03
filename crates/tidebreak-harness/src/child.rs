@@ -1383,12 +1383,10 @@ mod unix_process_tree_tests {
         let mut command = Command::new("/usr/bin/true");
         command
             .stdin(Stdio::null())
-            .stdout(Stdio::piped())
+            .stdout(Stdio::null())
             .stderr(Stdio::null());
         let mut child = spawn_process_tree(&mut command).unwrap();
-        let mut stdout = child.take_stdout().unwrap();
-        let mut output = Vec::new();
-        stdout.read_to_end(&mut output).await.unwrap();
+        sleep(Duration::from_millis(300)).await;
 
         let status = timeout(ASSERTION_TIMEOUT, child.interrupt(INTERRUPT_GRACE))
             .await

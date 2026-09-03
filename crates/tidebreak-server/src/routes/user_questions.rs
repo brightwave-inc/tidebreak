@@ -4,8 +4,8 @@ use axum::extract::State;
 use chrono::Utc;
 use serde::Serialize;
 use tidebreak_core::{
-    AnswerUserQuestions, AnswerUserQuestionsOutcome, AnswerUserQuestionsRequest, CallId, ChatId,
-    CodeApprovalId, CodeSessionId, PendingChatPrompt, PendingUserQuestions, TurnRunStatus,
+    AnswerUserQuestions, AnswerUserQuestionsOutcome, AnswerUserQuestionsRequest, ApprovalId,
+    CallId, PendingChatPrompt, PendingUserQuestions, SessionId, TurnRunStatus,
 };
 
 use crate::error::ServerError;
@@ -18,7 +18,7 @@ pub const MAX_USER_QUESTION_ANSWER_BODY_BYTES: usize = 8 * 1024;
 
 pub async fn list_pending_user_questions(
     store: ScopedStore,
-    Path(chat_id): Path<ChatId>,
+    Path(chat_id): Path<SessionId>,
 ) -> Result<Json<Vec<PendingUserQuestions>>, ServerError> {
     store.require_chat(chat_id).await?;
     Ok(Json(store.list_pending_user_questions(chat_id).await?))
@@ -64,7 +64,7 @@ pub struct AnsweredUserQuestions {
 pub async fn answer_user_questions(
     State(state): State<AppState>,
     store: ScopedStore,
-    Path((chat_id, call_id)): Path<(ChatId, CallId)>,
+    Path((chat_id, call_id)): Path<(SessionId, CallId)>,
     Json(answers): Json<AnswerUserQuestions>,
 ) -> Result<Json<AnsweredUserQuestions>, ServerError> {
     store.require_chat(chat_id).await?;
@@ -74,11 +74,11 @@ pub async fn answer_user_questions(
     // the engine contract carries; additional context has no field there
     // and settles the row directly, which the worker resumes from as well.
     if let Some(code) = state.code.as_ref() {
-        if answers.additional_user_context.is_none() && code.has_worker(CodeSessionId(chat_id.0)) {
+        if answers.additional_user_context.is_none() && code.has_worker(SessionId(chat_id.0)) {
             match code
                 .decide_approval(
                     &store.owner_id(),
-                    CodeApprovalId(call_id.0),
+                    ApprovalId(call_id.0),
                     crate::code::runtime::ApprovalDecisionRequest::Answers {
                         answers: answers.answers.clone(),
                     },

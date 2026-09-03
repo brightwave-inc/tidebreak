@@ -12,8 +12,8 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use crate::code::CodeRuntime;
 use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
 use tidebreak_core::{
-    AttentionSource, AttentionState, CapLevel, CodeEvent, CodeSessionId, CodeSessionLifecycle,
-    CodeTurnId, DbStore, HarnessKind,
+    AttentionSource, AttentionState, CapLevel, DbStore, Event, HarnessKind, SessionId,
+    SessionLifecycle, TurnId,
 };
 use tidebreak_harness::{AdapterRegistry, ApprovalDecision, HarnessApprovalRef, HarnessEvent};
 
@@ -77,7 +77,7 @@ async fn ran_one_ask_turn(
     reqwest::Client,
     std::net::SocketAddr,
     Arc<str>,
-    CodeSessionId,
+    SessionId,
     Arc<CodeRuntime>,
     tempfile::TempDir,
 ) {
@@ -102,7 +102,7 @@ async fn ran_one_ask_turn(
         .json()
         .await
         .unwrap();
-    let session_id: CodeSessionId = json_id(&session).parse().unwrap();
+    let session_id: SessionId = json_id(&session).parse().unwrap();
     let turn = tokio::time::timeout(
         Duration::from_secs(10),
         client
@@ -123,7 +123,7 @@ async fn approvals_for(
     client: &reqwest::Client,
     addr: std::net::SocketAddr,
     token: &str,
-    session_id: CodeSessionId,
+    session_id: SessionId,
 ) -> Vec<serde_json::Value> {
     client
         .get(format!(
@@ -141,13 +141,13 @@ async fn approvals_for(
 /// The outcome carried on every `ApprovalResolved` the session journaled.
 async fn journaled_resolutions(
     db: &DbStore,
-    session_id: CodeSessionId,
+    session_id: SessionId,
 ) -> Vec<tidebreak_core::ApprovalDecisionKind> {
     journaled_events(db, session_id)
         .await
         .into_iter()
         .filter_map(|framed| match framed.event {
-            CodeEvent::ApprovalResolved { decision, .. } => Some(decision),
+            Event::ApprovalResolved { decision, .. } => Some(decision),
             _ => None,
         })
         .collect()
@@ -216,7 +216,7 @@ async fn mid_turn_decision_is_delivered_while_run_turn_is_still_executing() {
     .await
     .expect("pending approval never appeared");
 
-    let parsed: CodeSessionId = session_id.parse().unwrap();
+    let parsed: SessionId = session_id.parse().unwrap();
     let row = tidebreak_core::db::code::get_session(
         &runtime.db,
         &tidebreak_core::OwnerId::local(),
@@ -225,7 +225,7 @@ async fn mid_turn_decision_is_delivered_while_run_turn_is_still_executing() {
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(row.lifecycle, CodeSessionLifecycle::Running);
+    assert_eq!(row.lifecycle, SessionLifecycle::Running);
     assert!(!turn.is_finished(), "run_turn must still be executing");
 
     let decided = tokio::time::timeout(Duration::from_secs(2), async {
@@ -260,12 +260,12 @@ async fn mid_turn_decision_is_delivered_while_run_turn_is_still_executing() {
     let kinds: Vec<&str> = events
         .iter()
         .map(|framed| match &framed.event {
-            tidebreak_core::CodeEvent::ApprovalRequested { .. } => "requested",
-            tidebreak_core::CodeEvent::ApprovalResolved { .. } => "resolved",
+            tidebreak_core::Event::ApprovalRequested { .. } => "requested",
+            tidebreak_core::Event::ApprovalResolved { .. } => "resolved",
             // Deltas stream and are never journaled; the message that states
             // the same text is what the turn leaves behind (record 57).
-            tidebreak_core::CodeEvent::AssistantMessage { .. } => "message",
-            tidebreak_core::CodeEvent::TurnCompleted { .. } => "completed",
+            tidebreak_core::Event::AssistantMessage { .. } => "message",
+            tidebreak_core::Event::TurnCompleted { .. } => "completed",
             _ => "other",
         })
         .collect();
@@ -275,7 +275,7 @@ async fn mid_turn_decision_is_delivered_while_run_turn_is_still_executing() {
     assert!(kinds.contains(&"completed"));
     assert!(events.iter().any(|framed| matches!(
         &framed.event,
-        tidebreak_core::CodeEvent::AssistantMessage { text, .. } if text == "after the decision"
+        tidebreak_core::Event::AssistantMessage { text, .. } if text == "after the decision"
     )));
     let requested = kinds.iter().position(|k| *k == "requested").unwrap();
     let message = kinds.iter().position(|k| *k == "message").unwrap();
@@ -387,7 +387,7 @@ async fn concurrent_approval_decisions_deliver_exactly_once() {
         &client,
         addr,
         &token,
-        session_id.parse::<CodeSessionId>().unwrap(),
+        session_id.parse::<SessionId>().unwrap(),
     )
     .await;
     assert_eq!(rows.len(), 1);
@@ -396,7 +396,7 @@ async fn concurrent_approval_decisions_deliver_exactly_once() {
         Some("approved" | "denied")
     ));
     let resolutions =
-        journaled_resolutions(&runtime.db, session_id.parse::<CodeSessionId>().unwrap()).await;
+        journaled_resolutions(&runtime.db, session_id.parse::<SessionId>().unwrap()).await;
     assert_eq!(resolutions.len(), 1);
 }
 
@@ -477,7 +477,7 @@ async fn a_definite_native_approval_delivery_failure_is_abandoned() {
     assert_eq!(body["kind"], "approval_delivery_failed");
     assert!(observed.observed_decisions().is_empty());
 
-    let parsed: CodeSessionId = session_id.parse().unwrap();
+    let parsed: SessionId = session_id.parse().unwrap();
     let rows = approvals_for(&client, addr, &token, parsed).await;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["state"], "abandoned");
@@ -615,7 +615,7 @@ async fn shutdown_waits_for_an_accepted_approval_to_finish_durably() {
         .unwrap();
     assert_eq!(archived.status(), reqwest::StatusCode::OK);
 
-    let parsed: CodeSessionId = session_id.parse().unwrap();
+    let parsed: SessionId = session_id.parse().unwrap();
     let rows = approvals_for(&client, addr, &token, parsed).await;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["state"], "approved");
@@ -690,7 +690,7 @@ async fn an_unknown_approval_delivery_stays_claimed_until_restart_recovery() {
     let approval_id = approval["id"]
         .as_str()
         .unwrap()
-        .parse::<tidebreak_core::CodeApprovalId>()
+        .parse::<tidebreak_core::ApprovalId>()
         .unwrap();
 
     let unknown = client
@@ -719,7 +719,7 @@ async fn an_unknown_approval_delivery_stays_claimed_until_restart_recovery() {
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(claimed.state, tidebreak_core::CodeApprovalState::Pending);
+    assert_eq!(claimed.state, tidebreak_core::ApprovalState::Pending);
     assert!(claimed.decision_claim.is_some());
     assert!(claimed.decided_at.is_none());
 
@@ -750,14 +750,11 @@ async fn an_unknown_approval_delivery_stays_claimed_until_restart_recovery() {
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(
-        recovered.state,
-        tidebreak_core::CodeApprovalState::Abandoned
-    );
+    assert_eq!(recovered.state, tidebreak_core::ApprovalState::Abandoned);
     assert!(recovered.decision_claim.is_none());
     assert!(recovered.decided_at.is_some());
     assert_eq!(
-        journaled_resolutions(&runtime.db, session_id.parse::<CodeSessionId>().unwrap()).await,
+        journaled_resolutions(&runtime.db, session_id.parse::<SessionId>().unwrap()).await,
         vec![tidebreak_core::ApprovalDecisionKind::Abandoned]
     );
 }
@@ -813,7 +810,7 @@ async fn deny_feedback_reaches_the_scripted_engine() {
             assert_eq!(listed.status(), reqwest::StatusCode::OK);
             let body: Vec<serde_json::Value> = listed.json().await.unwrap();
             if let Some(row) = body.into_iter().next() {
-                let parsed: CodeSessionId = json_id(&session).parse().unwrap();
+                let parsed: SessionId = json_id(&session).parse().unwrap();
                 let session = tidebreak_core::db::code::get_session(
                     &runtime.db,
                     &tidebreak_core::OwnerId::local(),
@@ -842,7 +839,7 @@ async fn deny_feedback_reaches_the_scripted_engine() {
         .unwrap_or("")
         .contains("Write"));
 
-    let parsed: CodeSessionId = json_id(&session).parse().unwrap();
+    let parsed: SessionId = json_id(&session).parse().unwrap();
     let row = tidebreak_core::db::code::get_session(
         &runtime.db,
         &tidebreak_core::OwnerId::local(),
@@ -1002,7 +999,7 @@ async fn restart_abandons_an_approval_whose_native_waiter_was_lost() {
     assert_eq!(rows[0]["id"], approval["id"]);
     assert_eq!(rows[0]["state"], "abandoned");
 
-    let parsed: CodeSessionId = session_id.parse().unwrap();
+    let parsed: SessionId = session_id.parse().unwrap();
     let row = tidebreak_core::db::code::get_session(
         &runtime.db,
         &tidebreak_core::OwnerId::local(),
@@ -1097,7 +1094,7 @@ async fn a_stale_worker_completion_cannot_abandon_a_reused_call_id() {
         .unwrap();
     assert_eq!(session.status(), reqwest::StatusCode::CREATED);
     let session = session.json::<serde_json::Value>().await.unwrap();
-    let session_id = json_id(&session).parse::<CodeSessionId>().unwrap();
+    let session_id = json_id(&session).parse::<SessionId>().unwrap();
     let turn = client
         .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
         .bearer_auth(&token)
@@ -1108,7 +1105,7 @@ async fn a_stale_worker_completion_cannot_abandon_a_reused_call_id() {
         .json::<serde_json::Value>()
         .await
         .unwrap();
-    let turn_id = json_id(&turn).parse::<CodeTurnId>().unwrap();
+    let turn_id = json_id(&turn).parse::<TurnId>().unwrap();
     let row = tidebreak_core::db::code::get_session(
         &runtime.db,
         &tidebreak_core::OwnerId::local(),
@@ -1118,17 +1115,17 @@ async fn a_stale_worker_completion_cannot_abandon_a_reused_call_id() {
     .unwrap()
     .unwrap();
     let stale_epoch = row.spawn_epoch - 1;
-    let stale_id = tidebreak_core::CodeApprovalId::new();
-    let current_id = tidebreak_core::CodeApprovalId::new();
+    let stale_id = tidebreak_core::ApprovalId::new();
+    let current_id = tidebreak_core::ApprovalId::new();
     for (id, worker_epoch) in [(stale_id, stale_epoch), (current_id, row.spawn_epoch)] {
         tidebreak_core::db::code::insert_approval(
             &runtime.db,
             &row.owner,
-            &tidebreak_core::CodeApproval {
+            &tidebreak_core::Approval {
                 id,
                 session_id,
                 turn_id,
-                kind: tidebreak_core::CodeApprovalKind::Other {
+                kind: tidebreak_core::ApprovalKind::Other {
                     summary: "run command".into(),
                 },
                 harness_raw: serde_json::json!({"call_id":"toolu_reused"}),
@@ -1138,7 +1135,7 @@ async fn a_stale_worker_completion_cannot_abandon_a_reused_call_id() {
                 worker_epoch: Some(worker_epoch),
                 decision_claim: None,
                 claimed_at: None,
-                state: tidebreak_core::CodeApprovalState::Pending,
+                state: tidebreak_core::ApprovalState::Pending,
                 feedback: None,
                 requested_at: chrono::Utc::now(),
                 decided_at: None,
@@ -1165,7 +1162,7 @@ async fn a_stale_worker_completion_cannot_abandon_a_reused_call_id() {
             .unwrap()
             .unwrap()
             .state,
-        tidebreak_core::CodeApprovalState::Abandoned
+        tidebreak_core::ApprovalState::Abandoned
     );
     assert_eq!(
         tidebreak_core::db::code::get_approval(&runtime.db, &row.owner, current_id)
@@ -1173,7 +1170,7 @@ async fn a_stale_worker_completion_cannot_abandon_a_reused_call_id() {
             .unwrap()
             .unwrap()
             .state,
-        tidebreak_core::CodeApprovalState::Pending,
+        tidebreak_core::ApprovalState::Pending,
         "a stale completion must not settle the replacement worker's approval"
     );
 }
@@ -1381,7 +1378,7 @@ async fn attention_follows_approval_completion_and_view() {
         }
     });
 
-    let parsed: CodeSessionId = session_id.parse().unwrap();
+    let parsed: SessionId = session_id.parse().unwrap();
     let approval = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let listed = client
@@ -1531,7 +1528,7 @@ async fn user_can_pin_and_clear_attention() {
     assert_eq!(body["attention"]["state"]["note"], "look at this later");
     assert_eq!(body["attention"]["source"], "user");
 
-    let parsed: CodeSessionId = session_id.parse().unwrap();
+    let parsed: SessionId = session_id.parse().unwrap();
     let mut row = tidebreak_core::db::code::get_session(
         &runtime.db,
         &tidebreak_core::OwnerId::local(),
@@ -1540,7 +1537,7 @@ async fn user_can_pin_and_clear_attention() {
     .await
     .unwrap()
     .unwrap();
-    row.lifecycle = CodeSessionLifecycle::Running;
+    row.lifecycle = SessionLifecycle::Running;
     tidebreak_core::db::code::save_session(&runtime.db, &row)
         .await
         .unwrap();

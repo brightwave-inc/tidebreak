@@ -131,7 +131,7 @@ pub enum ConsentMethodSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tidebreak_core::{ChatId, ProjectId};
+    use tidebreak_core::{ProjectId, SessionId};
     use uuid::Uuid;
 
     /// Both halves of the union serialize to the tagged JSON the renderer's
@@ -148,7 +148,7 @@ mod tests {
                 call_id: CallId(call_id),
             },
             level: GrantLevel::Chat {
-                chat_id: ChatId::from(chat_id),
+                chat_id: SessionId::from(chat_id),
             },
             level_title: Some("Quarterly filings".into()),
             verb: ConsentVerb::Tool {

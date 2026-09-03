@@ -62,7 +62,7 @@ async fn drive_provider_search_with_standalone_control(
 ) -> (AgentTurnOutcome, Vec<AgentEvent>) {
     let db = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect_test_sqlite_fixture(&format!(
+        DbStore::connect(&format!(
             "sqlite://{}?mode=rwc",
             db.path().join("provider-search-sibling.db").display()
         ))
@@ -70,7 +70,7 @@ async fn drive_provider_search_with_standalone_control(
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -513,7 +513,7 @@ impl ModelProvider for InterleavedProviderSearchProvider {
 async fn a_provider_executed_search_replaces_the_host_tool_and_is_kept_like_one() {
     let db = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect_test_sqlite_fixture(&format!(
+        DbStore::connect(&format!(
             "sqlite://{}?mode=rwc",
             db.path().join("t.db").display()
         ))
@@ -521,7 +521,7 @@ async fn a_provider_executed_search_replaces_the_host_tool_and_is_kept_like_one(
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -613,7 +613,7 @@ async fn a_provider_executed_search_replaces_the_host_tool_and_is_kept_like_one(
 async fn foreground_vendor_search_budget_is_offered_to_only_one_model_request() {
     let db = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect_test_sqlite_fixture(&format!(
+        DbStore::connect(&format!(
             "sqlite://{}?mode=rwc",
             db.path()
                 .join("multi-step-vendor-search-budget.db")
@@ -623,7 +623,7 @@ async fn foreground_vendor_search_budget_is_offered_to_only_one_model_request() 
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -680,7 +680,7 @@ async fn unused_vendor_search_stays_offered_across_a_host_tool_follow_up() {
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -734,7 +734,7 @@ async fn unused_vendor_search_stays_offered_across_a_host_tool_follow_up() {
 async fn interleaved_host_calls_and_provider_search_keep_one_order_everywhere() {
     let db = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect_test_sqlite_fixture(&format!(
+        DbStore::connect(&format!(
             "sqlite://{}?mode=rwc",
             db.path().join("interleaved-provider-search.db").display()
         ))
@@ -742,7 +742,7 @@ async fn interleaved_host_calls_and_provider_search_keep_one_order_everywhere() 
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -848,7 +848,7 @@ async fn interleaved_host_calls_and_provider_search_keep_one_order_everywhere() 
 async fn malformed_provider_browsing_actions_are_never_persisted_as_host_searches() {
     let db = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect_test_sqlite_fixture(&format!(
+        DbStore::connect(&format!(
             "sqlite://{}?mode=rwc",
             db.path().join("malformed-search.db").display()
         ))
@@ -856,7 +856,7 @@ async fn malformed_provider_browsing_actions_are_never_persisted_as_host_searche
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,

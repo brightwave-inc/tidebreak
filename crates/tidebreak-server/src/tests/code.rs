@@ -25,8 +25,8 @@ use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
 use tidebreak_core::{
     BlobStore, BrowserListResult, BrowserNavigateArgs, BrowserNavigateResult, BrowserPageSnapshot,
     BrowserScreenshotArgs, BrowserScreenshotResult, BrowserSnapshotArgs, BrowserWaitArgs,
-    BrowserWaitResult, CodeSessionId, CodeTurnId, CodeTurnStatus, CodeWorkspaceStatus, DbStore,
-    HarnessKind, PermissionMode, ReasoningEffort, RepoId, Store, WorkspaceId,
+    BrowserWaitResult, CodeWorkspaceStatus, DbStore, HarnessKind, PermissionMode, ReasoningEffort,
+    RepoId, SessionId, Store, TurnId, TurnStatus, WorkspaceId,
 };
 use tidebreak_harness::{AdapterRegistry, HarnessApprovalRef, HarnessEvent, ListedHarnessModel};
 
@@ -292,8 +292,8 @@ pub(super) fn write_approval_script(call_id: &str, content: &str) -> Vec<Harness
 /// Every event a session journaled, in order.
 pub(super) async fn journaled_events(
     db: &DbStore,
-    session_id: CodeSessionId,
-) -> Vec<tidebreak_core::SequencedCodeEvent> {
+    session_id: SessionId,
+) -> Vec<tidebreak_core::SequencedEvent> {
     tidebreak_core::db::code::list_events(
         db,
         &tidebreak_core::OwnerId::local(),
@@ -531,10 +531,7 @@ pub(super) async fn wait_until(mut ready: impl FnMut() -> bool) {
     .expect("condition never held");
 }
 
-pub(super) async fn wait_for_open_turn(
-    runtime: &CodeRuntime,
-    session_id: CodeSessionId,
-) -> CodeTurnId {
+pub(super) async fn wait_for_open_turn(runtime: &CodeRuntime, session_id: SessionId) -> TurnId {
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             if let Some(turn) = tidebreak_core::db::code::get_open_turn(
@@ -614,7 +611,7 @@ pub(super) async fn next_json(
 fn _types(
     _id: WorkspaceId,
     _status: CodeWorkspaceStatus,
-    _turn: CodeTurnStatus,
+    _turn: TurnStatus,
     _db: Option<DbStore>,
     _mode: PermissionMode,
     _kind: HarnessKind,

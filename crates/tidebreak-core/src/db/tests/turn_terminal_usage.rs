@@ -34,29 +34,29 @@ async fn claimed_turn(
 }
 
 async fn set_checkpoint(store: &DbStore, turn_id: TurnId, model_steps: i32, usage: Usage) {
-    let updated = entities::code_turn::Entity::update_many()
+    let updated = entities::turn::Entity::update_many()
         .col_expr(
-            entities::code_turn::Column::ModelSteps,
+            entities::turn::Column::ModelSteps,
             sea_orm::sea_query::Expr::value(model_steps),
         )
         .col_expr(
-            entities::code_turn::Column::InputTokens,
+            entities::turn::Column::InputTokens,
             sea_orm::sea_query::Expr::value(i64::from(usage.input_tokens)),
         )
         .col_expr(
-            entities::code_turn::Column::OutputTokens,
+            entities::turn::Column::OutputTokens,
             sea_orm::sea_query::Expr::value(i64::from(usage.output_tokens)),
         )
         .col_expr(
-            entities::code_turn::Column::CacheReadInputTokens,
+            entities::turn::Column::CacheReadInputTokens,
             sea_orm::sea_query::Expr::value(i64::from(usage.cache_read_input_tokens)),
         )
         .col_expr(
-            entities::code_turn::Column::CacheCreationInputTokens,
+            entities::turn::Column::CacheCreationInputTokens,
             sea_orm::sea_query::Expr::value(i64::from(usage.cache_creation_input_tokens)),
         )
-        .filter(entities::code_turn::Column::Id.eq(turn_id.0))
-        .filter(entities::code_turn::Column::Status.eq(TurnRunStatus::Running.as_str()))
+        .filter(entities::turn::Column::Id.eq(turn_id.0))
+        .filter(entities::turn::Column::Status.eq(TurnRunStatus::Running.as_str()))
         .exec(&store.conn)
         .await
         .unwrap();

@@ -445,7 +445,7 @@ fn active_titled(id: MemoryRecordId, title: &str) -> MemoryRecord {
     record
 }
 
-async fn wait_for_turns(store: &Arc<dyn Store>, chat: ChatId, terminal: usize) {
+async fn wait_for_turns(store: &Arc<dyn Store>, chat: SessionId, terminal: usize) {
     for _ in 0..500 {
         let events = store.list_events(chat, 0).await.unwrap();
         let finished = events

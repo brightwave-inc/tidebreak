@@ -16,7 +16,7 @@ use crate::deliverable::{
     OutputRevision, MAX_OUTPUT_REVISIONS,
 };
 use crate::error::{AgentError, Result};
-use crate::id::{ChatId, OutputId, OutputRevisionId};
+use crate::id::{OutputId, OutputRevisionId, SessionId};
 
 use super::super::{entities, store_err, DbStore};
 use super::acquire_chat_write_lock;
@@ -201,7 +201,7 @@ pub(in crate::db) async fn get_output(
 
 pub(in crate::db) async fn list_outputs(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
     limit: u64,
 ) -> Result<Vec<OutputRecord>> {
     entities::output::Entity::find()
@@ -220,7 +220,7 @@ pub(in crate::db) async fn list_outputs(
 
 pub(in crate::db) async fn find_outputs_by_filename(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
     filename: &str,
 ) -> Result<Vec<OutputRecord>> {
     entities::output::Entity::find()
@@ -531,7 +531,7 @@ where
 /// one, so this reads a single id rather than a list.
 async fn find_live_output_by_filename_on<C>(
     conn: &C,
-    chat_id: ChatId,
+    chat_id: SessionId,
     filename: &str,
 ) -> Result<Option<OutputId>>
 where
@@ -566,7 +566,7 @@ where
 fn output_from_model(model: entities::output::Model) -> Result<OutputRecord> {
     Ok(OutputRecord {
         id: OutputId(model.id),
-        chat_id: ChatId(model.chat_id),
+        chat_id: SessionId(model.chat_id),
         filename: model.filename,
         media_type: model.media_type,
         current_revision: OutputRevisionId(model.current_revision_id),

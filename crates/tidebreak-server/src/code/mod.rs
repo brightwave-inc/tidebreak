@@ -66,7 +66,7 @@ pub(crate) fn trigger_target_at(
 /// skip the work instead of failing the session.
 pub(crate) async fn session_workspace(
     db: &tidebreak_core::db::DbStore,
-    session: &tidebreak_core::CodeSession,
+    session: &tidebreak_core::Session,
 ) -> Result<Option<tidebreak_core::CodeWorkspace>, tidebreak_core::AgentError> {
     match session.workspace_id {
         Some(workspace_id) => {

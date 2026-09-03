@@ -15,7 +15,7 @@ use crate::citation::{parse_assistant_citations, AssistantCitationInput};
 use crate::context;
 use crate::error::{AgentError, Result};
 use crate::event::AgentEvent;
-use crate::id::{CallId, ChatId, MessageId, TurnId};
+use crate::id::{CallId, MessageId, SessionId, TurnId};
 use crate::model::{
     Chat, Message, Role, ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus,
     TurnRunStatus,
@@ -1571,7 +1571,7 @@ impl Agent {
 
     async fn persist_report_blocked_call(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         turn_id: TurnId,
         call: &PendingCall,
         explanation: &str,
@@ -2027,7 +2027,7 @@ impl Agent {
 
     pub(crate) async fn resolve_server_call_retry(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         turn_id: TurnId,
         call_id: CallId,
         resolution: &ToolCallResolution,
@@ -2066,7 +2066,7 @@ impl Agent {
 
     pub(crate) async fn abandon_inherited_server_call_retry(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         turn_id: TurnId,
         call_id: CallId,
         resolution: &ToolCallResolution,
@@ -2228,7 +2228,7 @@ impl Agent {
 
     pub(crate) async fn persist(
         &self,
-        chat_id: crate::id::ChatId,
+        chat_id: crate::id::SessionId,
         turn_id: TurnId,
         role: Role,
         content: &str,
@@ -2251,7 +2251,7 @@ impl Agent {
 
     pub(crate) async fn persist_assistant(
         &self,
-        chat_id: crate::id::ChatId,
+        chat_id: crate::id::SessionId,
         turn_id: TurnId,
         candidate: &AssistantCandidate,
     ) -> Result<MessageId> {

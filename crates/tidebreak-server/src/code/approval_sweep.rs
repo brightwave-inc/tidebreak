@@ -1,14 +1,14 @@
 //! Reconcile approvals whose tool call resolved before anyone decided.
 //!
 //! An approval is parked on the engine's `tool_use_id`, and the same id comes
-//! back on [`tidebreak_core::CodeEvent::ToolCompleted`]. When a completion arrives for a call
+//! back on [`tidebreak_core::Event::ToolCompleted`]. When a completion arrives for a call
 //! that still has a pending approval, nobody's decision can reach the engine
 //! any more: the engine timed the call out, denied it itself, or ran it under
 //! a rule of its own. Leaving the row `Pending` would list a request that can
 //! never be acted on, and would let a later `code approve` report success for
 //! a command the engine already failed.
 //!
-//! So the row moves to [`CodeApprovalState::Abandoned`] and the session
+//! So the row moves to [`ApprovalState::Abandoned`] and the session
 //! journals an `ApprovalResolved` carrying
 //! [`tidebreak_core::ApprovalDecisionKind::Abandoned`]. The turn and session boundaries sweep
 //! the same way, because a tool call that never reports completion must not
@@ -18,7 +18,7 @@ use tidebreak_core::db::code::{
     abandon_pending_approval, abandon_pending_approvals_for_stopped_session, get_session,
     list_approvals, list_turns,
 };
-use tidebreak_core::{CodeApproval, CodeApprovalState, CodeSessionId, DbStore, OwnerId};
+use tidebreak_core::{Approval, ApprovalState, DbStore, OwnerId, SessionId};
 
 use super::bus::CodeEventBus;
 
@@ -27,7 +27,7 @@ use super::bus::CodeEventBus;
 /// Written as a sibling of the capped payload, so an oversized request still
 /// carries it — the same field [`super::runtime::CodeRuntime::decide_approval`]
 /// reads.
-fn call_id_of(approval: &CodeApproval) -> Option<&str> {
+fn call_id_of(approval: &Approval) -> Option<&str> {
     approval.native_call_id.as_deref().or_else(|| {
         approval
             .harness_raw
@@ -42,14 +42,14 @@ pub(crate) async fn abandon_for_call(
     db: &DbStore,
     bus: &CodeEventBus,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     spawn_epoch: i64,
     call_id: &str,
 ) {
     if call_id.is_empty() {
         return;
     }
-    let doomed: Vec<CodeApproval> = pending_for_epoch(db, owner, session_id, spawn_epoch)
+    let doomed: Vec<Approval> = pending_for_epoch(db, owner, session_id, spawn_epoch)
         .await
         .into_iter()
         .filter(|approval| call_id_of(approval) == Some(call_id))
@@ -64,7 +64,7 @@ pub(crate) async fn abandon_for_settled_turns(
     db: &DbStore,
     bus: &CodeEventBus,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     spawn_epoch: i64,
 ) {
     let waiting = pending_for_epoch(db, owner, session_id, spawn_epoch).await;
@@ -79,7 +79,7 @@ pub(crate) async fn abandon_for_settled_turns(
         .filter(|turn| !turn.status.is_open())
         .map(|turn| turn.id)
         .collect();
-    let doomed: Vec<CodeApproval> = waiting
+    let doomed: Vec<Approval> = waiting
         .into_iter()
         .filter(|approval| settled.contains(&approval.turn_id))
         .collect();
@@ -96,7 +96,7 @@ pub(crate) async fn abandon_for_ended_session(
     db: &DbStore,
     bus: &CodeEventBus,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     spawn_epoch: i64,
 ) {
     if parks_are_durable(db, owner, session_id).await {
@@ -113,7 +113,7 @@ pub(crate) async fn abandon_for_restart(
     db: &DbStore,
     bus: &CodeEventBus,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     spawn_epoch: i64,
 ) {
     if parks_are_durable(db, owner, session_id).await {
@@ -132,30 +132,25 @@ pub(crate) async fn abandon_for_restart(
 
 /// Whether the session's engine holds its pending cards in the store rather
 /// than in a live process (decision 0048 step 5: `durable_parks`).
-async fn parks_are_durable(db: &DbStore, owner: &OwnerId, session_id: CodeSessionId) -> bool {
+async fn parks_are_durable(db: &DbStore, owner: &OwnerId, session_id: SessionId) -> bool {
     matches!(
         get_session(db, owner, session_id).await,
         Ok(Some(session)) if session.harness_kind == tidebreak_core::HarnessKind::Internal
     )
 }
 
-async fn pending(db: &DbStore, owner: &OwnerId, session_id: CodeSessionId) -> Vec<CodeApproval> {
-    list_approvals(
-        db,
-        owner,
-        Some(CodeApprovalState::Pending),
-        Some(session_id),
-    )
-    .await
-    .unwrap_or_default()
+async fn pending(db: &DbStore, owner: &OwnerId, session_id: SessionId) -> Vec<Approval> {
+    list_approvals(db, owner, Some(ApprovalState::Pending), Some(session_id))
+        .await
+        .unwrap_or_default()
 }
 
 async fn pending_for_epoch(
     db: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     spawn_epoch: i64,
-) -> Vec<CodeApproval> {
+) -> Vec<Approval> {
     pending(db, owner, session_id)
         .await
         .into_iter()
@@ -172,9 +167,9 @@ async fn abandon(
     db: &DbStore,
     bus: &CodeEventBus,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     spawn_epoch: i64,
-    doomed: Vec<CodeApproval>,
+    doomed: Vec<Approval>,
 ) {
     if doomed.is_empty() {
         return;
@@ -198,7 +193,7 @@ async fn refresh_attention_if_clear(
     db: &DbStore,
     bus: &CodeEventBus,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
 ) {
     if !pending(db, owner, session_id).await.is_empty() {
         return;

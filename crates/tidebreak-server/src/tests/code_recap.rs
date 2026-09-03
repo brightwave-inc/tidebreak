@@ -210,7 +210,7 @@ async fn start_turn(
     token: &str,
     dir: &std::path::Path,
     harness_kind: tidebreak_core::HarnessKind,
-) -> tidebreak_core::CodeSessionId {
+) -> tidebreak_core::SessionId {
     let repo = init_git_repo(dir);
     let registered = client
         .post(format!("http://{addr}/code/repos"))
@@ -247,9 +247,8 @@ async fn start_turn(
         .unwrap();
     assert_eq!(session.status(), reqwest::StatusCode::CREATED);
     let session: serde_json::Value = session.json().await.unwrap();
-    let session_id = tidebreak_core::CodeSessionId(
-        uuid::Uuid::parse_str(session["id"].as_str().unwrap()).unwrap(),
-    );
+    let session_id =
+        tidebreak_core::SessionId(uuid::Uuid::parse_str(session["id"].as_str().unwrap()).unwrap());
 
     let turn = client
         .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
@@ -266,8 +265,8 @@ async fn start_turn(
 
 async fn wait_for_completed_turn(
     runtime: &CodeRuntime,
-    session_id: tidebreak_core::CodeSessionId,
-) -> tidebreak_core::CodeTurn {
+    session_id: tidebreak_core::SessionId,
+) -> tidebreak_core::Turn {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
         let turns = tidebreak_core::db::code::list_turns(
@@ -279,7 +278,7 @@ async fn wait_for_completed_turn(
         .unwrap();
         if let Some(turn) = turns
             .last()
-            .filter(|turn| turn.status == tidebreak_core::CodeTurnStatus::Completed)
+            .filter(|turn| turn.status == tidebreak_core::TurnStatus::Completed)
         {
             return turn.clone();
         }
@@ -496,8 +495,8 @@ async fn a_machine_with_no_utility_model_stores_no_recap() {
     let outcome = recapper
         .derive(
             &tidebreak_core::OwnerId::local(),
-            tidebreak_core::CodeSessionId(uuid::Uuid::new_v4()),
-            tidebreak_core::CodeTurnId(uuid::Uuid::new_v4()),
+            tidebreak_core::SessionId(uuid::Uuid::new_v4()),
+            tidebreak_core::TurnId(uuid::Uuid::new_v4()),
         )
         .await
         .unwrap();

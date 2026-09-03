@@ -74,7 +74,12 @@ async fn make_chat_http(client: &reqwest::Client, addr: SocketAddr, token: &str)
         .unwrap()
 }
 
-async fn send_message_http(client: &reqwest::Client, addr: SocketAddr, token: &str, chat: ChatId) {
+async fn send_message_http(
+    client: &reqwest::Client,
+    addr: SocketAddr,
+    token: &str,
+    chat: SessionId,
+) {
     let response = client
         .post(format!("http://{addr}/chats/{chat}/messages"))
         .bearer_auth(token)
@@ -91,7 +96,7 @@ async fn send_message_http(client: &reqwest::Client, addr: SocketAddr, token: &s
 async fn read_until_turns_end(
     addr: SocketAddr,
     token: &str,
-    chat: ChatId,
+    chat: SessionId,
     after: i64,
     want: usize,
 ) -> Vec<RendererSequencedEvent> {
@@ -133,7 +138,7 @@ async fn read_until_turns_end(
 async fn read_until_turn_end(
     addr: SocketAddr,
     token: &str,
-    chat: ChatId,
+    chat: SessionId,
     after: i64,
 ) -> Vec<RendererSequencedEvent> {
     read_until_turns_end(addr, token, chat, after, 1).await
@@ -316,11 +321,11 @@ async fn ws_replays_a_journal_gap_before_accepting_a_later_live_event() {
     };
     assert_eq!(store.append_event(chat.id, &second).await.unwrap(), 2);
     assert_eq!(store.append_event(chat.id, &third).await.unwrap(), 3);
-    let _ = state.events.sender(chat.id).send(SequencedEvent {
+    let _ = state.events.sender(chat.id).send(SequencedAgentEvent {
         seq: 3,
         event: third,
     });
-    let _ = state.events.sender(chat.id).send(SequencedEvent {
+    let _ = state.events.sender(chat.id).send(SequencedAgentEvent {
         seq: 2,
         event: second.clone(),
     });
@@ -451,7 +456,7 @@ async fn ws_bad_after_cursor_is_a_json_400() {
 #[tokio::test(flavor = "multi_thread")]
 async fn ws_without_a_token_is_rejected() {
     let (addr, _token, _store, _dir) = serve_app_with(Arc::new(FakeProvider)).await;
-    let chat = ChatId::new();
+    let chat = SessionId::new();
     let request = format!("ws://{addr}/chats/{chat}/events")
         .into_client_request()
         .unwrap();
@@ -511,7 +516,7 @@ async fn ws_subprotocol_wrong_token_is_rejected() {
     use crate::auth::{WS_HANDSHAKE_SUBPROTOCOL, WS_TOKEN_SUBPROTOCOL_PREFIX};
 
     let (addr, _token, _store, _dir) = serve_app_with(Arc::new(FakeProvider)).await;
-    let chat = ChatId::new();
+    let chat = SessionId::new();
     let mut request = format!("ws://{addr}/chats/{chat}/events")
         .into_client_request()
         .unwrap();

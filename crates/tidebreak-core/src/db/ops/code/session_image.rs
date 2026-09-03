@@ -12,7 +12,7 @@
 
 use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set, TransactionTrait};
 
-use crate::code::{CodeSessionId, CodeSessionLifecycle};
+use crate::code::{SessionId, SessionLifecycle};
 use crate::error::Result;
 use crate::image::{ImageMediaType, ImageRef};
 use crate::{AgentError, OwnerId};
@@ -33,7 +33,7 @@ use super::acquire_code_session_write_lock;
 pub async fn publish_session_image(
     store: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     image: &ImageRef,
     created_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<bool> {
@@ -45,9 +45,9 @@ pub async fn publish_session_image(
         transaction.rollback().await.map_err(store_err)?;
         return Ok(false);
     }
-    let session_is_live = entities::code_session::Entity::find_by_id(session_id.0)
-        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
-        .filter(entities::code_session::Column::Lifecycle.ne(CodeSessionLifecycle::Ended.as_str()))
+    let session_is_live = entities::session::Entity::find_by_id(session_id.0)
+        .filter(entities::session::Column::Owner.eq(owner.as_str()))
+        .filter(entities::session::Column::Lifecycle.ne(SessionLifecycle::Ended.as_str()))
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -101,7 +101,7 @@ pub async fn publish_session_image(
 pub async fn get_published_session_image(
     store: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     blob_id: uuid::Uuid,
 ) -> Result<Option<ImageRef>> {
     get_published_session_image_on(&store.conn, owner, session_id, blob_id).await
@@ -110,7 +110,7 @@ pub async fn get_published_session_image(
 async fn get_published_session_image_on<C>(
     conn: &C,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     blob_id: uuid::Uuid,
 ) -> Result<Option<ImageRef>>
 where

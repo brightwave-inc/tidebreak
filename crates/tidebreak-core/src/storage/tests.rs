@@ -11,8 +11,8 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::error::{AgentError, Result};
-use crate::event::{AgentEvent, SequencedEvent};
-use crate::id::{CallId, ChatId, DocumentId, ProjectId, RootAttachmentChangeId};
+use crate::event::{AgentEvent, SequencedAgentEvent};
+use crate::id::{CallId, DocumentId, ProjectId, RootAttachmentChangeId, SessionId};
 use crate::model::{
     validate_chat_root_projection, validate_chat_root_projection_against_project,
     validate_project_root_projection, ChatRootAttachment, RootAttachmentChangeAction,
@@ -38,12 +38,12 @@ struct MemDocumentState {
 struct MemStore {
     projects: Mutex<HashMap<ProjectId, Project>>,
     document_state: Mutex<MemDocumentState>,
-    chats: Mutex<HashMap<ChatId, Chat>>,
+    chats: Mutex<HashMap<SessionId, Chat>>,
     root_attachment_changes: Mutex<HashMap<RootAttachmentChangeId, RootAttachmentChange>>,
     settings: Mutex<HashMap<String, Value>>,
-    events: Mutex<Vec<(ChatId, SequencedEvent)>>,
+    events: Mutex<Vec<(SessionId, SequencedAgentEvent)>>,
     tool_calls: Mutex<HashMap<crate::id::CallId, ToolCallRecord>>,
-    tool_history_order: Mutex<HashMap<crate::id::CallId, (ChatId, i64)>>,
+    tool_history_order: Mutex<HashMap<crate::id::CallId, (SessionId, i64)>>,
     tool_call_lease_tokens: Mutex<HashMap<crate::id::CallId, uuid::Uuid>>,
 }
 
@@ -51,7 +51,7 @@ impl MemStore {
     fn resolve_mem_tool_call(
         &self,
         id: CallId,
-        client_authority: Option<(ChatId, uuid::Uuid, chrono::DateTime<chrono::Utc>, bool)>,
+        client_authority: Option<(SessionId, uuid::Uuid, chrono::DateTime<chrono::Utc>, bool)>,
         resolution: &ToolCallResolution,
         resolved_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<ResolveToolCallOutcome> {
@@ -458,13 +458,13 @@ impl Store for MemStore {
         chats.insert(chat.id, chat.clone());
         Ok(chat)
     }
-    async fn get_chat(&self, id: ChatId) -> Result<Option<Chat>> {
+    async fn get_chat(&self, id: SessionId) -> Result<Option<Chat>> {
         Ok(self.chats.lock().unwrap().get(&id).cloned())
     }
     async fn list_chats(&self) -> Result<Vec<Chat>> {
         Ok(self.chats.lock().unwrap().values().cloned().collect())
     }
-    async fn get_chat_transcript(&self, id: ChatId) -> Result<Option<ChatTranscriptSnapshot>> {
+    async fn get_chat_transcript(&self, id: SessionId) -> Result<Option<ChatTranscriptSnapshot>> {
         if !self.chats.lock().unwrap().contains_key(&id) {
             return Ok(None);
         }
@@ -488,19 +488,19 @@ impl Store for MemStore {
             last_event_seq,
         }))
     }
-    async fn set_chat_model(&self, id: ChatId, model: Option<String>) -> Result<()> {
+    async fn set_chat_model(&self, id: SessionId, model: Option<String>) -> Result<()> {
         if let Some(chat) = self.chats.lock().unwrap().get_mut(&id) {
             chat.model = model;
         }
         Ok(())
     }
-    async fn set_chat_title(&self, id: ChatId, title: Option<String>) -> Result<()> {
+    async fn set_chat_title(&self, id: SessionId, title: Option<String>) -> Result<()> {
         if let Some(chat) = self.chats.lock().unwrap().get_mut(&id) {
             chat.title = title;
         }
         Ok(())
     }
-    async fn set_chat_title_if_unset(&self, id: ChatId, title: &str) -> Result<bool> {
+    async fn set_chat_title_if_unset(&self, id: SessionId, title: &str) -> Result<bool> {
         let mut chats = self.chats.lock().unwrap();
         let Some(chat) = chats.get_mut(&id) else {
             return Ok(false);
@@ -513,7 +513,7 @@ impl Store for MemStore {
     }
     async fn update_chat_metadata(
         &self,
-        id: ChatId,
+        id: SessionId,
         title: Option<Option<String>>,
         model: Option<Option<String>>,
         reasoning_effort: Option<Option<ReasoningEffort>>,
@@ -541,7 +541,11 @@ impl Store for MemStore {
         }
         Ok(true)
     }
-    async fn set_chat_memory_incognito(&self, id: ChatId, memory_incognito: bool) -> Result<bool> {
+    async fn set_chat_memory_incognito(
+        &self,
+        id: SessionId,
+        memory_incognito: bool,
+    ) -> Result<bool> {
         let mut chats = self.chats.lock().unwrap();
         let Some(chat) = chats.get_mut(&id) else {
             return Ok(false);
@@ -834,7 +838,7 @@ impl Store for MemStore {
     async fn append_message(&self, _message: &Message) -> Result<()> {
         Ok(())
     }
-    async fn list_messages(&self, _chat_id: ChatId) -> Result<Vec<Message>> {
+    async fn list_messages(&self, _chat_id: SessionId) -> Result<Vec<Message>> {
         Ok(vec![])
     }
     async fn accept_tool_call(&self, call: &ToolCallRecord) -> Result<AcceptToolCallOutcome> {
@@ -874,7 +878,7 @@ impl Store for MemStore {
     async fn claim_client_tool_call(
         &self,
         id: CallId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         executor_id: uuid::Uuid,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
@@ -931,7 +935,7 @@ impl Store for MemStore {
     async fn heartbeat_client_tool_call(
         &self,
         id: CallId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
         lease_expires_at: chrono::DateTime<chrono::Utc>,
@@ -975,7 +979,7 @@ impl Store for MemStore {
     async fn resolve_client_tool_call(
         &self,
         id: CallId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
         resolution: &ToolCallResolution,
@@ -991,7 +995,7 @@ impl Store for MemStore {
     async fn resolve_client_tool_call_and_append_event(
         &self,
         id: CallId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
         resolution: &ToolCallResolution,
@@ -1011,7 +1015,7 @@ impl Store for MemStore {
     async fn resolve_expired_client_tool_call(
         &self,
         id: CallId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
         resolution: &ToolCallResolution,
@@ -1027,7 +1031,7 @@ impl Store for MemStore {
     async fn resolve_expired_client_tool_call_and_append_event(
         &self,
         id: CallId,
-        chat_id: ChatId,
+        chat_id: SessionId,
         lease_token: uuid::Uuid,
         now: chrono::DateTime<chrono::Utc>,
         resolution: &ToolCallResolution,
@@ -1044,7 +1048,10 @@ impl Store for MemStore {
             terminal_event: None,
         })
     }
-    async fn list_pending_client_tool_calls(&self, chat_id: ChatId) -> Result<Vec<ToolCallRecord>> {
+    async fn list_pending_client_tool_calls(
+        &self,
+        chat_id: SessionId,
+    ) -> Result<Vec<ToolCallRecord>> {
         let mut calls: Vec<_> = self
             .tool_calls
             .lock()
@@ -1061,7 +1068,7 @@ impl Store for MemStore {
         calls.sort_by_key(|call| history.get(&call.id).map(|(_, order)| *order));
         Ok(calls)
     }
-    async fn list_tool_calls(&self, chat_id: ChatId) -> Result<Vec<ToolCallRecord>> {
+    async fn list_tool_calls(&self, chat_id: SessionId) -> Result<Vec<ToolCallRecord>> {
         let mut calls: Vec<_> = self
             .tool_calls
             .lock()
@@ -1088,19 +1095,23 @@ impl Store for MemStore {
         self.settings.lock().unwrap().remove(key);
         Ok(())
     }
-    async fn append_event(&self, chat_id: ChatId, event: &AgentEvent) -> Result<i64> {
+    async fn append_event(&self, chat_id: SessionId, event: &AgentEvent) -> Result<i64> {
         let mut events = self.events.lock().unwrap();
         let seq = events.iter().filter(|(id, _)| *id == chat_id).count() as i64 + 1;
         events.push((
             chat_id,
-            SequencedEvent {
+            SequencedAgentEvent {
                 seq,
                 event: event.clone(),
             },
         ));
         Ok(seq)
     }
-    async fn list_events(&self, chat_id: ChatId, after: i64) -> Result<Vec<SequencedEvent>> {
+    async fn list_events(
+        &self,
+        chat_id: SessionId,
+        after: i64,
+    ) -> Result<Vec<SequencedAgentEvent>> {
         Ok(self
             .events
             .lock()
@@ -1161,7 +1172,7 @@ fn mem_store_create_document_rejects_an_unknown_project() {
 fn store_is_object_safe_and_roundtrips() {
     let store: Arc<dyn Store> = Arc::new(MemStore::default());
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -1208,7 +1219,7 @@ fn store_is_object_safe_and_roundtrips() {
 fn custom_store_atomic_chat_default_fails_closed() {
     let store: Arc<dyn Store> = Arc::new(MemStore::default());
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -1228,7 +1239,7 @@ fn custom_store_atomic_chat_default_fails_closed() {
     assert_eq!(created, chat);
 
     let rejected = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         ..chat
     };
     block_on(store.set_setting("model", &serde_json::json!("before"))).unwrap();

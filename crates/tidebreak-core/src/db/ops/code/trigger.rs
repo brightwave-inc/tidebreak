@@ -11,9 +11,9 @@ use sea_orm::{
 };
 
 use crate::code::{
-    CodeSessionId, CodeSessionLifecycle, CodeTrigger, CodeTriggerAction, CodeTriggerCondition,
-    CodeTriggerDeliveryId, CodeTriggerDeliverySink, CodeTriggerFire, CodeTriggerFireIdentity,
-    CodeTriggerFirePayload, CodeTriggerFireState, CodeTriggerId, CodeTurn, CodeTurnId, RepoId,
+    CodeTrigger, CodeTriggerAction, CodeTriggerCondition, CodeTriggerDeliveryId,
+    CodeTriggerDeliverySink, CodeTriggerFire, CodeTriggerFireIdentity, CodeTriggerFirePayload,
+    CodeTriggerFireState, CodeTriggerId, RepoId, SessionId, SessionLifecycle, Turn, TurnId,
     WorkspaceId,
 };
 use crate::error::{AgentError, Result};
@@ -48,8 +48,8 @@ pub async fn accept_trigger_delivery(
     delivery_id: CodeTriggerDeliveryId,
     lease_token: uuid::Uuid,
     sink: CodeTriggerDeliverySink,
-    session_id: CodeSessionId,
-    turn_id: Option<CodeTurnId>,
+    session_id: SessionId,
+    turn_id: Option<TurnId>,
     accepted_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<bool> {
     let transaction = store.conn.begin().await.map_err(store_err)?;
@@ -75,7 +75,7 @@ pub async fn accept_trigger_turn_delivery(
     owner: &OwnerId,
     delivery_id: CodeTriggerDeliveryId,
     lease_token: uuid::Uuid,
-    turn: &CodeTurn,
+    turn: &Turn,
     accepted_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<bool> {
     let transaction = store.conn.begin().await.map_err(store_err)?;
@@ -87,8 +87,8 @@ pub async fn accept_trigger_turn_delivery(
             turn.session_id
         )));
     }
-    let session = entities::code_session::Entity::find_by_id(turn.session_id.0)
-        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+    let session = entities::session::Entity::find_by_id(turn.session_id.0)
+        .filter(entities::session::Column::Owner.eq(owner.as_str()))
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -98,7 +98,7 @@ pub async fn accept_trigger_turn_delivery(
                 turn.session_id
             ))
         })?;
-    let lifecycle = CodeSessionLifecycle::from_str(&session.lifecycle).ok_or_else(|| {
+    let lifecycle = SessionLifecycle::from_str(&session.lifecycle).ok_or_else(|| {
         AgentError::Store(format!(
             "code session {} has unknown lifecycle {}",
             session.id, session.lifecycle
@@ -106,7 +106,7 @@ pub async fn accept_trigger_turn_delivery(
     })?;
     if matches!(
         lifecycle,
-        CodeSessionLifecycle::Running | CodeSessionLifecycle::Fenced | CodeSessionLifecycle::Ended
+        SessionLifecycle::Running | SessionLifecycle::Fenced | SessionLifecycle::Ended
     ) {
         return Err(AgentError::Store(format!(
             "code trigger turn session {} cannot accept a turn while {}",
@@ -126,14 +126,14 @@ pub async fn accept_trigger_turn_delivery(
     .await?;
     if accepted {
         super::turn::insert_turn_on(&transaction, owner, turn).await?;
-        let updated = entities::code_session::Entity::update_many()
+        let updated = entities::session::Entity::update_many()
             .col_expr(
-                entities::code_session::Column::Lifecycle,
-                Expr::value(CodeSessionLifecycle::Running.as_str()),
+                entities::session::Column::Lifecycle,
+                Expr::value(SessionLifecycle::Running.as_str()),
             )
-            .filter(entities::code_session::Column::Id.eq(turn.session_id.0))
-            .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
-            .filter(entities::code_session::Column::Lifecycle.eq(session.lifecycle))
+            .filter(entities::session::Column::Id.eq(turn.session_id.0))
+            .filter(entities::session::Column::Owner.eq(owner.as_str()))
+            .filter(entities::session::Column::Lifecycle.eq(session.lifecycle))
             .exec(&transaction)
             .await
             .map_err(store_err)?;
@@ -158,7 +158,7 @@ pub async fn accept_trigger_attention_delivery(
     owner: &OwnerId,
     delivery_id: CodeTriggerDeliveryId,
     lease_token: uuid::Uuid,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     attention: &Attention,
     accepted_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<bool> {
@@ -170,8 +170,8 @@ pub async fn accept_trigger_attention_delivery(
             "code trigger attention session {session_id} not found"
         )));
     }
-    let session_exists = entities::code_session::Entity::find_by_id(session_id.0)
-        .filter(entities::code_session::Column::Owner.eq(owner.as_str()))
+    let session_exists = entities::session::Entity::find_by_id(session_id.0)
+        .filter(entities::session::Column::Owner.eq(owner.as_str()))
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -214,8 +214,8 @@ async fn insert_delivery_receipt_on<C>(
     owner: &OwnerId,
     delivery_id: CodeTriggerDeliveryId,
     sink: CodeTriggerDeliverySink,
-    session_id: CodeSessionId,
-    turn_id: Option<CodeTurnId>,
+    session_id: SessionId,
+    turn_id: Option<TurnId>,
     accepted_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<bool>
 where

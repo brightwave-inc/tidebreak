@@ -218,7 +218,7 @@ impl ModelProvider for MixedQuestionWithReasoningProvider {
 async fn a_rejected_mixed_control_step_does_not_replay_its_thinking_on_the_retry() {
     let db = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect_test_sqlite_fixture(&format!(
+        DbStore::connect(&format!(
             "sqlite://{}?mode=rwc",
             db.path().join("mixed-question-thinking.db").display()
         ))
@@ -226,7 +226,7 @@ async fn a_rejected_mixed_control_step_does_not_replay_its_thinking_on_the_retry
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -310,7 +310,7 @@ async fn turn_runs_a_tool_call_then_finishes() {
 
     let db = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect_test_sqlite_fixture(&format!(
+        DbStore::connect(&format!(
             "sqlite://{}?mode=rwc",
             db.path().join("t.db").display()
         ))
@@ -318,7 +318,7 @@ async fn turn_runs_a_tool_call_then_finishes() {
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -398,7 +398,7 @@ async fn claimed_turn_defers_terminal_publication_to_durable_worker() {
 
     let db = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect_test_sqlite_fixture(&format!(
+        DbStore::connect(&format!(
             "sqlite://{}?mode=rwc",
             db.path().join("t.db").display()
         ))
@@ -406,7 +406,7 @@ async fn claimed_turn_defers_terminal_publication_to_durable_worker() {
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -805,7 +805,7 @@ async fn claimed_turn_defers_terminal_publication_to_durable_worker() {
 async fn tool_context_inherits_the_chats_project_scope() {
     let db = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect_test_sqlite_fixture(&format!(
+        DbStore::connect(&format!(
             "sqlite://{}?mode=rwc",
             db.path().join("t.db").display()
         ))
@@ -821,7 +821,7 @@ async fn tool_context_inherits_the_chats_project_scope() {
     };
     store.create_project(&project).await.unwrap();
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: Some(project.id),
         title: None,
         model: None,
@@ -873,7 +873,7 @@ async fn a_turn_at_the_step_ceiling_concludes_with_an_answer() {
     std::fs::write(workspace.path().join("note.txt"), "secret").unwrap();
     let db = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect_test_sqlite_fixture(&format!(
+        DbStore::connect(&format!(
             "sqlite://{}?mode=rwc",
             db.path().join("t.db").display()
         ))
@@ -881,7 +881,7 @@ async fn a_turn_at_the_step_ceiling_concludes_with_an_answer() {
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -956,7 +956,7 @@ async fn a_turn_at_the_step_ceiling_concludes_with_an_answer() {
 async fn a_chat_only_wrap_up_sends_no_tool_choice_and_still_answers() {
     let db = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect_test_sqlite_fixture(&format!(
+        DbStore::connect(&format!(
             "sqlite://{}?mode=rwc",
             db.path().join("t.db").display()
         ))
@@ -964,7 +964,7 @@ async fn a_chat_only_wrap_up_sends_no_tool_choice_and_still_answers() {
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -1032,7 +1032,7 @@ async fn a_wrap_up_a_provider_answers_with_a_tool_call_retries_without_tools() {
     std::fs::write(workspace.path().join("note.txt"), "secret").unwrap();
     let db = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect_test_sqlite_fixture(&format!(
+        DbStore::connect(&format!(
             "sqlite://{}?mode=rwc",
             db.path().join("t.db").display()
         ))
@@ -1040,7 +1040,7 @@ async fn a_wrap_up_a_provider_answers_with_a_tool_call_retries_without_tools() {
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -1106,7 +1106,7 @@ async fn a_wrap_up_a_provider_answers_with_a_tool_call_retries_without_tools() {
 async fn a_chat_only_model_never_receives_tool_schemas() {
     let db = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect_test_sqlite_fixture(&format!(
+        DbStore::connect(&format!(
             "sqlite://{}?mode=rwc",
             db.path().join("t.db").display()
         ))
@@ -1114,7 +1114,7 @@ async fn a_chat_only_model_never_receives_tool_schemas() {
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -1166,7 +1166,7 @@ async fn tool_only_provider_replay_survives_the_turn_that_produced_it() {
     std::fs::write(workspace.path().join("note.txt"), "secret").unwrap();
     let db = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect_test_sqlite_fixture(&format!(
+        DbStore::connect(&format!(
             "sqlite://{}?mode=rwc",
             db.path().join("t.db").display()
         ))
@@ -1174,7 +1174,7 @@ async fn tool_only_provider_replay_survives_the_turn_that_produced_it() {
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -1361,7 +1361,7 @@ impl ModelProvider for RefusalProvider {
 async fn run_claimed_refusal(events: Vec<ProviderEvent>) -> (AgentTurnOutcome, Vec<AgentEvent>) {
     let db = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect_test_sqlite_fixture(&format!(
+        DbStore::connect(&format!(
             "sqlite://{}?mode=rwc",
             db.path().join("refusal.db").display()
         ))
@@ -1369,7 +1369,7 @@ async fn run_claimed_refusal(events: Vec<ProviderEvent>) -> (AgentTurnOutcome, V
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -1560,7 +1560,7 @@ async fn an_empty_model_response_does_not_complete_an_in_process_turn() {
 
     let db = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect_test_sqlite_fixture(&format!(
+        DbStore::connect(&format!(
             "sqlite://{}?mode=rwc",
             db.path().join("t.db").display()
         ))
@@ -1568,7 +1568,7 @@ async fn an_empty_model_response_does_not_complete_an_in_process_turn() {
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -1641,7 +1641,7 @@ async fn a_mid_stream_failure_reaches_the_client_with_its_classification() {
 
     let db = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect_test_sqlite_fixture(&format!(
+        DbStore::connect(&format!(
             "sqlite://{}?mode=rwc",
             db.path().join("t.db").display()
         ))
@@ -1649,7 +1649,7 @@ async fn a_mid_stream_failure_reaches_the_client_with_its_classification() {
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -1830,7 +1830,7 @@ async fn a_mid_stream_context_overflow_restarts_after_discarding_the_candidate()
 async fn a_stolen_lease_fences_intermediate_tool_effects() {
     let db = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect_test_sqlite_fixture(&format!(
+        DbStore::connect(&format!(
             "sqlite://{}?mode=rwc",
             db.path().join("t.db").display()
         ))
@@ -1838,7 +1838,7 @@ async fn a_stolen_lease_fences_intermediate_tool_effects() {
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,
@@ -1910,7 +1910,7 @@ async fn a_stolen_lease_fences_intermediate_tool_effects() {
 async fn retry_abandons_an_inherited_pending_tool_without_replaying_it() {
     let db = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect_test_sqlite_fixture(&format!(
+        DbStore::connect(&format!(
             "sqlite://{}?mode=rwc",
             db.path().join("t.db").display()
         ))
@@ -1918,7 +1918,7 @@ async fn retry_abandons_an_inherited_pending_tool_without_replaying_it() {
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,

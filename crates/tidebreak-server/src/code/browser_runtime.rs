@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use tidebreak_core::{
     BrowserActArgs, BrowserActResult, BrowserListResult, BrowserNavigateArgs,
     BrowserNavigateResult, BrowserPageSnapshot, BrowserScreenshotArgs, BrowserScreenshotResult,
-    BrowserSnapshotArgs, BrowserWaitArgs, BrowserWaitResult, CodeSessionId, OwnerId, WorkspaceId,
+    BrowserSnapshotArgs, BrowserWaitArgs, BrowserWaitResult, OwnerId, SessionId, WorkspaceId,
 };
 
 // ── BrowserRuntimeScope ─────────────────────────────────────────────────────
@@ -32,7 +32,7 @@ use tidebreak_core::{
 pub struct BrowserRuntimeScope {
     pub owner: OwnerId,
     pub workspace: WorkspaceId,
-    pub session: CodeSessionId,
+    pub session: SessionId,
 }
 
 impl From<crate::code::browser_channel::BrowserSubject> for BrowserRuntimeScope {

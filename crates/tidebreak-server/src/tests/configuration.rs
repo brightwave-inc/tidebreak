@@ -4996,14 +4996,12 @@ async fn enabling_a_plugin_provisions_the_host_tools_its_skills_declare() {
     #[derive(Default)]
     struct RecordingBroker {
         ensured: std::sync::Mutex<Vec<tidebreak_code_execution::HostDep>>,
-        changed: tokio::sync::Notify,
     }
 
     #[async_trait]
     impl tidebreak_code_execution::HostToolBroker for RecordingBroker {
         fn ensure(&self, tool: tidebreak_code_execution::HostDep) {
             self.ensured.lock().unwrap().push(tool);
-            self.changed.notify_one();
         }
 
         async fn status(
@@ -5051,14 +5049,17 @@ async fn enabling_a_plugin_provisions_the_host_tools_its_skills_declare() {
     assert_eq!(response.status(), StatusCode::OK);
 
     // The pass is spawned rather than awaited, so the response can land first.
-    let ensured = loop {
-        let changed = broker.changed.notified();
-        let ensured = broker.ensured.lock().unwrap().clone();
-        if ensured.contains(&tidebreak_code_execution::HostDep::Node) {
-            break ensured;
+    let ensured = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let ensured = broker.ensured.lock().unwrap().clone();
+            if ensured.contains(&tidebreak_code_execution::HostDep::Node) {
+                return ensured;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        changed.await;
-    };
+    })
+    .await
+    .expect("the enable write should provision the bundle's host tools");
     assert!(ensured.contains(&tidebreak_code_execution::HostDep::LibreOffice));
 
     // Re-asserting the same state switches nothing on, so nothing is
@@ -5071,7 +5072,7 @@ async fn enabling_a_plugin_provisions_the_host_tools_its_skills_declare() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     assert!(broker.ensured.lock().unwrap().is_empty());
 }
 
@@ -5380,7 +5381,7 @@ async fn the_catalog_lists_prompts_and_serves_their_bodies() {
 async fn send_message_invoking(
     router: &Router,
     bearer: &str,
-    chat: ChatId,
+    chat: SessionId,
     invoked: &[&str],
 ) -> axum::response::Response {
     router
@@ -5467,7 +5468,7 @@ async fn an_invoked_skill_must_be_enabled_or_the_turn_is_refused() {
 async fn steer_invoking(
     router: &Router,
     bearer: &str,
-    chat: ChatId,
+    chat: SessionId,
     turn: TurnId,
     steer_id: TurnSteerId,
     invoked: &[&str],

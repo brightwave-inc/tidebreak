@@ -5,7 +5,7 @@ use chrono::Utc;
 use serde_json::Value;
 use thiserror::Error;
 use tidebreak_core::{
-    ApprovalClass, ChatId, ResultEntry, ResultEntryKind, Tool, ToolCtx, ToolErrorCategory,
+    ApprovalClass, ResultEntry, ResultEntryKind, SessionId, Tool, ToolCtx, ToolErrorCategory,
     ToolOutput, ToolSpec, WebExtractArgs, WebSearchArgs,
 };
 use url::Url;
@@ -39,7 +39,7 @@ pub struct WebSearchResolverError;
 pub trait WebSearchResolver: Send + Sync {
     async fn resolve(
         &self,
-        chat: Option<ChatId>,
+        chat: Option<SessionId>,
     ) -> Result<Option<Arc<dyn WebSearchProvider>>, WebSearchResolverError>;
 }
 
@@ -318,7 +318,7 @@ fn page_entry(result: &WebSearchResult) -> ResultEntry {
 mod tests {
     use std::sync::Mutex;
 
-    use tidebreak_core::{ChatId, Tool};
+    use tidebreak_core::{SessionId, Tool};
 
     use super::*;
     use crate::web_search::{WebSearchProviderKind, WebSearchResponse};
@@ -332,7 +332,7 @@ mod tests {
     impl WebSearchResolver for FakeResolver {
         async fn resolve(
             &self,
-            _chat: Option<ChatId>,
+            _chat: Option<SessionId>,
         ) -> Result<Option<Arc<dyn WebSearchProvider>>, WebSearchResolverError> {
             if self.fail {
                 Err(WebSearchResolverError)
@@ -368,7 +368,7 @@ mod tests {
     }
 
     fn context() -> ToolCtx {
-        ToolCtx::without_private_scratch(ChatId::new(), None)
+        ToolCtx::without_private_scratch(SessionId::new(), None)
     }
 
     #[test]

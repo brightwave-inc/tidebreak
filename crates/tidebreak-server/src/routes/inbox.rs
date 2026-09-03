@@ -10,10 +10,8 @@
 //!
 //! Decision 48 step 3 made this one queue over both surfaces. An entry is a
 //! conversation carrying an [`Attention`] in the shared vocabulary, with the
-//! parked items behind it for deep links. Chat and code still have separate
-//! id spaces, so the conversation reference is tagged; that tag is the seam
-//! step 5 removes when the entities merge, and it is deliberately the only
-//! place either surface's shape shows through.
+//! parked items behind it for deep links. Chat and code now share one session
+//! id space, so every entry names the same conversation shape.
 //!
 //! Entries stay as opaque as the per-conversation attention summary.
 //! Identity, kind, the title, and when it parked are enough to triage;
@@ -22,7 +20,7 @@
 
 use serde::Serialize;
 use tidebreak_core::{
-    Attention, AttentionState, CallId, ChatId, CodeSessionId, InboxItemKind, TurnId, WorkspaceId,
+    Attention, AttentionState, CallId, InboxItemKind, SessionId, TurnId, WorkspaceId,
 };
 
 use crate::error::ServerError;
@@ -31,24 +29,13 @@ use crate::scoped_store::ScopedStore;
 use crate::state::AppState;
 
 /// Which conversation an entry belongs to.
-///
-/// Tagged because chat ids and code session ids are still separate spaces
-/// (the repository check `chat_and_code_entities_do_not_cross_reference`
-/// enforces it). When step 5 merges the entities this collapses to one id.
 #[derive(Debug, Serialize, ts_rs::TS)]
-#[serde(tag = "surface", rename_all = "snake_case")]
-pub enum InboxConversation {
-    /// A conversation with the internal engine.
-    Chat { chat_id: ChatId },
-    /// A conversation with an external agent engine.
-    ///
-    /// Carries the workspace too: a code conversation is reached through its
-    /// workspace, so a session id alone is not a link the reader can follow.
-    Code {
-        session_id: CodeSessionId,
-        /// `None` for a session with no workspace: the in-process engine's.
-        workspace_id: Option<WorkspaceId>,
-    },
+pub struct InboxConversation {
+    pub session_id: SessionId,
+    /// Present when the conversation belongs to a repo-backed workspace.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub workspace_id: Option<WorkspaceId>,
 }
 
 /// One item waiting on the reader, and where to go to answer it.
@@ -96,10 +83,12 @@ pub async fn list_inbox(
     let attention = store.chat_attention(&items).await?;
 
     let mut entries: Vec<InboxEntrySnapshot> = Vec::new();
-    let mut by_chat: std::collections::HashMap<ChatId, usize> = std::collections::HashMap::new();
+    let mut by_session: std::collections::HashMap<SessionId, usize> =
+        std::collections::HashMap::new();
 
     for item in items {
-        let index = match by_chat.get(&item.chat_id) {
+        let session_id = SessionId(item.chat_id.0);
+        let index = match by_session.get(&session_id) {
             Some(index) => *index,
             None => {
                 let attention = attention
@@ -115,15 +104,16 @@ pub async fn list_inbox(
                         )
                     });
                 entries.push(InboxEntrySnapshot {
-                    conversation: InboxConversation::Chat {
-                        chat_id: item.chat_id,
+                    conversation: InboxConversation {
+                        session_id,
+                        workspace_id: None,
                     },
                     title: item.chat_title.clone(),
                     attention,
                     items: Vec::new(),
                     waiting_since: item.requested_at,
                 });
-                by_chat.insert(item.chat_id, entries.len() - 1);
+                by_session.insert(session_id, entries.len() - 1);
                 entries.len() - 1
             }
         };
@@ -167,11 +157,15 @@ pub async fn list_inbox(
                 if !wants_the_reader(&session.attention.state) {
                     continue;
                 }
+                if let Some(index) = by_session.get(&session.id).copied() {
+                    entries[index].conversation.workspace_id = session.workspace_id;
+                    continue;
+                }
                 entries.push(InboxEntrySnapshot {
                     title: session
                         .workspace_id
                         .and_then(|workspace_id| titles.get(&workspace_id).cloned()),
-                    conversation: InboxConversation::Code {
+                    conversation: InboxConversation {
                         session_id: session.id,
                         workspace_id: session.workspace_id,
                     },
@@ -179,6 +173,7 @@ pub async fn list_inbox(
                     items: Vec::new(),
                     waiting_since: session.created_at,
                 });
+                by_session.insert(session.id, entries.len() - 1);
             }
         }
     }
@@ -187,7 +182,10 @@ pub async fn list_inbox(
     // needs to see, and it is what survives any cap a client applies.
     entries.sort_by(|left, right| {
         left.waiting_since.cmp(&right.waiting_since).then_with(|| {
-            format!("{:?}", left.conversation).cmp(&format!("{:?}", right.conversation))
+            left.conversation
+                .session_id
+                .to_string()
+                .cmp(&right.conversation.session_id.to_string())
         })
     });
     Ok(Json(entries))

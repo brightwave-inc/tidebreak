@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use tidebreak_core::{
-    AgentRun, ChatId, CompactionPolicy, OwnerId, PermissionMode, PromptCacheRetention,
-    ReasoningEffort, Store, TurnId, DEFAULT_COMPACTION_MIN_THRESHOLD_TOKENS,
+    AgentRun, CompactionPolicy, OwnerId, PermissionMode, PromptCacheRetention, ReasoningEffort,
+    SessionId, Store, TurnId, DEFAULT_COMPACTION_MIN_THRESHOLD_TOKENS,
     DEFAULT_COMPACTION_PROTECT_RECENT_MESSAGES, DEFAULT_COMPACTION_TARGET_FRACTION,
     DEFAULT_COMPACTION_THRESHOLD_FRACTION,
 };
@@ -920,7 +920,7 @@ pub async fn delete_code_execution_credential(
 pub async fn post_undo_turn_file_changes(
     State(state): State<AppState>,
     store: ScopedStore,
-    Path((chat_id, turn_id)): Path<(ChatId, TurnId)>,
+    Path((chat_id, turn_id)): Path<(SessionId, TurnId)>,
 ) -> Result<Json<ExecTurnUndoOutcome>, ServerError> {
     store.require_chat(chat_id).await?;
     let outcome = undo_turn_file_changes(&*state.store, &*state.blobs, chat_id, turn_id).await?;
@@ -937,7 +937,7 @@ pub async fn post_undo_turn_file_changes(
 pub async fn post_undo_one_file_change(
     State(state): State<AppState>,
     store: ScopedStore,
-    Path((chat_id, turn_id, snapshot_id)): Path<(ChatId, TurnId, uuid::Uuid)>,
+    Path((chat_id, turn_id, snapshot_id)): Path<(SessionId, TurnId, uuid::Uuid)>,
 ) -> Result<Json<ExecFileUndoOutcome>, ServerError> {
     store.require_chat(chat_id).await?;
     undo_one_file_change(&*state.store, &*state.blobs, chat_id, turn_id, snapshot_id)
@@ -953,7 +953,7 @@ pub async fn get_file_change_preview(
     State(state): State<AppState>,
     store: ScopedStore,
     Path((chat_id, turn_id, snapshot_id, revision)): Path<(
-        ChatId,
+        SessionId,
         TurnId,
         uuid::Uuid,
         ExecFilePreviewRevision,

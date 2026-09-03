@@ -26,9 +26,9 @@ async fn park_wait_set_for_test(
         .get_turn(turn_id)
         .await?
         .ok_or_else(|| crate::AgentError::Store("test turn disappeared".into()))?;
-    let existing = crate::db::entities::code_event::Entity::find()
-        .filter(crate::db::entities::code_event::Column::LeaseToken.eq(lease_token))
-        .filter(crate::db::entities::code_event::Column::AttemptEventOrdinal.eq(1))
+    let existing = crate::db::entities::event::Entity::find()
+        .filter(crate::db::entities::event::Column::LeaseToken.eq(lease_token))
+        .filter(crate::db::entities::event::Column::AttemptEventOrdinal.eq(1))
         .one(&store.conn)
         .await
         .map_err(crate::db::store_err)?;
@@ -100,13 +100,13 @@ async fn adapter_agent_wait_resolves_from_the_generic_park() {
         crate::db::code::store_turn_park(
             &store,
             &crate::OwnerId::local(),
-            crate::CodeTurnId(running.id.0),
+            crate::TurnId(running.id.0),
             &park_ref,
             &wait,
         )
         .await
         .unwrap(),
-        Some(crate::CodeTurnStatus::Waiting)
+        Some(crate::TurnStatus::Waiting)
     );
     assert_eq!(complete_next_child(&store, "done").await, child.id);
     assert_eq!(
@@ -132,12 +132,12 @@ async fn adapter_agent_wait_resolves_from_the_generic_park() {
     let turn = crate::db::code::get_turn(
         &store,
         &crate::OwnerId::local(),
-        crate::CodeTurnId(running.id.0),
+        crate::TurnId(running.id.0),
     )
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(turn.status, crate::CodeTurnStatus::Resuming);
+    assert_eq!(turn.status, crate::TurnStatus::Resuming);
     assert_eq!(turn.park_ref.as_deref(), Some(park_ref.as_str()));
     assert_eq!(turn.park_wait, Some(wait));
 }
@@ -181,35 +181,35 @@ async fn adapter_agent_park_preserves_a_resolution_that_won_first() {
         crate::db::code::store_turn_park(
             &store,
             &crate::OwnerId::local(),
-            crate::CodeTurnId(running.id.0),
+            crate::TurnId(running.id.0),
             &park_ref,
             &wait,
         )
         .await
         .unwrap(),
-        Some(crate::CodeTurnStatus::Resuming)
+        Some(crate::TurnStatus::Resuming)
     );
     assert_eq!(
         crate::db::code::clear_turn_park(
             &store,
             &crate::OwnerId::local(),
-            crate::CodeTurnId(running.id.0),
+            crate::TurnId(running.id.0),
             &park_ref,
             &wait,
         )
         .await
         .unwrap(),
-        Some(crate::CodeTurnStatus::Resuming)
+        Some(crate::TurnStatus::Resuming)
     );
     let turn = crate::db::code::get_turn(
         &store,
         &crate::OwnerId::local(),
-        crate::CodeTurnId(running.id.0),
+        crate::TurnId(running.id.0),
     )
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(turn.status, crate::CodeTurnStatus::Resuming);
+    assert_eq!(turn.status, crate::TurnStatus::Resuming);
     assert_eq!(turn.park_ref, None);
     assert_eq!(turn.park_wait, None);
 }
@@ -244,13 +244,13 @@ async fn adapter_agent_park_cancels_with_its_wait_receipt() {
         crate::db::code::store_turn_park(
             &store,
             &crate::OwnerId::local(),
-            crate::CodeTurnId(running.id.0),
+            crate::TurnId(running.id.0),
             &park_ref,
             &park_wait,
         )
         .await
         .unwrap(),
-        Some(crate::CodeTurnStatus::Waiting)
+        Some(crate::TurnStatus::Waiting)
     );
 
     assert!(matches!(
@@ -264,12 +264,12 @@ async fn adapter_agent_park_cancels_with_its_wait_receipt() {
     let turn = crate::db::code::get_turn(
         &store,
         &crate::OwnerId::local(),
-        crate::CodeTurnId(running.id.0),
+        crate::TurnId(running.id.0),
     )
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(turn.status, crate::CodeTurnStatus::Interrupted);
+    assert_eq!(turn.status, crate::TurnStatus::Interrupted);
     assert_eq!(turn.park_ref.as_deref(), Some(park_ref.as_str()));
     assert_eq!(turn.park_wait, Some(park_wait));
     assert_cancelled_wait_shape(
@@ -305,7 +305,7 @@ async fn assert_cancelled_wait_shape(
     assert!(!members.is_empty());
     assert!(members.iter().all(|member| !member.open));
     let call = store
-        .list_tool_calls(crate::ChatId(wait.session_id))
+        .list_tool_calls(crate::SessionId(wait.session_id))
         .await
         .unwrap()
         .into_iter()
@@ -313,7 +313,7 @@ async fn assert_cancelled_wait_shape(
         .unwrap();
     assert_eq!(call.status, ToolCallStatus::Cancelled);
     assert_eq!(call.result.as_deref(), Some(expected_result));
-    let event = crate::db::entities::code_event::Entity::find_by_id((wait.session_id, event_seq))
+    let event = crate::db::entities::event::Entity::find_by_id((wait.session_id, event_seq))
         .one(&store.conn)
         .await
         .unwrap()

@@ -12,7 +12,7 @@ use crate::attention::{AttentionSource, AttentionState};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use super::{CodeApprovalId, CodeTurnId, HarnessKind};
+use super::{ApprovalId, HarnessKind, TurnId};
 use crate::approval::{GrantScope, ToolApprovalKind};
 use crate::error::AgentErrorInfo;
 use crate::preview::{ToolActionPreview, ToolResultPreview};
@@ -76,9 +76,9 @@ impl ToolDetail {
     /// How much this detail says about the call, for the correction channel.
     ///
     /// An engine can open a tool call before its arguments finish streaming,
-    /// so the detail on [`CodeEvent::ToolStarted`] may name nothing. A later
+    /// so the detail on [`Event::ToolStarted`] may name nothing. A later
     /// detail built from the complete arguments rides
-    /// [`CodeEvent::ToolCompleted`] and replaces the first one only when it
+    /// [`Event::ToolCompleted`] and replaces the first one only when it
     /// scores higher, so a correction never downgrades a line that already
     /// names its subject.
     ///
@@ -158,9 +158,9 @@ pub struct Diffstat {
 /// None of the four answers "how full is the window". Summing turn totals
 /// counts the same transcript once per model call, so a long turn reads as a
 /// multiple of the prompt that was actually resident. That reading has its own
-/// field: [`CodeUsage::context_tokens`].
+/// field: [`TurnUsage::context_tokens`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, TS)]
-pub struct CodeUsage {
+pub struct TurnUsage {
     /// Fresh, uncached input tokens. Excludes both cache fields.
     #[serde(default)]
     pub input_tokens: u64,
@@ -206,7 +206,7 @@ pub struct CheckpointHint {
     pub diffstat: Option<Diffstat>,
 }
 
-/// Bounded error carried on [`CodeEvent::TurnFailed`].
+/// Bounded error carried on [`Event::TurnFailed`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct BoundedError {
     /// Short message, already truncated by the adapter.
@@ -225,7 +225,7 @@ pub enum HarnessNoticeLevel {
     Error,
 }
 
-/// Outcome recorded on [`CodeEvent::ApprovalResolved`].
+/// Outcome recorded on [`Event::ApprovalResolved`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ApprovalDecisionKind {
@@ -306,12 +306,12 @@ pub enum InternalApprovalRequest {
     /// A questions card parked the turn; the questions ride the row's kind.
     Questions {
         /// Turn that resumes after the answer commits.
-        turn_id: CodeTurnId,
+        turn_id: TurnId,
     },
     /// A plan proposal parked the turn; the plan body rides the row.
     Plan {
         /// Turn that resumes after the decision commits.
-        turn_id: CodeTurnId,
+        turn_id: TurnId,
     },
 }
 
@@ -323,7 +323,7 @@ pub enum InternalApprovalRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[non_exhaustive]
-pub enum CodeEvent {
+pub enum Event {
     /// The engine session has started (or resumed).
     SessionStarted {
         /// Which engine.
@@ -338,13 +338,13 @@ pub enum CodeEvent {
     /// A user→engine turn has begun.
     TurnStarted {
         /// The turn being processed.
-        turn_id: CodeTurnId,
+        turn_id: TurnId,
     },
     /// You continue a parked turn after a worker restart rather than
     /// starting over. The engine's durable checkpoint is still the same turn.
     TurnResumed {
         /// The turn that continues.
-        turn_id: CodeTurnId,
+        turn_id: TurnId,
     },
     /// A chunk of assistant text.
     AssistantDelta {
@@ -407,7 +407,7 @@ pub enum CodeEvent {
         /// Classification rebuilt from the call's complete arguments.
         ///
         /// Engines open a tool call before its arguments finish streaming, so
-        /// the detail on [`CodeEvent::ToolStarted`] can name nothing. This is
+        /// the detail on [`Event::ToolStarted`] can name nothing. This is
         /// the correction: adapters that see the final arguments fill it in,
         /// and renderers merge it into the started call. It is `None` when
         /// the engine's completion payload carries no arguments.
@@ -432,7 +432,7 @@ pub enum CodeEvent {
     /// An approval is waiting. The body loads from the approvals route.
     ApprovalRequested {
         /// Hint id; the row is the source of truth.
-        approval_id: CodeApprovalId,
+        approval_id: ApprovalId,
         /// What the card asks, for the chat surface's replay. Internal
         /// engine; absent on every row an external adapter writes.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -442,7 +442,7 @@ pub enum CodeEvent {
     /// A parked approval was decided.
     ApprovalResolved {
         /// The approval that was decided.
-        approval_id: CodeApprovalId,
+        approval_id: ApprovalId,
         /// The decision.
         decision: ApprovalDecisionKind,
     },
@@ -460,7 +460,7 @@ pub enum CodeEvent {
     /// The turn finished successfully.
     TurnCompleted {
         /// Token accounting as reported by the engine.
-        usage: CodeUsage,
+        usage: TurnUsage,
         /// Checkpoint recorded at turn end, when any.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
@@ -486,20 +486,20 @@ pub enum CodeEvent {
         /// it. Internal engine.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
-        usage: Option<CodeUsage>,
+        usage: Option<TurnUsage>,
     },
     /// The turn completed with a model refusal rather than a complete
     /// answer. Internal engine.
     TurnRefused {
         /// Token accounting up to the refusal.
-        usage: CodeUsage,
+        usage: TurnUsage,
         /// Category detail and whether visible output is incomplete.
         refusal: RefusalOutcome,
     },
     /// A per-turn checkpoint was recorded.
     CheckpointRecorded {
         /// The turn that ended at this checkpoint.
-        turn_id: CodeTurnId,
+        turn_id: TurnId,
         /// Bounded diffstat.
         diffstat: Diffstat,
     },
@@ -535,7 +535,7 @@ pub enum CodeEvent {
         /// The tool call that committed the replacement.
         call_id: String,
         /// Turn that made the call.
-        turn_id: CodeTurnId,
+        turn_id: TurnId,
     },
     /// The transcript was cut to fit the model's context window before a
     /// model call; the turn continues with reduced context. Internal engine.
@@ -560,13 +560,13 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-/// A [`CodeEvent`] paired with its per-session sequence number.
+/// A [`Event`] paired with its per-session sequence number.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
-pub struct SequencedCodeEvent {
+pub struct SequencedEvent {
     /// Monotonic per-session sequence number; the first event is 1.
     pub seq: i64,
     /// The event at this position.
-    pub event: CodeEvent,
+    pub event: Event,
 }
 
 #[cfg(test)]
@@ -578,7 +578,7 @@ mod tests {
 
     #[test]
     fn event_is_internally_tagged() {
-        let ev = CodeEvent::AssistantDelta { text: "hi".into() };
+        let ev = Event::AssistantDelta { text: "hi".into() };
         let json = serde_json::to_value(&ev).unwrap();
         assert_eq!(json["type"], "assistant_delta");
         assert_eq!(json["text"], "hi");
@@ -618,60 +618,60 @@ mod tests {
         Uuid::from_u128(n)
     }
 
-    fn variant_index(event: &CodeEvent) -> usize {
+    fn variant_index(event: &Event) -> usize {
         match event {
-            CodeEvent::SessionStarted { .. } => 0,
-            CodeEvent::TurnStarted { .. } => 1,
-            CodeEvent::TurnResumed { .. } => 2,
-            CodeEvent::AssistantDelta { .. } => 3,
-            CodeEvent::AssistantMessage { .. } => 4,
-            CodeEvent::ReasoningDelta { .. } => 5,
-            CodeEvent::ToolStarted { .. } => 6,
-            CodeEvent::ToolCompleted { .. } => 7,
-            CodeEvent::FileChanged { .. } => 8,
-            CodeEvent::ApprovalRequested { .. } => 9,
-            CodeEvent::ApprovalResolved { .. } => 10,
-            CodeEvent::UserSteered { .. } => 11,
-            CodeEvent::TurnCompleted { .. } => 12,
-            CodeEvent::TurnFailed { .. } => 13,
-            CodeEvent::TurnInterrupted { .. } => 14,
-            CodeEvent::CheckpointRecorded { .. } => 15,
-            CodeEvent::HarnessNotice { .. } => 16,
-            CodeEvent::AttentionChanged { .. } => 17,
-            CodeEvent::TurnRefused { .. } => 18,
-            CodeEvent::StreamInterrupted => 19,
-            CodeEvent::ToolArgsDelta { .. } => 20,
-            CodeEvent::TaskPlanUpdated { .. } => 21,
-            CodeEvent::ContextTruncated { .. } => 22,
-            CodeEvent::CompactionStarted => 23,
-            CodeEvent::CompactionFinished { .. } => 24,
+            Event::SessionStarted { .. } => 0,
+            Event::TurnStarted { .. } => 1,
+            Event::TurnResumed { .. } => 2,
+            Event::AssistantDelta { .. } => 3,
+            Event::AssistantMessage { .. } => 4,
+            Event::ReasoningDelta { .. } => 5,
+            Event::ToolStarted { .. } => 6,
+            Event::ToolCompleted { .. } => 7,
+            Event::FileChanged { .. } => 8,
+            Event::ApprovalRequested { .. } => 9,
+            Event::ApprovalResolved { .. } => 10,
+            Event::UserSteered { .. } => 11,
+            Event::TurnCompleted { .. } => 12,
+            Event::TurnFailed { .. } => 13,
+            Event::TurnInterrupted { .. } => 14,
+            Event::CheckpointRecorded { .. } => 15,
+            Event::HarnessNotice { .. } => 16,
+            Event::AttentionChanged { .. } => 17,
+            Event::TurnRefused { .. } => 18,
+            Event::StreamInterrupted => 19,
+            Event::ToolArgsDelta { .. } => 20,
+            Event::TaskPlanUpdated { .. } => 21,
+            Event::ContextTruncated { .. } => 22,
+            Event::CompactionStarted => 23,
+            Event::CompactionFinished { .. } => 24,
         }
     }
 
-    fn journal_samples() -> Vec<CodeEvent> {
+    fn journal_samples() -> Vec<Event> {
         vec![
-            CodeEvent::SessionStarted {
+            Event::SessionStarted {
                 harness_kind: HarnessKind::ClaudeCode,
                 harness_version: "2.1.233".into(),
                 resume_ref: Some("session-ref".into()),
             },
-            CodeEvent::TurnStarted {
-                turn_id: CodeTurnId(id(1)),
+            Event::TurnStarted {
+                turn_id: TurnId(id(1)),
             },
-            CodeEvent::TurnResumed {
-                turn_id: CodeTurnId(id(1)),
+            Event::TurnResumed {
+                turn_id: TurnId(id(1)),
             },
-            CodeEvent::AssistantDelta {
+            Event::AssistantDelta {
                 text: "hello".into(),
             },
-            CodeEvent::AssistantMessage {
+            Event::AssistantMessage {
                 text: "hello from fixture".into(),
                 parent_call_id: None,
             },
-            CodeEvent::ReasoningDelta {
+            Event::ReasoningDelta {
                 text: "thinking".into(),
             },
-            CodeEvent::ToolStarted {
+            Event::ToolStarted {
                 call_id: "toolu_1".into(),
                 name: "Read".into(),
                 detail: ToolDetail::FileRead {
@@ -679,7 +679,7 @@ mod tests {
                 },
                 parent_call_id: None,
             },
-            CodeEvent::ToolCompleted {
+            Event::ToolCompleted {
                 call_id: "toolu_1".into(),
                 outcome: ToolOutcome::Succeeded,
                 preview: "demo".into(),
@@ -691,7 +691,7 @@ mod tests {
                 }),
                 parent_call_id: None,
             },
-            CodeEvent::FileChanged {
+            Event::FileChanged {
                 path: "src/lib.rs".into(),
                 kind: FileChangeKind::Modified,
                 diffstat: Diffstat {
@@ -701,22 +701,22 @@ mod tests {
                     truncated: false,
                 },
             },
-            CodeEvent::ApprovalRequested {
-                approval_id: CodeApprovalId(id(2)),
+            Event::ApprovalRequested {
+                approval_id: ApprovalId(id(2)),
                 request: None,
             },
-            CodeEvent::ApprovalResolved {
-                approval_id: CodeApprovalId(id(2)),
+            Event::ApprovalResolved {
+                approval_id: ApprovalId(id(2)),
                 decision: ApprovalDecisionKind::Deny {
                     feedback: Some("use the fixtures directory".into()),
                 },
             },
-            CodeEvent::UserSteered {
+            Event::UserSteered {
                 text: "try the other file".into(),
                 message_id: None,
             },
-            CodeEvent::TurnCompleted {
-                usage: CodeUsage {
+            Event::TurnCompleted {
+                usage: TurnUsage {
                     input_tokens: 11,
                     output_tokens: 22,
                     cache_read_input_tokens: 33,
@@ -735,15 +735,15 @@ mod tests {
                 }),
                 stop_reason: None,
             },
-            CodeEvent::TurnFailed {
+            Event::TurnFailed {
                 error: BoundedError {
                     message: "engine exited 1".into(),
                 },
                 detail: None,
             },
-            CodeEvent::TurnInterrupted { usage: None },
-            CodeEvent::CheckpointRecorded {
-                turn_id: CodeTurnId(id(1)),
+            Event::TurnInterrupted { usage: None },
+            Event::CheckpointRecorded {
+                turn_id: TurnId(id(1)),
                 diffstat: Diffstat {
                     files: 2,
                     insertions: 10,
@@ -751,11 +751,11 @@ mod tests {
                     truncated: true,
                 },
             },
-            CodeEvent::HarnessNotice {
+            Event::HarnessNotice {
                 level: HarnessNoticeLevel::Warning,
                 message: "unrecognized event type counted".into(),
             },
-            CodeEvent::AttentionChanged {
+            Event::AttentionChanged {
                 state: AttentionState::Fenced {
                     reason: FenceReason::OrphanAlive,
                 },
@@ -764,8 +764,8 @@ mod tests {
             // The internal engine's rows. Their optional fields are pinned
             // on the chat journal fixture, which round-trips through these
             // variants; the samples here pin the tags and required fields.
-            CodeEvent::TurnRefused {
-                usage: CodeUsage {
+            Event::TurnRefused {
+                usage: TurnUsage {
                     input_tokens: 12,
                     output_tokens: 3,
                     cache_read_input_tokens: 0,
@@ -775,21 +775,21 @@ mod tests {
                 },
                 refusal: RefusalOutcome::report_blocked(),
             },
-            CodeEvent::StreamInterrupted,
-            CodeEvent::ToolArgsDelta {
+            Event::StreamInterrupted,
+            Event::ToolArgsDelta {
                 call_id: id(3).to_string(),
                 fragment: "{\"command\":".into(),
             },
-            CodeEvent::TaskPlanUpdated {
+            Event::TaskPlanUpdated {
                 call_id: id(6).to_string(),
-                turn_id: CodeTurnId(id(1)),
+                turn_id: TurnId(id(1)),
             },
-            CodeEvent::ContextTruncated {
+            Event::ContextTruncated {
                 original_tokens: 100_000,
                 fitted_tokens: 60_000,
             },
-            CodeEvent::CompactionStarted,
-            CodeEvent::CompactionFinished { compacted: true },
+            Event::CompactionStarted,
+            Event::CompactionFinished { compacted: true },
         ]
     }
 
@@ -812,15 +812,11 @@ mod tests {
 
     const JOURNAL_FIXTURE: &str = "fixtures/code-journal-events.json";
 
-    /// `CodeEvent` is written into `code_event.event` and read back, so its
+    /// `Event` is written into `event.event` and read back, so its
     /// field names are a storage format. Rows in the old shape survive a
     /// schema change now, so a diff here needs a `#[serde(alias)]` or a
     /// migration, not a refreshed fixture on its own. The chat journal's own
     /// copy of this test says the same thing.
-    ///
-    /// Do not name the chat payload type here, even in prose:
-    /// `chat_and_code_entities_do_not_cross_reference` scans this file as
-    /// text, and it cannot tell a doc comment from a use.
     ///
     /// Regenerate with
     /// `UPDATE_CODE_JOURNAL_FIXTURE=1 cargo test -p tidebreak-core`.

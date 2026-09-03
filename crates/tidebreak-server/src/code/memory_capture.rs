@@ -9,10 +9,10 @@ use serde::{Deserialize, Serialize};
 
 use tidebreak_core::db::code::{get_session, get_turn, list_recent_events};
 use tidebreak_core::{
-    AgentError, CodeEvent, CodeSessionId, CodeTurnId, CodeTurnStatus, DbStore, HarnessNoticeLevel,
-    MemoryAuthor, MemoryBackend, MemoryEvidence, MemoryKind, MemoryOrigin, MemoryProvenance,
-    MemoryRecord, MemoryRecordId, MemoryScope, MemoryStatus, OwnerId, Result,
-    MAX_MEMORY_BODY_BYTES, MAX_MEMORY_TITLE_CHARS,
+    AgentError, DbStore, Event, HarnessNoticeLevel, MemoryAuthor, MemoryBackend, MemoryEvidence,
+    MemoryKind, MemoryOrigin, MemoryProvenance, MemoryRecord, MemoryRecordId, MemoryScope,
+    MemoryStatus, OwnerId, Result, SessionId, TurnId, TurnStatus, MAX_MEMORY_BODY_BYTES,
+    MAX_MEMORY_TITLE_CHARS,
 };
 
 use crate::chat_titling::{derive_text_with_retries, Proposal};
@@ -68,7 +68,7 @@ Answer {{"kind":null,"title":null,"body":null}} when the turn has no durable fac
 
 /// Starts memory capture for a turn that just completed.
 pub(crate) trait TurnMemoryCapture: Send + Sync {
-    fn spawn(&self, owner: OwnerId, session_id: CodeSessionId, turn_id: CodeTurnId);
+    fn spawn(&self, owner: OwnerId, session_id: SessionId, turn_id: TurnId);
 }
 
 #[derive(Clone)]
@@ -102,13 +102,13 @@ impl TurnMemoryCapturer {
     pub(crate) async fn derive(
         &self,
         owner: &OwnerId,
-        session_id: CodeSessionId,
-        turn_id: CodeTurnId,
+        session_id: SessionId,
+        turn_id: TurnId,
     ) -> Result<()> {
         let Some(turn) = get_turn(&self.db, owner, turn_id).await? else {
             return Ok(());
         };
-        if turn.status != CodeTurnStatus::Completed {
+        if turn.status != TurnStatus::Completed {
             return Ok(());
         }
         let Some(session) = get_session(&self.db, owner, session_id).await? else {
@@ -182,7 +182,7 @@ impl TurnMemoryCapturer {
             evidence = events
                 .iter()
                 .take(1)
-                .map(|sequenced| MemoryEvidence::CodeEvent {
+                .map(|sequenced| MemoryEvidence::Event {
                     session_id,
                     seq: sequenced.seq,
                 })
@@ -233,7 +233,7 @@ impl TurnMemoryCapturer {
 
     /// Journals a capture failure so the person sees it in the session,
     /// instead of the proposal vanishing into a log line.
-    async fn report_failure(&self, owner: &OwnerId, session_id: CodeSessionId, error: &AgentError) {
+    async fn report_failure(&self, owner: &OwnerId, session_id: SessionId, error: &AgentError) {
         let Ok(Some(session)) = get_session(&self.db, owner, session_id).await else {
             return;
         };
@@ -243,7 +243,7 @@ impl TurnMemoryCapturer {
             owner,
             session_id,
             session.spawn_epoch,
-            CodeEvent::HarnessNotice {
+            Event::HarnessNotice {
                 level: HarnessNoticeLevel::Warning,
                 message: format!("Memory capture for this turn did not complete: {error}"),
             },
@@ -259,7 +259,7 @@ impl TurnMemoryCapturer {
 }
 
 impl TurnMemoryCapture for TurnMemoryCapturer {
-    fn spawn(&self, owner: OwnerId, session_id: CodeSessionId, turn_id: CodeTurnId) {
+    fn spawn(&self, owner: OwnerId, session_id: SessionId, turn_id: TurnId) {
         let capturer = self.clone();
         tokio::spawn(async move {
             if let Err(error) = capturer.derive(&owner, session_id, turn_id).await {
@@ -275,15 +275,15 @@ impl TurnMemoryCapture for TurnMemoryCapturer {
 async fn context_file_hint(
     db: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
-    turn_id: CodeTurnId,
+    session_id: SessionId,
+    turn_id: TurnId,
 ) -> Result<String> {
     let events = list_recent_events(db, owner, session_id, 400).await?;
     let mut paths = Vec::new();
     for sequenced in &events {
         match &sequenced.event {
-            CodeEvent::TurnStarted { turn_id: started } if *started == turn_id => break,
-            CodeEvent::FileChanged { path, .. }
+            Event::TurnStarted { turn_id: started } if *started == turn_id => break,
+            Event::FileChanged { path, .. }
                 if is_agent_context_file(path) && !paths.contains(path) =>
             {
                 paths.push(path.clone());

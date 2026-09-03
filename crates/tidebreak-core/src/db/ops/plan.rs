@@ -1,7 +1,7 @@
 //! The plan proposal as an approval row (decision 0048 step 5).
 //!
-//! `exit_plan_mode` parks its turn on a `code_approval` row whose kind is
-//! [`CodeApprovalKind::Plan`], whose id is the call id, and whose raw
+//! `exit_plan_mode` parks its turn on an `approval` row whose kind is
+//! [`ApprovalKind::Plan`], whose id is the call id, and whose raw
 //! payload is the plan body. The reader's decision settles the row as
 //! [`ApprovalDecisionKind::PlanDecided`] and completes the call, so the chat
 //! plan route and the session decision route land on the same row.
@@ -12,17 +12,15 @@ use sea_orm::{
     QuerySelect, Set, TransactionTrait,
 };
 
-use crate::code::{
-    ApprovalDecisionKind, CodeApproval, CodeApprovalId, CodeApprovalKind, CodeApprovalState,
-    CodeEvent, CodeSessionId, CodeTurnId,
-};
+use crate::code::{Approval, ApprovalDecisionKind, ApprovalId, ApprovalKind, ApprovalState, Event};
 use crate::error::{AgentError, Result};
-use crate::event::{AgentEvent, SequencedEvent};
+use crate::event::{AgentEvent, SequencedAgentEvent};
 use crate::model::{OwnerId, ToolCallExecution, ToolCallStatus, TurnRunStatus};
 use crate::storage::DecidePlanOutcome;
 use crate::{
-    plan_decision_result, CallId, ChatId, DecidePlanRequest, ExitPlanModeArgs, PendingPlanApproval,
-    PlanDecisionChoice, PlanProposalBody, TurnId, DEFAULT_ACCEPTED_PLAN_MODE, EXIT_PLAN_MODE_TOOL,
+    plan_decision_result, CallId, DecidePlanRequest, ExitPlanModeArgs, PendingPlanApproval,
+    PlanDecisionChoice, PlanProposalBody, SessionId, TurnId, DEFAULT_ACCEPTED_PLAN_MODE,
+    EXIT_PLAN_MODE_TOOL,
 };
 
 use super::super::{entities, store_err, DbStore};
@@ -42,7 +40,7 @@ pub(in crate::db) async fn checkpoint_on<C>(
     conn: &C,
     call: &crate::ClientToolCallRequest,
     proposed_at: DateTime<Utc>,
-) -> Result<Option<SequencedEvent>>
+) -> Result<Option<SequencedAgentEvent>>
 where
     C: ConnectionTrait,
 {
@@ -62,11 +60,11 @@ where
     insert_approval_on(
         conn,
         &owner,
-        &CodeApproval {
-            id: CodeApprovalId(call.id.0),
-            session_id: CodeSessionId(call.chat_id.0),
-            turn_id: CodeTurnId(call.turn_id.0),
-            kind: CodeApprovalKind::Plan {
+        &Approval {
+            id: ApprovalId(call.id.0),
+            session_id: SessionId(call.chat_id.0),
+            turn_id: TurnId(call.turn_id.0),
+            kind: ApprovalKind::Plan {
                 proposed_mode: DEFAULT_ACCEPTED_PLAN_MODE,
             },
             harness_raw: PlanProposalBody {
@@ -80,7 +78,7 @@ where
             worker_epoch: Some(session.spawn_epoch),
             decision_claim: None,
             claimed_at: None,
-            state: CodeApprovalState::Pending,
+            state: ApprovalState::Pending,
             feedback: None,
             requested_at: proposed_at,
             decided_at: None,
@@ -88,7 +86,7 @@ where
         },
     )
     .await?;
-    Ok(Some(SequencedEvent { seq, event }))
+    Ok(Some(SequencedAgentEvent { seq, event }))
 }
 
 /// Recover and validate the exact committed park for an ambiguous checkpoint
@@ -96,7 +94,7 @@ where
 pub(in crate::db) async fn recover_checkpoint_on<C>(
     conn: &C,
     call: &crate::ClientToolCallRequest,
-) -> Result<Option<SequencedEvent>>
+) -> Result<Option<SequencedAgentEvent>>
 where
     C: ConnectionTrait,
 {
@@ -104,7 +102,7 @@ where
         return Ok(None);
     }
     let expected = parse_arguments(&call.arguments)?;
-    let row = find_approval_row_on(conn, CodeApprovalId(call.id.0))
+    let row = find_approval_row_on(conn, ApprovalId(call.id.0))
         .await?
         .ok_or_else(|| {
             AgentError::Store(format!(
@@ -125,7 +123,7 @@ where
             call.id
         )));
     }
-    if row.state != CodeApprovalState::Pending.as_str() {
+    if row.state != ApprovalState::Pending.as_str() {
         return Ok(None);
     }
     let expected_event = AgentEvent::PlanProposed {
@@ -140,16 +138,16 @@ where
 /// whose request is missing is a broken receipt, not an absent one.
 pub(in crate::db::ops) async fn park_request_receipt_on<C>(
     conn: &C,
-    chat_id: ChatId,
+    chat_id: SessionId,
     expected: &AgentEvent,
-) -> Result<Option<SequencedEvent>>
+) -> Result<Option<SequencedAgentEvent>>
 where
     C: ConnectionTrait,
 {
     let expected_row = serde_json::to_value(crate::chat_journal::journal_row(expected))?;
-    let rows = entities::code_event::Entity::find()
-        .filter(entities::code_event::Column::SessionId.eq(chat_id.0))
-        .order_by_desc(entities::code_event::Column::Seq)
+    let rows = entities::event::Entity::find()
+        .filter(entities::event::Column::SessionId.eq(chat_id.0))
+        .order_by_desc(entities::event::Column::Seq)
         .limit(PARK_RECEIPT_SCAN)
         .all(conn)
         .await
@@ -163,9 +161,9 @@ where
                 "park request event does not match its checkpoint".into(),
             ));
         }
-        let event = serde_json::from_value::<CodeEvent>(stored.event)?;
+        let event = serde_json::from_value::<Event>(stored.event)?;
         return Ok(
-            crate::chat_journal::chat_event(event)?.map(|event| SequencedEvent {
+            crate::chat_journal::chat_event(event)?.map(|event| SequencedAgentEvent {
                 seq: stored.seq,
                 event,
             }),
@@ -180,16 +178,16 @@ where
 /// transaction. Consent cards are excluded by kind.
 pub(in crate::db::ops) async fn pending_park_rows_on<C>(
     conn: &C,
-    chat_id: ChatId,
-) -> Result<Vec<entities::code_approval::Model>>
+    chat_id: SessionId,
+) -> Result<Vec<entities::approval::Model>>
 where
     C: ConnectionTrait,
 {
-    entities::code_approval::Entity::find()
-        .filter(entities::code_approval::Column::SessionId.eq(chat_id.0))
-        .filter(entities::code_approval::Column::State.eq(CodeApprovalState::Pending.as_str()))
-        .order_by_asc(entities::code_approval::Column::RequestedAt)
-        .order_by_asc(entities::code_approval::Column::Id)
+    entities::approval::Entity::find()
+        .filter(entities::approval::Column::SessionId.eq(chat_id.0))
+        .filter(entities::approval::Column::State.eq(ApprovalState::Pending.as_str()))
+        .order_by_asc(entities::approval::Column::RequestedAt)
+        .order_by_asc(entities::approval::Column::Id)
         .all(conn)
         .await
         .map_err(store_err)
@@ -197,7 +195,7 @@ where
 
 pub(in crate::db) async fn list_pending(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
 ) -> Result<Vec<PendingPlanApproval>> {
     let transaction = store.conn.begin().await.map_err(store_err)?;
     if !acquire_chat_write_lock(&transaction, chat_id).await? {
@@ -220,7 +218,7 @@ pub(in crate::db) async fn list_pending(
             .await
             .map_err(store_err)?
             .ok_or_else(|| AgentError::Store("pending plan wait is missing".into()))?;
-        let turn = entities::code_turn::Entity::find_by_id(row.turn_id)
+        let turn = entities::turn::Entity::find_by_id(row.turn_id)
             .one(&transaction)
             .await
             .map_err(store_err)?
@@ -269,7 +267,7 @@ pub(in crate::db) async fn decide(
         return Ok(DecidePlanOutcome::InvalidDecision);
     }
     let requested_at = canonical_db_timestamp(decided_at)?;
-    let Some(scope) = find_approval_row_on(&store.conn, CodeApprovalId(request.call_id.0)).await?
+    let Some(scope) = find_approval_row_on(&store.conn, ApprovalId(request.call_id.0)).await?
     else {
         return Ok(DecidePlanOutcome::Unavailable);
     };
@@ -296,7 +294,7 @@ pub(in crate::db) async fn decide(
         transaction.commit().await.map_err(store_err)?;
         return Ok(DecidePlanOutcome::Unavailable);
     }
-    let row = find_approval_row_on(&transaction, CodeApprovalId(request.call_id.0))
+    let row = find_approval_row_on(&transaction, ApprovalId(request.call_id.0))
         .await?
         .ok_or_else(|| {
             AgentError::Store(format!(
@@ -314,13 +312,13 @@ pub(in crate::db) async fn decide(
     };
     let accepted = matches!(request.decision.decision, PlanDecisionChoice::Accept);
     let decided_state = if accepted {
-        CodeApprovalState::Approved
+        ApprovalState::Approved
     } else {
-        CodeApprovalState::Denied
+        ApprovalState::Denied
     };
     let result = serde_json::to_string(&plan_decision_result(&request.decision))?;
 
-    if row.state != CodeApprovalState::Pending.as_str() {
+    if row.state != ApprovalState::Pending.as_str() {
         if row.state != decided_state.as_str() {
             transaction.commit().await.map_err(store_err)?;
             return Ok(DecidePlanOutcome::DecisionConflict);
@@ -351,7 +349,7 @@ pub(in crate::db) async fn decide(
         transaction.commit().await.map_err(store_err)?;
         return Ok(DecidePlanOutcome::Unavailable);
     }
-    let turn = entities::code_turn::Entity::find_by_id(call.turn_id)
+    let turn = entities::turn::Entity::find_by_id(call.turn_id)
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -377,12 +375,12 @@ pub(in crate::db) async fn decide(
     // the call, so the resumed turn can never read the plan surface again
     // while believing the plan was accepted.
     if let Some(mode) = request.decision.mode_after() {
-        let chat = entities::code_session::Entity::find_by_id(request.chat_id.0)
+        let chat = entities::session::Entity::find_by_id(request.chat_id.0)
             .one(&transaction)
             .await
             .map_err(store_err)?
             .ok_or_else(|| AgentError::Store("plan chat disappeared".into()))?;
-        let mut active_chat: entities::code_session::ActiveModel = chat.into();
+        let mut active_chat: entities::session::ActiveModel = chat.into();
         active_chat.permission_mode = Set(Some(mode.as_str().to_owned()));
         active_chat.update(&transaction).await.map_err(store_err)?;
     }
@@ -435,7 +433,7 @@ pub(in crate::db) async fn decide(
     };
     let seq = super::conversation::append_event_on(
         &transaction,
-        ChatId(resolved.chat_id),
+        SessionId(resolved.chat_id),
         None,
         None,
         None,
@@ -455,7 +453,7 @@ pub(in crate::db) async fn decide(
     transaction.commit().await.map_err(store_err)?;
     Ok(DecidePlanOutcome::Decided {
         turn: transition.turn,
-        completion_event: Box::new(SequencedEvent {
+        completion_event: Box::new(SequencedAgentEvent {
             seq,
             event: completion_event,
         }),
@@ -472,9 +470,9 @@ fn parse_arguments(value: &serde_json::Value) -> Result<ExitPlanModeArgs> {
 }
 
 /// The plan a row carries, or an error for a row of another kind.
-fn plan_of(row: &entities::code_approval::Model) -> Result<PlanProposalBody> {
-    match serde_json::from_value::<CodeApprovalKind>(row.kind.clone())? {
-        CodeApprovalKind::Plan { .. } => PlanProposalBody::from_raw(&row.harness_raw)
+fn plan_of(row: &entities::approval::Model) -> Result<PlanProposalBody> {
+    match serde_json::from_value::<ApprovalKind>(row.kind.clone())? {
+        ApprovalKind::Plan { .. } => PlanProposalBody::from_raw(&row.harness_raw)
             .ok_or_else(|| AgentError::Store(format!("plan {} has no body", row.id))),
         _ => Err(AgentError::Store(format!(
             "approval {} is not a plan",

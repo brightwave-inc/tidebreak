@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tidebreak_core::{
-    ApprovalClass, ChatId, DocumentId, DocumentUpsert, NetworkPolicy, Result, SecretProvider,
+    ApprovalClass, DocumentId, DocumentUpsert, NetworkPolicy, Result, SecretProvider, SessionId,
     Store, Tool, ToolCtx, ToolOutput, ToolSpec, TurnWebSearch, VendorWebSearch,
 };
 
@@ -581,7 +581,7 @@ async fn required_credential(
 /// so the search runs on the model the reader believes they are talking to.
 async fn chat_search_model(
     store: &dyn Store,
-    chat: ChatId,
+    chat: SessionId,
     default_model: &str,
 ) -> Option<SearchModel> {
     let selected = match store
@@ -637,7 +637,7 @@ async fn chat_search_model(
 pub async fn resolve_provider(
     store: &dyn Store,
     secrets: &dyn SecretProvider,
-    chat: Option<ChatId>,
+    chat: Option<SessionId>,
     providers: Option<&Arc<dyn ProviderResolver>>,
     default_model: &str,
 ) -> std::result::Result<Option<Arc<dyn WebSearchProvider>>, ServerError> {
@@ -741,7 +741,7 @@ struct HostWebSearchResolver {
 impl WebSearchResolver for HostWebSearchResolver {
     async fn resolve(
         &self,
-        chat: Option<ChatId>,
+        chat: Option<SessionId>,
     ) -> std::result::Result<Option<Arc<dyn WebSearchProvider>>, WebSearchResolverError> {
         resolve_provider(
             &*self.store,
@@ -831,7 +831,7 @@ struct HostExtractedPageSink {
 impl ExtractedPageSink for HostExtractedPageSink {
     async fn store_page(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         page: &WebExtractResponse,
         fetched_at: DateTime<Utc>,
     ) -> std::result::Result<StoredExtractedPage, ExtractedPageSinkError> {
@@ -968,9 +968,9 @@ mod tests {
     }
 
     /// Store a chat pinned to `model`, and return the router to resolve against.
-    async fn chat_on(store: &DbStore, model: &str) -> (ChatId, Arc<dyn ProviderResolver>) {
+    async fn chat_on(store: &DbStore, model: &str) -> (SessionId, Arc<dyn ProviderResolver>) {
         let chat = Chat {
-            id: ChatId::new(),
+            id: SessionId::new(),
             project_id: None,
             title: None,
             model: Some(model.to_owned()),
@@ -1007,7 +1007,7 @@ mod tests {
     async fn offline_chat_network_denial_is_actionable_and_structured() {
         let (store, _dir) = test_store().await;
         let chat = Chat {
-            id: ChatId::new(),
+            id: SessionId::new(),
             project_id: None,
             title: None,
             model: None,

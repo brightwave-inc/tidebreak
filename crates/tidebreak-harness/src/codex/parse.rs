@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 use tidebreak_core::{
-    BoundedError, CodeUsage, HarnessKind, HarnessNoticeLevel, ToolDetail, ToolOutcome,
+    BoundedError, HarnessKind, HarnessNoticeLevel, ToolDetail, ToolOutcome, TurnUsage,
     MAX_EVENT_TEXT_CHARS, MAX_NOTICE_CHARS, MAX_PREVIEW_CHARS, MAX_TOOL_SUMMARY_CHARS,
 };
 
@@ -41,11 +41,11 @@ pub struct CodexStreamParser {
     /// Child frames are accepted only while their parent turn is open.
     parent_turn_active: bool,
     /// Thread-wide counters at the start of the active turn.
-    turn_usage_baseline: CodeUsage,
+    turn_usage_baseline: TurnUsage,
     /// Prompt resident on the first usage update after `turn/started`.
     turn_first_call_context_tokens: Option<u64>,
     /// Latest thread-wide counters plus the final call's context occupancy.
-    last_usage: CodeUsage,
+    last_usage: TurnUsage,
     last_turn_id: Option<String>,
     outbound_methods: HashMap<String, String>,
     /// itemId → JSON-RPC request id for a parked approval.
@@ -1184,15 +1184,15 @@ fn file_change_preview(item: &Value) -> String {
 /// leaving it inside `input_tokens` double-counts it. Subtract the cached and
 /// written portions so the four fields stay disjoint and still sum to the
 /// prompt.
-fn usage_from(value: Option<&Value>) -> CodeUsage {
+fn usage_from(value: Option<&Value>) -> TurnUsage {
     let Some(value) = value else {
-        return CodeUsage::default();
+        return TurnUsage::default();
     };
     let total = value.get("total").unwrap_or(value);
     let field = |name: &str| total.get(name).and_then(Value::as_u64).unwrap_or(0);
     let cache_read_input_tokens = field("cachedInputTokens");
     let cache_creation_input_tokens = field("cacheWriteInputTokens");
-    CodeUsage {
+    TurnUsage {
         input_tokens: field("inputTokens")
             .saturating_sub(cache_read_input_tokens)
             .saturating_sub(cache_creation_input_tokens),
@@ -1211,20 +1211,20 @@ fn usage_from(value: Option<&Value>) -> CodeUsage {
 /// inheriting every earlier turn's spend. If the engine resets a counter,
 /// treat the latest value as a fresh total instead of subtracting past zero.
 fn turn_usage_since(
-    total: &CodeUsage,
-    baseline: &CodeUsage,
+    total: &TurnUsage,
+    baseline: &TurnUsage,
     first_call_context_tokens: Option<u64>,
-) -> CodeUsage {
+) -> TurnUsage {
     let counters_reset = total.input_tokens < baseline.input_tokens
         || total.output_tokens < baseline.output_tokens
         || total.cache_read_input_tokens < baseline.cache_read_input_tokens
         || total.cache_creation_input_tokens < baseline.cache_creation_input_tokens;
     let baseline = if counters_reset {
-        CodeUsage::default()
+        TurnUsage::default()
     } else {
         baseline.clone()
     };
-    CodeUsage {
+    TurnUsage {
         input_tokens: total.input_tokens.saturating_sub(baseline.input_tokens),
         output_tokens: total.output_tokens.saturating_sub(baseline.output_tokens),
         cache_read_input_tokens: total
@@ -1313,7 +1313,7 @@ mod tests {
 
     #[test]
     fn a_resumed_turn_excludes_the_previous_thread_usage() {
-        let baseline = CodeUsage {
+        let baseline = TurnUsage {
             input_tokens: 4_547,
             output_tokens: 6,
             cache_read_input_tokens: 9_984,
@@ -1321,7 +1321,7 @@ mod tests {
             context_tokens: 14_531,
             first_call_context_tokens: None,
         };
-        let total = CodeUsage {
+        let total = TurnUsage {
             input_tokens: 5_819,
             output_tokens: 12,
             cache_read_input_tokens: 24_064,
@@ -1332,7 +1332,7 @@ mod tests {
 
         assert_eq!(
             turn_usage_since(&total, &baseline, Some(15_352)),
-            CodeUsage {
+            TurnUsage {
                 input_tokens: 1_272,
                 output_tokens: 6,
                 cache_read_input_tokens: 14_080,

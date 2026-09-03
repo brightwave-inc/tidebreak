@@ -1,4 +1,4 @@
-//! `WS /code/sessions/{id}/events?after=` — snapshot → replay → live.
+//! `WS /sessions/{id}/events?after=` — snapshot → replay → live.
 //!
 //! Replay is bounded (`MAX_REPLAY_EVENTS`) and says when it dropped history,
 //! so a very long session cannot make one connect read its whole life. The
@@ -13,7 +13,7 @@ use axum::Extension;
 use tokio::sync::broadcast::error::RecvError;
 
 use tidebreak_core::db::code::{list_events, MAX_REPLAY_EVENTS};
-use tidebreak_core::{CodeEvent, CodeSessionId, OwnerId};
+use tidebreak_core::{Event, OwnerId, SessionId};
 
 use crate::auth::{offered_handshake_subprotocol, GatewayAuthLease, WS_HANDSHAKE_SUBPROTOCOL};
 use crate::code::bus::LiveTail;
@@ -23,12 +23,12 @@ use crate::extract::{Path, Query};
 use crate::routes::events::{gateway_auth_revalidation_timer, wait_for_gateway_auth_revalidation};
 use crate::state::AppState;
 
-use super::types::{SequencedCodeEventFrame, SessionEventsQuery};
+use super::types::{SequencedEventFrame, SessionEventsQuery};
 
 pub async fn session_events(
     State(state): State<AppState>,
     code: ScopedCode,
-    Path(id): Path<CodeSessionId>,
+    Path(id): Path<SessionId>,
     Query(query): Query<SessionEventsQuery>,
     headers: axum::http::HeaderMap,
     auth_lease: Option<Extension<GatewayAuthLease>>,
@@ -70,7 +70,7 @@ pub(super) async fn stream_events(
     mut socket: WebSocket,
     state: AppState,
     owner: OwnerId,
-    session: CodeSessionId,
+    session: SessionId,
     after: i64,
     auth_lease: Option<GatewayAuthLease>,
     viewer: Viewer,
@@ -127,7 +127,7 @@ pub(super) async fn stream_events(
                         }
                         if send_frame(
                             &mut socket,
-                            &SequencedCodeEventFrame {
+                            &SequencedEventFrame {
                                 seq: last_seq,
                                 event: event.event,
                                 replayed: None,
@@ -158,7 +158,7 @@ pub(super) async fn stream_events(
                     last_seq = seq;
                     if send_frame(
                         &mut socket,
-                        &SequencedCodeEventFrame {
+                        &SequencedEventFrame {
                             seq,
                             event: event.event,
                             replayed: None,
@@ -206,9 +206,9 @@ async fn send_live_tail(
     }
     send_frame(
         socket,
-        &SequencedCodeEventFrame {
+        &SequencedEventFrame {
             seq: last_seq,
-            event: CodeEvent::AssistantDelta {
+            event: Event::AssistantDelta {
                 text: tail.assistant.clone(),
             },
             replayed: None,
@@ -224,7 +224,7 @@ async fn replay_after(
     socket: &mut WebSocket,
     store: &tidebreak_core::DbStore,
     owner: &OwnerId,
-    session: CodeSessionId,
+    session: SessionId,
     last_seq: &mut i64,
 ) -> Result<(), ()> {
     let page = list_events(store, owner, session, *last_seq, MAX_REPLAY_EVENTS)
@@ -235,7 +235,7 @@ async fn replay_after(
         *last_seq = event.seq;
         send_frame(
             socket,
-            &SequencedCodeEventFrame {
+            &SequencedEventFrame {
                 seq: event.seq,
                 event: event.event,
                 replayed: Some(true),
@@ -272,7 +272,7 @@ fn transient_is_current(cursor: i64, last_seq: i64) -> bool {
 
 async fn send_frame(
     socket: &mut WebSocket,
-    frame: &SequencedCodeEventFrame,
+    frame: &SequencedEventFrame,
 ) -> Result<(), axum::Error> {
     let Ok(json) = serde_json::to_string(frame) else {
         return Ok(());

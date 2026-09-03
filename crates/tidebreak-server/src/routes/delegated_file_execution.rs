@@ -45,7 +45,7 @@ pub struct ClaimDelegatedFileReadBody {
 pub struct ClaimedDelegatedFileRead {
     pub disposition: DelegatedFileClaimDisposition,
     pub call_id: CallId,
-    pub chat_id: tidebreak_core::ChatId,
+    pub chat_id: tidebreak_core::SessionId,
     pub root_id: HostRootId,
     pub relative_path: String,
 }

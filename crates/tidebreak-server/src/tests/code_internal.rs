@@ -17,10 +17,9 @@ use axum::http::{header, Request, StatusCode};
 use tower::ServiceExt;
 
 use tidebreak_core::{
-    ApprovalClass, ChatRequest, CodeSessionId, CodeTurnStatus, ContentBlock, DbStore,
-    ModelProvider, OwnerId, ProviderEvent, ProviderId, StopReason, Store,
-    SubmitAgentRunResultOutcome, Tool, ToolCtx, ToolOutput, ToolRegistry, ToolSpec, TurnId,
-    TurnParkWait, TurnRunStatus,
+    ApprovalClass, ChatRequest, ContentBlock, DbStore, ModelProvider, OwnerId, ProviderEvent,
+    ProviderId, SessionId, StopReason, Store, SubmitAgentRunResultOutcome, Tool, ToolCtx,
+    ToolOutput, ToolRegistry, ToolSpec, TurnId, TurnParkWait, TurnRunStatus, TurnStatus,
 };
 use tidebreak_harness::AdapterRegistry;
 
@@ -282,7 +281,7 @@ async fn pending_approval_of_kind(
     client: &reqwest::Client,
     addr: std::net::SocketAddr,
     token: &str,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     kind: &str,
 ) -> serde_json::Value {
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -316,7 +315,7 @@ async fn wait_for_turn_statuses(
     client: &reqwest::Client,
     addr: std::net::SocketAddr,
     token: &str,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     expected: &[&str],
 ) {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -337,7 +336,7 @@ async fn turn_statuses(
     client: &reqwest::Client,
     addr: std::net::SocketAddr,
     token: &str,
-    session_id: CodeSessionId,
+    session_id: SessionId,
 ) -> Vec<String> {
     let turns: Vec<serde_json::Value> = client
         .get(format!("http://{addr}/sessions/{session_id}/turns"))
@@ -373,7 +372,7 @@ async fn decide(
     assert_eq!(status, reqwest::StatusCode::OK, "{text}");
 }
 
-fn event_types(events: &[tidebreak_core::SequencedCodeEvent]) -> Vec<String> {
+fn event_types(events: &[tidebreak_core::SequencedEvent]) -> Vec<String> {
     events
         .iter()
         .map(|event| {
@@ -399,7 +398,7 @@ async fn create_internal_session(
     router: &axum::Router,
     bearer: &str,
     permission_mode: &str,
-) -> CodeSessionId {
+) -> SessionId {
     let created = router
         .clone()
         .oneshot(
@@ -423,7 +422,7 @@ async fn create_internal_session(
 fn submit_internal_turn(
     router: &axum::Router,
     bearer: &str,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     message: &str,
 ) -> tokio::task::JoinHandle<axum::response::Response> {
     let router = router.clone();
@@ -449,8 +448,8 @@ fn submit_internal_turn(
 
 async fn wait_for_durable_park(
     runtime: &CodeRuntime,
-    session_id: CodeSessionId,
-) -> tidebreak_core::CodeTurn {
+    session_id: SessionId,
+) -> tidebreak_core::Turn {
     let parked = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             if let Some(turn) =
@@ -458,7 +457,7 @@ async fn wait_for_durable_park(
                     .await
                     .unwrap()
             {
-                if turn.status == CodeTurnStatus::Waiting
+                if turn.status == TurnStatus::Waiting
                     && turn.park_ref.is_some()
                     && turn.park_wait.is_some()
                 {
@@ -478,7 +477,7 @@ async fn wait_for_durable_park(
                     .unwrap();
             let runs = runtime
                 .db
-                .list_agent_runs(tidebreak_core::ChatId(session_id.0))
+                .list_agent_runs(tidebreak_core::SessionId(session_id.0))
                 .await
                 .unwrap();
             let events = tidebreak_core::db::code::list_recent_events(
@@ -496,76 +495,7 @@ async fn wait_for_durable_park(
     }
 }
 
-#[tokio::test]
-async fn canonical_and_compatibility_routes_share_session_rows() {
-    let (addr, token, _runtime, _ran, _dir) = internal_engine_app(Vec::new()).await;
-    let client = reqwest::Client::new();
-    let created = client
-        .post(format!("http://{addr}/sessions"))
-        .bearer_auth(&token)
-        .json(&serde_json::json!({ "permission_mode": "ask" }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
-    let session: serde_json::Value = created.json().await.unwrap();
-    let session_id = session["id"].as_str().unwrap();
-
-    let canonical: serde_json::Value = client
-        .get(format!("http://{addr}/sessions/{session_id}"))
-        .bearer_auth(&token)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let code_alias: serde_json::Value = client
-        .get(format!("http://{addr}/code/sessions/{session_id}"))
-        .bearer_auth(&token)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(canonical, code_alias);
-
-    let chat_alias: serde_json::Value = client
-        .get(format!("http://{addr}/chats/{session_id}"))
-        .bearer_auth(&token)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(chat_alias["id"], canonical["id"]);
-
-    let canonical_approvals: serde_json::Value = client
-        .get(format!("http://{addr}/approvals?session_id={session_id}"))
-        .bearer_auth(&token)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let code_approvals: serde_json::Value = client
-        .get(format!(
-            "http://{addr}/code/approvals?session_id={session_id}"
-        ))
-        .bearer_auth(&token)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(canonical_approvals, code_approvals);
-}
-
-/// The whole chat interaction model, reached through the shared session routes: a plan
+/// The whole chat interaction model, reached through the shared routes: a plan
 /// proposal parks the turn as an approval and its acceptance re-postures
 /// the session; a questions card parks and its answers resume; a sensitive
 /// tool waits on a structured approval that offers a grant ladder; a steer
@@ -614,7 +544,7 @@ async fn a_conversation_without_a_workspace_runs_on_the_code_wire() {
     let session: serde_json::Value = created.json().await.unwrap();
     assert_eq!(session["harness_kind"], "internal");
     assert!(session["workspace_id"].is_null(), "{session}");
-    let session_id: CodeSessionId = session["id"].as_str().unwrap().parse().unwrap();
+    let session_id: SessionId = session["id"].as_str().unwrap().parse().unwrap();
 
     // The session row is the conversation row: the chat routes read the
     // same row by the same id.
@@ -831,7 +761,7 @@ async fn a_conversation_without_a_workspace_runs_on_the_code_wire() {
 /// always replayed that), one terminal row, and no `AssistantMessage`
 /// beside the deltas that carry the answer (the whole message lives on the
 /// transcript row, not a second journal row).
-fn assert_journaled_once(events: &[tidebreak_core::SequencedCodeEvent], legs: usize) {
+fn assert_journaled_once(events: &[tidebreak_core::SequencedEvent], legs: usize) {
     let types = event_types(events);
     let count = |kind: &str| types.iter().filter(|entry| entry.as_str() == kind).count();
     assert_eq!(count("turn_started"), legs, "{types:?}");
@@ -845,11 +775,11 @@ fn assert_journaled_once(events: &[tidebreak_core::SequencedCodeEvent], legs: us
 }
 
 /// The assistant text a journal streams, concatenated.
-fn streamed_text(events: &[tidebreak_core::SequencedCodeEvent]) -> String {
+fn streamed_text(events: &[tidebreak_core::SequencedEvent]) -> String {
     events
         .iter()
         .filter_map(|event| match &event.event {
-            tidebreak_core::CodeEvent::AssistantDelta { text } => Some(text.as_str()),
+            tidebreak_core::Event::AssistantDelta { text } => Some(text.as_str()),
             _ => None,
         })
         .collect()
@@ -860,12 +790,12 @@ fn streamed_text(events: &[tidebreak_core::SequencedCodeEvent]) -> String {
 /// reading of exactly that row.
 async fn assert_chat_replay_is_the_journal(
     db: &DbStore,
-    session_id: CodeSessionId,
-    journal: &[tidebreak_core::SequencedCodeEvent],
+    session_id: SessionId,
+    journal: &[tidebreak_core::SequencedEvent],
 ) {
     use tidebreak_core::Store as _;
     let replay = db
-        .list_events(tidebreak_core::ChatId(session_id.0), 0)
+        .list_events(tidebreak_core::SessionId(session_id.0), 0)
         .await
         .unwrap();
     assert!(!replay.is_empty());
@@ -898,6 +828,200 @@ async fn assert_chat_replay_is_the_journal(
     );
 }
 
+#[tokio::test]
+async fn canonical_and_compatibility_routes_share_conversation_rows() {
+    let (addr, token, _runtime, ran, _dir) = internal_engine_app(vec![
+        Step::Tool {
+            name: "exec",
+            input: serde_json::json!({"command": "echo", "args": ["hi"]}),
+        },
+        Step::Text("done"),
+    ])
+    .await;
+    let client = reqwest::Client::new();
+    let created = client
+        .post(format!("http://{addr}/sessions"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "permission_mode": "ask" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let session: serde_json::Value = created.json().await.unwrap();
+    let session_id: SessionId = session["id"].as_str().unwrap().parse().unwrap();
+
+    let canonical_session: serde_json::Value = client
+        .get(format!("http://{addr}/sessions/{session_id}"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let code_session: serde_json::Value = client
+        .get(format!("http://{addr}/code/sessions/{session_id}"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(canonical_session, code_session);
+    let chat: serde_json::Value = client
+        .get(format!("http://{addr}/chats/{session_id}"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(chat["id"], session["id"]);
+
+    let running = tokio::spawn({
+        let client = client.clone();
+        let token = token.clone();
+        async move {
+            client
+                .post(format!("http://{addr}/sessions/{session_id}/turns"))
+                .bearer_auth(&token)
+                .json(&serde_json::json!({ "message": "run it" }))
+                .send()
+                .await
+                .unwrap()
+        }
+    });
+    let approval = pending_approval_of_kind(&client, addr, &token, session_id, "tool_use").await;
+    let approval_id = approval["id"].as_str().unwrap();
+
+    let code_approvals: Vec<serde_json::Value> = client
+        .get(format!(
+            "http://{addr}/code/approvals?session_id={session_id}&state=pending"
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(code_approvals.len(), 1);
+    assert_eq!(code_approvals[0]["id"], approval["id"]);
+    let chat_approvals: Vec<serde_json::Value> = client
+        .get(format!("http://{addr}/chats/{session_id}/approvals"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(chat_approvals.len(), 1);
+    assert_eq!(chat_approvals[0]["call_id"], approval["id"]);
+
+    let canonical_turns: serde_json::Value = client
+        .get(format!("http://{addr}/sessions/{session_id}/turns"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let code_turns: serde_json::Value = client
+        .get(format!("http://{addr}/code/sessions/{session_id}/turns"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(canonical_turns, code_turns);
+
+    let queued_id = TurnId::new();
+    let queued = client
+        .post(format!("http://{addr}/chats/{session_id}/messages"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "turn_id": queued_id,
+            "content": "follow up",
+            "queue": true,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(queued.status(), reqwest::StatusCode::ACCEPTED);
+
+    let canonical_queue: serde_json::Value = client
+        .get(format!("http://{addr}/sessions/{session_id}/queued"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let code_queue: serde_json::Value = client
+        .get(format!("http://{addr}/code/sessions/{session_id}/queued"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(canonical_queue, code_queue);
+    assert_eq!(canonical_queue["queued"][0]["id"], queued_id.to_string());
+    let chat_queue: serde_json::Value = client
+        .get(format!("http://{addr}/chats/{session_id}/queued"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(chat_queue["queued"][0]["id"], queued_id.to_string());
+
+    let deleted = client
+        .delete(format!(
+            "http://{addr}/sessions/{session_id}/queued/{queued_id}"
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), reqwest::StatusCode::NO_CONTENT);
+    let chat_queue: serde_json::Value = client
+        .get(format!("http://{addr}/chats/{session_id}/queued"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(chat_queue["queued"], serde_json::json!([]));
+
+    decide(
+        &client,
+        addr,
+        &token,
+        approval_id,
+        serde_json::json!({ "decision": "approve" }),
+    )
+    .await;
+    let response = tokio::time::timeout(Duration::from_secs(20), running)
+        .await
+        .expect("the approved turn completes")
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::ACCEPTED);
+    assert_eq!(ran.load(Ordering::SeqCst), 1);
+}
+
 /// A questions park answered through the chat route resumes the session
 /// the runtime drives: the route settles the row (the answer carries
 /// context the engine contract has no field for), and the worker resumes
@@ -925,7 +1049,7 @@ async fn a_questions_park_answered_from_the_chat_route_resumes_the_session() {
     .await;
     let client = reqwest::Client::new();
     let created = client
-        .post(format!("http://{addr}/sessions"))
+        .post(format!("http://{addr}/code/sessions"))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "permission_mode": "ask" }))
         .send()
@@ -933,13 +1057,13 @@ async fn a_questions_park_answered_from_the_chat_route_resumes_the_session() {
         .unwrap();
     assert_eq!(created.status(), reqwest::StatusCode::CREATED);
     let session: serde_json::Value = created.json().await.unwrap();
-    let hosted: CodeSessionId = session["id"].as_str().unwrap().parse().unwrap();
+    let hosted: SessionId = session["id"].as_str().unwrap().parse().unwrap();
     let turn = tokio::spawn({
         let client = client.clone();
         let token = token.clone();
         async move {
             client
-                .post(format!("http://{addr}/sessions/{hosted}/turns"))
+                .post(format!("http://{addr}/code/sessions/{hosted}/turns"))
                 .bearer_auth(&token)
                 .json(&serde_json::json!({ "message": "ask me" }))
                 .send()
@@ -1005,7 +1129,7 @@ async fn a_plan_accepted_from_the_chat_route_resumes_the_session() {
         .await;
         let client = reqwest::Client::new();
         let created = client
-            .post(format!("http://{addr}/sessions"))
+            .post(format!("http://{addr}/code/sessions"))
             .bearer_auth(&token)
             .json(&serde_json::json!({ "permission_mode": "plan" }))
             .send()
@@ -1013,13 +1137,13 @@ async fn a_plan_accepted_from_the_chat_route_resumes_the_session() {
             .unwrap();
         assert_eq!(created.status(), reqwest::StatusCode::CREATED);
         let session: serde_json::Value = created.json().await.unwrap();
-        let hosted: CodeSessionId = session["id"].as_str().unwrap().parse().unwrap();
+        let hosted: SessionId = session["id"].as_str().unwrap().parse().unwrap();
         let turn = tokio::spawn({
             let client = client.clone();
             let token = token.clone();
             async move {
                 client
-                    .post(format!("http://{addr}/sessions/{hosted}/turns"))
+                    .post(format!("http://{addr}/code/sessions/{hosted}/turns"))
                     .bearer_auth(&token)
                     .json(&serde_json::json!({ "message": "plan it" }))
                     .send()
@@ -1057,7 +1181,7 @@ async fn a_plan_accepted_from_the_chat_route_resumes_the_session() {
             "{chosen_mode:?}"
         );
         let snapshot: serde_json::Value = client
-            .get(format!("http://{addr}/sessions/{hosted}"))
+            .get(format!("http://{addr}/code/sessions/{hosted}"))
             .bearer_auth(&token)
             .send()
             .await
@@ -1106,7 +1230,7 @@ async fn an_internal_client_wait_resumes_through_one_adapter_park() {
     let call_id: tidebreak_core::CallId = call_id.parse().unwrap();
     let pending = runtime
         .db
-        .list_pending_client_tool_calls(tidebreak_core::ChatId(session_id.0))
+        .list_pending_client_tool_calls(tidebreak_core::SessionId(session_id.0))
         .await
         .unwrap();
     assert_eq!(pending.len(), 1);
@@ -1177,7 +1301,7 @@ async fn an_internal_client_wait_resumes_through_one_adapter_park() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(completed.status, CodeTurnStatus::Completed);
+    assert_eq!(completed.status, TurnStatus::Completed);
     assert_eq!(completed.park_ref, None);
     assert_eq!(completed.park_wait, None);
     let after_resume = runtime
@@ -1228,7 +1352,7 @@ async fn an_internal_agent_wait_resumes_through_one_adapter_park() {
     let child_id: tidebreak_core::AgentRunId = run_ids[0].parse().unwrap();
     let children = runtime
         .db
-        .list_agent_runs(tidebreak_core::ChatId(session_id.0))
+        .list_agent_runs(tidebreak_core::SessionId(session_id.0))
         .await
         .unwrap()
         .into_iter()
@@ -1276,7 +1400,7 @@ async fn an_internal_agent_wait_resumes_through_one_adapter_park() {
     };
     let _ = state
         .events
-        .sender(tidebreak_core::ChatId(session_id.0))
+        .sender(tidebreak_core::SessionId(session_id.0))
         .send(event);
     state.turn_job_wake.notify_one();
 
@@ -1289,7 +1413,7 @@ async fn an_internal_agent_wait_resumes_through_one_adapter_park() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(completed.status, CodeTurnStatus::Completed);
+    assert_eq!(completed.status, TurnStatus::Completed);
     assert_eq!(completed.park_ref, None);
     assert_eq!(completed.park_wait, None);
     let after_resume = runtime
@@ -1327,7 +1451,7 @@ async fn interrupting_an_internal_client_park_closes_the_turn() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/sessions/{session_id}/interrupt"))
+                .uri(format!("/code/sessions/{session_id}/interrupt"))
                 .header(header::AUTHORIZATION, &bearer)
                 .body(Body::empty())
                 .unwrap(),
@@ -1344,11 +1468,11 @@ async fn interrupting_an_internal_client_park_closes_the_turn() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(closed.status, CodeTurnStatus::Interrupted);
+    assert_eq!(closed.status, TurnStatus::Interrupted);
     let call_id: tidebreak_core::CallId = call_id.parse().unwrap();
     let call = runtime
         .db
-        .list_tool_calls(tidebreak_core::ChatId(session_id.0))
+        .list_tool_calls(tidebreak_core::SessionId(session_id.0))
         .await
         .unwrap()
         .into_iter()
@@ -1366,7 +1490,7 @@ async fn a_plain_internal_turn_is_journaled_once() {
         internal_engine_app(vec![Step::Text("just the answer")]).await;
     let client = reqwest::Client::new();
     let created = client
-        .post(format!("http://{addr}/sessions"))
+        .post(format!("http://{addr}/code/sessions"))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "permission_mode": "ask" }))
         .send()
@@ -1374,11 +1498,11 @@ async fn a_plain_internal_turn_is_journaled_once() {
         .unwrap();
     assert_eq!(created.status(), reqwest::StatusCode::CREATED);
     let session: serde_json::Value = created.json().await.unwrap();
-    let hosted: CodeSessionId = session["id"].as_str().unwrap().parse().unwrap();
+    let hosted: SessionId = session["id"].as_str().unwrap().parse().unwrap();
 
     let response = tokio::time::timeout(Duration::from_secs(20), async {
         client
-            .post(format!("http://{addr}/sessions/{hosted}/turns"))
+            .post(format!("http://{addr}/code/sessions/{hosted}/turns"))
             .bearer_auth(&token)
             .json(&serde_json::json!({ "message": "say it" }))
             .send()
@@ -1427,7 +1551,7 @@ async fn a_chat_is_not_a_runtime_session_until_the_runtime_drives_it() {
 
     let sessions = || async {
         client
-            .get(format!("http://{addr}/sessions"))
+            .get(format!("http://{addr}/code/sessions"))
             .bearer_auth(&token)
             .send()
             .await
@@ -1453,7 +1577,7 @@ async fn a_chat_is_not_a_runtime_session_until_the_runtime_drives_it() {
 
     // The same id still resolves on the session route: one id, one row.
     let by_id = client
-        .get(format!("http://{addr}/sessions/{chat_id}"))
+        .get(format!("http://{addr}/code/sessions/{chat_id}"))
         .bearer_auth(&token)
         .send()
         .await
@@ -1472,7 +1596,7 @@ async fn deleting_a_hosted_session_through_the_chat_route_removes_it_from_both_s
     let (addr, token, _runtime, _ran, _dir) = internal_engine_app(Vec::new()).await;
     let client = reqwest::Client::new();
     let created = client
-        .post(format!("http://{addr}/sessions"))
+        .post(format!("http://{addr}/code/sessions"))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "permission_mode": "plan" }))
         .send()
@@ -1480,7 +1604,7 @@ async fn deleting_a_hosted_session_through_the_chat_route_removes_it_from_both_s
         .unwrap();
     assert_eq!(created.status(), reqwest::StatusCode::CREATED);
     let session: serde_json::Value = created.json().await.unwrap();
-    let id: CodeSessionId = session["id"].as_str().unwrap().parse().unwrap();
+    let id: SessionId = session["id"].as_str().unwrap().parse().unwrap();
 
     // Creating the session attached the engine, which journaled
     // `SessionStarted` under this id; without the code-side cascade the
@@ -1496,7 +1620,7 @@ async fn deleting_a_hosted_session_through_the_chat_route_removes_it_from_both_s
     assert_eq!(status, reqwest::StatusCode::NO_CONTENT, "{body}");
     for (surface, route) in [
         ("chat", format!("http://{addr}/chats/{id}")),
-        ("code", format!("http://{addr}/sessions/{id}")),
+        ("code", format!("http://{addr}/code/sessions/{id}")),
     ] {
         let missing = client.get(route).bearer_auth(&token).send().await.unwrap();
         assert_eq!(
@@ -1563,7 +1687,7 @@ async fn an_internal_turn_with_an_image_reaches_the_model_with_the_bytes() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/sessions")
+                .uri("/code/sessions")
                 .header(header::AUTHORIZATION, &bearer)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
@@ -1583,7 +1707,7 @@ async fn an_internal_turn_with_an_image_reaches_the_model_with_the_bytes() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/sessions/{session_id}/attachments/images"))
+                .uri(format!("/code/sessions/{session_id}/attachments/images"))
                 .header(header::AUTHORIZATION, &bearer)
                 .header(header::CONTENT_TYPE, "image/png")
                 .body(Body::from(pixels.clone()))
@@ -1605,7 +1729,7 @@ async fn an_internal_turn_with_an_image_reaches_the_model_with_the_bytes() {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/sessions/{session_id}/turns"))
+                    .uri(format!("/code/sessions/{session_id}/turns"))
                     .header(header::AUTHORIZATION, &bearer)
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(

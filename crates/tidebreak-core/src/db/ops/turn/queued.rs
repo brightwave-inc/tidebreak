@@ -12,9 +12,9 @@ use sea_orm::{
 };
 
 use crate::error::{AgentError, Result};
-use crate::id::{ChatId, DocumentId, TurnId};
+use crate::id::{DocumentId, SessionId, TurnId};
 use crate::image::ImageRef;
-use crate::model::{AgentRunStatus, QueuedTurn, TurnAdmissionLease, TurnAdmissionRequest};
+use crate::model::{AgentRunStatus, QueuedAgentTurn, TurnAdmissionLease, TurnAdmissionRequest};
 use crate::storage::{AcceptTurnOutcome, PromoteQueuedTurnOutcome, ReservedQueuedTurnOutcome};
 
 use super::super::super::{entities, store_err, DbStore};
@@ -22,14 +22,14 @@ use super::super::acquire_chat_write_lock;
 use super::super::agent_run::database_now;
 use super::admission;
 
-fn queued_turn_from_model(model: entities::code_queued_turn::Model) -> Result<QueuedTurn> {
+fn queued_turn_from_model(model: entities::code_queued_turn::Model) -> Result<QueuedAgentTurn> {
     let parse = |json: &str| -> Result<Vec<uuid::Uuid>> {
         serde_json::from_str(json)
             .map_err(|_| AgentError::Store("invalid stored queued-turn attachment list".into()))
     };
-    Ok(QueuedTurn {
+    Ok(QueuedAgentTurn {
         id: TurnId(model.id),
-        chat_id: ChatId(model.session_id),
+        chat_id: SessionId(model.session_id),
         content: model.message,
         attachments: parse(&model.attachments_json)?,
         file_attachments: parse(&model.file_attachments_json)?
@@ -45,7 +45,7 @@ fn queued_turn_from_model(model: entities::code_queued_turn::Model) -> Result<Qu
     })
 }
 
-fn admission_request(queued: &QueuedTurn) -> TurnAdmissionRequest {
+fn admission_request(queued: &QueuedAgentTurn) -> TurnAdmissionRequest {
     TurnAdmissionRequest {
         id: queued.id,
         chat_id: queued.chat_id,
@@ -57,7 +57,7 @@ fn admission_request(queued: &QueuedTurn) -> TurnAdmissionRequest {
     }
 }
 
-async fn current_head_on<C>(conn: &C, chat_id: ChatId) -> Result<Option<QueuedTurn>>
+async fn current_head_on<C>(conn: &C, chat_id: SessionId) -> Result<Option<QueuedAgentTurn>>
 where
     C: sea_orm::ConnectionTrait,
 {
@@ -74,8 +74,8 @@ where
 
 pub(in crate::db) async fn enqueue_turn(
     store: &DbStore,
-    queued: &QueuedTurn,
-) -> Result<QueuedTurn> {
+    queued: &QueuedAgentTurn,
+) -> Result<QueuedAgentTurn> {
     match enqueue_turn_inner(store, None, queued).await? {
         ReservedQueuedTurnOutcome::Queued(queued) => Ok(queued),
         ReservedQueuedTurnOutcome::LeaseLost => Err(AgentError::Store(format!(
@@ -88,7 +88,7 @@ pub(in crate::db) async fn enqueue_turn(
 pub(in crate::db) async fn enqueue_reserved_turn(
     store: &DbStore,
     lease: TurnAdmissionLease,
-    queued: &QueuedTurn,
+    queued: &QueuedAgentTurn,
 ) -> Result<ReservedQueuedTurnOutcome> {
     enqueue_turn_inner(store, Some(lease), queued).await
 }
@@ -96,7 +96,7 @@ pub(in crate::db) async fn enqueue_reserved_turn(
 async fn enqueue_turn_inner(
     store: &DbStore,
     reservation: Option<TurnAdmissionLease>,
-    queued: &QueuedTurn,
+    queued: &QueuedAgentTurn,
 ) -> Result<ReservedQueuedTurnOutcome> {
     if queued.id.0.is_nil() || queued.content.trim().is_empty() || queued.content.contains('\0') {
         return Err(AgentError::Store("invalid queued turn".into()));
@@ -134,11 +134,11 @@ async fn enqueue_turn_inner(
         .count(&transaction)
         .await
         .map_err(store_err)?;
-    if count >= QueuedTurn::MAX_PER_CHAT as u64 {
+    if count >= QueuedAgentTurn::MAX_PER_CHAT as u64 {
         transaction.commit().await.map_err(store_err)?;
         return Err(AgentError::Store(format!(
             "a chat may queue at most {} messages",
-            QueuedTurn::MAX_PER_CHAT
+            QueuedAgentTurn::MAX_PER_CHAT
         )));
     }
     let position = entities::code_queued_turn::Entity::find()
@@ -149,7 +149,7 @@ async fn enqueue_turn_inner(
         .map_err(store_err)?
         .map_or(0, |last| last.position + 1);
 
-    let session = entities::code_session::Entity::find_by_id(queued.chat_id.0)
+    let session = entities::session::Entity::find_by_id(queued.chat_id.0)
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -190,7 +190,7 @@ async fn enqueue_turn_inner(
 
 pub(in crate::db) async fn promote_turn(
     store: &DbStore,
-    expected: &QueuedTurn,
+    expected: &QueuedAgentTurn,
     model: &str,
     images: &[ImageRef],
 ) -> Result<PromoteQueuedTurnOutcome> {
@@ -231,7 +231,7 @@ pub(in crate::db) async fn promote_turn(
             ))
         })?;
 
-    if let Some(existing) = entities::code_turn::Entity::find_by_id(expected.id.0)
+    if let Some(existing) = entities::turn::Entity::find_by_id(expected.id.0)
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -269,7 +269,7 @@ pub(in crate::db) async fn promote_turn(
             super::turn_run_from_model(active)?,
         ));
     }
-    if entities::code_turn::Entity::find_by_id(expected.id.0)
+    if entities::turn::Entity::find_by_id(expected.id.0)
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -303,7 +303,7 @@ pub(in crate::db) async fn promote_turn(
     ))
 }
 
-async fn delete_exact_head_on<C>(conn: &C, expected: &QueuedTurn) -> Result<()>
+async fn delete_exact_head_on<C>(conn: &C, expected: &QueuedAgentTurn) -> Result<()>
 where
     C: sea_orm::ConnectionTrait,
 {
@@ -326,7 +326,7 @@ where
 
 pub(in crate::db) async fn delete_turn_if_current(
     store: &DbStore,
-    expected: &QueuedTurn,
+    expected: &QueuedAgentTurn,
 ) -> Result<bool> {
     let transaction = store.conn.begin().await.map_err(store_err)?;
     if !acquire_chat_write_lock(&transaction, expected.chat_id).await? {
@@ -348,8 +348,8 @@ pub(in crate::db) async fn delete_turn_if_current(
 
 pub(in crate::db) async fn list_queued_turns(
     store: &DbStore,
-    chat_id: ChatId,
-) -> Result<Vec<QueuedTurn>> {
+    chat_id: SessionId,
+) -> Result<Vec<QueuedAgentTurn>> {
     entities::code_queued_turn::Entity::find()
         .filter(entities::code_queued_turn::Column::SessionId.eq(chat_id.0))
         .order_by_asc(entities::code_queued_turn::Column::Position)
@@ -364,7 +364,7 @@ pub(in crate::db) async fn list_queued_turns(
 
 /// Chats that currently hold at least one queued message, for the promoter's
 /// scan. Bounded output: distinct chat ids only.
-pub(in crate::db) async fn chats_with_queued_turns(store: &DbStore) -> Result<Vec<ChatId>> {
+pub(in crate::db) async fn chats_with_queued_turns(store: &DbStore) -> Result<Vec<SessionId>> {
     use sea_orm::QuerySelect;
     Ok(entities::code_queued_turn::Entity::find()
         .select_only()
@@ -375,13 +375,13 @@ pub(in crate::db) async fn chats_with_queued_turns(store: &DbStore) -> Result<Ve
         .await
         .map_err(store_err)?
         .into_iter()
-        .map(ChatId)
+        .map(SessionId)
         .collect())
 }
 
 pub(in crate::db) async fn delete_queued_turn(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
     id: TurnId,
 ) -> Result<bool> {
     let transaction = store.conn.begin().await.map_err(store_err)?;
@@ -403,11 +403,11 @@ pub(in crate::db) async fn delete_queued_turn(
 /// every position in the chat so the order stays dense and total.
 pub(in crate::db) async fn update_queued_turn(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
     id: TurnId,
     content: Option<&str>,
     position: Option<i32>,
-) -> Result<Option<QueuedTurn>> {
+) -> Result<Option<QueuedAgentTurn>> {
     if let Some(content) = content {
         if content.trim().is_empty() || content.contains('\0') {
             return Err(AgentError::Store("invalid queued-turn content".into()));

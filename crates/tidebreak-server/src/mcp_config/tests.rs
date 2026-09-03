@@ -1589,11 +1589,7 @@ async fn verify_classifies_tls_handshake_failure() {
             tokio::spawn(async move {
                 let mut buf = [0u8; 512];
                 let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut buf).await;
-                let _ = tokio::io::AsyncWriteExt::write_all(
-                    &mut stream,
-                    b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n",
-                )
-                .await;
+                tokio::time::sleep(Duration::from_millis(200)).await;
             });
         }
     });
@@ -1683,7 +1679,10 @@ async fn verify_classifies_protocol_negotiation_and_quotes_first_bytes() {
 async fn verify_classifies_timeout_after_configured_milliseconds() {
     let app = axum::Router::new().route(
         "/mcp",
-        axum::routing::post(|| async { std::future::pending::<axum::http::StatusCode>().await }),
+        axum::routing::post(|| async {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            axum::http::StatusCode::OK
+        }),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();

@@ -8,13 +8,10 @@ use crate::approval::{
     ApprovalDecision, ApprovalRequest, AutoJudgeStatus, GrantScope, InternalToolApprovalRequest,
     StandingGrant, ToolApproval, ToolApprovalKind, ToolApprovalStatus,
 };
-use crate::code::{
-    ApprovalDecisionKind, CodeApproval, CodeApprovalId, CodeApprovalKind, CodeApprovalState,
-    CodeSessionId, CodeTurnId,
-};
+use crate::code::{Approval, ApprovalDecisionKind, ApprovalId, ApprovalKind, ApprovalState};
 use crate::error::{AgentError, Result};
-use crate::event::{AgentEvent, SequencedEvent};
-use crate::id::{CallId, ChatId, TurnId};
+use crate::event::{AgentEvent, SequencedAgentEvent};
+use crate::id::{CallId, SessionId, TurnId};
 use crate::model::{OwnerId, ToolCallExecution, ToolCallStatus, TurnRunStatus};
 use crate::preview::ToolActionPreview;
 use crate::storage::{
@@ -47,7 +44,7 @@ const CANCELLED_REASON: &str = "turn cancellation revoked approval";
 /// subsequent approval transition cannot race a grant write for the same chat.
 async fn matching_standing_grant<C>(
     conn: &C,
-    chat_id: ChatId,
+    chat_id: SessionId,
     project_id: Option<crate::id::ProjectId>,
     tool_name: &str,
     kind: ToolApprovalKind,
@@ -105,12 +102,12 @@ where
 /// epoch a card is stamped with, and the project a grant is matched against.
 pub(in crate::db::ops) async fn session_row<C>(
     conn: &C,
-    chat_id: ChatId,
-) -> Result<entities::code_session::Model>
+    chat_id: SessionId,
+) -> Result<entities::session::Model>
 where
     C: ConnectionTrait,
 {
-    entities::code_session::Entity::find_by_id(chat_id.0)
+    entities::session::Entity::find_by_id(chat_id.0)
         .one(conn)
         .await
         .map_err(store_err)?
@@ -128,7 +125,7 @@ fn grant_level_from_row(
 ) -> Option<crate::approval::GrantLevel> {
     match (chat_id, project_id) {
         (Some(chat_id), None) => Some(crate::approval::GrantLevel::Chat {
-            chat_id: ChatId(chat_id),
+            chat_id: SessionId(chat_id),
         }),
         (None, Some(project_id)) => Some(crate::approval::GrantLevel::Project {
             project_id: crate::id::ProjectId(project_id),
@@ -145,9 +142,9 @@ fn grant_level_from_row(
 /// delete the grant with its parent, so the derivation cannot dangle or drift.
 fn owned_grants_condition(owner: &OwnerId) -> sea_orm::Condition {
     let owned_chats = sea_orm::sea_query::Query::select()
-        .column(entities::code_session::Column::Id)
-        .from(entities::code_session::Entity)
-        .and_where(entities::code_session::Column::Owner.eq(owner.as_str()))
+        .column(entities::session::Column::Id)
+        .from(entities::session::Entity)
+        .and_where(entities::session::Column::Owner.eq(owner.as_str()))
         .cond_where(internal_sessions())
         .to_owned();
     let owned_projects = sea_orm::sea_query::Query::select()
@@ -227,30 +224,30 @@ fn judge_may_own(request: &ApprovalRequest, arguments: &serde_json::Value) -> bo
 /// ladder, and the raw payload is the engine's own request. A call a
 /// standing grant covers mints the row already approved, naming the grant.
 fn tool_use_approval(
-    session: &entities::code_session::Model,
+    session: &entities::session::Model,
     call: &entities::tool_call::Model,
     request: &ApprovalRequest,
     grant_scopes: Vec<GrantScope>,
     requested_at: DateTime<Utc>,
     auto_judge_status: Option<AutoJudgeStatus>,
     granted_by: Option<CallId>,
-) -> Result<CodeApproval> {
+) -> Result<Approval> {
     // The model's own narration never reaches a consent card (decision
     // 0018): the card renders the literal action, and a call that could
     // describe itself to a decision could describe itself favourably.
     let kind = match ToolActionPreview::build(&call.name, &call.arguments) {
-        Some(preview) => CodeApprovalKind::ToolUse {
+        Some(preview) => ApprovalKind::ToolUse {
             preview: preview.without_summary(),
             offered_grants: grant_scopes,
         },
-        None => CodeApprovalKind::Other {
+        None => ApprovalKind::Other {
             summary: crate::chat_journal::bounded(&call.name, crate::code::MAX_TOOL_SUMMARY_CHARS),
         },
     };
-    Ok(CodeApproval {
-        id: CodeApprovalId(call.id),
-        session_id: CodeSessionId(session.id),
-        turn_id: CodeTurnId(call.turn_id),
+    Ok(Approval {
+        id: ApprovalId(call.id),
+        session_id: SessionId(session.id),
+        turn_id: TurnId(call.turn_id),
         kind,
         harness_raw: InternalToolApprovalRequest {
             tool_name: call.name.clone(),
@@ -265,9 +262,9 @@ fn tool_use_approval(
         decision_claim: None,
         claimed_at: None,
         state: if granted_by.is_some() {
-            CodeApprovalState::Approved
+            ApprovalState::Approved
         } else {
-            CodeApprovalState::Pending
+            ApprovalState::Pending
         },
         feedback: None,
         requested_at,
@@ -281,7 +278,7 @@ fn tool_use_approval(
 /// asked, and the journal records only what they were.
 async fn grant_approval_on<C>(
     conn: &C,
-    session: &entities::code_session::Model,
+    session: &entities::session::Model,
     call: &entities::tool_call::Model,
     request: &ApprovalRequest,
     requested_at: DateTime<Utc>,
@@ -349,7 +346,7 @@ pub(in crate::db) async fn request_and_append_event(
         grant_scopes: grant_scopes.clone(),
         preview: request.preview.clone(),
     };
-    let turn = entities::code_turn::Entity::find_by_id(request.turn_id.0)
+    let turn = entities::turn::Entity::find_by_id(request.turn_id.0)
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -362,7 +359,7 @@ pub(in crate::db) async fn request_and_append_event(
         && call.name == request.tool_name
         && call.execution == ToolCallExecution::Server.as_str()
     {
-        if let Some(row) = find_approval_row_on(&transaction, CodeApprovalId(call.id)).await? {
+        if let Some(row) = find_approval_row_on(&transaction, ApprovalId(call.id)).await? {
             let approval = tool_approval_from_rows(&row, &call)?;
             if approval.class != request.class || approval.kind != request.kind {
                 transaction.commit().await.map_err(store_err)?;
@@ -469,7 +466,7 @@ pub(in crate::db) async fn request_and_append_event(
     transaction.commit().await.map_err(store_err)?;
     Ok(JournaledToolApprovalOutcome {
         outcome: RequestToolApprovalOutcome::Requested(approval),
-        required_event: Some(SequencedEvent { seq, event }),
+        required_event: Some(SequencedAgentEvent { seq, event }),
     })
 }
 
@@ -483,13 +480,13 @@ async fn exact_required_event<C>(
     lease_token: uuid::Uuid,
     event_ordinal: i32,
     expected: &AgentEvent,
-) -> Result<Option<SequencedEvent>>
+) -> Result<Option<SequencedAgentEvent>>
 where
     C: sea_orm::ConnectionTrait,
 {
-    let Some(stored) = entities::code_event::Entity::find()
-        .filter(entities::code_event::Column::LeaseToken.eq(lease_token))
-        .filter(entities::code_event::Column::AttemptEventOrdinal.eq(event_ordinal))
+    let Some(stored) = entities::event::Entity::find()
+        .filter(entities::event::Column::LeaseToken.eq(lease_token))
+        .filter(entities::event::Column::AttemptEventOrdinal.eq(event_ordinal))
         .one(conn)
         .await
         .map_err(store_err)?
@@ -506,7 +503,7 @@ where
             "approval event receipt does not match its request".into(),
         ));
     }
-    Ok(Some(SequencedEvent {
+    Ok(Some(SequencedAgentEvent {
         seq: stored.seq,
         event: payload,
     }))
@@ -516,7 +513,7 @@ where
 /// chat (session) lock, and append its `ApprovalResolved`.
 pub(in crate::db::ops) async fn settle_row_on<C>(
     conn: &C,
-    row: &entities::code_approval::Model,
+    row: &entities::approval::Model,
     claim: ApprovalClaim,
     decision: ApprovalDecisionKind,
     decided_at: DateTime<Utc>,
@@ -531,8 +528,8 @@ where
     settle_approval_on_locked(
         conn,
         &owner,
-        CodeApprovalId(row.id),
-        CodeSessionId(row.session_id),
+        ApprovalId(row.id),
+        SessionId(row.session_id),
         worker_epoch,
         claim,
         decision,
@@ -638,10 +635,10 @@ pub(in crate::db::ops) async fn abandon_pending_for_call_on<C>(
 where
     C: ConnectionTrait,
 {
-    let Some(row) = find_approval_row_on(conn, CodeApprovalId(call_id.0)).await? else {
+    let Some(row) = find_approval_row_on(conn, ApprovalId(call_id.0)).await? else {
         return Ok(());
     };
-    if row.state != CodeApprovalState::Pending.as_str() {
+    if row.state != ApprovalState::Pending.as_str() {
         return Ok(());
     }
     let decided_at = now.max(row.requested_at);
@@ -656,7 +653,7 @@ where
     Ok(())
 }
 
-pub(in crate::db::ops) fn claim_of(row: &entities::code_approval::Model) -> ApprovalClaim {
+pub(in crate::db::ops) fn claim_of(row: &entities::approval::Model) -> ApprovalClaim {
     match row.decision_claim {
         Some(claim) => ApprovalClaim::Exact(claim),
         None => ApprovalClaim::Unclaimed,
@@ -666,15 +663,15 @@ pub(in crate::db::ops) fn claim_of(row: &entities::code_approval::Model) -> Appr
 async fn pending_rows_for_turn<C>(
     conn: &C,
     turn_id: TurnId,
-) -> Result<Vec<entities::code_approval::Model>>
+) -> Result<Vec<entities::approval::Model>>
 where
     C: ConnectionTrait,
 {
-    entities::code_approval::Entity::find()
-        .filter(entities::code_approval::Column::TurnId.eq(turn_id.0))
-        .filter(entities::code_approval::Column::State.eq(CodeApprovalState::Pending.as_str()))
-        .order_by_asc(entities::code_approval::Column::RequestedAt)
-        .order_by_asc(entities::code_approval::Column::Id)
+    entities::approval::Entity::find()
+        .filter(entities::approval::Column::TurnId.eq(turn_id.0))
+        .filter(entities::approval::Column::State.eq(ApprovalState::Pending.as_str()))
+        .order_by_asc(entities::approval::Column::RequestedAt)
+        .order_by_asc(entities::approval::Column::Id)
         .all(conn)
         .await
         .map_err(store_err)
@@ -708,7 +705,7 @@ pub(in crate::db) async fn request(
         transaction.commit().await.map_err(store_err)?;
         return Ok(RequestToolApprovalOutcome::IdentityConflict);
     }
-    if let Some(row) = find_approval_row_on(&transaction, CodeApprovalId(existing.id)).await? {
+    if let Some(row) = find_approval_row_on(&transaction, ApprovalId(existing.id)).await? {
         let approval = tool_approval_from_rows(&row, &existing)?;
         transaction.commit().await.map_err(store_err)?;
         return if approval.class == request.class && approval.kind == request.kind {
@@ -779,7 +776,7 @@ fn decision_kind(decision: &ApprovalDecision) -> ApprovalDecisionKind {
 
 pub(in crate::db) async fn decide(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
     call_id: CallId,
     decision: &ApprovalDecision,
     _decided_at: DateTime<Utc>,
@@ -819,7 +816,7 @@ pub(in crate::db) async fn decide(
     // verdict CAS no-ops and the decision is never relabeled as automatic. A
     // terminal `declined` marker stays: it is history, not ownership.
     if current.auto_judge_status == Some(AutoJudgeStatus::Judging) {
-        set_auto_judge_status_on(&transaction, CodeApprovalId(row.id), None).await?;
+        set_auto_judge_status_on(&transaction, ApprovalId(row.id), None).await?;
     }
     let settlement = settle_row_on(
         &transaction,
@@ -845,7 +842,7 @@ pub(in crate::db) async fn decide(
 /// standing authority.
 pub(in crate::db) async fn decide_with_grant(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
     call_id: CallId,
     decision: &ApprovalDecision,
     grant: &StandingGrant,
@@ -902,7 +899,7 @@ pub(in crate::db) async fn decide_with_grant(
     // Same release as the plain human decision: an unanswered judge loses
     // ownership so its verdict CAS no-ops.
     if current.auto_judge_status == Some(AutoJudgeStatus::Judging) {
-        set_auto_judge_status_on(&transaction, CodeApprovalId(row.id), None).await?;
+        set_auto_judge_status_on(&transaction, ApprovalId(row.id), None).await?;
     }
     let settlement = settle_row_on(
         &transaction,
@@ -927,11 +924,11 @@ pub(in crate::db) async fn decide_with_grant(
 /// the call has no card, or the card belongs to another chat.
 async fn pending_tool_approval<C>(
     conn: &C,
-    chat_id: ChatId,
+    chat_id: SessionId,
     call_id: CallId,
 ) -> Result<
     Option<(
-        entities::code_approval::Model,
+        entities::approval::Model,
         entities::tool_call::Model,
         ToolApproval,
     )>,
@@ -949,7 +946,7 @@ where
         .await
         .map_err(store_err)?
         .expect("locked tool call exists");
-    let Some(row) = find_approval_row_on(conn, CodeApprovalId(call_id.0)).await? else {
+    let Some(row) = find_approval_row_on(conn, ApprovalId(call_id.0)).await? else {
         return Ok(None);
     };
     if row.session_id != chat_id.0 || existing.chat_id != chat_id.0 {
@@ -970,7 +967,7 @@ async fn decided_tool_approval<C>(
 where
     C: ConnectionTrait,
 {
-    let row = find_approval_row_on(conn, CodeApprovalId(call_id.0))
+    let row = find_approval_row_on(conn, ApprovalId(call_id.0))
         .await?
         .ok_or_else(|| AgentError::Store(format!("decided approval {call_id} disappeared")))?;
     tool_approval_from_rows(&row, call)
@@ -1002,7 +999,7 @@ where
 }
 
 pub(in crate::db) async fn get(store: &DbStore, call_id: CallId) -> Result<Option<ToolApproval>> {
-    let Some(row) = find_approval_row_on(&store.conn, CodeApprovalId(call_id.0)).await? else {
+    let Some(row) = find_approval_row_on(&store.conn, ApprovalId(call_id.0)).await? else {
         return Ok(None);
     };
     if InternalToolApprovalRequest::from_raw(&row.harness_raw).is_none() {
@@ -1020,7 +1017,7 @@ pub(in crate::db) async fn get(store: &DbStore, call_id: CallId) -> Result<Optio
 
 pub(in crate::db) async fn list_pending(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
     limit: u64,
 ) -> Result<Vec<ToolApproval>> {
     if limit == 0 || limit > 100 {
@@ -1028,11 +1025,11 @@ pub(in crate::db) async fn list_pending(
             "pending approval limit must be between 1 and 100".into(),
         ));
     }
-    let rows = entities::code_approval::Entity::find()
-        .filter(entities::code_approval::Column::SessionId.eq(chat_id.0))
-        .filter(entities::code_approval::Column::State.eq(CodeApprovalState::Pending.as_str()))
-        .order_by_asc(entities::code_approval::Column::RequestedAt)
-        .order_by_asc(entities::code_approval::Column::Id)
+    let rows = entities::approval::Entity::find()
+        .filter(entities::approval::Column::SessionId.eq(chat_id.0))
+        .filter(entities::approval::Column::State.eq(ApprovalState::Pending.as_str()))
+        .order_by_asc(entities::approval::Column::RequestedAt)
+        .order_by_asc(entities::approval::Column::Id)
         .all(&store.conn)
         .await
         .map_err(store_err)?;
@@ -1041,12 +1038,10 @@ pub(in crate::db) async fn list_pending(
 
 /// A bounded page of calls the Auto-mode judge currently owns, oldest first.
 pub(in crate::db) async fn list_judging(store: &DbStore, limit: u64) -> Result<Vec<ToolApproval>> {
-    let rows = entities::code_approval::Entity::find()
-        .filter(
-            entities::code_approval::Column::AutoJudgeStatus.eq(AutoJudgeStatus::Judging.as_str()),
-        )
-        .filter(entities::code_approval::Column::State.eq(CodeApprovalState::Pending.as_str()))
-        .order_by_asc(entities::code_approval::Column::RequestedAt)
+    let rows = entities::approval::Entity::find()
+        .filter(entities::approval::Column::AutoJudgeStatus.eq(AutoJudgeStatus::Judging.as_str()))
+        .filter(entities::approval::Column::State.eq(ApprovalState::Pending.as_str()))
+        .order_by_asc(entities::approval::Column::RequestedAt)
         .limit(limit)
         .all(&store.conn)
         .await
@@ -1058,7 +1053,7 @@ pub(in crate::db) async fn list_judging(store: &DbStore, limit: u64) -> Result<V
 /// A park (questions, a plan) carries no tool request and is skipped.
 async fn tool_approvals_from_rows(
     store: &DbStore,
-    rows: Vec<entities::code_approval::Model>,
+    rows: Vec<entities::approval::Model>,
     limit: u64,
 ) -> Result<Vec<ToolApproval>> {
     let mut approvals = Vec::new();
@@ -1092,7 +1087,7 @@ async fn tool_approvals_from_rows(
 /// human card, and the marker never returns to `judging`.
 pub(in crate::db) async fn resolve_from_judge(
     store: &DbStore,
-    chat_id: ChatId,
+    chat_id: SessionId,
     call_id: CallId,
     approved: bool,
 ) -> Result<JudgeVerdictOutcome> {
@@ -1114,7 +1109,7 @@ pub(in crate::db) async fn resolve_from_judge(
     if !approved {
         set_auto_judge_status_on(
             &transaction,
-            CodeApprovalId(row.id),
+            ApprovalId(row.id),
             Some(AutoJudgeStatus::Declined),
         )
         .await?;
@@ -1126,7 +1121,7 @@ pub(in crate::db) async fn resolve_from_judge(
         .max(current.requested_at);
     set_auto_judge_status_on(
         &transaction,
-        CodeApprovalId(row.id),
+        ApprovalId(row.id),
         Some(AutoJudgeStatus::Approved),
     )
     .await?;
@@ -1179,7 +1174,7 @@ fn validate_decision(decision: &ApprovalDecision) -> Result<()> {
 /// different action from the one that will run. The class is a function of
 /// the kind, as it always was in storage.
 pub(in crate::db) fn tool_approval_from_rows(
-    row: &entities::code_approval::Model,
+    row: &entities::approval::Model,
     call: &entities::tool_call::Model,
 ) -> Result<ToolApproval> {
     let request = InternalToolApprovalRequest::from_raw(&row.harness_raw)
@@ -1191,15 +1186,15 @@ pub(in crate::db) fn tool_approval_from_rows(
         )));
     }
     let approval = approval_from_row(row.clone())?;
-    if request.granted_by.is_some() && approval.state != CodeApprovalState::Approved {
+    if request.granted_by.is_some() && approval.state != ApprovalState::Approved {
         return Err(AgentError::Store(
             "non-approved tool call names a standing grant source".into(),
         ));
     }
     let (status, reason) = match approval.state {
-        CodeApprovalState::Pending => (ToolApprovalStatus::Pending, None),
-        CodeApprovalState::Approved => (ToolApprovalStatus::Approved, None),
-        CodeApprovalState::Denied => (
+        ApprovalState::Pending => (ToolApprovalStatus::Pending, None),
+        ApprovalState::Approved => (ToolApprovalStatus::Approved, None),
+        ApprovalState::Denied => (
             ToolApprovalStatus::Rejected,
             Some(
                 approval
@@ -1208,9 +1203,7 @@ pub(in crate::db) fn tool_approval_from_rows(
                     .unwrap_or_else(|| ToolApproval::DEFAULT_REJECT_REASON.into()),
             ),
         ),
-        CodeApprovalState::Abandoned => {
-            (ToolApprovalStatus::Rejected, Some(ABANDONED_REASON.into()))
-        }
+        ApprovalState::Abandoned => (ToolApprovalStatus::Rejected, Some(ABANDONED_REASON.into())),
     };
     let kind = request.kind;
     let class = if kind == ToolApprovalKind::WorkspaceMayModifyFiles {
@@ -1220,7 +1213,7 @@ pub(in crate::db) fn tool_approval_from_rows(
     };
     Ok(ToolApproval {
         call_id: CallId(row.id),
-        chat_id: ChatId(row.session_id),
+        chat_id: SessionId(row.session_id),
         turn_id: TurnId(row.turn_id),
         tool_name: call.name.clone(),
         class,

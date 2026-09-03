@@ -83,12 +83,12 @@ impl CodeRuntime {
         workspace_id: WorkspaceId,
         harness: HarnessKind,
         settings: NewSessionSettings,
-    ) -> CodeSession {
-        CodeSession {
-            id: CodeSessionId::new(),
+    ) -> Session {
+        Session {
+            id: SessionId::new(),
             owner: owner.clone(),
             workspace_id: Some(workspace_id),
-            kind: CodeSessionKind::Interactive,
+            kind: SessionKind::Interactive,
             harness_kind: harness,
             harness_version: None,
             harness_resume_ref: None,
@@ -96,7 +96,7 @@ impl CodeRuntime {
             model: normalize_model(settings.model),
             reasoning_effort: settings.reasoning_effort,
             fast_mode: false,
-            lifecycle: CodeSessionLifecycle::Idle,
+            lifecycle: SessionLifecycle::Idle,
             fence_reason: None,
             child_pid: None,
             child_process_identity: None,
@@ -154,7 +154,7 @@ impl CodeRuntime {
                 return Ok(tidebreak_core::ExternalSessionResolution::GrantMismatch);
             }
             let session = self.get_session(owner, binding.session_id).await?;
-            if session.lifecycle == CodeSessionLifecycle::Ended {
+            if session.lifecycle == SessionLifecycle::Ended {
                 return Ok(tidebreak_core::ExternalSessionResolution::Ended {
                     session_id: binding.session_id,
                 });
@@ -197,7 +197,7 @@ impl CodeRuntime {
         workspace_id: WorkspaceId,
         harness: HarnessKind,
         settings: NewSessionSettings,
-    ) -> Result<CodeSession, ServerError> {
+    ) -> Result<Session, ServerError> {
         if self.remote.is_none() {
             return Err(ServerError::conflict_kind(
                 "remote_disabled",
@@ -229,7 +229,7 @@ impl CodeRuntime {
     pub(super) async fn submit_remote_turn(
         &self,
         owner: &OwnerId,
-        mut session: CodeSession,
+        mut session: Session,
         workspace: &CodeWorkspace,
         message: String,
         model: Option<String>,
@@ -265,14 +265,14 @@ impl CodeRuntime {
         // Settings stick without local capability validation: the sandbox
         // engine reads them off the spawn, and no local harness answers for
         // a remote one.
-        let mut next = CodeSessionExecutionSettings::from(&session);
+        let mut next = SessionExecutionSettings::from(&session);
         if let Some(model) = normalize_model(model) {
             next.model = Some(model);
         }
         if let Some(effort) = reasoning_effort {
             next.reasoning_effort = effort;
         }
-        if next != CodeSessionExecutionSettings::from(&session) {
+        if next != SessionExecutionSettings::from(&session) {
             session = replace_session_execution_settings(&self.db, owner, &session, &next)
                 .await?
                 .ok_or_else(|| {
@@ -284,7 +284,7 @@ impl CodeRuntime {
         }
         // Queue-default, exactly as the local path: a busy session parks the
         // send as a durable row the remote sweep promotes at the next idle.
-        let in_flight = session.lifecycle == CodeSessionLifecycle::Running
+        let in_flight = session.lifecycle == SessionLifecycle::Running
             || get_open_turn(&self.db, owner, session.id).await?.is_some();
         let backlog = !tidebreak_core::db::code::list_queued_turns(&self.db, owner, session.id)
             .await?
@@ -315,7 +315,7 @@ impl CodeRuntime {
     pub(super) async fn relay_remote_outcome(
         &self,
         owner: &OwnerId,
-        session: &CodeSession,
+        session: &Session,
         outcome: crate::code::remote::driver::RemoteTurnOutcome,
         message: String,
         queue_if_busy: bool,
@@ -362,18 +362,18 @@ impl CodeRuntime {
     pub(super) async fn park_remote_follow_up(
         &self,
         owner: &OwnerId,
-        session: &CodeSession,
+        session: &Session,
         message: String,
     ) -> Result<SubmitTurnOutcome, ServerError> {
         let queued = tidebreak_core::db::code::list_queued_turns(&self.db, owner, session.id)
             .await
             .map_err(ServerError::from)?;
-        if queued.len() >= CodeQueuedTurn::MAX_PER_SESSION {
+        if queued.len() >= QueuedTurn::MAX_PER_SESSION {
             return Err(ServerError::conflict_kind(
                 "queue_full",
                 format!(
                     "this session may queue at most {} messages",
-                    CodeQueuedTurn::MAX_PER_SESSION
+                    QueuedTurn::MAX_PER_SESSION
                 ),
             ));
         }
@@ -381,8 +381,8 @@ impl CodeRuntime {
         let row = tidebreak_core::db::code::enqueue_queued_turn(
             &self.db,
             owner,
-            &CodeQueuedTurn {
-                id: CodeTurnId::new(),
+            &QueuedTurn {
+                id: TurnId::new(),
                 session_id: session.id,
                 message,
                 attachments: Vec::new(),
@@ -425,12 +425,12 @@ impl CodeRuntime {
     /// rather than waiting out a sweep tick.
     pub(super) async fn try_promote_remote_head(
         &self,
-        mut session: CodeSession,
+        mut session: Session,
     ) -> Result<(), ServerError> {
         let Some(remote) = self.remote_sessions() else {
             return Ok(());
         };
-        if session.lifecycle != CodeSessionLifecycle::Idle {
+        if session.lifecycle != SessionLifecycle::Idle {
             return Ok(());
         }
         let Ok(Some(workspace)) = self.session_workspace(&session).await else {
@@ -511,7 +511,7 @@ impl CodeRuntime {
         &self,
         owner: &OwnerId,
         grant_id: tidebreak_core::CodeGrantId,
-        session_id: CodeSessionId,
+        session_id: SessionId,
         message: String,
         event_id: &str,
         channel_ts: &str,
@@ -532,13 +532,13 @@ impl CodeRuntime {
         }
         let session = self.get_session(owner, session_id).await?;
         match session.lifecycle {
-            CodeSessionLifecycle::Ended => {
+            SessionLifecycle::Ended => {
                 return Err(ServerError::conflict_kind(
                     "session_ended",
                     "the bound session has ended; the conversation is closed",
                 ));
             }
-            CodeSessionLifecycle::Fenced => {
+            SessionLifecycle::Fenced => {
                 return Err(ServerError::conflict_kind(
                     "session_fenced",
                     "the bound session is fenced pending a reap",
@@ -579,7 +579,7 @@ impl CodeRuntime {
         Ok(ExternalMessageOutcome::Dropped)
     }
 
-    pub(super) async fn interrupt_remote(&self, session: &CodeSession) -> Result<(), ServerError> {
+    pub(super) async fn interrupt_remote(&self, session: &Session) -> Result<(), ServerError> {
         let Some(remote) = self.remote_sessions() else {
             return Err(ServerError::conflict_kind(
                 "remote_disabled",
@@ -629,7 +629,7 @@ impl CodeRuntime {
 
     /// Best-effort stop of a remote session's sandbox. Used when the session
     /// row is ending, so the environment does not keep spending.
-    pub(super) async fn cancel_remote_sandbox(&self, session: &CodeSession) {
+    pub(super) async fn cancel_remote_sandbox(&self, session: &Session) {
         let Some(remote) = self.remote_sessions() else {
             return;
         };

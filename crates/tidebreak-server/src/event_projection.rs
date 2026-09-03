@@ -27,7 +27,7 @@
 
 use serde::{Deserialize, Serialize};
 use tidebreak_core::{
-    AgentEvent, ApprovalClass, CallId, MessageId, RendererToolName, SequencedEvent,
+    AgentEvent, ApprovalClass, CallId, MessageId, RendererToolName, SequencedAgentEvent,
     ToolActionPreview, ToolApprovalKind, ToolResultPreview, TurnId,
 };
 use ts_rs::TS;
@@ -435,8 +435,8 @@ pub enum RendererToolFailureReason {
     ProviderUnavailable,
 }
 
-impl From<&SequencedEvent> for RendererSequencedEvent {
-    fn from(value: &SequencedEvent) -> Self {
+impl From<&SequencedAgentEvent> for RendererSequencedEvent {
+    fn from(value: &SequencedAgentEvent) -> Self {
         let event = match &value.event {
             AgentEvent::TurnStarted { turn_id } => {
                 RendererAgentEvent::TurnStarted { turn_id: *turn_id }
@@ -598,7 +598,7 @@ mod tests {
 
     #[test]
     fn refusal_projection_exposes_only_bounded_presentation_metadata() {
-        let projected = RendererSequencedEvent::from(&SequencedEvent {
+        let projected = RendererSequencedEvent::from(&SequencedAgentEvent {
             seq: 12,
             event: AgentEvent::TurnRefused {
                 usage: Usage {
@@ -652,7 +652,8 @@ mod tests {
             cache_read_input_tokens: 33_000,
             cache_creation_input_tokens: 4_400,
         };
-        let project = |event| RendererSequencedEvent::from(&SequencedEvent { seq: 1, event }).event;
+        let project =
+            |event| RendererSequencedEvent::from(&SequencedAgentEvent { seq: 1, event }).event;
 
         assert_eq!(
             project(AgentEvent::TurnCompleted {
@@ -679,7 +680,8 @@ mod tests {
 
     #[test]
     fn compaction_events_project_to_the_renderer() {
-        let project = |event| RendererSequencedEvent::from(&SequencedEvent { seq: 1, event }).event;
+        let project =
+            |event| RendererSequencedEvent::from(&SequencedAgentEvent { seq: 1, event }).event;
         assert_eq!(
             project(AgentEvent::CompactionStarted),
             RendererAgentEvent::CompactionStarted
@@ -697,7 +699,7 @@ mod tests {
     #[test]
     fn unavailable_exec_projects_a_bounded_failure_reason() {
         let call_id = CallId::new();
-        let projected = RendererSequencedEvent::from(&SequencedEvent {
+        let projected = RendererSequencedEvent::from(&SequencedAgentEvent {
             seq: 1,
             event: AgentEvent::ToolCallCompleted {
                 call_id,
@@ -778,7 +780,7 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(index, event)| {
-                serde_json::to_string(&RendererSequencedEvent::from(&SequencedEvent {
+                serde_json::to_string(&RendererSequencedEvent::from(&SequencedAgentEvent {
                     seq: index as i64 + 1,
                     event: event.clone(),
                 }))
@@ -815,7 +817,7 @@ mod tests {
     /// a unit variant would silently empty it.
     #[test]
     fn reasoning_summary_crosses_to_the_renderer() {
-        let projected = RendererSequencedEvent::from(&SequencedEvent {
+        let projected = RendererSequencedEvent::from(&SequencedAgentEvent {
             seq: 7,
             event: AgentEvent::ReasoningDelta {
                 text: "weighing two approaches".into(),
@@ -867,7 +869,7 @@ mod tests {
         ];
 
         for (error, expected, exposes_detail) in cases {
-            let projected = RendererSequencedEvent::from(&SequencedEvent {
+            let projected = RendererSequencedEvent::from(&SequencedAgentEvent {
                 seq: 1,
                 event: AgentEvent::TurnFailed {
                     error: (&error).into(),
@@ -895,7 +897,7 @@ mod tests {
     fn question_event_is_only_a_bounded_refresh_hint() {
         let call_id = CallId::new();
         let turn_id = TurnId::new();
-        let projected = RendererSequencedEvent::from(&SequencedEvent {
+        let projected = RendererSequencedEvent::from(&SequencedAgentEvent {
             seq: 7,
             event: AgentEvent::UserQuestionsAsked { call_id, turn_id },
         });
@@ -910,7 +912,7 @@ mod tests {
 
     #[test]
     fn exec_approval_projects_the_command_under_review() {
-        let projected = RendererSequencedEvent::from(&SequencedEvent {
+        let projected = RendererSequencedEvent::from(&SequencedAgentEvent {
             seq: 10,
             event: AgentEvent::ApprovalRequired {
                 auto_judging: false,
@@ -946,7 +948,7 @@ mod tests {
 
     #[test]
     fn interpreter_approval_projects_no_remembered_grant_choices() {
-        let projected = RendererSequencedEvent::from(&SequencedEvent {
+        let projected = RendererSequencedEvent::from(&SequencedAgentEvent {
             seq: 11,
             event: AgentEvent::ApprovalRequired {
                 auto_judging: false,
@@ -976,7 +978,7 @@ mod tests {
 
     #[test]
     fn exec_completion_projects_what_ran_and_what_it_produced() {
-        let projected = RendererSequencedEvent::from(&SequencedEvent {
+        let projected = RendererSequencedEvent::from(&SequencedAgentEvent {
             seq: 12,
             event: AgentEvent::ToolCallCompleted {
                 call_id: CallId::new(),
@@ -1024,7 +1026,7 @@ mod tests {
                 server: "gateway".into(),
                 resource_uri: "ui://gateway/app.html".into(),
             });
-        let projected = RendererSequencedEvent::from(&SequencedEvent {
+        let projected = RendererSequencedEvent::from(&SequencedAgentEvent {
             seq: 14,
             event: AgentEvent::ToolCallCompleted {
                 call_id: CallId::new(),
@@ -1054,7 +1056,7 @@ mod tests {
 
     #[test]
     fn completions_without_a_projection_stay_closed() {
-        let projected = RendererSequencedEvent::from(&SequencedEvent {
+        let projected = RendererSequencedEvent::from(&SequencedAgentEvent {
             seq: 13,
             event: AgentEvent::ToolCallCompleted {
                 call_id: CallId::new(),
@@ -1083,7 +1085,7 @@ mod tests {
 
     #[test]
     fn approvals_without_a_preview_stay_closed() {
-        let projected = RendererSequencedEvent::from(&SequencedEvent {
+        let projected = RendererSequencedEvent::from(&SequencedAgentEvent {
             seq: 11,
             event: AgentEvent::ApprovalRequired {
                 auto_judging: false,
@@ -1111,7 +1113,7 @@ mod tests {
     /// does — it is not part of the projection at all.
     #[test]
     fn a_workspace_write_approval_carries_the_path_and_not_the_content() {
-        let projected = RendererSequencedEvent::from(&SequencedEvent {
+        let projected = RendererSequencedEvent::from(&SequencedAgentEvent {
             seq: 11,
             event: AgentEvent::ApprovalRequired {
                 auto_judging: false,
@@ -1137,7 +1139,7 @@ mod tests {
     /// not.
     #[test]
     fn a_web_search_approval_carries_the_query_being_shared() {
-        let projected = RendererSequencedEvent::from(&SequencedEvent {
+        let projected = RendererSequencedEvent::from(&SequencedAgentEvent {
             seq: 11,
             event: AgentEvent::ApprovalRequired {
                 auto_judging: false,
@@ -1204,7 +1206,7 @@ mod tests {
                 RendererToolName::BrowserAct,
             ),
         ] {
-            let projected = RendererSequencedEvent::from(&SequencedEvent {
+            let projected = RendererSequencedEvent::from(&SequencedAgentEvent {
                 seq: 1,
                 event: AgentEvent::ToolCallStarted {
                     call_id: CallId::new(),
@@ -1226,14 +1228,14 @@ mod tests {
         let first_id = MessageId::new();
         let second_id = MessageId::new();
         let projected = [
-            SequencedEvent {
+            SequencedAgentEvent {
                 seq: 41,
                 event: AgentEvent::UserSteered {
                     message_id: first_id,
                     content: "first".into(),
                 },
             },
-            SequencedEvent {
+            SequencedAgentEvent {
                 seq: 42,
                 event: AgentEvent::UserSteered {
                     message_id: second_id,
@@ -1270,7 +1272,7 @@ mod tests {
 
     #[test]
     fn search_approval_projects_frozen_egress_kind_without_private_payload() {
-        let projected = RendererSequencedEvent::from(&SequencedEvent {
+        let projected = RendererSequencedEvent::from(&SequencedAgentEvent {
             seq: 7,
             event: AgentEvent::ApprovalRequired {
                 auto_judging: false,
@@ -1290,7 +1292,7 @@ mod tests {
 
     #[test]
     fn web_search_approval_projects_narrow_query_egress_kind() {
-        let projected = RendererSequencedEvent::from(&SequencedEvent {
+        let projected = RendererSequencedEvent::from(&SequencedAgentEvent {
             seq: 8,
             event: AgentEvent::ApprovalRequired {
                 auto_judging: false,
@@ -1311,7 +1313,7 @@ mod tests {
 
     #[test]
     fn mcp_approval_projects_one_generic_action_without_remote_metadata() {
-        let projected = RendererSequencedEvent::from(&SequencedEvent {
+        let projected = RendererSequencedEvent::from(&SequencedAgentEvent {
             seq: 9,
             event: AgentEvent::ApprovalRequired {
                 auto_judging: false,
@@ -1345,7 +1347,7 @@ mod tests {
                 r#""name":"ask_user_questions""#,
             ),
         ] {
-            let projected = RendererSequencedEvent::from(&SequencedEvent {
+            let projected = RendererSequencedEvent::from(&SequencedAgentEvent {
                 seq: 1,
                 event: AgentEvent::ToolCallStarted {
                     call_id: CallId::new(),

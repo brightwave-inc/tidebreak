@@ -964,7 +964,7 @@ relationships between references are ambiguous.</p>
         assert_eq!(extractor.transport.seen.lock().unwrap().len(), 1);
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn a_black_holed_resolver_cannot_outlive_the_extraction_budget() {
         struct SlowResolver;
 

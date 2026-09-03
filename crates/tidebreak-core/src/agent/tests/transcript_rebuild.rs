@@ -8,7 +8,7 @@ fn a_resumed_transcript_is_bounded_like_a_live_one() {
     let oversized = "y".repeat(DEFAULT_MAX_TOOL_RESULT_BYTES * 2);
     let call = ToolCallRecord {
         id: CallId::new(),
-        chat_id: ChatId::new(),
+        chat_id: SessionId::new(),
         turn_id: TurnId::new(),
         provider_id: "call-1".into(),
         name: "read_file".into(),
@@ -43,7 +43,7 @@ fn rebuild_replays_message_images_in_their_recorded_order() {
     use crate::image::ImageMediaType;
 
     let turn = TurnId::new();
-    let chat = ChatId::new();
+    let chat = SessionId::new();
     let t0 = DateTime::<Utc>::from_timestamp(1_000, 0).unwrap();
     let t1 = DateTime::<Utc>::from_timestamp(1_001, 0).unwrap();
     let with_images = MessageId::new();
@@ -135,7 +135,7 @@ fn rebuild_replays_message_images_in_their_recorded_order() {
 #[test]
 fn rebuild_announces_file_routes_and_bounds_attachment_context() {
     let turn = TurnId::new();
-    let chat = ChatId::new();
+    let chat = SessionId::new();
     let message_id = MessageId::new();
     let created_at = DateTime::<Utc>::from_timestamp(1_000, 0).unwrap();
     let mut message = Message {
@@ -255,7 +255,7 @@ fn rebuild_announces_file_routes_and_bounds_attachment_context() {
 #[test]
 fn rebuild_attaches_tools_to_assistant_text() {
     let turn = TurnId::new();
-    let chat = ChatId::new();
+    let chat = SessionId::new();
     let t0 = DateTime::<Utc>::from_timestamp(1_000, 0).unwrap();
     let t1 = DateTime::<Utc>::from_timestamp(1_001, 0).unwrap();
     let t2 = DateTime::<Utc>::from_timestamp(1_002, 0).unwrap();
@@ -324,7 +324,7 @@ fn rebuild_attaches_tools_to_assistant_text() {
 #[test]
 fn orchestration_forces_a_model_step_boundary_despite_overlapping_timestamps() {
     let turn = TurnId::new();
-    let chat = ChatId::new();
+    let chat = SessionId::new();
     let t1 = DateTime::<Utc>::from_timestamp(1_001, 0).unwrap();
     let t2 = DateTime::<Utc>::from_timestamp(1_002, 0).unwrap();
     let t3 = DateTime::<Utc>::from_timestamp(1_003, 0).unwrap();
@@ -381,7 +381,7 @@ fn orchestration_forces_a_model_step_boundary_despite_overlapping_timestamps() {
 #[test]
 fn answered_user_questions_rebuild_as_a_model_facing_tool_result() {
     let turn = TurnId::new();
-    let chat = ChatId::new();
+    let chat = SessionId::new();
     let created_at = DateTime::<Utc>::from_timestamp(1_001, 0).unwrap();
     let answer = crate::AnswerUserQuestions {
         answers: vec![crate::UserQuestionAnswer {
@@ -457,7 +457,7 @@ fn answered_user_questions_rebuild_as_a_model_facing_tool_result() {
 #[test]
 fn rebuild_emits_tool_only_step_before_final_text() {
     let turn = TurnId::new();
-    let chat = ChatId::new();
+    let chat = SessionId::new();
     let t0 = DateTime::<Utc>::from_timestamp(1_000, 0).unwrap();
     let t1 = DateTime::<Utc>::from_timestamp(1_001, 0).unwrap();
     let t2 = DateTime::<Utc>::from_timestamp(1_002, 0).unwrap();
@@ -520,7 +520,7 @@ fn rebuild_emits_tool_only_step_before_final_text() {
 #[test]
 fn rebuild_skips_legacy_tool_role_rows() {
     let turn = TurnId::new();
-    let chat = ChatId::new();
+    let chat = SessionId::new();
     let messages = vec![
         Message {
             id: MessageId::new(),
@@ -565,7 +565,7 @@ async fn second_turn_rebuilds_prior_tool_calls_into_transcript() {
     std::fs::write(workspace.path().join("note.txt"), "hello from disk").unwrap();
     let db = tempfile::tempdir().unwrap();
     let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect_test_sqlite_fixture(&format!(
+        DbStore::connect(&format!(
             "sqlite://{}?mode=rwc",
             db.path().join("t.db").display()
         ))
@@ -573,7 +573,7 @@ async fn second_turn_rebuilds_prior_tool_calls_into_transcript() {
         .unwrap(),
     );
     let chat = Chat {
-        id: ChatId::new(),
+        id: SessionId::new(),
         project_id: None,
         title: None,
         model: None,

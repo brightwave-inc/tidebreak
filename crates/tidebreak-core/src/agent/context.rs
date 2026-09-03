@@ -9,7 +9,7 @@ use crate::compaction::{
 };
 use crate::context;
 use crate::error::{AgentError, Result};
-use crate::id::{ChatId, MessageId};
+use crate::id::{MessageId, SessionId};
 use crate::image::{ImageAttachments, ImageData};
 use crate::model::{Chat, Role};
 use crate::provider::{ChatMessage, ChatRequest, ContentBlock, ProviderEvent, StopReason, Usage};
@@ -44,7 +44,7 @@ pub(crate) struct RequestPrefix {
 
 /// Inputs for one semantic-compaction attempt.
 pub(crate) struct CreateContextCheckpoint<'a> {
-    pub chat_id: ChatId,
+    pub chat_id: SessionId,
     pub transcript: &'a [ChatMessage],
     pub source_boundaries: &'a [TranscriptSourceBoundary],
     pub user_texts: &'a [(MessageId, String)],
@@ -133,7 +133,7 @@ impl Agent {
     /// than turning an otherwise valid turn into an infrastructure failure.
     pub(crate) async fn load_projectable_checkpoint(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
     ) -> Option<ContextCheckpoint> {
         let checkpoint = self.store.get_context_checkpoint(chat_id).await.ok()??;
         checkpoint_is_projectable(&checkpoint, chat_id).then_some(checkpoint)
@@ -141,7 +141,7 @@ impl Agent {
 
     pub(crate) async fn load_transcript(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         checkpoint_source: Option<MessageId>,
     ) -> Result<LoadedTranscript> {
         let mut messages = self.store.list_messages(chat_id).await?;

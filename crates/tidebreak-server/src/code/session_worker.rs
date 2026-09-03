@@ -30,14 +30,13 @@ use tidebreak_core::db::code::{
     next_turn_ordinal, promote_queued_turn, queue_paused, queued_turn_head,
     rebind_pending_approvals_to_worker, save_session, save_turn, set_queue_paused,
     set_session_harness_resume_ref, set_session_subagents, settle_engine_observed_approval,
-    store_turn_park, CodeJournalError, CodeSessionExecutionSettings,
+    store_turn_park, JournalError, SessionExecutionSettings,
 };
 use tidebreak_core::{
-    bound_subagents, Attention, AttentionSource, BlobStore, BoundedError, CodeApproval,
-    CodeApprovalId, CodeApprovalKind, CodeApprovalState, CodeEvent, CodeQueuedTurn, CodeSession,
-    CodeSessionId, CodeSessionLifecycle, CodeSubagentStatus, CodeSubagentSummary, CodeTurn,
-    CodeTurnId, CodeTurnStatus, CodeWorkspaceStatus, DbStore, FenceReason, HarnessKind,
-    HarnessNoticeLevel, OwnerId, PermissionMode, Store, ToolOutcome,
+    bound_subagents, Approval, ApprovalId, ApprovalKind, ApprovalState, Attention, AttentionSource,
+    BlobStore, BoundedError, CodeSubagentStatus, CodeSubagentSummary, CodeWorkspaceStatus, DbStore,
+    Event, FenceReason, HarnessKind, HarnessNoticeLevel, OwnerId, PermissionMode, QueuedTurn,
+    Session, SessionId, SessionLifecycle, Store, ToolOutcome, Turn, TurnId, TurnStatus,
 };
 use tidebreak_harness::{
     ApprovalDecision, HarnessApprovalRef, HarnessError, HarnessEvent, HarnessEventSink,
@@ -51,7 +50,7 @@ pub(crate) enum WorkerCommand {
         message: String,
         attachments: Vec<tidebreak_core::ImageRef>,
         trigger_delivery: Option<TriggerDeliveryClaim>,
-        reply: oneshot::Sender<Result<CodeTurn, WorkerError>>,
+        reply: oneshot::Sender<Result<Turn, WorkerError>>,
     },
     SetPermissionMode {
         mode: PermissionMode,
@@ -59,7 +58,7 @@ pub(crate) enum WorkerCommand {
         reply: oneshot::Sender<Result<(), WorkerError>>,
     },
     SetExecutionSettings {
-        settings: CodeSessionExecutionSettings,
+        settings: SessionExecutionSettings,
         settlement: oneshot::Receiver<ExecutionSettingsSettlement>,
         reply: oneshot::Sender<Result<(), WorkerError>>,
     },
@@ -74,7 +73,7 @@ pub(crate) enum WorkerCommand {
         reply: oneshot::Sender<Result<(), WorkerError>>,
     },
     Steer {
-        expected_turn_id: CodeTurnId,
+        expected_turn_id: TurnId,
         message: String,
         reply: oneshot::Sender<Result<(), WorkerError>>,
     },
@@ -241,7 +240,7 @@ pub(crate) struct QueuedFollowUp {
     /// The durable queue row this turn promotes, when the message came from
     /// the queue rather than a live send. The turn is inserted under the
     /// row's id, in the transaction that deletes the row.
-    pub queued_row: Option<Box<CodeQueuedTurn>>,
+    pub queued_row: Option<Box<QueuedTurn>>,
 }
 
 pub(crate) struct LiveSink {
@@ -250,7 +249,7 @@ pub(crate) struct LiveSink {
     /// Owner of the session this sink writes for. Carried explicitly so every
     /// journal and approval write the worker makes stays inside one owner.
     owner: OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     spawn_epoch: i64,
     /// Which engine this session runs, for copy that names it.
     harness: HarnessKind,
@@ -270,7 +269,7 @@ pub(crate) struct LiveSink {
     /// (decision 71). The relay's refusals are already legible and name the
     /// gateway, so [`LiveSink::legible_turn_error`] leaves them untouched.
     relay_wired: bool,
-    turn_id: std::sync::Mutex<Option<CodeTurnId>>,
+    turn_id: std::sync::Mutex<Option<TurnId>>,
     /// Resume ref reported during engine startup but not yet proven durable.
     ///
     /// Codex creates a thread before it writes that thread to disk. The first
@@ -311,7 +310,7 @@ impl LiveSink {
         &self.owner
     }
 
-    pub(crate) fn set_turn(&self, turn_id: CodeTurnId) {
+    pub(crate) fn set_turn(&self, turn_id: TurnId) {
         *self.turn_id.lock().expect("code sink turn") = Some(turn_id);
     }
 
@@ -393,9 +392,9 @@ impl LiveSink {
     /// whose own completion was lost, so the rail never claims work survived a
     /// turn that has already ended. Boundaries are rare, so each one persists
     /// the list through the targeted write and restates the session's digest.
-    async fn note_subagent_boundary(&self, event: &CodeEvent) {
+    async fn note_subagent_boundary(&self, event: &Event) {
         let changed = match event {
-            CodeEvent::ToolStarted {
+            Event::ToolStarted {
                 call_id,
                 name,
                 detail,
@@ -416,7 +415,7 @@ impl LiveSink {
                 bound_subagents(&mut subagents);
                 Some(subagents.clone())
             }
-            CodeEvent::ToolCompleted {
+            Event::ToolCompleted {
                 call_id,
                 outcome,
                 detail,
@@ -444,12 +443,12 @@ impl LiveSink {
                     Some(_) | None => None,
                 }
             }
-            CodeEvent::TurnCompleted { .. } | CodeEvent::TurnRefused { .. } => {
+            Event::TurnCompleted { .. } | Event::TurnRefused { .. } => {
                 let mut subagents = self.subagents.lock().expect("code sink subagents");
                 settle_running_subagents(&mut subagents, CodeSubagentStatus::Done)
                     .then(|| subagents.clone())
             }
-            CodeEvent::TurnFailed { .. } | CodeEvent::TurnInterrupted { .. } => {
+            Event::TurnFailed { .. } | Event::TurnInterrupted { .. } => {
                 let mut subagents = self.subagents.lock().expect("code sink subagents");
                 settle_running_subagents(&mut subagents, CodeSubagentStatus::Failed)
                     .then(|| subagents.clone())
@@ -467,10 +466,10 @@ impl LiveSink {
 
     pub(crate) async fn record_external_approval(
         &self,
-        approval_id: CodeApprovalId,
+        approval_id: ApprovalId,
         harness_ref: &tidebreak_harness::HarnessApprovalRef,
         raw: &serde_json::Value,
-    ) -> Result<CodeApproval, WorkerError> {
+    ) -> Result<Approval, WorkerError> {
         let Some(capability) = harness_ref.capability.as_ref() else {
             return Err(WorkerError::Failed(
                 "external approval is missing its server capability".into(),
@@ -525,11 +524,11 @@ impl LiveSink {
 
     async fn record_approval(
         &self,
-        approval_id: CodeApprovalId,
+        approval_id: ApprovalId,
         harness_ref: &tidebreak_harness::HarnessApprovalRef,
         raw: &serde_json::Value,
-        kind: Option<&tidebreak_core::CodeApprovalKind>,
-    ) -> Result<CodeApproval, WorkerError> {
+        kind: Option<&tidebreak_core::ApprovalKind>,
+    ) -> Result<Approval, WorkerError> {
         let existing = *self.turn_id.lock().expect("code sink turn");
         let turn_id = match existing {
             Some(id) => id,
@@ -552,7 +551,7 @@ impl LiveSink {
             }
         }
         let capability = harness_ref.capability.as_ref();
-        let approval = CodeApproval {
+        let approval = Approval {
             id: approval_id,
             session_id: self.session_id,
             turn_id,
@@ -566,7 +565,7 @@ impl LiveSink {
             worker_epoch: Some(self.spawn_epoch),
             decision_claim: None,
             claimed_at: None,
-            state: CodeApprovalState::Pending,
+            state: ApprovalState::Pending,
             feedback: None,
             requested_at: Utc::now(),
             decided_at: None,
@@ -653,7 +652,7 @@ impl HarnessEventSink for LiveSink {
         } = &event
         {
             if let Err(error) = self
-                .record_approval(CodeApprovalId::new(), harness_ref, raw, kind.as_ref())
+                .record_approval(ApprovalId::new(), harness_ref, raw, kind.as_ref())
                 .await
             {
                 warn!(
@@ -684,14 +683,14 @@ impl HarnessEventSink for LiveSink {
             return;
         }
         let turn_id = *self.turn_id.lock().unwrap();
-        let Some(code_event) = map_event(event, turn_id) else {
+        let Some(session_event) = map_event(event, turn_id) else {
             return;
         };
         // An engine that fails a turn can pass the provider's raw 401 body
         // straight through. Swap it for the legible sentence before the
         // journal keeps it.
-        let code_event = match code_event {
-            CodeEvent::TurnFailed { error, .. } => CodeEvent::TurnFailed {
+        let session_event = match session_event {
+            Event::TurnFailed { error, .. } => Event::TurnFailed {
                 error: self.legible_turn_error(error.message),
                 detail: None,
             },
@@ -700,34 +699,34 @@ impl HarnessEventSink for LiveSink {
         // Assistant deltas stream and are gone. The `assistant_message` that
         // closes the run repeats them exactly, so a row here would store the
         // same words a second time (record 57).
-        if matches!(code_event, CodeEvent::AssistantDelta { .. }) {
+        if matches!(session_event, Event::AssistantDelta { .. }) {
             if self.native_journal {
                 return;
             }
-            self.bus.publish_transient(self.session_id, code_event);
+            self.bus.publish_transient(self.session_id, session_event);
             let _ =
                 super::attention::note_activity(&self.db, &self.bus, &self.owner, self.session_id)
                     .await;
             return;
         }
-        self.note_subagent_boundary(&code_event).await;
+        self.note_subagent_boundary(&session_event).await;
         // An approval is parked on the call this completion names. Reconcile
         // it after the completion lands, so the journal reads in the order it
         // happened. See `approval_sweep`.
-        let completed_call = match &code_event {
-            CodeEvent::ToolCompleted { call_id, .. } => Some(call_id.clone()),
+        let completed_call = match &session_event {
+            Event::ToolCompleted { call_id, .. } => Some(call_id.clone()),
             _ => None,
         };
         // A completed turn is the moment its recap has everything it needs and
         // the reader has most likely stopped watching. Started below rather
         // than here, so a journal write that was dropped never produces a line
         // describing a turn the database does not agree finished.
-        let completed_turn = matches!(code_event, CodeEvent::TurnCompleted { .. })
+        let completed_turn = matches!(session_event, Event::TurnCompleted { .. })
             .then_some(turn_id)
             .flatten();
         let notification_turn = matches!(
-            &code_event,
-            CodeEvent::TurnCompleted { .. } | CodeEvent::TurnFailed { .. }
+            &session_event,
+            Event::TurnCompleted { .. } | Event::TurnFailed { .. }
         )
         .then_some(turn_id)
         .flatten();
@@ -739,7 +738,7 @@ impl HarnessEventSink for LiveSink {
                 self.session_id,
                 self.spawn_epoch,
                 turn_id,
-                code_event,
+                session_event,
                 self.native_journal,
             )
             .await
@@ -750,14 +749,14 @@ impl HarnessEventSink for LiveSink {
                 &self.owner,
                 self.session_id,
                 self.spawn_epoch,
-                code_event,
+                session_event,
                 self.native_journal,
             )
             .await
         };
         let journaled = match write {
             Ok(()) => !self.native_journal,
-            Err(CodeJournalError::StaleSpawnEpoch { .. }) => {
+            Err(JournalError::StaleSpawnEpoch { .. }) => {
                 warn!(
                     session = %self.session_id,
                     "dropping event from a superseded code-session worker"
@@ -804,7 +803,7 @@ impl HarnessEventSink for LiveSink {
 /// turn, which is what keeps two agents from editing one worktree at once;
 /// see record 55.
 pub(crate) fn spawn_session_worker(
-    session: CodeSession,
+    session: Session,
     engine: Box<dyn HarnessSession>,
     sink: Arc<LiveSink>,
     attachments: AttachmentStore,
@@ -834,7 +833,7 @@ pub(crate) fn spawn_session_worker(
     }
 }
 
-fn record_child_process(session: &mut CodeSession, pid: Option<i64>) {
+fn record_child_process(session: &mut Session, pid: Option<i64>) {
     session.child_pid = pid;
     session.child_process_identity = pid.and_then(|pid| {
         tidebreak_harness::spawned_process_identity(pid).or_else(|| {
@@ -853,7 +852,7 @@ pub(crate) fn wake_queue(handle: &WorkerHandle) {
 }
 
 async fn run_worker(
-    mut session: CodeSession,
+    mut session: Session,
     engine: Box<dyn HarnessSession>,
     sink: Arc<LiveSink>,
     queue: TurnQueue,
@@ -866,10 +865,8 @@ async fn run_worker(
     }
 
     if let Ok(Some(open)) = get_open_turn(&sink.db, &session.owner, session.id).await {
-        if matches!(
-            open.status,
-            CodeTurnStatus::Waiting | CodeTurnStatus::Resuming
-        ) && open.park_ref.is_some()
+        if matches!(open.status, TurnStatus::Waiting | TurnStatus::Resuming)
+            && open.park_ref.is_some()
             && open.park_wait.is_some()
         {
             if let Err(error) = continue_parked_turn(
@@ -889,7 +886,7 @@ async fn run_worker(
                 );
             }
         } else if session.harness_kind == HarnessKind::Internal
-            && open.status == CodeTurnStatus::Running
+            && open.status == TurnStatus::Running
         {
             let lease_token = uuid::Uuid::new_v4();
             let now = Utc::now();
@@ -1139,7 +1136,7 @@ const QUIESCE_PARK_RETRY: Duration = Duration::from_millis(50);
 /// nothing reads the dead process as live. The next turn respawns and
 /// resumes. A park that fails keeps the child and simply retries on the next
 /// idle window.
-async fn park_idle_engine(session: &mut CodeSession, engine: &dyn HarnessSession, sink: &LiveSink) {
+async fn park_idle_engine(session: &mut Session, engine: &dyn HarnessSession, sink: &LiveSink) {
     if let Err(error) = engine.park().await {
         warn!(
             session = %session.id,
@@ -1193,7 +1190,7 @@ enum WorktreeWait<'a> {
 }
 
 async fn await_worktree_turn<'a>(
-    session: &mut CodeSession,
+    session: &mut Session,
     engine: &dyn HarnessSession,
     worktree_turn: &'a tokio::sync::Mutex<()>,
     commands: &mut mpsc::Receiver<WorkerCommand>,
@@ -1240,8 +1237,8 @@ async fn await_worktree_turn<'a>(
 /// wait, or the live route cannot use the same reserve-commit-release boundary
 /// that protects ordinary idle updates.
 async fn reserve_execution_settings(
-    session: &mut CodeSession,
-    settings: CodeSessionExecutionSettings,
+    session: &mut Session,
+    settings: SessionExecutionSettings,
     settlement: oneshot::Receiver<ExecutionSettingsSettlement>,
     reply: oneshot::Sender<Result<(), WorkerError>>,
 ) -> bool {
@@ -1321,8 +1318,8 @@ async fn deliver_decision(
 /// awaited dependency, mapped into the durable park-wait shape.
 async fn persist_turn_park(
     db: &DbStore,
-    session: &CodeSession,
-    turn: &mut CodeTurn,
+    session: &Session,
+    turn: &mut Turn,
     park_ref: &str,
     waiting_on: &tidebreak_harness::ParkWait,
 ) -> Result<tidebreak_core::TurnParkWait, String> {
@@ -1355,18 +1352,16 @@ async fn persist_turn_park(
 
 async fn clear_persisted_turn_park(
     db: &DbStore,
-    session: &CodeSession,
-    turn: &mut CodeTurn,
+    session: &Session,
+    turn: &mut Turn,
     park_ref: &str,
     wait: &tidebreak_core::TurnParkWait,
 ) -> Result<(), String> {
-    clear_turn_park(db, &session.owner, turn.id, park_ref, wait)
+    let status = clear_turn_park(db, &session.owner, turn.id, park_ref, wait)
         .await
         .map_err(|err| format!("clearing the parked turn failed: {err}"))?
         .ok_or_else(|| format!("clearing the parked turn {} lost its row", turn.id))?;
-    // The worker is about to start the resumed leg. Do not restore the
-    // transient `waiting` or `resuming` database status in its live snapshot.
-    turn.status = CodeTurnStatus::Running;
+    turn.status = status;
     turn.park_ref = None;
     turn.park_wait = None;
     Ok(())
@@ -1390,7 +1385,7 @@ async fn clear_persisted_turn_park(
 async fn apply_accepted_plan_mode(
     db: &DbStore,
     bus: &CodeEventBus,
-    session: &mut CodeSession,
+    session: &mut Session,
     engine: &dyn HarnessSession,
     input: &tidebreak_harness::ResumeInput,
 ) {
@@ -1404,7 +1399,7 @@ async fn apply_accepted_plan_mode(
     let proposed = match list_approvals(db, &session.owner, None, Some(session.id)).await {
         Ok(approvals) => approvals.into_iter().find_map(|approval| {
             match (&approval.native_call_id, &approval.kind) {
-                (Some(native), CodeApprovalKind::Plan { proposed_mode }) if native == call_id => {
+                (Some(native), ApprovalKind::Plan { proposed_mode }) if native == call_id => {
                     Some(*proposed_mode)
                 }
                 _ => None,
@@ -1456,7 +1451,7 @@ async fn apply_accepted_plan_mode(
                 &session.owner,
                 session.id,
                 session.spawn_epoch,
-                CodeEvent::HarnessNotice {
+                Event::HarnessNotice {
                     level: HarnessNoticeLevel::Info,
                     message: format!(
                         "Plan accepted; the session continues in {} mode.",
@@ -1475,7 +1470,7 @@ async fn apply_accepted_plan_mode(
                 &session.owner,
                 session.id,
                 session.spawn_epoch,
-                CodeEvent::HarnessNotice {
+                Event::HarnessNotice {
                     level: HarnessNoticeLevel::Warning,
                     message: format!(
                         "Plan accepted, but the engine kept its {} posture: {error}",
@@ -1532,7 +1527,7 @@ fn resume_decision(decision: tidebreak_core::ApprovalDecisionKind) -> ApprovalDe
 async fn resume_from_settled_row(
     db: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     call_id: &str,
 ) -> Result<Option<tidebreak_harness::ResumeInput>, WorkerError> {
     let approval = list_approvals(db, owner, None, Some(session_id))
@@ -1551,7 +1546,7 @@ async fn resume_from_settled_row(
         .map_err(|error| WorkerError::Failed(error.to_string()))?
         .into_iter()
         .find_map(|row| match row.event {
-            CodeEvent::ApprovalResolved {
+            Event::ApprovalResolved {
                 approval_id,
                 decision,
             } if approval_id == approval.id => Some(decision),
@@ -1560,11 +1555,11 @@ async fn resume_from_settled_row(
     let decision = match journaled {
         Some(decision) => decision,
         None => match approval.state {
-            CodeApprovalState::Approved => tidebreak_core::ApprovalDecisionKind::Approve,
-            CodeApprovalState::Denied => tidebreak_core::ApprovalDecisionKind::Deny {
+            ApprovalState::Approved => tidebreak_core::ApprovalDecisionKind::Approve,
+            ApprovalState::Denied => tidebreak_core::ApprovalDecisionKind::Deny {
                 feedback: approval.feedback,
             },
-            CodeApprovalState::Abandoned | CodeApprovalState::Pending => {
+            ApprovalState::Abandoned | ApprovalState::Pending => {
                 tidebreak_core::ApprovalDecisionKind::Abandoned
             }
         },
@@ -1577,10 +1572,10 @@ async fn resume_from_settled_row(
 
 async fn durable_park_state(
     db: &DbStore,
-    session: &CodeSession,
+    session: &Session,
     park_ref: &str,
     wait: &tidebreak_core::TurnParkWait,
-    turn_id: CodeTurnId,
+    turn_id: TurnId,
     delivered: &DeliveredDecisions,
 ) -> Result<DurableParkState, WorkerError> {
     if let Some(input) = resume_if_already_delivered(wait, delivered) {
@@ -1606,14 +1601,14 @@ async fn durable_park_state(
             resume_from_settled_row(db, &session.owner, session.id, call_id).await?
         }
         tidebreak_core::TurnParkWait::ClientToolCall { call_id }
-            if turn.status == CodeTurnStatus::Resuming =>
+            if turn.status == TurnStatus::Resuming =>
         {
             Some(tidebreak_harness::ResumeInput::ClientToolCompleted {
                 call_id: call_id.clone(),
             })
         }
         tidebreak_core::TurnParkWait::AgentRuns { run_ids }
-            if turn.status == CodeTurnStatus::Resuming =>
+            if turn.status == TurnStatus::Resuming =>
         {
             Some(tidebreak_harness::ResumeInput::AgentRunsSettled {
                 run_ids: run_ids.clone(),
@@ -1630,13 +1625,14 @@ async fn durable_park_state(
     }
     if matches!(
         turn.status,
-        CodeTurnStatus::Waiting | CodeTurnStatus::CancellingClient
+        TurnStatus::Waiting | TurnStatus::CancellingClient
     ) {
         Ok(DurableParkState::Pending)
     } else {
-        // A legacy or damaged wait cannot resume safely. Close it through the
-        // normal turn path so one bad row cannot keep the session worker live.
-        Ok(DurableParkState::Closed)
+        Err(WorkerError::Failed(format!(
+            "turn {turn_id} has status {} while its durable park is unresolved",
+            turn.status.as_str()
+        )))
     }
 }
 
@@ -1645,14 +1641,14 @@ async fn await_park_resolution<'a>(
     engine: &'a dyn HarnessSession,
     db: &DbStore,
     bus: &CodeEventBus,
-    session: &CodeSession,
+    session: &Session,
     commands: &mut mpsc::Receiver<WorkerCommand>,
     controls: &mut FuturesUnordered<BoxFuture<'a, ControlFlow>>,
     interrupted: &mut bool,
     commands_closed: &mut bool,
     park_ref: &str,
     wait: &tidebreak_core::TurnParkWait,
-    turn_id: CodeTurnId,
+    turn_id: TurnId,
     delivered: &DeliveredDecisions,
 ) -> Result<Option<ParkResolution>, WorkerError> {
     // Subscribe before the read below, so a settlement between the two
@@ -1760,7 +1756,7 @@ async fn await_park_resolution<'a>(
 async fn apply_control(
     engine: &dyn HarnessSession,
     command: WorkerCommand,
-    active_turn_id: Option<CodeTurnId>,
+    active_turn_id: Option<TurnId>,
     delivered: Option<DeliveredDecisions>,
 ) -> ControlFlow {
     match command {
@@ -1877,7 +1873,7 @@ async fn set_permission_mode(
 /// queue. A pause holds the whole drain; the resume, the next enqueue, or
 /// send-now wakes the worker again.
 async fn drain_queued(
-    session: &mut CodeSession,
+    session: &mut Session,
     engine: &dyn HarnessSession,
     sink: &LiveSink,
     queue: &TurnQueue,
@@ -1986,14 +1982,14 @@ async fn drain_queued(
                     &session.owner,
                     session.id,
                     session.spawn_epoch,
-                    CodeEvent::HarnessNotice {
+                    Event::HarnessNotice {
                         level: HarnessNoticeLevel::Error,
                         message: format!("The queued turn could not start: {detail}"),
                     },
                     false,
                 )
                 .await;
-                if session.lifecycle != CodeSessionLifecycle::Fenced {
+                if session.lifecycle != SessionLifecycle::Fenced {
                     super::attention::replace_attention(
                         session,
                         Attention::needs_you(
@@ -2016,13 +2012,13 @@ async fn drain_queued(
 /// Pick a waiting turn back up after a worker restart and drive the same
 /// `resume_turn` path a live park resolution uses.
 async fn continue_parked_turn(
-    session: &mut CodeSession,
+    session: &mut Session,
     engine: &dyn HarnessSession,
     sink: &LiveSink,
     commands: &mut mpsc::Receiver<WorkerCommand>,
     queue: &TurnQueue,
-    mut turn: CodeTurn,
-) -> Result<CodeTurn, WorkerError> {
+    mut turn: Turn,
+) -> Result<Turn, WorkerError> {
     let db = &sink.db;
     let bus = &sink.bus;
     let Some(park_ref) = turn.park_ref.clone() else {
@@ -2050,7 +2046,7 @@ async fn continue_parked_turn(
         return Err(WorkerError::Conflict("session has ended".into()));
     }
 
-    session.lifecycle = CodeSessionLifecycle::Running;
+    session.lifecycle = SessionLifecycle::Running;
     super::attention::replace_attention(
         session,
         Attention::working(AttentionSource::Lifecycle),
@@ -2075,7 +2071,7 @@ async fn continue_parked_turn(
         &session.owner,
         session.id,
         session.spawn_epoch,
-        CodeEvent::TurnResumed { turn_id: turn.id },
+        Event::TurnResumed { turn_id: turn.id },
         false,
     )
     .await
@@ -2227,14 +2223,14 @@ async fn continue_parked_turn(
 
 #[allow(clippy::too_many_arguments)]
 async fn close_open_turn(
-    session: &mut CodeSession,
+    session: &mut Session,
     engine: &dyn HarnessSession,
     sink: &LiveSink,
-    mut turn: CodeTurn,
+    mut turn: Turn,
     run: Result<TurnOutcome, HarnessError>,
     interrupted: bool,
     attachment_cleanup_error: Option<String>,
-) -> Result<CodeTurn, WorkerError> {
+) -> Result<Turn, WorkerError> {
     let db = &sink.db;
     let bus = &sink.bus;
     record_child_process(session, engine.child_pid());
@@ -2271,7 +2267,7 @@ async fn close_open_turn(
                     &session.owner,
                     session.id,
                     session.spawn_epoch,
-                    CodeEvent::HarnessNotice {
+                    Event::HarnessNotice {
                         level: HarnessNoticeLevel::Error,
                         message: detail.clone(),
                     },
@@ -2282,21 +2278,21 @@ async fn close_open_turn(
             if turn.status.is_open() {
                 let (status, event) = if interrupted {
                     (
-                        CodeTurnStatus::Interrupted,
-                        CodeEvent::TurnInterrupted { usage: None },
+                        TurnStatus::Interrupted,
+                        Event::TurnInterrupted { usage: None },
                     )
                 } else if let Some(detail) = detail {
                     (
-                        CodeTurnStatus::Failed,
-                        CodeEvent::TurnFailed {
+                        TurnStatus::Failed,
+                        Event::TurnFailed {
                             error: sink.legible_turn_error(detail),
                             detail: None,
                         },
                     )
                 } else {
                     (
-                        CodeTurnStatus::Completed,
-                        CodeEvent::TurnCompleted {
+                        TurnStatus::Completed,
+                        Event::TurnCompleted {
                             usage: turn.usage.clone().unwrap_or_default(),
                             checkpoint: None,
                             stop_reason: None,
@@ -2307,7 +2303,7 @@ async fn close_open_turn(
                 turn.ended_at = Some(Utc::now());
                 let _ = save_turn(db, &session.owner, &turn).await;
                 sink.note_subagent_boundary(&event).await;
-                let write = if matches!(event, CodeEvent::TurnInterrupted { .. }) {
+                let write = if matches!(event, Event::TurnInterrupted { .. }) {
                     persist_and_publish(
                         db,
                         bus,
@@ -2336,10 +2332,10 @@ async fn close_open_turn(
         }
         Err(err) => {
             if turn.status.is_open() {
-                turn.status = CodeTurnStatus::Failed;
+                turn.status = TurnStatus::Failed;
                 turn.ended_at = Some(Utc::now());
                 let _ = save_turn(db, &session.owner, &turn).await;
-                let event = CodeEvent::TurnFailed {
+                let event = Event::TurnFailed {
                     error: sink.legible_turn_error(err.to_string()),
                     detail: None,
                 };
@@ -2390,7 +2386,7 @@ async fn close_open_turn(
                     .await;
                     return Err(WorkerError::Failed(err.to_string()));
                 }
-                session.lifecycle = CodeSessionLifecycle::Idle;
+                session.lifecycle = SessionLifecycle::Idle;
                 super::attention::replace_attention(
                     session,
                     Attention::needs_you("the engine turn failed", AttentionSource::Lifecycle),
@@ -2430,13 +2426,13 @@ async fn close_open_turn(
     if session_was_ended(db, session).await {
         return Ok(turn);
     }
-    if turn.status == CodeTurnStatus::Interrupted {
+    if turn.status == TurnStatus::Interrupted {
         super::attention::replace_attention(
             session,
             Attention::needs_you("the turn was interrupted", AttentionSource::Lifecycle),
             false,
         );
-    } else if turn.status == CodeTurnStatus::Failed {
+    } else if turn.status == TurnStatus::Failed {
         if let Some(reason) = repeated_failure_fence(db, session, &turn).await {
             let _ = super::recovery::fence_session(db, bus, session, reason).await;
             return Ok(turn);
@@ -2456,20 +2452,20 @@ async fn close_open_turn(
             false,
         );
     }
-    session.lifecycle = CodeSessionLifecycle::Idle;
+    session.lifecycle = SessionLifecycle::Idle;
     let _ = super::attention::persist_session(db, bus, session).await;
     Ok(turn)
 }
 
 async fn drive_turn(
-    session: &mut CodeSession,
+    session: &mut Session,
     engine: &dyn HarnessSession,
     sink: &LiveSink,
     store: &AttachmentStore,
     commands: &mut mpsc::Receiver<WorkerCommand>,
     worktree: WorktreeTurn<'_>,
     follow_up: QueuedFollowUp,
-) -> Result<CodeTurn, WorkerError> {
+) -> Result<Turn, WorkerError> {
     let session_id = session.id;
     let wait = match worktree.wait {
         TurnWait::Send => "send",
@@ -2477,8 +2473,8 @@ async fn drive_turn(
     };
     let span = tracing::info_span!(
         target: crate::diagnostics::EVENT_TARGET,
-        "tidebreak.code_turn",
-        otel.name = "tidebreak.code_turn",
+        "tidebreak.turn",
+        otel.name = "tidebreak.turn",
         otel.kind = "internal",
         otel.status_code = tracing::field::Empty,
         tidebreak.code.session_id = %session_id,
@@ -2505,17 +2501,17 @@ async fn drive_turn(
     span.in_scope(|| {
         tracing::info!(
             target: crate::diagnostics::EVENT_TARGET,
-            event_name = "tidebreak.code_turn.completed",
+            event_name = "tidebreak.turn.completed",
             outcome,
             duration_ms,
-            "code turn completed"
+            "turn completed"
         );
     });
     result
 }
 
 async fn drive_turn_inner(
-    session: &mut CodeSession,
+    session: &mut Session,
     engine: &dyn HarnessSession,
     sink: &LiveSink,
     store: &AttachmentStore,
@@ -2527,20 +2523,20 @@ async fn drive_turn_inner(
         trigger_delivery,
         queued_row,
     }: QueuedFollowUp,
-) -> Result<CodeTurn, WorkerError> {
+) -> Result<Turn, WorkerError> {
     let db = &sink.db;
     let bus = &sink.bus;
-    if session.lifecycle == CodeSessionLifecycle::Running {
+    if session.lifecycle == SessionLifecycle::Running {
         return Err(WorkerError::Conflict(
             "a turn is already running on this session".into(),
         ));
     }
-    if session.lifecycle == CodeSessionLifecycle::Fenced {
+    if session.lifecycle == SessionLifecycle::Fenced {
         return Err(WorkerError::Conflict(
             "session is fenced until it is reaped".into(),
         ));
     }
-    if session.lifecycle == CodeSessionLifecycle::Ended {
+    if session.lifecycle == SessionLifecycle::Ended {
         return Err(WorkerError::Conflict("session has ended".into()));
     }
     // Bytes first, before the worktree lock: a blob read and a decode should
@@ -2639,7 +2635,7 @@ async fn drive_turn_inner(
     // engine. A queued row uses the worker copy initialized before the wait and
     // updated by every confirmed reservation accepted during that wait.
     let turn_settings = match worktree.wait {
-        TurnWait::Queued => CodeSessionExecutionSettings::from(&*session),
+        TurnWait::Queued => SessionExecutionSettings::from(&*session),
         TurnWait::Send => {
             let current = get_session(db, &session.owner, session.id)
                 .await
@@ -2653,23 +2649,21 @@ async fn drive_turn_inner(
             session.model = current.model;
             session.reasoning_effort = current.reasoning_effort;
             session.fast_mode = current.fast_mode;
-            CodeSessionExecutionSettings::from(&*session)
+            SessionExecutionSettings::from(&*session)
         }
     };
 
     let ordinal = next_turn_ordinal(db, &session.owner, session.id)
         .await
         .map_err(|err| WorkerError::Failed(err.to_string()))?;
-    let mut turn = CodeTurn {
+    let mut turn = Turn {
         // A promoted queue row already carries the turn's id: inserting under
         // it is what lets the row deletion and the turn insertion commit as
         // one write (decision 69).
-        id: queued_row
-            .as_ref()
-            .map_or_else(CodeTurnId::new, |row| row.id),
+        id: queued_row.as_ref().map_or_else(TurnId::new, |row| row.id),
         session_id: session.id,
         ordinal,
-        status: CodeTurnStatus::Running,
+        status: TurnStatus::Running,
         model: turn_settings.model.clone(),
         fast_mode: turn_settings.fast_mode,
         user_input: message.clone(),
@@ -2769,7 +2763,7 @@ async fn drive_turn_inner(
         None
     };
 
-    session.lifecycle = CodeSessionLifecycle::Running;
+    session.lifecycle = SessionLifecycle::Running;
     super::attention::replace_attention(
         session,
         Attention::working(AttentionSource::Lifecycle),
@@ -2786,7 +2780,7 @@ async fn drive_turn_inner(
         &session.owner,
         session.id,
         session.spawn_epoch,
-        CodeEvent::TurnStarted { turn_id: turn.id },
+        Event::TurnStarted { turn_id: turn.id },
         sink.native_journal,
     )
     .await
@@ -3075,7 +3069,7 @@ async fn drive_turn_inner(
                     &session.owner,
                     session.id,
                     session.spawn_epoch,
-                    CodeEvent::HarnessNotice {
+                    Event::HarnessNotice {
                         level: HarnessNoticeLevel::Error,
                         message: detail.clone(),
                     },
@@ -3083,33 +3077,28 @@ async fn drive_turn_inner(
                 )
                 .await;
             }
-            if turn.status.is_open()
-                && !matches!(
-                    turn.status,
-                    CodeTurnStatus::WaitingForClient | CodeTurnStatus::WaitingForAgentRun
-                )
-            {
+            if turn.status.is_open() {
                 // The stream ended without closing the turn. Only the worker
-                // knows whether that was asked for. Client and agent-run
-                // waits keep the lease-release shape until D4b. An approval
-                // park stays on the worker, so an interrupt must close it.
+                // knows whether that was asked for. Durable parks return to
+                // the leg loop before this point, so every remaining open
+                // state needs a terminal result.
                 let (status, event) = if interrupted {
                     (
-                        CodeTurnStatus::Interrupted,
-                        CodeEvent::TurnInterrupted { usage: None },
+                        TurnStatus::Interrupted,
+                        Event::TurnInterrupted { usage: None },
                     )
                 } else if let Some(detail) = detail {
                     (
-                        CodeTurnStatus::Failed,
-                        CodeEvent::TurnFailed {
+                        TurnStatus::Failed,
+                        Event::TurnFailed {
                             error: sink.legible_turn_error(detail),
                             detail: None,
                         },
                     )
                 } else {
                     (
-                        CodeTurnStatus::Completed,
-                        CodeEvent::TurnCompleted {
+                        TurnStatus::Completed,
+                        Event::TurnCompleted {
                             usage: turn.usage.clone().unwrap_or_default(),
                             checkpoint: None,
                             stop_reason: None,
@@ -3120,7 +3109,7 @@ async fn drive_turn_inner(
                 turn.ended_at = Some(Utc::now());
                 let _ = save_turn(db, &session.owner, &turn).await;
                 sink.note_subagent_boundary(&event).await;
-                let write = if matches!(event, CodeEvent::TurnInterrupted { .. }) {
+                let write = if matches!(event, Event::TurnInterrupted { .. }) {
                     persist_and_publish(
                         db,
                         bus,
@@ -3149,10 +3138,10 @@ async fn drive_turn_inner(
         }
         Err(err) => {
             if turn.status.is_open() {
-                turn.status = CodeTurnStatus::Failed;
+                turn.status = TurnStatus::Failed;
                 turn.ended_at = Some(Utc::now());
                 let _ = save_turn(db, &session.owner, &turn).await;
-                let event = CodeEvent::TurnFailed {
+                let event = Event::TurnFailed {
                     error: sink.legible_turn_error(err.to_string()),
                     detail: None,
                 };
@@ -3209,7 +3198,7 @@ async fn drive_turn_inner(
                     .await;
                     return Err(WorkerError::Failed(err.to_string()));
                 }
-                session.lifecycle = CodeSessionLifecycle::Idle;
+                session.lifecycle = SessionLifecycle::Idle;
                 super::attention::replace_attention(
                     session,
                     Attention::needs_you("the engine turn failed", AttentionSource::Lifecycle),
@@ -3249,13 +3238,13 @@ async fn drive_turn_inner(
     if session_was_ended(db, session).await {
         return Ok(turn);
     }
-    if turn.status == CodeTurnStatus::Interrupted {
+    if turn.status == TurnStatus::Interrupted {
         super::attention::replace_attention(
             session,
             Attention::needs_you("the turn was interrupted", AttentionSource::Lifecycle),
             false,
         );
-    } else if turn.status == CodeTurnStatus::Failed {
+    } else if turn.status == TurnStatus::Failed {
         // Whatever broke may not be about this prompt. An expired credential
         // or an unreachable provider fails every turn identically, and a
         // session that keeps saying "idle" invites the user to retry into it
@@ -3280,7 +3269,7 @@ async fn drive_turn_inner(
             false,
         );
     }
-    session.lifecycle = CodeSessionLifecycle::Idle;
+    session.lifecycle = SessionLifecycle::Idle;
     let _ = super::attention::persist_session(db, bus, session).await;
     Ok(turn)
 }
@@ -3292,7 +3281,7 @@ async fn drive_turn_inner(
 async fn sweep_attachment_leftovers_or_fence(
     db: &DbStore,
     bus: &CodeEventBus,
-    session: &mut CodeSession,
+    session: &mut Session,
     private_root: &super::scratch::ScratchRoot,
 ) -> Result<(), WorkerError> {
     let Err(error) = super::scratch::sweep_scopes(private_root, ATTACHMENTS_DIR) else {
@@ -3316,7 +3305,7 @@ async fn sweep_attachment_leftovers_or_fence(
     Err(WorkerError::Failed(detail))
 }
 
-fn code_turn_outcome(result: &Result<CodeTurn, WorkerError>) -> &'static str {
+fn code_turn_outcome(result: &Result<Turn, WorkerError>) -> &'static str {
     match result {
         Ok(turn) => turn.status.as_str(),
         Err(WorkerError::Conflict(_)) => "conflict",
@@ -3336,11 +3325,11 @@ fn code_turn_outcome(result: &Result<CodeTurn, WorkerError>) -> &'static str {
     }
 }
 
-fn code_turn_is_error(result: &Result<CodeTurn, WorkerError>) -> bool {
+fn code_turn_is_error(result: &Result<Turn, WorkerError>) -> bool {
     matches!(
         result,
-        Ok(CodeTurn {
-            status: CodeTurnStatus::Failed,
+        Ok(Turn {
+            status: TurnStatus::Failed,
             ..
         }) | Err(WorkerError::Failed(_))
     )
@@ -3361,8 +3350,8 @@ struct StagedTurnAttachments {
 /// from this one. The returned scope removes the directory on every exit.
 async fn write_turn_attachments(
     private_root: &super::scratch::ScratchRoot,
-    session_id: CodeSessionId,
-    turn_id: CodeTurnId,
+    session_id: SessionId,
+    turn_id: TurnId,
     attachments: &[tidebreak_core::ImageRef],
     images: &[TurnImage],
 ) -> std::io::Result<StagedTurnAttachments> {
@@ -3462,8 +3451,8 @@ const REPEATED_FAILURE_FENCE: u32 = 3;
 /// did not fail, so a session that recovers starts the count over.
 async fn repeated_failure_fence(
     db: &DbStore,
-    session: &CodeSession,
-    turn: &CodeTurn,
+    session: &Session,
+    turn: &Turn,
 ) -> Option<FenceReason> {
     let turns = tidebreak_core::db::code::list_turns(db, &session.owner, session.id)
         .await
@@ -3471,10 +3460,10 @@ async fn repeated_failure_fence(
     let mut count = 0u32;
     for candidate in turns.iter().rev() {
         match candidate.status {
-            CodeTurnStatus::Failed => count += 1,
+            TurnStatus::Failed => count += 1,
             // A turn still running is the one we are closing out; anything
             // else ends the streak.
-            CodeTurnStatus::Running if candidate.id == turn.id => count += 1,
+            TurnStatus::Running if candidate.id == turn.id => count += 1,
             _ => break,
         }
     }
@@ -3489,19 +3478,19 @@ async fn repeated_failure_fence(
 ///
 /// The turn row keeps no error column, so the journal is the only place the
 /// reason survives. Without it the fence would say only that turns failed.
-async fn last_failure_detail(db: &DbStore, session: &CodeSession) -> Option<String> {
+async fn last_failure_detail(db: &DbStore, session: &Session) -> Option<String> {
     let events = tidebreak_core::db::code::list_recent_events(db, &session.owner, session.id, 64)
         .await
         .ok()?;
     events.into_iter().find_map(|item| match item.event {
-        CodeEvent::TurnFailed { error, .. } => Some(error.message),
+        Event::TurnFailed { error, .. } => Some(error.message),
         _ => None,
     })
 }
 
-async fn session_was_ended(db: &DbStore, session: &mut CodeSession) -> bool {
+async fn session_was_ended(db: &DbStore, session: &mut Session) -> bool {
     match get_session(db, &session.owner, session.id).await {
-        Ok(Some(current)) if current.lifecycle == CodeSessionLifecycle::Ended => {
+        Ok(Some(current)) if current.lifecycle == SessionLifecycle::Ended => {
             *session = current;
             true
         }
@@ -3519,11 +3508,11 @@ async fn session_was_ended(db: &DbStore, session: &mut CodeSession) -> bool {
 pub(crate) async fn attach_engine(
     db: &DbStore,
     bus: &CodeEventBus,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     kind: tidebreak_core::HarnessKind,
     version: Option<String>,
     child_pid: Option<i64>,
-) -> Result<CodeSession, WorkerError> {
+) -> Result<Session, WorkerError> {
     let epoch = bump_spawn_epoch(db, session_id, child_pid)
         .await
         .map_err(|err| WorkerError::Failed(err.to_string()))?;
@@ -3535,7 +3524,7 @@ pub(crate) async fn attach_engine(
     session.child_pid = child_pid;
     session.child_process_identity = None;
     session.harness_version = version.or(session.harness_version);
-    session.lifecycle = CodeSessionLifecycle::Idle;
+    session.lifecycle = SessionLifecycle::Idle;
     // Attaching an engine makes it ready for a turn, not active. Restore
     // automatic active attention left by an earlier attachment. Preserve
     // unread work and user pins.
@@ -3569,7 +3558,7 @@ pub(crate) async fn attach_engine(
             &session.owner,
             session_id,
             epoch,
-            CodeEvent::SessionStarted {
+            Event::SessionStarted {
                 harness_kind: kind,
                 harness_version: session
                     .harness_version
@@ -3612,11 +3601,11 @@ pub(crate) fn sink_for(
     db: Arc<DbStore>,
     bus: Arc<CodeEventBus>,
     owner: OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     spawn_epoch: i64,
     harness: HarnessKind,
     relay_wired: bool,
-    turn_id: Option<CodeTurnId>,
+    turn_id: Option<TurnId>,
     subagents: Vec<CodeSubagentSummary>,
     gh_search_path: Option<String>,
     recap: Option<Arc<dyn super::recap::TurnRecap>>,
@@ -3649,10 +3638,10 @@ pub(crate) async fn journal_event(
     db: &DbStore,
     bus: &CodeEventBus,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     spawn_epoch: i64,
-    event: CodeEvent,
-) -> Result<(), CodeJournalError> {
+    event: Event,
+) -> Result<(), JournalError> {
     persist_and_publish(db, bus, owner, session_id, spawn_epoch, event, false).await
 }
 
@@ -3664,11 +3653,11 @@ pub(crate) async fn persist_and_publish(
     db: &DbStore,
     bus: &CodeEventBus,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     spawn_epoch: i64,
-    event: CodeEvent,
+    event: Event,
     native_journal: bool,
-) -> Result<(), CodeJournalError> {
+) -> Result<(), JournalError> {
     persist_and_publish_inner(
         db,
         bus,
@@ -3687,12 +3676,12 @@ async fn persist_turn_and_publish(
     db: &DbStore,
     bus: &CodeEventBus,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     spawn_epoch: i64,
-    turn_id: CodeTurnId,
-    event: CodeEvent,
+    turn_id: TurnId,
+    event: Event,
     native_journal: bool,
-) -> Result<(), CodeJournalError> {
+) -> Result<(), JournalError> {
     persist_and_publish_inner(
         db,
         bus,
@@ -3711,12 +3700,12 @@ async fn persist_and_publish_inner(
     db: &DbStore,
     bus: &CodeEventBus,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     spawn_epoch: i64,
-    notification_turn_id: Option<CodeTurnId>,
-    event: CodeEvent,
+    notification_turn_id: Option<TurnId>,
+    event: Event,
     native_journal: bool,
-) -> Result<(), CodeJournalError> {
+) -> Result<(), JournalError> {
     if native_journal {
         // The row is already in the journal and on the bus; only the
         // worker's bookkeeping is left: the turn row closes with the usage
@@ -3724,10 +3713,10 @@ async fn persist_and_publish_inner(
         apply_side_effects(db, owner, session_id, spawn_epoch, &event).await?;
         if matches!(
             &event,
-            CodeEvent::TurnCompleted { .. }
-                | CodeEvent::TurnRefused { .. }
-                | CodeEvent::TurnFailed { .. }
-                | CodeEvent::TurnInterrupted { .. }
+            Event::TurnCompleted { .. }
+                | Event::TurnRefused { .. }
+                | Event::TurnFailed { .. }
+                | Event::TurnInterrupted { .. }
         ) {
             super::approval_sweep::abandon_for_settled_turns(
                 db,
@@ -3743,10 +3732,10 @@ async fn persist_and_publish_inner(
     settle_streamed_text(db, bus, owner, session_id, spawn_epoch, &event).await;
     let activity_boundary = matches!(
         &event,
-        CodeEvent::ToolStarted {
+        Event::ToolStarted {
             parent_call_id: None,
             ..
-        } | CodeEvent::ToolCompleted {
+        } | Event::ToolCompleted {
             parent_call_id: None,
             ..
         }
@@ -3768,15 +3757,12 @@ async fn persist_and_publish_inner(
     // journals keeps its later sequence number on the live stream too.
     let closes_turn = matches!(
         &event,
-        CodeEvent::TurnCompleted { .. }
-            | CodeEvent::TurnRefused { .. }
-            | CodeEvent::TurnFailed { .. }
-            | CodeEvent::TurnInterrupted { .. }
+        Event::TurnCompleted { .. }
+            | Event::TurnRefused { .. }
+            | Event::TurnFailed { .. }
+            | Event::TurnInterrupted { .. }
     );
-    bus.publish(
-        session_id,
-        tidebreak_core::SequencedCodeEvent { seq, event },
-    );
+    bus.publish(session_id, tidebreak_core::SequencedEvent { seq, event });
     if closes_turn {
         super::approval_sweep::abandon_for_settled_turns(db, bus, owner, session_id, spawn_epoch)
             .await;
@@ -3809,16 +3795,16 @@ async fn settle_streamed_text(
     db: &DbStore,
     bus: &CodeEventBus,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     spawn_epoch: i64,
-    event: &CodeEvent,
+    event: &Event,
 ) {
     if !matches!(
         event,
-        CodeEvent::TurnCompleted { .. }
-            | CodeEvent::TurnRefused { .. }
-            | CodeEvent::TurnFailed { .. }
-            | CodeEvent::TurnInterrupted { .. }
+        Event::TurnCompleted { .. }
+            | Event::TurnRefused { .. }
+            | Event::TurnFailed { .. }
+            | Event::TurnInterrupted { .. }
     ) {
         return;
     }
@@ -3826,14 +3812,14 @@ async fn settle_streamed_text(
     if streamed.is_empty() {
         return;
     }
-    let recovered = CodeEvent::AssistantMessage {
+    let recovered = Event::AssistantMessage {
         text: streamed,
         parent_call_id: None,
     };
     match append_event(db, owner, session_id, spawn_epoch, &recovered).await {
         Ok(seq) => bus.publish(
             session_id,
-            tidebreak_core::SequencedCodeEvent {
+            tidebreak_core::SequencedEvent {
                 seq,
                 event: recovered,
             },
@@ -3846,32 +3832,32 @@ async fn settle_streamed_text(
     }
 }
 
-fn is_activity(event: &CodeEvent) -> bool {
+fn is_activity(event: &Event) -> bool {
     matches!(
         event,
-        CodeEvent::AssistantMessage { .. }
-            | CodeEvent::ReasoningDelta { .. }
-            | CodeEvent::ToolStarted { .. }
-            | CodeEvent::ToolCompleted { .. }
-            | CodeEvent::FileChanged { .. }
-            | CodeEvent::ApprovalRequested { .. }
-            | CodeEvent::UserSteered { .. }
+        Event::AssistantMessage { .. }
+            | Event::ReasoningDelta { .. }
+            | Event::ToolStarted { .. }
+            | Event::ToolCompleted { .. }
+            | Event::FileChanged { .. }
+            | Event::ApprovalRequested { .. }
+            | Event::UserSteered { .. }
     )
 }
 
 async fn apply_side_effects(
     db: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
     _spawn_epoch: i64,
-    event: &CodeEvent,
-) -> Result<(), CodeJournalError> {
+    event: &Event,
+) -> Result<(), JournalError> {
     match event {
-        CodeEvent::TurnCompleted {
+        Event::TurnCompleted {
             usage, checkpoint, ..
         } => {
             if let Ok(Some(mut turn)) = get_open_turn(db, owner, session_id).await {
-                turn.status = CodeTurnStatus::Completed;
+                turn.status = TurnStatus::Completed;
                 turn.ended_at = Some(Utc::now());
                 turn.usage = Some(usage.clone());
                 if let Some(hint) = checkpoint {
@@ -3883,24 +3869,24 @@ async fn apply_side_effects(
         }
         // A refusal ends the turn the way a completion does: the model
         // answered, and its answer was to decline.
-        CodeEvent::TurnRefused { usage, .. } => {
+        Event::TurnRefused { usage, .. } => {
             if let Ok(Some(mut turn)) = get_open_turn(db, owner, session_id).await {
-                turn.status = CodeTurnStatus::Completed;
+                turn.status = TurnStatus::Completed;
                 turn.ended_at = Some(Utc::now());
                 turn.usage = Some(usage.clone());
                 let _ = save_turn(db, owner, &turn).await;
             }
         }
-        CodeEvent::TurnFailed { .. } => {
+        Event::TurnFailed { .. } => {
             if let Ok(Some(mut turn)) = get_open_turn(db, owner, session_id).await {
-                turn.status = CodeTurnStatus::Failed;
+                turn.status = TurnStatus::Failed;
                 turn.ended_at = Some(Utc::now());
                 let _ = save_turn(db, owner, &turn).await;
             }
         }
-        CodeEvent::TurnInterrupted { .. } => {
+        Event::TurnInterrupted { .. } => {
             if let Ok(Some(mut turn)) = get_open_turn(db, owner, session_id).await {
-                turn.status = CodeTurnStatus::Interrupted;
+                turn.status = TurnStatus::Interrupted;
                 turn.ended_at = Some(Utc::now());
                 let _ = save_turn(db, owner, &turn).await;
             }
@@ -3940,7 +3926,7 @@ fn cap_raw(raw: &serde_json::Value) -> serde_json::Value {
     serde_json::json!({ "truncated": true, "preview": &rendered[..end] })
 }
 
-fn kind_from_raw(raw: &serde_json::Value) -> CodeApprovalKind {
+fn kind_from_raw(raw: &serde_json::Value) -> ApprovalKind {
     let input = raw
         .get("input")
         .or_else(|| raw.get("metadata"))
@@ -3952,7 +3938,7 @@ fn kind_from_raw(raw: &serde_json::Value) -> CodeApprovalKind {
         .and_then(serde_json::Value::as_str)
         .filter(|cmd| !cmd.is_empty())
     {
-        return CodeApprovalKind::Command {
+        return ApprovalKind::Command {
             cmd: cmd.to_owned(),
             cwd: raw
                 .get("cwd")
@@ -3965,7 +3951,7 @@ fn kind_from_raw(raw: &serde_json::Value) -> CodeApprovalKind {
         .and_then(serde_json::Value::as_str)
         .filter(|cmd| !cmd.is_empty())
     {
-        return CodeApprovalKind::Command {
+        return ApprovalKind::Command {
             cmd: cmd.to_owned(),
             cwd: input
                 .get("cwd")
@@ -3982,21 +3968,19 @@ fn kind_from_raw(raw: &serde_json::Value) -> CodeApprovalKind {
     let paths = approval_file_paths(raw, &input);
     let path = paths.first().map(String::as_str).unwrap_or("");
     match tool {
-        "Write" | "Edit" | "NotebookEdit" | "write" | "edit" => {
-            CodeApprovalKind::FileWrite { paths }
-        }
-        "Bash" | "bash" => CodeApprovalKind::Command {
+        "Write" | "Edit" | "NotebookEdit" | "write" | "edit" => ApprovalKind::FileWrite { paths },
+        "Bash" | "bash" => ApprovalKind::Command {
             cmd: String::new(),
             cwd: input
                 .get("cwd")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned),
         },
-        "WebFetch" | "WebSearch" | "webfetch" | "websearch" => CodeApprovalKind::Network {
+        "WebFetch" | "WebSearch" | "webfetch" | "websearch" => ApprovalKind::Network {
             summary: tool.to_owned(),
         },
         "Read" | "read" | "Grep" | "grep" | "Glob" | "glob" | "NotebookRead" => {
-            CodeApprovalKind::Other {
+            ApprovalKind::Other {
                 summary: if path.is_empty() {
                     tool.to_owned()
                 } else {
@@ -4004,10 +3988,10 @@ fn kind_from_raw(raw: &serde_json::Value) -> CodeApprovalKind {
                 },
             }
         }
-        "" | "unknown" => CodeApprovalKind::Other {
+        "" | "unknown" => ApprovalKind::Other {
             summary: "The engine needs approval".to_owned(),
         },
-        other => CodeApprovalKind::Other {
+        other => ApprovalKind::Other {
             summary: other.to_owned(),
         },
     }
@@ -4066,33 +4050,33 @@ fn normalize_approval_path(path: &str, cwd: Option<&str>) -> String {
     render(path)
 }
 
-fn map_event(event: HarnessEvent, turn_id: Option<CodeTurnId>) -> Option<CodeEvent> {
+fn map_event(event: HarnessEvent, turn_id: Option<TurnId>) -> Option<Event> {
     Some(match event {
         HarnessEvent::SessionStarted {
             harness_kind,
             harness_version,
             resume_ref,
-        } => CodeEvent::SessionStarted {
+        } => Event::SessionStarted {
             harness_kind,
             harness_version,
             resume_ref,
         },
-        HarnessEvent::TurnStarted => CodeEvent::TurnStarted { turn_id: turn_id? },
-        HarnessEvent::AssistantDelta { text } => CodeEvent::AssistantDelta { text },
+        HarnessEvent::TurnStarted => Event::TurnStarted { turn_id: turn_id? },
+        HarnessEvent::AssistantDelta { text } => Event::AssistantDelta { text },
         HarnessEvent::AssistantMessage {
             text,
             parent_call_id,
-        } => CodeEvent::AssistantMessage {
+        } => Event::AssistantMessage {
             text,
             parent_call_id,
         },
-        HarnessEvent::ReasoningDelta { text } => CodeEvent::ReasoningDelta { text },
+        HarnessEvent::ReasoningDelta { text } => Event::ReasoningDelta { text },
         HarnessEvent::ToolStarted {
             call_id,
             name,
             detail,
             parent_call_id,
-        } => CodeEvent::ToolStarted {
+        } => Event::ToolStarted {
             call_id,
             name,
             detail,
@@ -4104,7 +4088,7 @@ fn map_event(event: HarnessEvent, turn_id: Option<CodeTurnId>) -> Option<CodeEve
             preview,
             detail,
             parent_call_id,
-        } => CodeEvent::ToolCompleted {
+        } => Event::ToolCompleted {
             call_id,
             outcome,
             preview,
@@ -4118,7 +4102,7 @@ fn map_event(event: HarnessEvent, turn_id: Option<CodeTurnId>) -> Option<CodeEve
             path,
             kind,
             diffstat,
-        } => CodeEvent::FileChanged {
+        } => Event::FileChanged {
             path,
             kind,
             diffstat,
@@ -4126,27 +4110,25 @@ fn map_event(event: HarnessEvent, turn_id: Option<CodeTurnId>) -> Option<CodeEve
         HarnessEvent::ApprovalRequested { .. } => {
             return None;
         }
-        HarnessEvent::ApprovalResolved { decision, .. } => CodeEvent::ApprovalResolved {
-            approval_id: CodeApprovalId::new(),
+        HarnessEvent::ApprovalResolved { decision, .. } => Event::ApprovalResolved {
+            approval_id: ApprovalId::new(),
             decision: decision.into(),
         },
-        HarnessEvent::UserSteered { text } => CodeEvent::UserSteered {
+        HarnessEvent::UserSteered { text } => Event::UserSteered {
             text,
             message_id: None,
         },
-        HarnessEvent::TurnCompleted { usage } => CodeEvent::TurnCompleted {
+        HarnessEvent::TurnCompleted { usage } => Event::TurnCompleted {
             usage,
             checkpoint: None,
             stop_reason: None,
         },
-        HarnessEvent::TurnFailed { error } => CodeEvent::TurnFailed {
+        HarnessEvent::TurnFailed { error } => Event::TurnFailed {
             error,
             detail: None,
         },
-        HarnessEvent::TurnInterrupted => CodeEvent::TurnInterrupted { usage: None },
-        HarnessEvent::HarnessNotice { level, message } => {
-            CodeEvent::HarnessNotice { level, message }
-        }
+        HarnessEvent::TurnInterrupted => Event::TurnInterrupted { usage: None },
+        HarnessEvent::HarnessNotice { level, message } => Event::HarnessNotice { level, message },
     })
 }
 

@@ -3,38 +3,35 @@ use sea_orm::{
     QueryOrder, QuerySelect, Set, TransactionTrait,
 };
 
-use crate::code::{
-    CodeSessionId, CodeTurn, CodeTurnId, CodeTurnStatus, CodeUsage, Diffstat, TurnParkWait,
-};
+use crate::code::{Diffstat, Turn, TurnId, TurnParkWait, TurnStatus, TurnUsage};
 use crate::error::{AgentError, Result};
 use crate::image::ImageMediaType;
 use crate::image::ImageRef;
 use crate::model::{TurnAgentRunWaitStatus, TurnClientWaitStatus, MAX_MESSAGE_ATTACHMENTS};
-use crate::{AgentRunId, CallId, OwnerId};
+use crate::{AgentRunId, CallId, OwnerId, SessionId};
 
 use super::super::super::{entities, store_err, DbStore};
 use super::super::blob as blob_ops;
 use super::super::{
-    acquire_advisory_lock, acquire_code_turn_write_lock, acquire_session_write_lock,
-    AdvisoryLockName,
+    acquire_advisory_lock, acquire_chat_write_lock, acquire_turn_write_lock, AdvisoryLockName,
 };
 
 /// The fields analytics needs from one turn.
 ///
-/// Keeping this projection separate from [`CodeTurn`] avoids loading image
+/// Keeping this projection separate from [`Turn`] avoids loading image
 /// attachment rows for a report that never reads them.
 #[derive(Debug, Clone, PartialEq)]
-pub struct CodeTurnMetric {
-    pub session_id: CodeSessionId,
-    pub status: CodeTurnStatus,
+pub struct TurnMetric {
+    pub session_id: SessionId,
+    pub status: TurnStatus,
     pub model: Option<String>,
     pub fast_mode: bool,
-    pub usage: Option<CodeUsage>,
+    pub usage: Option<TurnUsage>,
     pub started_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// Insert a turn row under its session's owner.
-pub async fn insert_turn(store: &DbStore, owner: &OwnerId, turn: &CodeTurn) -> Result<()> {
+pub async fn insert_turn(store: &DbStore, owner: &OwnerId, turn: &Turn) -> Result<()> {
     validate_attachments(&turn.attachments)?;
     let txn = store.conn.begin().await.map_err(store_err)?;
     insert_turn_on(&txn, owner, turn).await?;
@@ -42,16 +39,12 @@ pub async fn insert_turn(store: &DbStore, owner: &OwnerId, turn: &CodeTurn) -> R
     Ok(())
 }
 
-pub(in crate::db) async fn insert_turn_on<C>(
-    conn: &C,
-    owner: &OwnerId,
-    turn: &CodeTurn,
-) -> Result<()>
+pub(in crate::db) async fn insert_turn_on<C>(conn: &C, owner: &OwnerId, turn: &Turn) -> Result<()>
 where
     C: ConnectionTrait,
 {
     validate_attachments(&turn.attachments)?;
-    entities::code_turn::ActiveModel {
+    entities::turn::ActiveModel {
         id: Set(turn.id.0),
         owner: Set(owner.as_str().to_owned()),
         session_id: Set(turn.session_id.0),
@@ -135,7 +128,7 @@ fn validate_attachments(attachments: &[ImageRef]) -> Result<()> {
 async fn insert_attachments_on<C>(
     conn: &C,
     owner: &OwnerId,
-    turn_id: CodeTurnId,
+    turn_id: TurnId,
     attachments: &[ImageRef],
 ) -> Result<()>
 where
@@ -154,7 +147,7 @@ where
             let byte_len = i64::try_from(attachment.byte_len).map_err(|_| {
                 AgentError::Store("code turn attachment byte length overflow".to_owned())
             })?;
-            Ok(entities::code_turn_attachment::ActiveModel {
+            Ok(entities::turn_attachment::ActiveModel {
                 turn_id: Set(turn_id.0),
                 owner: Set(owner.as_str().to_owned()),
                 ordinal: Set(ordinal),
@@ -167,7 +160,7 @@ where
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    entities::code_turn_attachment::Entity::insert_many(rows)
+    entities::turn_attachment::Entity::insert_many(rows)
         .exec_without_returning(conn)
         .await
         .map_err(store_err)?;
@@ -180,18 +173,14 @@ where
     Ok(())
 }
 
-async fn load_attachments_on<C>(
-    conn: &C,
-    owner: &OwnerId,
-    turn_id: CodeTurnId,
-) -> Result<Vec<ImageRef>>
+async fn load_attachments_on<C>(conn: &C, owner: &OwnerId, turn_id: TurnId) -> Result<Vec<ImageRef>>
 where
     C: ConnectionTrait,
 {
-    let rows = entities::code_turn_attachment::Entity::find()
-        .filter(entities::code_turn_attachment::Column::Owner.eq(owner.as_str()))
-        .filter(entities::code_turn_attachment::Column::TurnId.eq(turn_id.0))
-        .order_by_asc(entities::code_turn_attachment::Column::Ordinal)
+    let rows = entities::turn_attachment::Entity::find()
+        .filter(entities::turn_attachment::Column::Owner.eq(owner.as_str()))
+        .filter(entities::turn_attachment::Column::TurnId.eq(turn_id.0))
+        .order_by_asc(entities::turn_attachment::Column::Ordinal)
         .all(conn)
         .await
         .map_err(store_err)?;
@@ -199,13 +188,13 @@ where
         .map(|row| {
             let media_type = ImageMediaType::parse(&row.media_type).ok_or_else(|| {
                 AgentError::Store(format!(
-                    "code_turn_attachment {turn_id} has unknown media type {}",
+                    "turn_attachment {turn_id} has unknown media type {}",
                     row.media_type
                 ))
             })?;
             let byte_len = u64::try_from(row.byte_len).map_err(|_| {
                 AgentError::Store(format!(
-                    "code_turn_attachment {turn_id} has a negative byte length"
+                    "turn_attachment {turn_id} has a negative byte length"
                 ))
             })?;
             Ok(ImageRef {
@@ -220,13 +209,9 @@ where
 }
 
 /// Load one of the owner's turns by id.
-pub async fn get_turn(
-    store: &DbStore,
-    owner: &OwnerId,
-    id: CodeTurnId,
-) -> Result<Option<CodeTurn>> {
-    let Some(row) = entities::code_turn::Entity::find_by_id(id.0)
-        .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
+pub async fn get_turn(store: &DbStore, owner: &OwnerId, id: TurnId) -> Result<Option<Turn>> {
+    let Some(row) = entities::turn::Entity::find_by_id(id.0)
+        .filter(entities::turn::Column::Owner.eq(owner.as_str()))
         .one(&store.conn)
         .await
         .map_err(store_err)?
@@ -240,12 +225,12 @@ pub async fn get_turn(
 pub async fn list_turns(
     store: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
-) -> Result<Vec<CodeTurn>> {
-    let rows = entities::code_turn::Entity::find()
-        .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
-        .filter(entities::code_turn::Column::SessionId.eq(session_id.0))
-        .order_by_asc(entities::code_turn::Column::Ordinal)
+    session_id: SessionId,
+) -> Result<Vec<Turn>> {
+    let rows = entities::turn::Entity::find()
+        .filter(entities::turn::Column::Owner.eq(owner.as_str()))
+        .filter(entities::turn::Column::SessionId.eq(session_id.0))
+        .order_by_asc(entities::turn::Column::Ordinal)
         .all(&store.conn)
         .await
         .map_err(store_err)?;
@@ -257,18 +242,18 @@ pub async fn list_turns(
 }
 
 /// Every turn that belongs to one owner, newest first, projected for reports.
-pub async fn list_turn_metrics(store: &DbStore, owner: &OwnerId) -> Result<Vec<CodeTurnMetric>> {
-    let rows = entities::code_turn::Entity::find()
+pub async fn list_turn_metrics(store: &DbStore, owner: &OwnerId) -> Result<Vec<TurnMetric>> {
+    let rows = entities::turn::Entity::find()
         .select_only()
-        .column(entities::code_turn::Column::Id)
-        .column(entities::code_turn::Column::SessionId)
-        .column(entities::code_turn::Column::Status)
-        .column(entities::code_turn::Column::Model)
-        .column(entities::code_turn::Column::FastMode)
-        .column(entities::code_turn::Column::Usage)
-        .column(entities::code_turn::Column::StartedAt)
-        .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
-        .order_by_desc(entities::code_turn::Column::StartedAt)
+        .column(entities::turn::Column::Id)
+        .column(entities::turn::Column::SessionId)
+        .column(entities::turn::Column::Status)
+        .column(entities::turn::Column::Model)
+        .column(entities::turn::Column::FastMode)
+        .column(entities::turn::Column::Usage)
+        .column(entities::turn::Column::StartedAt)
+        .filter(entities::turn::Column::Owner.eq(owner.as_str()))
+        .order_by_desc(entities::turn::Column::StartedAt)
         .into_tuple::<(
             uuid::Uuid,
             uuid::Uuid,
@@ -284,8 +269,8 @@ pub async fn list_turn_metrics(store: &DbStore, owner: &OwnerId) -> Result<Vec<C
     rows.into_iter()
         .map(
             |(id, session_id, status, model, fast_mode, usage, started_at)| {
-                Ok(CodeTurnMetric {
-                    session_id: CodeSessionId(session_id),
+                Ok(TurnMetric {
+                    session_id: SessionId(session_id),
                     status: turn_status_from_stored(id, &status)?,
                     model,
                     fast_mode,
@@ -298,14 +283,10 @@ pub async fn list_turn_metrics(store: &DbStore, owner: &OwnerId) -> Result<Vec<C
 }
 
 /// How many turns one of the owner's sessions has recorded.
-pub async fn count_turns(
-    store: &DbStore,
-    owner: &OwnerId,
-    session_id: CodeSessionId,
-) -> Result<i64> {
-    let count = entities::code_turn::Entity::find()
-        .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
-        .filter(entities::code_turn::Column::SessionId.eq(session_id.0))
+pub async fn count_turns(store: &DbStore, owner: &OwnerId, session_id: SessionId) -> Result<i64> {
+    let count = entities::turn::Entity::find()
+        .filter(entities::turn::Column::Owner.eq(owner.as_str()))
+        .filter(entities::turn::Column::SessionId.eq(session_id.0))
         .count(&store.conn)
         .await
         .map_err(store_err)?;
@@ -317,12 +298,12 @@ pub async fn count_turns(
 pub async fn latest_turn(
     store: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
-) -> Result<Option<CodeTurn>> {
-    let Some(row) = entities::code_turn::Entity::find()
-        .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
-        .filter(entities::code_turn::Column::SessionId.eq(session_id.0))
-        .order_by_desc(entities::code_turn::Column::Ordinal)
+    session_id: SessionId,
+) -> Result<Option<Turn>> {
+    let Some(row) = entities::turn::Entity::find()
+        .filter(entities::turn::Column::Owner.eq(owner.as_str()))
+        .filter(entities::turn::Column::SessionId.eq(session_id.0))
+        .order_by_desc(entities::turn::Column::Ordinal)
         .one(&store.conn)
         .await
         .map_err(store_err)?
@@ -336,8 +317,8 @@ pub async fn latest_turn(
 pub async fn get_open_turn(
     store: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
-) -> Result<Option<CodeTurn>> {
+    session_id: SessionId,
+) -> Result<Option<Turn>> {
     let turns = list_turns(store, owner, session_id).await?;
     Ok(turns.into_iter().rev().find(|turn| turn.status.is_open()))
 }
@@ -346,12 +327,12 @@ pub async fn get_open_turn(
 pub async fn next_turn_ordinal(
     store: &DbStore,
     owner: &OwnerId,
-    session_id: CodeSessionId,
+    session_id: SessionId,
 ) -> Result<i64> {
-    let last = entities::code_turn::Entity::find()
-        .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
-        .filter(entities::code_turn::Column::SessionId.eq(session_id.0))
-        .order_by_desc(entities::code_turn::Column::Ordinal)
+    let last = entities::turn::Entity::find()
+        .filter(entities::turn::Column::Owner.eq(owner.as_str()))
+        .filter(entities::turn::Column::SessionId.eq(session_id.0))
+        .order_by_desc(entities::turn::Column::Ordinal)
         .one(&store.conn)
         .await
         .map_err(store_err)?;
@@ -365,60 +346,60 @@ pub async fn next_turn_ordinal(
 ///
 /// `narrative` and `rewrite` are deliberately not among them. Both are derived
 /// asynchronously after a turn ends and can land at any point, while the
-/// callers here hold a [`CodeTurn`] read before that — `checkpoint::after_turn_ended`
+/// callers here hold a [`Turn`] read before that — `checkpoint::after_turn_ended`
 /// takes its snapshot before the turn is even terminal. Writing the whole row
 /// from a stale snapshot would blank a recap or rewrite that had already been
 /// stored, so each column has exactly one writer: [`set_turn_narrative`] and
 /// [`set_turn_rewrite`].
-pub async fn save_turn(store: &DbStore, owner: &OwnerId, turn: &CodeTurn) -> Result<bool> {
-    let result = entities::code_turn::Entity::update_many()
+pub async fn save_turn(store: &DbStore, owner: &OwnerId, turn: &Turn) -> Result<bool> {
+    let result = entities::turn::Entity::update_many()
         .col_expr(
-            entities::code_turn::Column::Status,
+            entities::turn::Column::Status,
             sea_orm::sea_query::Expr::value(turn.status.as_str().to_owned()),
         )
         .col_expr(
-            entities::code_turn::Column::UserInput,
+            entities::turn::Column::UserInput,
             sea_orm::sea_query::Expr::value(turn.user_input.clone()),
         )
         .col_expr(
-            entities::code_turn::Column::UserInputBlobId,
+            entities::turn::Column::UserInputBlobId,
             sea_orm::sea_query::Expr::value(turn.user_input_blob_id),
         )
         .col_expr(
-            entities::code_turn::Column::CheckpointRef,
+            entities::turn::Column::CheckpointRef,
             sea_orm::sea_query::Expr::value(turn.checkpoint_ref.clone()),
         )
         .col_expr(
-            entities::code_turn::Column::Diffstat,
+            entities::turn::Column::Diffstat,
             sea_orm::sea_query::Expr::value(match &turn.diffstat {
                 Some(stat) => Some(serde_json::to_value(stat)?),
                 None => None,
             }),
         )
         .col_expr(
-            entities::code_turn::Column::Usage,
+            entities::turn::Column::Usage,
             sea_orm::sea_query::Expr::value(match &turn.usage {
                 Some(usage) => Some(serde_json::to_value(usage)?),
                 None => None,
             }),
         )
         .col_expr(
-            entities::code_turn::Column::EndedAt,
+            entities::turn::Column::EndedAt,
             sea_orm::sea_query::Expr::value(turn.ended_at),
         )
         .col_expr(
-            entities::code_turn::Column::ParkRef,
+            entities::turn::Column::ParkRef,
             sea_orm::sea_query::Expr::value(turn.park_ref.clone()),
         )
         .col_expr(
-            entities::code_turn::Column::ParkWait,
+            entities::turn::Column::ParkWait,
             sea_orm::sea_query::Expr::value(match &turn.park_wait {
                 Some(wait) => Some(serde_json::to_value(wait)?),
                 None => None,
             }),
         )
-        .filter(entities::code_turn::Column::Id.eq(turn.id.0))
-        .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
+        .filter(entities::turn::Column::Id.eq(turn.id.0))
+        .filter(entities::turn::Column::Owner.eq(owner.as_str()))
         .exec(&store.conn)
         .await
         .map_err(store_err)?;
@@ -436,12 +417,12 @@ pub async fn save_turn(store: &DbStore, owner: &OwnerId, turn: &CodeTurn) -> Res
 pub async fn store_turn_park(
     store: &DbStore,
     owner: &OwnerId,
-    id: CodeTurnId,
+    id: TurnId,
     park_ref: &str,
     wait: &TurnParkWait,
-) -> Result<Option<CodeTurnStatus>> {
-    let Some(scope) = entities::code_turn::Entity::find_by_id(id.0)
-        .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
+) -> Result<Option<TurnStatus>> {
+    let Some(scope) = entities::turn::Entity::find_by_id(id.0)
+        .filter(entities::turn::Column::Owner.eq(owner.as_str()))
         .one(&store.conn)
         .await
         .map_err(store_err)?
@@ -452,14 +433,14 @@ pub async fn store_turn_park(
     if matches!(wait, TurnParkWait::AgentRuns { .. }) {
         acquire_advisory_lock(&transaction, AdvisoryLockName::TurnAgentRunWait).await?;
     }
-    if !acquire_session_write_lock(&transaction, scope.session_id).await?
-        || !acquire_code_turn_write_lock(&transaction, id).await?
+    if !acquire_chat_write_lock(&transaction, SessionId(scope.session_id)).await?
+        || !acquire_turn_write_lock(&transaction, crate::TurnId(id.0)).await?
     {
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     }
-    let Some(turn) = entities::code_turn::Entity::find_by_id(id.0)
-        .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
+    let Some(turn) = entities::turn::Entity::find_by_id(id.0)
+        .filter(entities::turn::Column::Owner.eq(owner.as_str()))
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -467,7 +448,7 @@ pub async fn store_turn_park(
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     };
-    let status = CodeTurnStatus::from_str(&turn.status).ok_or_else(|| {
+    let status = TurnStatus::from_str(&turn.status).ok_or_else(|| {
         AgentError::Store(format!("turn {} has unknown status {}", id, turn.status))
     })?;
     let raw_wait = serde_json::to_value(wait)?;
@@ -487,8 +468,8 @@ pub async fn store_turn_park(
     }
 
     let next_status = match status {
-        CodeTurnStatus::Running => CodeTurnStatus::Waiting,
-        CodeTurnStatus::WaitingForClient
+        TurnStatus::Running => TurnStatus::Waiting,
+        TurnStatus::WaitingForClient
             if matches!(
                 wait,
                 TurnParkWait::Approval { .. } | TurnParkWait::ClientToolCall { .. }
@@ -496,9 +477,9 @@ pub async fn store_turn_park(
         {
             require_client_park_receipt(&transaction, &turn, wait, TurnClientWaitStatus::Waiting)
                 .await?;
-            CodeTurnStatus::Waiting
+            TurnStatus::Waiting
         }
-        CodeTurnStatus::WaitingForAgentRun if matches!(wait, TurnParkWait::AgentRuns { .. }) => {
+        TurnStatus::WaitingForAgentRun if matches!(wait, TurnParkWait::AgentRuns { .. }) => {
             require_agent_run_park_receipt(
                 &transaction,
                 &turn,
@@ -507,13 +488,13 @@ pub async fn store_turn_park(
                 TurnAgentRunWaitStatus::Waiting,
             )
             .await?;
-            CodeTurnStatus::Waiting
+            TurnStatus::Waiting
         }
-        CodeTurnStatus::Resuming => {
+        TurnStatus::Resuming => {
             require_resolved_park_receipt(&transaction, &turn, park_ref, wait).await?;
-            CodeTurnStatus::Resuming
+            TurnStatus::Resuming
         }
-        CodeTurnStatus::CancellingClient
+        TurnStatus::CancellingClient
             if matches!(
                 wait,
                 TurnParkWait::Approval { .. } | TurnParkWait::ClientToolCall { .. }
@@ -521,11 +502,11 @@ pub async fn store_turn_park(
         {
             require_client_park_receipt(&transaction, &turn, wait, TurnClientWaitStatus::Waiting)
                 .await?;
-            CodeTurnStatus::CancellingClient
+            TurnStatus::CancellingClient
         }
-        CodeTurnStatus::Interrupted => {
+        TurnStatus::Interrupted => {
             require_cancelled_park_receipt(&transaction, &turn, park_ref, wait).await?;
-            CodeTurnStatus::Interrupted
+            TurnStatus::Interrupted
         }
         _ => {
             return Err(AgentError::Store(format!(
@@ -534,26 +515,26 @@ pub async fn store_turn_park(
             )));
         }
     };
-    let updated = entities::code_turn::Entity::update_many()
+    let updated = entities::turn::Entity::update_many()
         .col_expr(
-            entities::code_turn::Column::Status,
+            entities::turn::Column::Status,
             sea_orm::sea_query::Expr::value(next_status.as_str()),
         )
         .col_expr(
-            entities::code_turn::Column::ParkRef,
+            entities::turn::Column::ParkRef,
             sea_orm::sea_query::Expr::value(Some(park_ref.to_owned())),
         )
         .col_expr(
-            entities::code_turn::Column::ParkWait,
+            entities::turn::Column::ParkWait,
             sea_orm::sea_query::Expr::value(Some(raw_wait)),
         )
-        .filter(entities::code_turn::Column::Id.eq(turn.id))
-        .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
-        .filter(entities::code_turn::Column::Status.eq(&turn.status))
-        .filter(entities::code_turn::Column::AttemptCount.eq(turn.attempt_count))
-        .filter(entities::code_turn::Column::ClaimCount.eq(turn.claim_count))
-        .filter(entities::code_turn::Column::ParkRef.is_null())
-        .filter(entities::code_turn::Column::ParkWait.is_null())
+        .filter(entities::turn::Column::Id.eq(turn.id))
+        .filter(entities::turn::Column::Owner.eq(owner.as_str()))
+        .filter(entities::turn::Column::Status.eq(&turn.status))
+        .filter(entities::turn::Column::AttemptCount.eq(turn.attempt_count))
+        .filter(entities::turn::Column::ClaimCount.eq(turn.claim_count))
+        .filter(entities::turn::Column::ParkRef.is_null())
+        .filter(entities::turn::Column::ParkWait.is_null())
         .exec(&transaction)
         .await
         .map_err(store_err)?;
@@ -569,12 +550,12 @@ pub async fn store_turn_park(
 pub async fn clear_turn_park(
     store: &DbStore,
     owner: &OwnerId,
-    id: CodeTurnId,
+    id: TurnId,
     park_ref: &str,
     wait: &TurnParkWait,
-) -> Result<Option<CodeTurnStatus>> {
-    let Some(scope) = entities::code_turn::Entity::find_by_id(id.0)
-        .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
+) -> Result<Option<TurnStatus>> {
+    let Some(scope) = entities::turn::Entity::find_by_id(id.0)
+        .filter(entities::turn::Column::Owner.eq(owner.as_str()))
         .one(&store.conn)
         .await
         .map_err(store_err)?
@@ -582,14 +563,14 @@ pub async fn clear_turn_park(
         return Ok(None);
     };
     let transaction = store.conn.begin().await.map_err(store_err)?;
-    if !acquire_session_write_lock(&transaction, scope.session_id).await?
-        || !acquire_code_turn_write_lock(&transaction, id).await?
+    if !acquire_chat_write_lock(&transaction, SessionId(scope.session_id)).await?
+        || !acquire_turn_write_lock(&transaction, crate::TurnId(id.0)).await?
     {
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     }
-    let Some(turn) = entities::code_turn::Entity::find_by_id(id.0)
-        .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
+    let Some(turn) = entities::turn::Entity::find_by_id(id.0)
+        .filter(entities::turn::Column::Owner.eq(owner.as_str()))
         .one(&transaction)
         .await
         .map_err(store_err)?
@@ -597,7 +578,7 @@ pub async fn clear_turn_park(
         transaction.commit().await.map_err(store_err)?;
         return Ok(None);
     };
-    let status = CodeTurnStatus::from_str(&turn.status).ok_or_else(|| {
+    let status = TurnStatus::from_str(&turn.status).ok_or_else(|| {
         AgentError::Store(format!("turn {} has unknown status {}", id, turn.status))
     })?;
     let raw_wait = serde_json::to_value(wait)?;
@@ -610,19 +591,19 @@ pub async fn clear_turn_park(
             "turn {id} carries a different durable park"
         )));
     }
-    let updated = entities::code_turn::Entity::update_many()
+    let updated = entities::turn::Entity::update_many()
         .col_expr(
-            entities::code_turn::Column::ParkRef,
+            entities::turn::Column::ParkRef,
             sea_orm::sea_query::Expr::value(Option::<String>::None),
         )
         .col_expr(
-            entities::code_turn::Column::ParkWait,
+            entities::turn::Column::ParkWait,
             sea_orm::sea_query::Expr::value(Option::<serde_json::Value>::None),
         )
-        .filter(entities::code_turn::Column::Id.eq(turn.id))
-        .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
-        .filter(entities::code_turn::Column::ParkRef.eq(park_ref))
-        .filter(entities::code_turn::Column::ParkWait.eq(raw_wait))
+        .filter(entities::turn::Column::Id.eq(turn.id))
+        .filter(entities::turn::Column::Owner.eq(owner.as_str()))
+        .filter(entities::turn::Column::ParkRef.eq(park_ref))
+        .filter(entities::turn::Column::ParkWait.eq(raw_wait))
         .exec(&transaction)
         .await
         .map_err(store_err)?;
@@ -636,7 +617,7 @@ pub async fn clear_turn_park(
 
 async fn require_resolved_park_receipt<C>(
     conn: &C,
-    turn: &entities::code_turn::Model,
+    turn: &entities::turn::Model,
     park_ref: &str,
     wait: &TurnParkWait,
 ) -> Result<()>
@@ -662,7 +643,7 @@ where
 
 async fn require_cancelled_park_receipt<C>(
     conn: &C,
-    turn: &entities::code_turn::Model,
+    turn: &entities::turn::Model,
     park_ref: &str,
     wait: &TurnParkWait,
 ) -> Result<()>
@@ -688,7 +669,7 @@ where
 
 async fn require_client_park_receipt<C>(
     conn: &C,
-    turn: &entities::code_turn::Model,
+    turn: &entities::turn::Model,
     wait: &TurnParkWait,
     expected_status: TurnClientWaitStatus,
 ) -> Result<()>
@@ -700,14 +681,14 @@ where
         TurnParkWait::AgentRuns { .. } => {
             return Err(AgentError::Store(format!(
                 "turn {} client park has an agent-run wait",
-                CodeTurnId(turn.id)
+                crate::TurnId(turn.id)
             )));
         }
     };
     let call_id = call_id.parse::<CallId>().map_err(|_| {
         AgentError::Store(format!(
             "turn {} client park has an invalid call id",
-            CodeTurnId(turn.id)
+            crate::TurnId(turn.id)
         ))
     })?;
     let receipt = entities::turn_client_wait::Entity::find_by_id(call_id.0)
@@ -717,7 +698,7 @@ where
         .ok_or_else(|| {
             AgentError::Store(format!(
                 "turn {} client park is missing wait {call_id}",
-                CodeTurnId(turn.id)
+                crate::TurnId(turn.id)
             ))
         })?;
     if receipt.turn_id != turn.id
@@ -728,7 +709,7 @@ where
     {
         return Err(AgentError::Store(format!(
             "turn {} client park has a mismatched wait {call_id}",
-            CodeTurnId(turn.id)
+            crate::TurnId(turn.id)
         )));
     }
     Ok(())
@@ -736,7 +717,7 @@ where
 
 async fn require_agent_run_park_receipt<C>(
     conn: &C,
-    turn: &entities::code_turn::Model,
+    turn: &entities::turn::Model,
     park_ref: &str,
     wait: &TurnParkWait,
     expected_status: TurnAgentRunWaitStatus,
@@ -747,13 +728,13 @@ where
     let TurnParkWait::AgentRuns { run_ids } = wait else {
         return Err(AgentError::Store(format!(
             "turn {} agent-run park has a different wait kind",
-            CodeTurnId(turn.id)
+            crate::TurnId(turn.id)
         )));
     };
     let wait_id = park_ref.parse::<CallId>().map_err(|_| {
         AgentError::Store(format!(
             "turn {} agent-run park has an invalid wait id",
-            CodeTurnId(turn.id)
+            crate::TurnId(turn.id)
         ))
     })?;
     let expected_runs = run_ids
@@ -762,7 +743,7 @@ where
             id.parse::<AgentRunId>().map_err(|_| {
                 AgentError::Store(format!(
                     "turn {} agent-run park has an invalid run id",
-                    CodeTurnId(turn.id)
+                    crate::TurnId(turn.id)
                 ))
             })
         })
@@ -774,7 +755,7 @@ where
         .ok_or_else(|| {
             AgentError::Store(format!(
                 "turn {} agent-run park is missing wait {wait_id}",
-                CodeTurnId(turn.id)
+                crate::TurnId(turn.id)
             ))
         })?;
     let members = entities::turn_agent_run_wait_member::Entity::find()
@@ -796,7 +777,7 @@ where
     {
         return Err(AgentError::Store(format!(
             "turn {} agent-run park has a mismatched wait {wait_id}",
-            CodeTurnId(turn.id)
+            crate::TurnId(turn.id)
         )));
     }
     Ok(())
@@ -805,21 +786,21 @@ where
 /// Store one turn's derived narrative, touching no other column.
 ///
 /// Targeted for the reason [`save_turn`] documents: this lands while other
-/// writers hold a `CodeTurn` read before the narrative existed, so it must not
+/// writers hold a `Turn` read before the narrative existed, so it must not
 /// be carried on a whole-row write in either direction.
 pub async fn set_turn_narrative(
     store: &DbStore,
     owner: &OwnerId,
-    id: CodeTurnId,
+    id: TurnId,
     narrative: &str,
 ) -> Result<bool> {
-    let result = entities::code_turn::Entity::update_many()
+    let result = entities::turn::Entity::update_many()
         .col_expr(
-            entities::code_turn::Column::Narrative,
+            entities::turn::Column::Narrative,
             sea_orm::sea_query::Expr::value(Some(narrative.to_owned())),
         )
-        .filter(entities::code_turn::Column::Id.eq(id.0))
-        .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
+        .filter(entities::turn::Column::Id.eq(id.0))
+        .filter(entities::turn::Column::Owner.eq(owner.as_str()))
         .exec(&store.conn)
         .await
         .map_err(store_err)?;
@@ -829,21 +810,21 @@ pub async fn set_turn_narrative(
 /// Store one turn's derived rewrite, touching no other column.
 ///
 /// Targeted for the reason [`save_turn`] documents: this lands while other
-/// writers hold a `CodeTurn` read before the rewrite existed, so it must not
+/// writers hold a `Turn` read before the rewrite existed, so it must not
 /// be carried on a whole-row write in either direction.
 pub async fn set_turn_rewrite(
     store: &DbStore,
     owner: &OwnerId,
-    id: CodeTurnId,
+    id: TurnId,
     rewrite: &str,
 ) -> Result<bool> {
-    let result = entities::code_turn::Entity::update_many()
+    let result = entities::turn::Entity::update_many()
         .col_expr(
-            entities::code_turn::Column::Rewrite,
+            entities::turn::Column::Rewrite,
             sea_orm::sea_query::Expr::value(Some(rewrite.to_owned())),
         )
-        .filter(entities::code_turn::Column::Id.eq(id.0))
-        .filter(entities::code_turn::Column::Owner.eq(owner.as_str()))
+        .filter(entities::turn::Column::Id.eq(id.0))
+        .filter(entities::turn::Column::Owner.eq(owner.as_str()))
         .exec(&store.conn)
         .await
         .map_err(store_err)?;
@@ -853,26 +834,26 @@ pub async fn set_turn_rewrite(
 async fn turn_from_stored(
     store: &DbStore,
     owner: &OwnerId,
-    row: entities::code_turn::Model,
-) -> Result<CodeTurn> {
+    row: entities::turn::Model,
+) -> Result<Turn> {
     let mut turn = turn_from_row(row)?;
     turn.attachments = load_attachments_on(&store.conn, owner, turn.id).await?;
     Ok(turn)
 }
 
-pub(super) fn turn_from_row(row: entities::code_turn::Model) -> Result<CodeTurn> {
+pub(super) fn turn_from_row(row: entities::turn::Model) -> Result<Turn> {
     let status = turn_status_from_stored(row.id, &row.status)?;
-    let diffstat =
-        match row.diffstat {
-            Some(value) => Some(serde_json::from_value::<Diffstat>(value).map_err(|err| {
-                AgentError::Store(format!("code_turn {} diffstat: {err}", row.id))
-            })?),
-            None => None,
-        };
+    let diffstat = match row.diffstat {
+        Some(value) => Some(
+            serde_json::from_value::<Diffstat>(value)
+                .map_err(|err| AgentError::Store(format!("turn {} diffstat: {err}", row.id)))?,
+        ),
+        None => None,
+    };
     let usage = code_usage_from_stored(row.id, row.usage)?;
-    Ok(CodeTurn {
-        id: CodeTurnId(row.id),
-        session_id: CodeSessionId(row.session_id),
+    Ok(Turn {
+        id: TurnId(row.id),
+        session_id: SessionId(row.session_id),
         ordinal: row.ordinal,
         status,
         model: row.model,
@@ -889,27 +870,29 @@ pub(super) fn turn_from_row(row: entities::code_turn::Model) -> Result<CodeTurn>
         ended_at: row.ended_at,
         park_ref: row.park_ref,
         park_wait: match row.park_wait {
-            Some(value) => Some(serde_json::from_value(value).map_err(|err| {
-                AgentError::Store(format!("code_turn {} park_wait: {err}", row.id))
-            })?),
+            Some(value) => {
+                Some(serde_json::from_value(value).map_err(|err| {
+                    AgentError::Store(format!("turn {} park_wait: {err}", row.id))
+                })?)
+            }
             None => None,
         },
     })
 }
 
-fn turn_status_from_stored(id: uuid::Uuid, status: &str) -> Result<CodeTurnStatus> {
-    CodeTurnStatus::from_str(status)
-        .ok_or_else(|| AgentError::Store(format!("code_turn {id} has unknown status {status}")))
+fn turn_status_from_stored(id: uuid::Uuid, status: &str) -> Result<TurnStatus> {
+    TurnStatus::from_str(status)
+        .ok_or_else(|| AgentError::Store(format!("turn {id} has unknown status {status}")))
 }
 
 fn code_usage_from_stored(
     id: uuid::Uuid,
     usage: Option<serde_json::Value>,
-) -> Result<Option<CodeUsage>> {
+) -> Result<Option<TurnUsage>> {
     usage
         .map(|value| {
-            serde_json::from_value::<CodeUsage>(value)
-                .map_err(|err| AgentError::Store(format!("code_turn {id} usage: {err}")))
+            serde_json::from_value::<TurnUsage>(value)
+                .map_err(|err| AgentError::Store(format!("turn {id} usage: {err}")))
         })
         .transpose()
 }

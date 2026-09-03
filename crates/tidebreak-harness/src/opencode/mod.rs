@@ -290,7 +290,7 @@ mod tests {
         assert_eq!(usage.cache_read_input_tokens, 7_552);
     }
 
-    fn completed_usage(events: &[HarnessEvent]) -> tidebreak_core::CodeUsage {
+    fn completed_usage(events: &[HarnessEvent]) -> tidebreak_core::TurnUsage {
         events
             .iter()
             .find_map(|event| match event {

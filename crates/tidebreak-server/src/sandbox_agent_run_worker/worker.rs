@@ -243,8 +243,8 @@ impl SandboxAgentRunWorker {
     fn publish_parent_wait_set_resume(
         &self,
         wait_id: CallId,
-        chat_id: tidebreak_core::ChatId,
-        event: tidebreak_core::SequencedEvent,
+        chat_id: tidebreak_core::SessionId,
+        event: tidebreak_core::SequencedAgentEvent,
     ) -> Result<SandboxAgentRunWorkerOutcome> {
         // The journal remains authoritative for replay. Publish its exact
         // committed event before shortening the ordinary turn worker's next

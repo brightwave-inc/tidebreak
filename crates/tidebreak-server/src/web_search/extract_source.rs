@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use tidebreak_core::{ChatId, DocumentId};
+use tidebreak_core::{DocumentId, SessionId};
 
 use crate::web_search::WebExtractResponse;
 
@@ -22,7 +22,7 @@ pub struct ExtractedPageSinkError;
 pub trait ExtractedPageSink: Send + Sync {
     async fn store_page(
         &self,
-        chat_id: ChatId,
+        chat_id: SessionId,
         page: &WebExtractResponse,
         fetched_at: DateTime<Utc>,
     ) -> Result<StoredExtractedPage, ExtractedPageSinkError>;

@@ -197,7 +197,7 @@ async fn bound_session_id(
     runtime: &CodeRuntime,
     owner: &OwnerId,
     external_key: &str,
-) -> tidebreak_core::CodeSessionId {
+) -> tidebreak_core::SessionId {
     tidebreak_core::db::code::get_external_binding(&runtime.db, owner, "slack", external_key)
         .await
         .unwrap()

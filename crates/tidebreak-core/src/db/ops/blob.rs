@@ -5,7 +5,7 @@ use sea_orm::{
     TransactionTrait, TryInsertResult,
 };
 
-use crate::code::CodeSessionLifecycle;
+use crate::code::SessionLifecycle;
 use crate::error::{AgentError, Result};
 use crate::model::{BlobRetirement, BlobRetirementStatus};
 
@@ -69,11 +69,9 @@ where
         return Ok(true);
     }
     let live_code_sessions = sea_orm::sea_query::Query::select()
-        .column(entities::code_session::Column::Id)
-        .from(entities::code_session::Entity)
-        .and_where(
-            entities::code_session::Column::Lifecycle.ne(CodeSessionLifecycle::Ended.as_str()),
-        )
+        .column(entities::session::Column::Id)
+        .from(entities::session::Entity)
+        .and_where(entities::session::Column::Lifecycle.ne(SessionLifecycle::Ended.as_str()))
         .to_owned();
     let by_code_publication = entities::code_session_image::Entity::find()
         .select_only()
@@ -88,10 +86,10 @@ where
     if by_code_publication {
         return Ok(true);
     }
-    let by_code_turn = entities::code_turn_attachment::Entity::find()
+    let by_code_turn = entities::turn_attachment::Entity::find()
         .select_only()
-        .column(entities::code_turn_attachment::Column::TurnId)
-        .filter(entities::code_turn_attachment::Column::BlobId.eq(blob_id))
+        .column(entities::turn_attachment::Column::TurnId)
+        .filter(entities::turn_attachment::Column::BlobId.eq(blob_id))
         .into_tuple::<uuid::Uuid>()
         .one(conn)
         .await

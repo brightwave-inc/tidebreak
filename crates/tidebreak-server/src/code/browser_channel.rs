@@ -27,7 +27,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use tidebreak_core::{CodeSessionId, OwnerId, WorkspaceId};
+use tidebreak_core::{OwnerId, SessionId, WorkspaceId};
 use tidebreak_harness::BrowserChannelSpec;
 
 /// Capfile format version. Increment when the schema changes in a backward-
@@ -47,7 +47,7 @@ const CAPFILE_SUBDIR: &str = "browser-caps";
 pub(crate) struct BrowserSubject {
     pub owner: OwnerId,
     pub workspace: WorkspaceId,
-    pub session: CodeSessionId,
+    pub session: SessionId,
 }
 
 /// Per-session state held in the registry.
@@ -63,7 +63,7 @@ struct SessionEntry {
 /// into inconsistent state.
 struct RegistryState {
     tokens: HashMap<String, BrowserSubject>,
-    by_session: HashMap<CodeSessionId, SessionEntry>,
+    by_session: HashMap<SessionId, SessionEntry>,
 }
 
 // ── registry ────────────────────────────────────────────────────────────────
@@ -257,7 +257,7 @@ impl BrowserTokenRegistry {
     /// Returns the [`BrowserSubject`] that was mapped to the revoked
     /// session so the caller can derive an adapter scope, or `None` if
     /// the session was not found (idempotent).
-    pub(crate) fn revoke(&self, session_id: CodeSessionId) -> Option<BrowserSubject> {
+    pub(crate) fn revoke(&self, session_id: SessionId) -> Option<BrowserSubject> {
         let mut state = self.state.lock().expect("browser registry");
         match state.by_session.remove(&session_id) {
             Some(entry) => {
@@ -478,7 +478,7 @@ mod tests {
         BrowserSubject {
             owner: OwnerId::local(),
             workspace: WorkspaceId::new(),
-            session: CodeSessionId::new(),
+            session: SessionId::new(),
         }
     }
 
@@ -608,7 +608,7 @@ mod tests {
     fn revoke_nonexistent_session_is_noop() {
         let dir = tempfile::tempdir().unwrap();
         let reg = seeded(dir.path());
-        let nonexistent = CodeSessionId::new();
+        let nonexistent = SessionId::new();
         reg.revoke(nonexistent);
     }
 

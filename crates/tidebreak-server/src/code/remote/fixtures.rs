@@ -8,20 +8,20 @@ use tidebreak_core::db::code::{
     activate_incarnation, create_incarnation_intent, insert_repo, insert_session, insert_workspace,
 };
 use tidebreak_core::{
-    Attention, AttentionSource, CodeIncarnationId, CodeRepo, CodeSession, CodeSessionId,
-    CodeSessionKind, CodeSessionLifecycle, CodeWorkspace, CodeWorkspaceStatus, DbStore,
-    HarnessKind, IncarnationAdmission, OwnerId, PermissionMode, RepoId, WorkspaceId,
+    Attention, AttentionSource, CodeIncarnationId, CodeRepo, CodeWorkspace, CodeWorkspaceStatus,
+    DbStore, HarnessKind, IncarnationAdmission, OwnerId, PermissionMode, RepoId, Session,
+    SessionId, SessionKind, SessionLifecycle, WorkspaceId,
 };
 
 use super::super::bus::CodeEventBus;
 
 /// A session value with sensible remote defaults, unsaved.
-pub(crate) fn session_value() -> CodeSession {
-    CodeSession {
-        id: CodeSessionId::new(),
+pub(crate) fn session_value() -> Session {
+    Session {
+        id: SessionId::new(),
         owner: OwnerId::local(),
         workspace_id: Some(WorkspaceId::new()),
-        kind: CodeSessionKind::Interactive,
+        kind: SessionKind::Interactive,
         harness_kind: HarnessKind::ClaudeCode,
         harness_version: None,
         harness_resume_ref: None,
@@ -29,7 +29,7 @@ pub(crate) fn session_value() -> CodeSession {
         model: None,
         reasoning_effort: None,
         fast_mode: false,
-        lifecycle: CodeSessionLifecycle::Running,
+        lifecycle: SessionLifecycle::Running,
         fence_reason: None,
         child_pid: None,
         child_process_identity: None,
@@ -45,13 +45,7 @@ pub(crate) fn session_value() -> CodeSession {
 /// path), and one session, all inserted.
 pub(crate) async fn seed(
     root: &Path,
-) -> (
-    Arc<DbStore>,
-    CodeEventBus,
-    CodeSession,
-    CodeWorkspace,
-    CodeRepo,
-) {
+) -> (Arc<DbStore>, CodeEventBus, Session, CodeWorkspace, CodeRepo) {
     let db = Arc::new(
         DbStore::connect(&format!(
             "sqlite://{}?mode=rwc",
@@ -103,10 +97,7 @@ pub(crate) async fn seed(
 }
 
 /// Reserve and activate one incarnation for the session.
-pub(crate) async fn seeded_incarnation(
-    db: &Arc<DbStore>,
-    session: &CodeSession,
-) -> CodeIncarnationId {
+pub(crate) async fn seeded_incarnation(db: &Arc<DbStore>, session: &Session) -> CodeIncarnationId {
     let admission = create_incarnation_intent(db, &session.owner, session.id, 1, 4)
         .await
         .unwrap();
