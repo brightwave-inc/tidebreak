@@ -8,10 +8,6 @@ import {
   type SandboxHarness,
   type SandboxStatus,
 } from "@/sidebar/SandboxAgentsSection";
-import {
-  SpawnSandboxDialog,
-  type SandboxProfile,
-} from "@/sidebar/SpawnSandboxDialog";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
 // ---------------------------------------------------------------------------
@@ -127,12 +123,6 @@ const singleRunning: SandboxAgent[] = [
       spendMicroUsd: 55_000,
     },
   ),
-];
-
-const profiles: SandboxProfile[] = [
-  { id: "default", name: "Default", enabled: true },
-  { id: "high-resource", name: "High resource", enabled: true },
-  { id: "restricted", name: "Restricted (disabled)", enabled: false },
 ];
 
 // ---------------------------------------------------------------------------
@@ -273,29 +263,6 @@ export const DetailFailed: StoryObj = {
     <div className="w-80 rounded-lg border border-border bg-background">
       <SandboxAgentDetail agent={mixedAgents[3]!} />
     </div>
-  ),
-};
-
-// ---------------------------------------------------------------------------
-// Spawn dialog stories
-// ---------------------------------------------------------------------------
-
-export const SpawnDialog: StoryObj = {
-  name: "Spawn dialog",
-  render: () => (
-    <SpawnSandboxDialog
-      open
-      profiles={profiles}
-      onSubmit={fn()}
-      onClose={fn()}
-    />
-  ),
-};
-
-export const SpawnDialogNoProfiles: StoryObj = {
-  name: "Spawn dialog — no profiles",
-  render: () => (
-    <SpawnSandboxDialog open profiles={[]} onSubmit={fn()} onClose={fn()} />
   ),
 };
 

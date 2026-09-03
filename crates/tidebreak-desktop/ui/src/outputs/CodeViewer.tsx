@@ -2,9 +2,11 @@ import { useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 
-// `rehype-highlight` bundles lowlight's common grammars. Keep this mapping to
-// that exact set: recognized source extensions outside it still use the source
-// viewer, with the media-type fallback selecting plain text.
+import { highlightRehypeOptions } from "@/highlightLanguages";
+
+// Map source extensions onto the highlighter's registered grammars. Extensions
+// outside that subset still open in the source viewer, with the media-type
+// fallback selecting plain text.
 const LANGUAGE_BY_EXTENSION: Readonly<Record<string, string>> = {
   py: "python",
   pyw: "python",
@@ -112,7 +114,9 @@ export function CodeViewer({
 
   return (
     <div className="message-markdown code-viewer">
-      <ReactMarkdown rehypePlugins={[rehypeHighlight]}>
+      <ReactMarkdown
+        rehypePlugins={[[rehypeHighlight, highlightRehypeOptions]]}
+      >
         {markdown}
       </ReactMarkdown>
     </div>

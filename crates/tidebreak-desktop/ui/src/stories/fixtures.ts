@@ -29,7 +29,6 @@ import type {
   WebSearchConfigInfo,
   WebSearchCredentialReadiness,
 } from "@/api";
-import type { CodeDeliveryNotification } from "@/code/CodeDeliveryStore";
 import type { ContextUsageReading } from "@/ContextUsageIndicator";
 
 export const taskPlan: TaskPlan = {
@@ -2081,73 +2080,6 @@ export const deliveryRunDetails: Record<number, CodeDeliveryRunDetail> = {
     can_rerun_failed: false,
   },
 };
-
-export const deliveryNotifications: CodeDeliveryNotification[] = [
-  {
-    id: "pr-attention:2251:82ab990",
-    fingerprint: "pr-attention:2251:82ab990",
-    rule: "pull_request_attention",
-    title: "brightwave-inc/tidebreak #2251 needs attention",
-    detail: "Build the delivery center",
-    repositoryName: "brightwave-inc/tidebreak",
-    occurredAt: "2026-08-20T15:08:00.000Z",
-    receivedAt: "2026-08-20T15:10:00.000Z",
-    url: deliveryPullRequests[0]!.url,
-    workspaceId: deliveryWorkspaceLink.workspace_id,
-    target: {
-      kind: "pull_request",
-      repository: {
-        host: deliveryRepository.host,
-        owner: deliveryRepository.owner,
-        name: deliveryRepository.name,
-      },
-      number: 2251,
-    },
-  },
-  {
-    id: "run-failure:4401:failure",
-    fingerprint: "run-failure:4401:failure",
-    rule: "run_failure",
-    title: "brightwave-inc/tidebreak Desktop CI failed",
-    detail: "failure",
-    repositoryName: "brightwave-inc/tidebreak",
-    occurredAt: "2026-08-20T15:11:00.000Z",
-    receivedAt: "2026-08-20T15:12:00.000Z",
-    readAt: "2026-08-20T15:14:00.000Z",
-    url: deliveryRuns[0]!.url,
-    workspaceId: deliveryWorkspaceLink.workspace_id,
-    target: {
-      kind: "run",
-      repository: {
-        host: deliveryRepository.host,
-        owner: deliveryRepository.owner,
-        name: deliveryRepository.name,
-      },
-      runKind: "workflow_run",
-      id: 4401,
-    },
-  },
-  {
-    id: "pr-ready:2247:73fc201",
-    fingerprint: "pr-ready:2247:73fc201",
-    rule: "pull_request_ready",
-    title: "brightwave-inc/tidebreak #2247 is ready",
-    detail: "Make workspace deep links durable",
-    repositoryName: "brightwave-inc/tidebreak",
-    occurredAt: "2026-08-20T14:32:00.000Z",
-    receivedAt: "2026-08-20T14:34:00.000Z",
-    url: deliveryPullRequests[1]!.url,
-    target: {
-      kind: "pull_request",
-      repository: {
-        host: deliveryRepository.host,
-        owner: deliveryRepository.owner,
-        name: deliveryRepository.name,
-      },
-      number: 2247,
-    },
-  },
-];
 
 /**
  * Web-search settings, one entry per verdict the panel can reach.

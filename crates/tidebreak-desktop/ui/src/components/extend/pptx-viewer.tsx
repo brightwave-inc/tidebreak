@@ -17,16 +17,15 @@ import pptxWasmUrl from "@extend-ai/react-pptx/pptx_wasm_bg.wasm?url";
 import "@extend-ai/react-pptx/styles.css";
 
 import {
-  ArrowLeft01Icon,
-  ArrowRight01Icon,
-  Download01Icon,
-  MinusSignCircleIcon,
-  MoreHorizontalIcon,
-  PlusSignCircleIcon,
-  SidebarLeftIcon,
-  Upload01Icon,
-} from "@hugeicons/core-free-icons";
-import { HugeiconsIcon } from "@hugeicons/react";
+  ArrowLeft,
+  ArrowRight,
+  CircleMinus,
+  CirclePlus,
+  Download,
+  MoreHorizontal,
+  PanelLeft,
+  Upload,
+} from "lucide-react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
 import { cn } from "@/lib/utils";
@@ -255,7 +254,7 @@ function PptxFileActionsMenu({
           size="icon-sm"
           aria-label="Open PowerPoint actions"
         >
-          <HugeiconsIcon icon={MoreHorizontalIcon} className="size-4" />
+          <MoreHorizontal className="size-4" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-44">
@@ -264,14 +263,14 @@ function PptxFileActionsMenu({
             {isPreparingDownload ? (
               <Spinner className="size-4" />
             ) : (
-              <HugeiconsIcon icon={Download01Icon} className="size-4" />
+              <Download className="size-4" />
             )}
             Download
           </DropdownMenuItem>
         ) : null}
         {showUploadButton ? (
           <DropdownMenuItem disabled={controlsDisabled} onClick={onUploadClick}>
-            <HugeiconsIcon icon={Upload01Icon} className="size-4" />
+            <Upload className="size-4" />
             Upload
           </DropdownMenuItem>
         ) : null}
@@ -416,7 +415,7 @@ function PptxToolbar({
               disabled={controlsDisabled}
               onClick={onToggleSidebar}
             >
-              <HugeiconsIcon icon={SidebarLeftIcon} className="size-4" />
+              <PanelLeft className="size-4" />
             </Button>
           </ToolbarTooltip>
           <Separator orientation="vertical" className="mx-1 h-4 self-center" />
@@ -429,7 +428,7 @@ function PptxToolbar({
               disabled={!canGoPrevious}
               onClick={() => onSlideChange(activeSlideIndex - 1)}
             >
-              <HugeiconsIcon icon={ArrowLeft01Icon} className="size-4" />
+              <ArrowLeft className="size-4" />
             </Button>
           </ToolbarTooltip>
           <PptxSlideNumberControl
@@ -447,7 +446,7 @@ function PptxToolbar({
               disabled={!canGoNext}
               onClick={() => onSlideChange(activeSlideIndex + 1)}
             >
-              <HugeiconsIcon icon={ArrowRight01Icon} className="size-4" />
+              <ArrowRight className="size-4" />
             </Button>
           </ToolbarTooltip>
         </div>
@@ -464,7 +463,7 @@ function PptxToolbar({
                   setZoom((currentZoom) => getNextZoom(currentZoom, -1))
                 }
               >
-                <HugeiconsIcon icon={MinusSignCircleIcon} className="size-4" />
+                <CircleMinus className="size-4" />
               </Button>
             </ToolbarTooltip>
             <Select
@@ -499,7 +498,7 @@ function PptxToolbar({
                   setZoom((currentZoom) => getNextZoom(currentZoom, 1))
                 }
               >
-                <HugeiconsIcon icon={PlusSignCircleIcon} className="size-4" />
+                <CirclePlus className="size-4" />
               </Button>
             </ToolbarTooltip>
           </div>
@@ -1269,7 +1268,7 @@ export function PptxViewerPreview({
                   className="mt-4"
                   onClick={() => fileInputRef.current?.click()}
                 >
-                  <HugeiconsIcon icon={Upload01Icon} className="size-4" />
+                  <Upload className="size-4" />
                   Upload PowerPoint
                 </Button>
               </div>

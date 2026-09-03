@@ -1,27 +1,24 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { fn } from "storybook/test";
-import { useState } from "react";
-
 import { FileDownloadProgressIndicator } from "@/components/document/FileDownloadProgress";
 import {
   DocumentDetailActions,
   DocumentDetailBreadcrumb,
 } from "@/document-detail/DocumentDetailHeader";
-import { PdfHeaderControls } from "@/document/PdfHeaderControls";
 import { SpreadsheetShortcutsInfoBar } from "@/document/SpreadsheetShortcutsInfo";
 
 type ChromeVariant = "pdf" | "spreadsheet" | "download" | "shared";
 
 function PdfChrome() {
-  const [page, setPage] = useState(7);
+  const page = 7;
   return (
     <>
       <header className="flex h-11 shrink-0 items-center justify-between gap-3 border-b px-3">
         <DocumentDetailBreadcrumb documentName="Board packet.pdf" />
         <div className="flex min-w-0 items-center gap-2">
-          <PdfHeaderControls
-            page={{ currentPage: page, numPages: 24, setPage }}
-          />
+          <p className="text-xs tabular-nums text-muted-foreground">
+            {page} / 24
+          </p>
           <DocumentDetailActions
             canDownload
             onDownload={fn()}

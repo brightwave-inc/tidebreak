@@ -8,7 +8,6 @@ import { captureHandoffToken } from "./hostedSession";
 import { refuseStrayFileDrops } from "./ImageAttachments";
 import { createAppRouter } from "./router";
 import { initTheme } from "./theme";
-import "katex/dist/katex.min.css";
 import "./styles.css";
 
 initTheme();

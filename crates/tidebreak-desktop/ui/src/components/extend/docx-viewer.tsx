@@ -15,17 +15,16 @@ import {
 } from "@extend-ai/react-docx";
 import docxWasmUrl from "@extend-ai/react-docx/docx_wasm_bg.wasm?url";
 import {
-  Comment01Icon,
-  Download01Icon,
-  FileDiffIcon,
-  MinusSignCircleIcon,
-  Moon02Icon,
-  MoreHorizontalIcon,
-  PlusSignCircleIcon,
-  SidebarLeftIcon,
-  Upload01Icon,
-} from "@hugeicons/core-free-icons";
-import { HugeiconsIcon } from "@hugeicons/react";
+  CircleMinus,
+  CirclePlus,
+  Download,
+  FileDiff,
+  MessageSquare,
+  Moon,
+  MoreHorizontal,
+  PanelLeft,
+  Upload,
+} from "lucide-react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
 import { cn } from "@/lib/utils";
@@ -368,7 +367,7 @@ function DocxFileActionsMenu({
           size="icon-sm"
           aria-label="Open DOCX actions"
         >
-          <HugeiconsIcon icon={MoreHorizontalIcon} className="size-4" />
+          <MoreHorizontal className="size-4" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-52">
@@ -381,7 +380,7 @@ function DocxFileActionsMenu({
               onCheckedChange={(checked) => onIsDarkChange(checked === true)}
             >
               <span className="flex min-w-0 items-center gap-2">
-                <HugeiconsIcon icon={Moon02Icon} className="size-4" />
+                <Moon className="size-4" />
                 Dark mode
               </span>
             </DropdownMenuCheckboxItem>
@@ -395,7 +394,7 @@ function DocxFileActionsMenu({
           onCheckedChange={(checked) => onShowCommentsChange(checked === true)}
         >
           <span className="flex min-w-0 items-center gap-2">
-            <HugeiconsIcon icon={Comment01Icon} className="size-4" />
+            <MessageSquare className="size-4" />
             Comments
           </span>
         </DropdownMenuCheckboxItem>
@@ -408,7 +407,7 @@ function DocxFileActionsMenu({
           }
         >
           <span className="flex min-w-0 items-center gap-2">
-            <HugeiconsIcon icon={FileDiffIcon} className="size-4" />
+            <FileDiff className="size-4" />
             Edits
           </span>
         </DropdownMenuCheckboxItem>
@@ -418,14 +417,14 @@ function DocxFileActionsMenu({
             {isPreparingDownload ? (
               <Spinner className="size-4" />
             ) : (
-              <HugeiconsIcon icon={Download01Icon} className="size-4" />
+              <Download className="size-4" />
             )}
             Download
           </DropdownMenuItem>
         ) : null}
         {showUploadButton ? (
           <DropdownMenuItem onClick={onUploadClick}>
-            <HugeiconsIcon icon={Upload01Icon} className="size-4" />
+            <Upload className="size-4" />
             Upload
           </DropdownMenuItem>
         ) : null}
@@ -584,7 +583,7 @@ function DocxToolbar({
               disabled={controlsDisabled}
               onClick={onToggleSidebar}
             >
-              <HugeiconsIcon icon={SidebarLeftIcon} className="size-4" />
+              <PanelLeft className="size-4" />
             </Button>
           </ToolbarTooltip>
           <DocxPageNumberControl
@@ -609,7 +608,7 @@ function DocxToolbar({
                   )
                 }
               >
-                <HugeiconsIcon icon={MinusSignCircleIcon} className="size-4" />
+                <CircleMinus className="size-4" />
               </Button>
             </ToolbarTooltip>
             <Select
@@ -646,7 +645,7 @@ function DocxToolbar({
                   )
                 }
               >
-                <HugeiconsIcon icon={PlusSignCircleIcon} className="size-4" />
+                <CirclePlus className="size-4" />
               </Button>
             </ToolbarTooltip>
           </div>
@@ -1522,7 +1521,7 @@ function DocxViewerContent({
                   className="mt-4"
                   onClick={() => fileInputRef.current?.click()}
                 >
-                  <HugeiconsIcon icon={Upload01Icon} className="size-4" />
+                  <Upload className="size-4" />
                   Upload Word document
                 </Button>
               </div>

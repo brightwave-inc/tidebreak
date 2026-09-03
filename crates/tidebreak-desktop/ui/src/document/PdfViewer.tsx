@@ -1,12 +1,11 @@
 import type { HTMLAttributes } from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   PDFViewer as ExtendPdfViewer,
   type PDFViewerHandle,
 } from "@/components/extend/pdf-viewer";
 import { FileDownloadProgressIndicator } from "@/components/document/FileDownloadProgress";
-import { useRegisterPdfControls } from "@/document/PdfControlsContext";
 import { useSecureViewerLinks } from "@/document/extendViewerSurface";
 import { useLocalDocumentUrl } from "@/document/useLocalDocumentUrl";
 import { usePdfPageState } from "@/document/usePdfPageState";
@@ -44,18 +43,6 @@ function PdfViewerSource({
 
   useSecureViewerLinks(containerRef);
 
-  const goToPage = useCallback(
-    (page: number) => {
-      const nextPage = Math.min(Math.max(1, Math.round(page)), numPages || 1);
-      setCurrentPage(nextPage);
-      viewerRef.current?.scrollToPage(nextPage, {
-        behavior: "smooth",
-        block: "start",
-      });
-    },
-    [numPages, setCurrentPage],
-  );
-
   // Restore remembered position, or apply a citation, when the engine learns
   // the document's page count. Scroll callbacks thereafter update state without
   // snapping the continuous viewport back to the top of its active page.
@@ -68,18 +55,6 @@ function PdfViewerSource({
       block: "start",
     });
   }, [numPages, source.id, targetPage]);
-
-  const registerPdfControls = useRegisterPdfControls();
-  useEffect(() => {
-    if (!registerPdfControls) return;
-    registerPdfControls(
-      numPages > 0 ? { currentPage, numPages, setPage: goToPage } : null,
-    );
-  }, [currentPage, goToPage, numPages, registerPdfControls]);
-  useEffect(() => {
-    if (!registerPdfControls) return;
-    return () => registerPdfControls(null);
-  }, [registerPdfControls]);
 
   if (file.error) {
     return (

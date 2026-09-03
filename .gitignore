@@ -45,3 +45,6 @@ Thumbs.db
 .vercel/
 .env.local
 .env.*.local
+
+# TypeScript incremental build info
+*.tsbuildinfo

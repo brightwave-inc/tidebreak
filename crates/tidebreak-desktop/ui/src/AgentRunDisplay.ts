@@ -192,18 +192,3 @@ export function agentActivityHistoryLabel(
 ): string {
   return ACTIVITY_HISTORY_LABELS[entry.kind][entry.outcome];
 }
-
-export function getAgentActivityOutcomeDotClass(
-  outcome: AgentActivityOutcome,
-): string {
-  switch (outcome) {
-    case "waiting":
-    case "running":
-      return "animate-pulse bg-muted-foreground";
-    case "completed":
-      return "bg-success";
-    case "failed":
-    case "cancelled":
-      return "bg-destructive";
-  }
-}

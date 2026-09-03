@@ -228,9 +228,6 @@ export function officePdfSource(
   };
 }
 
-export const presentationPdfSource = officePdfSource;
-export const spreadsheetPdfSource = officePdfSource;
-
 function encodeBase64(bytes: Uint8Array): string {
   let binary = "";
   const CHUNK = 0x8000;

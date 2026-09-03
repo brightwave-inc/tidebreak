@@ -76,7 +76,6 @@ import {
   WorkspaceSessionStartingState,
 } from "./StartSessionPrompt";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
-import { TerminalPane } from "./TerminalPane";
 import { WatchTaskBar } from "./workspace/subagents";
 import { WorkspaceHeader } from "./WorkspaceHeader";
 import {
@@ -116,6 +115,11 @@ const FileViewer = lazy(async () => {
 const CodeBrowserTab = lazy(async () => {
   const module = await import("./browser/CodeBrowserTab");
   return { default: module.CodeBrowserTab };
+});
+
+const TerminalPane = lazy(async () => {
+  const module = await import("./TerminalPane");
+  return { default: module.TerminalPane };
 });
 
 /**
@@ -414,15 +418,17 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
             />
           </Suspense>
         ) : panel.type === "terminal" ? (
-          <TerminalPane
-            client={client}
-            workspaceId={workspaceId}
-            terminalId={panel.terminalId}
-            onAttach={(terminalId) =>
-              adoptTerminal(panel.terminalId, terminalId)
-            }
-            hideHeader
-          />
+          <Suspense fallback={<Skeleton className="h-full w-full" />}>
+            <TerminalPane
+              client={client}
+              workspaceId={workspaceId}
+              terminalId={panel.terminalId}
+              onAttach={(terminalId) =>
+                adoptTerminal(panel.terminalId, terminalId)
+              }
+              hideHeader
+            />
+          </Suspense>
         ) : panel.type === "source_control" ? (
           <div
             className="flex min-h-0 flex-1 flex-col overflow-hidden"

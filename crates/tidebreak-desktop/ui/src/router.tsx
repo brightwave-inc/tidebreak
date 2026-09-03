@@ -1,11 +1,14 @@
-import { useEffect } from "react";
+import { Suspense, type ReactNode, useEffect } from "react";
 import {
   createHashHistory,
   createRootRoute,
   createRoute,
   createRouter,
+  lazyRouteComponent,
   useNavigate,
 } from "@tanstack/react-router";
+
+import { Skeleton } from "@/components/ui/skeleton";
 
 import { AppShell } from "./AppShell";
 import { AppsPage } from "./apps/AppsPage";
@@ -21,15 +24,36 @@ import { RouteFrame } from "./RouteFrame";
 import { SettingsRoute } from "./SettingsRoute";
 import { defaultSettingsPathFor, SETTINGS_SECTIONS } from "./settings/sections";
 import { AppSidebar } from "./sidebar/AppSidebar";
-import { CodeHome } from "./code/CodeHome";
-import { CodeAnalyticsPage } from "./code/CodeAnalyticsPage";
-import { CodeArchivePage } from "./code/CodeArchivePage";
 import {
   CodeDeliveryPage,
   codeDeliverySearchFrom,
 } from "./code/CodeDeliveryPage";
-import { CodeWorkspacePage } from "./code/CodeWorkspacePage";
 import { ConnectApprovalRoute } from "./ConnectApprovalRoute";
+
+const CodeHome = lazyRouteComponent(
+  () => import("./code/CodeHome"),
+  "CodeHome",
+);
+const CodeAnalyticsPage = lazyRouteComponent(
+  () => import("./code/CodeAnalyticsPage"),
+  "CodeAnalyticsPage",
+);
+const CodeArchivePage = lazyRouteComponent(
+  () => import("./code/CodeArchivePage"),
+  "CodeArchivePage",
+);
+const CodeWorkspacePage = lazyRouteComponent(
+  () => import("./code/CodeWorkspacePage"),
+  "CodeWorkspacePage",
+);
+
+function CodeRouteSuspense({ children }: { children: ReactNode }) {
+  return (
+    <Suspense fallback={<Skeleton className="h-full w-full" />}>
+      {children}
+    </Suspense>
+  );
+}
 
 const rootRoute = createRootRoute({ component: AppShell });
 
@@ -195,7 +219,11 @@ function ProjectRouteComponent() {
 const codeRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/code",
-  component: CodeHome,
+  component: () => (
+    <CodeRouteSuspense>
+      <CodeHome />
+    </CodeRouteSuspense>
+  ),
 });
 
 const codeWorkspaceRoute = createRoute({
@@ -209,7 +237,11 @@ const codeWorkspaceRoute = createRoute({
 const codeAnalyticsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/code/analytics",
-  component: CodeAnalyticsPage,
+  component: () => (
+    <CodeRouteSuspense>
+      <CodeAnalyticsPage />
+    </CodeRouteSuspense>
+  ),
 });
 
 const codeDeliveryPullRequestsRoute = createRoute({
@@ -247,12 +279,20 @@ function CodeDeliveryRunsRoute() {
 const codeArchiveRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/code/archive",
-  component: CodeArchivePage,
+  component: () => (
+    <CodeRouteSuspense>
+      <CodeArchivePage />
+    </CodeRouteSuspense>
+  ),
 });
 
 function CodeWorkspaceRouteComponent() {
   const { workspaceId } = codeWorkspaceRoute.useParams();
-  return <CodeWorkspacePage workspaceId={workspaceId} />;
+  return (
+    <CodeRouteSuspense>
+      <CodeWorkspacePage workspaceId={workspaceId} />
+    </CodeRouteSuspense>
+  );
 }
 
 export const settingsRoute = createRoute({

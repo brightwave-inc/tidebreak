@@ -36,14 +36,6 @@ export const EXTERNAL_EDITORS: readonly {
   { id: "custom", label: "Custom command…" },
 ];
 
-/** The editors the native probe reports on. `custom` is the reader's own. */
-export const DETECTABLE_EDITORS: readonly ExternalEditorId[] = [
-  "vscode",
-  "cursor",
-  "zed",
-  "jetbrains",
-];
-
 const STORAGE_KEY = "tidebreak.externalEditor";
 
 const DEFAULT_PREFERENCE: EditorPreference = {
