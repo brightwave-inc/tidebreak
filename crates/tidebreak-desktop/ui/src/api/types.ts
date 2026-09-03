@@ -228,6 +228,7 @@ import {
   type CodeTerminalRead as WireCodeTerminalRead,
   type CodeTerminalSnapshot as WireCodeTerminalSnapshot,
   type CodeWorkspaceSnapshot as WireCodeWorkspaceSnapshot,
+  type WorkspaceTitleProposal as WireWorkspaceTitleProposal,
   type CodeGrantSnapshot as WireCodeGrantSnapshot,
   type CodeConnectPage as WireCodeConnectPage,
   type Diffstat as WireDiffstat,
@@ -1268,6 +1269,7 @@ export type MemorySweepStatus = WireMemorySweepStatus;
 
 /** One isolated worktree + branch on a repo. */
 export type CodeWorkspaceSnapshot = WireCodeWorkspaceSnapshot;
+export type WorkspaceTitleProposal = WireWorkspaceTitleProposal;
 export type WorkspaceId = WireWorkspaceId;
 export type CodeWorkspaceStatus = WireCodeWorkspaceStatus;
 /** One durable conversation with an external coding engine. */

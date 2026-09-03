@@ -1,4 +1,4 @@
-import type { CodeWorkspaceSnapshot } from "../types";
+import type { CodeWorkspaceSnapshot, WorkspaceTitleProposal } from "../types";
 import { parseCodeWorkspace } from "../../code/parsers";
 import { type Constructor, HttpCore, parseList, requireParsed } from "./http";
 
@@ -20,6 +20,7 @@ export function withCodeWorkspacesApi<TBase extends Constructor<HttpCore>>(
     async createCodeWorkspace(body: {
       repo_id: string;
       title?: string;
+      suggested_title?: string;
       base_ref?: string;
     }): Promise<CodeWorkspaceSnapshot> {
       return requireParsed(
@@ -32,6 +33,21 @@ export function withCodeWorkspacesApi<TBase extends Constructor<HttpCore>>(
         ),
         "code workspace",
       );
+    }
+
+    async proposeCodeWorkspaceTitle(message: string): Promise<string | null> {
+      const body = await this.json<WorkspaceTitleProposal>(
+        "/code/workspace-title",
+        {
+          method: "POST",
+          headers: this.headers(true),
+          body: JSON.stringify({ message }),
+        },
+      );
+      if (!body || !(body.title === null || typeof body.title === "string")) {
+        throw new Error("invalid workspace title proposal");
+      }
+      return body.title;
     }
 
     async getCodeWorkspace(

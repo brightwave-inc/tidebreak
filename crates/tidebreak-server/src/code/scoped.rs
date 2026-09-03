@@ -283,10 +283,11 @@ impl ScopedCode {
         &self,
         repo_id: RepoId,
         title: Option<String>,
+        suggested_title: Option<String>,
         base_ref: Option<String>,
     ) -> Result<CodeWorkspace, ServerError> {
         self.runtime
-            .create_workspace(&self.owner, repo_id, title, base_ref)
+            .create_workspace(&self.owner, repo_id, title, suggested_title, base_ref)
             .await
     }
 

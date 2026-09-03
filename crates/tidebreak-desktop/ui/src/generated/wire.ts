@@ -5690,6 +5690,11 @@ export type WorkspaceConfigSections = { code_repositories: Array<ExportedCodeRep
 export type WorkspaceId = string;
 
 /**
+ * Suggested display title for a workspace that has not been created yet.
+ */
+export type WorkspaceTitleProposal = { title: string | null, };
+
+/**
  * Every tool name the renderer will accept, at runtime.
  *
  * An allowlist, not a display transformation. Tool events come from

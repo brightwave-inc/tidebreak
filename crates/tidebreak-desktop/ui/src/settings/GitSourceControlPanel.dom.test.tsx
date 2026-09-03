@@ -72,7 +72,7 @@ describe("GitSourceControlPanel", () => {
 
     await user.click(
       await screen.findByRole("switch", {
-        name: "Rename generated branches automatically",
+        name: "Name generated branches and folders automatically",
       }),
     );
     expect(putSettings).toHaveBeenCalledWith({
@@ -109,7 +109,7 @@ describe("GitSourceControlPanel", () => {
     );
 
     const toggle = await screen.findByRole("switch", {
-      name: "Rename generated branches automatically",
+      name: "Name generated branches and folders automatically",
     });
     await user.click(toggle);
 

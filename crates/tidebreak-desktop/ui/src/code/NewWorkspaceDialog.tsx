@@ -60,6 +60,7 @@ import { useManagedPolicy } from "../managedPolicy";
 import { usesCommandModifier } from "@/ShellShortcuts";
 import {
   OPTIMISTIC_WORKSPACE_ID_PREFIX,
+  type OptimisticCodeWorkspaceSnapshot,
   useCodeCatalogStore,
 } from "./CodeCatalogStore";
 import { EMPTY_NEW_WORKSPACE_DRAFT, useCodeUiStore } from "./CodeUiStore";
@@ -113,9 +114,11 @@ const NO_ENGINE_EFFORTS: ReasoningEffort[] = [];
  * settings. A create that is not "Create more" opens the workspace as soon
  * as it exists, so the reader is already on it while the first session starts.
  *
- * The title is optional: left blank, the server generates a two-word name and
- * later replaces it with one derived from the first turn, the same way chats
- * are named. Permission mode defaults to the most autonomous posture the
+ * The title is optional. When the composer has a first message, Tidebreak
+ * derives the title before it creates the branch and worktree folder. The
+ * optimistic rail card shows both phases and changes title in place. Without
+ * a first message, the server uses a stable two-word name. Permission mode
+ * defaults to the most autonomous posture the
  * engine honors (decision 0039, amended). The engine menu lists every doctor
  * entry — ready rows are selectable; unusable ones stay visible, dimmed, with
  * the reason.
@@ -189,6 +192,8 @@ type CreateAttempt = {
   fastModeByHarness: Partial<Record<HarnessKind, boolean>>;
   createMore: boolean;
   images: readonly File[];
+  suggestedTitle?: string;
+  namingComplete: boolean;
 };
 
 type HeldWorkspaceImage = {
@@ -623,6 +628,7 @@ export function NewWorkspaceDialog({
       fastModeByHarness: { ...fastByHarness },
       createMore,
       images: heldImagesRef.current.map((image) => image.file),
+      namingComplete: Boolean(title.trim()) || !startingPrompt.trim(),
     };
     useCodeUiStore.getState().setNewWorkspaceDraft(EMPTY_NEW_WORKSPACE_DRAFT);
     clearImages();
@@ -669,15 +675,17 @@ export function NewWorkspaceDialog({
       toast.error("Could not create the workspace because its repo is gone");
       return;
     }
-    const pending: CodeWorkspaceSnapshot = {
+    const naming = !attempt.namingComplete;
+    const pending: OptimisticCodeWorkspaceSnapshot = {
       id: `${OPTIMISTIC_WORKSPACE_ID_PREFIX}${crypto.randomUUID()}`,
       repo_id: attempt.repoId,
-      title: attempt.title.trim() || "New workspace",
+      title: attempt.title.trim() || attempt.suggestedTitle || "New workspace",
       worktree_path: "",
       branch_name: "",
       base_ref: attempt.baseRef.trim() || repo.default_base_ref,
       status: "creating",
       created_at: new Date().toISOString(),
+      optimistic_creation_phase: naming ? "naming" : "creating",
     };
     upsertWorkspace(pending);
     void finishCreate(attempt, pending);
@@ -713,13 +721,32 @@ export function NewWorkspaceDialog({
 
   async function finishCreate(
     attempt: CreateAttempt,
-    pending: CodeWorkspaceSnapshot,
+    pending: OptimisticCodeWorkspaceSnapshot,
   ) {
+    if (!attempt.namingComplete) {
+      attempt.namingComplete = true;
+      try {
+        attempt.suggestedTitle =
+          (await client.proposeCodeWorkspaceTitle(attempt.startingPrompt)) ??
+          undefined;
+      } catch {
+        attempt.suggestedTitle = undefined;
+      }
+      const creatingPending: OptimisticCodeWorkspaceSnapshot = {
+        ...pending,
+        title: attempt.suggestedTitle ?? pending.title,
+        optimistic_creation_phase: "creating",
+      };
+      upsertWorkspace(creatingPending);
+    }
     let workspace: CodeWorkspaceSnapshot;
     try {
       workspace = await client.createCodeWorkspace({
         repo_id: attempt.repoId,
         title: attempt.title.trim() || undefined,
+        ...(attempt.suggestedTitle
+          ? { suggested_title: attempt.suggestedTitle }
+          : {}),
         base_ref: attempt.baseRef.trim() || undefined,
       });
     } catch (error) {
@@ -1039,7 +1066,8 @@ export function NewWorkspaceDialog({
                   }}
                 />
                 <p className="text-muted-foreground text-xs">
-                  Left blank, the first turn names it.
+                  With a first message, Tidebreak names the workspace, branch,
+                  and folder before creation.
                 </p>
               </PopoverContent>
             </Popover>

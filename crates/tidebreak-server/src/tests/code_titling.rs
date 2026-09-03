@@ -142,6 +142,7 @@ fn init_git_repo(dir: &std::path::Path) -> std::path::PathBuf {
         ["git", "init", "-b", "main"].as_slice(),
         ["git", "config", "user.email", "dev@example.com"].as_slice(),
         ["git", "config", "user.name", "Dev"].as_slice(),
+        ["git", "config", "commit.gpgsign", "false"].as_slice(),
     ] {
         assert!(std::process::Command::new(args[0])
             .args(&args[1..])
@@ -175,12 +176,85 @@ async fn serve(router: Router) -> std::net::SocketAddr {
     addr
 }
 
-/// The whole feature over the wire: a workspace created without a title gets
-/// the generated two-word placeholder, and the first turn replaces it with a
-/// name derived from what the user asked for, on the utility model, announced
-/// on the digest channel — without the turn waiting for any of it.
+/// A first message names the display title, branch, and folder before Git
+/// creates the checkout.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_first_turn_names_an_untitled_workspace() {
+async fn a_precreation_title_names_the_branch_and_worktree_folder() {
+    let (router, token, stub, _runtime, dir) = code_titling_app().await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+
+    let registered = client
+        .post(format!("http://{addr}/code/repos"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "path": repo }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(registered.status(), reqwest::StatusCode::CREATED);
+    let repo_body: serde_json::Value = registered.json().await.unwrap();
+
+    let proposed = client
+        .post(format!("http://{addr}/code/workspace-title"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "message": "Fix the flaky retry test in the auth crate"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(proposed.status(), reqwest::StatusCode::OK);
+    let proposed: serde_json::Value = proposed.json().await.unwrap();
+    assert_eq!(proposed["title"], DERIVED_TITLE);
+
+    let created = client
+        .post(format!("http://{addr}/code/workspaces"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({
+            "repo_id": repo_body["id"],
+            "suggested_title": proposed["title"],
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let workspace: serde_json::Value = created.json().await.unwrap();
+    let id = workspace["id"].as_str().unwrap();
+    assert_eq!(workspace["title"], DERIVED_TITLE);
+    assert_eq!(
+        workspace["branch_name"],
+        "tidebreak/fix-the-flaky-auth-retry-test"
+    );
+    assert!(workspace["worktree_path"]
+        .as_str()
+        .unwrap()
+        .ends_with(&format!("fix-the-flaky-auth-retry-test-{}", &id[..8])));
+
+    let checked_out = std::process::Command::new("git")
+        .args(["branch", "--show-current"])
+        .current_dir(workspace["worktree_path"].as_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(checked_out.status.success());
+    assert_eq!(
+        String::from_utf8(checked_out.stdout).unwrap().trim(),
+        "tidebreak/fix-the-flaky-auth-retry-test"
+    );
+
+    let requests = stub.requests.lock().unwrap().clone();
+    assert_eq!(
+        requests.len(),
+        1,
+        "precreation naming makes one utility call"
+    );
+    assert_eq!(requests[0]["model"], UTILITY_MODEL);
+}
+
+/// A workspace created without a first message can still gain a display title
+/// later. Its branch and worktree path stay fixed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_first_turn_names_an_untitled_workspace_without_moving_it() {
     let (router, token, stub, runtime, dir) = code_titling_app().await;
     let addr = serve(router).await;
     let client = reqwest::Client::new();
@@ -208,6 +282,7 @@ async fn a_first_turn_names_an_untitled_workspace() {
     let workspace: serde_json::Value = created.json().await.unwrap();
     let workspace_id = workspace["id"].as_str().unwrap().to_owned();
     let original_branch = workspace["branch_name"].as_str().unwrap().to_owned();
+    let original_path = workspace["worktree_path"].as_str().unwrap().to_owned();
     let placeholder = crate::code::worktree::two_word_name(
         uuid::Uuid::parse_str(&workspace_id).unwrap().as_u128(),
     );
@@ -249,7 +324,7 @@ async fn a_first_turn_names_an_untitled_workspace() {
     // The derived name lands in the store.
     let mut title = String::new();
     let mut branch = original_branch.clone();
-    let mut worktree_path = String::new();
+    let mut worktree_path = original_path.clone();
     for _ in 0..300 {
         let current: serde_json::Value = client
             .get(format!("http://{addr}/code/workspaces/{workspace_id}"))
@@ -263,13 +338,14 @@ async fn a_first_turn_names_an_untitled_workspace() {
         title = current["title"].as_str().unwrap().to_owned();
         branch = current["branch_name"].as_str().unwrap().to_owned();
         worktree_path = current["worktree_path"].as_str().unwrap().to_owned();
-        if title != placeholder && branch != original_branch {
+        if title != placeholder {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert_eq!(title, DERIVED_TITLE);
-    assert_eq!(branch, "tidebreak/fix-the-flaky-auth-retry-test");
+    assert_eq!(branch, original_branch);
+    assert_eq!(worktree_path, original_path);
     let checked_out = std::process::Command::new("git")
         .args(["branch", "--show-current"])
         .current_dir(worktree_path)
@@ -291,7 +367,7 @@ async fn a_first_turn_names_an_untitled_workspace() {
         "the naming call reads the submitted turn: {input}"
     );
 
-    // The rename was announced on the digest channel every list surface
+    // The display title was announced on the digest channel every list surface
     // watches, so an open sidebar re-labels without a refresh.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     loop {

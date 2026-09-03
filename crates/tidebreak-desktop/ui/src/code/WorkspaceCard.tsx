@@ -58,6 +58,11 @@ import {
 } from "./labels";
 import type { WorkspaceCommand } from "./workspaceActions";
 import {
+  workspaceCreationPhase,
+  type OptimisticCodeWorkspaceSnapshot,
+  type WorkspaceCreationPhase,
+} from "./CodeCatalogStore";
+import {
   workspaceWorkflowActionLabel,
   workspaceWorkflowModel,
   type WorkspaceWorkflowAction,
@@ -176,7 +181,7 @@ export function WorkspaceCard({
   onOpenStackParent,
   onWorkflowAction,
 }: {
-  workspace: CodeWorkspaceSnapshot;
+  workspace: OptimisticCodeWorkspaceSnapshot;
   digest: CodeSessionDigest | undefined;
   session: CodeSessionSnapshot | undefined;
   repoName: string;
@@ -210,6 +215,8 @@ export function WorkspaceCard({
   const pr = digest?.pr_state ?? workspace.pr;
   const archived = isPutAway(workspace);
   const creating = workspace.status === "creating";
+  const creationPhase = workspaceCreationPhase(workspace);
+  const creationLabel = workspaceCreationLabel(creationPhase);
   const cardStatus = workspaceCardStatus(workspace, digest);
   const attentionMark = attentionMarkForDigest(digest);
   const [detailOpen, setDetailOpen] = useState(detailDefaultOpen);
@@ -265,6 +272,7 @@ export function WorkspaceCard({
                   pr,
                   terminalOpen,
                   workspaceStatus: workspace.status,
+                  creationLabel,
                 })}
                 aria-current={active ? "page" : undefined}
                 aria-selected={selected || undefined}
@@ -372,7 +380,7 @@ export function WorkspaceCard({
       </ContextMenu>
 
       {creating ? (
-        <WorkspaceCreationProgress />
+        <WorkspaceCreationProgress phase={creationPhase} />
       ) : (
         density === "detailed" && (
           <WorkspaceActivityLine
@@ -1036,16 +1044,25 @@ function runningParkedOn(
   return null;
 }
 
-function WorkspaceCreationProgress() {
+function workspaceCreationLabel(phase: WorkspaceCreationPhase): string {
+  return phase === "naming" ? "Naming workspace" : "Creating branch and folder";
+}
+
+function WorkspaceCreationProgress({
+  phase,
+}: {
+  phase: WorkspaceCreationPhase;
+}) {
+  const label = workspaceCreationLabel(phase);
   return (
     <div
       className="px-2.5 pb-2 pl-7"
       role="status"
-      aria-label="Creating workspace"
+      aria-label={label}
       data-testid="workspace-creation-progress"
     >
       <LiveLabel live className="block truncate text-xs">
-        Creating workspace
+        {label}
       </LiveLabel>
       <span
         className="workspace-creation-progress mt-1.5 block h-0.5 overflow-hidden rounded-full bg-live-border/20"

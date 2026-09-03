@@ -313,6 +313,7 @@ pub(super) fn init_git_repo_named(dir: &std::path::Path, name: &str) -> std::pat
         ["git", "init", "-b", "main"].as_slice(),
         ["git", "config", "user.email", "dev@example.com"].as_slice(),
         ["git", "config", "user.name", "Dev"].as_slice(),
+        ["git", "config", "commit.gpgsign", "false"].as_slice(),
         // Windows runners default to autocrlf=true; pin LF so file-content
         // assertions stay identical across platforms.
         ["git", "config", "core.autocrlf", "false"].as_slice(),

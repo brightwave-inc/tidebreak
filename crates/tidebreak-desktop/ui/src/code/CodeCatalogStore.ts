@@ -107,6 +107,21 @@ type CodeCatalogStore = CodeCatalogState & {
 
 export const OPTIMISTIC_WORKSPACE_ID_PREFIX = "optimistic-workspace:";
 
+export type WorkspaceCreationPhase = "naming" | "creating";
+
+export type OptimisticCodeWorkspaceSnapshot = CodeWorkspaceSnapshot & {
+  optimistic_creation_phase?: WorkspaceCreationPhase;
+};
+
+export function workspaceCreationPhase(
+  workspace: CodeWorkspaceSnapshot,
+): WorkspaceCreationPhase {
+  return (
+    (workspace as OptimisticCodeWorkspaceSnapshot).optimistic_creation_phase ??
+    "creating"
+  );
+}
+
 export function isOptimisticWorkspace(workspace: CodeWorkspaceSnapshot) {
   return workspace.id.startsWith(OPTIMISTIC_WORKSPACE_ID_PREFIX);
 }

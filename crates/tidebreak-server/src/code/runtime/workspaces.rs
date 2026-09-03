@@ -2,32 +2,58 @@
 
 use super::*;
 
+fn collision_resolved_slug(base: &str, index: u64) -> String {
+    if index <= 1 {
+        return base.to_owned();
+    }
+    let suffix = format!("-{index}");
+    let keep = 40_usize.saturating_sub(suffix.len());
+    let mut stem = base[..base.len().min(keep)]
+        .trim_end_matches('-')
+        .to_owned();
+    if stem.is_empty() {
+        stem.push_str("workspace");
+    }
+    stem.push_str(&suffix);
+    stem
+}
+
 impl CodeRuntime {
     pub(crate) async fn create_workspace(
         &self,
         owner: &OwnerId,
         repo_id: RepoId,
         title: Option<String>,
+        suggested_title: Option<String>,
         base_ref: Option<String>,
     ) -> Result<CodeWorkspace, ServerError> {
         let repo = self.get_repo(owner, repo_id).await?;
         Self::refuse_removed_repo(&repo)?;
-        let title = title
+        let explicit_title = title
             .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty())
-            .unwrap_or_default();
+            .filter(|value| !value.is_empty());
+        let suggested_title = suggested_title
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
         let id = WorkspaceId::new();
-        let branch = branch_name(&repo.branch_prefix, &title, id.as_uuid());
-        let existing = list_workspaces(&self.db, owner, Some(repo_id)).await?;
-        if existing
-            .iter()
-            .any(|workspace| workspace.branch_name == branch)
-        {
-            return Err(ServerError::conflict_kind(
-                "branch_collision",
-                format!("branch {branch} already exists on this repository"),
-            ));
-        }
+        let fallback_name = worktree::two_word_name(id.as_uuid().as_u128());
+        let fallback_branch_slug = format!("{fallback_name}-{}", worktree::short_id(id.as_uuid()));
+        let display_title = explicit_title
+            .clone()
+            .or_else(|| suggested_title.clone())
+            .unwrap_or_else(|| fallback_name.clone());
+        let use_suggested_checkout_name = explicit_title.is_none()
+            && suggested_title.is_some()
+            && naming_settings::auto_rename_branches(&*self.db, owner).await?;
+        let named_checkout = explicit_title
+            .as_deref()
+            .or_else(|| use_suggested_checkout_name.then_some(display_title.as_str()))
+            .map(slugify)
+            .filter(|slug| !slug.is_empty());
+        let checkout_slug = named_checkout
+            .clone()
+            .unwrap_or_else(|| fallback_name.clone());
+        let branch_slug_base = named_checkout.unwrap_or(fallback_branch_slug);
         let repo_slug = {
             let from_name = slugify(&repo.display_name);
             if from_name.is_empty() {
@@ -36,25 +62,11 @@ impl CodeRuntime {
                 from_name
             }
         };
-        let workspace_slug = {
-            let from_title = slugify(&title);
-            if from_title.is_empty() {
-                worktree::two_word_name(id.0.as_u128())
-            } else {
-                from_title
-            }
-        };
         // Resolved per creation, not cached: the root is a setting an operator
         // can change while the process runs, and it decides only where the
         // *next* worktree lands. Existing workspaces keep the absolute path on
         // their row (`crate::code::worktree_root`).
         let root = self.owner_worktree_root(owner).await?;
-        let path = worktree_dir(&root, id, &repo_slug, &workspace_slug);
-        let display_title = if title.is_empty() {
-            workspace_slug.clone()
-        } else {
-            title
-        };
         let explicit_base = base_ref
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty());
@@ -79,33 +91,66 @@ impl CodeRuntime {
             repo.default_base_ref = base.clone();
             self.save_repo(&repo).await?;
         }
-        let mut workspace = CodeWorkspace {
-            id,
-            owner: owner.clone(),
-            repo_id,
-            title: display_title,
-            worktree_path: path.display().to_string(),
-            branch_name: branch.clone(),
-            base_ref: base.clone(),
-            status: CodeWorkspaceStatus::Creating,
-            pr: None,
-            created_at: Utc::now(),
-            archived_at: None,
-            released_at: None,
-            released_tip: None,
-            bundle_bytes: None,
-        };
-        insert_workspace(&self.db, &workspace).await?;
-        let operation =
-            match create_worktree(std::path::Path::new(&repo.root_path), &path, &branch, &base)
-                .await
+        let repo_root = std::path::Path::new(&repo.root_path);
+        let creation = self.workspace_creation_lock(repo_id);
+        let creation_guard = creation.lock().await;
+        let mut existing = list_workspaces(&self.db, owner, Some(repo_id))
+            .await?
+            .into_iter()
+            .map(|workspace| workspace.branch_name)
+            .collect::<HashSet<_>>();
+        let mut collision_index = 1_u64;
+        let (mut workspace, path, operation) = loop {
+            let workspace_slug = collision_resolved_slug(&checkout_slug, collision_index);
+            let resolved_branch_slug = collision_resolved_slug(&branch_slug_base, collision_index);
+            let branch = branch_name_from_slug(&repo.branch_prefix, &resolved_branch_slug);
+            if existing.contains(&branch)
+                || worktree::branch_exists(repo_root, &branch)
+                    .await
+                    .map_err(map_worktree)?
             {
-                Ok(operation) => operation,
+                collision_index = collision_index.checked_add(1).ok_or_else(|| {
+                    ServerError::internal("workspace name collision limit exhausted")
+                })?;
+                continue;
+            }
+            let path = worktree_dir(&root, id, &repo_slug, &workspace_slug);
+            let workspace = CodeWorkspace {
+                id,
+                owner: owner.clone(),
+                repo_id,
+                title: display_title.clone(),
+                worktree_path: path.display().to_string(),
+                branch_name: branch.clone(),
+                base_ref: base.clone(),
+                status: CodeWorkspaceStatus::Creating,
+                pr: None,
+                created_at: Utc::now(),
+                archived_at: None,
+                released_at: None,
+                released_tip: None,
+                bundle_bytes: None,
+            };
+            insert_workspace(&self.db, &workspace).await?;
+            match create_worktree(repo_root, &path, &branch, &base).await {
+                Ok(operation) => break (workspace, path, operation),
+                Err(WorktreeError::Conflict {
+                    kind: "branch_collision",
+                    ..
+                }) => {
+                    let _ = delete_workspace(&self.db, owner, id).await;
+                    existing.insert(branch);
+                    collision_index = collision_index.checked_add(1).ok_or_else(|| {
+                        ServerError::internal("workspace name collision limit exhausted")
+                    })?;
+                }
                 Err(err) => {
                     let _ = delete_workspace(&self.db, owner, id).await;
                     return Err(map_worktree(err));
                 }
-            };
+            }
+        };
+        drop(creation_guard);
         // Before the setup script, which may itself commit: from here on,
         // anything this workspace commits should already carry the right
         // name.
@@ -216,59 +261,6 @@ impl CodeRuntime {
         )
         .await;
         Ok(())
-    }
-
-    /// Rename the untouched placeholder branch after background titling names
-    /// the workspace. Every guard fails closed and leaves the original branch.
-    pub(crate) async fn rename_generated_workspace_branch(
-        &self,
-        owner: &OwnerId,
-        id: WorkspaceId,
-        title: &str,
-    ) -> Result<bool, ServerError> {
-        if !naming_settings::auto_rename_branches(&*self.db, owner).await? {
-            return Ok(false);
-        }
-        let turn = self.worktree_turn_lock(id);
-        let _turn_guard = turn.lock().await;
-        let lifecycle = self.workspace_lifecycle_lock(id);
-        let _lifecycle_guard = lifecycle.lock().await;
-        let workspace = self.get_workspace(owner, id).await?;
-        if workspace.is_remote()
-            || workspace.status != CodeWorkspaceStatus::Active
-            || workspace.pr.is_some()
-            || workspace.title != title
-        {
-            return Ok(false);
-        }
-        let repo = self.get_repo(owner, workspace.repo_id).await?;
-        let expected = branch_name(&repo.branch_prefix, "", id.as_uuid());
-        if workspace.branch_name != expected {
-            return Ok(false);
-        }
-        let next = branch_name(&repo.branch_prefix, title, id.as_uuid());
-        if next == expected {
-            return Ok(false);
-        }
-        let path = std::path::Path::new(&workspace.worktree_path);
-        if !rename_local_only_branch(path, &expected, &next)
-            .await
-            .map_err(map_worktree)?
-        {
-            return Ok(false);
-        }
-        if !set_workspace_branch_if(&self.db, owner, id, title, &expected, &next).await? {
-            if let Err(error) = rename_local_only_branch(path, &next, &expected).await {
-                tracing::error!(
-                    workspace = %id,
-                    error = %error,
-                    "could not restore a branch after its workspace update lost the race"
-                );
-            }
-            return Ok(false);
-        }
-        crate::code::attention::emit_workspace_digests(&self.db, &self.bus, owner, id).await;
-        Ok(true)
     }
 
     pub(crate) async fn archive_workspace(
@@ -606,6 +598,15 @@ impl CodeRuntime {
             .lock()
             .expect("worktree turn locks")
             .remove(&workspace_id);
+    }
+
+    fn workspace_creation_lock(&self, repo_id: RepoId) -> Arc<tokio::sync::Mutex<()>> {
+        self.workspace_creations
+            .lock()
+            .expect("workspace creation locks")
+            .entry(repo_id)
+            .or_default()
+            .clone()
     }
 
     /// Restore a saved workspace. A local archive records the exact tip,

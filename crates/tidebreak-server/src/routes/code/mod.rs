@@ -102,7 +102,7 @@ pub(crate) use types::{
     CodeWorkspacePullRequests, CodeWorkspaceSearch, CodeWorkspaceSnapshot, CodeWorkspaceTree,
     CreateCodeTriggerBody, HarnessDoctorReport, HarnessModelList, MergeCodePrBody, QueuedCodeTurn,
     ResolveCodeDeliveryRepositoriesBody, SequencedCodeEventFrame, SetCodeWorktreeRootBody,
-    UpdateCodeTriggerBody,
+    UpdateCodeTriggerBody, WorkspaceTitleProposal,
 };
 pub(crate) use types::{
     CodeCloneDefaults, CodeCloneJobSnapshot, CodeGithubRepositories, CodeGithubRepository,
@@ -113,8 +113,8 @@ pub(crate) use usage::subscription_usage;
 pub(crate) use workspaces::{
     archive_workspace, create_remote_workspace, create_workspace, get_workspace,
     get_workspace_blob, get_workspace_diff, get_worktree_root, list_workspace_files,
-    list_workspace_tree, list_workspaces, patch_workspace, restore_workspace,
-    retry_workspace_setup, search_workspace, set_worktree_root,
+    list_workspace_tree, list_workspaces, patch_workspace, propose_workspace_title,
+    restore_workspace, retry_workspace_setup, search_workspace, set_worktree_root,
 };
 
 // App-token handlers do not reach `AppState.code` directly. They extract a
