@@ -3078,15 +3078,28 @@ const HOST_MAX_CONNECTIONS: u32 = 8;
 /// dialog that never resolves.
 const HOST_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Build the connect options every host store opens with.
+/// Build the connect options a self-host store opens with.
 pub(crate) fn host_connect_options(url: &str) -> sea_orm::ConnectOptions {
     let mut options = sea_orm::ConnectOptions::new(url.to_owned());
     options
         .max_connections(HOST_MAX_CONNECTIONS)
-        // Keep one connection warm so an idle profile does not pay reconnect
-        // latency on the first interactive request.
+        // Keep one connection warm without forcing every self-host database
+        // to reserve the desktop pool's full capacity.
         .min_connections(1)
         .acquire_timeout(HOST_ACQUIRE_TIMEOUT);
+    options
+}
+
+/// Build the connect options for the desktop profile's local SQLite store.
+pub(crate) fn desktop_connect_options(url: &str) -> sea_orm::ConnectOptions {
+    let mut options = host_connect_options(url);
+    options
+        // New SQLite connections apply per-connection PRAGMAs. Opening them
+        // lazily during active writes can block every waiter behind that work,
+        // so create the full fixed pool at startup and keep it warm.
+        .min_connections(HOST_MAX_CONNECTIONS)
+        .idle_timeout(None)
+        .max_lifetime(None);
     options
 }
 
