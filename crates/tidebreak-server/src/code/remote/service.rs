@@ -1046,7 +1046,24 @@ mod tests {
             session.id,
             LaneBackoff::new(initial, initial * 4),
         ));
+        for _ in 0..100 {
+            if *fake.event_reads_issued.lock().unwrap() >= 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            *fake.event_reads_issued.lock().unwrap(),
+            1,
+            "the pump did not issue its initial read"
+        );
         tokio::time::advance(std::time::Duration::from_millis(400)).await;
+        for _ in 0..100 {
+            if *fake.event_reads_issued.lock().unwrap() >= 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
         pump.abort();
 
         // The waits are at least 20, 40, 80, then 80ms each, so at most
