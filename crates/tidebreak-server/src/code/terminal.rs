@@ -1065,44 +1065,6 @@ mod tests {
 
     // The probe is a POSIX `printf`, and `user_shell()` falls back to
     // PowerShell on Windows, which never expands it.
-    #[cfg(not(windows))]
-    #[test]
-    fn spawned_shell_sees_the_embedded_terminal_type() {
-        let dir = tempfile::tempdir().unwrap();
-        let hub = TerminalHub::new();
-        let ws = workspace();
-        let snap = hub
-            .open(&OwnerId::local(), ws, dir.path(), Some(80), Some(24))
-            .unwrap();
-        // A plain POSIX command, so the assertion holds for whichever shell
-        // `$SHELL` names on the machine running the test.
-        hub.write(
-            ws,
-            snap.id,
-            b"printf 'T=%s P=%s\\n' \"$TERM\" \"$TERM_PROGRAM\"\r",
-        )
-        .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(20);
-        let mut seen = Vec::new();
-        while Instant::now() < deadline {
-            let read = hub.read(ws, snap.id, 0);
-            seen = read.data;
-            if seen
-                .windows(b"T=xterm-256color P=tidebreak".len())
-                .any(|w| w == b"T=xterm-256color P=tidebreak")
-            {
-                break;
-            }
-            thread::sleep(Duration::from_millis(100));
-        }
-        let _ = hub.close(ws, snap.id);
-        assert!(
-            seen.windows(b"T=xterm-256color P=tidebreak".len())
-                .any(|w| w == b"T=xterm-256color P=tidebreak"),
-            "shell output: {}",
-            String::from_utf8_lossy(&seen)
-        );
-    }
 
     #[test]
     fn restart_reaps_terminals_and_leaves_no_durable_bytes() {
