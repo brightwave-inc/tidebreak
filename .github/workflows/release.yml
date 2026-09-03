@@ -1383,10 +1383,8 @@ jobs:
           add-rust-environment-hash-key: "false"
           cache-bin: false
           cache-targets: false
-          # The Warm Windows release cache workflow writes this registry cache
-          # on pushes to main. This credential-free prerequisite stays a
-          # fallback writer for releases cut before the warm run finishes;
-          # a duplicate save against an existing key is skipped harmlessly.
+          # This credential-free prerequisite can populate the registry cache.
+          # A duplicate save against an existing key is skipped harmlessly.
           save-if: true
 
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
