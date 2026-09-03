@@ -425,11 +425,28 @@ jobs:
             --key "$APPLE_API_KEY_PATH" \
             --key-id "$APPLE_API_KEY_ID" \
             --issuer "$APPLE_API_ISSUER" \
-            --wait \
-            --timeout 30m \
             --output-format json)"
           printf '%s\n' "$submission_output"
           submission_id="$(jq -er .id <<<"$submission_output")"
+
+          submission_output=""
+          for attempt in 1 2 3; do
+            if submission_output="$(xcrun notarytool wait "$submission_id" \
+              --key "$APPLE_API_KEY_PATH" \
+              --key-id "$APPLE_API_KEY_ID" \
+              --issuer "$APPLE_API_ISSUER" \
+              --timeout 20m \
+              --output-format json)"; then
+              break
+            fi
+            if (( attempt == 3 )); then
+              echo "Notary status checks failed three times for $submission_id." >&2
+              exit 1
+            fi
+            echo "Notary status check failed; retrying in 15 seconds." >&2
+            sleep 15
+          done
+          printf '%s\n' "$submission_output"
           submission_status="$(jq -er .status <<<"$submission_output")"
           if [[ "$submission_status" != Accepted ]]; then
             echo "DMG notarization failed with status: $submission_status" >&2
