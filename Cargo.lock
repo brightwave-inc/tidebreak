@@ -6545,7 +6545,8 @@ dependencies = [
 [[package]]
 name = "symphonia"
 version = "0.6.0"
-source = "git+https://github.com/pdeljanov/Symphonia?rev=619c6806e5122b3206b8938773a801dd4a8a5950#619c6806e5122b3206b8938773a801dd4a8a5950"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1758d6c853020a7244de03cc3e0185eaea3f58715122422dd3cc7452e6d4c16a"
 dependencies = [
  "lazy_static",
  "symphonia-codec-aac",
@@ -6559,7 +6560,8 @@ dependencies = [
 [[package]]
 name = "symphonia-codec-aac"
 version = "0.6.0"
-source = "git+https://github.com/pdeljanov/Symphonia?rev=619c6806e5122b3206b8938773a801dd4a8a5950#619c6806e5122b3206b8938773a801dd4a8a5950"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1979c515a76371b186aad2feff5f23e21cbec775bf95de08bf1e3af92a2ad76"
 dependencies = [
  "lazy_static",
  "log",
@@ -6570,7 +6572,8 @@ dependencies = [
 [[package]]
 name = "symphonia-codec-alac"
 version = "0.6.0"
-source = "git+https://github.com/pdeljanov/Symphonia?rev=619c6806e5122b3206b8938773a801dd4a8a5950#619c6806e5122b3206b8938773a801dd4a8a5950"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a149cbfc7fb5c405d123a273227d31de17138419552112bf1aa7b73e65827b8"
 dependencies = [
  "log",
  "symphonia-common",
@@ -6580,7 +6583,8 @@ dependencies = [
 [[package]]
 name = "symphonia-common"
 version = "0.6.0"
-source = "git+https://github.com/pdeljanov/Symphonia?rev=619c6806e5122b3206b8938773a801dd4a8a5950#619c6806e5122b3206b8938773a801dd4a8a5950"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8257891ffa7f05e02b58f4761e2abf7e5278c8744fd59e981559e050f86eef55"
 dependencies = [
  "log",
  "symphonia-core",
@@ -6590,7 +6594,8 @@ dependencies = [
 [[package]]
 name = "symphonia-core"
 version = "0.6.0"
-source = "git+https://github.com/pdeljanov/Symphonia?rev=619c6806e5122b3206b8938773a801dd4a8a5950#619c6806e5122b3206b8938773a801dd4a8a5950"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95ec293b5f288383b72a7bffcade6b2860b642cf66f28b3bd5967349a49938b1"
 dependencies = [
  "bitflags 2.13.1",
  "bytemuck",
@@ -6603,7 +6608,8 @@ dependencies = [
 [[package]]
 name = "symphonia-format-isomp4"
 version = "0.6.0"
-source = "git+https://github.com/pdeljanov/Symphonia?rev=619c6806e5122b3206b8938773a801dd4a8a5950#619c6806e5122b3206b8938773a801dd4a8a5950"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d179a01305b3505940135a9f0180d6ef4b487912748fe97554756f120fbd05e"
 dependencies = [
  "log",
  "symphonia-common",
@@ -6614,7 +6620,6 @@ dependencies = [
 [[package]]
 name = "symphonia-format-mkv"
 version = "0.6.0"
-source = "git+https://github.com/pdeljanov/Symphonia?rev=619c6806e5122b3206b8938773a801dd4a8a5950#619c6806e5122b3206b8938773a801dd4a8a5950"
 dependencies = [
  "lazy_static",
  "log",
@@ -6625,7 +6630,8 @@ dependencies = [
 [[package]]
 name = "symphonia-metadata"
 version = "0.6.0"
-source = "git+https://github.com/pdeljanov/Symphonia?rev=619c6806e5122b3206b8938773a801dd4a8a5950#619c6806e5122b3206b8938773a801dd4a8a5950"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a31acf5cd623398a6208e2225d18f4b20f761c55098a796a5247ad516a4a8681"
 dependencies = [
  "lazy_static",
  "log",
