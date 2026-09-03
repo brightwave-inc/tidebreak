@@ -1147,6 +1147,7 @@ fn sandbox_path(
 }
 
 #[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
 fn direct_denied_host_path(
     request: &ExecRequest,
     workspace: &Path,

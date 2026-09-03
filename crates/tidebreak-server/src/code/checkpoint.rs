@@ -550,6 +550,33 @@ pub(crate) async fn produce_diff(
     })
 }
 
+/// Bounded unified diff for an explicit set of wire-format paths.
+pub(crate) async fn produce_diff_for_paths(
+    worktree: &Path,
+    from: &str,
+    to: &str,
+    files: &[String],
+    max_bytes: usize,
+) -> Result<String, CheckpointError> {
+    let paths = files
+        .iter()
+        .map(|path| GitPath::from_wire(path))
+        .collect::<Result<Vec<_>, _>>()?;
+    if paths.is_empty() {
+        return Ok(String::new());
+    }
+    let (raw, _) = git_bytes_with_literal_paths_bounded(
+        worktree,
+        &["diff", "--find-renames", from, to, "--"],
+        &paths,
+        GIT_SNAPSHOT_TIMEOUT,
+        OutputBudget::head(max_bytes, MAX_DIFF_LINES),
+    )
+    .await
+    .map_err(CheckpointError::internal)?;
+    Ok(truncate_bytes(&raw, max_bytes).0)
+}
+
 /// Snapshot the current worktree (tracked + untracked) as a tree oid.
 ///
 /// The user's index is never opened. A temporary index file is used and
