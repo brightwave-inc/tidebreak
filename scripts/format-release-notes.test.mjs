@@ -58,6 +58,21 @@ test("keeps unscoped release entries in their category without a subheading", ()
   );
 });
 
+test("formats improvements as their own release category", () => {
+  const notes = `### Improvements
+- improve(desktop): simplify settings navigation ([#18](https://example.com/18)) by @octo
+`;
+
+  assert.equal(
+    formatReleaseNotes(notes),
+    `${THANK_YOU}
+
+## 🌟 Improvements
+- **Desktop:** simplify settings navigation ([#18](https://example.com/18)) by @octo
+`,
+  );
+});
+
 test("uses readable acronyms in singleton scope prefixes", () => {
   const notes = `### Breaking Changes
 - feat(mcp)!: replace the protocol ([#18](https://example.com/18)) by @octo

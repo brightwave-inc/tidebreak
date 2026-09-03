@@ -41,9 +41,27 @@ test("leaves already-correct labels unchanged", () => {
   assert.deepEqual(plan.updates, []);
 });
 
+test("plans improvement release labels", () => {
+  const plan = createReleaseLabelPlan([
+    {
+      number: 14,
+      title: "improve(desktop): simplify navigation",
+      labels: ["release-note:feature", "semver:minor"],
+    },
+  ]);
+
+  assert.deepEqual(plan.updates[0], {
+    number: 14,
+    title: "improve(desktop): simplify navigation",
+    desired_labels: ["release-note:improvement", "semver:patch"],
+    add_labels: ["release-note:improvement", "semver:patch"],
+    remove_labels: ["release-note:feature", "semver:minor"],
+  });
+});
+
 test("skips ambiguous historical titles instead of guessing", () => {
   const plan = createReleaseLabelPlan([
-    { number: 14, title: "Add search", labels: [] },
+    { number: 15, title: "Add search", labels: [] },
   ]);
 
   assert.equal(plan.summary.skipped, 1);
