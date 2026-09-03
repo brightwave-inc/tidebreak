@@ -1,9 +1,17 @@
 //! The protocol conformance suite, surfaced as individual CI checks.
 //!
-//! Each test drives one scenario from [`tidebreak_sandbox_protocol::conformance`]
-//! against the in-process reference backend. Once the local container backend
-//! lands (delivery-sequence step 7.1), the same scenarios re-point at it behind
-//! the protocol seam; the assertions do not change.
+//! One integration binary hosts every conformance module — each `tests/*.rs`
+//! file would otherwise link its own full copy of the crate graph.
+//!
+//! Each test below drives one scenario from
+//! [`tidebreak_sandbox_protocol::conformance`] against the in-process
+//! reference backend. Once the local container backend lands
+//! (delivery-sequence step 7.1), the same scenarios re-point at it behind the
+//! protocol seam; the assertions do not change.
+
+mod selfhost_conformance;
+mod wire_conformance;
+mod wire_format;
 
 use tidebreak_sandbox_protocol::conformance;
 

@@ -594,6 +594,9 @@ mod tests {
         );
     }
 
+    /// One roundtrip test covers the shared `serde(transparent)` newtype
+    /// shape for both id macros in this crate: `id_type!` (via `ChatId`) and
+    /// `code_id_type!` (via `CodeSessionId`).
     #[test]
     fn roundtrips_through_string_and_json() {
         let id = ChatId::new();
@@ -603,11 +606,28 @@ mod tests {
         // Transparent: serializes as the bare quoted UUID, no wrapper.
         assert_eq!(json, format!("\"{id}\""));
         assert_eq!(serde_json::from_str::<ChatId>(&json).unwrap(), id);
+
+        let code_id = crate::code::CodeSessionId::new();
+        let json = serde_json::to_string(&code_id).unwrap();
+        assert_eq!(json, format!("\"{code_id}\""));
+        assert_eq!(
+            serde_json::from_str::<crate::code::CodeSessionId>(&json).unwrap(),
+            code_id
+        );
+        assert_eq!(
+            code_id
+                .to_string()
+                .parse::<crate::code::CodeSessionId>()
+                .unwrap(),
+            code_id
+        );
     }
 
+    /// One test covers every nil-rejecting id type; the bodies were copies.
     #[test]
-    fn host_root_ids_reject_nil_and_roundtrip() {
+    fn nil_rejecting_ids_reject_nil_and_roundtrip() {
         let uuid = Uuid::new_v4();
+
         let id = HostRootId::from_uuid(uuid).unwrap();
         let json = serde_json::to_string(&id).unwrap();
         assert_eq!(serde_json::from_str::<HostRootId>(&json).unwrap(), id);
@@ -615,11 +635,7 @@ mod tests {
         assert!(
             serde_json::from_str::<HostRootId>("\"00000000-0000-0000-0000-000000000000\"").is_err()
         );
-    }
 
-    #[test]
-    fn root_attachment_change_ids_reject_nil_and_roundtrip() {
-        let uuid = Uuid::new_v4();
         let id = RootAttachmentChangeId::from_uuid(uuid).unwrap();
         let json = serde_json::to_string(&id).unwrap();
         assert_eq!(

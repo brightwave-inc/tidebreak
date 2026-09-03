@@ -1,5 +1,10 @@
+//! The bound listener served over a real socket: loopback bind, bearer auth,
+//! and CORS preflight. Lives in the crate's unit-test tree rather than its own
+//! integration binary — `serve` here still exercises a real socket.
+
 use tidebreak_core::{Chat, Config, KeychainSecretProvider};
-use tidebreak_server::bind;
+
+use crate::bind;
 
 async fn serve_test_server() -> (std::net::SocketAddr, String, tempfile::TempDir) {
     KeychainSecretProvider::use_mock();

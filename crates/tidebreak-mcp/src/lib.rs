@@ -57,3 +57,24 @@ pub use http::{validate_http_url, validate_http_url_with_credentials};
 pub use protocol::PROTOCOL_VERSION;
 pub use server::McpServer;
 pub use stdio::{serve, serve_stdio};
+
+#[cfg(test)]
+mod doc_example {
+    //! Mirror of the crate-level documentation example. Doctests are disabled
+    //! workspace-wide (`doctest = false`), so this keeps the snippet compiling.
+
+    #[test]
+    fn crate_example_constructs_a_server() -> std::io::Result<()> {
+        use std::sync::Arc;
+        use tidebreak_core::{ChatId, ToolCtx, ToolRegistry};
+
+        use crate::McpServer;
+
+        let tools = Arc::new(ToolRegistry::new());
+        let ctx = ToolCtx::try_new_legacy_workspace(ChatId::new(), None, ".".into())?;
+        let server = McpServer::new(tools, ctx);
+        // then: `tidebreak_mcp::serve_stdio(server).await` inside an async runtime.
+        let _ = server;
+        Ok(())
+    }
+}

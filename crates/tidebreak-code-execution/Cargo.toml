@@ -8,6 +8,10 @@ repository.workspace = true
 authors.workspace = true
 publish = false
 
+[lib]
+# No executable documentation examples; behavior contracts live in the test
+# suite, so skip the doctest compile step.
+doctest = false
 [lints]
 workspace = true
 

@@ -39,5 +39,9 @@ libc = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "test-util"] }
 tempfile = { workspace = true }
 
+[lib]
+# No executable documentation examples; behavior contracts live in the test
+# suite, so skip the doctest compile step.
+doctest = false
 [lints]
 workspace = true

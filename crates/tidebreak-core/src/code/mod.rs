@@ -2258,14 +2258,8 @@ pub fn classify_trigger_condition(pr: &PullRequestDigest) -> Option<CodeTriggerC
 mod tests {
     use super::*;
 
-    #[test]
-    fn code_ids_roundtrip_as_bare_uuids() {
-        let id = CodeSessionId::new();
-        let json = serde_json::to_string(&id).unwrap();
-        assert_eq!(json, format!("\"{id}\""));
-        assert_eq!(serde_json::from_str::<CodeSessionId>(&json).unwrap(), id);
-        assert_eq!(id.to_string().parse::<CodeSessionId>().unwrap(), id);
-    }
+    // Code id serde behavior is asserted once for both id macros in
+    // `crate::id::tests::roundtrips_through_string_and_json`.
 
     #[test]
     fn harness_kind_tokens_are_stable() {

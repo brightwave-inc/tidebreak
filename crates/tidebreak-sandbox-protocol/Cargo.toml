@@ -24,5 +24,9 @@ tokio = { workspace = true, features = ["rt", "sync", "macros", "time", "io-util
 # the suite waiting on it.
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "macros", "time", "io-util", "net", "test-util"] }
 
+[lib]
+# No executable documentation examples; behavior contracts live in the test
+# suite, so skip the doctest compile step.
+doctest = false
 [lints]
 workspace = true

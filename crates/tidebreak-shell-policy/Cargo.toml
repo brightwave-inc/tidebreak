@@ -9,6 +9,10 @@ authors.workspace = true
 description = "Deterministic allow/ask/deny analysis for shell commands against standing rules."
 publish = false
 
+[lib]
+# No executable documentation examples; behavior contracts live in the test
+# suite, so skip the doctest compile step.
+doctest = false
 [lints]
 workspace = true
 
