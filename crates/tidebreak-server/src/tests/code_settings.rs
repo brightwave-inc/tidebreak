@@ -593,7 +593,7 @@ async fn a_live_setting_update_becomes_active_only_after_its_exact_write_commits
     execute_code_db_unprepared(
         &dir,
         "CREATE TRIGGER ignore_reasoning_effort_update
-         BEFORE UPDATE OF reasoning_effort ON code_session
+         BEFORE UPDATE OF reasoning_effort ON session
          WHEN NEW.reasoning_effort IS NOT OLD.reasoning_effort
          BEGIN
            SELECT RAISE(IGNORE);
@@ -730,7 +730,7 @@ async fn a_permission_mode_intent_persistence_failure_never_reaches_the_engine()
     execute_code_db_unprepared(
         &dir,
         "CREATE TRIGGER fail_permission_mode_intent
-         BEFORE UPDATE OF permission_mode_intent ON code_session
+         BEFORE UPDATE OF permission_mode_intent ON session
          WHEN NEW.permission_mode_intent IS NOT NULL
          BEGIN
            SELECT RAISE(FAIL, 'permission-mode intent write failed');
@@ -782,7 +782,7 @@ async fn a_permission_mode_confirmation_failure_terminates_and_fences_the_engine
     execute_code_db_unprepared(
         &dir,
         "CREATE TRIGGER ignore_permission_mode_confirmation
-         BEFORE UPDATE OF permission_mode ON code_session
+         BEFORE UPDATE OF permission_mode ON session
          WHEN NEW.permission_mode <> OLD.permission_mode
          BEGIN
            SELECT RAISE(IGNORE);
