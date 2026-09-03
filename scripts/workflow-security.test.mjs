@@ -448,8 +448,7 @@ test("PR lanes are scope-gated, never label-gated", () => {
     /cp "\$trusted" "\$GITHUB_WORKSPACE\/scripts\/workflow-security\.test\.mjs"/,
   );
   // A pull request's green checks must prove the same commits stay green on
-  // main: no platform-neutral lane may hide behind an opt-in label. Native
-  // Windows tests stay behind `windows-ci` / the windows scope; Windows
+  // main: no platform-neutral lane may hide behind an opt-in label. Windows
   // `cargo check` is rust-scoped like clippy.
   assert.doesNotMatch(ci, /full-ci/);
   assert.doesNotMatch(fmt, /github\.event_name/);
@@ -612,59 +611,21 @@ function skipsSupersededPush(job) {
   );
 }
 
-test("native Windows CI is scope-triggered, label-overridable, with a main backstop", () => {
+test("Windows cargo check is a compile-only installer gate", () => {
   const ci = workflows["ci.yml"];
   const windows = workflowJob(ci, "windows-check");
   const changes = workflowJob(ci, "changes");
-  const nativeTests = windows.match(
-    /- name: Record native Windows test gate[\s\S]*?(?=\n {6}- name: Compile native Windows test binaries)/,
-  )?.[0];
-  assert.ok(nativeTests, "missing native Windows test gate step");
-  const check = windows.match(
-    /- name: Check Windows-gated crates[\s\S]*?(?=\n {6}- name: Record native Windows test gate)/,
-  )?.[0];
-  assert.ok(check, "missing Windows cargo check step");
-  assert.match(check, /RUSTFLAGS: ""/);
-  assert.doesNotMatch(check, /linker=rust-lld/);
-  assert.match(
-    nativeTests,
-    /github\.event_name != 'pull_request' \|\| contains\(github\.event\.pull_request\.labels\.\*\.name, 'windows-ci'\) \|\| needs\.changes\.outputs\.windows == 'true'/,
-  );
-  assert.match(nativeTests, /"\$EVENT_NAME" == merge_group/);
-  assert.match(windows, /NATIVE_RUN: \$\{\{ steps\.native\.outputs\.run \}\}/);
-  assert.match(windows, /Skipping native Windows tests\./);
+  assert.match(windows, /Check the Windows installer crates/);
   assert.match(windows, /vars\.CI_WINDOWS_RUNNER \|\| 'windows-latest'/);
-  assert.match(windows, /CARGO_PROFILE_TEST_DEBUG: 0/);
-  assert.match(windows, /-p tidebreak-cli/);
   assert.match(windows, /Stage sidecar placeholders for cargo check/);
   assert.doesNotMatch(windows, /prepare-sidecar\.mjs/);
-  assert.match(changes, /windows: \$\{\{ steps\.scope\.outputs\.windows \}\}/);
-  assert.match(changes, /echo "windows=\$windows"/);
-  assert.match(changes, /echo "windows=true"/);
-  // The scope must imply the Rust one, for the same reason `workspace` does:
-  // the lane is gated on both, so a scope the Rust gate never admits is dead.
-  assert.match(
-    changes,
-    /if \[\[ "\$windows" == true && "\$rust" != true \]\]; then/,
-  );
-  // Every crate or module the lane runs tests for. Dropping one silently
-  // returns that boundary to label-only coverage.
-  for (const boundary of [
-    "crates/tidebreak-code-execution/\\*",
-    "crates/tidebreak-harness/\\*",
-    "crates/tidebreak-host-broker/\\*",
-    "crates/tidebreak-server/src/code/\\*",
-    "crates/tidebreak-server/src/tests/code\\*",
-    "crates/tidebreak-server/src/desktop_schema\\.rs",
-    "crates/tidebreak-core/src/keychain\\.rs",
-    "crates/tidebreak-desktop/scripts/prepare-sidecar\\.mjs",
-  ]) {
-    assert.match(
-      changes,
-      new RegExp(`${boundary}[^\\n]*\\n?[^\\n]*windows=true`),
-      `${boundary} must set the Windows scope`,
-    );
-  }
+  assert.match(windows, /-p tidebreak-desktop/);
+  assert.match(windows, /-p tidebreak-cli/);
+  assert.match(windows, /-p tidebreak-host-broker/);
+  assert.match(windows, /cargo check --target x86_64-pc-windows-msvc/);
+  assert.doesNotMatch(windows, /cargo test/);
+  assert.doesNotMatch(ci, /windows-ci/);
+  assert.doesNotMatch(changes, /echo "windows=/);
   assert.ok(
     skipsSupersededPush(windows),
     "a superseded main push must skip the Windows lane, not cancel it",
@@ -677,31 +638,9 @@ test("native Windows CI is scope-triggered, label-overridable, with a main backs
   assert.match(windows, /SCCACHE_GHA_ENABLED: "true"/);
   assert.match(windows, /SCCACHE_GHA_RW_MODE: READ_WRITE/);
   assert.match(windows, /RUSTC_WRAPPER: sccache/);
-  assert.match(windows, /RUSTFLAGS: -C linker=rust-lld/);
   assert.match(
     windows,
     /uses: mozilla-actions\/sccache-action@[0-9a-f]{40}/,
-  );
-  assert.match(windows, /Compile native Windows test binaries/);
-  assert.match(windows, /Skipping native Windows test precompile/);
-  assert.match(
-    windows,
-    /cargo test --target x86_64-pc-windows-msvc --locked --no-run --lib/,
-  );
-  assert.match(
-    windows,
-    /cargo test --target x86_64-pc-windows-msvc --locked --no-run \\\n\s+-p tidebreak-host-broker/,
-  );
-  assert.match(windows, /\$attempts = 3/);
-  assert.match(windows, /tidebreak-server", "--lib", "code::"/);
-  assert.match(windows, /failed on attempt/);
-  assert.match(
-    windows,
-    /cargo check --target x86_64-pc-windows-msvc/,
-  );
-  assert.match(
-    windows,
-    /cargo test --target x86_64-pc-windows-msvc -p tidebreak-host-broker --locked/,
   );
 });
 

@@ -697,12 +697,9 @@ managed release labels match the title, so requiring the label job too would
 add nothing.
 
 `Windows cargo check` is rust-scoped like clippy because a Windows compile
-break on `main` blocks the desktop release. Native Windows tests inside that
-job still wait for the `windows` scope, the `windows-ci` label, or a
-main/scheduled/manual run: those suites need NTFS and the Windows process
-APIs, and they retry a PowerShell startup race that should not gate unrelated
-Rust changes. Native test binaries link with `rust-lld`. `cargo check` keeps
-the MSVC linker.
+break on `main` blocks the desktop release. It typechecks the installer graph
+on `x86_64-pc-windows-msvc`: `tidebreak-desktop` plus the `tidebreak-cli` and
+`tidebreak-host-broker` sidecars. It does not run native Windows tests.
 
 To run that job on an 8-core Windows larger runner (8 vCPU, 32 GB), set the
 repository variable `CI_WINDOWS_RUNNER` to the provisioned x64 label. If you
