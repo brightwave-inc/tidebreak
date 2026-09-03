@@ -84,6 +84,7 @@ async fn a_fresh_database_records_the_whole_chain() {
             "m20260903_000001_one_turn_lane",
             "m20260903_000002_ready_agent_run_wait_index",
             "m20260903_000003_client_wait_vendor_web_search",
+            "m20260903_000004_restore_turn_claim_indexes",
         ]
     );
     assert!(db
@@ -94,6 +95,67 @@ async fn a_fresh_database_records_the_whole_chain() {
         .await
         .unwrap()
         .is_none());
+}
+
+#[tokio::test]
+async fn turn_claim_indexes_reach_existing_sqlite_databases() {
+    let db = Database::connect("sqlite::memory:").await.unwrap();
+    Migrator::up(
+        &db,
+        Some(steps_before("m20260903_000004_restore_turn_claim_indexes")),
+    )
+    .await
+    .unwrap();
+
+    for index in ["idx_code_turn_due", "idx_code_turn_stale_lease"] {
+        let missing = db
+            .query_one_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                format!(
+                    "SELECT 1 AS present FROM sqlite_master \
+                     WHERE type = 'index' AND name = '{index}'"
+                ),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            missing.is_none(),
+            "the pre-repair schema already has {index}"
+        );
+    }
+
+    Migrator::up(&db, None).await.unwrap();
+
+    for (index, query) in [
+        (
+            "idx_code_turn_due",
+            "SELECT id FROM code_turn \
+             WHERE status = 'queued' AND available_at <= '2026-09-03T00:00:00Z' \
+             ORDER BY available_at, started_at LIMIT 1",
+        ),
+        (
+            "idx_code_turn_stale_lease",
+            "SELECT id FROM code_turn \
+             WHERE status = 'running' AND lease_expires_at <= '2026-09-03T00:00:00Z' \
+             ORDER BY lease_expires_at, started_at LIMIT 1",
+        ),
+    ] {
+        let plan = db
+            .query_all_raw(Statement::from_string(
+                DbBackend::Sqlite,
+                format!("EXPLAIN QUERY PLAN {query}"),
+            ))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.try_get::<String>("", "detail").unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            plan.contains(index),
+            "the turn claim scan must use {index}:\n{plan}"
+        );
+    }
 }
 
 #[tokio::test]
