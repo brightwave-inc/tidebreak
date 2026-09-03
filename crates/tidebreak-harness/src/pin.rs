@@ -49,25 +49,25 @@ pub struct HarnessPin {
 pub const PINS: &[HarnessPin] = &[
     HarnessPin {
         kind: HarnessKind::ClaudeCode,
-        version: "2.1.234",
+        version: "2.1.259",
         package: "@anthropic-ai/claude-code",
         bin: "claude",
     },
     HarnessPin {
         kind: HarnessKind::Codex,
-        version: "0.147.0",
+        version: "0.153.0",
         package: "@openai/codex",
         bin: "codex",
     },
     HarnessPin {
         kind: HarnessKind::Opencode,
-        version: "1.18.18",
+        version: "1.18.27",
         package: "opencode-ai",
         bin: "opencode",
     },
     HarnessPin {
         kind: HarnessKind::Grok,
-        version: "1.0.4",
+        version: "1.0.13",
         package: "@xai-official/grok",
         bin: "grok",
     },
@@ -484,14 +484,14 @@ mod tests {
 
     /// A newer version sits beside the pin in its own directory. Neither
     /// hides the other, and the listing puts the newer one first — by
-    /// number, not by text, so `2.1.251` beats `2.1.99`.
+    /// number, not by text, so `2.1.300` beats `2.1.99`.
     #[test]
     fn installed_versions_list_newest_first_beside_the_pin() {
         let tmp = tempfile::tempdir().unwrap();
         let kind = HarnessKind::ClaudeCode;
         let pin = pin_for(kind).unwrap();
         let pinned = write_install(tmp.path(), kind, pin.version);
-        let newer = write_install(tmp.path(), kind, "2.1.251");
+        let newer = write_install(tmp.path(), kind, "2.1.300");
         write_install(tmp.path(), kind, "2.1.99");
         // A directory whose marker disagrees with its name is not a version.
         let torn = install_dir_for(tmp.path(), pin, "9.9.9");
@@ -505,14 +505,14 @@ mod tests {
         assert_eq!(
             installed_versions(tmp.path(), kind),
             vec![
-                "2.1.251".to_owned(),
+                "2.1.300".to_owned(),
                 pin.version.to_owned(),
                 "2.1.99".to_owned()
             ]
         );
         assert_eq!(managed_binary(tmp.path(), kind), Some(pinned));
         assert_eq!(
-            managed_binary_version(tmp.path(), kind, "2.1.251"),
+            managed_binary_version(tmp.path(), kind, "2.1.300"),
             Some(newer)
         );
         assert_eq!(managed_binary_version(tmp.path(), kind, "9.9.9"), None);

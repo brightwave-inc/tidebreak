@@ -221,7 +221,7 @@ mod probe_freshness_tests {
         HarnessProbe {
             found: path.is_some(),
             binary_path: path.map(PathBuf::from),
-            version: Some("2.1.234".into()),
+            version: Some("2.1.259".into()),
             authenticated: Some(true),
             stderr: String::new(),
             env: Vec::new(),

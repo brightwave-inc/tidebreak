@@ -263,7 +263,7 @@ impl CodeRuntime {
 mod install_target_tests {
     use super::*;
 
-    const PIN: &str = "2.1.234";
+    const PIN: &str = "2.1.259";
 
     /// The registry's last answer moves an install only when a person pressed
     /// Update. A warm-up keeps what is on disk, and a cold machine takes the
@@ -272,16 +272,16 @@ mod install_target_tests {
     fn only_a_deliberate_latest_install_takes_the_registry_answer() {
         let latest = HarnessUpdateChannel::Latest;
         assert_eq!(
-            install_target(latest, PIN, Some(PIN), Some("2.1.258"), false).as_deref(),
+            install_target(latest, PIN, Some(PIN), Some("2.1.300"), false).as_deref(),
             Some(PIN)
         );
         assert_eq!(
-            install_target(latest, PIN, Some(PIN), Some("2.1.258"), true).as_deref(),
-            Some("2.1.258")
+            install_target(latest, PIN, Some(PIN), Some("2.1.300"), true).as_deref(),
+            Some("2.1.300")
         );
         assert_eq!(
-            install_target(latest, PIN, None, Some("2.1.258"), false).as_deref(),
-            Some("2.1.258")
+            install_target(latest, PIN, None, Some("2.1.300"), false).as_deref(),
+            Some("2.1.300")
         );
         // No answer yet: the detached task resolves it.
         assert_eq!(install_target(latest, PIN, Some(PIN), None, true), None);
@@ -295,8 +295,8 @@ mod install_target_tests {
             install_target(
                 HarnessUpdateChannel::Pinned,
                 PIN,
-                Some("2.1.258"),
-                Some("2.1.258"),
+                Some("2.1.300"),
+                Some("2.1.300"),
                 true
             )
             .as_deref(),
