@@ -171,7 +171,12 @@ export default defineConfig(async () => ({
         test: {
           name: "node",
           environment: "node",
-          isolate: false,
+          // Files in this project use `vi.mock` for shared modules such as
+          // `@tauri-apps/api/core`; without isolation one file's mock and
+          // module cache leak into the next, and codeWorktreeHost.test.ts
+          // failed on an unrelated PR with a leaked mock and a
+          // `window is not defined` from a cached module.
+          isolate: true,
           pool: "threads",
           include: nodeTestFiles,
         },
