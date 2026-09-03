@@ -25,6 +25,19 @@ const workflows = Object.fromEntries(
     .filter((name) => name.endsWith(".yml") || name.endsWith(".yaml"))
     .map((name) => [name, readFileSync(join(workflowDirectory, name), "utf8")]),
 );
+const cacheWarmerNames = [
+  "cache-macos.yml",
+  "cache-windows.yml",
+  "cache-linux.yml",
+];
+const existingCacheWarmerNames = cacheWarmerNames.filter(
+  (name) => workflows[name] !== undefined,
+);
+assert.ok(
+  existingCacheWarmerNames.length === 0 ||
+    existingCacheWarmerNames.length === cacheWarmerNames.length,
+  "cache warmer workflows must be retained or retired as one set",
+);
 const compilerCacheAction = readFileSync(
   repositoryFile(".github", "actions", "setup-sccache-s3", "action.yml"),
   "utf8",
@@ -825,9 +838,7 @@ test("compiler caches use OIDC-scoped S3 access", () => {
     ["release.yml", "prepare_windows"],
     ["release.yml", "build_linux"],
     ["staging-publish.yml", "prepare_macos_staging"],
-    ["cache-macos.yml", "warm"],
-    ["cache-windows.yml", "warm"],
-    ["cache-linux.yml", "warm"],
+    ...existingCacheWarmerNames.map((file) => [file, "warm"]),
   ]) {
     const job = workflowJob(workflows[file], name);
     assert.match(job, /permissions:\n      contents: read\n      id-token: write/);
@@ -840,9 +851,7 @@ test("compiler caches use OIDC-scoped S3 access", () => {
     "ci.yml",
     "release.yml",
     "staging-publish.yml",
-    "cache-macos.yml",
-    "cache-windows.yml",
-    "cache-linux.yml",
+    ...existingCacheWarmerNames,
   ]) {
     assert.doesNotMatch(workflows[name], /SCCACHE_GHA_/);
   }
@@ -1036,7 +1045,7 @@ test("desktop voice delegates whisper.cpp to the verified helper", () => {
 
   const releaseWindows = workflowJob(workflows["release.yml"], "build_windows");
   const warmWindows = workflows["cache-windows.yml"];
-  for (const job of [releaseWindows, warmWindows]) {
+  for (const job of [releaseWindows, ...(warmWindows ? [warmWindows] : [])]) {
     assert.doesNotMatch(job, /Use clang-cl for Windows ARM native code/);
     assert.doesNotMatch(job, /CMAKE_GENERATOR=Ninja/);
   }
@@ -1670,37 +1679,38 @@ test("release documentation is built from the validated tag and promoted only af
   );
 });
 
-test("cache warming cannot access production credentials or publish", () => {
+test("cache warmer retirement preserves release cache isolation", () => {
   const cache = workflows["cache-macos.yml"];
-  assert.ok(cache);
-  assert.match(cache, /^on:\n  push:\n    branches: \[main\]/m);
-  assert.match(cache, /^  workflow_dispatch:$/m);
-  assert.doesNotMatch(cache, /^\s*pull_request(?:_target)?:/m);
-  assert.match(cache, /^  cargo-downloads:$/m);
-  assert.match(cache, /^    needs: cargo-downloads$/m);
-  assert.match(cache, /cargo fetch --locked --target aarch64-apple-darwin/);
-  assert.match(cache, /target: aarch64-apple-darwin/);
-  assert.match(cache, /target: x86_64-apple-darwin/);
-  assert.match(cache, /--target \$\{\{ matrix\.target \}\} --no-bundle --ci/);
-  assert.match(
-    cache,
-    /macos-release-target-v5-\$\{\{ matrix\.target \}\}-\$\{\{ hashFiles\('Cargo\.lock', 'rust-toolchain\.toml'\) \}\}-\$\{\{ github\.sha \}\}/,
-  );
-  assert.doesNotMatch(cache, /macos-release-target-v5-universal/);
-  assert.match(cache, /cancel-in-progress: false/);
-  assert.match(cache, /--no-bundle --ci/);
-  assert.match(cache, /continue-on-error: true/);
-  assert.doesNotMatch(cache, /^    environment:/m);
-  assert.doesNotMatch(cache, /secrets\./);
-  assert.doesNotMatch(cache, /APPLE_|TAURI_SIGNING|AWS_|DOWNLOADS_/);
-  assert.doesNotMatch(cache, /actions\/upload-artifact/);
-
-  for (const name of ["cache-macos.yml", "cache-windows.yml", "cache-linux.yml"]) {
-    assert.doesNotMatch(
-      workflows[name],
-      /restore-keys:/,
-      `${name} must compile against S3 instead of restoring an older target archive`,
+  if (cache) {
+    assert.match(cache, /^on:\n  push:\n    branches: \[main\]/m);
+    assert.match(cache, /^  workflow_dispatch:$/m);
+    assert.doesNotMatch(cache, /^\s*pull_request(?:_target)?:/m);
+    assert.match(cache, /^  cargo-downloads:$/m);
+    assert.match(cache, /^    needs: cargo-downloads$/m);
+    assert.match(cache, /cargo fetch --locked --target aarch64-apple-darwin/);
+    assert.match(cache, /target: aarch64-apple-darwin/);
+    assert.match(cache, /target: x86_64-apple-darwin/);
+    assert.match(cache, /--target \$\{\{ matrix\.target \}\} --no-bundle --ci/);
+    assert.match(
+      cache,
+      /macos-release-target-v5-\$\{\{ matrix\.target \}\}-\$\{\{ hashFiles\('Cargo\.lock', 'rust-toolchain\.toml'\) \}\}-\$\{\{ github\.sha \}\}/,
     );
+    assert.doesNotMatch(cache, /macos-release-target-v5-universal/);
+    assert.match(cache, /cancel-in-progress: false/);
+    assert.match(cache, /--no-bundle --ci/);
+    assert.match(cache, /continue-on-error: true/);
+    assert.doesNotMatch(cache, /^    environment:/m);
+    assert.doesNotMatch(cache, /secrets\./);
+    assert.doesNotMatch(cache, /APPLE_|TAURI_SIGNING|AWS_|DOWNLOADS_/);
+    assert.doesNotMatch(cache, /actions\/upload-artifact/);
+
+    for (const name of cacheWarmerNames) {
+      assert.doesNotMatch(
+        workflows[name],
+        /restore-keys:/,
+        `${name} must compile against S3 instead of restoring an older target archive`,
+      );
+    }
   }
 
   const release = workflows["release.yml"];
@@ -1716,7 +1726,7 @@ test("cache warming cannot access production credentials or publish", () => {
   assert.doesNotMatch(buildLinux, /actions\/cache\/restore@/);
   assert.doesNotMatch(buildLinux, /linux-release-target-v1-/);
 
-  for (const workflow of [cache, release]) {
+  for (const workflow of [release, ...(cache ? [cache] : [])]) {
     const downloadCaches = [
       ...workflow.matchAll(
         /- name: Cache Cargo downloads[\s\S]*?(?=\n\s+- (?:name:|uses:))/g,
@@ -1929,7 +1939,7 @@ test("cache archives never include bundles, signatures, or keychains", () => {
   // Only match `path:` blocks inside cache steps. The path list must not
   // cross a step boundary (a line starting with `      - name:` or
   // `      - uses:`), so filter out matches that span multiple steps.
-  for (const source of [release, cache]) {
+  for (const source of [release, ...(cache ? [cache] : [])]) {
     const cacheSteps = [...source.matchAll(
       /path: \|\n([\s\S]*?)\n\s+key: [$a-zA-Z]/g,
     )]
@@ -2299,7 +2309,9 @@ test("universal macOS release and staging packages contain both slices", () => {
   // and two sidecars, then gives the signed job the same universal archive
   // contract it consumed before the split.
   assertPerArchMacosCompile(releasePrepare, "prepare_macos");
-  assertPerArchMacosCompile(warm, "cache-macos.yml");
+  if (warm) {
+    assertPerArchMacosCompile(warm, "cache-macos.yml");
+  }
   assert.equal(
     releaseCombine.split("lipo -create").length - 1,
     3,
