@@ -35,7 +35,7 @@ const REVALIDATE: &str = "no-cache";
 /// Refuse a configured directory that cannot serve a page. Checked at bind,
 /// so an image that forgot to copy its bundle fails before it listens rather
 /// than answering every navigation with a `404`.
-pub(crate) fn verify(dist: &Path) -> Result<(), AgentError> {
+pub fn verify(dist: &Path) -> Result<(), AgentError> {
     let index = dist.join("index.html");
     if index.is_file() {
         return Ok(());
@@ -49,7 +49,7 @@ pub(crate) fn verify(dist: &Path) -> Result<(), AgentError> {
 
 /// The router fallback: a file from the bundle, `index.html` for a page
 /// navigation, and a `404` for everything else.
-pub(crate) async fn serve(dist: Arc<PathBuf>, request: Request) -> Response {
+pub async fn serve(dist: Arc<PathBuf>, request: Request) -> Response {
     if !matches!(*request.method(), Method::GET | Method::HEAD) {
         return StatusCode::NOT_FOUND.into_response();
     }

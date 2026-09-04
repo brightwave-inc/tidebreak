@@ -30,10 +30,10 @@ use tidebreak_core::{
 };
 
 /// Directory holding fork transcripts below the workspace's private root.
-pub(crate) const FORKS_DIR: &str = "forks";
+pub const FORKS_DIR: &str = "forks";
 
 /// The condensed transcript's file name inside a fork's directory.
-pub(crate) const SUMMARY_NAME: &str = "transcript.md";
+pub const SUMMARY_NAME: &str = "transcript.md";
 
 /// Largest condensed transcript written, in bytes. Bounds the whole file,
 /// header included.
@@ -84,16 +84,16 @@ fn fork_lock(
 }
 
 /// A session's turns sliced at a fork point.
-pub(crate) struct ForkCut<'a> {
+pub struct ForkCut<'a> {
     /// The turns the fork covers, oldest first, ending at the fork point.
-    pub(crate) turns: &'a [Turn],
+    pub turns: &'a [Turn],
     /// Turns of the session that ran after the fork point.
-    pub(crate) excluded: usize,
+    pub excluded: usize,
 }
 
 /// Why a requested fork does not name a settled turn boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ForkBoundaryError {
+pub enum ForkBoundaryError {
     /// The session has no turn to hand off.
     NoTurns,
     /// The requested turn does not belong to this session.
@@ -110,7 +110,7 @@ pub(crate) enum ForkBoundaryError {
 
 impl ForkBoundaryError {
     /// Stable HTTP error kind for this refusal.
-    pub(crate) const fn kind(self) -> &'static str {
+    pub const fn kind(self) -> &'static str {
         match self {
             Self::UnknownTurn => "fork_turn_not_found",
             Self::NoTurns
@@ -122,7 +122,7 @@ impl ForkBoundaryError {
     }
 
     /// Reader-facing recovery instruction.
-    pub(crate) fn message(self) -> String {
+    pub fn message(self) -> String {
         match self {
             Self::NoTurns => "this session has no completed turn to fork".to_owned(),
             Self::UnknownTurn => "that turn is not part of this session".to_owned(),
@@ -148,7 +148,7 @@ impl ForkBoundaryError {
 /// `None` forks at the newest turn. Returns `None` when `at_turn` names a
 /// turn that is not part of this session, which the route reports rather
 /// than silently forking the whole conversation.
-pub(crate) fn cut_at(turns: &[Turn], at_turn: Option<TurnId>) -> Option<ForkCut<'_>> {
+pub fn cut_at(turns: &[Turn], at_turn: Option<TurnId>) -> Option<ForkCut<'_>> {
     let Some(at) = at_turn else {
         return Some(ForkCut { turns, excluded: 0 });
     };
@@ -164,7 +164,7 @@ pub(crate) fn cut_at(turns: &[Turn], at_turn: Option<TurnId>) -> Option<ForkCut<
 /// A session-level fork means "everything accepted so far," so a queued
 /// follow-up blocks it. An explicit turn fork may leave later running or
 /// queued work behind because the reader selected that earlier seam.
-pub(crate) fn cut_at_settled_boundary<'a>(
+pub fn cut_at_settled_boundary<'a>(
     turns: &'a [Turn],
     boundary_status: Option<TurnStatus>,
     pending_approval_turns: &HashSet<TurnId>,
@@ -206,24 +206,24 @@ pub(crate) fn cut_at_settled_boundary<'a>(
 }
 
 /// A written fork, as the route reports it.
-pub(crate) struct WrittenTranscript {
+pub struct WrittenTranscript {
     /// Absolute path of the condensed transcript, in the form the composer
     /// shows and the engine opens.
-    pub(crate) path: String,
+    pub path: String,
     /// Absolute path of the fork's directory, holding the per-turn records
     /// and any retained attachments next to the transcript.
-    pub(crate) dir: String,
+    pub dir: String,
     /// Bytes of the condensed transcript on disk.
-    pub(crate) byte_len: u64,
+    pub byte_len: u64,
     /// Complete turn histories the condensed transcript renders in full.
-    pub(crate) turns: u32,
+    pub turns: u32,
     /// Turns the fork covers, up to and including the fork point.
-    pub(crate) total_turns: u32,
+    pub total_turns: u32,
     /// The fork point's ordinal, when the conversation continued past it.
-    pub(crate) at_turn_ordinal: Option<i64>,
+    pub at_turn_ordinal: Option<i64>,
     /// True when bounded replay omitted whole turn histories or the condensed
     /// transcript reduced content to fit [`MAX_TRANSCRIPT_BYTES`].
-    pub(crate) truncated: bool,
+    pub truncated: bool,
 }
 
 /// Render one fork and write its directory under private storage.

@@ -26,22 +26,22 @@ use super::trigger_target_at;
 
 /// Running-but-silent threshold. A periodic sweep applies
 /// [`AttentionState::Stalled`] past this many seconds.
-pub(crate) const STALL_IDLE_SECS: u32 = 90;
+pub const STALL_IDLE_SECS: u32 = 90;
 
 /// How often the stall sweep walks running sessions.
-pub(crate) const STALL_SWEEP_INTERVAL: Duration = Duration::from_secs(15);
+pub const STALL_SWEEP_INTERVAL: Duration = Duration::from_secs(15);
 const ACTIVITY_EVENT_WINDOW: u64 = 256;
 
 /// Most characters of a tool subject a digest carries. A rail row shows one
 /// line; anything longer is a script, not a label.
-pub(crate) const ACTIVITY_DETAIL_MAX_CHARS: usize = 120;
+pub const ACTIVITY_DETAIL_MAX_CHARS: usize = 120;
 
 /// The only function that may write attention onto a session value.
 ///
 /// `from_user` is the explicit pin/clear path: it may replace anything,
 /// including [`AttentionState::Manual`]. Automatic writes still go through
 /// [`tidebreak_core::should_replace`].
-pub(crate) fn replace_attention(session: &mut Session, next: Attention, from_user: bool) -> bool {
+pub fn replace_attention(session: &mut Session, next: Attention, from_user: bool) -> bool {
     if !from_user && !tidebreak_core::should_replace(&session.attention, &next) {
         return false;
     }
@@ -54,7 +54,7 @@ pub(crate) fn replace_attention(session: &mut Session, next: Attention, from_use
 
 /// Persist general session fields and route attention through its targeted
 /// row-locked write before publishing the stored digest.
-pub(crate) async fn persist_session(
+pub async fn persist_session(
     db: &DbStore,
     bus: &CodeEventBus,
     session: &Session,
@@ -78,7 +78,7 @@ pub(crate) async fn persist_session(
 
 /// Load, gate, persist, and publish. For callers that do not already hold
 /// the row (the stall sweep, the events-socket view signal, the user route).
-pub(crate) async fn apply_attention(
+pub async fn apply_attention(
     db: &DbStore,
     bus: &CodeEventBus,
     owner: &OwnerId,
@@ -102,7 +102,7 @@ pub(crate) async fn apply_attention(
 }
 
 /// Apply attention created by one durable trigger delivery.
-pub(crate) async fn apply_trigger_attention(
+pub async fn apply_trigger_attention(
     db: &DbStore,
     bus: &CodeEventBus,
     owner: &OwnerId,
@@ -134,7 +134,7 @@ pub(crate) async fn apply_trigger_attention(
 }
 
 /// Options for [`compute_attention`].
-pub(crate) struct ComputeOpts {
+pub struct ComputeOpts {
     /// Treat a completed turn as already reviewed (clear / view).
     pub reviewed: bool,
     pub now: DateTime<Utc>,
@@ -153,7 +153,7 @@ impl Default for ComputeOpts {
 
 /// Attention implied by current rows. Used to restore state after a user
 /// clear, never to second-guess a live Manual pin.
-pub(crate) async fn compute_attention(
+pub async fn compute_attention(
     db: &DbStore,
     bus: &CodeEventBus,
     session: &Session,
@@ -217,7 +217,7 @@ pub(crate) async fn compute_attention(
 
 /// Mark a session as viewed: a connected events socket clears
 /// [`AttentionState::DoneUnreviewed`].
-pub(crate) async fn mark_viewed(
+pub async fn mark_viewed(
     db: &DbStore,
     bus: &CodeEventBus,
     owner: &OwnerId,
@@ -247,7 +247,7 @@ pub(crate) async fn mark_viewed(
 
 /// User pin (`note`) or clear (restore computed, treating the session as
 /// reviewed so DoneUnreviewed does not bounce back).
-pub(crate) async fn user_set_attention(
+pub async fn user_set_attention(
     db: &DbStore,
     bus: &CodeEventBus,
     owner: &OwnerId,
@@ -281,7 +281,7 @@ pub(crate) async fn user_set_attention(
 }
 
 /// Walk running sessions and apply [`AttentionState::Stalled`] when silent.
-pub(crate) async fn sweep_stalled(
+pub async fn sweep_stalled(
     db: &DbStore,
     bus: &CodeEventBus,
     idle_secs: u32,
@@ -316,7 +316,7 @@ pub(crate) async fn sweep_stalled(
 /// common case — a session that is plainly working — returns without reading
 /// the row at all. The hint starts pessimistic and every read corrects it,
 /// so a wrong guess costs one query, never a missed clear.
-pub(crate) async fn note_activity(
+pub async fn note_activity(
     db: &DbStore,
     bus: &CodeEventBus,
     owner: &OwnerId,
@@ -348,7 +348,7 @@ pub(crate) async fn note_activity(
     Ok(())
 }
 
-pub(crate) async fn emit_digest(db: &DbStore, bus: &CodeEventBus, session: &Session) {
+pub async fn emit_digest(db: &DbStore, bus: &CodeEventBus, session: &Session) {
     match build_digest(db, session).await {
         Ok(digest) => {
             bus.publish_update(&session.owner, CodeLiveUpdate::Digest(Box::new(digest)));
@@ -361,7 +361,7 @@ pub(crate) async fn emit_digest(db: &DbStore, bus: &CodeEventBus, session: &Sess
     }
 }
 
-pub(crate) async fn emit_workspace_digests(
+pub async fn emit_workspace_digests(
     db: &DbStore,
     bus: &CodeEventBus,
     owner: &OwnerId,
@@ -384,7 +384,7 @@ pub(crate) async fn emit_workspace_digests(
 /// The owner's live session digests, restated on every `/updates`
 /// connection. Scoped: a subscriber never learns that another owner's session
 /// exists.
-pub(crate) async fn list_digests(
+pub async fn list_digests(
     db: &DbStore,
     owner: &OwnerId,
 ) -> Result<Vec<SessionDigest>, tidebreak_core::AgentError> {
@@ -649,10 +649,10 @@ async fn last_activity_at(
 }
 
 /// Abort the stall sweep when the runtime is dropped.
-pub(crate) struct StallSweepGuard(Option<tokio::task::JoinHandle<()>>);
+pub struct StallSweepGuard(Option<tokio::task::JoinHandle<()>>);
 
 impl StallSweepGuard {
-    pub(crate) fn spawn(db: std::sync::Arc<DbStore>, bus: std::sync::Arc<CodeEventBus>) -> Self {
+    pub fn spawn(db: std::sync::Arc<DbStore>, bus: std::sync::Arc<CodeEventBus>) -> Self {
         let handle = tokio::spawn(async move {
             let mut ticker = tokio::time::interval(STALL_SWEEP_INTERVAL);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);

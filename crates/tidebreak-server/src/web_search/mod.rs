@@ -36,7 +36,7 @@ pub use host::{
     WebSearchConfigInfo, WebSearchConfigUpdate, WebSearchCredentialReadiness,
     WebSearchCredentialsInfo, WebSearchMode, DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS, MIN_TIMEOUT_MS,
 };
-pub(crate) use host::{foreground_extract_tool, foreground_tool};
+pub use host::{foreground_extract_tool, foreground_tool};
 pub use http::{
     HttpClient, HttpGetRequest, HttpRequest, HttpResponse, OutboundOrigin, ReqwestHttpClient,
     MAX_HTTP_RESPONSE_BYTES,

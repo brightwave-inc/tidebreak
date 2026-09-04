@@ -131,7 +131,7 @@ impl ChatEventSender {
 impl EventBus {
     /// Mirror every journaled chat event onto the session bus. Called once,
     /// when the code runtime that owns the bus is assembled.
-    pub(crate) fn mirror_into(&self, bus: Arc<CodeEventBus>) {
+    pub fn mirror_into(&self, bus: Arc<CodeEventBus>) {
         let _ = self.mirror.set(bus);
     }
 

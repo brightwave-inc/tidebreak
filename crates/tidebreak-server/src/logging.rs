@@ -63,7 +63,8 @@ const DEFAULT_DIRECTIVES: &str = "warn,tidebreak_cli=info,tidebreak_code_deliver
     tidebreak_managed_node=info,\
     tidebreak_mcp=info,\
     tidebreak_router=info,tidebreak_sandbox_agent=info,tidebreak_sandbox_protocol=info,\
-    tidebreak_sandbox_runtime=info,tidebreak_server=info,tidebreak_shell_policy=info,\
+    tidebreak_sandbox_runtime=info,tidebreak_server=info,tidebreak_server_core=info,\
+    tidebreak_shell_policy=info,\
     tidebreak_supervised_agent=info,tidebreak_whisper=info,tidebreak_worker_runtime=info";
 
 /// Keep the structured file focused on purpose-built, payload-free events.
@@ -475,7 +476,20 @@ mod tests {
             if !entry.path().join("Cargo.toml").is_file() {
                 continue;
             }
-            let name = entry.file_name().to_string_lossy().replace('-', "_");
+            let manifest = std::fs::read_to_string(entry.path().join("Cargo.toml"))
+                .expect("read crate manifest");
+            let name = manifest
+                .lines()
+                .skip_while(|line| line.trim() != "[package]")
+                .skip(1)
+                .take_while(|line| !line.trim_start().starts_with('['))
+                .find_map(|line| {
+                    line.trim()
+                        .strip_prefix("name = \"")
+                        .and_then(|name| name.strip_suffix('"'))
+                })
+                .expect("workspace crate package name")
+                .replace('-', "_");
             if !listed.contains(name.as_str()) {
                 missing.push(name);
             }

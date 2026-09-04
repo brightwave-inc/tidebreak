@@ -28,7 +28,7 @@ const CHAT_FRAMES: { name: string; frame: ChatFrame }[] = JSON.parse(
   readFileSync(
     fileURLToPath(
       new URL(
-        "../../../tidebreak-server/fixtures/chat-frames.json",
+        "../../../tidebreak-server-api/fixtures/chat-frames.json",
         import.meta.url,
       ),
     ),

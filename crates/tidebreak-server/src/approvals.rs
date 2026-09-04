@@ -9,7 +9,9 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
+use ts_rs::TS;
 
 use tidebreak_core::code::SequencedEvent;
 use tidebreak_core::{
@@ -18,6 +20,49 @@ use tidebreak_core::{
     DecideToolApprovalOutcome, GrantLevel, GrantScope, JudgeVerdictOutcome,
     RequestToolApprovalOutcome, Result, SessionId, StandingGrant, StandingGrants, Store,
 };
+
+/// How wide a standing grant the human chose, narrowest first.
+///
+/// The renderer names a rung; the server builds the concrete grant from the
+/// arguments the call is parked on. A grant can therefore only ever describe
+/// the action that was actually under review.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalGrantRung {
+    /// Exactly the action the card showed.
+    ExactAction,
+    /// A leading run of the command's argv tokens, with any arguments after
+    /// it — "any `cargo test`", not just "any `cargo`".
+    CommandPrefix { tokens: usize },
+    /// A leading run of a workspace write's path segments — the file itself,
+    /// or the directory that holds it.
+    PathPrefix { segments: usize },
+    /// Every call to this tool.
+    WholeTool,
+}
+
+pub fn grant_rungs_from_scopes(
+    scopes: &[GrantScope],
+    action_is_exact: bool,
+) -> Vec<ApprovalGrantRung> {
+    scopes
+        .iter()
+        .filter_map(|scope| match scope {
+            GrantScope::ExactAction(_) if action_is_exact => Some(ApprovalGrantRung::ExactAction),
+            GrantScope::ExactAction(_) => None,
+            GrantScope::CommandPrefix { tokens } => Some(ApprovalGrantRung::CommandPrefix {
+                tokens: tokens.len(),
+            }),
+            GrantScope::PathSubtree { prefix } => Some(ApprovalGrantRung::PathPrefix {
+                segments: prefix.split('/').count(),
+            }),
+            GrantScope::WholeTool => Some(ApprovalGrantRung::WholeTool),
+            // Retained for old durable grants; the current ladder names the
+            // same authority as a one-token command prefix.
+            GrantScope::AnyArgsFor { .. } => Some(ApprovalGrantRung::CommandPrefix { tokens: 1 }),
+        })
+        .collect()
+}
 
 /// Coordinates durable approval state with local low-latency waiters.
 pub struct ApprovalBroker {
@@ -83,7 +128,7 @@ impl ApprovalBroker {
         chat_id: SessionId,
         call_id: CallId,
         decision: ApprovalDecision,
-        rung: Option<crate::routes::ApprovalGrantRung>,
+        rung: Option<ApprovalGrantRung>,
     ) -> Result<ResolveApprovalOutcome> {
         let Some(current) = self.store.get_tool_call_approval(call_id).await? else {
             return Ok(ResolveApprovalOutcome::NotPending);
@@ -283,11 +328,10 @@ pub enum ResolveApprovalOutcome {
 /// on. A narrow rung over an action the renderer could not describe has nothing
 /// to name, so it is refused rather than widened.
 fn grant_scope(
-    rung: crate::routes::ApprovalGrantRung,
+    rung: ApprovalGrantRung,
     action: Option<&tidebreak_core::ToolActionPreview>,
     action_is_exact: bool,
 ) -> Option<GrantScope> {
-    use crate::routes::ApprovalGrantRung;
     use tidebreak_core::ToolActionPreview;
     // A narrow rung names the action, and the preview it would be named from is
     // clamped for display. Naming one from a clamped preview would authorize
@@ -768,7 +812,7 @@ mod tests {
                     request.chat_id,
                     request.call_id,
                     ApprovalDecision::Approve,
-                    Some(crate::routes::ApprovalGrantRung::WholeTool),
+                    Some(ApprovalGrantRung::WholeTool),
                 )
                 .await
                 .unwrap(),
@@ -848,7 +892,7 @@ mod tests {
                     request.call_id,
                     ApprovalDecision::Approve,
                     // Two tokens: `cargo test`.
-                    Some(crate::routes::ApprovalGrantRung::CommandPrefix { tokens: 2 }),
+                    Some(ApprovalGrantRung::CommandPrefix { tokens: 2 }),
                 )
                 .await
                 .unwrap(),
@@ -889,7 +933,7 @@ mod tests {
                     request.call_id,
                     ApprovalDecision::Approve,
                     // The ladder offers 1 and 2 tokens; 9 is not on it.
-                    Some(crate::routes::ApprovalGrantRung::CommandPrefix { tokens: 9 }),
+                    Some(ApprovalGrantRung::CommandPrefix { tokens: 9 }),
                 )
                 .await
                 .unwrap(),
@@ -910,7 +954,7 @@ mod tests {
                     request.chat_id,
                     request.call_id,
                     ApprovalDecision::Approve,
-                    Some(crate::routes::ApprovalGrantRung::WholeTool),
+                    Some(ApprovalGrantRung::WholeTool),
                 )
                 .await
                 .unwrap(),
@@ -1061,7 +1105,7 @@ mod tests {
                     request.chat_id,
                     request.call_id,
                     ApprovalDecision::Approve,
-                    Some(crate::routes::ApprovalGrantRung::WholeTool),
+                    Some(ApprovalGrantRung::WholeTool),
                 )
                 .await
                 .unwrap(),
@@ -1088,7 +1132,7 @@ mod tests {
                     first_request.chat_id,
                     first_request.call_id,
                     ApprovalDecision::Approve,
-                    Some(crate::routes::ApprovalGrantRung::ExactAction),
+                    Some(ApprovalGrantRung::ExactAction),
                 )
                 .await
                 .unwrap(),
@@ -1168,7 +1212,7 @@ mod tests {
                     request.chat_id,
                     request.call_id,
                     ApprovalDecision::Approve,
-                    Some(crate::routes::ApprovalGrantRung::WholeTool),
+                    Some(ApprovalGrantRung::WholeTool),
                 )
                 .await
                 .unwrap(),
@@ -1207,7 +1251,7 @@ mod tests {
                     request.chat_id,
                     request.call_id,
                     ApprovalDecision::Approve,
-                    Some(crate::routes::ApprovalGrantRung::ExactAction),
+                    Some(ApprovalGrantRung::ExactAction),
                 )
                 .await
                 .unwrap(),
@@ -1258,7 +1302,7 @@ mod tests {
                     request.chat_id,
                     request.call_id,
                     ApprovalDecision::Approve,
-                    Some(crate::routes::ApprovalGrantRung::WholeTool),
+                    Some(ApprovalGrantRung::WholeTool),
                 )
                 .await
                 .unwrap(),
@@ -1271,7 +1315,7 @@ mod tests {
                     request.chat_id,
                     request.call_id,
                     ApprovalDecision::Approve,
-                    Some(crate::routes::ApprovalGrantRung::PathPrefix { segments: 3 }),
+                    Some(ApprovalGrantRung::PathPrefix { segments: 3 }),
                 )
                 .await
                 .unwrap(),
@@ -1284,7 +1328,7 @@ mod tests {
                     request.chat_id,
                     request.call_id,
                     ApprovalDecision::Approve,
-                    Some(crate::routes::ApprovalGrantRung::PathPrefix { segments: 1 }),
+                    Some(ApprovalGrantRung::PathPrefix { segments: 1 }),
                 )
                 .await
                 .unwrap(),
@@ -1343,7 +1387,7 @@ mod tests {
                     request.chat_id,
                     request.call_id,
                     ApprovalDecision::Approve,
-                    Some(crate::routes::ApprovalGrantRung::ExactAction),
+                    Some(ApprovalGrantRung::ExactAction),
                 )
                 .await
                 .unwrap(),
@@ -1388,7 +1432,7 @@ mod tests {
                     request.chat_id,
                     request.call_id,
                     ApprovalDecision::Approve,
-                    Some(crate::routes::ApprovalGrantRung::ExactAction),
+                    Some(ApprovalGrantRung::ExactAction),
                 )
                 .await
                 .unwrap(),
@@ -1425,7 +1469,7 @@ mod tests {
                     request.chat_id,
                     request.call_id,
                     ApprovalDecision::Approve,
-                    Some(crate::routes::ApprovalGrantRung::CommandPrefix { tokens: 1 }),
+                    Some(ApprovalGrantRung::CommandPrefix { tokens: 1 }),
                 )
                 .await
                 .unwrap(),
@@ -1448,7 +1492,7 @@ mod tests {
                     request.chat_id,
                     request.call_id,
                     ApprovalDecision::Approve,
-                    Some(crate::routes::ApprovalGrantRung::ExactAction),
+                    Some(ApprovalGrantRung::ExactAction),
                 )
                 .await
                 .unwrap(),
@@ -1477,10 +1521,7 @@ mod tests {
         let broker = ApprovalBroker::new(store.clone());
         let _pending = broker.register(request.clone(), None).await;
 
-        for rung in [
-            crate::routes::ApprovalGrantRung::ExactAction,
-            crate::routes::ApprovalGrantRung::WholeTool,
-        ] {
+        for rung in [ApprovalGrantRung::ExactAction, ApprovalGrantRung::WholeTool] {
             assert_eq!(
                 broker
                     .resolve_with_grant(
@@ -1529,7 +1570,7 @@ mod tests {
                     request.chat_id,
                     request.call_id,
                     ApprovalDecision::Approve,
-                    Some(crate::routes::ApprovalGrantRung::WholeTool),
+                    Some(ApprovalGrantRung::WholeTool),
                 )
                 .await
                 .unwrap(),

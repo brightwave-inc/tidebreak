@@ -110,7 +110,7 @@ impl CodeRuntime {
         }
     }
 
-    pub(crate) async fn recover(&self) -> Result<Vec<RecoveryAction>, ServerError> {
+    pub async fn recover(&self) -> Result<Vec<RecoveryAction>, ServerError> {
         self.ensure_stall_sweep();
         let mut actions = Vec::new();
         let mut recovery_owners = list_sessions_all_owners(&self.db)

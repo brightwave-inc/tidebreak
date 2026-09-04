@@ -105,7 +105,7 @@ crates/tidebreak-server/src/code/   (the spine, not the whole directory)
   browser_runtime.rs the server↔desktop browser adapter boundary (0054)
   terminal.rs        PTY shells, ring buffers, cursor reads (0036)
   bus.rs             per-session broadcast + install-wide updates channel
-crates/tidebreak-server/src/routes/code/      repos, workspaces, sessions,
+crates/tidebreak-server-api/src/routes/code/  repos, workspaces, sessions,
                                               session_events, updates, approvals,
                                               git, terminals, harnesses, triggers,
                                               delivery, analytics, usage, browser, llm

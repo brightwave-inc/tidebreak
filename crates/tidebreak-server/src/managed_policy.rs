@@ -64,7 +64,7 @@ const MANAGED_ALLOW_LOCAL_MCP_KEY: &str = "AllowLocalMcpServers";
 /// Which authority asserted the active policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum ManagedPolicySource {
+pub enum ManagedPolicySource {
     /// OS-managed device policy (MDM); not removable by the user in place.
     Os,
     /// Sticky state written when the app was paired with a gateway.
@@ -76,11 +76,11 @@ pub(crate) enum ManagedPolicySource {
 /// Renderer-safe resolved policy. Carries only what surfaces need to render
 /// managed state: the verdict, the locked gateway URL, and its authority.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
-pub(crate) struct ManagedPolicy {
-    pub(crate) managed: bool,
+pub struct ManagedPolicy {
+    pub managed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
-    pub(crate) gateway_url: Option<String>,
+    pub gateway_url: Option<String>,
     /// The gateway a hosted deployment authenticates its own callers against
     /// (`docs/decisions/0049-gateway-authenticated-hosted-machines.md`).
     ///
@@ -98,13 +98,13 @@ pub(crate) struct ManagedPolicy {
     /// still wins (decision 51, rule 3).
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
-    pub(crate) hosted_gateway_url: Option<String>,
-    pub(crate) source: ManagedPolicySource,
+    pub hosted_gateway_url: Option<String>,
+    pub source: ManagedPolicySource,
     /// True when `source` asserted management but its gateway URL is missing,
     /// unreadable, or invalid. The profile stays managed with no usable URL —
     /// fail closed — and surfaces can name the authority that needs repair
     /// instead of showing an opaque error.
-    pub(crate) misconfigured: bool,
+    pub misconfigured: bool,
     /// A deep-link pairing awaiting the sign-in that is its consent. Runtime
     /// state merged in by the `/policy` route from [`GatewayRuntime`]
     /// (crate::gateway_runtime), never part of the durable resolution —
@@ -112,7 +112,7 @@ pub(crate) struct ManagedPolicy {
     /// profile is unmanaged.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
-    pub(crate) pending_gateway_url: Option<String>,
+    pub pending_gateway_url: Option<String>,
     /// The highest permission mode any chat may run under, when the OS policy
     /// asserts one. A ceiling, not a fixed mode: the reader may always pick a
     /// stricter mode, and clearing back to the default is always allowed.
@@ -120,12 +120,12 @@ pub(crate) struct ManagedPolicy {
     /// the profile is otherwise unmanaged.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
-    pub(crate) permission_mode_ceiling: Option<PermissionMode>,
+    pub permission_mode_ceiling: Option<PermissionMode>,
     /// True when the OS policy explicitly allows local stdio MCP servers on a
     /// managed profile. False by default — the managed lockdown covers every
     /// manual transport unless the organization opts in — and carries no
     /// meaning while unmanaged, where nothing is locked to begin with.
-    pub(crate) allow_local_mcp_servers: bool,
+    pub allow_local_mcp_servers: bool,
 }
 
 impl ManagedPolicy {
@@ -147,10 +147,7 @@ impl ManagedPolicy {
     /// Clamp a chat's stored mode to the asserted ceiling. `None` reads as
     /// the default (`Ask`), same as everywhere else the stored mode is
     /// interpreted, so a ceiling below the default binds unset chats too.
-    pub(crate) fn clamp_permission_mode(
-        &self,
-        mode: Option<PermissionMode>,
-    ) -> Option<PermissionMode> {
+    pub fn clamp_permission_mode(&self, mode: Option<PermissionMode>) -> Option<PermissionMode> {
         match self.permission_mode_ceiling {
             Some(ceiling) if mode.unwrap_or(PermissionMode::Ask) > ceiling => Some(ceiling),
             _ => mode,
@@ -158,13 +155,13 @@ impl ManagedPolicy {
     }
 
     /// Whether the reader may select `mode` under this policy.
-    pub(crate) fn permits_permission_mode(&self, mode: PermissionMode) -> bool {
+    pub fn permits_permission_mode(&self, mode: PermissionMode) -> bool {
         self.permission_mode_ceiling
             .is_none_or(|ceiling| mode <= ceiling)
     }
 
     /// True when an asserted ceiling leaves `offered` empty.
-    pub(crate) fn permission_mode_ceiling_excludes_all(
+    pub fn permission_mode_ceiling_excludes_all(
         ceiling: Option<PermissionMode>,
         offered: impl IntoIterator<Item = PermissionMode>,
     ) -> bool {
@@ -178,7 +175,7 @@ impl ManagedPolicy {
 /// An OS-managed policy reader. One per platform — macOS managed preferences,
 /// Windows registry policy, Linux policy file — selected at boot by
 /// [`platform_source`].
-pub(crate) trait OsPolicySource: Send + Sync {
+pub trait OsPolicySource: Send + Sync {
     /// The OS-asserted gateway base URL, when the platform declares one.
     ///
     /// `Ok(None)` means the platform asserts no policy. `Err` means a policy
@@ -206,7 +203,7 @@ pub(crate) trait OsPolicySource: Send + Sync {
 
 /// The source that asserts nothing: non-desktop platforms, embeddings without
 /// a policy domain, and directly assembled test state.
-pub(crate) struct NoOsPolicy;
+pub struct NoOsPolicy;
 
 impl OsPolicySource for NoOsPolicy {
     fn gateway_url(&self) -> Result<Option<String>> {
@@ -223,7 +220,7 @@ impl OsPolicySource for NoOsPolicy {
 /// every reader sees the same record. The trait is deliberately synchronous,
 /// like the OS readers: the artifacts are tiny local files read on every
 /// resolution.
-pub(crate) trait ProvisionedPolicySource: Send + Sync {
+pub trait ProvisionedPolicySource: Send + Sync {
     /// The provisioned gateway URL on record, or `None` when the profile was
     /// never paired (or was deprovisioned). `Err` means an artifact exists
     /// but cannot be read or decoded — [`resolve`] projects that as a
@@ -250,13 +247,13 @@ pub(crate) trait ProvisionedPolicySource: Send + Sync {
 /// guarantees it) and every write is serialized under the pairing lock, so
 /// the read-modify-write in [`provision`]/[`reprovision`]/[`deprovision`]
 /// needs no wider transaction.
-pub(crate) struct ProvisionedPolicyFile {
+pub struct ProvisionedPolicyFile {
     path: PathBuf,
 }
 
 impl ProvisionedPolicyFile {
     /// The production home: `{data_dir}/gateway-policy.json`.
-    pub(crate) fn in_data_dir(data_dir: &Path) -> Self {
+    pub fn in_data_dir(data_dir: &Path) -> Self {
         Self {
             path: data_dir.join(PROVISIONED_POLICY_FILE),
         }
@@ -264,7 +261,7 @@ impl ProvisionedPolicyFile {
 
     /// Test seam: an explicit path.
     #[cfg(test)]
-    pub(crate) fn at(path: impl Into<PathBuf>) -> Self {
+    pub fn at(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
     }
 }
@@ -313,18 +310,18 @@ impl ProvisionedPolicySource for ProvisionedPolicyFile {
 /// The in-memory provisioned-policy source for tests: the same trait with no
 /// disk, so a test can drive provision/reprovision/deprovision and resolution
 /// without a data directory.
-#[cfg(test)]
-pub(crate) struct MemoryProvisionedPolicy(std::sync::Mutex<Option<String>>);
+#[cfg(any(test, feature = "test-support"))]
+pub struct MemoryProvisionedPolicy(std::sync::Mutex<Option<String>>);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl MemoryProvisionedPolicy {
     /// An empty source — the never-paired state.
-    pub(crate) fn new() -> Arc<Self> {
+    pub fn new() -> Arc<Self> {
         Arc::new(Self(std::sync::Mutex::new(None)))
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl ProvisionedPolicySource for MemoryProvisionedPolicy {
     fn read(&self) -> Result<Option<String>> {
         Ok(self.0.lock().unwrap().clone())
@@ -391,7 +388,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 /// construction, so directly assembled state (tests, custom embedders) stays
 /// hermetic and reads nothing from the host OS.
 #[cfg(target_os = "macos")]
-pub(crate) fn platform_source(config: &Config) -> Arc<dyn OsPolicySource> {
+pub fn platform_source(config: &Config) -> Arc<dyn OsPolicySource> {
     // Managed preferences are keyed by the embedding's bundle id; an
     // embedding without one (the CLI, tests) has no policy domain to read.
     match &config.bundle_id {
@@ -401,17 +398,17 @@ pub(crate) fn platform_source(config: &Config) -> Arc<dyn OsPolicySource> {
 }
 
 #[cfg(windows)]
-pub(crate) fn platform_source(_config: &Config) -> Arc<dyn OsPolicySource> {
+pub fn platform_source(_config: &Config) -> Arc<dyn OsPolicySource> {
     Arc::new(RegistryPolicySource)
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn platform_source(_config: &Config) -> Arc<dyn OsPolicySource> {
+pub fn platform_source(_config: &Config) -> Arc<dyn OsPolicySource> {
     Arc::new(PolicyFileSource::at("/etc/tidebreak/managed-policy.json"))
 }
 
 #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
-pub(crate) fn platform_source(_config: &Config) -> Arc<dyn OsPolicySource> {
+pub fn platform_source(_config: &Config) -> Arc<dyn OsPolicySource> {
     Arc::new(NoOsPolicy)
 }
 
@@ -424,7 +421,7 @@ pub(crate) fn platform_source(_config: &Config) -> Arc<dyn OsPolicySource> {
 /// and testable; the user channel is consulted first, matching the
 /// framework's search order.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub(crate) struct ManagedPreferencesSource {
+pub struct ManagedPreferencesSource {
     /// Candidate plist paths in precedence order.
     paths: Vec<PathBuf>,
     /// The uid a channel plist must be owned by to be honored — root in
@@ -436,7 +433,7 @@ pub(crate) struct ManagedPreferencesSource {
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 impl ManagedPreferencesSource {
-    pub(crate) fn for_bundle_id(bundle_id: &str) -> Self {
+    pub fn for_bundle_id(bundle_id: &str) -> Self {
         let root = PathBuf::from("/Library/Managed Preferences");
         let mut paths = Vec::new();
         // The user channel is scoped by the *effective* uid's account name,
@@ -687,7 +684,7 @@ fn allow_local_mcp_from_managed_plist(bytes: &[u8]) -> Result<Option<bool>> {
 /// portable seam, so only the value check ([`asserted_gateway_url`]) is
 /// unit-tested and this reader stays a thin shell over `winreg`.
 #[cfg(windows)]
-pub(crate) struct RegistryPolicySource;
+pub struct RegistryPolicySource;
 
 /// Read one string value from the machine policy key. An absent key or
 /// absent value asserts no policy for that name.
@@ -743,13 +740,13 @@ impl OsPolicySource for RegistryPolicySource {
 /// `/etc/tidebreak/managed-policy.json`; the reader itself is portable so its
 /// whole contract is testable on any OS.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-pub(crate) struct PolicyFileSource {
+pub struct PolicyFileSource {
     path: PathBuf,
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 impl PolicyFileSource {
-    pub(crate) fn at(path: impl Into<PathBuf>) -> Self {
+    pub fn at(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
     }
 }
@@ -892,7 +889,7 @@ struct ProvisionedPolicy {
 /// Both artifacts are read on every call, deliberately: an MDM push or
 /// removal — or a pairing commit — becomes visible on the next `/policy`
 /// read without an app restart, and the artifacts are tiny.
-pub(crate) fn resolve(
+pub fn resolve(
     provisioned: &dyn ProvisionedPolicySource,
     os_policy: &dyn OsPolicySource,
 ) -> Result<ManagedPolicy> {
@@ -918,7 +915,7 @@ pub(crate) fn resolve(
 /// than failing the profile closed: the deployment is already up and
 /// authenticating callers against it, so a URL this side cannot render is a
 /// display fault, not an authority in need of repair.
-pub(crate) fn resolve_with_deployment(
+pub fn resolve_with_deployment(
     provisioned: &dyn ProvisionedPolicySource,
     os_policy: &dyn OsPolicySource,
     hosted_gateway_url: Option<&str>,
@@ -1032,7 +1029,7 @@ fn asserted(source: ManagedPolicySource, gateway_url: &str) -> ManagedPolicy {
 /// The one gateway-URL contract for every policy authority: http/https, no
 /// embedded credentials, normalized to the parsed form. Shared with the
 /// provider write path so a locked base URL compares in the same shape.
-pub(crate) fn validated_gateway_url(gateway_url: &str) -> Result<String> {
+pub fn validated_gateway_url(gateway_url: &str) -> Result<String> {
     Ok(crate::connectors::GatewayAuthConfig::new(gateway_url)?
         .base_url()
         .to_string())
@@ -1047,10 +1044,7 @@ pub(crate) fn validated_gateway_url(gateway_url: &str) -> Result<String> {
 /// a real product flow, but it runs through [`reprovision`] — which demands
 /// the caller name the policy it believes it is replacing — never through
 /// this write path.
-pub(crate) fn provision(
-    provisioned: &dyn ProvisionedPolicySource,
-    gateway_url: &str,
-) -> Result<()> {
+pub fn provision(provisioned: &dyn ProvisionedPolicySource, gateway_url: &str) -> Result<()> {
     let gateway_url = validated_gateway_url(gateway_url)?;
     if let Some(existing) = provisioned_url(provisioned)? {
         if existing == gateway_url {
@@ -1070,7 +1064,7 @@ pub(crate) fn provision(
 /// because the consent on record was given against a different state.
 /// Callers serialize the read-check-write under the pairing lock; this check
 /// is the belt to that suspender, and the part a unit seam can hold still.
-pub(crate) fn reprovision(
+pub fn reprovision(
     provisioned: &dyn ProvisionedPolicySource,
     new_url: &str,
     expected_current: &str,
@@ -1093,7 +1087,7 @@ pub(crate) fn reprovision(
 ///
 /// The OS authority is untouched by design: resolution precedence means an
 /// MDM-asserted gateway still wins after the file underneath is gone.
-pub(crate) fn deprovision(
+pub fn deprovision(
     provisioned: &dyn ProvisionedPolicySource,
     expected_current: &str,
 ) -> Result<()> {
@@ -1112,7 +1106,7 @@ pub(crate) fn deprovision(
 /// pairing pre-check must agree with that judgment. (Resolution itself fails
 /// closed instead — see [`resolve_gateway`] — because an unreadable policy
 /// must never render as the open experience.)
-pub(crate) fn provisioned_url(provisioned: &dyn ProvisionedPolicySource) -> Result<Option<String>> {
+pub fn provisioned_url(provisioned: &dyn ProvisionedPolicySource) -> Result<Option<String>> {
     match provisioned.read() {
         Ok(gateway_url) => Ok(gateway_url),
         Err(error) => {
@@ -1141,7 +1135,7 @@ pub(crate) fn provisioned_url(provisioned: &dyn ProvisionedPolicySource) -> Resu
 /// path retires gateway sessions the policy no longer stands behind, so
 /// booting with the policy silently lost would destroy the very state this
 /// import exists to preserve.
-pub(crate) async fn import_legacy_setting(
+pub async fn import_legacy_setting(
     provisioned: &dyn ProvisionedPolicySource,
     store: &dyn Store,
 ) -> Result<()> {

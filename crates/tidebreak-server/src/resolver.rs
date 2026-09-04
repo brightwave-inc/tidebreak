@@ -114,7 +114,7 @@ impl ConfiguredResolver {
     /// Only a gateway-authenticated hosted machine supplies one. Every other
     /// deployment leaves this unset and keeps its configured providers.
     #[must_use]
-    pub(crate) fn with_on_behalf_of_gateway(
+    pub fn with_on_behalf_of_gateway(
         mut self,
         on_behalf_of: Option<Arc<crate::obo_gateway::OboGateway>>,
     ) -> Self {

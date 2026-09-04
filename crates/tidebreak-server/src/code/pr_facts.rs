@@ -32,7 +32,7 @@ use tidebreak_shell_policy::simple_command_argvs;
 
 use super::delivery::{git_read, parse_repository_input, repository_target_from_path};
 use super::gh::{list_pull_requests_for_head_raw, view_pull_request_raw};
-use crate::routes::code::types::CodeGitHubRepositoryTarget;
+use crate::code::types::CodeGitHubRepositoryTarget;
 
 /// Journal tail read per turn. A turn longer than this loses its earliest
 /// commands to the detector; the reconcile sweep is the backstop.
@@ -81,7 +81,7 @@ struct PushAct {
 /// push moves the head the watch assesses, and nothing else dirties the row
 /// for it: without the mark the next assessment reads a pre-push head, calls
 /// its own fix turn a repeat, and parks the watch.
-pub(crate) async fn sweep_turn_for_pull_request_acts(
+pub async fn sweep_turn_for_pull_request_acts(
     db: &DbStore,
     session: &Session,
     turn_id: TurnId,

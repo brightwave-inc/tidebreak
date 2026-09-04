@@ -44,7 +44,7 @@ const CAPFILE_SUBDIR: &str = "browser-caps";
 
 /// The `{owner, workspace, session}` subject derived from a token look-up.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct BrowserSubject {
+pub struct BrowserSubject {
     pub owner: OwnerId,
     pub workspace: WorkspaceId,
     pub session: SessionId,
@@ -75,7 +75,7 @@ struct RegistryState {
 /// held across capfile write + map commit so revoke cannot interleave.
 /// Startup synchronously deletes every stale capfile before any issuance
 /// can run.
-pub(crate) struct BrowserTokenRegistry {
+pub struct BrowserTokenRegistry {
     state: Mutex<RegistryState>,
     /// Absolute path to the data-dir subtree that holds capfiles. Resolved
     /// at construction time and proven free of symlink traversal.
@@ -90,7 +90,7 @@ impl BrowserTokenRegistry {
     /// The capfile directory is `{data_dir}/browser-caps`, resolved to a
     /// lexical absolute path proven not to traverse a symlink outside the
     /// trusted data-dir subtree. Returns an error if resolution fails.
-    pub(crate) fn new(data_dir: &Path) -> Result<Self, String> {
+    pub fn new(data_dir: &Path) -> Result<Self, String> {
         let joined = data_dir.join(CAPFILE_SUBDIR);
         let capfile_dir = resolve_absolute_trusted(&joined)?;
         Ok(Self {
@@ -105,7 +105,7 @@ impl BrowserTokenRegistry {
 
     /// Publish the bound loopback base so later [`Self::issue`] calls can
     /// write it into the capfile endpoint.
-    pub(crate) fn set_loopback_base(&self, base: &str) {
+    pub fn set_loopback_base(&self, base: &str) {
         *self.loopback_base.lock().expect("loopback base") =
             Some(base.trim_end_matches('/').into());
     }
@@ -114,7 +114,7 @@ impl BrowserTokenRegistry {
     ///
     /// Must run at startup before any session is recovered or created.
     /// Returns an error on any failure — the caller must fail closed.
-    pub(crate) fn delete_all_stale_capfiles(&self) -> Result<(), String> {
+    pub fn delete_all_stale_capfiles(&self) -> Result<(), String> {
         // Remove the entire subtree including unknown files, subdirs, and
         // leftover temp files.
         match std::fs::remove_dir_all(&self.capfile_dir) {
@@ -162,8 +162,8 @@ impl BrowserTokenRegistry {
     /// Returns an error if the loopback base has not been set, the bridge
     /// command is not absolute, or the capfile cannot be written. On error
     /// no state is committed.
-    #[cfg(test)]
-    pub(crate) fn issue(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn issue(
         &self,
         subject: BrowserSubject,
         bridge_command: &Path,
@@ -172,7 +172,7 @@ impl BrowserTokenRegistry {
     }
 
     /// Mint a channel and record whether its runtime supports native actions.
-    pub(crate) fn issue_with_semantic_actions(
+    pub fn issue_with_semantic_actions(
         &self,
         subject: BrowserSubject,
         bridge_command: &Path,
@@ -239,7 +239,7 @@ impl BrowserTokenRegistry {
     }
 
     /// Return the subject for an inbound browser bearer token, or `None`.
-    pub(crate) fn subject_for_token(&self, token: &str) -> Option<BrowserSubject> {
+    pub fn subject_for_token(&self, token: &str) -> Option<BrowserSubject> {
         self.state
             .lock()
             .expect("browser registry")
@@ -257,7 +257,7 @@ impl BrowserTokenRegistry {
     /// Returns the [`BrowserSubject`] that was mapped to the revoked
     /// session so the caller can derive an adapter scope, or `None` if
     /// the session was not found (idempotent).
-    pub(crate) fn revoke(&self, session_id: SessionId) -> Option<BrowserSubject> {
+    pub fn revoke(&self, session_id: SessionId) -> Option<BrowserSubject> {
         let mut state = self.state.lock().expect("browser registry");
         match state.by_session.remove(&session_id) {
             Some(entry) => {
@@ -270,8 +270,8 @@ impl BrowserTokenRegistry {
     }
 
     /// The data-dir subtree where capfiles live (for tests).
-    #[cfg(test)]
-    pub(crate) fn capfile_dir(&self) -> &Path {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn capfile_dir(&self) -> &Path {
         &self.capfile_dir
     }
 }
@@ -452,8 +452,8 @@ fn write_capfile(
 /// stays correct on both hosts. The server never opens this path — the
 /// desktop sibling resolver owns existence and executability — so the
 /// target does not have to exist.
-#[cfg(test)]
-pub(crate) fn test_bridge_command() -> PathBuf {
+#[cfg(any(test, feature = "test-support"))]
+pub fn test_bridge_command() -> PathBuf {
     if cfg!(windows) {
         PathBuf::from(r"C:\Program Files\Tidebreak\tidebreak.exe")
     } else {

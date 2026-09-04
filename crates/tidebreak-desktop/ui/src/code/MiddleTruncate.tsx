@@ -4,7 +4,7 @@ import { cn } from "@/lib/utils";
  * A command, path, or branch that keeps its tail when the row runs out of room.
  *
  * The unique part of a path is its end, so an end-truncated
- * `crates/tidebreak-server/src/routes/…` tells a reader nothing they did not
+ * `crates/tidebreak-server-api/src/routes/…` tells a reader nothing they did not
  * already know. This keeps a tail proportional to the string and lets the head
  * take whatever space is left, so the same name reads the same way in a 200px
  * rail and a full-width panel — no character cap, no per-site tuning.

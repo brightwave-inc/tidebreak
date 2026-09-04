@@ -11,9 +11,9 @@ use tidebreak_router::BearerTokenSource;
 use crate::managed_policy::{OsPolicySource, ProvisionedPolicySource};
 use crate::providers;
 
-pub(crate) use runtime::{GatewayApps, GatewayMachineOffer, GatewayStatus};
+pub use runtime::{GatewayApps, GatewayMachineOffer, GatewayStatus};
 #[cfg(test)]
-pub(crate) use runtime::{SignInProgress, GATEWAY_STATE_WRITES};
+pub use runtime::{SignInProgress, GATEWAY_STATE_WRITES};
 
 #[cfg(test)]
 use crate::providers::CustomModelConfig;
@@ -231,7 +231,7 @@ impl runtime::GatewayPairingCommit for PairingCommitAdapter {
     }
 }
 
-pub(crate) struct GatewayRuntime {
+pub struct GatewayRuntime {
     inner: Arc<runtime::GatewayRuntime>,
     store: Arc<dyn Store>,
     pub(super) secrets: Arc<dyn SecretProvider>,
@@ -242,7 +242,7 @@ pub(crate) struct GatewayRuntime {
 }
 
 impl GatewayRuntime {
-    pub(crate) fn new(
+    pub fn new(
         store: Arc<dyn Store>,
         secrets: Arc<dyn SecretProvider>,
         provisioned_policy: Arc<dyn ProvisionedPolicySource>,
@@ -269,11 +269,11 @@ impl GatewayRuntime {
         })
     }
 
-    pub(crate) fn provisioned_policy(&self) -> &Arc<dyn ProvisionedPolicySource> {
+    pub fn provisioned_policy(&self) -> &Arc<dyn ProvisionedPolicySource> {
         &self.provisioned_policy
     }
 
-    pub(crate) fn policy(&self) -> Result<crate::managed_policy::ManagedPolicy> {
+    pub fn policy(&self) -> Result<crate::managed_policy::ManagedPolicy> {
         crate::managed_policy::resolve(&*self.provisioned_policy, &*self.os_policy)
     }
 
@@ -303,7 +303,7 @@ impl GatewayRuntime {
     #[cfg(not(test))]
     async fn install_sync_pause(&self) {}
 
-    pub(crate) async fn register_pending_pairing(
+    pub async fn register_pending_pairing(
         &self,
         base_url: String,
         mcp: Arc<crate::mcp_config::McpRuntime>,
@@ -319,37 +319,35 @@ impl GatewayRuntime {
             .await;
     }
 
-    pub(crate) async fn pending_pairing_url(&self) -> Option<String> {
+    pub async fn pending_pairing_url(&self) -> Option<String> {
         self.inner.pending_pairing_url().await
     }
 
-    pub(crate) async fn dismiss_pending_pairing(&self) {
+    pub async fn dismiss_pending_pairing(&self) {
         self.inner.dismiss_pending_pairing().await;
     }
 
-    pub(crate) async fn status(&self) -> Result<GatewayStatus> {
+    pub async fn status(&self) -> Result<GatewayStatus> {
         self.inner.status().await
     }
 
-    pub(crate) async fn offered_machine(&self) -> GatewayMachineOffer {
+    pub async fn offered_machine(&self) -> GatewayMachineOffer {
         self.inner.offered_machine().await
     }
 
-    pub(crate) async fn begin_sign_in(
+    pub async fn begin_sign_in(
         self: &Arc<Self>,
         mcp: Arc<crate::mcp_config::McpRuntime>,
     ) -> Result<String> {
         self.inner.begin_sign_in(Self::mcp_adapter(mcp)).await
     }
 
-    pub(crate) async fn lock_model_authority_mutation(
-        &self,
-    ) -> tokio::sync::OwnedRwLockWriteGuard<()> {
+    pub async fn lock_model_authority_mutation(&self) -> tokio::sync::OwnedRwLockWriteGuard<()> {
         self.inner.lock_model_authority_mutation().await
     }
 
     #[cfg(test)]
-    pub(crate) async fn commit_signed_in_pairing_for_test(
+    pub async fn commit_signed_in_pairing_for_test(
         &self,
         mcp: &Arc<crate::mcp_config::McpRuntime>,
         base_url: &str,
@@ -364,15 +362,15 @@ impl GatewayRuntime {
             .await
     }
 
-    pub(crate) async fn sign_out(&self) -> Result<()> {
+    pub async fn sign_out(&self) -> Result<()> {
         self.inner.sign_out().await
     }
 
-    pub(crate) async fn abandon_sign_in_and_pairing(&self) {
+    pub async fn abandon_sign_in_and_pairing(&self) {
         self.inner.abandon_sign_in_and_pairing().await;
     }
 
-    pub(crate) async fn retire_session_for_current_policy(
+    pub async fn retire_session_for_current_policy(
         &self,
         authority: &tokio::sync::OwnedRwLockWriteGuard<()>,
     ) -> Result<()> {
@@ -381,27 +379,25 @@ impl GatewayRuntime {
             .await
     }
 
-    pub(crate) async fn connection(&self) -> Result<Option<Arc<runtime::GatewayConnection>>> {
+    pub async fn connection(&self) -> Result<Option<Arc<runtime::GatewayConnection>>> {
         self.inner.connection().await
     }
 
-    pub(crate) async fn model_snapshot(&self) -> Result<Option<providers::GatewayModelSnapshot>> {
+    pub async fn model_snapshot(&self) -> Result<Option<providers::GatewayModelSnapshot>> {
         providers::gateway_snapshot_for_policy(&*self.store, &self.policy()?).await
     }
 
-    pub(crate) async fn route_token_source(self: &Arc<Self>) -> Option<Arc<dyn BearerTokenSource>> {
+    pub async fn route_token_source(self: &Arc<Self>) -> Option<Arc<dyn BearerTokenSource>> {
         self.inner.route_token_source().await
     }
 
-    pub(crate) async fn sync_models(
-        &self,
-    ) -> std::result::Result<usize, crate::error::ServerError> {
+    pub async fn sync_models(&self) -> std::result::Result<usize, crate::error::ServerError> {
         self.install_sync_pause().await;
         self.inner.sync_models().await.map_err(map_sync_error)
     }
 
     #[cfg(test)]
-    pub(crate) async fn sync_models_if_connected(
+    pub async fn sync_models_if_connected(
         &self,
     ) -> std::result::Result<Option<usize>, crate::error::ServerError> {
         self.install_sync_pause().await;
@@ -411,7 +407,7 @@ impl GatewayRuntime {
             .map_err(map_sync_error)
     }
 
-    pub(crate) async fn sync_models_periodically(
+    pub async fn sync_models_periodically(
         self: Arc<Self>,
         mcp: Arc<crate::mcp_config::McpRuntime>,
     ) {
@@ -421,11 +417,11 @@ impl GatewayRuntime {
             .await;
     }
 
-    pub(crate) async fn apps(&self, owner: &OwnerId) -> Result<GatewayApps> {
+    pub async fn apps(&self, owner: &OwnerId) -> Result<GatewayApps> {
         self.inner.apps(owner).await
     }
 
-    pub(crate) async fn reconcile_endpoint_mounts(
+    pub async fn reconcile_endpoint_mounts(
         &self,
         mcp: &Arc<crate::mcp_config::McpRuntime>,
     ) -> Result<()> {
@@ -434,7 +430,7 @@ impl GatewayRuntime {
             .await
     }
 
-    pub(crate) async fn app_roster(&self) -> Option<Vec<runtime::GatewayRosterApp>> {
+    pub async fn app_roster(&self) -> Option<Vec<runtime::GatewayRosterApp>> {
         self.inner.app_roster().await
     }
 }
@@ -448,7 +444,7 @@ fn map_sync_error(error: runtime::GatewaySyncError) -> crate::error::ServerError
     }
 }
 
-pub(crate) async fn retire_superseded_gateway_session(
+pub async fn retire_superseded_gateway_session(
     secrets: Arc<dyn SecretProvider>,
     policy: &crate::managed_policy::ManagedPolicy,
 ) -> Result<()> {
@@ -462,7 +458,7 @@ pub(crate) async fn retire_superseded_gateway_session(
     .await
 }
 
-pub(crate) fn gateway_relay_dispatcher(
+pub fn gateway_relay_dispatcher(
     runtime: Arc<GatewayRuntime>,
     drafts: Arc<dyn runtime::GatewayDraftSource>,
 ) -> Arc<dyn runtime::GatewayInvokeDispatcher> {

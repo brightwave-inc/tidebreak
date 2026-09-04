@@ -16,6 +16,16 @@ use serde::Serialize;
 
 use crate::error::ServerError;
 
+/// Deserialize a present field, including JSON `null`, as `Some(..)`.
+/// `#[serde(default)]` supplies `None` when the field is absent.
+pub fn double_option<'de, D, T>(deserializer: D) -> std::result::Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    serde::Deserialize::deserialize(deserializer).map(Some)
+}
+
 /// Raw request bytes with Axum's body failures mapped into the API's stable
 /// JSON error envelope.
 pub struct RawBytes(pub Bytes);

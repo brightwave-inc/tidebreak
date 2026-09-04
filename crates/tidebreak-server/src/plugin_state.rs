@@ -29,19 +29,19 @@ use serde::{Deserialize, Serialize};
 use tidebreak_core::Store;
 
 /// The `setting` row the flags live in.
-pub(crate) const PLUGIN_ENABLE_STATE_SETTING: &str = "plugins.enable_state";
+pub const PLUGIN_ENABLE_STATE_SETTING: &str = "plugins.enable_state";
 
 /// How many disabled components one install may record, per kind. A bound, not
 /// a product limit: nothing legitimate approaches it, and it stops a client
 /// from growing the settings row without end.
-pub(crate) const MAX_DISABLED_COMPONENTS: usize = 512;
+pub const MAX_DISABLED_COMPONENTS: usize = 512;
 
 /// Which plugins and skills this installation has switched off.
 ///
 /// Absent means enabled, so a fresh install and an install that has never
 /// touched a toggle are the same state.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct PluginEnableState {
+pub struct PluginEnableState {
     /// Plugin slugs the user turned off. Only `false` entries are kept.
     #[serde(default)]
     plugins: BTreeMap<String, bool>,
@@ -53,35 +53,35 @@ pub(crate) struct PluginEnableState {
 
 impl PluginEnableState {
     /// Whether the bundle itself is on.
-    pub(crate) fn plugin_enabled(&self, plugin: &str) -> bool {
+    pub fn plugin_enabled(&self, plugin: &str) -> bool {
         self.plugins.get(plugin).copied().unwrap_or(true)
     }
 
     /// Whether the skill's own flag is on, ignoring any owning plugin.
-    pub(crate) fn skill_flag(&self, skill: &str) -> bool {
+    pub fn skill_flag(&self, skill: &str) -> bool {
         self.skills.get(skill).copied().unwrap_or(true)
     }
 
     /// Whether the skill is live: its own flag is on *and* the bundle that
     /// claims it, if any, is on. A skill no plugin claims is gated only by its
     /// own flag.
-    pub(crate) fn skill_enabled(&self, skill: &str, owner: Option<&str>) -> bool {
+    pub fn skill_enabled(&self, skill: &str, owner: Option<&str>) -> bool {
         self.skill_flag(skill) && owner.is_none_or(|plugin| self.plugin_enabled(plugin))
     }
 
     /// Record a plugin's flag. Enabling drops the row rather than storing
     /// `true`, since absent already means enabled.
-    pub(crate) fn set_plugin(&mut self, plugin: &str, enabled: bool) {
+    pub fn set_plugin(&mut self, plugin: &str, enabled: bool) {
         set(&mut self.plugins, plugin, enabled);
     }
 
     /// Record a skill's own flag, independent of any owning plugin's.
-    pub(crate) fn set_skill(&mut self, skill: &str, enabled: bool) {
+    pub fn set_skill(&mut self, skill: &str, enabled: bool) {
         set(&mut self.skills, skill, enabled);
     }
 
     /// Whether the state is within the recorded-flag bound.
-    pub(crate) fn within_bounds(&self) -> bool {
+    pub fn within_bounds(&self) -> bool {
         self.plugins.len() <= MAX_DISABLED_COMPONENTS
             && self.skills.len() <= MAX_DISABLED_COMPONENTS
     }
@@ -101,7 +101,7 @@ fn set(flags: &mut BTreeMap<String, bool>, name: &str, enabled: bool) {
 /// warning rather than failing the caller: this gates prompt composition and
 /// workspace staging on every turn, and a bad settings row must not take the
 /// skill system down or, worse, silently disable it.
-pub(crate) async fn read_plugin_enable_state(store: &dyn Store) -> PluginEnableState {
+pub async fn read_plugin_enable_state(store: &dyn Store) -> PluginEnableState {
     let value = match store.get_setting(PLUGIN_ENABLE_STATE_SETTING).await {
         Ok(value) => value,
         Err(error) => {
@@ -122,7 +122,7 @@ pub(crate) async fn read_plugin_enable_state(store: &dyn Store) -> PluginEnableS
 }
 
 /// Persist the install's flags.
-pub(crate) async fn write_plugin_enable_state(
+pub async fn write_plugin_enable_state(
     store: &dyn Store,
     state: &PluginEnableState,
 ) -> tidebreak_core::Result<()> {

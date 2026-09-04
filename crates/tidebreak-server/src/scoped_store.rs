@@ -60,7 +60,7 @@ pub struct ScopedStore {
 
 impl ScopedStore {
     /// Bind the state's store to the request's authenticated principal.
-    pub(crate) fn new(state: &AppState, auth: &AuthContext) -> Self {
+    pub fn new(state: &AppState, auth: &AuthContext) -> Self {
         Self {
             store: state.store.clone(),
             owner: auth.principal.owner_id(),
@@ -69,7 +69,7 @@ impl ScopedStore {
 
     /// Durable owner key carried into owner-aware background seams after the
     /// request has authorized an app through this view.
-    pub(crate) fn owner_id(&self) -> OwnerId {
+    pub fn owner_id(&self) -> OwnerId {
         self.owner.clone()
     }
 

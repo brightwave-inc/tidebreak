@@ -24,7 +24,7 @@ use crate::state::AppState;
 ///
 /// The field stays private and no method returns the inner backend handle.
 #[derive(Clone)]
-pub(crate) struct ScopedMemory {
+pub struct ScopedMemory {
     backend: Arc<dyn MemoryBackend>,
     owner: OwnerId,
 }
@@ -39,12 +39,12 @@ impl ScopedMemory {
     }
 
     /// Every capability the memory backend reports.
-    pub(crate) fn caps(&self) -> MemoryCaps {
+    pub fn caps(&self) -> MemoryCaps {
         self.backend.caps()
     }
 
     /// Ask an extraction-capable backend to derive owned records.
-    pub(crate) async fn ingest(
+    pub async fn ingest(
         &self,
         request: MemoryIngestRequest,
     ) -> Result<MemoryIngestReceipt, ServerError> {
@@ -55,10 +55,7 @@ impl ScopedMemory {
     }
 
     /// Store one caller-supplied record for the requesting principal.
-    pub(crate) async fn put(
-        &self,
-        record: MemoryRecord,
-    ) -> Result<MemoryWriteReceipt, ServerError> {
+    pub async fn put(&self, record: MemoryRecord) -> Result<MemoryWriteReceipt, ServerError> {
         self.backend
             .put(&self.owner, record)
             .await
@@ -66,10 +63,7 @@ impl ScopedMemory {
     }
 
     /// Load one record owned by the requesting principal.
-    pub(crate) async fn get(
-        &self,
-        id: MemoryRecordId,
-    ) -> Result<Option<MemoryRecord>, ServerError> {
+    pub async fn get(&self, id: MemoryRecordId) -> Result<Option<MemoryRecord>, ServerError> {
         self.backend
             .get(&self.owner, id)
             .await
@@ -77,10 +71,7 @@ impl ScopedMemory {
     }
 
     /// List records owned by the requesting principal.
-    pub(crate) async fn list(
-        &self,
-        filter: MemoryListFilter,
-    ) -> Result<Vec<MemoryRecord>, ServerError> {
+    pub async fn list(&self, filter: MemoryListFilter) -> Result<Vec<MemoryRecord>, ServerError> {
         self.backend
             .list(&self.owner, filter)
             .await
@@ -88,7 +79,7 @@ impl ScopedMemory {
     }
 
     /// Replace one record owned by the requesting principal.
-    pub(crate) async fn update(
+    pub async fn update(
         &self,
         update: MemoryRecordUpdate,
     ) -> Result<MemoryWriteReceipt, ServerError> {
@@ -99,7 +90,7 @@ impl ScopedMemory {
     }
 
     /// Move one owned record through its lifecycle.
-    pub(crate) async fn set_status(
+    pub async fn set_status(
         &self,
         change: MemoryStatusChange,
     ) -> Result<MemoryWriteReceipt, ServerError> {
@@ -110,7 +101,7 @@ impl ScopedMemory {
     }
 
     /// Hard-delete one owned record.
-    pub(crate) async fn delete(&self, id: MemoryRecordId) -> Result<bool, ServerError> {
+    pub async fn delete(&self, id: MemoryRecordId) -> Result<bool, ServerError> {
         self.backend
             .delete(&self.owner, id)
             .await
@@ -118,7 +109,7 @@ impl ScopedMemory {
     }
 
     /// Search owned records.
-    pub(crate) async fn search(
+    pub async fn search(
         &self,
         request: MemorySearchRequest,
     ) -> Result<Vec<MemorySearchHit>, ServerError> {
@@ -129,7 +120,7 @@ impl ScopedMemory {
     }
 
     /// Render the owned scope's active-record digest.
-    pub(crate) async fn assemble_context(
+    pub async fn assemble_context(
         &self,
         scope: tidebreak_core::MemoryScope,
     ) -> Result<MemoryDigest, ServerError> {
@@ -140,7 +131,7 @@ impl ScopedMemory {
     }
 
     /// Return an owned record's immutable history.
-    pub(crate) async fn revision_history(
+    pub async fn revision_history(
         &self,
         id: MemoryRecordId,
     ) -> Result<Vec<MemoryRevision>, ServerError> {

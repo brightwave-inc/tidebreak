@@ -96,11 +96,7 @@ impl CodeRuntime {
         Ok(list_repos(&self.db, owner).await?)
     }
 
-    pub(crate) async fn get_repo(
-        &self,
-        owner: &OwnerId,
-        id: RepoId,
-    ) -> Result<CodeRepo, ServerError> {
+    pub async fn get_repo(&self, owner: &OwnerId, id: RepoId) -> Result<CodeRepo, ServerError> {
         get_repo(&self.db, owner, id)
             .await?
             .ok_or_else(|| ServerError::not_found(format!("repo {id} not found")))

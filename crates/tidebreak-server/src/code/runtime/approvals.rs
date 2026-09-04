@@ -106,7 +106,7 @@ impl CodeRuntime {
         })
     }
 
-    pub(crate) async fn list_approvals(
+    pub async fn list_approvals(
         &self,
         owner: &OwnerId,
         state: Option<ApprovalState>,
@@ -115,7 +115,7 @@ impl CodeRuntime {
         Ok(list_approvals(&self.db, owner, state, session_id).await?)
     }
 
-    pub(crate) async fn get_approval(
+    pub async fn get_approval(
         &self,
         owner: &OwnerId,
         id: ApprovalId,
@@ -125,7 +125,7 @@ impl CodeRuntime {
             .ok_or_else(|| ServerError::not_found(format!("approval {id} not found")))
     }
 
-    pub(crate) async fn record_external_approval(
+    pub async fn record_external_approval(
         &self,
         session_id: SessionId,
         approval_id: ApprovalId,
@@ -149,7 +149,7 @@ impl CodeRuntime {
             .map_err(map_worker)
     }
 
-    pub(crate) async fn abandon_external_approval(
+    pub async fn abandon_external_approval(
         &self,
         session_id: SessionId,
         approval_id: ApprovalId,
@@ -282,7 +282,7 @@ impl CodeRuntime {
         Ok(())
     }
 
-    pub(crate) async fn decide_approval(
+    pub async fn decide_approval(
         &self,
         owner: &OwnerId,
         id: ApprovalId,

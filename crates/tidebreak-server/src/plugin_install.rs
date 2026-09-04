@@ -51,7 +51,7 @@ use url::{Host, Url};
 
 use tidebreak_code_execution::MAX_WORKSPACE_FILE_BYTES;
 
-pub(crate) const MAX_PLUGIN_INSTALL_BODY_BYTES: usize = 16 * 1024;
+pub const MAX_PLUGIN_INSTALL_BODY_BYTES: usize = 16 * 1024;
 
 const MAX_ARCHIVE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_UNPACKED_BYTES: u64 = 32 * 1024 * 1024;
@@ -70,7 +70,7 @@ const USER_AGENT: &str =
 /// A source whose immutable identity is explicit in the request.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum PluginInstallSource {
+pub enum PluginInstallSource {
     /// A public HTTPS git repository. The importer fetches its archive for the
     /// supplied tag or full commit SHA; it never executes the git client.
     Git { url: String, revision: String },
@@ -81,13 +81,13 @@ pub(crate) enum PluginInstallSource {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct PluginInstallRequest {
+pub struct PluginInstallRequest {
     pub source: PluginInstallSource,
 }
 
 /// One archive member the instruction-only importer deliberately left out.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
-pub(crate) struct SkippedPluginMember {
+pub struct SkippedPluginMember {
     pub path: String,
     pub reason: String,
 }
@@ -95,7 +95,7 @@ pub(crate) struct SkippedPluginMember {
 /// Result of one successful import. The full installed shape is available
 /// from `GET /plugins`; this response carries the import-only disclosures.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
-pub(crate) struct PluginInstallOutcome {
+pub struct PluginInstallOutcome {
     pub plugin: String,
     pub revision: String,
     pub compatibility: PluginCompatibility,
@@ -103,7 +103,7 @@ pub(crate) struct PluginInstallOutcome {
 }
 
 #[derive(Debug, Error)]
-pub(crate) enum PluginInstallError {
+pub enum PluginInstallError {
     #[error("plugin source is invalid: {0}")]
     InvalidSource(String),
     #[error("plugin source could not be fetched: {0}")]
@@ -119,12 +119,12 @@ pub(crate) enum PluginInstallError {
 }
 
 #[async_trait]
-pub(crate) trait PluginArchiveFetcher: Send + Sync {
+pub trait PluginArchiveFetcher: Send + Sync {
     async fn fetch(&self, url: &str) -> Result<Vec<u8>, PluginInstallError>;
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct HttpsPluginArchiveFetcher;
+pub struct HttpsPluginArchiveFetcher;
 
 #[async_trait]
 impl PluginArchiveFetcher for HttpsPluginArchiveFetcher {
@@ -134,13 +134,13 @@ impl PluginArchiveFetcher for HttpsPluginArchiveFetcher {
 }
 
 #[derive(Debug)]
-pub(crate) struct ResolvedPluginSource {
+pub struct ResolvedPluginSource {
     pub source_url: String,
     pub archive_url: String,
     pub revision: String,
 }
 
-pub(crate) fn resolve_source(
+pub fn resolve_source(
     source: &PluginInstallSource,
 ) -> Result<ResolvedPluginSource, PluginInstallError> {
     let (url, revision) = match source {
@@ -361,7 +361,7 @@ fn fetch_transport_error(error: reqwest::Error) -> PluginInstallError {
 }
 
 #[derive(Debug)]
-pub(crate) struct PreparedPlugin {
+pub struct PreparedPlugin {
     pub package: PluginPackage,
     pub manifest: String,
     /// The canonical `mcp.json` to retain beside the manifest, regenerated
@@ -380,7 +380,7 @@ struct ArchiveTree {
     paths: BTreeSet<Vec<String>>,
 }
 
-pub(crate) fn prepare_plugin(
+pub fn prepare_plugin(
     archive: &[u8],
     source: &ResolvedPluginSource,
 ) -> Result<PreparedPlugin, PluginInstallError> {
@@ -1234,12 +1234,12 @@ fn push_skipped(skipped: &mut Vec<SkippedPluginMember>, path: String, reason: &s
 }
 
 #[derive(Debug)]
-pub(crate) struct InstalledPluginFiles {
+pub struct InstalledPluginFiles {
     pub plugin_dir: PathBuf,
     pub skill_dirs: Vec<PathBuf>,
 }
 
-pub(crate) fn install_prepared(
+pub fn install_prepared(
     prepared: &PreparedPlugin,
     plugins_root: &Path,
     skills_root: &Path,
@@ -1324,7 +1324,7 @@ pub(crate) fn install_prepared(
     })
 }
 
-pub(crate) fn rollback_install(files: &InstalledPluginFiles) {
+pub fn rollback_install(files: &InstalledPluginFiles) {
     remove_created_directory(&files.plugin_dir);
     for skill in &files.skill_dirs {
         remove_created_directory(skill);
@@ -1342,6 +1342,6 @@ fn remove_created_directory(path: &Path) {
     }
 }
 
-pub(crate) fn default_fetcher() -> Arc<dyn PluginArchiveFetcher> {
+pub fn default_fetcher() -> Arc<dyn PluginArchiveFetcher> {
     Arc::new(HttpsPluginArchiveFetcher)
 }

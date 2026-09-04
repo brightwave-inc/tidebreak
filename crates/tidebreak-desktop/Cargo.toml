@@ -42,7 +42,7 @@ tidebreak-code-execution = { path = "../tidebreak-code-execution" }
 tidebreak-core = { path = "../tidebreak-core", default-features = false, features = ["keychain"] }
 tidebreak-host-broker = { path = "../tidebreak-host-broker" }
 tidebreak-managed-node = { path = "../tidebreak-managed-node" }
-tidebreak-server = { path = "../tidebreak-server" }
+tidebreak-server = { path = "../tidebreak-server-api" }
 reqwest = { workspace = true }
 semver = "=1.0.28"
 sha2 = { workspace = true }

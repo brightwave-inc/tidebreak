@@ -20,8 +20,8 @@ use tidebreak_core::{OwnerId, Store};
 use super::clone::owner_dir;
 use super::runtime::CodeRuntime;
 use super::worktree::data_dir_worktree_root;
+use crate::code::types::CodeWorktreeRoot;
 use crate::error::ServerError;
-use crate::routes::code::CodeWorktreeRoot;
 
 /// Deployment-wide setting naming the root. Absent means "use the default".
 pub(crate) const WORKTREE_ROOT_SETTING: &str = "code_worktree_root";
@@ -43,16 +43,13 @@ impl CodeRuntime {
     /// users' repositories of the same name share a folder. The local profile
     /// has exactly one owner and keeps the root itself. Existing workspaces do
     /// not use this derivation: they keep the absolute path stored on the row.
-    pub(crate) async fn owner_worktree_root(
-        &self,
-        owner: &OwnerId,
-    ) -> Result<PathBuf, ServerError> {
+    pub async fn owner_worktree_root(&self, owner: &OwnerId) -> Result<PathBuf, ServerError> {
         Ok(owner_dir(&self.worktree_root().await?, owner))
     }
 
     /// What the root falls back to with no setting stored: the visible
     /// location the embedding named, or the app-data directory it always used.
-    pub(crate) fn default_worktree_root(&self) -> PathBuf {
+    pub fn default_worktree_root(&self) -> PathBuf {
         self.worktree_root_default
             .clone()
             .unwrap_or_else(|| data_dir_worktree_root(&self.data_dir))

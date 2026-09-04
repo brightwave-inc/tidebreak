@@ -64,7 +64,7 @@ pub(super) fn short_sha(sha: &str) -> &str {
 /// re-checks the same host at `get`, so both halves refuse independently.
 pub(super) async fn forge_lending_target(
     worktree: &std::path::Path,
-) -> Option<crate::routes::code::types::CodeGitHubRepositoryTarget> {
+) -> Option<crate::code::types::CodeGitHubRepositoryTarget> {
     let target = crate::code::delivery::repository_target_from_path(worktree)
         .await
         .ok()?;
@@ -75,7 +75,7 @@ pub(super) async fn forge_lending_target(
 }
 
 impl CodeRuntime {
-    pub(crate) async fn commit_workspace(
+    pub async fn commit_workspace(
         &self,
         owner: &OwnerId,
         id: WorkspaceId,
@@ -93,7 +93,7 @@ impl CodeRuntime {
         .map_err(map_gh)
     }
 
-    pub(crate) async fn push_workspace(
+    pub async fn push_workspace(
         &self,
         owner: &OwnerId,
         id: WorkspaceId,
@@ -194,8 +194,8 @@ impl CodeRuntime {
     }
 
     /// The forge login used for account-prefixed branches, when one is known.
-    pub(crate) async fn branch_account_name(&self, owner: &OwnerId) -> Option<String> {
-        #[cfg(test)]
+    pub async fn branch_account_name(&self, owner: &OwnerId) -> Option<String> {
+        #[cfg(any(test, feature = "test-support"))]
         // Tests must not inherit the developer machine's `gh` login.
         self.git_credentials()?;
         if let Some(lender) = self.git_credentials() {
@@ -262,7 +262,7 @@ impl CodeRuntime {
         worktree: &std::path::Path,
     ) -> Result<
         Option<(
-            crate::routes::code::types::CodeGitHubRepositoryTarget,
+            crate::code::types::CodeGitHubRepositoryTarget,
             crate::obo_gateway::GitCredential,
         )>,
         ServerError,
@@ -285,7 +285,7 @@ impl CodeRuntime {
         Ok(Some((target, credential)))
     }
 
-    pub(crate) async fn workspace_pr(
+    pub async fn workspace_pr(
         &self,
         owner: &OwnerId,
         id: WorkspaceId,
@@ -343,7 +343,7 @@ impl CodeRuntime {
 
     /// Force a fresh host read now — the user asked, or a mutation just
     /// moved the pull request — then answer with the refreshed row.
-    pub(crate) async fn refresh_workspace_pr(
+    pub async fn refresh_workspace_pr(
         &self,
         owner: &OwnerId,
         id: WorkspaceId,
@@ -362,7 +362,7 @@ impl CodeRuntime {
     /// gateway-hosted machine has none (decision 65), so there the same
     /// refresh drives the forge REST API with a borrowed credential —
     /// same gate, same stored ETags, same 304-shaped traffic.
-    pub(crate) async fn refresh_workspace_pr_row(&self, owner: &OwnerId, id: WorkspaceId) {
+    pub async fn refresh_workspace_pr_row(&self, owner: &OwnerId, id: WorkspaceId) {
         let Ok(workspace) = self.get_workspace(owner, id).await else {
             return;
         };
@@ -432,7 +432,7 @@ impl CodeRuntime {
     /// One delivery nudge on the updates channel, debounced per owner
     /// (decision 66): a sweep that moves several rows costs one re-read,
     /// not one per row.
-    pub(crate) fn nudge_delivery_update(&self, owner: &OwnerId) {
+    pub fn nudge_delivery_update(&self, owner: &OwnerId) {
         self.delivery_nudges.publish(&self.bus, owner);
     }
 
@@ -457,14 +457,14 @@ impl CodeRuntime {
         &self,
         owner: &OwnerId,
         workspace: &CodeWorkspace,
-    ) -> Option<crate::routes::code::types::CodeGitHubRepositoryTarget> {
+    ) -> Option<crate::code::types::CodeGitHubRepositoryTarget> {
         let repo = self.get_repo(owner, workspace.repo_id).await.ok()?;
         if let (Some(host), Some(repo_owner), Some(name)) = (
             repo.origin_host.clone(),
             repo.origin_owner.clone(),
             repo.origin_name.clone(),
         ) {
-            return Some(crate::routes::code::types::CodeGitHubRepositoryTarget {
+            return Some(crate::code::types::CodeGitHubRepositoryTarget {
                 host,
                 owner: repo_owner,
                 name,
@@ -792,7 +792,7 @@ impl CodeRuntime {
     /// repository stays untouched. Detached and best-effort: the action's
     /// response never waits on it, and a failed re-read leaves the next
     /// sweep to correct.
-    pub(crate) fn refresh_workspaces_for_pull_request(
+    pub fn refresh_workspaces_for_pull_request(
         self: &Arc<Self>,
         owner: &OwnerId,
         pull_request_url: &str,
@@ -840,7 +840,7 @@ impl CodeRuntime {
     /// and digest cache both — and broadcasts, so one host read updates
     /// every surface without a second one. Best-effort: a missing fact row
     /// or a store failure leaves the sweeps to correct.
-    pub(crate) async fn record_pull_request_live_state(
+    pub async fn record_pull_request_live_state(
         &self,
         owner: &OwnerId,
         source: Option<WorkspaceId>,
@@ -923,7 +923,7 @@ impl CodeRuntime {
         }
     }
 
-    pub(crate) async fn workspace_pr_comments(
+    pub async fn workspace_pr_comments(
         &self,
         owner: &OwnerId,
         id: WorkspaceId,
@@ -940,7 +940,7 @@ impl CodeRuntime {
 
     /// Every pull request attributed to the workspace, from the durable fact
     /// store (decision 77): open first, then newest activity. No host read.
-    pub(crate) async fn workspace_pull_requests(
+    pub async fn workspace_pull_requests(
         &self,
         owner: &OwnerId,
         id: WorkspaceId,
@@ -973,7 +973,7 @@ impl CodeRuntime {
     /// plus the repository-qualified merge invocation. The final helper also
     /// sends `--match-head-commit`, so a force push after the live read fails
     /// at GitHub instead of changing what this request lands.
-    pub(crate) async fn merge_workspace_pr(
+    pub async fn merge_workspace_pr(
         &self,
         owner: &OwnerId,
         id: WorkspaceId,
@@ -1133,7 +1133,7 @@ impl CodeRuntime {
     /// status. Decision 42 keeps pull-request state changes on a user-initiated
     /// endpoint rather than on any agent or automation path, so this is the
     /// only route to `gh pr ready` for a workspace.
-    pub(crate) async fn mark_workspace_pr_ready(
+    pub async fn mark_workspace_pr_ready(
         &self,
         owner: &OwnerId,
         id: WorkspaceId,
@@ -1152,7 +1152,7 @@ impl CodeRuntime {
         self.refresh_workspace_pr(owner, id).await
     }
 
-    pub(crate) async fn create_workspace_pr(
+    pub async fn create_workspace_pr(
         &self,
         owner: &OwnerId,
         id: WorkspaceId,
@@ -1256,7 +1256,7 @@ impl CodeRuntime {
         self.refresh_workspace_pr(owner, id).await
     }
 
-    pub(crate) async fn run_workspace_action(
+    pub async fn run_workspace_action(
         &self,
         owner: &OwnerId,
         id: WorkspaceId,
@@ -1299,12 +1299,12 @@ impl CodeRuntime {
         Ok(workspace)
     }
 
-    pub(crate) fn gh_search_path_owned(&self) -> Option<String> {
-        #[cfg(test)]
+    pub fn gh_search_path_owned(&self) -> Option<String> {
+        #[cfg(any(test, feature = "test-support"))]
         {
             return self.gh_search_path.lock().expect("gh search path").clone();
         }
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-support")))]
         None
     }
 }

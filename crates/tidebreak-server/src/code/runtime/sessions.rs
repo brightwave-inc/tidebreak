@@ -3,7 +3,7 @@
 use super::*;
 
 impl CodeRuntime {
-    pub(crate) async fn create_session(
+    pub async fn create_session(
         &self,
         owner: &OwnerId,
         workspace_id: WorkspaceId,
@@ -26,7 +26,7 @@ impl CodeRuntime {
     /// watch session, so the guard below covers watch only. The worktree they
     /// share is protected by the per-workspace turn lock rather than by a cap
     /// on conversations; see record 55.
-    pub(crate) async fn create_session_of_kind(
+    pub async fn create_session_of_kind(
         &self,
         owner: &OwnerId,
         workspace_id: WorkspaceId,
@@ -73,7 +73,7 @@ impl CodeRuntime {
             }
         }
         let adapter = self.adapter(harness)?;
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-support")))]
         {
             // The warm install the dialog starts usually got here first, in
             // which case this is a marker read. It stays on the create path
@@ -209,7 +209,7 @@ impl CodeRuntime {
     /// The workspace-bound create path probes an installed engine and pins
     /// a checkout; this one needs neither. Everything after the row — the
     /// worker, the journal, approvals — is the same machinery.
-    pub(crate) async fn create_internal_session(
+    pub async fn create_internal_session(
         &self,
         owner: &OwnerId,
         NewSessionSettings {
@@ -275,7 +275,7 @@ impl CodeRuntime {
         self.attach_and_spawn_worker(session).await
     }
 
-    pub(crate) async fn get_session(
+    pub async fn get_session(
         &self,
         owner: &OwnerId,
         id: SessionId,
@@ -290,7 +290,7 @@ impl CodeRuntime {
     /// Takes the owner and session because publication is per-session
     /// authority. Resolving without them — as this did — could only check that
     /// the bytes existed somewhere, which is not the same question.
-    pub(crate) async fn resolve_turn_attachments(
+    pub async fn resolve_turn_attachments(
         &self,
         owner: &OwnerId,
         session_id: SessionId,
@@ -345,7 +345,7 @@ impl CodeRuntime {
                 .await
                 .map_err(|err| ServerError::internal(format!("blob read: {err}")))?
                 .ok_or_else(unpublished)?;
-            let image = crate::routes::inspect_image_bytes(&bytes)?;
+            let image = crate::image_attachment::inspect_image_bytes(&bytes)?;
             if image.blob_id != *blob_id || image != published {
                 return Err(unpublished());
             }
@@ -364,7 +364,7 @@ impl CodeRuntime {
         Ok(resolved)
     }
 
-    pub(crate) async fn set_attention(
+    pub async fn set_attention(
         &self,
         owner: &OwnerId,
         id: SessionId,
@@ -377,7 +377,7 @@ impl CodeRuntime {
             .map_err(ServerError::from)
     }
 
-    pub(crate) async fn mark_session_viewed(
+    pub async fn mark_session_viewed(
         &self,
         owner: &OwnerId,
         id: SessionId,
@@ -474,11 +474,11 @@ impl CodeRuntime {
         Ok(())
     }
 
-    pub(crate) async fn list_sessions(&self, owner: &OwnerId) -> Result<Vec<Session>, ServerError> {
+    pub async fn list_sessions(&self, owner: &OwnerId) -> Result<Vec<Session>, ServerError> {
         Ok(list_sessions(&self.db, owner).await?)
     }
 
-    pub(crate) async fn list_workspace_sessions(
+    pub async fn list_workspace_sessions(
         &self,
         owner: &OwnerId,
         workspace_id: WorkspaceId,
@@ -488,7 +488,7 @@ impl CodeRuntime {
     }
 
     /// The owner's sessions that bind no workspace, newest first.
-    pub(crate) async fn list_internal_sessions(
+    pub async fn list_internal_sessions(
         &self,
         owner: &OwnerId,
     ) -> Result<Vec<Session>, ServerError> {
@@ -501,7 +501,7 @@ impl CodeRuntime {
 
     /// The external bindings behind `session_ids`, for provenance display.
     /// Sessions the desktop created have none and are simply absent.
-    pub(crate) async fn external_bindings_for_sessions(
+    pub async fn external_bindings_for_sessions(
         &self,
         owner: &OwnerId,
         session_ids: &[SessionId],
@@ -516,7 +516,7 @@ impl CodeRuntime {
         )
     }
 
-    pub(crate) async fn list_session_turns(
+    pub async fn list_session_turns(
         &self,
         owner: &OwnerId,
         session_id: SessionId,
@@ -525,28 +525,28 @@ impl CodeRuntime {
         Ok(list_turns(&self.db, owner, session_id).await?)
     }
 
-    pub(crate) async fn list_turn_metrics(
+    pub async fn list_turn_metrics(
         &self,
         owner: &OwnerId,
     ) -> Result<Vec<tidebreak_core::db::code::TurnMetric>, ServerError> {
         Ok(tidebreak_core::db::code::list_turn_metrics(&self.db, owner).await?)
     }
 
-    pub(crate) async fn list_pull_request_facts(
+    pub async fn list_pull_request_facts(
         &self,
         owner: &OwnerId,
     ) -> Result<Vec<tidebreak_core::CodePullRequestFact>, ServerError> {
         Ok(tidebreak_core::db::code::list_pull_request_facts(&self.db, owner).await?)
     }
 
-    pub(crate) async fn list_pull_request_attributions(
+    pub async fn list_pull_request_attributions(
         &self,
         owner: &OwnerId,
     ) -> Result<Vec<tidebreak_core::CodePullRequestAttribution>, ServerError> {
         Ok(tidebreak_core::db::code::list_pull_request_attributions(&self.db, owner).await?)
     }
 
-    pub(crate) async fn session_debug(
+    pub async fn session_debug(
         &self,
         owner: &OwnerId,
         session_id: SessionId,
@@ -570,7 +570,7 @@ impl CodeRuntime {
     /// `at_turn` forks at the end of that turn; `None` forks at the newest.
     /// The caller creates the child and names the absolute path in its first
     /// message. Git cannot index the transcript or its attachments.
-    pub(crate) async fn fork_transcript(
+    pub async fn fork_transcript(
         &self,
         owner: &OwnerId,
         session_id: SessionId,

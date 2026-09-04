@@ -118,7 +118,7 @@ impl CodeRuntime {
     /// creates converge on one session through the binding's unique
     /// conversation key.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn external_get_or_create(
+    pub async fn external_get_or_create(
         &self,
         owner: &OwnerId,
         grant_id: tidebreak_core::CodeGrantId,
@@ -507,7 +507,7 @@ impl CodeRuntime {
     /// row's current state — still queued, promoted into a turn, or
     /// retracted — without writing a second row. An idle session promotes
     /// the head immediately; a busy one queues durably.
-    pub(crate) async fn external_submit_message(
+    pub async fn external_submit_message(
         &self,
         owner: &OwnerId,
         grant_id: tidebreak_core::CodeGrantId,

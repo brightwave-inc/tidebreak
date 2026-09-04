@@ -22,7 +22,7 @@ use tidebreak_core::OwnerId;
 
 use super::delivery::{query_pull_requests, repository_target_from_local, MAX_REPOSITORIES};
 use super::runtime::CodeRuntime;
-use crate::routes::code::types::{CodeDeliveryPullRequestQuery, CodeGitHubRepositoryTarget};
+use crate::code::types::{CodeDeliveryPullRequestQuery, CodeGitHubRepositoryTarget};
 #[cfg(test)]
 pub(crate) use tidebreak_code_delivery::{
     StackParentCandidate, StackParentEdge, StackParentIndex, StackParentResolution,
@@ -131,7 +131,7 @@ impl Drop for ReconcileSweepGuard {
 /// GitHub, plus every repository identity that already holds a fact row —
 /// which is how a cross-repo pull request the detector observed keeps
 /// itself fresh without a local checkout.
-pub(crate) async fn sweep_reconcile(runtime: &Arc<CodeRuntime>) {
+pub async fn sweep_reconcile(runtime: &Arc<CodeRuntime>) {
     let mut targets_by_owner: HashMap<String, Vec<CodeGitHubRepositoryTarget>> = HashMap::new();
 
     match list_repos_all_owners(&runtime.db).await {

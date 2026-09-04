@@ -3,25 +3,14 @@
 //! Document lifecycle and search handlers live in the dedicated `document`
 //! submodule; other handler clusters live in sibling modules under `routes/`.
 
-pub(crate) const MAX_ACTIVE_BACKGROUND_AGENTS_SETTING: &str = "agents.max_active_background_agents";
-pub(crate) const SANDBOX_AGENT_CHECKIN_STEPS_SETTING: &str = "agents.sandbox_agent_checkin_steps";
-pub(crate) const SANDBOX_AGENT_ERROR_CHECKIN_SETTING: &str = "agents.sandbox_agent_error_checkin";
-pub(crate) const COMPACTION_THRESHOLD_FRACTION_SETTING: &str = "compaction.threshold_fraction";
-pub(crate) const COMPACTION_TARGET_FRACTION_SETTING: &str = "compaction.target_fraction";
-pub(crate) const COMPACTION_MIN_THRESHOLD_TOKENS_SETTING: &str = "compaction.min_threshold_tokens";
-pub(crate) const COMPACTION_PROTECT_RECENT_MESSAGES_SETTING: &str =
-    "compaction.protect_recent_messages";
-pub(crate) const MODEL_VISIBILITY_OVERRIDES_SETTING: &str = "models.visibility_overrides";
-pub(crate) const PROMPT_CACHE_RETENTION_SETTING: &str = "models.prompt_cache_retention";
-/// Master switch for the computer-use capability (screen capture + app
-/// control). Default on; setting it false unregisters the tools at boot.
-pub(crate) const COMPUTER_USE_ENABLED_SETTING: &str = "computer_use.enabled";
-/// Master switch for experimental durable memory. Default off; an explicit
-/// opt-in enables records, digests, and the foreground memory tool.
-pub(crate) const MEMORY_ENABLED_SETTING: &str = "memory.enabled";
-/// Master switch for post-turn memory capture. Capture also requires a
-/// resolvable utility model.
-pub(crate) const MEMORY_CAPTURE_ENABLED_SETTING: &str = "memory.capture.enabled";
+pub(crate) use crate::runtime_settings::{
+    COMPACTION_MIN_THRESHOLD_TOKENS_SETTING, COMPACTION_PROTECT_RECENT_MESSAGES_SETTING,
+    COMPACTION_TARGET_FRACTION_SETTING, COMPACTION_THRESHOLD_FRACTION_SETTING,
+    COMPUTER_USE_ENABLED_SETTING, MAX_ACTIVE_BACKGROUND_AGENTS_SETTING,
+    MEMORY_CAPTURE_ENABLED_SETTING, MEMORY_ENABLED_SETTING, MODEL_VISIBILITY_OVERRIDES_SETTING,
+    PROMPT_CACHE_RETENTION_SETTING, SANDBOX_AGENT_CHECKIN_STEPS_SETTING,
+    SANDBOX_AGENT_ERROR_CHECKIN_SETTING,
+};
 
 mod agent_runs;
 mod app_gateway_page;

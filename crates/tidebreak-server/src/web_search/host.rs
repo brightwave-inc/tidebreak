@@ -759,7 +759,7 @@ impl WebSearchResolver for HostWebSearchResolver {
 ///
 /// The registry may keep this object for the server lifetime: each approved
 /// call rereads current settings and credentials before any outbound request.
-pub(crate) fn foreground_tool(
+pub fn foreground_tool(
     store: Arc<dyn Store>,
     secrets: Arc<dyn SecretProvider>,
     providers: Arc<dyn ProviderResolver>,
@@ -877,7 +877,7 @@ impl ExtractedPageSink for HostExtractedPageSink {
 /// implements it, the native engine otherwise — including when the provider is
 /// search-only or absent. Every page it extracts becomes a citable source of
 /// the conversation that asked for it.
-pub(crate) fn foreground_extract_tool(
+pub fn foreground_extract_tool(
     store: Arc<dyn Store>,
     secrets: Arc<dyn SecretProvider>,
 ) -> Box<dyn Tool> {

@@ -11,9 +11,7 @@ use tidebreak_core::{OwnerId, PullRequestDigest, RepoId, WorkspaceId};
 
 use super::gh::{self, GhObservation};
 use super::runtime::CodeRuntime;
-use crate::error::ServerError;
-use crate::obo_gateway::{GitCredential, GitForgeAttribution};
-use crate::routes::code::types::{
+use crate::code::types::{
     CodeDeliveryActionResult, CodeDeliveryPullRequestAction, CodeDeliveryPullRequestActionBody,
     CodeDeliveryPullRequestDetail, CodeDeliveryPullRequestQuery, CodeDeliveryPullRequestTarget,
     CodeDeliveryPullRequestsPage, CodeDeliveryRepositoriesSnapshot, CodeDeliveryRunActionBody,
@@ -21,6 +19,8 @@ use crate::routes::code::types::{
     CodeGitHubCapability, CodeGitHubRepositoryRef, CodeGitHubRepositoryTarget, CodePrMergeMethod,
     ResolveCodeDeliveryRepositoriesBody,
 };
+use crate::error::ServerError;
+use crate::obo_gateway::{GitCredential, GitForgeAttribution};
 
 mod api;
 
@@ -59,7 +59,7 @@ pub(crate) async fn resolve_repositories(
         .map_err(Into::into)
 }
 
-pub(crate) async fn query_pull_requests(
+pub async fn query_pull_requests(
     runtime: &Arc<CodeRuntime>,
     owner: &OwnerId,
     allow_unscoped_delivery: bool,

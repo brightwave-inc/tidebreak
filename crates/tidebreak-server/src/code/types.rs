@@ -93,7 +93,7 @@ impl CodeGrantSnapshot {
         self
     }
 
-    pub(super) fn from_grant_and_profile(
+    pub fn from_grant_and_profile(
         grant: tidebreak_core::CodeExternalGrant,
         profile: Option<tidebreak_core::CodeGrantProfile>,
     ) -> Self {
@@ -1270,7 +1270,7 @@ pub struct SubmitTurnBody {
     /// engine default. Absent leaves the session's stored choice alone, which
     /// is why plain `Option<Option<_>>` will not do: serde reads `null` and an
     /// absent field the same way without the helper.
-    #[serde(default, deserialize_with = "crate::routes::code::double_option")]
+    #[serde(default, deserialize_with = "crate::extract::double_option")]
     pub reasoning_effort: Option<Option<ReasoningEffort>>,
     #[serde(default)]
     pub attachments: Vec<SubmitTurnAttachment>,
@@ -1854,7 +1854,7 @@ pub enum TurnRewriteState {
 }
 
 impl UpdateNotice {
-    pub(crate) fn harness_install(progress: crate::code::bus::HarnessInstallProgress) -> Self {
+    pub fn harness_install(progress: crate::code::bus::HarnessInstallProgress) -> Self {
         Self::HarnessInstall {
             kind: progress.kind,
             version: progress.version,
@@ -1864,7 +1864,7 @@ impl UpdateNotice {
         }
     }
 
-    pub(crate) fn clone_progress(progress: crate::code::bus::CloneProgress) -> Self {
+    pub fn clone_progress(progress: crate::code::bus::CloneProgress) -> Self {
         Self::CloneProgress {
             job: progress.job,
             phase: progress.phase,
@@ -1875,7 +1875,7 @@ impl UpdateNotice {
         }
     }
 
-    pub(crate) fn digest(digest: crate::code::bus::SessionDigest) -> Self {
+    pub fn digest(digest: crate::code::bus::SessionDigest) -> Self {
         let wire = SessionDigest::from(digest);
         Self::Digest {
             workspace: wire.workspace,
@@ -1900,7 +1900,7 @@ impl UpdateNotice {
         }
     }
 
-    pub(crate) fn turn_rewrite(notice: crate::code::bus::TurnRewriteNotice) -> Self {
+    pub fn turn_rewrite(notice: crate::code::bus::TurnRewriteNotice) -> Self {
         Self::TurnRewrite {
             session: notice.session,
             turn_id: notice.turn_id,

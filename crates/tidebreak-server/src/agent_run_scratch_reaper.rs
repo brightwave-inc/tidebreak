@@ -56,7 +56,7 @@ use crate::code_execution::ConfiguredExecProvider;
 const WORKSPACE_PREFIX: &str = "agent-run-";
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct AgentRunScratchReaperConfig {
+pub struct AgentRunScratchReaperConfig {
     /// How long to wait past a run's terminal transition (or, for a directory
     /// with no matching run row, past its own mtime) before destroying its
     /// workspace. Absorbs any straggling async work — a heartbeat in flight, a
@@ -85,7 +85,7 @@ impl Default for AgentRunScratchReaperConfig {
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct AgentRunScratchReapReport {
+pub struct AgentRunScratchReapReport {
     pub scanned: usize,
     pub reaped: usize,
     pub skipped: usize,
@@ -94,13 +94,13 @@ pub(crate) struct AgentRunScratchReapReport {
 }
 
 #[derive(Debug)]
-pub(crate) struct AgentRunScratchReapFailure {
+pub struct AgentRunScratchReapFailure {
     pub run_id: Option<AgentRunId>,
     pub error: String,
 }
 
 #[derive(Clone)]
-pub(crate) struct AgentRunScratchReaper {
+pub struct AgentRunScratchReaper {
     store: Arc<dyn Store>,
     code_execution: Arc<ConfiguredExecProvider>,
     scratch_root: Arc<PathBuf>,
@@ -116,7 +116,7 @@ struct ScanResult {
 }
 
 impl AgentRunScratchReaper {
-    pub(crate) fn new(
+    pub fn new(
         store: Arc<dyn Store>,
         code_execution: Arc<ConfiguredExecProvider>,
         scratch_root: impl Into<PathBuf>,
@@ -133,7 +133,7 @@ impl AgentRunScratchReaper {
         }
     }
 
-    pub(crate) async fn run(self) {
+    pub async fn run(self) {
         loop {
             let delay = match self.sweep_once().await {
                 Ok(report) => {
@@ -170,7 +170,7 @@ impl AgentRunScratchReaper {
         }
     }
 
-    pub(crate) async fn sweep_once(&self) -> Result<AgentRunScratchReapReport> {
+    pub async fn sweep_once(&self) -> Result<AgentRunScratchReapReport> {
         let _sweep = self.sweep.lock().await;
         let cutoff = SystemTime::now()
             .checked_sub(self.config.grace_period)
@@ -280,7 +280,7 @@ impl AgentRunScratchReaper {
 /// Shared by the periodic reaper and the chat-deletion path, which erases a
 /// deleted conversation's former runs immediately rather than waiting for the
 /// next sweep. Safe to call when the workspace is already gone.
-pub(crate) async fn destroy_agent_run_workspace(
+pub async fn destroy_agent_run_workspace(
     code_execution: &ConfiguredExecProvider,
     scratch_root: &Path,
     run_id: AgentRunId,

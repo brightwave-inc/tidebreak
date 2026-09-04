@@ -1,6 +1,6 @@
 [package]
-name = "tidebreak-server"
-description = "Tidebreak in-process HTTP/WebSocket surface: the local API the desktop and CLI clients drive the agent through."
+name = "tidebreak-server-core"
+description = "Tidebreak server state, workers, and host runtimes behind the HTTP route crate."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -19,6 +19,9 @@ workspace = true
 # `TIDEBREAK_DATABASE_URL` names. Off by default: the desktop profile is
 # SQLite-only and the driver is a heavy build-time dependency.
 postgres = ["tidebreak-core/postgres", "sea-orm/sqlx-postgres", "tidebreak-core/blob-object"]
+# Keep the route crate's moved test suite on the existing server fixtures
+# without compiling those seams into release builds.
+test-support = ["tidebreak-core/test-util"]
 
 [dependencies]
 tidebreak-shell-policy = { path = "../tidebreak-shell-policy" }
@@ -40,7 +43,6 @@ tidebreak-gateway-runtime = { path = "../tidebreak-gateway-runtime" }
 tidebreak-mcp = { path = "../tidebreak-mcp" }
 tidebreak-router = { path = "../tidebreak-router" }
 tidebreak-sandbox-runtime = { path = "../tidebreak-sandbox-runtime" }
-tidebreak-sandbox-protocol = { path = "../tidebreak-sandbox-protocol" }
 tidebreak-worker-runtime = { path = "../tidebreak-worker-runtime" }
 axum = { workspace = true }
 # Pool sizing for the store this host opens (`host_connect_options`); the
@@ -60,7 +62,6 @@ jsonschema = { workspace = true }
 # Output-constraint schemas for the host's own model calls, e.g. chat titling.
 schemars = { workspace = true }
 uuid = { workspace = true }
-unicode-general-category = { workspace = true }
 chrono = { workspace = true }
 ts-rs = { workspace = true }
 # REST invoke responses cross to the renderer with the raw body base64-encoded.

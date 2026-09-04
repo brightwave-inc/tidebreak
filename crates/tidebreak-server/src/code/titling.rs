@@ -63,7 +63,7 @@ enum ProposalOutcome {
 }
 
 /// Derive the name that a new workspace should use before checkout creation.
-pub(crate) async fn propose_for_creation(
+pub async fn propose_for_creation(
     state: &AppState,
     owner: &OwnerId,
     message: &str,
@@ -80,12 +80,7 @@ pub(crate) async fn propose_for_creation(
 /// Returns immediately; nothing waits on the result and a lost title costs
 /// nothing. Called from the front of turn submission so the name usually lands
 /// while the engine is still working, mirroring chat titling's hook point.
-pub(crate) fn spawn_for_turn(
-    state: &AppState,
-    owner: &OwnerId,
-    session_id: SessionId,
-    message: String,
-) {
+pub fn spawn_for_turn(state: &AppState, owner: &OwnerId, session_id: SessionId, message: String) {
     let Some(code) = state.code.clone() else {
         return;
     };

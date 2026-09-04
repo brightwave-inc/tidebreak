@@ -7,4 +7,4 @@
 //! journal, and approvals. Nothing reaches an engine here another way
 //! (decision 0048 step 5).
 
-pub(crate) mod internal;
+pub mod internal;

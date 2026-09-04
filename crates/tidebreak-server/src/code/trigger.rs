@@ -38,11 +38,11 @@ use super::delivery::{query_pull_requests_by_number, repository_target_from_loca
 use super::runtime::CodeRuntime;
 use super::session_worker::journal_event;
 use super::trigger_target_at;
-use crate::error::ServerError;
-use crate::routes::code::types::{
+use crate::code::types::{
     CodeDeliveryPullRequestSummary, CodeDeliveryPullRequestsPage, CodeDeliveryWorkspaceLink,
     CodeGitHubRepositoryRef, CodeGitHubRepositoryTarget,
 };
+use crate::error::ServerError;
 
 /// How often the trigger sweep walks enabled triggers.
 ///
@@ -98,7 +98,7 @@ struct EligibleWorkspaces {
 
 /// One pass over every enabled trigger. A failure on one repository never
 /// stops the others.
-pub(crate) async fn sweep_triggers(runtime: &Arc<CodeRuntime>) {
+pub async fn sweep_triggers(runtime: &Arc<CodeRuntime>) {
     retry_due_deliveries(runtime).await;
 
     let triggers = match list_enabled_triggers_all_owners(&runtime.db).await {
@@ -1189,7 +1189,7 @@ mod tests {
     use tidebreak_core::{CodeTriggerCondition, PullRequestCheckBucket};
 
     use crate::code::delivery::digest_from_summary;
-    use crate::routes::code::types::{CodeDeliveryCheck, CodeGitHubRepositoryRef};
+    use crate::code::types::{CodeDeliveryCheck, CodeGitHubRepositoryRef};
 
     fn repository() -> CodeGitHubRepositoryRef {
         CodeGitHubRepositoryRef {

@@ -47,10 +47,7 @@ impl CodeRuntime {
         stopped
     }
 
-    pub(crate) async fn attach_and_spawn_worker(
-        &self,
-        session: Session,
-    ) -> Result<Session, ServerError> {
+    pub async fn attach_and_spawn_worker(&self, session: Session) -> Result<Session, ServerError> {
         let mut session = session;
         let workspace = self.session_workspace(&session).await?;
         let adapter = self.adapter(session.harness_kind)?;
@@ -311,7 +308,7 @@ impl CodeRuntime {
     }
 
     /// Whether a worker is attached to the session right now.
-    pub(crate) fn has_worker(&self, id: SessionId) -> bool {
+    pub fn has_worker(&self, id: SessionId) -> bool {
         self.workers.lock().expect("code workers").contains_key(&id)
     }
 
@@ -330,7 +327,7 @@ impl CodeRuntime {
     /// dispatched through the old file.
     ///
     /// Returns the sessions whose worker moved on this pass.
-    pub(crate) async fn resync_workers_to_selected_binaries(
+    pub async fn resync_workers_to_selected_binaries(
         self: &Arc<Self>,
         kinds: &[HarnessKind],
     ) -> Vec<SessionId> {

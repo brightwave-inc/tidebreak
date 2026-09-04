@@ -306,8 +306,8 @@
           "deletions": 0,
           "insertions": 2,
           "kind": "renamed",
-          "path": "crates/tidebreak-server/fixtures/code-frames.json",
-          "previous_path": "crates/tidebreak-server/fixtures/code.json"
+          "path": "crates/tidebreak-server-api/fixtures/code-frames.json",
+          "previous_path": "crates/tidebreak-server-api/fixtures/code.json"
         }
       ],
       "stat": {

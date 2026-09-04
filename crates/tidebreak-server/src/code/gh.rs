@@ -19,8 +19,8 @@ use tidebreak_core::{Diffstat, PullRequestDigest, QuickAction};
 use tidebreak_harness::{filter_child_env, probe_shell, HostEnv, OutputBudget};
 
 use super::setup_script::spawn_workspace_script;
+use crate::code::types::CodeGitHubRepositoryTarget;
 use crate::obo_gateway::GitCredential;
-use crate::routes::code::types::CodeGitHubRepositoryTarget;
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 const GIT_PUSH_TIMEOUT: Duration = Duration::from_secs(120);
@@ -30,23 +30,23 @@ const MAX_OUTPUT_CHARS: usize = 4_096;
 const MAX_ACTION_OUTPUT_BYTES: usize = 4_096;
 const MAX_ACTION_OUTPUT_LINES: usize = 256;
 const GH_OBSERVATION_TTL: Duration = Duration::from_secs(30);
-pub(crate) const GH_UNAVAILABLE_PREFIX: &str = "gh_unavailable: ";
-pub(crate) const PR_HEAD_CHANGED_PREFIX: &str = "pr_head_changed: ";
+pub const GH_UNAVAILABLE_PREFIX: &str = "gh_unavailable: ";
+pub const PR_HEAD_CHANGED_PREFIX: &str = "pr_head_changed: ";
 
 /// Environment variables the one-shot credential helper reads a borrowed
 /// credential from. The environment, not argv: another user's `ps` can read
 /// a process's arguments, not its environment.
-pub(crate) const GIT_CREDENTIAL_USERNAME_ENV: &str = "TIDEBREAK_GIT_CREDENTIAL_USERNAME";
-pub(crate) const GIT_CREDENTIAL_SECRET_ENV: &str = "TIDEBREAK_GIT_CREDENTIAL_SECRET";
+pub const GIT_CREDENTIAL_USERNAME_ENV: &str = "TIDEBREAK_GIT_CREDENTIAL_USERNAME";
+pub const GIT_CREDENTIAL_SECRET_ENV: &str = "TIDEBREAK_GIT_CREDENTIAL_SECRET";
 
 /// The one host the one-shot helper may answer for, set beside the pair.
-pub(crate) const GIT_CREDENTIAL_HOST_ENV: &str = "TIDEBREAK_GIT_CREDENTIAL_HOST";
+pub const GIT_CREDENTIAL_HOST_ENV: &str = "TIDEBREAK_GIT_CREDENTIAL_HOST";
 
 /// The forge host a borrowed credential is confined to (decision 63).
 ///
 /// One value for v1 because the gateway mints from exactly one GitHub App;
 /// a GHES forge would thread its own host through here.
-pub(crate) const GIT_CREDENTIAL_FORGE_HOST: &str = "github.com";
+pub const GIT_CREDENTIAL_FORGE_HOST: &str = "github.com";
 
 /// Configuration that lends one borrowed credential to one git subprocess
 /// (decision 63).
@@ -64,7 +64,7 @@ pub(crate) const GIT_CREDENTIAL_FORGE_HOST: &str = "github.com";
 /// and without the check the environment pair would be offered to whatever
 /// host asked. A mismatched description reads to git as "no credential",
 /// never as an error.
-pub(crate) const GIT_CREDENTIAL_CONFIG_ARGS: [&str; 4] = [
+pub const GIT_CREDENTIAL_CONFIG_ARGS: [&str; 4] = [
     "-c",
     "credential.helper=",
     "-c",
@@ -99,7 +99,7 @@ impl CachedGhObservation {
 
 /// Failure from a git, `gh`, or quick-action operation.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum GhError {
+pub enum GhError {
     #[error("nothing to commit")]
     NothingToCommit,
     #[error("{0}")]
@@ -140,7 +140,7 @@ impl From<String> for GhError {
 
 /// Result of staging and committing the worktree.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CommitOutcome {
+pub struct CommitOutcome {
     pub sha: String,
     pub message: String,
     pub stat: Diffstat,
@@ -148,7 +148,7 @@ pub(crate) struct CommitOutcome {
 
 /// Result of pushing the workspace branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PushOutcome {
+pub struct PushOutcome {
     pub branch: String,
     pub remote: String,
 }
@@ -160,7 +160,7 @@ pub(crate) struct PushOutcome {
 /// worktree's own configuration: sibling workspaces of the same clone can
 /// belong to callers with other identities, and the shared repository
 /// configuration must never name any one of them.
-pub(crate) async fn configure_workspace_identity(
+pub async fn configure_workspace_identity(
     worktree: &Path,
     name: &str,
     email: &str,
@@ -188,7 +188,7 @@ pub(crate) async fn configure_workspace_identity(
 
 /// Live git + `gh` observation for the workspace PR card.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct WorkspaceGitStatus {
+pub struct WorkspaceGitStatus {
     pub dirty: bool,
     pub unpushed: bool,
     pub ahead: u64,
@@ -211,7 +211,7 @@ pub(crate) struct WorkspaceGitStatus {
 /// Mutable local facts that must still hold when a workspace merge reaches
 /// the host. The runtime reads them while it owns the workspace turn lock.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct WorkspaceMergeLocalState {
+pub struct WorkspaceMergeLocalState {
     pub current_branch: Option<String>,
     pub head_sha: String,
     pub dirty: bool,
@@ -221,7 +221,7 @@ pub(crate) struct WorkspaceMergeLocalState {
 
 /// The pull request `gh` resolves from the locked workspace branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct WorkspacePullRequestIdentity {
+pub struct WorkspacePullRequestIdentity {
     pub target: CodeGitHubRepositoryTarget,
     pub number: u64,
     pub state: String,
@@ -231,7 +231,7 @@ pub(crate) struct WorkspacePullRequestIdentity {
 
 /// Outcome of one named quick action.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ActionOutcome {
+pub struct ActionOutcome {
     pub name: String,
     pub success: bool,
     pub exit_code: Option<i32>,
@@ -245,7 +245,7 @@ pub(crate) struct ActionOutcome {
 /// When `gh` is signed in, the URL is whatever `gh repo view --json url`
 /// reports. Otherwise the HTTPS GitHub URL is constructed. Credentials are
 /// never read or stored.
-pub(crate) async fn resolve_github_clone_url(
+pub async fn resolve_github_clone_url(
     owner_repo: &str,
     search_path: Option<&str>,
 ) -> Result<String, GhError> {
@@ -286,7 +286,7 @@ fn github_clone_url(url: &str) -> String {
 
 /// Observed `gh` availability. Tokens are never read or stored.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct GhObservation {
+pub struct GhObservation {
     pub found: bool,
     pub authenticated: Option<bool>,
     pub viewer_login: Option<String>,
@@ -295,7 +295,7 @@ pub(crate) struct GhObservation {
 }
 
 /// Stage every change in `worktree` and create one commit.
-pub(crate) async fn commit_all(
+pub async fn commit_all(
     worktree: &Path,
     title: &str,
     message: Option<&str>,
@@ -325,7 +325,7 @@ pub(crate) async fn commit_all(
 /// hosted machine (decision 63), lent to this one subprocess and dropped.
 /// `None` is every other machine: git authenticates however the operator's
 /// own configuration says.
-pub(crate) async fn push_branch(
+pub async fn push_branch(
     worktree: &Path,
     branch: &str,
     credential: Option<&GitCredential>,
@@ -346,7 +346,7 @@ pub(crate) async fn push_branch(
 
 /// Inspect the worktree and, when `gh` can, refresh the PR digest.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn workspace_git_status(
+pub async fn workspace_git_status(
     worktree: &Path,
     title: &str,
     branch: &str,
@@ -381,7 +381,7 @@ pub(crate) async fn workspace_git_status(
 }
 
 /// The `gh` binary to drive reads with, when one is present and signed in.
-pub(crate) async fn authenticated_gh_binary(search_path: Option<&str>) -> Option<PathBuf> {
+pub async fn authenticated_gh_binary(search_path: Option<&str>) -> Option<PathBuf> {
     let gh = observe_gh(search_path).await;
     (gh.found && gh.authenticated == Some(true))
         .then_some(gh.binary)
@@ -390,7 +390,7 @@ pub(crate) async fn authenticated_gh_binary(search_path: Option<&str>) -> Option
 
 /// Create a pull request from the workspace branch. Never merges.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn create_pull_request(
+pub async fn create_pull_request(
     worktree: &Path,
     title: &str,
     branch: &str,
@@ -485,7 +485,7 @@ pub(crate) async fn create_pull_request(
 /// with `gh` — a light digest from the creation answer serves until the next
 /// status read.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn create_pull_request_rest(
+pub async fn create_pull_request_rest(
     worktree: &Path,
     title: &str,
     branch: &str,
@@ -493,7 +493,7 @@ pub(crate) async fn create_pull_request_rest(
     requested_title: Option<&str>,
     requested_body: Option<&str>,
     api_base: &str,
-    target: &crate::routes::code::types::CodeGitHubRepositoryTarget,
+    target: &crate::code::types::CodeGitHubRepositoryTarget,
     credential: &GitCredential,
 ) -> Result<(PullRequestDigest, serde_json::Value), GhError> {
     let inspect = inspect_git(worktree, base_ref, title).await?;
@@ -558,7 +558,7 @@ pub(crate) async fn create_pull_request_rest(
 
 /// Merge strategy for the user-initiated merge operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MergeMethod {
+pub enum MergeMethod {
     Squash,
     Merge,
     Rebase,
@@ -584,7 +584,7 @@ impl MergeMethod {
 /// It stays on the general runner. Readying a draft is a user state change but
 /// not a merge, and widening the merge-only runner to carry it would undo the
 /// point of having two runners (decision 42).
-pub(crate) async fn mark_workspace_pull_request_ready(
+pub async fn mark_workspace_pull_request_ready(
     worktree: &Path,
     gh_search_path: Option<&str>,
 ) -> Result<(), GhError> {
@@ -597,7 +597,7 @@ pub(crate) async fn mark_workspace_pull_request_ready(
 }
 
 /// Turn a `gh pr merge` failure into something the PR card can show.
-pub(crate) fn classify_merge_error(err: String) -> GhError {
+pub fn classify_merge_error(err: String) -> GhError {
     let bounded = bound_text(&err);
     let lower = bounded.to_ascii_lowercase();
     // Sign-out markers must be specific: a bare `auth` substring also matches
@@ -637,7 +637,7 @@ pub(crate) fn classify_merge_error(err: String) -> GhError {
 
 /// PR comments read live from the host. Never persisted.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PrComments {
+pub struct PrComments {
     pub number: u64,
     pub comments: Vec<tidebreak_core::PullRequestComment>,
 }
@@ -645,7 +645,7 @@ pub(crate) struct PrComments {
 /// Load issue comments, review bodies, and inline review comments for the
 /// workspace PR. Inline comments come from the REST endpoint because
 /// `gh pr view --json` does not carry file/line positions.
-pub(crate) async fn load_pr_comments(
+pub async fn load_pr_comments(
     worktree: &Path,
     gh_search_path: Option<&str>,
 ) -> Result<PrComments, GhError> {
@@ -675,7 +675,7 @@ pub(crate) async fn load_pr_comments(
     Ok(PrComments { number, comments })
 }
 
-pub(crate) fn require_gh_binary(gh: &GhObservation) -> Result<PathBuf, GhError> {
+pub fn require_gh_binary(gh: &GhObservation) -> Result<PathBuf, GhError> {
     if !gh.found {
         return Err(GhError::GhAbsent {
             instructions: gh.remediation.clone(),
@@ -699,7 +699,7 @@ pub(crate) fn require_gh_binary(gh: &GhObservation) -> Result<PathBuf, GhError> 
 
 /// Parse `gh pr view --json number,comments,reviews`: issue comments plus
 /// review bodies. Missing or malformed entries are skipped, never fatal.
-pub(crate) fn parse_pr_view_comments(
+pub fn parse_pr_view_comments(
     json: &str,
 ) -> (Option<u64>, Vec<tidebreak_core::PullRequestComment>) {
     use tidebreak_core::{PullRequestComment, PullRequestCommentKind};
@@ -782,7 +782,7 @@ pub(crate) fn parse_pr_view_comments(
 
 /// Parse the REST `pulls/{n}/comments` array: inline review comments with
 /// file path and line. Missing fields are tolerated.
-pub(crate) fn parse_review_comments(json: &str) -> Vec<tidebreak_core::PullRequestComment> {
+pub fn parse_review_comments(json: &str) -> Vec<tidebreak_core::PullRequestComment> {
     use tidebreak_core::{PullRequestComment, PullRequestCommentKind};
 
     let parsed: serde_json::Value = serde_json::from_str(json).unwrap_or(serde_json::Value::Null);
@@ -839,7 +839,7 @@ fn json_id(value: Option<&serde_json::Value>) -> Option<String> {
 }
 
 /// Run one named quick action in the worktree. Output is not journaled.
-pub(crate) async fn run_named_action(
+pub async fn run_named_action(
     worktree: &Path,
     actions: &[QuickAction],
     name: &str,
@@ -852,7 +852,7 @@ pub(crate) async fn run_named_action(
 }
 
 /// Run every `auto_run_on_create` action after setup. Failures are ignored.
-pub(crate) async fn run_auto_create_actions(worktree: &Path, actions: &[QuickAction]) {
+pub async fn run_auto_create_actions(worktree: &Path, actions: &[QuickAction]) {
     for action in actions.iter().filter(|action| action.auto_run_on_create) {
         let outcome = run_action(worktree, action).await;
         if !outcome.success {
@@ -866,7 +866,7 @@ pub(crate) async fn run_auto_create_actions(worktree: &Path, actions: &[QuickAct
 }
 
 /// Deterministic commit subject + shortstat body. No model calls.
-pub(crate) fn generate_commit_message(title: &str, stat: &Diffstat) -> String {
+pub fn generate_commit_message(title: &str, stat: &Diffstat) -> String {
     let subject = title.trim();
     let subject = if subject.is_empty() {
         "Update workspace"
@@ -876,7 +876,7 @@ pub(crate) fn generate_commit_message(title: &str, stat: &Diffstat) -> String {
     format!("{subject}\n\n{}", format_shortstat(stat))
 }
 
-pub(crate) fn generate_pr_title(title: &str, branch: &str) -> String {
+pub fn generate_pr_title(title: &str, branch: &str) -> String {
     let title = title.trim();
     if title.is_empty() {
         branch.rsplit('/').next().unwrap_or(branch).to_owned()
@@ -885,7 +885,7 @@ pub(crate) fn generate_pr_title(title: &str, branch: &str) -> String {
     }
 }
 
-pub(crate) fn generate_pr_body(commits: &[String], stat: &Diffstat) -> String {
+pub fn generate_pr_body(commits: &[String], stat: &Diffstat) -> String {
     let mut body = String::from("## Commits\n\n");
     if commits.is_empty() {
         body.push_str("No commits on this branch yet.\n");
@@ -903,7 +903,7 @@ pub(crate) fn generate_pr_body(commits: &[String], stat: &Diffstat) -> String {
 }
 
 /// Branch name `gh pr create --base` expects: strip a remote prefix.
-pub(crate) fn gh_base_branch(base_ref: &str) -> &str {
+pub fn gh_base_branch(base_ref: &str) -> &str {
     let trimmed = base_ref.trim();
     trimmed
         .strip_prefix("refs/remotes/origin/")
@@ -911,7 +911,7 @@ pub(crate) fn gh_base_branch(base_ref: &str) -> &str {
         .unwrap_or(trimmed)
 }
 
-pub(crate) fn format_shortstat(stat: &Diffstat) -> String {
+pub fn format_shortstat(stat: &Diffstat) -> String {
     format!(
         "{} file{} changed, {} insertion{}(+), {} deletion{}(-)",
         stat.files,
@@ -938,7 +938,7 @@ struct GitInspect {
 /// The caller owns the workspace turn lock for this read and the host action
 /// that follows. A missing upstream and a detached head stay distinct so the
 /// route can return a specific typed conflict.
-pub(crate) async fn inspect_workspace_merge_local_state(
+pub async fn inspect_workspace_merge_local_state(
     worktree: &Path,
 ) -> Result<WorkspaceMergeLocalState, GhError> {
     let current_branch = git(
@@ -1082,7 +1082,7 @@ async fn commit_subjects(worktree: &Path, range: &str) -> Result<Vec<String>, Gh
         .collect())
 }
 
-pub(crate) fn parse_shortstat(text: &str) -> Diffstat {
+pub fn parse_shortstat(text: &str) -> Diffstat {
     let mut files = 0;
     let mut insertions = 0;
     let mut deletions = 0;
@@ -1113,11 +1113,11 @@ fn parse_count(text: &str) -> u64 {
     text.trim().parse().unwrap_or(0)
 }
 
-pub(crate) async fn observe_gh(search_path: Option<&str>) -> GhObservation {
+pub async fn observe_gh(search_path: Option<&str>) -> GhObservation {
     observe_gh_with_cache(search_path, false).await
 }
 
-pub(crate) async fn refresh_gh_observation(search_path: Option<&str>) -> GhObservation {
+pub async fn refresh_gh_observation(search_path: Option<&str>) -> GhObservation {
     observe_gh_with_cache(search_path, true).await
 }
 
@@ -1672,7 +1672,7 @@ async fn git_with_credential(
 /// arguments so no automation path can ever merge a PR; the one allowed merge
 /// entry point is [`run_gh_user_merge`], reachable only from the dedicated
 /// user-initiated merge operation. GraphQL is refused on every runner.
-pub(crate) async fn run_gh(
+pub async fn run_gh(
     cwd: &Path,
     binary: &Path,
     args: &[&str],
@@ -1689,7 +1689,7 @@ pub(crate) async fn run_gh(
 /// This is a user-initiated state change, but not a merge. It stays on the
 /// general runner so the merge-only runner remains incapable of doing
 /// anything else.
-pub(crate) async fn mark_pull_request_ready(
+pub async fn mark_pull_request_ready(
     host: &str,
     owner: &str,
     repo: &str,
@@ -1715,7 +1715,7 @@ pub(crate) async fn mark_pull_request_ready(
 ///
 /// Like `mark_pull_request_ready`, this is a user-initiated state change that
 /// is not a merge, so it stays on the general runner.
-pub(crate) async fn close_pull_request_target(
+pub async fn close_pull_request_target(
     host: &str,
     owner: &str,
     repo: &str,
@@ -1738,7 +1738,7 @@ pub(crate) async fn close_pull_request_target(
 }
 
 /// Reopen one repository-qualified pull request that was closed unmerged.
-pub(crate) async fn reopen_pull_request_target(
+pub async fn reopen_pull_request_target(
     host: &str,
     owner: &str,
     repo: &str,
@@ -1764,7 +1764,7 @@ pub(crate) async fn reopen_pull_request_target(
 ///
 /// The body reaches `gh` as an argv value, never a shell string, so backticks
 /// and newlines in a review note are inert.
-pub(crate) async fn comment_on_pull_request_target(
+pub async fn comment_on_pull_request_target(
     host: &str,
     owner: &str,
     repo: &str,
@@ -1800,7 +1800,7 @@ pub(crate) async fn comment_on_pull_request_target(
 /// user's explicit branch-protection bypass (`--admin`); callers reject the
 /// `admin && auto` pair before it gets here.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn merge_pull_request_target(
+pub async fn merge_pull_request_target(
     host: &str,
     owner: &str,
     repo: &str,
@@ -1838,7 +1838,7 @@ pub(crate) async fn merge_pull_request_target(
         .map_err(classify_merge_error)
 }
 
-pub(crate) async fn rerun_failed_jobs_with_observation(
+pub async fn rerun_failed_jobs_with_observation(
     observation: &GhObservation,
     host: &str,
     owner: &str,
@@ -1856,7 +1856,7 @@ pub(crate) async fn rerun_failed_jobs_with_observation(
     .await
 }
 
-pub(crate) async fn rerun_workflow_with_observation(
+pub async fn rerun_workflow_with_observation(
     observation: &GhObservation,
     host: &str,
     owner: &str,
@@ -1898,7 +1898,7 @@ async fn rerun_workflow_endpoint_with_observation(
 /// The array rides `--field pull_requests[]=N` per member: that is the one
 /// `gh api` spelling that serializes as a JSON array, which the stacks
 /// endpoint requires.
-pub(crate) async fn create_stack(
+pub async fn create_stack(
     host: &str,
     owner: &str,
     repo: &str,
@@ -1928,7 +1928,7 @@ pub(crate) async fn create_stack(
         .map_err(|error| classify_observed_gh(error, &observation))
 }
 
-pub(crate) fn cli_repository(host: &str, owner: &str, repo: &str) -> String {
+pub fn cli_repository(host: &str, owner: &str, repo: &str) -> String {
     if host == "github.com" {
         format!("{owner}/{repo}")
     } else {
@@ -1939,7 +1939,7 @@ pub(crate) fn cli_repository(host: &str, owner: &str, repo: &str) -> String {
 /// Fields a pull-request fact snapshot needs (decision 77). Narrower than the
 /// delivery list fields: no checks, review, or mergeability — those stay
 /// live-only.
-pub(crate) const PR_FACT_FIELDS: &str = "number,url,title,state,isDraft,author,headRefName,headRefOid,baseRefName,createdAt,updatedAt,mergedAt,closedAt";
+pub const PR_FACT_FIELDS: &str = "number,url,title,state,isDraft,author,headRefName,headRefOid,baseRefName,createdAt,updatedAt,mergedAt,closedAt";
 
 /// Resolve the pull request attached to the workspace's current branch.
 ///
@@ -1947,7 +1947,7 @@ pub(crate) const PR_FACT_FIELDS: &str = "number,url,title,state,isDraft,author,h
 /// runtime compares the returned URL, number, branch, and head with the exact
 /// target the desktop confirmed before it calls the repository-qualified
 /// merge helper.
-pub(crate) async fn view_workspace_pull_request(
+pub async fn view_workspace_pull_request(
     worktree: &Path,
     search_path: Option<&str>,
 ) -> Result<WorkspacePullRequestIdentity, GhError> {
@@ -2006,7 +2006,7 @@ pub(crate) async fn view_workspace_pull_request(
 }
 
 /// Read one repository-qualified pull request's fact fields, as raw JSON.
-pub(crate) async fn view_pull_request_raw(
+pub async fn view_pull_request_raw(
     host: &str,
     owner: &str,
     repo: &str,
@@ -2041,7 +2041,7 @@ pub(crate) async fn view_pull_request_raw(
 ///
 /// `--state all` so a push confirmed just after a merge still resolves; the
 /// caller picks among the handful of results.
-pub(crate) async fn list_pull_requests_for_head_raw(
+pub async fn list_pull_requests_for_head_raw(
     host: &str,
     owner: &str,
     repo: &str,
@@ -2186,7 +2186,7 @@ async fn spawn_gh_output(
 /// One `gh api --include` answer: the status line, the caching and pacing
 /// headers the fetcher acts on, and the body.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RawHttpResponse {
+pub struct RawHttpResponse {
     pub status: u16,
     pub etag: Option<String>,
     pub retry_after_secs: Option<u64>,
@@ -2201,7 +2201,7 @@ pub(crate) struct RawHttpResponse {
 /// this process must read — a 304 is the conditional fetcher's cheapest
 /// success, and a 403's headers say how long to park. Only a run that
 /// produced no HTTP status line at all is an error here.
-pub(crate) async fn run_gh_http(
+pub async fn run_gh_http(
     cwd: &Path,
     binary: &Path,
     args: &[&str],

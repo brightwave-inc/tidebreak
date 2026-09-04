@@ -71,7 +71,7 @@ pub(crate) fn configured_settings(
 
 /// The remote-session context one deployment configures: the transport and
 /// the spawn settings, plus the live pump tasks the sweep reconciles.
-pub(crate) struct RemoteSessions {
+pub struct RemoteSessions {
     /// The environment transport.
     pub(crate) provisioner: Arc<dyn SandboxProvisioner>,
     /// Spawn-time settings.
@@ -90,7 +90,7 @@ pub(crate) struct RemoteSessions {
 }
 
 impl RemoteSessions {
-    pub(crate) fn new(
+    pub fn new(
         provisioner: Arc<dyn SandboxProvisioner>,
         settings: RemoteSpawnSettings,
     ) -> Arc<Self> {
@@ -109,7 +109,7 @@ impl RemoteSessions {
     }
 
     /// The driver view over this context for one call.
-    pub(crate) fn driver<'a>(
+    pub fn driver<'a>(
         &'a self,
         db: &'a Arc<DbStore>,
         bus: &'a super::super::bus::CodeEventBus,

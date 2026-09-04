@@ -22,7 +22,7 @@ const MAX_VIEW_FRAME_TOKENS: usize = 64;
 
 /// What one frame token addresses.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ViewFrameSource {
+pub enum ViewFrameSource {
     /// A prefetched MCP Apps view, re-resolved against the live runtime at
     /// redemption so a server that dropped its view stops serving it.
     McpView {
@@ -43,14 +43,14 @@ pub(crate) enum ViewFrameSource {
 
 /// Outstanding single-use view-frame tokens.
 #[derive(Default)]
-pub(crate) struct ViewFrameTokens {
+pub struct ViewFrameTokens {
     tokens: Mutex<HashMap<uuid::Uuid, (ViewFrameSource, Instant)>>,
 }
 
 impl ViewFrameTokens {
     /// Mint a token addressing `source`, sweeping expired tokens first.
     /// Returns `None` at the outstanding-token bound.
-    pub(crate) async fn mint(&self, source: ViewFrameSource) -> Option<uuid::Uuid> {
+    pub async fn mint(&self, source: ViewFrameSource) -> Option<uuid::Uuid> {
         let token = uuid::Uuid::new_v4();
         let mut tokens = self.tokens.lock().await;
         let now = Instant::now();
@@ -64,7 +64,7 @@ impl ViewFrameTokens {
 
     /// Redeem a token, consuming it. An expired token is consumed too: the
     /// capability is spent by presentation, whether or not it was served.
-    pub(crate) async fn take(&self, token: uuid::Uuid) -> Option<ViewFrameSource> {
+    pub async fn take(&self, token: uuid::Uuid) -> Option<ViewFrameSource> {
         let mut tokens = self.tokens.lock().await;
         let (source, minted) = tokens.remove(&token)?;
         if minted.elapsed() >= VIEW_FRAME_TOKEN_TTL {

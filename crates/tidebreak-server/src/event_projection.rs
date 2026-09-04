@@ -169,7 +169,7 @@ pub struct RendererModelIdentity {
     pub provider: crate::providers::ProviderKind,
 }
 
-pub(crate) fn model_identity(selection: &str) -> Option<RendererModelIdentity> {
+pub fn model_identity(selection: &str) -> Option<RendererModelIdentity> {
     let (provider, id) = crate::model_registry::parse_selection_key(selection)?;
     Some(RendererModelIdentity {
         id: id.to_owned(),
@@ -239,7 +239,7 @@ pub enum RendererAgentEvent {
         /// Complete standing-grant ladder for this exact call, narrowest first.
         /// Empty means only one-shot approval is available.
         #[serde(default)]
-        grant_rungs: Vec<crate::routes::ApprovalGrantRung>,
+        grant_rungs: Vec<crate::approvals::ApprovalGrantRung>,
         /// The one deliberate opening in this boundary. A human cannot consent
         /// to a command they are not shown, so a tool may project a closed,
         /// field-by-field view of the action under review. Tools without one
@@ -360,7 +360,7 @@ impl TurnFailureCategory {
     ///
     /// Unrecognized kinds fall to [`Self::Unknown`], so a new internal failure
     /// code is coarse rather than wrong.
-    pub(crate) fn from_kind(kind: &str) -> Self {
+    pub fn from_kind(kind: &str) -> Self {
         match kind {
             "rate_limited" | "overloaded" => Self::RateLimited,
             "authentication" | "missing_credential" => Self::Auth,
@@ -371,7 +371,7 @@ impl TurnFailureCategory {
     }
 
     /// Whether running the same turn again could plausibly succeed.
-    pub(crate) const fn retries_may_succeed(self) -> bool {
+    pub const fn retries_may_succeed(self) -> bool {
         matches!(self, Self::RateLimited | Self::Transient)
     }
 
@@ -392,7 +392,7 @@ impl TurnFailureCategory {
 /// Only provider-originated diagnostics cross to the renderer. These strings
 /// have already passed the router's bounded message extraction and credential
 /// redaction; internal failures can carry host paths and stay server-side.
-pub(crate) fn renderer_provider_failure_detail(kind: &str, detail: &str) -> Option<String> {
+pub fn renderer_provider_failure_detail(kind: &str, detail: &str) -> Option<String> {
     matches!(
         kind,
         "authentication"
@@ -484,7 +484,7 @@ impl From<&SequencedAgentEvent> for RendererSequencedEvent {
                 approval: *kind,
                 class: *class,
                 auto_judging: *auto_judging,
-                grant_rungs: crate::routes::grant_rungs_from_scopes(grant_scopes, true),
+                grant_rungs: crate::approvals::grant_rungs_from_scopes(grant_scopes, true),
                 preview: preview.clone(),
             },
             AgentEvent::ApprovalDecided { call_id, approved } => {
@@ -577,14 +577,14 @@ fn renderer_tool_failure(output: &tidebreak_core::ToolOutput) -> Option<Renderer
 }
 
 impl RendererSequencedEvent {
-    pub(crate) fn with_turn_model(mut self, selection: Option<&str>) -> Self {
+    pub fn with_turn_model(mut self, selection: Option<&str>) -> Self {
         if let RendererAgentEvent::TurnFailed { model, .. } = &mut self.event {
             *model = selection.and_then(model_identity);
         }
         self
     }
 
-    pub(crate) fn mark_replayed(mut self) -> Self {
+    pub fn mark_replayed(mut self) -> Self {
         self.replayed = Some(true);
         self
     }

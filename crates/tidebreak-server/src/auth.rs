@@ -95,25 +95,25 @@ pub const LOCAL_IMPORT_HEADER: HeaderName = HeaderName::from_static("x-tidebreak
 /// Comma-separated adapter bootstrap bearers accepted by the pre-grant
 /// connect route. Several values allow a zero-downtime rotation: add the new
 /// value, move the adapter, then remove the old one.
-pub(crate) const ADAPTER_BOOTSTRAP_TOKENS_ENV: &str = "TIDEBREAK_ADAPTER_BOOTSTRAP_TOKENS";
+pub const ADAPTER_BOOTSTRAP_TOKENS_ENV: &str = "TIDEBREAK_ADAPTER_BOOTSTRAP_TOKENS";
 
 /// The narrow service credentials allowed to start an external connect flow.
 ///
 /// This type deliberately implements neither `Debug` nor serialization. The
 /// credentials live only in process memory and authorize no owner API or
 /// post-connect adapter route.
-pub(crate) struct AdapterBootstrapTokens {
+pub struct AdapterBootstrapTokens {
     tokens: Vec<std::sync::Arc<str>>,
 }
 
 impl AdapterBootstrapTokens {
     /// Read and validate the optional token set once at boot.
-    pub(crate) fn from_env() -> Result<Option<Self>> {
+    pub fn from_env() -> Result<Option<Self>> {
         Self::parse(std::env::var(ADAPTER_BOOTSTRAP_TOKENS_ENV).ok())
     }
 
-    #[cfg(test)]
-    pub(crate) fn for_test(token: &str) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test(token: &str) -> Self {
         Self::parse(Some(token.to_owned()))
             .expect("the adapter bootstrap test token is valid")
             .expect("the adapter bootstrap test token is present")
@@ -166,7 +166,7 @@ impl AdapterBootstrapTokens {
 ///
 /// The adapter does not hold a grant yet, so this credential is distinct from
 /// both owner bearers and the grant tokens minted at completion.
-pub(crate) struct AdapterBootstrapAuth;
+pub struct AdapterBootstrapAuth;
 
 impl FromRequestParts<AppState> for AdapterBootstrapAuth {
     type Rejection = ServerError;
@@ -195,7 +195,7 @@ impl FromRequestParts<AppState> for AdapterBootstrapAuth {
 /// long-lived static bearer.
 #[derive(serde::Serialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
-pub(crate) enum AuthDiscovery {
+pub enum AuthDiscovery {
     Gateway {
         gateway_url: String,
         resource: String,
@@ -204,7 +204,7 @@ pub(crate) enum AuthDiscovery {
     Local,
 }
 
-pub(crate) async fn discovery(State(state): State<AppState>) -> Json<AuthDiscovery> {
+pub async fn discovery(State(state): State<AppState>) -> Json<AuthDiscovery> {
     let discovery = match state.config.profile {
         Profile::SelfHost => match state.config.auth_gateway_url.as_deref() {
             Some(gateway_url) => AuthDiscovery::Gateway {
@@ -223,7 +223,7 @@ pub(crate) async fn discovery(State(state): State<AppState>) -> Json<AuthDiscove
 }
 
 #[derive(serde::Deserialize)]
-pub(crate) struct HandoffQuery {
+pub struct HandoffQuery {
     #[serde(default)]
     code: String,
     /// Which UI route should open once the page is signed in — the hash-router
@@ -312,10 +312,7 @@ fn handoff_redirect(
 /// take codes from, so the route does not exist there. A refused or
 /// unusable exchange still lands on the page, with a reason the page can
 /// word, rather than on a bare error a reader cannot act on.
-pub(crate) async fn handoff(
-    State(state): State<AppState>,
-    Query(query): Query<HandoffQuery>,
-) -> Response {
+pub async fn handoff(State(state): State<AppState>, Query(query): Query<HandoffQuery>) -> Response {
     let PrincipalAuthenticator::Gateway(gateway) = state.principal_authenticator.as_ref() else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -392,7 +389,7 @@ pub async fn require_token(
 /// neither `Debug` nor serialization. Socket loops use it only to re-check the
 /// live Gateway principal; static-token and local sockets receive no lease.
 #[derive(Clone)]
-pub(crate) struct GatewayAuthLease {
+pub struct GatewayAuthLease {
     bearer: std::sync::Arc<str>,
     principal: Principal,
 }
@@ -401,7 +398,7 @@ impl GatewayAuthLease {
     /// Revalidate the original credential and require identity and role to be
     /// unchanged. Refusal, expiry, deactivation, demotion/promotion, and
     /// verifier outages all fail closed.
-    pub(crate) async fn revalidate(&self, state: &AppState) -> bool {
+    pub async fn revalidate(&self, state: &AppState) -> bool {
         state
             .principal_authenticator
             .resolve(&self.bearer)
@@ -434,14 +431,14 @@ async fn resolve_principal(state: &AppState, presented: &str) -> Option<Principa
 /// Gateway mode is the hosted default: every request is checked against the
 /// Gateway's live account and session state. Static tokens remain available
 /// for standalone self-host deployments with no Model Gateway.
-pub(crate) enum PrincipalAuthenticator {
+pub enum PrincipalAuthenticator {
     None,
     Static(TokenMap),
     Gateway(GatewayAuthenticator),
 }
 
 impl PrincipalAuthenticator {
-    pub(crate) fn from_config(config: &tidebreak_core::Config) -> Result<Self> {
+    pub fn from_config(config: &tidebreak_core::Config) -> Result<Self> {
         match (
             config.auth_tokens_file.as_deref(),
             config.auth_gateway_url.as_deref(),
@@ -500,7 +497,7 @@ impl PrincipalAuthenticator {
 }
 
 /// Live verifier for Gateway-issued `tidebreak` resource tokens.
-pub(crate) struct GatewayAuthenticator {
+pub struct GatewayAuthenticator {
     principal_url: reqwest::Url,
     /// Where a one-time handoff code becomes a bearer; see [`handoff`].
     handoff_url: reqwest::Url,
@@ -509,7 +506,7 @@ pub(crate) struct GatewayAuthenticator {
 }
 
 /// What redeeming a handoff code came to.
-pub(crate) enum HandoffOutcome {
+pub enum HandoffOutcome {
     /// A bearer for this machine, bound by the gateway to this resource.
     Granted(String),
     /// The gateway would not exchange the code: unknown, consumed, or past
@@ -585,7 +582,7 @@ impl GatewayAuthenticator {
     /// bearer to [`GatewayAuthenticator::resolve`], so nothing the code
     /// claims is trusted here — not even the shape of what comes back beyond
     /// it being a bearer this verifier would accept.
-    pub(crate) async fn redeem_handoff(&self, code: &str) -> HandoffOutcome {
+    pub async fn redeem_handoff(&self, code: &str) -> HandoffOutcome {
         let response = match self
             .client
             .post(self.handoff_url.clone())
@@ -699,7 +696,7 @@ impl GatewayAuthenticator {
 /// Normalize the public URL whose digest names this machine's `tidebreak:`
 /// resource. Shared with the on-behalf-of gateway, which names the same
 /// resource in git-credential requests (decision 63).
-pub(crate) fn canonical_public_url(raw: &str) -> Result<String> {
+pub fn canonical_public_url(raw: &str) -> Result<String> {
     let url = reqwest::Url::parse(raw.trim())
         .map_err(|error| AgentError::config(format!("invalid Tidebreak public URL: {error}")))?;
     if !matches!(url.scheme(), "http" | "https")

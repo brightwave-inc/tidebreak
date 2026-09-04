@@ -60,9 +60,9 @@ const GIT_ERROR_LINES: usize = 2_048;
 const MAX_DIFF_LINES: usize = 32_768;
 
 /// Default bound on a unified-diff body.
-pub(crate) const MAX_DIFF_BYTES: usize = 256 * 1024;
+pub const MAX_DIFF_BYTES: usize = 256 * 1024;
 /// Default bound on how many files a files/diff payload includes in full.
-pub(crate) const MAX_DIFF_FILES: usize = 64;
+pub const MAX_DIFF_FILES: usize = 64;
 
 const REF_PREFIX: &str = "refs/tidebreak/checkpoints";
 const GIT_PATH_WIRE_PREFIX: &str = "tidebreak-path:v1:";
@@ -77,7 +77,7 @@ const BASELINE_ORDINAL: i64 = 0;
 
 /// Byte and file-count caps for a produced diff or file list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct DiffBounds {
+pub struct DiffBounds {
     pub max_bytes: usize,
     pub max_files: usize,
 }
@@ -97,7 +97,7 @@ impl Default for DiffBounds {
 /// reserved prefix. Every other path uses a canonical URL-safe base64 value,
 /// which the file-diff query must return unchanged.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct GitPath(Vec<u8>);
+pub struct GitPath(Vec<u8>);
 
 impl GitPath {
     fn from_bytes(bytes: &[u8]) -> Self {
@@ -120,7 +120,7 @@ impl GitPath {
         Ok(path)
     }
 
-    pub(crate) fn to_wire(&self) -> String {
+    pub fn to_wire(&self) -> String {
         match std::str::from_utf8(&self.0) {
             Ok(path) if !path.starts_with(GIT_PATH_WIRE_PREFIX) => path.to_owned(),
             _ => format!("{GIT_PATH_WIRE_PREFIX}{}", URL_SAFE_NO_PAD.encode(&self.0)),
@@ -144,7 +144,7 @@ impl GitPath {
 
 /// One file in a bounded workspace or turn file list.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ChangedFile {
+pub struct ChangedFile {
     pub path: GitPath,
     pub kind: FileChangeKind,
     pub insertions: u32,
@@ -154,7 +154,7 @@ pub(crate) struct ChangedFile {
 
 /// Bounded file list for `GET /code/workspaces/{id}/files`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct BoundedFiles {
+pub struct BoundedFiles {
     pub files: Vec<ChangedFile>,
     pub truncated: bool,
     pub stat: Diffstat,
@@ -162,7 +162,7 @@ pub(crate) struct BoundedFiles {
 
 /// Bounded unified diff for `GET /code/workspaces/{id}/diff`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct BoundedDiff {
+pub struct BoundedDiff {
     pub diff: String,
     pub truncated: bool,
     pub stat: Diffstat,
@@ -170,14 +170,14 @@ pub(crate) struct BoundedDiff {
 
 /// A recorded checkpoint: hidden ref name and the turn-scoped diffstat.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RecordedCheckpoint {
+pub struct RecordedCheckpoint {
     pub checkpoint_ref: String,
     pub diffstat: Diffstat,
 }
 
 /// Failure from a checkpoint or diff operation.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum CheckpointError {
+pub enum CheckpointError {
     #[error("{0}")]
     User(String),
     #[error("{0}")]
@@ -262,16 +262,12 @@ impl SnapshotGit for ProcessSnapshotGit {
 /// `next_turn_ordinal`, which counts per session, so two sessions sharing a
 /// workspace both reach turn 1. The workspace stays first in the path so
 /// [`delete_workspace_refs`] can match every session by prefix.
-pub(crate) fn checkpoint_ref(
-    workspace_id: WorkspaceId,
-    session_id: SessionId,
-    ordinal: i64,
-) -> String {
+pub fn checkpoint_ref(workspace_id: WorkspaceId, session_id: SessionId, ordinal: i64) -> String {
     format!("{REF_PREFIX}/{workspace_id}/{session_id}/{ordinal}")
 }
 
 /// Hidden ref for where one session started.
-pub(crate) fn session_baseline_ref(workspace_id: WorkspaceId, session_id: SessionId) -> String {
+pub fn session_baseline_ref(workspace_id: WorkspaceId, session_id: SessionId) -> String {
     checkpoint_ref(workspace_id, session_id, BASELINE_ORDINAL)
 }
 
@@ -286,7 +282,7 @@ pub(crate) fn session_baseline_ref(workspace_id: WorkspaceId, session_id: Sessio
 /// session with no baseline falls back to `merge_base(base_ref)`, which is
 /// what every first turn used to diff against and is still the same tree for
 /// the only session in a fresh workspace.
-pub(crate) async fn record_session_baseline(
+pub async fn record_session_baseline(
     worktree: &Path,
     workspace_id: WorkspaceId,
     session_id: SessionId,
@@ -307,7 +303,7 @@ pub(crate) async fn record_session_baseline(
 ///
 /// Checkpoint failure does not fail the turn: a [`Event::HarnessNotice`]
 /// is journaled and the already-recorded work stands.
-pub(crate) async fn after_turn_ended(
+pub async fn after_turn_ended(
     db: &Arc<DbStore>,
     bus: &Arc<CodeEventBus>,
     session: &Session,
@@ -399,7 +395,7 @@ async fn record_for_turn(
 ///
 /// Uses a temporary index file. The user's index and `HEAD` are not written.
 /// `status` is the turn's terminal status, recorded in the commit message.
-pub(crate) async fn record_checkpoint(
+pub async fn record_checkpoint(
     worktree: &Path,
     workspace_id: WorkspaceId,
     session_id: SessionId,
@@ -462,7 +458,7 @@ async fn write_snapshot_ref(
 }
 
 /// Changed files between two trees or a tree and the live worktree snapshot.
-pub(crate) async fn list_changed_files(
+pub async fn list_changed_files(
     worktree: &Path,
     from: &str,
     to: &str,
@@ -472,7 +468,7 @@ pub(crate) async fn list_changed_files(
 }
 
 /// Bounded unified diff between two trees (or a live snapshot oid).
-pub(crate) async fn produce_diff(
+pub async fn produce_diff(
     worktree: &Path,
     from: &str,
     to: &str,
@@ -552,7 +548,7 @@ pub(crate) async fn produce_diff(
 }
 
 /// Bounded unified diff for an explicit set of wire-format paths.
-pub(crate) async fn produce_diff_for_paths(
+pub async fn produce_diff_for_paths(
     worktree: &Path,
     from: &str,
     to: &str,
@@ -582,7 +578,7 @@ pub(crate) async fn produce_diff_for_paths(
 ///
 /// The user's index is never opened. A temporary index file is used and
 /// deleted before this returns.
-pub(crate) async fn snapshot_tree(worktree: &Path) -> Result<String, CheckpointError> {
+pub async fn snapshot_tree(worktree: &Path) -> Result<String, CheckpointError> {
     snapshot_tree_with_git(worktree, GIT_SNAPSHOT_TIMEOUT, &ProcessSnapshotGit).await
 }
 
@@ -801,7 +797,7 @@ async fn snapshot_tree_with_index_before(
 }
 
 /// Resolve `merge-base(base_ref, HEAD)`, falling back to `base_ref`.
-pub(crate) async fn merge_base(worktree: &Path, base_ref: &str) -> Result<String, CheckpointError> {
+pub async fn merge_base(worktree: &Path, base_ref: &str) -> Result<String, CheckpointError> {
     match git_text(worktree, &["merge-base", base_ref, "HEAD"], GIT_TIMEOUT).await {
         Ok(oid) if !oid.is_empty() => Ok(oid),
         _ => git_text(worktree, &["rev-parse", base_ref], GIT_TIMEOUT)
@@ -870,7 +866,7 @@ fn workspace_pull_request_base(workspace: &CodeWorkspace) -> Option<&str> {
 ///
 /// The workspace stays first in the ref path, so one prefix covers every
 /// session's turns and its start baseline.
-pub(crate) async fn delete_workspace_refs(
+pub async fn delete_workspace_refs(
     repo_root: &Path,
     workspace_id: WorkspaceId,
 ) -> Result<usize, CheckpointError> {
@@ -886,7 +882,7 @@ pub(crate) async fn delete_workspace_refs(
     Ok(removed)
 }
 
-pub(crate) async fn list_checkpoint_refs(repo_root: &Path) -> Result<Vec<String>, CheckpointError> {
+pub async fn list_checkpoint_refs(repo_root: &Path) -> Result<Vec<String>, CheckpointError> {
     let out = git_text(
         repo_root,
         &[
@@ -907,7 +903,7 @@ pub(crate) async fn list_checkpoint_refs(repo_root: &Path) -> Result<Vec<String>
 }
 
 /// Resolve the trees a files/diff query should compare.
-pub(crate) async fn resolve_diff_range(
+pub async fn resolve_diff_range(
     db: &DbStore,
     workspace: &CodeWorkspace,
     turn_id: Option<TurnId>,
@@ -1488,9 +1484,7 @@ fn finish_git_output(
 /// Fingerprint of the user's `HEAD` and index, used to prove a checkpoint
 /// does not touch either.
 #[cfg(test)]
-pub(crate) async fn user_git_fingerprint(
-    worktree: &Path,
-) -> Result<(String, Vec<u8>), CheckpointError> {
+pub async fn user_git_fingerprint(worktree: &Path) -> Result<(String, Vec<u8>), CheckpointError> {
     let head = git_text(worktree, &["rev-parse", "HEAD"], GIT_TIMEOUT)
         .await
         .map_err(CheckpointError::internal)?;

@@ -43,7 +43,7 @@ use crate::resolver::ProviderResolver;
 use crate::state::AppState;
 
 /// Tracing target reserved for machine-oriented timing events.
-pub(crate) const EVENT_TARGET: &str = tidebreak_core::DIAGNOSTICS_TRACING_TARGET;
+pub const EVENT_TARGET: &str = tidebreak_core::DIAGNOSTICS_TRACING_TARGET;
 
 const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 const BUNDLE_SCHEMA_VERSION: u32 = 1;
@@ -62,7 +62,7 @@ const BUILD_VERSION: &str = match option_env!("TIDEBREAK_VERSION") {
 };
 
 /// Per-process measurements. One instance belongs to one assembled server.
-pub(crate) struct Diagnostics {
+pub struct Diagnostics {
     started_at: DateTime<Utc>,
     started: Instant,
     in_flight_http: Arc<AtomicU64>,
@@ -153,7 +153,7 @@ impl Default for Diagnostics {
 }
 
 impl Diagnostics {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             started_at: Utc::now(),
             started: Instant::now(),
@@ -185,7 +185,7 @@ impl Diagnostics {
 
     /// Record one bounded, host-defined operation. Callers must use stable
     /// names and outcomes rather than ids or provider-authored strings.
-    pub(crate) fn observe_operation(
+    pub fn observe_operation(
         &self,
         operation: &'static str,
         outcome: &'static str,
@@ -245,7 +245,7 @@ impl Diagnostics {
             .saturating_add(usage.cache_creation_input_tokens);
     }
 
-    pub(crate) fn snapshot(&self, profile: Profile) -> DiagnosticSnapshot {
+    pub fn snapshot(&self, profile: Profile) -> DiagnosticSnapshot {
         let state = self.lock_state();
         DiagnosticSnapshot {
             schema_version: SNAPSHOT_SCHEMA_VERSION,
@@ -312,13 +312,13 @@ impl Diagnostics {
 }
 
 /// Add model-request spans and timings without changing provider behavior.
-pub(crate) struct DiagnosticProviderResolver {
+pub struct DiagnosticProviderResolver {
     inner: Arc<dyn ProviderResolver>,
     diagnostics: Arc<Diagnostics>,
 }
 
 impl DiagnosticProviderResolver {
-    pub(crate) fn new(inner: Arc<dyn ProviderResolver>, diagnostics: Arc<Diagnostics>) -> Self {
+    pub fn new(inner: Arc<dyn ProviderResolver>, diagnostics: Arc<Diagnostics>) -> Self {
         Self { inner, diagnostics }
     }
 
@@ -698,7 +698,7 @@ impl Drop for HttpInFlightGuard {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct DiagnosticSnapshot {
+pub struct DiagnosticSnapshot {
     schema_version: u32,
     generated_at: DateTime<Utc>,
     build: BuildSnapshot,
@@ -795,7 +795,7 @@ struct HistogramBucketSnapshot {
 }
 
 /// Measure one matched request without recording its raw URI or query string.
-pub(crate) async fn observe_http_request(
+pub async fn observe_http_request(
     State(state): State<AppState>,
     request: Request<Body>,
     next: Next,
@@ -847,7 +847,7 @@ pub(crate) async fn observe_http_request(
 }
 
 /// `GET /diagnostics/snapshot` — one stable JSON view of live measurements.
-pub(crate) async fn get_snapshot(State(state): State<AppState>) -> Response {
+pub async fn get_snapshot(State(state): State<AppState>) -> Response {
     (
         [
             (header::CACHE_CONTROL, "no-store"),
@@ -859,7 +859,7 @@ pub(crate) async fn get_snapshot(State(state): State<AppState>) -> Response {
 }
 
 /// `GET /diagnostics/metrics` — OpenMetrics text for local scraping or export.
-pub(crate) async fn get_metrics(State(state): State<AppState>) -> Response {
+pub async fn get_metrics(State(state): State<AppState>) -> Response {
     let snapshot = state.diagnostics.snapshot(state.config.profile);
     let body = render_openmetrics(&snapshot);
     (
@@ -877,7 +877,7 @@ pub(crate) async fn get_metrics(State(state): State<AppState>) -> Response {
 }
 
 /// `GET /diagnostics/export` — the snapshot, OpenMetrics, and allowlisted logs.
-pub(crate) async fn get_export(State(state): State<AppState>) -> Result<Response, ServerError> {
+pub async fn get_export(State(state): State<AppState>) -> Result<Response, ServerError> {
     let snapshot = state.diagnostics.snapshot(state.config.profile);
     let metrics = render_openmetrics(&snapshot);
     let data_dir = state.config.data_dir.clone();

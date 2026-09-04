@@ -47,29 +47,29 @@ const UNSUPPORTED_CHECK_LOG_MESSAGE: &str =
     "This failing check does not link to a supported GitHub Actions job, so Tidebreak could not download its log.";
 
 /// One downloaded job log, as the route reports it.
-pub(crate) struct WrittenCheckLog {
+pub struct WrittenCheckLog {
     /// Check name as the host reports it.
-    pub(crate) check: String,
+    pub check: String,
     /// Absolute path, in the form the prompt names and the engine opens.
-    pub(crate) path: String,
+    pub path: String,
     /// Bytes on disk.
-    pub(crate) byte_len: u64,
+    pub byte_len: u64,
     /// True when the file holds only the tail of the job log.
-    pub(crate) truncated: bool,
+    pub truncated: bool,
     /// The job's host URL. A check without one has no log to download, so
     /// every written log has one.
-    pub(crate) url: String,
+    pub url: String,
 }
 
 /// One job whose log could not be read. Never fatal: the other logs still land.
-pub(crate) struct CheckLogFailure {
-    pub(crate) check: String,
-    pub(crate) message: String,
+pub struct CheckLogFailure {
+    pub check: String,
+    pub message: String,
 }
 
-pub(crate) struct WrittenCheckLogs {
-    pub(crate) logs: Vec<WrittenCheckLog>,
-    pub(crate) failures: Vec<CheckLogFailure>,
+pub struct WrittenCheckLogs {
+    pub logs: Vec<WrittenCheckLog>,
+    pub failures: Vec<CheckLogFailure>,
 }
 
 /// A GitHub Actions job, addressed the way its check URL spells it.

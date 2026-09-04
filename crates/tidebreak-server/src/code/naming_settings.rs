@@ -5,9 +5,9 @@ use tidebreak_core::{OwnerId, Store};
 
 use super::worktree::slugify;
 
-pub(crate) const AUTO_RENAME_BRANCHES_KEY: &str = "code.git.auto_rename_branches";
-pub(crate) const BRANCH_PREFIX_MODE_KEY: &str = "code.git.branch_prefix_mode";
-pub(crate) const CUSTOM_BRANCH_PREFIX_KEY: &str = "code.git.custom_branch_prefix";
+pub const AUTO_RENAME_BRANCHES_KEY: &str = "code.git.auto_rename_branches";
+pub const BRANCH_PREFIX_MODE_KEY: &str = "code.git.branch_prefix_mode";
+pub const CUSTOM_BRANCH_PREFIX_KEY: &str = "code.git.custom_branch_prefix";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "snake_case")]
@@ -31,7 +31,7 @@ pub struct GitSourceControlSettings {
     pub effective_branch_prefix: String,
 }
 
-pub(crate) fn user_setting_key(owner: &OwnerId, key: &str) -> String {
+pub fn user_setting_key(owner: &OwnerId, key: &str) -> String {
     if owner.is_local() {
         key.to_owned()
     } else {
@@ -50,7 +50,7 @@ async fn read_value<T: serde::de::DeserializeOwned>(
         .and_then(|value| serde_json::from_value(value).ok()))
 }
 
-pub(crate) async fn auto_rename_branches(
+pub async fn auto_rename_branches(
     store: &dyn Store,
     owner: &OwnerId,
 ) -> tidebreak_core::Result<bool> {
@@ -59,7 +59,7 @@ pub(crate) async fn auto_rename_branches(
         .unwrap_or(true))
 }
 
-pub(crate) async fn read(
+pub async fn read(
     store: &dyn Store,
     owner: &OwnerId,
     account_name: Option<&str>,
@@ -90,7 +90,7 @@ pub(crate) async fn read(
     })
 }
 
-pub(crate) async fn write_auto_rename_branches(
+pub async fn write_auto_rename_branches(
     store: &dyn Store,
     owner: &OwnerId,
     enabled: bool,
@@ -103,7 +103,7 @@ pub(crate) async fn write_auto_rename_branches(
         .await
 }
 
-pub(crate) async fn write_branch_prefix_mode(
+pub async fn write_branch_prefix_mode(
     store: &dyn Store,
     owner: &OwnerId,
     mode: BranchPrefixMode,
@@ -116,7 +116,7 @@ pub(crate) async fn write_branch_prefix_mode(
         .await
 }
 
-pub(crate) async fn write_custom_branch_prefix(
+pub async fn write_custom_branch_prefix(
     store: &dyn Store,
     owner: &OwnerId,
     prefix: Option<&str>,
@@ -132,7 +132,7 @@ pub(crate) async fn write_custom_branch_prefix(
 }
 
 /// Normalize a custom prefix and reject names Git cannot use as a ref prefix.
-pub(crate) fn normalize_custom_prefix(value: &str) -> Option<String> {
+pub fn normalize_custom_prefix(value: &str) -> Option<String> {
     let value = value.trim().trim_matches('/');
     if value.is_empty() || value.len() > 120 || value.contains("@{") || value.contains("..") {
         return None;

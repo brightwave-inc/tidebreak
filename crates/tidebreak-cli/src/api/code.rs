@@ -15,7 +15,7 @@
 //! reads back from its own journal, so a variant accepts keys it does not
 //! declare. The frame around it does not.
 //!
-//! `crates/tidebreak-server/fixtures/code-frames.json` holds one real value of
+//! `crates/tidebreak-server-api/fixtures/code-frames.json` holds one real value of
 //! every snapshot, notice, and event; the test at the bottom decodes each one.
 
 use serde::{Deserialize, Serialize};
@@ -585,7 +585,7 @@ mod tests {
     }
 
     /// Path of the server's code-mode fixtures, relative to this crate.
-    const CODE_FRAMES: &str = "../tidebreak-server/fixtures/code-frames.json";
+    const CODE_FRAMES: &str = "../tidebreak-server-api/fixtures/code-frames.json";
 
     fn code_frame_fixtures() -> Vec<(String, String, serde_json::Value)> {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(CODE_FRAMES);

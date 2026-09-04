@@ -19,8 +19,8 @@ use std::time::Duration;
 use futures::{stream, StreamExt as _};
 use serde_json::Value;
 
+use crate::code::types::CodeGitHubRepositoryTarget;
 use crate::obo_gateway::GitCredential;
-use crate::routes::code::types::CodeGitHubRepositoryTarget;
 use tidebreak_core::{
     PullRequestCheck, PullRequestCheckBucket, PullRequestCheckCounts, PullRequestDigest,
 };

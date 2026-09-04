@@ -22,13 +22,13 @@ use tidebreak_core::{OwnerId, RepoId, Store};
 use super::bus::{CloneProgress, CodeLiveUpdate};
 use super::gh::{self, resolve_github_clone_url};
 use super::runtime::CodeRuntime;
-use crate::error::ServerError;
-use crate::obo_gateway::{GitCredential, GitForgeAttribution, GitForgeError, GitForgeIdentity};
-use crate::principal::{legacy_owner_path_segment, owner_path_segment};
-use crate::routes::code::{
+use super::types::{
     CodeCloneDefaults, CodeCloneJobSnapshot, CodeGithubRepositories, CodeRepoSource,
     CodeRepoSources,
 };
+use crate::error::ServerError;
+use crate::obo_gateway::{GitCredential, GitForgeAttribution, GitForgeError, GitForgeIdentity};
+use crate::principal::{legacy_owner_path_segment, owner_path_segment};
 
 const CLONE_TIMEOUT: Duration = Duration::from_secs(900);
 /// Long enough for a cold binary to answer, short enough that a machine
@@ -37,13 +37,13 @@ const GIT_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_STDERR_CHARS: usize = 4_096;
 const COMPLETED_JOB_RETENTION: Duration = Duration::from_secs(30 * 60);
 const MAX_COMPLETED_JOBS: usize = 256;
-pub(crate) const CLONE_PARENT_DIR_SETTING: &str = "code_clone_parent_dir";
+pub const CLONE_PARENT_DIR_SETTING: &str = "code_clone_parent_dir";
 const HOSTED_CLONE_SCHEMES: [&str; 4] = ["git", "http", "https", "ssh"];
 const SAFE_GIT_ENV: [&str; 5] = ["COMSPEC", "PATH", "PATHEXT", "SystemRoot", "WINDIR"];
 
 /// In-memory clone jobs for this process. Not journaled; a restart drops them.
 #[derive(Debug, Default)]
-pub(crate) struct CloneJobs {
+pub struct CloneJobs {
     jobs: Mutex<std::collections::HashMap<Uuid, CloneJob>>,
 }
 
@@ -148,18 +148,18 @@ impl CloneJob {
 /// Only paths created after the collision-resistant encoding use this root.
 /// Existing repositories and worktrees remain reachable through the absolute
 /// paths stored on their rows.
-pub(crate) fn owner_dir(parent: &Path, owner: &OwnerId) -> PathBuf {
+pub fn owner_dir(parent: &Path, owner: &OwnerId) -> PathBuf {
     owner_path_segment(owner).map_or_else(|| parent.to_path_buf(), |segment| parent.join(segment))
 }
 
 /// The pre-SEC-6 owner directory, used only for compatibility reads.
-pub(crate) fn legacy_owner_dir(parent: &Path, owner: &OwnerId) -> PathBuf {
+pub fn legacy_owner_dir(parent: &Path, owner: &OwnerId) -> PathBuf {
     legacy_owner_path_segment(owner)
         .map_or_else(|| parent.to_path_buf(), |segment| parent.join(segment))
 }
 
 /// Body fields after the route has rejected an empty or mixed source.
-pub(crate) struct CloneRequest {
+pub struct CloneRequest {
     pub url: Option<String>,
     pub github: Option<String>,
     /// Where to put the checkout. Optional: a machine whose operator
@@ -170,7 +170,7 @@ pub(crate) struct CloneRequest {
 }
 
 impl CodeRuntime {
-    pub(crate) async fn clone_defaults(&self) -> Result<CodeCloneDefaults, ServerError> {
+    pub async fn clone_defaults(&self) -> Result<CodeCloneDefaults, ServerError> {
         let parent_dir = read_clone_parent_dir(&*self.db).await?;
         let gh = gh::observe_gh(self.gh_search_path().as_deref()).await;
         Ok(CodeCloneDefaults {
@@ -189,10 +189,7 @@ impl CodeRuntime {
     /// the `github` answer is about the caller too: it reflects whether the
     /// deployment's gateway would lend *this* caller the forge's App
     /// identity (decision 63), probed live rather than assumed.
-    pub(crate) async fn repo_sources(
-        &self,
-        owner: &OwnerId,
-    ) -> Result<CodeRepoSources, ServerError> {
+    pub async fn repo_sources(&self, owner: &OwnerId) -> Result<CodeRepoSources, ServerError> {
         let git = git_available().await;
         let no_git = || {
             Some(
@@ -299,7 +296,7 @@ impl CodeRuntime {
     /// an empty list so the typed `owner/repo` field stays the path. A
     /// lender error is a failed list, not an empty one: the dialog keeps
     /// type-in and says the suggestions did not load.
-    pub(crate) async fn list_github_repositories(
+    pub async fn list_github_repositories(
         &self,
         owner: &OwnerId,
     ) -> Result<CodeGithubRepositories, ServerError> {
@@ -312,7 +309,7 @@ impl CodeRuntime {
             Ok(repositories) => Ok(CodeGithubRepositories {
                 repositories: repositories
                     .into_iter()
-                    .map(|repository| crate::routes::code::CodeGithubRepository {
+                    .map(|repository| crate::code::types::CodeGithubRepository {
                         full_name: repository.full_name,
                         private: repository.private,
                         description: repository.description,
@@ -326,7 +323,7 @@ impl CodeRuntime {
         }
     }
 
-    pub(crate) fn get_clone_job(
+    pub fn get_clone_job(
         &self,
         owner: &OwnerId,
         id: Uuid,
@@ -337,7 +334,7 @@ impl CodeRuntime {
     }
 
     /// Validate, remember the parent, return a job id, and spawn the clone.
-    pub(crate) async fn start_clone(
+    pub async fn start_clone(
         self: &std::sync::Arc<Self>,
         owner: &OwnerId,
         request: CloneRequest,
@@ -500,11 +497,11 @@ impl CodeRuntime {
     }
 
     fn gh_search_path(&self) -> Option<String> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         {
             return self.gh_search_path.lock().expect("gh search path").clone();
         }
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-support")))]
         None
     }
 }
@@ -515,7 +512,7 @@ impl CodeRuntime {
 /// A bare existence check would reintroduce the collision: another owner may
 /// occupy the same lossy legacy directory. The owner-scoped row is the proof
 /// that lets clone setup preserve the old conflict behavior safely.
-pub(crate) async fn registered_legacy_clone_target(
+pub async fn registered_legacy_clone_target(
     store: &tidebreak_core::DbStore,
     owner: &OwnerId,
     target: &Path,
@@ -785,7 +782,7 @@ fn hosted_github_source(
 /// Issue #2510's contract, extended by decision 65: the add-repository
 /// dialog says out loud whose account work lands as — the deployment's App
 /// (decision 63), or the caller's own once they have connected it.
-pub(crate) fn hosted_attribution_sentence(identity: &GitForgeIdentity) -> String {
+pub fn hosted_attribution_sentence(identity: &GitForgeIdentity) -> String {
     match &identity.attribution {
         GitForgeAttribution::Person { login, .. } => format!(
             "Clones and pushes use your own GitHub account: work lands as {login}."
@@ -804,7 +801,7 @@ pub(crate) fn hosted_attribution_sentence(identity: &GitForgeIdentity) -> String
 
 /// One user-facing sentence for a git-forge refusal, phrased for the
 /// operation or offer it stopped.
-pub(crate) fn git_forge_refusal_message(refusal: &GitForgeError) -> String {
+pub fn git_forge_refusal_message(refusal: &GitForgeError) -> String {
     match refusal {
         GitForgeError::SignInRequired(detail) | GitForgeError::Unavailable(detail) => {
             detail.clone()
@@ -849,7 +846,7 @@ pub(crate) fn git_forge_refusal_message(refusal: &GitForgeError) -> String {
 /// the clone below can spawn it, and a `PATH` entry that is not executable —
 /// or a Windows extension a walk missed — would answer a different question
 /// than the one asked.
-pub(crate) async fn git_available() -> bool {
+pub async fn git_available() -> bool {
     matches!(
         timeout(
             GIT_PROBE_TIMEOUT,
@@ -912,7 +909,7 @@ async fn validate_parent_dir(parent: &Path) -> Result<(), ServerError> {
 /// Source validation rejects userinfo before clone. This redaction remains a
 /// defense at the registration boundary so a future resolver cannot expose a
 /// credential through `cloned_from`.
-pub(crate) fn redact_clone_url(url: &str) -> String {
+pub fn redact_clone_url(url: &str) -> String {
     let Some((scheme, rest)) = url.split_once("://") else {
         // scp-style `git@host:org/repo` carries a username, not a secret.
         return url.to_owned();
@@ -1062,7 +1059,7 @@ fn isolated_ssh_command() -> &'static str {
 }
 
 /// Parse a `git clone --progress` stderr line into a phase name and percent.
-pub(crate) fn parse_clone_progress_line(line: &str) -> Option<(String, u8)> {
+pub fn parse_clone_progress_line(line: &str) -> Option<(String, u8)> {
     let line = line.trim();
     let percent_at = line.find('%')?;
     let before = &line[..percent_at];
@@ -1093,7 +1090,7 @@ pub(crate) fn parse_clone_progress_line(line: &str) -> Option<(String, u8)> {
 }
 
 /// Last path segment of a git URL, minus a trailing `.git`.
-pub(crate) fn infer_clone_name(url: &str) -> String {
+pub fn infer_clone_name(url: &str) -> String {
     let trimmed = url.trim().trim_end_matches('/');
     let trimmed = trimmed.strip_suffix(".git").unwrap_or(trimmed);
     let segment = trimmed
@@ -1103,7 +1100,7 @@ pub(crate) fn infer_clone_name(url: &str) -> String {
     segment.to_owned()
 }
 
-pub(crate) fn valid_github_slug(value: &str) -> bool {
+pub fn valid_github_slug(value: &str) -> bool {
     let Some((owner, repo)) = value.split_once('/') else {
         return false;
     };

@@ -866,9 +866,9 @@ token is no longer printed at startup, because it authenticates nobody there.
 | Agent loop | `crates/tidebreak-core/src/agent.rs` | Model/tool loop, context fitting, cancellation, steering |
 | Operational database | `crates/tidebreak-core/src/db/` | Schema plus transactional SQLite/Postgres state transitions |
 | Model providers | `crates/tidebreak-router/src/` | Anthropic/OpenAI adapters and model-to-provider routing |
-| Local API | `crates/tidebreak-server/src/lib.rs`, `routes.rs`, `routes/client_execution.rs` | Authentication, API assembly, chat, turn, and leased client-execution routes |
+| Local API | `crates/tidebreak-server-api/src/lib.rs`, `src/routes.rs`, `src/routes/client_execution.rs` | API assembly, chat, turn, and leased client-execution routes |
 | Turn execution | `crates/tidebreak-server/src/engine/internal/leg.rs` | Claiming, heartbeats, event journaling, terminal resolution |
-| Documents | `crates/tidebreak-server/src/routes/document.rs` | Synchronous upload, canonical decoding, and source-file access |
+| Documents | `crates/tidebreak-server-api/src/routes/document.rs` | Synchronous upload, canonical decoding, and source-file access |
 | Document decoding | `crates/tidebreak-server/src/document_decode.rs` | Media-type-routed UTF-8 decoding with a binary fallback |
 | Desktop | `crates/tidebreak-desktop/src/`, `crates/tidebreak-desktop/ui/src/` | Tauri host and current React shell |
 | Host access | `crates/tidebreak-host-broker/src/`, `docs/host-access.md` | Broker trust boundary, connected-root model, and reconciliation plan |

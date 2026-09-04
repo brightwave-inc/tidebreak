@@ -5,7 +5,7 @@
 /// Text, JSON, and XML are decoded lossily so one malformed byte does not hide
 /// an otherwise-readable source. Unknown formats retain valid UTF-8 text but
 /// treat other bytes as binary and produce no canonical text.
-pub(crate) fn decode_document(media_type: &str, raw: &[u8]) -> String {
+pub fn decode_document(media_type: &str, raw: &[u8]) -> String {
     if is_text_media_type(media_type) {
         String::from_utf8_lossy(raw).into_owned()
     } else {

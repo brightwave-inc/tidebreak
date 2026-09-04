@@ -20,9 +20,7 @@ use crate::mcp_config::McpRuntime;
 use crate::resolver::ProviderResolver;
 use crate::view_frames::ViewFrameTokens;
 
-pub(crate) use tidebreak_sandbox_runtime::{
-    SandboxAttemptGuard, SandboxSteerGuard, SandboxSteerRefusal,
-};
+pub use tidebreak_sandbox_runtime::{SandboxAttemptGuard, SandboxSteerGuard, SandboxSteerRefusal};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalVoiceStatus {
@@ -119,13 +117,13 @@ pub struct AppState {
     /// Boot configuration for this launch.
     pub config: Arc<Config>,
     /// Bounded in-memory request and operation measurements for export.
-    pub(crate) diagnostics: Arc<crate::diagnostics::Diagnostics>,
+    pub diagnostics: Arc<crate::diagnostics::Diagnostics>,
     /// Durable metadata, conversation state, and the event journal.
     pub store: Arc<dyn Store>,
     /// The same database as [`Self::store`], where memory routes need the
     /// backend trait. `None` keeps the public constructor compatible with
     /// test adapters; production boot installs it beside the store.
-    pub(crate) memory: Option<Arc<DbStore>>,
+    pub memory: Option<Arc<DbStore>>,
     /// Durable raw bytes and generated artifacts under the configured data directory.
     pub blobs: Arc<dyn BlobStore>,
     /// Builds the model provider for each turn from the configured credentials.
@@ -135,75 +133,75 @@ pub struct AppState {
     /// The tools available to the agent.
     pub tools: Arc<ToolRegistry>,
     /// Runtime-managed MCP connections and immutable per-turn tool snapshots.
-    pub(crate) mcp: Arc<McpRuntime>,
+    pub mcp: Arc<McpRuntime>,
     /// Executes one governed REST operation for the app-invoke route. The
     /// production assembly is the real executor over the real transport and
     /// resolver ([`crate::connected_apps::governed_rest_dispatcher`]); tests
     /// substitute a fake transport behind the same governed validation.
-    pub(crate) rest_dispatch: Arc<dyn crate::connected_apps::RestOperationDispatcher>,
+    pub rest_dispatch: Arc<dyn crate::connected_apps::RestOperationDispatcher>,
     /// Reads the operation catalog of a gateway connected app a manifest
     /// binds, live per request. The production assembly is the one gateway
     /// runtime below; tests substitute a static roster behind the same seam
     /// rather than standing up an OAuth session against a fake deployment.
-    pub(crate) gateway_catalogs: Arc<dyn crate::connected_apps::GatewayCatalogSource>,
+    pub gateway_catalogs: Arc<dyn crate::connected_apps::GatewayCatalogSource>,
     /// Relays one pinned gateway operation to the gateway's shared-app invoke
     /// route as the signed-in user. The production assembly is the relay over
     /// the one gateway runtime
     /// ([`crate::gateway_runtime::gateway_relay_dispatcher`]); tests
     /// substitute a fake so the whole refusal ladder is drivable without a
     /// deployment.
-    pub(crate) gateway_dispatch: Arc<dyn crate::connected_apps::GatewayInvokeDispatcher>,
+    pub gateway_dispatch: Arc<dyn crate::connected_apps::GatewayInvokeDispatcher>,
     /// Establishes and advances the gateway-side registration a local app's
     /// gateway bindings are relayed through, and relays the author's consent
     /// for it. The production assembly is the store-backed registry over the
     /// one gateway runtime ([`crate::gateway_drafts::GatewayDraftRegistry`]);
     /// tests substitute a fake so the grant path's best-effort posture is
     /// drivable without a deployment.
-    pub(crate) gateway_drafts: Arc<dyn crate::connected_apps::GatewayDraftSource>,
+    pub gateway_drafts: Arc<dyn crate::connected_apps::GatewayDraftSource>,
     /// Outstanding single-use tokens redeemed by the sandboxed view frames —
     /// prefetched MCP views and stored local-app revisions alike.
-    pub(crate) view_frames: Arc<ViewFrameTokens>,
+    pub view_frames: Arc<ViewFrameTokens>,
     /// The signed-in model-gateway session handle (sign-in, model sync,
     /// per-request tokens). Always the same instance `mcp` dispatches
     /// through — see [`Self::with_gateway_runtime`] for why the process
     /// must hold exactly one.
-    pub(crate) gateway: Arc<crate::gateway_runtime::GatewayRuntime>,
+    pub gateway: Arc<crate::gateway_runtime::GatewayRuntime>,
     /// ChatGPT subscription OAuth for the OpenAI provider (sign-in, sign-out,
     /// per-request tokens). Shared with the resolver for the reason given in
     /// [`Self::with_gateway_runtime`].
-    pub(crate) chatgpt: Arc<crate::chatgpt_runtime::ChatGptRuntime>,
+    pub chatgpt: Arc<crate::chatgpt_runtime::ChatGptRuntime>,
     /// The OS-managed policy reader for managed-mode resolution. Directly
     /// assembled state (tests, custom hosts) gets the source that asserts
     /// nothing, so it reads nothing from the host OS; the production
     /// assembly in `bind_inner` injects the platform's reader via
     /// `managed_policy::platform_source`.
-    pub(crate) os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
+    pub os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
     /// The durable provisioned-policy home for managed-mode resolution.
     /// Directly assembled state roots it at the profile's own data directory
     /// (`Config::data_dir`), hermetic per profile; the production assembly
     /// in `bind_inner` shares the one instance the pairing write path and
     /// the legacy-row import ran on, so no reader can disagree with them.
-    pub(crate) provisioned_policy: Arc<dyn crate::managed_policy::ProvisionedPolicySource>,
+    pub provisioned_policy: Arc<dyn crate::managed_policy::ProvisionedPolicySource>,
     /// Wakes the durable turn worker after acceptance or cancellation commits.
-    pub(crate) turn_job_wake: Arc<Notify>,
+    pub turn_job_wake: Arc<Notify>,
     /// Wakes the bounded sandbox-run worker after delegated work commits.
     ///
     /// This is only a latency hint; the worker always uses its durable claim
     /// scan as the correctness source after a missed or coalesced wake-up.
-    pub(crate) agent_run_wake: Arc<Notify>,
+    pub agent_run_wake: Arc<Notify>,
     /// Wakes the queued-turn promoter when a queued message may have become
     /// promotable: a row was enqueued, a running turn reached a terminal
     /// state, or a chat's queue pause was released.
     ///
     /// This is only a latency hint; the promoter's sweep stays the
     /// correctness source behind a slow fallback tick.
-    pub(crate) queued_turn_wake: Arc<Notify>,
+    pub queued_turn_wake: Arc<Notify>,
     /// Wakes the source-blob retirement worker after a reference drop commits.
-    pub(crate) blob_retirement_wake: Arc<Notify>,
+    pub blob_retirement_wake: Arc<Notify>,
     /// Coordinates source publication and retirement across server processes.
-    pub(crate) blob_writes: Arc<BlobWriteGuard>,
+    pub blob_writes: Arc<BlobWriteGuard>,
     /// Bounds expensive document renderers used by post-turn binary previews.
-    pub(crate) file_preview_permits: Arc<Semaphore>,
+    pub file_preview_permits: Arc<Semaphore>,
     /// Per-turn agent tuning (model, limits, …).
     pub agent_config: AgentConfig,
     /// The secret every request must present as `Authorization: Bearer <token>`.
@@ -213,27 +211,27 @@ pub struct AppState {
     /// The self-host profile's credential-to-principal verifier. Gateway mode
     /// checks live account state; static-token mode remains for standalone
     /// deployments. Desktop never consults it.
-    pub(crate) principal_authenticator: Arc<crate::auth::PrincipalAuthenticator>,
+    pub principal_authenticator: Arc<crate::auth::PrincipalAuthenticator>,
     /// Narrow service bearers that may start an external connect handshake.
     /// `None` keeps the pre-grant adapter surface disabled.
-    pub(crate) adapter_bootstrap_tokens: Option<Arc<crate::auth::AdapterBootstrapTokens>>,
+    pub adapter_bootstrap_tokens: Option<Arc<crate::auth::AdapterBootstrapTokens>>,
     /// Per-caller gateway capabilities — inference credentials and
     /// entitlement snapshots — on a gateway-authenticated hosted machine
     /// (decisions 51 and 62). `None` everywhere else, which is what keeps
     /// static-token and desktop deployments on their configured providers.
-    pub(crate) on_behalf_of_gateway: Option<Arc<crate::obo_gateway::OboGateway>>,
+    pub on_behalf_of_gateway: Option<Arc<crate::obo_gateway::OboGateway>>,
     /// A second per-launch secret required for native-only operations.
-    pub(crate) client_executor_token: Arc<str>,
+    pub client_executor_token: Arc<str>,
     /// A per-launch capability limited to publishing caller-supplied bytes.
     ///
     /// Unlike the client-executor credential this authorizes no host action;
     /// it exists so a local process that discovered the server through the
     /// restricted listen file can add a document or image it already holds.
-    pub(crate) local_import_token: Arc<str>,
+    pub local_import_token: Arc<str>,
     /// Stable private identity owning native attachment reconciliation work.
-    pub(crate) client_executor_id: Uuid,
+    pub client_executor_id: Uuid,
     /// Whether this embedding supplied a restart-stable attachment executor.
-    pub(crate) root_attachment_routes_enabled: bool,
+    pub root_attachment_routes_enabled: bool,
     /// Process-local cancel/steer handles for exact durably claimed attempts.
     pub active_turns: Arc<TurnGuard>,
     /// Process-local, exact-attempt cancellation signals for sandbox work.
@@ -241,7 +239,7 @@ pub struct AppState {
     /// Durable run and tool-call state remains authoritative. These handles
     /// only let an authenticated cancellation request promptly drop provider
     /// futures owned by this server process.
-    pub(crate) sandbox_attempts: Arc<SandboxAttemptGuard>,
+    pub sandbox_attempts: Arc<SandboxAttemptGuard>,
     /// Process-local steering sinks and cancellation handles for container runs.
     ///
     /// Mid-run steering is delivered over the connection the container driver
@@ -249,12 +247,12 @@ pub struct AppState {
     /// the request is refused rather than queued. Cancellation is registered
     /// for the whole exact claimed drive so a committed request wakes it even
     /// while it is provisioning or between attachments.
-    pub(crate) sandbox_steering: Arc<SandboxSteerGuard>,
+    pub sandbox_steering: Arc<SandboxSteerGuard>,
     /// Live fan-out of turn events to connected WebSocket clients.
     pub events: Arc<EventBus>,
     /// Coordinates durable Sensitive-tool decisions and low-latency wakeups.
     pub approvals: Arc<ApprovalBroker>,
-    pub(crate) local_voice: Arc<dyn LocalVoiceRunner>,
+    pub local_voice: Arc<dyn LocalVoiceRunner>,
     /// The configured code-execution provider, when this embedding has one.
     ///
     /// Installed after assembly, like the blob store: the provider is built
@@ -262,19 +260,19 @@ pub struct AppState {
     /// management routes read it — they list what is installed, which is the
     /// provider's own load — so an embedding without one (tests, headless)
     /// simply has nothing to manage.
-    pub(crate) code_execution: Option<Arc<crate::code_execution::ConfiguredExecProvider>>,
+    pub code_execution: Option<Arc<crate::code_execution::ConfiguredExecProvider>>,
     /// The host-folder surface for local-app folder bindings, when this
     /// embedding has one (docs/folder-bindings.md).
     ///
     /// Installed after assembly by the desktop over its broker client;
     /// absent everywhere else, where folder bindings read as not connected
     /// and refuse to grant instead of parking.
-    pub(crate) host_folders: Option<Arc<dyn crate::host_folders::HostFolders>>,
+    pub host_folders: Option<Arc<dyn crate::host_folders::HostFolders>>,
     /// Code-mode runtime: worktrees, session workers, doctor, event bus.
     /// Absent only in tests that assemble state without a [`DbStore`].
-    pub(crate) code: Option<Arc<crate::code::CodeRuntime>>,
+    pub code: Option<Arc<crate::code::CodeRuntime>>,
     /// In-memory auxiliary terminals. Ephemeral: empty after every restart.
-    pub(crate) terminals: Arc<crate::code::terminal::TerminalHub>,
+    pub terminals: Arc<crate::code::terminal::TerminalHub>,
 }
 
 impl AppState {
@@ -367,7 +365,7 @@ impl AppState {
     /// revoke the one stored subscription session, and only a shared instance
     /// serializes them.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn with_gateway_runtime(
+    pub fn with_gateway_runtime(
         config: Config,
         store: Arc<dyn Store>,
         resolver: Arc<dyn ProviderResolver>,
@@ -484,7 +482,7 @@ impl AppState {
     /// (`docs/decisions/0049-gateway-authenticated-hosted-machines.md`). That
     /// tier only describes the deployment — it never asserts management, so
     /// no route gains a lockdown or a sign-in gate by moving here.
-    pub(crate) fn managed_policy(&self) -> Result<crate::managed_policy::ManagedPolicy> {
+    pub fn managed_policy(&self) -> Result<crate::managed_policy::ManagedPolicy> {
         crate::managed_policy::resolve_with_deployment(
             &*self.provisioned_policy,
             &*self.os_policy,
@@ -500,7 +498,7 @@ impl AppState {
     /// resolver reads it back when it builds that caller's routes. Two
     /// instances would leave every turn without a credential.
     #[must_use]
-    pub(crate) fn with_on_behalf_of_gateway(
+    pub fn with_on_behalf_of_gateway(
         mut self,
         gateway: Option<Arc<crate::obo_gateway::OboGateway>>,
     ) -> Self {
@@ -514,7 +512,7 @@ impl AppState {
     ///
     /// # Errors
     /// Fails when the gateway refuses the caller's exchange or catalog read.
-    pub(crate) async fn caller_gateway_snapshot(
+    pub async fn caller_gateway_snapshot(
         &self,
         owner: &tidebreak_core::OwnerId,
     ) -> tidebreak_core::Result<Option<crate::providers::GatewayModelSnapshot>> {
@@ -525,25 +523,25 @@ impl AppState {
     }
 }
 
-#[cfg(test)]
-pub(crate) const TEST_CLIENT_EXECUTOR_TOKEN: &str = "test-native-client-executor";
+#[cfg(any(test, feature = "test-support"))]
+pub const TEST_CLIENT_EXECUTOR_TOKEN: &str = "test-native-client-executor";
 
-#[cfg(test)]
-pub(crate) const TEST_LOCAL_IMPORT_TOKEN: &str = "test-scoped-local-import";
+#[cfg(any(test, feature = "test-support"))]
+pub const TEST_LOCAL_IMPORT_TOKEN: &str = "test-scoped-local-import";
 
 fn mint_client_executor_token() -> Arc<str> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     return TEST_CLIENT_EXECUTOR_TOKEN.into();
 
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     return Uuid::new_v4().to_string().into();
 }
 
 fn mint_local_import_token() -> Arc<str> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     return TEST_LOCAL_IMPORT_TOKEN.into();
 
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     return Uuid::new_v4().to_string().into();
 }
 
@@ -552,22 +550,22 @@ fn mint_local_import_token() -> Arc<str> {
 /// Lock files are permanent stable rendezvous points. Removing one could split
 /// waiters across different inodes, so the grace-period auditor must ignore this
 /// dedicated directory.
-pub(crate) struct BlobWriteGuard {
+pub struct BlobWriteGuard {
     root: Arc<PathBuf>,
 }
 
-pub(crate) struct BlobWritePermit {
+pub struct BlobWritePermit {
     _file: File,
 }
 
 impl BlobWriteGuard {
-    pub(crate) fn new(root: impl Into<PathBuf>) -> Self {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             root: Arc::new(root.into()),
         }
     }
 
-    pub(crate) async fn acquire(&self, blob_id: Uuid) -> Result<BlobWritePermit> {
+    pub async fn acquire(&self, blob_id: Uuid) -> Result<BlobWritePermit> {
         let root = Arc::clone(&self.root);
         tokio::task::spawn_blocking(move || {
             fs::create_dir_all(&*root).map_err(blob_lock_error)?;

@@ -18,60 +18,23 @@
 //! decompression bomb — a few kilobytes of deflate that expand to gigabytes of
 //! pixels. The header carries the two numbers this endpoint needs.
 
-use std::io::Cursor;
-
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use image::{ImageFormat, ImageReader};
-use serde::Serialize;
 use uuid::Uuid;
 
-use tidebreak_core::{
-    DocumentBlob, ImageMediaType, ImageRef, SessionId, MAX_IMAGE_BYTES, MAX_IMAGE_DIMENSION,
-};
+use tidebreak_core::SessionId;
+#[cfg(test)]
+use tidebreak_core::{ImageMediaType, MAX_IMAGE_DIMENSION};
 
 use crate::error::ServerError;
 use crate::extract::{Path, RawBytes};
+pub(crate) use crate::image_attachment::{inspect_image_bytes, require_declared_type_matches};
+pub use crate::image_attachment::{PublishedImageAttachment, MAX_IMAGE_ATTACHMENT_BYTES};
 use crate::routes::SERVED_BYTES_CONTENT_POLICY;
 use crate::scoped_store::ScopedStore;
 use crate::state::AppState;
-
-/// Body limit for the publish endpoint, matching the durable per-image ceiling
-/// so a request that the store would refuse never reaches a handler at all.
-pub const MAX_IMAGE_ATTACHMENT_BYTES: usize = MAX_IMAGE_BYTES as usize;
-
-/// Renderer-safe result of publishing one image.
-///
-/// `attachment_id` is the content-addressed blob id: opaque, derived from the
-/// bytes, and revealing nothing about where they live. Everything else is a
-/// small bounded number a UI can render.
-#[derive(Debug, Serialize)]
-pub struct PublishedImageAttachment {
-    /// Opaque identity to reference on a later turn.
-    pub attachment_id: Uuid,
-    /// Format sniffed from the bytes.
-    pub media_type: String,
-    /// Pixel width read from the image header.
-    pub width: u32,
-    /// Pixel height read from the image header.
-    pub height: u32,
-    /// Size of the stored bytes.
-    pub byte_len: u64,
-}
-
-impl From<ImageRef> for PublishedImageAttachment {
-    fn from(image: ImageRef) -> Self {
-        Self {
-            attachment_id: image.blob_id,
-            media_type: image.media_type.as_str().to_owned(),
-            width: image.width,
-            height: image.height,
-            byte_len: image.byte_len,
-        }
-    }
-}
 
 /// `POST /chats/{chat_id}/attachments/images` — validate and durably retain one
 /// image for a conversation, returning identity a turn can reference.
@@ -201,135 +164,6 @@ pub async fn get_chat_image_attachment(
                 "failed to build image attachment response: {error}"
             ))
         })
-}
-
-/// Derive durable identity from candidate image bytes.
-///
-/// Every refusal carries its own machine-readable `kind` so a client can tell
-/// "that is not an image" from "that image is too big" and say something useful
-/// about the file the user actually picked.
-pub(crate) fn inspect_image_bytes(bytes: &[u8]) -> Result<ImageRef, ServerError> {
-    if bytes.is_empty() {
-        return Err(ServerError::bad_request_kind(
-            "image_attachment_empty",
-            "image attachment must not be empty",
-        ));
-    }
-    let byte_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-    if byte_len > MAX_IMAGE_BYTES {
-        return Err(ServerError::bad_request_kind(
-            "image_attachment_too_large",
-            format!("image attachment must be at most {MAX_IMAGE_BYTES} bytes"),
-        ));
-    }
-    let media_type = sniff_media_type(bytes)?;
-    let (width, height) = read_header_dimensions(bytes, media_type)?;
-    if width == 0 || height == 0 {
-        return Err(ServerError::bad_request_kind(
-            "image_attachment_zero_dimension",
-            "image attachment has a zero width or height",
-        ));
-    }
-    if width > MAX_IMAGE_DIMENSION || height > MAX_IMAGE_DIMENSION {
-        return Err(ServerError::bad_request_kind(
-            "image_attachment_dimensions_too_large",
-            format!("image attachment must be at most {MAX_IMAGE_DIMENSION} pixels on a side"),
-        ));
-    }
-    let image = ImageRef {
-        blob_id: DocumentBlob::from_bytes(bytes).id,
-        media_type,
-        width,
-        height,
-        byte_len,
-    };
-    // The durable bounds are checked above; this is the store's own predicate,
-    // kept here so the two can never drift apart unnoticed.
-    image.validate().map_err(|reason| {
-        ServerError::bad_request_kind("image_attachment_invalid", reason.to_owned())
-    })?;
-    Ok(image)
-}
-
-/// Identify the format from magic bytes, refusing anything off the allowlist.
-///
-/// Two distinct refusals: bytes that are not a recognizable image at all, and
-/// bytes that are a real image in a format Tidebreak will not forward to a
-/// provider. A caller can offer to convert in the second case and cannot in the
-/// first.
-fn sniff_media_type(bytes: &[u8]) -> Result<ImageMediaType, ServerError> {
-    let format = image::guess_format(bytes).map_err(|_| {
-        ServerError::bad_request_kind(
-            "image_attachment_not_an_image",
-            "attachment bytes are not a recognized image",
-        )
-    })?;
-    match format {
-        ImageFormat::Png => Ok(ImageMediaType::Png),
-        ImageFormat::Jpeg => Ok(ImageMediaType::Jpeg),
-        ImageFormat::WebP => Ok(ImageMediaType::Webp),
-        ImageFormat::Gif => Ok(ImageMediaType::Gif),
-        _ => Err(ServerError::bad_request_kind(
-            "image_attachment_unsupported_format",
-            "image attachments must be PNG, JPEG, WebP, or GIF",
-        )),
-    }
-}
-
-/// Read `(width, height)` from the image header without decoding pixels.
-///
-/// The format comes from the sniff above rather than being guessed again, so a
-/// container that lies about itself cannot route the bytes to a different
-/// decoder than the one whose media type was recorded.
-fn read_header_dimensions(
-    bytes: &[u8],
-    media_type: ImageMediaType,
-) -> Result<(u32, u32), ServerError> {
-    let format = match media_type {
-        ImageMediaType::Png => ImageFormat::Png,
-        ImageMediaType::Jpeg => ImageFormat::Jpeg,
-        ImageMediaType::Webp => ImageFormat::WebP,
-        ImageMediaType::Gif => ImageFormat::Gif,
-    };
-    ImageReader::with_format(Cursor::new(bytes), format)
-        .into_dimensions()
-        .map_err(|_| {
-            ServerError::bad_request_kind(
-                "image_attachment_unreadable",
-                "image attachment header could not be read",
-            )
-        })
-}
-
-/// Require the declared `Content-Type` to agree with the sniffed bytes.
-///
-/// The header is required rather than optional: a caller that never states a
-/// type can never be caught contradicting one, and the point of this check is
-/// to catch the contradiction.
-pub(crate) fn require_declared_type_matches(
-    headers: &HeaderMap,
-    sniffed: ImageMediaType,
-) -> Result<(), ServerError> {
-    let declared = headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            ServerError::bad_request_kind(
-                "image_attachment_media_type_required",
-                "Content-Type header is required for an image attachment",
-            )
-        })?;
-    if ImageMediaType::parse(declared) != Some(sniffed) {
-        return Err(ServerError::bad_request_kind(
-            "image_attachment_media_type_mismatch",
-            format!(
-                "declared Content-Type `{declared}` disagrees with the attachment's actual format `{sniffed}`"
-            ),
-        ));
-    }
-    Ok(())
 }
 
 /// A PNG that declares `width × height` and carries no pixel data at all.

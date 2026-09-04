@@ -569,10 +569,7 @@ fn serialize_body(
 /// or a query is refused rather than stripped — a base URL is configuration,
 /// and configuration that cannot mean anything should be corrected, not
 /// silently rewritten.
-pub(crate) fn admit_base_url(
-    base_url: &str,
-    allow_loopback_http: bool,
-) -> Result<Url, RestExecuteError> {
+pub fn admit_base_url(base_url: &str, allow_loopback_http: bool) -> Result<Url, RestExecuteError> {
     admit_connected_app_url(base_url, UrlQueryPolicy::Refuse, allow_loopback_http).map_err(
         |refusal| match refusal {
             UrlAdmissionRefusal::Reason(reason) => RestExecuteError::InadmissibleBaseUrl { reason },
@@ -1066,7 +1063,7 @@ pub enum SpecFetchError {
 
 /// Body and declared media type of a fetched OpenAPI document.
 #[derive(Debug)]
-pub(crate) struct FetchedSpecDocument {
+pub struct FetchedSpecDocument {
     pub body: Vec<u8>,
     pub content_type: Option<String>,
 }
@@ -1093,7 +1090,7 @@ pub(crate) enum SpecRedirectPolicy {
 /// credential is ever attached to any hop.
 /// Loopback-http documents (only reachable with `allow_loopback_http`)
 /// never follow redirects: a 302 must not walk the opt-in off that origin.
-pub(crate) async fn fetch_spec_document(
+pub async fn fetch_spec_document(
     url: &str,
     allow_loopback_http: bool,
 ) -> Result<Vec<u8>, SpecFetchError> {
@@ -1104,8 +1101,8 @@ pub(crate) async fn fetch_spec_document(
 
 /// Fetch a document the way [`fetch_spec_document`] does, keeping the
 /// declared content type so discovery can tell JSON from HTML or YAML.
-#[cfg(test)]
-pub(crate) mod spec_fetch_mock {
+#[cfg(any(test, feature = "test-support"))]
+pub mod spec_fetch_mock {
     use super::*;
     use std::sync::{Mutex, OnceLock};
 
@@ -1117,15 +1114,15 @@ pub(crate) mod spec_fetch_mock {
         MOCK.get_or_init(|| Mutex::new(None))
     }
 
-    pub(crate) fn install(mock: MockFn) {
+    pub fn install(mock: MockFn) {
         *slot().lock().expect("spec fetch mock") = Some(mock);
     }
 
-    pub(crate) fn clear() {
+    pub fn clear() {
         *slot().lock().expect("spec fetch mock") = None;
     }
 
-    pub(crate) fn try_fetch(url: &str) -> Option<Result<FetchedSpecDocument, SpecFetchError>> {
+    pub fn try_fetch(url: &str) -> Option<Result<FetchedSpecDocument, SpecFetchError>> {
         slot()
             .lock()
             .expect("spec fetch mock")
@@ -1142,7 +1139,7 @@ pub(crate) async fn fetch_spec_document_detailed(
     let started = std::time::Instant::now();
     let mut current = url.to_string();
     let origin = admit_spec_fetch_url(&current, allow_loopback_http)?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(mocked) = spec_fetch_mock::try_fetch(&current) {
         let _ = redirects;
         let _ = origin;
@@ -1280,7 +1277,7 @@ pub(crate) async fn fetch_spec_document_detailed(
 /// server can stand in for a vendor origin; production still requires https
 /// and the denied-network list.
 fn admit_spec_fetch_url(url: &str, allow_loopback_http: bool) -> Result<Url, SpecFetchError> {
-    if cfg!(test) {
+    if cfg!(any(test, feature = "test-support")) {
         if let Ok(parsed) = Url::parse(url) {
             let loopback = matches!(parsed.host_str(), Some("127.0.0.1") | Some("[::1]"));
             if parsed.scheme() == "http" && loopback {

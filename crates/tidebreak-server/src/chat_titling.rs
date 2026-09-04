@@ -49,7 +49,10 @@ use tidebreak_core::{
 
 use crate::bus::{ChatMetadataNotice, EventBus};
 use crate::resolver::ProviderResolver;
-use crate::routes::MAX_CHAT_TITLE_CHARS;
+
+/// Conversation names stay compact whether a reader typed one or the product
+/// derived one. Project and conversation rows share the same visual bound.
+pub const MAX_CHAT_TITLE_CHARS: usize = 120;
 
 /// Most user messages one titling call reads.
 ///
@@ -160,7 +163,7 @@ Answer {{"title":null}} when there is nothing to name yet — a greeting, a test
 }
 
 /// Derives names for untitled conversations, one at a time per conversation.
-pub(crate) struct ChatTitler {
+pub struct ChatTitler {
     store: Arc<dyn Store>,
     resolver: Arc<dyn ProviderResolver>,
     events: Arc<EventBus>,
@@ -176,7 +179,7 @@ pub(crate) struct ChatTitler {
 impl ChatTitler {
     /// A titler reading conversations from `store`, reaching providers through
     /// `resolver`, and announcing a stored name on `events`.
-    pub(crate) fn new(
+    pub fn new(
         store: Arc<dyn Store>,
         resolver: Arc<dyn ProviderResolver>,
         events: Arc<EventBus>,
@@ -194,7 +197,7 @@ impl ChatTitler {
     /// Returns immediately. Nothing waits on the result and nothing fails when
     /// it does not arrive, which is what lets this be called from the front of a
     /// turn rather than bolted onto each of its completion paths.
-    pub(crate) fn spawn(self: &Arc<Self>, chat_id: SessionId, utility: UtilityModel) {
+    pub fn spawn(self: &Arc<Self>, chat_id: SessionId, utility: UtilityModel) {
         let Some((mut claim, mut utility)) = TitlingClaim::acquire(self, chat_id, utility) else {
             return;
         };
@@ -243,7 +246,7 @@ impl ChatTitler {
     /// caller wants and all a test can assert on. `Ok(None)` covers every
     /// ordinary reason a chat comes out of this still untitled: it was renamed,
     /// it has nothing to name yet, or another writer named it first.
-    pub(crate) async fn derive_title(
+    pub async fn derive_title(
         &self,
         chat_id: SessionId,
         utility: &UtilityModel,

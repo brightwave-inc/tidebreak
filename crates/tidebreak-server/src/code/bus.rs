@@ -40,7 +40,7 @@ const UPDATES_BUFFER: usize = 256;
 
 /// Cheap per-session digest published on `/updates`.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct SessionDigest {
+pub struct SessionDigest {
     /// `None` for a session that binds no workspace.
     pub workspace: Option<WorkspaceId>,
     pub session: SessionId,
@@ -85,7 +85,7 @@ pub(crate) struct SessionDigest {
 
 /// Progress of one in-flight `git clone` job.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct CloneProgress {
+pub struct CloneProgress {
     pub job: String,
     pub phase: String,
     pub percent: Option<u8>,
@@ -96,7 +96,7 @@ pub(crate) struct CloneProgress {
 
 /// Progress of one warm harness install.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HarnessInstallProgress {
+pub struct HarnessInstallProgress {
     pub kind: HarnessKind,
     pub version: Option<String>,
     pub phase: String,
@@ -106,7 +106,7 @@ pub(crate) struct HarnessInstallProgress {
 
 /// One unsequenced notice on the install-wide updates channel.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum CodeLiveUpdate {
+pub enum CodeLiveUpdate {
     /// Cheap per-session digest, computed from rows. Boxed: the PR digest
     /// makes it much larger than the clone-progress variant.
     Digest(Box<SessionDigest>),
@@ -125,7 +125,7 @@ pub(crate) enum CodeLiveUpdate {
 
 /// Progress of one background rewrite of a completed turn's closing message.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TurnRewriteNotice {
+pub struct TurnRewriteNotice {
     pub session: SessionId,
     pub turn_id: TurnId,
     pub state: TurnRewriteState,
@@ -134,7 +134,7 @@ pub(crate) struct TurnRewriteNotice {
 
 /// Where one rewrite stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TurnRewriteState {
+pub enum TurnRewriteState {
     Rewriting,
     Rewritten,
     Failed,
@@ -142,7 +142,7 @@ pub(crate) enum TurnRewriteState {
 
 /// Per-session broadcast channels for live journal events, plus one digest
 /// channel per owner.
-pub(crate) struct CodeEventBus {
+pub struct CodeEventBus {
     channels: Mutex<HashMap<SessionId, LiveSession>>,
     updates: Mutex<HashMap<OwnerId, broadcast::Sender<CodeLiveUpdate>>>,
     /// Fires when a client subscribes to `/updates`, so background work
@@ -190,7 +190,7 @@ impl Default for LiveSession {
 /// holds: it is delivered live and never replayed, so it carries no cursor a
 /// client could resume from.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct CodeLiveEvent {
+pub struct CodeLiveEvent {
     pub seq: Option<i64>,
     /// Journal position this event streamed behind — its own, for a journaled
     /// event.
@@ -204,7 +204,7 @@ pub(crate) struct CodeLiveEvent {
 }
 
 /// What a freshly attached reader needs to catch up on the live tail.
-pub(crate) struct LiveTail {
+pub struct LiveTail {
     /// Assistant text streamed but not yet journaled. Empty most of the time.
     pub assistant: String,
     /// Journal position the tail is current as of. A reader whose replay went
@@ -234,10 +234,7 @@ impl CodeEventBus {
     /// tail afterwards would count any delta published in between twice: once
     /// in the tail it read, once from its own receiver. Publication takes the
     /// same lock, so nothing lands between these two lines.
-    pub(crate) fn attach(
-        &self,
-        session: SessionId,
-    ) -> (broadcast::Receiver<CodeLiveEvent>, LiveTail) {
+    pub fn attach(&self, session: SessionId) -> (broadcast::Receiver<CodeLiveEvent>, LiveTail) {
         self.with_session(session, |live| {
             (
                 live.sender.subscribe(),
@@ -254,7 +251,7 @@ impl CodeEventBus {
     /// Journaled events are what the tail is measured against: an event that
     /// finishes the assistant's turn of speech retires the buffered text
     /// rather than leaving a stale copy for the next reconnect to replay.
-    pub(crate) fn publish(&self, session: SessionId, event: SequencedEvent) {
+    pub fn publish(&self, session: SessionId, event: SequencedEvent) {
         self.with_session(session, |live| {
             live.cursor = live.cursor.max(event.seq);
             live.last_activity = Utc::now();
@@ -275,7 +272,7 @@ impl CodeEventBus {
     /// reader watches an answer arrive, and the `assistant_message` that
     /// follows carries the same bytes, so the durable copy would say nothing
     /// new (record 57).
-    pub(crate) fn publish_transient(&self, session: SessionId, event: Event) {
+    pub fn publish_transient(&self, session: SessionId, event: Event) {
         self.with_session(session, |live| {
             live.last_activity = Utc::now();
             if let Event::AssistantDelta { text } = &event {
@@ -293,7 +290,7 @@ impl CodeEventBus {
     ///
     /// Empty once the message lands. Taking it clears it, which is what the
     /// journal path wants: it is about to write the text down.
-    pub(crate) fn take_assistant_tail(&self, session: SessionId) -> String {
+    pub fn take_assistant_tail(&self, session: SessionId) -> String {
         self.with_session(session, |live| std::mem::take(&mut live.assistant))
     }
 
@@ -302,7 +299,7 @@ impl CodeEventBus {
     /// The stall sweep reads it. Without it a session streaming a long answer
     /// and nothing else would look silent, because the deltas carrying that
     /// answer no longer touch a row's `created_at`.
-    pub(crate) fn last_activity(&self, session: SessionId) -> Option<DateTime<Utc>> {
+    pub fn last_activity(&self, session: SessionId) -> Option<DateTime<Utc>> {
         self.channels
             .lock()
             .expect("code event bus lock")
@@ -315,7 +312,7 @@ impl CodeEventBus {
     /// A hint, not an answer: it starts pessimistic and is corrected by the
     /// first caller that reads the row. Its job is to spare the common path —
     /// a running session that is not stalled — a `get_session` per event.
-    pub(crate) fn maybe_stalled(&self, session: SessionId) -> bool {
+    pub fn maybe_stalled(&self, session: SessionId) -> bool {
         self.channels
             .lock()
             .expect("code event bus lock")
@@ -325,7 +322,7 @@ impl CodeEventBus {
 
     /// Record what the session row actually says, so the next event can skip
     /// the read.
-    pub(crate) fn set_maybe_stalled(&self, session: SessionId, stalled: bool) {
+    pub fn set_maybe_stalled(&self, session: SessionId, stalled: bool) {
         self.with_session(session, |live| live.maybe_stalled = stalled);
     }
 
@@ -345,7 +342,7 @@ impl CodeEventBus {
     /// A client says it is looking by opening an `/updates` socket. Sweeps
     /// that back off while nobody is looking use that moment to return to
     /// their fast cadence.
-    pub(crate) fn subscribe_updates(&self, owner: &OwnerId) -> broadcast::Receiver<CodeLiveUpdate> {
+    pub fn subscribe_updates(&self, owner: &OwnerId) -> broadcast::Receiver<CodeLiveUpdate> {
         let receiver = self.updates_sender(owner).subscribe();
         self.updates_attached.notify_one();
         receiver
@@ -357,7 +354,7 @@ impl CodeEventBus {
     /// desktop keeps that socket open for as long as it runs, and the CLI
     /// opens it to watch. Counting receivers is exact because a dropped
     /// socket drops its receiver with it.
-    pub(crate) fn has_updates_subscribers(&self) -> bool {
+    pub fn has_updates_subscribers(&self) -> bool {
         self.updates
             .lock()
             .expect("code updates bus lock")
@@ -372,13 +369,13 @@ impl CodeEventBus {
     /// then waits cannot miss an attach that fell between the two. The cost
     /// is at most one spurious wake, which callers absorb by re-reading the
     /// subscriber count.
-    pub(crate) async fn updates_attached(&self) {
+    pub async fn updates_attached(&self) {
         self.updates_attached.notified().await;
     }
 
     /// Publish a notice to one owner. Publishers name the owner the notice
     /// belongs to; there is no channel that reaches everyone.
-    pub(crate) fn publish_update(&self, owner: &OwnerId, update: CodeLiveUpdate) {
+    pub fn publish_update(&self, owner: &OwnerId, update: CodeLiveUpdate) {
         let _ = self.updates_sender(owner).send(update);
     }
 }

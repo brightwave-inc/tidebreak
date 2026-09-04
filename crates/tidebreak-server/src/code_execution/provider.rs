@@ -259,7 +259,7 @@ impl ConfiguredExecProvider {
     /// Without it — and without a blob store — staged writes are applied with no
     /// snapshot, which is the behavior granted folders had before this existed.
     #[must_use]
-    pub(crate) fn with_blob_write_locks(mut self, blob_writes: Arc<BlobWriteGuard>) -> Self {
+    pub fn with_blob_write_locks(mut self, blob_writes: Arc<BlobWriteGuard>) -> Self {
         self.blob_writes = Some(blob_writes);
         self
     }
@@ -375,8 +375,8 @@ impl ConfiguredExecProvider {
         self
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_plugin_archive_fetcher(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_plugin_archive_fetcher(
         mut self,
         fetcher: Arc<dyn crate::plugin_install::PluginArchiveFetcher>,
     ) -> Self {
@@ -411,14 +411,14 @@ impl ConfiguredExecProvider {
     /// This is what a management surface lists — it has to show a disabled
     /// component in order to offer turning it back on. Everything the model
     /// or a sandbox sees goes through [`Self::current_skills`] instead.
-    pub(crate) fn installed_skills(&self) -> Vec<tidebreak_code_execution::LoadedSkill> {
+    pub fn installed_skills(&self) -> Vec<tidebreak_code_execution::LoadedSkill> {
         tidebreak_code_execution::merged_skills(&self.skills, self.user_skills_dir.as_deref())
     }
 
     /// Every installed bundle, before the install's enable flags apply: the
     /// built-in bundles merged with a fresh read of the user plugins
     /// directory, exactly as [`Self::installed_skills`] does.
-    pub(crate) fn installed_plugins(&self) -> Vec<tidebreak_code_execution::PluginPackage> {
+    pub fn installed_plugins(&self) -> Vec<tidebreak_code_execution::PluginPackage> {
         self.merged_plugins(&self.installed_skills(), &self.installed_prompts())
     }
 
@@ -431,7 +431,7 @@ impl ConfiguredExecProvider {
     /// A bundle whose root will not canonicalize (removed between the listing
     /// and this call) is dropped rather than launched from a path that no
     /// longer means what the loader read.
-    pub(crate) fn installed_plugin_mcp(
+    pub fn installed_plugin_mcp(
         &self,
     ) -> Vec<(
         tidebreak_code_execution::PluginPackage,
@@ -459,7 +459,7 @@ impl ConfiguredExecProvider {
     /// ordinary merged loaders whether it survived the existing reserved-name
     /// and ownership rules. A conflict rolls back only the directories this
     /// call just created.
-    pub(crate) async fn install_plugin(
+    pub async fn install_plugin(
         &self,
         request: &crate::plugin_install::PluginInstallRequest,
     ) -> std::result::Result<
@@ -559,7 +559,7 @@ impl ConfiguredExecProvider {
     ///
     /// There is no filtered counterpart. A prompt is never staged and never
     /// advertised, so this one listing is the whole consumer surface.
-    pub(crate) fn installed_prompts(&self) -> Vec<tidebreak_code_execution::LoadedPrompt> {
+    pub fn installed_prompts(&self) -> Vec<tidebreak_code_execution::LoadedPrompt> {
         tidebreak_code_execution::merged_prompts(&self.prompts, self.user_prompts_dir.as_deref())
     }
 
@@ -575,7 +575,7 @@ impl ConfiguredExecProvider {
     }
 
     /// The install's plugin and skill enable flags.
-    pub(crate) async fn enable_state(&self) -> crate::plugin_state::PluginEnableState {
+    pub async fn enable_state(&self) -> crate::plugin_state::PluginEnableState {
         crate::plugin_state::read_plugin_enable_state(&*self.store).await
     }
 
@@ -612,7 +612,7 @@ impl ConfiguredExecProvider {
     }
 
     /// The host-derived (name, description) catalog for prompt composition.
-    pub(crate) async fn skill_catalog(&self) -> Vec<tidebreak_code_execution::SkillPackage> {
+    pub async fn skill_catalog(&self) -> Vec<tidebreak_code_execution::SkillPackage> {
         self.current_skills()
             .await
             .into_iter()
@@ -622,7 +622,7 @@ impl ConfiguredExecProvider {
 
     /// The bundles the catalog groups skills under, built-in and user-authored
     /// alike. A skill no bundle claims stays standalone.
-    pub(crate) async fn plugin_catalog(&self) -> Vec<tidebreak_code_execution::PluginPackage> {
+    pub async fn plugin_catalog(&self) -> Vec<tidebreak_code_execution::PluginPackage> {
         let state = self.enable_state().await;
         self.installed_plugins()
             .into_iter()
@@ -640,7 +640,7 @@ impl ConfiguredExecProvider {
     /// on purpose — prompt enrichment is not an authority boundary, and
     /// `execute` re-prepares (with the provider-correct mirroring flag)
     /// before any command runs.
-    pub(crate) async fn stage_turn_workspace(&self, chat_id: SessionId) {
+    pub async fn stage_turn_workspace(&self, chat_id: SessionId) {
         // A configuration with no skills at all — a headless embedding — has
         // no workspace to prepare. An install that has *disabled* every skill
         // is a different case: a workspace may already hold staged copies, and
@@ -679,7 +679,7 @@ impl ConfiguredExecProvider {
     /// line would steer nothing and is omitted. Otherwise the broker's status
     /// is the truth: only a tool that resolves right now counts, so a prompt
     /// never promises a converter that is mid-download or failed to install.
-    pub(crate) async fn office_rendering_available(&self) -> Option<bool> {
+    pub async fn office_rendering_available(&self) -> Option<bool> {
         let declared = self.current_skills().await.iter().any(|skill| {
             skill
                 .package
@@ -713,9 +713,7 @@ impl ConfiguredExecProvider {
     /// backend has anything to resolve; there, a host with no broker at all
     /// (a headless embedding) reports the honest absence rather than letting
     /// the model discover it one failed command at a time.
-    pub(crate) async fn node_runtime_status(
-        &self,
-    ) -> Option<tidebreak_code_execution::HostToolStatus> {
+    pub async fn node_runtime_status(&self) -> Option<tidebreak_code_execution::HostToolStatus> {
         let needed = self
             .current_skills()
             .await
@@ -786,7 +784,7 @@ impl ConfiguredExecProvider {
 
     /// Whether verified offline package installs are currently possible on the
     /// selected provider, for truthful operating-prompt steering.
-    pub(crate) async fn offline_package_cache_ready(&self) -> bool {
+    pub async fn offline_package_cache_ready(&self) -> bool {
         let Ok(config) = read_config(&*self.store).await else {
             return false;
         };
@@ -803,7 +801,7 @@ impl ConfiguredExecProvider {
     /// operating-prompt steering. Execution re-reads the setting per
     /// invocation; this is the same value rendered ahead of time so the model
     /// can plan long-running commands around it.
-    pub(crate) async fn current_timeout_ms(&self) -> u64 {
+    pub async fn current_timeout_ms(&self) -> u64 {
         match read_config(&*self.store).await {
             Ok(config) => config.timeout_ms,
             Err(_) => DEFAULT_TIMEOUT_MS,
@@ -844,7 +842,7 @@ impl ConfiguredExecProvider {
     /// piece of work behind it is already fire-and-forget or bounded by the
     /// broker's own discipline (serialized installs, a remembered failure only
     /// an explicit retry clears).
-    pub(crate) fn spawn_dependency_provisioning(self: &Arc<Self>) {
+    pub fn spawn_dependency_provisioning(self: &Arc<Self>) {
         let provider = self.clone();
         tokio::spawn(async move { provider.provision_dependencies().await });
     }
@@ -902,7 +900,7 @@ impl ConfiguredExecProvider {
     /// Exposed for the enable route, which compares this across the write it
     /// just made: enabling a *bundle* moves no skill flag, so only liveness
     /// shows what came on.
-    pub(crate) fn live_skill_names(
+    pub fn live_skill_names(
         &self,
         state: &crate::plugin_state::PluginEnableState,
     ) -> HashSet<String> {
@@ -961,7 +959,7 @@ impl ConfiguredExecProvider {
     /// Managed providers cannot mount host folders, so they deliberately
     /// receive an empty list. The execution boundary resolves again on every
     /// invocation so a revocation after the prompt snapshot still fails closed.
-    pub(crate) async fn folder_grants_for_chat(
+    pub async fn folder_grants_for_chat(
         &self,
         chat: &Chat,
         turn: TurnId,
@@ -1042,7 +1040,7 @@ impl ConfiguredExecProvider {
     /// to do. A turn that is abandoned rather than finished never reaches here,
     /// and its staged writes are discarded when the next turn sweeps them:
     /// applying them later would write a folder that has since moved on.
-    pub(crate) async fn close_write_overlay(&self, chat: SessionId) -> Option<TurnId> {
+    pub async fn close_write_overlay(&self, chat: SessionId) -> Option<TurnId> {
         let staged = self
             .write_overlays
             .lock()

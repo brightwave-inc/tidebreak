@@ -15,7 +15,7 @@ use crate::error::ServerError;
 
 /// A freshly minted token pair. The only copy of the secrets: the store
 /// keeps hashes, and this value goes to the adapter once.
-pub(crate) struct AdapterTokenPair {
+pub struct AdapterTokenPair {
     /// The access token every grant call presents (`tbg_` prefix).
     pub token: String,
     /// The refresh token rotation trades in (`tbr_` prefix).
@@ -23,7 +23,7 @@ pub(crate) struct AdapterTokenPair {
 }
 
 /// Hex SHA-256 of a presented token, the only form the store sees.
-pub(crate) fn hash_adapter_token(secret: &str) -> String {
+pub fn hash_adapter_token(secret: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(secret.as_bytes());
     hasher
@@ -130,7 +130,7 @@ fn safe_avatar_url(value: Option<&str>) -> Result<Option<String>, ServerError> {
 /// Live fan-out for revocations. The events WebSocket route subscribes and
 /// closes its stream the moment its grant's id arrives; everything else
 /// learns from the durable row.
-pub(crate) struct GrantRevocations {
+pub struct GrantRevocations {
     sender: tokio::sync::broadcast::Sender<CodeGrantId>,
 }
 
@@ -142,7 +142,7 @@ impl Default for GrantRevocations {
 }
 
 impl GrantRevocations {
-    pub(crate) fn subscribe(&self) -> tokio::sync::broadcast::Receiver<CodeGrantId> {
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<CodeGrantId> {
         self.sender.subscribe()
     }
 
@@ -162,8 +162,8 @@ impl super::runtime::CodeRuntime {
     /// `src/tests/code_external.rs`) drive the token pair through this
     /// helper. Keep it compiled only in tests until a connect-approval
     /// path calls it.
-    #[cfg(test)]
-    pub(crate) async fn mint_adapter_grant(
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn mint_adapter_grant(
         &self,
         owner: &OwnerId,
         channel_kind: &str,
@@ -186,7 +186,7 @@ impl super::runtime::CodeRuntime {
 
     /// The live grant a presented access token authenticates. A revoked
     /// grant's next call dies here.
-    pub(crate) async fn authenticate_adapter_token(
+    pub async fn authenticate_adapter_token(
         &self,
         token: &str,
     ) -> Result<Option<CodeExternalGrant>, ServerError> {
@@ -200,7 +200,7 @@ impl super::runtime::CodeRuntime {
     /// Rotate a token pair against a presented refresh token. A replayed
     /// rotated token revokes the grant durably and severs its live event
     /// streams before this returns.
-    pub(crate) async fn rotate_adapter_token(
+    pub async fn rotate_adapter_token(
         &self,
         refresh: &str,
     ) -> Result<(GrantRotation, Option<AdapterTokenPair>), ServerError> {
@@ -228,7 +228,7 @@ impl super::runtime::CodeRuntime {
     }
 
     /// Revoke one grant on the owner's word and sever its live streams.
-    pub(crate) async fn revoke_adapter_grant(
+    pub async fn revoke_adapter_grant(
         &self,
         owner: &OwnerId,
         grant_id: CodeGrantId,
@@ -243,7 +243,7 @@ impl super::runtime::CodeRuntime {
         Ok(revoked)
     }
 
-    pub(crate) fn grant_revocations(&self) -> Arc<GrantRevocations> {
+    pub fn grant_revocations(&self) -> Arc<GrantRevocations> {
         self.grant_revocations.clone()
     }
 
@@ -253,7 +253,7 @@ impl super::runtime::CodeRuntime {
     /// between token authentication and the revocation subscription
     /// published into a channel nobody held, so the stream re-reads the
     /// row while holding its subscription before it starts.
-    pub(crate) async fn adapter_grant_is_live(
+    pub async fn adapter_grant_is_live(
         &self,
         owner: &OwnerId,
         grant_id: CodeGrantId,
@@ -267,7 +267,7 @@ impl super::runtime::CodeRuntime {
 
     /// Park a connect handshake and mint its one-time nonce. The adapter
     /// puts the nonce in the connect card link; the machine keeps a hash.
-    pub(crate) async fn start_connect_handshake(
+    pub async fn start_connect_handshake(
         &self,
         channel_kind: &str,
         external_identity: &str,
@@ -305,7 +305,7 @@ impl super::runtime::CodeRuntime {
 
     /// The handshake a nonce opens, with the CSRF token the approval page
     /// posts back. `None` for a used or stale link.
-    pub(crate) async fn view_connect_handshake(
+    pub async fn view_connect_handshake(
         &self,
         owner: &OwnerId,
         nonce: &str,
@@ -320,7 +320,7 @@ impl super::runtime::CodeRuntime {
 
     /// The state the adapter may poll with the confirmation capability that
     /// never appears in the approval link.
-    pub(crate) async fn connect_handshake_status(
+    pub async fn connect_handshake_status(
         &self,
         nonce: &str,
         confirmation_token: &str,
@@ -337,7 +337,7 @@ impl super::runtime::CodeRuntime {
 
     /// The owner's "is this you?". Approving mints nothing — the adapter's
     /// closing confirm does, so a forwarded link binds nothing.
-    pub(crate) async fn approve_connect_handshake(
+    pub async fn approve_connect_handshake(
         &self,
         owner: &OwnerId,
         nonce: &str,
@@ -359,7 +359,7 @@ impl super::runtime::CodeRuntime {
     /// live grant already covering that identity is revoked first — a
     /// re-link is an explicit replacement — and the mint answers with the
     /// only copy of the token pair.
-    pub(crate) async fn complete_connect_handshake(
+    pub async fn complete_connect_handshake(
         &self,
         nonce: &str,
         confirmation_token: &str,
@@ -384,7 +384,7 @@ impl super::runtime::CodeRuntime {
     }
 
     /// Every grant the owner holds, for the desktop grants list.
-    pub(crate) async fn list_adapter_grants(
+    pub async fn list_adapter_grants(
         &self,
         owner: &OwnerId,
     ) -> Result<Vec<CodeExternalGrant>, ServerError> {
@@ -392,7 +392,7 @@ impl super::runtime::CodeRuntime {
     }
 
     /// Human-facing names retained from completed approval handshakes.
-    pub(crate) async fn list_adapter_grant_profiles(
+    pub async fn list_adapter_grant_profiles(
         &self,
         owner: &OwnerId,
     ) -> Result<Vec<tidebreak_core::CodeGrantProfile>, ServerError> {
@@ -402,7 +402,7 @@ impl super::runtime::CodeRuntime {
     /// Revoke every live grant a channel workspace holds. The grants list
     /// shows the workspace so an owner can cut off a whole workspace at
     /// once — the hostile-admin boundary the design names.
-    pub(crate) async fn revoke_workspace_grants(
+    pub async fn revoke_workspace_grants(
         &self,
         owner: &OwnerId,
         channel_kind: &str,

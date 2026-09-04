@@ -458,12 +458,12 @@ pub(crate) fn code_frame_fixtures() -> Vec<Fixture> {
                         previous_path: None,
                     },
                     CodeFileChange {
-                        path: "crates/tidebreak-server/fixtures/code-frames.json".to_owned(),
+                        path: "crates/tidebreak-server-api/fixtures/code-frames.json".to_owned(),
                         kind: FileChangeKind::Renamed,
                         insertions: 2,
                         deletions: 0,
                         previous_path: Some(
-                            "crates/tidebreak-server/fixtures/code.json".to_owned(),
+                            "crates/tidebreak-server-api/fixtures/code.json".to_owned(),
                         ),
                     },
                 ],

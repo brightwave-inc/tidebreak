@@ -43,7 +43,7 @@ impl ServerError {
 
     /// A `403 Forbidden` for a caller whose token is real but whose authority
     /// no longer covers the request (for example, an ended session).
-    pub(crate) fn forbidden(message: impl Into<String>) -> Self {
+    pub fn forbidden(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::FORBIDDEN,
             info: AgentErrorInfo {
@@ -55,7 +55,7 @@ impl ServerError {
 
     /// A `501 Not Implemented` for a capability this embedding does not
     /// provide (for example, browser routes with no runtime attached).
-    pub(crate) fn not_implemented(message: impl Into<String>) -> Self {
+    pub fn not_implemented(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_IMPLEMENTED,
             info: AgentErrorInfo {
@@ -80,7 +80,7 @@ impl ServerError {
     }
 
     /// A `400 Bad Request` with a route-specific stable machine-readable kind.
-    pub(crate) fn bad_request_kind(kind: &'static str, message: impl Into<String>) -> Self {
+    pub fn bad_request_kind(kind: &'static str, message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
             info: AgentErrorInfo {
@@ -103,12 +103,12 @@ impl ServerError {
     }
 
     /// The stable machine-readable `kind` clients branch on.
-    pub(crate) fn kind(&self) -> &str {
+    pub fn kind(&self) -> &str {
         &self.info.kind
     }
 
     /// The human-readable message, for surfaces that log rather than respond.
-    pub(crate) fn message(&self) -> &str {
+    pub fn message(&self) -> &str {
         &self.info.message
     }
 
@@ -125,7 +125,7 @@ impl ServerError {
     }
 
     /// A `409 Conflict` with a route-specific stable machine-readable kind.
-    pub(crate) fn conflict_kind(kind: &'static str, message: impl Into<String>) -> Self {
+    pub fn conflict_kind(kind: &'static str, message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::CONFLICT,
             info: AgentErrorInfo {
@@ -136,10 +136,7 @@ impl ServerError {
     }
 
     /// A `415 Unsupported Media Type` with a route-specific stable kind.
-    pub(crate) fn unsupported_media_type_kind(
-        kind: &'static str,
-        message: impl Into<String>,
-    ) -> Self {
+    pub fn unsupported_media_type_kind(kind: &'static str, message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::UNSUPPORTED_MEDIA_TYPE,
             info: AgentErrorInfo {
@@ -150,7 +147,7 @@ impl ServerError {
     }
 
     /// A `422 Unprocessable Entity` with a route-specific stable kind.
-    pub(crate) fn unprocessable_kind(kind: &'static str, message: impl Into<String>) -> Self {
+    pub fn unprocessable_kind(kind: &'static str, message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::UNPROCESSABLE_ENTITY,
             info: AgentErrorInfo {
@@ -161,7 +158,7 @@ impl ServerError {
     }
 
     /// A `429 Too Many Requests` with a route-specific stable kind.
-    pub(crate) fn too_many_requests_kind(kind: &'static str, message: impl Into<String>) -> Self {
+    pub fn too_many_requests_kind(kind: &'static str, message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::TOO_MANY_REQUESTS,
             info: AgentErrorInfo {
@@ -186,7 +183,7 @@ impl ServerError {
 
     /// Keep secret-store setup errors that an operator can fix while redacting
     /// all other backend details behind a route-specific fallback message.
-    pub(crate) fn credential_storage(error: AgentError, fallback: impl Into<String>) -> Self {
+    pub fn credential_storage(error: AgentError, fallback: impl Into<String>) -> Self {
         if matches!(error, AgentError::Config(_)) {
             Self::from(error)
         } else {

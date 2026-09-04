@@ -22,7 +22,7 @@ Chat mode already has a proven streaming contract for (a): a per-chat journal
 table, sequence numbers, journal-before-live-publication, and a WebSocket
 whose reconnect discipline is snapshot → replay from cursor → live
 ([`0004`](0004-chat-scoped-journal-events.md),
-`crates/tidebreak-server/src/routes/events.rs`). It has no contract for (b)
+`crates/tidebreak-server-api/src/routes/events.rs`). It has no contract for (b)
 beyond per-chat metadata notices.
 
 All renderer-facing types are generated from Rust
