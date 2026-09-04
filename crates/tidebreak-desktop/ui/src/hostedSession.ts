@@ -27,7 +27,7 @@ export type HostedSession = {
  * server or its access log, and the page clears it before anything else can
  * read it. Tokens are URL-safe by construction; anything else is not a token.
  */
-const HANDOFF_FRAGMENT = /^#handoff=([A-Za-z0-9._~-]+)$/;
+const HANDOFF_TOKEN = /^[A-Za-z0-9._~-]+$/;
 
 /**
  * Why the machine's landing route could not hand the page a bearer. The
@@ -50,15 +50,41 @@ let session: HostedSession | null = null;
  * this page's life — long enough for boot to retry — and nowhere else.
  */
 export function captureHandoffToken(win: Window = window): void {
+  const handoff = handoffEnvelope(win.location.hash);
   const failed = HANDOFF_FAILURE_FRAGMENT.exec(win.location.hash);
-  const match = HANDOFF_FRAGMENT.exec(win.location.hash);
-  if (!failed && !match) return;
+  if (!failed && !handoff) return;
   if (failed) failure = failed[1] as HandoffFailure;
-  if (match) handoffToken = match[1];
+  if (handoff) handoffToken = handoff.token;
   win.history.replaceState(
     win.history.state,
     "",
-    `${win.location.pathname}${win.location.search}`,
+    `${win.location.pathname}${win.location.search}${handoff?.returnRoute ? `#${handoff.returnRoute}` : ""}`,
+  );
+}
+
+function handoffEnvelope(
+  hash: string,
+): { token: string; returnRoute: string | null } | null {
+  if (!hash.startsWith("#handoff=")) return null;
+  const params = new URLSearchParams(hash.slice(1));
+  const tokens = params.getAll("handoff");
+  if (tokens.length !== 1 || !HANDOFF_TOKEN.test(tokens[0])) return null;
+  const routes = params.getAll("return_to");
+  const returnRoute =
+    routes.length === 1 && isHandoffReturnRoute(routes[0]) ? routes[0] : null;
+  return { token: tokens[0], returnRoute };
+}
+
+function isHandoffReturnRoute(route: string): boolean {
+  return (
+    route.startsWith("/") &&
+    !route.startsWith("//") &&
+    !route.startsWith("/\\") &&
+    !route.includes("#") &&
+    route.length <= 4096 &&
+    !Array.from(route).some((character) =>
+      /[\u0000-\u001f\u007f]/.test(character),
+    )
   );
 }
 
@@ -91,18 +117,18 @@ export function resetHostedSessionForTests(): void {
 
 /**
  * Where the console signs a reader in and sends them back to this page:
- * the console's Tidebreak page with this page's path as `return_to`, which
- * the hand-off carries through to the landing route. A connect card's
- * approval page survives the round trip this way; the root asks for no
- * return path at all.
+ * the console's Tidebreak page with this page's hash-router route as
+ * `return_to`, which the hand-off carries through to the landing page. A
+ * connect card's approval page survives the round trip this way; the root
+ * asks for no return route at all.
  */
 export function consoleSignInUrl(
   gatewayUrl: string,
   win: Pick<Window, "location"> = window,
 ): string {
   const base = `${gatewayUrl.replace(/\/+$/, "")}/tidebreak`;
-  const here = `${win.location.pathname}${win.location.search}`;
-  return here === "/" || here === ""
-    ? base
-    : `${base}?return_to=${encodeURIComponent(here)}`;
+  const here = win.location.hash.startsWith("#/")
+    ? win.location.hash.slice(1)
+    : "/";
+  return here === "/" ? base : `${base}?return_to=${encodeURIComponent(here)}`;
 }

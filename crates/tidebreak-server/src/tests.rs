@@ -2959,7 +2959,7 @@ async fn the_handoff_route_lands_the_page_with_the_bearer_in_the_fragment() {
     // an authority-shaped or fragment-carrying value falls back to the root.
     assert_eq!(
         landed("?code=mg_ho_good&return_to=%2Fconnect%2Fnonce-1%3Fsource%3Dslack").await,
-        "https://machine.example.com/tidebreak/connect/nonce-1?source=slack#handoff=mg_at_minted"
+        "https://machine.example.com/tidebreak/#handoff=mg_at_minted&return_to=%2Fconnect%2Fnonce-1%3Fsource%3Dslack"
     );
     assert_eq!(
         landed("?code=mg_ho_good&return_to=%2F%2Fevil.example%2F").await,
