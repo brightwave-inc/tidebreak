@@ -73,7 +73,8 @@ an accepted boundary.
 - [Wire types](wire-types.md) — generating the desktop TypeScript contract from
   Rust serde types and checking it in CI.
 - [Self-hosting](self-hosting.md) — deployment profile, token roles, Compose,
-  reverse proxies, backup, and upgrades.
+  reverse proxies, backup, upgrades, the bring-your-own image contract, and
+  toolchain bundles.
 - [Tidebreak ↔ model gateway boundary](gateway-boundary.md) — managed-profile
   pairing, authentication, policy tiers, and wire responsibilities.
 - [OS-managed policy](managed-policy.md) — macOS, Windows, and Linux policy
