@@ -264,18 +264,15 @@ installer itself, so no separate updater archive exists on Windows. Release
 builds check that authenticated feed and ask before restarting into the new
 installer.
 
-Like macOS, Windows has a cache-warming workflow: **Warm Windows release
-cache** compiles each architecture on pushes to `main` and saves the compiler
-outputs, so the credential-free `prepare_windows` job usually restores a warm
-archive instead of compiling the tag from scratch. That prepare job remains a
-fallback writer of the Windows Cargo registry cache and saves the
-release-specific prepared cache. The Windows ARM jobs keep the
-`aarch64-pc-windows-msvc` Rust target and compile whisper.cpp with Ninja plus
-`clang-cl`, because ggml refuses MSVC on ARM; the warm workflow uses the same
-compiler setup so its CMake trees stay reusable in the release. After the
-compile, the job transfers only the final binary, sidecars, and Tauri
-configuration to the production job. The production job verifies and bundles
-those files without installing a compiler or rebuilding the frontend.
+The credential-free `prepare_windows` job reuses compiler outputs directly
+from the shared S3 `sccache` backend. It compiles the exact release tag and
+product version, then saves a release-specific prepared archive for the
+credentialed packaging job. The Windows ARM job keeps the
+`aarch64-pc-windows-msvc` Rust target and compiles whisper.cpp with Ninja plus
+`clang-cl`, because ggml refuses MSVC on ARM. After the compile, each job
+transfers only the final binary, sidecars, and Tauri configuration to the
+production job. The production job verifies and bundles those files without
+installing a compiler or rebuilding the frontend.
 
 Windows code mode uses the desktop's digest-verified managed Node ZIP and
 pinned harness packages. Setup, archive, and quick-action commands run through
@@ -300,15 +297,12 @@ installation, and computer use remain governed by their existing platform
 capability checks; packaging the desktop does not claim those features on
 Linux.
 
-The Linux packaging job uses compiler and Cargo download caches in read-only
-mode and does not enable pnpm caching. It restores the unsigned build archive
-that **Warm Linux release cache** saves from `main`, discards any restored
-product binaries so the shipped bytes are always produced by the release job,
-and never saves a cache of its own. It builds both formats from the validated
-release tag before the updater private key enters the step environment, then
-signs and collects only the completed package bytes. This avoids exposing a
-default-branch cache writer to code executed during a manually dispatched
-release.
+The Linux packaging job reads and writes compiler outputs through the shared
+S3 `sccache` backend. It uses the Cargo download cache without storing target
+outputs and does not enable pnpm caching. It builds both formats from the
+validated release tag before the updater private key enters the step
+environment, then signs and collects only the completed package bytes. The
+compile step can write S3 cache entries without receiving the updater key.
 
 Hosted `ubuntu-22.04` runners pin apt at `azure.archive.ubuntu.com`, which can
 stall on `apt-get update` for most of the 90-minute job. The packaging step
@@ -377,33 +371,25 @@ older installed binaries have no updater and therefore cannot discover it.
 Users must install that first updater-enabled release manually; subsequent
 releases can advance automatically.
 
-**Warm macOS release cache**, **Warm Windows release cache**, and **Warm Linux
-release cache** run independently after relevant changes land on `main`. In
-each workflow a short prerequisite job saves Cargo dependency downloads before
-the build job compiles the desktop app with `--no-bundle`. This keeps a later UI
-setup or compilation failure from also losing newly downloaded Cargo
-dependencies. Each architecture then saves one unsigned archive containing
-Cargo fingerprints, build-script outputs, compiled dependency files, and the
-credential-free Rust products produced by `--no-bundle`: the desktop
-executable, host broker, and desktop libraries. Keeping
-those final unsigned products lets an exact-source build skip the otherwise
-expensive desktop relink. The archive is saved before a failed compile is
-reported, so successful partial work remains reusable. None of these jobs load
-the `desktop-production` environment, sign, or publish. Because cache warming
-has its own workflows and failure boundary, a later signing, notarization, or
-publication failure cannot prevent that main-tip cache run from finishing. If
-a shared cache is empty or has been evicted, manually run the matching warm
-workflow from `main`; the production release workflow also compiles the exact tag
-and product version in credential-free prerequisites. On macOS, one
-`macos-latest` runner compiles each real architecture and saves its
-release-specific unsigned cache before reporting a compile failure. A third
-credential-free job verifies both prepared slices, combines the desktop binary
-and both sidecars with `lipo`, and uploads the universal inputs and Tauri
-configuration in a one-day, run-scoped artifact. The `desktop-production` job
-verifies that artifact before it loads signing material, then packages those
-exact binaries without compiling again. Six warm archives plus the
-release-specific ones compete for the repository's shared cache budget, so an
-evicted archive costs a slower release, never a broken one.
+Protected continuous integration, staging, and release jobs reuse Rust
+compiler outputs through the private S3 `sccache` backend. Same-repository pull
+requests receive read-only access, and fork pull requests skip remote access.
+The credential-free release jobs compile the exact tag and product version, so
+version-sensitive product crates may miss while shared dependencies still hit.
+The separate Cargo download caches retain `cache-targets: false` and do not
+store compiler outputs.
+
+Each release architecture saves a run-scoped archive containing the unsigned
+products produced by `--no-bundle`: the desktop executable, host broker, and
+desktop libraries. The archive transfers verified inputs to the credentialed
+packaging job; it does not populate the shared compiler cache. On macOS, one
+`macos-latest` runner compiles each real architecture. A third credential-free
+job verifies both prepared slices, combines the desktop binary and both
+sidecars with `lipo`, and uploads the universal inputs and Tauri configuration
+in a one-day artifact. The `desktop-production` job verifies that artifact
+before it loads signing material, then packages those exact binaries without
+compiling again. If S3 has no matching entry, the release job compiles it and
+can write it for a later build.
 
 The signing and notarization job stays on its own standard runner because it
 receives the prepared universal inputs and does not compile the application.
@@ -526,25 +512,16 @@ Treat the release workflow as public even while the repository is private:
   before Tauri invokes the release-only resource-signing hook. The workflow
   verifies the configured identity is available, then deletes the keychain and
   decoded certificate even when the build fails.
-- The dispatched builds run under the shared protected `main` cache scope, so
-  later release tags can reuse earlier compiler outputs. A credential-free
-  release prerequisite restores the main-tip archive, compiles the exact tag
-  and version with `--no-bundle`, and saves a release-specific archive before
-  reporting failure. It has no production environment or secrets. The
-  secret-bearing jobs only restore that archive, before loading production
-  secrets. Both cache writers include Cargo fingerprints, build-script outputs,
-  dependency files, and explicitly named unsigned compiler products created
-  without the production environment. They never include bundle directories,
-  signed apps, DMGs, updater archives, signatures, keychains, or temporary
-  Apple key files. `sccache` remains a read-only fallback because GitHub
-  throttles its many small writes; the separate Cargo download cache retains
-  `cache-targets: false`.
-- The independent cache-warm workflows run only for relevant pushes to `main`
-  or an explicit manual dispatch. They have no production environment and
-  receive no Apple, Tauri, or AWS credentials. Each fetches Cargo dependencies
-  early and stops after compiling with `--no-bundle`; none can sign or publish
-  a release. Signing, notarization, or publication failures therefore do not
-  cancel or roll back the separate main-tip cache runs.
+- The credential-free release builds use GitHub OpenID Connect to read and
+  write the shared S3 compiler cache. They compile the exact tag and version
+  with `--no-bundle`, then save release-specific prepared archives before
+  reporting a compile failure. They have no production environment or signing
+  secrets. The secret-bearing jobs restore and verify those archives before
+  loading production secrets. The archives include explicitly named unsigned
+  products and the Rust build state required by the release. They never include
+  bundle directories, signed apps, DMGs, updater archives, signatures,
+  keychains, or temporary Apple key files. The separate Cargo download cache
+  retains `cache-targets: false`.
 - Production artifacts are collected only after code-signing, notarization,
   stapling, and local verification succeed. The temporary App Store Connect key
   is removed even when the build fails.

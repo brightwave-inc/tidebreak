@@ -25,19 +25,6 @@ const workflows = Object.fromEntries(
     .filter((name) => name.endsWith(".yml") || name.endsWith(".yaml"))
     .map((name) => [name, readFileSync(join(workflowDirectory, name), "utf8")]),
 );
-const cacheWarmerNames = [
-  "cache-macos.yml",
-  "cache-windows.yml",
-  "cache-linux.yml",
-];
-const existingCacheWarmerNames = cacheWarmerNames.filter(
-  (name) => workflows[name] !== undefined,
-);
-assert.ok(
-  existingCacheWarmerNames.length === 0 ||
-    existingCacheWarmerNames.length === cacheWarmerNames.length,
-  "cache warmer workflows must be retained or retired as one set",
-);
 const compilerCacheAction = readFileSync(
   repositoryFile(".github", "actions", "setup-sccache-s3", "action.yml"),
   "utf8",
@@ -838,7 +825,6 @@ test("compiler caches use OIDC-scoped S3 access", () => {
     ["release.yml", "prepare_windows"],
     ["release.yml", "build_linux"],
     ["staging-publish.yml", "prepare_macos_staging"],
-    ...existingCacheWarmerNames.map((file) => [file, "warm"]),
   ]) {
     const job = workflowJob(workflows[file], name);
     assert.match(job, /permissions:\n      contents: read\n      id-token: write/);
@@ -851,7 +837,6 @@ test("compiler caches use OIDC-scoped S3 access", () => {
     "ci.yml",
     "release.yml",
     "staging-publish.yml",
-    ...existingCacheWarmerNames,
   ]) {
     assert.doesNotMatch(workflows[name], /SCCACHE_GHA_/);
   }
@@ -1044,11 +1029,8 @@ test("desktop voice delegates whisper.cpp to the verified helper", () => {
   );
 
   const releaseWindows = workflowJob(workflows["release.yml"], "build_windows");
-  const warmWindows = workflows["cache-windows.yml"];
-  for (const job of [releaseWindows, ...(warmWindows ? [warmWindows] : [])]) {
-    assert.doesNotMatch(job, /Use clang-cl for Windows ARM native code/);
-    assert.doesNotMatch(job, /CMAKE_GENERATOR=Ninja/);
-  }
+  assert.doesNotMatch(releaseWindows, /Use clang-cl for Windows ARM native code/);
+  assert.doesNotMatch(releaseWindows, /CMAKE_GENERATOR=Ninja/);
 
   const helperBuild = workflowJob(
     workflows["publish-whisper-helper.yml"],
@@ -1679,38 +1661,9 @@ test("release documentation is built from the validated tag and promoted only af
   );
 });
 
-test("cache warmer retirement preserves release cache isolation", () => {
-  const cache = workflows["cache-macos.yml"];
-  if (cache) {
-    assert.match(cache, /^on:\n  push:\n    branches: \[main\]/m);
-    assert.match(cache, /^  workflow_dispatch:$/m);
-    assert.doesNotMatch(cache, /^\s*pull_request(?:_target)?:/m);
-    assert.match(cache, /^  cargo-downloads:$/m);
-    assert.match(cache, /^    needs: cargo-downloads$/m);
-    assert.match(cache, /cargo fetch --locked --target aarch64-apple-darwin/);
-    assert.match(cache, /target: aarch64-apple-darwin/);
-    assert.match(cache, /target: x86_64-apple-darwin/);
-    assert.match(cache, /--target \$\{\{ matrix\.target \}\} --no-bundle --ci/);
-    assert.match(
-      cache,
-      /macos-release-target-v5-\$\{\{ matrix\.target \}\}-\$\{\{ hashFiles\('Cargo\.lock', 'rust-toolchain\.toml'\) \}\}-\$\{\{ github\.sha \}\}/,
-    );
-    assert.doesNotMatch(cache, /macos-release-target-v5-universal/);
-    assert.match(cache, /cancel-in-progress: false/);
-    assert.match(cache, /--no-bundle --ci/);
-    assert.match(cache, /continue-on-error: true/);
-    assert.doesNotMatch(cache, /^    environment:/m);
-    assert.doesNotMatch(cache, /secrets\./);
-    assert.doesNotMatch(cache, /APPLE_|TAURI_SIGNING|AWS_|DOWNLOADS_/);
-    assert.doesNotMatch(cache, /actions\/upload-artifact/);
-
-    for (const name of cacheWarmerNames) {
-      assert.doesNotMatch(
-        workflows[name],
-        /restore-keys:/,
-        `${name} must compile against S3 instead of restoring an older target archive`,
-      );
-    }
+test("release compilation uses S3 without cache warmer workflows", () => {
+  for (const name of ["cache-macos.yml", "cache-windows.yml", "cache-linux.yml"]) {
+    assert.equal(workflows[name], undefined);
   }
 
   const release = workflows["release.yml"];
@@ -1726,7 +1679,7 @@ test("cache warmer retirement preserves release cache isolation", () => {
   assert.doesNotMatch(buildLinux, /actions\/cache\/restore@/);
   assert.doesNotMatch(buildLinux, /linux-release-target-v1-/);
 
-  for (const workflow of [release, ...(cache ? [cache] : [])]) {
+  for (const workflow of [release]) {
     const downloadCaches = [
       ...workflow.matchAll(
         /- name: Cache Cargo downloads[\s\S]*?(?=\n\s+- (?:name:|uses:))/g,
@@ -1899,8 +1852,8 @@ test("restored product binaries are discarded before the packaging build", () =>
     assert.notEqual(discardIdx, -1, `${name}: restored products must be discarded`);
     assert.ok(restoreIdx < discardIdx, `${name}: cache restore must come before discard`);
     assert.ok(discardIdx < buildIdx, `${name}: discard must come before the build`);
-    // The discard step must remove every final product binary the warm cache
-    // can restore. The Linux CLI patterns are exact because `\b` also matches
+    // The discard step must remove every final product binary the cache can
+    // restore. The Linux CLI patterns are exact because `\b` also matches
     // before the hyphen in `tidebreak-desktop` and `tidebreak-host-broker`.
     const discardStep = job.match(
       new RegExp(`- name: ${names[discardIdx].replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[\\s\\S]*?(?=\\n\\s+- name:)`),
@@ -1935,11 +1888,10 @@ test("release version changes invalidate restored Rust artifacts", () => {
 
 test("cache archives never include bundles, signatures, or keychains", () => {
   const release = workflows["release.yml"];
-  const cache = workflows["cache-macos.yml"];
   // Only match `path:` blocks inside cache steps. The path list must not
   // cross a step boundary (a line starting with `      - name:` or
   // `      - uses:`), so filter out matches that span multiple steps.
-  for (const source of [release, ...(cache ? [cache] : [])]) {
+  for (const source of [release]) {
     const cacheSteps = [...source.matchAll(
       /path: \|\n([\s\S]*?)\n\s+key: [$a-zA-Z]/g,
     )]
@@ -2289,7 +2241,6 @@ test("universal macOS release and staging packages contain both slices", () => {
   const releaseBuild = workflowJob(release, "build_macos");
   const stagingBuild = workflowJob(stagingPublish, "build_macos_staging");
   const stagingPrepare = workflowJob(stagingPublish, "prepare_macos_staging");
-  const warm = workflows["cache-macos.yml"];
   const sidecarPreparation = readFileSync(
     repositoryFile("crates/tidebreak-desktop/scripts/prepare-sidecar.mjs"),
     "utf8",
@@ -2309,9 +2260,6 @@ test("universal macOS release and staging packages contain both slices", () => {
   // and two sidecars, then gives the signed job the same universal archive
   // contract it consumed before the split.
   assertPerArchMacosCompile(releasePrepare, "prepare_macos");
-  if (warm) {
-    assertPerArchMacosCompile(warm, "cache-macos.yml");
-  }
   assert.equal(
     releaseCombine.split("lipo -create").length - 1,
     3,
