@@ -347,7 +347,16 @@ export function ManagedGate({
         <HostedSignIn
           reason="session_ended"
           machineUrl={hosted.baseUrl}
-          gatewayUrl={hosted.gatewayUrl}
+          discovery={
+            hosted.discovery ??
+            (hosted.gatewayUrl
+              ? {
+                  mode: "gateway",
+                  gateway_url: hosted.gatewayUrl,
+                  resource: "tidebreak",
+                }
+              : { mode: "static_token" })
+          }
         />
       );
     }

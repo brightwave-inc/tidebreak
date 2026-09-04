@@ -18,7 +18,11 @@ const meta = {
   args: {
     reason: "no_session",
     machineUrl: "https://tidebreak.example.com",
-    gatewayUrl: "https://gateway.example.com",
+    discovery: {
+      mode: "gateway",
+      gateway_url: "https://gateway.example.com",
+      resource: "tidebreak",
+    },
     onRetry: fn(),
   },
 } satisfies Meta<typeof HostedSignIn>;
@@ -44,8 +48,18 @@ export const SessionEnded: Story = {
  * A machine on static tokens has no console to send a browser to. The page
  * still says what to do instead of offering a link that goes nowhere.
  */
-export const NoBrowserSignIn: Story = {
-  args: { gatewayUrl: null },
+export const StaticToken: Story = {
+  args: { discovery: { mode: "static_token" } },
+};
+
+export const Oidc: Story = {
+  args: {
+    discovery: {
+      mode: "oidc",
+      issuer_name: "login.example.com",
+      start_url: "/auth/oidc/start",
+    },
+  },
 };
 
 /**

@@ -1,7 +1,14 @@
 import { ExternalLink, RotateCw } from "lucide-react";
+import { useState, type FormEvent } from "react";
 
 import { Button } from "@/components/ui/button";
-import { consoleSignInUrl, type HandoffFailure } from "./hostedSession";
+import {
+  consoleSignInUrl,
+  oidcSignInUrl,
+  type HandoffFailure,
+} from "./hostedSession";
+import type { AuthDiscovery } from "./boot";
+import { Input } from "@/components/ui/input";
 import { Logomark } from "./Logomark";
 import { WindowDragStrip } from "./WindowDragStrip";
 
@@ -28,7 +35,8 @@ export type HostedSignInProps = {
    * The console that can sign the reader in here. `null` when the machine
    * has no gateway, in which case the page can only say where to go instead.
    */
-  gatewayUrl: string | null;
+  discovery: AuthDiscovery;
+  onToken?: (token: string) => Promise<void>;
   onRetry?: () => void;
 };
 
@@ -70,11 +78,29 @@ export function HostedSignIn({
   reason,
   failure = null,
   machineUrl,
-  gatewayUrl,
+  discovery,
+  onToken,
   onRetry = () => window.location.reload(),
 }: HostedSignInProps) {
   const failed =
     reason === "handoff_failed" ? handoffFailureCopy(failure) : null;
+  const [token, setToken] = useState("");
+  const [tokenError, setTokenError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const gatewayUrl =
+    discovery.mode === "gateway" ? discovery.gateway_url : null;
+  async function submitToken(event: FormEvent) {
+    event.preventDefault();
+    if (!onToken || !token.trim()) return;
+    setSubmitting(true);
+    setTokenError(null);
+    try {
+      await onToken(token.trim());
+    } catch {
+      setTokenError("This machine refused that token.");
+      setSubmitting(false);
+    }
+  }
   return (
     <div className="boot" aria-label="Sign in required">
       <WindowDragStrip />
@@ -107,19 +133,50 @@ export function HostedSignIn({
         )}
         {gatewayUrl ? (
           <p>
-            Open the console: it signs you in and brings you straight back to
+            Open the console. It signs you in and brings you straight back to
             this page.
           </p>
-        ) : (
+        ) : discovery.mode === "static_token" ? (
           <p>
-            This machine does not sign browsers in. Attach to it from the
-            Tidebreak desktop app instead.
+            Paste the token your administrator gave you. This tab keeps it only
+            in memory.
           </p>
-        )}
+        ) : discovery.mode === "oidc" ? (
+          <p>
+            Your identity provider signs you in and brings you straight back to
+            this page.
+          </p>
+        ) : null}
       </div>
       <p className="text-muted-foreground text-sm">
         Machine <code className="font-medium">{machineUrl}</code>
       </p>
+      {discovery.mode === "static_token" && (
+        <form className="welcome-copy" onSubmit={submitToken}>
+          <label className="text-sm font-medium" htmlFor="hosted-token">
+            Token
+          </label>
+          <Input
+            id="hosted-token"
+            type="password"
+            autoComplete="off"
+            value={token}
+            onChange={(event) => setToken(event.target.value)}
+          />
+          {tokenError && (
+            <p className="text-critical text-sm" role="alert">
+              {tokenError}
+            </p>
+          )}
+          <Button
+            size="sm"
+            type="submit"
+            disabled={submitting || !token.trim()}
+          >
+            {submitting ? "Signing in…" : "Sign in"}
+          </Button>
+        </form>
+      )}
       <div className="boot-actions">
         {gatewayUrl && (
           <Button size="sm" asChild>
@@ -129,9 +186,23 @@ export function HostedSignIn({
             </a>
           </Button>
         )}
+        {discovery.mode === "oidc" && (
+          <Button size="sm" asChild>
+            <a href={oidcSignInUrl(discovery.start_url)}>
+              <ExternalLink size={16} aria-hidden />
+              Sign in with {discovery.issuer_name}
+            </a>
+          </Button>
+        )}
         <Button
           size="sm"
-          variant={gatewayUrl ? "outline" : "default"}
+          variant={
+            gatewayUrl ||
+            discovery.mode === "oidc" ||
+            discovery.mode === "static_token"
+              ? "outline"
+              : "default"
+          }
           onClick={onRetry}
         >
           <RotateCw size={16} aria-hidden />

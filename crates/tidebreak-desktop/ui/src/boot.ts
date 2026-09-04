@@ -69,20 +69,21 @@ export async function remoteMachineState(): Promise<RemoteMachineState> {
  */
 export class HostedSignInRequired extends Error {
   constructor(
-    readonly gatewayUrl: string | null,
+    readonly discovery: AuthDiscovery,
     /** Set when the page came from the landing route and it could not
      * hand over a bearer; the sign-in screen words the reason. */
     readonly failure: HandoffFailure | null = null,
   ) {
-    super("This machine needs a session from your Model Gateway console.");
+    super("This machine needs you to sign in.");
     this.name = "HostedSignInRequired";
   }
 }
 
 /** What the machine's public discovery document says about signing in. */
-type AuthDiscovery =
+export type AuthDiscovery =
   | { mode: "gateway"; gateway_url: string; resource: string }
   | { mode: "static_token" }
+  | { mode: "oidc"; issuer_name: string; start_url: string }
   | { mode: "local" };
 
 const DISCOVERY_PATH = "/auth/discovery";
@@ -119,8 +120,8 @@ export async function hostedServerInfo({
     discovery.mode === "gateway"
       ? discovery.gateway_url.replace(/\/$/, "")
       : null;
-  markHostedSession({ baseUrl: origin, gatewayUrl });
-  if (!bearer) throw new HostedSignInRequired(gatewayUrl, failure);
+  markHostedSession({ baseUrl: origin, gatewayUrl, discovery });
+  if (!bearer) throw new HostedSignInRequired(discovery, failure);
   return {
     baseUrl: origin,
     token: bearer,
@@ -145,6 +146,17 @@ async function readDiscovery(
     if (record.mode === "gateway") {
       return typeof record.gateway_url === "string" && record.gateway_url
         ? { mode: "gateway", gateway_url: record.gateway_url, resource: "" }
+        : null;
+    }
+    if (record.mode === "oidc") {
+      const oidc = record as { issuer_name?: unknown; start_url?: unknown };
+      return typeof oidc.issuer_name === "string" &&
+        typeof oidc.start_url === "string"
+        ? {
+            mode: "oidc",
+            issuer_name: oidc.issuer_name,
+            start_url: oidc.start_url,
+          }
         : null;
     }
     if (record.mode === "static_token" || record.mode === "local") {

@@ -144,7 +144,10 @@ describe("the hosted boot branch", () => {
     });
     await expect(attempt).rejects.toBeInstanceOf(HostedSignInRequired);
     await attempt.catch((error: HostedSignInRequired) => {
-      expect(error.gatewayUrl).toBe("https://gateway.example.com");
+      expect(error.discovery).toMatchObject({
+        mode: "gateway",
+        gateway_url: "https://gateway.example.com",
+      });
       expect(error.failure).toBeNull();
     });
   });

@@ -20,6 +20,7 @@ export type HostedSession = {
    * no browser sign-in to send a reader to.
    */
   gatewayUrl: string | null;
+  discovery?: import("./boot").AuthDiscovery;
 };
 
 /**
@@ -88,6 +89,12 @@ function isHandoffReturnRoute(route: string): boolean {
   );
 }
 
+/** Hold a validated pasted bearer in the same tab-memory slot as a handoff. */
+export function rememberHostedBearer(token: string): void {
+  handoffToken = token;
+  failure = null;
+}
+
 /** The bearer the page arrived with, or `null` if it opened without one. */
 export function handoffBearer(): string | null {
   return handoffToken;
@@ -131,4 +138,17 @@ export function consoleSignInUrl(
     ? win.location.hash.slice(1)
     : "/";
   return here === "/" ? base : `${base}?return_to=${encodeURIComponent(here)}`;
+}
+
+/** Where machine-owned OIDC starts and returns to the current route. */
+export function oidcSignInUrl(
+  startUrl: string,
+  win: Pick<Window, "location"> = window,
+): string {
+  const url = new URL(startUrl, win.location.origin);
+  const here = win.location.hash.startsWith("#/")
+    ? win.location.hash.slice(1)
+    : "/";
+  if (here !== "/") url.searchParams.set("return_to", here);
+  return url.toString();
 }

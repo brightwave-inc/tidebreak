@@ -28,9 +28,9 @@ Selecting `TIDEBREAK_PROFILE=self_host` changes five things about the server:
   `TIDEBREAK_BLOB_STORE_URL`. PostgreSQL keeps the document catalog and
   references; the bucket keeps immutable source bytes, images, and artifacts.
 - **Boot fails closed.** The server refuses to open the shared store unless
-  exactly one of `TIDEBREAK_AUTH_GATEWAY_URL` or
-  `TIDEBREAK_AUTH_TOKENS_FILE` is valid — a shared database never comes up
-  behind an API that cannot tell its callers apart.
+  it has a valid Gateway, OIDC, or token-file authenticator. You cannot combine
+  Gateway and OIDC identity. You can keep a token file beside OIDC for the
+  first administrator and CLI access.
 - **Stored credentials use Vault KV v2.** The server never opens the desktop
   OS keychain. When Vault is not configured, provider environment variables
   remain available as read fallbacks, but deployment-plane credential writes
@@ -262,6 +262,10 @@ aspirational.
 | `TIDEBREAK_PUBLIC_URL` | with Gateway auth | `ADD_ON_PUBLIC_URL` | The machine's own public URL, which user credentials are bound to. On a Model Gateway managed machine the plane's `ADD_ON_PUBLIC_URL` stands in when this is unset (decision 0085). |
 | `TIDEBREAK_AUTH_GATEWAY_VERIFIER_URL` | no | `TIDEBREAK_AUTH_GATEWAY_URL` | Optional server-to-server Gateway URL for principal validation when the public origin is not cluster-routable. Requires Gateway auth. |
 | `TIDEBREAK_AUTH_TOKENS_FILE` | one auth mode required | — | Standalone compatibility: path to the static token file above. Mutually exclusive with Gateway auth. |
+| `TIDEBREAK_AUTH_OIDC_ISSUER` | with OIDC | — | OIDC issuer URL. Mutually exclusive with Gateway auth. |
+| `TIDEBREAK_AUTH_OIDC_CLIENT_ID` | with OIDC | — | OIDC client id registered with the callback at `<TIDEBREAK_PUBLIC_URL>/auth/oidc/callback`. |
+| `TIDEBREAK_AUTH_OIDC_CLIENT_SECRET` | with OIDC | — | OIDC client secret used only for the server-side code exchange. |
+| `TIDEBREAK_AUTH_OIDC_CLAIM` | no | `sub` | String ID-token claim mapped to the Tidebreak user id. |
 | `TIDEBREAK_ADAPTER_BOOTSTRAP_TOKENS` | no | unset | Comma-separated service bearers allowed to start an external channel connect handshake. Each value must be 32–512 header-safe characters. Leave unset to disable connect start. To rotate without downtime, add the new value, move the adapter, then remove the old value. |
 | `TIDEBREAK_VAULT_ADDR` | required with Vault custody | — | Vault base URL. HTTPS is required except for literal loopback development. Setting any Vault option enables Vault configuration and requires this variable plus `TIDEBREAK_VAULT_TOKEN_FILE`. |
 | `TIDEBREAK_VAULT_TOKEN_FILE` | required with Vault custody | — | Mounted file containing the Vault token. Tidebreak reads it for every request so rotation does not require a restart. |
@@ -379,18 +383,26 @@ served for navigations only — a request for an unknown route with a JSON
 `Accept` still answers `404`, and every API route is matched ahead of the
 bundle — so the API contract does not change.
 
-A tab signs in the way the desktop does: with a short-lived Gateway bearer
-bound to this machine. The page holds that bearer in memory for the tab's
-life and never in a cookie or in storage. It arrives once, from the Model
-Gateway console's Manage action: the console sends the browser to the
-machine's `/auth/handoff` route with a one-time code, the machine exchanges
-the code with the gateway server to server, and the page receives the bearer
-in the URL fragment, which no server or access log sees. The bearer lasts
-its hour; a tab that opens the address directly, outlives its bearer, or
-arrives with a code that has already been used, shows a sign-in screen that
-sends the reader back through the console. A machine on static tokens
-(`TIDEBREAK_AUTH_TOKENS_FILE`) has no browser sign-in: the page says so, and
-the desktop app remains the client for it.
+The browser sign-in path follows the configured authenticator. With
+`TIDEBREAK_AUTH_TOKENS_FILE`, the page asks you to paste your token and probes
+the same authenticated model read that boot uses. A successful token stays in
+memory for the tab's life. Tidebreak never writes it to a cookie, localStorage,
+or disk. A refused token leaves you on the same page with the refusal.
+
+For OIDC, set `TIDEBREAK_AUTH_OIDC_ISSUER`,
+`TIDEBREAK_AUTH_OIDC_CLIENT_ID`, and `TIDEBREAK_AUTH_OIDC_CLIENT_SECRET`.
+Tidebreak starts authorization code sign-in with PKCE at
+`/auth/oidc/start`, verifies state, nonce, issuer, signature, expiry, and the
+client-id audience at `/auth/oidc/callback`, then issues a bearer that lasts one
+hour. `TIDEBREAK_AUTH_OIDC_CLAIM` selects the string claim used as the user id;
+it defaults to `sub`. You can also set `TIDEBREAK_AUTH_TOKENS_FILE` in OIDC
+mode to bootstrap the first administrator and keep CLI access. Do not combine
+OIDC with `TIDEBREAK_AUTH_GATEWAY_URL`; the server refuses that ambiguous
+configuration.
+
+Gateway and OIDC callbacks use the same fragment handoff. The page removes the
+bearer before the router starts and keeps it only in memory. A session link
+keeps its `return_to` route, so sign-in lands you on the session you opened.
 
 Everything that reaches the reader's own computer — connected folders, tool
 calls on the local machine, saving files locally, computer use — is

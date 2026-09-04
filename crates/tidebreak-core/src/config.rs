@@ -200,6 +200,18 @@ pub struct Config {
     /// cannot hairpin through that public origin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_gateway_verifier_url: Option<String>,
+    /// OpenID Connect issuer used for standalone browser sign-in (decision 0087).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_oidc_issuer: Option<String>,
+    /// OpenID Connect client id registered for this machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_oidc_client_id: Option<String>,
+    /// OpenID Connect client secret. It stays in process memory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_oidc_client_secret: Option<String>,
+    /// Claim whose string value names the Tidebreak principal. Defaults to `sub`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_oidc_claim: Option<String>,
     /// Canonical public base URL of this self-hosted Tidebreak machine.
     ///
     /// Gateway-backed authentication hashes this URL into the OAuth resource,
@@ -365,6 +377,10 @@ impl Config {
             auth_tokens_file: None,
             auth_gateway_url: None,
             auth_gateway_verifier_url: None,
+            auth_oidc_issuer: None,
+            auth_oidc_client_id: None,
+            auth_oidc_client_secret: None,
+            auth_oidc_claim: None,
             public_url: None,
             vault_secrets: None,
             listen_addr: None,
@@ -432,6 +448,12 @@ impl Config {
             std::env::var("TIDEBREAK_RUNTIME_ENDPOINT").ok(),
             std::env::var("TIDEBREAK_RUNTIME_PROFILE").ok(),
             vault_secrets,
+        )?
+        .with_oidc_vars(
+            std::env::var("TIDEBREAK_AUTH_OIDC_ISSUER").ok(),
+            std::env::var("TIDEBREAK_AUTH_OIDC_CLIENT_ID").ok(),
+            std::env::var("TIDEBREAK_AUTH_OIDC_CLIENT_SECRET").ok(),
+            std::env::var("TIDEBREAK_AUTH_OIDC_CLAIM").ok(),
         )?
         .with_runtime_limit_vars(
             std::env::var("TIDEBREAK_RUNTIME_CONCURRENCY_CAP").ok(),
@@ -553,6 +575,10 @@ impl Config {
             auth_tokens_file,
             auth_gateway_url,
             auth_gateway_verifier_url,
+            auth_oidc_issuer: None,
+            auth_oidc_client_id: None,
+            auth_oidc_client_secret: None,
+            auth_oidc_claim: None,
             public_url,
             vault_secrets,
             listen_addr,
@@ -565,6 +591,48 @@ impl Config {
             code_worktree_root_default: None,
             ui_dist: None,
         })
+    }
+
+    fn with_oidc_vars(
+        mut self,
+        issuer: Option<String>,
+        client_id: Option<String>,
+        client_secret: Option<String>,
+        claim: Option<String>,
+    ) -> Result<Self> {
+        let issuer = issuer.filter(|value| !value.trim().is_empty());
+        let client_id = client_id.filter(|value| !value.trim().is_empty());
+        let client_secret = client_secret.filter(|value| !value.trim().is_empty());
+        let configured = [
+            issuer.is_some(),
+            client_id.is_some(),
+            client_secret.is_some(),
+        ]
+        .into_iter()
+        .filter(|set| *set)
+        .count();
+        if configured != 0 && configured != 3 {
+            return Err(AgentError::config(
+                "TIDEBREAK_AUTH_OIDC_ISSUER, TIDEBREAK_AUTH_OIDC_CLIENT_ID, and TIDEBREAK_AUTH_OIDC_CLIENT_SECRET are required together",
+            ));
+        }
+        if configured == 3 && self.auth_gateway_url.is_some() {
+            return Err(AgentError::config(
+                "TIDEBREAK_AUTH_OIDC_ISSUER cannot be combined with TIDEBREAK_AUTH_GATEWAY_URL because a self-host machine must select one browser identity provider",
+            ));
+        }
+        if configured == 0 && claim.as_ref().is_some_and(|value| !value.trim().is_empty()) {
+            return Err(AgentError::config(
+                "TIDEBREAK_AUTH_OIDC_CLAIM requires TIDEBREAK_AUTH_OIDC_ISSUER",
+            ));
+        }
+        self.auth_oidc_issuer = issuer.map(|value| value.trim_end_matches('/').to_owned());
+        self.auth_oidc_client_id = client_id;
+        self.auth_oidc_client_secret = client_secret;
+        self.auth_oidc_claim = claim
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| value.trim().to_owned());
+        Ok(self)
     }
 
     /// Apply the three operator-controlled remote runtime limits. Split from
@@ -1305,5 +1373,42 @@ mod tests {
             tidebreak_machine_resource("https://tidebreak.example.test"),
             tidebreak_machine_resource("https://other.example.test")
         );
+    }
+
+    #[test]
+    fn oidc_auth_vars_are_complete_and_exclusive_with_gateway() {
+        let configured = Config::desktop("/data")
+            .with_oidc_vars(
+                Some("https://login.example.test/".into()),
+                Some("client-id".into()),
+                Some("client-secret".into()),
+                Some("email".into()),
+            )
+            .unwrap();
+        assert_eq!(
+            configured.auth_oidc_issuer.as_deref(),
+            Some("https://login.example.test")
+        );
+        assert_eq!(configured.auth_oidc_claim.as_deref(), Some("email"));
+
+        assert!(Config::desktop("/data")
+            .with_oidc_vars(Some("https://login.example.test".into()), None, None, None)
+            .is_err());
+        assert!(Config::desktop("/data")
+            .with_oidc_vars(None, None, None, Some("email".into()))
+            .is_err());
+
+        let mut gateway = Config::desktop("/data");
+        gateway.auth_gateway_url = Some("https://gateway.example.test".into());
+        let error = gateway
+            .with_oidc_vars(
+                Some("https://login.example.test".into()),
+                Some("client-id".into()),
+                Some("client-secret".into()),
+                None,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cannot be combined with TIDEBREAK_AUTH_GATEWAY_URL"));
     }
 }

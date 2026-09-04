@@ -111,6 +111,8 @@ tokio-util = { version = "=0.7.19", features = ["io-util"] }
 # loopback chat socket itself is plain ws://.
 tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["connect", "handshake", "rustls-tls-webpki-roots"] }
 reqwest = { version = "=0.12.28", default-features = false, features = ["json", "multipart", "stream", "rustls-tls"] }
+oauth2 = { version = "=5.0.0", default-features = false }
+jsonwebtoken = { version = "=11.0.0", default-features = false, features = ["aws_lc_rs"] }
 sha2 = "=0.11.0"
 symphonia = { version = "=0.6.0", default-features = false, features = ["aac", "alac", "isomp4", "mkv"] }
 opus-decoder = "=0.1.1"
