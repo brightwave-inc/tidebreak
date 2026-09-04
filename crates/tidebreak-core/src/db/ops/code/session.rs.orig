@@ -111,7 +111,6 @@ where
         network_policy: Set(serde_json::to_string(&crate::NetworkPolicy::default())?),
         attachment_revision: Set(0),
         memory_incognito: Set(false),
-        visibility: Set(session.visibility.as_str().to_owned()),
     }
     .insert(connection)
     .await
@@ -1209,13 +1208,6 @@ pub(super) fn session_from_row(row: entities::session::Model) -> Result<Session>
         ),
         None => None,
     };
-    let visibility =
-        crate::code::SessionVisibility::from_str(&row.visibility).ok_or_else(|| {
-            AgentError::Store(format!(
-                "session {} has unknown visibility {}",
-                row.id, row.visibility
-            ))
-        })?;
     let subagents = match row.subagents {
         Some(value) => serde_json::from_value::<Vec<CodeSubagentSummary>>(value)
             .map_err(|err| AgentError::Store(format!("session {} subagents: {err}", row.id)))?,
@@ -1241,7 +1233,6 @@ pub(super) fn session_from_row(row: entities::session::Model) -> Result<Session>
         attention: Attention::new(state, source),
         unrecognized_event_count: row.unrecognized_event_count,
         subagents,
-        visibility,
         created_at: row.created_at,
     })
 }

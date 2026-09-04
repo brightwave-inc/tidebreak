@@ -123,6 +123,11 @@ fn approval_active_model(
         feedback: Set(approval.feedback.clone()),
         requested_at: Set(approval.requested_at),
         decided_at: Set(approval.decided_at),
+        actor: Set(approval
+            .actor
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()?),
         auto_judge_status: Set(approval
             .auto_judge_status
             .map(|status| status.as_str().to_owned())),
@@ -715,6 +720,11 @@ pub(in crate::db) fn approval_from_row(row: entities::approval::Model) -> Result
     let kind = serde_json::from_value::<ApprovalKind>(row.kind)
         .map_err(|err| AgentError::Store(format!("approval {} kind: {err}", row.id)))?;
     Ok(Approval {
+        actor: row
+            .actor
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|err| AgentError::Store(format!("approval {} actor: {err}", row.id)))?,
         id: ApprovalId(row.id),
         session_id: SessionId(row.session_id),
         turn_id: TurnId(row.turn_id),

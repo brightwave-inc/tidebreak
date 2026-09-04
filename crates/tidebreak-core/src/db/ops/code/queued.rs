@@ -27,6 +27,11 @@ pub(super) fn queued_turn_from_model(
     model: entities::code_queued_turn::Model,
 ) -> Result<QueuedTurn> {
     Ok(QueuedTurn {
+        actor: model
+            .actor
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|err| AgentError::Store(format!("queued turn {} actor: {err}", model.id)))?,
         id: TurnId(model.id),
         session_id: SessionId(model.session_id),
         message: model.message,
@@ -142,6 +147,11 @@ pub async fn enqueue_queued_turn(
         invoked_skills_json: Set("[]".to_owned()),
         voice_input_used: Set(false),
         fingerprint: Set(None),
+        actor: Set(queued
+            .actor
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()?),
         position: Set(position),
         created_at: Set(now),
         updated_at: Set(now),
@@ -389,4 +399,24 @@ pub async fn set_queue_paused(
         .await
         .map_err(store_err)?;
     Ok(())
+}
+
+/// Record the actor on a queued turn so promotion keeps the attribution.
+pub async fn set_queued_turn_actor(
+    store: &DbStore,
+    owner: &OwnerId,
+    id: TurnId,
+    actor: &crate::code::TurnActor,
+) -> Result<bool> {
+    let updated = entities::code_queued_turn::Entity::update_many()
+        .col_expr(
+            entities::code_queued_turn::Column::Actor,
+            sea_orm::sea_query::Expr::value(Some(serde_json::to_value(actor)?)),
+        )
+        .filter(entities::code_queued_turn::Column::Id.eq(id.0))
+        .filter(entities::code_queued_turn::Column::Owner.eq(owner.as_str()))
+        .exec(&store.conn)
+        .await
+        .map_err(store_err)?;
+    Ok(updated.rows_affected == 1)
 }

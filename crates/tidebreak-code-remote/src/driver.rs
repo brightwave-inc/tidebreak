@@ -834,6 +834,7 @@ async fn start_turn_row(
     promoted: Option<&tidebreak_core::code::QueuedTurn>,
 ) -> Result<Turn, tidebreak_core::AgentError> {
     let mut turn = Turn {
+        actor: None,
         id: promoted.map_or_else(TurnId::new, |row| row.id),
         session_id: session.id,
         ordinal,

@@ -553,6 +553,7 @@ impl LiveSink {
         }
         let capability = harness_ref.capability.as_ref();
         let approval = Approval {
+            actor: None,
             id: approval_id,
             session_id: self.session_id,
             turn_id,
@@ -2659,6 +2660,7 @@ async fn drive_turn_inner(
         .await
         .map_err(|err| WorkerError::Failed(err.to_string()))?;
     let mut turn = Turn {
+        actor: queued_row.as_ref().and_then(|row| row.actor.clone()),
         // A promoted queue row already carries the turn's id: inserting under
         // it is what lets the row deletion and the turn insertion commit as
         // one write (decision 69).

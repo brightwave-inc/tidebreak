@@ -169,6 +169,7 @@ pub async fn record_external_message(
         invoked_skills_json: Set("[]".to_owned()),
         voice_input_used: Set(false),
         fingerprint: Set(None),
+        actor: Set(None),
         position: Set(position),
         created_at: Set(now),
         updated_at: Set(now),

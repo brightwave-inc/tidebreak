@@ -291,6 +291,7 @@ pub async fn external_events(
             query.after,
             None,
             super::session_events::Viewer::Adapter,
+            None,
         );
         tokio::pin!(stream);
         loop {

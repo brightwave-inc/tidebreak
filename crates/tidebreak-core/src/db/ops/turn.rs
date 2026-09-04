@@ -700,6 +700,7 @@ where
         output_message_id: Set(None),
         updated_at: Set(Some(now)),
         fingerprint: Set(Some(fingerprint)),
+        actor: Set(None),
     }
     .insert(conn)
     .await

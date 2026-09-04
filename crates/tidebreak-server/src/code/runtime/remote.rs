@@ -85,6 +85,7 @@ impl CodeRuntime {
         settings: NewSessionSettings,
     ) -> Session {
         Session {
+            visibility: tidebreak_core::SessionVisibility::Private,
             id: SessionId::new(),
             owner: owner.clone(),
             workspace_id: Some(workspace_id),
@@ -382,6 +383,7 @@ impl CodeRuntime {
             &self.db,
             owner,
             &QueuedTurn {
+                actor: None,
                 id: TurnId::new(),
                 session_id: session.id,
                 message,

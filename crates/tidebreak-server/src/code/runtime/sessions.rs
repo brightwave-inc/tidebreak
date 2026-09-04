@@ -160,6 +160,7 @@ impl CodeRuntime {
             Self::validate_execution_settings(harness, &execution_settings, &selected)?;
         }
         let session = Session {
+            visibility: tidebreak_core::SessionVisibility::Private,
             id: SessionId::new(),
             owner: owner.clone(),
             workspace_id: Some(workspace_id),
@@ -250,6 +251,7 @@ impl CodeRuntime {
             ));
         }
         let session = Session {
+            visibility: tidebreak_core::SessionVisibility::Private,
             id: SessionId::new(),
             owner: owner.clone(),
             workspace_id: None,

@@ -392,6 +392,7 @@ impl CodeRuntime {
             &self.db,
             owner,
             &QueuedTurn {
+                actor: None,
                 id: TurnId::new(),
                 session_id: session.id,
                 message,
