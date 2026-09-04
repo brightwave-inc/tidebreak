@@ -8,6 +8,7 @@ import { WithTooltip } from "@/components/ui/tooltip";
 import { formatMessageTimestamp } from "@/MessageFooter";
 import { cn } from "@/lib/utils";
 import { ScrollableContainer } from "@/ScrollableContainer";
+import { actorLabel } from "./CodeSessionReducer";
 import { FOCUS_RING, HOVER_TINT } from "./interactive";
 import { MiddleTruncate } from "./MiddleTruncate";
 
@@ -36,6 +37,7 @@ export function CodeApprovalCard({
   const [payloadOpen, setPayloadOpen] = useState(false);
   const payloadId = useId();
   const decided = approval.state !== "pending";
+  const decidedBy = actorLabel(approval.actor);
 
   useEffect(() => {
     if (approval.state !== "pending") setDenying(false);
@@ -59,6 +61,12 @@ export function CodeApprovalCard({
         requestedAt={approval.requested_at}
         decidedAt={approval.decided_at}
       />
+      {/* A shared session has several contributors, so a settled card names
+          who decided (decision 0086). A card with no actor was settled by the
+          owner, or by an older build that recorded no one. */}
+      {decided && decidedBy && (
+        <p className="text-muted-foreground text-xs">Decided by {decidedBy}</p>
+      )}
       {approval.state === "denied" && approval.feedback && (
         <p className="text-md break-words">{approval.feedback}</p>
       )}

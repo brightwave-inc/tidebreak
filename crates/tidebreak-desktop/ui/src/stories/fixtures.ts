@@ -436,6 +436,7 @@ export const codeSidebarWorkspaces: CodeWorkspaceSnapshot[] = [
 ];
 
 export const codeSession: CodeSessionSnapshot = {
+  visibility: "private",
   id: "sess-1",
   workspace_id: "ws-1",
   kind: "interactive",

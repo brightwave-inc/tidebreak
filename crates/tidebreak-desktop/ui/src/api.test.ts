@@ -1849,10 +1849,12 @@ describe("code workspace sessions", () => {
     vi.stubGlobal("fetch", fetchMock);
     const client = new ApiClient("http://127.0.0.1", "token");
 
-    // The payload omits `fast_mode`, as a server predating the field does.
-    // It reads as off, which is what such a session was actually running.
+    // The payload omits `fast_mode` and `visibility`, as a server predating
+    // those fields does. Fast mode reads as off, which is what such a session
+    // was actually running, and the session reads as private, which is what it
+    // was before sharing existed (decision 0086).
     await expect(client.listCodeWorkspaceSessions("ws-1")).resolves.toEqual([
-      { ...session, fast_mode: false },
+      { ...session, fast_mode: false, visibility: "private" },
     ]);
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("http://127.0.0.1/code/workspaces/ws-1/sessions");

@@ -274,6 +274,7 @@ describe("CodeSidebar", () => {
 
   it("brands the running digest instead of a stopped remembered sibling", async () => {
     useCodeCatalogStore.getState().rememberSession({
+      visibility: "private",
       id: "sess-codex",
       workspace_id: "ws-1",
       kind: "interactive",

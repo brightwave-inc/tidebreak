@@ -1,4 +1,4 @@
-import type { ApprovalDecisionKind } from "../generated/wire";
+import type { ApprovalDecisionKind, TurnActor } from "../generated/wire";
 import type {
   Attention,
   CodeApprovalState,
@@ -52,6 +52,12 @@ export type CodeTranscriptItem =
       text: string;
       /** When the server accepted the turn, for the message footer's time. */
       createdAt: string;
+      /**
+       * Who submitted the turn, when the row names someone (decision 0086).
+       * Absent on a turn the session's owner sent, and on rows written before
+       * turns recorded an actor.
+       */
+      actorLabel?: string;
       attachments?: import("../generated/wire").ImageRef[];
     }
   | {
@@ -752,6 +758,18 @@ function latestTurnUsage(
   return state.lastUsage;
 }
 
+/**
+ * The name to show for an actor: the channel's display name, falling back to
+ * the principal. A turn with no actor renders as the session's owner, which
+ * is what showing nothing means here.
+ */
+export function actorLabel(
+  actor: TurnActor | null | undefined,
+): string | undefined {
+  const label = actor?.display ?? actor?.principal;
+  return label && label.length > 0 ? label : undefined;
+}
+
 function upsertTurnPrompt(
   state: CodeSessionState,
   turn: CodeTurnSnapshot,
@@ -766,6 +784,7 @@ function upsertTurnPrompt(
     // Every accepted turn carries its own start, live or replayed, so the
     // prompt's timestamp never depends on when this client happened to see it.
     createdAt: turn.started_at,
+    actorLabel: actorLabel(turn.actor),
     attachments: turn.attachments ?? [],
   };
   const hasUser = state.items.some(

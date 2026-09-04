@@ -103,6 +103,58 @@ type Story = StoryObj<typeof meta>;
 
 export const ProgressUpdates: Story = {};
 
+/**
+ * One shared session driven by three actors: the owner on the desktop, a
+ * teammate who only exists to this machine as a Slack identity, and a trigger
+ * firing under the owner's key. A turn with no actor is the owner's, and
+ * carries no name, which is what every unshared session looks like.
+ */
+export const ThreeActors: Story = {
+  args: {
+    items: [
+      {
+        kind: "user",
+        id: "actor-owner",
+        turnId: "turn-owner",
+        text: "Trace where the session access rows resolve.",
+        createdAt: "2026-09-04T09:00:00.000Z",
+      },
+      {
+        kind: "assistant",
+        id: "actor-owner-reply",
+        turnId: "turn-owner",
+        parentCallId: null,
+        text: "Resolution happens once, in `ScopedCode::session_access`.",
+        streaming: false,
+      },
+      {
+        kind: "user",
+        id: "actor-ines",
+        turnId: "turn-ines",
+        text: "Keep the display name the channel sent on the turn.",
+        createdAt: "2026-09-04T09:02:00.000Z",
+        actorLabel: "Ines Okafor",
+      },
+      {
+        kind: "assistant",
+        id: "actor-ines-reply",
+        turnId: "turn-ines",
+        parentCallId: null,
+        text: "The grant supplies the channel identity; the adapter supplies the name.",
+        streaming: false,
+      },
+      {
+        kind: "user",
+        id: "actor-trigger",
+        turnId: "turn-trigger",
+        text: "Checks failed on this pull request. Take a look.",
+        createdAt: "2026-09-04T09:04:00.000Z",
+        actorLabel: "Trigger: checks failed",
+      },
+    ],
+  },
+};
+
 /** Internal trigger delivery stays out of the transcript after the turn runs. */
 export const TriggerFireNoticeHidden: Story = {
   args: {

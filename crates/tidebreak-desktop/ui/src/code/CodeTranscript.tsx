@@ -637,6 +637,7 @@ const TranscriptItem = memo(function TranscriptItem({
           text={item.text}
           createdAt={item.createdAt}
           anchorId={item.id}
+          author={item.actorLabel}
           leading={
             sessionId && item.attachments && item.attachments.length > 0 ? (
               <CodeTurnImages
