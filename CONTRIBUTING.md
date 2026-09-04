@@ -49,6 +49,9 @@ pnpm --dir crates/tidebreak-desktop/ui test
 git config core.hooksPath .githooks
 ```
 
+For documentation-only changes, review the rendered Markdown and verify any
+new links rather than running the full Rust and UI test suites.
+
 The Rust toolchain is pinned to an exact version in
 [`rust-toolchain.toml`](rust-toolchain.toml); `rustup` will pick it up
 automatically. Bump the pin deliberately — a floating `stable` would let a
