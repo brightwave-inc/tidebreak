@@ -27,9 +27,9 @@ a stale one.
 
 ## Summary
 
-- Rust crates: 849
+- Rust crates: 853
 - Desktop UI production packages: 535
-- Distinct license texts: 589
+- Distinct license texts: 591
 - Packages with no declared license: 0
 - Packages with a curated license: 28
 
@@ -2018,6 +2018,12 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/Stranger6667/jsonschema
 - License text: not distributed with this package
 
+### jsonwebtoken 11.0.0
+
+- License: `MIT`
+- Repository: https://github.com/Keats/jsonwebtoken
+- License text: `LICENSE` ([L-3a738a7fc361](#l-3a738a7fc361))
+
 ### keyboard-types 0.7.0
 
 - License: `MIT OR Apache-2.0`
@@ -2387,6 +2393,12 @@ License identifiers named across all declared expressions:
 - License: `BSD-3-Clause OR MIT OR Apache-2.0`
 - Repository: https://github.com/illicitonion/num_enum
 - License text: `LICENSE-APACHE` ([L-95bd3988beee](#l-95bd3988beee)), `LICENSE-BSD` ([L-882b129495bc](#l-882b129495bc)), `LICENSE-MIT` ([L-30fefc3a7d6a](#l-30fefc3a7d6a))
+
+### oauth2 5.0.0
+
+- License: `MIT OR Apache-2.0`
+- Repository: https://github.com/ramosbugs/oauth2-rs
+- License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-84e1bbfebd74](#l-84e1bbfebd74))
 
 ### objc2 0.6.4
 
@@ -3480,6 +3492,12 @@ License identifiers named across all declared expressions:
 - Repository: https://github.com/vorner/signal-hook
 - License text: `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-aaac889d0a4a](#l-aaac889d0a4a))
 
+### signature 2.2.0
+
+- License: `Apache-2.0 OR MIT`
+- Repository: https://github.com/RustCrypto/traits/tree/master/signature
+- License text: `LICENSE-APACHE` ([L-59013a5c8d3a](#l-59013a5c8d3a)), `LICENSE-MIT` ([L-7d9f551458e8](#l-7d9f551458e8))
+
 ### simd-adler32 0.3.10
 
 - License: `MIT`
@@ -4276,6 +4294,12 @@ License identifiers named across all declared expressions:
 - License: `MIT OR Apache-2.0`
 - Repository: https://github.com/unicode-rs/unicode-xid
 - License text: `COPYRIGHT` ([L-20cec30ad778](#l-20cec30ad778)), `LICENSE-APACHE` ([L-769f80b5bcb4](#l-769f80b5bcb4)), `LICENSE-MIT` ([L-033a9383ff21](#l-033a9383ff21))
+
+### untrusted 0.7.1
+
+- License: `ISC`
+- Repository: https://github.com/briansmith/untrusted
+- License text: `LICENSE.txt` ([L-a1fff3442978](#l-a1fff3442978))
 
 ### untrusted 0.9.0
 
@@ -13702,6 +13726,32 @@ INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
 LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
 OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
 PERFORMANCE OF THIS SOFTWARE.
+```
+
+### L-3a738a7fc361
+
+```
+The MIT License (MIT)
+
+Copyright (c) 2015 Vincent Prouillet
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ### L-3a771adcf280
@@ -24534,6 +24584,36 @@ DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
 THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+### L-7d9f551458e8
+
+```
+Copyright (c) 2018-2023 RustCrypto Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
 ```
 
 ### L-7db0bcff78e7
