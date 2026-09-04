@@ -627,7 +627,7 @@ test("PR lanes are scope-gated, never label-gated", () => {
   }
   assert.match(
     desktopCargo,
-    /tidebreak-server = \{ path = "\.\.\/tidebreak-server" \}/,
+    /tidebreak-server = \{ path = "\.\.\/tidebreak-server(?:-api)?" \}/,
   );
   assert.doesNotMatch(desktopCargo, /document-parsers/);
 });
