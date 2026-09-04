@@ -64,11 +64,26 @@ COPY . .
 # below as an environment variable, which is where `option_env!` reads it.
 ARG TIDEBREAK_VERSION="0.0.0-unreleased"
 
+# `release` is the image operators run. `dev` builds the same binary with debug
+# assertions on, which is the only build that carries the scripted harness
+# (`crates/tidebreak-server/src/scripted_harness.rs`); the end-to-end lane in
+# the Model Gateway repository drives a real machine through it. A `dev` image
+# is a test fixture: never deploy one.
+ARG CARGO_PROFILE=release
+# Debug info is dead weight in a container and triples the dev binary.
+ENV CARGO_PROFILE_DEV_DEBUG=0
+
 # `--features tidebreak-server/postgres` reaches through the CLI into the
 # server crate's feature, because the feature lives there and the CLI takes
 # tidebreak-server with default features. Without it the self-host boot has no
-# PostgreSQL driver compiled in.
-RUN cargo build --release --locked -p tidebreak-cli --features tidebreak-server/postgres
+# PostgreSQL driver compiled in. The binary lands in `/out` so the runtime
+# stage copies one path whichever profile built it (cargo writes `dev` to
+# `target/debug`).
+RUN set -eu; \
+    cargo build --profile "${CARGO_PROFILE}" --locked -p tidebreak-cli \
+        --features tidebreak-server/postgres; \
+    case "${CARGO_PROFILE}" in dev) target_dir=debug ;; *) target_dir="${CARGO_PROFILE}" ;; esac; \
+    install -D "target/${target_dir}/tidebreak" /out/tidebreak
 
 # ---- runtime ---------------------------------------------------------------
 # Digest-pinned like the build stage: this is debian:bookworm-slim as of
@@ -170,7 +185,7 @@ RUN set -eu; \
     node --version; \
     npm --version
 
-COPY --from=build /src/target/release/tidebreak /usr/local/bin/tidebreak
+COPY --from=build /out/tidebreak /usr/local/bin/tidebreak
 COPY --from=renderer /src/crates/tidebreak-desktop/ui/dist /opt/tidebreak/ui
 COPY deploy/self-host/entrypoint.sh /usr/local/bin/tidebreak-entrypoint
 
