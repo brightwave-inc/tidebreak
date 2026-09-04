@@ -205,6 +205,66 @@ async fn bound_session_id(
         .session_id
 }
 
+/// A channel names its repository the way a forge does. `repository:
+/// owner/name` resolves to the owner's registered checkout regardless of
+/// case, a name nobody registered is a typed conflict the adapter can word,
+/// and a request naming no repository at all is a bad request.
+#[tokio::test]
+async fn an_external_session_names_its_repository_by_origin() {
+    let (router, _fake, runtime, repo_id, _dir) = external_app().await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let owner = OwnerId::local();
+    let (_grant, pair) = runtime
+        .mint_adapter_grant(&owner, "slack", "U1", "T1")
+        .await
+        .unwrap();
+
+    let created = client
+        .post(format!("http://{addr}/external/code/sessions"))
+        .bearer_auth(&pair.token)
+        .json(&serde_json::json!({ "external_key": "T1/C9/1.1", "repository": "ACME/Tools" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let session_id = bound_session_id(&runtime, &owner, "T1/C9/1.1").await;
+    let session = runtime.get_session(&owner, session_id).await.unwrap();
+    let workspace = runtime
+        .get_workspace(
+            &owner,
+            session
+                .workspace_id
+                .expect("a repository session has a workspace"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        workspace.repo_id, repo_id,
+        "the origin resolved to the registered checkout"
+    );
+
+    let unknown = client
+        .post(format!("http://{addr}/external/code/sessions"))
+        .bearer_auth(&pair.token)
+        .json(&serde_json::json!({ "external_key": "T1/C9/2.1", "repository": "acme/other" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = unknown.json().await.unwrap();
+    assert_eq!(body["kind"], "repo_unknown");
+
+    let nameless = client
+        .post(format!("http://{addr}/external/code/sessions"))
+        .bearer_auth(&pair.token)
+        .json(&serde_json::json!({ "external_key": "T1/C9/3.1" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(nameless.status(), reqwest::StatusCode::BAD_REQUEST);
+}
+
 /// The whole adapter surface over HTTP: bad tokens refuse, get-or-create
 /// is idempotent, messages are idempotent on the event id, a foreign grant
 /// sees "not found", interrupt reaches the sandbox, and rotation with a
