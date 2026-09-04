@@ -12,15 +12,27 @@ use crate::scripted_harness::{plain_text_script, ScriptedAdapter};
 use tidebreak_core::{CodeRepo, CodeWorkspace, CodeWorkspaceStatus, RepoId, Store, WorkspaceId};
 use tidebreak_harness::AdapterRegistry;
 
-/// A self-host code app with two principals: alice is an admin, bob a member.
+/// A self-host code app with three principals: alice is an admin, bob and
+/// carol are members. Carol holds no row on anything alice makes, which is
+/// what a `deployment` session has to be visible to and a `private` one not.
 async fn two_user_code_app() -> (Router, tempfile::TempDir, std::path::PathBuf) {
+    let (router, dir, repo, _runtime) = two_user_code_app_with_runtime().await;
+    (router, dir, repo)
+}
+
+async fn two_user_code_app_with_runtime() -> (
+    Router,
+    tempfile::TempDir,
+    std::path::PathBuf,
+    Arc<CodeRuntime>,
+) {
     let (dir, store) = temp_db_store("code-two-user.db").await;
     let db = Arc::new(store);
     let store_trait: Arc<dyn Store> = db.clone();
     let tokens_file = dir.path().join("tokens");
     std::fs::write(
         &tokens_file,
-        format!("alice {ALICE_TOKEN} admin\nbob {BOB_TOKEN}\n"),
+        format!("alice {ALICE_TOKEN} admin\nbob {BOB_TOKEN}\ncarol {CAROL_TOKEN}\n"),
     )
     .unwrap();
     let mut registry = AdapterRegistry::new();
@@ -44,9 +56,9 @@ async fn two_user_code_app() -> (Router, tempfile::TempDir, std::path::PathBuf) 
             ..AgentConfig::default()
         },
     );
-    state.code = Some(runtime);
+    state.code = Some(runtime.clone());
     let repo = init_git_repo(dir.path());
-    (app(state), dir, repo)
+    (app(state), dir, repo, runtime)
 }
 
 /// Deployment-plane code routes are admin-gated by where they are registered
@@ -408,5 +420,593 @@ fn code_routes_go_through_the_owner_scoped_view() {
     assert!(
         findings.is_empty(),
         "code routes must query through the owner-scoped view: {findings:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Session access (decision 0086)
+// ---------------------------------------------------------------------------
+
+/// Register a repository, open a workspace, and start one session under the
+/// named principal. Returns the session id.
+async fn owned_session(
+    client: &reqwest::Client,
+    addr: std::net::SocketAddr,
+    token: &str,
+    repo: &std::path::Path,
+) -> String {
+    let (_repo_body, workspace) = register_and_workspace(client, addr, token, repo).await;
+    create_sibling_sessions(client, addr, token, &workspace, 1)
+        .await
+        .remove(0)
+}
+
+async fn get_status(
+    client: &reqwest::Client,
+    addr: std::net::SocketAddr,
+    token: &str,
+    path: &str,
+) -> reqwest::StatusCode {
+    client
+        .get(format!("http://{addr}{path}"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+        .status()
+}
+
+/// Publish the one-pixel fixture image to a session as the named principal.
+async fn publish_png(
+    client: &reqwest::Client,
+    addr: std::net::SocketAddr,
+    token: &str,
+    session: &str,
+) -> reqwest::Response {
+    client
+        .post(format!(
+            "http://{addr}/sessions/{session}/attachments/images"
+        ))
+        .bearer_auth(token)
+        .header(reqwest::header::CONTENT_TYPE, "image/png")
+        .body(super::code_attachments::one_pixel_png())
+        .send()
+        .await
+        .unwrap()
+}
+
+async fn post_status(
+    client: &reqwest::Client,
+    addr: std::net::SocketAddr,
+    token: &str,
+    path: &str,
+    body: serde_json::Value,
+) -> reqwest::StatusCode {
+    client
+        .post(format!("http://{addr}{path}"))
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+        .status()
+}
+
+/// Grant one subject a level on one session, as its owner.
+async fn grant_access(
+    client: &reqwest::Client,
+    addr: std::net::SocketAddr,
+    token: &str,
+    session: &str,
+    subject: &str,
+    level: &str,
+) {
+    let response = client
+        .post(format!("http://{addr}/sessions/{session}/access"))
+        .bearer_auth(token)
+        .json(&serde_json::json!({ "subject": subject, "level": level }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::CREATED,
+        "the owner may grant access to their own session"
+    );
+}
+
+/// The drill from decision 0086 on the self-host profile, where a machine has
+/// many principals: a viewer reads and never writes, a contributor writes but
+/// holds no lifecycle authority, and revoking the row puts the session back
+/// out of reach.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_viewer_reads_a_contributor_writes_and_neither_owns() {
+    let (router, _dir, repo) = two_user_code_app().await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let session = owned_session(&client, addr, ALICE_TOKEN, &repo).await;
+
+    // Before any row exists the behavior is exactly what it was: another
+    // principal's session is indistinguishable from one that never existed.
+    for path in [
+        format!("/sessions/{session}"),
+        format!("/sessions/{session}/turns"),
+        format!("/sessions/{session}/queued"),
+    ] {
+        assert_eq!(
+            get_status(&client, addr, BOB_TOKEN, &path).await,
+            reqwest::StatusCode::NOT_FOUND,
+            "{path} answered before a row existed"
+        );
+    }
+
+    grant_access(
+        &client,
+        addr,
+        ALICE_TOKEN,
+        &session,
+        "principal:user:bob",
+        "view",
+    )
+    .await;
+
+    // A viewer sees exactly the reads.
+    for path in [
+        format!("/sessions/{session}"),
+        format!("/sessions/{session}/turns"),
+        format!("/sessions/{session}/queued"),
+        format!("/approvals?session_id={session}"),
+    ] {
+        assert_eq!(
+            get_status(&client, addr, BOB_TOKEN, &path).await,
+            reqwest::StatusCode::OK,
+            "a viewer must read {path}"
+        );
+    }
+
+    // And none of the writes. Each answers not found rather than forbidden:
+    // the caller learns no more than they would about a session that does
+    // not exist.
+    let writes = [
+        (
+            format!("/sessions/{session}/turns"),
+            serde_json::json!({ "message": "do the thing" }),
+        ),
+        (
+            format!("/sessions/{session}/interrupt"),
+            serde_json::json!({}),
+        ),
+        (
+            format!("/sessions/{session}/steer"),
+            serde_json::json!({
+                "expected_turn_id": uuid::Uuid::new_v4(),
+                "guidance": "look at the other file",
+            }),
+        ),
+        (
+            format!("/sessions/{session}/queued/send-now"),
+            serde_json::json!({}),
+        ),
+    ];
+    for (path, body) in &writes {
+        assert_eq!(
+            post_status(&client, addr, BOB_TOKEN, path, body.clone()).await,
+            reqwest::StatusCode::NOT_FOUND,
+            "a viewer must not write {path}"
+        );
+    }
+    // The queue pause is a PUT, and refused the same way.
+    assert_eq!(
+        client
+            .put(format!("http://{addr}/sessions/{session}/queue-paused"))
+            .bearer_auth(BOB_TOKEN)
+            .json(&serde_json::json!({ "paused": true }))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "a viewer must not pause the queue"
+    );
+    // Publishing an image is a write too: it is the authority a later turn
+    // attachment is checked against, so a viewer is refused before any
+    // bytes are stored.
+    assert_eq!(
+        publish_png(&client, addr, BOB_TOKEN, &session)
+            .await
+            .status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "a viewer must not publish an image"
+    );
+
+    grant_access(
+        &client,
+        addr,
+        ALICE_TOKEN,
+        &session,
+        "principal:user:bob",
+        "contribute",
+    )
+    .await;
+
+    // A contributor submits.
+    let submitted = client
+        .post(format!("http://{addr}/sessions/{session}/turns"))
+        .bearer_auth(BOB_TOKEN)
+        .json(&serde_json::json!({ "message": "trace the access path" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        submitted.status(),
+        reqwest::StatusCode::ACCEPTED,
+        "a contributor submits a turn"
+    );
+    // And the turn says who sent it, not whose session it ran under.
+    let turn: serde_json::Value = submitted.json().await.unwrap();
+    assert_eq!(
+        turn["actor"]["principal"].as_str(),
+        Some("user:bob"),
+        "the submitted turn names its actor"
+    );
+
+    // A contributor publishes an image and attaches it. The publication row
+    // is written under the session's owner, which is the scope the turn's
+    // attachment check reads it back through; written under the caller it
+    // would be refused here, and the attachment would never resolve.
+    let published = publish_png(&client, addr, BOB_TOKEN, &session).await;
+    assert_eq!(
+        published.status(),
+        reqwest::StatusCode::CREATED,
+        "a contributor publishes an image"
+    );
+    let published: serde_json::Value = published.json().await.unwrap();
+    let blob_id = published["attachment_id"]
+        .as_str()
+        .or_else(|| published["blob_id"].as_str())
+        .expect("the publication names its blob")
+        .to_owned();
+    assert_eq!(
+        post_status(
+            &client,
+            addr,
+            BOB_TOKEN,
+            &format!("/sessions/{session}/turns"),
+            serde_json::json!({
+                "message": "and look at this",
+                "attachments": [{ "blob_id": blob_id, "media_type": "image/png" }],
+            }),
+        )
+        .await,
+        reqwest::StatusCode::ACCEPTED,
+        "a contributor attaches the image they published"
+    );
+
+    // Lifecycle and settings stay with the owner, and so does the access
+    // list itself.
+    let owner_only = [
+        (format!("/sessions/{session}/reap"), serde_json::json!({})),
+        (
+            format!("/sessions/{session}/mode"),
+            serde_json::json!({ "permission_mode": "allow" }),
+        ),
+        (
+            format!("/sessions/{session}/effort"),
+            serde_json::json!({ "reasoning_effort": "high" }),
+        ),
+        (
+            format!("/sessions/{session}/access"),
+            serde_json::json!({ "subject": "principal:user:carol", "level": "view" }),
+        ),
+        (
+            format!("/sessions/{session}/visibility"),
+            serde_json::json!({ "visibility": "deployment" }),
+        ),
+    ];
+    for (path, body) in &owner_only {
+        assert_eq!(
+            post_status(&client, addr, BOB_TOKEN, path, body.clone()).await,
+            reqwest::StatusCode::NOT_FOUND,
+            "a contributor must not reach {path}"
+        );
+    }
+    assert_eq!(
+        get_status(
+            &client,
+            addr,
+            BOB_TOKEN,
+            &format!("/sessions/{session}/access")
+        )
+        .await,
+        reqwest::StatusCode::NOT_FOUND,
+        "a contributor must not read the access list"
+    );
+
+    // The owner reads the list and sees one row.
+    let listed = client
+        .get(format!("http://{addr}/sessions/{session}/access"))
+        .bearer_auth(ALICE_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(listed.status(), reqwest::StatusCode::OK);
+    let rows: serde_json::Value = listed.json().await.unwrap();
+    let rows = rows.as_array().expect("the access list is an array");
+    assert_eq!(rows.len(), 1, "granting twice raises one row, not two");
+    assert_eq!(rows[0]["subject"].as_str(), Some("principal:user:bob"));
+    assert_eq!(rows[0]["level"].as_str(), Some("contribute"));
+    assert_eq!(rows[0]["granted_by"].as_str(), Some("user:alice"));
+
+    // Revocation puts the session back out of reach.
+    let revoked = client
+        .delete(format!(
+            "http://{addr}/sessions/{session}/access/principal:user:bob"
+        ))
+        .bearer_auth(ALICE_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(revoked.status(), reqwest::StatusCode::NO_CONTENT);
+    assert_eq!(
+        get_status(&client, addr, BOB_TOKEN, &format!("/sessions/{session}")).await,
+        reqwest::StatusCode::NOT_FOUND,
+        "a revoked row leaves nothing behind"
+    );
+}
+
+/// `deployment` visibility opens a session to every authenticated principal
+/// on the machine, and never to a write. `private` closes it again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deployment_session_shows_to_a_third_principal_and_a_private_one_does_not() {
+    let (router, _dir, repo) = two_user_code_app().await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let session = owned_session(&client, addr, ALICE_TOKEN, &repo).await;
+
+    assert_eq!(
+        get_status(&client, addr, CAROL_TOKEN, &format!("/sessions/{session}")).await,
+        reqwest::StatusCode::NOT_FOUND,
+        "a private session holds no third principal"
+    );
+
+    let opened = client
+        .post(format!("http://{addr}/sessions/{session}/visibility"))
+        .bearer_auth(ALICE_TOKEN)
+        .json(&serde_json::json!({ "visibility": "deployment" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(opened.status(), reqwest::StatusCode::OK);
+    let snapshot: serde_json::Value = opened.json().await.unwrap();
+    assert_eq!(snapshot["visibility"].as_str(), Some("deployment"));
+
+    assert_eq!(
+        get_status(&client, addr, CAROL_TOKEN, &format!("/sessions/{session}")).await,
+        reqwest::StatusCode::OK,
+        "a deployment session shows to a third principal"
+    );
+    // Visibility never grants a write.
+    assert_eq!(
+        post_status(
+            &client,
+            addr,
+            CAROL_TOKEN,
+            &format!("/sessions/{session}/turns"),
+            serde_json::json!({ "message": "not mine to send" }),
+        )
+        .await,
+        reqwest::StatusCode::NOT_FOUND,
+        "deployment visibility is a read, not a contribution"
+    );
+
+    let closed = client
+        .post(format!("http://{addr}/sessions/{session}/visibility"))
+        .bearer_auth(ALICE_TOKEN)
+        .json(&serde_json::json!({ "visibility": "private" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(closed.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        get_status(&client, addr, CAROL_TOKEN, &format!("/sessions/{session}")).await,
+        reqwest::StatusCode::NOT_FOUND,
+        "narrowing back to private closes it again"
+    );
+}
+
+/// Revoking a row severs the reader's open event socket rather than leaving
+/// it streaming a session they no longer hold.
+#[tokio::test(flavor = "multi_thread")]
+async fn revoking_a_row_drops_that_readers_live_stream() {
+    use futures::StreamExt;
+    use tokio_tungstenite::connect_async;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    let (router, _dir, repo) = two_user_code_app().await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let session = owned_session(&client, addr, ALICE_TOKEN, &repo).await;
+    grant_access(
+        &client,
+        addr,
+        ALICE_TOKEN,
+        &session,
+        "principal:user:bob",
+        "view",
+    )
+    .await;
+
+    let mut request = format!("ws://{addr}/sessions/{session}/events?after=0")
+        .into_client_request()
+        .unwrap();
+    request.headers_mut().insert(
+        axum::http::header::AUTHORIZATION,
+        format!("Bearer {BOB_TOKEN}").parse().unwrap(),
+    );
+    let (mut socket, _) = connect_async(request).await.unwrap();
+
+    let revoked = client
+        .delete(format!(
+            "http://{addr}/sessions/{session}/access/principal:user:bob"
+        ))
+        .bearer_auth(ALICE_TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(revoked.status(), reqwest::StatusCode::NO_CONTENT);
+
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while let Some(frame) = socket.next().await {
+            match frame {
+                Ok(tokio_tungstenite::tungstenite::Message::Close(_)) | Err(_) => return true,
+                Ok(_) => continue,
+            }
+        }
+        true
+    })
+    .await;
+    assert_eq!(
+        closed,
+        Ok(true),
+        "the revoked reader's stream must close without waiting for a reconnect"
+    );
+}
+
+/// An external-identity row names someone the machine knows only through an
+/// adapter. It resolves for a web caller through their live grant for that
+/// identity, and stops resolving when the grant is fenced — the row itself
+/// never changes.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_external_identity_row_resolves_only_through_a_live_grant() {
+    let (router, _dir, repo, runtime) = two_user_code_app_with_runtime().await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let session = owned_session(&client, addr, ALICE_TOKEN, &repo).await;
+    let bob = tidebreak_core::OwnerId::new("user:bob").unwrap();
+
+    grant_access(
+        &client,
+        addr,
+        ALICE_TOKEN,
+        &session,
+        "external:slack:U42",
+        "view",
+    )
+    .await;
+    assert_eq!(
+        get_status(&client, addr, BOB_TOKEN, &format!("/sessions/{session}")).await,
+        reqwest::StatusCode::NOT_FOUND,
+        "the row alone binds nobody on this machine"
+    );
+
+    let (grant, _pair) = runtime
+        .mint_adapter_grant(&bob, "slack", "U42", "T1")
+        .await
+        .unwrap();
+    assert_eq!(
+        get_status(&client, addr, BOB_TOKEN, &format!("/sessions/{session}")).await,
+        reqwest::StatusCode::OK,
+        "a live grant binds the principal to the identity the row names"
+    );
+
+    runtime
+        .revoke_adapter_grant(&bob, grant.id, "the workspace was unlinked")
+        .await
+        .unwrap();
+    assert_eq!(
+        get_status(&client, addr, BOB_TOKEN, &format!("/sessions/{session}")).await,
+        reqwest::StatusCode::NOT_FOUND,
+        "a fenced grant makes the row inert without the row changing"
+    );
+}
+
+/// The desktop profile has one owner, so the drill there is that nothing
+/// moved: a session with no rows and `private` visibility answers its owner
+/// exactly as before, and the owner still administers its access list.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_single_owner_profile_keeps_its_default_behavior() {
+    let (router, token, _runtime, dir) = code_app(plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let repo = init_git_repo(dir.path());
+    let session = owned_session(&client, addr, &token, &repo).await;
+
+    let snapshot = client
+        .get(format!("http://{addr}/code/sessions/{session}"))
+        .bearer_auth(&*token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(snapshot.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = snapshot.json().await.unwrap();
+    assert_eq!(
+        body["visibility"].as_str(),
+        Some("private"),
+        "a fresh session is private"
+    );
+
+    let listed = client
+        .get(format!("http://{addr}/code/sessions/{session}/access"))
+        .bearer_auth(&*token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(listed.status(), reqwest::StatusCode::OK);
+    let rows: serde_json::Value = listed.json().await.unwrap();
+    assert!(
+        rows.as_array().expect("an array").is_empty(),
+        "a session nobody shared has no rows"
+    );
+
+    // The owner administers the list on this profile too, and the store
+    // refuses a subject that is neither a principal nor a channel identity.
+    assert_eq!(
+        post_status(
+            &client,
+            addr,
+            &token,
+            &format!("/code/sessions/{session}/access"),
+            serde_json::json!({ "subject": "whoever", "level": "view" }),
+        )
+        .await,
+        reqwest::StatusCode::BAD_REQUEST,
+        "a malformed subject is a bad request, not a store failure"
+    );
+    assert_eq!(
+        post_status(
+            &client,
+            addr,
+            &token,
+            &format!("/code/sessions/{session}/access"),
+            serde_json::json!({ "subject": "principal:someone-else", "level": "view" }),
+        )
+        .await,
+        reqwest::StatusCode::CREATED,
+    );
+
+    // The owner's own reads and writes are untouched by any of it.
+    assert_eq!(
+        get_status(
+            &client,
+            addr,
+            &token,
+            &format!("/code/sessions/{session}/turns")
+        )
+        .await,
+        reqwest::StatusCode::OK,
+    );
+    let submitted = client
+        .post(format!("http://{addr}/code/sessions/{session}/turns"))
+        .bearer_auth(&*token)
+        .json(&serde_json::json!({ "message": "still mine to send" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(submitted.status(), reqwest::StatusCode::ACCEPTED);
+    let turn: serde_json::Value = submitted.json().await.unwrap();
+    assert_eq!(
+        turn["actor"]["principal"].as_str(),
+        Some("local"),
+        "a desktop turn names the principal that sent it"
     );
 }

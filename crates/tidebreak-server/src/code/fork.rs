@@ -1176,6 +1176,7 @@ mod tests {
 
     fn session() -> Session {
         Session {
+            visibility: tidebreak_core::SessionVisibility::Private,
             id: SessionId::new(),
             owner: OwnerId::local(),
             workspace_id: Some(WorkspaceId::new()),
@@ -1202,6 +1203,7 @@ mod tests {
 
     fn turn(session_id: SessionId, ordinal: i64, asked: &str) -> Turn {
         Turn {
+            actor: None,
             id: TurnId::new(),
             session_id,
             ordinal,

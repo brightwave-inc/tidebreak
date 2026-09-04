@@ -331,6 +331,7 @@ async fn seed_session(db: &DbStore, lc: SessionLifecycle) -> (WorkspaceId, Sessi
         attention: Attention::new(AttentionState::Working, AttentionSource::Lifecycle),
         unrecognized_event_count: 0,
         subagents: vec![],
+        visibility: tidebreak_core::SessionVisibility::Private,
         created_at: chrono::Utc::now(),
         execution_location: tidebreak_core::ExecutionLocation::Machine,
     };

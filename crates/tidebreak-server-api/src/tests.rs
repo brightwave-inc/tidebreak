@@ -95,9 +95,10 @@ use lifecycle::{post_json, post_native_json, steer_turn, steer_turn_with_id};
 
 /// Self-host fixture credentials, named rather than inlined: the token floor
 /// is 32 characters, and inline high-entropy literals trip the secret scan.
-/// Alice administers the fixture deployments; Bob is a member.
+/// Alice administers the fixture deployments; Bob and Carol are members.
 const ALICE_TOKEN: &str = "alice-token-padded-out-to-thirty-two";
 const BOB_TOKEN: &str = "bob-token-padded-out-to-thirty-two-x";
+const CAROL_TOKEN: &str = "carol-token-padded-out-to-thirty-two";
 
 async fn temp_db_store(database_name: &str) -> (tempfile::TempDir, DbStore) {
     let directory = tempfile::tempdir().unwrap();

@@ -254,6 +254,13 @@ const nonEmptyLine = (value: unknown): value is string =>
   nonEmptyBounded(value, MAX_CODE_LINE_CHARS);
 const optionalLine = (value: unknown): value is string | undefined =>
   value === undefined || bounded(value, MAX_CODE_LINE_CHARS);
+/**
+ * A bounded line or `null`. An actor's fields are always present and any of
+ * them may be null: the paths that write one know different things about who
+ * acted (decision 0086).
+ */
+const nullableLine = (value: unknown): value is string | null =>
+  value === null || bounded(value, MAX_CODE_LINE_CHARS);
 const lineList = (value: unknown): value is string[] =>
   boundedStringList(value, MAX_CODE_LINE_CHARS);
 
@@ -343,6 +350,9 @@ const SESSION_LIFECYCLES = new Set<CodeSessionLifecycle>([
   "ended",
 ]);
 const SESSION_KINDS = new Set<CodeSessionKind>(["interactive", "watch"]);
+const SESSION_VISIBILITIES = new Set<
+  import("../generated/wire").SessionVisibility
+>(["private", "deployment"]);
 const EXECUTION_LOCATIONS = new Set<"sandbox" | "machine">([
   "sandbox",
   "machine",
@@ -2618,6 +2628,7 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
       "fence_reason",
       "attention",
       "unrecognized_event_count",
+      "visibility",
       "created_at",
       "external_origin",
       "execution_location",
@@ -2641,6 +2652,11 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
     !isMember(value.permission_mode, PERMISSION_MODES) ||
     !isMember(value.lifecycle, SESSION_LIFECYCLES) ||
     !isFiniteNumber(value.unrecognized_event_count) ||
+    // Serialized unconditionally, but tolerate its absence: a session row
+    // written before sharing existed is private, which is what it was
+    // (decision 0086).
+    (value.visibility !== undefined &&
+      !isMember(value.visibility, SESSION_VISIBILITIES)) ||
     !timestamp(value.created_at)
   ) {
     return null;
@@ -2684,6 +2700,7 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
     lifecycle: value.lifecycle,
     attention,
     unrecognized_event_count: value.unrecognized_event_count,
+    visibility: value.visibility ?? "private",
     created_at: value.created_at,
     fast_mode: value.fast_mode === true,
     // A server from before decision 0088 sends no location; everything it
@@ -2759,6 +2776,7 @@ export function parseCodeTurn(value: unknown): CodeTurnSnapshot | null {
       "started_at",
       "ended_at",
       "rewrite",
+      "actor",
     ]) ||
     !wireId(value.id) ||
     !wireId(value.session_id) ||
@@ -2777,6 +2795,8 @@ export function parseCodeTurn(value: unknown): CodeTurnSnapshot | null {
   ) {
     return null;
   }
+  const actor = parseTurnActor(value.actor);
+  if (value.actor !== undefined && !actor) return null;
   const attachments = parseCodeTurnAttachments(value.attachments);
   if (!attachments) return null;
   const usage = value.usage === undefined ? undefined : parseUsage(value.usage);
@@ -2801,6 +2821,41 @@ export function parseCodeTurn(value: unknown): CodeTurnSnapshot | null {
     ...(diffstat ? { diffstat } : {}),
     ...(value.ended_at !== undefined ? { ended_at: value.ended_at } : {}),
     ...(value.rewrite !== undefined ? { rewrite: value.rewrite } : {}),
+    ...(actor ? { actor } : {}),
+  };
+}
+
+/**
+ * Who submitted a turn or settled a decision (decision 0086).
+ *
+ * Every field is optional on the wire, so an object with all four null is
+ * valid and simply names nobody. A display name is a channel's, not this
+ * machine's, so it is bounded as a line like every other untrusted label.
+ */
+export function parseTurnActor(
+  value: unknown,
+): import("../generated/wire").TurnActor | null {
+  if (value === undefined) return null;
+  if (
+    !isRecord(value) ||
+    !onlyKeys<import("../generated/wire").TurnActor>(value, [
+      "principal",
+      "display",
+      "channel_kind",
+      "external_identity",
+    ]) ||
+    !nullableLine(value.principal) ||
+    !nullableLine(value.display) ||
+    !nullableLine(value.channel_kind) ||
+    !nullableLine(value.external_identity)
+  ) {
+    return null;
+  }
+  return {
+    principal: value.principal ?? null,
+    display: value.display ?? null,
+    channel_kind: value.channel_kind ?? null,
+    external_identity: value.external_identity ?? null,
   };
 }
 
@@ -3851,9 +3906,9 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
         return null;
       }
       return { type: "approval_requested", approval_id: value.approval_id };
-    case "approval_resolved":
+    case "approval_resolved": {
       if (
-        !onlyKeys(value, ["type", "approval_id", "decision"]) ||
+        !onlyKeys(value, ["type", "approval_id", "decision", "actor"]) ||
         !wireId(value.approval_id) ||
         !isRecord(value.decision) ||
         (value.decision.type !== "approve" &&
@@ -3865,6 +3920,8 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
       ) {
         return null;
       }
+      const actor = parseTurnActor(value.actor);
+      if (value.actor !== undefined && !actor) return null;
       return {
         type: "approval_resolved",
         approval_id: value.approval_id,
@@ -3872,7 +3929,9 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
           CodeEvent,
           { type: "approval_resolved" }
         >["decision"],
+        ...(actor ? { actor } : {}),
       };
+    }
     case "attention_changed": {
       if (
         !onlyKeys<Extract<WireCodeEvent, { type: "attention_changed" }>>(
@@ -4432,6 +4491,8 @@ export function parseCodeApproval(value: unknown): CodeApprovalSnapshot | null {
   ) {
     return null;
   }
+  const actor = parseTurnActor(value.actor);
+  if (value.actor !== undefined && !actor) return null;
   return {
     id: value.id,
     session_id: value.session_id,
@@ -4442,6 +4503,7 @@ export function parseCodeApproval(value: unknown): CodeApprovalSnapshot | null {
     requested_at: value.requested_at,
     ...(value.feedback !== undefined ? { feedback: value.feedback } : {}),
     ...(value.decided_at !== undefined ? { decided_at: value.decided_at } : {}),
+    ...(actor ? { actor } : {}),
   };
 }
 

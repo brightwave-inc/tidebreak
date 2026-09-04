@@ -1579,6 +1579,7 @@ pub mod session {
         /// Whether this conversation keeps durable memory out entirely: no
         /// digest injection and no post-turn capture.
         pub memory_incognito: bool,
+        pub visibility: String,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -1601,6 +1602,26 @@ pub mod session {
         }
     }
 
+    impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod session_access {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "session_access")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub session_id: Uuid,
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub subject: String,
+        pub level: String,
+        pub granted_by: String,
+        pub created_at: DateTimeUtc,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
     impl ActiveModelBehavior for ActiveModel {}
 }
 
@@ -1655,6 +1676,8 @@ pub mod turn {
         pub output_message_id: Option<Uuid>,
         pub updated_at: Option<DateTimeUtc>,
         pub fingerprint: Option<Vec<u8>>,
+        #[sea_orm(column_type = "JsonBinary", nullable)]
+        pub actor: Option<Json>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -1727,6 +1750,8 @@ pub mod code_queued_turn {
         pub invoked_skills_json: String,
         pub voice_input_used: bool,
         pub fingerprint: Option<Vec<u8>>,
+        #[sea_orm(column_type = "JsonBinary", nullable)]
+        pub actor: Option<Json>,
         pub position: i32,
         pub created_at: DateTimeUtc,
         pub updated_at: DateTimeUtc,
@@ -1982,6 +2007,8 @@ pub mod approval {
         /// when one was engaged (decision 0048 step 5: the judge is a
         /// capability of the internal engine, on the one approval row).
         pub auto_judge_status: Option<String>,
+        #[sea_orm(column_type = "JsonBinary", nullable)]
+        pub actor: Option<Json>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

@@ -91,6 +91,7 @@ impl CodeRuntime {
         settings: NewSessionSettings,
     ) -> Session {
         Session {
+            visibility: tidebreak_core::SessionVisibility::Private,
             id: SessionId::new(),
             owner: owner.clone(),
             workspace_id: Some(workspace_id),
@@ -282,6 +283,7 @@ impl CodeRuntime {
         model: Option<String>,
         reasoning_effort: Option<Option<ReasoningEffort>>,
         attachments: Vec<tidebreak_core::ImageRef>,
+        actor: Option<tidebreak_core::TurnActor>,
         trigger_delivery: Option<TriggerDeliveryClaim>,
         queue_if_busy: bool,
     ) -> Result<SubmitTurnOutcome, ServerError> {
@@ -343,7 +345,9 @@ impl CodeRuntime {
                     "the turn was not accepted because the session is busy",
                 ));
             }
-            return self.park_remote_follow_up(owner, &session, message).await;
+            return self
+                .park_remote_follow_up(owner, &session, message, actor)
+                .await;
         }
         let repo = self.get_repo(owner, workspace.repo_id).await?;
         let driver = remote.driver(&self.db, self.bus.as_ref());
@@ -354,7 +358,7 @@ impl CodeRuntime {
         // one has a head to promote; either way the sweep should look now,
         // not at its next floor.
         remote.wake_sweep();
-        self.relay_remote_outcome(owner, &session, outcome, message, queue_if_busy)
+        self.relay_remote_outcome(owner, &session, outcome, message, actor, queue_if_busy)
             .await
     }
 
@@ -365,6 +369,7 @@ impl CodeRuntime {
         session: &Session,
         outcome: crate::code::remote::driver::RemoteTurnOutcome,
         message: String,
+        actor: Option<tidebreak_core::TurnActor>,
         queue_if_busy: bool,
     ) -> Result<SubmitTurnOutcome, ServerError> {
         use crate::code::remote::driver::RemoteTurnOutcome as Outcome;
@@ -379,7 +384,8 @@ impl CodeRuntime {
                         "the turn was not accepted because the session is busy",
                     ));
                 }
-                self.park_remote_follow_up(owner, session, message).await
+                self.park_remote_follow_up(owner, session, message, actor)
+                    .await
             }
             Outcome::CapExhausted { running } => Err(ServerError::conflict_kind(
                 "sandbox_cap_exhausted",
@@ -411,6 +417,7 @@ impl CodeRuntime {
         owner: &OwnerId,
         session: &Session,
         message: String,
+        actor: Option<tidebreak_core::TurnActor>,
     ) -> Result<SubmitTurnOutcome, ServerError> {
         let queued = tidebreak_core::db::code::list_queued_turns(&self.db, owner, session.id)
             .await
@@ -432,6 +439,7 @@ impl CodeRuntime {
                 id: TurnId::new(),
                 session_id: session.id,
                 message,
+                actor,
                 attachments: Vec::new(),
                 position: 0,
                 created_at: now,
@@ -592,10 +600,14 @@ impl CodeRuntime {
         owner: &OwnerId,
         grant_id: tidebreak_core::CodeGrantId,
         session_id: SessionId,
-        message: String,
-        event_id: &str,
-        channel_ts: &str,
+        message: ExternalMessage,
     ) -> Result<ExternalMessageOutcome, ServerError> {
+        let ExternalMessage {
+            text,
+            event_id,
+            channel_ts,
+            actor,
+        } = message;
         if !tidebreak_core::db::code::session_bound_to_grant(&self.db, owner, session_id, grant_id)
             .await?
         {
@@ -621,7 +633,13 @@ impl CodeRuntime {
             _ => {}
         }
         let record = tidebreak_core::db::code::record_external_message(
-            &self.db, owner, session_id, event_id, channel_ts, &message,
+            &self.db,
+            owner,
+            session_id,
+            &event_id,
+            &channel_ts,
+            &text,
+            &actor,
         )
         .await?;
         let (turn_id, fresh) = match &record {

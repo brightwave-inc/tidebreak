@@ -11,6 +11,7 @@ use crate::OwnerId;
 
 use super::super::{entities, store_err};
 
+pub mod access;
 pub mod approval;
 pub mod binding;
 pub mod connect;
@@ -31,6 +32,7 @@ pub mod watch;
 pub mod workflow_run;
 pub mod workspace;
 
+pub use access::*;
 pub use approval::*;
 pub use binding::*;
 pub use connect::*;

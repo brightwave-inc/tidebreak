@@ -82,6 +82,7 @@ async fn seed_owner(
     insert_session(
         store,
         &Session {
+            visibility: tidebreak_core::SessionVisibility::Private,
             id: session_id,
             owner: owner.clone(),
             workspace_id: Some(workspace_id),
@@ -112,6 +113,7 @@ async fn seed_owner(
         store,
         owner,
         &Turn {
+            actor: None,
             id: turn_id,
             session_id,
             ordinal: 1,
@@ -215,6 +217,7 @@ async fn postgres_code_queries_partition_by_owner() {
         &store,
         &alice,
         &Approval {
+            actor: None,
             id: approval_id,
             session_id: alice_session,
             turn_id: alice_turn,

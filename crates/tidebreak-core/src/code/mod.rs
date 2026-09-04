@@ -1322,6 +1322,72 @@ pub fn bound_subagents(subagents: &mut Vec<CodeSubagentSummary>) {
     }
 }
 
+/// Who may read a session without holding an access row (decision 0086).
+///
+/// Visibility never grants a write. A `deployment` session is readable by any
+/// authenticated principal on the machine; driving it still needs ownership
+/// or a `contribute` row.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionVisibility {
+    #[default]
+    Private,
+    Deployment,
+}
+
+impl SessionVisibility {
+    /// The token the `session.visibility` column stores.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Private => "private",
+            Self::Deployment => "deployment",
+        }
+    }
+
+    /// Read a stored token back, or `None` when the column holds a word this
+    /// build does not know.
+    pub fn from_token(value: &str) -> Option<Self> {
+        match value {
+            "private" => Some(Self::Private),
+            "deployment" => Some(Self::Deployment),
+            _ => None,
+        }
+    }
+}
+
+/// What one `session_access` row lets its subject do (decision 0086).
+///
+/// Ownership stays separate: it is the session's execution identity and its
+/// lifecycle authority, and no level here confers either.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionAccessLevel {
+    /// Read the session and everything under it.
+    View,
+    /// Read, and also submit, queue, steer, interrupt, and decide approvals.
+    Contribute,
+}
+
+impl SessionAccessLevel {
+    /// The token the `session_access.level` column stores.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::View => "view",
+            Self::Contribute => "contribute",
+        }
+    }
+
+    /// Read a stored token back, or `None` when the column holds a word this
+    /// build does not know.
+    pub fn from_token(value: &str) -> Option<Self> {
+        match value {
+            "view" => Some(Self::View),
+            "contribute" => Some(Self::Contribute),
+            _ => None,
+        }
+    }
+}
+
 /// Where a session's engine runs (decision 0088).
 ///
 /// Chosen once, when the session is created, from what the deployment has:
@@ -1360,6 +1426,54 @@ impl ExecutionLocation {
             "machine" => Some(Self::Machine),
             _ => None,
         }
+    }
+}
+
+/// Who submitted a turn, or settled a decision (decision 0086).
+///
+/// Every field is optional, because the paths that write one know different
+/// things. A submit from the desktop or the CLI knows the principal. A submit
+/// through an adapter knows the channel identity, and the display name only
+/// when the channel sent one. A trigger knows its own name and nothing else.
+/// A row written before this field existed carries nothing and renders as the
+/// session's owner.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct TurnActor {
+    /// Principal key, when the submitter holds one on this machine.
+    pub principal: Option<String>,
+    /// Name to show: the channel's display name, or a trigger's name.
+    pub display: Option<String>,
+    /// Channel family the input arrived through, such as `slack`.
+    pub channel_kind: Option<String>,
+    /// The channel's own id for this person.
+    pub external_identity: Option<String>,
+}
+
+impl TurnActor {
+    /// One principal on this machine, with no channel identity.
+    pub fn principal(owner: &crate::OwnerId) -> Self {
+        Self {
+            principal: Some(owner.to_string()),
+            ..Self::default()
+        }
+    }
+
+    /// A trigger firing under the owner's identity, named so the transcript
+    /// does not read as though a person typed it.
+    pub fn trigger(name: &str) -> Self {
+        Self {
+            display: Some(name.to_owned()),
+            ..Self::default()
+        }
+    }
+
+    /// The name to render, falling back to the principal when the channel
+    /// sent no display name.
+    pub fn label(&self) -> Option<&str> {
+        self.display
+            .as_deref()
+            .or(self.principal.as_deref())
+            .filter(|label| !label.is_empty())
     }
 }
 
@@ -1420,6 +1534,11 @@ pub struct Session {
     /// Harness subagents observed on this session, bounded (decision 52).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub subagents: Vec<CodeSubagentSummary>,
+    /// Discovery rule for authenticated principals without an access row
+    /// (decision 0086). A session written before the column existed reads as
+    /// `private`.
+    #[serde(default)]
+    pub visibility: SessionVisibility,
     /// Creation time.
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// Where the engine runs, fixed at creation (decision 0088).
@@ -1448,6 +1567,10 @@ pub struct Turn {
     /// Whether this turn started in the engine's fast service tier.
     #[serde(default)]
     pub fast_mode: bool,
+    /// Who submitted this turn (decision 0086). A row written before the
+    /// column existed stays null and renders as the session's owner.
+    #[serde(default)]
+    pub actor: Option<TurnActor>,
     /// User input, inline when small enough.
     pub user_input: String,
     /// Blob id when the input was spilled, unused in this layer.
@@ -1505,6 +1628,10 @@ pub struct QueuedTurn {
     pub session_id: SessionId,
     /// Byte-exact user message.
     pub message: String,
+    /// Who submitted this message (decision 0086). Promotion carries it onto
+    /// the turn.
+    #[serde(default)]
+    pub actor: Option<TurnActor>,
     /// Bounded image references carried into the promoted turn.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<ImageRef>,
@@ -1958,6 +2085,10 @@ pub struct Approval {
     /// 5: the judge is a capability of that engine, on the one approval row).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_judge_status: Option<crate::approval::AutoJudgeStatus>,
+    /// Who settled this decision (decision 0086). Null while the approval is
+    /// pending, and on rows the engine or a recovery sweep settled.
+    #[serde(default)]
+    pub actor: Option<TurnActor>,
 }
 
 /// A pull-request fact a trigger fires on.

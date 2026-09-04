@@ -50,6 +50,9 @@ pub(crate) enum WorkerCommand {
     RunTurn {
         message: String,
         attachments: Vec<tidebreak_core::ImageRef>,
+        /// Who submitted it (decision 0086). `None` for a path that knows of
+        /// no one but the owner.
+        actor: Option<tidebreak_core::TurnActor>,
         trigger_delivery: Option<TriggerDeliveryClaim>,
         reply: oneshot::Sender<Result<Turn, WorkerError>>,
     },
@@ -237,6 +240,9 @@ pub(crate) struct AttachmentStore {
 pub(crate) struct QueuedFollowUp {
     pub message: String,
     pub attachments: Vec<tidebreak_core::ImageRef>,
+    /// Who submitted the message (decision 0086). A promoted queue row
+    /// carries its own, which wins over this.
+    pub actor: Option<tidebreak_core::TurnActor>,
     pub trigger_delivery: Option<TriggerDeliveryClaim>,
     /// The durable queue row this turn promotes, when the message came from
     /// the queue rather than a live send. The turn is inserted under the
@@ -553,6 +559,7 @@ impl LiveSink {
         }
         let capability = harness_ref.capability.as_ref();
         let approval = Approval {
+            actor: None,
             id: approval_id,
             session_id: self.session_id,
             turn_id,
@@ -974,6 +981,7 @@ async fn run_worker(
                 Some(WorkerCommand::RunTurn {
                     message,
                     attachments,
+                    actor,
                     trigger_delivery,
                     reply,
                 }) => {
@@ -991,6 +999,7 @@ async fn run_worker(
                         QueuedFollowUp {
                             message,
                             attachments,
+                            actor,
                             trigger_delivery,
                             queued_row: None,
                         },
@@ -1552,6 +1561,7 @@ async fn resume_from_settled_row(
             Event::ApprovalResolved {
                 approval_id,
                 decision,
+                ..
             } if approval_id == approval.id => Some(decision),
             _ => None,
         });
@@ -1918,6 +1928,7 @@ async fn drain_queued(
         let follow_up = QueuedFollowUp {
             message: head.message.clone(),
             attachments: head.attachments.clone(),
+            actor: head.actor.clone(),
             trigger_delivery: None,
             queued_row: Some(Box::new(head.clone())),
         };
@@ -2522,6 +2533,7 @@ async fn drive_turn_inner(
     QueuedFollowUp {
         message,
         attachments,
+        actor,
         trigger_delivery,
         queued_row,
     }: QueuedFollowUp,
@@ -2668,6 +2680,10 @@ async fn drive_turn_inner(
         status: TurnStatus::Running,
         model: turn_settings.model.clone(),
         fast_mode: turn_settings.fast_mode,
+        actor: queued_row
+            .as_ref()
+            .and_then(|row| row.actor.clone())
+            .or(actor),
         user_input: message.clone(),
         user_input_blob_id: None,
         attachments,
@@ -4118,6 +4134,7 @@ fn map_event(event: HarnessEvent, turn_id: Option<TurnId>) -> Option<Event> {
         HarnessEvent::ApprovalResolved { decision, .. } => Event::ApprovalResolved {
             approval_id: ApprovalId::new(),
             decision: decision.into(),
+            actor: None,
         },
         HarnessEvent::UserSteered { text } => Event::UserSteered {
             text,

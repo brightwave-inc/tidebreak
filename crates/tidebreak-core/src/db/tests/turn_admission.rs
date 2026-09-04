@@ -40,6 +40,7 @@ async fn make_queued_turn(
         .unwrap();
     let ordinal = last.map_or(1, |row| row.ordinal + 1);
     entities::turn::ActiveModel {
+        actor: sea_orm::ActiveValue::NotSet,
         id: Set(turn_id.0),
         owner: Set(session.owner),
         session_id: Set(chat_id.0),

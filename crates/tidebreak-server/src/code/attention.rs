@@ -348,17 +348,72 @@ pub async fn note_activity(
     Ok(())
 }
 
+/// Publish one session's digest to everyone who may read it.
+///
+/// The owner, every principal an access row resolves for, and — when the
+/// session is `deployment` — every principal currently watching `/updates`,
+/// because that visibility admits any authenticated principal and the store
+/// cannot enumerate them (decision 0086). The notice is still addressed
+/// per principal, so nothing is filtered on the way out.
 pub async fn emit_digest(db: &DbStore, bus: &CodeEventBus, session: &Session) {
-    match build_digest(db, session).await {
-        Ok(digest) => {
-            bus.publish_update(&session.owner, CodeLiveUpdate::Digest(Box::new(digest)));
+    let digest = match build_digest(db, session).await {
+        Ok(digest) => digest,
+        Err(err) => {
+            warn!(
+                session = %session.id,
+                error = %err,
+                "failed to build a code-session digest"
+            );
+            return;
         }
-        Err(err) => warn!(
-            session = %session.id,
-            error = %err,
-            "failed to build a code-session digest"
-        ),
+    };
+    for reader in digest_readers(db, bus, session).await {
+        bus.publish_update(&reader, CodeLiveUpdate::Digest(Box::new(digest.clone())));
     }
+}
+
+/// Tell everyone who may read this session that its access list moved.
+///
+/// The caller names the principals whose claim changed, so a reader that just
+/// lost its row still hears about it and can close what it was watching.
+pub async fn emit_access_changed(
+    db: &DbStore,
+    bus: &CodeEventBus,
+    session: &Session,
+    also: &[OwnerId],
+) {
+    let mut readers = digest_readers(db, bus, session).await;
+    for owner in also {
+        if !readers.contains(owner) {
+            readers.push(owner.clone());
+        }
+    }
+    for reader in readers {
+        bus.publish_update(&reader, CodeLiveUpdate::AccessChanged(session.id));
+    }
+}
+
+async fn digest_readers(db: &DbStore, bus: &CodeEventBus, session: &Session) -> Vec<OwnerId> {
+    let mut readers =
+        match tidebreak_core::db::code::session_readers_all_owners(db, session.id).await {
+            Ok(readers) => readers,
+            Err(err) => {
+                warn!(
+                    session = %session.id,
+                    error = %err,
+                    "failed to resolve a code-session's readers"
+                );
+                vec![session.owner.clone()]
+            }
+        };
+    if session.visibility == tidebreak_core::SessionVisibility::Deployment {
+        for attached in bus.attached_owners() {
+            if !readers.contains(&attached) {
+                readers.push(attached);
+            }
+        }
+    }
+    readers
 }
 
 pub async fn emit_workspace_digests(
@@ -381,9 +436,24 @@ pub async fn emit_workspace_digests(
     }
 }
 
-/// The owner's live session digests, restated on every `/updates`
-/// connection. Scoped: a subscriber never learns that another owner's session
-/// exists.
+/// Every live session digest this principal may read, restated on every
+/// `/updates` connection. Scoped by decision 0086: their own sessions, the
+/// ones an access row admits them to, and the `deployment` ones. A session
+/// they hold no claim on is not something the socket learns exists.
+pub async fn list_accessible_digests(
+    db: &DbStore,
+    principal: &OwnerId,
+) -> Result<Vec<SessionDigest>, tidebreak_core::AgentError> {
+    let mut out = Vec::new();
+    for session in tidebreak_core::db::code::list_accessible_sessions(db, principal).await? {
+        if session.lifecycle != SessionLifecycle::Ended {
+            out.push(build_digest(db, &session).await?);
+        }
+    }
+    Ok(out)
+}
+
+/// The owner's live session digests.
 pub async fn list_digests(
     db: &DbStore,
     owner: &OwnerId,
@@ -700,6 +770,7 @@ mod tests {
 
     fn session_with(attention: Attention) -> Session {
         Session {
+            visibility: tidebreak_core::SessionVisibility::Private,
             id: SessionId::new(),
             owner: tidebreak_core::OwnerId::local(),
             workspace_id: Some(WorkspaceId::new()),

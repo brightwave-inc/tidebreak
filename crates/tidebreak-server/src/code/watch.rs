@@ -651,7 +651,17 @@ async fn sweep_one(runtime: &Arc<CodeRuntime>, watch: &mut CodeWatch) -> Result<
             // sweeps until the worker durably accepts or rejects the turn.
             tokio::spawn(async move {
                 let result = task_runtime
-                    .submit_turn(&task_owner, session_id, instruction, None, None, Vec::new())
+                    .submit_turn(
+                        &task_owner,
+                        session_id,
+                        instruction,
+                        None,
+                        None,
+                        Vec::new(),
+                        // The watch sweep runs under the owner's identity and
+                        // names itself, the way a trigger does.
+                        Some(tidebreak_core::TurnActor::trigger("Watch")),
+                    )
                     .await;
                 let accepted = match &result {
                     Ok(_) => Some(true),

@@ -54,6 +54,7 @@ where
         conn,
         &owner,
         &Approval {
+            actor: None,
             id: ApprovalId(call.id.0),
             session_id: SessionId(call.chat_id.0),
             turn_id: TurnId(call.turn_id.0),

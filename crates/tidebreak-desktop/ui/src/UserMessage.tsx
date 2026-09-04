@@ -12,6 +12,12 @@ type UserMessageProps = {
   createdAt?: string;
   /** Landing point for transcript-rail and deep-link jumps. */
   anchorId?: string;
+  /**
+   * Who sent it, when that is someone other than the reader. A shared session
+   * has several contributors (decision 0086); a session with one reads as
+   * "You" the way it always did.
+   */
+  author?: string;
   /** Rendered above the prose — chat puts its image and file attachments here. */
   leading?: ReactNode;
   /** Rendered below the prose — chat puts the skills the turn invoked here. */
@@ -31,6 +37,7 @@ export function UserMessage({
   text,
   createdAt,
   anchorId,
+  author,
   leading,
   trailing,
 }: UserMessageProps) {
@@ -40,9 +47,12 @@ export function UserMessage({
     <div className="message-user-frame">
       <article
         className="message message-user"
-        aria-label="You"
+        aria-label={author ?? "You"}
         data-transcript-anchor={anchorId}
       >
+        {author && (
+          <p className="text-muted-foreground mb-1 text-xs">{author}</p>
+        )}
         {leading}
         {prose && <MessageMarkdown>{prose}</MessageMarkdown>}
         {pasted.map((block, index) => (

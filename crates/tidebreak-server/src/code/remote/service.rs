@@ -581,7 +581,15 @@ mod tests {
         assert_eq!(session.lifecycle, SessionLifecycle::Idle);
 
         let outcome = runtime
-            .submit_turn(&owner, session.id, "start".into(), None, None, Vec::new())
+            .submit_turn(
+                &owner,
+                session.id,
+                "start".into(),
+                None,
+                None,
+                Vec::new(),
+                None,
+            )
             .await
             .unwrap();
         assert!(matches!(outcome, SubmitTurnOutcome::Ran(_)));
@@ -603,6 +611,7 @@ mod tests {
                 None,
                 None,
                 Vec::new(),
+                None,
             )
             .await
             .unwrap();
@@ -721,7 +730,15 @@ mod tests {
             .await
             .unwrap();
         runtime
-            .submit_turn(&owner, session.id, "start".into(), None, None, Vec::new())
+            .submit_turn(
+                &owner,
+                session.id,
+                "start".into(),
+                None,
+                None,
+                Vec::new(),
+                None,
+            )
             .await
             .unwrap();
         runtime
@@ -732,6 +749,7 @@ mod tests {
                 None,
                 None,
                 Vec::new(),
+                None,
             )
             .await
             .unwrap();
@@ -869,6 +887,7 @@ mod tests {
             &runtime.db,
             &owner,
             &tidebreak_core::code::QueuedTurn {
+                actor: None,
                 id: tidebreak_core::TurnId::new(),
                 session_id: blocked.id,
                 message: "waiting".into(),
@@ -975,6 +994,7 @@ mod tests {
             &runtime.db,
             &owner,
             &tidebreak_core::code::QueuedTurn {
+                actor: None,
                 id: tidebreak_core::TurnId::new(),
                 session_id: session.id,
                 message: "one more".into(),
@@ -1030,7 +1050,15 @@ mod tests {
             .await
             .unwrap();
         runtime
-            .submit_turn(&owner, session.id, "start".into(), None, None, Vec::new())
+            .submit_turn(
+                &owner,
+                session.id,
+                "start".into(),
+                None,
+                None,
+                Vec::new(),
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(fake.spawns.lock().unwrap().len(), 1);
@@ -1077,7 +1105,15 @@ mod tests {
             .await
             .unwrap();
         runtime
-            .submit_turn(&owner, session.id, "start".into(), None, None, Vec::new())
+            .submit_turn(
+                &owner,
+                session.id,
+                "start".into(),
+                None,
+                None,
+                Vec::new(),
+                None,
+            )
             .await
             .unwrap();
         let mut live = runtime.get_session(&owner, session.id).await.unwrap();
@@ -1121,7 +1157,15 @@ mod tests {
             .await
             .unwrap();
         runtime
-            .submit_turn(&owner, session.id, "start".into(), None, None, Vec::new())
+            .submit_turn(
+                &owner,
+                session.id,
+                "start".into(),
+                None,
+                None,
+                Vec::new(),
+                None,
+            )
             .await
             .unwrap();
         runtime.interrupt(session.id).await.unwrap();
@@ -1181,6 +1225,7 @@ mod tests {
                 &owner,
                 session.id,
                 "review changed".into(),
+                "Trigger: checks failed",
                 tidebreak_core::CodeTriggerDeliveryId::new(),
                 uuid::Uuid::new_v4(),
             )
@@ -1210,6 +1255,7 @@ mod tests {
                     height: 1,
                     byte_len: 1,
                 }],
+                None,
             )
             .await
         {
@@ -1267,7 +1313,15 @@ mod tests {
             .await
             .unwrap();
         runtime
-            .submit_turn(&owner, session.id, "start".into(), None, None, Vec::new())
+            .submit_turn(
+                &owner,
+                session.id,
+                "start".into(),
+                None,
+                None,
+                Vec::new(),
+                None,
+            )
             .await
             .unwrap();
         runtime.end_session_row(&owner, session.id).await.unwrap();
@@ -1411,9 +1465,12 @@ mod tests {
                 &owner,
                 grant,
                 session_id,
-                "start".into(),
-                "Ev1",
-                "1700000001.000100",
+                crate::code::runtime::ExternalMessage {
+                    text: "start".into(),
+                    event_id: "Ev1".to_owned(),
+                    channel_ts: "1700000001.000100".to_owned(),
+                    actor: tidebreak_core::TurnActor::default(),
+                },
             )
             .await
             .unwrap();
@@ -1428,9 +1485,12 @@ mod tests {
                 &owner,
                 grant,
                 session_id,
-                "start".into(),
-                "Ev1",
-                "1700000001.000100",
+                crate::code::runtime::ExternalMessage {
+                    text: "start".into(),
+                    event_id: "Ev1".to_owned(),
+                    channel_ts: "1700000001.000100".to_owned(),
+                    actor: tidebreak_core::TurnActor::default(),
+                },
             )
             .await
             .unwrap();
@@ -1447,9 +1507,12 @@ mod tests {
                 &owner,
                 grant,
                 session_id,
-                "and then".into(),
-                "Ev2",
-                "1700000002.000100",
+                crate::code::runtime::ExternalMessage {
+                    text: "and then".into(),
+                    event_id: "Ev2".to_owned(),
+                    channel_ts: "1700000002.000100".to_owned(),
+                    actor: tidebreak_core::TurnActor::default(),
+                },
             )
             .await
             .unwrap();
@@ -1461,9 +1524,12 @@ mod tests {
                 &owner,
                 grant,
                 session_id,
-                "and then".into(),
-                "Ev2",
-                "1700000002.000100",
+                crate::code::runtime::ExternalMessage {
+                    text: "and then".into(),
+                    event_id: "Ev2".to_owned(),
+                    channel_ts: "1700000002.000100".to_owned(),
+                    actor: tidebreak_core::TurnActor::default(),
+                },
             )
             .await
             .unwrap();
@@ -1480,9 +1546,12 @@ mod tests {
                 &owner,
                 tidebreak_core::CodeGrantId::new(),
                 session_id,
-                "hijack".into(),
-                "Ev3",
-                "1700000003.000100",
+                crate::code::runtime::ExternalMessage {
+                    text: "hijack".into(),
+                    event_id: "Ev3".to_owned(),
+                    channel_ts: "1700000003.000100".to_owned(),
+                    actor: tidebreak_core::TurnActor::default(),
+                },
             )
             .await;
         assert!(foreign.is_err(), "a foreign grant must refuse");
@@ -1498,9 +1567,12 @@ mod tests {
                 &owner,
                 grant,
                 session_id,
-                "still there?".into(),
-                "Ev4",
-                "1700000004.000100",
+                crate::code::runtime::ExternalMessage {
+                    text: "still there?".into(),
+                    event_id: "Ev4".to_owned(),
+                    channel_ts: "1700000004.000100".to_owned(),
+                    actor: tidebreak_core::TurnActor::default(),
+                },
             )
             .await;
         assert!(ended.is_err(), "an ended session must refuse");
@@ -1541,9 +1613,12 @@ mod tests {
                 &owner,
                 grant,
                 session_id,
-                "start".into(),
-                "Ev0",
-                "1700000000.000100",
+                crate::code::runtime::ExternalMessage {
+                    text: "start".into(),
+                    event_id: "Ev0".to_owned(),
+                    channel_ts: "1700000000.000100".to_owned(),
+                    actor: tidebreak_core::TurnActor::default(),
+                },
             )
             .await
             .unwrap();
@@ -1552,9 +1627,12 @@ mod tests {
                 &owner,
                 grant,
                 session_id,
-                "message B".into(),
-                "EvB",
-                "1700000002.000100",
+                crate::code::runtime::ExternalMessage {
+                    text: "message B".into(),
+                    event_id: "EvB".to_owned(),
+                    channel_ts: "1700000002.000100".to_owned(),
+                    actor: tidebreak_core::TurnActor::default(),
+                },
             )
             .await
             .unwrap();
@@ -1575,9 +1653,12 @@ mod tests {
                 &owner,
                 grant,
                 session_id,
-                "message A".into(),
-                "EvA",
-                "1700000001.000100",
+                crate::code::runtime::ExternalMessage {
+                    text: "message A".into(),
+                    event_id: "EvA".to_owned(),
+                    channel_ts: "1700000001.000100".to_owned(),
+                    actor: tidebreak_core::TurnActor::default(),
+                },
             )
             .await
             .unwrap();
@@ -1645,9 +1726,12 @@ mod tests {
                 &owner,
                 grant,
                 session_id,
-                "message B".into(),
-                "EvB",
-                "1700000002.000100",
+                crate::code::runtime::ExternalMessage {
+                    text: "message B".into(),
+                    event_id: "EvB".to_owned(),
+                    channel_ts: "1700000002.000100".to_owned(),
+                    actor: tidebreak_core::TurnActor::default(),
+                },
             )
             .await
             .unwrap();

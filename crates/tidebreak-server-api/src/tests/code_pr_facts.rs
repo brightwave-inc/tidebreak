@@ -181,6 +181,7 @@ async fn seeded(store: &tidebreak_core::DbStore, worktree: &std::path::Path) -> 
         attention: Attention::working(AttentionSource::Lifecycle),
         unrecognized_event_count: 0,
         subagents: Vec::new(),
+        visibility: tidebreak_core::SessionVisibility::Private,
         created_at: chrono::Utc::now(),
         execution_location: tidebreak_core::ExecutionLocation::Machine,
     };
@@ -190,6 +191,7 @@ async fn seeded(store: &tidebreak_core::DbStore, worktree: &std::path::Path) -> 
         store,
         &owner,
         &Turn {
+            actor: None,
             id: turn_id,
             session_id: session.id,
             ordinal: 1,

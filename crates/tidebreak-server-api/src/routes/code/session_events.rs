@@ -5,18 +5,24 @@
 //! live stream also carries frames the journal does not hold: assistant
 //! deltas stream and are never written down (record 57), so they arrive
 //! marked `transient` with no cursor of their own.
+//!
+//! A reader who is not the owner holds their claim through an access row or
+//! `deployment` visibility (decision 0086), and either can be withdrawn while
+//! they watch. Such a socket also listens on that principal's updates channel,
+//! so a revoke closes it on the next event rather than at the next reconnect.
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::Response;
 use axum::Extension;
+use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 
 use tidebreak_core::db::code::{list_events, MAX_REPLAY_EVENTS};
 use tidebreak_core::{Event, OwnerId, SessionId};
 
 use crate::auth::{offered_handshake_subprotocol, GatewayAuthLease, WS_HANDSHAKE_SUBPROTOCOL};
-use crate::code::bus::LiveTail;
+use crate::code::bus::{CodeLiveUpdate, LiveTail};
 use crate::code::ScopedCode;
 use crate::error::ServerError;
 use crate::extract::{Path, Query};
@@ -37,8 +43,8 @@ pub async fn session_events(
     // Authorize before upgrading: the per-session channel is keyed by id, so
     // the principal's claim to this session is settled here, on the chat
     // journal's pattern, rather than by filtering frames afterwards.
-    let _ = code.get_session(id).await?;
-    let owner = code.owner().clone();
+    let principal = code.owner().clone();
+    let (owner, is_owner) = code.event_stream_access(id).await?;
     let auth_lease = auth_lease.map(|Extension(lease)| lease);
     let upgrade = if offered_handshake_subprotocol(&headers) {
         upgrade.protocols([WS_HANDSHAKE_SUBPROTOCOL])
@@ -53,16 +59,26 @@ pub async fn session_events(
             id,
             query.after,
             auth_lease,
-            Viewer::Owner,
+            if is_owner {
+                Viewer::Owner
+            } else {
+                Viewer::Granted(principal)
+            },
         )
     }))
 }
 
 /// Who is on the other end of an events socket. The owner's own reader
-/// counts as looking at the session; an adapter's follower does not.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// counts as looking at the session; a granted reader's and an adapter's
+/// follower do not.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Viewer {
     Owner,
+    /// A second principal reading through an access row or `deployment`
+    /// visibility (decision 0086). Their reading is not the owner's review,
+    /// and their claim can be withdrawn while they watch, so the variant
+    /// carries who they are rather than leaving that to a parallel argument.
+    Granted(OwnerId),
     Adapter,
 }
 
@@ -79,6 +95,18 @@ pub(super) async fn stream_events(
     let Some(runtime) = state.code.clone() else {
         return;
     };
+    // A granted reader's claim can be withdrawn while they are watching. The
+    // revoking route publishes on their updates channel, so this socket learns
+    // of it on the same breath rather than by polling the row (decision 0086).
+    // The owner's claim never is, and an adapter's rides on its grant, so
+    // neither subscribes.
+    let granted = match &viewer {
+        Viewer::Granted(principal) => Some(principal.clone()),
+        Viewer::Owner | Viewer::Adapter => None,
+    };
+    let mut access_notices = granted
+        .as_ref()
+        .map(|principal| runtime.bus.subscribe_updates(principal));
     let (mut live, tail) = runtime.bus.attach(session);
     // Only the desktop's own socket means the owner is looking at the
     // session. The adapter's follower is a renderer, not a viewer: its
@@ -101,6 +129,24 @@ pub(super) async fn stream_events(
             incoming = socket.recv() => match incoming {
                 None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
                 _ => {}
+            },
+            _ = next_access_change(access_notices.as_mut(), session) => {
+                let principal = granted
+                    .as_ref()
+                    .expect("only a granted reader subscribes to access notices");
+                let still_current = tidebreak_core::db::code::resolve_session_access(
+                    &runtime.db,
+                    principal,
+                    session,
+                )
+                .await
+                .ok()
+                .flatten()
+                .is_some();
+                if !still_current {
+                    let _ = socket.send(Message::Close(None)).await;
+                    break;
+                }
             },
             _ = wait_for_gateway_auth_revalidation(&mut auth_revalidation) => {
                 let invalid = match auth_lease.as_ref() {
@@ -183,6 +229,31 @@ pub(super) async fn stream_events(
                 }
                 Err(RecvError::Closed) => break,
             },
+        }
+    }
+}
+
+/// Wait until this session's access list moves under the reader's feet.
+///
+/// Pends forever when there is no channel, which is the owner's and the
+/// adapter's case: neither holds a row that could be revoked. A dropped
+/// notice resolves too, because holding a stream open on a claim this socket
+/// can no longer vouch for is not something a full channel may cause.
+async fn next_access_change(
+    notices: Option<&mut broadcast::Receiver<CodeLiveUpdate>>,
+    session: SessionId,
+) {
+    let Some(notices) = notices else {
+        return std::future::pending().await;
+    };
+    loop {
+        match notices.recv().await {
+            Ok(CodeLiveUpdate::AccessChanged(id)) if id == session => return,
+            Ok(_) => continue,
+            Err(RecvError::Lagged(_)) => return,
+            // The bus outlives the process, so a closed channel is not a
+            // revocation. Stop listening rather than close a live stream.
+            Err(RecvError::Closed) => return std::future::pending().await,
         }
     }
 }

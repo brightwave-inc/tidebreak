@@ -2,11 +2,18 @@
 //!
 //! The channel is partitioned by owner in the bus rather than filtered here:
 //! [`ScopedCode`] resolves the requesting principal before the upgrade, and
-//! the receiver this socket holds is subscribed to that owner alone. A digest
-//! for another owner is not dropped on the way out — it never arrives, and no
-//! code in this file could publish it if it did. Decision 47 names the
-//! alternative, filtering an install-wide stream at the route or in the
-//! client, as the wrong implementation.
+//! the receiver this socket holds is subscribed to that principal alone. A
+//! digest addressed to someone else is not dropped on the way out — it never
+//! arrives, and no code in this file could publish it if it did. Decision 47
+//! names the alternative, filtering an install-wide stream at the route or in
+//! the client, as the wrong implementation.
+//!
+//! What is addressed to a principal is wider than their own sessions now.
+//! Decision 0086 gives a session readers besides its owner, so the snapshot
+//! this socket restates is every live session the principal may read, and the
+//! publisher decides who a digest reaches. An `AccessChanged` notice restates
+//! that snapshot, which is how a revoked session leaves a live client's list
+//! without waiting for a reconnect.
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -17,7 +24,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tidebreak_core::OwnerId;
 
 use crate::auth::{offered_handshake_subprotocol, GatewayAuthLease, WS_HANDSHAKE_SUBPROTOCOL};
-use crate::code::attention::list_digests;
+use crate::code::attention::list_accessible_digests;
 use crate::code::bus::CodeLiveUpdate;
 use crate::code::ScopedCode;
 use crate::error::ServerError;
@@ -55,16 +62,8 @@ async fn stream_updates(
     };
     let mut live = runtime.bus.subscribe_updates(&owner);
     let mut terminals = state.terminals.subscribe(&owner);
-    match list_digests(&runtime.db, &owner).await {
-        Ok(sessions) => {
-            let notice = UpdateNotice::Snapshot {
-                sessions: sessions.into_iter().map(SessionDigest::from).collect(),
-            };
-            if send_notice(&mut socket, &notice).await.is_err() {
-                return;
-            }
-        }
-        Err(_) => return,
+    if send_snapshot(&mut socket, &runtime, &owner).await.is_err() {
+        return;
     }
     loop {
         tokio::select! {
@@ -123,20 +122,17 @@ async fn stream_updates(
                         break;
                     }
                 }
+                Ok(CodeLiveUpdate::AccessChanged(_)) => {
+                    // A row was granted or revoked, or visibility moved. The
+                    // snapshot is what says which sessions this principal may
+                    // see now, so restate it rather than patch one digest.
+                    if send_snapshot(&mut socket, &runtime, &owner).await.is_err() {
+                        break;
+                    }
+                }
                 Err(RecvError::Lagged(_)) => {
-                    match list_digests(&runtime.db, &owner).await {
-                        Ok(sessions) => {
-                            let notice = UpdateNotice::Snapshot {
-                                sessions: sessions
-                                    .into_iter()
-                                    .map(SessionDigest::from)
-                                    .collect(),
-                            };
-                            if send_notice(&mut socket, &notice).await.is_err() {
-                                break;
-                            }
-                        }
-                        Err(_) => break,
+                    if send_snapshot(&mut socket, &runtime, &owner).await.is_err() {
+                        break;
                     }
                 }
                 Err(RecvError::Closed) => break,
@@ -161,6 +157,24 @@ async fn stream_updates(
             },
         }
     }
+}
+
+/// Restate every live session this principal may read.
+///
+/// The snapshot is the whole answer to "what may I see", so a client that
+/// gains or loses access needs no reconciliation of its own.
+async fn send_snapshot(
+    socket: &mut WebSocket,
+    runtime: &crate::code::runtime::CodeRuntime,
+    owner: &OwnerId,
+) -> Result<(), ()> {
+    let sessions = list_accessible_digests(&runtime.db, owner)
+        .await
+        .map_err(|_| ())?;
+    let notice = UpdateNotice::Snapshot {
+        sessions: sessions.into_iter().map(SessionDigest::from).collect(),
+    };
+    send_notice(socket, &notice).await.map_err(|_| ())
 }
 
 async fn send_notice(socket: &mut WebSocket, notice: &UpdateNotice) -> Result<(), axum::Error> {

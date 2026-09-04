@@ -765,6 +765,7 @@ async fn pin_code_turn_attachment(store: &DbStore, blob: &DocumentBlob) {
     insert_session(
         store,
         &Session {
+            visibility: crate::SessionVisibility::Private,
             id: session_id,
             owner: crate::OwnerId::local(),
             workspace_id: Some(workspace_id),
@@ -794,6 +795,7 @@ async fn pin_code_turn_attachment(store: &DbStore, blob: &DocumentBlob) {
         store,
         &crate::OwnerId::local(),
         &Turn {
+            actor: None,
             id: TurnId::new(),
             session_id,
             ordinal: 1,

@@ -376,6 +376,7 @@ async fn settle_interrupted_session(
         let event = Event::ApprovalResolved {
             approval_id: ApprovalId(approval.id),
             decision: ApprovalDecisionKind::Abandoned,
+            actor: None,
         };
         let seq = append_event_on_locked(&transaction, owner, session_id, &event).await?;
         events.push(SequencedEvent { seq, event });

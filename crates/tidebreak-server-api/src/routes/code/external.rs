@@ -20,7 +20,7 @@ use tidebreak_core::{
     RepoId, SessionId,
 };
 
-use crate::code::runtime::{ExternalMessageOutcome, NewSessionSettings};
+use crate::code::runtime::{ExternalMessage, ExternalMessageOutcome, NewSessionSettings};
 use crate::error::ServerError;
 use crate::extract::{Json, Path, Query};
 use crate::state::AppState;
@@ -190,6 +190,8 @@ pub struct ExternalMessageBody {
     /// The channel's ordering token; still-queued messages apply in its
     /// order.
     pub channel_ts: String,
+    /// Display name the channel supplied, when available.
+    pub display: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -211,14 +213,25 @@ pub async fn external_messages(
     Json(body): Json<ExternalMessageBody>,
 ) -> Result<Json<ExternalMessageResponse>, ServerError> {
     let runtime = require_bound(&state, &grant, id).await?;
+    // The turn is attributed to the channel identity behind the grant, not to
+    // the shared principal that owns the session (decision 0086). The display
+    // name is whatever the channel sent, and nothing more.
     let outcome = runtime
         .external_submit_message(
             &grant.owner,
             grant.id,
             id,
-            body.text,
-            &body.event_id,
-            &body.channel_ts,
+            ExternalMessage {
+                text: body.text,
+                event_id: body.event_id,
+                channel_ts: body.channel_ts,
+                actor: tidebreak_core::TurnActor {
+                    principal: None,
+                    display: body.display,
+                    channel_kind: Some(grant.channel_kind.clone()),
+                    external_identity: Some(grant.external_identity.clone()),
+                },
+            },
         )
         .await?;
     let response = match outcome {

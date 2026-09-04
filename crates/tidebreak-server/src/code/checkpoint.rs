@@ -2494,6 +2494,7 @@ mod tests {
         .await
         .unwrap();
         let session = Session {
+            visibility: tidebreak_core::SessionVisibility::Private,
             id: SessionId::new(),
             owner,
             workspace_id: Some(workspace_id),
@@ -2527,6 +2528,7 @@ mod tests {
         status: TurnStatus,
     ) -> Turn {
         let turn = Turn {
+            actor: None,
             id: TurnId::new(),
             session_id: session.id,
             ordinal,

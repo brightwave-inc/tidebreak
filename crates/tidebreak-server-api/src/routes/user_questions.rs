@@ -82,6 +82,12 @@ pub async fn answer_user_questions(
                     crate::code::runtime::ApprovalDecisionRequest::Answers {
                         answers: answers.answers.clone(),
                     },
+                    Some(tidebreak_core::TurnActor {
+                        principal: Some(store.owner_id().to_string()),
+                        display: None,
+                        channel_kind: None,
+                        external_identity: None,
+                    }),
                 )
                 .await
             {

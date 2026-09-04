@@ -93,6 +93,7 @@ where
         output_message_id: Set(None),
         updated_at: Set(Some(turn.started_at)),
         fingerprint: Set(None),
+        actor: Set(turn.actor.as_ref().map(serde_json::to_value).transpose()?),
     }
     .insert(conn)
     .await
@@ -852,6 +853,11 @@ pub(super) fn turn_from_row(row: entities::turn::Model) -> Result<Turn> {
     };
     let usage = code_usage_from_stored(row.id, row.usage)?;
     Ok(Turn {
+        actor: row
+            .actor
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|err| AgentError::Store(format!("turn {} actor: {err}", row.id)))?,
         id: TurnId(row.id),
         session_id: SessionId(row.session_id),
         ordinal: row.ordinal,

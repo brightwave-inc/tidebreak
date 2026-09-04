@@ -9,6 +9,7 @@ use tidebreak_core::{
 /// A session value with sensible remote defaults, unsaved.
 pub(crate) fn session_value() -> Session {
     Session {
+        visibility: tidebreak_core::SessionVisibility::Private,
         id: SessionId::new(),
         owner: OwnerId::local(),
         workspace_id: Some(WorkspaceId::new()),

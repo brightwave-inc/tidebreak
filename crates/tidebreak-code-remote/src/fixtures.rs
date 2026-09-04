@@ -182,6 +182,7 @@ pub(crate) fn session_value() -> Session {
         subagents: Vec::new(),
         created_at: chrono::Utc::now(),
         execution_location: tidebreak_core::ExecutionLocation::Machine,
+        visibility: tidebreak_core::SessionVisibility::Private,
     }
 }
 

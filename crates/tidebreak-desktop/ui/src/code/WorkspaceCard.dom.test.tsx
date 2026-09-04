@@ -344,6 +344,7 @@ describe("WorkspaceCard", () => {
     renderCard({
       digest,
       session: {
+        visibility: "private",
         id: "sess-1",
         workspace_id: workspace.id,
         kind: "interactive",
@@ -523,6 +524,7 @@ describe("WorkspaceCard", () => {
       recap: "Folded the backoff into refresh.",
     };
     const session: CodeSessionSnapshot = {
+      visibility: "private",
       id: "sess-1",
       workspace_id: workspace.id,
       kind: "interactive",
@@ -723,6 +725,7 @@ describe("WorkspaceCard", () => {
       activity: "agent",
     };
     const session: CodeSessionSnapshot = {
+      visibility: "private",
       id: "sess-1",
       workspace_id: workspace.id,
       kind: "interactive",
@@ -772,6 +775,7 @@ describe("WorkspaceCard", () => {
       activity: "agent",
     };
     const stoppedCodex: CodeSessionSnapshot = {
+      visibility: "private",
       id: "sess-codex",
       workspace_id: workspace.id,
       kind: "interactive",
