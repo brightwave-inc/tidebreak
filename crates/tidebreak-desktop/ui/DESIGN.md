@@ -258,3 +258,15 @@ A destructive action goes through `useConfirm`, which opens the shared
 consequence, a safe Cancel default, and the `destructive` action variant on
 the confirm button. `destructive` is the only chromatic button fill. Do not
 add type-to-confirm fields or a second confirmation shape.
+
+### Notices and errors
+
+Use `notice-surface` with `notice-info`, `notice-warning`, `notice-critical`,
+or `notice-success` for banners and notices. Keep the surface neutral and the
+body in normal ink. A thin leading edge carries the status color; icons may
+repeat it. Do not fill a notice with a status color. Keep its role, recovery
+actions, and error detail accessible.
+
+In chat and code journals, notices span the full message column regardless of
+text length or severity. Do not add a prose-width cap or size a notice to its
+content. Compaction stays a plain text event in the same column.

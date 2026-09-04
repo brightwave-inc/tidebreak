@@ -92,7 +92,7 @@ export function PartialErrorBanner({
     <div
       role="status"
       className={cn(
-        "flex shrink-0 items-start gap-2 border-b border-warning-border bg-warning-background px-5 py-2.5 text-xs text-warning-foreground-muted",
+        "notice-surface notice-warning flex shrink-0 items-start gap-2 border-b px-5 py-2.5 text-xs",
         compact && "border-t",
       )}
     >
@@ -110,7 +110,7 @@ export function RepositoryRefreshWarning({
   onRetry: () => void;
 }) {
   return (
-    <div className="flex shrink-0 items-center justify-between gap-3 border-b border-warning-border bg-warning-background px-5 py-2.5 text-xs text-warning-foreground-muted">
+    <div className="notice-surface notice-warning flex shrink-0 items-center justify-between gap-3 border-b px-5 py-2.5 text-xs">
       <span>GitHub repository discovery is stale: {message}</span>
       <Button type="button" size="xs" variant="outline" onClick={onRetry}>
         Try again
@@ -162,7 +162,7 @@ export function InlineLoadError({
   onRetry: () => void;
 }) {
   return (
-    <div className="m-4 flex items-center justify-between gap-3 rounded-lg border border-critical-border bg-critical-background px-3 py-2 text-sm text-critical-foreground-muted">
+    <div className="notice-surface notice-critical m-4 flex items-center justify-between gap-3 rounded-lg border px-3 py-2 text-sm">
       <span>{message}</span>
       <Button type="button" size="xs" variant="outline" onClick={onRetry}>
         Try again

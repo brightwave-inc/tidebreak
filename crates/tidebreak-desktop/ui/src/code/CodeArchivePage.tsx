@@ -345,7 +345,7 @@ function CodeArchiveBody() {
         {!loaded ? (
           <ArchiveSkeleton />
         ) : error ? (
-          <div className="m-5 rounded-lg border border-critical-border bg-critical-background px-3 py-2 text-sm text-critical-foreground-muted">
+          <div className="notice-surface notice-critical m-5 rounded-lg border px-3 py-2 text-sm">
             {error}
           </div>
         ) : totalArchived === 0 ? (

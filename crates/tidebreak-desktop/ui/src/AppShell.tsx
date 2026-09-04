@@ -941,7 +941,7 @@ export function AppShell() {
             will close and reopen. Wait for active work to finish before
             restarting.
           </span>
-          <span className="border-warning-border bg-warning-background text-warning-foreground mt-3 block rounded-md border px-3 py-2.5">
+          <span className="notice-surface notice-warning mt-3 block rounded-md border px-3 py-2.5">
             <strong className="block font-medium">Pre-v1 data warning</strong>
             <span className="mt-0.5 block">
               Until Tidebreak reaches version 1.0, this update may wipe all

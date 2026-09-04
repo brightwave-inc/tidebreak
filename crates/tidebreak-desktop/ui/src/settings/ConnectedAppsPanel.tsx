@@ -829,7 +829,7 @@ export function ConnectedAppsPanel({
         </p>
       )}
       {loopbackHttpHost(draft.baseUrl) !== null && (
-        <div className="flex flex-col gap-2 rounded-xl border border-warning-border bg-warning-background px-3 py-2">
+        <div className="notice-surface notice-warning flex flex-col gap-2 rounded-xl border px-3 py-2">
           <p className="text-sm font-medium">
             Allow clear-text HTTP on this computer?
           </p>

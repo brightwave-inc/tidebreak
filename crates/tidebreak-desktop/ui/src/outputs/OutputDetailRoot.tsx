@@ -506,7 +506,7 @@ export function OutputDetailRoot({
       {confirmDialog}
       {previewRevision && (
         <div
-          className="mx-6 mt-3 flex shrink-0 flex-wrap items-center gap-2 rounded-md bg-info-background px-3 py-2 text-sm text-info-foreground-muted"
+          className="notice-surface notice-info mx-6 mt-3 flex shrink-0 flex-wrap items-center gap-2 rounded-md px-3 py-2 text-sm"
           role="status"
         >
           <HistoryIcon className="size-4 shrink-0" />
@@ -539,7 +539,7 @@ export function OutputDetailRoot({
       )}
       {editConflict && (
         <div
-          className="mx-6 mt-3 flex shrink-0 flex-wrap items-center gap-2 rounded-md bg-critical-background px-3 py-2 text-sm text-critical-foreground-muted"
+          className="notice-surface notice-critical mx-6 mt-3 flex shrink-0 flex-wrap items-center gap-2 rounded-md px-3 py-2 text-sm"
           role="alert"
         >
           <span className="min-w-0 flex-1">

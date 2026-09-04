@@ -499,7 +499,7 @@ export function BrowserToolbar({
         <p
           id={addressErrorId}
           role="alert"
-          className="border-t border-critical-border/45 bg-critical-background/55 px-3 py-1 text-xs text-critical-foreground"
+          className="notice-surface notice-critical border-t px-3 py-1 text-xs"
         >
           {addressError}
         </p>
@@ -516,7 +516,7 @@ export function BrowserToolbar({
         <div
           role="status"
           aria-live="polite"
-          className="border-t border-info-border bg-info-background px-3 py-1.5 text-xs text-info-foreground"
+          className="notice-surface notice-info border-t px-3 py-1.5 text-xs"
         >
           <span className="live-label-shimmer">
             {profileResetStatusMessage(lastResetPhaseRef.current)}
@@ -910,13 +910,10 @@ export function BrowserNoticeRow({
   return (
     <div
       className={cn(
-        "flex min-h-8 shrink-0 items-center gap-2 border-b px-3 py-1 text-xs",
-        tone === "info" &&
-          "border-info-border bg-info-background text-info-foreground",
-        tone === "warning" &&
-          "border-warning-border bg-warning-background text-warning-foreground",
-        tone === "critical" &&
-          "border-critical-border bg-critical-background text-critical-foreground",
+        "notice-surface flex min-h-8 shrink-0 items-center gap-2 border-b px-3 py-1 text-xs",
+        tone === "info" && "notice-info",
+        tone === "warning" && "notice-warning",
+        tone === "critical" && "notice-critical",
       )}
     >
       <Icon className="size-3.5 shrink-0" />

@@ -1714,7 +1714,7 @@ function ProbeFailure({
   onRetry: () => void;
 }) {
   return (
-    <div className="rounded-lg border border-warning-border bg-warning-background p-3">
+    <div className="notice-surface notice-warning rounded-lg border p-3">
       <p className={cn("text-sm", STATUS_TEXT.warning)}>{message}</p>
       <Button
         type="button"
