@@ -340,6 +340,7 @@ async fn seed_owner(
     insert_session(
         store,
         &Session {
+            visibility: crate::SessionVisibility::Private,
             id: session_id,
             owner: owner.clone(),
             workspace_id: Some(workspace_id),
@@ -369,6 +370,7 @@ async fn seed_owner(
         store,
         owner,
         &Turn {
+            actor: None,
             id: turn_id,
             session_id,
             ordinal: 1,
@@ -983,6 +985,7 @@ async fn entity_graph_round_trips() {
         &store,
         &OwnerId::local(),
         &Approval {
+            actor: None,
             id: approval_id,
             session_id,
             turn_id,
@@ -1027,6 +1030,7 @@ async fn approval_claim_and_abandonment_have_one_winner() {
         &store,
         &owner,
         &Approval {
+            actor: None,
             id: approval_id,
             session_id,
             turn_id,
@@ -1083,6 +1087,7 @@ async fn approval_claim_and_abandonment_have_one_winner() {
             &store,
             &owner,
             ClaimedApprovalSettlement {
+                actor: None,
                 approval_id,
                 session_id,
                 worker_epoch: session.spawn_epoch,
@@ -1126,6 +1131,7 @@ async fn approval_request_rolls_back_when_its_journal_event_fails() {
     assert!(save_session(&store, &session).await.unwrap());
     let approval_id = ApprovalId::new();
     let approval = Approval {
+        actor: None,
         id: approval_id,
         session_id,
         turn_id,
@@ -1178,6 +1184,7 @@ async fn approval_settlement_rolls_back_when_its_journal_event_fails() {
         &store,
         &owner,
         &Approval {
+            actor: None,
             id: approval_id,
             session_id,
             turn_id,
@@ -1226,6 +1233,7 @@ async fn approval_settlement_rolls_back_when_its_journal_event_fails() {
         &store,
         &owner,
         ClaimedApprovalSettlement {
+            actor: None,
             approval_id,
             session_id,
             worker_epoch: session.spawn_epoch,
@@ -1265,6 +1273,7 @@ async fn a_replaced_worker_cannot_insert_a_late_approval() {
     assert_eq!(bump_spawn_epoch(&store, session_id, None).await.unwrap(), 1);
     let approval_id = ApprovalId::new();
     let approval = Approval {
+        actor: None,
         id: approval_id,
         session_id,
         turn_id,
@@ -1310,6 +1319,7 @@ async fn restart_abandons_claimed_and_unclaimed_approvals_for_the_stopped_worker
         &store,
         &owner,
         &Approval {
+            actor: None,
             id: claimed_id,
             session_id,
             turn_id,
@@ -1351,6 +1361,7 @@ async fn restart_abandons_claimed_and_unclaimed_approvals_for_the_stopped_worker
         &store,
         &owner,
         &Approval {
+            actor: None,
             id: unclaimed_id,
             session_id,
             turn_id,
@@ -1379,6 +1390,7 @@ async fn restart_abandons_claimed_and_unclaimed_approvals_for_the_stopped_worker
         &store,
         &owner,
         &Approval {
+            actor: None,
             id: stale_id,
             session_id,
             turn_id,
@@ -1495,6 +1507,7 @@ async fn interrupted_recovery_rolls_back_every_row_when_the_journal_fails() {
         &store,
         &owner,
         &Approval {
+            actor: None,
             id: approval_id,
             session_id,
             turn_id,
@@ -1597,6 +1610,7 @@ async fn durable_park_recovery_leaves_a_waiting_turn_open() {
         &store,
         &owner,
         &Approval {
+            actor: None,
             id: approval_id,
             session_id,
             turn_id,
@@ -1966,6 +1980,7 @@ async fn a_turn_attachment_stays_live_after_its_session_ends() {
         &store,
         &OwnerId::local(),
         &Turn {
+            actor: None,
             id: TurnId::new(),
             session_id,
             ordinal: 2,
@@ -2178,6 +2193,7 @@ async fn deleting_a_chat_removes_the_code_side_rows_under_its_id() {
         &store,
         &owner,
         &Turn {
+            actor: None,
             id: turn_id,
             session_id,
             ordinal: 1,
@@ -2248,6 +2264,7 @@ async fn one_id_resolves_in_one_space() {
     insert_session(
         &store,
         &Session {
+            visibility: crate::SessionVisibility::Private,
             id: session_id,
             owner: owner.clone(),
             workspace_id: None,
@@ -2425,6 +2442,7 @@ async fn owner_scoped_code_queries_partition_every_table() {
         &store,
         &alice,
         &Approval {
+            actor: None,
             id: approval_id,
             session_id: alice_session,
             turn_id: alice_turn,
@@ -2572,10 +2590,17 @@ fn every_code_table_carries_an_owner_column() {
     );
 }
 
-/// Every code-mode store function takes an owner, so there is no unscoped
-/// query for a caller to reach for by accident. The exceptions are named
-/// `_all_owners` and are documented as system paths — boot recovery, the
-/// stall sweep, and a worker re-reading the session it was spawned against.
+/// Every code-mode store function is scoped to the caller, so there is no
+/// unscoped query for a caller to reach for by accident. The exceptions are
+/// named `_all_owners` and are documented as system paths — boot recovery, the
+/// stall sweep, a worker re-reading the session it was spawned against, and
+/// the live fan-out resolving who may read a session.
+///
+/// Two words satisfy the rule. `owner: &OwnerId` is the caller whose rows
+/// these are. `principal: &OwnerId` is the caller asking what they may reach,
+/// which decision 0086 made a separate question from ownership: the answer
+/// may include a session someone else owns, and calling that parameter
+/// `owner` would say the opposite of what it means.
 #[test]
 fn code_store_queries_are_owner_scoped_or_say_they_are_not() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/db/ops/code");
@@ -2623,7 +2648,8 @@ fn code_store_queries_are_owner_scoped_or_say_they_are_not() {
                     None => break,
                 }
             }
-            if !signature.contains("owner: &OwnerId") {
+            if !signature.contains("owner: &OwnerId") && !signature.contains("principal: &OwnerId")
+            {
                 unscoped.push(format!("{file}::{name}"));
             }
         }
@@ -2657,6 +2683,7 @@ async fn latest_watch_for_session_matches_on_the_session_not_the_workspace() {
     insert_session(
         &store,
         &Session {
+            visibility: crate::SessionVisibility::Private,
             id: watch_session_id,
             owner: owner.clone(),
             workspace_id: Some(workspace_id),
@@ -4424,6 +4451,7 @@ async fn saving_a_turn_does_not_blank_its_rewrite() {
 
 fn queued_message(session_id: SessionId, message: &str) -> QueuedTurn {
     QueuedTurn {
+        actor: None,
         id: TurnId::new(),
         session_id,
         message: message.to_owned(),
@@ -4436,6 +4464,7 @@ fn queued_message(session_id: SessionId, message: &str) -> QueuedTurn {
 
 fn turn_for(row: &QueuedTurn, ordinal: i64) -> Turn {
     Turn {
+        actor: None,
         id: row.id,
         session_id: row.session_id,
         ordinal,
@@ -4933,6 +4962,7 @@ fn external_pair(owner: &OwnerId, repo_id: RepoId, label: &str) -> (CodeWorkspac
         bundle_bytes: None,
     };
     let session = Session {
+        visibility: crate::SessionVisibility::Private,
         id: SessionId::new(),
         owner: owner.clone(),
         workspace_id: Some(workspace_id),
@@ -5617,6 +5647,7 @@ async fn a_replayed_external_message_records_once() {
         "Ev001",
         "1700000001.000100",
         "hello",
+        &crate::code::TurnActor::default(),
     )
     .await
     .unwrap();
@@ -5631,6 +5662,7 @@ async fn a_replayed_external_message_records_once() {
         "Ev001",
         "1700000001.000100",
         "hello",
+        &crate::code::TurnActor::default(),
     )
     .await
     .unwrap();
@@ -5650,6 +5682,7 @@ async fn a_replayed_external_message_records_once() {
         "Ev002",
         "1700000002.000100",
         "again",
+        &crate::code::TurnActor::default(),
     )
     .await
     .unwrap();
@@ -5678,6 +5711,7 @@ async fn out_of_order_external_messages_apply_in_channel_order() {
         "EvB",
         "1700000002.000100",
         "message B",
+        &crate::code::TurnActor::default(),
     )
     .await
     .unwrap();
@@ -5691,6 +5725,7 @@ async fn out_of_order_external_messages_apply_in_channel_order() {
         "EvA",
         "1700000001.000100",
         "message A",
+        &crate::code::TurnActor::default(),
     )
     .await
     .unwrap();

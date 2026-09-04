@@ -245,6 +245,7 @@ fn tool_use_approval(
         },
     };
     Ok(Approval {
+        actor: None,
         id: ApprovalId(call.id),
         session_id: SessionId(session.id),
         turn_id: TurnId(call.turn_id),
@@ -534,6 +535,7 @@ where
         claim,
         decision,
         decided_at,
+        None,
     )
     .await
 }

@@ -160,6 +160,7 @@ async fn enqueue_turn_inner(
         session_id: Set(queued.chat_id.0),
         message: Set(queued.content.clone()),
         fingerprint: Set(Some(admission_request(queued).fingerprint().to_vec())),
+        actor: Set(None),
         attachments_json: Set(serde_json::to_string(&queued.attachments).map_err(store_err)?),
         file_attachments_json: Set(serde_json::to_string(
             &queued

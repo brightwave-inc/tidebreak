@@ -834,6 +834,9 @@ async fn start_turn_row(
     promoted: Option<&tidebreak_core::code::QueuedTurn>,
 ) -> Result<Turn, tidebreak_core::AgentError> {
     let mut turn = Turn {
+        // A promoted row already names who sent the message (decision 0086);
+        // a direct sandbox submit carries the session's own identity.
+        actor: promoted.and_then(|row| row.actor.clone()),
         id: promoted.map_or_else(TurnId::new, |row| row.id),
         session_id: session.id,
         ordinal,

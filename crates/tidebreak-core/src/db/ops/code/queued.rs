@@ -27,6 +27,11 @@ pub(super) fn queued_turn_from_model(
     model: entities::code_queued_turn::Model,
 ) -> Result<QueuedTurn> {
     Ok(QueuedTurn {
+        actor: model
+            .actor
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|err| AgentError::Store(format!("queued turn {} actor: {err}", model.id)))?,
         id: TurnId(model.id),
         session_id: SessionId(model.session_id),
         message: model.message,
@@ -142,6 +147,11 @@ pub async fn enqueue_queued_turn(
         invoked_skills_json: Set("[]".to_owned()),
         voice_input_used: Set(false),
         fingerprint: Set(None),
+        actor: Set(queued
+            .actor
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()?),
         position: Set(position),
         created_at: Set(now),
         updated_at: Set(now),

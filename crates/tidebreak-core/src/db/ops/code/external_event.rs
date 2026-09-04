@@ -113,6 +113,9 @@ where
 /// `channel_ts`, all in one transaction. Replay: answers with the recorded
 /// id and writes nothing. The queue row's id becomes the promoted turn's
 /// id (decision 69), so one id follows the message through its whole life.
+///
+/// The actor rides on the queue row so promotion carries the channel identity
+/// onto the turn, which is what names the person on the web (decision 0086).
 pub async fn record_external_message(
     store: &DbStore,
     owner: &OwnerId,
@@ -120,6 +123,7 @@ pub async fn record_external_message(
     event_id: &str,
     channel_ts: &str,
     message: &str,
+    actor: &crate::code::TurnActor,
 ) -> Result<ExternalMessageRecord> {
     if event_id.trim().is_empty() || channel_ts.trim().is_empty() {
         return Err(AgentError::Store(
@@ -169,6 +173,7 @@ pub async fn record_external_message(
         invoked_skills_json: Set("[]".to_owned()),
         voice_input_used: Set(false),
         fingerprint: Set(None),
+        actor: Set(Some(serde_json::to_value(actor)?)),
         position: Set(position),
         created_at: Set(now),
         updated_at: Set(now),
