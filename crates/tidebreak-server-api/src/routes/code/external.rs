@@ -90,8 +90,15 @@ async fn require_bound(
 pub struct ExternalSessionBody {
     /// The channel's durable conversation identity, opaque here.
     pub external_key: String,
-    /// The repository the sandbox clones. Required in v1.
-    pub repo_id: RepoId,
+    /// The repository the sandbox clones, by record id. One of `repo_id`
+    /// and `repository` is required; `repo_id` wins when both are sent.
+    #[serde(default)]
+    pub repo_id: Option<RepoId>,
+    /// The repository by its origin, `owner/name`, resolved against the
+    /// grant owner's registered repositories. This is how a channel names
+    /// its default: the adapter never learns record ids.
+    #[serde(default)]
+    pub repository: Option<String>,
     #[serde(default)]
     pub title: Option<String>,
     #[serde(default)]
@@ -118,13 +125,23 @@ pub async fn external_get_or_create(
         .code
         .clone()
         .ok_or_else(|| ServerError::unauthorized("adapter access is not configured"))?;
+    let repo_id = match (body.repo_id, body.repository.as_deref()) {
+        (Some(id), _) => id,
+        (None, Some(origin)) => runtime.repo_by_origin(&grant.owner, origin).await?.id,
+        (None, None) => {
+            return Err(ServerError::bad_request_kind(
+                "repo_required",
+                "name the repository by `repo_id` or as `repository: owner/name`",
+            ));
+        }
+    };
     let resolution = runtime
         .external_get_or_create(
             &grant.owner,
             grant.id,
             &grant.channel_kind,
             &body.external_key,
-            body.repo_id,
+            repo_id,
             body.title,
             body.harness.unwrap_or(HarnessKind::ClaudeCode),
             NewSessionSettings {

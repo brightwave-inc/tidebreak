@@ -96,6 +96,43 @@ impl CodeRuntime {
         Ok(list_repos(&self.db, owner).await?)
     }
 
+    /// The owner's registered repository whose origin is `owner/name`, for
+    /// callers that name repositories the way a forge does. Both parts
+    /// compare case-insensitively, as GitHub does; a removed registration
+    /// does not count. A repository that is not registered is a conflict
+    /// the caller can word, not a not-found: the name may be right and the
+    /// clone simply missing.
+    pub async fn repo_by_origin(&self, owner: &OwnerId, origin: &str) -> Result<CodeRepo, ServerError> {
+        let Some((origin_owner, origin_name)) = parse_repository_origin(origin) else {
+            return Err(ServerError::bad_request_kind(
+                "repo_origin_invalid",
+                format!("{origin:?} is not a repository as owner/name"),
+            ));
+        };
+        self.list_repos(owner)
+            .await?
+            .into_iter()
+            .filter(|repo| repo.removed_at.is_none())
+            .find(|repo| {
+                repo.origin_owner
+                    .as_deref()
+                    .is_some_and(|value| value.eq_ignore_ascii_case(origin_owner))
+                    && repo
+                        .origin_name
+                        .as_deref()
+                        .is_some_and(|value| value.eq_ignore_ascii_case(origin_name))
+            })
+            .ok_or_else(|| {
+                ServerError::conflict_kind(
+                    "repo_unknown",
+                    format!(
+                        "{origin_owner}/{origin_name} is not registered on this machine; \
+                         clone it in Tidebreak first"
+                    ),
+                )
+            })
+    }
+
     pub async fn get_repo(&self, owner: &OwnerId, id: RepoId) -> Result<CodeRepo, ServerError> {
         get_repo(&self.db, owner, id)
             .await?
@@ -203,5 +240,51 @@ impl CodeRuntime {
         }
         self.delivery_cache.invalidate_owner(owner);
         Ok(())
+    }
+}
+
+/// `owner/name` out of the shapes people paste: the bare pair, the pair
+/// with a `.git` suffix, or a GitHub URL or host-prefixed path. Anything
+/// with more or fewer segments, an empty segment, or whitespace is not a
+/// repository name.
+fn parse_repository_origin(raw: &str) -> Option<(&str, &str)> {
+    let mut rest = raw.trim();
+    for prefix in ["https://github.com/", "http://github.com/", "github.com/"] {
+        if let Some(stripped) = rest.strip_prefix(prefix) {
+            rest = stripped;
+            break;
+        }
+    }
+    let rest = rest.trim_end_matches('/');
+    let rest = rest.strip_suffix(".git").unwrap_or(rest);
+    let (owner, name) = rest.split_once('/')?;
+    let valid = |part: &str| {
+        !part.is_empty()
+            && part
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.'))
+    };
+    (valid(owner) && valid(name)).then_some((owner, name))
+}
+
+#[cfg(test)]
+mod origin_tests {
+    use super::parse_repository_origin;
+
+    #[test]
+    fn every_pasted_shape_of_a_repository_name_resolves_to_owner_and_name() {
+        for raw in [
+            "acme/tools",
+            " acme/tools ",
+            "acme/tools.git",
+            "github.com/acme/tools",
+            "https://github.com/acme/tools",
+            "https://github.com/acme/tools.git/",
+        ] {
+            assert_eq!(parse_repository_origin(raw), Some(("acme", "tools")), "{raw:?}");
+        }
+        for raw in ["tools", "acme/", "/tools", "acme/tools/extra", "acme tools/x", ""] {
+            assert_eq!(parse_repository_origin(raw), None, "{raw:?}");
+        }
     }
 }
