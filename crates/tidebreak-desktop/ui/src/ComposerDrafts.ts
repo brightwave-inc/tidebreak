@@ -24,7 +24,9 @@ function attachmentsStorageKeyFor(key: string): string {
   return `${ATTACHMENTS_PREFIX}${key}`;
 }
 
-function composerKeyForRoute(route: string): string | null {
+/** The composer a hash route's draft belongs to: a chat's id, the home
+ * composer's key, or `null` where no composer lives. */
+export function composerKeyForRoute(route: string): string | null {
   const chatMatch = /\/c\/([^/?]+)/.exec(route);
   if (chatMatch) return chatMatch[1];
   if (route === "/") return HOME_DRAFT_KEY;
