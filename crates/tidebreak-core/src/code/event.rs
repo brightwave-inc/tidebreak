@@ -445,6 +445,10 @@ pub enum Event {
         approval_id: ApprovalId,
         /// The decision.
         decision: ApprovalDecisionKind,
+        /// Person or automation that made the decision.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        actor: Option<super::TurnActor>,
     },
     /// The user injected a mid-turn message.
     UserSteered {
@@ -710,6 +714,7 @@ mod tests {
                 decision: ApprovalDecisionKind::Deny {
                     feedback: Some("use the fixtures directory".into()),
                 },
+                actor: None,
             },
             Event::UserSteered {
                 text: "try the other file".into(),

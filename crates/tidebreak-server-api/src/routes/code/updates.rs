@@ -17,7 +17,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tidebreak_core::OwnerId;
 
 use crate::auth::{offered_handshake_subprotocol, GatewayAuthLease, WS_HANDSHAKE_SUBPROTOCOL};
-use crate::code::attention::list_digests;
+use crate::code::attention::{list_accessible_digests, list_digests};
 use crate::code::bus::CodeLiveUpdate;
 use crate::code::ScopedCode;
 use crate::error::ServerError;
@@ -54,6 +54,7 @@ async fn stream_updates(
         return;
     };
     let mut live = runtime.bus.subscribe_updates(&owner);
+    let mut access_refresh = tokio::time::interval(std::time::Duration::from_millis(100));
     let mut terminals = state.terminals.subscribe(&owner);
     match list_digests(&runtime.db, &owner).await {
         Ok(sessions) => {
@@ -71,6 +72,19 @@ async fn stream_updates(
             incoming = socket.recv() => match incoming {
                 None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
                 _ => {}
+            },
+            _ = access_refresh.tick() => {
+                match list_accessible_digests(&runtime.db, &owner).await {
+                    Ok(sessions) => {
+                        let notice = UpdateNotice::Snapshot {
+                            sessions: sessions.into_iter().map(SessionDigest::from).collect(),
+                        };
+                        if send_notice(&mut socket, &notice).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
             },
             _ = wait_for_gateway_auth_revalidation(&mut auth_revalidation) => {
                 let invalid = match auth_lease.as_ref() {

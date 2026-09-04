@@ -190,6 +190,8 @@ pub struct ExternalMessageBody {
     /// The channel's ordering token; still-queued messages apply in its
     /// order.
     pub channel_ts: String,
+    /// Display name the channel supplied, when available.
+    pub display: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -219,6 +221,7 @@ pub async fn external_messages(
             body.text,
             &body.event_id,
             &body.channel_ts,
+            body.display,
         )
         .await?;
     let response = match outcome {
@@ -291,6 +294,7 @@ pub async fn external_events(
             query.after,
             None,
             super::session_events::Viewer::Adapter,
+            None,
         );
         tokio::pin!(stream);
         loop {

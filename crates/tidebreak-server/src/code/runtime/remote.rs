@@ -85,6 +85,7 @@ impl CodeRuntime {
         settings: NewSessionSettings,
     ) -> Session {
         Session {
+            visibility: tidebreak_core::SessionVisibility::Private,
             id: SessionId::new(),
             owner: owner.clone(),
             workspace_id: Some(workspace_id),
@@ -382,6 +383,7 @@ impl CodeRuntime {
             &self.db,
             owner,
             &QueuedTurn {
+                actor: None,
                 id: TurnId::new(),
                 session_id: session.id,
                 message,
@@ -515,6 +517,7 @@ impl CodeRuntime {
         message: String,
         event_id: &str,
         channel_ts: &str,
+        display: Option<String>,
     ) -> Result<ExternalMessageOutcome, ServerError> {
         if self.remote.is_none() {
             return Err(ServerError::conflict_kind(
@@ -546,8 +549,17 @@ impl CodeRuntime {
             }
             _ => {}
         }
-        let record = tidebreak_core::db::code::record_external_message(
-            &self.db, owner, session_id, event_id, channel_ts, &message,
+        let grant = tidebreak_core::db::code::get_external_grant(&self.db, owner, grant_id)
+            .await?
+            .ok_or_else(|| ServerError::unauthorized("the adapter token matches no live grant"))?;
+        let actor = tidebreak_core::TurnActor {
+            principal: None,
+            display,
+            channel_kind: Some(grant.channel_kind),
+            external_identity: Some(grant.external_identity),
+        };
+        let record = tidebreak_core::db::code::record_external_message_with_actor(
+            &self.db, owner, session_id, event_id, channel_ts, &message, &actor,
         )
         .await?;
         let (turn_id, fresh) = match &record {

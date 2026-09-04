@@ -86,6 +86,7 @@ pub fn journal_row(event: &AgentEvent) -> Event {
             } else {
                 ApprovalDecisionKind::Deny { feedback: None }
             },
+            actor: None,
         },
         AgentEvent::ToolCallCompleted {
             call_id,
@@ -214,6 +215,7 @@ pub fn chat_event(event: Event) -> Result<Option<AgentEvent>> {
                 | ApprovalDecisionKind::ApprovedWithGrant { .. }
                 | ApprovalDecisionKind::Deny { .. }
                 | ApprovalDecisionKind::Abandoned),
+            ..
         } => AgentEvent::ApprovalDecided {
             call_id: CallId(approval_id.0),
             approved: matches!(
@@ -498,6 +500,7 @@ mod tests {
         // completion the answer journals.
         assert_eq!(
             chat_event(Event::ApprovalResolved {
+                actor: None,
                 approval_id: approval_id_of(call_id),
                 decision: ApprovalDecisionKind::Answered {
                     answers: Vec::new()

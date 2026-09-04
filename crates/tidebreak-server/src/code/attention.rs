@@ -384,6 +384,19 @@ pub async fn emit_workspace_digests(
 /// The owner's live session digests, restated on every `/updates`
 /// connection. Scoped: a subscriber never learns that another owner's session
 /// exists.
+pub async fn list_accessible_digests(
+    db: &DbStore,
+    principal: &OwnerId,
+) -> Result<Vec<SessionDigest>, tidebreak_core::AgentError> {
+    let mut out = Vec::new();
+    for session in tidebreak_core::db::code::list_accessible_sessions(db, principal).await? {
+        if session.lifecycle != SessionLifecycle::Ended {
+            out.push(build_digest(db, &session).await?);
+        }
+    }
+    Ok(out)
+}
+
 pub async fn list_digests(
     db: &DbStore,
     owner: &OwnerId,

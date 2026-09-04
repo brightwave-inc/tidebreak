@@ -72,6 +72,34 @@ impl ScopedCode {
         })
     }
 
+    async fn session_access(
+        &self,
+        id: SessionId,
+    ) -> Result<tidebreak_core::db::code::ResolvedSessionAccess, ServerError> {
+        tidebreak_core::db::code::resolve_session_access(&self.runtime.db, &self.owner, id)
+            .await?
+            .ok_or_else(|| ServerError::not_found("code session not found"))
+    }
+
+    async fn session_owner_for_read(&self, id: SessionId) -> Result<OwnerId, ServerError> {
+        Ok(self.session_access(id).await?.session.owner)
+    }
+
+    async fn session_owner_for_contribute(&self, id: SessionId) -> Result<OwnerId, ServerError> {
+        let access = self.session_access(id).await?;
+        if !access.owner && access.level != tidebreak_core::SessionAccessLevel::Contribute {
+            return Err(ServerError::not_found("code session not found"));
+        }
+        Ok(access.session.owner)
+    }
+
+    async fn require_session_owner(&self, id: SessionId) -> Result<(), ServerError> {
+        if !self.session_access(id).await?.owner {
+            return Err(ServerError::not_found("code session not found"));
+        }
+        Ok(())
+    }
+
     /// Bind an already-resolved runtime to a principal.
     ///
     /// For callers that have decided for themselves what to do when code mode
@@ -89,6 +117,11 @@ impl ScopedCode {
     /// the live buses, and background naming.
     pub fn owner(&self) -> &OwnerId {
         &self.owner
+    }
+
+    pub async fn event_stream_access(&self, id: SessionId) -> Result<(OwnerId, bool), ServerError> {
+        let access = self.session_access(id).await?;
+        Ok((access.session.owner, access.owner))
     }
 
     // ------------------------------------------------------------------
@@ -595,7 +628,68 @@ impl ScopedCode {
     }
 
     pub async fn get_session(&self, id: SessionId) -> Result<Session, ServerError> {
-        self.runtime.get_session(&self.owner, id).await
+        Ok(self.session_access(id).await?.session)
+    }
+
+    pub async fn list_session_access(
+        &self,
+        id: SessionId,
+    ) -> Result<Vec<tidebreak_core::db::code::SessionAccess>, ServerError> {
+        self.require_session_owner(id).await?;
+        Ok(
+            tidebreak_core::db::code::list_session_access(&self.runtime.db, &self.owner, id)
+                .await?,
+        )
+    }
+
+    pub async fn grant_session_access(
+        &self,
+        id: SessionId,
+        subject: &str,
+        level: tidebreak_core::SessionAccessLevel,
+    ) -> Result<tidebreak_core::db::code::SessionAccess, ServerError> {
+        self.require_session_owner(id).await?;
+        tidebreak_core::db::code::grant_session_access(
+            &self.runtime.db,
+            &self.owner,
+            id,
+            subject,
+            level,
+            chrono::Utc::now(),
+        )
+        .await?
+        .ok_or_else(|| ServerError::not_found("code session not found"))
+    }
+
+    pub async fn revoke_session_access(
+        &self,
+        id: SessionId,
+        subject: &str,
+    ) -> Result<bool, ServerError> {
+        self.require_session_owner(id).await?;
+        Ok(tidebreak_core::db::code::revoke_session_access(
+            &self.runtime.db,
+            &self.owner,
+            id,
+            subject,
+        )
+        .await?)
+    }
+
+    pub async fn set_session_visibility(
+        &self,
+        id: SessionId,
+        visibility: tidebreak_core::SessionVisibility,
+    ) -> Result<Session, ServerError> {
+        self.require_session_owner(id).await?;
+        tidebreak_core::db::code::set_session_visibility(
+            &self.runtime.db,
+            &self.owner,
+            id,
+            visibility,
+        )
+        .await?
+        .ok_or_else(|| ServerError::not_found("code session not found"))
     }
 
     pub async fn list_internal_sessions(&self) -> Result<Vec<Session>, ServerError> {
@@ -621,7 +715,8 @@ impl ScopedCode {
     }
 
     pub async fn list_session_turns(&self, id: SessionId) -> Result<Vec<Turn>, ServerError> {
-        self.runtime.list_session_turns(&self.owner, id).await
+        let owner = self.session_owner_for_read(id).await?;
+        self.runtime.list_session_turns(&owner, id).await
     }
 
     pub async fn list_turn_metrics(
@@ -664,8 +759,9 @@ impl ScopedCode {
         session_id: SessionId,
         requested: &[(uuid::Uuid, String)],
     ) -> Result<Vec<tidebreak_core::ImageRef>, ServerError> {
+        let owner = self.session_owner_for_contribute(session_id).await?;
         self.runtime
-            .resolve_turn_attachments(&self.owner, session_id, requested)
+            .resolve_turn_attachments(&owner, session_id, requested)
             .await
     }
 
@@ -677,23 +773,46 @@ impl ScopedCode {
         reasoning_effort: Option<Option<ReasoningEffort>>,
         attachments: Vec<tidebreak_core::ImageRef>,
     ) -> Result<SubmitTurnOutcome, ServerError> {
+        let owner = self.session_owner_for_contribute(id).await?;
         self.runtime
-            .submit_turn(
-                &self.owner,
-                id,
-                message,
-                model,
-                reasoning_effort,
-                attachments,
-            )
+            .submit_turn(&owner, id, message, model, reasoning_effort, attachments)
             .await
+    }
+
+    pub async fn record_submission_actor(
+        &self,
+        session_id: SessionId,
+        turn_id: TurnId,
+        queued: bool,
+        actor: &tidebreak_core::TurnActor,
+    ) -> Result<(), ServerError> {
+        let owner = self.session_owner_for_contribute(session_id).await?;
+        let recorded = if queued {
+            tidebreak_core::db::code::set_queued_turn_actor(
+                &self.runtime.db,
+                &owner,
+                turn_id,
+                actor,
+            )
+            .await?
+        } else {
+            tidebreak_core::db::code::set_turn_actor(&self.runtime.db, &owner, turn_id, actor)
+                .await?
+        };
+        if !recorded {
+            return Err(ServerError::internal(
+                "accepted turn disappeared before actor attribution",
+            ));
+        }
+        Ok(())
     }
 
     pub async fn list_queued_turns(
         &self,
         id: SessionId,
     ) -> Result<(Vec<QueuedTurn>, bool), ServerError> {
-        self.runtime.list_queued_turns(&self.owner, id).await
+        let owner = self.session_owner_for_read(id).await?;
+        self.runtime.list_queued_turns(&owner, id).await
     }
 
     pub async fn update_queued_turn(
@@ -703,8 +822,9 @@ impl ScopedCode {
         message: Option<&str>,
         position: Option<i32>,
     ) -> Result<Option<QueuedTurn>, ServerError> {
+        let owner = self.session_owner_for_contribute(id).await?;
         self.runtime
-            .update_queued_turn(&self.owner, id, queued_id, message, position)
+            .update_queued_turn(&owner, id, queued_id, message, position)
             .await
     }
 
@@ -713,17 +833,18 @@ impl ScopedCode {
         id: SessionId,
         queued_id: TurnId,
     ) -> Result<bool, ServerError> {
-        self.runtime
-            .delete_queued_turn(&self.owner, id, queued_id)
-            .await
+        let owner = self.session_owner_for_contribute(id).await?;
+        self.runtime.delete_queued_turn(&owner, id, queued_id).await
     }
 
     pub async fn set_queue_paused(&self, id: SessionId, paused: bool) -> Result<(), ServerError> {
-        self.runtime.set_queue_paused(&self.owner, id, paused).await
+        let owner = self.session_owner_for_contribute(id).await?;
+        self.runtime.set_queue_paused(&owner, id, paused).await
     }
 
     pub async fn send_queued_now(&self, id: SessionId) -> Result<(), ServerError> {
-        self.runtime.send_queued_now(&self.owner, id).await
+        let owner = self.session_owner_for_contribute(id).await?;
+        self.runtime.send_queued_now(&owner, id).await
     }
 
     pub async fn set_reasoning_effort(
@@ -731,6 +852,7 @@ impl ScopedCode {
         id: SessionId,
         effort: Option<ReasoningEffort>,
     ) -> Result<Session, ServerError> {
+        self.require_session_owner(id).await?;
         self.runtime
             .set_reasoning_effort(&self.owner, id, effort)
             .await
@@ -741,13 +863,12 @@ impl ScopedCode {
         id: SessionId,
         fast_mode: bool,
     ) -> Result<Session, ServerError> {
+        self.require_session_owner(id).await?;
         self.runtime.set_fast_mode(&self.owner, id, fast_mode).await
     }
 
     pub async fn interrupt(&self, id: SessionId) -> Result<(), ServerError> {
-        // Authorize the session first: without this the worker registry would
-        // answer for a session id whatever owner holds it.
-        let _ = self.get_session(id).await?;
+        let _ = self.session_owner_for_contribute(id).await?;
         self.runtime.interrupt(id).await
     }
 
@@ -757,12 +878,14 @@ impl ScopedCode {
         expected_turn_id: TurnId,
         message: String,
     ) -> Result<(), ServerError> {
+        let owner = self.session_owner_for_contribute(id).await?;
         self.runtime
-            .steer(&self.owner, id, expected_turn_id, message)
+            .steer(&owner, id, expected_turn_id, message)
             .await
     }
 
     pub async fn reap(&self, id: SessionId) -> Result<Session, ServerError> {
+        self.require_session_owner(id).await?;
         self.runtime.reap(&self.owner, id).await
     }
 
@@ -827,6 +950,7 @@ impl ScopedCode {
         id: SessionId,
         mode: PermissionMode,
     ) -> Result<Session, ServerError> {
+        self.require_session_owner(id).await?;
         self.runtime
             .set_permission_mode(&self.owner, id, mode)
             .await
@@ -838,6 +962,7 @@ impl ScopedCode {
         clear: bool,
         note: Option<String>,
     ) -> Result<Session, ServerError> {
+        self.require_session_owner(id).await?;
         self.runtime
             .set_attention(&self.owner, id, clear, note)
             .await
@@ -852,9 +977,11 @@ impl ScopedCode {
         state: Option<ApprovalState>,
         session_id: Option<SessionId>,
     ) -> Result<Vec<Approval>, ServerError> {
-        self.runtime
-            .list_approvals(&self.owner, state, session_id)
-            .await
+        let owner = match session_id {
+            Some(id) => self.session_owner_for_read(id).await?,
+            None => self.owner.clone(),
+        };
+        self.runtime.list_approvals(&owner, state, session_id).await
     }
 
     pub async fn decide_approval(
@@ -862,8 +989,20 @@ impl ScopedCode {
         id: ApprovalId,
         decision: super::runtime::ApprovalDecisionRequest,
     ) -> Result<Approval, ServerError> {
+        let approval = tidebreak_core::db::code::get_approval_all_owners(&self.runtime.db, id)
+            .await?
+            .ok_or_else(|| ServerError::not_found(format!("approval {id} not found")))?;
+        let owner = self
+            .session_owner_for_contribute(approval.session_id)
+            .await?;
+        let actor = tidebreak_core::TurnActor {
+            principal: Some(self.owner.to_string()),
+            display: None,
+            channel_kind: None,
+            external_identity: None,
+        };
         self.runtime
-            .decide_approval(&self.owner, id, decision)
+            .decide_approval(&owner, id, decision, Some(actor))
             .await
     }
 

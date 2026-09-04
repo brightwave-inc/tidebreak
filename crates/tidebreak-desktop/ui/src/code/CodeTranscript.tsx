@@ -633,7 +633,11 @@ const TranscriptItem = memo(function TranscriptItem({
   switch (item.kind) {
     case "user":
       return (
-        <UserMessage
+        <>
+          {item.actorLabel && (
+            <p className="text-muted-foreground mb-1 text-xs">{item.actorLabel}</p>
+          )}
+                  <UserMessage
           text={item.text}
           createdAt={item.createdAt}
           anchorId={item.id}

@@ -629,6 +629,7 @@ fn rewrite_event(payload: &serde_json::Value) -> Result<Event, String> {
             } else {
                 ApprovalDecisionKind::Deny { feedback: None }
             },
+            actor: None,
         },
         "questions_asked" => Event::ApprovalRequested {
             approval_id,

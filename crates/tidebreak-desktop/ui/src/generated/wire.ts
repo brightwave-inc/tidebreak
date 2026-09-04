@@ -617,7 +617,7 @@ proposed_mode: PermissionMode, };
 /**
  * One parked or decided engine approval.
  */
-export type ApprovalSnapshot = { id: ApprovalId, session_id: SessionId, turn_id: TurnId, kind: ApprovalKind,
+export type ApprovalSnapshot = { actor?: TurnActor, id: ApprovalId, session_id: SessionId, turn_id: TurnId, kind: ApprovalKind,
 /**
  * Exact JSON the engine sent, already size-capped. The card renders this.
  */
@@ -2163,7 +2163,11 @@ approval_id: ApprovalId,
 /**
  * The decision.
  */
-decision: ApprovalDecisionKind, } | { "type": "user_steered",
+decision: ApprovalDecisionKind,
+/**
+ * Person or automation that made the decision.
+ */
+actor?: TurnActor, } | { "type": "user_steered",
 /**
  * The steered user text, already bounded.
  */
@@ -4808,11 +4812,16 @@ reasoning_effort?: ReasoningEffort,
 /**
  * Whether this session runs its turns in the engine's fast mode.
  */
-fast_mode: boolean, lifecycle: SessionLifecycle, fence_reason?: FenceReason, attention: Attention, unrecognized_event_count: number, created_at: string,
+fast_mode: boolean, lifecycle: SessionLifecycle, fence_reason?: FenceReason, attention: Attention, unrecognized_event_count: number, visibility: SessionVisibility, created_at: string,
 /**
  * Present when an external channel created the session.
  */
 external_origin?: SessionExternalOrigin, };
+
+/**
+ * Who can discover a session without an explicit access row.
+ */
+export type SessionVisibility = "private" | "deployment";
 
 /**
  * Body of `PUT /code/worktree-root`. A null or blank root clears the setting.
@@ -5411,6 +5420,11 @@ width: number, height: number, };
 export type TranscriptRole = "user" | "assistant" | "system" | "compaction";
 
 /**
+ * One actor recorded on a turn or settled decision.
+ */
+export type TurnActor = { principal: string | null, display: string | null, channel_kind: string | null, external_identity: string | null, };
+
+/**
  * Why a turn failed, closed and coarse enough to be stable.
  *
  * A failure's `kind` is an internal diagnostic vocabulary: it grows with the
@@ -5440,7 +5454,7 @@ export type TurnRewriteState = "rewriting" | "rewritten" | "failed";
 /**
  * One user→engine turn.
  */
-export type TurnSnapshot = { id: TurnId, session_id: SessionId, ordinal: number, status: TurnStatus, model?: string, fast_mode: boolean, user_input: string, attachments: Array<ImageRef>, usage?: TurnUsage, checkpoint_ref?: string, diffstat?: Diffstat, started_at: string, ended_at?: string,
+export type TurnSnapshot = { actor?: TurnActor, id: TurnId, session_id: SessionId, ordinal: number, status: TurnStatus, model?: string, fast_mode: boolean, user_input: string, attachments: Array<ImageRef>, usage?: TurnUsage, checkpoint_ref?: string, diffstat?: Diffstat, started_at: string, ended_at?: string,
 /**
  * Lucid rewrite of the closing message. The journal keeps the original.
  */

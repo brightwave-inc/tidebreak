@@ -227,6 +227,12 @@ pub async fn submit_turn(
     // turn: a code turn can run for minutes, and the derived name should land
     // while the engine works, not after.
     crate::code::titling::spawn_for_turn(&state, code.owner(), id, message.clone());
+    let actor = tidebreak_core::TurnActor {
+        principal: Some(code.owner().to_string()),
+        display: None,
+        channel_kind: None,
+        external_identity: None,
+    };
     match code
         .submit_turn(
             id,
@@ -237,10 +243,16 @@ pub async fn submit_turn(
         )
         .await?
     {
-        SubmitTurnOutcome::Ran(turn) => {
+        SubmitTurnOutcome::Ran(mut turn) => {
+            code.record_submission_actor(id, turn.id, false, &actor)
+                .await?;
+            turn.actor = Some(actor);
             Ok((StatusCode::ACCEPTED, Json(TurnSnapshot::from(*turn))).into_response())
         }
-        SubmitTurnOutcome::Queued(row) => {
+        SubmitTurnOutcome::Queued(mut row) => {
+            code.record_submission_actor(id, row.id, true, &actor)
+                .await?;
+            row.actor = Some(actor);
             Ok((StatusCode::ACCEPTED, Json(QueuedTurn::from(*row))).into_response())
         }
         // Trigger submits never come through this route; the enum is shared

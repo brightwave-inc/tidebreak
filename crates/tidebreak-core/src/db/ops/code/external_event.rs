@@ -121,6 +121,27 @@ pub async fn record_external_message(
     channel_ts: &str,
     message: &str,
 ) -> Result<ExternalMessageRecord> {
+    record_external_message_with_actor(
+        store,
+        owner,
+        session_id,
+        event_id,
+        channel_ts,
+        message,
+        &crate::code::TurnActor::default(),
+    )
+    .await
+}
+
+pub async fn record_external_message_with_actor(
+    store: &DbStore,
+    owner: &OwnerId,
+    session_id: SessionId,
+    event_id: &str,
+    channel_ts: &str,
+    message: &str,
+    actor: &crate::code::TurnActor,
+) -> Result<ExternalMessageRecord> {
     if event_id.trim().is_empty() || channel_ts.trim().is_empty() {
         return Err(AgentError::Store(
             "an external message needs an event id and an ordering token".into(),
@@ -169,6 +190,7 @@ pub async fn record_external_message(
         invoked_skills_json: Set("[]".to_owned()),
         voice_input_used: Set(false),
         fingerprint: Set(None),
+        actor: Set(Some(serde_json::to_value(actor)?)),
         position: Set(position),
         created_at: Set(now),
         updated_at: Set(now),

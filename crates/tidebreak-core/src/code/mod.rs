@@ -1322,6 +1322,61 @@ pub fn bound_subagents(subagents: &mut Vec<CodeSubagentSummary>) {
     }
 }
 
+/// Who can discover a session without an explicit access row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionVisibility {
+    Private,
+    Deployment,
+}
+
+impl SessionVisibility {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Private => "private",
+            Self::Deployment => "deployment",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "private" => Some(Self::Private),
+            "deployment" => Some(Self::Deployment),
+            _ => None,
+        }
+    }
+}
+
+fn default_session_visibility() -> SessionVisibility {
+    SessionVisibility::Private
+}
+
+/// One explicit session access level. Ownership remains separate (decision 0086).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionAccessLevel {
+    View,
+    Contribute,
+}
+
+impl SessionAccessLevel {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::View => "view",
+            Self::Contribute => "contribute",
+        }
+    }
+}
+
+/// One actor recorded on a turn or settled decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS, Default)]
+pub struct TurnActor {
+    pub principal: Option<String>,
+    pub display: Option<String>,
+    pub channel_kind: Option<String>,
+    pub external_identity: Option<String>,
+}
+
 /// Persisted session record.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Session {
@@ -1379,6 +1434,9 @@ pub struct Session {
     /// Harness subagents observed on this session, bounded (decision 52).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub subagents: Vec<CodeSubagentSummary>,
+    /// Discovery rule for authenticated principals without an access row.
+    #[serde(default = "default_session_visibility")]
+    pub visibility: SessionVisibility,
     /// Creation time.
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
@@ -1386,6 +1444,9 @@ pub struct Session {
 /// Persisted turn record.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Turn {
+    /// Person or automation that submitted this turn. Older rows render as the owner.
+    #[serde(default)]
+    pub actor: Option<TurnActor>,
     /// Stable id.
     pub id: TurnId,
     /// Owning session.
@@ -1456,6 +1517,9 @@ pub struct Turn {
 /// onto code sessions.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueuedTurn {
+    /// Person or automation that submitted this queued turn.
+    #[serde(default)]
+    pub actor: Option<TurnActor>,
     /// The turn id this row becomes when promoted.
     pub id: TurnId,
     /// Owning session.
@@ -1915,6 +1979,9 @@ pub struct Approval {
     /// 5: the judge is a capability of that engine, on the one approval row).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_judge_status: Option<crate::approval::AutoJudgeStatus>,
+    /// Person or automation that settled this decision.
+    #[serde(default)]
+    pub actor: Option<TurnActor>,
 }
 
 /// A pull-request fact a trigger fires on.

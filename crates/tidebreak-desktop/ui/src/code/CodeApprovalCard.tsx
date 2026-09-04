@@ -59,6 +59,11 @@ export function CodeApprovalCard({
         requestedAt={approval.requested_at}
         decidedAt={approval.decided_at}
       />
+      {decided && (approval.actor?.display ?? approval.actor?.principal) && (
+        <p className="text-muted-foreground text-xs">
+          Decided by {approval.actor?.display ?? approval.actor?.principal}
+        </p>
+      )}
       {approval.state === "denied" && approval.feedback && (
         <p className="text-md break-words">{approval.feedback}</p>
       )}

@@ -273,6 +273,7 @@ where
         ),
         attachment_revision: Set(chat.attachment_revision),
         memory_incognito: Set(chat.memory_incognito),
+        visibility: Set("private".to_owned()),
     }
     .insert(conn)
     .await

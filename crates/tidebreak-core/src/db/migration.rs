@@ -28,6 +28,7 @@ mod idens;
 mod one_approval_surface;
 mod one_journal;
 mod one_turn_lane;
+mod session_access_actor;
 
 #[cfg(test)]
 pub(crate) use baseline::tables_for_test;
@@ -84,6 +85,7 @@ impl MigratorTrait for Migrator {
             Box::new(PendingPromptIndexes),
             Box::new(SandboxToolRecoveryIndexes),
             Box::new(UniversalSessionNames),
+            Box::new(session_access_actor::SessionAccessActor),
         ]
     }
 }

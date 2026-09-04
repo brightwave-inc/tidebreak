@@ -37,6 +37,8 @@ pub struct ClaimedApprovalSettlement {
     pub decision: ApprovalDecisionKind,
     /// Time when the engine acknowledged the decision.
     pub decided_at: chrono::DateTime<chrono::Utc>,
+    /// Person or automation that made the decision.
+    pub actor: Option<crate::code::TurnActor>,
 }
 
 /// Insert an approval row under its session's owner.
@@ -123,6 +125,11 @@ fn approval_active_model(
         feedback: Set(approval.feedback.clone()),
         requested_at: Set(approval.requested_at),
         decided_at: Set(approval.decided_at),
+        actor: Set(approval
+            .actor
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()?),
         auto_judge_status: Set(approval
             .auto_judge_status
             .map(|status| status.as_str().to_owned())),
@@ -185,6 +192,18 @@ where
 }
 
 /// Load one of the owner's approvals by id.
+pub async fn get_approval_all_owners(store: &DbStore, id: ApprovalId) -> Result<Option<Approval>> {
+    let Some(row) = entities::approval::Entity::find_by_id(id.0)
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(approval_from_row(row)?))
+}
+
+/** Load one of the owner's approvals by id. */
 pub async fn get_approval(
     store: &DbStore,
     owner: &OwnerId,
@@ -278,6 +297,7 @@ pub async fn settle_approval_claim(
         ApprovalClaim::Exact(settlement.claim),
         settlement.decision,
         settlement.decided_at,
+        settlement.actor,
     )
     .await
 }
@@ -319,6 +339,7 @@ pub async fn settle_engine_observed_approval(
         ApprovalClaim::Unclaimed,
         decision,
         decided_at,
+        None,
     )
     .await
 }
@@ -341,6 +362,7 @@ pub async fn abandon_pending_approval(
         ApprovalClaim::Unclaimed,
         ApprovalDecisionKind::Abandoned,
         decided_at,
+        None,
     )
     .await
 }
@@ -364,6 +386,7 @@ async fn settle_approval(
     claim: ApprovalClaim,
     decision: ApprovalDecisionKind,
     decided_at: chrono::DateTime<chrono::Utc>,
+    actor: Option<crate::code::TurnActor>,
 ) -> Result<Option<ApprovalSettlement>> {
     let transaction = store.conn.begin().await.map_err(store_err)?;
     if !acquire_code_session_write_lock(&transaction, session_id).await? {
@@ -391,6 +414,7 @@ async fn settle_approval(
         claim,
         decision,
         decided_at,
+        actor,
     )
     .await?;
     transaction.commit().await.map_err(store_err)?;
@@ -414,6 +438,7 @@ pub(in crate::db) async fn settle_approval_on_locked<C>(
     claim: ApprovalClaim,
     decision: ApprovalDecisionKind,
     decided_at: chrono::DateTime<chrono::Utc>,
+    actor: Option<crate::code::TurnActor>,
 ) -> Result<Option<ApprovalSettlement>>
 where
     C: ConnectionTrait,
@@ -449,6 +474,10 @@ where
         .col_expr(
             entities::approval::Column::DecidedAt,
             sea_orm::sea_query::Expr::value(Some(decided_at)),
+        )
+        .col_expr(
+            entities::approval::Column::Actor,
+            sea_orm::sea_query::Expr::value(actor.as_ref().map(serde_json::to_value).transpose()?),
         )
         .col_expr(
             entities::approval::Column::DecisionClaim,
@@ -490,6 +519,7 @@ where
     let event = Event::ApprovalResolved {
         approval_id: id,
         decision,
+        actor,
     };
     let seq = append_event_on_locked(conn, owner, session_id, &event).await?;
     let approval = approval_from_row(row)?;
@@ -639,6 +669,7 @@ pub async fn abandon_pending_approvals_for_stopped_session(
             claim,
             ApprovalDecisionKind::Abandoned,
             decided_at,
+            None,
         )
         .await?
         {
@@ -715,6 +746,11 @@ pub(in crate::db) fn approval_from_row(row: entities::approval::Model) -> Result
     let kind = serde_json::from_value::<ApprovalKind>(row.kind)
         .map_err(|err| AgentError::Store(format!("approval {} kind: {err}", row.id)))?;
     Ok(Approval {
+        actor: row
+            .actor
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|err| AgentError::Store(format!("approval {} actor: {err}", row.id)))?,
         id: ApprovalId(row.id),
         session_id: SessionId(row.session_id),
         turn_id: TurnId(row.turn_id),

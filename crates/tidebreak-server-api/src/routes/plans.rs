@@ -62,6 +62,12 @@ pub async fn decide_plan(
                         approve: matches!(decision.decision, PlanDecisionChoice::Accept),
                         feedback: decision.feedback.clone(),
                     },
+                    Some(tidebreak_core::TurnActor {
+                        principal: Some(store.owner_id().to_string()),
+                        display: None,
+                        channel_kind: None,
+                        external_identity: None,
+                    }),
                 )
                 .await
             {

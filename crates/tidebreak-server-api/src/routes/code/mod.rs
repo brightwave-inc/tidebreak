@@ -12,6 +12,7 @@
 //! principal shares — are registered on the deployment-plane router in
 //! `crate::lib` instead, behind `require_admin`.
 
+mod access;
 mod analytics;
 mod approvals;
 mod browser;
@@ -34,6 +35,9 @@ mod usage;
 mod workspaces;
 
 pub(crate) use crate::code::approval_bridge::approval_prompt;
+pub(crate) use access::{
+    add_session_access, list_session_access, revoke_session_access, set_session_visibility,
+};
 pub(crate) use analytics::analytics;
 pub(crate) use approvals::{decide_approval, list_approvals};
 pub(crate) use browser::{

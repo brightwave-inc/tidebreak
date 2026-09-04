@@ -1122,6 +1122,7 @@ async fn a_stale_worker_completion_cannot_abandon_a_reused_call_id() {
             &runtime.db,
             &row.owner,
             &tidebreak_core::Approval {
+                actor: None,
                 id,
                 session_id,
                 turn_id,

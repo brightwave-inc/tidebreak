@@ -10,6 +10,7 @@ const items: CodeTranscriptItem[] = [
     turnId: "turn-1",
     text: "Keep recent transcript stores in memory when I switch workspaces.",
     createdAt: "2026-08-25T16:45:00.000Z",
+    actorLabel: "Mara",
   },
   {
     kind: "assistant",
@@ -102,6 +103,17 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 export const ProgressUpdates: Story = {};
+
+/** Three contributors remain attributable in one shared session. */
+export const ThreeActors: Story = {
+  args: {
+    items: [
+      { kind: "user", id: "actor-mara", turnId: "turn-mara", text: "Trace the session access path.", createdAt: "2026-09-04T09:00:00.000Z", actorLabel: "Mara" },
+      { kind: "user", id: "actor-ines", turnId: "turn-ines", text: "Keep the Slack display name on the turn.", createdAt: "2026-09-04T09:02:00.000Z", actorLabel: "Ines" },
+      { kind: "user", id: "actor-trigger", turnId: "turn-trigger", text: "Recheck the pull request after CI changes.", createdAt: "2026-09-04T09:04:00.000Z", actorLabel: "Pull request trigger" },
+    ],
+  },
+};
 
 /** Internal trigger delivery stays out of the transcript after the turn runs. */
 export const TriggerFireNoticeHidden: Story = {

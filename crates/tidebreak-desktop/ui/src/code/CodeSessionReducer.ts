@@ -767,6 +767,7 @@ function upsertTurnPrompt(
     // prompt's timestamp never depends on when this client happened to see it.
     createdAt: turn.started_at,
     attachments: turn.attachments ?? [],
+    actorLabel: turn.actor?.display ?? turn.actor?.principal ?? undefined,
   };
   const hasUser = state.items.some(
     (item) => item.kind === "user" && item.turnId === turn.id,

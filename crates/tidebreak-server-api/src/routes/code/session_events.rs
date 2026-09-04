@@ -37,8 +37,8 @@ pub async fn session_events(
     // Authorize before upgrading: the per-session channel is keyed by id, so
     // the principal's claim to this session is settled here, on the chat
     // journal's pattern, rather than by filtering frames afterwards.
-    let _ = code.get_session(id).await?;
-    let owner = code.owner().clone();
+    let principal = code.owner().clone();
+    let (owner, is_owner) = code.event_stream_access(id).await?;
     let auth_lease = auth_lease.map(|Extension(lease)| lease);
     let upgrade = if offered_handshake_subprotocol(&headers) {
         upgrade.protocols([WS_HANDSHAKE_SUBPROTOCOL])
@@ -53,7 +53,12 @@ pub async fn session_events(
             id,
             query.after,
             auth_lease,
-            Viewer::Owner,
+            if is_owner {
+                Viewer::Owner
+            } else {
+                Viewer::Granted
+            },
+            Some(principal),
         )
     }))
 }
@@ -63,6 +68,7 @@ pub async fn session_events(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Viewer {
     Owner,
+    Granted,
     Adapter,
 }
 
@@ -74,8 +80,10 @@ pub(super) async fn stream_events(
     after: i64,
     auth_lease: Option<GatewayAuthLease>,
     viewer: Viewer,
+    access_principal: Option<OwnerId>,
 ) {
     let mut auth_revalidation = gateway_auth_revalidation_timer(auth_lease.as_ref());
+    let mut access_revalidation = tokio::time::interval(std::time::Duration::from_millis(100));
     let Some(runtime) = state.code.clone() else {
         return;
     };
@@ -101,6 +109,18 @@ pub(super) async fn stream_events(
             incoming = socket.recv() => match incoming {
                 None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
                 _ => {}
+            },
+            _ = access_revalidation.tick(), if access_principal.is_some() => {
+                let principal = access_principal.as_ref().expect("guarded principal");
+                let live = tidebreak_core::db::code::resolve_session_access(&runtime.db, principal, session)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some();
+                if !live {
+                    let _ = socket.send(Message::Close(None)).await;
+                    break;
+                }
             },
             _ = wait_for_gateway_auth_revalidation(&mut auth_revalidation) => {
                 let invalid = match auth_lease.as_ref() {

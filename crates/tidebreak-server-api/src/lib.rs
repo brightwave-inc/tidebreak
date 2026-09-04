@@ -843,6 +843,18 @@ pub fn app(state: AppState) -> Router {
             post(routes::code::set_attention),
         )
         .route("/sessions/{id}/events", get(routes::code::session_events))
+        .route(
+            "/sessions/{id}/access",
+            get(routes::code::list_session_access).post(routes::code::add_session_access),
+        )
+        .route(
+            "/sessions/{id}/access/{subject}",
+            delete(routes::code::revoke_session_access),
+        )
+        .route(
+            "/sessions/{id}/visibility",
+            post(routes::code::set_session_visibility),
+        )
         .route("/updates", get(routes::code::code_updates))
         .route("/approvals", get(routes::code::list_approvals))
         .route(
@@ -1091,6 +1103,18 @@ pub fn app(state: AppState) -> Router {
         .route(
             "/code/sessions/{id}/events",
             get(routes::code::session_events),
+        )
+        .route(
+            "/code/sessions/{id}/access",
+            get(routes::code::list_session_access).post(routes::code::add_session_access),
+        )
+        .route(
+            "/code/sessions/{id}/access/{subject}",
+            delete(routes::code::revoke_session_access),
+        )
+        .route(
+            "/code/sessions/{id}/visibility",
+            post(routes::code::set_session_visibility),
         )
         .route("/code/updates", get(routes::code::code_updates))
         .route(
