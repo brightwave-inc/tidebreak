@@ -780,6 +780,7 @@ mod tests {
                 unrecognized_event_count: 0,
                 subagents: Vec::new(),
                 created_at: now(),
+                execution_location: tidebreak_core::ExecutionLocation::Machine,
             },
         )
         .await
@@ -1433,6 +1434,7 @@ mod tests {
                 unrecognized_event_count: 0,
                 subagents: Vec::new(),
                 created_at: now(),
+                execution_location: tidebreak_core::ExecutionLocation::Machine,
             },
         )
         .await

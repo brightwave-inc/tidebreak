@@ -1568,6 +1568,7 @@ pub mod session {
         #[sea_orm(column_type = "JsonBinary", nullable)]
         pub subagents: Option<Json>,
         pub created_at: DateTimeUtc,
+        pub execution_location: String,
         /// The conversation columns (decision 0048 step 5): a session is
         /// the conversation, so the project it belongs to, its title, its
         /// network policy, and its host-root revision live on the same row.

@@ -682,6 +682,10 @@ async fn external_events_snapshot_then_replay_then_sever_on_revoke() {
     );
     assert!(value["snapshot"]["attention"].is_object());
     assert!(value["snapshot"]["lifecycle"].is_string());
+    assert_eq!(
+        value["snapshot"]["execution_location"], "sandbox",
+        "a runtime is configured, so the session runs in a sandbox"
+    );
 
     // The sandbox streams the turn; ingest journals it, and the frames —
     // the per-turn assistant record a renderer needs — reach the socket.
@@ -1105,4 +1109,196 @@ async fn connect_start_rejects_an_oversized_body() {
         .await
         .unwrap();
     assert_eq!(response.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+/// An app with no sandbox runtime and the scripted engine registered as
+/// Claude Code, plus one local git repository: the machine the adapter's
+/// end-to-end lane drives.
+async fn machine_app() -> (Router, Arc<CodeRuntime>, RepoId, tempfile::TempDir) {
+    let (dir, store) = temp_db_store("code.db").await;
+    let db = Arc::new(store);
+    let store_trait: Arc<dyn Store> = db.clone();
+    let mut registry = tidebreak_harness::AdapterRegistry::new();
+    // The machine location takes the deployment's default mode, `ask`, so
+    // the engine must offer structured approvals the way Claude Code does.
+    registry.register(Arc::new(
+        crate::scripted_harness::ScriptedAdapter::new(crate::scripted_harness::plain_text_script())
+            .with_approvals(tidebreak_core::CapLevel::Supported),
+    ));
+    let runtime = Arc::new(CodeRuntime::with_registry_and_browser_runtime(
+        db,
+        dir.path().to_path_buf(),
+        registry,
+        None,
+        None,
+    ));
+    let owner = OwnerId::local();
+    let root = super::code::init_git_repo(dir.path());
+    let repo = CodeRepo {
+        id: RepoId::new(),
+        owner: owner.clone(),
+        root_path: root.display().to_string(),
+        display_name: "tools".into(),
+        default_base_ref: "main".into(),
+        branch_prefix: "tidebreak/".into(),
+        setup_script: None,
+        archive_script: None,
+        quick_actions: Vec::new(),
+        created_at: chrono::Utc::now(),
+        removed_at: None,
+        cloned_from: None,
+        origin_host: None,
+        origin_owner: None,
+        origin_name: None,
+    };
+    insert_repo(&runtime.db, &repo).await.unwrap();
+    let mut state = AppState::new(
+        Config::desktop(dir.path()),
+        store_trait,
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    state.code = Some(runtime.clone());
+    state.adapter_bootstrap_tokens = Some(Arc::new(crate::auth::AdapterBootstrapTokens::for_test(
+        ADAPTER_BOOTSTRAP_TOKEN,
+    )));
+    (app(state), runtime, repo.id, dir)
+}
+
+/// Decision 0088: a machine with no sandbox runtime runs an external
+/// session on its own engine. The conversation gets a worktree under the
+/// machine's root and an ordinary session at the deployment's default
+/// permission mode; a second get-or-create answers the same session; a
+/// message becomes a turn at once and its reply reaches the external
+/// stream, whose snapshot names the location; a replayed delivery answers
+/// from the first row.
+#[tokio::test]
+async fn a_machine_without_a_runtime_runs_an_external_session_on_its_own_engine() {
+    let (router, runtime, repo_id, _dir) = machine_app().await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let owner = OwnerId::local();
+    let (_grant, pair) = runtime
+        .mint_adapter_grant(&owner, "slack", "U1", "T1")
+        .await
+        .unwrap();
+
+    let created = client
+        .post(format!("http://{addr}/external/code/sessions"))
+        .bearer_auth(&pair.token)
+        .json(&serde_json::json!({ "external_key": "T1/C1/1.1", "repo_id": repo_id }))
+        .send()
+        .await
+        .unwrap();
+    let status = created.status();
+    let body = created.text().await.unwrap();
+    assert_eq!(status, reqwest::StatusCode::CREATED, "{body}");
+    let session_id = bound_session_id(&runtime, &owner, "T1/C1/1.1").await;
+    let session = runtime.get_session(&owner, session_id).await.unwrap();
+    assert_eq!(
+        session.execution_location,
+        tidebreak_core::ExecutionLocation::Machine
+    );
+    assert_eq!(
+        session.permission_mode,
+        tidebreak_core::PermissionMode::default(),
+        "the channel's Allow is a sandbox posture; the machine takes the deployment default"
+    );
+    let workspace = runtime
+        .get_workspace(
+            &owner,
+            session
+                .workspace_id
+                .expect("a repository session has a workspace"),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !workspace.is_remote(),
+        "the workspace is a worktree on the machine"
+    );
+    assert!(
+        std::path::Path::new(&workspace.worktree_path)
+            .join("README.md")
+            .is_file(),
+        "the worktree is checked out at {}",
+        workspace.worktree_path
+    );
+
+    let again = client
+        .post(format!("http://{addr}/external/code/sessions"))
+        .bearer_auth(&pair.token)
+        .json(&serde_json::json!({ "external_key": "T1/C1/1.1", "repo_id": repo_id }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(again.status(), reqwest::StatusCode::OK);
+    let again: serde_json::Value = again.json().await.unwrap();
+    assert_eq!(again["status"], "existing");
+    assert_eq!(again["session_id"], session_id.to_string());
+
+    let delivered = client
+        .post(format!(
+            "http://{addr}/external/code/sessions/{session_id}/messages"
+        ))
+        .bearer_auth(&pair.token)
+        .json(&serde_json::json!({ "text": "say hello", "event_id": "Ev-1", "channel_ts": "1.1" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(delivered.status(), reqwest::StatusCode::OK);
+    let delivered: serde_json::Value = delivered.json().await.unwrap();
+    assert_eq!(
+        delivered["outcome"], "new_turn",
+        "an idle machine session promotes the message at once: {delivered}"
+    );
+    let turn_id = delivered["turn_id"].as_str().unwrap().to_owned();
+
+    let mut request = format!("ws://{addr}/external/code/sessions/{session_id}/events")
+        .into_client_request()
+        .unwrap();
+    request.headers_mut().insert(
+        "Authorization",
+        format!("Bearer {}", pair.token).parse().unwrap(),
+    );
+    let (mut socket, _) = connect_async(request).await.unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let mut saw_snapshot = false;
+    let mut saw_reply = false;
+    while !(saw_snapshot && saw_reply) {
+        let frame = tokio::time::timeout_at(deadline, socket.next())
+            .await
+            .expect("the stream carries the snapshot and the scripted reply in time")
+            .expect("the stream stays open")
+            .unwrap();
+        let Ok(text) = frame.to_text() else { continue };
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
+            if value["snapshot"]["execution_location"] == "machine" {
+                saw_snapshot = true;
+            }
+        }
+        if text.contains("hello from the scripted engine") {
+            saw_reply = true;
+        }
+    }
+
+    let replay = client
+        .post(format!(
+            "http://{addr}/external/code/sessions/{session_id}/messages"
+        ))
+        .bearer_auth(&pair.token)
+        .json(&serde_json::json!({ "text": "say hello", "event_id": "Ev-1", "channel_ts": "1.1" }))
+        .send()
+        .await
+        .unwrap();
+    let replay: serde_json::Value = replay.json().await.unwrap();
+    assert_eq!(
+        replay["turn_id"], turn_id,
+        "a replayed delivery answers from the first row"
+    );
 }
