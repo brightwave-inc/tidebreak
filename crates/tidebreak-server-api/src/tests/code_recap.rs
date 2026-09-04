@@ -17,8 +17,7 @@ use tokio::net::TcpListener;
 const UTILITY_MODEL: &str = "gpt-5.4-nano";
 
 /// What the stub answers every recap call with.
-const DERIVED_RECAP: &str =
-    "The retry test is passing again. Next: fold the same backoff into the refresh path.";
+const DERIVED_RECAP: &str = "Retry test passes. Next: apply the backoff to refresh.";
 
 /// A stub OpenAI Responses endpoint that answers by requested schema.
 struct RecapStub {
@@ -54,6 +53,7 @@ async fn answer_as_stub(
 /// installed the way `lib.rs` installs it in a real process.
 async fn code_recap_app(
     harness_kind: tidebreak_core::HarnessKind,
+    mut script: Vec<HarnessEvent>,
 ) -> (
     Router,
     String,
@@ -104,7 +104,6 @@ async fn code_recap_app(
     )
     .await
     .unwrap();
-    let mut script = plain_text_script();
     if let Some(HarnessEvent::SessionStarted {
         harness_kind: started,
         ..
@@ -162,6 +161,95 @@ async fn code_recap_app(
     state.code = Some(runtime.clone());
     let token = state.token.to_string();
     (app(state), token, stub, runtime, dir)
+}
+
+fn meaningful_edit_script() -> Vec<HarnessEvent> {
+    let mut script = plain_text_script();
+    let completed = script.pop().expect("the fixture ends the turn");
+    script.extend([
+        HarnessEvent::ToolStarted {
+            call_id: "edit-1".into(),
+            name: "fileChange".into(),
+            detail: tidebreak_core::ToolDetail::FileEdit {
+                path: "src/auth.rs".into(),
+            },
+            parent_call_id: None,
+        },
+        HarnessEvent::ToolCompleted {
+            call_id: "edit-1".into(),
+            outcome: tidebreak_core::ToolOutcome::Succeeded,
+            preview: "+ retry backoff".into(),
+            detail: Some(tidebreak_core::ToolDetail::FileEdit {
+                path: "src/auth.rs".into(),
+            }),
+            parent_call_id: None,
+        },
+        HarnessEvent::FileChanged {
+            path: "src/auth.rs".into(),
+            kind: tidebreak_core::FileChangeKind::Modified,
+            diffstat: tidebreak_core::Diffstat {
+                files: 1,
+                insertions: 3,
+                deletions: 1,
+                truncated: false,
+            },
+        },
+        HarnessEvent::AssistantMessage {
+            text: "The retry fix is in and the focused test passes.".into(),
+            parent_call_id: None,
+        },
+        completed,
+    ]);
+    script
+}
+
+fn read_only_script() -> Vec<HarnessEvent> {
+    let mut script = plain_text_script();
+    let completed = script.pop().expect("the fixture ends the turn");
+    script.extend([
+        HarnessEvent::ToolStarted {
+            call_id: "read-1".into(),
+            name: "read".into(),
+            detail: tidebreak_core::ToolDetail::FileRead {
+                path: "src/auth.rs".into(),
+            },
+            parent_call_id: None,
+        },
+        HarnessEvent::ToolCompleted {
+            call_id: "read-1".into(),
+            outcome: tidebreak_core::ToolOutcome::Succeeded,
+            preview: "retry logic".into(),
+            detail: Some(tidebreak_core::ToolDetail::FileRead {
+                path: "src/auth.rs".into(),
+            }),
+            parent_call_id: None,
+        },
+        HarnessEvent::ToolStarted {
+            call_id: "inspect-1".into(),
+            name: "commandExecution".into(),
+            detail: tidebreak_core::ToolDetail::Command {
+                cmd: "git status --short".into(),
+                cwd: "/workspace".into(),
+            },
+            parent_call_id: None,
+        },
+        HarnessEvent::ToolCompleted {
+            call_id: "inspect-1".into(),
+            outcome: tidebreak_core::ToolOutcome::Succeeded,
+            preview: "M src/auth.rs".into(),
+            detail: Some(tidebreak_core::ToolDetail::Command {
+                cmd: "git status --short".into(),
+                cwd: "/workspace".into(),
+            }),
+            parent_call_id: None,
+        },
+        HarnessEvent::AssistantMessage {
+            text: "The retry uses exponential backoff.".into(),
+            parent_call_id: None,
+        },
+        completed,
+    ]);
+    script
 }
 
 fn init_git_repo(dir: &std::path::Path) -> std::path::PathBuf {
@@ -295,7 +383,7 @@ async fn wait_for_completed_turn(
 #[tokio::test(flavor = "multi_thread")]
 async fn a_completed_turn_is_recapped_onto_the_digest() {
     let (router, token, stub, runtime, dir) =
-        code_recap_app(tidebreak_core::HarnessKind::Codex).await;
+        code_recap_app(tidebreak_core::HarnessKind::Codex, meaningful_edit_script()).await;
     let addr = serve(router).await;
     let client = reqwest::Client::new();
 
@@ -348,6 +436,10 @@ async fn a_completed_turn_is_recapped_onto_the_digest() {
         .collect();
     assert_eq!(recap_calls.len(), 1, "one completed turn, one recap call");
     assert_eq!(recap_calls[0]["model"], UTILITY_MODEL);
+    let wire = recap_calls[0].to_string();
+    assert!(wire.contains(r#""maxLength":160"#), "schema: {wire}");
+    assert!(wire.contains(r#""minLength":1"#), "schema: {wire}");
+    assert!(wire.contains("Lead with the outcome"), "prompt: {wire}");
     let input = recap_calls[0]["input"].to_string();
     assert!(
         input.contains("Fix the flaky retry test in the auth crate"),
@@ -355,12 +447,76 @@ async fn a_completed_turn_is_recapped_onto_the_digest() {
     );
 }
 
+/// A prose-only completion has no session state to return to. The heuristic
+/// must stop it before provider resolution rather than paying for a model to
+/// say `null`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plain_answer_skips_the_fallback_recap_call() {
+    let (router, token, stub, runtime, dir) =
+        code_recap_app(tidebreak_core::HarnessKind::Codex, plain_text_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let session_id = start_turn(
+        &client,
+        addr,
+        &token,
+        dir.path(),
+        tidebreak_core::HarnessKind::Codex,
+    )
+    .await;
+
+    let turn = wait_for_completed_turn(&runtime, session_id).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(turn.narrative.is_none());
+    let recap_calls = stub
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| request.to_string().contains("session_recap"))
+        .count();
+    assert_eq!(recap_calls, 0);
+}
+
+/// Successful reads and shell inspections still skip the utility call. Tool
+/// success and non-empty output do not establish progress.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_only_turn_skips_the_fallback_recap_call() {
+    let (router, token, stub, runtime, dir) =
+        code_recap_app(tidebreak_core::HarnessKind::Codex, read_only_script()).await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let session_id = start_turn(
+        &client,
+        addr,
+        &token,
+        dir.path(),
+        tidebreak_core::HarnessKind::Codex,
+    )
+    .await;
+
+    let turn = wait_for_completed_turn(&runtime, session_id).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(turn.narrative.is_none());
+    let recap_calls = stub
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| request.to_string().contains("session_recap"))
+        .count();
+    assert_eq!(recap_calls, 0);
+}
+
 /// Claude Code already supplies the closing recap that the transcript keeps.
 /// A second utility-model call would duplicate that line and its cost.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_claude_turn_skips_the_fallback_recap() {
-    let (router, token, stub, runtime, dir) =
-        code_recap_app(tidebreak_core::HarnessKind::ClaudeCode).await;
+    let (router, token, stub, runtime, dir) = code_recap_app(
+        tidebreak_core::HarnessKind::ClaudeCode,
+        meaningful_edit_script(),
+    )
+    .await;
     let addr = serve(router).await;
     let client = reqwest::Client::new();
     let session_id = start_turn(
@@ -410,7 +566,7 @@ async fn a_claude_turn_skips_the_fallback_recap() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_disabled_recap_setting_skips_the_model_call() {
     let (router, token, stub, runtime, dir) =
-        code_recap_app(tidebreak_core::HarnessKind::Codex).await;
+        code_recap_app(tidebreak_core::HarnessKind::Codex, meaningful_edit_script()).await;
     runtime
         .db
         .set_setting(
