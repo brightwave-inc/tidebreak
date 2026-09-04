@@ -4,6 +4,11 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ApiClient, GatewayStatus, ManagedPolicy } from "./api";
 import { ManagedGate } from "./ManagedGate";
+import {
+  captureHandoffToken,
+  markHostedSession,
+  resetHostedSessionForTests,
+} from "./hostedSession";
 import { useManagedPolicy } from "./managedPolicy";
 
 // The policy stores its URL normalized with a trailing slash; the status
@@ -85,6 +90,7 @@ function HostedGatewayProbe() {
 afterEach(() => {
   cleanup();
   pairingNudge.fire = null;
+  resetHostedSessionForTests();
   vi.clearAllMocks();
   vi.useRealTimers();
   vi.unstubAllGlobals();
@@ -559,6 +565,43 @@ describe("ManagedGate", () => {
     ).toBeInTheDocument();
     expect(
       screen.getByText("https://next-gateway.example/"),
+    ).toBeInTheDocument();
+  });
+
+  it("a standalone hosted machine whose bearer died shows the session-ended screen", async () => {
+    markHostedSession({
+      baseUrl: "https://machine.example.test",
+      gatewayUrl: null,
+    });
+    const client = api({
+      getPolicy: vi.fn().mockRejectedValue(new Error("401: unauthorized")),
+    });
+    mount(client);
+    expect(
+      await screen.findByText("Your session on this machine ended"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("the open product")).not.toBeInTheDocument();
+  });
+
+  it("a second refusal after a hand-off shows the session-ended screen", async () => {
+    captureHandoffToken({
+      location: {
+        hash: "#handoff=mg_at_abc.DEF-123~",
+        pathname: "/",
+        search: "",
+      },
+      history: { state: null, replaceState: () => undefined },
+    } as unknown as Window);
+    markHostedSession({
+      baseUrl: "https://machine.example.test",
+      gatewayUrl: "https://gateway.example.test",
+    });
+    const client = api({
+      getPolicy: vi.fn().mockRejectedValue(new Error("401: unauthorized")),
+    });
+    mount(client);
+    expect(
+      await screen.findByText("Your session on this machine ended"),
     ).toBeInTheDocument();
   });
 });

@@ -22,6 +22,11 @@ export type HostedSession = {
   gatewayUrl: string | null;
 };
 
+/** Enough of `window` for hash-route and navigation seams in tests. */
+export type HostedLocationWin = {
+  location: { hash: string; href?: string };
+};
+
 /**
  * The one carrier a bearer may arrive in. A fragment never reaches the
  * server or its access log, and the page clears it before anything else can
@@ -41,6 +46,16 @@ const HANDOFF_FAILURE_FRAGMENT =
 let handoffToken: string | null = null;
 let failure: HandoffFailure | null = null;
 let session: HostedSession | null = null;
+/** When this tab last landed through a hand-off. In memory only: a loop
+ * guard, not a session. */
+let handoffReturnedAt: number | null = null;
+/** Unsent composer text keyed by hash route, for a re-entry that stays in
+ * this document. A full-page navigation also writes it to sessionStorage. */
+const draftsByRoute = new Map<string, string>();
+
+const HOSTED_REENTRY_DRAFT_PREFIX = "tidebreak.hostedReentryDraft:";
+/** A second refusal this soon after a hand-off is a loop, not a new hour. */
+const REENTRY_LOOP_MS = 15_000;
 
 /**
  * Take the handoff bearer out of the page's fragment, if it arrived with one.
@@ -54,7 +69,10 @@ export function captureHandoffToken(win: Window = window): void {
   const failed = HANDOFF_FAILURE_FRAGMENT.exec(win.location.hash);
   if (!failed && !handoff) return;
   if (failed) failure = failed[1] as HandoffFailure;
-  if (handoff) handoffToken = handoff.token;
+  if (handoff) {
+    handoffToken = handoff.token;
+    handoffReturnedAt = Date.now();
+  }
   win.history.replaceState(
     win.history.state,
     "",
@@ -113,6 +131,90 @@ export function resetHostedSessionForTests(): void {
   handoffToken = null;
   failure = null;
   session = null;
+  handoffReturnedAt = null;
+  draftsByRoute.clear();
+}
+
+function sessionStorageOrNull(storage?: Storage | null): Storage | null {
+  if (storage !== undefined) return storage;
+  try {
+    return window.sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
+function draftStorageKey(route: string): string {
+  return `${HOSTED_REENTRY_DRAFT_PREFIX}${route}`;
+}
+
+/**
+ * Keep an unsent composer draft across hosted re-entry. Memory covers an
+ * in-page navigation; sessionStorage covers a full-page trip to the console
+ * and back. The bearer never goes here.
+ */
+export function stashComposerDraftForReentry(
+  route: string,
+  draft: string,
+  storage?: Storage | null,
+): void {
+  if (!draft) return;
+  draftsByRoute.set(route, draft);
+  try {
+    sessionStorageOrNull(storage)?.setItem(draftStorageKey(route), draft);
+  } catch {
+    // A lost draft is not a lost session.
+  }
+}
+
+/**
+ * Read the draft stashed for `route` once, then forget it. Memory wins when
+ * both are present.
+ */
+export function takeComposerDraftForReentry(
+  route: string,
+  storage?: Storage | null,
+): string | null {
+  const fromMemory = draftsByRoute.get(route) ?? null;
+  draftsByRoute.delete(route);
+  const store = sessionStorageOrNull(storage);
+  let fromStore: string | null = null;
+  try {
+    const key = draftStorageKey(route);
+    fromStore = store?.getItem(key) ?? null;
+    store?.removeItem(key);
+  } catch {
+    // Missing storage is the same as no draft.
+  }
+  return fromMemory || fromStore;
+}
+
+/** True when a hand-off just landed this tab and another refusal is a loop. */
+export function hostedReentryIsLooping(now: number = Date.now()): boolean {
+  return (
+    handoffReturnedAt !== null && now - handoffReturnedAt < REENTRY_LOOP_MS
+  );
+}
+
+/** This tab's hash-router path, or `/` when the fragment is not a route. */
+export function hostedHashRoute(win: HostedLocationWin = window): string {
+  return win.location.hash.startsWith("#/") ? win.location.hash.slice(1) : "/";
+}
+
+/**
+ * A gateway machine whose bearer died: send the tab to the console unless
+ * we just came back that way. Returns `"redirect"` after assigning
+ * `win.location.href`, or `"sign_in"` when the dead-end screen should
+ * render (standalone machine, or a loop).
+ */
+export function reenterExpiredHostedSession(
+  hosted: HostedSession,
+  win: HostedLocationWin = window,
+  now: number = Date.now(),
+): "redirect" | "sign_in" {
+  if (!hosted.gatewayUrl || hostedReentryIsLooping(now)) return "sign_in";
+  win.location.href = consoleSignInUrl(hosted.gatewayUrl, win);
+  return "redirect";
 }
 
 /**
@@ -124,7 +226,7 @@ export function resetHostedSessionForTests(): void {
  */
 export function consoleSignInUrl(
   gatewayUrl: string,
-  win: Pick<Window, "location"> = window,
+  win: HostedLocationWin = window,
 ): string {
   const base = `${gatewayUrl.replace(/\/+$/, "")}/tidebreak`;
   const here = win.location.hash.startsWith("#/")

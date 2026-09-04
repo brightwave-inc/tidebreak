@@ -7,7 +7,13 @@ import { HostedSignIn } from "./HostedSignIn";
 import { Logomark } from "./Logomark";
 import { ManagedPolicyContext } from "./managedPolicy";
 import { hasNativeHost, onPairingChanged } from "./host";
-import { hostedSession } from "./hostedSession";
+import { HOME_DRAFT_KEY, useComposerDrafts } from "./ComposerDrafts";
+import {
+  hostedHashRoute,
+  hostedSession,
+  reenterExpiredHostedSession,
+  stashComposerDraftForReentry,
+} from "./hostedSession";
 import { openInBrowser } from "./openInBrowser";
 import { disconnectRemoteMachine, remoteMachineState } from "./remoteMachine";
 import { useVisibilityGatedPoll } from "./useVisibilityGatedPoll";
@@ -343,6 +349,21 @@ export function ManagedGate({
       policyState.kind === "blocked" &&
       (policyState.status === 401 || policyState.status === 403)
     ) {
+      const route = hostedHashRoute();
+      const chatMatch = /\/c\/([^/?]+)/.exec(route);
+      const composerKey = chatMatch
+        ? chatMatch[1]
+        : route === "/"
+          ? HOME_DRAFT_KEY
+          : null;
+      const draft =
+        composerKey === null
+          ? ""
+          : (useComposerDrafts.getState().drafts[composerKey] ?? "");
+      stashComposerDraftForReentry(route, draft);
+      if (reenterExpiredHostedSession(hosted) === "redirect") {
+        return null;
+      }
       return (
         <HostedSignIn
           reason="session_ended"
