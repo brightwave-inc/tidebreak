@@ -264,15 +264,16 @@ installer itself, so no separate updater archive exists on Windows. Release
 builds check that authenticated feed and ask before restarting into the new
 installer.
 
-The credential-free `prepare_windows` job reuses compiler outputs directly
-from the shared S3 `sccache` backend. It compiles the exact release tag and
-product version, then saves a release-specific prepared archive for the
-credentialed packaging job. The Windows ARM job keeps the
-`aarch64-pc-windows-msvc` Rust target and compiles whisper.cpp with Ninja plus
+The credential-free `prepare_windows` and `prepare_windows_desktop` jobs reuse
+compiler outputs directly from the shared S3 `sccache` backend. They compile
+the sidecars and desktop in parallel for the
+exact release tag and product version, then save separate prepared archives for
+the credentialed packaging job. The Windows ARM jobs keep the
+`aarch64-pc-windows-msvc` Rust target and compile whisper.cpp with Ninja plus
 `clang-cl`, because ggml refuses MSVC on ARM. After the compile, each job
-transfers only the final binary, sidecars, and Tauri configuration to the
-production job. The production job verifies and bundles those files without
-installing a compiler or rebuilding the frontend.
+transfers only its final binaries and Tauri configuration to the production
+job. The production job verifies and bundles those files without installing a
+compiler or rebuilding the frontend.
 
 Windows code mode uses the desktop's digest-verified managed Node ZIP and
 pinned harness packages. Setup, archive, and quick-action commands run through
@@ -686,10 +687,10 @@ repository variable `CI_WINDOWS_RUNNER` to the provisioned x64 label. If you
 omit the variable, the job uses `windows-latest`. Do not point the variable at
 an ARM runner: the lane compiles `x86_64-pc-windows-msvc`.
 
-To run the x86_64 Windows release compile and packaging jobs on the same larger
-runner, set `RELEASE_WINDOWS_X64_RUNNER` to the provisioned x64 label. If you
-omit the variable, both jobs use `windows-latest`. Windows ARM64 stays on the
-native `windows-11-arm` runner required by decision 43.
+The x86_64 Windows release compile and packaging jobs use the runner named by
+`RELEASE_WINDOWS_X64_RUNNER`. The repository sets this variable to
+`windows-latest`. Windows ARM64 stays on the native `windows-11-arm` runner
+required by decision 43.
 
 The release-draft workflow uses the built-in `GITHUB_TOKEN`; it does not require
 a personal access token.

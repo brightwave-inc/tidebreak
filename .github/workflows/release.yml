@@ -1282,7 +1282,180 @@ jobs:
             || rm -f "$APPLE_CERTIFICATE_PATH"
 
   prepare_windows:
-    name: prepare unsigned Windows · ${{ matrix.arch }}
+    name: prepare unsigned Windows sidecars · ${{ matrix.arch }}
+    needs: [validate, inspect_hosted, notices]
+    if: >-
+      ${{
+        needs.validate.outputs.draft == 'true'
+        && needs.inspect_hosted.outputs.exists != 'true'
+      }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-pc-windows-msvc
+            runner: ${{ vars.RELEASE_WINDOWS_X64_RUNNER || 'windows-latest' }}
+          - arch: aarch64
+            target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+    env:
+      CARGO_INCREMENTAL: 0
+      RUSTC_WRAPPER: sccache
+      TIDEBREAK_VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+
+      - name: Install Rust target
+        run: |
+          rustup show
+          rustup target add "${{ matrix.target }}"
+
+      - name: Restore unsigned sidecar build cache
+        id: rust-build-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            target/release/.cargo-lock
+            target/release/.fingerprint
+            target/release/build
+            target/release/deps
+            target/${{ matrix.target }}/release/.cargo-lock
+            target/${{ matrix.target }}/release/.fingerprint
+            target/${{ matrix.target }}/release/build
+            target/${{ matrix.target }}/release/deps
+            target/${{ matrix.target }}/release/tidebreak-desktop.exe
+            target/${{ matrix.target }}/release/tidebreak-host-broker.exe
+            target/${{ matrix.target }}/release/tidebreak.exe
+            target/${{ matrix.target }}/release/tidebreak_desktop_lib.*
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}.exe
+            crates/tidebreak-desktop/binaries/tidebreak-${{ matrix.target }}.exe
+          key: windows-release-sidecars-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-${{ needs.validate.outputs.version }}
+
+      # The release version is a compile-time input. Rebuild every shipped
+      # product even when an exact retry restores this release's cache.
+      - name: Discard restored sidecar product binaries
+        run: |
+          rm -rf \
+            target/${{ matrix.target }}/release/tidebreak-desktop.exe \
+            target/${{ matrix.target }}/release/tidebreak-host-broker.exe \
+            target/${{ matrix.target }}/release/tidebreak.exe \
+            target/${{ matrix.target }}/release/tidebreak_desktop_lib.* \
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}.exe \
+            crates/tidebreak-desktop/binaries/tidebreak-${{ matrix.target }}.exe
+
+      - name: Set up compiler cache
+        uses: ./.github/actions/setup-sccache-s3
+        with:
+          access: write
+
+      - name: Cache Cargo downloads
+        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          shared-key: windows-release-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
+          add-job-id-key: "false"
+          add-rust-environment-hash-key: "false"
+          cache-bin: false
+          cache-targets: false
+          # This credential-free prerequisite can populate the registry cache.
+          # A duplicate save against an existing key is skipped harmlessly.
+          save-if: true
+
+      - name: Compile sidecars without production credentials
+        id: compile
+        continue-on-error: true
+        env:
+          TAURI_ENV_TARGET_TRIPLE: ${{ matrix.target }}
+        run: node crates/tidebreak-desktop/scripts/prepare-sidecar.mjs --release
+
+      - name: Save release-specific unsigned sidecar build cache
+        if: ${{ !cancelled() && steps.rust-build-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            target/release/.cargo-lock
+            target/release/.fingerprint
+            target/release/build
+            target/release/deps
+            target/${{ matrix.target }}/release/.cargo-lock
+            target/${{ matrix.target }}/release/.fingerprint
+            target/${{ matrix.target }}/release/build
+            target/${{ matrix.target }}/release/deps
+            target/${{ matrix.target }}/release/tidebreak-desktop.exe
+            target/${{ matrix.target }}/release/tidebreak-host-broker.exe
+            target/${{ matrix.target }}/release/tidebreak.exe
+            target/${{ matrix.target }}/release/tidebreak_desktop_lib.*
+            crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}.exe
+            crates/tidebreak-desktop/binaries/tidebreak-${{ matrix.target }}.exe
+          key: ${{ steps.rust-build-cache.outputs.cache-primary-key }}
+
+      - name: Require successful sidecar compilation
+        if: ${{ steps.compile.outcome != 'success' }}
+        run: exit 1
+
+      - name: Archive prepared Windows sidecars
+        env:
+          PREPARED_ROOT: ${{ runner.temp }}/tidebreak-prepared-windows-sidecars
+          RELEASE_TARGET: ${{ matrix.target }}
+        run: |
+          # GNU tar treats C:\path as a remote host and \ as escapes. Stay on
+          # POSIX paths for every tar argument.
+          PREPARED_ROOT="$(cygpath -u "$PREPARED_ROOT")"
+          workspace="$(cygpath -u "$GITHUB_WORKSPACE")"
+          broker_sidecar="crates/tidebreak-desktop/binaries/tidebreak-host-broker-$RELEASE_TARGET.exe"
+          cli_sidecar="crates/tidebreak-desktop/binaries/tidebreak-$RELEASE_TARGET.exe"
+          for file in "$broker_sidecar" "$cli_sidecar"; do
+            [[ -s "$file" ]] || {
+              echo "Prepared Windows sidecar is missing or empty: $file" >&2
+              exit 1
+            }
+          done
+
+          rm -rf "$PREPARED_ROOT"
+          mkdir -p "$PREPARED_ROOT/crates/tidebreak-desktop/binaries"
+          cp -p "$broker_sidecar" "$PREPARED_ROOT/$broker_sidecar"
+          cp -p "$cli_sidecar" "$PREPARED_ROOT/$cli_sidecar"
+
+          (
+            cd "$PREPARED_ROOT"
+            sha256sum \
+              "$broker_sidecar" \
+              "$cli_sidecar" \
+              > SHA256SUMS
+          )
+          (
+            cd "$workspace"
+            tar -cf prepared-windows-sidecars.tar -C "$PREPARED_ROOT" \
+              SHA256SUMS \
+              crates
+            sha256sum prepared-windows-sidecars.tar \
+              > prepared-windows-sidecars.tar.sha256
+          )
+
+      - name: Upload prepared Windows sidecars
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: tidebreak-prepared-windows-sidecars-${{ matrix.arch }}-${{ github.run_id }}
+          path: |
+            prepared-windows-sidecars.tar
+            prepared-windows-sidecars.tar.sha256
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          overwrite: true
+
+  prepare_windows_desktop:
+    name: prepare unsigned Windows desktop · ${{ matrix.arch }}
     needs: [validate, inspect_hosted, notices]
     if: >-
       ${{
@@ -1322,6 +1495,9 @@ jobs:
             const fs = require("node:fs");
             fs.writeFileSync(process.env.RELEASE_CONFIG, JSON.stringify({
               version: process.env.TIDEBREAK_VERSION,
+              build: {
+                beforeBuildCommand: { script: "pnpm build", cwd: "ui" }
+              },
               // NSIS supports per-user installs without elevation and needs
               // no WiX configuration.
               bundle: { targets: ["nsis"] },
@@ -1340,7 +1516,7 @@ jobs:
           rustup show
           rustup target add "${{ matrix.target }}"
 
-      - name: Restore unsigned Rust build cache
+      - name: Restore unsigned desktop build cache
         id: rust-build-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -1354,24 +1530,27 @@ jobs:
             target/${{ matrix.target }}/release/build
             target/${{ matrix.target }}/release/deps
             target/${{ matrix.target }}/release/tidebreak-desktop.exe
-            target/${{ matrix.target }}/release/tidebreak-host-broker.exe
-            target/${{ matrix.target }}/release/tidebreak.exe
             target/${{ matrix.target }}/release/tidebreak_desktop_lib.*
-            crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}.exe
-            crates/tidebreak-desktop/binaries/tidebreak-${{ matrix.target }}.exe
-          key: windows-release-prepared-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-${{ needs.validate.outputs.version }}
+          key: windows-release-desktop-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-${{ needs.validate.outputs.version }}
 
-      # The release version is a compile-time input. Rebuild every shipped
-      # product even when an exact retry restores this release's cache.
-      - name: Discard restored product binaries
+      - name: Discard restored desktop product binaries
         run: |
           rm -rf \
             target/${{ matrix.target }}/release/tidebreak-desktop.exe \
-            target/${{ matrix.target }}/release/tidebreak-host-broker.exe \
-            target/${{ matrix.target }}/release/tidebreak.exe \
-            target/${{ matrix.target }}/release/tidebreak_desktop_lib.* \
-            crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}.exe \
-            crates/tidebreak-desktop/binaries/tidebreak-${{ matrix.target }}.exe
+            target/${{ matrix.target }}/release/tidebreak_desktop_lib.*
+
+      # The desktop build script requires target-named sidecars in release
+      # mode. The packaging job replaces these inert files with verified
+      # sidecars from the parallel preparation job.
+      - name: Stage inert sidecars for desktop compilation
+        env:
+          RELEASE_TARGET: ${{ matrix.target }}
+        run: |
+          mkdir -p crates/tidebreak-desktop/binaries
+          printf 'MZ' \
+            > "crates/tidebreak-desktop/binaries/tidebreak-host-broker-$RELEASE_TARGET.exe"
+          printf 'MZ' \
+            > "crates/tidebreak-desktop/binaries/tidebreak-$RELEASE_TARGET.exe"
 
       - name: Set up compiler cache
         uses: ./.github/actions/setup-sccache-s3
@@ -1386,23 +1565,21 @@ jobs:
           add-rust-environment-hash-key: "false"
           cache-bin: false
           cache-targets: false
-          # This credential-free prerequisite can populate the registry cache.
-          # A duplicate save against an existing key is skipped harmlessly.
           save-if: true
 
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
-        with:
-          version: 10.18.3
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
-          cache: pnpm
-          cache-dependency-path: crates/tidebreak-desktop/ui/pnpm-lock.yaml
+      - name: Enable pinned pnpm
+        run: |
+          corepack enable
+          corepack install --global pnpm@10.18.3
+          node -e 'const bin = process.platform === "win32" ? "pnpm.cmd" : "pnpm"; const version = require("node:child_process").execFileSync(bin, ["--version"], { encoding: "utf8" }).trim(); if (version !== "10.18.3") throw new Error("Expected pnpm 10.18.3, got " + version)'
       - name: Install UI dependencies
         working-directory: crates/tidebreak-desktop/ui
         run: pnpm install --frozen-lockfile --ignore-scripts
 
-      - name: Compile without production credentials or bundles
+      - name: Compile desktop without production credentials or bundles
         id: compile
         continue-on-error: true
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
@@ -1414,7 +1591,7 @@ jobs:
             --no-bundle
             --ci
 
-      - name: Save release-specific unsigned Rust build cache
+      - name: Save release-specific unsigned desktop build cache
         if: ${{ !cancelled() && steps.rust-build-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -1428,73 +1605,56 @@ jobs:
             target/${{ matrix.target }}/release/build
             target/${{ matrix.target }}/release/deps
             target/${{ matrix.target }}/release/tidebreak-desktop.exe
-            target/${{ matrix.target }}/release/tidebreak-host-broker.exe
-            target/${{ matrix.target }}/release/tidebreak.exe
             target/${{ matrix.target }}/release/tidebreak_desktop_lib.*
-            crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}.exe
-            crates/tidebreak-desktop/binaries/tidebreak-${{ matrix.target }}.exe
           key: ${{ steps.rust-build-cache.outputs.cache-primary-key }}
 
-      - name: Require a successful unsigned compilation
+      - name: Require successful desktop compilation
         if: ${{ steps.compile.outcome != 'success' }}
         run: exit 1
 
-      - name: Archive prepared Windows inputs
+      - name: Archive prepared Windows desktop
         env:
-          PREPARED_ROOT: ${{ runner.temp }}/tidebreak-prepared-windows
+          PREPARED_ROOT: ${{ runner.temp }}/tidebreak-prepared-windows-desktop
           RELEASE_CONFIG: ${{ runner.temp }}/tidebreak-release.json
           RELEASE_TARGET: ${{ matrix.target }}
         run: |
-          # GNU tar treats C:\path as a remote host and \ as escapes. Stay on
-          # POSIX paths for every tar argument.
           PREPARED_ROOT="$(cygpath -u "$PREPARED_ROOT")"
           RELEASE_CONFIG="$(cygpath -u "$RELEASE_CONFIG")"
           workspace="$(cygpath -u "$GITHUB_WORKSPACE")"
           app_binary="target/$RELEASE_TARGET/release/tidebreak-desktop.exe"
-          broker_sidecar="crates/tidebreak-desktop/binaries/tidebreak-host-broker-$RELEASE_TARGET.exe"
-          cli_sidecar="crates/tidebreak-desktop/binaries/tidebreak-$RELEASE_TARGET.exe"
-          for file in "$app_binary" "$broker_sidecar" "$cli_sidecar" "$RELEASE_CONFIG"; do
+          for file in "$app_binary" "$RELEASE_CONFIG"; do
             [[ -s "$file" ]] || {
-              echo "Prepared Windows input is missing or empty: $file" >&2
+              echo "Prepared Windows desktop input is missing or empty: $file" >&2
               exit 1
             }
           done
 
           rm -rf "$PREPARED_ROOT"
-          mkdir -p \
-            "$PREPARED_ROOT/target/$RELEASE_TARGET/release" \
-            "$PREPARED_ROOT/crates/tidebreak-desktop/binaries"
+          mkdir -p "$PREPARED_ROOT/target/$RELEASE_TARGET/release"
           cp -p "$app_binary" "$PREPARED_ROOT/$app_binary"
-          cp -p "$broker_sidecar" "$PREPARED_ROOT/$broker_sidecar"
-          cp -p "$cli_sidecar" "$PREPARED_ROOT/$cli_sidecar"
           cp "$RELEASE_CONFIG" "$PREPARED_ROOT/release-config.json"
 
           (
             cd "$PREPARED_ROOT"
-            sha256sum \
-              release-config.json \
-              "$app_binary" \
-              "$broker_sidecar" \
-              "$cli_sidecar" \
-              > SHA256SUMS
+            sha256sum release-config.json "$app_binary" > SHA256SUMS
           )
           (
             cd "$workspace"
-            tar -cf prepared-windows.tar -C "$PREPARED_ROOT" \
+            tar -cf prepared-windows-desktop.tar -C "$PREPARED_ROOT" \
               SHA256SUMS \
               release-config.json \
-              target \
-              crates
-            sha256sum prepared-windows.tar > prepared-windows.tar.sha256
+              target
+            sha256sum prepared-windows-desktop.tar \
+              > prepared-windows-desktop.tar.sha256
           )
 
-      - name: Upload prepared Windows inputs
+      - name: Upload prepared Windows desktop
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: tidebreak-prepared-windows-${{ matrix.arch }}-${{ github.run_id }}
+          name: tidebreak-prepared-windows-desktop-${{ matrix.arch }}-${{ github.run_id }}
           path: |
-            prepared-windows.tar
-            prepared-windows.tar.sha256
+            prepared-windows-desktop.tar
+            prepared-windows-desktop.tar.sha256
           if-no-files-found: error
           retention-days: 1
           compression-level: 0
@@ -1502,7 +1662,7 @@ jobs:
 
   build_windows:
     name: Windows · ${{ matrix.arch }}
-    needs: [validate, inspect_hosted, notices, prepare_windows]
+    needs: [validate, inspect_hosted, notices, prepare_windows, prepare_windows_desktop]
     if: >-
       ${{
         always()
@@ -1512,6 +1672,7 @@ jobs:
         && needs.inspect_hosted.outputs.exists != 'true'
         && needs.notices.result == 'success'
         && needs.prepare_windows.result == 'success'
+        && needs.prepare_windows_desktop.result == 'success'
       }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
@@ -1538,42 +1699,71 @@ jobs:
         with:
           ref: ${{ needs.validate.outputs.sha }}
 
-      - name: Download prepared Windows inputs
+      - name: Download prepared Windows sidecars
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: tidebreak-prepared-windows-${{ matrix.arch }}-${{ github.run_id }}
-          path: ${{ runner.temp }}/prepared-windows-download
+          name: tidebreak-prepared-windows-sidecars-${{ matrix.arch }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/prepared-windows-sidecars-download
+
+      - name: Download prepared Windows desktop
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: tidebreak-prepared-windows-desktop-${{ matrix.arch }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/prepared-windows-desktop-download
 
       - name: Verify prepared Windows inputs
         env:
-          PREPARED_DOWNLOAD: ${{ runner.temp }}/prepared-windows-download
-          PREPARED_ROOT: ${{ runner.temp }}/tidebreak-prepared-windows
+          DESKTOP_DOWNLOAD: ${{ runner.temp }}/prepared-windows-desktop-download
+          DESKTOP_ROOT: ${{ runner.temp }}/tidebreak-prepared-windows-desktop
           RELEASE_CONFIG: ${{ runner.temp }}/tidebreak-release.json
           RELEASE_TARGET: ${{ matrix.target }}
+          SIDECARS_DOWNLOAD: ${{ runner.temp }}/prepared-windows-sidecars-download
+          SIDECARS_ROOT: ${{ runner.temp }}/tidebreak-prepared-windows-sidecars
         run: |
-          PREPARED_ROOT="$(cygpath -u "$PREPARED_ROOT")"
-          PREPARED_DOWNLOAD="$(cygpath -u "$PREPARED_DOWNLOAD")"
+          DESKTOP_DOWNLOAD="$(cygpath -u "$DESKTOP_DOWNLOAD")"
+          DESKTOP_ROOT="$(cygpath -u "$DESKTOP_ROOT")"
           RELEASE_CONFIG="$(cygpath -u "$RELEASE_CONFIG")"
-          rm -rf "$PREPARED_ROOT"
-          mkdir -p "$PREPARED_ROOT"
+          SIDECARS_DOWNLOAD="$(cygpath -u "$SIDECARS_DOWNLOAD")"
+          SIDECARS_ROOT="$(cygpath -u "$SIDECARS_ROOT")"
+
+          rm -rf "$DESKTOP_ROOT" "$SIDECARS_ROOT"
+          mkdir -p "$DESKTOP_ROOT" "$SIDECARS_ROOT"
           (
-            cd "$PREPARED_DOWNLOAD"
-            sha256sum --check --strict prepared-windows.tar.sha256
-            tar -xf prepared-windows.tar -C "$PREPARED_ROOT"
+            cd "$DESKTOP_DOWNLOAD"
+            sha256sum --check --strict prepared-windows-desktop.tar.sha256
+            tar -xf prepared-windows-desktop.tar -C "$DESKTOP_ROOT"
           )
           (
-            cd "$PREPARED_ROOT"
+            cd "$DESKTOP_ROOT"
             sha256sum --check --strict SHA256SUMS
             expected_files="$(printf '%s\n' \
               "./SHA256SUMS" \
-              "./crates/tidebreak-desktop/binaries/tidebreak-host-broker-$RELEASE_TARGET.exe" \
-              "./crates/tidebreak-desktop/binaries/tidebreak-$RELEASE_TARGET.exe" \
               "./release-config.json" \
               "./target/$RELEASE_TARGET/release/tidebreak-desktop.exe" \
               | LC_ALL=C sort)"
             actual_files="$(find . -type f -print | LC_ALL=C sort)"
             [[ "$actual_files" = "$expected_files" ]] || {
-              echo "Prepared Windows archive contains an unexpected file set" >&2
+              echo "Prepared Windows desktop archive contains an unexpected file set" >&2
+              printf '%s\n' "$actual_files" >&2
+              exit 1
+            }
+          )
+          (
+            cd "$SIDECARS_DOWNLOAD"
+            sha256sum --check --strict prepared-windows-sidecars.tar.sha256
+            tar -xf prepared-windows-sidecars.tar -C "$SIDECARS_ROOT"
+          )
+          (
+            cd "$SIDECARS_ROOT"
+            sha256sum --check --strict SHA256SUMS
+            expected_files="$(printf '%s\n' \
+              "./SHA256SUMS" \
+              "./crates/tidebreak-desktop/binaries/tidebreak-host-broker-$RELEASE_TARGET.exe" \
+              "./crates/tidebreak-desktop/binaries/tidebreak-$RELEASE_TARGET.exe" \
+              | LC_ALL=C sort)"
+            actual_files="$(find . -type f -print | LC_ALL=C sort)"
+            [[ "$actual_files" = "$expected_files" ]] || {
+              echo "Prepared Windows sidecar archive contains an unexpected file set" >&2
               printf '%s\n' "$actual_files" >&2
               exit 1
             }
@@ -1583,10 +1773,10 @@ jobs:
           broker_sidecar="crates/tidebreak-desktop/binaries/tidebreak-host-broker-$RELEASE_TARGET.exe"
           cli_sidecar="crates/tidebreak-desktop/binaries/tidebreak-$RELEASE_TARGET.exe"
           mkdir -p "$(dirname "$app_binary")" "$(dirname "$broker_sidecar")"
-          cp -p "$PREPARED_ROOT/$app_binary" "$app_binary"
-          cp -p "$PREPARED_ROOT/$broker_sidecar" "$broker_sidecar"
-          cp -p "$PREPARED_ROOT/$cli_sidecar" "$cli_sidecar"
-          cp "$PREPARED_ROOT/release-config.json" "$RELEASE_CONFIG"
+          cp -p "$DESKTOP_ROOT/$app_binary" "$app_binary"
+          cp -p "$SIDECARS_ROOT/$broker_sidecar" "$broker_sidecar"
+          cp -p "$SIDECARS_ROOT/$cli_sidecar" "$cli_sidecar"
+          cp "$DESKTOP_ROOT/release-config.json" "$RELEASE_CONFIG"
 
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
