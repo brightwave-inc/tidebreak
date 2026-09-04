@@ -7,7 +7,14 @@ import { HostedSignIn } from "./HostedSignIn";
 import { Logomark } from "./Logomark";
 import { ManagedPolicyContext } from "./managedPolicy";
 import { hasNativeHost, onPairingChanged } from "./host";
-import { hostedSession } from "./hostedSession";
+import { composerKeyForRoute, useComposerDrafts } from "./ComposerDrafts";
+import {
+  hostedHashRoute,
+  hostedReentryIsLooping,
+  hostedSession,
+  reenterExpiredHostedSession,
+  stashComposerDraftForReentry,
+} from "./hostedSession";
 import { openInBrowser } from "./openInBrowser";
 import { disconnectRemoteMachine, remoteMachineState } from "./remoteMachine";
 import { useVisibilityGatedPoll } from "./useVisibilityGatedPoll";
@@ -343,6 +350,21 @@ export function ManagedGate({
       policyState.kind === "blocked" &&
       (policyState.status === 401 || policyState.status === 403)
     ) {
+      // Only a redirect needs the draft carried over; the dead-end screen
+      // keeps the page, and a draft written for nothing would resurface on
+      // some later boot.
+      if (hosted.gatewayUrl && !hostedReentryIsLooping()) {
+        const route = hostedHashRoute();
+        const composerKey = composerKeyForRoute(route);
+        const draft =
+          composerKey === null
+            ? ""
+            : (useComposerDrafts.getState().drafts[composerKey] ?? "");
+        stashComposerDraftForReentry(route, draft);
+      }
+      if (reenterExpiredHostedSession(hosted) === "redirect") {
+        return null;
+      }
       return (
         <HostedSignIn
           reason="session_ended"

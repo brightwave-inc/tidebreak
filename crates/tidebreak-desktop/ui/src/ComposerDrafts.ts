@@ -1,5 +1,10 @@
 import { create } from "zustand";
 
+import {
+  hostedHashRoute,
+  type HostedLocationWin,
+  takeComposerDraftForReentry,
+} from "./hostedSession";
 import { isRecord } from "./lib/guards";
 import type { ImportedDocument } from "./documents";
 import type { ImageAttachment } from "./ImageAttachments";
@@ -17,6 +22,15 @@ function storageKeyFor(key: string): string {
 
 function attachmentsStorageKeyFor(key: string): string {
   return `${ATTACHMENTS_PREFIX}${key}`;
+}
+
+/** The composer a hash route's draft belongs to: a chat's id, the home
+ * composer's key, or `null` where no composer lives. */
+export function composerKeyForRoute(route: string): string | null {
+  const chatMatch = /\/c\/([^/?]+)/.exec(route);
+  if (chatMatch) return chatMatch[1];
+  if (route === "/") return HOME_DRAFT_KEY;
+  return null;
 }
 
 function readStoredDrafts(): Record<string, string> {
@@ -281,6 +295,17 @@ export function createComposerDraftStore() {
 }
 
 export const useComposerDrafts = createComposerDraftStore();
+
+/** After a hosted console round trip: put the stashed draft back, once. */
+export function hydrateComposerDraftFromHostedReentry(
+  win: HostedLocationWin = window,
+  storage?: Storage | null,
+): void {
+  const route = hostedHashRoute(win);
+  const reentry = takeComposerDraftForReentry(route, storage);
+  const key = composerKeyForRoute(route);
+  if (reentry && key) useComposerDrafts.getState().setDraft(key, reentry);
+}
 
 /** This composer's unsent text, restored from a previous visit if there is one. */
 export function useComposerDraft(key: string): string {

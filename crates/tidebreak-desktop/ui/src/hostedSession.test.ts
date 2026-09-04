@@ -3,12 +3,20 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { HostedSignInRequired, hostedServerInfo } from "./boot";
 import {
+  HOME_DRAFT_KEY,
+  hydrateComposerDraftFromHostedReentry,
+  useComposerDrafts,
+} from "./ComposerDrafts";
+import {
   captureHandoffToken,
   consoleSignInUrl,
   handoffBearer,
   handoffFailure,
   hostedSession,
+  reenterExpiredHostedSession,
   resetHostedSessionForTests,
+  stashComposerDraftForReentry,
+  takeComposerDraftForReentry,
 } from "./hostedSession";
 import { remoteMachineState } from "./remoteMachine";
 
@@ -203,6 +211,47 @@ describe("the hosted boot branch", () => {
   });
 });
 
+function navWindow(hash: string): {
+  location: { hash: string; href: string };
+} {
+  let href = "https://machine.example.test/";
+  return {
+    location: {
+      hash,
+      get href() {
+        return href;
+      },
+      set href(next: string) {
+        href = next;
+      },
+    },
+  };
+}
+
+function memoryStorage(): Storage {
+  const data = new Map<string, string>();
+  return {
+    get length() {
+      return data.size;
+    },
+    clear() {
+      data.clear();
+    },
+    getItem(key: string) {
+      return data.get(key) ?? null;
+    },
+    key(index: number) {
+      return [...data.keys()][index] ?? null;
+    },
+    removeItem(key: string) {
+      data.delete(key);
+    },
+    setItem(key: string, value: string) {
+      data.set(key, value);
+    },
+  };
+}
+
 describe("consoleSignInUrl", () => {
   it("sends the reader to the console's Tidebreak page with this page as the return path", () => {
     const win = {
@@ -224,5 +273,79 @@ describe("consoleSignInUrl", () => {
     expect(consoleSignInUrl("https://gateway.example.test", win)).toBe(
       "https://gateway.example.test/tidebreak",
     );
+  });
+});
+
+describe("reenterExpiredHostedSession", () => {
+  it("navigates a gateway machine to the console with the current hash route", () => {
+    const win = navWindow("#/c/chat-1");
+    const outcome = reenterExpiredHostedSession(
+      {
+        baseUrl: "https://machine.example.test",
+        gatewayUrl: "https://gateway.example.test",
+      },
+      win,
+    );
+    expect(outcome).toBe("redirect");
+    expect(win.location.href).toBe(
+      "https://gateway.example.test/tidebreak?return_to=%2Fc%2Fchat-1",
+    );
+  });
+
+  it("renders sign-in when a hand-off is refused again inside the loop window", () => {
+    captureHandoffToken(fakeWindow("#handoff=mg_at_abc.DEF-123~"));
+    const win = navWindow("#/c/chat-1");
+    const outcome = reenterExpiredHostedSession(
+      {
+        baseUrl: "https://machine.example.test",
+        gatewayUrl: "https://gateway.example.test",
+      },
+      win,
+    );
+    expect(outcome).toBe("sign_in");
+    expect(win.location.href).toBe("https://machine.example.test/");
+  });
+
+  it("renders sign-in on a standalone machine", () => {
+    const win = navWindow("#/c/chat-1");
+    const outcome = reenterExpiredHostedSession(
+      {
+        baseUrl: "https://machine.example.test",
+        gatewayUrl: null,
+      },
+      win,
+    );
+    expect(outcome).toBe("sign_in");
+    expect(win.location.href).toBe("https://machine.example.test/");
+  });
+});
+
+describe("hosted re-entry composer draft", () => {
+  afterEach(() => {
+    useComposerDrafts.getState().clearDraft("chat-1");
+    useComposerDrafts.getState().clearDraft(HOME_DRAFT_KEY);
+  });
+
+  it("survives the round trip and is deleted after it is read", () => {
+    const storage = memoryStorage();
+    const route = "/c/chat-1";
+    stashComposerDraftForReentry(route, "unsent hello", storage);
+    expect(storage.getItem(`tidebreak.hostedReentryDraft:${route}`)).toBe(
+      "unsent hello",
+    );
+    expect(takeComposerDraftForReentry(route, storage)).toBe("unsent hello");
+    expect(storage.getItem(`tidebreak.hostedReentryDraft:${route}`)).toBeNull();
+    expect(takeComposerDraftForReentry(route, storage)).toBeNull();
+  });
+
+  it("hydrates the composer from storage once on boot", () => {
+    const storage = memoryStorage();
+    const route = "/c/chat-1";
+    stashComposerDraftForReentry(route, "keep this", storage);
+    resetHostedSessionForTests();
+    const win = { location: { hash: `#${route}` } };
+    hydrateComposerDraftFromHostedReentry(win, storage);
+    expect(useComposerDrafts.getState().drafts["chat-1"]).toBe("keep this");
+    expect(storage.getItem(`tidebreak.hostedReentryDraft:${route}`)).toBeNull();
   });
 });

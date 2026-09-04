@@ -4,6 +4,7 @@ import { RouterProvider } from "@tanstack/react-router";
 import { Toaster } from "@/components/ui/sonner";
 import { restoreStoredAppMode } from "./appMode";
 import { ErrorBoundary } from "./ErrorBoundary";
+import { hydrateComposerDraftFromHostedReentry } from "./ComposerDrafts";
 import { captureHandoffToken } from "./hostedSession";
 import { refuseStrayFileDrops } from "./ImageAttachments";
 import { createAppRouter } from "./router";
@@ -16,6 +17,7 @@ refuseStrayFileDrops(window);
 // Before the router: it owns the fragment from here on, and a handoff bearer
 // left in it would be read as a route and stay in the address bar.
 captureHandoffToken();
+hydrateComposerDraftFromHostedReentry();
 const router = createAppRouter();
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
