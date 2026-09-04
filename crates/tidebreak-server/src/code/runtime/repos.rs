@@ -102,7 +102,11 @@ impl CodeRuntime {
     /// does not count. A repository that is not registered is a conflict
     /// the caller can word, not a not-found: the name may be right and the
     /// clone simply missing.
-    pub async fn repo_by_origin(&self, owner: &OwnerId, origin: &str) -> Result<CodeRepo, ServerError> {
+    pub async fn repo_by_origin(
+        &self,
+        owner: &OwnerId,
+        origin: &str,
+    ) -> Result<CodeRepo, ServerError> {
         let Some((origin_owner, origin_name)) = parse_repository_origin(origin) else {
             return Err(ServerError::bad_request_kind(
                 "repo_origin_invalid",
@@ -260,9 +264,9 @@ fn parse_repository_origin(raw: &str) -> Option<(&str, &str)> {
     let (owner, name) = rest.split_once('/')?;
     let valid = |part: &str| {
         !part.is_empty()
-            && part
-                .chars()
-                .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.'))
+            && part.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+            })
     };
     (valid(owner) && valid(name)).then_some((owner, name))
 }
@@ -281,9 +285,20 @@ mod origin_tests {
             "https://github.com/acme/tools",
             "https://github.com/acme/tools.git/",
         ] {
-            assert_eq!(parse_repository_origin(raw), Some(("acme", "tools")), "{raw:?}");
+            assert_eq!(
+                parse_repository_origin(raw),
+                Some(("acme", "tools")),
+                "{raw:?}"
+            );
         }
-        for raw in ["tools", "acme/", "/tools", "acme/tools/extra", "acme tools/x", ""] {
+        for raw in [
+            "tools",
+            "acme/",
+            "/tools",
+            "acme/tools/extra",
+            "acme tools/x",
+            "",
+        ] {
             assert_eq!(parse_repository_origin(raw), None, "{raw:?}");
         }
     }
