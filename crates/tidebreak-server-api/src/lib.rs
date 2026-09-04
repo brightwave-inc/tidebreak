@@ -1148,6 +1148,8 @@ pub fn app(state: AppState) -> Router {
     let auth_discovery = Router::new()
         .route("/auth/discovery", get(auth::discovery))
         .route("/auth/handoff", get(auth::handoff))
+        .route("/auth/oidc/start", get(auth::oidc_start))
+        .route("/auth/oidc/callback", get(auth::oidc_callback))
         .with_state(state.clone());
 
     // Loopback-only + bearer token is the real gate. CORS names the origins

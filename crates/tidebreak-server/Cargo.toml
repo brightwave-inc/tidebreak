@@ -56,6 +56,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 # The governed REST executor's pinned per-request egress client.
 reqwest = { workspace = true }
+oauth2 = { workspace = true }
+jsonwebtoken = { workspace = true }
 # Catalog-declared parameter and body schemas validated per request in the
 # governed REST executor.
 jsonschema = { workspace = true }

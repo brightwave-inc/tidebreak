@@ -121,9 +121,11 @@ function samePolicy(a: ManagedPolicy, b: ManagedPolicy): boolean {
 export function ManagedGate({
   client,
   children,
+  onHostedToken,
 }: {
   client: ApiClient;
   children: ReactNode;
+  onHostedToken?: (token: string) => Promise<void>;
 }) {
   const [policyState, setPolicyState] = useState<PolicyState>({
     kind: "loading",
@@ -369,7 +371,17 @@ export function ManagedGate({
         <HostedSignIn
           reason="session_ended"
           machineUrl={hosted.baseUrl}
-          gatewayUrl={hosted.gatewayUrl}
+          discovery={
+            hosted.discovery ??
+            (hosted.gatewayUrl
+              ? {
+                  mode: "gateway",
+                  gateway_url: hosted.gatewayUrl,
+                  resource: "tidebreak",
+                }
+              : { mode: "static_token" })
+          }
+          onToken={onHostedToken}
         />
       );
     }

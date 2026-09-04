@@ -16,10 +16,11 @@ export type HostedSession = {
   baseUrl: string;
   /**
    * The Model Gateway the machine authenticates against, from the machine's
-   * own discovery document. `null` for a machine on static tokens, which has
-   * no browser sign-in to send a reader to.
+   * own discovery document. `null` for standalone token and OIDC machines,
+   * whose browser sign-in starts on the machine itself.
    */
   gatewayUrl: string | null;
+  discovery?: import("./boot").AuthDiscovery;
 };
 
 /** Enough of `window` for hash-route and navigation seams in tests. */
@@ -104,6 +105,12 @@ function isHandoffReturnRoute(route: string): boolean {
       /[\u0000-\u001f\u007f]/.test(character),
     )
   );
+}
+
+/** Hold a validated pasted bearer in the same tab-memory slot as a handoff. */
+export function rememberHostedBearer(token: string): void {
+  handoffToken = token;
+  failure = null;
 }
 
 /** The bearer the page arrived with, or `null` if it opened without one. */
@@ -233,4 +240,17 @@ export function consoleSignInUrl(
     ? win.location.hash.slice(1)
     : "/";
   return here === "/" ? base : `${base}?return_to=${encodeURIComponent(here)}`;
+}
+
+/** Where machine-owned OIDC starts and returns to the current route. */
+export function oidcSignInUrl(
+  startUrl: string,
+  win: Pick<Window, "location"> = window,
+): string {
+  const url = new URL(startUrl, win.location.origin);
+  const here = win.location.hash.startsWith("#/")
+    ? win.location.hash.slice(1)
+    : "/";
+  if (here !== "/") url.searchParams.set("return_to", here);
+  return url.toString();
 }

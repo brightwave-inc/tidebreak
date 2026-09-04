@@ -130,6 +130,11 @@ describe("the hosted boot branch", () => {
     expect(hostedSession()).toEqual({
       baseUrl: "https://tidebreak.example.com",
       gatewayUrl: "https://gateway.example.com",
+      discovery: {
+        mode: "gateway",
+        gateway_url: "https://gateway.example.com/",
+        resource: "",
+      },
     });
     // The gate and the Machine panel read the attachment from here, and a
     // browser tab has no shell to ask.
@@ -152,7 +157,10 @@ describe("the hosted boot branch", () => {
     });
     await expect(attempt).rejects.toBeInstanceOf(HostedSignInRequired);
     await attempt.catch((error: HostedSignInRequired) => {
-      expect(error.gatewayUrl).toBe("https://gateway.example.com");
+      expect(error.discovery).toMatchObject({
+        mode: "gateway",
+        gateway_url: "https://gateway.example.com",
+      });
       expect(error.failure).toBeNull();
     });
   });
@@ -181,7 +189,14 @@ describe("the hosted boot branch", () => {
       fetch,
       bearer: null,
     });
-    await expect(attempt).rejects.toMatchObject({ gatewayUrl: null });
+    await expect(attempt).rejects.toMatchObject({
+      discovery: { mode: "static_token" },
+    });
+    expect(hostedSession()).toMatchObject({
+      baseUrl: "https://tidebreak.example.com",
+      gatewayUrl: null,
+      discovery: { mode: "static_token" },
+    });
   });
 
   it("is not a machine when the origin answers no discovery document", async () => {

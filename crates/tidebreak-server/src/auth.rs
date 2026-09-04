@@ -7,9 +7,9 @@
 //!   [`Principal::LocalOwner`]. It's the one thing standing between the agent
 //!   and any other local process that finds the port, so the check is
 //!   mandatory on every non-health route.
-//! - **Self-host** authenticates either with live Model Gateway identity or
-//!   static named bearer tokens from an operator-maintained file ([`TokenMap`]).
-//!   Both resolve to [`Principal::User`]. The per-launch token names nobody on
+//! - **Self-host** authenticates with live Model Gateway identity, standalone
+//!   OpenID Connect, or static named bearer tokens from an operator-maintained
+//!   file ([`TokenMap`]). Each resolves to [`Principal::User`]. The per-launch token names nobody on
 //!   a shared deployment and is not accepted there — a credential that names
 //!   no one is rejected at this middleware (#853).
 //!
@@ -54,7 +54,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::extract::{FromRequestParts, Query, Request, State};
 use axum::http::{
@@ -201,21 +201,36 @@ pub enum AuthDiscovery {
         resource: String,
     },
     StaticToken,
+    Oidc {
+        issuer_name: String,
+        start_url: String,
+    },
     Local,
 }
 
 pub async fn discovery(State(state): State<AppState>) -> Json<AuthDiscovery> {
     let discovery = match state.config.profile {
-        Profile::SelfHost => match state.config.auth_gateway_url.as_deref() {
-            Some(gateway_url) => AuthDiscovery::Gateway {
-                gateway_url: gateway_url.trim_end_matches('/').to_owned(),
+        Profile::SelfHost => match state.principal_authenticator.as_ref() {
+            PrincipalAuthenticator::Gateway(_) => AuthDiscovery::Gateway {
+                gateway_url: state
+                    .config
+                    .auth_gateway_url
+                    .as_deref()
+                    .expect("gateway config")
+                    .trim_end_matches('/')
+                    .to_owned(),
                 resource: state
                     .principal_authenticator
                     .gateway_resource()
                     .expect("Gateway authenticator exposes its machine resource")
                     .to_owned(),
             },
-            None => AuthDiscovery::StaticToken,
+            PrincipalAuthenticator::Oidc(oidc) => AuthDiscovery::Oidc {
+                issuer_name: oidc.issuer_name(),
+                start_url: "/auth/oidc/start".to_owned(),
+            },
+            PrincipalAuthenticator::Static(_) => AuthDiscovery::StaticToken,
+            PrincipalAuthenticator::None => AuthDiscovery::Local,
         },
         _ => AuthDiscovery::Local,
     };
@@ -428,17 +443,37 @@ async fn resolve_principal(state: &AppState, presented: &str) -> Option<Principa
 
 /// The self-host credential-to-principal mechanism selected at boot.
 ///
-/// Gateway mode is the hosted default: every request is checked against the
-/// Gateway's live account and session state. Static tokens remain available
-/// for standalone self-host deployments with no Model Gateway.
+/// Gateway mode checks every request against the Gateway's live account and
+/// session state. Standalone machines use static tokens or OpenID Connect;
+/// OIDC may also load a token file for administrator bootstrap and CLI access.
 pub enum PrincipalAuthenticator {
     None,
     Static(TokenMap),
     Gateway(GatewayAuthenticator),
+    Oidc(OidcAuthenticator),
 }
 
 impl PrincipalAuthenticator {
     pub fn from_config(config: &tidebreak_core::Config) -> Result<Self> {
+        let oidc = config.auth_oidc_issuer.as_deref();
+        if config.auth_gateway_url.is_some() && oidc.is_some() {
+            return Err(AgentError::config("TIDEBREAK_AUTH_OIDC_ISSUER cannot be combined with TIDEBREAK_AUTH_GATEWAY_URL because a self-host machine must select one browser identity provider"));
+        }
+        if let Some(issuer) = oidc {
+            let bootstrap = config
+                .auth_tokens_file
+                .as_deref()
+                .map(TokenMap::load)
+                .transpose()?;
+            return Ok(Self::Oidc(OidcAuthenticator::new(
+                issuer,
+                config.auth_oidc_client_id.as_deref().ok_or_else(|| AgentError::config("TIDEBREAK_AUTH_OIDC_CLIENT_ID is required with TIDEBREAK_AUTH_OIDC_ISSUER"))?,
+                config.auth_oidc_client_secret.as_deref().ok_or_else(|| AgentError::config("TIDEBREAK_AUTH_OIDC_CLIENT_SECRET is required with TIDEBREAK_AUTH_OIDC_ISSUER"))?,
+                config.auth_oidc_claim.as_deref().unwrap_or("sub"),
+                config.public_url.as_deref().ok_or_else(|| AgentError::config("TIDEBREAK_PUBLIC_URL is required with TIDEBREAK_AUTH_OIDC_ISSUER so the provider can return to this machine"))?,
+                bootstrap,
+            )?));
+        }
         match (
             config.auth_tokens_file.as_deref(),
             config.auth_gateway_url.as_deref(),
@@ -453,22 +488,10 @@ impl PrincipalAuthenticator {
                     tidebreak_core::config::tidebreak_machine_resource(&public_url),
                 )?))
             }
-            (None, Some(_), _, None) => Err(AgentError::config(
-                "TIDEBREAK_PUBLIC_URL is required with TIDEBREAK_AUTH_GATEWAY_URL so user credentials can be bound to this exact machine",
-            )),
-            (Some(_), Some(_), _, _) | (Some(_), None, Some(_), _) => Err(AgentError::config(
-                "self-host authentication is ambiguous: set exactly one of \
-                 TIDEBREAK_AUTH_TOKENS_FILE or TIDEBREAK_AUTH_GATEWAY_URL",
-            )),
-            (None, None, Some(_), _) => Err(AgentError::config(
-                "TIDEBREAK_AUTH_GATEWAY_VERIFIER_URL requires \
-                 TIDEBREAK_AUTH_GATEWAY_URL to name the public identity authority",
-            )),
-            (None, None, None, _) => Err(AgentError::config(
-                "self-host requires a principal-naming authenticator: set \
-                 TIDEBREAK_AUTH_GATEWAY_URL for Model Gateway identity, or \
-                 TIDEBREAK_AUTH_TOKENS_FILE for standalone static tokens",
-            )),
+            (None, Some(_), _, None) => Err(AgentError::config("TIDEBREAK_PUBLIC_URL is required with TIDEBREAK_AUTH_GATEWAY_URL so user credentials can be bound to this exact machine")),
+            (Some(_), Some(_), _, _) | (Some(_), None, Some(_), _) => Err(AgentError::config("self-host authentication is ambiguous: set exactly one of TIDEBREAK_AUTH_TOKENS_FILE or TIDEBREAK_AUTH_GATEWAY_URL")),
+            (None, None, Some(_), _) => Err(AgentError::config("TIDEBREAK_AUTH_GATEWAY_VERIFIER_URL requires TIDEBREAK_AUTH_GATEWAY_URL to name the public identity authority")),
+            (None, None, None, _) => Err(AgentError::config("self-host requires a principal-naming authenticator: set TIDEBREAK_AUTH_GATEWAY_URL for Model Gateway identity, TIDEBREAK_AUTH_OIDC_ISSUER for OpenID Connect, or TIDEBREAK_AUTH_TOKENS_FILE for standalone static tokens")),
         }
     }
 
@@ -478,6 +501,7 @@ impl PrincipalAuthenticator {
             Self::Static(tokens) => tokens
                 .resolve(presented)
                 .map(|(id, role)| Principal::User { id, role }),
+            Self::Oidc(oidc) => oidc.resolve(presented),
             Self::Gateway(gateway) => match gateway.resolve(presented).await {
                 Ok(principal) => principal,
                 Err(error) => {
@@ -491,9 +515,341 @@ impl PrincipalAuthenticator {
     fn gateway_resource(&self) -> Option<&str> {
         match self {
             Self::Gateway(gateway) => Some(&gateway.resource),
-            Self::None | Self::Static(_) => None,
+            Self::None | Self::Static(_) | Self::Oidc(_) => None,
         }
     }
+}
+
+#[derive(serde::Deserialize)]
+struct OidcMetadata {
+    issuer: String,
+    authorization_endpoint: String,
+    token_endpoint: String,
+    jwks_uri: String,
+}
+
+struct PendingOidc {
+    verifier: String,
+    nonce: String,
+    return_to: String,
+    created: Instant,
+}
+
+/// Standalone OpenID Connect authenticator from decision 0087.
+pub struct OidcAuthenticator {
+    issuer: reqwest::Url,
+    client_id: String,
+    client_secret: String,
+    claim: String,
+    callback_url: String,
+    client: reqwest::Client,
+    pending: std::sync::Mutex<HashMap<String, PendingOidc>>,
+    bearers: std::sync::Mutex<HashMap<String, (Principal, Instant)>>,
+    bootstrap: Option<TokenMap>,
+}
+
+impl OidcAuthenticator {
+    fn new(
+        issuer: &str,
+        client_id: &str,
+        client_secret: &str,
+        claim: &str,
+        public_url: &str,
+        bootstrap: Option<TokenMap>,
+    ) -> Result<Self> {
+        let issuer = reqwest::Url::parse(issuer)
+            .map_err(|error| AgentError::config(format!("invalid OIDC issuer: {error}")))?;
+        if issuer.scheme() != "https"
+            && !(issuer.scheme() == "http"
+                && issuer.host_str().is_some_and(|host| {
+                    host == "localhost"
+                        || host
+                            .parse::<std::net::IpAddr>()
+                            .is_ok_and(|ip| ip.is_loopback())
+                }))
+        {
+            return Err(AgentError::config("TIDEBREAK_AUTH_OIDC_ISSUER must use https (http is allowed only for loopback development)"));
+        }
+        if issuer.query().is_some()
+            || issuer.fragment().is_some()
+            || !issuer.username().is_empty()
+            || issuer.password().is_some()
+        {
+            return Err(AgentError::config(
+                "TIDEBREAK_AUTH_OIDC_ISSUER must not contain credentials, a query, or a fragment",
+            ));
+        }
+        if claim.is_empty()
+            || claim.len() > 128
+            || !claim
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        {
+            return Err(AgentError::config(
+                "TIDEBREAK_AUTH_OIDC_CLAIM must be a plain claim name",
+            ));
+        }
+        let public_url = canonical_public_url(public_url)?;
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|error| AgentError::config(format!("OIDC client: {error}")))?;
+        Ok(Self {
+            issuer,
+            client_id: client_id.to_owned(),
+            client_secret: client_secret.to_owned(),
+            claim: claim.to_owned(),
+            callback_url: format!("{public_url}/auth/oidc/callback"),
+            client,
+            pending: std::sync::Mutex::new(HashMap::new()),
+            bearers: std::sync::Mutex::new(HashMap::new()),
+            bootstrap,
+        })
+    }
+
+    fn issuer_name(&self) -> String {
+        self.issuer
+            .host_str()
+            .unwrap_or(self.issuer.as_str())
+            .to_owned()
+    }
+
+    fn resolve(&self, presented: &str) -> Option<Principal> {
+        if let Some((id, role)) = self
+            .bootstrap
+            .as_ref()
+            .and_then(|tokens| tokens.resolve(presented))
+        {
+            return Some(Principal::User { id, role });
+        }
+        if !presented.starts_with("tb_oidc_") {
+            return None;
+        }
+        let mut bearers = self.bearers.lock().ok()?;
+        let now = Instant::now();
+        bearers.retain(|_, (_, expires)| *expires > now);
+        bearers
+            .get(presented)
+            .map(|(principal, _)| principal.clone())
+    }
+
+    async fn metadata(&self) -> Result<OidcMetadata> {
+        let mut url = self.issuer.clone();
+        let base = url.path().trim_end_matches('/');
+        url.set_path(&format!("{base}/.well-known/openid-configuration"));
+        let metadata: OidcMetadata = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(|error| AgentError::msg(format!("OIDC discovery failed: {error}")))?
+            .error_for_status()
+            .map_err(|error| AgentError::msg(format!("OIDC discovery was refused: {error}")))?
+            .json()
+            .await
+            .map_err(|error| AgentError::msg(format!("OIDC discovery was invalid: {error}")))?;
+        if metadata.issuer.trim_end_matches('/') != self.issuer.as_str().trim_end_matches('/') {
+            return Err(AgentError::msg(
+                "OIDC discovery issuer did not match the configured issuer",
+            ));
+        }
+        Ok(metadata)
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct OidcStartQuery {
+    #[serde(default)]
+    return_to: Option<String>,
+}
+
+pub async fn oidc_start(
+    State(state): State<AppState>,
+    Query(query): Query<OidcStartQuery>,
+) -> Response {
+    let PrincipalAuthenticator::Oidc(oidc) = state.principal_authenticator.as_ref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let metadata = match oidc.metadata().await {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(%error, "OIDC discovery failed");
+            return StatusCode::SERVICE_UNAVAILABLE.into_response();
+        }
+    };
+    let mut authorization = match reqwest::Url::parse(&metadata.authorization_endpoint) {
+        Ok(url) => url,
+        Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    };
+    let (challenge, verifier) = oauth2::PkceCodeChallenge::new_random_sha256();
+    let state_value = uuid::Uuid::new_v4().simple().to_string();
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    oidc.pending
+        .lock()
+        .expect("OIDC pending lock")
+        .retain(|_, pending| pending.created.elapsed() < Duration::from_secs(600));
+    oidc.pending.lock().expect("OIDC pending lock").insert(
+        state_value.clone(),
+        PendingOidc {
+            verifier: verifier.secret().to_owned(),
+            nonce: nonce.clone(),
+            return_to: handoff_return_route(query.return_to.as_deref()).to_owned(),
+            created: Instant::now(),
+        },
+    );
+    authorization
+        .query_pairs_mut()
+        .append_pair("response_type", "code")
+        .append_pair("client_id", &oidc.client_id)
+        .append_pair("redirect_uri", &oidc.callback_url)
+        .append_pair("scope", "openid")
+        .append_pair("state", &state_value)
+        .append_pair("nonce", &nonce)
+        .append_pair("code_challenge", challenge.as_str())
+        .append_pair("code_challenge_method", "S256");
+    (
+        StatusCode::FOUND,
+        [
+            (LOCATION, authorization.to_string()),
+            (CACHE_CONTROL, "no-store".to_owned()),
+            (REFERRER_POLICY, "no-referrer".to_owned()),
+        ],
+    )
+        .into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub struct OidcCallbackQuery {
+    #[serde(default)]
+    code: String,
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    error: Option<String>,
+}
+#[derive(serde::Deserialize)]
+struct OidcTokenResponse {
+    id_token: String,
+}
+
+pub async fn oidc_callback(
+    State(state): State<AppState>,
+    Query(query): Query<OidcCallbackQuery>,
+) -> Response {
+    let PrincipalAuthenticator::Oidc(oidc) = state.principal_authenticator.as_ref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let landing = handoff_landing(&state);
+    if query.error.is_some() || query.code.is_empty() || query.state.is_empty() {
+        return handoff_redirect(&landing, "handoff-failed", "invalid", None);
+    }
+    let pending = oidc
+        .pending
+        .lock()
+        .expect("OIDC pending lock")
+        .remove(&query.state);
+    let Some(pending) =
+        pending.filter(|pending| pending.created.elapsed() < Duration::from_secs(600))
+    else {
+        return handoff_redirect(&landing, "handoff-failed", "invalid", None);
+    };
+    let metadata = match oidc.metadata().await {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(%error, "OIDC discovery failed");
+            return handoff_redirect(&landing, "handoff-failed", "unavailable", None);
+        }
+    };
+    let token: OidcTokenResponse = match oidc
+        .client
+        .post(&metadata.token_endpoint)
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", query.code.as_str()),
+            ("redirect_uri", oidc.callback_url.as_str()),
+            ("client_id", oidc.client_id.as_str()),
+            ("client_secret", oidc.client_secret.as_str()),
+            ("code_verifier", pending.verifier.as_str()),
+        ])
+        .send()
+        .await
+    {
+        Ok(response) if response.status().is_success() => match response.json().await {
+            Ok(value) => value,
+            Err(_) => return handoff_redirect(&landing, "handoff-failed", "unavailable", None),
+        },
+        Ok(_) => return handoff_redirect(&landing, "handoff-failed", "invalid", None),
+        Err(error) => {
+            tracing::warn!(%error, "OIDC token exchange failed");
+            return handoff_redirect(&landing, "handoff-failed", "unavailable", None);
+        }
+    };
+    let jwks: jsonwebtoken::jwk::JwkSet = match oidc.client.get(&metadata.jwks_uri).send().await {
+        Ok(response) if response.status().is_success() => match response.json().await {
+            Ok(value) => value,
+            Err(_) => return handoff_redirect(&landing, "handoff-failed", "unavailable", None),
+        },
+        _ => return handoff_redirect(&landing, "handoff-failed", "unavailable", None),
+    };
+    let principal =
+        match validate_oidc_id_token(oidc, &metadata, &jwks, &token.id_token, &pending.nonce) {
+            Some(value) => value,
+            None => return handoff_redirect(&landing, "handoff-failed", "invalid", None),
+        };
+    let bearer = format!(
+        "tb_oidc_{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    oidc.bearers.lock().expect("OIDC bearer lock").insert(
+        bearer.clone(),
+        (principal, Instant::now() + Duration::from_secs(3600)),
+    );
+    handoff_redirect(&landing, "handoff", &bearer, Some(&pending.return_to))
+}
+
+fn validate_oidc_id_token(
+    oidc: &OidcAuthenticator,
+    metadata: &OidcMetadata,
+    jwks: &jsonwebtoken::jwk::JwkSet,
+    id_token: &str,
+    nonce: &str,
+) -> Option<Principal> {
+    let header = jsonwebtoken::decode_header(id_token).ok()?;
+    if !matches!(
+        header.alg,
+        jsonwebtoken::Algorithm::RS256
+            | jsonwebtoken::Algorithm::RS384
+            | jsonwebtoken::Algorithm::RS512
+            | jsonwebtoken::Algorithm::PS256
+            | jsonwebtoken::Algorithm::PS384
+            | jsonwebtoken::Algorithm::PS512
+            | jsonwebtoken::Algorithm::ES256
+            | jsonwebtoken::Algorithm::ES384
+            | jsonwebtoken::Algorithm::EdDSA
+    ) {
+        return None;
+    }
+    let key = jsonwebtoken::DecodingKey::from_jwk(jwks.find(header.kid.as_deref()?)?).ok()?;
+    let mut validation = jsonwebtoken::Validation::new(header.alg);
+    validation.set_audience(&[&oidc.client_id]);
+    validation.set_issuer(&[metadata.issuer.as_str()]);
+    validation.set_required_spec_claims(&["exp", "aud", "iss", "sub"]);
+    let claims = jsonwebtoken::decode::<serde_json::Value>(id_token, &key, &validation)
+        .ok()?
+        .claims;
+    if claims.get("nonce").and_then(serde_json::Value::as_str) != Some(nonce) {
+        return None;
+    }
+    let login = claims
+        .get(&oidc.claim)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())?;
+    Some(Principal::User {
+        id: UserId::new(login).ok()?,
+        role: Role::Member,
+    })
 }
 
 /// Live verifier for Gateway-issued `tidebreak` resource tokens.
@@ -1491,5 +1847,157 @@ mod tests {
             PrincipalAuthenticator::from_config(&config),
             Ok(PrincipalAuthenticator::Static(_))
         ));
+    }
+
+    const TEST_OIDC_PRIVATE_KEY: &[u8] = &[
+        48, 46, 2, 1, 0, 48, 5, 6, 3, 43, 101, 112, 4, 34, 4, 32, 77, 131, 23, 2, 149, 50, 243,
+        210, 168, 16, 155, 75, 190, 114, 52, 174, 24, 147, 187, 163, 47, 207, 192, 156, 53, 223,
+        168, 73, 209, 213, 223, 139,
+    ];
+
+    fn oidc_test_token(audience: &str, nonce: &str, issuer: &str) -> String {
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
+        header.kid = Some("test-key".to_owned());
+        jsonwebtoken::encode(
+            &header,
+            &serde_json::json!({
+                "iss": issuer,
+                "sub": "oidc-user",
+                "aud": audience,
+                "exp": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() + 300,
+                "nonce": nonce,
+                "email": "person@example.test"
+            }),
+            &jsonwebtoken::EncodingKey::from_ed_der(TEST_OIDC_PRIVATE_KEY),
+        )
+        .unwrap()
+    }
+
+    fn oidc_test_jwks() -> jsonwebtoken::jwk::JwkSet {
+        serde_json::from_value(serde_json::json!({
+            "keys": [{
+                "kty": "OKP",
+                "crv": "Ed25519",
+                "kid": "test-key",
+                "use": "sig",
+                "alg": "EdDSA",
+                "x": "iCQjb0jIV9LwVk60OpxoyoYEtpKuMou948yRVjp6UEU"
+            }]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn oidc_id_token_validation_refuses_wrong_audience_nonce_and_issuer() {
+        let oidc = OidcAuthenticator::new(
+            "http://127.0.0.1:12345",
+            "client-id",
+            "client-secret",
+            "sub",
+            "http://127.0.0.1:8080",
+            None,
+        )
+        .unwrap();
+        let metadata = OidcMetadata {
+            issuer: "http://127.0.0.1:12345".to_owned(),
+            authorization_endpoint: "http://127.0.0.1:12345/authorize".to_owned(),
+            token_endpoint: "http://127.0.0.1:12345/token".to_owned(),
+            jwks_uri: "http://127.0.0.1:12345/jwks".to_owned(),
+        };
+        let jwks = oidc_test_jwks();
+        let valid = oidc_test_token("client-id", "expected-nonce", &metadata.issuer);
+        assert_eq!(
+            validate_oidc_id_token(&oidc, &metadata, &jwks, &valid, "expected-nonce"),
+            Some(Principal::User {
+                id: UserId::new("oidc-user").unwrap(),
+                role: Role::Member,
+            })
+        );
+        assert!(validate_oidc_id_token(&oidc, &metadata, &jwks, &valid, "wrong-nonce").is_none());
+        assert!(validate_oidc_id_token(
+            &oidc,
+            &metadata,
+            &jwks,
+            &oidc_test_token("wrong-client", "expected-nonce", &metadata.issuer),
+            "expected-nonce",
+        )
+        .is_none());
+        assert!(validate_oidc_id_token(
+            &oidc,
+            &metadata,
+            &jwks,
+            &oidc_test_token("client-id", "expected-nonce", "https://other.example.test"),
+            "expected-nonce",
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn oidc_claim_override_maps_only_a_string_claim() {
+        let oidc = OidcAuthenticator::new(
+            "http://127.0.0.1:12345",
+            "client-id",
+            "client-secret",
+            "email",
+            "http://127.0.0.1:8080",
+            None,
+        )
+        .unwrap();
+        let metadata = OidcMetadata {
+            issuer: "http://127.0.0.1:12345".to_owned(),
+            authorization_endpoint: String::new(),
+            token_endpoint: String::new(),
+            jwks_uri: String::new(),
+        };
+        let principal = validate_oidc_id_token(
+            &oidc,
+            &metadata,
+            &oidc_test_jwks(),
+            &oidc_test_token("client-id", "nonce", &metadata.issuer),
+            "nonce",
+        );
+        assert_eq!(
+            principal,
+            Some(Principal::User {
+                id: UserId::new("person@example.test").unwrap(),
+                role: Role::Member,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn oidc_mode_refuses_unconfigured_static_tokens() {
+        let oidc = OidcAuthenticator::new(
+            "http://127.0.0.1:12345",
+            "client-id",
+            "client-secret",
+            "sub",
+            "http://127.0.0.1:8080",
+            None,
+        )
+        .unwrap();
+        let authenticator = PrincipalAuthenticator::Oidc(oidc);
+        assert!(authenticator
+            .resolve("0123456789abcdef0123456789abcdef")
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn static_token_mode_refuses_oidc_bearers() {
+        let tokens = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            tokens.path(),
+            "admin 0123456789abcdef0123456789abcdef admin\n",
+        )
+        .unwrap();
+        let authenticator = PrincipalAuthenticator::Static(TokenMap::load(tokens.path()).unwrap());
+        assert!(authenticator
+            .resolve("tb_oidc_0123456789abcdef0123456789abcdef")
+            .await
+            .is_none());
     }
 }
