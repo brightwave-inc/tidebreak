@@ -258,7 +258,7 @@ jobs:
         run: |
           corepack enable
           corepack install --global pnpm@10.18.3
-          node -e 'const bin = process.platform === "win32" ? "pnpm.cmd" : "pnpm"; const version = require("node:child_process").execFileSync(bin, ["--version"], { encoding: "utf8" }).trim(); if (version !== "10.18.3") throw new Error("Expected pnpm 10.18.3, got " + version)'
+          node -e 'const bin = process.platform === "win32" ? "pnpm.cmd" : "pnpm"; const version = require("node:child_process").execFileSync(bin, ["--version"], { encoding: "utf8", shell: process.platform === "win32" }).trim(); if (version !== "10.18.3") throw new Error("Expected pnpm 10.18.3, got " + version)'
       - name: Install the locked deployment client
         run: pnpm --dir .github/vercel-cli install --frozen-lockfile --ignore-scripts
       - name: Download the inert prebuilt documentation
@@ -1574,7 +1574,7 @@ jobs:
         run: |
           corepack enable
           corepack install --global pnpm@10.18.3
-          node -e 'const bin = process.platform === "win32" ? "pnpm.cmd" : "pnpm"; const version = require("node:child_process").execFileSync(bin, ["--version"], { encoding: "utf8" }).trim(); if (version !== "10.18.3") throw new Error("Expected pnpm 10.18.3, got " + version)'
+          node -e 'const bin = process.platform === "win32" ? "pnpm.cmd" : "pnpm"; const version = require("node:child_process").execFileSync(bin, ["--version"], { encoding: "utf8", shell: process.platform === "win32" }).trim(); if (version !== "10.18.3") throw new Error("Expected pnpm 10.18.3, got " + version)'
       - name: Install UI dependencies
         working-directory: crates/tidebreak-desktop/ui
         run: pnpm install --frozen-lockfile --ignore-scripts
