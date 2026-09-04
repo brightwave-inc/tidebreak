@@ -1012,13 +1012,10 @@ export function HarnessNotice({
       // the reader. A warning or an aside is announced when they get to it.
       role={level === "error" ? "alert" : "status"}
       className={cn(
-        "max-w-prose rounded-md border px-3 py-2 text-sm",
-        tone === "critical" &&
-          "border-critical-border bg-critical-background text-critical-foreground",
-        tone === "warning" &&
-          "border-warning-border bg-warning-background text-warning-foreground",
-        tone === "info" &&
-          "border-info-border bg-info-background text-info-foreground",
+        "notice-surface w-full self-stretch px-3 py-2 text-sm",
+        tone === "critical" && "notice-critical",
+        tone === "warning" && "notice-warning",
+        tone === "info" && "notice-info",
       )}
     >
       {level === "error" && onFileIssue ? (

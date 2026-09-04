@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState, type ReactNode } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { fn } from "storybook/test";
+import { expect, fn } from "storybook/test";
 import {
   createMemoryHistory,
   createRootRoute,
@@ -438,4 +438,35 @@ export const CompactWidth: Story = {
 
 export const TranscriptContents: Story = {
   args: { messages: denseMessages },
+};
+
+export const Notices: Story = {
+  args: {
+    messages: [
+      { id: "notice-system", role: "system", text: "Turn stopped." },
+      {
+        id: "notice-error",
+        role: "error",
+        text: "The connection closed before the response completed. Check the connection and try again.",
+      },
+      blockedMessages[2],
+      { id: "notice-compaction", role: "compaction" },
+      ...failureMessages,
+    ],
+  },
+  play: async ({ canvasElement }) => {
+    const notices = Array.from(
+      canvasElement.querySelectorAll<HTMLElement>(
+        ".message-notice, .message-turn-failure, .notice-surface",
+      ),
+    );
+    await expect(notices.length).toBeGreaterThan(2);
+    const first = notices[0].getBoundingClientRect();
+    for (const notice of notices) {
+      const rect = notice.getBoundingClientRect();
+      await expect(Math.abs(rect.width - first.width)).toBeLessThan(1);
+      await expect(Math.abs(rect.left - first.left)).toBeLessThan(1);
+      await expect(notice.scrollWidth).toBeLessThanOrEqual(notice.clientWidth);
+    }
+  },
 };

@@ -278,7 +278,7 @@ export function FoldersView({ chat }: { chat: Chat }) {
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto p-4">
         {error && (
           <div
-            className="shrink-0 rounded-md bg-critical-background px-3 py-2 text-sm text-critical-foreground-muted"
+            className="notice-surface notice-critical shrink-0 rounded-md px-3 py-2 text-sm"
             role="alert"
           >
             {error}

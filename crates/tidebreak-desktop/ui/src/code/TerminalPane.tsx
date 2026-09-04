@@ -812,7 +812,7 @@ export function TerminalPane({
       )}
       {writeFailure && (
         <div
-          className="flex shrink-0 flex-col gap-2 border-b border-critical-border bg-critical-background px-3 py-2 sm:flex-row sm:items-center sm:justify-between"
+          className="notice-surface notice-critical flex shrink-0 flex-col gap-2 border-b px-3 py-2 sm:flex-row sm:items-center sm:justify-between"
           data-testid="terminal-write-failure"
           role="alert"
         >
@@ -852,7 +852,7 @@ export function TerminalPane({
       )}
       {terminalError && (
         <div
-          className="flex shrink-0 flex-col gap-2 border-b border-critical-border bg-critical-background px-3 py-2 sm:flex-row sm:items-center sm:justify-between"
+          className="notice-surface notice-critical flex shrink-0 flex-col gap-2 border-b px-3 py-2 sm:flex-row sm:items-center sm:justify-between"
           data-testid={`terminal-${terminalError.kind}-error`}
           role="alert"
         >

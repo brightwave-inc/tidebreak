@@ -1129,22 +1129,46 @@ body {
 
   /* ---------- Notices ---------- */
 
+  .notice-surface {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    border-color: var(--border);
+    border-inline-start: 2px solid var(--notice-tone, var(--border));
+    background: transparent;
+    color: var(--foreground);
+  }
+
+  .notice-critical {
+    --notice-tone: var(--critical);
+  }
+  .notice-warning {
+    --notice-tone: var(--warning);
+  }
+  .notice-info {
+    --notice-tone: var(--info);
+  }
+  .notice-success {
+    --notice-tone: var(--success);
+  }
+
   .message-notice {
-    align-self: center;
-    max-width: min(100%, 42rem);
+    align-self: stretch;
+    width: 100%;
+    min-width: 0;
+    overflow-wrap: anywhere;
     padding: 0.35rem 0.6rem;
     border-radius: 6px;
     color: var(--muted-foreground);
     font-size: 0.8rem;
-    text-align: center;
-    background: color-mix(in srgb, var(--muted) 68%, transparent);
+    text-align: left;
+    border-inline-start: 2px solid var(--border);
+    background: transparent;
   }
 
   .message-notice.is-error {
     align-self: stretch;
-    border: 1px solid color-mix(in srgb, var(--destructive) 35%, var(--line));
-    color: var(--destructive);
-    background: var(--critical-background);
+    border-inline-start-color: var(--critical);
+    color: var(--foreground);
     text-align: left;
   }
 
@@ -1155,13 +1179,11 @@ body {
     align-items: start;
     gap: 0.75rem;
     padding: 0.875rem;
-    border: 1px solid color-mix(in srgb, var(--destructive) 24%, var(--line));
-    border-radius: 8px;
-    background: color-mix(
-      in srgb,
-      var(--critical-background) 48%,
-      var(--background)
-    );
+    width: 100%;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    border-inline-start: 2px solid var(--critical);
+    background: transparent;
     color: var(--foreground);
     text-align: left;
   }
@@ -1230,13 +1252,13 @@ body {
 
   .message-notice.is-refusal {
     align-self: stretch;
-    border: 1px solid color-mix(in srgb, var(--warning) 42%, var(--line));
-    color: var(--warning-foreground);
-    background: var(--warning-background);
+    border-inline-start-color: var(--warning);
+    color: var(--foreground);
     text-align: left;
   }
 
   .message-notice.is-compaction {
+    border-inline-start: 0;
     padding: 0.15rem 0;
     background: transparent;
     color: var(--muted-foreground);

@@ -220,7 +220,7 @@ export function OutputsView({
       <div className="flex min-h-0 flex-1 flex-col gap-2 pt-4">
         {error && (
           <div
-            className="mx-4 flex shrink-0 items-center justify-between gap-3 rounded-md bg-critical-background px-3 py-2 text-sm text-critical-foreground-muted"
+            className="notice-surface notice-critical mx-4 flex shrink-0 items-center justify-between gap-3 rounded-md px-3 py-2 text-sm"
             role="alert"
           >
             <span>{error}</span>

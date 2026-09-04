@@ -362,3 +362,55 @@ const pastedTurn: CodeTranscriptItem[] = [
 export const PastedTextFolded: Story = {
   args: { items: pastedTurn },
 };
+
+export const Notices: Story = {
+  args: {
+    onFileIssue: fn(),
+    items: [
+      {
+        kind: "notice",
+        id: "notice-info",
+        level: "info",
+        message: "Session resumed.",
+      },
+      {
+        kind: "notice",
+        id: "notice-warning",
+        level: "warning",
+        message:
+          "The provider is busy. The session will retry when capacity is available.",
+      },
+      {
+        kind: "notice",
+        id: "notice-error",
+        level: "error",
+        message:
+          "The connection closed before the response completed. Check the connection and try again.",
+      },
+      {
+        kind: "notice",
+        id: "notice-path",
+        level: "error",
+        message:
+          "Unable to read /workspace/" +
+          "long-directory-name/".repeat(12) +
+          "output.log",
+      },
+    ],
+  },
+  play: async ({ canvasElement }) => {
+    const notices = Array.from(
+      canvasElement.querySelectorAll<HTMLElement>(
+        ".message-notice, .message-turn-failure, .notice-surface",
+      ),
+    );
+    await expect(notices.length).toBeGreaterThan(2);
+    const first = notices[0].getBoundingClientRect();
+    for (const notice of notices) {
+      const rect = notice.getBoundingClientRect();
+      await expect(Math.abs(rect.width - first.width)).toBeLessThan(1);
+      await expect(Math.abs(rect.left - first.left)).toBeLessThan(1);
+      await expect(notice.scrollWidth).toBeLessThanOrEqual(notice.clientWidth);
+    }
+  },
+};

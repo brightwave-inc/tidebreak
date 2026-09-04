@@ -108,7 +108,7 @@ export function TurnReviewCard({
     return (
       <div
         role="alert"
-        className="border-critical-border bg-critical-background text-critical-foreground flex flex-col gap-1.5 rounded-md border px-3 py-2 text-sm"
+        className="notice-surface notice-critical flex flex-col gap-1.5 rounded-md border px-3 py-2 text-sm"
       >
         <p className="flex items-center gap-1.5 font-medium">
           <TriangleAlert size={14} aria-hidden="true" />

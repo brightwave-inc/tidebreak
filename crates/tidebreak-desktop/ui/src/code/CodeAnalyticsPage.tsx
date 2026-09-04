@@ -839,7 +839,7 @@ function AnalyticsRefreshError({
 }) {
   return (
     <div
-      className="mx-auto mb-4 flex w-full max-w-[1500px] items-center gap-2 rounded-lg border border-critical-border bg-critical-background px-3 py-2 text-xs text-critical-foreground"
+      className="notice-surface notice-critical mx-auto mb-4 flex w-full max-w-[1500px] items-center gap-2 rounded-lg border px-3 py-2 text-xs"
       role="alert"
     >
       <CircleAlert className="size-3.5 shrink-0" />

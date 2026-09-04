@@ -155,7 +155,7 @@ export function PluginsView({
 
           {error && (
             <div
-              className="flex shrink-0 items-center justify-between gap-3 rounded-lg bg-critical-background px-3 py-2 text-sm text-critical-foreground-muted"
+              className="notice-surface notice-critical flex shrink-0 items-center justify-between gap-3 rounded-lg px-3 py-2 text-sm"
               role="alert"
             >
               <span>{error}</span>

@@ -65,7 +65,7 @@ export function UpdatesPanel({
       busy={busy}
     >
       <div
-        className="border-warning-border bg-warning-background text-warning-foreground flex items-start gap-3 rounded-md border px-4 py-3"
+        className="notice-surface notice-warning flex items-start gap-3 rounded-md border px-4 py-3"
         aria-label="Pre-v1 update warning"
       >
         <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden="true" />

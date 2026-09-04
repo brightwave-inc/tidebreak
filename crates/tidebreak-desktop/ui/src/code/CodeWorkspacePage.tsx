@@ -559,7 +559,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
             // including on an empty transcript.
             <div className="chat-pane" hidden={!visible || !showingChat}>
               {fenced && session?.fence_reason && (
-                <div className="border-warning-border bg-warning-background text-warning-foreground mx-4 mt-3 flex flex-col gap-2 rounded-md border px-3 py-2 text-sm">
+                <div className="notice-surface notice-warning mx-4 mt-3 flex flex-col gap-2 rounded-md border px-3 py-2 text-sm">
                   <p>{fenceReasonText(session.fence_reason)}</p>
                   <Button
                     type="button"

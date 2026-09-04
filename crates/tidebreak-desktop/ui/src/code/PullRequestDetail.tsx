@@ -2005,7 +2005,7 @@ function InlineDetailError({
   onRetry: () => void;
 }) {
   return (
-    <div className="m-5 flex items-center justify-between gap-3 rounded-lg border border-critical-border bg-critical-background px-3 py-2 text-sm text-critical-foreground-muted">
+    <div className="notice-surface notice-critical m-5 flex items-center justify-between gap-3 rounded-lg border px-3 py-2 text-sm">
       <span>{message}</span>
       <Button type="button" size="xs" variant="outline" onClick={onRetry}>
         Try again

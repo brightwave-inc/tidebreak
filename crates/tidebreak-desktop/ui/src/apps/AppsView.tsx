@@ -94,7 +94,7 @@ export function AppsView({
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-3">
           {error && hasApps && (
             <div
-              className="flex shrink-0 items-center justify-between gap-3 rounded-lg bg-critical-background px-3 py-2 text-sm text-critical-foreground-muted"
+              className="notice-surface notice-critical flex shrink-0 items-center justify-between gap-3 rounded-lg px-3 py-2 text-sm"
               role="alert"
             >
               <span>{error}</span>

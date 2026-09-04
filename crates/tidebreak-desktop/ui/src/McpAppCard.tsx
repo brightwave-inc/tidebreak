@@ -137,7 +137,7 @@ export function McpAppCard({
       <div className="border-t">
         {payloadState === "failed" && (
           <div
-            className="border-warning-border bg-warning-background text-warning-foreground flex min-w-0 flex-wrap items-center justify-between gap-2 border-b px-2.5 py-2"
+            className="notice-surface notice-warning flex min-w-0 flex-wrap items-center justify-between gap-2 border-b px-2.5 py-2"
             role="alert"
           >
             <div className="flex min-w-0 items-center gap-1.5 text-xs">

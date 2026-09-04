@@ -227,7 +227,7 @@ export function RepositorySettings({
         )}
       </div>
       {error && (
-        <div className="mb-4 flex flex-col items-stretch gap-2 rounded-md border border-critical-border bg-critical-background px-3 py-2 text-xs text-critical-foreground-muted min-[480px]:flex-row min-[480px]:items-center min-[480px]:justify-between">
+        <div className="notice-surface notice-critical mb-4 flex flex-col items-stretch gap-2 rounded-md border px-3 py-2 text-xs min-[480px]:flex-row min-[480px]:items-center min-[480px]:justify-between">
           <span className="flex min-w-0 items-start gap-2">
             <CircleAlert className="mt-0.5 size-3.5 shrink-0" />
             <span className="min-w-0">{error}</span>
