@@ -137,11 +137,26 @@ async fn external_app_with_token() -> (
     Arc<str>,
     tempfile::TempDir,
 ) {
+    external_app_built(|runtime| runtime).await
+}
+
+/// [`external_app_with_token`] with the runtime shaped by the caller before
+/// the app is built: a lender or a relay a test needs wired in.
+async fn external_app_built(
+    customize: impl FnOnce(CodeRuntime) -> CodeRuntime,
+) -> (
+    Router,
+    Arc<FakeProvisioner>,
+    Arc<CodeRuntime>,
+    RepoId,
+    Arc<str>,
+    tempfile::TempDir,
+) {
     let (dir, store) = temp_db_store("code.db").await;
     let db = Arc::new(store);
     let store_trait: Arc<dyn Store> = db.clone();
     let fake = Arc::new(FakeProvisioner::default());
-    let runtime = Arc::new(
+    let runtime = Arc::new(customize(
         CodeRuntime::new(
             db,
             dir.path().to_path_buf(),
@@ -153,7 +168,7 @@ async fn external_app_with_token() -> (
             None,
         )
         .with_remote_sessions(RemoteSessions::new(fake.clone(), remote_settings())),
-    );
+    ));
     let owner = OwnerId::local();
     let repo = CodeRepo {
         id: RepoId::new(),
@@ -263,6 +278,139 @@ async fn an_external_session_names_its_repository_by_origin() {
         .await
         .unwrap();
     assert_eq!(nameless.status(), reqwest::StatusCode::BAD_REQUEST);
+}
+
+/// A fake forge that lends one fixed credential for whichever repository is
+/// asked, recording the ask.
+struct LendingFake(StdMutex<Vec<String>>);
+
+#[async_trait::async_trait]
+impl crate::obo_gateway::GitCredentialLender for LendingFake {
+    async fn git_forge_identity(
+        &self,
+        _owner: &OwnerId,
+    ) -> Result<crate::obo_gateway::GitForgeIdentity, crate::obo_gateway::GitForgeError> {
+        Err(crate::obo_gateway::GitForgeError::NoGitForge)
+    }
+
+    async fn git_credential(
+        &self,
+        _owner: &OwnerId,
+        repository: &str,
+    ) -> Result<crate::obo_gateway::GitCredential, crate::obo_gateway::GitForgeError> {
+        self.0.lock().unwrap().push(repository.to_owned());
+        Ok(crate::obo_gateway::GitCredential {
+            username: "x-access-token".to_owned(),
+            secret: "lent-secret".to_owned(),
+        })
+    }
+
+    async fn list_repositories(
+        &self,
+        _owner: &OwnerId,
+    ) -> Result<Vec<crate::obo_gateway::GitHubRepository>, crate::obo_gateway::GitForgeError> {
+        Ok(Vec::new())
+    }
+}
+
+/// A machine session's own git borrows the person's forge credential from
+/// the loopback route under the session's relay key: `https` against the
+/// repository's origin host answers a credential minted for that
+/// repository, any other host or protocol answers nothing, and a missing or
+/// unknown key is refused before anything is looked up.
+#[tokio::test]
+async fn a_sessions_git_borrows_the_persons_credential_from_the_loopback_route() {
+    let lender = Arc::new(LendingFake(StdMutex::new(Vec::new())));
+    let gateway = Arc::new(
+        crate::obo_gateway::OboGateway::new(
+            "https://gateway.example",
+            "tidebreak:feedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeed".to_owned(),
+        )
+        .unwrap(),
+    );
+    let relay = Arc::new(crate::code::harness_llm::HarnessLlmRelay::new(gateway));
+    let (router, _fake, runtime, repo_id, _token, _dir) = external_app_built({
+        let lender = lender.clone();
+        let relay = relay.clone();
+        move |runtime| runtime.with_git_credentials(lender).with_harness_llm(relay)
+    })
+    .await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let owner = OwnerId::local();
+    let (_grant, pair) = runtime
+        .mint_adapter_grant(&owner, "slack", "U1", "T1")
+        .await
+        .unwrap();
+    let created = client
+        .post(format!("http://{addr}/external/code/sessions"))
+        .bearer_auth(&pair.token)
+        .json(&serde_json::json!({ "external_key": "T1/C7/1.1", "repo_id": repo_id }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let session_id = bound_session_id(&runtime, &owner, "T1/C7/1.1").await;
+    let key = relay.issue(crate::code::harness_llm::HarnessLlmSubject {
+        owner: owner.clone(),
+        session: session_id,
+    });
+    let route = format!(
+        "http://{addr}{}",
+        crate::code::harness_llm::GIT_CREDENTIAL_PATH
+    );
+    let ask = |body: &'static str, key: Option<&str>| {
+        let mut request = client.post(&route).body(body);
+        if let Some(key) = key {
+            request = request.bearer_auth(key);
+        }
+        request.send()
+    };
+
+    let lent = ask(
+        "protocol=https\nhost=github.com\npath=acme/tools.git\n",
+        Some(&key),
+    )
+    .await
+    .unwrap();
+    assert_eq!(lent.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        lent.text().await.unwrap(),
+        "username=x-access-token\npassword=lent-secret\n"
+    );
+    assert_eq!(
+        lender.0.lock().unwrap().as_slice(),
+        ["acme/tools"],
+        "minted for the workspace's own repository"
+    );
+
+    for other in [
+        "protocol=https\nhost=evil.example\n",
+        "protocol=http\nhost=github.com\n",
+        "protocol=ssh\nhost=github.com\n",
+    ] {
+        let nothing = ask(other, Some(&key)).await.unwrap();
+        assert_eq!(nothing.status(), reqwest::StatusCode::OK, "{other:?}");
+        assert_eq!(
+            nothing.text().await.unwrap(),
+            "",
+            "{other:?} gets no credential"
+        );
+    }
+    assert_eq!(
+        lender.0.lock().unwrap().len(),
+        1,
+        "no mint for a host that is not the origin"
+    );
+
+    let unkeyed = ask("protocol=https\nhost=github.com\n", None)
+        .await
+        .unwrap();
+    assert_eq!(unkeyed.status(), reqwest::StatusCode::UNAUTHORIZED);
+    let wrong = ask("protocol=https\nhost=github.com\n", Some("not-a-key"))
+        .await
+        .unwrap();
+    assert_eq!(wrong.status(), reqwest::StatusCode::UNAUTHORIZED);
 }
 
 /// The whole adapter surface over HTTP: bad tokens refuse, get-or-create

@@ -440,6 +440,14 @@ pub fn app(state: AppState) -> Router {
         .layer(DefaultBodyLimit::max(
             routes::code::MAX_HARNESS_LLM_BODY_BYTES,
         ))
+        // A machine session's own git borrows the person's forge credential
+        // here, under the same key; its body is a few description lines.
+        .route(
+            crate::code::harness_llm::GIT_CREDENTIAL_PATH,
+            post(routes::code::harness_git_credential).layer(DefaultBodyLimit::max(
+                routes::code::MAX_GIT_CREDENTIAL_BODY_BYTES,
+            )),
+        )
         .with_state(state.clone());
 
     // The channel-adapter surface (docs/slack-sessions.md, stage 2).

@@ -161,6 +161,13 @@ impl HarnessLlmRelay {
         }
     }
 
+    /// Whose session a relayed request speaks for, from the same key the
+    /// inference routes accept. `None` for a missing, unknown, or revoked
+    /// key; the caller words the refusal for its own protocol.
+    pub fn subject_for_headers(&self, headers: &HeaderMap) -> Option<HarnessLlmSubject> {
+        relay_key(headers).and_then(|key| self.subject_for_key(key))
+    }
+
     fn subject_for_key(&self, key: &str) -> Option<HarnessLlmSubject> {
         self.state
             .lock()
@@ -400,6 +407,43 @@ pub fn spawn_wiring(
             key,
         },
     )
+}
+
+/// The loopback route a machine session's git asks for a credential.
+pub const GIT_CREDENTIAL_PATH: &str = "/code/git/credential";
+
+/// The environment that points a machine session's own `git` at the
+/// loopback credential route, so the harness's shell can push the branch it
+/// made without the person holding a token on the machine.
+///
+/// Two helper entries: the first empty one clears any helper the machine's
+/// git config names, the second answers `get` by posting git's description
+/// to the route with the session's relay key and passing the answer back.
+/// `store` and `erase` swallow their input, so a dying credential is never
+/// written by another helper. The route pins the host to the workspace's
+/// origin, so a rewritten remote gets no credential. The shell policy
+/// refuses the agent's own `credential.helper` changes, which keeps this
+/// the only helper the session ever runs.
+pub fn git_credential_wiring(loopback_base: &str) -> Vec<(String, String)> {
+    let base = loopback_base.trim_end_matches('/');
+    let helper = format!(
+        "!f() {{ if [ \"$1\" = get ]; then curl -fsS -X POST --data-binary @- \
+         -H \"Authorization: Bearer ${RELAY_KEY_ENV}\" \"{base}{GIT_CREDENTIAL_PATH}\"; \
+         else cat >/dev/null; fi; }}; f"
+    );
+    vec![
+        ("GIT_CONFIG_COUNT".to_owned(), "2".to_owned()),
+        (
+            "GIT_CONFIG_KEY_0".to_owned(),
+            "credential.helper".to_owned(),
+        ),
+        ("GIT_CONFIG_VALUE_0".to_owned(), String::new()),
+        (
+            "GIT_CONFIG_KEY_1".to_owned(),
+            "credential.helper".to_owned(),
+        ),
+        ("GIT_CONFIG_VALUE_1".to_owned(), helper),
+    ]
 }
 
 /// Whether the on-behalf-of relay can carry this engine's inference.
@@ -795,6 +839,43 @@ mod tests {
         assert!(
             text.contains("authentication_error") && text.contains("\"error\""),
             "the OpenAI error shape: {text}"
+        );
+    }
+
+    #[test]
+    fn git_wiring_clears_inherited_helpers_and_posts_to_the_loopback_route() {
+        let env = git_credential_wiring("http://127.0.0.1:4321/");
+        let value = |key: &str| {
+            env.iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.as_str())
+                .unwrap_or_default()
+        };
+        assert_eq!(value("GIT_CONFIG_COUNT"), "2");
+        assert_eq!(value("GIT_CONFIG_KEY_0"), "credential.helper");
+        assert_eq!(
+            value("GIT_CONFIG_VALUE_0"),
+            "",
+            "the first entry clears every configured helper"
+        );
+        assert_eq!(value("GIT_CONFIG_KEY_1"), "credential.helper");
+        let helper = value("GIT_CONFIG_VALUE_1");
+        assert!(helper.starts_with("!f() {"), "{helper}");
+        assert!(
+            helper.contains("http://127.0.0.1:4321/code/git/credential"),
+            "{helper}"
+        );
+        assert!(
+            helper.contains("Bearer $TIDEBREAK_LLM_KEY"),
+            "the session's own key: {helper}"
+        );
+        assert!(
+            helper.contains("= get ]"),
+            "only `get` reaches the route: {helper}"
+        );
+        assert!(
+            helper.contains("cat >/dev/null"),
+            "store and erase swallow: {helper}"
         );
     }
 }
