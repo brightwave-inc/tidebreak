@@ -3026,3 +3026,127 @@ async fn the_handoff_route_lands_the_page_with_the_bearer_in_the_fragment() {
         .unwrap();
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 }
+
+/// A self-host router whose authenticator the caller chooses.
+async fn standalone_app(configure: impl FnOnce(&mut Config)) -> (Router, tempfile::TempDir) {
+    let (dir, store) = temp_db_store("t.db").await;
+    let store: Arc<dyn Store> = Arc::new(store);
+    let mut config = Config::desktop(dir.path());
+    config.profile = Profile::SelfHost;
+    config.public_url = Some("https://machine.example.com/tidebreak/".to_owned());
+    configure(&mut config);
+    let state = AppState::new(
+        config,
+        store,
+        Arc::new(FixedResolver(Arc::new(FakeProvider))),
+        Arc::new(MemSecrets::default()),
+        Arc::new(ToolRegistry::new()),
+        AgentConfig {
+            model: "fake".into(),
+            ..AgentConfig::default()
+        },
+    );
+    (app(state), dir)
+}
+
+fn public_get(uri: &str) -> Request<Body> {
+    Request::builder().uri(uri).body(Body::empty()).unwrap()
+}
+
+/// What a standalone machine tells a browser it can do, and what it refuses.
+///
+/// The discovery document is the page's only input before it holds anything,
+/// so it stays readable without a bearer and names the one mode this machine
+/// booted with. The routes for the other modes do not exist here: a
+/// token-file machine has no OIDC flow to start, and neither standalone
+/// machine has a console hand-off to redeem (decision 0087).
+#[tokio::test]
+async fn a_standalone_machine_publishes_the_one_sign_in_it_can_run() {
+    let tokens = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        tokens.path(),
+        "alice alice-token-one-padded-to-thirty-two admin\n",
+    )
+    .unwrap();
+    let (static_token, _dir) = standalone_app(|config| {
+        config.auth_tokens_file = Some(tokens.path().to_owned());
+    })
+    .await;
+    let discovery: serde_json::Value = json_body(
+        static_token
+            .clone()
+            .oneshot(public_get("/auth/discovery"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(discovery, serde_json::json!({ "mode": "static_token" }));
+    for route in [
+        "/auth/oidc/start",
+        "/auth/oidc/callback?code=c&state=s",
+        "/auth/handoff?code=mg_ho_good",
+    ] {
+        let response = static_token
+            .clone()
+            .oneshot(public_get(route))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_FOUND,
+            "{route} is not a route a token-file machine has"
+        );
+    }
+
+    let (oidc, _dir) = standalone_app(|config| {
+        config.auth_oidc_issuer = Some("https://login.example.test".to_owned());
+        config.auth_oidc_client_id = Some("client-id".to_owned());
+        config.auth_oidc_client_secret = Some("client-secret".to_owned());
+    })
+    .await;
+    let discovery: serde_json::Value = json_body(
+        oidc.clone()
+            .oneshot(public_get("/auth/discovery"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        discovery,
+        serde_json::json!({
+            "mode": "oidc",
+            "issuer_name": "login.example.test",
+            // The public URL's path prefix is kept, so the button works
+            // behind the operator's own ingress.
+            "start_url": "https://machine.example.com/tidebreak/auth/oidc/start",
+        })
+    );
+    let no_console = oidc
+        .clone()
+        .oneshot(public_get("/auth/handoff?code=mg_ho_good"))
+        .await
+        .unwrap();
+    assert_eq!(no_console.status(), StatusCode::NOT_FOUND);
+
+    // A callback this machine did not start is refused before the issuer is
+    // ever contacted, so a forged one costs nothing and admits nobody.
+    for query in [
+        "",
+        "?error=access_denied&state=s",
+        "?code=stolen-code&state=a-state-this-machine-never-issued",
+        "?code=stolen-code",
+    ] {
+        let response = oidc
+            .clone()
+            .oneshot(public_get(&format!("/auth/oidc/callback{query}")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FOUND, "{query}");
+        assert_eq!(
+            response.headers()[header::LOCATION].to_str().unwrap(),
+            "https://machine.example.com/tidebreak/#handoff-failed=invalid",
+            "{query}"
+        );
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    }
+}

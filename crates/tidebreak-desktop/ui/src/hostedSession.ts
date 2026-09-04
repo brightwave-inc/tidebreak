@@ -10,16 +10,25 @@
  * React (boot, the machine state read, the gate) agree.
  */
 
+/** What the machine's public discovery document says about signing in. */
+export type AuthDiscovery =
+  | { mode: "gateway"; gateway_url: string; resource: string }
+  | { mode: "static_token" }
+  | { mode: "oidc"; issuer_name: string; start_url: string }
+  | { mode: "local" };
+
 /** Where a page came from, once boot has confirmed the origin is a machine. */
 export type HostedSession = {
   /** The machine's origin, which is also this page's. */
   baseUrl: string;
   /**
    * The Model Gateway the machine authenticates against, from the machine's
-   * own discovery document. `null` for a machine on static tokens, which has
-   * no browser sign-in to send a reader to.
+   * own discovery document. `null` for standalone token and OIDC machines,
+   * whose browser sign-in starts on the machine itself.
    */
   gatewayUrl: string | null;
+  /** How this machine signs a browser in, so the gate can offer it again. */
+  discovery: AuthDiscovery;
 };
 
 /** Enough of `window` for hash-route and navigation seams in tests. */
@@ -104,6 +113,22 @@ function isHandoffReturnRoute(route: string): boolean {
       /[\u0000-\u001f\u007f]/.test(character),
     )
   );
+}
+
+/**
+ * Hold a bearer the reader pasted, in the same tab memory a hand-off bearer
+ * lives in: no cookie, no storage, gone on reload. Boot has already probed it
+ * against the machine, so this only records what was accepted.
+ */
+export function rememberHostedBearer(token: string): void {
+  handoffToken = token;
+  failure = null;
+}
+
+/** Whether a pasted value could be a bearer at all. Same alphabet a hand-off
+ * bearer arrives in, so a stray paste is refused before any request. */
+export function isHostedBearerShape(token: string): boolean {
+  return token.length <= 512 && HANDOFF_TOKEN.test(token);
 }
 
 /** The bearer the page arrived with, or `null` if it opened without one. */
@@ -208,7 +233,7 @@ export function hostedHashRoute(win: HostedLocationWin = window): string {
  * render (standalone machine, or a loop).
  */
 export function reenterExpiredHostedSession(
-  hosted: HostedSession,
+  hosted: Pick<HostedSession, "baseUrl" | "gatewayUrl">,
   win: HostedLocationWin = window,
   now: number = Date.now(),
 ): "redirect" | "sign_in" {
@@ -233,4 +258,21 @@ export function consoleSignInUrl(
     ? win.location.hash.slice(1)
     : "/";
   return here === "/" ? base : `${base}?return_to=${encodeURIComponent(here)}`;
+}
+
+/**
+ * Where a machine-owned OIDC sign-in starts, carrying this tab's route back.
+ *
+ * The machine publishes the start URL in its discovery document, and this
+ * adds `return_to` the way {@link consoleSignInUrl} does, so a session link
+ * opened in a fresh browser lands on the session rather than the root.
+ */
+export function oidcSignInUrl(
+  startUrl: string,
+  win: Pick<Window, "location"> = window,
+): string {
+  const url = new URL(startUrl, win.location.origin);
+  const here = hostedHashRoute(win);
+  if (here !== "/") url.searchParams.set("return_to", here);
+  return url.toString();
 }

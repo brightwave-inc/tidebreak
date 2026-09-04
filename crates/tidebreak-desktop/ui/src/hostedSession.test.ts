@@ -1,7 +1,11 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { HostedSignInRequired, hostedServerInfo } from "./boot";
+import {
+  HostedSignInRequired,
+  acceptPastedToken,
+  hostedServerInfo,
+} from "./boot";
 import {
   HOME_DRAFT_KEY,
   hydrateComposerDraftFromHostedReentry,
@@ -13,6 +17,7 @@ import {
   handoffBearer,
   handoffFailure,
   hostedSession,
+  oidcSignInUrl,
   reenterExpiredHostedSession,
   resetHostedSessionForTests,
   stashComposerDraftForReentry,
@@ -130,6 +135,11 @@ describe("the hosted boot branch", () => {
     expect(hostedSession()).toEqual({
       baseUrl: "https://tidebreak.example.com",
       gatewayUrl: "https://gateway.example.com",
+      discovery: {
+        mode: "gateway",
+        gateway_url: "https://gateway.example.com/",
+        resource: "",
+      },
     });
     // The gate and the Machine panel read the attachment from here, and a
     // browser tab has no shell to ask.
@@ -152,7 +162,10 @@ describe("the hosted boot branch", () => {
     });
     await expect(attempt).rejects.toBeInstanceOf(HostedSignInRequired);
     await attempt.catch((error: HostedSignInRequired) => {
-      expect(error.gatewayUrl).toBe("https://gateway.example.com");
+      expect(error.discovery).toMatchObject({
+        mode: "gateway",
+        gateway_url: "https://gateway.example.com",
+      });
       expect(error.failure).toBeNull();
     });
   });
@@ -173,7 +186,7 @@ describe("the hosted boot branch", () => {
     ).rejects.toMatchObject({ failure: "unavailable" });
   });
 
-  it("has no console to name for a machine on static tokens", async () => {
+  it("offers the token field, not a console, for a machine on a token file", async () => {
     const fetch = discovery({ mode: "static_token" });
     const attempt = hostedServerInfo({
       origin: "https://tidebreak.example.com",
@@ -181,7 +194,47 @@ describe("the hosted boot branch", () => {
       fetch,
       bearer: null,
     });
-    await expect(attempt).rejects.toMatchObject({ gatewayUrl: null });
+    await expect(attempt).rejects.toMatchObject({
+      discovery: { mode: "static_token" },
+    });
+    expect(hostedSession()).toMatchObject({
+      baseUrl: "https://tidebreak.example.com",
+      gatewayUrl: null,
+      discovery: { mode: "static_token" },
+    });
+  });
+
+  it("carries an OIDC machine's issuer and start URL to the sign-in screen", async () => {
+    const attempt = hostedServerInfo({
+      origin: "https://tidebreak.example.com",
+      dev: false,
+      fetch: discovery({
+        mode: "oidc",
+        issuer_name: "login.example.test",
+        start_url: "https://tidebreak.example.com/auth/oidc/start",
+      }),
+      bearer: null,
+    });
+    await expect(attempt).rejects.toMatchObject({
+      discovery: {
+        mode: "oidc",
+        issuer_name: "login.example.test",
+        start_url: "https://tidebreak.example.com/auth/oidc/start",
+      },
+    });
+    // An OIDC machine is standalone: there is no console to send anyone to.
+    expect(hostedSession()).toMatchObject({ gatewayUrl: null });
+  });
+
+  it("is not a machine when its discovery document names a mode it cannot read", async () => {
+    await expect(
+      hostedServerInfo({
+        origin: "https://tidebreak.example.com",
+        dev: false,
+        fetch: discovery({ mode: "oidc", issuer_name: "login.example.test" }),
+        bearer: null,
+      }),
+    ).resolves.toBeNull();
   });
 
   it("is not a machine when the origin answers no discovery document", async () => {
@@ -252,6 +305,72 @@ function memoryStorage(): Storage {
   };
 }
 
+describe("a pasted token", () => {
+  function probe(ok: boolean): typeof globalThis.fetch {
+    return vi.fn(async () => ({ ok })) as unknown as typeof globalThis.fetch;
+  }
+
+  it("is probed against the machine and then held in memory alone", async () => {
+    const fetch = probe(true);
+    await expect(
+      acceptPastedToken("alice-token-one-padded-to-thirty-two", {
+        origin: "https://tidebreak.example.com",
+        fetch,
+      }),
+    ).resolves.toBe(true);
+    expect(fetch).toHaveBeenCalledWith(
+      "https://tidebreak.example.com/models",
+      expect.objectContaining({
+        cache: "no-store",
+        headers: expect.objectContaining({
+          authorization: "Bearer alice-token-one-padded-to-thirty-two",
+        }),
+      }),
+    );
+    // The same slot the hand-off bearer lands in, and nowhere else.
+    expect(handoffBearer()).toBe("alice-token-one-padded-to-thirty-two");
+    expect(window.localStorage.length).toBe(0);
+    expect(window.sessionStorage.length).toBe(0);
+    expect(document.cookie).toBe("");
+  });
+
+  it("leaves the tab with no bearer when the machine refuses it", async () => {
+    await expect(
+      acceptPastedToken("wrong-token-padded-out-to-thirty-two", {
+        origin: "https://tidebreak.example.com",
+        fetch: probe(false),
+      }),
+    ).resolves.toBe(false);
+    expect(handoffBearer()).toBeNull();
+  });
+
+  it("is not sent at all when it could not be a bearer", async () => {
+    const fetch = probe(true);
+    for (const pasted of ["", "has spaces", "line\nbreak", "a".repeat(513)]) {
+      await expect(
+        acceptPastedToken(pasted, {
+          origin: "https://tidebreak.example.com",
+          fetch,
+        }),
+      ).resolves.toBe(false);
+    }
+    expect(fetch).not.toHaveBeenCalled();
+    expect(handoffBearer()).toBeNull();
+  });
+
+  it("is refused, not thrown, when the machine cannot be reached", async () => {
+    await expect(
+      acceptPastedToken("alice-token-one-padded-to-thirty-two", {
+        origin: "https://tidebreak.example.com",
+        fetch: vi.fn(async () => {
+          throw new TypeError("network down");
+        }) as unknown as typeof globalThis.fetch,
+      }),
+    ).resolves.toBe(false);
+    expect(handoffBearer()).toBeNull();
+  });
+});
+
 describe("consoleSignInUrl", () => {
   it("sends the reader to the console's Tidebreak page with this page as the return path", () => {
     const win = {
@@ -273,6 +392,35 @@ describe("consoleSignInUrl", () => {
     expect(consoleSignInUrl("https://gateway.example.test", win)).toBe(
       "https://gateway.example.test/tidebreak",
     );
+  });
+});
+
+/**
+ * The same return-path contract, on the machine's own start route: a Slack
+ * link to a session survives the trip through the issuer.
+ */
+describe("oidcSignInUrl", () => {
+  function win(hash: string): Pick<Window, "location"> {
+    return {
+      location: { origin: "https://machine.example.test", hash },
+    } as unknown as Pick<Window, "location">;
+  }
+
+  it("carries this page's hash route through the issuer", () => {
+    expect(
+      oidcSignInUrl("/auth/oidc/start", win("#/c/session-1?source=slack")),
+    ).toBe(
+      "https://machine.example.test/auth/oidc/start?return_to=%2Fc%2Fsession-1%3Fsource%3Dslack",
+    );
+  });
+
+  it("asks for no return path from the root, and keeps an absolute start URL", () => {
+    expect(
+      oidcSignInUrl(
+        "https://machine.example.test/tidebreak/auth/oidc/start",
+        win("#/"),
+      ),
+    ).toBe("https://machine.example.test/tidebreak/auth/oidc/start");
   });
 });
 

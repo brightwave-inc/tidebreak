@@ -2102,6 +2102,22 @@ body {
     margin-top: 0.5rem;
   }
 
+  /* The token field a standalone machine signs a browser in with. Its own
+     block because the boot screen is centered copy and a field is not: the
+     label sits over the input, both left-aligned, at a width a token fits. */
+  .boot-token-form {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.5rem;
+    width: min(24rem, 100%);
+    text-align: left;
+  }
+
+  .boot-token-form p {
+    text-align: left;
+  }
+
   /* A transcript phase whose row threw while rendering. Deliberately quiet: the
    conversation around it is intact, and the step itself is recoverable from the
    durable record. */

@@ -572,6 +572,7 @@ describe("ManagedGate", () => {
     markHostedSession({
       baseUrl: "https://machine.example.test",
       gatewayUrl: null,
+      discovery: { mode: "static_token" },
     });
     const client = api({
       getPolicy: vi.fn().mockRejectedValue(new Error("401: unauthorized")),
@@ -595,6 +596,11 @@ describe("ManagedGate", () => {
     markHostedSession({
       baseUrl: "https://machine.example.test",
       gatewayUrl: "https://gateway.example.test",
+      discovery: {
+        mode: "gateway",
+        gateway_url: "https://gateway.example.test",
+        resource: "tidebreak:abc",
+      },
     });
     const client = api({
       getPolicy: vi.fn().mockRejectedValue(new Error("401: unauthorized")),
