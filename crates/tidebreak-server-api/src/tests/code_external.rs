@@ -1106,3 +1106,98 @@ async fn connect_start_rejects_an_oversized_body() {
         .unwrap();
     assert_eq!(response.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
 }
+
+/// A message from a channel is attributed to the person who sent it there,
+/// not to the shared principal that owns the session (decision 0086). The
+/// channel identity comes from the grant behind the call and the display name
+/// from the adapter; a call that sends no name leaves it unset rather than
+/// inventing one.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_external_message_carries_the_senders_channel_identity() {
+    let (router, _fake, runtime, repo_id, _dir) = external_app().await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let owner = OwnerId::local();
+    let (_grant, pair) = runtime
+        .mint_adapter_grant(&owner, "slack", "U7", "T1")
+        .await
+        .unwrap();
+
+    let created = client
+        .post(format!("http://{addr}/external/code/sessions"))
+        .bearer_auth(&pair.token)
+        .json(&serde_json::json!({ "external_key": "T1/C9/1.1", "repo_id": repo_id }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let session_id = bound_session_id(&runtime, &owner, "T1/C9/1.1").await;
+
+    let named: serde_json::Value = client
+        .post(format!(
+            "http://{addr}/external/code/sessions/{session_id}/messages"
+        ))
+        .bearer_auth(&pair.token)
+        .json(&serde_json::json!({
+            "text": "take a look at this",
+            "event_id": "Ev9",
+            "channel_ts": "1700000009.000100",
+            "display": "Ines Okafor",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(named["outcome"], "new_turn");
+    let turn_id: tidebreak_core::TurnId = serde_json::from_value(named["turn_id"].clone()).unwrap();
+    let turn = tidebreak_core::db::code::get_turn(&runtime.db, &owner, turn_id)
+        .await
+        .unwrap()
+        .expect("the delivered message became a turn");
+    let actor = turn.actor.expect("an adapter message names its sender");
+    assert_eq!(actor.channel_kind.as_deref(), Some("slack"));
+    assert_eq!(actor.external_identity.as_deref(), Some("U7"));
+    assert_eq!(actor.display.as_deref(), Some("Ines Okafor"));
+    assert_eq!(
+        actor.principal, None,
+        "a person who never connected holds no principal here"
+    );
+
+    // A second message while the first is in flight parks as a queue row, and
+    // the row carries the same attribution so promotion keeps it.
+    let queued: serde_json::Value = client
+        .post(format!(
+            "http://{addr}/external/code/sessions/{session_id}/messages"
+        ))
+        .bearer_auth(&pair.token)
+        .json(&serde_json::json!({
+            "text": "and this one too",
+            "event_id": "Ev10",
+            "channel_ts": "1700000010.000100",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(queued["outcome"], "queued");
+    let (rows, _paused) =
+        tidebreak_core::db::code::list_queued_turns(&runtime.db, &owner, session_id)
+            .await
+            .map(|rows| (rows, false))
+            .unwrap();
+    let row = rows.first().expect("the second message parked");
+    let actor = row
+        .actor
+        .clone()
+        .expect("a parked message names its sender");
+    assert_eq!(actor.channel_kind.as_deref(), Some("slack"));
+    assert_eq!(actor.external_identity.as_deref(), Some("U7"));
+    assert_eq!(
+        actor.display, None,
+        "no display name is not the same as a made-up one"
+    );
+}
