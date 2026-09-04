@@ -6,17 +6,14 @@ use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tidebreak_code_execution::{PluginPackage, SkillPackage};
-use tidebreak_core::{AgentConfig, SecretProvider, Store, TurnWebSearch};
+use tidebreak_code_execution::{skill_summary_catalog_lines, PluginPackage, SkillPackage};
+use tidebreak_core::{AgentConfig, Store, TurnWebSearch};
 use tokio::sync::Notify;
 
-use crate::bus::EventBus;
-use crate::code_execution::ConfiguredExecProvider;
-use crate::foreground_prompt::skill_summary_catalog_lines;
-use crate::lane::{LaneOutcome, LaneStep};
-use crate::resolver::ProviderResolver;
-use crate::retry::RetrySchedule;
-use crate::state::SandboxAttemptGuard;
+use crate::guards::SandboxAttemptGuard;
+use crate::host::SandboxHost;
+use tidebreak_worker_runtime::lane::{LaneOutcome, LaneStep};
+use tidebreak_worker_runtime::retry::RetrySchedule;
 
 /// Fixed instruction set for the initial isolated executor, up to the sentence
 /// that names the run's tools.
@@ -134,7 +131,7 @@ pub(super) fn sandbox_skills_summary(
 pub(super) const MAX_PROVIDER_EXECUTED_RECORDS: usize = 16;
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct SandboxAgentRunWorkerConfig {
+pub struct SandboxAgentRunWorkerConfig {
     pub(crate) lease: Duration,
     pub(crate) heartbeat: Duration,
     pub(crate) idle_min: Duration,
@@ -185,14 +182,14 @@ impl Default for SandboxAgentRunWorkerConfig {
 
 impl SandboxAgentRunWorkerConfig {
     #[must_use]
-    pub(crate) const fn with_delegated_file_executor(mut self, enabled: bool) -> Self {
+    pub const fn with_delegated_file_executor(mut self, enabled: bool) -> Self {
         self.delegated_file_executor_enabled = enabled;
         self
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SandboxAgentRunWorkerOutcome {
+pub enum SandboxAgentRunWorkerOutcome {
     Idle,
     Completed(tidebreak_core::AgentRunId),
     RetryScheduled(tidebreak_core::AgentRunId),
@@ -214,13 +211,13 @@ impl LaneOutcome for SandboxAgentRunWorkerOutcome {
 }
 
 #[derive(Clone)]
-pub(crate) struct SandboxAgentRunWorker {
+pub struct SandboxAgentRunWorker {
     pub(crate) store: Arc<dyn Store>,
-    pub(crate) secrets: Arc<dyn SecretProvider>,
-    pub(crate) resolver: Arc<dyn ProviderResolver>,
+    pub(crate) host: Arc<dyn SandboxHost>,
+    #[cfg(test)]
+    pub(crate) events: Arc<crate::bus::EventBus>,
     pub(crate) wake: Arc<Notify>,
     pub(crate) turn_wake: Arc<Notify>,
-    pub(crate) events: Arc<EventBus>,
     pub(crate) attempts: Arc<SandboxAttemptGuard>,
     #[cfg(test)]
     pub(crate) fail_wait_set_resume_responses: Arc<AtomicUsize>,
@@ -239,9 +236,5 @@ pub(crate) struct SandboxAgentRunWorker {
     /// future sandbox-safe tool adapter must be given an exact per-run handle
     /// rather than a chat or project path.
     pub(crate) private_scratch_root: Option<PathBuf>,
-    /// Same host code-execution surface the foreground turn uses for its skill
-    /// catalog. Absent on a headless embedding with no exec provider — the
-    /// sandbox prompt then carries no skills section.
-    pub(crate) code_execution: Option<Arc<ConfiguredExecProvider>>,
     pub(crate) config: SandboxAgentRunWorkerConfig,
 }

@@ -20,4 +20,6 @@ mod worker;
 #[path = "tests.rs"]
 mod tests;
 
-pub(crate) use config::{SandboxAgentRunWorker, SandboxAgentRunWorkerConfig};
+pub use config::{
+    SandboxAgentRunWorker, SandboxAgentRunWorkerConfig, SandboxAgentRunWorkerOutcome,
+};

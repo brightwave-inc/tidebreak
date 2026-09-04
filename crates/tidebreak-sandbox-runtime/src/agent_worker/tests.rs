@@ -13,9 +13,9 @@ use tidebreak_core::{
 use tokio::sync::Notify;
 
 use crate::bus::EventBus;
+use crate::guards::SandboxAttemptGuard;
 use crate::resolver::ProviderResolver;
-use crate::retry::RetrySchedule;
-use crate::state::SandboxAttemptGuard;
+use tidebreak_worker_runtime::retry::RetrySchedule;
 
 use super::*;
 
@@ -750,7 +750,9 @@ async fn sandbox_run_inherits_the_chat_model_and_reasoning_effort() {
     store.create_chat(&chat).await.unwrap();
 
     // Mirror message acceptance: the turn freezes the chat's resolved model.
-    let selected = crate::routes::resolve_chat_model(&*store, &chat, "boot-default-model")
+    let selected = worker
+        .host
+        .resolve_chat_model(&chat, "boot-default-model")
         .await
         .unwrap();
     assert_eq!(selected, "chat-cheap-model");
@@ -2238,7 +2240,7 @@ async fn pre_signalled_cancellation_after_egress_heartbeat_never_polls_provider(
 
     let provider_entries = Arc::new(AtomicUsize::new(0));
     let attempts = Arc::new(SandboxAttemptGuard::default());
-    let worker = SandboxAgentRunWorker::with_attempts(
+    let worker = SandboxAgentRunWorker::with_test_attempts(
         store.clone(),
         test_secrets(),
         Arc::new(FixedResolver(Arc::new(CountingPendingProvider {
@@ -2302,7 +2304,7 @@ async fn local_signal_drops_resolver_before_durable_cancellation_ack() {
     let entered = Arc::new(Notify::new());
     let dropped = Arc::new(AtomicBool::new(false));
     let attempts = Arc::new(SandboxAttemptGuard::default());
-    let worker = SandboxAgentRunWorker::with_attempts(
+    let worker = SandboxAgentRunWorker::with_test_attempts(
         store.clone(),
         test_secrets(),
         Arc::new(DropAwareResolver {
@@ -2354,7 +2356,7 @@ async fn local_signal_drops_provider_stream_before_durable_cancellation_ack() {
     let started = Arc::new(Notify::new());
     let dropped = Arc::new(AtomicBool::new(false));
     let attempts = Arc::new(SandboxAttemptGuard::default());
-    let worker = SandboxAgentRunWorker::with_attempts(
+    let worker = SandboxAgentRunWorker::with_test_attempts(
         store.clone(),
         test_secrets(),
         Arc::new(FixedResolver(Arc::new(DropAwareProvider {
@@ -2412,7 +2414,7 @@ async fn local_cancellation_accounts_usage_observed_before_stream_drop() {
         output_tokens: 5,
         ..Usage::default()
     };
-    let worker = SandboxAgentRunWorker::with_attempts(
+    let worker = SandboxAgentRunWorker::with_test_attempts(
         store.clone(),
         test_secrets(),
         Arc::new(FixedResolver(Arc::new(DropAwareProvider {
@@ -2494,7 +2496,7 @@ async fn local_cancellation_finalization_survives_accounting_failure_past_execut
             cache_creation_input_tokens: 3,
         };
         let lease = Duration::from_millis(150);
-        let worker = SandboxAgentRunWorker::with_attempts(
+        let worker = SandboxAgentRunWorker::with_test_attempts(
             store.clone(),
             test_secrets(),
             Arc::new(FixedResolver(Arc::new(DropAwareProvider {
@@ -2611,7 +2613,7 @@ async fn local_cancellation_accounts_output_observed_without_usage() {
     let started = Arc::new(Notify::new());
     let dropped = Arc::new(AtomicBool::new(false));
     let attempts = Arc::new(SandboxAttemptGuard::default());
-    let worker = SandboxAgentRunWorker::with_attempts(
+    let worker = SandboxAgentRunWorker::with_test_attempts(
         store.clone(),
         test_secrets(),
         Arc::new(FixedResolver(Arc::new(DropAwareProvider {
@@ -3523,289 +3525,6 @@ fn sandbox_chat() -> Chat {
     }
 }
 
-/// Emits `plan_calls` successive `update_task_plan` calls, then `done` for
-/// every step after that.
-struct TaskPlanThenDoneProvider {
-    requests: Mutex<Vec<ChatRequest>>,
-    plan_calls: usize,
-}
-
-impl Default for TaskPlanThenDoneProvider {
-    fn default() -> Self {
-        Self {
-            requests: Mutex::new(Vec::new()),
-            plan_calls: 2,
-        }
-    }
-}
-
-impl TaskPlanThenDoneProvider {
-    fn with_plan_calls(plan_calls: usize) -> Self {
-        Self {
-            plan_calls,
-            ..Self::default()
-        }
-    }
-
-    fn plan_call(id: &str, arguments: &str) -> Vec<ProviderEvent> {
-        vec![
-            ProviderEvent::TextDelta {
-                text: "Writing the plan down first.".into(),
-            },
-            ProviderEvent::ToolCallStarted {
-                index: 0,
-                id: id.into(),
-                name: tidebreak_core::UPDATE_TASK_PLAN_TOOL.into(),
-            },
-            ProviderEvent::ToolCallArgsDelta {
-                index: 0,
-                fragment: arguments.into(),
-            },
-            ProviderEvent::Stop {
-                reason: StopReason::ToolUse,
-            },
-        ]
-    }
-
-    fn done_call(id: &str) -> Vec<ProviderEvent> {
-        vec![
-            ProviderEvent::ToolCallStarted {
-                index: 0,
-                id: id.into(),
-                name: tidebreak_core::SANDBOX_DONE_TOOL.into(),
-            },
-            ProviderEvent::ToolCallArgsDelta {
-                index: 0,
-                fragment: r#"{"outputs":[],"summary":"finished the research"}"#.into(),
-            },
-            ProviderEvent::Stop {
-                reason: StopReason::ToolUse,
-            },
-        ]
-    }
-}
-
-#[async_trait]
-impl ModelProvider for TaskPlanThenDoneProvider {
-    fn id(&self) -> ProviderId {
-        ProviderId::new("sandbox-task-plan")
-    }
-
-    async fn stream(&self, request: ChatRequest) -> Result<BoxStream<'static, ProviderEvent>> {
-        let call_number = {
-            let mut requests = self.requests.lock().unwrap();
-            requests.push(request);
-            requests.len()
-        };
-        let events = if call_number == 1 {
-            Self::plan_call(
-                "plan_1",
-                r#"{"steps":[{"content":"read the brief","status":"in_progress"},{"content":"write the summary","status":"pending"}]}"#,
-            )
-        } else if call_number <= self.plan_calls {
-            Self::plan_call(
-                &format!("plan_{call_number}"),
-                r#"{"steps":[{"content":"read the brief","status":"completed"},{"content":"write the summary","status":"in_progress"}]}"#,
-            )
-        } else {
-            // Every later step tries to finish. The first attempt may still
-            // have an open step and be handed back; a later one is accepted
-            // whether or not the model closed the plan.
-            Self::done_call(&format!("done_{call_number}"))
-        };
-        Ok(stream::iter(events).boxed())
-    }
-}
-
-/// A background run keeps a plan across its own checkpoints, and abandoning it
-/// mid-list is pointed out once rather than accepted silently or refused.
-///
-/// This drives the whole path the way the run does: the tool is advertised to
-/// the sandbox surface, each call parks a durable checkpoint that the host —
-/// not the sandbox — resolves, and the plan that comes back is keyed by the
-/// run. The `done` push-back is the part worth pinning: it must be one
-/// rejected call the model can read and answer, and it must never be able to
-/// stop the run from finishing.
-#[tokio::test]
-async fn a_sandbox_run_keeps_a_plan_and_is_reminded_once_before_it_finishes() {
-    let dir = tempfile::tempdir().unwrap();
-    let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect(&format!(
-            "sqlite://{}?mode=rwc",
-            dir.path().join("t.db").display()
-        ))
-        .await
-        .unwrap(),
-    );
-    let chat = sandbox_chat();
-    store.create_chat(&chat).await.unwrap();
-    let provider = Arc::new(TaskPlanThenDoneProvider::default());
-    let worker = SandboxAgentRunWorker::new(
-        store.clone(),
-        test_secrets(),
-        Arc::new(FixedResolver(provider.clone())),
-        Arc::new(Notify::new()),
-        Arc::new(Notify::new()),
-        Arc::new(EventBus::default()),
-        AgentConfig {
-            model: "sandbox-model".into(),
-            max_steps: 8,
-            ..AgentConfig::default()
-        },
-        None,
-        SandboxAgentRunWorkerConfig::default(),
-    );
-    let plans = crate::sandbox_task_plan_worker::SandboxTaskPlanWorker::new(
-        store.clone(),
-        Arc::new(Notify::new()),
-        crate::sandbox_task_plan_worker::SandboxTaskPlanWorkerConfig::default(),
-    );
-    let spawn = CallId::new();
-    let id = tidebreak_core::AgentRunId::sandbox_for_spawn_call(spawn);
-    admit_sandbox(&store, chat.id, spawn, "Research this.").await;
-
-    // The plan tool is offered to the sandbox surface alongside the rest.
-    assert!(matches!(
-        worker.run_once().await.unwrap(),
-        SandboxAgentRunWorkerOutcome::ToolCheckpointed(_)
-    ));
-    assert!(provider.requests.lock().unwrap()[0]
-        .tools
-        .iter()
-        .any(|tool| tool.name == tidebreak_core::UPDATE_TASK_PLAN_TOOL));
-    // Nothing is recorded until the host lane resolves the checkpoint: the row
-    // lives in this database, not where the agent runs.
-    assert!(store.get_agent_run_task_plan(id).await.unwrap().is_none());
-    assert!(matches!(
-        plans.run_once().await.unwrap(),
-        crate::sandbox_task_plan_worker::SandboxTaskPlanWorkerOutcome::Resolved(_)
-    ));
-    let first = store.get_agent_run_task_plan(id).await.unwrap().unwrap();
-    assert_eq!(first.run_id, id);
-    assert_eq!(
-        first.steps[0].status,
-        tidebreak_core::TaskPlanStepStatus::InProgress
-    );
-
-    // The second call replaces the list rather than appending to it.
-    assert!(matches!(
-        worker.run_once().await.unwrap(),
-        SandboxAgentRunWorkerOutcome::ToolCheckpointed(_)
-    ));
-    assert!(matches!(
-        plans.run_once().await.unwrap(),
-        crate::sandbox_task_plan_worker::SandboxTaskPlanWorkerOutcome::Resolved(_)
-    ));
-    let second = store.get_agent_run_task_plan(id).await.unwrap().unwrap();
-    assert_eq!(second.steps.len(), 2);
-    assert_eq!(
-        second.steps[0].status,
-        tidebreak_core::TaskPlanStepStatus::Completed
-    );
-    assert_eq!(
-        second.steps[1].status,
-        tidebreak_core::TaskPlanStepStatus::InProgress
-    );
-
-    // `done` with an unfinished plan is handed back as an ordinary error
-    // result, keeping the run's attempt, rather than completing it.
-    let reminder = match worker.run_once().await.unwrap() {
-        SandboxAgentRunWorkerOutcome::ToolCheckpointed(call_id) => call_id,
-        outcome => panic!("unexpected outcome: {outcome:?}"),
-    };
-    let receipt = store
-        .get_sandbox_tool_call_receipt(reminder)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(receipt.status, SandboxToolCallStatus::Failed);
-    assert_eq!(receipt.error_code.as_deref(), Some("task_plan_incomplete"));
-    assert!(receipt.result.contains("write the summary"));
-    assert_eq!(
-        store.get_agent_run(id).await.unwrap().unwrap().status,
-        AgentRunStatus::RetryWait
-    );
-
-    // The reminder is spent. A run that calls `done` again finishes, so a
-    // model that will not close its list is never trapped.
-    assert_eq!(
-        worker.run_once().await.unwrap(),
-        SandboxAgentRunWorkerOutcome::Completed(id)
-    );
-}
-
-/// A run one model step from its ceiling submits instead of being reminded.
-///
-/// The reminder parks a row the next completion has to read, so it can only be
-/// offered while the run can still pay for that completion. Getting this wrong
-/// turns the nudge into a failure on exactly the runs that were about to
-/// finish: the step budget would be exceeded assembling the request that was
-/// supposed to carry the correction.
-#[tokio::test]
-async fn a_run_at_its_last_step_submits_rather_than_being_reminded() {
-    let dir = tempfile::tempdir().unwrap();
-    let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect(&format!(
-            "sqlite://{}?mode=rwc",
-            dir.path().join("t.db").display()
-        ))
-        .await
-        .unwrap(),
-    );
-    let chat = sandbox_chat();
-    store.create_chat(&chat).await.unwrap();
-    let provider = Arc::new(TaskPlanThenDoneProvider::with_plan_calls(1));
-    let worker = SandboxAgentRunWorker::new(
-        store.clone(),
-        test_secrets(),
-        Arc::new(FixedResolver(provider.clone())),
-        Arc::new(Notify::new()),
-        Arc::new(Notify::new()),
-        Arc::new(EventBus::default()),
-        AgentConfig {
-            model: "sandbox-model".into(),
-            // One checkpoint, then one completion to read it. `done` on that
-            // second step leaves no room for a third.
-            max_steps: 2,
-            ..AgentConfig::default()
-        },
-        None,
-        SandboxAgentRunWorkerConfig::default(),
-    );
-    let plans = crate::sandbox_task_plan_worker::SandboxTaskPlanWorker::new(
-        store.clone(),
-        Arc::new(Notify::new()),
-        crate::sandbox_task_plan_worker::SandboxTaskPlanWorkerConfig::default(),
-    );
-    let spawn = CallId::new();
-    let id = tidebreak_core::AgentRunId::sandbox_for_spawn_call(spawn);
-    admit_sandbox(&store, chat.id, spawn, "Research this.").await;
-
-    assert!(matches!(
-        worker.run_once().await.unwrap(),
-        SandboxAgentRunWorkerOutcome::ToolCheckpointed(_)
-    ));
-    assert!(matches!(
-        plans.run_once().await.unwrap(),
-        crate::sandbox_task_plan_worker::SandboxTaskPlanWorkerOutcome::Resolved(_)
-    ));
-    // The plan is left with an open step, which is exactly what would earn a
-    // reminder if the run could afford one.
-    assert!(!tidebreak_core::open_task_plan_steps(
-        &store
-            .get_agent_run_task_plan(id)
-            .await
-            .unwrap()
-            .unwrap()
-            .steps
-    )
-    .is_empty());
-    assert_eq!(
-        worker.run_once().await.unwrap(),
-        SandboxAgentRunWorkerOutcome::Completed(id)
-    );
-}
-
 /// Spend a run's steps up to the point its cadence withdraws the parking tools.
 ///
 /// The rows are written directly rather than driven through the worker: what
@@ -4052,84 +3771,5 @@ async fn a_call_made_after_the_budget_is_spent_is_refused_rather_than_failing_th
                 |block| matches!(block, ContentBlock::Text { text } if text.contains("Wrap up now"))
             ),
         "the resumed request should carry the guidance in its task text"
-    );
-}
-
-/// The parent model can act on a check-in itself: resume with guidance, or
-/// cancel outright — the same transitions the run panel drives, as tools.
-#[tokio::test]
-async fn parent_tools_resume_and_cancel_a_checked_in_child() {
-    let dir = tempfile::tempdir().unwrap();
-    let store: Arc<dyn Store> = Arc::new(
-        DbStore::connect(&format!(
-            "sqlite://{}?mode=rwc",
-            dir.path().join("t.db").display()
-        ))
-        .await
-        .unwrap(),
-    );
-    let chat = sandbox_chat();
-    store.create_chat(&chat).await.unwrap();
-    let provider = Arc::new(WebSearchThenFinalProvider::default());
-    let worker = SandboxAgentRunWorker::new(
-        store.clone(),
-        test_secrets(),
-        Arc::new(FixedResolver(provider.clone())),
-        Arc::new(Notify::new()),
-        Arc::new(Notify::new()),
-        Arc::new(EventBus::default()),
-        AgentConfig {
-            model: "sandbox-model".into(),
-            max_steps: 8,
-            ..AgentConfig::default()
-        },
-        None,
-        SandboxAgentRunWorkerConfig::default(),
-    );
-    let spawn = CallId::new();
-    let id = tidebreak_core::AgentRunId::sandbox_for_spawn_call(spawn);
-    admit_sandbox(&store, chat.id, spawn, "Produce a document.").await;
-    spend_the_cadence(&store, id, chat.id, 7).await;
-    assert_eq!(
-        worker.run_once().await.unwrap(),
-        SandboxAgentRunWorkerOutcome::CheckedIn(id)
-    );
-
-    let ctx = tidebreak_core::ToolCtx::new_legacy_workspace(chat.id, None, dir.path().join("ws"));
-    let resume = crate::agent_control_tools::ResumeAgentTool::new(store.clone());
-    let output = tidebreak_core::Tool::execute(
-        &resume,
-        &ctx,
-        serde_json::json!({"agent_id": id, "guidance": "Wrap it up."}),
-    )
-    .await
-    .unwrap();
-    assert!(!output.is_error, "resume should succeed: {output:?}");
-    let resumed = store.get_agent_run(id).await.unwrap().unwrap();
-    assert_eq!(resumed.status, AgentRunStatus::RetryWait);
-    assert_eq!(resumed.checkin_grants, 1);
-
-    // Resuming a run that is not paused is a readable refusal, not an error.
-    let again = tidebreak_core::Tool::execute(&resume, &ctx, serde_json::json!({"agent_id": id}))
-        .await
-        .unwrap();
-    assert!(again.is_error);
-
-    // Drive the run to its next pause, then cancel it from the parent's side.
-    assert_eq!(
-        worker.run_once().await.unwrap(),
-        SandboxAgentRunWorkerOutcome::Completed(id)
-    );
-    let cancel = crate::agent_control_tools::CancelAgentTool::new(store.clone());
-    let output = tidebreak_core::Tool::execute(
-        &cancel,
-        &ctx,
-        serde_json::json!({"agent_id": id, "reason": "no longer needed"}),
-    )
-    .await
-    .unwrap();
-    assert!(
-        !output.is_error,
-        "cancelling a finished run reads as already finished: {output:?}"
     );
 }

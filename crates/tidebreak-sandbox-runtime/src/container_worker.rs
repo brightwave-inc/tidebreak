@@ -11,14 +11,14 @@ use tidebreak_core::{Result, Store};
 use tidebreak_sandbox_protocol::SandboxBackend;
 use tokio::sync::Notify;
 
-use crate::lane::{self, FailureWait, LanePacing};
-use crate::resolver::ProviderResolver;
-use crate::sandbox_container_run::{SandboxContainerRunConfig, SandboxContainerRunner};
-use crate::state::SandboxSteerGuard;
+use crate::container_run::{SandboxContainerRunConfig, SandboxContainerRunner};
+use crate::guards::SandboxSteerGuard;
+use crate::host::SandboxHost;
+use tidebreak_worker_runtime::lane::{self, FailureWait, LanePacing};
 
 /// Service-level polling and maintenance tunables.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct SandboxContainerRunWorkerConfig {
+pub struct SandboxContainerRunWorkerConfig {
     pub(crate) idle_min: Duration,
     pub(crate) idle_cap: Duration,
     pub(crate) failure_delay: Duration,
@@ -42,7 +42,7 @@ impl Default for SandboxContainerRunWorkerConfig {
 
 /// Polls for and drives container-located background runs.
 #[derive(Clone)]
-pub(crate) struct SandboxContainerRunWorker {
+pub struct SandboxContainerRunWorker {
     store: Arc<dyn Store>,
     runner: Arc<SandboxContainerRunner>,
     wake: Arc<Notify>,
@@ -53,16 +53,16 @@ impl SandboxContainerRunWorker {
     /// Build the service only when container execution is enabled.
     ///
     /// Production assembly passes the resolved admission decision
-    /// ([`crate::sandbox_admission::resolve`]): the configured opt-in and a
+    /// ([`crate::admission::resolve`]): the configured opt-in and a
     /// detected container runtime together. The caller separately checks
     /// backend availability before spawning the returned worker, so absence of
     /// a container runtime stays an inert capability miss rather than a boot
     /// failure.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
+    pub fn new(
         store: Arc<dyn Store>,
         backend: Arc<dyn SandboxBackend>,
-        resolver: Arc<dyn ProviderResolver>,
+        host: Arc<dyn SandboxHost>,
         wake: Arc<Notify>,
         steering: Arc<SandboxSteerGuard>,
         enabled: bool,
@@ -79,7 +79,7 @@ impl SandboxContainerRunWorker {
         assert!(config.candidate_limit > 0);
         assert!(config.max_concurrency > 0);
         let runner = Arc::new(
-            SandboxContainerRunner::new(store.clone(), backend, resolver, runner_config)
+            SandboxContainerRunner::new(store.clone(), backend, host, runner_config)
                 // The same guard the steer route resolves a run against, so an
                 // instruction reaches the connection this worker's driver holds.
                 .with_steering(steering),
@@ -95,7 +95,7 @@ impl SandboxContainerRunWorker {
     /// Run the owned drive lanes and maintenance lane until the server drops
     /// the worker task. Dropping this future drops the [`tokio::task::JoinSet`],
     /// which aborts every child lane rather than detaching background work.
-    pub(crate) async fn run(self) {
+    pub async fn run(self) {
         let mut lanes = tokio::task::JoinSet::new();
         for _ in 0..self.config.max_concurrency {
             lanes.spawn(self.clone().run_drive_lane());

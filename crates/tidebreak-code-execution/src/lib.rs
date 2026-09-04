@@ -11,6 +11,7 @@
 //! sandbox and share session, idempotency, and bounded-output primitives.
 
 pub mod agent_plugins;
+mod catalog;
 mod credential;
 mod daytona;
 mod docker;
@@ -47,6 +48,7 @@ pub use agent_plugins::{
     AGENT_PLUGIN_SKILLS_DIR, AGENT_PLUGIN_SPEC_VERSION, PLUGIN_DATA_VARIABLE, PLUGIN_ROOT_VARIABLE,
     TIDEBREAK_EXTENSION_NAMESPACE,
 };
+pub use catalog::{skill_catalog_lines, skill_summary_catalog_lines};
 pub use daytona::{DaytonaCredential, DaytonaExecutionProvider, DAYTONA_CREDENTIAL_KEY};
 pub use docker::{resolve_container_runtime_binary, DockerExecutionProvider};
 pub use e2b::{E2BCredential, E2BExecutionProvider, E2B_CREDENTIAL_KEY};

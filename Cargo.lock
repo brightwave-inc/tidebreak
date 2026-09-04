@@ -7444,6 +7444,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "tidebreak-sandbox-runtime"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures",
+ "sea-orm",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tidebreak-code-execution",
+ "tidebreak-core",
+ "tidebreak-egress",
+ "tidebreak-sandbox-agent",
+ "tidebreak-sandbox-protocol",
+ "tidebreak-worker-runtime",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "tidebreak-server"
 version = "0.0.0"
 dependencies = [
@@ -7485,7 +7507,9 @@ dependencies = [
  "tidebreak-router",
  "tidebreak-sandbox-agent",
  "tidebreak-sandbox-protocol",
+ "tidebreak-sandbox-runtime",
  "tidebreak-shell-policy",
+ "tidebreak-worker-runtime",
  "tokio",
  "tokio-tungstenite 0.30.0",
  "tower",
@@ -7523,6 +7547,17 @@ dependencies = [
  "tidebreak-core",
  "tidebreak-harness",
  "tokio",
+]
+
+[[package]]
+name = "tidebreak-worker-runtime"
+version = "0.0.0"
+dependencies = [
+ "chrono",
+ "tidebreak-core",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

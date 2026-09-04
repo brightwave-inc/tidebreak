@@ -12,24 +12,24 @@ use tidebreak_code_execution::ExecProviderKind;
 use tidebreak_core::{AgentRunExecutionLocation, Config, SandboxAdmissionMode};
 use tidebreak_sandbox_protocol::provisioning::SandboxBackend;
 
-use crate::sandbox_docker::{DockerConfig, DockerSandboxBackend};
+use crate::docker::{DockerConfig, DockerSandboxBackend};
 use crate::scoped_model_token::{GatewayScopedTokenIssuer, ScopedModelTokenIssuer};
 
 /// Container backend and admission route resolved once during server startup.
-pub(crate) struct SandboxContainerAdmission {
-    pub(crate) backend: Arc<DockerSandboxBackend>,
-    pub(crate) execution_location: AgentRunExecutionLocation,
+pub struct SandboxContainerAdmission {
+    pub backend: Arc<DockerSandboxBackend>,
+    pub execution_location: AgentRunExecutionLocation,
 }
 
 impl SandboxContainerAdmission {
     /// Whether both configuration and runtime availability selected containers.
-    pub(crate) fn enabled(&self) -> bool {
+    pub fn enabled(&self) -> bool {
         self.execution_location == AgentRunExecutionLocation::Container
     }
 }
 
 /// Resolve the backend and fixed location for this server process.
-pub(crate) fn resolve(config: &Config) -> SandboxContainerAdmission {
+pub fn resolve(config: &Config) -> SandboxContainerAdmission {
     let docker = docker_config(config);
     let backend = Arc::new(DockerSandboxBackend::new(docker));
     let backend_available = config.container_execution_enabled && backend.is_available();
@@ -65,7 +65,7 @@ fn execution_location(
 /// image (the published documents image by digest, or the local development
 /// build while no digest is pinned); an explicit override replaces the whole
 /// ref, digest included, so a mutable-tag override is honestly unverified.
-pub(crate) fn docker_config(config: &Config) -> DockerConfig {
+pub fn docker_config(config: &Config) -> DockerConfig {
     let mut docker = DockerConfig::default();
     if let Some(image) = &config.container_image {
         docker.image.clone_from(image);
@@ -82,26 +82,26 @@ pub(crate) fn docker_config(config: &Config) -> DockerConfig {
 /// preconditions are the ones docs/sandbox-providers.md fixes for detached
 /// admission; each maps one-to-one onto a [`DetachedAdmissionDenial`].
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct DetachedPreconditions {
+pub struct DetachedPreconditions {
     /// A short-lived, scoped, revocable model token can be minted for this
     /// run (a gateway session or a provider that issues them). A long-lived
     /// provider API key never satisfies this.
-    pub(crate) scoped_model_token_available: bool,
+    pub scoped_model_token_available: bool,
     /// The backend enforces a sandbox lifetime cap from outside the sandbox,
     /// set at provisioning to no more than the run's absolute deadline.
-    pub(crate) external_lifetime_cap: bool,
+    pub external_lifetime_cap: bool,
     /// The agent image is verified within the topology's trust root.
-    pub(crate) image_verified: bool,
+    pub image_verified: bool,
     /// The run's tool surface can reach a host-authority operation (work that
     /// needs consent mid-run). Such a run is refused detached admission at
     /// the start, not parked indefinitely in the middle.
-    pub(crate) host_authority_tool_surface: bool,
+    pub host_authority_tool_surface: bool,
     /// The run carries third-party credentials (connected-app or similar).
     /// The scoped model token itself is deliberately exempt.
-    pub(crate) carries_third_party_credentials: bool,
+    pub carries_third_party_credentials: bool,
     /// Egress policy is enforced from outside the sandbox by a mechanism the
     /// host knows out-of-band. Consulted only for credential-bearing runs.
-    pub(crate) external_egress_enforcement: bool,
+    pub external_egress_enforcement: bool,
 }
 
 impl Default for DetachedPreconditions {
@@ -122,7 +122,7 @@ impl Default for DetachedPreconditions {
 /// One unmet detached-admission precondition, named for surfacing (the
 /// settings slice renders these per provider) and for the audit trail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DetachedAdmissionDenial {
+pub enum DetachedAdmissionDenial {
     /// No issuer of short-lived, scoped, revocable model tokens.
     NoScopedModelToken,
     /// Nothing outside the sandbox bounds its lifetime.
@@ -139,7 +139,7 @@ pub(crate) enum DetachedAdmissionDenial {
 /// The detached-admission decision: admitted only when every precondition
 /// holds, otherwise denied with every unmet precondition named.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum DetachedAdmission {
+pub enum DetachedAdmission {
     /// Every precondition held; the run may be recorded as detached-admitted.
     Admitted,
     /// At least one precondition failed; the run falls back to attached-only.
@@ -148,7 +148,7 @@ pub(crate) enum DetachedAdmission {
 
 impl DetachedAdmission {
     /// The durable admission mode this decision records.
-    pub(crate) fn mode(&self) -> SandboxAdmissionMode {
+    pub fn mode(&self) -> SandboxAdmissionMode {
         match self {
             Self::Admitted => SandboxAdmissionMode::Detached,
             Self::Denied(_) => SandboxAdmissionMode::AttachedOnly,
@@ -161,9 +161,7 @@ impl DetachedAdmission {
 /// The contract: `Admitted` requires **all** preconditions to hold, and a
 /// denial names every unmet one rather than the first, so the settings
 /// surface can say exactly what a provider is missing.
-pub(crate) fn evaluate_detached_admission(
-    preconditions: DetachedPreconditions,
-) -> DetachedAdmission {
+pub fn evaluate_detached_admission(preconditions: DetachedPreconditions) -> DetachedAdmission {
     let mut denials = Vec::new();
     if !preconditions.scoped_model_token_available {
         denials.push(DetachedAdmissionDenial::NoScopedModelToken);
@@ -198,7 +196,7 @@ pub(crate) fn evaluate_detached_admission(
 /// credential is ever delivered into a run. The runner and the settings
 /// surface both read this one function, so what settings says a provider is
 /// missing is by construction what the gate would deny it for.
-pub(crate) fn structural_preconditions(
+pub fn structural_preconditions(
     scoped_model_token_available: bool,
     external_lifetime_cap: bool,
     image_verified: bool,
@@ -230,9 +228,7 @@ pub(crate) fn structural_preconditions(
 /// container tier: the two are deliberately orthogonal, and running commands
 /// in a container through `docker exec` establishes none of the preconditions
 /// a detached run needs.
-pub(crate) fn settings_detached_admissions(
-    config: &Config,
-) -> Vec<(ExecProviderKind, DetachedAdmission)> {
+pub fn settings_detached_admissions(config: &Config) -> Vec<(ExecProviderKind, DetachedAdmission)> {
     let scoped_token = GatewayScopedTokenIssuer.available();
     let local = DockerSandboxBackend::new(docker_config(config));
     let local_facts = (
