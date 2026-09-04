@@ -20,17 +20,19 @@ Selecting `TIDEBREAK_PROFILE=self_host` changes five things about the server:
   driver to exist at all.
 - **Every request must name a user.** The desktop profile's per-launch bearer
   token authenticates nobody here. A hosted deployment validates short-lived
-  Model Gateway `tidebreak` resource tokens; a standalone deployment can use
-  the operator-managed token file. Both resolve to a named principal carrying
-  a role. Chats, projects, documents, transcripts, code workspaces, and event
+  Model Gateway `tidebreak` resource tokens; a standalone deployment uses the
+  operator-managed token file, an OpenID Connect provider, or both. Each
+  resolves to a named principal carrying a role. Chats, projects, documents, transcripts, code workspaces, and event
   streams are owner-scoped to that principal.
 - **Blob bytes live in S3-compatible object storage**, selected by
   `TIDEBREAK_BLOB_STORE_URL`. PostgreSQL keeps the document catalog and
   references; the bucket keeps immutable source bytes, images, and artifacts.
 - **Boot fails closed.** The server refuses to open the shared store unless
-  exactly one of `TIDEBREAK_AUTH_GATEWAY_URL` or
-  `TIDEBREAK_AUTH_TOKENS_FILE` is valid — a shared database never comes up
-  behind an API that cannot tell its callers apart.
+  it has exactly one valid authenticator — a Model Gateway, an OpenID Connect
+  provider, or the token file — because a shared database never comes up
+  behind an API that cannot tell its callers apart. The token file may sit
+  beside OIDC as the bootstrap administrator and the CLI credential; the
+  gateway and OIDC may not sit together.
 - **Stored credentials use Vault KV v2.** The server never opens the desktop
   OS keychain. When Vault is not configured, provider environment variables
   remain available as read fallbacks, but deployment-plane credential writes
@@ -54,8 +56,9 @@ and for what is still integration work.
 
 - Docker with Compose v2.
 - A machine that can reach your model provider's API.
-- Somewhere private to keep the database password, plus either a Model Gateway
-  installation or a standalone tokens file.
+- Somewhere private to keep the database password, plus one way to name your
+  users: a Model Gateway installation, an OpenID Connect provider, or a
+  standalone tokens file.
 - A Vault KV v2 mount if administrators need to save shared credentials through
   Tidebreak. Provider environment variables remain available without Vault.
 
@@ -259,9 +262,13 @@ aspirational.
 | `TIDEBREAK_BLOB_STORE_URL` | yes (self-host) | — | S3 bucket and optional prefix, for example `s3://company-tidebreak/production`. Credentials, region, and an optional compatible endpoint come from standard `AWS_*` variables. |
 | `AWS_DEFAULT_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_ENDPOINT_URL_S3`, `AWS_ALLOW_HTTP` | depends on provider | AWS defaults | Configure AWS S3 or an S3-compatible endpoint. Keep `AWS_ALLOW_HTTP=false` outside isolated development networks. Role, web-identity, and container credential variables are also accepted. |
 | `TIDEBREAK_AUTH_GATEWAY_URL` | one auth mode required | `GATEWAY_BASE_URL` | Public Model Gateway identity URL exposed to clients and, by default, used for live validation. HTTPS required except for loopback development. |
-| `TIDEBREAK_PUBLIC_URL` | with Gateway auth | `ADD_ON_PUBLIC_URL` | The machine's own public URL, which user credentials are bound to. On a Model Gateway managed machine the plane's `ADD_ON_PUBLIC_URL` stands in when this is unset (decision 0085). |
+| `TIDEBREAK_PUBLIC_URL` | with Gateway or OIDC auth | `ADD_ON_PUBLIC_URL` | The machine's own public URL. Gateway credentials are bound to it, and the OIDC callback returns to it. On a Model Gateway managed machine the plane's `ADD_ON_PUBLIC_URL` stands in when this is unset (decision 0085). |
 | `TIDEBREAK_AUTH_GATEWAY_VERIFIER_URL` | no | `TIDEBREAK_AUTH_GATEWAY_URL` | Optional server-to-server Gateway URL for principal validation when the public origin is not cluster-routable. Requires Gateway auth. |
-| `TIDEBREAK_AUTH_TOKENS_FILE` | one auth mode required | — | Standalone compatibility: path to the static token file above. Mutually exclusive with Gateway auth. |
+| `TIDEBREAK_AUTH_TOKENS_FILE` | one auth mode required | — | Standalone: path to the static token file above. Mutually exclusive with Gateway auth. Set it beside OIDC to name the first administrator and keep CLI access. |
+| `TIDEBREAK_AUTH_OIDC_ISSUER` | one auth mode required | — | OpenID Connect issuer URL, whose `/.well-known/openid-configuration` the machine reads. HTTPS required except for loopback development. Mutually exclusive with Gateway auth; set all three OIDC variables or none. |
+| `TIDEBREAK_AUTH_OIDC_CLIENT_ID` | with OIDC | — | OIDC client id. Register `<TIDEBREAK_PUBLIC_URL>/auth/oidc/callback` as its redirect URI. |
+| `TIDEBREAK_AUTH_OIDC_CLIENT_SECRET` | with OIDC | — | OIDC client secret, used only for the server-to-server code exchange. It stays in process memory. |
+| `TIDEBREAK_AUTH_OIDC_CLAIM` | no | `sub` | ID-token claim whose string value becomes the Tidebreak user id. Requires OIDC. |
 | `TIDEBREAK_ADAPTER_BOOTSTRAP_TOKENS` | no | unset | Comma-separated service bearers allowed to start an external channel connect handshake. Each value must be 32–512 header-safe characters. Leave unset to disable connect start. To rotate without downtime, add the new value, move the adapter, then remove the old value. |
 | `TIDEBREAK_VAULT_ADDR` | required with Vault custody | — | Vault base URL. HTTPS is required except for literal loopback development. Setting any Vault option enables Vault configuration and requires this variable plus `TIDEBREAK_VAULT_TOKEN_FILE`. |
 | `TIDEBREAK_VAULT_TOKEN_FILE` | required with Vault custody | — | Mounted file containing the Vault token. Tidebreak reads it for every request so rotation does not require a restart. |
@@ -381,6 +388,75 @@ nothing but the machine and a database. Model Gateway's Slack adapter lane is
 the consumer. The image is a test fixture: it is never attested, never
 versioned, and never a candidate for a managed machine. Do not deploy it.
 
+## Bring your own image
+
+You may replace the published server image with one you build, as long as
+the server still finds every path it checks. The Dockerfile comments in
+`deploy/self-host/Dockerfile` are the contract. Keep all of the following:
+
+- **Managed Node at one path.** The server accepts Node only from
+  `$TIDEBREAK_DATA_DIR/tools/node/<version>`. That directory must contain
+  `bin/node`, `bin/npm`, and `installed.json` naming the version and the
+  SHA-256 of the official nodejs.org artifact the tree was unpacked from.
+  Nothing is scanned and `PATH` is never consulted, so a Node you install
+  elsewhere does not count.
+- **The data directory.** The image sets `TIDEBREAK_DATA_DIR` to
+  `/var/lib/tidebreak`. A volume mounted there hides whatever the image
+  layer put underneath it.
+- **The entrypoint's link step.** The image keeps its Node copy under
+  `/opt/tidebreak/node/<version>`. `tidebreak-entrypoint` links the data
+  directory at that copy on every start. Unpack Node into the data
+  directory at build time and the link is gone the moment you mount a
+  volume.
+- **The healthcheck.** The image probes `http://127.0.0.1:8080/healthz`
+  with `curl`. Keep `curl` and that listen address, or replace the
+  healthcheck with an equivalent probe of `/healthz`.
+- **The non-root user.** The server runs as uid `10001` / gid `10001`
+  (`tidebreak`). Own the data directory and home so that user can write
+  them. A hosting plane may still run a different non-root uid; `HOME`
+  stays on the data volume for that case.
+
+You may add packages, compilers, and language runtimes on top of that
+contract. You may also change the Debian snapshot or the Node pin, if you
+keep `installed.json` in lockstep with the tree you unpack. Do not drop
+the link step, the healthcheck, or the unprivileged user.
+
+## Toolchain bundles
+
+The default image carries managed Node, `git`, and `gh` only. A machine
+session that runs `cargo test` on that image fails because `cargo` is not
+there. Optional bundles install extra toolchains at image build:
+
+```sh
+docker build --build-arg TOOLCHAINS=rust,python \
+  -f deploy/self-host/Dockerfile \
+  -t tidebreak-self-host \
+  .
+```
+
+`TOOLCHAINS` is a comma-separated list. The default is empty and installs
+nothing extra. Known names are `rust`, `python`, `go`, and `jvm`. An
+unknown name fails the build and prints the name. Pins, SHA-256 digests,
+and Debian package versions live in
+[`deploy/self-host/TOOLCHAINS.md`](../deploy/self-host/TOOLCHAINS.md). The
+image label `io.tidebreak.toolchains` records the argument you passed, so
+the digest's provenance states which bundles it carries.
+
+| Bundle | What you get |
+| --- | --- |
+| `rust` | rustup 1.27.1, stable toolchain 1.97.1, cargo, clippy, rustfmt, and Debian `build-essential` 12.9 so crates can link |
+| `python` | Debian `python3` 3.11.2-1+b1, `python3-pip` 23.0.1+dfsg-1, `python3-venv` 3.11.2-1+b1 |
+| `go` | Go 1.25.1 from the official release tarball, SHA-256 verified before unpack |
+| `jvm` | Debian OpenJDK 17 headless 17.0.20+8-1~deb12u1 and Maven 3.8.7-1 |
+
+When a workspace setup script or a test quick action fails with
+`command not found` for `cargo`, `python3`, `go`, `mvn`, or `java`, the
+turn names the missing tool and points you at this page.
+
+If this machine has a Model Gateway runtime endpoint, run the suite in a
+sandbox child instead of stuffing every compiler into the server image.
+The runtime profile's image is the toolchain for that path.
+
 ## Opening the machine in a browser
 
 The image carries the Tidebreak desktop app's renderer, and the server serves
@@ -390,18 +466,55 @@ served for navigations only — a request for an unknown route with a JSON
 `Accept` still answers `404`, and every API route is matched ahead of the
 bundle — so the API contract does not change.
 
-A tab signs in the way the desktop does: with a short-lived Gateway bearer
-bound to this machine. The page holds that bearer in memory for the tab's
-life and never in a cookie or in storage. It arrives once, from the Model
-Gateway console's Manage action: the console sends the browser to the
-machine's `/auth/handoff` route with a one-time code, the machine exchanges
-the code with the gateway server to server, and the page receives the bearer
-in the URL fragment, which no server or access log sees. The bearer lasts
-its hour; a tab that opens the address directly, outlives its bearer, or
-arrives with a code that has already been used, shows a sign-in screen that
-sends the reader back through the console. A machine on static tokens
-(`TIDEBREAK_AUTH_TOKENS_FILE`) has no browser sign-in: the page says so, and
-the desktop app remains the client for it.
+However a tab signs in, it ends the same way: the bearer arrives in the URL
+fragment, which no server and no access log sees, and the page takes it out
+of the address before the router runs. It lives in that tab's memory for its
+hour and nowhere else — never a cookie, never localStorage, never disk. A
+link to a session keeps its route through sign-in, so you land on the session
+you opened rather than the root. Which path a machine offers is its own to
+say: the page reads `/auth/discovery`, which is public and needs no bearer,
+and shows the one screen that machine can act on. See
+[decision 0087](decisions/0087-standalone-browser-sign-in.md).
+
+**With a Model Gateway** (`TIDEBREAK_AUTH_GATEWAY_URL`), the bearer comes
+from the console's Manage action: the console sends the browser to the
+machine's `/auth/handoff` route with a one-time code, and the machine
+exchanges that code with the gateway server to server. A tab that opens the
+address directly, outlives its bearer, or arrives with a code that has
+already been used shows a sign-in screen that sends you back through the
+console.
+
+**With a token file** (`TIDEBREAK_AUTH_TOKENS_FILE`), the page asks you to
+paste your token. It probes the token against an authenticated read on the
+machine first, so a wrong one leaves you on the same screen with the
+refusal instead of a broken session. A token is as strong as the file it came
+from; whoever maintains the roster decides who holds one.
+
+**With an OpenID Connect provider**, set `TIDEBREAK_AUTH_OIDC_ISSUER`,
+`TIDEBREAK_AUTH_OIDC_CLIENT_ID`, and `TIDEBREAK_AUTH_OIDC_CLIENT_SECRET`, and
+register `<TIDEBREAK_PUBLIC_URL>/auth/oidc/callback` as the client's redirect
+URI. The page then shows one button. The machine runs authorization code with
+PKCE itself: it starts the flow at `/auth/oidc/start`, and at
+`/auth/oidc/callback` it checks the `state` against a flow it started,
+exchanges the code with the PKCE verifier, and validates the ID token against
+the issuer's discovery document and keys — signature, issuer, expiry, the
+client id as audience, and the flow's nonce. Only then does it mint its own
+bearer, good for one hour. Anything that does not check out signs nobody in.
+
+`TIDEBREAK_AUTH_OIDC_CLAIM` names the ID-token claim whose string value
+becomes the Tidebreak user id; it defaults to `sub`, the one claim every
+issuer sends. Point it at `email` or `preferred_username` when you want
+readable owner ids, and know that the mapping is the identity: a claim the
+provider stops sending, or a value that changes, signs that person in as
+nobody rather than as someone else. Tidebreak asks for the scope that claim
+needs (`email` or `profile`) alongside `openid`, so grant it to the client.
+
+OIDC never makes anyone an administrator. Keep `TIDEBREAK_AUTH_TOKENS_FILE`
+set beside it: that file is where the first administrator comes from, and it
+is what CLI and script access uses. What you cannot do is combine OIDC with
+`TIDEBREAK_AUTH_GATEWAY_URL` — a machine signs browsers in through one
+identity provider, and setting both is a boot error that names the two
+variables.
 
 Everything that reaches the reader's own computer — connected folders, tool
 calls on the local machine, saving files locally, computer use — is

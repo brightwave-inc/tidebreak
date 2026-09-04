@@ -188,10 +188,11 @@ pub struct Config {
     pub auth_tokens_file: Option<PathBuf>,
     /// Model Gateway base URL used to authenticate self-hosted callers.
     ///
-    /// Mutually exclusive with [`Config::auth_tokens_file`]. The server sends
-    /// each presented `tidebreak` resource token to the Gateway's live
-    /// principal endpoint, so Gateway membership, deactivation, session
-    /// revocation, and administrator changes apply without a generated roster.
+    /// Mutually exclusive with [`Config::auth_tokens_file`] and with OpenID
+    /// Connect. The server sends each presented `tidebreak` resource token to
+    /// the Gateway's live principal endpoint, so Gateway membership,
+    /// deactivation, session revocation, and administrator changes apply
+    /// without a generated roster.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_gateway_url: Option<String>,
     /// Optional server-to-server Model Gateway URL used only for principal
@@ -200,6 +201,25 @@ pub struct Config {
     /// cannot hairpin through that public origin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_gateway_verifier_url: Option<String>,
+    /// OpenID Connect issuer that signs browsers in to a standalone machine.
+    ///
+    /// The third exclusive authenticator (decision 0087). Mutually exclusive
+    /// with [`Config::auth_gateway_url`]; [`Config::auth_tokens_file`] may sit
+    /// beside it as the bootstrap for the first administrator and for CLI
+    /// access. Set together with the client id and secret below.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_oidc_issuer: Option<String>,
+    /// OpenID Connect client id this machine is registered with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_oidc_client_id: Option<String>,
+    /// OpenID Connect client secret, used only for the server-to-server code
+    /// exchange. It stays in process memory and is never persisted or logged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_oidc_client_secret: Option<String>,
+    /// ID-token claim whose string value names the Tidebreak user. `sub` when
+    /// unset, which is the only claim an issuer always sends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_oidc_claim: Option<String>,
     /// Canonical public base URL of this self-hosted Tidebreak machine.
     ///
     /// Gateway-backed authentication hashes this URL into the OAuth resource,
@@ -365,6 +385,10 @@ impl Config {
             auth_tokens_file: None,
             auth_gateway_url: None,
             auth_gateway_verifier_url: None,
+            auth_oidc_issuer: None,
+            auth_oidc_client_id: None,
+            auth_oidc_client_secret: None,
+            auth_oidc_claim: None,
             public_url: None,
             vault_secrets: None,
             listen_addr: None,
@@ -432,6 +456,12 @@ impl Config {
             std::env::var("TIDEBREAK_RUNTIME_ENDPOINT").ok(),
             std::env::var("TIDEBREAK_RUNTIME_PROFILE").ok(),
             vault_secrets,
+        )?
+        .with_oidc_vars(
+            std::env::var("TIDEBREAK_AUTH_OIDC_ISSUER").ok(),
+            std::env::var("TIDEBREAK_AUTH_OIDC_CLIENT_ID").ok(),
+            std::env::var("TIDEBREAK_AUTH_OIDC_CLIENT_SECRET").ok(),
+            std::env::var("TIDEBREAK_AUTH_OIDC_CLAIM").ok(),
         )?
         .with_runtime_limit_vars(
             std::env::var("TIDEBREAK_RUNTIME_CONCURRENCY_CAP").ok(),
@@ -553,6 +583,10 @@ impl Config {
             auth_tokens_file,
             auth_gateway_url,
             auth_gateway_verifier_url,
+            auth_oidc_issuer: None,
+            auth_oidc_client_id: None,
+            auth_oidc_client_secret: None,
+            auth_oidc_claim: None,
             public_url,
             vault_secrets,
             listen_addr,
@@ -565,6 +599,61 @@ impl Config {
             code_worktree_root_default: None,
             ui_dist: None,
         })
+    }
+
+    /// Apply the OpenID Connect variables of decision 0087. Split from
+    /// [`Config::from_env`] the way the runtime limits are, so the rules can be
+    /// tested without mutating process-global environment variables.
+    ///
+    /// The three credentials are one setting in three parts: two of them
+    /// describe a machine nobody can sign in to, so a partial set is a boot
+    /// error rather than a mode that half exists. The gateway is refused here
+    /// as well as at the authenticator, because this is where an operator's
+    /// environment is read and where the message can name both variables.
+    fn with_oidc_vars(
+        mut self,
+        issuer: Option<String>,
+        client_id: Option<String>,
+        client_secret: Option<String>,
+        claim: Option<String>,
+    ) -> Result<Self> {
+        fn present(value: Option<String>) -> Option<String> {
+            value
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+        }
+        let issuer = present(issuer);
+        let client_id = present(client_id);
+        let client_secret = present(client_secret);
+        let claim = present(claim);
+        let configured = [&issuer, &client_id, &client_secret]
+            .into_iter()
+            .filter(|value| value.is_some())
+            .count();
+        if configured != 0 && configured != 3 {
+            return Err(AgentError::config(
+                "TIDEBREAK_AUTH_OIDC_ISSUER, TIDEBREAK_AUTH_OIDC_CLIENT_ID, and \
+                 TIDEBREAK_AUTH_OIDC_CLIENT_SECRET are one setting: set all three or none",
+            ));
+        }
+        if configured == 3 && self.auth_gateway_url.is_some() {
+            return Err(AgentError::config(
+                "self-host authentication is ambiguous: TIDEBREAK_AUTH_OIDC_ISSUER cannot \
+                 be combined with TIDEBREAK_AUTH_GATEWAY_URL, because a machine signs \
+                 browsers in through one identity provider",
+            ));
+        }
+        if configured == 0 && claim.is_some() {
+            return Err(AgentError::config(
+                "TIDEBREAK_AUTH_OIDC_CLAIM names a claim in an ID token, so it requires \
+                 TIDEBREAK_AUTH_OIDC_ISSUER",
+            ));
+        }
+        self.auth_oidc_issuer = issuer.map(|value| value.trim_end_matches('/').to_owned());
+        self.auth_oidc_client_id = client_id;
+        self.auth_oidc_client_secret = client_secret;
+        self.auth_oidc_claim = claim;
+        Ok(self)
     }
 
     /// Apply the three operator-controlled remote runtime limits. Split from
@@ -1304,6 +1393,95 @@ mod tests {
         assert_ne!(
             tidebreak_machine_resource("https://tidebreak.example.test"),
             tidebreak_machine_resource("https://other.example.test")
+        );
+    }
+
+    /// The OIDC variables are one setting: all three or none, never beside
+    /// the gateway, and the claim override means nothing without them.
+    #[test]
+    fn the_oidc_variables_are_complete_and_exclusive_with_the_gateway() {
+        let configured = Config::desktop("/data")
+            .with_oidc_vars(
+                Some("  https://login.example.test/  ".into()),
+                Some(" client-id ".into()),
+                Some("client-secret".into()),
+                Some(" email ".into()),
+            )
+            .unwrap();
+        assert_eq!(
+            configured.auth_oidc_issuer.as_deref(),
+            Some("https://login.example.test"),
+            "a pasted issuer keeps neither its surrounding space nor its trailing slash"
+        );
+        assert_eq!(configured.auth_oidc_client_id.as_deref(), Some("client-id"));
+        assert_eq!(configured.auth_oidc_claim.as_deref(), Some("email"));
+
+        // An unset machine is not an OIDC machine, and a blank variable is
+        // unset — an empty client secret must not read as a configured one.
+        let none = Config::desktop("/data")
+            .with_oidc_vars(Some("   ".into()), None, None, Some("  ".into()))
+            .unwrap();
+        assert_eq!(none.auth_oidc_issuer, None);
+        assert_eq!(none.auth_oidc_claim, None);
+
+        for (issuer, client_id, client_secret, claim, why) in [
+            (
+                Some("https://login.example.test"),
+                None,
+                None,
+                None,
+                "an issuer with no client",
+            ),
+            (
+                Some("https://login.example.test"),
+                Some("client-id"),
+                None,
+                None,
+                "a client with no secret",
+            ),
+            (
+                None,
+                Some("client-id"),
+                Some("client-secret"),
+                None,
+                "a client with no issuer",
+            ),
+            (
+                None,
+                None,
+                None,
+                Some("email"),
+                "a login claim with no provider to read it from",
+            ),
+        ] {
+            assert!(
+                Config::desktop("/data")
+                    .with_oidc_vars(
+                        issuer.map(str::to_owned),
+                        client_id.map(str::to_owned),
+                        client_secret.map(str::to_owned),
+                        claim.map(str::to_owned),
+                    )
+                    .is_err(),
+                "{why} must fail boot"
+            );
+        }
+
+        let mut gateway = Config::desktop("/data");
+        gateway.auth_gateway_url = Some("https://gateway.example.test".into());
+        let error = gateway
+            .with_oidc_vars(
+                Some("https://login.example.test".into()),
+                Some("client-id".into()),
+                Some("client-secret".into()),
+                None,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("TIDEBREAK_AUTH_OIDC_ISSUER")
+                && error.contains("TIDEBREAK_AUTH_GATEWAY_URL"),
+            "the refusal must name both variables: {error}"
         );
     }
 }

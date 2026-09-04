@@ -1,4 +1,4 @@
-//! `m20260904_000001_session_access`: who may read or drive a session.
+//! `m20260904_000011_session_access`: who may read or drive a session.
 //!
 //! Decision 0086. A session keeps one owner, who stays its execution identity
 //! and lifecycle authority. Access becomes a per-session list, and visibility
@@ -20,7 +20,7 @@ pub(super) struct SessionAccess;
 
 impl MigrationName for SessionAccess {
     fn name(&self) -> &str {
-        "m20260904_000001_session_access"
+        "m20260904_000011_session_access"
     }
 }
 

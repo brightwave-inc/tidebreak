@@ -195,7 +195,7 @@ pub use code::{
     CodeTriggerDeliveryId, CodeTriggerDeliverySink, CodeTriggerFire, CodeTriggerFireIdentity,
     CodeTriggerFirePayload, CodeTriggerFireState, CodeTriggerId, CodeWatch, CodeWatchId,
     CodeWatchState, CodeWorkflowRunFact, CodeWorkflowRunId, CodeWorkspace, CodeWorkspaceStatus,
-    Diffstat, Event, ExternalMessageRecord, ExternalSessionResolution, FileChangeKind,
+    Diffstat, Event, ExecutionLocation, ExternalMessageRecord, ExternalSessionResolution, FileChangeKind,
     GrantRotation, HarnessCaps, HarnessCommand, HarnessKind, HarnessNoticeLevel, HarnessTier,
     HarnessUpdateChannel, IncarnationAdmission, IncarnationState, InternalApprovalRequest,
     PullRequestCheck, PullRequestCheckBucket, PullRequestCheckCounts, PullRequestComment,

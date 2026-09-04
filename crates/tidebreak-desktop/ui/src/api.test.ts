@@ -1854,7 +1854,14 @@ describe("code workspace sessions", () => {
     // was actually running, and the session reads as private, which is what it
     // was before sharing existed (decision 0086).
     await expect(client.listCodeWorkspaceSessions("ws-1")).resolves.toEqual([
-      { ...session, fast_mode: false, visibility: "private" },
+      // A server predating decision 0088 names no location either; it ran on
+      // the machine.
+      {
+        ...session,
+        fast_mode: false,
+        visibility: "private",
+        execution_location: "machine",
+      },
     ]);
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("http://127.0.0.1/code/workspaces/ws-1/sessions");

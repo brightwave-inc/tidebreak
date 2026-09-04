@@ -199,6 +199,107 @@ RUN groupadd --gid 10001 tidebreak \
     && mkdir -p /var/lib/tidebreak \
     && chown -R tidebreak:tidebreak /var/lib/tidebreak /home/tidebreak
 
+# Optional toolchain bundles. Empty (the default) installs nothing, so this
+# RUN is a no-op and the image stays the size of git, gh, and managed Node.
+# Pass --build-arg TOOLCHAINS=rust,python,go,jvm to add bundles; each name
+# is one delimited block below. An unknown name fails the build. Pins live
+# in TOOLCHAINS.md next to this file. The label records what this digest
+# was built with (decision record 84).
+ARG TOOLCHAINS=""
+LABEL io.tidebreak.toolchains="${TOOLCHAINS}"
+RUN set -eu; \
+    arch="$(dpkg --print-architecture)"; \
+    for bundle in $(printf '%s' "${TOOLCHAINS}" | tr ',' ' '); do \
+      bundle="$(printf '%s' "${bundle}" | tr -d '[:space:]')"; \
+      [ -n "${bundle}" ] || continue; \
+      case "${bundle}" in \
+        rust) \
+          # rust: rustup with pinned stable, cargo, clippy, rustfmt, and a
+          # C toolchain so `cargo test` can link. Homes sit under /usr/local
+          # so the non-root user can execute them, matching managed Node.
+          rustup_version=1.27.1; \
+          rust_toolchain=1.97.1; \
+          case "${arch}" in \
+            amd64) rustup_triple=x86_64-unknown-linux-gnu; \
+                   rustup_sha256=6aeece6993e902708983b209d04c0d1dbb14ebb405ddb87def578d41f920f56d ;; \
+            arm64) rustup_triple=aarch64-unknown-linux-gnu; \
+                   rustup_sha256=1cffbf51e63e634c746f741de50649bbbcbd9dbe1de363c9ecef64e278dba2b2 ;; \
+            *) echo "no rustup pin for ${arch}" >&2; exit 1 ;; \
+          esac; \
+          apt-get -o Acquire::Check-Valid-Until=false update; \
+          apt-get install -y --no-install-recommends \
+            build-essential=12.9; \
+          rm -rf /var/lib/apt/lists/*; \
+          curl -fsSL --proto '=https' --tlsv1.2 \
+            -o /tmp/rustup-init \
+            "https://static.rust-lang.org/rustup/archive/${rustup_version}/${rustup_triple}/rustup-init"; \
+          printf '%s  /tmp/rustup-init\n' "${rustup_sha256}" | sha256sum --check --strict -; \
+          chmod 0755 /tmp/rustup-init; \
+          export CARGO_HOME=/usr/local/cargo RUSTUP_HOME=/usr/local/rustup; \
+          /tmp/rustup-init -y --no-modify-path \
+            --default-toolchain "${rust_toolchain}" \
+            --profile minimal \
+            --component rustfmt,clippy; \
+          rm -f /tmp/rustup-init; \
+          ln -sf /usr/local/cargo/bin/cargo /usr/local/bin/cargo; \
+          ln -sf /usr/local/cargo/bin/rustc /usr/local/bin/rustc; \
+          ln -sf /usr/local/cargo/bin/rustup /usr/local/bin/rustup; \
+          ln -sf /usr/local/cargo/bin/rustfmt /usr/local/bin/rustfmt; \
+          ln -sf /usr/local/cargo/bin/cargo-clippy /usr/local/bin/cargo-clippy; \
+          ln -sf /usr/local/cargo/bin/clippy-driver /usr/local/bin/clippy-driver; \
+          chmod -R a+rX /usr/local/cargo /usr/local/rustup; \
+          cargo --version; \
+          rustc --version; \
+          ;; \
+        python) \
+          # python: Debian python3, pip, and venv from the same snapshot as git.
+          apt-get -o Acquire::Check-Valid-Until=false update; \
+          apt-get install -y --no-install-recommends \
+            python3=3.11.2-1+b1 \
+            python3-pip=23.0.1+dfsg-1 \
+            python3-venv=3.11.2-1+b1; \
+          rm -rf /var/lib/apt/lists/*; \
+          python3 --version; \
+          pip3 --version; \
+          ;; \
+        go) \
+          # go: pinned release tarball, SHA-256 checked before unpack.
+          go_version=1.25.1; \
+          case "${arch}" in \
+            amd64) go_platform=linux-amd64; \
+                   go_sha256=7716a0d940a0f6ae8e1f3b3f4f36299dc53e31b16840dbd171254312c41ca12e ;; \
+            arm64) go_platform=linux-arm64; \
+                   go_sha256=65a3e34fb2126f55b34e1edfc709121660e1be2dee6bdf405fc399a63a95a87d ;; \
+            *) echo "no go pin for ${arch}" >&2; exit 1 ;; \
+          esac; \
+          archive="go${go_version}.${go_platform}.tar.gz"; \
+          curl -fsSL --proto '=https' --tlsv1.2 \
+            -o "/tmp/${archive}" "https://go.dev/dl/${archive}"; \
+          printf '%s  /tmp/%s\n' "${go_sha256}" "${archive}" | sha256sum --check --strict -; \
+          tar -xzf "/tmp/${archive}" -C /usr/local; \
+          rm -f "/tmp/${archive}"; \
+          ln -sf /usr/local/go/bin/go /usr/local/bin/go; \
+          ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt; \
+          go version; \
+          ;; \
+        jvm) \
+          # jvm: Debian OpenJDK 17 headless (the LTS bookworm carries; no
+          # newer JDK exists in this snapshot's main or backports) and Maven.
+          apt-get -o Acquire::Check-Valid-Until=false update; \
+          apt-get install -y --no-install-recommends \
+            openjdk-17-jdk-headless=17.0.20+8-1~deb12u1 \
+            maven=3.8.7-1; \
+          rm -rf /var/lib/apt/lists/*; \
+          java -version; \
+          mvn --version; \
+          ;; \
+        *) \
+          echo "unknown toolchain bundle: ${bundle}" >&2; \
+          exit 1; \
+          ;; \
+      esac; \
+    done
+
 # The self-host profile. `TIDEBREAK_DATABASE_URL` and `TIDEBREAK_AUTH_TOKENS_FILE`
 # have no defaults and must be supplied — the server refuses to open a shared
 # store without a principal-naming authenticator, and refuses to start when
@@ -220,6 +321,13 @@ ENV HOME=/var/lib/tidebreak/home
 # 127.0.0.1 only, and production exposure belongs to a TLS-terminating proxy in
 # front of it. Plain HTTP by design; nothing here terminates TLS.
 ENV TIDEBREAK_LISTEN_ADDR=0.0.0.0:8080
+# Where the rust bundle's toolchains live when the image carries one. The
+# rustup proxies under /usr/local/bin read this at run time; without it
+# they look in $HOME/.rustup and find no toolchain. CARGO_HOME stays at its
+# default under $HOME, which sits on the data volume and is writable, so
+# the registry cache and built crates land there. Harmless when the rust
+# bundle was not built in.
+ENV RUSTUP_HOME=/usr/local/rustup
 EXPOSE 8080
 # The renderer bundle the server serves to browsers: a page navigation to any
 # path the API does not own answers with it, and an unknown route fetched as

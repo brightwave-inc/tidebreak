@@ -18,7 +18,7 @@ use tokio::time::timeout;
 use tidebreak_core::{Diffstat, PullRequestDigest, QuickAction};
 use tidebreak_harness::{filter_child_env, probe_shell, HostEnv, OutputBudget};
 
-use super::setup_script::spawn_workspace_script;
+use super::setup_script::{missing_image_toolchain_notice, spawn_workspace_script};
 use crate::code::types::CodeGitHubRepositoryTarget;
 use crate::obo_gateway::GitCredential;
 
@@ -1538,14 +1538,26 @@ async fn run_action(worktree: &Path, action: &QuickAction) -> ActionOutcome {
     )
     .await
     {
-        Ok(Ok(output)) => ActionOutcome {
-            name: action.name.clone(),
-            success: output.status.success() && !output.terminated_for_output,
-            exit_code: output.status.code(),
-            stdout: output.stdout.into_marked_text(),
-            stderr: output.stderr.into_marked_text(),
-            timed_out: false,
-        },
+        Ok(Ok(output)) => {
+            let stdout = output.stdout.into_marked_text();
+            let mut stderr = output.stderr.into_marked_text();
+            if let Some(notice) = missing_image_toolchain_notice(&stderr)
+                .or_else(|| missing_image_toolchain_notice(&stdout))
+            {
+                if !stderr.is_empty() && !stderr.ends_with('\n') && !stderr.ends_with(' ') {
+                    stderr.push(' ');
+                }
+                stderr.push_str(&notice);
+            }
+            ActionOutcome {
+                name: action.name.clone(),
+                success: output.status.success() && !output.terminated_for_output,
+                exit_code: output.status.code(),
+                stdout,
+                stderr,
+                timed_out: false,
+            }
+        }
         Ok(Err(err)) => ActionOutcome {
             name: action.name.clone(),
             success: false,

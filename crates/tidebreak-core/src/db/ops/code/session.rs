@@ -5,8 +5,8 @@ use sea_orm::{
 
 use crate::attention::{Attention, AttentionSource, AttentionState, FenceReason};
 use crate::code::{
-    CodeSubagentSummary, HarnessKind, Session, SessionId, SessionKind, SessionLifecycle,
-    WorkspaceId,
+    CodeSubagentSummary, ExecutionLocation, HarnessKind, Session, SessionId, SessionKind,
+    SessionLifecycle, WorkspaceId,
 };
 use crate::error::{AgentError, Result};
 use crate::OwnerId;
@@ -104,6 +104,7 @@ where
             Some(serde_json::to_value(&session.subagents)?)
         }),
         created_at: Set(session.created_at),
+        execution_location: Set(session.execution_location.as_str().to_owned()),
         // The conversation columns start at their creation defaults; the
         // chat routes fill them in once the session is read as a chat.
         project_id: Set(None),
@@ -1221,6 +1222,13 @@ pub(super) fn session_from_row(row: entities::session::Model) -> Result<Session>
             .map_err(|err| AgentError::Store(format!("session {} subagents: {err}", row.id)))?,
         None => Vec::new(),
     };
+    let execution_location =
+        ExecutionLocation::from_str(&row.execution_location).ok_or_else(|| {
+            AgentError::Store(format!(
+                "session {} has unknown execution_location {}",
+                row.id, row.execution_location
+            ))
+        })?;
     Ok(Session {
         id: SessionId(row.id),
         owner: OwnerId::new(&row.owner)?,
@@ -1243,5 +1251,6 @@ pub(super) fn session_from_row(row: entities::session::Model) -> Result<Session>
         subagents,
         visibility,
         created_at: row.created_at,
+        execution_location,
     })
 }

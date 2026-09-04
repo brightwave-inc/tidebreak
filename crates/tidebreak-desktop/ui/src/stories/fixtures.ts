@@ -441,6 +441,7 @@ export const codeSession: CodeSessionSnapshot = {
   workspace_id: "ws-1",
   kind: "interactive",
   harness_kind: "claude_code",
+  execution_location: "machine",
   harness_version: "2.1.234 (Claude Code)",
   permission_mode: "ask",
   fast_mode: false,

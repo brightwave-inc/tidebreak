@@ -183,6 +183,7 @@ async fn seeded(store: &tidebreak_core::DbStore, worktree: &std::path::Path) -> 
         subagents: Vec::new(),
         visibility: tidebreak_core::SessionVisibility::Private,
         created_at: chrono::Utc::now(),
+        execution_location: tidebreak_core::ExecutionLocation::Machine,
     };
     insert_session(store, &session).await.unwrap();
     let turn_id = TurnId::new();

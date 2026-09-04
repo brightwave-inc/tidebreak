@@ -2515,6 +2515,7 @@ mod tests {
             unrecognized_event_count: 0,
             subagents: Vec::new(),
             created_at: chrono::Utc::now(),
+            execution_location: tidebreak_core::ExecutionLocation::Machine,
         };
         insert_session(&db, &session).await.unwrap();
         (db, Arc::new(CodeEventBus::default()), session)

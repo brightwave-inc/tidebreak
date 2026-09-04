@@ -86,9 +86,62 @@ impl MigratorTrait for Migrator {
             Box::new(PendingPromptIndexes),
             Box::new(SandboxToolRecoveryIndexes),
             Box::new(UniversalSessionNames),
+            Box::new(SessionExecutionLocation),
             Box::new(session_access::SessionAccess),
             Box::new(turn_actor::TurnActor),
         ]
+    }
+}
+
+/// Record where a session's engine runs (decision 0088).
+///
+/// Every row so far ran either in a gateway sandbox, whose workspace carries
+/// the remote marker, or on the machine. The column defaults to `machine`
+/// and the backfill names the sandbox rows from their workspaces, so the
+/// stored value agrees with what actually ran.
+struct SessionExecutionLocation;
+
+impl MigrationName for SessionExecutionLocation {
+    fn name(&self) -> &str {
+        "m20260904_000010_session_execution_location"
+    }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for SessionExecutionLocation {
+    async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        if manager.has_column("session", "execution_location").await? {
+            return Ok(());
+        }
+        let connection = manager.get_connection();
+        connection
+            .execute_unprepared(
+                r#"ALTER TABLE "session" ADD COLUMN "execution_location" TEXT NOT NULL DEFAULT 'machine'"#,
+            )
+            .await?;
+        connection
+            .execute_unprepared(
+                r#"
+UPDATE "session" SET "execution_location" = 'sandbox'
+WHERE "workspace_id" IN (
+    SELECT "id" FROM "code_workspace"
+    WHERE "worktree_path" = '' OR "worktree_path" LIKE 'remote:%'
+)
+"#,
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        if !manager.has_column("session", "execution_location").await? {
+            return Ok(());
+        }
+        manager
+            .get_connection()
+            .execute_unprepared(r#"ALTER TABLE "session" DROP COLUMN "execution_location""#)
+            .await?;
+        Ok(())
     }
 }
 

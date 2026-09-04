@@ -279,6 +279,7 @@ describe("CodeSidebar", () => {
       workspace_id: "ws-1",
       kind: "interactive",
       harness_kind: "codex",
+      execution_location: "machine",
       permission_mode: "ask",
       fast_mode: false,
       lifecycle: "ended",

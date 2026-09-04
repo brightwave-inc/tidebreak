@@ -85,6 +85,7 @@
         }
       },
       "created_at": "2025-09-01T04:13:20Z",
+      "execution_location": "sandbox",
       "external_origin": {
         "channel_kind": "slack",
         "external_key": "T0/C1/1756700000.000100"
@@ -119,6 +120,7 @@
         }
       },
       "created_at": "2025-09-01T04:13:20Z",
+      "execution_location": "sandbox",
       "fast_mode": false,
       "fence_reason": {
         "detail": "the engine forgot the resume ref",

@@ -399,19 +399,28 @@ execution in
 concerned detached execution under Tidebreak's own container trust root,
 which this path does not use.
 
-Do not ship Slack on the shared hosted-machine engine as a temporary
-path. The honest version of why: the owner-text-only rule removes most
-of the channel-specific injection risk, and mobile already drives the
-hosted engine remotely — but a Slack session is unattended `Allow` with
-an unscoped forge token, the sandbox is defense in depth for exactly
-that posture, and remote execution is wanted independently of Slack.
-The counter-argument is real and recorded in Open questions; the
-decision here is to pay for the sandbox.
+A session runs where the deployment can run it
+([`0088`](decisions/0088-a-slack-session-runs-where-the-deployment-can-run-it.md)).
+The machine chooses an execution location once, at external
+get-or-create, from what it has: a gateway sandbox when a sandbox
+runtime is configured, else its own engine on a worktree under its
+worktree root. The location is stored on the session, reported on the
+snapshot and the external event stream, and never changes. The machine
+engine is the floor, not an interim path: a deployment without a
+gateway, and a gateway deployment without a configured runtime, runs
+Slack sessions the way it already runs desktop, mobile, and `agent-mcp`
+sessions. An earlier version of this page refused to ship Slack on the
+machine engine; the refusal rested on the sandbox being the only thing
+that made unattended `Allow` safe, and the answer is not to withhold
+sessions but to withhold `Allow`.
 
-Inside the sandbox the engine is `Allow`; confinement is the permission
-boundary
+Permission mode follows the location. Inside a sandbox the engine is
+`Allow`; confinement is the permission boundary
 ([`0039`](decisions/0039-allow-is-a-first-class-code-permission-mode.md)).
-Slack renders no harness approval cards. Slack `NeedsYou` is connect,
+On the machine the session takes the deployment's default mode, and the
+owner answers approvals from the desktop or the web, where the session
+is visible like any other, until the channel can carry them. Slack
+renders no harness approval cards yet. Slack `NeedsYou` is connect,
 fenced, or failed — never `approval_requested`.
 
 Incarnations follow a durable intent protocol: write the incarnation

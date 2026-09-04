@@ -1,11 +1,14 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { RemoteMachineState, ServerInfo } from "./api";
 import {
+  type AuthDiscovery,
   type HandoffFailure,
   handoffBearer,
   handoffFailure,
   hostedSession,
+  isHostedBearerShape,
   markHostedSession,
+  rememberHostedBearer,
 } from "./hostedSession";
 
 /**
@@ -69,23 +72,59 @@ export async function remoteMachineState(): Promise<RemoteMachineState> {
  */
 export class HostedSignInRequired extends Error {
   constructor(
-    readonly gatewayUrl: string | null,
+    readonly discovery: AuthDiscovery,
     /** Set when the page came from the landing route and it could not
      * hand over a bearer; the sign-in screen words the reason. */
     readonly failure: HandoffFailure | null = null,
   ) {
-    super("This machine needs a session from your Model Gateway console.");
+    super("This machine needs you to sign in.");
     this.name = "HostedSignInRequired";
   }
 }
 
-/** What the machine's public discovery document says about signing in. */
-type AuthDiscovery =
-  | { mode: "gateway"; gateway_url: string; resource: string }
-  | { mode: "static_token" }
-  | { mode: "local" };
-
+/** The one public, JSON-answering route every machine has. */
 const DISCOVERY_PATH = "/auth/discovery";
+
+/**
+ * The authenticated read a pasted token has to pass before the tab holds it.
+ *
+ * `/models` is a member-plane capability read: every principal may make it,
+ * it names nobody, and it is the kind of request the shell makes with a
+ * bearer the moment boot finishes. A machine that refuses it refuses the
+ * token, which is the whole answer the sign-in screen needs.
+ */
+const PRINCIPAL_PROBE_PATH = "/models";
+
+/**
+ * Take a token the reader pasted and, if the machine accepts it, hold it for
+ * this tab's life exactly as a hand-off bearer is held (decision 0087).
+ *
+ * The token is probed first, so a wrong one never becomes the tab's session
+ * and the sign-in screen can word the refusal. Nothing is written to a
+ * cookie, to storage, or to disk on either path — and the token is not even
+ * sent when it could not be a bearer.
+ */
+export async function acceptPastedToken(
+  token: string,
+  {
+    origin = window.location.origin,
+    fetch = globalThis.fetch,
+  }: { origin?: string; fetch?: typeof globalThis.fetch } = {},
+): Promise<boolean> {
+  if (!isHostedBearerShape(token)) return false;
+  let response: Response;
+  try {
+    response = await fetch(`${origin}${PRINCIPAL_PROBE_PATH}`, {
+      cache: "no-store",
+      headers: { authorization: `Bearer ${token}`, accept: "application/json" },
+    });
+  } catch {
+    return false;
+  }
+  if (!response.ok) return false;
+  rememberHostedBearer(token);
+  return true;
+}
 
 /**
  * The hosted branch: a production bundle whose origin is a Tidebreak machine.
@@ -95,7 +134,8 @@ const DISCOVERY_PATH = "/auth/discovery";
  * document back is served by a machine, and one that does not — a static
  * preview of the bundle, say — is not, and boot goes on to say nothing is
  * reachable. A page served by a machine but holding no bearer throws
- * {@link HostedSignInRequired} with the console that can mint one.
+ * {@link HostedSignInRequired} carrying the mode the machine signs browsers
+ * in with, which is what the sign-in screen offers.
  */
 export async function hostedServerInfo({
   origin = window.location.origin,
@@ -119,8 +159,8 @@ export async function hostedServerInfo({
     discovery.mode === "gateway"
       ? discovery.gateway_url.replace(/\/$/, "")
       : null;
-  markHostedSession({ baseUrl: origin, gatewayUrl });
-  if (!bearer) throw new HostedSignInRequired(gatewayUrl, failure);
+  markHostedSession({ baseUrl: origin, gatewayUrl, discovery });
+  if (!bearer) throw new HostedSignInRequired(discovery, failure);
   return {
     baseUrl: origin,
     token: bearer,
@@ -145,6 +185,17 @@ async function readDiscovery(
     if (record.mode === "gateway") {
       return typeof record.gateway_url === "string" && record.gateway_url
         ? { mode: "gateway", gateway_url: record.gateway_url, resource: "" }
+        : null;
+    }
+    if (record.mode === "oidc") {
+      const oidc = record as { issuer_name?: unknown; start_url?: unknown };
+      return typeof oidc.issuer_name === "string" &&
+        typeof oidc.start_url === "string"
+        ? {
+            mode: "oidc",
+            issuer_name: oidc.issuer_name,
+            start_url: oidc.start_url,
+          }
         : null;
     }
     if (record.mode === "static_token" || record.mode === "local") {

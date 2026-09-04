@@ -21,9 +21,13 @@ import {
 } from "./api";
 import { AppContextProvider, type AppContextValue } from "./AppContext";
 
-import { HostedSignInRequired, resolveServerInfo } from "./boot";
+import {
+  HostedSignInRequired,
+  acceptPastedToken,
+  resolveServerInfo,
+} from "./boot";
 import { HostedSignIn } from "./HostedSignIn";
-import type { HandoffFailure } from "./hostedSession";
+import type { AuthDiscovery, HandoffFailure } from "./hostedSession";
 import {
   BootFailure,
   type BootAttachment,
@@ -242,9 +246,9 @@ export function AppShell() {
     null,
   );
   // A hosted browser tab that holds no session. Not a failure: the machine
-  // answered, and the page knows which console can sign it in.
+  // answered, and its discovery document says how it signs a browser in.
   const [hostedSignIn, setHostedSignIn] = useState<{
-    gatewayUrl: string | null;
+    discovery: AuthDiscovery;
     failure: HandoffFailure | null;
   } | null>(null);
   const [appVersion, setAppVersion] = useState<string | null>(null);
@@ -516,7 +520,7 @@ export function AppShell() {
       } catch (err) {
         if (cancelled) return;
         if (err instanceof HostedSignInRequired) {
-          setHostedSignIn({ gatewayUrl: err.gatewayUrl, failure: err.failure });
+          setHostedSignIn({ discovery: err.discovery, failure: err.failure });
           return;
         }
         setBootFailure({ stage: "connect", error: err });
@@ -1083,13 +1087,22 @@ export function AppShell() {
     ],
   );
 
+  // A pasted token is probed against the machine before this tab holds it,
+  // and a held one only matters once boot runs again with it.
+  async function acceptHostedToken(token: string): Promise<boolean> {
+    const accepted = await acceptPastedToken(token);
+    if (accepted) retryBoot();
+    return accepted;
+  }
+
   if (hostedSignIn) {
     return (
       <HostedSignIn
         reason={hostedSignIn.failure ? "handoff_failed" : "no_session"}
         failure={hostedSignIn.failure}
         machineUrl={window.location.origin}
-        gatewayUrl={hostedSignIn.gatewayUrl}
+        discovery={hostedSignIn.discovery}
+        onToken={acceptHostedToken}
         onRetry={retryBoot}
       />
     );
@@ -1128,7 +1141,7 @@ export function AppShell() {
   const macOverlayTitlebar = hasMacOverlayTitlebar();
 
   return (
-    <ManagedGate client={client}>
+    <ManagedGate client={client} onHostedToken={acceptHostedToken}>
       <GatedShellHooks
         client={client}
         chatId={openChatId}

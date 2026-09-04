@@ -95,6 +95,39 @@ pub(crate) async fn run_workspace_script_with_env(
     })
 }
 
+/// Sentence appended when a setup script or quick action fails because a
+/// toolchain binary is missing from the machine image.
+pub(crate) fn missing_image_toolchain_notice(output: &str) -> Option<String> {
+    const TOOLS: [&str; 5] = ["cargo", "python3", "go", "mvn", "java"];
+    for tool in TOOLS {
+        if command_not_found(output, tool) {
+            return Some(format!(
+                "This machine's image carries no {tool}; see the image contract in docs/self-hosting.md."
+            ));
+        }
+    }
+    None
+}
+
+fn command_not_found(output: &str, tool: &str) -> bool {
+    let command_not_found = format!("{tool}: command not found");
+    let not_found = format!("{tool}: not found");
+    output.lines().any(|line| {
+        let line = line.trim();
+        [&command_not_found, &not_found].iter().any(|needle| {
+            // The tool name must stand alone: `django: command not found`
+            // is not `go: command not found`.
+            line.match_indices(needle.as_str()).any(|(at, _)| {
+                at == 0
+                    || !line[..at]
+                        .chars()
+                        .next_back()
+                        .is_some_and(|prior| prior.is_ascii_alphanumeric() || prior == '_')
+            })
+        })
+    })
+}
+
 fn workspace_script_command(
     worktree: &Path,
     script: &str,
@@ -174,6 +207,58 @@ fn system_windows_powershell() -> io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_image_toolchain_notice_maps_command_not_found() {
+        assert_eq!(
+            missing_image_toolchain_notice("sh: 1: cargo: not found\n"),
+            Some(
+                "This machine's image carries no cargo; see the image contract in docs/self-hosting.md."
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            missing_image_toolchain_notice("bash: python3: command not found"),
+            Some(
+                "This machine's image carries no python3; see the image contract in docs/self-hosting.md."
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            missing_image_toolchain_notice("/bin/sh: go: command not found"),
+            Some(
+                "This machine's image carries no go; see the image contract in docs/self-hosting.md."
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            missing_image_toolchain_notice("mvn: command not found"),
+            Some(
+                "This machine's image carries no mvn; see the image contract in docs/self-hosting.md."
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            missing_image_toolchain_notice("java: not found"),
+            Some(
+                "This machine's image carries no java; see the image contract in docs/self-hosting.md."
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            missing_image_toolchain_notice("setup script failed (exit 1): tests failed"),
+            None
+        );
+        assert_eq!(
+            missing_image_toolchain_notice("sh: 1: django: command not found"),
+            None,
+            "a tool name inside another name is not that tool"
+        );
+        assert_eq!(
+            missing_image_toolchain_notice("sh: 1: cargo_wrapper: not found"),
+            None
+        );
+    }
 
     #[cfg(unix)]
     #[test]

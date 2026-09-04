@@ -361,6 +361,7 @@ async fn seed_owner(
             unrecognized_event_count: 0,
             subagents: Vec::new(),
             created_at: now(),
+            execution_location: crate::code::ExecutionLocation::Machine,
         },
     )
     .await
@@ -2285,6 +2286,7 @@ async fn one_id_resolves_in_one_space() {
             unrecognized_event_count: 0,
             subagents: Vec::new(),
             created_at: now(),
+            execution_location: crate::code::ExecutionLocation::Machine,
         },
     )
     .await
@@ -2704,6 +2706,7 @@ async fn latest_watch_for_session_matches_on_the_session_not_the_workspace() {
             unrecognized_event_count: 0,
             subagents: Vec::new(),
             created_at: now(),
+            execution_location: crate::code::ExecutionLocation::Machine,
         },
     )
     .await
@@ -4983,6 +4986,7 @@ fn external_pair(owner: &OwnerId, repo_id: RepoId, label: &str) -> (CodeWorkspac
         unrecognized_event_count: 0,
         subagents: Vec::new(),
         created_at: now(),
+        execution_location: crate::code::ExecutionLocation::Machine,
     };
     (workspace, session)
 }

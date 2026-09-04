@@ -1,4 +1,4 @@
-//! `m20260904_000002_turn_actor`: who submitted a turn, who settled a decision.
+//! `m20260904_000012_turn_actor`: who submitted a turn, who settled a decision.
 //!
 //! Decision 0086. A session with several contributors cannot show who said
 //! what while the row records only the text. Each of these columns holds one
@@ -12,7 +12,7 @@ pub(super) struct TurnActor;
 
 impl MigrationName for TurnActor {
     fn name(&self) -> &str {
-        "m20260904_000002_turn_actor"
+        "m20260904_000012_turn_actor"
     }
 }
 

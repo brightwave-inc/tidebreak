@@ -174,6 +174,7 @@ fn session() -> SessionSnapshot {
         attention: attention(),
         unrecognized_event_count: 0,
         created_at: at(1_756_700_000),
+        execution_location: tidebreak_core::ExecutionLocation::Sandbox,
         external_origin: Some(SessionExternalOrigin {
             channel_kind: "slack".to_owned(),
             external_key: "T0/C1/1756700000.000100".to_owned(),

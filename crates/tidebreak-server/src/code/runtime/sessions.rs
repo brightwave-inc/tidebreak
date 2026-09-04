@@ -181,6 +181,7 @@ impl CodeRuntime {
             unrecognized_event_count: 0,
             subagents: Vec::new(),
             created_at: Utc::now(),
+            execution_location: tidebreak_core::ExecutionLocation::Machine,
         };
         insert_session(&self.db, &session).await?;
         // Pin where this session starts, before it can take a turn. Sessions
@@ -272,6 +273,7 @@ impl CodeRuntime {
             unrecognized_event_count: 0,
             subagents: Vec::new(),
             created_at: Utc::now(),
+            execution_location: tidebreak_core::ExecutionLocation::Machine,
         };
         insert_session(&self.db, &session).await?;
         self.attach_and_spawn_worker(session).await

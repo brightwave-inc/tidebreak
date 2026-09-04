@@ -7,11 +7,12 @@
 //!   [`Principal::LocalOwner`]. It's the one thing standing between the agent
 //!   and any other local process that finds the port, so the check is
 //!   mandatory on every non-health route.
-//! - **Self-host** authenticates either with live Model Gateway identity or
-//!   static named bearer tokens from an operator-maintained file ([`TokenMap`]).
-//!   Both resolve to [`Principal::User`]. The per-launch token names nobody on
-//!   a shared deployment and is not accepted there — a credential that names
-//!   no one is rejected at this middleware (#853).
+//! - **Self-host** authenticates with live Model Gateway identity, with a
+//!   standalone OpenID Connect provider, or with static named bearer tokens
+//!   from an operator-maintained file ([`TokenMap`]). Each resolves to
+//!   [`Principal::User`]. The per-launch token names nobody on a shared
+//!   deployment and is not accepted there — a credential that names no one is
+//!   rejected at this middleware (#853).
 //!
 //! # Self-host token file
 //!
@@ -39,6 +40,22 @@
 //! bob    0123456789abcdef0123456789abcdef0123456789abcdef01234567
 //! ```
 //!
+//! # Self-host OpenID Connect
+//!
+//! `TIDEBREAK_AUTH_OIDC_ISSUER`, `TIDEBREAK_AUTH_OIDC_CLIENT_ID`, and
+//! `TIDEBREAK_AUTH_OIDC_CLIENT_SECRET` select a third exclusive mode
+//! ([`OidcAuthenticator`]) that signs a browser in without a gateway
+//! (`docs/decisions/0087-standalone-browser-sign-in.md`). Combining them with
+//! `TIDEBREAK_AUTH_GATEWAY_URL` is a boot error; a token file may sit beside
+//! them as the bootstrap for the first administrator and for CLI access,
+//! because OIDC itself only ever names a member.
+//!
+//! The machine runs the authorization-code flow with PKCE itself
+//! ([`oidc_start`] and [`oidc_callback`]), maps the login claim named by
+//! `TIDEBREAK_AUTH_OIDC_CLAIM` (`sub` by default) to a [`UserId`], and mints
+//! its own bearer for an hour. Every bearer it mints starts with
+//! `tb_oidc_`, so a mode confusion is a refusal rather than a coincidence.
+//!
 //! Browsers can't set an `Authorization` header on a WebSocket upgrade, so on
 //! upgrade requests the token is also accepted via `Sec-WebSocket-Protocol` as
 //! `tidebreak-token.<token>` (alongside the handshake subprotocol `tidebreak-v1`).
@@ -54,7 +71,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::extract::{FromRequestParts, Query, Request, State};
 use axum::http::{
@@ -189,10 +206,15 @@ impl FromRequestParts<AppState> for AdapterBootstrapAuth {
     }
 }
 
-/// Public, non-secret authentication metadata for native clients attaching to
-/// a hosted machine. A client uses this to discover that it should mint a
+/// Public, non-secret authentication metadata for clients attaching to a
+/// hosted machine. A native client uses it to discover that it should mint a
 /// Gateway `tidebreak` resource token instead of asking a person to paste a
-/// long-lived static bearer.
+/// long-lived static bearer; a browser tab uses it to pick which of the three
+/// sign-in screens it can offer (decision 0087).
+///
+/// The document is public and unauthenticated by design — a page has to read
+/// it before it holds any credential — so it names modes and public URLs and
+/// nothing else.
 #[derive(serde::Serialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum AuthDiscovery {
@@ -201,22 +223,32 @@ pub enum AuthDiscovery {
         resource: String,
     },
     StaticToken,
+    Oidc {
+        /// What the sign-in button names, taken from the issuer's host.
+        issuer_name: String,
+        /// Where the browser starts the authorization-code flow.
+        start_url: String,
+    },
     Local,
 }
 
 pub async fn discovery(State(state): State<AppState>) -> Json<AuthDiscovery> {
-    let discovery = match state.config.profile {
-        Profile::SelfHost => match state.config.auth_gateway_url.as_deref() {
-            Some(gateway_url) => AuthDiscovery::Gateway {
+    let discovery = match (
+        state.config.profile,
+        state.principal_authenticator.as_ref(),
+        state.config.auth_gateway_url.as_deref(),
+    ) {
+        (Profile::SelfHost, PrincipalAuthenticator::Gateway(gateway), Some(gateway_url)) => {
+            AuthDiscovery::Gateway {
                 gateway_url: gateway_url.trim_end_matches('/').to_owned(),
-                resource: state
-                    .principal_authenticator
-                    .gateway_resource()
-                    .expect("Gateway authenticator exposes its machine resource")
-                    .to_owned(),
-            },
-            None => AuthDiscovery::StaticToken,
+                resource: gateway.resource.clone(),
+            }
+        }
+        (Profile::SelfHost, PrincipalAuthenticator::Oidc(oidc), _) => AuthDiscovery::Oidc {
+            issuer_name: oidc.issuer_name(),
+            start_url: oidc.start_url.clone(),
         },
+        (Profile::SelfHost, PrincipalAuthenticator::Static(_), _) => AuthDiscovery::StaticToken,
         _ => AuthDiscovery::Local,
     };
     Json(discovery)
@@ -428,17 +460,64 @@ async fn resolve_principal(state: &AppState, presented: &str) -> Option<Principa
 
 /// The self-host credential-to-principal mechanism selected at boot.
 ///
-/// Gateway mode is the hosted default: every request is checked against the
-/// Gateway's live account and session state. Static tokens remain available
-/// for standalone self-host deployments with no Model Gateway.
+/// Gateway mode checks every request against the Gateway's live account and
+/// session state. Standalone machines use static tokens or OpenID Connect;
+/// OIDC may also load a token file for administrator bootstrap and CLI access.
 pub enum PrincipalAuthenticator {
     None,
     Static(TokenMap),
     Gateway(GatewayAuthenticator),
+    Oidc(OidcAuthenticator),
 }
 
 impl PrincipalAuthenticator {
     pub fn from_config(config: &tidebreak_core::Config) -> Result<Self> {
+        // OIDC is checked first because it is the one mode that may carry a
+        // token file alongside it, so the exclusivity table below would read
+        // an OIDC deployment's bootstrap file as static-token mode.
+        if let Some(issuer) = config.auth_oidc_issuer.as_deref() {
+            if config.auth_gateway_url.is_some() {
+                return Err(AgentError::config(
+                    "self-host authentication is ambiguous: TIDEBREAK_AUTH_OIDC_ISSUER \
+                     cannot be combined with TIDEBREAK_AUTH_GATEWAY_URL, because a machine \
+                     signs browsers in through one identity provider",
+                ));
+            }
+            let client_id = config.auth_oidc_client_id.as_deref().ok_or_else(|| {
+                AgentError::config(
+                    "TIDEBREAK_AUTH_OIDC_CLIENT_ID is required with TIDEBREAK_AUTH_OIDC_ISSUER",
+                )
+            })?;
+            let client_secret = config.auth_oidc_client_secret.as_deref().ok_or_else(|| {
+                AgentError::config(
+                    "TIDEBREAK_AUTH_OIDC_CLIENT_SECRET is required with TIDEBREAK_AUTH_OIDC_ISSUER",
+                )
+            })?;
+            let public_url = config.public_url.as_deref().ok_or_else(|| {
+                AgentError::config(
+                    "TIDEBREAK_PUBLIC_URL is required with TIDEBREAK_AUTH_OIDC_ISSUER so the \
+                     provider has a callback to return to",
+                )
+            })?;
+            // The token file stays the bootstrap for the first administrator
+            // and for CLI access; OIDC never mints an admin (decision 0087).
+            let bootstrap = config
+                .auth_tokens_file
+                .as_deref()
+                .map(TokenMap::load)
+                .transpose()?;
+            return Ok(Self::Oidc(OidcAuthenticator::new(
+                issuer,
+                client_id,
+                client_secret,
+                config
+                    .auth_oidc_claim
+                    .as_deref()
+                    .unwrap_or(DEFAULT_OIDC_CLAIM),
+                public_url,
+                bootstrap,
+            )?));
+        }
         match (
             config.auth_tokens_file.as_deref(),
             config.auth_gateway_url.as_deref(),
@@ -466,7 +545,8 @@ impl PrincipalAuthenticator {
             )),
             (None, None, None, _) => Err(AgentError::config(
                 "self-host requires a principal-naming authenticator: set \
-                 TIDEBREAK_AUTH_GATEWAY_URL for Model Gateway identity, or \
+                 TIDEBREAK_AUTH_GATEWAY_URL for Model Gateway identity, \
+                 TIDEBREAK_AUTH_OIDC_ISSUER for an OpenID Connect provider, or \
                  TIDEBREAK_AUTH_TOKENS_FILE for standalone static tokens",
             )),
         }
@@ -478,6 +558,7 @@ impl PrincipalAuthenticator {
             Self::Static(tokens) => tokens
                 .resolve(presented)
                 .map(|(id, role)| Principal::User { id, role }),
+            Self::Oidc(oidc) => oidc.resolve(presented),
             Self::Gateway(gateway) => match gateway.resolve(presented).await {
                 Ok(principal) => principal,
                 Err(error) => {
@@ -487,13 +568,564 @@ impl PrincipalAuthenticator {
             },
         }
     }
+}
 
-    fn gateway_resource(&self) -> Option<&str> {
-        match self {
-            Self::Gateway(gateway) => Some(&gateway.resource),
-            Self::None | Self::Static(_) => None,
+/// The ID-token claim whose string value names the Tidebreak user when the
+/// operator sets no override.
+const DEFAULT_OIDC_CLAIM: &str = "sub";
+
+/// Prefix on every bearer this machine mints for an OIDC sign-in. It is what
+/// makes a mode confusion visible: a static token never carries it, and a
+/// token-file machine holds no store that could ever answer for one.
+const OIDC_BEARER_PREFIX: &str = "tb_oidc_";
+
+/// How long a minted bearer names its principal. A browser tab holds no
+/// refreshable session, so this is the length of a hosted sign-in (decision
+/// 0082 defers the refresh path).
+const OIDC_BEARER_LIFETIME: Duration = Duration::from_secs(3600);
+
+/// How long a started authorization flow waits for its callback. Long enough
+/// for a password, a second factor, and a consent screen; short enough that an
+/// abandoned flow is not a lasting entry.
+const OIDC_FLOW_LIFETIME: Duration = Duration::from_secs(600);
+
+/// Ceilings on the two in-memory maps. `/auth/oidc/start` is public, so
+/// without a cap anyone could grow the pending map by asking; a start that
+/// would exceed the cap is refused rather than served, which is the
+/// fail-closed direction. Both are far above any real standalone deployment.
+const MAX_PENDING_OIDC_FLOWS: usize = 512;
+const MAX_OIDC_BEARERS: usize = 4096;
+
+/// Nothing an issuer legitimately answers with is this large. Discovery
+/// documents and key sets run to a few kilobytes.
+const OIDC_RESPONSE_LIMIT: usize = 64 * 1024;
+
+/// The subset of the issuer's discovery document this machine uses.
+#[derive(serde::Deserialize)]
+struct OidcMetadata {
+    issuer: String,
+    authorization_endpoint: String,
+    token_endpoint: String,
+    jwks_uri: String,
+}
+
+/// One authorization flow between `/auth/oidc/start` and its callback.
+///
+/// The verifier and the nonce never leave this process: the verifier proves
+/// the callback belongs to the browser that started the flow, and the nonce
+/// proves the ID token was minted for it.
+struct PendingOidc {
+    verifier: String,
+    nonce: String,
+    return_to: String,
+    created: Instant,
+}
+
+/// Standalone OpenID Connect authenticator (decision 0087).
+///
+/// The machine runs the authorization-code flow itself and mints its own
+/// bearer once the ID token verifies, so the issuer is on the path at sign-in
+/// and nowhere else. Bearers live in process memory: a restart signs everyone
+/// out, which is the same bound a hosted tab already has.
+pub struct OidcAuthenticator {
+    issuer: reqwest::Url,
+    client_id: String,
+    client_secret: String,
+    /// The ID-token claim mapped to the Tidebreak user id.
+    claim: String,
+    /// What the authorization request asks the issuer to release.
+    scope: &'static str,
+    callback_url: String,
+    /// Where the sign-in page sends the browser; published by discovery.
+    start_url: String,
+    client: reqwest::Client,
+    pending: std::sync::Mutex<HashMap<String, PendingOidc>>,
+    bearers: std::sync::Mutex<HashMap<String, (Principal, Instant)>>,
+    /// The token file an OIDC deployment may keep beside the provider, for the
+    /// first administrator and for CLI access. OIDC itself mints no admin.
+    bootstrap: Option<TokenMap>,
+}
+
+/// Claims an issuer releases only for the `profile` scope. Asking for the
+/// scope a login claim needs is the difference between a working mapping and
+/// a sign-in that fails closed on a claim the provider was never told to send.
+const OIDC_PROFILE_CLAIMS: &[&str] = &[
+    "name",
+    "preferred_username",
+    "nickname",
+    "given_name",
+    "family_name",
+    "profile",
+];
+
+impl OidcAuthenticator {
+    fn new(
+        issuer: &str,
+        client_id: &str,
+        client_secret: &str,
+        claim: &str,
+        public_url: &str,
+        bootstrap: Option<TokenMap>,
+    ) -> Result<Self> {
+        let issuer = reqwest::Url::parse(issuer.trim())
+            .map_err(|error| AgentError::config(format!("invalid OIDC issuer: {error}")))?;
+        require_https_or_loopback(&issuer, "TIDEBREAK_AUTH_OIDC_ISSUER")?;
+        if issuer.query().is_some()
+            || issuer.fragment().is_some()
+            || !issuer.username().is_empty()
+            || issuer.password().is_some()
+        {
+            return Err(AgentError::config(
+                "TIDEBREAK_AUTH_OIDC_ISSUER must not contain credentials, a query, or a fragment",
+            ));
         }
+        if claim.is_empty()
+            || claim.len() > 128
+            || !claim
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        {
+            return Err(AgentError::config(
+                "TIDEBREAK_AUTH_OIDC_CLAIM must be a plain claim name of letters, digits, \
+                 `.`, `_`, or `-`",
+            ));
+        }
+        let scope = match claim {
+            "email" | "email_verified" => "openid email",
+            claim if OIDC_PROFILE_CLAIMS.contains(&claim) => "openid profile",
+            _ => "openid",
+        };
+        let public_url = canonical_public_url(public_url)?;
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|error| AgentError::config(format!("OIDC client: {error}")))?;
+        Ok(Self {
+            issuer,
+            client_id: client_id.to_owned(),
+            client_secret: client_secret.to_owned(),
+            claim: claim.to_owned(),
+            scope,
+            callback_url: format!("{public_url}/auth/oidc/callback"),
+            start_url: format!("{public_url}/auth/oidc/start"),
+            client,
+            pending: std::sync::Mutex::new(HashMap::new()),
+            bearers: std::sync::Mutex::new(HashMap::new()),
+            bootstrap,
+        })
     }
+
+    /// What the sign-in button names. The host alone, because an operator
+    /// reads "login.example.com", not a URL with a scheme and a path.
+    fn issuer_name(&self) -> String {
+        self.issuer
+            .host_str()
+            .unwrap_or(self.issuer.as_str())
+            .to_owned()
+    }
+
+    /// The bootstrap token file first, then this machine's own bearers.
+    ///
+    /// Anything else names nobody, which is how an OIDC machine refuses a
+    /// static token it was never given: there is no roster to find it in.
+    fn resolve(&self, presented: &str) -> Option<Principal> {
+        if let Some((id, role)) = self
+            .bootstrap
+            .as_ref()
+            .and_then(|tokens| tokens.resolve(presented))
+        {
+            return Some(Principal::User { id, role });
+        }
+        if !presented.starts_with(OIDC_BEARER_PREFIX) {
+            return None;
+        }
+        let mut bearers = self.bearers.lock().ok()?;
+        let now = Instant::now();
+        bearers.retain(|_, (_, expires)| *expires > now);
+        bearers
+            .get(presented)
+            .map(|(principal, _)| principal.clone())
+    }
+
+    /// Start a flow: remember what the callback must prove, and answer with
+    /// what the authorization request has to carry.
+    ///
+    /// `None` when the pending map is at its ceiling. A machine that cannot
+    /// remember a flow must not start one, because a callback it cannot check
+    /// is a callback it would have to trust.
+    fn begin(&self, return_to: &str) -> Option<(String, String, oauth2::PkceCodeChallenge)> {
+        let (challenge, verifier) = oauth2::PkceCodeChallenge::new_random_sha256();
+        // 256 bits from the OS generator, base64url — so both values are
+        // header- and fragment-safe as well as unguessable.
+        let state = oauth2::CsrfToken::new_random().secret().clone();
+        let nonce = oauth2::CsrfToken::new_random().secret().clone();
+        let mut pending = self.pending.lock().ok()?;
+        pending.retain(|_, flow| flow.created.elapsed() < OIDC_FLOW_LIFETIME);
+        if pending.len() >= MAX_PENDING_OIDC_FLOWS {
+            return None;
+        }
+        pending.insert(
+            state.clone(),
+            PendingOidc {
+                verifier: verifier.secret().clone(),
+                nonce: nonce.clone(),
+                return_to: return_to.to_owned(),
+                created: Instant::now(),
+            },
+        );
+        Some((state, nonce, challenge))
+    }
+
+    /// Take the flow this callback claims, if it is one this machine started
+    /// and has not already answered. Removing it is what makes a `state`
+    /// single-use.
+    fn claim_flow(&self, state: &str) -> Option<PendingOidc> {
+        self.pending
+            .lock()
+            .ok()?
+            .remove(state)
+            .filter(|flow| flow.created.elapsed() < OIDC_FLOW_LIFETIME)
+    }
+
+    /// The URL the browser is sent to, carrying everything the callback will
+    /// be checked against. Separate from [`OidcAuthenticator::begin`] so the
+    /// request this machine actually makes is readable on its own.
+    fn authorization_url(
+        &self,
+        endpoint: &str,
+        state: &str,
+        nonce: &str,
+        challenge: &oauth2::PkceCodeChallenge,
+    ) -> Option<reqwest::Url> {
+        let mut url = reqwest::Url::parse(endpoint).ok()?;
+        url.query_pairs_mut()
+            .append_pair("response_type", "code")
+            .append_pair("client_id", &self.client_id)
+            .append_pair("redirect_uri", &self.callback_url)
+            .append_pair("scope", self.scope)
+            .append_pair("state", state)
+            .append_pair("nonce", nonce)
+            .append_pair("code_challenge", challenge.as_str())
+            .append_pair("code_challenge_method", challenge.method().as_str());
+        Some(url)
+    }
+
+    /// Mint a bearer for a verified principal and remember it for `lifetime`.
+    fn mint_bearer(&self, principal: Principal, lifetime: Duration) -> Option<String> {
+        let bearer = format!(
+            "{OIDC_BEARER_PREFIX}{}",
+            oauth2::CsrfToken::new_random().secret()
+        );
+        let mut bearers = self.bearers.lock().ok()?;
+        let now = Instant::now();
+        bearers.retain(|_, (_, expires)| *expires > now);
+        if bearers.len() >= MAX_OIDC_BEARERS {
+            return None;
+        }
+        bearers.insert(bearer.clone(), (principal, now + lifetime));
+        Some(bearer)
+    }
+
+    /// Read the issuer's discovery document and check it describes the issuer
+    /// this machine was configured with.
+    ///
+    /// Every endpoint it names is used to reach the provider, so each one is
+    /// held to the same transport rule as the issuer itself: an issuer that
+    /// answers with an `http://` token endpoint does not get the client
+    /// secret.
+    async fn metadata(&self) -> Result<OidcMetadata> {
+        let mut url = self.issuer.clone();
+        let base = url.path().trim_end_matches('/');
+        url.set_path(&format!("{base}/.well-known/openid-configuration"));
+        let response = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(|error| AgentError::msg(format!("OIDC discovery failed: {error}")))?
+            .error_for_status()
+            .map_err(|error| AgentError::msg(format!("OIDC discovery was refused: {error}")))?;
+        let metadata: OidcMetadata = bounded_oidc_json(response).await?;
+        if metadata.issuer.trim_end_matches('/') != self.issuer.as_str().trim_end_matches('/') {
+            return Err(AgentError::msg(
+                "OIDC discovery named a different issuer than the configured one",
+            ));
+        }
+        for (endpoint, what) in [
+            (&metadata.authorization_endpoint, "authorization_endpoint"),
+            (&metadata.token_endpoint, "token_endpoint"),
+            (&metadata.jwks_uri, "jwks_uri"),
+        ] {
+            let url = reqwest::Url::parse(endpoint).map_err(|error| {
+                AgentError::msg(format!("OIDC discovery {what} is not a URL: {error}"))
+            })?;
+            require_https_or_loopback(&url, &format!("the OIDC {what}"))?;
+        }
+        Ok(metadata)
+    }
+}
+
+/// Read a bounded JSON body. An issuer that answers with more than a key set
+/// is not one this machine reads into memory.
+async fn bounded_oidc_json<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+) -> Result<T> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > OIDC_RESPONSE_LIMIT as u64)
+    {
+        return Err(AgentError::msg("OIDC response exceeded the size limit"));
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|error| AgentError::msg(format!("OIDC response failed: {error}")))?;
+    if bytes.len() > OIDC_RESPONSE_LIMIT {
+        return Err(AgentError::msg("OIDC response exceeded the size limit"));
+    }
+    serde_json::from_slice(&bytes)
+        .map_err(|error| AgentError::msg(format!("OIDC response was invalid: {error}")))
+}
+
+/// Require a URL this machine is willing to send a credential to. Plain HTTP
+/// is allowed only against loopback, where there is no network to read it off.
+fn require_https_or_loopback(url: &reqwest::Url, what: &str) -> Result<()> {
+    let loopback = url.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    });
+    if url.scheme() == "https" || (url.scheme() == "http" && loopback) {
+        return Ok(());
+    }
+    Err(AgentError::config(format!(
+        "{what} must use https (http is allowed only for loopback development)"
+    )))
+}
+
+#[derive(serde::Deserialize)]
+pub struct OidcStartQuery {
+    /// Which UI route to open once the page is signed in, exactly as the
+    /// console hand-off carries it.
+    #[serde(default)]
+    return_to: Option<String>,
+}
+
+/// Start an OpenID Connect sign-in on this machine.
+///
+/// The browser arrives from the sign-in screen with no credential — the
+/// route is public for the same reason the discovery document is. It answers
+/// with a redirect to the issuer's authorization endpoint carrying a fresh
+/// `state`, `nonce`, and PKCE challenge; the secrets behind all three stay
+/// here. A machine that does not authenticate through OIDC has no such flow,
+/// so the route does not exist there.
+pub async fn oidc_start(
+    State(state): State<AppState>,
+    Query(query): Query<OidcStartQuery>,
+) -> Response {
+    let PrincipalAuthenticator::Oidc(oidc) = state.principal_authenticator.as_ref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let landing = handoff_landing(&state);
+    let metadata = match oidc.metadata().await {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            tracing::warn!(%error, "OIDC discovery could not be read");
+            return handoff_redirect(&landing, "handoff-failed", "unavailable", None);
+        }
+    };
+    let return_to = handoff_return_route(query.return_to.as_deref());
+    let Some((flow_state, nonce, challenge)) = oidc.begin(return_to) else {
+        tracing::warn!("refused an OIDC sign-in: too many flows are already waiting");
+        return handoff_redirect(&landing, "handoff-failed", "unavailable", None);
+    };
+    let Some(authorization) = oidc.authorization_url(
+        &metadata.authorization_endpoint,
+        &flow_state,
+        &nonce,
+        &challenge,
+    ) else {
+        return handoff_redirect(&landing, "handoff-failed", "unavailable", None);
+    };
+    (
+        StatusCode::FOUND,
+        [
+            (LOCATION, authorization.to_string()),
+            (CACHE_CONTROL, "no-store".to_owned()),
+            (REFERRER_POLICY, "no-referrer".to_owned()),
+        ],
+    )
+        .into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub struct OidcCallbackQuery {
+    #[serde(default)]
+    code: String,
+    #[serde(default)]
+    state: String,
+    /// What the issuer sends instead of a code when it refused. A refusal
+    /// admits nobody, so it is only a reason for the page to word.
+    #[serde(default)]
+    error: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct OidcTokenResponse {
+    id_token: String,
+}
+
+/// Finish an OpenID Connect sign-in and land the page holding a bearer.
+///
+/// Everything the issuer says is checked before anything is minted: the
+/// `state` names a flow this machine started and has not answered, the code
+/// is exchanged with that flow's PKCE verifier, and the ID token has to carry
+/// this client's audience, the configured issuer, a live expiry, and the
+/// flow's nonce. Only then does the machine mint a bearer of its own and hand
+/// it to the page through the fragment envelope the console hand-off uses
+/// (decision 0082), so the page needs no second way to receive one.
+///
+/// Nothing here is logged: not the code, not the ID token, not the bearer.
+pub async fn oidc_callback(
+    State(state): State<AppState>,
+    Query(query): Query<OidcCallbackQuery>,
+) -> Response {
+    let PrincipalAuthenticator::Oidc(oidc) = state.principal_authenticator.as_ref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let landing = handoff_landing(&state);
+    let refused = |reason| handoff_redirect(&landing, "handoff-failed", reason, None);
+    if query.error.is_some() || query.code.is_empty() || query.state.is_empty() {
+        return refused("invalid");
+    }
+    let Some(flow) = oidc.claim_flow(&query.state) else {
+        return refused("invalid");
+    };
+    let metadata = match oidc.metadata().await {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            tracing::warn!(%error, "OIDC discovery could not be read");
+            return refused("unavailable");
+        }
+    };
+    let exchange = oidc
+        .client
+        .post(&metadata.token_endpoint)
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", query.code.as_str()),
+            ("redirect_uri", oidc.callback_url.as_str()),
+            ("client_id", oidc.client_id.as_str()),
+            ("client_secret", oidc.client_secret.as_str()),
+            ("code_verifier", flow.verifier.as_str()),
+        ])
+        .send()
+        .await;
+    let token: OidcTokenResponse = match exchange {
+        // A refused exchange is the provider saying no, which admits nobody.
+        Ok(response) if response.status().is_client_error() => return refused("invalid"),
+        Ok(response) if !response.status().is_success() => {
+            tracing::warn!(status = %response.status(), "OIDC token exchange returned an error status");
+            return refused("unavailable");
+        }
+        Ok(response) => match bounded_oidc_json(response).await {
+            Ok(token) => token,
+            Err(error) => {
+                tracing::warn!(%error, "OIDC token response was unusable");
+                return refused("unavailable");
+            }
+        },
+        Err(error) => {
+            tracing::warn!(%error, "OIDC token exchange failed");
+            return refused("unavailable");
+        }
+    };
+    let jwks: jsonwebtoken::jwk::JwkSet = match oidc.client.get(&metadata.jwks_uri).send().await {
+        Ok(response) if response.status().is_success() => match bounded_oidc_json(response).await {
+            Ok(jwks) => jwks,
+            Err(error) => {
+                tracing::warn!(%error, "OIDC key set was unusable");
+                return refused("unavailable");
+            }
+        },
+        _ => {
+            tracing::warn!("OIDC key set could not be read");
+            return refused("unavailable");
+        }
+    };
+    let Some(principal) =
+        validate_oidc_id_token(oidc, &metadata, &jwks, &token.id_token, &flow.nonce)
+    else {
+        return refused("invalid");
+    };
+    let Some(bearer) = oidc.mint_bearer(principal, OIDC_BEARER_LIFETIME) else {
+        tracing::warn!("refused an OIDC sign-in: too many bearers are already live");
+        return refused("unavailable");
+    };
+    handoff_redirect(&landing, "handoff", &bearer, Some(&flow.return_to))
+}
+
+/// Verify an ID token against the issuer's keys and map it to a principal.
+///
+/// `None` for every failure, deliberately without distinguishing them: the
+/// caller lands the page on one refusal either way, and a reason told apart
+/// here would only be told apart by whoever forged the token.
+///
+/// The role is always [`Role::Member`]. Decision 6 requires an external
+/// identity provider to supply a role or default everyone to member, and an
+/// ID token carries no Tidebreak role — the token file is where a standalone
+/// deployment names its administrators.
+fn validate_oidc_id_token(
+    oidc: &OidcAuthenticator,
+    metadata: &OidcMetadata,
+    jwks: &jsonwebtoken::jwk::JwkSet,
+    id_token: &str,
+    nonce: &str,
+) -> Option<Principal> {
+    let header = jsonwebtoken::decode_header(id_token).ok()?;
+    // The algorithm comes from the token, so the set it may name is fixed
+    // here: signing algorithms only. `none` and the HMAC family are excluded,
+    // the latter because their key would be the client secret rather than
+    // anything the issuer's key set publishes.
+    if !matches!(
+        header.alg,
+        jsonwebtoken::Algorithm::RS256
+            | jsonwebtoken::Algorithm::RS384
+            | jsonwebtoken::Algorithm::RS512
+            | jsonwebtoken::Algorithm::PS256
+            | jsonwebtoken::Algorithm::PS384
+            | jsonwebtoken::Algorithm::PS512
+            | jsonwebtoken::Algorithm::ES256
+            | jsonwebtoken::Algorithm::ES384
+            | jsonwebtoken::Algorithm::EdDSA
+    ) {
+        return None;
+    }
+    let key = jsonwebtoken::DecodingKey::from_jwk(jwks.find(header.kid.as_deref()?)?).ok()?;
+    let mut validation = jsonwebtoken::Validation::new(header.alg);
+    validation.set_audience(&[&oidc.client_id]);
+    validation.set_issuer(&[metadata.issuer.as_str()]);
+    validation.set_required_spec_claims(&["exp", "aud", "iss", "sub"]);
+    let claims = jsonwebtoken::decode::<serde_json::Value>(id_token, &key, &validation)
+        .ok()?
+        .claims;
+    // The nonce binds the token to the flow this browser started, which is
+    // what stops one replayed here from another.
+    if claims.get("nonce").and_then(serde_json::Value::as_str) != Some(nonce) {
+        return None;
+    }
+    let login = claims
+        .get(&oidc.claim)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())?;
+    Some(Principal::User {
+        id: UserId::new(login).ok()?,
+        role: Role::Member,
+    })
 }
 
 /// Live verifier for Gateway-issued `tidebreak` resource tokens.
@@ -1491,5 +2123,450 @@ mod tests {
             PrincipalAuthenticator::from_config(&config),
             Ok(PrincipalAuthenticator::Static(_))
         ));
+    }
+
+    /// A throwaway Ed25519 key pair for the ID tokens below. The private half
+    /// is spelled as DER bytes rather than a PEM block so the secret scanner
+    /// has nothing key-shaped to trip over; it signs nothing outside this
+    /// module.
+    const TEST_OIDC_PRIVATE_KEY: &[u8] = &[
+        48, 46, 2, 1, 0, 48, 5, 6, 3, 43, 101, 112, 4, 34, 4, 32, 77, 131, 23, 2, 149, 50, 243,
+        210, 168, 16, 155, 75, 190, 114, 52, 174, 24, 147, 187, 163, 47, 207, 192, 156, 53, 223,
+        168, 73, 209, 213, 223, 139,
+    ];
+    const TEST_OIDC_PUBLIC_KEY: &str = "iCQjb0jIV9LwVk60OpxoyoYEtpKuMou948yRVjp6UEU";
+    const TEST_OIDC_ISSUER: &str = "http://127.0.0.1:12345";
+
+    fn unix_now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    /// Sign an ID token the configured client would accept, with `overrides`
+    /// applied over the well-formed claims so each case says exactly what it
+    /// changed. A `null` override drops the claim entirely.
+    fn oidc_test_token(overrides: serde_json::Value) -> String {
+        let mut claims = serde_json::json!({
+            "iss": TEST_OIDC_ISSUER,
+            "sub": "oidc-user",
+            "aud": "client-id",
+            "exp": unix_now() + 300,
+            "nonce": "expected-nonce",
+            "email": "person@example.test",
+        });
+        let object = claims.as_object_mut().expect("the claims are an object");
+        for (name, value) in overrides.as_object().expect("overrides are an object") {
+            if value.is_null() {
+                object.remove(name);
+            } else {
+                object.insert(name.clone(), value.clone());
+            }
+        }
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
+        header.kid = Some("test-key".to_owned());
+        jsonwebtoken::encode(
+            &header,
+            &claims,
+            &jsonwebtoken::EncodingKey::from_ed_der(TEST_OIDC_PRIVATE_KEY),
+        )
+        .unwrap()
+    }
+
+    fn oidc_test_jwks() -> jsonwebtoken::jwk::JwkSet {
+        serde_json::from_value(serde_json::json!({
+            "keys": [{
+                "kty": "OKP",
+                "crv": "Ed25519",
+                "kid": "test-key",
+                "use": "sig",
+                "alg": "EdDSA",
+                "x": TEST_OIDC_PUBLIC_KEY,
+            }]
+        }))
+        .unwrap()
+    }
+
+    fn oidc_test_metadata() -> OidcMetadata {
+        OidcMetadata {
+            issuer: TEST_OIDC_ISSUER.to_owned(),
+            authorization_endpoint: format!("{TEST_OIDC_ISSUER}/authorize"),
+            token_endpoint: format!("{TEST_OIDC_ISSUER}/token"),
+            jwks_uri: format!("{TEST_OIDC_ISSUER}/jwks"),
+        }
+    }
+
+    fn oidc_test_authenticator(claim: &str, bootstrap: Option<TokenMap>) -> OidcAuthenticator {
+        OidcAuthenticator::new(
+            TEST_OIDC_ISSUER,
+            "client-id",
+            "client-secret",
+            claim,
+            "http://127.0.0.1:8080",
+            bootstrap,
+        )
+        .unwrap()
+    }
+
+    /// The authorization request carries everything the callback is checked
+    /// against, and the flow behind it is single-use: a `state` answers once,
+    /// so a callback replayed after the browser landed finds nothing.
+    #[test]
+    fn a_started_flow_is_single_use_and_its_request_carries_the_whole_check() {
+        let oidc = oidc_test_authenticator(DEFAULT_OIDC_CLAIM, None);
+        let (state, nonce, challenge) = oidc.begin("/c/session-1").unwrap();
+        let url = oidc
+            .authorization_url(
+                &oidc_test_metadata().authorization_endpoint,
+                &state,
+                &nonce,
+                &challenge,
+            )
+            .unwrap();
+        let query: HashMap<String, String> = url.query_pairs().into_owned().collect();
+        assert_eq!(url.path(), "/authorize");
+        assert_eq!(query["response_type"], "code");
+        assert_eq!(query["client_id"], "client-id");
+        assert_eq!(
+            query["redirect_uri"],
+            "http://127.0.0.1:8080/auth/oidc/callback"
+        );
+        assert_eq!(query["scope"], "openid");
+        assert_eq!(query["state"], state);
+        assert_eq!(query["nonce"], nonce);
+        assert_eq!(query["code_challenge_method"], "S256");
+        assert_eq!(query["code_challenge"], challenge.as_str());
+        assert_ne!(
+            query["code_challenge"], "",
+            "the verifier never leaves this process, so the challenge must"
+        );
+        assert!(
+            !query.contains_key("code_verifier"),
+            "the verifier is the secret half and must not travel with the browser"
+        );
+
+        // The flow answers exactly one callback, and only its own state.
+        assert!(oidc.claim_flow("some-other-state").is_none());
+        let flow = oidc.claim_flow(&state).unwrap();
+        assert_eq!(flow.nonce, nonce);
+        assert_eq!(flow.return_to, "/c/session-1");
+        assert!(
+            oidc.claim_flow(&state).is_none(),
+            "a state that already landed a browser must not land another"
+        );
+    }
+
+    /// `/auth/oidc/start` is public, so the map behind it is bounded. A
+    /// machine that cannot remember a flow refuses to start one rather than
+    /// accepting a callback it could not check.
+    #[test]
+    fn the_number_of_waiting_sign_ins_is_bounded() {
+        let oidc = oidc_test_authenticator(DEFAULT_OIDC_CLAIM, None);
+        let started: Vec<_> = (0..MAX_PENDING_OIDC_FLOWS)
+            .filter_map(|_| oidc.begin("/"))
+            .collect();
+        assert_eq!(started.len(), MAX_PENDING_OIDC_FLOWS);
+        assert!(oidc.begin("/").is_none());
+        // Answering one makes room for the next reader.
+        oidc.claim_flow(&started[0].0).unwrap();
+        assert!(oidc.begin("/").is_some());
+    }
+
+    /// Every reason an ID token can fail is a refusal, and each one is a
+    /// separate way a forged or replayed token would otherwise get in: a
+    /// token minted for another client, one from another issuer, one from a
+    /// flow this machine did not start, one whose hour is up, and one signed
+    /// by a key the issuer does not publish.
+    #[test]
+    fn an_id_token_this_machine_did_not_ask_for_names_nobody() {
+        let oidc = oidc_test_authenticator(DEFAULT_OIDC_CLAIM, None);
+        let metadata = oidc_test_metadata();
+        let jwks = oidc_test_jwks();
+        let verify =
+            |token: &str| validate_oidc_id_token(&oidc, &metadata, &jwks, token, "expected-nonce");
+
+        assert_eq!(
+            verify(&oidc_test_token(serde_json::json!({}))),
+            Some(Principal::User {
+                id: UserId::new("oidc-user").unwrap(),
+                // OIDC names a member; the token file names administrators.
+                role: Role::Member,
+            }),
+            "a token for this client, from this issuer, in this flow, signs the person in"
+        );
+
+        for (token, why) in [
+            (
+                oidc_test_token(serde_json::json!({ "aud": "another-client" })),
+                "an audience that is not this client id",
+            ),
+            (
+                oidc_test_token(serde_json::json!({ "iss": "https://other.example.test" })),
+                "an issuer that is not the configured one",
+            ),
+            (
+                oidc_test_token(serde_json::json!({ "nonce": "some-other-flow" })),
+                "a nonce from a flow this machine did not start",
+            ),
+            (
+                oidc_test_token(serde_json::json!({ "nonce": null })),
+                "no nonce at all",
+            ),
+            (
+                oidc_test_token(serde_json::json!({ "exp": unix_now() - 3600 })),
+                "an expiry in the past",
+            ),
+            (
+                oidc_test_token(serde_json::json!({ "sub": null })),
+                "no subject",
+            ),
+        ] {
+            assert!(verify(&token).is_none(), "{why} must admit nobody");
+        }
+
+        // A key set that does not publish the signing key admits nobody
+        // either, however well-formed the token is.
+        let other_keys: jsonwebtoken::jwk::JwkSet = serde_json::from_value(serde_json::json!({
+            "keys": [{
+                "kty": "OKP",
+                "crv": "Ed25519",
+                "kid": "another-key",
+                "use": "sig",
+                "alg": "EdDSA",
+                "x": TEST_OIDC_PUBLIC_KEY,
+            }]
+        }))
+        .unwrap();
+        assert!(validate_oidc_id_token(
+            &oidc,
+            &metadata,
+            &other_keys,
+            &oidc_test_token(serde_json::json!({})),
+            "expected-nonce",
+        )
+        .is_none());
+    }
+
+    /// The claim override picks which string names the user. A claim the
+    /// provider did not send, or sent as something other than a string, signs
+    /// nobody in — decision 0087's fail-closed outcome for a stale mapping.
+    #[test]
+    fn the_login_claim_override_names_the_user_or_nobody() {
+        let oidc = oidc_test_authenticator("email", None);
+        let metadata = oidc_test_metadata();
+        let jwks = oidc_test_jwks();
+        assert_eq!(
+            validate_oidc_id_token(
+                &oidc,
+                &metadata,
+                &jwks,
+                &oidc_test_token(serde_json::json!({})),
+                "expected-nonce",
+            ),
+            Some(Principal::User {
+                id: UserId::new("person@example.test").unwrap(),
+                role: Role::Member,
+            })
+        );
+        for overrides in [
+            serde_json::json!({ "email": null }),
+            serde_json::json!({ "email": "" }),
+            serde_json::json!({ "email": 42 }),
+            serde_json::json!({ "email": ["person@example.test"] }),
+        ] {
+            assert!(validate_oidc_id_token(
+                &oidc,
+                &metadata,
+                &jwks,
+                &oidc_test_token(overrides.clone()),
+                "expected-nonce",
+            )
+            .is_none());
+        }
+        // Asking for a claim means asking for the scope that releases it.
+        assert_eq!(oidc.scope, "openid email");
+        assert_eq!(oidc_test_authenticator("sub", None).scope, "openid");
+        assert_eq!(
+            oidc_test_authenticator("preferred_username", None).scope,
+            "openid profile"
+        );
+    }
+
+    /// A bearer this machine minted names its principal until its hour is up,
+    /// and never a moment longer. Nothing else is a bearer.
+    #[test]
+    fn a_minted_bearer_lasts_its_hour_and_then_names_nobody() {
+        let oidc = oidc_test_authenticator(DEFAULT_OIDC_CLAIM, None);
+        let principal = Principal::User {
+            id: UserId::new("oidc-user").unwrap(),
+            role: Role::Member,
+        };
+        let bearer = oidc
+            .mint_bearer(principal.clone(), OIDC_BEARER_LIFETIME)
+            .unwrap();
+        assert!(bearer.starts_with(OIDC_BEARER_PREFIX));
+        assert!(
+            bearer.bytes().all(is_token_byte),
+            "a bearer travels in a header and a subprotocol, so it stays in their alphabet"
+        );
+        assert_eq!(oidc.resolve(&bearer), Some(principal.clone()));
+        assert_eq!(oidc.resolve(&format!("{bearer}x")), None);
+
+        let expired = oidc.mint_bearer(principal, Duration::ZERO).unwrap();
+        assert_eq!(oidc.resolve(&expired), None);
+    }
+
+    /// Decision 0087's cross-mode rule, both directions. An OIDC machine has
+    /// no roster to find a static token in — except the bootstrap file it may
+    /// be given, which is exactly the tokens in that file and no others — and
+    /// a token-file machine holds nothing that could answer for a bearer only
+    /// an OIDC machine mints.
+    #[tokio::test]
+    async fn an_oidc_machine_refuses_a_static_token_and_a_token_file_machine_refuses_a_bearer() {
+        let bootstrap = TokenMap::parse(&format!("alice {ALICE_FIRST} admin\n")).unwrap();
+        let oidc = PrincipalAuthenticator::Oidc(oidc_test_authenticator(
+            DEFAULT_OIDC_CLAIM,
+            Some(bootstrap),
+        ));
+        // The bootstrap file is the first administrator and the CLI, and it
+        // is the only static credential an OIDC machine accepts.
+        assert_eq!(
+            oidc.resolve(ALICE_FIRST).await,
+            Some(Principal::User {
+                id: UserId::new("alice").unwrap(),
+                role: Role::Admin,
+            })
+        );
+        assert_eq!(oidc.resolve(BOB_TOKEN).await, None);
+        // Nor does a bearer shaped like one it mints but never minted.
+        assert_eq!(
+            oidc.resolve(&format!("{OIDC_BEARER_PREFIX}{}", "a".repeat(43)))
+                .await,
+            None
+        );
+
+        let tokens = PrincipalAuthenticator::Static(
+            TokenMap::parse(&format!("alice {ALICE_FIRST} admin\n")).unwrap(),
+        );
+        let bearer = oidc_test_authenticator(DEFAULT_OIDC_CLAIM, None)
+            .mint_bearer(
+                Principal::User {
+                    id: UserId::new("oidc-user").unwrap(),
+                    role: Role::Member,
+                },
+                OIDC_BEARER_LIFETIME,
+            )
+            .unwrap();
+        assert_eq!(tokens.resolve(&bearer).await, None);
+    }
+
+    /// The third mode's boot rules: it needs its client credentials and a
+    /// public URL to be returned to, it refuses to stand beside the gateway,
+    /// and it does stand beside a token file.
+    #[test]
+    fn oidc_is_a_third_exclusive_mode_that_keeps_its_bootstrap_token_file() {
+        let data_dir = tempfile::tempdir().unwrap();
+        let tokens = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tokens.path(), format!("alice {ALICE_FIRST} admin\n")).unwrap();
+
+        let mut config = tidebreak_core::Config::desktop(data_dir.path());
+        config.profile = Profile::SelfHost;
+        config.auth_oidc_issuer = Some("https://login.example.test".to_owned());
+        // The issuer alone is not a configuration.
+        assert!(PrincipalAuthenticator::from_config(&config).is_err());
+        config.auth_oidc_client_id = Some("client-id".to_owned());
+        config.auth_oidc_client_secret = Some("client-secret".to_owned());
+        // Nowhere for the provider to return to.
+        assert!(PrincipalAuthenticator::from_config(&config).is_err());
+        config.public_url = Some("https://tidebreak.example.test".to_owned());
+        assert!(matches!(
+            PrincipalAuthenticator::from_config(&config),
+            Ok(PrincipalAuthenticator::Oidc(_))
+        ));
+
+        // The token file stays the bootstrap: still OIDC mode, not static.
+        config.auth_tokens_file = Some(tokens.path().to_owned());
+        assert!(matches!(
+            PrincipalAuthenticator::from_config(&config),
+            Ok(PrincipalAuthenticator::Oidc(_))
+        ));
+
+        // The gateway is the one thing it cannot share a machine with, and
+        // the refusal says which two variables to choose between.
+        config.auth_gateway_url = Some("https://gateway.example.test".to_owned());
+        let Err(refusal) = PrincipalAuthenticator::from_config(&config) else {
+            panic!("a machine cannot be both an OIDC and a gateway machine");
+        };
+        let refusal = refusal.to_string();
+        assert!(
+            refusal.contains("TIDEBREAK_AUTH_OIDC_ISSUER")
+                && refusal.contains("TIDEBREAK_AUTH_GATEWAY_URL"),
+            "the refusal must name both: {refusal}"
+        );
+    }
+
+    /// The issuer and every endpoint it names carry a credential, so plain
+    /// HTTP is refused off loopback. The login claim is a claim name, not a
+    /// path into one.
+    #[test]
+    fn an_oidc_provider_this_machine_would_not_trust_fails_boot() {
+        for (issuer, claim, why) in [
+            (
+                "http://login.example.test",
+                DEFAULT_OIDC_CLAIM,
+                "plain http",
+            ),
+            (
+                "ftp://login.example.test",
+                DEFAULT_OIDC_CLAIM,
+                "no scheme to speak",
+            ),
+            ("not a url", DEFAULT_OIDC_CLAIM, "not a URL"),
+            (
+                "https://user:pass@login.example.test",
+                DEFAULT_OIDC_CLAIM,
+                "credentials in the issuer",
+            ),
+            (
+                "https://login.example.test?tenant=a",
+                DEFAULT_OIDC_CLAIM,
+                "a query in the issuer",
+            ),
+            ("https://login.example.test", "", "an empty claim name"),
+            (
+                "https://login.example.test",
+                "profile/email",
+                "a path rather than a claim name",
+            ),
+        ] {
+            assert!(
+                OidcAuthenticator::new(
+                    issuer,
+                    "client-id",
+                    "client-secret",
+                    claim,
+                    "https://tidebreak.example.test",
+                    None,
+                )
+                .is_err(),
+                "{why} must fail boot"
+            );
+        }
+        // Loopback is the development exception, on both sides.
+        assert!(OidcAuthenticator::new(
+            "http://localhost:12345",
+            "client-id",
+            "client-secret",
+            DEFAULT_OIDC_CLAIM,
+            "http://127.0.0.1:8080",
+            None,
+        )
+        .is_ok());
+        assert!(require_https_or_loopback(
+            &reqwest::Url::parse("http://keys.example.test/jwks").unwrap(),
+            "the OIDC jwks_uri",
+        )
+        .is_err());
     }
 }

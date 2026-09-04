@@ -2438,6 +2438,17 @@ export type ExecProviderSnapshot = "local" | "e2b" | "daytona" | "docker" | "off
 export type ExecUnavailableReason = "unsupported_platform" | "missing_sandbox_binary" | "missing_credential" | "missing_container_runtime" | "container_runtime_unreachable" | "container_runtime_refused";
 
 /**
+ * Where a session's engine runs (decision 0088).
+ *
+ * Chosen once, when the session is created, from what the deployment has:
+ * a gateway sandbox when a sandbox runtime is configured and the session
+ * has a repository, else the machine's own engine. The machine is the
+ * floor, not an interim path: every deployment can run a session, and a
+ * sandbox is what a deployment adds on top.
+ */
+export type ExecutionLocation = "sandbox" | "machine";
+
+/**
  * Portable code-repository registration.
  */
 export type ExportedCodeRepository = { display_name: string, origin_url?: string, root_path: string, default_base_ref: string, branch_prefix: string, setup_script?: string, archive_script?: string, quick_actions: Array<QuickAction>, cloned_from?: string, };
@@ -4828,7 +4839,11 @@ fast_mode: boolean, lifecycle: SessionLifecycle, fence_reason?: FenceReason, att
 /**
  * Present when an external channel created the session.
  */
-external_origin?: SessionExternalOrigin, };
+external_origin?: SessionExternalOrigin,
+/**
+ * Where the engine runs, fixed at creation (decision 0088).
+ */
+execution_location: ExecutionLocation, };
 
 /**
  * Who may read a session without holding an access row (decision 0086).

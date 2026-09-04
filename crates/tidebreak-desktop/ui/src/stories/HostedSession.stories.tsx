@@ -1,15 +1,17 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { fn } from "storybook/test";
+import { expect, fn, userEvent, within } from "storybook/test";
 
 import { HostedSignIn } from "@/HostedSignIn";
 
 /**
  * A browser tab served by a hosted machine, before it holds a session.
  *
- * The machine serves the same renderer the desktop app runs, but a tab
- * cannot sign itself in: its bearer comes from the reader's Model Gateway
- * console, once. These are the screens between opening the address and
- * arriving signed in, and the one that follows an hour later.
+ * The machine serves the same renderer the desktop app runs, and how a tab
+ * signs in is the machine's to say: a gateway machine sends the reader to
+ * the console that mints its bearers, a token-file machine takes a pasted
+ * token, and an OIDC machine starts the flow on the machine itself. These
+ * are the screens between opening the address and arriving signed in, and
+ * the one that follows an hour later.
  */
 const meta = {
   title: "Shell/Hosted browser session",
@@ -18,7 +20,11 @@ const meta = {
   args: {
     reason: "no_session",
     machineUrl: "https://tidebreak.example.com",
-    gatewayUrl: "https://gateway.example.com",
+    discovery: {
+      mode: "gateway",
+      gateway_url: "https://gateway.example.com",
+      resource: "tidebreak",
+    },
     onRetry: fn(),
   },
 } satisfies Meta<typeof HostedSignIn>;
@@ -41,11 +47,45 @@ export const SessionEnded: Story = {
 };
 
 /**
- * A machine on static tokens has no console to send a browser to. The page
- * still says what to do instead of offering a link that goes nowhere.
+ * A machine on a token file takes the token its administrator handed out.
+ * The tab holds it in memory alone, and forgets it on reload.
  */
-export const NoBrowserSignIn: Story = {
-  args: { gatewayUrl: null },
+export const StaticToken: Story = {
+  args: {
+    discovery: { mode: "static_token" },
+    onToken: fn(async () => true),
+  },
+};
+
+/**
+ * The refusal a wrong token gets. It stays on this screen with the field
+ * still filled, because the next thing the reader does is fix the token.
+ */
+export const StaticTokenRefused: Story = {
+  args: {
+    discovery: { mode: "static_token" },
+    onToken: fn(async () => false),
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.type(canvas.getByLabelText("Token"), "not-the-token");
+    await userEvent.click(canvas.getByRole("button", { name: "Sign in" }));
+    await expect(await canvas.findByRole("alert")).toBeVisible();
+  },
+};
+
+/**
+ * An OIDC machine offers one button, named for the issuer the operator
+ * configured. The flow starts and finishes on the machine.
+ */
+export const Oidc: Story = {
+  args: {
+    discovery: {
+      mode: "oidc",
+      issuer_name: "login.example.com",
+      start_url: "/auth/oidc/start",
+    },
+  },
 };
 
 /**
@@ -58,8 +98,8 @@ export const HandoffExpired: Story = {
 };
 
 /**
- * The machine could not reach the gateway to exchange the code. Nothing
- * about the reader's account is in question, and the copy says so.
+ * The machine could not reach the provider that signs the reader in. Nothing
+ * about their account is in question, and the copy says so.
  */
 export const HandoffUnavailable: Story = {
   args: { reason: "handoff_failed", failure: "unavailable" },

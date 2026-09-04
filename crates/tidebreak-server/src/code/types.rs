@@ -22,9 +22,10 @@ use tidebreak_core::{
     Approval, ApprovalId, ApprovalKind, ApprovalState, Attention, CapLevel,
     CodePullRequestRelation, CodeRepo, CodeSubagentSummary, CodeTerminalId, CodeTrigger,
     CodeTriggerAction, CodeTriggerCondition, CodeTriggerId, CodeWatch, CodeWatchId, CodeWatchState,
-    CodeWorkspace, CodeWorkspaceStatus, Diffstat, Event, FenceReason, FileChangeKind, HarnessCaps,
-    HarnessKind, HarnessTier, PermissionMode, PullRequestDigest, QuickAction, ReasoningEffort,
-    RepoId, Session, SessionKind, SessionLifecycle, Turn, TurnId, TurnStatus, WorkspaceId,
+    CodeWorkspace, CodeWorkspaceStatus, Diffstat, Event, ExecutionLocation, FenceReason,
+    FileChangeKind, HarnessCaps, HarnessKind, HarnessTier, PermissionMode, PullRequestDigest,
+    QuickAction, ReasoningEffort, RepoId, Session, SessionKind, SessionLifecycle, Turn, TurnId,
+    TurnStatus, WorkspaceId,
 };
 
 /// One adapter grant, as the desktop grants list renders it. Carries no
@@ -265,6 +266,8 @@ pub struct SessionSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub external_origin: Option<SessionExternalOrigin>,
+    /// Where the engine runs, fixed at creation (decision 0088).
+    pub execution_location: ExecutionLocation,
 }
 
 impl From<Session> for SessionSnapshot {
@@ -289,6 +292,7 @@ impl From<Session> for SessionSnapshot {
             // Provenance is a separate lookup; the handlers that serve the
             // desktop attach it.
             external_origin: None,
+            execution_location: session.execution_location,
         }
     }
 }

@@ -1388,6 +1388,47 @@ impl SessionAccessLevel {
     }
 }
 
+/// Where a session's engine runs (decision 0088).
+///
+/// Chosen once, when the session is created, from what the deployment has:
+/// a gateway sandbox when a sandbox runtime is configured and the session
+/// has a repository, else the machine's own engine. The machine is the
+/// floor, not an interim path: every deployment can run a session, and a
+/// sandbox is what a deployment adds on top.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionLocation {
+    /// A gateway sandbox provisioned through the configured runtime; the
+    /// session's workspace is the remote marker and the engine lives in
+    /// the lease.
+    Sandbox,
+    /// The machine's own engine on a worktree under its worktree root, or
+    /// the in-process engine for a session without a workspace.
+    Machine,
+}
+
+impl ExecutionLocation {
+    /// Stable database and wire token.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Sandbox => "sandbox",
+            Self::Machine => "machine",
+        }
+    }
+
+    /// Parse a stored/wire token.
+    #[must_use]
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "sandbox" => Some(Self::Sandbox),
+            "machine" => Some(Self::Machine),
+            _ => None,
+        }
+    }
+}
+
 /// Who submitted a turn, or settled a decision (decision 0086).
 ///
 /// Every field is optional, because the paths that write one know different
@@ -1500,6 +1541,8 @@ pub struct Session {
     pub visibility: SessionVisibility,
     /// Creation time.
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Where the engine runs, fixed at creation (decision 0088).
+    pub execution_location: ExecutionLocation,
 }
 
 /// Persisted turn record.

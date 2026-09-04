@@ -96,3 +96,4 @@
 0085  0085-the-server-honors-the-model-gateway-add-on-plane-s-environment-contract.md
 0086  0086-session-access-is-separate-from-ownership.md
 0087  0087-standalone-browser-sign-in.md
+0088  0088-a-slack-session-runs-where-the-deployment-can-run-it.md
