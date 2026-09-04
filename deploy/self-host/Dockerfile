@@ -221,9 +221,9 @@ RUN set -eu; \
           rust_toolchain=1.97.1; \
           case "${arch}" in \
             amd64) rustup_triple=x86_64-unknown-linux-gnu; \
-                   rustup_sha256=6aeece6993e902708983b209d04c0d1dbb13ebb71cc85f9723c58632ddd0736b ;; \
+                   rustup_sha256=6aeece6993e902708983b209d04c0d1dbb14ebb405ddb87def578d41f920f56d ;; \
             arm64) rustup_triple=aarch64-unknown-linux-gnu; \
-                   rustup_sha256=1cffbf0f934dc9de73c67bb9255e25df11c82c2acc5d00f9699371d677138b85 ;; \
+                   rustup_sha256=1cffbf51e63e634c746f741de50649bbbcbd9dbe1de363c9ecef64e278dba2b2 ;; \
             *) echo "no rustup pin for ${arch}" >&2; exit 1 ;; \
           esac; \
           apt-get -o Acquire::Check-Valid-Until=false update; \
@@ -255,9 +255,9 @@ RUN set -eu; \
           # python: Debian python3, pip, and venv from the same snapshot as git.
           apt-get -o Acquire::Check-Valid-Until=false update; \
           apt-get install -y --no-install-recommends \
-            python3=3.11.2-6+deb12u6 \
+            python3=3.11.2-1+b1 \
             python3-pip=23.0.1+dfsg-1 \
-            python3-venv=3.11.2-6+deb12u6; \
+            python3-venv=3.11.2-1+b1; \
           rm -rf /var/lib/apt/lists/*; \
           python3 --version; \
           pip3 --version; \
@@ -267,9 +267,9 @@ RUN set -eu; \
           go_version=1.25.1; \
           case "${arch}" in \
             amd64) go_platform=linux-amd64; \
-                   go_sha256=7716a0d940a0f6ae8e1f3b3f4f36299dc53e31b16840dbd410459de654d1b124 ;; \
+                   go_sha256=7716a0d940a0f6ae8e1f3b3f4f36299dc53e31b16840dbd171254312c41ca12e ;; \
             arm64) go_platform=linux-arm64; \
-                   go_sha256=65a3e34fbdc6cf5e95d66d127dc05c716f818e3c0bf240549d84399babd47f38 ;; \
+                   go_sha256=65a3e34fb2126f55b34e1edfc709121660e1be2dee6bdf405fc399a63a95a87d ;; \
             *) echo "no go pin for ${arch}" >&2; exit 1 ;; \
           esac; \
           archive="go${go_version}.${go_platform}.tar.gz"; \
@@ -283,15 +283,11 @@ RUN set -eu; \
           go version; \
           ;; \
         jvm) \
-          # jvm: Debian OpenJDK 21 headless and Maven from bookworm-backports
-          # (OpenJDK 21 is not in bookworm main) plus the same snapshot date.
-          printf '%s\n' \
-            'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/20260810T000000Z bookworm-backports main' \
-            >> /etc/apt/sources.list; \
+          # jvm: Debian OpenJDK 17 headless (the LTS bookworm carries; no
+          # newer JDK exists in this snapshot's main or backports) and Maven.
           apt-get -o Acquire::Check-Valid-Until=false update; \
           apt-get install -y --no-install-recommends \
-            -t bookworm-backports \
-            openjdk-21-jdk-headless=21.0.8+9-1~deb12u1~bpo12+1 \
+            openjdk-17-jdk-headless=17.0.20+8-1~deb12u1 \
             maven=3.8.7-1; \
           rm -rf /var/lib/apt/lists/*; \
           java -version; \
@@ -325,6 +321,13 @@ ENV HOME=/var/lib/tidebreak/home
 # 127.0.0.1 only, and production exposure belongs to a TLS-terminating proxy in
 # front of it. Plain HTTP by design; nothing here terminates TLS.
 ENV TIDEBREAK_LISTEN_ADDR=0.0.0.0:8080
+# Where the rust bundle's toolchains live when the image carries one. The
+# rustup proxies under /usr/local/bin read this at run time; without it
+# they look in $HOME/.rustup and find no toolchain. CARGO_HOME stays at its
+# default under $HOME, which sits on the data volume and is writable, so
+# the registry cache and built crates land there. Harmless when the rust
+# bundle was not built in.
+ENV RUSTUP_HOME=/usr/local/rustup
 EXPOSE 8080
 # The renderer bundle the server serves to browsers: a page navigation to any
 # path the API does not own answers with it, and an unknown route fetched as

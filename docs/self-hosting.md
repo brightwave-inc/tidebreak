@@ -438,9 +438,9 @@ the digest's provenance states which bundles it carries.
 | Bundle | What you get |
 | --- | --- |
 | `rust` | rustup 1.27.1, stable toolchain 1.97.1, cargo, clippy, rustfmt, and Debian `build-essential` 12.9 so crates can link |
-| `python` | Debian `python3` 3.11.2-6+deb12u6, `python3-pip` 23.0.1+dfsg-1, `python3-venv` 3.11.2-6+deb12u6 |
+| `python` | Debian `python3` 3.11.2-1+b1, `python3-pip` 23.0.1+dfsg-1, `python3-venv` 3.11.2-1+b1 |
 | `go` | Go 1.25.1 from the official release tarball, SHA-256 verified before unpack |
-| `jvm` | Debian OpenJDK 21 headless 21.0.8+9-1~deb12u1~bpo12+1 and Maven 3.8.7-1 |
+| `jvm` | Debian OpenJDK 17 headless 17.0.20+8-1~deb12u1 and Maven 3.8.7-1 |
 
 When a workspace setup script or a test quick action fails with
 `command not found` for `cargo`, `python3`, `go`, `mvn`, or `java`, the

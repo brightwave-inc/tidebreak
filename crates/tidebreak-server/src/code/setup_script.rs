@@ -114,7 +114,17 @@ fn command_not_found(output: &str, tool: &str) -> bool {
     let not_found = format!("{tool}: not found");
     output.lines().any(|line| {
         let line = line.trim();
-        line.contains(&command_not_found) || line.contains(&not_found)
+        [&command_not_found, &not_found].iter().any(|needle| {
+            // The tool name must stand alone: `django: command not found`
+            // is not `go: command not found`.
+            line.match_indices(needle.as_str()).any(|(at, _)| {
+                at == 0
+                    || !line[..at]
+                        .chars()
+                        .next_back()
+                        .is_some_and(|prior| prior.is_ascii_alphanumeric() || prior == '_')
+            })
+        })
     })
 }
 
@@ -237,6 +247,15 @@ mod tests {
         );
         assert_eq!(
             missing_image_toolchain_notice("setup script failed (exit 1): tests failed"),
+            None
+        );
+        assert_eq!(
+            missing_image_toolchain_notice("sh: 1: django: command not found"),
+            None,
+            "a tool name inside another name is not that tool"
+        );
+        assert_eq!(
+            missing_image_toolchain_notice("sh: 1: cargo_wrapper: not found"),
             None
         );
     }
