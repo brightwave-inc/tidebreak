@@ -1,6 +1,12 @@
 //! Remote and external sessions: creation, remote turns, and queue promotion.
 
 use super::*;
+use tidebreak_core::ExecutionLocation;
+
+/// How long a machine-location message waits for its worker to promote the
+/// queue head before the route answers `queued` (decision 0088).
+const MACHINE_PROMOTION_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+const MACHINE_PROMOTION_POLLS: usize = 40;
 
 impl CodeRuntime {
     /// Create a workspace whose checkout lives in a sandbox, not on this
@@ -105,6 +111,7 @@ impl CodeRuntime {
             unrecognized_event_count: 0,
             subagents: Vec::new(),
             created_at: Utc::now(),
+            execution_location: tidebreak_core::ExecutionLocation::Sandbox,
         }
     }
 
@@ -129,12 +136,6 @@ impl CodeRuntime {
         harness: HarnessKind,
         settings: NewSessionSettings,
     ) -> Result<tidebreak_core::ExternalSessionResolution, ServerError> {
-        if self.remote.is_none() {
-            return Err(ServerError::conflict_kind(
-                "remote_disabled",
-                "this deployment has no sandbox runtime configured",
-            ));
-        }
         if channel_kind.trim().is_empty() || external_key.trim().is_empty() {
             return Err(ServerError::conflict_kind(
                 "binding_key_invalid",
@@ -165,24 +166,70 @@ impl CodeRuntime {
         }
         let repo = self.get_repo(owner, repo_id).await?;
         Self::refuse_removed_repo(&repo)?;
-        if repo.origin_host.is_none() || repo.origin_owner.is_none() || repo.origin_name.is_none() {
-            return Err(ServerError::conflict_kind(
-                "repo_origin_unknown",
-                "the repository records no origin, so a sandbox cannot clone it",
-            ));
+        match self.external_execution_location() {
+            ExecutionLocation::Sandbox => {
+                if repo.origin_host.is_none()
+                    || repo.origin_owner.is_none()
+                    || repo.origin_name.is_none()
+                {
+                    return Err(ServerError::conflict_kind(
+                        "repo_origin_unknown",
+                        "the repository records no origin, so a sandbox cannot clone it",
+                    ));
+                }
+                let workspace = self.build_remote_workspace(owner, &repo, title).await?;
+                let session = Self::remote_session_value(owner, workspace.id, harness, settings);
+                Ok(tidebreak_core::db::code::resolve_external_session(
+                    &self.db,
+                    owner,
+                    grant_id,
+                    channel_kind,
+                    external_key,
+                    &workspace,
+                    &session,
+                )
+                .await?)
+            }
+            ExecutionLocation::Machine => {
+                // The machine's own engine: the ordinary local workspace and
+                // session, then the binding. The channel's `Allow` is a
+                // sandbox posture; on the machine the session takes the
+                // deployment's default mode, and the owner decides approvals
+                // from the desktop or the web until the channel can carry
+                // them (decision 0088).
+                let settings = NewSessionSettings {
+                    permission_mode: tidebreak_core::PermissionMode::default(),
+                    ..settings
+                };
+                let workspace = self
+                    .create_workspace(owner, repo_id, title, None, None)
+                    .await?;
+                let session = self
+                    .create_session(owner, workspace.id, harness, settings)
+                    .await?;
+                Ok(tidebreak_core::db::code::bind_external_session(
+                    &self.db,
+                    owner,
+                    grant_id,
+                    channel_kind,
+                    external_key,
+                    session.id,
+                )
+                .await?)
+            }
         }
-        let workspace = self.build_remote_workspace(owner, &repo, title).await?;
-        let session = Self::remote_session_value(owner, workspace.id, harness, settings);
-        Ok(tidebreak_core::db::code::resolve_external_session(
-            &self.db,
-            owner,
-            grant_id,
-            channel_kind,
-            external_key,
-            &workspace,
-            &session,
-        )
-        .await?)
+    }
+
+    /// Where an external session runs on this deployment (decision 0088):
+    /// a gateway sandbox when a sandbox runtime is configured, else the
+    /// machine's own engine. The machine is the floor, not an interim path.
+    #[must_use]
+    pub fn external_execution_location(&self) -> ExecutionLocation {
+        if self.remote.is_some() {
+            ExecutionLocation::Sandbox
+        } else {
+            ExecutionLocation::Machine
+        }
     }
 
     /// Create a session on a remote workspace: a row and nothing else. No
@@ -419,6 +466,39 @@ impl CodeRuntime {
         Ok(())
     }
 
+    /// Promote a freshly recorded external message by the session's
+    /// location (decision 0088). A sandbox session hands the head to its
+    /// lease; a machine session wakes its worker, which drains the queue the
+    /// way it does after any turn, and this waits briefly for the head to
+    /// become a turn so the channel hears `new_turn` rather than `queued`
+    /// for an idle session.
+    async fn promote_external_head(
+        &self,
+        session: Session,
+        turn_id: tidebreak_core::TurnId,
+    ) -> Result<(), ServerError> {
+        match session.execution_location {
+            ExecutionLocation::Sandbox => self.try_promote_remote_head(session).await,
+            ExecutionLocation::Machine => {
+                let owner = session.owner.clone();
+                let session_id = session.id;
+                self.wake_session_queue(session_id);
+                for _ in 0..MACHINE_PROMOTION_POLLS {
+                    let still_queued =
+                        tidebreak_core::db::code::list_queued_turns(&self.db, &owner, session_id)
+                            .await?
+                            .iter()
+                            .any(|row| row.id == turn_id);
+                    if !still_queued {
+                        break;
+                    }
+                    tokio::time::sleep(MACHINE_PROMOTION_POLL).await;
+                }
+                Ok(())
+            }
+        }
+    }
+
     /// Promote one idle remote session's queue head, when it has one and
     /// nothing holds promotion. Shared by the sweep and the external
     /// messages path, which tries the head immediately after enqueueing
@@ -516,12 +596,6 @@ impl CodeRuntime {
         event_id: &str,
         channel_ts: &str,
     ) -> Result<ExternalMessageOutcome, ServerError> {
-        if self.remote.is_none() {
-            return Err(ServerError::conflict_kind(
-                "remote_disabled",
-                "this deployment has no sandbox runtime configured",
-            ));
-        }
         if !tidebreak_core::db::code::session_bound_to_grant(&self.db, owner, session_id, grant_id)
             .await?
         {
@@ -557,7 +631,7 @@ impl CodeRuntime {
         if fresh {
             // Best effort: a refusal leaves the row queued for the sweep.
             let session = self.get_session(owner, session_id).await?;
-            if let Err(error) = self.try_promote_remote_head(session).await {
+            if let Err(error) = self.promote_external_head(session, turn_id).await {
                 tracing::warn!(
                     session = %session_id,
                     ?error,

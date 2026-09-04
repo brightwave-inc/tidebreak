@@ -741,6 +741,7 @@ async fn postgres_v060_upgrade_merges_conversations_into_sessions() {
                 "attention_state".to_owned(),
                 r#"{"type": "idle"}"#.to_owned()
             ),
+            ("execution_location".to_owned(), "machine".to_owned()),
             ("harness_kind".to_owned(), "internal".to_owned()),
             ("kind".to_owned(), "interactive".to_owned()),
             ("lifecycle".to_owned(), "idle".to_owned()),

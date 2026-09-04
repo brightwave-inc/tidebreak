@@ -343,6 +343,10 @@ const SESSION_LIFECYCLES = new Set<CodeSessionLifecycle>([
   "ended",
 ]);
 const SESSION_KINDS = new Set<CodeSessionKind>(["interactive", "watch"]);
+const EXECUTION_LOCATIONS = new Set<"sandbox" | "machine">([
+  "sandbox",
+  "machine",
+]);
 const SESSION_ACTIVITIES = new Set<CodeSessionActivity>([
   "agent",
   "shell",
@@ -2616,10 +2620,15 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
       "unrecognized_event_count",
       "created_at",
       "external_origin",
+      "execution_location",
     ]) ||
     !wireId(value.id) ||
     !nullableWireId(value.workspace_id) ||
     !isMember(value.kind, SESSION_KINDS) ||
+    // Absent from a server before decision 0088; present as a fixed token
+    // since.
+    (value.execution_location !== undefined &&
+      !isMember(value.execution_location, EXECUTION_LOCATIONS)) ||
     !isMember(value.harness_kind, HARNESS_KINDS) ||
     !optionalLine(value.harness_version) ||
     !optionalLine(value.harness_resume_ref) ||
@@ -2677,6 +2686,10 @@ export function parseCodeSession(value: unknown): CodeSessionSnapshot | null {
     unrecognized_event_count: value.unrecognized_event_count,
     created_at: value.created_at,
     fast_mode: value.fast_mode === true,
+    // A server from before decision 0088 sends no location; everything it
+    // ran was on the machine.
+    execution_location:
+      value.execution_location === "sandbox" ? "sandbox" : "machine",
     ...(value.harness_version !== undefined
       ? { harness_version: value.harness_version }
       : {}),

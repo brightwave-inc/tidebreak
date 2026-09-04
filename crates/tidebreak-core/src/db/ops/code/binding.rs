@@ -199,6 +199,76 @@ pub async fn resolve_external_session(
     }
 }
 
+/// Bind one conversation to a session that already exists, for the machine
+/// location where the workspace and session were created by the ordinary
+/// local path before the binding (decision 0088).
+///
+/// A hit classifies the existing binding and inserts nothing; a miss
+/// inserts the binding. Two racing creates cannot both commit: the unique
+/// conversation key refuses the loser, which re-reads and answers
+/// `Existing` for the winner's binding. The loser's session stays as an
+/// unbound, idle session its owner can reap.
+///
+/// # Errors
+///
+/// Returns an error when the store refuses.
+pub async fn bind_external_session(
+    store: &DbStore,
+    owner: &OwnerId,
+    grant_id: CodeGrantId,
+    channel_kind: &str,
+    external_key: &str,
+    session_id: SessionId,
+) -> Result<ExternalSessionResolution> {
+    if let Some(hit) = entities::code_external_binding::Entity::find()
+        .filter(entities::code_external_binding::Column::Owner.eq(owner.as_str()))
+        .filter(entities::code_external_binding::Column::ChannelKind.eq(channel_kind))
+        .filter(entities::code_external_binding::Column::ExternalKey.eq(external_key))
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+    {
+        return classify_hit(&store.conn, hit, grant_id).await;
+    }
+    let now = database_now(&store.conn).await?;
+    let binding = CodeExternalBinding {
+        id: CodeBindingId::new(),
+        owner: owner.clone(),
+        channel_kind: channel_kind.to_owned(),
+        external_key: external_key.to_owned(),
+        grant_id,
+        session_id,
+        created_at: now,
+    };
+    let inserted = entities::code_external_binding::ActiveModel {
+        id: Set(binding.id.0),
+        owner: Set(owner.as_str().to_owned()),
+        channel_kind: Set(channel_kind.to_owned()),
+        external_key: Set(external_key.to_owned()),
+        grant_id: Set(grant_id.0),
+        session_id: Set(session_id.0),
+        created_at: Set(now),
+    }
+    .insert(&store.conn)
+    .await;
+    match inserted {
+        Ok(_) => Ok(ExternalSessionResolution::Created(Box::new(binding))),
+        Err(error) => {
+            let Some(hit) = entities::code_external_binding::Entity::find()
+                .filter(entities::code_external_binding::Column::Owner.eq(owner.as_str()))
+                .filter(entities::code_external_binding::Column::ChannelKind.eq(channel_kind))
+                .filter(entities::code_external_binding::Column::ExternalKey.eq(external_key))
+                .one(&store.conn)
+                .await
+                .map_err(store_err)?
+            else {
+                return Err(store_err(error));
+            };
+            classify_hit(&store.conn, hit, grant_id).await
+        }
+    }
+}
+
 /// Every binding pointing at one session, for revoke and scope sweeps.
 pub async fn list_bindings_for_session(
     store: &DbStore,

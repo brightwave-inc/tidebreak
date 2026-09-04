@@ -332,6 +332,7 @@ async fn seed_session(db: &DbStore, lc: SessionLifecycle) -> (WorkspaceId, Sessi
         unrecognized_event_count: 0,
         subagents: vec![],
         created_at: chrono::Utc::now(),
+        execution_location: tidebreak_core::ExecutionLocation::Machine,
     };
     db::code::insert_session(db, &s).await.unwrap();
     (ws.id, s.id)

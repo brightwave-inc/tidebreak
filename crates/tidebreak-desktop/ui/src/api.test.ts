@@ -1852,7 +1852,9 @@ describe("code workspace sessions", () => {
     // The payload omits `fast_mode`, as a server predating the field does.
     // It reads as off, which is what such a session was actually running.
     await expect(client.listCodeWorkspaceSessions("ws-1")).resolves.toEqual([
-      { ...session, fast_mode: false },
+      // A server predating decision 0088 names no location; it ran on the
+      // machine.
+      { ...session, fast_mode: false, execution_location: "machine" },
     ]);
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("http://127.0.0.1/code/workspaces/ws-1/sessions");
