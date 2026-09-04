@@ -88,6 +88,8 @@ async fn a_fresh_database_records_the_whole_chain() {
             "m20260903_000005_pending_prompt_indexes",
             "m20260903_000006_sandbox_tool_recovery_indexes",
             "m20260903_000007_universal_session_names",
+            "m20260904_000001_session_access",
+            "m20260904_000002_turn_actor",
         ]
     );
     assert!(db
