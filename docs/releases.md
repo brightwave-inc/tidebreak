@@ -264,9 +264,9 @@ installer itself, so no separate updater archive exists on Windows. Release
 builds check that authenticated feed and ask before restarting into the new
 installer.
 
-The credential-free `prepare_windows_sidecars` and
-`prepare_windows_desktop` jobs reuse compiler outputs directly from the shared
-S3 `sccache` backend. They compile the sidecars and desktop in parallel for the
+The credential-free `prepare_windows` and `prepare_windows_desktop` jobs reuse
+compiler outputs directly from the shared S3 `sccache` backend. They compile
+the sidecars and desktop in parallel for the
 exact release tag and product version, then save separate prepared archives for
 the credentialed packaging job. The Windows ARM jobs keep the
 `aarch64-pc-windows-msvc` Rust target and compile whisper.cpp with Ninja plus
@@ -687,9 +687,10 @@ repository variable `CI_WINDOWS_RUNNER` to the provisioned x64 label. If you
 omit the variable, the job uses `windows-latest`. Do not point the variable at
 an ARM runner: the lane compiles `x86_64-pc-windows-msvc`.
 
-The x86_64 Windows release compile and packaging jobs use `windows-latest`.
-Windows ARM64 stays on the native `windows-11-arm` runner required by decision
-43.
+The x86_64 Windows release compile and packaging jobs use the runner named by
+`RELEASE_WINDOWS_X64_RUNNER`. The repository sets this variable to
+`windows-latest`. Windows ARM64 stays on the native `windows-11-arm` runner
+required by decision 43.
 
 The release-draft workflow uses the built-in `GITHUB_TOKEN`; it does not require
 a personal access token.

@@ -1281,7 +1281,7 @@ jobs:
           [[ -z "${APPLE_CERTIFICATE_PATH:-}" ]] \
             || rm -f "$APPLE_CERTIFICATE_PATH"
 
-  prepare_windows_sidecars:
+  prepare_windows:
     name: prepare unsigned Windows sidecars · ${{ matrix.arch }}
     needs: [validate, inspect_hosted, notices]
     if: >-
@@ -1303,7 +1303,7 @@ jobs:
         include:
           - arch: x86_64
             target: x86_64-pc-windows-msvc
-            runner: windows-latest
+            runner: ${{ vars.RELEASE_WINDOWS_X64_RUNNER || 'windows-latest' }}
           - arch: aarch64
             target: aarch64-pc-windows-msvc
             runner: windows-11-arm
@@ -1334,8 +1334,10 @@ jobs:
             target/${{ matrix.target }}/release/.fingerprint
             target/${{ matrix.target }}/release/build
             target/${{ matrix.target }}/release/deps
+            target/${{ matrix.target }}/release/tidebreak-desktop.exe
             target/${{ matrix.target }}/release/tidebreak-host-broker.exe
             target/${{ matrix.target }}/release/tidebreak.exe
+            target/${{ matrix.target }}/release/tidebreak_desktop_lib.*
             crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}.exe
             crates/tidebreak-desktop/binaries/tidebreak-${{ matrix.target }}.exe
           key: windows-release-sidecars-v1-${{ matrix.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ needs.validate.outputs.sha }}-${{ needs.validate.outputs.version }}
@@ -1345,8 +1347,10 @@ jobs:
       - name: Discard restored sidecar product binaries
         run: |
           rm -rf \
+            target/${{ matrix.target }}/release/tidebreak-desktop.exe \
             target/${{ matrix.target }}/release/tidebreak-host-broker.exe \
             target/${{ matrix.target }}/release/tidebreak.exe \
+            target/${{ matrix.target }}/release/tidebreak_desktop_lib.* \
             crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}.exe \
             crates/tidebreak-desktop/binaries/tidebreak-${{ matrix.target }}.exe
 
@@ -1387,8 +1391,10 @@ jobs:
             target/${{ matrix.target }}/release/.fingerprint
             target/${{ matrix.target }}/release/build
             target/${{ matrix.target }}/release/deps
+            target/${{ matrix.target }}/release/tidebreak-desktop.exe
             target/${{ matrix.target }}/release/tidebreak-host-broker.exe
             target/${{ matrix.target }}/release/tidebreak.exe
+            target/${{ matrix.target }}/release/tidebreak_desktop_lib.*
             crates/tidebreak-desktop/binaries/tidebreak-host-broker-${{ matrix.target }}.exe
             crates/tidebreak-desktop/binaries/tidebreak-${{ matrix.target }}.exe
           key: ${{ steps.rust-build-cache.outputs.cache-primary-key }}
@@ -1470,7 +1476,7 @@ jobs:
         include:
           - arch: x86_64
             target: x86_64-pc-windows-msvc
-            runner: windows-latest
+            runner: ${{ vars.RELEASE_WINDOWS_X64_RUNNER || 'windows-latest' }}
           - arch: aarch64
             target: aarch64-pc-windows-msvc
             runner: windows-11-arm
@@ -1656,7 +1662,7 @@ jobs:
 
   build_windows:
     name: Windows · ${{ matrix.arch }}
-    needs: [validate, inspect_hosted, notices, prepare_windows_sidecars, prepare_windows_desktop]
+    needs: [validate, inspect_hosted, notices, prepare_windows, prepare_windows_desktop]
     if: >-
       ${{
         always()
@@ -1665,7 +1671,7 @@ jobs:
         && needs.inspect_hosted.result == 'success'
         && needs.inspect_hosted.outputs.exists != 'true'
         && needs.notices.result == 'success'
-        && needs.prepare_windows_sidecars.result == 'success'
+        && needs.prepare_windows.result == 'success'
         && needs.prepare_windows_desktop.result == 'success'
       }}
     runs-on: ${{ matrix.runner }}
@@ -1682,7 +1688,7 @@ jobs:
         include:
           - arch: x86_64
             target: x86_64-pc-windows-msvc
-            runner: windows-latest
+            runner: ${{ vars.RELEASE_WINDOWS_X64_RUNNER || 'windows-latest' }}
           - arch: aarch64
             target: aarch64-pc-windows-msvc
             runner: windows-11-arm
@@ -1772,14 +1778,14 @@ jobs:
           cp -p "$SIDECARS_ROOT/$cli_sidecar" "$cli_sidecar"
           cp "$DESKTOP_ROOT/release-config.json" "$RELEASE_CONFIG"
 
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          version: 10.18.3
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
-      - name: Enable pinned pnpm
-        run: |
-          corepack enable
-          corepack install --global pnpm@10.18.3
-          node -e 'const bin = process.platform === "win32" ? "pnpm.cmd" : "pnpm"; const version = require("node:child_process").execFileSync(bin, ["--version"], { encoding: "utf8" }).trim(); if (version !== "10.18.3") throw new Error("Expected pnpm 10.18.3, got " + version)'
+          cache: pnpm
+          cache-dependency-path: .github/tauri-cli/pnpm-lock.yaml
       - name: Install pinned Tauri bundler
         run: |
           pnpm --dir .github/tauri-cli install --frozen-lockfile --ignore-scripts

@@ -825,7 +825,7 @@ test("compiler caches use OIDC-scoped S3 access", () => {
 
   for (const [file, name] of [
     ["release.yml", "prepare_macos"],
-    ["release.yml", "prepare_windows_sidecars"],
+    ["release.yml", "prepare_windows"],
     ["release.yml", "prepare_windows_desktop"],
     ["release.yml", "build_linux"],
     ["staging-publish.yml", "prepare_macos_staging"],
@@ -1677,10 +1677,7 @@ test("release compilation uses S3 without cache warmer workflows", () => {
   assert.doesNotMatch(release, /^  warm-macos-cache:/m);
 
   const prepareMacos = workflowJob(release, "prepare_macos");
-  const prepareWindowsSidecars = workflowJob(
-    release,
-    "prepare_windows_sidecars",
-  );
+  const prepareWindowsSidecars = workflowJob(release, "prepare_windows");
   const prepareWindowsDesktop = workflowJob(
     release,
     "prepare_windows_desktop",
@@ -1694,13 +1691,15 @@ test("release compilation uses S3 without cache warmer workflows", () => {
   assert.doesNotMatch(prepareWindowsDesktop, /windows-release-target-v1-/);
   assert.doesNotMatch(buildLinux, /actions\/cache\/restore@/);
   assert.doesNotMatch(buildLinux, /linux-release-target-v1-/);
-  assert.doesNotMatch(release, /RELEASE_WINDOWS_X64_RUNNER/);
   for (const job of [prepareWindowsSidecars, prepareWindowsDesktop, buildWindows]) {
-    assert.match(job, /target: x86_64-pc-windows-msvc\n\s+runner: windows-latest/);
+    assert.match(
+      job,
+      /target: x86_64-pc-windows-msvc\n\s+runner: \$\{\{ vars\.RELEASE_WINDOWS_X64_RUNNER \|\| 'windows-latest' \}\}/,
+    );
   }
   assert.match(
     buildWindows,
-    /needs: \[validate, inspect_hosted, notices, prepare_windows_sidecars, prepare_windows_desktop\]/,
+    /needs: \[validate, inspect_hosted, notices, prepare_windows, prepare_windows_desktop\]/,
   );
   assert.match(prepareWindowsSidecars, /prepare-sidecar\.mjs --release/);
   assert.match(
@@ -1712,10 +1711,8 @@ test("release compilation uses S3 without cache warmer workflows", () => {
   assert.match(buildWindows, /tidebreak-prepared-windows-desktop-/);
   assert.match(buildWindows, /Prepared Windows sidecar archive contains an unexpected file set/);
   assert.match(buildWindows, /Prepared Windows desktop archive contains an unexpected file set/);
-  for (const job of [prepareWindowsDesktop, buildWindows]) {
-    assert.match(job, /corepack install --global pnpm@10\.18\.3/);
-    assert.doesNotMatch(job, /uses: pnpm\/action-setup/);
-  }
+  assert.match(prepareWindowsDesktop, /corepack install --global pnpm@10\.18\.3/);
+  assert.doesNotMatch(prepareWindowsDesktop, /uses: pnpm\/action-setup/);
 
   for (const workflow of [release]) {
     const downloadCaches = [
@@ -1755,7 +1752,7 @@ test("credential-free compile jobs never load production secrets", () => {
   for (const jobName of [
     "prepare_macos",
     "combine_macos",
-    "prepare_windows_sidecars",
+    "prepare_windows",
     "prepare_windows_desktop",
   ]) {
     const job = workflowJob(release, jobName);
@@ -1767,7 +1764,7 @@ test("credential-free compile jobs never load production secrets", () => {
   // failed compile, so partial work is reusable.
   for (const jobName of [
     "prepare_macos",
-    "prepare_windows_sidecars",
+    "prepare_windows",
     "prepare_windows_desktop",
   ]) {
     const job = workflowJob(release, jobName);
@@ -1808,7 +1805,7 @@ test("the updater private key is isolated from compilation", () => {
   const release = workflows["release.yml"];
   for (const jobName of [
     "prepare_macos",
-    "prepare_windows_sidecars",
+    "prepare_windows",
     "prepare_windows_desktop",
   ]) {
     assert.doesNotMatch(
@@ -1906,7 +1903,7 @@ test("restored product binaries are discarded before the packaging build", () =>
       ],
     ],
     [
-      "prepare_windows_sidecars",
+      "prepare_windows",
       [
         /release\/tidebreak-host-broker/,
         /release\/tidebreak\b/,
@@ -1931,7 +1928,7 @@ test("restored product binaries are discarded before the packaging build", () =>
   ]);
   for (const name of [
     "build_macos",
-    "prepare_windows_sidecars",
+    "prepare_windows",
     "prepare_windows_desktop",
     "build_windows",
     "build_linux",
@@ -2108,7 +2105,7 @@ test("an existing immutable release resumes without rebuilding or overwriting", 
     /needs\.inspect_hosted\.outputs\.exists != 'true'/,
   );
   assert.match(
-    workflowJob(release, "prepare_windows_sidecars"),
+    workflowJob(release, "prepare_windows"),
     /needs\.inspect_hosted\.outputs\.exists != 'true'/,
   );
   assert.match(
@@ -2432,7 +2429,7 @@ test("release and staging share one third-party notices implementation", () => {
       platformJobs: [
         "prepare_macos",
         "build_macos",
-        "prepare_windows_sidecars",
+        "prepare_windows",
         "prepare_windows_desktop",
         "build_windows",
         "build_linux",
