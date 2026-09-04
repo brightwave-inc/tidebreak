@@ -990,14 +990,14 @@ jobs:
           install -m 755 "$PREPARED_ROOT/$cli_sidecar" "$cli_sidecar"
           install -m 644 "$PREPARED_ROOT/release-config.json" "$RELEASE_CONFIG"
 
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          version: 10.18.3
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
-      - name: Enable pinned pnpm
-        run: |
-          corepack enable
-          corepack install --global pnpm@10.18.3
-          node -e 'const bin = process.platform === "win32" ? "pnpm.cmd" : "pnpm"; const version = require("node:child_process").execFileSync(bin, ["--version"], { encoding: "utf8" }).trim(); if (version !== "10.18.3") throw new Error("Expected pnpm 10.18.3, got " + version)'
+          cache: pnpm
+          cache-dependency-path: .github/tauri-cli/pnpm-lock.yaml
       - name: Install pinned Tauri bundler
         run: |
           pnpm --dir .github/tauri-cli install --frozen-lockfile --ignore-scripts
@@ -1588,14 +1588,14 @@ jobs:
           cp -p "$PREPARED_ROOT/$cli_sidecar" "$cli_sidecar"
           cp "$PREPARED_ROOT/release-config.json" "$RELEASE_CONFIG"
 
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          version: 10.18.3
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
-      - name: Enable pinned pnpm
-        run: |
-          corepack enable
-          corepack install --global pnpm@10.18.3
-          node -e 'const bin = process.platform === "win32" ? "pnpm.cmd" : "pnpm"; const version = require("node:child_process").execFileSync(bin, ["--version"], { encoding: "utf8" }).trim(); if (version !== "10.18.3") throw new Error("Expected pnpm 10.18.3, got " + version)'
+          cache: pnpm
+          cache-dependency-path: .github/tauri-cli/pnpm-lock.yaml
       - name: Install pinned Tauri bundler
         run: |
           pnpm --dir .github/tauri-cli install --frozen-lockfile --ignore-scripts

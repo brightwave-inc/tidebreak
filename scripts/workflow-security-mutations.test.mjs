@@ -497,10 +497,7 @@ const mutations = [
     expected: "signing jobs run installers before loading signing material",
     mutate: (source) =>
       editWorkflowJob(source, "build_macos", (job) =>
-        job.replace(
-          "corepack install --global pnpm@10.18.3",
-          "corepack install --global pnpm@latest",
-        ),
+        job.replace(/version: 10(?:\.18\.3)?\n/, "version: latest\n"),
       ),
   },
   {
@@ -528,10 +525,7 @@ const mutations = [
     expected: "signing jobs run installers before loading signing material",
     mutate: (source) =>
       editWorkflowJob(source, "build_macos", (job) =>
-        job.replace(
-          "corepack install --global pnpm@10.18.3",
-          "corepack install --global pnpm@10",
-        ),
+        job.replace(/version: 10\.18\.3\n/, "version: 10\n"),
       ),
   },
   {
