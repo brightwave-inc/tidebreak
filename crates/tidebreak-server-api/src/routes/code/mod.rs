@@ -12,6 +12,7 @@
 //! principal shares — are registered on the deployment-plane router in
 //! `crate::lib` instead, behind `require_admin`.
 
+mod access;
 mod analytics;
 mod approvals;
 mod browser;
@@ -34,6 +35,9 @@ mod usage;
 mod workspaces;
 
 pub(crate) use crate::code::approval_bridge::approval_prompt;
+pub(crate) use access::{
+    add_session_access, list_session_access, revoke_session_access, set_session_visibility,
+};
 pub(crate) use analytics::analytics;
 pub(crate) use approvals::{decide_approval, list_approvals};
 pub(crate) use browser::{
@@ -90,20 +94,21 @@ pub(crate) use triggers::{
 #[cfg(test)]
 #[allow(unused_imports)]
 pub(crate) use types::{
-    ApprovalDecisionBody, ApprovalSnapshot, CodeActionSnapshot, CodeAnalyticsSnapshot,
-    CodeCheckLogsSnapshot, CodeCommitSnapshot, CodeConnectPage, CodeDeliveryActionResult,
-    CodeDeliveryPullRequestActionBody, CodeDeliveryPullRequestDetail, CodeDeliveryPullRequestFile,
-    CodeDeliveryPullRequestQuery, CodeDeliveryPullRequestTarget, CodeDeliveryPullRequestsPage,
-    CodeDeliveryRepositoriesSnapshot, CodeDeliveryRunActionBody, CodeDeliveryRunDetail,
-    CodeDeliveryRunQuery, CodeDeliveryRunTarget, CodeDeliveryRunsPage, CodeForkBody,
-    CodeForkTranscript, CodeGrantSnapshot, CodePrCommentsSnapshot, CodePushSnapshot,
+    AddSessionAccessBody, ApprovalDecisionBody, ApprovalSnapshot, CodeActionSnapshot,
+    CodeAnalyticsSnapshot, CodeCheckLogsSnapshot, CodeCommitSnapshot, CodeConnectPage,
+    CodeDeliveryActionResult, CodeDeliveryPullRequestActionBody, CodeDeliveryPullRequestDetail,
+    CodeDeliveryPullRequestFile, CodeDeliveryPullRequestQuery, CodeDeliveryPullRequestTarget,
+    CodeDeliveryPullRequestsPage, CodeDeliveryRepositoriesSnapshot, CodeDeliveryRunActionBody,
+    CodeDeliveryRunDetail, CodeDeliveryRunQuery, CodeDeliveryRunTarget, CodeDeliveryRunsPage,
+    CodeForkBody, CodeForkTranscript, CodeGrantSnapshot, CodePrCommentsSnapshot, CodePushSnapshot,
     CodeRepoSnapshot, CodeTerminalActivityNotice, CodeTerminalRead, CodeTerminalSnapshot,
     CodeTriggerSnapshot, CodeWorkspaceBlob, CodeWorkspaceDiff, CodeWorkspaceFiles,
     CodeWorkspacePrSnapshot, CodeWorkspacePullRequests, CodeWorkspaceSearch, CodeWorkspaceSnapshot,
     CodeWorkspaceTree, CreateCodeTriggerBody, HarnessDoctorReport, HarnessModelList,
     MergeCodePrBody, QueuedTurn, ResolveCodeDeliveryRepositoriesBody, SequencedEventFrame,
-    SessionDigest, SessionSnapshot, SetCodeWorktreeRootBody, TurnSnapshot, UpdateCodeTriggerBody,
-    UpdateNotice, WorkspaceTitleProposal,
+    SessionAccessSnapshot, SessionDigest, SessionSnapshot, SetCodeWorktreeRootBody,
+    SetSessionVisibilityBody, TurnSnapshot, UpdateCodeTriggerBody, UpdateNotice,
+    WorkspaceTitleProposal,
 };
 #[allow(unused_imports)] // Compatibility exports keep these route paths stable.
 pub(crate) use types::{

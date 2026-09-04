@@ -158,6 +158,7 @@ fn caps() -> HarnessCaps {
 
 fn session() -> SessionSnapshot {
     SessionSnapshot {
+        visibility: tidebreak_core::SessionVisibility::Private,
         id: session_id(),
         workspace_id: Some(workspace_id()),
         kind: SessionKind::Interactive,
@@ -182,6 +183,12 @@ fn session() -> SessionSnapshot {
 
 fn turn() -> TurnSnapshot {
     TurnSnapshot {
+        actor: Some(tidebreak_core::TurnActor {
+            principal: Some("mara".into()),
+            display: Some("Mara".into()),
+            channel_kind: None,
+            external_identity: None,
+        }),
         id: turn_id(),
         session_id: session_id(),
         ordinal: 3,
@@ -492,6 +499,7 @@ pub(crate) fn code_frame_fixtures() -> Vec<Fixture> {
             "pending approval",
             "approval",
             &ApprovalSnapshot {
+                actor: None,
                 id: approval_id(),
                 session_id: session_id(),
                 turn_id: turn_id(),
@@ -511,6 +519,7 @@ pub(crate) fn code_frame_fixtures() -> Vec<Fixture> {
             "denied approval",
             "approval",
             &ApprovalSnapshot {
+                actor: None,
                 id: ApprovalId(id(0x15)),
                 session_id: session_id(),
                 turn_id: turn_id(),
@@ -799,6 +808,12 @@ fn event_frames() -> Vec<Fixture> {
                     decision: ApprovalDecisionKind::Deny {
                         feedback: Some("Not that file.".to_owned()),
                     },
+                    actor: Some(tidebreak_core::TurnActor {
+                        principal: None,
+                        display: Some("Ines".into()),
+                        channel_kind: Some("slack".into()),
+                        external_identity: Some("U123".into()),
+                    }),
                 },
             ),
         ),
