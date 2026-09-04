@@ -121,9 +121,14 @@ function samePolicy(a: ManagedPolicy, b: ManagedPolicy): boolean {
 export function ManagedGate({
   client,
   children,
+  onHostedToken,
 }: {
   client: ApiClient;
   children: ReactNode;
+  /** How a hosted tab whose bearer died signs in again on a token-file
+   * machine. Only that gate branch uses it; the desktop app never renders
+   * one, because it has a shell to refresh a bearer from. */
+  onHostedToken?: (token: string) => Promise<boolean>;
 }) {
   const [policyState, setPolicyState] = useState<PolicyState>({
     kind: "loading",
@@ -369,7 +374,8 @@ export function ManagedGate({
         <HostedSignIn
           reason="session_ended"
           machineUrl={hosted.baseUrl}
-          gatewayUrl={hosted.gatewayUrl}
+          discovery={hosted.discovery}
+          onToken={onHostedToken}
         />
       );
     }
