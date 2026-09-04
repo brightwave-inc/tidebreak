@@ -38,6 +38,8 @@ use axum::response::Response;
 
 use tidebreak_core::{AgentError, HarnessKind, OwnerId, SessionId};
 
+use std::path::Path;
+
 use crate::obo_gateway::{GatewayCompatModel, OboGateway};
 
 /// Whose inference a relay key spends.
@@ -444,6 +446,33 @@ pub fn git_credential_wiring(loopback_base: &str) -> Vec<(String, String)> {
         ),
         ("GIT_CONFIG_VALUE_1".to_owned(), helper),
     ]
+}
+
+/// The `gh` a machine session runs: a wrapper that borrows the session's
+/// forge credential for one call through the same loopback route git uses,
+/// hands it to the real `gh` as `GH_TOKEN`, and never writes it anywhere.
+/// `gh auth status` reads signed in, `gh pr create` works against the
+/// workspace's own repository, and a token that dies within the hour is
+/// fetched fresh on the next call. With no relay key in the environment, or
+/// no credential lent, the real `gh` runs as it would have anyway.
+pub fn gh_shim_script(real_gh: &Path, loopback_base: &str, origin_host: &str) -> String {
+    let base = loopback_base.trim_end_matches('/');
+    let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
+    format!(
+        "#!/bin/sh\n\
+         # Tidebreak: gh borrows this session's forge credential per call.\n\
+         if [ -n \"${RELAY_KEY_ENV}\" ]; then\n\
+         \x20 token=$(printf 'protocol=https\\nhost=%s\\n' {host} | \
+         curl -fsS -X POST --data-binary @- \
+         -H \"Authorization: Bearer ${RELAY_KEY_ENV}\" {route} 2>/dev/null | \
+         sed -n 's/^password=//p')\n\
+         \x20 if [ -n \"$token\" ]; then GH_TOKEN=\"$token\"; export GH_TOKEN; fi\n\
+         fi\n\
+         exec {real} \"$@\"\n",
+        host = quote(origin_host),
+        route = quote(&format!("{base}{GIT_CREDENTIAL_PATH}")),
+        real = quote(&real_gh.to_string_lossy()),
+    )
 }
 
 /// Whether the on-behalf-of relay can carry this engine's inference.
@@ -876,6 +905,40 @@ mod tests {
         assert!(
             helper.contains("cat >/dev/null"),
             "store and erase swallow: {helper}"
+        );
+    }
+
+    #[test]
+    fn the_gh_shim_borrows_per_call_and_execs_the_real_binary() {
+        let script = gh_shim_script(
+            Path::new("/usr/bin/gh"),
+            "http://127.0.0.1:4321/",
+            "github.com",
+        );
+        assert!(script.starts_with("#!/bin/sh\n"), "{script}");
+        assert!(script.contains("host=%s"), "{script}");
+        assert!(
+            script.contains("'github.com'"),
+            "the origin host is pinned: {script}"
+        );
+        assert!(
+            script.contains("'http://127.0.0.1:4321/code/git/credential'"),
+            "{script}"
+        );
+        assert!(script.contains("Bearer $TIDEBREAK_LLM_KEY"), "{script}");
+        assert!(
+            script.contains("GH_TOKEN=\"$token\"; export GH_TOKEN"),
+            "{script}"
+        );
+        assert!(script.ends_with("exec '/usr/bin/gh' \"$@\"\n"), "{script}");
+        assert!(
+            !script.contains("gh auth login"),
+            "nothing durable is written: {script}"
+        );
+        let odd = gh_shim_script(Path::new("/opt/it's/gh"), "http://h", "GitHub.Example");
+        assert!(
+            odd.contains("exec '/opt/it'\\''s/gh'"),
+            "a quote in the path survives: {odd}"
         );
     }
 }
