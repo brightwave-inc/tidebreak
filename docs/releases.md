@@ -686,5 +686,10 @@ repository variable `CI_WINDOWS_RUNNER` to the provisioned x64 label. If you
 omit the variable, the job uses `windows-latest`. Do not point the variable at
 an ARM runner: the lane compiles `x86_64-pc-windows-msvc`.
 
+To run the x86_64 Windows release compile and packaging jobs on the same larger
+runner, set `RELEASE_WINDOWS_X64_RUNNER` to the provisioned x64 label. If you
+omit the variable, both jobs use `windows-latest`. Windows ARM64 stays on the
+native `windows-11-arm` runner required by decision 43.
+
 The release-draft workflow uses the built-in `GITHUB_TOKEN`; it does not require
 a personal access token.

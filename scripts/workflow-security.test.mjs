@@ -757,6 +757,9 @@ test("UI tests and production build each gate the UI lane", () => {
   const ui = workflowJob(ci, "ui");
 
   assert.match(ui, /if:.*needs\.changes\.outputs\.ui == 'true'/);
+  assert.match(ui, /timeout-minutes: 20/);
+  assert.match(ui, /corepack install --global pnpm@10\.18\.3/);
+  assert.doesNotMatch(ui, /uses: pnpm\/action-setup/);
   assert.match(ui, /run: pnpm install --frozen-lockfile/);
   // Sequential steps, one command each: a backgrounded `a & b & wait` swallows
   // the children's exit codes, so a failing test or build reported success
@@ -1587,6 +1590,8 @@ test("release documentation is built from the validated tag and promoted only af
   assert.equal(vercelCliPackage.dependencies.vercel, "59.0.0");
   assert.match(publish, /sparse-checkout: \.github\/vercel-cli/);
   assert.match(publish, /persist-credentials: false/);
+  assert.match(publish, /corepack install --global pnpm@10\.18\.3/);
+  assert.doesNotMatch(publish, /uses: pnpm\/action-setup/);
   assert.match(
     publish,
     /pnpm --dir \.github\/vercel-cli install --frozen-lockfile --ignore-scripts/,
@@ -1672,12 +1677,26 @@ test("release compilation uses S3 without cache warmer workflows", () => {
 
   const prepareMacos = workflowJob(release, "prepare_macos");
   const prepareWindows = workflowJob(release, "prepare_windows");
+  const buildMacos = workflowJob(release, "build_macos");
+  const buildWindows = workflowJob(release, "build_windows");
   const buildLinux = workflowJob(release, "build_linux");
   assert.doesNotMatch(prepareMacos, /restore-keys:/);
   assert.doesNotMatch(prepareWindows, /restore-keys:/);
   assert.doesNotMatch(prepareWindows, /windows-release-target-v1-/);
   assert.doesNotMatch(buildLinux, /actions\/cache\/restore@/);
   assert.doesNotMatch(buildLinux, /linux-release-target-v1-/);
+  assert.match(
+    prepareWindows,
+    /vars\.RELEASE_WINDOWS_X64_RUNNER \|\| 'windows-latest'/,
+  );
+  assert.match(
+    buildWindows,
+    /vars\.RELEASE_WINDOWS_X64_RUNNER \|\| 'windows-latest'/,
+  );
+  for (const job of [buildMacos, buildWindows]) {
+    assert.match(job, /corepack install --global pnpm@10\.18\.3/);
+    assert.doesNotMatch(job, /uses: pnpm\/action-setup/);
+  }
 
   for (const workflow of [release]) {
     const downloadCaches = [
@@ -1788,7 +1807,9 @@ test("signing jobs run installers before loading signing material", () => {
     const label = `${name} (${file})`;
     const secretsAt = firstSigningMaterialIndex(job, validate);
     assert.notEqual(secretsAt, -1, `${label} must still load signing material`);
-    const pnpmAt = job.search(/pnpm\/action-setup@[0-9a-f]{40}/);
+    const pnpmAt = job.search(
+      /(?:pnpm\/action-setup@[0-9a-f]{40}|corepack install --global pnpm@10\.18\.3)/,
+    );
     const nodeAt = job.search(/actions\/setup-node@[0-9a-f]{40}/);
     assert.ok(pnpmAt !== -1, `${label} must set up pnpm`);
     assert.ok(nodeAt !== -1, `${label} must set up Node`);
@@ -1802,7 +1823,11 @@ test("signing jobs run installers before loading signing material", () => {
     assert.ok(installAt !== -1, `${label} must have a frozen-lockfile install step`);
     assert.ok(installAt < secretsAt, `${label} must install dependencies before signing material`);
     // pnpm must be pinned to an exact version, not floating.
-    assert.match(job, /version: 10\.18\.3\n/, `${label} must pin pnpm 10.18.3`);
+    assert.match(
+      job,
+      /(?:version: 10\.18\.3\n|corepack install --global pnpm@10\.18\.3)/,
+      `${label} must pin pnpm 10.18.3`,
+    );
     // Installs must be frozen-lockfile with lifecycle scripts disabled.
     assert.match(
       job,
