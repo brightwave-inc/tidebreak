@@ -1,0 +1,84 @@
+# Publishes the end-to-end fixture image: the self-host server built with the
+# `dev` cargo profile, so the scripted harness
+# (`crates/tidebreak-server/src/scripted_harness.rs`, compiled only under
+# debug assertions) is present and a lane can drive a real machine without a
+# model. The Model Gateway repository's Slack adapter lane pulls
+# `ghcr.io/brightwave-inc/tidebreak-server-e2e:main` (issue
+# brightwave-inc/model-gateway#1865).
+#
+# This image is a test fixture. It is never attested, never tagged with a
+# release version, and never a candidate for the managed machine, which tracks
+# `tidebreak-server` releases (decision 0108).
+name: Publish e2e image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "crates/**"
+      - "deploy/self-host/**"
+      - ".github/workflows/publish-e2e-image.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tidebreak-e2e-image
+  cancel-in-progress: true
+
+env:
+  E2E_REPOSITORY: ghcr.io/${{ github.repository_owner }}/tidebreak-server-e2e
+
+jobs:
+  build:
+    name: build and push the dev-profile server
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      - name: Build the fixture image
+        env:
+          VERSION: 0.0.0-e2e.${{ github.sha }}
+        run: |
+          docker build \
+            --file deploy/self-host/Dockerfile \
+            --build-arg CARGO_PROFILE=dev \
+            --build-arg "TIDEBREAK_VERSION=$VERSION" \
+            --tag "$E2E_REPOSITORY:sha-${GITHUB_SHA::12}" \
+            .
+      - name: Prove the scripted harness is compiled in
+        # A release binary ignores the variable. The dev binary refuses to
+        # boot on a script that does not parse, and names the variable while
+        # doing so, before it needs a database or a token file.
+        run: |
+          set +e
+          output="$(docker run --rm --entrypoint /usr/local/bin/tidebreak \
+            -e TIDEBREAK_PROFILE=desktop -e TIDEBREAK_LISTEN_ADDR= \
+            -e TIDEBREAK_SCRIPTED_HARNESS='{not json' \
+            "$E2E_REPOSITORY:sha-${GITHUB_SHA::12}" serve 2>&1)"
+          status=$?
+          set -e
+          echo "$output" | tail -5
+          [[ $status -ne 0 ]] || { echo "serve exited 0 with a broken script" >&2; exit 1; }
+          grep -q 'TIDEBREAK_SCRIPTED_HARNESS is not a valid script' <<<"$output" || {
+            echo "the binary did not reject the script: the scripted harness is not compiled in" >&2
+            exit 1
+          }
+      - name: Push the tags
+        run: |
+          docker tag "$E2E_REPOSITORY:sha-${GITHUB_SHA::12}" "$E2E_REPOSITORY:main"
+          docker push "$E2E_REPOSITORY:sha-${GITHUB_SHA::12}"
+          docker push "$E2E_REPOSITORY:main"

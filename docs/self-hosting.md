@@ -370,6 +370,17 @@ Two things the image deliberately does not decide for you:
 The image ships no SSH client and no known-hosts file, so clone over HTTPS.
 An SSH clone URL fails.
 
+### The end-to-end fixture image
+
+`ghcr.io/brightwave-inc/tidebreak-server-e2e:main` is the same Dockerfile
+built with `--build-arg CARGO_PROFILE=dev`. That build carries the scripted
+harness, an engine that plays a JSON script of events from
+`TIDEBREAK_SCRIPTED_HARNESS` instead of running a model, so an integration
+lane can drive a real machine through connect, a turn, and an approval with
+nothing but the machine and a database. Model Gateway's Slack adapter lane is
+the consumer. The image is a test fixture: it is never attested, never
+versioned, and never a candidate for a managed machine. Do not deploy it.
+
 ## Opening the machine in a browser
 
 The image carries the Tidebreak desktop app's renderer, and the server serves
