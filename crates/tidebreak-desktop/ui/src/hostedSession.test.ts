@@ -12,10 +12,14 @@ import {
 } from "./hostedSession";
 import { remoteMachineState } from "./remoteMachine";
 
-function fakeWindow(hash: string): Window & { replaced: string[] } {
+function fakeWindow(
+  hash: string,
+  pathname = "/",
+  search = "",
+): Window & { replaced: string[] } {
   const replaced: string[] = [];
   return {
-    location: { hash, pathname: "/", search: "" },
+    location: { hash, pathname, search },
     history: {
       state: null,
       replaceState: (_state: unknown, _title: string, url: string) => {
@@ -43,6 +47,16 @@ describe("the handoff fragment", () => {
     captureHandoffToken(win);
     expect(handoffBearer()).toBe("mg_at_abc.DEF-123~");
     expect(win.replaced).toEqual(["/"]);
+  });
+
+  it("restores a return route for the hash router while clearing the bearer", () => {
+    const win = fakeWindow(
+      "#handoff=mg_at_abc.DEF-123%7E&return_to=%2Fconnect%2Fnonce-1%3Fsource%3Dslack",
+      "/tidebreak/",
+    );
+    captureHandoffToken(win);
+    expect(handoffBearer()).toBe("mg_at_abc.DEF-123~");
+    expect(win.replaced).toEqual(["/tidebreak/#/connect/nonce-1?source=slack"]);
   });
 
   it("leaves a route fragment alone", () => {
@@ -192,7 +206,11 @@ describe("the hosted boot branch", () => {
 describe("consoleSignInUrl", () => {
   it("sends the reader to the console's Tidebreak page with this page as the return path", () => {
     const win = {
-      location: { pathname: "/connect/nonce-1", search: "?source=slack" },
+      location: {
+        pathname: "/tidebreak/",
+        search: "",
+        hash: "#/connect/nonce-1?source=slack",
+      },
     } as unknown as Window;
     expect(consoleSignInUrl("https://gateway.example.test/", win)).toBe(
       "https://gateway.example.test/tidebreak?return_to=%2Fconnect%2Fnonce-1%3Fsource%3Dslack",
@@ -201,7 +219,7 @@ describe("consoleSignInUrl", () => {
 
   it("asks for no return path from the root", () => {
     const win = {
-      location: { pathname: "/", search: "" },
+      location: { pathname: "/tidebreak/", search: "", hash: "#/" },
     } as unknown as Window;
     expect(consoleSignInUrl("https://gateway.example.test", win)).toBe(
       "https://gateway.example.test/tidebreak",
