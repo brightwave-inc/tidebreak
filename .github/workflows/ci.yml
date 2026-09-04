@@ -853,6 +853,11 @@ jobs:
         run: >-
           cargo build --locked -p tidebreak-cli
           --features tidebreak-server/postgres
+      # Every download the image pins by SHA-256 is checked against the
+      # publisher's own checksum list, so a pin that was typed rather than
+      # copied fails here instead of in the release image build.
+      - name: Verify the image's download pins against their publishers
+        run: bash deploy/self-host/check-pins.sh
 
   ui:
     name: desktop UI

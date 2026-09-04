@@ -381,6 +381,75 @@ nothing but the machine and a database. Model Gateway's Slack adapter lane is
 the consumer. The image is a test fixture: it is never attested, never
 versioned, and never a candidate for a managed machine. Do not deploy it.
 
+## Bring your own image
+
+You may replace the published server image with one you build, as long as
+the server still finds every path it checks. The Dockerfile comments in
+`deploy/self-host/Dockerfile` are the contract. Keep all of the following:
+
+- **Managed Node at one path.** The server accepts Node only from
+  `$TIDEBREAK_DATA_DIR/tools/node/<version>`. That directory must contain
+  `bin/node`, `bin/npm`, and `installed.json` naming the version and the
+  SHA-256 of the official nodejs.org artifact the tree was unpacked from.
+  Nothing is scanned and `PATH` is never consulted, so a Node you install
+  elsewhere does not count.
+- **The data directory.** The image sets `TIDEBREAK_DATA_DIR` to
+  `/var/lib/tidebreak`. A volume mounted there hides whatever the image
+  layer put underneath it.
+- **The entrypoint's link step.** The image keeps its Node copy under
+  `/opt/tidebreak/node/<version>`. `tidebreak-entrypoint` links the data
+  directory at that copy on every start. Unpack Node into the data
+  directory at build time and the link is gone the moment you mount a
+  volume.
+- **The healthcheck.** The image probes `http://127.0.0.1:8080/healthz`
+  with `curl`. Keep `curl` and that listen address, or replace the
+  healthcheck with an equivalent probe of `/healthz`.
+- **The non-root user.** The server runs as uid `10001` / gid `10001`
+  (`tidebreak`). Own the data directory and home so that user can write
+  them. A hosting plane may still run a different non-root uid; `HOME`
+  stays on the data volume for that case.
+
+You may add packages, compilers, and language runtimes on top of that
+contract. You may also change the Debian snapshot or the Node pin, if you
+keep `installed.json` in lockstep with the tree you unpack. Do not drop
+the link step, the healthcheck, or the unprivileged user.
+
+## Toolchain bundles
+
+The default image carries managed Node, `git`, and `gh` only. A machine
+session that runs `cargo test` on that image fails because `cargo` is not
+there. Optional bundles install extra toolchains at image build:
+
+```sh
+docker build --build-arg TOOLCHAINS=rust,python \
+  -f deploy/self-host/Dockerfile \
+  -t tidebreak-self-host \
+  .
+```
+
+`TOOLCHAINS` is a comma-separated list. The default is empty and installs
+nothing extra. Known names are `rust`, `python`, `go`, and `jvm`. An
+unknown name fails the build and prints the name. Pins, SHA-256 digests,
+and Debian package versions live in
+[`deploy/self-host/TOOLCHAINS.md`](../deploy/self-host/TOOLCHAINS.md). The
+image label `io.tidebreak.toolchains` records the argument you passed, so
+the digest's provenance states which bundles it carries.
+
+| Bundle | What you get |
+| --- | --- |
+| `rust` | rustup 1.27.1, stable toolchain 1.97.1, cargo, clippy, rustfmt, and Debian `build-essential` 12.9 so crates can link |
+| `python` | Debian `python3` 3.11.2-1+b1, `python3-pip` 23.0.1+dfsg-1, `python3-venv` 3.11.2-1+b1 |
+| `go` | Go 1.25.1 from the official release tarball, SHA-256 verified before unpack |
+| `jvm` | Debian OpenJDK 17 headless 17.0.20+8-1~deb12u1 and Maven 3.8.7-1 |
+
+When a workspace setup script or a test quick action fails with
+`command not found` for `cargo`, `python3`, `go`, `mvn`, or `java`, the
+turn names the missing tool and points you at this page.
+
+If this machine has a Model Gateway runtime endpoint, run the suite in a
+sandbox child instead of stuffing every compiler into the server image.
+The runtime profile's image is the toolchain for that path.
+
 ## Opening the machine in a browser
 
 The image carries the Tidebreak desktop app's renderer, and the server serves

@@ -13,7 +13,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::time::timeout;
 
-use super::setup_script::run_workspace_script_with_env;
+use super::setup_script::{missing_image_toolchain_notice, run_workspace_script_with_env};
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 const GIT_WORKTREE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -1401,15 +1401,23 @@ async fn run_hook_script(
         } else {
             ""
         };
-        Err(WorktreeError::user(format!(
+        let detail = first_line(&run.stderr)
+            .or_else(|| first_line(&run.stdout))
+            .unwrap_or("no output");
+        let mut message = format!(
             "{label} script failed (exit {}): {}{truncation}",
             run.status
                 .map(|code| code.to_string())
                 .unwrap_or_else(|| "signal".into()),
-            first_line(&run.stderr)
-                .or_else(|| first_line(&run.stdout))
-                .unwrap_or("no output")
-        )))
+            detail
+        );
+        if let Some(notice) = missing_image_toolchain_notice(&run.stderr)
+            .or_else(|| missing_image_toolchain_notice(&run.stdout))
+        {
+            message.push(' ');
+            message.push_str(&notice);
+        }
+        Err(WorktreeError::user(message))
     }
 }
 
