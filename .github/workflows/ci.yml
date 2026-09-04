@@ -859,20 +859,22 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.ui == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Keep enough headroom for a cold package install. A timeout reports as a
+    # cancelled job and makes an otherwise healthy main run red.
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: crates/tidebreak-desktop/ui
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
-        with:
-          version: 10
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
-          cache: pnpm
-          cache-dependency-path: crates/tidebreak-desktop/ui/pnpm-lock.yaml
+      - name: Enable pinned pnpm
+        run: |
+          corepack enable
+          corepack install --global pnpm@10.18.3
+          node -e 'const version = require("node:child_process").execFileSync("pnpm", ["--version"], { encoding: "utf8" }).trim(); if (version !== "10.18.3") throw new Error("Expected pnpm 10.18.3, got " + version)'
       - name: Install UI dependencies
         run: pnpm install --frozen-lockfile
       - name: Format

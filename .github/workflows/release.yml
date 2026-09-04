@@ -248,14 +248,17 @@ jobs:
           persist-credentials: false
           sparse-checkout: .github/vercel-cli
           sparse-checkout-cone-mode: false
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
-        with:
-          version: 10.18.3
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 22
-          cache: pnpm
-          cache-dependency-path: .github/vercel-cli/pnpm-lock.yaml
+      # pnpm/action-setup installs a bootstrap release and then self-updates it.
+      # That step has taken seven minutes on otherwise healthy hosted runners.
+      # Node 22's Corepack installs the exact project pin directly.
+      - name: Enable pinned pnpm
+        run: |
+          corepack enable
+          corepack install --global pnpm@10.18.3
+          node -e 'const bin = process.platform === "win32" ? "pnpm.cmd" : "pnpm"; const version = require("node:child_process").execFileSync(bin, ["--version"], { encoding: "utf8" }).trim(); if (version !== "10.18.3") throw new Error("Expected pnpm 10.18.3, got " + version)'
       - name: Install the locked deployment client
         run: pnpm --dir .github/vercel-cli install --frozen-lockfile --ignore-scripts
       - name: Download the inert prebuilt documentation
@@ -1300,7 +1303,7 @@ jobs:
         include:
           - arch: x86_64
             target: x86_64-pc-windows-msvc
-            runner: windows-latest
+            runner: ${{ vars.RELEASE_WINDOWS_X64_RUNNER || 'windows-latest' }}
           - arch: aarch64
             target: aarch64-pc-windows-msvc
             runner: windows-11-arm
@@ -1524,7 +1527,7 @@ jobs:
         include:
           - arch: x86_64
             target: x86_64-pc-windows-msvc
-            runner: windows-latest
+            runner: ${{ vars.RELEASE_WINDOWS_X64_RUNNER || 'windows-latest' }}
           - arch: aarch64
             target: aarch64-pc-windows-msvc
             runner: windows-11-arm

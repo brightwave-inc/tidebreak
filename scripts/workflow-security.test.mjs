@@ -757,6 +757,9 @@ test("UI tests and production build each gate the UI lane", () => {
   const ui = workflowJob(ci, "ui");
 
   assert.match(ui, /if:.*needs\.changes\.outputs\.ui == 'true'/);
+  assert.match(ui, /timeout-minutes: 20/);
+  assert.match(ui, /corepack install --global pnpm@10\.18\.3/);
+  assert.doesNotMatch(ui, /uses: pnpm\/action-setup/);
   assert.match(ui, /run: pnpm install --frozen-lockfile/);
   // Sequential steps, one command each: a backgrounded `a & b & wait` swallows
   // the children's exit codes, so a failing test or build reported success
@@ -1587,6 +1590,8 @@ test("release documentation is built from the validated tag and promoted only af
   assert.equal(vercelCliPackage.dependencies.vercel, "59.0.0");
   assert.match(publish, /sparse-checkout: \.github\/vercel-cli/);
   assert.match(publish, /persist-credentials: false/);
+  assert.match(publish, /corepack install --global pnpm@10\.18\.3/);
+  assert.doesNotMatch(publish, /uses: pnpm\/action-setup/);
   assert.match(
     publish,
     /pnpm --dir \.github\/vercel-cli install --frozen-lockfile --ignore-scripts/,
@@ -1678,6 +1683,14 @@ test("release compilation uses S3 without cache warmer workflows", () => {
   assert.doesNotMatch(prepareWindows, /windows-release-target-v1-/);
   assert.doesNotMatch(buildLinux, /actions\/cache\/restore@/);
   assert.doesNotMatch(buildLinux, /linux-release-target-v1-/);
+  assert.match(
+    prepareWindows,
+    /vars\.RELEASE_WINDOWS_X64_RUNNER \|\| 'windows-latest'/,
+  );
+  assert.match(
+    workflowJob(release, "build_windows"),
+    /vars\.RELEASE_WINDOWS_X64_RUNNER \|\| 'windows-latest'/,
+  );
 
   for (const workflow of [release]) {
     const downloadCaches = [
