@@ -54,6 +54,7 @@ async fn an_aborted_permission_mode_settlement_rejects_a_turn_queued_behind_it()
     let (reply, outcome) = oneshot::channel();
     assert!(commands
         .send(WorkerCommand::RunTurn {
+            actor: None,
             message: "must not disappear".into(),
             attachments: Vec::new(),
             trigger_delivery: None,
@@ -144,6 +145,7 @@ async fn seeded_session(
     insert_session(
         &store,
         &Session {
+            visibility: tidebreak_core::SessionVisibility::Private,
             id: session_id,
             owner: owner.clone(),
             workspace_id: Some(workspace_id),
@@ -279,6 +281,7 @@ async fn an_engine_observed_decision_settles_its_own_approval_row() {
     handle
         .commands
         .send(WorkerCommand::RunTurn {
+            actor: None,
             message: "run it".into(),
             attachments: Vec::new(),
             trigger_delivery: None,
@@ -308,6 +311,7 @@ async fn an_engine_observed_decision_settles_its_own_approval_row() {
             Event::ApprovalResolved {
                 approval_id,
                 decision: tidebreak_core::ApprovalDecisionKind::Approve,
+                ..
             } if *approval_id == approvals[0].id
         )),
         "the journal records the engine's own decision"
@@ -346,6 +350,7 @@ async fn a_send_over_an_internal_turn_waiting_on_a_client_is_refused() {
     session.lifecycle = SessionLifecycle::Idle;
     assert!(save_session(&store, &session).await.unwrap());
     let waiting = Turn {
+        actor: None,
         id: TurnId::new(),
         session_id,
         ordinal: 1,
@@ -418,6 +423,7 @@ async fn a_send_over_an_internal_turn_waiting_on_a_client_is_refused() {
     handle
         .commands
         .send(WorkerCommand::RunTurn {
+            actor: None,
             message: "and now this".into(),
             attachments: Vec::new(),
             trigger_delivery: None,
@@ -527,6 +533,7 @@ async fn a_parked_turn_waits_durably_and_resumes_on_the_awaited_decision() {
     handle
         .commands
         .send(WorkerCommand::RunTurn {
+            actor: None,
             message: "park then resume".into(),
             attachments: Vec::new(),
             trigger_delivery: None,
@@ -681,6 +688,7 @@ async fn client_and_agent_run_parks_resume_after_a_worker_restart() {
         first
             .commands
             .send(WorkerCommand::RunTurn {
+                actor: None,
                 message: "park across a restart".into(),
                 attachments: Vec::new(),
                 trigger_delivery: None,
@@ -866,6 +874,7 @@ async fn a_decision_on_the_running_leg_resumes_the_park() {
     handle
         .commands
         .send(WorkerCommand::RunTurn {
+            actor: None,
             message: "decide before the park".into(),
             attachments: Vec::new(),
             trigger_delivery: None,
@@ -983,6 +992,7 @@ async fn an_interrupt_closes_a_parked_turn() {
     handle
         .commands
         .send(WorkerCommand::RunTurn {
+            actor: None,
             message: "park then interrupt".into(),
             attachments: Vec::new(),
             trigger_delivery: None,
@@ -1102,6 +1112,7 @@ async fn a_confirmed_setting_reservation_wins_over_an_already_queued_idle_turn()
     handle
         .commands
         .send(WorkerCommand::RunTurn {
+            actor: None,
             message: "use the committed settings".into(),
             attachments: Vec::new(),
             trigger_delivery: None,
@@ -1186,6 +1197,7 @@ async fn a_queued_turn_uses_a_later_setting_committed_before_promotion() {
         &store,
         &owner,
         &QueuedTurn {
+            actor: None,
             id: TurnId::new(),
             session_id,
             message: "use the held settings".into(),
@@ -1874,6 +1886,7 @@ async fn an_update_quiesce_refuses_new_turns_until_resumed() {
     handle
         .commands
         .send(WorkerCommand::RunTurn {
+            actor: None,
             message: "hello".into(),
             attachments: Vec::new(),
             trigger_delivery: None,
@@ -1897,6 +1910,7 @@ async fn an_update_quiesce_refuses_new_turns_until_resumed() {
     handle
         .commands
         .send(WorkerCommand::RunTurn {
+            actor: None,
             message: "hello again".into(),
             attachments: Vec::new(),
             trigger_delivery: None,

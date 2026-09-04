@@ -596,6 +596,7 @@ mod tests {
             store,
             &tidebreak_core::OwnerId::local(),
             &Approval {
+                actor: None,
                 id: approval_id,
                 session_id,
                 turn_id,
@@ -675,6 +676,7 @@ mod tests {
             &store,
             &tidebreak_core::OwnerId::local(),
             &Turn {
+                actor: None,
                 id: turn_id,
                 session_id,
                 ordinal: 1,
@@ -760,6 +762,7 @@ mod tests {
         insert_session(
             &store,
             &Session {
+                visibility: tidebreak_core::SessionVisibility::Private,
                 id: session_id,
                 owner: tidebreak_core::OwnerId::local(),
                 workspace_id: Some(workspace_id),
@@ -933,6 +936,7 @@ mod tests {
             Event::ApprovalResolved {
                 approval_id: resolved,
                 decision: ApprovalDecisionKind::Abandoned,
+                ..
             } if *resolved == approval_id
         ));
         assert_subagent_failed(&store, session_id).await;
@@ -1300,6 +1304,7 @@ mod tests {
         handle
             .commands
             .send(crate::code::session_worker::WorkerCommand::RunTurn {
+                actor: None,
                 message: "hello".into(),
                 attachments: Vec::new(),
                 trigger_delivery: None,
@@ -1413,6 +1418,7 @@ mod tests {
         insert_session(
             &store,
             &Session {
+                visibility: tidebreak_core::SessionVisibility::Private,
                 id: session_id,
                 owner: owner.clone(),
                 workspace_id: None,
@@ -1442,6 +1448,7 @@ mod tests {
             &store,
             &owner,
             &Turn {
+                actor: None,
                 id: turn_id,
                 session_id,
                 ordinal: 1,

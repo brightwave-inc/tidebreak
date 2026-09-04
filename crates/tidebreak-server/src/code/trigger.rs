@@ -923,8 +923,18 @@ async fn deliver_fire(
                 .await?;
         }
         Delivery::Turn { .. } => {
+            // The transcript names the trigger rather than the owner, so a
+            // shared session shows a fired turn for what it is (decision 0086).
+            let trigger_name = format!("Trigger: {}", payload.condition.as_str());
             runtime
-                .submit_trigger_turn(owner, session_id, message, delivery_id, lease_token)
+                .submit_trigger_turn(
+                    owner,
+                    session_id,
+                    message,
+                    &trigger_name,
+                    delivery_id,
+                    lease_token,
+                )
                 .await?;
         }
         Delivery::Notify { .. } => {

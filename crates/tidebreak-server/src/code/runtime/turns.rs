@@ -106,6 +106,7 @@ impl CodeRuntime {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn submit_turn(
         &self,
         owner: &OwnerId,
@@ -114,6 +115,7 @@ impl CodeRuntime {
         model: Option<String>,
         reasoning_effort: Option<Option<ReasoningEffort>>,
         attachments: Vec<tidebreak_core::ImageRef>,
+        actor: Option<TurnActor>,
     ) -> Result<SubmitTurnOutcome, ServerError> {
         self.submit_turn_inner(
             owner,
@@ -122,6 +124,7 @@ impl CodeRuntime {
             model,
             reasoning_effort,
             attachments,
+            actor,
             None,
             true,
         )
@@ -137,6 +140,7 @@ impl CodeRuntime {
         model: Option<String>,
         reasoning_effort: Option<Option<ReasoningEffort>>,
         attachments: Vec<tidebreak_core::ImageRef>,
+        actor: Option<TurnActor>,
         trigger_delivery: Option<TriggerDeliveryClaim>,
         queue_if_busy: bool,
     ) -> Result<SubmitTurnOutcome, ServerError> {
@@ -186,6 +190,7 @@ impl CodeRuntime {
                     model,
                     reasoning_effort,
                     attachments,
+                    actor,
                     trigger_delivery,
                     queue_if_busy,
                 )
@@ -279,7 +284,7 @@ impl CodeRuntime {
                 ));
             }
             return self
-                .park_follow_up(owner, &handle, &session, message, attachments)
+                .park_follow_up(owner, &handle, &session, message, attachments, actor)
                 .await;
         }
         let (reply, rx) = oneshot::channel();
@@ -288,6 +293,7 @@ impl CodeRuntime {
             .send(WorkerCommand::RunTurn {
                 message: message.clone(),
                 attachments: attachments.clone(),
+                actor: actor.clone(),
                 trigger_delivery,
                 reply,
             })
@@ -312,7 +318,7 @@ impl CodeRuntime {
                     ));
                 }
                 return self
-                    .park_follow_up(owner, &handle, &session, message, attachments)
+                    .park_follow_up(owner, &handle, &session, message, attachments, actor)
                     .await;
             }
             // The quiesce flag flipped while this send was in flight. Park it
@@ -325,7 +331,7 @@ impl CodeRuntime {
                     ));
                 }
                 return self
-                    .park_follow_up(owner, &handle, &session, message, attachments)
+                    .park_follow_up(owner, &handle, &session, message, attachments, actor)
                     .await;
             }
             Err(WorkerError::TriggerDeliveryAccepted) => {
@@ -342,6 +348,7 @@ impl CodeRuntime {
         owner: &OwnerId,
         id: SessionId,
         message: String,
+        trigger_name: &str,
         delivery_id: tidebreak_core::CodeTriggerDeliveryId,
         lease_token: uuid::Uuid,
     ) -> Result<SubmitTurnOutcome, ServerError> {
@@ -352,6 +359,9 @@ impl CodeRuntime {
             None,
             None,
             Vec::new(),
+            // A trigger fires under the owner's identity but is not the owner
+            // typing, so the transcript names the trigger (decision 0086).
+            Some(TurnActor::trigger(trigger_name)),
             Some(TriggerDeliveryClaim {
                 delivery_id,
                 lease_token,
@@ -374,6 +384,7 @@ impl CodeRuntime {
         session: &Session,
         message: String,
         attachments: Vec<tidebreak_core::ImageRef>,
+        actor: Option<TurnActor>,
     ) -> Result<SubmitTurnOutcome, ServerError> {
         let queued = tidebreak_core::db::code::list_queued_turns(&self.db, owner, session.id)
             .await
@@ -395,6 +406,7 @@ impl CodeRuntime {
                 id: TurnId::new(),
                 session_id: session.id,
                 message,
+                actor,
                 attachments,
                 position: 0,
                 created_at: now,

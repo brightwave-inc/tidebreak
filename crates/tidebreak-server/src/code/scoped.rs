@@ -5,8 +5,17 @@
 //! [`ScopedCode`], and every query it makes carries the requesting
 //! principal's [`OwnerId`]. The unscoped runtime handle never escapes this
 //! type, so route code cannot express a query that crosses owners — another
-//! owner's repository, workspace, session, turn, event, or approval is
+//! owner's repository, workspace, turn, event, or approval is
 //! indistinguishable from one that does not exist (decisions 47 and 48).
+//!
+//! A session is the one thing that resolves for more than its owner, and
+//! decision 0086 says on what terms. Resolution happens here, in
+//! [`ScopedCode::session_access`], and there is exactly one of it: reads
+//! resolve for the owner, for any access row, or on `deployment` visibility;
+//! submit, queue, steer, interrupt, and approval decisions need `contribute`
+//! or ownership; reap, permission mode, model, settings, delete, and access
+//! management stay with the owner. A session the caller holds no claim on
+//! still answers "not found", the same shape as one that never existed.
 //!
 //! System paths — boot recovery, the stall sweep, session workers, the
 //! capability-token approval bridge — are not requests. They keep the
@@ -72,6 +81,50 @@ impl ScopedCode {
         })
     }
 
+    /// What this principal may do with this session (decision 0086).
+    ///
+    /// The single resolution step every session-scoped method below goes
+    /// through. A session that does not exist and one this principal holds no
+    /// claim on both answer "not found".
+    async fn session_access(
+        &self,
+        id: SessionId,
+    ) -> Result<tidebreak_core::db::code::ResolvedSessionAccess, ServerError> {
+        tidebreak_core::db::code::resolve_session_access(&self.runtime.db, &self.owner, id)
+            .await?
+            .ok_or_else(|| ServerError::not_found("code session not found"))
+    }
+
+    /// The owner to run a read under. Reads resolve for the owner, for any
+    /// access row, and on `deployment` visibility.
+    ///
+    /// The row still belongs to its owner, so the query underneath keeps
+    /// carrying that key: a granted reader borrows the owner's scope for this
+    /// one session, and gains nothing anywhere else.
+    async fn session_owner_for_read(&self, id: SessionId) -> Result<OwnerId, ServerError> {
+        Ok(self.session_access(id).await?.session.owner)
+    }
+
+    /// The owner to run a write under. Submit, queue, steer, interrupt, and
+    /// approval decisions need `contribute` or ownership.
+    async fn session_owner_for_contribute(&self, id: SessionId) -> Result<OwnerId, ServerError> {
+        let access = self.session_access(id).await?;
+        if !access.owner && access.level != tidebreak_core::SessionAccessLevel::Contribute {
+            return Err(ServerError::not_found("code session not found"));
+        }
+        Ok(access.session.owner)
+    }
+
+    /// Refuse anyone but the owner. Reap, permission mode, model, settings,
+    /// delete, and access management never leave the owner.
+    async fn require_session_owner(&self, id: SessionId) -> Result<Session, ServerError> {
+        let access = self.session_access(id).await?;
+        if !access.owner {
+            return Err(ServerError::not_found("code session not found"));
+        }
+        Ok(access.session)
+    }
+
     /// Bind an already-resolved runtime to a principal.
     ///
     /// For callers that have decided for themselves what to do when code mode
@@ -89,6 +142,15 @@ impl ScopedCode {
     /// the live buses, and background naming.
     pub fn owner(&self) -> &OwnerId {
         &self.owner
+    }
+
+    /// Whose scope this session's event socket runs under, and whether the
+    /// caller owns it. The socket needs both: the owner key to read the
+    /// journal, and the caller's own standing so a granted reader's stream can
+    /// be severed when their row goes.
+    pub async fn event_stream_access(&self, id: SessionId) -> Result<(OwnerId, bool), ServerError> {
+        let access = self.session_access(id).await?;
+        Ok((access.session.owner, access.owner))
     }
 
     // ------------------------------------------------------------------
@@ -595,7 +657,103 @@ impl ScopedCode {
     }
 
     pub async fn get_session(&self, id: SessionId) -> Result<Session, ServerError> {
-        self.runtime.get_session(&self.owner, id).await
+        Ok(self.session_access(id).await?.session)
+    }
+
+    /// One session's access list. Owner-only (decision 0086).
+    pub async fn list_session_access(
+        &self,
+        id: SessionId,
+    ) -> Result<Vec<tidebreak_core::db::code::SessionAccess>, ServerError> {
+        self.require_session_owner(id).await?;
+        Ok(
+            tidebreak_core::db::code::list_session_access(&self.runtime.db, &self.owner, id)
+                .await?,
+        )
+    }
+
+    /// Add or raise one subject's access. Owner-only, and idempotent: granting
+    /// a subject that already holds a row rewrites its level.
+    pub async fn grant_session_access(
+        &self,
+        id: SessionId,
+        subject: &str,
+        level: tidebreak_core::SessionAccessLevel,
+    ) -> Result<tidebreak_core::db::code::SessionAccess, ServerError> {
+        let session = self.require_session_owner(id).await?;
+        if !tidebreak_core::db::code::valid_access_subject(subject) {
+            return Err(ServerError::bad_request_kind(
+                "invalid_access_subject",
+                "a subject is `principal:<key>` or `external:<channel kind>:<id>`",
+            ));
+        }
+        let row = tidebreak_core::db::code::grant_session_access(
+            &self.runtime.db,
+            &self.owner,
+            id,
+            subject,
+            level,
+            chrono::Utc::now(),
+        )
+        .await?
+        .ok_or_else(|| ServerError::not_found("code session not found"))?;
+        self.announce_access_change(&session, &[]).await;
+        Ok(row)
+    }
+
+    /// Drop one subject's access. Owner-only. The principals the row resolved
+    /// for are read before the delete, so the reader that just lost it is told
+    /// and can close what it was watching.
+    pub async fn revoke_session_access(
+        &self,
+        id: SessionId,
+        subject: &str,
+    ) -> Result<bool, ServerError> {
+        let session = self.require_session_owner(id).await?;
+        let before = tidebreak_core::db::code::session_readers_all_owners(&self.runtime.db, id)
+            .await
+            .unwrap_or_default();
+        let revoked = tidebreak_core::db::code::revoke_session_access(
+            &self.runtime.db,
+            &self.owner,
+            id,
+            subject,
+        )
+        .await?;
+        if revoked {
+            self.announce_access_change(&session, &before).await;
+        }
+        Ok(revoked)
+    }
+
+    /// Set who may discover the session without a row. Owner-only, and never
+    /// a grant of writes.
+    pub async fn set_session_visibility(
+        &self,
+        id: SessionId,
+        visibility: tidebreak_core::SessionVisibility,
+    ) -> Result<Session, ServerError> {
+        let before = self.require_session_owner(id).await?;
+        let session = tidebreak_core::db::code::set_session_visibility(
+            &self.runtime.db,
+            &self.owner,
+            id,
+            visibility,
+        )
+        .await?
+        .ok_or_else(|| ServerError::not_found("code session not found"))?;
+        // Narrowing to `private` has to reach the readers the old visibility
+        // admitted, which is why the announcement runs against both.
+        self.announce_access_change(&before, &[]).await;
+        self.announce_access_change(&session, &[]).await;
+        Ok(session)
+    }
+
+    /// Publish the access change and a fresh digest to everyone it touches.
+    async fn announce_access_change(&self, session: &Session, also: &[OwnerId]) {
+        super::attention::emit_access_changed(&self.runtime.db, &self.runtime.bus, session, also)
+            .await;
+        super::attention::emit_digest(&self.runtime.db, &self.runtime.bus, session).await;
     }
 
     pub async fn list_internal_sessions(&self) -> Result<Vec<Session>, ServerError> {
@@ -621,7 +779,8 @@ impl ScopedCode {
     }
 
     pub async fn list_session_turns(&self, id: SessionId) -> Result<Vec<Turn>, ServerError> {
-        self.runtime.list_session_turns(&self.owner, id).await
+        let owner = self.session_owner_for_read(id).await?;
+        self.runtime.list_session_turns(&owner, id).await
     }
 
     pub async fn list_turn_metrics(
@@ -664,8 +823,9 @@ impl ScopedCode {
         session_id: SessionId,
         requested: &[(uuid::Uuid, String)],
     ) -> Result<Vec<tidebreak_core::ImageRef>, ServerError> {
+        let owner = self.session_owner_for_contribute(session_id).await?;
         self.runtime
-            .resolve_turn_attachments(&self.owner, session_id, requested)
+            .resolve_turn_attachments(&owner, session_id, requested)
             .await
     }
 
@@ -677,14 +837,19 @@ impl ScopedCode {
         reasoning_effort: Option<Option<ReasoningEffort>>,
         attachments: Vec<tidebreak_core::ImageRef>,
     ) -> Result<SubmitTurnOutcome, ServerError> {
+        let owner = self.session_owner_for_contribute(id).await?;
+        // The turn records who sent it, not whose session it ran under
+        // (decision 0086). On a shared session those differ.
+        let actor = tidebreak_core::TurnActor::principal(&self.owner);
         self.runtime
             .submit_turn(
-                &self.owner,
+                &owner,
                 id,
                 message,
                 model,
                 reasoning_effort,
                 attachments,
+                Some(actor),
             )
             .await
     }
@@ -693,7 +858,8 @@ impl ScopedCode {
         &self,
         id: SessionId,
     ) -> Result<(Vec<QueuedTurn>, bool), ServerError> {
-        self.runtime.list_queued_turns(&self.owner, id).await
+        let owner = self.session_owner_for_read(id).await?;
+        self.runtime.list_queued_turns(&owner, id).await
     }
 
     pub async fn update_queued_turn(
@@ -703,8 +869,9 @@ impl ScopedCode {
         message: Option<&str>,
         position: Option<i32>,
     ) -> Result<Option<QueuedTurn>, ServerError> {
+        let owner = self.session_owner_for_contribute(id).await?;
         self.runtime
-            .update_queued_turn(&self.owner, id, queued_id, message, position)
+            .update_queued_turn(&owner, id, queued_id, message, position)
             .await
     }
 
@@ -713,17 +880,18 @@ impl ScopedCode {
         id: SessionId,
         queued_id: TurnId,
     ) -> Result<bool, ServerError> {
-        self.runtime
-            .delete_queued_turn(&self.owner, id, queued_id)
-            .await
+        let owner = self.session_owner_for_contribute(id).await?;
+        self.runtime.delete_queued_turn(&owner, id, queued_id).await
     }
 
     pub async fn set_queue_paused(&self, id: SessionId, paused: bool) -> Result<(), ServerError> {
-        self.runtime.set_queue_paused(&self.owner, id, paused).await
+        let owner = self.session_owner_for_contribute(id).await?;
+        self.runtime.set_queue_paused(&owner, id, paused).await
     }
 
     pub async fn send_queued_now(&self, id: SessionId) -> Result<(), ServerError> {
-        self.runtime.send_queued_now(&self.owner, id).await
+        let owner = self.session_owner_for_contribute(id).await?;
+        self.runtime.send_queued_now(&owner, id).await
     }
 
     pub async fn set_reasoning_effort(
@@ -731,6 +899,7 @@ impl ScopedCode {
         id: SessionId,
         effort: Option<ReasoningEffort>,
     ) -> Result<Session, ServerError> {
+        self.require_session_owner(id).await?;
         self.runtime
             .set_reasoning_effort(&self.owner, id, effort)
             .await
@@ -741,13 +910,12 @@ impl ScopedCode {
         id: SessionId,
         fast_mode: bool,
     ) -> Result<Session, ServerError> {
+        self.require_session_owner(id).await?;
         self.runtime.set_fast_mode(&self.owner, id, fast_mode).await
     }
 
     pub async fn interrupt(&self, id: SessionId) -> Result<(), ServerError> {
-        // Authorize the session first: without this the worker registry would
-        // answer for a session id whatever owner holds it.
-        let _ = self.get_session(id).await?;
+        let _ = self.session_owner_for_contribute(id).await?;
         self.runtime.interrupt(id).await
     }
 
@@ -757,12 +925,14 @@ impl ScopedCode {
         expected_turn_id: TurnId,
         message: String,
     ) -> Result<(), ServerError> {
+        let owner = self.session_owner_for_contribute(id).await?;
         self.runtime
-            .steer(&self.owner, id, expected_turn_id, message)
+            .steer(&owner, id, expected_turn_id, message)
             .await
     }
 
     pub async fn reap(&self, id: SessionId) -> Result<Session, ServerError> {
+        self.require_session_owner(id).await?;
         self.runtime.reap(&self.owner, id).await
     }
 
@@ -827,6 +997,7 @@ impl ScopedCode {
         id: SessionId,
         mode: PermissionMode,
     ) -> Result<Session, ServerError> {
+        self.require_session_owner(id).await?;
         self.runtime
             .set_permission_mode(&self.owner, id, mode)
             .await
@@ -838,6 +1009,7 @@ impl ScopedCode {
         clear: bool,
         note: Option<String>,
     ) -> Result<Session, ServerError> {
+        self.require_session_owner(id).await?;
         self.runtime
             .set_attention(&self.owner, id, clear, note)
             .await
@@ -852,9 +1024,11 @@ impl ScopedCode {
         state: Option<ApprovalState>,
         session_id: Option<SessionId>,
     ) -> Result<Vec<Approval>, ServerError> {
-        self.runtime
-            .list_approvals(&self.owner, state, session_id)
-            .await
+        let owner = match session_id {
+            Some(id) => self.session_owner_for_read(id).await?,
+            None => self.owner.clone(),
+        };
+        self.runtime.list_approvals(&owner, state, session_id).await
     }
 
     pub async fn decide_approval(
@@ -862,8 +1036,20 @@ impl ScopedCode {
         id: ApprovalId,
         decision: super::runtime::ApprovalDecisionRequest,
     ) -> Result<Approval, ServerError> {
+        let approval = tidebreak_core::db::code::get_approval_all_owners(&self.runtime.db, id)
+            .await?
+            .ok_or_else(|| ServerError::not_found(format!("approval {id} not found")))?;
+        let owner = self
+            .session_owner_for_contribute(approval.session_id)
+            .await?;
+        let actor = tidebreak_core::TurnActor {
+            principal: Some(self.owner.to_string()),
+            display: None,
+            channel_kind: None,
+            external_identity: None,
+        };
         self.runtime
-            .decide_approval(&self.owner, id, decision)
+            .decide_approval(&owner, id, decision, Some(actor))
             .await
     }
 

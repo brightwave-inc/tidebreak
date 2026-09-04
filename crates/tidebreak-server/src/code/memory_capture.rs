@@ -490,6 +490,7 @@ mod tests {
         insert_session(
             &db,
             &Session {
+                visibility: tidebreak_core::SessionVisibility::Private,
                 id: session_id,
                 owner: owner.clone(),
                 workspace_id: None,
@@ -519,6 +520,7 @@ mod tests {
             &db,
             &owner,
             &Turn {
+                actor: None,
                 id: turn_id,
                 session_id,
                 ordinal: 1,
@@ -636,6 +638,7 @@ mod tests {
         insert_session(
             &db,
             &Session {
+                visibility: tidebreak_core::SessionVisibility::Private,
                 id: session_id,
                 owner: owner.clone(),
                 workspace_id: Some(workspace_id),
@@ -666,6 +669,7 @@ mod tests {
 
         let turn_id = TurnId::new();
         let mut turn = Turn {
+            actor: None,
             id: turn_id,
             session_id,
             ordinal: 1,

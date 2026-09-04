@@ -565,6 +565,7 @@ mod tests {
 
     fn workspaceless_session(owner: &OwnerId, harness: HarnessKind) -> Session {
         Session {
+            visibility: tidebreak_core::SessionVisibility::Private,
             id: SessionId::new(),
             owner: owner.clone(),
             workspace_id: None,

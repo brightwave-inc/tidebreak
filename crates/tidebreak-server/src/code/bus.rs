@@ -17,11 +17,17 @@
 //!
 //! Updates are keyed by owner rather than filtered on the way out. There is
 //! one broadcast channel per principal, so a subscriber's receiver carries
-//! only its own owner's notices and another owner's digest is not something
-//! the socket could drop — it never reaches it. Filtering published notices
-//! in the route, or in the client, would leave the cross-owner event on the
-//! wire for anyone who skipped the filter; decision 47 names that the wrong
-//! implementation.
+//! only notices addressed to it and another principal's digest is not
+//! something the socket could drop — it never reaches it. Filtering published
+//! notices in the route, or in the client, would leave the cross-principal
+//! event on the wire for anyone who skipped the filter; decision 47 names that
+//! the wrong implementation.
+//!
+//! Who a notice is addressed to is settled before it is published. Decision
+//! 0086 widened that from "the session's owner" to "every principal that
+//! reads the session", which [`super::attention::emit_digest`] resolves from
+//! the access rows. The partition itself is unchanged: a principal still
+//! receives only what was addressed to it.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -121,6 +127,10 @@ pub enum CodeLiveUpdate {
     /// Lucid rewrite of a completed turn's closing message. Not restated on
     /// connect: the turn snapshot carries the stored rewrite.
     TurnRewrite(TurnRewriteNotice),
+    /// Who may read this session changed (decision 0086). No payload beyond
+    /// the id: a reader re-reads what it may see, which is what drops a
+    /// session it no longer holds and adds one it just gained.
+    AccessChanged(SessionId),
 }
 
 /// Progress of one background rewrite of a completed turn's closing message.
@@ -377,6 +387,22 @@ impl CodeEventBus {
     /// belongs to; there is no channel that reaches everyone.
     pub fn publish_update(&self, owner: &OwnerId, update: CodeLiveUpdate) {
         let _ = self.updates_sender(owner).send(update);
+    }
+
+    /// Every principal that currently holds an `/updates` subscription.
+    ///
+    /// `deployment` visibility admits any authenticated principal, which is
+    /// not a set the store can enumerate (decision 0086). This is the set that
+    /// could observe a notice at all, so a session readable by everyone
+    /// reaches its readers through it.
+    pub fn attached_owners(&self) -> Vec<OwnerId> {
+        self.updates
+            .lock()
+            .expect("code updates bus lock")
+            .iter()
+            .filter(|(_, sender)| sender.receiver_count() > 0)
+            .map(|(owner, _)| owner.clone())
+            .collect()
     }
 }
 

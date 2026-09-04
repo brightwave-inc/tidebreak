@@ -48,7 +48,7 @@ use tidebreak_core::{
     CapLevel, CodeRepo, CodeTrigger, CodeTriggerAction, CodeTriggerCondition, CodeTriggerId,
     CodeWorkspace, CodeWorkspaceStatus, DbStore, Diffstat, Event, FenceReason, HarnessKind,
     OwnerId, PermissionMode, PullRequestDigest, QuickAction, ReasoningEffort, RepoId, Session,
-    SessionId, SessionKind, SessionLifecycle, Turn, TurnId, WorkspaceId,
+    SessionId, SessionKind, SessionLifecycle, Turn, TurnActor, TurnId, WorkspaceId,
 };
 use tidebreak_harness::{
     builtin_registry, AdapterRegistry, ApprovalChannelSpec, ApprovalDecision, HarnessAdapter,
@@ -127,6 +127,24 @@ pub enum SubmitTurnOutcome {
     /// The durable trigger delivery behind this submit was already accepted
     /// by an earlier attempt; nothing new was written.
     AlreadyDelivered,
+}
+
+/// One message an adapter delivers into a bound session
+/// (`docs/slack-sessions.md`, stage 2).
+///
+/// The actor rides with the text because the channel is the only place the
+/// sender's identity exists: they may hold no principal on this machine at
+/// all (decision 0086).
+#[derive(Debug, Clone)]
+pub struct ExternalMessage {
+    /// What the person said.
+    pub text: String,
+    /// The channel's delivery id; replays of it answer from the first row.
+    pub event_id: String,
+    /// The channel's ordering token; still-queued messages apply in its order.
+    pub channel_ts: String,
+    /// Who sent it, resolved from the grant behind the call.
+    pub actor: TurnActor,
 }
 
 /// Result of one external message delivery (`docs/slack-sessions.md`,

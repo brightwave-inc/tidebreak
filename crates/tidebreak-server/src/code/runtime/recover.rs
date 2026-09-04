@@ -375,6 +375,7 @@ mod tests {
 
     fn saved_session(owner: &OwnerId, kind: HarnessKind) -> Session {
         Session {
+            visibility: tidebreak_core::SessionVisibility::Private,
             id: SessionId::new(),
             owner: owner.clone(),
             workspace_id: None,

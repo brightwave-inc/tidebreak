@@ -259,6 +259,7 @@ pub struct SessionSnapshot {
     pub fence_reason: Option<FenceReason>,
     pub attention: Attention,
     pub unrecognized_event_count: i64,
+    pub visibility: tidebreak_core::SessionVisibility,
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// Present when an external channel created the session.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -283,6 +284,7 @@ impl From<Session> for SessionSnapshot {
             fence_reason: session.fence_reason,
             attention: session.attention,
             unrecognized_event_count: session.unrecognized_event_count,
+            visibility: session.visibility,
             created_at: session.created_at,
             // Provenance is a separate lookup; the handlers that serve the
             // desktop attach it.
@@ -291,10 +293,48 @@ impl From<Session> for SessionSnapshot {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct SessionAccessSnapshot {
+    pub session_id: tidebreak_core::SessionId,
+    pub subject: String,
+    pub level: tidebreak_core::SessionAccessLevel,
+    pub granted_by: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl From<tidebreak_core::db::code::SessionAccess> for SessionAccessSnapshot {
+    fn from(row: tidebreak_core::db::code::SessionAccess) -> Self {
+        Self {
+            session_id: row.session_id,
+            subject: row.subject,
+            level: row.level,
+            granted_by: row.granted_by.to_string(),
+            created_at: row.created_at,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct AddSessionAccessBody {
+    pub subject: String,
+    pub level: tidebreak_core::SessionAccessLevel,
+}
+
+#[derive(Debug, Deserialize, Serialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct SetSessionVisibilityBody {
+    pub visibility: tidebreak_core::SessionVisibility,
+}
+
 /// One user→engine turn.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
 pub struct TurnSnapshot {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub actor: Option<tidebreak_core::TurnActor>,
     pub id: tidebreak_core::TurnId,
     pub session_id: tidebreak_core::SessionId,
     pub ordinal: i64,
@@ -328,6 +368,7 @@ pub struct TurnSnapshot {
 impl From<Turn> for TurnSnapshot {
     fn from(turn: Turn) -> Self {
         Self {
+            actor: turn.actor,
             id: turn.id,
             session_id: turn.session_id,
             ordinal: turn.ordinal,
@@ -1501,6 +1542,9 @@ pub struct CodeWorkspaceDiff {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
 pub struct ApprovalSnapshot {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub actor: Option<tidebreak_core::TurnActor>,
     pub id: ApprovalId,
     pub session_id: tidebreak_core::SessionId,
     pub turn_id: tidebreak_core::TurnId,
@@ -1520,6 +1564,7 @@ pub struct ApprovalSnapshot {
 impl From<Approval> for ApprovalSnapshot {
     fn from(approval: Approval) -> Self {
         Self {
+            actor: approval.actor,
             id: approval.id,
             session_id: approval.session_id,
             turn_id: approval.turn_id,

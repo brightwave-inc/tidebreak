@@ -272,6 +272,7 @@ impl CodeRuntime {
                 claim,
                 decision: ApprovalDecisionKind::Abandoned,
                 decided_at: Utc::now(),
+                actor: None,
             },
         )
         .await?
@@ -287,6 +288,7 @@ impl CodeRuntime {
         owner: &OwnerId,
         id: ApprovalId,
         request: ApprovalDecisionRequest,
+        actor: Option<tidebreak_core::TurnActor>,
     ) -> Result<Approval, ServerError> {
         let initial = self.get_approval(owner, id).await?;
         if !initial.state.is_pending() {
@@ -433,6 +435,7 @@ impl CodeRuntime {
                 claim,
                 decision: event_decision,
                 decided_at: Utc::now(),
+                actor,
             },
         )
         .await?
