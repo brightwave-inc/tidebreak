@@ -14,17 +14,17 @@ use chrono::{DateTime, Utc};
 
 /// The durable retry state of one work item, as the schedule sees it.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct RetryAttempt {
+pub struct RetryAttempt {
     /// Row identity. Seeds the jitter so a given item's schedule is
     /// reproducible in a debugger and in tests.
-    pub(crate) id: uuid::Uuid,
+    pub id: uuid::Uuid,
     /// Attempts already started, including the one that just failed.
-    pub(crate) attempt_count: i32,
+    pub attempt_count: i32,
     /// Attempt budget after which the failure becomes terminal.
-    pub(crate) max_attempts: i32,
+    pub max_attempts: i32,
     /// When this item's current episode began. The envelope is measured from
     /// here, not from the current failure.
-    pub(crate) first_attempt_at: DateTime<Utc>,
+    pub first_attempt_at: DateTime<Utc>,
 }
 
 /// When a retryably failed work item becomes claimable again.
@@ -35,7 +35,7 @@ pub(crate) struct RetryAttempt {
 /// retried inside the envelope fails now with its own error rather than being
 /// parked for longer than anyone is waiting.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct RetrySchedule {
+pub struct RetrySchedule {
     /// Wait before the first retry, doubled for each attempt after it.
     initial: Duration,
     /// Ceiling on any single computed wait.
@@ -45,7 +45,7 @@ pub(crate) struct RetrySchedule {
 }
 
 impl RetrySchedule {
-    pub(crate) const fn new(initial: Duration, max_delay: Duration, envelope: Duration) -> Self {
+    pub const fn new(initial: Duration, max_delay: Duration, envelope: Duration) -> Self {
         Self {
             initial,
             max_delay,
@@ -55,13 +55,13 @@ impl RetrySchedule {
 
     /// The ceiling on any single wait, for the callers that must supply some
     /// delay even when the schedule has decided no further attempt is useful.
-    pub(crate) const fn max_delay(self) -> Duration {
+    pub const fn max_delay(self) -> Duration {
         self.max_delay
     }
 
     /// Decide when a retryable failure may be attempted again, or `None` when
     /// waiting can no longer help and the failure should be made permanent.
-    pub(crate) fn next_attempt_at(
+    pub fn next_attempt_at(
         self,
         attempt: RetryAttempt,
         hint: Option<Duration>,
@@ -84,7 +84,7 @@ impl RetrySchedule {
     /// A hint longer than the remaining envelope is refused outright instead
     /// of being honored: parking the work for it would consume an attempt that
     /// the deadline will never let run.
-    pub(crate) fn delay(
+    pub fn delay(
         self,
         attempt: RetryAttempt,
         hint: Option<Duration>,
@@ -140,7 +140,7 @@ fn backoff(initial: Duration, max_delay: Duration, consecutive_failures: u32) ->
 /// the jitter seed is drawn once per lane so lanes that failed together do
 /// not recover in lockstep.
 #[derive(Debug, Clone)]
-pub(crate) struct LaneBackoff {
+pub struct LaneBackoff {
     seed: uuid::Uuid,
     consecutive_failures: u32,
     initial: Duration,
@@ -148,7 +148,7 @@ pub(crate) struct LaneBackoff {
 }
 
 impl LaneBackoff {
-    pub(crate) fn new(initial: Duration, max_delay: Duration) -> Self {
+    pub fn new(initial: Duration, max_delay: Duration) -> Self {
         assert!(!initial.is_zero());
         assert!(initial <= max_delay);
         Self {
@@ -160,14 +160,14 @@ impl LaneBackoff {
     }
 
     /// One successful iteration ends the failure episode.
-    pub(crate) fn reset(&mut self) {
+    pub fn reset(&mut self) {
         self.consecutive_failures = 0;
     }
 
     /// The wait before the lane iterates again after another failure:
     /// `initial` doubled per consecutive failure, capped at `max_delay`, and
     /// jittered into the top half.
-    pub(crate) fn next_delay(&mut self) -> Duration {
+    pub fn next_delay(&mut self) -> Duration {
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
         jitter(
             backoff(self.initial, self.max_delay, self.consecutive_failures),

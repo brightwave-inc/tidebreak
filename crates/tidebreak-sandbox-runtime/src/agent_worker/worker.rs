@@ -12,16 +12,15 @@ use tidebreak_core::{
     AgentConfig, AgentError, AgentRun, AgentRunExecutionLocation, AgentRunStatus,
     AgentRunSubmittedOutput, CallId, FailAgentRunOutcome, ModelProvider,
     ParkSandboxToolCallOutcome, RequestFolderAccessArgs, Result,
-    ResumeTurnForAgentRunWaitSetOutcome, SandboxToolCallParkEntry, SandboxToolCallRequest,
-    SecretProvider, Store, SubmitAgentRunResultOutcome, ToolCallResolution, Usage,
+    ResumeTurnForAgentRunWaitSetOutcome, SandboxToolCallParkEntry, SandboxToolCallRequest, Store,
+    SubmitAgentRunResultOutcome, ToolCallResolution, Usage,
 };
 use tokio::sync::Notify;
 
-use crate::bus::EventBus;
-use crate::lane::{self, LanePacing};
-use crate::resolver::ProviderResolver;
-use crate::retry::{LaneBackoff, RetryAttempt};
-use crate::state::SandboxAttemptGuard;
+use crate::guards::SandboxAttemptGuard;
+use crate::host::{SandboxHost, SandboxModelUse};
+use tidebreak_worker_runtime::lane::{self, LanePacing};
+use tidebreak_worker_runtime::retry::{LaneBackoff, RetryAttempt};
 
 use super::config::*;
 use super::model_step::*;
@@ -61,42 +60,79 @@ impl SandboxAgentRunWorker {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         store: Arc<dyn Store>,
-        secrets: Arc<dyn SecretProvider>,
-        resolver: Arc<dyn ProviderResolver>,
+        secrets: Arc<dyn tidebreak_core::SecretProvider>,
+        resolver: Arc<dyn crate::resolver::ProviderResolver>,
         wake: Arc<Notify>,
         turn_wake: Arc<Notify>,
-        events: Arc<EventBus>,
+        events: Arc<crate::bus::EventBus>,
         agent_config: AgentConfig,
         private_scratch_root: Option<PathBuf>,
         config: SandboxAgentRunWorkerConfig,
     ) -> Self {
-        Self::with_attempts(
-            store,
+        let host = Arc::new(crate::TestSandboxHost::new(
+            store.clone(),
             secrets,
             resolver,
+            events.clone(),
+        ));
+        let mut worker = Self::with_attempts(
+            store,
+            host,
             wake,
             turn_wake,
-            events,
             Arc::new(SandboxAttemptGuard::default()),
             agent_config,
             private_scratch_root,
-            None,
             config,
-        )
+        );
+        worker.events = events;
+        worker
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn with_attempts(
+    pub(crate) fn with_test_attempts(
         store: Arc<dyn Store>,
-        secrets: Arc<dyn SecretProvider>,
-        resolver: Arc<dyn ProviderResolver>,
+        secrets: Arc<dyn tidebreak_core::SecretProvider>,
+        resolver: Arc<dyn crate::resolver::ProviderResolver>,
         wake: Arc<Notify>,
         turn_wake: Arc<Notify>,
-        events: Arc<EventBus>,
+        events: Arc<crate::bus::EventBus>,
         attempts: Arc<SandboxAttemptGuard>,
         agent_config: AgentConfig,
         private_scratch_root: Option<PathBuf>,
-        code_execution: Option<Arc<crate::code_execution::ConfiguredExecProvider>>,
+        _legacy_exec_provider: Option<()>,
+        config: SandboxAgentRunWorkerConfig,
+    ) -> Self {
+        let host = Arc::new(crate::TestSandboxHost::new(
+            store.clone(),
+            secrets,
+            resolver,
+            events.clone(),
+        ));
+        let mut worker = Self::with_attempts(
+            store,
+            host,
+            wake,
+            turn_wake,
+            attempts,
+            agent_config,
+            private_scratch_root,
+            config,
+        );
+        worker.events = events;
+        worker
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_attempts(
+        store: Arc<dyn Store>,
+        host: Arc<dyn SandboxHost>,
+        wake: Arc<Notify>,
+        turn_wake: Arc<Notify>,
+        attempts: Arc<SandboxAttemptGuard>,
+        agent_config: AgentConfig,
+        private_scratch_root: Option<PathBuf>,
         config: SandboxAgentRunWorkerConfig,
     ) -> Self {
         assert!(!config.lease.is_zero());
@@ -107,11 +143,11 @@ impl SandboxAgentRunWorker {
         assert!(config.max_running_per_chat > 0);
         Self {
             store,
-            secrets,
-            resolver,
+            host,
+            #[cfg(test)]
+            events: Arc::new(crate::bus::EventBus::default()),
             wake,
             turn_wake,
-            events,
             attempts,
             #[cfg(test)]
             fail_wait_set_resume_responses: Arc::new(AtomicUsize::new(0)),
@@ -123,12 +159,11 @@ impl SandboxAgentRunWorker {
             cancellation_accounting_calls: Arc::new(AtomicUsize::new(0)),
             agent_config,
             private_scratch_root,
-            code_execution,
             config,
         }
     }
 
-    pub(crate) async fn run(self) {
+    pub async fn run(self) {
         lane::supervise_lanes(
             LANE_NAME,
             self.config.max_concurrency,
@@ -158,7 +193,7 @@ impl SandboxAgentRunWorker {
     /// Claim and execute one sandbox run. It is exposed inside the server crate
     /// so focused integration tests can exercise the real durable transitions
     /// without starting permanent worker lanes.
-    pub(crate) async fn run_once(&self) -> Result<SandboxAgentRunWorkerOutcome> {
+    pub async fn run_once(&self) -> Result<SandboxAgentRunWorkerOutcome> {
         let wait_sets = self
             .store
             .list_ready_agent_run_wait_set_candidates(16)
@@ -249,7 +284,7 @@ impl SandboxAgentRunWorker {
         // The journal remains authoritative for replay. Publish its exact
         // committed event before shortening the ordinary turn worker's next
         // durable scan.
-        let _ = self.events.sender(chat_id).send(event);
+        self.host.publish_event(chat_id, event);
         self.turn_wake.notify_one();
         Ok(SandboxAgentRunWorkerOutcome::ParentWaitSetResumed(wait_id))
     }
@@ -367,7 +402,8 @@ impl SandboxAgentRunWorker {
         let model = match run.model.clone() {
             Some(model) => model,
             None => {
-                crate::routes::resolve_chat_model(&*self.store, &chat, &self.agent_config.model)
+                self.host
+                    .resolve_chat_model(&chat, &self.agent_config.model)
                     .await?
             }
         };
@@ -376,9 +412,7 @@ impl SandboxAgentRunWorker {
         // raising it rescues an in-flight run at its next claim instead of
         // waiting for a restart. Absent a stored choice the boot
         // configuration's step budget stands.
-        if let Some(steps) =
-            crate::routes::read_sandbox_agent_checkin_steps_override(&*self.store).await?
-        {
+        if let Some(steps) = self.host.checkin_steps_override().await? {
             agent_config.max_steps = steps as usize;
         }
         // Each check-in resume grants one more full window, recorded durably
@@ -392,8 +426,7 @@ impl SandboxAgentRunWorker {
         // of the same: check in with the requester before spending another
         // model step. Only rows past the last resume count, so the errors one
         // check-in reported cannot re-trigger the next.
-        let error_threshold =
-            crate::routes::read_sandbox_agent_error_checkin(&*self.store).await? as usize;
+        let error_threshold = self.host.error_checkin_threshold().await? as usize;
         {
             let watermark = usize::try_from(run.checkin_watermark).unwrap_or(0);
             let trailing = previous_calls
@@ -428,66 +461,32 @@ impl SandboxAgentRunWorker {
                     .await;
             }
         }
-        let search_capabilities = if self.resolver.enforces_model_registry() {
-            // Sandbox runs resolve without a caller snapshot: on a hosted
-            // machine their model path has no per-caller route yet either.
-            // Decision 62 names this gap and leaves it open.
-            let Some(policy) =
-                crate::providers::resolve_model_policy(&*self.store, &model, true, None).await?
-            else {
-                return Err(AgentError::config(
-                    "sandbox model is not registered for its provider",
-                ));
-            };
-            if !crate::providers::is_valid_execution_policy(&policy) {
-                return Err(AgentError::config(
-                    "managed gateway execution requires a frozen model identity",
-                ));
-            }
-            let capabilities = (
-                policy.supports_vendor_web_search,
-                policy.supports_search_subrequest,
-            );
-            crate::providers::apply_model_policy(
-                &mut agent_config,
-                &policy,
-                chat.reasoning_effort,
-            )?;
-            capabilities
-        } else {
-            crate::providers::apply_free_form_model(
-                &mut agent_config,
+        let resolved = self
+            .host
+            .resolve_model(
+                SandboxModelUse::InProcess,
                 model,
                 chat.reasoning_effort,
-            )?;
-            // A model reached without the registry claims nothing, here as
-            // everywhere else: no row asserts that its adapter emits a
-            // provider-executed search, or that its provider would accept a
-            // search sub-request, so this run is offered neither.
-            (false, false)
-        };
+                agent_config,
+            )
+            .await?;
+        agent_config = resolved.config;
         // One host setting governs both surfaces. A background run is the
         // conversation's own work delegated to a child, so the operator's
         // single web-search choice decides which search it gets, resolved
         // against the model that is about to run rather than the boot default.
-        agent_config.web_search = crate::web_search::resolve_turn_web_search(
-            &*self.store,
-            &*self.secrets,
-            search_capabilities.0,
-            search_capabilities.1,
-        )
-        .await?;
+        agent_config.web_search = self
+            .host
+            .resolve_web_search(
+                resolved.supports_vendor_web_search,
+                resolved.supports_search_subrequest,
+            )
+            .await?;
         // Same source the foreground turn freezes into its operating prompt:
         // the host code-execution provider's enabled skill/plugin catalogs.
         // Absent a provider (headless without exec), the run gets an empty
         // catalog and the skills section is omitted — never a fake list.
-        let (skills, plugins) = match self.code_execution.as_ref() {
-            Some(provider) => (
-                provider.skill_catalog().await,
-                provider.plugin_catalog().await,
-            ),
-            None => (Vec::new(), Vec::new()),
-        };
+        let (skills, plugins) = tokio::join!(self.host.skill_catalog(), self.host.plugin_catalog());
         let request = sandbox_request(
             &agent_config,
             task,
@@ -954,7 +953,7 @@ impl SandboxAgentRunWorker {
         if cancel.is_cancelled() {
             return Ok(None);
         }
-        let resolver = self.resolver.resolve();
+        let resolver = self.host.resolve_provider();
         tokio::pin!(resolver);
         #[cfg(test)]
         if self.config.suppress_resolver_heartbeats {

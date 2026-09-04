@@ -83,6 +83,7 @@ mod memory;
 mod outputs;
 mod root_attachment;
 mod sandbox;
+mod sandbox_runtime;
 mod websocket;
 mod workers;
 mod workspace_config;

@@ -17,7 +17,7 @@ use crate::retry::LaneBackoff;
 
 /// What one lane iteration did, as far as pacing is concerned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LaneStep {
+pub enum LaneStep {
     /// Nothing was claimable. The lane sleeps, doubling its wait each time
     /// until the cap, and a wake signal ends the sleep early.
     Idle,
@@ -27,7 +27,7 @@ pub(crate) enum LaneStep {
 }
 
 /// A worker outcome the lane loop can pace on.
-pub(crate) trait LaneOutcome {
+pub trait LaneOutcome {
     fn lane_step(&self) -> LaneStep;
 }
 
@@ -50,7 +50,7 @@ impl LaneOutcome for LaneStep {
 
 /// How long a lane waits after an iteration error.
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum FailureWait {
+pub enum FailureWait {
     /// The same wait after every failure.
     Fixed(Duration),
     /// [`LaneBackoff`]: doubled per consecutive failure up to `cap`, jittered,
@@ -60,18 +60,18 @@ pub(crate) enum FailureWait {
 
 /// The sleeps a lane takes between iterations.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct LanePacing {
+pub struct LanePacing {
     /// First idle wait, and the wait after any worked item.
-    pub(crate) idle_min: Duration,
+    pub idle_min: Duration,
     /// Ceiling on the doubled idle wait.
-    pub(crate) idle_cap: Duration,
-    pub(crate) failure: FailureWait,
+    pub idle_cap: Duration,
+    pub failure: FailureWait,
 }
 
 impl LanePacing {
     /// Pacing whose failure wait is a [`LaneBackoff`] between `failure_delay`
     /// and `failure_delay_cap` — the shape every durable worker config has.
-    pub(crate) const fn backoff(
+    pub const fn backoff(
         idle_min: Duration,
         idle_cap: Duration,
         failure_delay: Duration,
@@ -91,14 +91,14 @@ impl LanePacing {
 /// The idle wait of one lane: starts at the minimum, doubles per idle
 /// iteration up to the cap, and returns to the minimum whenever work appears.
 #[derive(Debug, Clone)]
-pub(crate) struct IdleDelay {
+pub struct IdleDelay {
     current: Duration,
     min: Duration,
     cap: Duration,
 }
 
 impl IdleDelay {
-    pub(crate) fn new(min: Duration, cap: Duration) -> Self {
+    pub fn new(min: Duration, cap: Duration) -> Self {
         Self {
             current: min,
             min,
@@ -107,17 +107,17 @@ impl IdleDelay {
     }
 
     /// The wait for the next idle sleep.
-    pub(crate) fn current(&self) -> Duration {
+    pub fn current(&self) -> Duration {
         self.current
     }
 
     /// Work appeared: the next idle sleep is the minimum again.
-    pub(crate) fn reset(&mut self) {
+    pub fn reset(&mut self) {
         self.current = self.min;
     }
 
     /// Another idle iteration: wait twice as long next time, up to the cap.
-    pub(crate) fn grow(&mut self) {
+    pub fn grow(&mut self) {
         self.current = self.current.saturating_mul(2).min(self.cap);
     }
 }
@@ -156,7 +156,7 @@ impl FailureState {
 /// and the failure backoff; an error logs under `name` and sleeps the failure
 /// wait. Every sleep ends early when `wake` is notified, so a producer that
 /// just enqueued work never waits out a lane's idle cap.
-pub(crate) async fn run_lane<O, F, Fut>(
+pub async fn run_lane<O, F, Fut>(
     name: &'static str,
     pacing: LanePacing,
     wake: &Notify,
@@ -203,7 +203,7 @@ pub(crate) async fn run_lane<O, F, Fut>(
 /// next wait, so a lane that panics on every iteration does not spin. Dropping
 /// the future drops the [`tokio::task::JoinSet`] and aborts every lane rather
 /// than detaching background work.
-pub(crate) async fn supervise_lanes<F, Fut>(
+pub async fn supervise_lanes<F, Fut>(
     name: &'static str,
     count: usize,
     mut restart: LaneBackoff,

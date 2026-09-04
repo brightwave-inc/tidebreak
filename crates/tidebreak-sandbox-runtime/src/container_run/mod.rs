@@ -2,7 +2,7 @@
 //! and attached-only (issue #874).
 //!
 //! This is the host side of the sandbox-resident execution location. Where the
-//! [in-process worker](crate::sandbox_agent_run_worker) advances a background run
+//! [in-process worker](crate::agent_worker) advances a background run
 //! by streaming the model itself, this driver hands the loop to a container and
 //! becomes the container's model proxy over the reverse channel. Concretely, for
 //! one admitted `container`-located run it:
@@ -17,8 +17,8 @@
 //!    [`WireClient::connect`], doing the version handshake;
 //! 4. **drives** the run: it backs the protocol host's operation log with the
 //!    crash-safe [`DurableOperationStore`], answers the sandbox's reverse-RPC
-//!    model-inference calls with the host's own [`ProviderResolver`] (the same
-//!    resolver the in-process worker uses — no model credential lives in the
+//!    model-inference calls with the host's own [`SandboxHost`] (the same host
+//!    boundary the in-process worker uses — no model credential lives in the
 //!    container), drains the event stream committing its cursor, and commits the
 //!    agent's final result through the run tier's fenced result path;
 //! 5. **tears down** the container idempotently on the run's terminal state.
@@ -67,12 +67,12 @@ use tidebreak_sandbox_protocol::{
 use tokio::net::TcpStream;
 use uuid::Uuid;
 
+use crate::admission::{evaluate_detached_admission, DetachedPreconditions};
+use crate::docker::DEFAULT_IDLE_TIMEOUT_SECS;
 use crate::durable_oplog::DurableOperationStore;
-use crate::resolver::ProviderResolver;
-use crate::sandbox_admission::{evaluate_detached_admission, DetachedPreconditions};
-use crate::sandbox_docker::DEFAULT_IDLE_TIMEOUT_SECS;
+use crate::guards::SandboxSteerGuard;
+use crate::host::{SandboxHost, SandboxModelUse};
 use crate::scoped_model_token::{GatewayScopedTokenIssuer, ScopedModelTokenIssuer};
-use crate::state::SandboxSteerGuard;
 
 /// The provider attribution stamped on reverse operations from a local
 /// container. Untrusted attribution rendered on consent prompts, never a claim
@@ -205,19 +205,19 @@ pub enum SandboxContainerRunOutcome {
 /// The host's model proxy for an attached-only sandbox run.
 ///
 /// It answers each reverse [`ReverseRequest::ModelInference`] with the host's own
-/// configured model access — the same [`ProviderResolver`] the in-process worker
+/// configured model access — the same [`SandboxHost`] the in-process worker
 /// resolves — so no model credential ever enters the container. The
 /// [`CapabilityHost`] calls this at most once per [`OperationId`], recording the
 /// bounded completion in the [`DurableOperationStore`]; a re-issue after a
 /// reconnect replays that record rather than spending a second time.
 struct HostModelProxy {
-    resolver: Arc<dyn ProviderResolver>,
+    host: Arc<dyn SandboxHost>,
     /// Shared with the exact claimed container drive. A durable cancellation
     /// trips it before the route acknowledges, fencing a reverse request that
     /// races the outer drive's connection teardown from starting provider
     /// egress.
     cancel: CancelToken,
-    /// Exact durable execution authority checked immediately before resolver
+    /// Exact durable execution authority checked immediately before provider
     /// and provider egress. The outer drive also polls this fence, but the
     /// responder revalidates at the actual credential boundary so a remote
     /// cancellation observed between polls fails closed.
@@ -473,7 +473,7 @@ impl CapabilityResponder for HostModelProxy {
         let provider = tokio::select! {
             biased;
             () = self.cancel.cancelled() => return Self::cancelled_response(),
-            provider = self.resolver.resolve() => provider,
+            provider = self.host.resolve_provider() => provider,
         };
         match self.durable_egress_authorized().await {
             Ok(true) => {}
@@ -603,7 +603,7 @@ impl CapabilityResponder for HostModelProxy {
 pub struct SandboxContainerRunner {
     store: Arc<dyn Store>,
     backend: Arc<dyn SandboxBackend>,
-    resolver: Arc<dyn ProviderResolver>,
+    host: Arc<dyn SandboxHost>,
     config: SandboxContainerRunConfig,
     /// The issuer of run-scoped model tokens for detached-admitted runs, and
     /// the truthful source of the admission gate's
@@ -623,18 +623,18 @@ pub struct SandboxContainerRunner {
 
 impl SandboxContainerRunner {
     /// A runner over `store`, provisioning through `backend` and proxying model
-    /// inference with `resolver`.
+    /// inference through `host`.
     #[must_use]
     pub fn new(
         store: Arc<dyn Store>,
         backend: Arc<dyn SandboxBackend>,
-        resolver: Arc<dyn ProviderResolver>,
+        host: Arc<dyn SandboxHost>,
         config: SandboxContainerRunConfig,
     ) -> Self {
         Self {
             store,
             backend,
-            resolver,
+            host,
             config,
             token_issuer: Arc::new(GatewayScopedTokenIssuer),
             steering: Arc::new(SandboxSteerGuard::default()),
@@ -673,7 +673,7 @@ impl SandboxContainerRunner {
     /// — never a constant. The same shared shape backs the settings surface,
     /// so what settings names as missing is what this gate denies for.
     fn detached_preconditions(&self) -> DetachedPreconditions {
-        crate::sandbox_admission::structural_preconditions(
+        crate::admission::structural_preconditions(
             // The real fact from the configured issuer: true only when a
             // run-scoped, short-lived, revocable token can actually be minted.
             self.token_issuer.available(),
@@ -1440,32 +1440,17 @@ impl SandboxContainerRunner {
             .get_chat(run.chat_id)
             .await?
             .ok_or_else(|| AgentError::msg("container agent run has no chat"))?;
-        let mut config = AgentConfig::default();
-        if self.resolver.enforces_model_registry() {
-            // Container sandboxes resolve without a caller snapshot: on a
-            // hosted machine their model proxy has no per-caller route yet
-            // either. Decision 62 names this gap and leaves it open.
-            let Some(policy) =
-                crate::providers::resolve_model_policy(&*self.store, &model, true, None).await?
-            else {
-                return Err(AgentError::config(
-                    "container sandbox model is not registered for its provider",
-                ));
-            };
-            if !crate::providers::is_valid_execution_policy(&policy) {
-                return Err(AgentError::config(
-                    "managed gateway execution requires a frozen model identity",
-                ));
-            }
-            crate::providers::apply_model_policy(&mut config, &policy, chat.reasoning_effort)?;
-        } else {
-            // A test or custom embedder that injects one provider keeps its
-            // free-form model contract, as elsewhere in the server — but a
-            // registered model still runs under its own policy.
-            crate::providers::apply_free_form_model(&mut config, model, chat.reasoning_effort)?;
-        }
-        let network_policy = crate::sandbox_docker::compile_network_policy(&chat.network_policy);
-        Ok((config, network_policy))
+        let resolved = self
+            .host
+            .resolve_model(
+                SandboxModelUse::Container,
+                model,
+                chat.reasoning_effort,
+                AgentConfig::default(),
+            )
+            .await?;
+        let network_policy = crate::docker::compile_network_policy(&chat.network_policy);
+        Ok((resolved.config, network_policy))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1498,7 +1483,7 @@ impl SandboxContainerRunner {
         // attempts.
         let durable_spent = self.store.operation_log_len(run_id.0).await?;
         let model_proxy = Arc::new(HostModelProxy {
-            resolver: Arc::clone(&self.resolver),
+            host: Arc::clone(&self.host),
             cancel: cancel.clone(),
             lease_guard: Some(HostModelLeaseGuard {
                 store: Arc::clone(&self.store),

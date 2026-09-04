@@ -38,7 +38,6 @@ pub mod consent;
 mod desktop_schema;
 mod diagnostics;
 mod document_decode;
-mod durable_oplog;
 mod engine;
 mod error;
 mod event_projection;
@@ -48,7 +47,9 @@ mod foreground_prompt;
 mod gateway_drafts;
 mod gateway_runtime;
 pub mod host_folders;
-mod lane;
+mod lane {
+    pub(crate) use tidebreak_worker_runtime::lane::*;
+}
 /// Per-launch `{data_dir}/listen.json` so a CLI can attach without argv tokens.
 pub mod listen_endpoint;
 pub mod logging;
@@ -84,21 +85,33 @@ mod resolver;
 /// connected app: catalog validation before any I/O, pinned bounded egress,
 /// request-time credential injection.
 pub mod rest_executor;
-mod retry;
+mod retry {
+    pub(crate) use tidebreak_worker_runtime::retry::*;
+}
 mod routes;
-mod sandbox_admission;
-mod sandbox_agent_run_worker;
-pub mod sandbox_container_run;
-mod sandbox_container_run_worker;
+mod sandbox_admission {
+    pub(crate) use tidebreak_sandbox_runtime::admission::*;
+}
+mod sandbox_agent_run_worker {
+    pub(crate) use tidebreak_sandbox_runtime::agent_worker::*;
+}
+pub mod sandbox_container_run {
+    pub use tidebreak_sandbox_runtime::container_run::*;
+}
+mod sandbox_container_run_worker {
+    pub(crate) use tidebreak_sandbox_runtime::container_worker::*;
+}
 /// A [`SandboxBackend`](tidebreak_sandbox_protocol::SandboxBackend) over the Docker
 /// CLI: container provision, loopback addressing, idempotent teardown, and a
 /// correlation-tag orphan sweep.
-pub mod sandbox_docker;
+pub mod sandbox_docker {
+    pub use tidebreak_sandbox_runtime::docker::*;
+}
 mod sandbox_exec_worker;
+mod sandbox_runtime;
 mod sandbox_task_plan_worker;
 mod sandbox_web_search_worker;
 mod scoped_memory;
-mod scoped_model_token;
 mod scoped_store;
 #[cfg(any(test, debug_assertions))]
 mod scripted_harness;
@@ -218,7 +231,6 @@ impl BrowserChannelBinding {
         &self.bridge_command
     }
 }
-pub use durable_oplog::DurableOperationStore;
 pub use error::ServerError;
 pub use pairing::{
     deprovision_provisioned_gateway, deprovision_target, register_pending_pairing,
@@ -226,6 +238,7 @@ pub use pairing::{
     PendingRegistration,
 };
 pub use state::{AppState, LocalVoiceError, LocalVoiceRunner, LocalVoiceState, LocalVoiceStatus};
+pub use tidebreak_sandbox_runtime::DurableOperationStore;
 pub use update_quiesce::UpdateQuiesce;
 
 pub(crate) const MAX_RAW_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
@@ -2583,19 +2596,24 @@ async fn bind_inner(
         .with_on_behalf_of_gateway(state.on_behalf_of_gateway.clone()),
     )
     .with_update_quiesce(chat_quiesce_worker);
+    let sandbox_host: Arc<dyn tidebreak_sandbox_runtime::SandboxHost> =
+        Arc::new(sandbox_runtime::ServerSandboxHost::new(
+            state.store.clone(),
+            state.secrets.clone(),
+            state.resolver.clone(),
+            state.events.clone(),
+            Some(code_execution.clone()),
+        ));
     let sandbox_worker_config = sandbox_agent_run_worker::SandboxAgentRunWorkerConfig::default()
         .with_delegated_file_executor(client_executor_id.is_some());
     let sandbox_agent_run_worker = sandbox_agent_run_worker::SandboxAgentRunWorker::with_attempts(
         state.store.clone(),
-        state.secrets.clone(),
-        state.resolver.clone(),
+        sandbox_host.clone(),
         state.agent_run_wake.clone(),
         state.turn_job_wake.clone(),
-        state.events.clone(),
         state.sandbox_attempts.clone(),
         state.agent_config.clone(),
         Some(state.config.data_dir.join("scratch")),
-        Some(code_execution.clone()),
         sandbox_worker_config,
     );
     let sandbox_web_search_worker =
@@ -2631,7 +2649,7 @@ async fn bind_inner(
         sandbox_container_run_worker::SandboxContainerRunWorker::new(
             state.store.clone(),
             sandbox_container_admission.backend,
-            state.resolver.clone(),
+            sandbox_host,
             state.agent_run_wake.clone(),
             state.sandbox_steering.clone(),
             enabled,

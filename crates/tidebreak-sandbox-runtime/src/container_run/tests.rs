@@ -3,7 +3,7 @@
 //! The non-Docker tests drive the **real** in-container agent loop
 //! (`tidebreak_sandbox_agent::run_agent` plus its sandbox-resident tool registry
 //! and the sandbox transport server) over a real loopback TCP socket, with only Docker
-//! (the [`SandboxBackend`]) and the host model (the [`ProviderResolver`]) mocked.
+//! (the [`SandboxBackend`]) and the [`SandboxHost`] mocked.
 //! That exercises the whole stack — provision, attach, reverse-RPC model
 //! inference answered by the host proxy through the durable op-log, event drain,
 //! fenced result commit, teardown — without a container runtime. The Docker
@@ -48,18 +48,14 @@ use super::{
     DriveEnd, HostModelAccounting, HostModelObservedAccounting, HostModelProxy, PreAttachEnd,
     SandboxContainerRunConfig, SandboxContainerRunOutcome, SandboxContainerRunner,
 };
+use crate::admission::{evaluate_detached_admission, DetachedAdmission, DetachedAdmissionDenial};
+use crate::container_worker::{SandboxContainerRunWorker, SandboxContainerRunWorkerConfig};
 use crate::durable_oplog::DurableOperationStore;
+use crate::guards::{SandboxSteerGuard, SandboxSteerRefusal};
 use crate::resolver::ProviderResolver;
-use crate::sandbox_admission::{
-    evaluate_detached_admission, DetachedAdmission, DetachedAdmissionDenial,
-};
-use crate::sandbox_container_run_worker::{
-    SandboxContainerRunWorker, SandboxContainerRunWorkerConfig,
-};
 use crate::scoped_model_token::{MintedScopedToken, ScopedModelTokenIssuer};
-use crate::state::{SandboxSteerGuard, SandboxSteerRefusal};
 
-// --- Mock host model (the resolver the driver proxies inference through) ------
+// --- Mock host model ----------------------------------------------------------
 
 /// A one-shot hold. The producer takes the receiver and publishes `entered`
 /// before awaiting, so a faster test cannot lose the release. A `oneshot`
@@ -209,7 +205,7 @@ impl ModelProvider for ScriptedProvider {
     }
 }
 
-/// A resolver that always hands back the same scripted provider, so completion
+/// A host that always hands back the same scripted provider, so completion
 /// counts are observable and the op-log's exactly-once holds across a re-issue.
 struct FixedResolver(Arc<ScriptedProvider>);
 
@@ -1588,7 +1584,7 @@ async fn container_worker_service_cadence_completes_pending_teardown() {
 /// The whole stack over loopback: admit a container run, drive it with the real
 /// in-container agent loop running a sandbox filesystem tool and dialing the host
 /// for model inference, and assert the host committed the result exactly once,
-/// proxied each model step through the resolver, delivered the run's ACTUAL task,
+/// proxied each model step through the host, delivered the run's actual task,
 /// and tore the container down.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn drives_a_container_run_end_to_end_over_loopback() {
@@ -1630,7 +1626,7 @@ async fn drives_a_container_run_end_to_end_over_loopback() {
         let committed = store.get_agent_run(run_id).await.unwrap().unwrap();
         assert_eq!(committed.status, AgentRunStatus::Completed);
 
-        // Both model steps were proxied through the host resolver (no model
+        // Both model steps were proxied through the host (no model
         // credential in the container), and the op-log recorded each exactly once.
         assert_eq!(
             provider.calls.load(Ordering::SeqCst),
@@ -2273,7 +2269,7 @@ async fn cancelled_host_model_proxy_refuses_before_provider_egress() {
     let cancel = CancelToken::new();
     cancel.cancel();
     let proxy = HostModelProxy {
-        resolver: Arc::new(FixedResolver(provider.clone())),
+        host: Arc::new(FixedResolver(provider.clone())),
         cancel,
         lease_guard: None,
         config: AgentConfig {
@@ -2317,7 +2313,7 @@ async fn host_model_proxy_answers_a_reissued_inference_from_the_op_log() {
                 [Capability::ModelInference],
             ),
             Arc::new(HostModelProxy {
-                resolver: Arc::new(FixedResolver(provider.clone())),
+                host: Arc::new(FixedResolver(provider.clone())),
                 cancel: CancelToken::new(),
                 lease_guard: None,
                 config: AgentConfig {
@@ -2987,7 +2983,7 @@ async fn a_result_fenced_by_cancellation_still_finishes_cancellation() {
 
         let fault_store = TerminalFaultStore::new(store.clone());
         fault_store.block_next_result();
-        let resolver: Arc<dyn ProviderResolver> =
+        let resolver: Arc<dyn crate::host::SandboxHost> =
             Arc::new(FixedResolver(Arc::new(ScriptedProvider::new(Vec::new()))));
         let runner = Arc::new(SandboxContainerRunner::new(
             fault_store.clone(),
@@ -2996,7 +2992,7 @@ async fn a_result_fenced_by_cancellation_still_finishes_cancellation() {
             fast_config(),
         ));
         let model_proxy = Arc::new(HostModelProxy {
-            resolver,
+            host: resolver,
             cancel: CancelToken::new(),
             lease_guard: None,
             config: AgentConfig::default(),
@@ -3088,7 +3084,7 @@ async fn cancellation_finalization_survives_accounting_failure_past_execution_le
         };
         let fault_store = TerminalFaultStore::new(store.clone());
         fault_store.fail_accounting_until_released();
-        let resolver: Arc<dyn ProviderResolver> =
+        let resolver: Arc<dyn crate::host::SandboxHost> =
             Arc::new(FixedResolver(Arc::new(ScriptedProvider::new(Vec::new()))));
         let runner = Arc::new(SandboxContainerRunner::new(
             fault_store.clone(),
@@ -3101,7 +3097,7 @@ async fn cancellation_finalization_survives_accounting_failure_past_execution_le
             },
         ));
         let model_proxy = Arc::new(HostModelProxy {
-            resolver,
+            host: resolver,
             cancel: CancelToken::new(),
             lease_guard: None,
             config: AgentConfig::default(),
@@ -4462,7 +4458,7 @@ async fn cancelling_an_unattached_container_child_enqueues_its_teardown() {
 /// Both Docker tests build the same tag; the CI lane serializes them so the
 /// second build is a cache hit.
 async fn build_agent_image() -> Option<&'static str> {
-    use crate::sandbox_docker::DockerSandboxBackend;
+    use crate::docker::DockerSandboxBackend;
 
     let backend_probe = DockerSandboxBackend::with_defaults();
     if !backend_probe.is_available() {
@@ -4523,7 +4519,7 @@ async fn build_agent_image() -> Option<&'static str> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires a Docker daemon and builds the agent image; run explicitly or in the Docker CI lane"]
 async fn docker_end_to_end_drives_a_real_container() {
-    use crate::sandbox_docker::{DockerConfig, DockerSandboxBackend, RUN_TAG_LABEL};
+    use crate::docker::{DockerConfig, DockerSandboxBackend, RUN_TAG_LABEL};
 
     let Some(image) = build_agent_image().await else {
         return;
@@ -4620,7 +4616,7 @@ async fn dial_container(authority: &str) -> tokio::net::TcpStream {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires a Docker daemon and builds the agent image; run explicitly or in the Docker CI lane"]
 async fn docker_container_conforms_at_the_transport_boundary() {
-    use crate::sandbox_docker::{DockerConfig, DockerSandboxBackend};
+    use crate::docker::{DockerConfig, DockerSandboxBackend};
     use tidebreak_sandbox_protocol::{
         events::EventPayload, ids::EventCursor, protocol::AttachRequest, ConnectError, SandboxTag,
         WireClient,
@@ -4668,7 +4664,7 @@ async fn docker_container_conforms_at_the_transport_boundary() {
             Arc::new(HostModelProxy {
                 // No scripted directives: every completion defaults to a final
                 // answer, so the agent emits progress then a terminal result.
-                resolver: Arc::new(FixedResolver(Arc::new(ScriptedProvider::new(vec![])))),
+                host: Arc::new(FixedResolver(Arc::new(ScriptedProvider::new(vec![])))),
                 cancel: CancelToken::new(),
                 lease_guard: None,
                 config: AgentConfig::default(),
@@ -4842,7 +4838,7 @@ async fn exec_probe(container: &str, script: &str) -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires a Docker daemon, the agent image, and outbound network reach; run explicitly or in the Docker CI lane"]
 async fn docker_egress_boundary_denies_and_allows_through_the_proxy() {
-    use crate::sandbox_docker::{
+    use crate::docker::{
         sandbox_name, DockerConfig, DockerSandboxBackend, EGRESS_PROXY_ALIAS, EGRESS_PROXY_PORT,
     };
     use tidebreak_sandbox_protocol::SandboxNetworkPolicy;

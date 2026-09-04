@@ -10,7 +10,9 @@ use std::collections::BTreeSet;
 use std::fmt::Write;
 
 use sha2::{Digest, Sha256};
-use tidebreak_code_execution::{PluginPackage, SkillOrigin, SkillPackage};
+#[cfg(test)]
+use tidebreak_code_execution::SkillOrigin;
+use tidebreak_code_execution::{skill_catalog_lines, PluginPackage, SkillPackage};
 use tidebreak_core::{NetworkPolicy, ToolSpec};
 
 use crate::code_execution::ResolvedExecFolderGrant;
@@ -120,124 +122,6 @@ fn render_timeout(timeout_ms: u64) -> String {
     } else {
         format!("{timeout_ms} milliseconds")
     }
-}
-
-/// Render one skill's catalog line.
-///
-/// The catalog is host-derived from strictly parsed skill manifests.
-/// Re-checking the same bounds here keeps a forged name or a multi-line
-/// description from ever composing into a prompt line, mirroring how folder
-/// paths are JSON-quoted elsewhere; an entry that fails is dropped, not
-/// sanitized.
-pub(crate) fn skill_line(skill: &SkillPackage) -> Option<String> {
-    if !tidebreak_code_execution::is_valid_skill_name(&skill.name)
-        || !tidebreak_code_execution::is_valid_skill_description(&skill.description)
-    {
-        return None;
-    }
-    // A user-authored skill is attributed so the model knows the instructions
-    // are the user's own conventions. The suffix is host-appended after
-    // validation, never manifest content.
-    let attribution = match skill.origin {
-        SkillOrigin::Builtin => "",
-        SkillOrigin::User => " (yours)",
-    };
-    Some(format!(
-        "- {}: {}{attribution}",
-        skill.name, skill.description
-    ))
-}
-
-/// One catalog line plus the pinned install pins the skill's manifest names.
-///
-/// Used by tool-capable sandbox prompts so a background agent can pick the
-/// right package and install path without pasting SKILL.md bodies. Dep pins
-/// already passed the skill parser's pin checks when the package was loaded;
-/// foreground composition keeps the leaner [`skill_line`] shape.
-pub(crate) fn skill_summary_line(skill: &SkillPackage) -> Option<String> {
-    let base = skill_line(skill)?;
-    let mut hints = Vec::new();
-    if !skill.python_deps.is_empty() {
-        hints.push(format!(
-            "pip install --user {}",
-            skill.python_deps.join(" ")
-        ));
-    }
-    if !skill.npm_deps.is_empty() {
-        hints.push(format!(
-            "npm install --ignore-scripts {}",
-            skill.npm_deps.join(" ")
-        ));
-    }
-    if hints.is_empty() {
-        Some(base)
-    } else {
-        Some(format!("{base} [{}]", hints.join("; ")))
-    }
-}
-
-/// Render the skill catalog, grouping the skills a plugin bundles under that
-/// plugin's router preamble.
-///
-/// Grouping is presentation only: every line keeps the `- name: description`
-/// shape the model already routes on, and the `read_file` instruction below
-/// the list is unchanged. Members render in manifest order, so a preamble that
-/// names them in a deliberate order reads against the same order. A plugin
-/// whose members are all forged or missing contributes nothing, and a preamble
-/// failing the same bounds check the parser applied is dropped while its
-/// skills still render — a bad line never suppresses a real capability. Skills
-/// no plugin claims follow the grouped ones in catalog order, which is where
-/// user-authored skills land.
-pub(crate) fn skill_catalog_lines(
-    skills: &[SkillPackage],
-    plugins: &[PluginPackage],
-) -> Vec<String> {
-    skill_catalog_lines_with(skills, plugins, skill_line)
-}
-
-/// Same grouping as [`skill_catalog_lines`], with each skill rendered by
-/// [`skill_summary_line`] so install pins travel with the name.
-pub(crate) fn skill_summary_catalog_lines(
-    skills: &[SkillPackage],
-    plugins: &[PluginPackage],
-) -> Vec<String> {
-    skill_catalog_lines_with(skills, plugins, skill_summary_line)
-}
-
-fn skill_catalog_lines_with(
-    skills: &[SkillPackage],
-    plugins: &[PluginPackage],
-    mut render: impl FnMut(&SkillPackage) -> Option<String>,
-) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut grouped: BTreeSet<&str> = BTreeSet::new();
-    for plugin in plugins {
-        let members: Vec<&SkillPackage> = plugin
-            .skills
-            .iter()
-            .filter_map(|member| skills.iter().find(|skill| skill.name == *member))
-            .collect();
-        let member_lines: Vec<String> = members.iter().copied().filter_map(&mut render).collect();
-        if member_lines.is_empty() {
-            continue;
-        }
-        if let Some(preamble) = plugin
-            .router_preamble
-            .as_deref()
-            .filter(|preamble| tidebreak_code_execution::is_valid_plugin_router_preamble(preamble))
-        {
-            lines.push(format!("- {preamble}"));
-        }
-        grouped.extend(members.iter().map(|skill| skill.name.as_str()));
-        lines.extend(member_lines);
-    }
-    lines.extend(
-        skills
-            .iter()
-            .filter(|skill| !grouped.contains(skill.name.as_str()))
-            .filter_map(render),
-    );
-    lines
 }
 
 /// Compose the prompt for one exact tool surface, with a bounded snapshot of

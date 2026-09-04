@@ -1,0 +1,36 @@
+[package]
+name = "tidebreak-sandbox-runtime"
+description = "Sandbox agent workers, container execution, and local Docker lifecycle."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lib]
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+tidebreak-code-execution = { path = "../tidebreak-code-execution" }
+tidebreak-core = { path = "../tidebreak-core" }
+tidebreak-egress = { path = "../tidebreak-egress" }
+tidebreak-sandbox-protocol = { path = "../tidebreak-sandbox-protocol" }
+tidebreak-worker-runtime = { path = "../tidebreak-worker-runtime" }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tidebreak-core = { path = "../tidebreak-core", features = ["test-util"] }
+tidebreak-sandbox-agent = { path = "../tidebreak-sandbox-agent" }
+sea-orm = { workspace = true }
+tempfile = { workspace = true }

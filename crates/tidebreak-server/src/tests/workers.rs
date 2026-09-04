@@ -304,13 +304,19 @@ async fn foreground_spawn_is_nonblocking_and_ordered_wait_resumes_with_child_res
     );
     let token = state.token.clone();
     spawn_turn_worker(&state);
-    let sandbox_worker = sandbox_agent_run_worker::SandboxAgentRunWorker::new(
+    let sandbox_host = Arc::new(crate::sandbox_runtime::ServerSandboxHost::new(
         state.store.clone(),
         state.secrets.clone(),
         state.resolver.clone(),
+        state.events.clone(),
+        state.code_execution.clone(),
+    ));
+    let sandbox_worker = sandbox_agent_run_worker::SandboxAgentRunWorker::with_attempts(
+        state.store.clone(),
+        sandbox_host,
         state.agent_run_wake.clone(),
         state.turn_job_wake.clone(),
-        state.events.clone(),
+        state.sandbox_attempts.clone(),
         state.agent_config.clone(),
         None,
         sandbox_agent_run_worker::SandboxAgentRunWorkerConfig::default(),

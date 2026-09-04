@@ -39,7 +39,9 @@ tidebreak-egress = { path = "../tidebreak-egress" }
 tidebreak-gateway-runtime = { path = "../tidebreak-gateway-runtime" }
 tidebreak-mcp = { path = "../tidebreak-mcp" }
 tidebreak-router = { path = "../tidebreak-router" }
+tidebreak-sandbox-runtime = { path = "../tidebreak-sandbox-runtime" }
 tidebreak-sandbox-protocol = { path = "../tidebreak-sandbox-protocol" }
+tidebreak-worker-runtime = { path = "../tidebreak-worker-runtime" }
 axum = { workspace = true }
 # Pool sizing for the store this host opens (`host_connect_options`); the
 # driver features come from `tidebreak-core`.

@@ -63,8 +63,8 @@ const DEFAULT_DIRECTIVES: &str = "warn,tidebreak_cli=info,tidebreak_code_deliver
     tidebreak_managed_node=info,\
     tidebreak_mcp=info,\
     tidebreak_router=info,tidebreak_sandbox_agent=info,tidebreak_sandbox_protocol=info,\
-    tidebreak_server=info,tidebreak_shell_policy=info,\
-    tidebreak_supervised_agent=info,tidebreak_whisper=info";
+    tidebreak_sandbox_runtime=info,tidebreak_server=info,tidebreak_shell_policy=info,\
+    tidebreak_supervised_agent=info,tidebreak_whisper=info,tidebreak_worker_runtime=info";
 
 /// Keep the structured file focused on purpose-built, payload-free events.
 const DEFAULT_DIAGNOSTIC_DIRECTIVES: &str = "off,tidebreak_diagnostics=info";
