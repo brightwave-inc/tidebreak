@@ -825,7 +825,8 @@ test("compiler caches use OIDC-scoped S3 access", () => {
 
   for (const [file, name] of [
     ["release.yml", "prepare_macos"],
-    ["release.yml", "prepare_windows"],
+    ["release.yml", "prepare_windows_sidecars"],
+    ["release.yml", "prepare_windows_desktop"],
     ["release.yml", "build_linux"],
     ["staging-publish.yml", "prepare_macos_staging"],
   ]) {
@@ -1676,21 +1677,45 @@ test("release compilation uses S3 without cache warmer workflows", () => {
   assert.doesNotMatch(release, /^  warm-macos-cache:/m);
 
   const prepareMacos = workflowJob(release, "prepare_macos");
-  const prepareWindows = workflowJob(release, "prepare_windows");
+  const prepareWindowsSidecars = workflowJob(
+    release,
+    "prepare_windows_sidecars",
+  );
+  const prepareWindowsDesktop = workflowJob(
+    release,
+    "prepare_windows_desktop",
+  );
+  const buildWindows = workflowJob(release, "build_windows");
   const buildLinux = workflowJob(release, "build_linux");
   assert.doesNotMatch(prepareMacos, /restore-keys:/);
-  assert.doesNotMatch(prepareWindows, /restore-keys:/);
-  assert.doesNotMatch(prepareWindows, /windows-release-target-v1-/);
+  assert.doesNotMatch(prepareWindowsSidecars, /restore-keys:/);
+  assert.doesNotMatch(prepareWindowsDesktop, /restore-keys:/);
+  assert.doesNotMatch(prepareWindowsSidecars, /windows-release-target-v1-/);
+  assert.doesNotMatch(prepareWindowsDesktop, /windows-release-target-v1-/);
   assert.doesNotMatch(buildLinux, /actions\/cache\/restore@/);
   assert.doesNotMatch(buildLinux, /linux-release-target-v1-/);
+  assert.doesNotMatch(release, /RELEASE_WINDOWS_X64_RUNNER/);
+  for (const job of [prepareWindowsSidecars, prepareWindowsDesktop, buildWindows]) {
+    assert.match(job, /target: x86_64-pc-windows-msvc\n\s+runner: windows-latest/);
+  }
   assert.match(
-    prepareWindows,
-    /vars\.RELEASE_WINDOWS_X64_RUNNER \|\| 'windows-latest'/,
+    buildWindows,
+    /needs: \[validate, inspect_hosted, notices, prepare_windows_sidecars, prepare_windows_desktop\]/,
   );
+  assert.match(prepareWindowsSidecars, /prepare-sidecar\.mjs --release/);
   assert.match(
-    workflowJob(release, "build_windows"),
-    /vars\.RELEASE_WINDOWS_X64_RUNNER \|\| 'windows-latest'/,
+    prepareWindowsDesktop,
+    /beforeBuildCommand: \{ script: "pnpm build", cwd: "ui" \}/,
   );
+  assert.match(prepareWindowsDesktop, /Stage inert sidecars for desktop compilation/);
+  assert.match(buildWindows, /tidebreak-prepared-windows-sidecars-/);
+  assert.match(buildWindows, /tidebreak-prepared-windows-desktop-/);
+  assert.match(buildWindows, /Prepared Windows sidecar archive contains an unexpected file set/);
+  assert.match(buildWindows, /Prepared Windows desktop archive contains an unexpected file set/);
+  for (const job of [prepareWindowsDesktop, buildWindows]) {
+    assert.match(job, /corepack install --global pnpm@10\.18\.3/);
+    assert.doesNotMatch(job, /uses: pnpm\/action-setup/);
+  }
 
   for (const workflow of [release]) {
     const downloadCaches = [
@@ -1727,7 +1752,12 @@ function stepNames(job) {
 
 test("credential-free compile jobs never load production secrets", () => {
   const release = workflows["release.yml"];
-  for (const jobName of ["prepare_macos", "combine_macos", "prepare_windows"]) {
+  for (const jobName of [
+    "prepare_macos",
+    "combine_macos",
+    "prepare_windows_sidecars",
+    "prepare_windows_desktop",
+  ]) {
     const job = workflowJob(release, jobName);
     assert.doesNotMatch(job, /^    environment:/m);
     assert.doesNotMatch(job, /secrets\./);
@@ -1735,7 +1765,11 @@ test("credential-free compile jobs never load production secrets", () => {
   }
   // The credential-free compile must save its cache before reporting a
   // failed compile, so partial work is reusable.
-  for (const jobName of ["prepare_macos", "prepare_windows"]) {
+  for (const jobName of [
+    "prepare_macos",
+    "prepare_windows_sidecars",
+    "prepare_windows_desktop",
+  ]) {
     const job = workflowJob(release, jobName);
     const names = stepNames(job);
     const saveIdx = names.findIndex((n) => /Save.*cache/i.test(n));
@@ -1772,7 +1806,11 @@ test("credentialed packaging policy rejects cache restores after signing materia
 
 test("the updater private key is isolated from compilation", () => {
   const release = workflows["release.yml"];
-  for (const jobName of ["prepare_macos", "prepare_windows"]) {
+  for (const jobName of [
+    "prepare_macos",
+    "prepare_windows_sidecars",
+    "prepare_windows_desktop",
+  ]) {
     assert.doesNotMatch(
       workflowJob(release, jobName),
       /TAURI_SIGNING_PRIVATE_KEY/,
@@ -1801,7 +1839,9 @@ test("signing jobs run installers before loading signing material", () => {
     const label = `${name} (${file})`;
     const secretsAt = firstSigningMaterialIndex(job, validate);
     assert.notEqual(secretsAt, -1, `${label} must still load signing material`);
-    const pnpmAt = job.search(/pnpm\/action-setup@[0-9a-f]{40}/);
+    const pnpmAt = job.search(
+      /pnpm\/action-setup@[0-9a-f]{40}|- name: Enable pinned pnpm/,
+    );
     const nodeAt = job.search(/actions\/setup-node@[0-9a-f]{40}/);
     assert.ok(pnpmAt !== -1, `${label} must set up pnpm`);
     assert.ok(nodeAt !== -1, `${label} must set up Node`);
@@ -1815,7 +1855,11 @@ test("signing jobs run installers before loading signing material", () => {
     assert.ok(installAt !== -1, `${label} must have a frozen-lockfile install step`);
     assert.ok(installAt < secretsAt, `${label} must install dependencies before signing material`);
     // pnpm must be pinned to an exact version, not floating.
-    assert.match(job, /version: 10\.18\.3\n/, `${label} must pin pnpm 10.18.3`);
+    assert.match(
+      job,
+      /version: 10\.18\.3\n|corepack install --global pnpm@10\.18\.3/,
+      `${label} must pin pnpm 10.18.3`,
+    );
     // Installs must be frozen-lockfile with lifecycle scripts disabled.
     assert.match(
       job,
@@ -1850,7 +1894,48 @@ test("prepared binaries are checksum-verified before signing material loads", ()
 
 test("restored product binaries are discarded before the packaging build", () => {
   const release = workflows["release.yml"];
-  for (const name of ["build_macos", "prepare_windows", "build_windows", "build_linux"]) {
+  const expectedProducts = new Map([
+    [
+      "build_macos",
+      [
+        /release\/tidebreak-desktop/,
+        /release\/tidebreak-host-broker/,
+        /release\/tidebreak\b/,
+        /binaries\/tidebreak-host-broker/,
+        /binaries\/tidebreak\b/,
+      ],
+    ],
+    [
+      "prepare_windows_sidecars",
+      [
+        /release\/tidebreak-host-broker/,
+        /release\/tidebreak\b/,
+        /binaries\/tidebreak-host-broker/,
+        /binaries\/tidebreak\b/,
+      ],
+    ],
+    [
+      "prepare_windows_desktop",
+      [/release\/tidebreak-desktop/, /release\/tidebreak_desktop_lib/],
+    ],
+    [
+      "build_linux",
+      [
+        /release\/tidebreak-desktop/,
+        /release\/tidebreak-host-broker/,
+        /release\/tidebreak(?:\s|$)/m,
+        /binaries\/tidebreak-host-broker/,
+        /binaries\/tidebreak-\$\{\{ matrix\.target \}\}(?:\s|$)/m,
+      ],
+    ],
+  ]);
+  for (const name of [
+    "build_macos",
+    "prepare_windows_sidecars",
+    "prepare_windows_desktop",
+    "build_windows",
+    "build_linux",
+  ]) {
     const job = workflowJob(release, name);
     const names = stepNames(job);
     const restoreIdx = names.findIndex((n) => /Restore.*cache/i.test(n));
@@ -1872,17 +1957,7 @@ test("restored product binaries are discarded before the packaging build", () =>
       new RegExp(`- name: ${names[discardIdx].replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[\\s\\S]*?(?=\\n\\s+- name:)`),
     )?.[0];
     assert.ok(discardStep, `${name}: discard step content not found`);
-    const products = [
-      /release\/tidebreak-desktop/,
-      /release\/tidebreak-host-broker/,
-      name === "build_linux"
-        ? /release\/tidebreak(?:\s|$)/m
-        : /release\/tidebreak\b/,
-      /binaries\/tidebreak-host-broker/,
-      name === "build_linux"
-        ? /binaries\/tidebreak-\$\{\{ matrix\.target \}\}(?:\s|$)/m
-        : /binaries\/tidebreak\b/,
-    ];
+    const products = expectedProducts.get(name) ?? [];
     for (const product of products) {
       assert.match(discardStep, product, `${name}: discard must remove ${product}`);
     }
@@ -2033,7 +2108,11 @@ test("an existing immutable release resumes without rebuilding or overwriting", 
     /needs\.inspect_hosted\.outputs\.exists != 'true'/,
   );
   assert.match(
-    workflowJob(release, "prepare_windows"),
+    workflowJob(release, "prepare_windows_sidecars"),
+    /needs\.inspect_hosted\.outputs\.exists != 'true'/,
+  );
+  assert.match(
+    workflowJob(release, "prepare_windows_desktop"),
     /needs\.inspect_hosted\.outputs\.exists != 'true'/,
   );
   assert.match(
@@ -2353,7 +2432,8 @@ test("release and staging share one third-party notices implementation", () => {
       platformJobs: [
         "prepare_macos",
         "build_macos",
-        "prepare_windows",
+        "prepare_windows_sidecars",
+        "prepare_windows_desktop",
         "build_windows",
         "build_linux",
       ],
