@@ -405,7 +405,7 @@ jobs:
         uses: ./.github/actions/setup-sccache-s3
         with:
           access: ${{ github.event_name == 'pull_request' && 'read' || 'write' }}
-          remote-cache-enabled: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          remote-cache-enabled: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') }}
       - name: Install system deps (Tauri)
         timeout-minutes: 8
         run: |
@@ -460,7 +460,7 @@ jobs:
         uses: ./.github/actions/setup-sccache-s3
         with:
           access: ${{ github.event_name == 'pull_request' && 'read' || 'write' }}
-          remote-cache-enabled: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          remote-cache-enabled: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') }}
       - name: Install system deps (Tauri)
         timeout-minutes: 8
         run: |
@@ -537,7 +537,7 @@ jobs:
         uses: ./.github/actions/setup-sccache-s3
         with:
           access: ${{ github.event_name == 'pull_request' && 'read' || 'write' }}
-          remote-cache-enabled: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          remote-cache-enabled: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') }}
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         if: ${{ steps.tip.outputs.superseded != 'true' }}
         with:
@@ -602,7 +602,7 @@ jobs:
         uses: ./.github/actions/setup-sccache-s3
         with:
           access: ${{ github.event_name == 'pull_request' && 'read' || 'write' }}
-          remote-cache-enabled: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          remote-cache-enabled: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') }}
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: windows-check-cargo-registry-v1-${{ hashFiles('Cargo.lock') }}
@@ -691,7 +691,7 @@ jobs:
         uses: ./.github/actions/setup-sccache-s3
         with:
           access: ${{ github.event_name == 'pull_request' && 'read' || 'write' }}
-          remote-cache-enabled: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          remote-cache-enabled: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') }}
       - name: Install headless system deps
         timeout-minutes: 8
         run: |
@@ -786,7 +786,7 @@ jobs:
         uses: ./.github/actions/setup-sccache-s3
         with:
           access: ${{ github.event_name == 'pull_request' && 'read' || 'write' }}
-          remote-cache-enabled: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          remote-cache-enabled: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') }}
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: cargo-registry-v3-${{ hashFiles('Cargo.lock') }}
@@ -829,7 +829,7 @@ jobs:
         uses: ./.github/actions/setup-sccache-s3
         with:
           access: ${{ github.event_name == 'pull_request' && 'read' || 'write' }}
-          remote-cache-enabled: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          remote-cache-enabled: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') }}
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: cargo-registry-v3-${{ hashFiles('Cargo.lock') }}

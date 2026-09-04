@@ -140,6 +140,15 @@ test("the mirrored workflow-security fixture passes before mutation", () => {
 
 const mutations = [
   {
+    name: "compiler cache manual feature-branch OIDC access",
+    file: ".github/workflows/ci.yml",
+    expected: "compiler caches use OIDC-scoped S3 access",
+    mutate: (source) => source.replace(
+      " && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main')",
+      "",
+    ),
+  },
+  {
     name: "compiler cache pull-request write access",
     file: ".github/workflows/ci.yml",
     expected: "compiler caches use OIDC-scoped S3 access",
@@ -161,7 +170,7 @@ const mutations = [
     expected: "compiler caches use OIDC-scoped S3 access",
     mutate: (source) =>
       source.replace(
-        "          remote-cache-enabled: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}\n",
+        "          remote-cache-enabled: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') }}\n",
         "",
       ),
   },

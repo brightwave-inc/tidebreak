@@ -811,8 +811,8 @@ test("compiler caches use OIDC-scoped S3 access", () => {
     "the S3 environment and credentials must exist before the sccache server starts",
   );
 
-  const forkGuard =
-    "remote-cache-enabled: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}";
+  const remoteCacheGuard =
+    "remote-cache-enabled: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main') }}";
   const accessMode =
     "access: ${{ github.event_name == 'pull_request' && 'read' || 'write' }}";
   for (const name of ciJobs) {
@@ -820,7 +820,7 @@ test("compiler caches use OIDC-scoped S3 access", () => {
     assert.match(job, /permissions:\n      contents: read\n      id-token: write/);
     assert.match(job, /uses: \.\/\.github\/actions\/setup-sccache-s3/);
     assert.ok(job.includes(accessMode), `${name} must keep pull requests read-only`);
-    assert.ok(job.includes(forkGuard), `${name} must skip OIDC on fork pull requests`);
+    assert.ok(job.includes(remoteCacheGuard), `${name} must skip OIDC on forks and manual feature-branch runs`);
   }
 
   for (const [file, name] of [
