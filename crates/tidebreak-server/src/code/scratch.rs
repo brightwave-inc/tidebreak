@@ -36,6 +36,27 @@ impl ScratchRoot {
         &self.path
     }
 
+    /// Publish one owner-only executable in a child directory of this root:
+    /// the same atomic rename as any published file, then the mode that
+    /// lets its owner run it and nobody else read it. Returns the path an
+    /// engine reaches it by.
+    pub(crate) async fn publish_executable(
+        &self,
+        subdir: &OsStr,
+        name: &OsStr,
+        bytes: &[u8],
+    ) -> io::Result<PathBuf> {
+        let child = ensure_child_dir(&self.dir, subdir)?;
+        publish_file(&child, name, bytes).await?;
+        #[cfg(unix)]
+        {
+            use cap_std::fs::{Permissions, PermissionsExt as _};
+
+            child.set_permissions(name, Permissions::from_mode(0o700))?;
+        }
+        Ok(self.path.join(subdir).join(name))
+    }
+
     #[cfg(test)]
     pub(crate) fn open_for_test(path: &Path) -> io::Result<Self> {
         let path = absolute_path(path)?;
@@ -799,5 +820,28 @@ mod tests {
             .join("private.png");
         assert_eq!(std::fs::read(held.join(&relative)).unwrap(), b"private");
         assert!(!redirected.join(relative).exists());
+    }
+
+    #[tokio::test]
+    async fn a_published_executable_is_runnable_by_its_owner_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = ScratchRoot::open_for_test(tmp.path()).unwrap();
+        let path = root
+            .publish_executable(OsStr::new("bin"), OsStr::new("gh"), b"#!/bin/sh\nexit 0\n")
+            .await
+            .unwrap();
+        assert_eq!(path, tmp.path().join("bin").join("gh"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"#!/bin/sh\nexit 0\n");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "owner runs it, nobody else reads it");
+        }
+        // Publishing again replaces the file in place.
+        root.publish_executable(OsStr::new("bin"), OsStr::new("gh"), b"#!/bin/sh\nexit 1\n")
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"#!/bin/sh\nexit 1\n");
     }
 }

@@ -9,6 +9,57 @@ const DEFERRED_RESYNC_POLL: Duration = Duration::from_secs(2);
 const DEFERRED_RESYNC_DEADLINE: Duration = Duration::from_secs(2 * 60 * 60);
 
 impl CodeRuntime {
+    /// The `PATH` a machine session's child runs with when this machine
+    /// lends forge credentials: the session's private `bin` first, holding
+    /// a `gh` wrapper that borrows the credential per call, then the probe's
+    /// own path. Best effort: a machine without `gh`, a repository with no
+    /// origin, or a private root that refuses the write leaves the path
+    /// alone and the child's `gh` behaves as it always did.
+    async fn gh_shim_path(
+        &self,
+        private_root: &crate::code::scratch::ScratchRoot,
+        workspace: Option<&tidebreak_core::CodeWorkspace>,
+        probe_env: &[(std::ffi::OsString, std::ffi::OsString)],
+        loopback_base: &str,
+        owner: &OwnerId,
+    ) -> Option<String> {
+        let workspace = workspace?;
+        let repo = self.get_repo(owner, workspace.repo_id).await.ok()?;
+        let origin_host = repo.origin_host?;
+        let real = crate::code::gh::observe_gh(self.gh_search_path_owned().as_deref())
+            .await
+            .binary?;
+        let script = crate::code::harness_llm::gh_shim_script(&real, loopback_base, &origin_host);
+        let shim = match private_root
+            .publish_executable(
+                std::ffi::OsStr::new("bin"),
+                std::ffi::OsStr::new("gh"),
+                script.as_bytes(),
+            )
+            .await
+        {
+            Ok(path) => path,
+            Err(error) => {
+                tracing::warn!(%error, "the session's gh wrapper was not written");
+                return None;
+            }
+        };
+        let bin = shim.parent()?.to_path_buf();
+        let prior = probe_env
+            .iter()
+            .find(|(key, _)| key == "PATH")
+            .map(|(_, value)| value.clone())
+            .unwrap_or_default();
+        let mut paths = vec![bin];
+        paths.extend(std::env::split_paths(&prior));
+        Some(
+            std::env::join_paths(paths)
+                .ok()?
+                .to_string_lossy()
+                .into_owned(),
+        )
+    }
+
     pub(super) fn wake_all_workers(&self) {
         for handle in self.workers.lock().expect("code workers").values() {
             wake_queue(handle);
@@ -196,6 +247,18 @@ impl CodeRuntime {
                 // that lends none leaves git as it found it.
                 if workspace.is_some() && self.git_credentials.is_some() {
                     env.extend(crate::code::harness_llm::git_credential_wiring(&base));
+                    if let Some(path) = self
+                        .gh_shim_path(
+                            &private_root,
+                            workspace.as_ref(),
+                            &probe.env,
+                            &base,
+                            &session.owner,
+                        )
+                        .await
+                    {
+                        env.push(("PATH".to_owned(), path));
+                    }
                 }
                 (
                     argv,
