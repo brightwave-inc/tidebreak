@@ -751,6 +751,7 @@ async fn postgres_v060_upgrade_merges_conversations_into_sessions() {
             ("reasoning_effort".to_owned(), "<null>".to_owned()),
             ("spawn_epoch".to_owned(), "0".to_owned()),
             ("title".to_owned(), "kept".to_owned()),
+            ("visibility".to_owned(), "private".to_owned()),
             ("workspace_id".to_owned(), "<null>".to_owned()),
         ]
     );
@@ -786,6 +787,9 @@ async fn postgres_v060_upgrade_merges_conversations_into_sessions() {
             ("message_identity".to_owned(), "a".to_owned()),
             ("output".to_owned(), "c".to_owned()),
             ("root_attachment_change".to_owned(), "r".to_owned()),
+            // Decision 0086: an access row dies with its session, so a
+            // reused id can never inherit a grant.
+            ("session_access".to_owned(), "c".to_owned()),
             ("standing_tool_grant".to_owned(), "c".to_owned()),
             ("task_plan".to_owned(), "r".to_owned()),
             ("tool_call".to_owned(), "a".to_owned()),
