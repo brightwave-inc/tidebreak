@@ -3,6 +3,7 @@ import { useParams } from "@tanstack/react-router";
 
 import { useApp } from "./AppContext";
 import { HttpError, type CodeConnectPage } from "./api";
+import { Logomark } from "./Logomark";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 
@@ -102,9 +103,16 @@ export function ConnectApprovalView({
   onApprove: () => void;
   onRetry: () => void;
 }) {
+  // The same shell as the hosted sign-in screen: a person arrives here
+  // from a Slack card, often on a machine they have never opened, and the
+  // page must say whose it is before it asks "is this you?".
   return (
-    <div className="flex min-h-full items-center justify-center p-6">
-      <Card className="w-full max-w-md p-6">
+    <div className="boot" aria-label="Connect approval">
+      <div className="boot-brand">
+        <Logomark />
+        <h1>Tidebreak</h1>
+      </div>
+      <Card className="w-full max-w-md p-6 text-left">
         {phase === "loading" ? (
           <p className="text-sm text-muted-foreground" role="status">
             Opening the connect request…
