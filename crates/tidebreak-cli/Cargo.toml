@@ -30,7 +30,7 @@ tidebreak-code-execution = { path = "../tidebreak-code-execution" }
 # in-process the way the desktop's sidecar opens it, against the same data dir.
 tidebreak-host-broker = { path = "../tidebreak-host-broker" }
 tidebreak-mcp = { path = "../tidebreak-mcp" }
-tidebreak-server = { path = "../tidebreak-server" }
+tidebreak-server = { path = "../tidebreak-server-api" }
 async-trait = { workspace = true }
 # Decoding the broker's binary file reads, whose protocol shape is base64 —
 # `import_connected_file` publishes those bytes as a conversation source.

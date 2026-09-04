@@ -137,7 +137,7 @@ impl ChatGptRuntime {
     /// Abandon any in-flight sign-in and wait for its callback listener to go
     /// away. Aborting alone is not enough: the port is only freed once the
     /// task has actually been dropped.
-    pub(crate) async fn cancel_pending(&self) {
+    pub async fn cancel_pending(&self) {
         self.sign_in_generation.fetch_add(1, Ordering::SeqCst);
         let mut sign_in = self.sign_in.lock().await;
         sign_in.progress = SignInProgress::Idle;

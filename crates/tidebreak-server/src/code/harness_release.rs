@@ -22,10 +22,10 @@ use super::runtime::CodeRuntime;
 /// Store key for the update channel. One channel for every engine: the
 /// question it answers is "may this machine run past the pins", not
 /// "which pins".
-pub(crate) const HARNESS_UPDATE_CHANNEL_SETTING: &str = "code.harness_update_channel";
+pub const HARNESS_UPDATE_CHANNEL_SETTING: &str = "code.harness_update_channel";
 
 /// The stored update channel, or `pinned` when unset or unreadable.
-pub(crate) async fn read_update_channel(
+pub async fn read_update_channel(
     store: &dyn Store,
 ) -> tidebreak_core::Result<HarnessUpdateChannel> {
     Ok(store
@@ -37,14 +37,14 @@ pub(crate) async fn read_update_channel(
 
 /// One installed engine binary and the exact version its marker names.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct InstalledHarness {
+pub struct InstalledHarness {
     pub version: String,
     pub binary: PathBuf,
 }
 
 /// Where one engine stands against its pin and the registry, for the doctor.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct HarnessReleaseStatus {
+pub struct HarnessReleaseStatus {
     /// The version this build pins, when it ships one.
     pub pinned_version: Option<String>,
     /// The managed install the channel currently drives, when one is on disk.
@@ -60,7 +60,7 @@ pub(crate) struct HarnessReleaseStatus {
 /// Last registry answers, one per engine. Not journaled: a restart forgets
 /// them and the next Check for updates asks again.
 #[derive(Debug, Default)]
-pub(crate) struct KnownReleases {
+pub struct KnownReleases {
     latest: std::sync::Mutex<HashMap<HarnessKind, String>>,
 }
 
@@ -83,12 +83,12 @@ impl KnownReleases {
 
 impl CodeRuntime {
     /// The update channel this machine is on.
-    pub(crate) async fn harness_update_channel(&self) -> HarnessUpdateChannel {
+    pub async fn harness_update_channel(&self) -> HarnessUpdateChannel {
         read_update_channel(&*self.db).await.unwrap_or_default()
     }
 
     /// The registry's last answer for `kind`, if this process asked.
-    pub(crate) fn known_latest_version(&self, kind: HarnessKind) -> Option<String> {
+    pub fn known_latest_version(&self, kind: HarnessKind) -> Option<String> {
         self.harness_releases.get(kind)
     }
 
@@ -98,7 +98,7 @@ impl CodeRuntime {
     /// `pinned`, the pin — an installed newer version stays on disk but is
     /// not driven, so flipping the channel back is a probe away, not a
     /// download away.
-    pub(crate) async fn selected_harness(&self, kind: HarnessKind) -> Option<InstalledHarness> {
+    pub async fn selected_harness(&self, kind: HarnessKind) -> Option<InstalledHarness> {
         let pin = tidebreak_harness::pin_for(kind)?;
         let channel = self.harness_update_channel().await;
         let version = match channel {
@@ -239,7 +239,7 @@ impl CodeRuntime {
     /// Ask the registry for every engine's newest version and remember the
     /// answers. Returns the first failure when nothing answered, so a machine
     /// with no route to the registry hears that rather than "no updates".
-    pub(crate) async fn check_harness_updates(&self) -> Result<(), String> {
+    pub async fn check_harness_updates(&self) -> Result<(), String> {
         let node_root = self.managed_node_root(false).await?;
         let lookups = HarnessKind::ALL
             .iter()
@@ -281,7 +281,7 @@ impl CodeRuntime {
     }
 
     /// Where `kind` stands against its pin and the registry.
-    pub(crate) async fn harness_release_status(&self, kind: HarnessKind) -> HarnessReleaseStatus {
+    pub async fn harness_release_status(&self, kind: HarnessKind) -> HarnessReleaseStatus {
         let Some(pin) = tidebreak_harness::pin_for(kind) else {
             return HarnessReleaseStatus::default();
         };

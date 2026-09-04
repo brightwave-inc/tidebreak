@@ -43,7 +43,7 @@ const GATEWAY_MODELS_KEY: &str = "gateway.models_v1";
 /// to the local id before egress.
 const FROZEN_GATEWAY_MODEL_PREFIX: &str = "__tidebreak_gateway_v1.";
 
-pub(crate) fn is_frozen_gateway_route_model(model: &str) -> bool {
+pub fn is_frozen_gateway_route_model(model: &str) -> bool {
     model.starts_with(FROZEN_GATEWAY_MODEL_PREFIX)
 }
 
@@ -54,7 +54,7 @@ pub(crate) fn is_frozen_gateway_route_model(model: &str) -> bool {
 /// after the turn or agent run was accepted. Every registry-enforced execution
 /// seam therefore requires the frozen selector minted at admission. Direct
 /// providers have no gateway catalog indirection and remain valid as resolved.
-pub(crate) fn is_valid_execution_policy(policy: &ResolvedModelPolicy) -> bool {
+pub fn is_valid_execution_policy(policy: &ResolvedModelPolicy) -> bool {
     policy.provider != ProviderKind::ModelGateway
         || is_frozen_gateway_route_model(&policy.route_model)
 }
@@ -64,40 +64,40 @@ pub(crate) fn is_valid_execution_policy(policy: &ResolvedModelPolicy) -> bool {
 /// honest without coordinated clears: a snapshot synced from one gateway is
 /// simply never honored while policy names another.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct GatewayModelSnapshot {
+pub struct GatewayModelSnapshot {
     /// The normalized gateway base URL the models were fetched from.
-    pub(crate) gateway_url: String,
+    pub gateway_url: String,
     /// Gateway installation that issued this catalog. URL alone is not enough:
     /// an administrator may replace a deployment in place.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) installation_id: Option<String>,
-    pub(crate) models: Vec<CustomModelConfig>,
+    pub installation_id: Option<String>,
+    pub models: Vec<CustomModelConfig>,
     /// Per-model inference protocol. An absent map is a snapshot written by a
     /// gateway generation that served only Anthropic Messages, so lookup
     /// defaults to that protocol for backward compatibility.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) model_protocols: BTreeMap<String, GatewayModelProtocol>,
+    pub model_protocols: BTreeMap<String, GatewayModelProtocol>,
     /// Per-model reasoning ladders stated by the member catalog. Presence is
     /// significant: an empty list means no effort control, while absence
     /// means an older gateway did not state a ladder.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) model_reasoning_efforts: BTreeMap<String, Vec<ReasoningEffort>>,
+    pub model_reasoning_efforts: BTreeMap<String, Vec<ReasoningEffort>>,
     /// The member-catalog contract revision the last sync read (`"v1"`),
     /// or `None` when the deployment predates `/api/v1/me/catalog` and the
     /// sync degraded to the per-surface CLI reads. Drives the "older
     /// gateway" note in settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) member_catalog: Option<String>,
+    pub member_catalog: Option<String>,
     /// The catalog `ETag` of this snapshot, sent as `If-None-Match` on the
     /// next sync so an unchanged catalog costs a `304` instead of a body.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) catalog_etag: Option<String>,
+    pub catalog_etag: Option<String>,
 }
 
 /// The compatibility protocol a managed gateway uses for one entitled model.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum GatewayModelProtocol {
+pub enum GatewayModelProtocol {
     /// Anthropic Messages at `/compat/anthropic/v1/messages`.
     #[default]
     AnthropicMessages,
@@ -112,7 +112,7 @@ pub(crate) enum GatewayModelProtocol {
 impl GatewayModelProtocol {
     /// Accept the canonical gateway values plus the short names older
     /// deployments used for the model-list filter.
-    pub(crate) fn parse(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value {
             "anthropic" | "anthropic_messages" => Some(Self::AnthropicMessages),
             "openai" | "openai_compatible" | "openai_chat_completions" | "openai_responses" => {
@@ -127,9 +127,7 @@ impl GatewayModelProtocol {
 /// models to anything must use [`gateway_models`] instead; this raw read
 /// exists for selection-key resolution, where usability is enforced
 /// separately by [`provider_is_usable`] and route collection.
-pub(crate) async fn read_gateway_snapshot(
-    store: &dyn Store,
-) -> Result<Option<GatewayModelSnapshot>> {
+pub async fn read_gateway_snapshot(store: &dyn Store) -> Result<Option<GatewayModelSnapshot>> {
     Ok(store
         .get_setting(GATEWAY_MODELS_KEY)
         .await?
@@ -142,7 +140,7 @@ pub(crate) async fn read_gateway_snapshot(
 /// owns it (`model-gateway-<profile>/...`). OpenCode uses a shorter provider
 /// prefix. The snapshot keeps the raw gateway ids, so match those wrappers
 /// without assuming that the raw id itself contains no slash.
-pub(crate) fn gateway_reasoning_efforts_for_model<'a>(
+pub fn gateway_reasoning_efforts_for_model<'a>(
     snapshot: &'a GatewayModelSnapshot,
     selection: &str,
 ) -> Option<&'a [ReasoningEffort]> {
@@ -159,7 +157,7 @@ pub(crate) fn gateway_reasoning_efforts_for_model<'a>(
 /// intersect only when the picker actually used a Codex row. If the harness
 /// did not list the gateway-only row and has no engine-wide ladder, use the
 /// gateway's ladder rather than treating the missing row as unsupported.
-pub(crate) fn effective_gateway_reasoning_efforts(
+pub fn effective_gateway_reasoning_efforts(
     hosted: bool,
     listed_model_efforts: Option<&[ReasoningEffort]>,
     engine_efforts: &[ReasoningEffort],
@@ -193,7 +191,7 @@ fn gateway_selection_matches(selection: &str, id: &str) -> bool {
 
 /// Persist the entitled-model snapshot. The gateway runtime serializes its
 /// policy recheck and this write with its state-write lock.
-pub(crate) async fn write_gateway_snapshot(
+pub async fn write_gateway_snapshot(
     store: &dyn Store,
     snapshot: &GatewayModelSnapshot,
 ) -> Result<()> {
@@ -207,15 +205,13 @@ pub(crate) async fn write_gateway_snapshot(
 /// One conversion for both consumers — the deployment-wide managed sync and
 /// the per-caller hosted fetch (decision 62) — so a model a hosted caller is
 /// offered is shaped exactly like a model the sync would have stored.
-pub(crate) struct MemberCatalogModels {
-    pub(crate) models: Vec<CustomModelConfig>,
-    pub(crate) model_protocols: BTreeMap<String, GatewayModelProtocol>,
-    pub(crate) model_reasoning_efforts: BTreeMap<String, Vec<ReasoningEffort>>,
+pub struct MemberCatalogModels {
+    pub models: Vec<CustomModelConfig>,
+    pub model_protocols: BTreeMap<String, GatewayModelProtocol>,
+    pub model_reasoning_efforts: BTreeMap<String, Vec<ReasoningEffort>>,
 }
 
-pub(crate) fn member_catalog_models(
-    catalog: crate::connectors::GatewayCatalog,
-) -> MemberCatalogModels {
+pub fn member_catalog_models(catalog: crate::connectors::GatewayCatalog) -> MemberCatalogModels {
     let mut model_protocols = BTreeMap::new();
     let mut model_reasoning_efforts = BTreeMap::new();
     let models = catalog
@@ -267,7 +263,7 @@ pub(crate) fn member_catalog_models(
 
 /// Clamp a gateway-reported limit into the u32 the config carries; zero and
 /// out-of-range values fall back to the default.
-pub(crate) fn clamp_u32(value: Option<i64>, default: u32) -> u32 {
+pub fn clamp_u32(value: Option<i64>, default: u32) -> u32 {
     value
         .and_then(|value| u32::try_from(value).ok())
         .filter(|value| *value > 0)
@@ -278,7 +274,7 @@ pub(crate) fn clamp_u32(value: Option<i64>, default: u32) -> u32 {
 /// deployment-wide snapshot, or the caller's own snapshot on a hosted machine
 /// (decision 62). Empty for an unmanaged profile with no caller snapshot, a
 /// misconfigured policy, and a snapshot stamped by a different deployment.
-pub(crate) async fn gateway_models(
+pub async fn gateway_models(
     store: &dyn Store,
     policy: &crate::managed_policy::ManagedPolicy,
     caller_gateway: Option<&GatewayModelSnapshot>,
@@ -293,7 +289,7 @@ pub(crate) async fn gateway_models(
 /// deployment-wide snapshot, or — on a gateway-authenticated hosted machine —
 /// the caller's own entitlements, resolved per request and held only in
 /// process memory (decision 62).
-pub(crate) async fn gateway_snapshot_for(
+pub async fn gateway_snapshot_for(
     store: &dyn Store,
     policy: &crate::managed_policy::ManagedPolicy,
     caller_gateway: Option<&GatewayModelSnapshot>,
@@ -304,7 +300,7 @@ pub(crate) async fn gateway_snapshot_for(
     Ok(caller_gateway.cloned())
 }
 
-pub(crate) async fn gateway_snapshot_for_policy(
+pub async fn gateway_snapshot_for_policy(
     store: &dyn Store,
     policy: &crate::managed_policy::ManagedPolicy,
 ) -> Result<Option<GatewayModelSnapshot>> {
@@ -336,7 +332,7 @@ pub(crate) async fn gateway_snapshot_for_policy(
 /// Either way the row is dropped once it has been dealt with, which is what
 /// makes "the provider row is retired" true of the store and not only of the
 /// read paths — and keeps the warning a one-time upgrade notice.
-pub(crate) async fn retire_legacy_gateway_row(
+pub async fn retire_legacy_gateway_row(
     store: &dyn Store,
     policy: &crate::managed_policy::ManagedPolicy,
 ) -> Result<()> {
@@ -646,17 +642,17 @@ fn base_url_is_allowed(base: &str, allow_credentialless_loopback_http: bool) -> 
         return true;
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     return test_loopback_provider_urls()
         .lock()
         .unwrap()
         .contains(url.as_str());
 
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     false
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn test_loopback_provider_urls() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     static URLS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
         std::sync::OnceLock::new();
@@ -668,8 +664,8 @@ fn test_loopback_provider_urls() -> &'static std::sync::Mutex<std::collections::
 /// This exists only in crate tests. Production builds cannot register an
 /// exception, and provider-update tests exercise the production validator
 /// unless they explicitly opt a URL into this narrow seam first.
-#[cfg(test)]
-pub(crate) fn allow_test_loopback_provider_base_url(base: &str) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn allow_test_loopback_provider_base_url(base: &str) {
     let url = url::Url::parse(base).expect("test provider base URL must parse");
     assert_eq!(url.scheme(), "http", "test seam is only for cleartext HTTP");
     assert!(
@@ -796,7 +792,7 @@ pub struct ProviderConfig {
 /// provider rejection from being advertised and routed again.
 const CHATGPT_RECONNECT_REQUIRED_SETTING: &str = "provider.openai.chatgpt_reconnect_required";
 
-pub(crate) async fn chatgpt_reconnect_required(store: &dyn Store) -> Result<bool> {
+pub async fn chatgpt_reconnect_required(store: &dyn Store) -> Result<bool> {
     Ok(matches!(
         store
             .get_setting(CHATGPT_RECONNECT_REQUIRED_SETTING)
@@ -805,7 +801,7 @@ pub(crate) async fn chatgpt_reconnect_required(store: &dyn Store) -> Result<bool
     ))
 }
 
-pub(crate) async fn mark_chatgpt_reconnect_required(store: &dyn Store) -> Result<()> {
+pub async fn mark_chatgpt_reconnect_required(store: &dyn Store) -> Result<()> {
     store
         .set_setting(
             CHATGPT_RECONNECT_REQUIRED_SETTING,
@@ -814,7 +810,7 @@ pub(crate) async fn mark_chatgpt_reconnect_required(store: &dyn Store) -> Result
         .await
 }
 
-pub(crate) async fn clear_chatgpt_reconnect_required(store: &dyn Store) -> Result<()> {
+pub async fn clear_chatgpt_reconnect_required(store: &dyn Store) -> Result<()> {
     store
         .delete_setting(CHATGPT_RECONNECT_REQUIRED_SETTING)
         .await
@@ -979,11 +975,11 @@ impl ResolvedModelPolicy {
     /// Direct routes return the ordinary catalog key. Gateway routes return a
     /// frozen host selector that the router rewrites to `id` only after the
     /// current deployment proves it still owns the same route.
-    pub(crate) fn execution_key(&self) -> String {
+    pub fn execution_key(&self) -> String {
         model_registry::selection_key(self.provider, &self.route_model)
     }
 
-    pub(crate) fn curated(spec: &ModelSpec) -> Self {
+    pub fn curated(spec: &ModelSpec) -> Self {
         Self {
             key: model_registry::selection_key(spec.provider, spec.id),
             id: spec.id.to_owned(),
@@ -1234,7 +1230,7 @@ fn freeze_gateway_policy(
     policy
 }
 
-pub(crate) fn gateway_execution_policy(
+pub fn gateway_execution_policy(
     snapshot: &GatewayModelSnapshot,
     selection: &str,
 ) -> Option<ResolvedModelPolicy> {
@@ -1284,7 +1280,7 @@ fn resolve_frozen_gateway_policy(
 /// `None` means either no equivalent exists or the catalog is ambiguous. A
 /// caller must leave the saved selection unresolved in both cases so the
 /// reader chooses deliberately instead of Tidebreak guessing between routes.
-pub(crate) async fn unique_gateway_equivalent(
+pub async fn unique_gateway_equivalent(
     store: &dyn Store,
     snapshot: &GatewayModelSnapshot,
     selection: &str,
@@ -1743,7 +1739,7 @@ pub async fn list_providers(
 
 /// The refusal every managed-lockdown write path answers with. One stable
 /// `kind` so clients can branch on it wherever the lock surfaces.
-pub(crate) fn managed_profile_refusal(message: impl Into<String>) -> ServerError {
+pub fn managed_profile_refusal(message: impl Into<String>) -> ServerError {
     ServerError::conflict_kind("managed_profile", message)
 }
 
@@ -1874,7 +1870,7 @@ pub async fn update_provider(
     })
 }
 
-pub(crate) fn validate_custom_models(
+pub fn validate_custom_models(
     models: &[CustomModelConfig],
 ) -> std::result::Result<(), ServerError> {
     validate_configured_models(ProviderKind::OpenaiCompatible, models)

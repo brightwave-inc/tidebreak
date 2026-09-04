@@ -24,13 +24,13 @@ use tidebreak_core::{
 };
 
 /// Search, read, and propose against the owner's durable memory.
-pub(crate) struct MemoryTool {
+pub struct MemoryTool {
     memory: Arc<dyn MemoryBackend>,
     store: Arc<dyn Store>,
 }
 
 impl MemoryTool {
-    pub(crate) fn new(memory: Arc<dyn MemoryBackend>, store: Arc<dyn Store>) -> Self {
+    pub fn new(memory: Arc<dyn MemoryBackend>, store: Arc<dyn Store>) -> Self {
         Self { memory, store }
     }
 }
@@ -104,7 +104,7 @@ impl Tool for MemoryTool {
         // unadvertised call must not read or propose past it either.
         let enabled = self
             .store
-            .get_setting(crate::routes::MEMORY_ENABLED_SETTING)
+            .get_setting(crate::runtime_settings::MEMORY_ENABLED_SETTING)
             .await
             .ok()
             .flatten()

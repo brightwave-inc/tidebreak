@@ -19,7 +19,7 @@ fn collision_resolved_slug(base: &str, index: u64) -> String {
 }
 
 impl CodeRuntime {
-    pub(crate) async fn create_workspace(
+    pub async fn create_workspace(
         &self,
         owner: &OwnerId,
         repo_id: RepoId,
@@ -221,7 +221,7 @@ impl CodeRuntime {
         Ok(list_workspaces(&self.db, owner, repo_id).await?)
     }
 
-    pub(crate) async fn get_workspace(
+    pub async fn get_workspace(
         &self,
         owner: &OwnerId,
         id: WorkspaceId,
@@ -380,7 +380,7 @@ impl CodeRuntime {
             ));
         }
         let workers_stopped = self.end_workspace_sessions(owner, workspace.id).await?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let workers_stopped =
             workers_stopped && !self.archive_shutdown_timeout.load(Ordering::SeqCst);
         if !workers_stopped {
@@ -507,7 +507,7 @@ impl CodeRuntime {
             .await;
             return Ok(workspace);
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if self
             .fail_next_workspace_release_metadata
             .swap(false, Ordering::SeqCst)
@@ -851,7 +851,7 @@ impl CodeRuntime {
         Ok((pr.head_sha, written))
     }
 
-    pub(crate) async fn workspace_tree(
+    pub async fn workspace_tree(
         &self,
         owner: &OwnerId,
         workspace_id: WorkspaceId,

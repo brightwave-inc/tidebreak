@@ -50,14 +50,14 @@ use crate::resolver::ProviderResolver;
 ///
 /// Offset from the watch (47 s), trigger (53 s), and reconcile (61 s)
 /// intervals so the periodic sweeps do not land on one tick.
-pub(crate) const MEMORY_SWEEP_INTERVAL: Duration = Duration::from_secs(59);
+pub const MEMORY_SWEEP_INTERVAL: Duration = Duration::from_secs(59);
 
 /// Minimum interval between utility-model consolidation steps per owner.
 ///
 /// The sweep ticks every minute to keep expiry prompt; the model step is the
 /// part that costs money and attention, so it runs at most this often even
 /// while records keep changing.
-pub(crate) const MEMORY_MODEL_STEP_MIN_INTERVAL: Duration = Duration::from_secs(10 * 60);
+pub const MEMORY_MODEL_STEP_MIN_INTERVAL: Duration = Duration::from_secs(10 * 60);
 
 /// How long a tracked hypothesis may sit without a new observation before it
 /// expires mechanically. `updated_at` moves on every observation bump, so an
@@ -175,7 +175,7 @@ fn model_step_rate_bound_holds(last: Option<DateTime<Utc>>, now: DateTime<Utc>) 
 }
 
 /// Runs the maintenance sweep for every owner with memory records.
-pub(crate) struct MemorySweep {
+pub struct MemorySweep {
     db: Arc<DbStore>,
     store: Arc<dyn Store>,
     resolver: Arc<dyn ProviderResolver>,
@@ -186,7 +186,7 @@ pub(crate) struct MemorySweep {
 }
 
 impl MemorySweep {
-    pub(crate) fn new(
+    pub fn new(
         db: Arc<DbStore>,
         store: Arc<dyn Store>,
         resolver: Arc<dyn ProviderResolver>,
@@ -205,7 +205,7 @@ impl MemorySweep {
         }
     }
 
-    pub(crate) fn with_on_behalf_of_gateway(
+    pub fn with_on_behalf_of_gateway(
         mut self,
         gateway: Option<Arc<crate::obo_gateway::OboGateway>>,
     ) -> Self {
@@ -214,7 +214,7 @@ impl MemorySweep {
     }
 
     /// Tick forever. Failures on one pass never stop the next.
-    pub(crate) async fn run(self) {
+    pub async fn run(self) {
         let mut ticker = tokio::time::interval(MEMORY_SWEEP_INTERVAL);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -225,10 +225,10 @@ impl MemorySweep {
 
     /// One pass over every owner. A failure on one owner never stops the
     /// others; a failed pass leaves the owner's last run untouched.
-    pub(crate) async fn sweep(&self, now: DateTime<Utc>) {
+    pub async fn sweep(&self, now: DateTime<Utc>) {
         let enabled = self
             .store
-            .get_setting(crate::routes::MEMORY_ENABLED_SETTING)
+            .get_setting(crate::runtime_settings::MEMORY_ENABLED_SETTING)
             .await
             .ok()
             .flatten()
@@ -282,7 +282,7 @@ impl MemorySweep {
 
     /// One pass for one owner: expiry always, then at most one bounded
     /// consolidation step.
-    pub(crate) async fn sweep_owner(
+    pub async fn sweep_owner(
         &self,
         owner: &OwnerId,
         utility: Option<&UtilityModel>,
@@ -700,7 +700,7 @@ fn merge_record(
 }
 
 /// The owner's last completed pass, for the route.
-pub(crate) async fn sweep_status(db: &DbStore, owner: &OwnerId) -> Result<MemorySweepStatus> {
+pub async fn sweep_status(db: &DbStore, owner: &OwnerId) -> Result<MemorySweepStatus> {
     Ok(MemorySweepStatus {
         last_run: latest_sweep_run(db, owner).await?,
     })

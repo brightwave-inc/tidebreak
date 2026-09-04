@@ -201,7 +201,7 @@ jobs:
               .github/workflows/ci.yml) windows_native=true ;;
               crates/tidebreak-code-execution/*|crates/tidebreak-harness/*|crates/tidebreak-host-broker/*)
                 windows_native=true ;;
-              crates/tidebreak-server/src/code/*|crates/tidebreak-server/src/tests/code*)
+              crates/tidebreak-server/src/code/*|crates/tidebreak-server-api/src/routes/code/*|crates/tidebreak-server-api/src/tests/code*)
                 windows_native=true ;;
               crates/tidebreak-server/src/desktop_schema.rs|crates/tidebreak-core/src/keychain.rs)
                 windows_native=true ;;

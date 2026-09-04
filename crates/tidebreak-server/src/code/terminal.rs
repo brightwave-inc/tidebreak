@@ -44,7 +44,7 @@ const NOTICE_BUFFER: usize = 64;
 const TERMINAL_EXIT_GRACE: Duration = Duration::from_secs(5);
 
 /// In-memory process-wide registry of live auxiliary terminals.
-pub(crate) struct TerminalHub {
+pub struct TerminalHub {
     inner: Mutex<HubInner>,
     /// One notice channel per owner. Terminal activity rides
     /// `/updates`, so it is partitioned the same way the digests are:
@@ -94,14 +94,14 @@ struct Coalesce {
 
 /// Unsequenced activity notice. Published on the workspace bus; never journaled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct TerminalNotice {
+pub struct TerminalNotice {
     pub workspace_id: WorkspaceId,
     pub terminal_id: CodeTerminalId,
 }
 
 /// Snapshot a route can serialize.
 #[derive(Debug, Clone)]
-pub(crate) struct TerminalSnapshot {
+pub struct TerminalSnapshot {
     pub id: CodeTerminalId,
     pub workspace_id: WorkspaceId,
     pub cols: u16,
@@ -112,7 +112,7 @@ pub(crate) struct TerminalSnapshot {
 
 /// One cursor-pull response.
 #[derive(Debug, Clone)]
-pub(crate) struct TerminalRead {
+pub struct TerminalRead {
     pub data: Vec<u8>,
     pub next_cursor: u64,
     pub overflow: bool,
@@ -121,7 +121,7 @@ pub(crate) struct TerminalRead {
 }
 
 #[derive(Debug)]
-pub(crate) enum TerminalError {
+pub enum TerminalError {
     WorkspaceCap,
     WriteTooLarge,
     Ended,
@@ -132,7 +132,7 @@ pub(crate) enum TerminalError {
 }
 
 impl TerminalHub {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             inner: Mutex::new(HubInner {
                 by_id: HashMap::new(),
@@ -152,11 +152,11 @@ impl TerminalHub {
     }
 
     /// Subscribe to one owner's terminal activity.
-    pub(crate) fn subscribe(&self, owner: &OwnerId) -> broadcast::Receiver<TerminalNotice> {
+    pub fn subscribe(&self, owner: &OwnerId) -> broadcast::Receiver<TerminalNotice> {
         self.notices_sender(owner).subscribe()
     }
 
-    pub(crate) fn open(
+    pub fn open(
         &self,
         owner: &OwnerId,
         workspace_id: WorkspaceId,
@@ -200,7 +200,7 @@ impl TerminalHub {
 
     /// Open a ring with no PTY. Used by tests that must not spawn a shell.
     #[cfg(test)]
-    pub(crate) fn open_memory(
+    pub fn open_memory(
         &self,
         owner: &OwnerId,
         workspace_id: WorkspaceId,
@@ -232,7 +232,7 @@ impl TerminalHub {
         Ok(lock_snapshot(&handle))
     }
 
-    pub(crate) fn list(&self, workspace_id: WorkspaceId) -> Vec<TerminalSnapshot> {
+    pub fn list(&self, workspace_id: WorkspaceId) -> Vec<TerminalSnapshot> {
         let inner = self.inner.lock().expect("terminal hub");
         let ids = inner
             .by_workspace
@@ -245,11 +245,7 @@ impl TerminalHub {
     }
 
     #[cfg(test)]
-    pub(crate) fn get(
-        &self,
-        workspace_id: WorkspaceId,
-        id: CodeTerminalId,
-    ) -> Option<TerminalSnapshot> {
+    pub fn get(&self, workspace_id: WorkspaceId, id: CodeTerminalId) -> Option<TerminalSnapshot> {
         let inner = self.inner.lock().expect("terminal hub");
         let handle = inner.by_id.get(&id)?;
         let snap = lock_snapshot(handle);
@@ -259,12 +255,7 @@ impl TerminalHub {
         Some(snap)
     }
 
-    pub(crate) fn read(
-        &self,
-        workspace_id: WorkspaceId,
-        id: CodeTerminalId,
-        cursor: u64,
-    ) -> TerminalRead {
+    pub fn read(&self, workspace_id: WorkspaceId, id: CodeTerminalId, cursor: u64) -> TerminalRead {
         let Some(handle) = self.handle(workspace_id, id) else {
             return TerminalRead {
                 data: Vec::new(),
@@ -289,7 +280,7 @@ impl TerminalHub {
         }
     }
 
-    pub(crate) fn write(
+    pub fn write(
         &self,
         workspace_id: WorkspaceId,
         id: CodeTerminalId,
@@ -320,7 +311,7 @@ impl TerminalHub {
         Ok(())
     }
 
-    pub(crate) fn resize(
+    pub fn resize(
         &self,
         workspace_id: WorkspaceId,
         id: CodeTerminalId,
@@ -351,7 +342,7 @@ impl TerminalHub {
         Ok(snapshot(&live))
     }
 
-    pub(crate) fn close(
+    pub fn close(
         &self,
         workspace_id: WorkspaceId,
         id: CodeTerminalId,
@@ -367,7 +358,7 @@ impl TerminalHub {
         Ok(())
     }
 
-    pub(crate) fn close_workspace(&self, workspace_id: WorkspaceId) {
+    pub fn close_workspace(&self, workspace_id: WorkspaceId) {
         let ids = {
             let inner = self.inner.lock().expect("terminal hub");
             inner
@@ -384,7 +375,7 @@ impl TerminalHub {
     /// Stop every terminal and prove that each shell process exited.
     ///
     /// Archive treats a timeout as uncertainty and preserves the checkout.
-    pub(crate) async fn close_workspace_and_wait(&self, workspace_id: WorkspaceId) -> bool {
+    pub async fn close_workspace_and_wait(&self, workspace_id: WorkspaceId) -> bool {
         let handles = {
             let inner = self.inner.lock().expect("terminal hub");
             inner
@@ -416,8 +407,8 @@ impl TerminalHub {
     }
 
     /// Append output as if the PTY had produced it. Tests and the reader thread.
-    #[cfg(test)]
-    pub(crate) fn push_output(&self, id: CodeTerminalId, bytes: &[u8]) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn push_output(&self, id: CodeTerminalId, bytes: &[u8]) {
         let handle = {
             let inner = self.inner.lock().expect("terminal hub");
             inner.by_id.get(&id).cloned()

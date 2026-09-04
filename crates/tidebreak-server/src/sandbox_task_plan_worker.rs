@@ -26,7 +26,7 @@ use crate::retry::LaneBackoff;
 const CANDIDATE_BATCH_SIZE: u64 = 16;
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct SandboxTaskPlanWorkerConfig {
+pub struct SandboxTaskPlanWorkerConfig {
     /// Short by design: the whole operation is one local transaction, so a
     /// lease long enough to survive scheduling is already generous.
     lease: Duration,
@@ -51,7 +51,7 @@ impl Default for SandboxTaskPlanWorkerConfig {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SandboxTaskPlanWorkerOutcome {
+pub enum SandboxTaskPlanWorkerOutcome {
     Idle,
     Resolved(tidebreak_core::CallId),
     LeaseLost(tidebreak_core::CallId),
@@ -70,14 +70,14 @@ impl LaneOutcome for SandboxTaskPlanWorkerOutcome {
 const LANE_NAME: &str = "sandbox task-plan worker";
 
 #[derive(Clone)]
-pub(crate) struct SandboxTaskPlanWorker {
+pub struct SandboxTaskPlanWorker {
     store: Arc<dyn Store>,
     wake: Arc<Notify>,
     config: SandboxTaskPlanWorkerConfig,
 }
 
 impl SandboxTaskPlanWorker {
-    pub(crate) fn new(
+    pub fn new(
         store: Arc<dyn Store>,
         wake: Arc<Notify>,
         config: SandboxTaskPlanWorkerConfig,
@@ -91,7 +91,7 @@ impl SandboxTaskPlanWorker {
         }
     }
 
-    pub(crate) async fn run(self) {
+    pub async fn run(self) {
         lane::supervise_lanes(
             LANE_NAME,
             self.config.max_concurrency,
@@ -119,7 +119,7 @@ impl SandboxTaskPlanWorker {
     }
 
     /// Claim and resolve one exact persisted plan checkpoint.
-    pub(crate) async fn run_once(&self) -> Result<SandboxTaskPlanWorkerOutcome> {
+    pub async fn run_once(&self) -> Result<SandboxTaskPlanWorkerOutcome> {
         for candidate in self
             .store
             .list_sandbox_tool_call_candidates_named(UPDATE_TASK_PLAN_TOOL, CANDIDATE_BATCH_SIZE)

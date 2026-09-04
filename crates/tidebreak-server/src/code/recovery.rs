@@ -28,7 +28,7 @@ use super::session_worker::settle_running_subagents;
 
 /// What boot recovery did to one session.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RecoveryAction {
+pub enum RecoveryAction {
     Interrupted {
         session: String,
     },

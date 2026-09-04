@@ -47,21 +47,21 @@ use crate::retry::{LaneBackoff, RetryAttempt, RetrySchedule};
 use crate::state::{BlobWriteGuard, TurnGuard};
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct LegDriverConfig {
-    pub(crate) lease: Duration,
-    pub(crate) heartbeat: Duration,
-    pub(crate) steer_poll: Duration,
-    pub(crate) idle_min: Duration,
-    pub(crate) idle_cap: Duration,
-    pub(crate) failure_delay: Duration,
+pub struct LegDriverConfig {
+    pub lease: Duration,
+    pub heartbeat: Duration,
+    pub steer_poll: Duration,
+    pub idle_min: Duration,
+    pub idle_cap: Duration,
+    pub failure_delay: Duration,
     /// Ceiling on the lane's own backoff after consecutive iteration errors,
     /// so a store outage is not polled at a fixed rate forever.
-    pub(crate) failure_delay_cap: Duration,
-    pub(crate) retry: RetrySchedule,
-    pub(crate) max_concurrency: usize,
+    pub failure_delay_cap: Duration,
+    pub retry: RetrySchedule,
+    pub max_concurrency: usize,
     /// Startup-resolved location for every background child admitted by this
     /// worker. Capability detection never runs in the spawn path.
-    pub(crate) sandbox_spawn_execution_location: AgentRunExecutionLocation,
+    pub sandbox_spawn_execution_location: AgentRunExecutionLocation,
 }
 
 impl Default for LegDriverConfig {
@@ -89,7 +89,7 @@ impl Default for LegDriverConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum LegDriverOutcome {
+pub enum LegDriverOutcome {
     Completed(TurnId),
     WaitingForApproval {
         turn_id: TurnId,
@@ -111,7 +111,7 @@ pub(crate) enum LegDriverOutcome {
 }
 
 #[derive(Clone)]
-pub(crate) struct LegDriver {
+pub struct LegDriver {
     /// Per-caller gateway capabilities on a hosted machine (decisions 51 and
     /// 62): the turn's model resolution and utility role read the owner's
     /// own entitlement snapshot through this. `None` everywhere else.
@@ -170,7 +170,7 @@ pub(crate) struct LegDriver {
     /// inside `run_turn`: a claim aborted before it registered there would
     /// otherwise keep its lease and make the relaunched worker wait it out.
     update_claims: Arc<std::sync::Mutex<std::collections::HashMap<uuid::Uuid, TurnId>>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     post_drive_pause: Option<(Arc<Notify>, Arc<Notify>)>,
 }
 
@@ -371,13 +371,13 @@ impl Drop for UpdateClaimEntry {
 /// Both the provider-visible tool definitions and host-owned operating prompt
 /// derive from `tools`; runtime MCP refreshes can only produce a different
 /// surface for a later execution.
-pub(crate) struct ForegroundTurnSurface {
-    pub(crate) tools: Arc<ToolRegistry>,
-    pub(crate) agent_config: AgentConfig,
+pub struct ForegroundTurnSurface {
+    pub tools: Arc<ToolRegistry>,
+    pub agent_config: AgentConfig,
 }
 
-#[cfg(test)]
-pub(crate) fn freeze_foreground_turn_surface(
+#[cfg(any(test, feature = "test-support"))]
+pub fn freeze_foreground_turn_surface(
     tools: Arc<ToolRegistry>,
     base_agent_config: &AgentConfig,
 ) -> ForegroundTurnSurface {
@@ -644,7 +644,7 @@ impl<T> AbortOnDrop<T> {
 
 impl LegDriver {
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
+    pub fn new(
         store: Arc<dyn Store>,
         resolver: Arc<dyn ProviderResolver>,
         secrets: Arc<dyn SecretProvider>,
@@ -701,7 +701,7 @@ impl LegDriver {
             config,
             quiesce: None,
             update_claims: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             post_drive_pause: None,
         }
     }
@@ -710,7 +710,7 @@ impl LegDriver {
     ///
     /// Without it an agent evicts every image block to a text stand-in, so a
     /// turn still runs but the model is told the image is unavailable.
-    pub(crate) fn with_on_behalf_of_gateway(
+    pub fn with_on_behalf_of_gateway(
         mut self,
         gateway: Option<Arc<crate::obo_gateway::OboGateway>>,
     ) -> Self {
@@ -718,14 +718,14 @@ impl LegDriver {
         self
     }
 
-    pub(crate) fn with_blobs(mut self, blobs: Arc<dyn BlobStore>) -> Self {
+    pub fn with_blobs(mut self, blobs: Arc<dyn BlobStore>) -> Self {
         self.blobs = Some(blobs);
         self
     }
 
     /// Attach the memory backend: the digest injects into this worker's
     /// composed prompts, and completed turns spawn post-turn capture.
-    pub(crate) fn with_memory(
+    pub fn with_memory(
         mut self,
         memory: Arc<dyn tidebreak_core::MemoryBackend>,
         capture: crate::memory_capture::MemoryCapture,
@@ -740,7 +740,7 @@ impl LegDriver {
     ///
     /// Without the blob write guard there is nowhere safe to publish the
     /// retained copy, so the journal stays off rather than racing the retirer.
-    pub(crate) fn with_blob_write_locks(mut self, blob_writes: Arc<BlobWriteGuard>) -> Self {
+    pub fn with_blob_write_locks(mut self, blob_writes: Arc<BlobWriteGuard>) -> Self {
         self.blob_writes = Some(blob_writes);
         self
     }
@@ -769,7 +769,7 @@ impl LegDriver {
 
     /// Resolve one immutable registry when a turn begins. Runtime MCP changes
     /// affect later turns without changing this worker's active replay surface.
-    pub(crate) fn with_mcp_runtime(mut self, mcp: Arc<McpRuntime>) -> Self {
+    pub fn with_mcp_runtime(mut self, mcp: Arc<McpRuntime>) -> Self {
         self.mcp = Some(mcp);
         self
     }
@@ -777,7 +777,7 @@ impl LegDriver {
     /// Add per-turn folder visibility for local exec. The provider resolves
     /// again at invocation time; this snapshot is model guidance, not
     /// authority.
-    pub(crate) fn with_exec_folder_context(
+    pub fn with_exec_folder_context(
         mut self,
         provider: Arc<crate::code_execution::ConfiguredExecProvider>,
     ) -> Self {
@@ -786,10 +786,7 @@ impl LegDriver {
     }
 
     /// Record turn-segment timings in the server instance's diagnostics.
-    pub(crate) fn with_diagnostics(
-        mut self,
-        diagnostics: Arc<crate::diagnostics::Diagnostics>,
-    ) -> Self {
+    pub fn with_diagnostics(mut self, diagnostics: Arc<crate::diagnostics::Diagnostics>) -> Self {
         self.diagnostics = diagnostics;
         self
     }
@@ -808,17 +805,13 @@ impl LegDriver {
     /// Pause after a foreground drive has returned but before its outcome is
     /// interpreted. Tests use this exact seam to make terminal-state races
     /// deterministic instead of relying on scheduler timing.
-    #[cfg(test)]
-    pub(crate) fn with_post_drive_pause(
-        mut self,
-        entered: Arc<Notify>,
-        release: Arc<Notify>,
-    ) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_post_drive_pause(mut self, entered: Arc<Notify>, release: Arc<Notify>) -> Self {
         self.post_drive_pause = Some((entered, release));
         self
     }
 
-    pub(crate) async fn run(self) {
+    pub async fn run(self) {
         let mut turns = tokio::task::JoinSet::new();
         let mut idle_delay = IdleDelay::new(self.config.idle_min, self.config.idle_cap);
         let mut failure_backoff =
@@ -1118,7 +1111,7 @@ impl LegDriver {
         }
         let enabled = self
             .store
-            .get_setting(crate::routes::MEMORY_ENABLED_SETTING)
+            .get_setting(crate::runtime_settings::MEMORY_ENABLED_SETTING)
             .await
             .ok()
             .flatten()
@@ -1192,7 +1185,7 @@ impl LegDriver {
         Some(markdown)
     }
 
-    pub(crate) async fn run_turn(
+    pub async fn run_turn(
         &self,
         turn: TurnRun,
         lease_token: uuid::Uuid,
@@ -1536,9 +1529,10 @@ impl LegDriver {
             )));
             let mut heartbeat_open = true;
             let mut config = surface.agent_config.clone();
-            config.compaction = crate::routes::read_compaction_policy(&*self.store).await?;
+            config.compaction =
+                crate::runtime_settings::read_compaction_policy(&*self.store).await?;
             config.prompt_cache_retention =
-                crate::routes::read_prompt_cache_retention(&*self.store).await?;
+                crate::runtime_settings::read_prompt_cache_retention(&*self.store).await?;
             config.max_steps = remaining_steps;
             // A parked segment belongs to the same Tidebreak turn. Restore an
             // unused allowance only from the exact client wait that preceded
@@ -1720,7 +1714,7 @@ impl LegDriver {
                     Ok(result) => result,
                     Err(error) => Err(AgentError::msg(format!("agent task stopped: {error}"))),
                 };
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             if let Some((entered, release)) = self.post_drive_pause.as_ref() {
                 entered.notify_one();
                 release.notified().await;
@@ -2415,7 +2409,8 @@ impl LegDriver {
                         progress,
                         remaining_requests: pending_sandbox_spawns.clone(),
                         max_active_background_agents:
-                            crate::routes::read_max_active_background_agents(&*self.store).await?,
+                            crate::runtime_settings::read_max_active_background_agents(&*self.store)
+                                .await?,
                         execution_location: self.config.sandbox_spawn_execution_location,
                     };
                     let mut checkpoint_heartbeat = AbortOnDrop(tokio::spawn(
@@ -3392,10 +3387,7 @@ impl LegDriver {
 /// The path is derived rather than stored, so the turn worker that journals a
 /// scratch write and the transcript that labels it later agree without either
 /// one persisting a host path.
-pub(crate) fn private_chat_scratch_path(
-    root: &Path,
-    chat_id: tidebreak_core::SessionId,
-) -> PathBuf {
+pub fn private_chat_scratch_path(root: &Path, chat_id: tidebreak_core::SessionId) -> PathBuf {
     root.join(chat_id.to_string())
 }
 

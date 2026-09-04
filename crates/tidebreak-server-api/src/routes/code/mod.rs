@@ -12,8 +12,6 @@
 //! principal shares — are registered on the deployment-plane router in
 //! `crate::lib` instead, behind `require_admin`.
 
-pub(crate) use super::settings::double_option;
-
 mod analytics;
 mod approvals;
 mod browser;
@@ -28,7 +26,9 @@ mod session_events;
 mod sessions;
 mod terminals;
 mod triggers;
-pub(crate) mod types;
+pub mod types {
+    pub use crate::code::types::*;
+}
 mod updates;
 mod usage;
 mod workspaces;
@@ -88,6 +88,7 @@ pub(crate) use triggers::{
     create_repo_trigger, delete_repo_trigger, list_repo_triggers, update_repo_trigger,
 };
 #[cfg(test)]
+#[allow(unused_imports)]
 pub(crate) use types::{
     ApprovalDecisionBody, ApprovalSnapshot, CodeActionSnapshot, CodeAnalyticsSnapshot,
     CodeCheckLogsSnapshot, CodeCommitSnapshot, CodeConnectPage, CodeDeliveryActionResult,
@@ -104,6 +105,7 @@ pub(crate) use types::{
     SessionDigest, SessionSnapshot, SetCodeWorktreeRootBody, TurnSnapshot, UpdateCodeTriggerBody,
     UpdateNotice, WorkspaceTitleProposal,
 };
+#[allow(unused_imports)] // Compatibility exports keep these route paths stable.
 pub(crate) use types::{
     CodeCloneDefaults, CodeCloneJobSnapshot, CodeGithubRepositories, CodeGithubRepository,
     CodeHarnessInstallSnapshot, CodeRepoSource, CodeRepoSources, CodeWorktreeRoot,

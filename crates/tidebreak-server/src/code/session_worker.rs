@@ -1107,30 +1107,30 @@ enum ControlFlow {
     Shutdown,
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 const STEER_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const STEER_CONTROL_TIMEOUT: Duration = Duration::from_millis(100);
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 const APPROVAL_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const APPROVAL_CONTROL_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// How long a session sits between turns — no turn, no queued follow-up, no
 /// command — before its engine child is released (decision 0064). Sits well
 /// past the documented provider prompt-cache TTL, so a wake in practice pays
 /// spawn latency and not tokens a warm child would have saved.
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 const PARK_AFTER_IDLE: Duration = Duration::from_secs(15 * 60);
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const PARK_AFTER_IDLE: Duration = Duration::from_millis(150);
 
 /// Retry cadence for a park that failed while an update quiesce is waiting
 /// on this session. Outside a quiesce a failed park just waits for the next
 /// idle window.
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 const QUIESCE_PARK_RETRY: Duration = Duration::from_millis(500);
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const QUIESCE_PARK_RETRY: Duration = Duration::from_millis(50);
 
 /// Release an idle engine child (decision 0064) and clear the row's pid so
@@ -2789,7 +2789,7 @@ async fn drive_turn_inner(
     .map_err(|err| WorkerError::Failed(err.to_string()))?;
 
     let memory_enabled = db
-        .get_setting(crate::routes::MEMORY_ENABLED_SETTING)
+        .get_setting(crate::runtime_settings::MEMORY_ENABLED_SETTING)
         .await
         .ok()
         .flatten()

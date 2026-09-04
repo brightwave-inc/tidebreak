@@ -7,7 +7,7 @@ impl CodeRuntime {
     /// new turn starts, and idle engine children park immediately. Turns
     /// already in flight run to their boundary; [`Self::await_update_quiesce`]
     /// is how the caller waits for that. See `crate::update_quiesce`.
-    pub(crate) fn begin_update_quiesce(&self) {
+    pub fn begin_update_quiesce(&self) {
         self.update_quiesce.send_replace(true);
         self.wake_all_workers();
     }
@@ -15,12 +15,12 @@ impl CodeRuntime {
     /// Reopen turn admission after an update that did not install. Parked
     /// children stay parked; the next turn respawns and resumes them exactly
     /// as an idle park does (decision 0064).
-    pub(crate) fn end_update_quiesce(&self) {
+    pub fn end_update_quiesce(&self) {
         self.update_quiesce.send_replace(false);
         self.wake_all_workers();
     }
 
-    pub(crate) fn update_quiesce_active(&self) -> bool {
+    pub fn update_quiesce_active(&self) -> bool {
         *self.update_quiesce.borrow()
     }
 
@@ -28,7 +28,7 @@ impl CodeRuntime {
     /// or fail with a sentence the updater can show as-is. Remote sessions
     /// run their engine in a sandbox and survive a restart on their own, so
     /// they never appear here — the worker map only holds local sessions.
-    pub(crate) async fn await_update_quiesce(&self, deadline: Duration) -> Result<(), String> {
+    pub async fn await_update_quiesce(&self, deadline: Duration) -> Result<(), String> {
         let deadline_at = Instant::now() + deadline;
         // Turn starts are fenced by the worktree lock, not by the database:
         // a starting turn holds its workspace's lock from before it re-reads
@@ -106,7 +106,7 @@ impl CodeRuntime {
         }
     }
 
-    pub(crate) async fn submit_turn(
+    pub async fn submit_turn(
         &self,
         owner: &OwnerId,
         id: SessionId,
@@ -337,7 +337,7 @@ impl CodeRuntime {
     }
 
     /// Submit a turn created by one durable trigger delivery.
-    pub(crate) async fn submit_trigger_turn(
+    pub async fn submit_trigger_turn(
         &self,
         owner: &OwnerId,
         id: SessionId,
@@ -408,7 +408,7 @@ impl CodeRuntime {
     }
 
     /// The session's queued messages plus whether promotion is paused.
-    pub(crate) async fn list_queued_turns(
+    pub async fn list_queued_turns(
         &self,
         owner: &OwnerId,
         id: SessionId,
@@ -420,7 +420,7 @@ impl CodeRuntime {
     }
 
     /// Edit or reorder one queued message. `None` when the row is gone.
-    pub(crate) async fn update_queued_turn(
+    pub async fn update_queued_turn(
         &self,
         owner: &OwnerId,
         id: SessionId,
@@ -435,7 +435,7 @@ impl CodeRuntime {
         .await?)
     }
 
-    pub(crate) async fn interrupt(&self, id: SessionId) -> Result<(), ServerError> {
+    pub async fn interrupt(&self, id: SessionId) -> Result<(), ServerError> {
         // Interrupt stops only the active turn. The worker and logical code
         // session continue, so its browser capfile and native capability must
         // remain live for later turns.
@@ -471,7 +471,7 @@ impl CodeRuntime {
     }
 
     /// Retract one queued message. `false` when the row is gone.
-    pub(crate) async fn delete_queued_turn(
+    pub async fn delete_queued_turn(
         &self,
         owner: &OwnerId,
         id: SessionId,
@@ -483,7 +483,7 @@ impl CodeRuntime {
 
     /// Pause or release the session's queue. A release wakes the worker so a
     /// waiting head starts without a new send.
-    pub(crate) async fn set_queue_paused(
+    pub async fn set_queue_paused(
         &self,
         owner: &OwnerId,
         id: SessionId,
@@ -500,11 +500,7 @@ impl CodeRuntime {
     /// Clear the session's queue pause so the worker's next drain starts the
     /// head row. The tray composes send-now client-side exactly as chat does:
     /// pause, move the row first, stop the live turn, then this.
-    pub(crate) async fn send_queued_now(
-        &self,
-        owner: &OwnerId,
-        id: SessionId,
-    ) -> Result<(), ServerError> {
+    pub async fn send_queued_now(&self, owner: &OwnerId, id: SessionId) -> Result<(), ServerError> {
         let _ = self.get_session(owner, id).await?;
         tidebreak_core::db::code::set_queue_paused(&self.db, owner, id, false).await?;
         self.wake_session_queue(id);
@@ -558,7 +554,7 @@ impl CodeRuntime {
             }))
     }
 
-    pub(crate) async fn steer(
+    pub async fn steer(
         &self,
         owner: &OwnerId,
         id: SessionId,
@@ -678,7 +674,7 @@ impl CodeRuntime {
     }
 
     /// Steer an active turn for one durable trigger delivery.
-    pub(crate) async fn steer_trigger(
+    pub async fn steer_trigger(
         &self,
         owner: &OwnerId,
         id: SessionId,
@@ -700,11 +696,7 @@ impl CodeRuntime {
         .await
     }
 
-    pub(crate) async fn reap(
-        &self,
-        owner: &OwnerId,
-        id: SessionId,
-    ) -> Result<Session, ServerError> {
+    pub async fn reap(&self, owner: &OwnerId, id: SessionId) -> Result<Session, ServerError> {
         let session = self.get_session(owner, id).await?;
         if session.lifecycle != SessionLifecycle::Fenced {
             return Err(ServerError::conflict_kind(

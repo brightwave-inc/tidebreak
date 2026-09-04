@@ -34,9 +34,7 @@ use super::delivery;
 use super::gh::{self, ActionOutcome, CommitOutcome, PushOutcome, WorkspaceGitStatus};
 use super::runtime::{CodeRuntime, NewSessionSettings, RepoRegistration, SubmitTurnOutcome};
 use super::worktree;
-use crate::error::ServerError;
-use crate::principal::AuthContext;
-use crate::routes::code::types::{
+use crate::code::types::{
     CodeCloneDefaults, CodeCloneJobSnapshot, CodeDeliveryActionResult,
     CodeDeliveryPullRequestActionBody, CodeDeliveryPullRequestDetail, CodeDeliveryPullRequestQuery,
     CodeDeliveryPullRequestTarget, CodeDeliveryPullRequestsPage, CodeDeliveryRepositoriesSnapshot,
@@ -44,6 +42,8 @@ use crate::routes::code::types::{
     CodeDeliveryRunsPage, CodeHarnessInstallSnapshot, CodeRepoSources,
     ResolveCodeDeliveryRepositoriesBody,
 };
+use crate::error::ServerError;
+use crate::principal::AuthContext;
 use crate::state::AppState;
 
 /// Code mode as one authenticated principal may see it.
@@ -52,7 +52,7 @@ use crate::state::AppState;
 /// owner inside is always the one the auth middleware resolved. Fields stay
 /// private and no method returns the inner runtime handle.
 #[derive(Clone)]
-pub(crate) struct ScopedCode {
+pub struct ScopedCode {
     runtime: Arc<CodeRuntime>,
     owner: OwnerId,
     allow_unscoped_delivery: bool,
@@ -77,10 +77,7 @@ impl ScopedCode {
     /// For callers that have decided for themselves what to do when code mode
     /// is not configured — the inbox lists chats either way, so it must not
     /// take the extractor's all-or-nothing rejection.
-    pub(crate) fn for_owner(
-        runtime: std::sync::Arc<super::runtime::CodeRuntime>,
-        owner: OwnerId,
-    ) -> Self {
+    pub fn for_owner(runtime: std::sync::Arc<super::runtime::CodeRuntime>, owner: OwnerId) -> Self {
         Self {
             runtime,
             owner,
@@ -90,7 +87,7 @@ impl ScopedCode {
 
     /// The principal's durable owner key, for the seams that take it directly:
     /// the live buses, and background naming.
-    pub(crate) fn owner(&self) -> &OwnerId {
+    pub fn owner(&self) -> &OwnerId {
         &self.owner
     }
 
@@ -99,7 +96,7 @@ impl ScopedCode {
     // register or clone the same remote and neither sees the other's row.
     // ------------------------------------------------------------------
 
-    pub(crate) async fn register_repo(
+    pub async fn register_repo(
         &self,
         root_path: std::path::PathBuf,
         metadata: RepoRegistration,
@@ -109,53 +106,46 @@ impl ScopedCode {
             .await
     }
 
-    pub(crate) async fn list_repos(&self) -> Result<Vec<CodeRepo>, ServerError> {
+    pub async fn list_repos(&self) -> Result<Vec<CodeRepo>, ServerError> {
         self.runtime.list_repos(&self.owner).await
     }
 
-    pub(crate) async fn get_repo(&self, id: RepoId) -> Result<CodeRepo, ServerError> {
+    pub async fn get_repo(&self, id: RepoId) -> Result<CodeRepo, ServerError> {
         self.runtime.get_repo(&self.owner, id).await
     }
 
-    pub(crate) async fn save_repo(&self, repo: &CodeRepo) -> Result<(), ServerError> {
+    pub async fn save_repo(&self, repo: &CodeRepo) -> Result<(), ServerError> {
         self.runtime.save_repo(repo).await
     }
 
-    pub(crate) async fn remove_repo(
-        &self,
-        id: RepoId,
-        reclaim_checkout: bool,
-    ) -> Result<(), ServerError> {
+    pub async fn remove_repo(&self, id: RepoId, reclaim_checkout: bool) -> Result<(), ServerError> {
         self.runtime
             .remove_repo(&self.owner, id, reclaim_checkout)
             .await
     }
 
-    pub(crate) async fn clone_defaults(&self) -> Result<CodeCloneDefaults, ServerError> {
+    pub async fn clone_defaults(&self) -> Result<CodeCloneDefaults, ServerError> {
         self.runtime.clone_defaults().await
     }
 
-    pub(crate) async fn repo_sources(&self) -> Result<CodeRepoSources, ServerError> {
+    pub async fn repo_sources(&self) -> Result<CodeRepoSources, ServerError> {
         self.runtime.repo_sources(&self.owner).await
     }
 
-    pub(crate) async fn list_github_repositories(
+    pub async fn list_github_repositories(
         &self,
-    ) -> Result<crate::routes::code::CodeGithubRepositories, ServerError> {
+    ) -> Result<crate::code::types::CodeGithubRepositories, ServerError> {
         self.runtime.list_github_repositories(&self.owner).await
     }
 
-    pub(crate) async fn start_clone(
+    pub async fn start_clone(
         &self,
         request: CloneRequest,
     ) -> Result<CodeCloneJobSnapshot, ServerError> {
         self.runtime.start_clone(&self.owner, request).await
     }
 
-    pub(crate) fn get_clone_job(
-        &self,
-        id: uuid::Uuid,
-    ) -> Result<CodeCloneJobSnapshot, ServerError> {
+    pub fn get_clone_job(&self, id: uuid::Uuid) -> Result<CodeCloneJobSnapshot, ServerError> {
         self.runtime.get_clone_job(&self.owner, id)
     }
 
@@ -164,14 +154,14 @@ impl ScopedCode {
     // workspace correlation remains scoped to this owner.
     // ------------------------------------------------------------------
 
-    pub(crate) async fn discover_delivery_repositories(
+    pub async fn discover_delivery_repositories(
         &self,
         refresh: bool,
     ) -> Result<CodeDeliveryRepositoriesSnapshot, ServerError> {
         delivery::discover_repositories(&self.runtime, &self.owner, refresh).await
     }
 
-    pub(crate) async fn resolve_delivery_repositories(
+    pub async fn resolve_delivery_repositories(
         &self,
         body: ResolveCodeDeliveryRepositoriesBody,
     ) -> Result<CodeDeliveryRepositoriesSnapshot, ServerError> {
@@ -184,7 +174,7 @@ impl ScopedCode {
         .await
     }
 
-    pub(crate) async fn query_delivery_pull_requests(
+    pub async fn query_delivery_pull_requests(
         &self,
         query: CodeDeliveryPullRequestQuery,
     ) -> Result<CodeDeliveryPullRequestsPage, ServerError> {
@@ -197,7 +187,7 @@ impl ScopedCode {
         .await
     }
 
-    pub(crate) async fn delivery_pull_request_detail(
+    pub async fn delivery_pull_request_detail(
         &self,
         target: CodeDeliveryPullRequestTarget,
     ) -> Result<CodeDeliveryPullRequestDetail, ServerError> {
@@ -210,7 +200,7 @@ impl ScopedCode {
         .await
     }
 
-    pub(crate) async fn act_on_delivery_pull_request(
+    pub async fn act_on_delivery_pull_request(
         &self,
         body: CodeDeliveryPullRequestActionBody,
     ) -> Result<CodeDeliveryActionResult, ServerError> {
@@ -223,7 +213,7 @@ impl ScopedCode {
         .await
     }
 
-    pub(crate) async fn query_delivery_runs(
+    pub async fn query_delivery_runs(
         &self,
         query: CodeDeliveryRunQuery,
     ) -> Result<CodeDeliveryRunsPage, ServerError> {
@@ -236,7 +226,7 @@ impl ScopedCode {
         .await
     }
 
-    pub(crate) async fn delivery_run_detail(
+    pub async fn delivery_run_detail(
         &self,
         target: CodeDeliveryRunTarget,
     ) -> Result<CodeDeliveryRunDetail, ServerError> {
@@ -249,7 +239,7 @@ impl ScopedCode {
         .await
     }
 
-    pub(crate) async fn act_on_delivery_run(
+    pub async fn act_on_delivery_run(
         &self,
         body: CodeDeliveryRunActionBody,
     ) -> Result<CodeDeliveryActionResult, ServerError> {
@@ -262,16 +252,14 @@ impl ScopedCode {
         .await
     }
 
-    pub(crate) async fn worktree_root(
-        &self,
-    ) -> Result<crate::routes::code::CodeWorktreeRoot, ServerError> {
+    pub async fn worktree_root(&self) -> Result<crate::code::types::CodeWorktreeRoot, ServerError> {
         self.runtime.worktree_root_snapshot().await
     }
 
-    pub(crate) async fn set_worktree_root(
+    pub async fn set_worktree_root(
         &self,
         root: Option<&str>,
-    ) -> Result<crate::routes::code::CodeWorktreeRoot, ServerError> {
+    ) -> Result<crate::code::types::CodeWorktreeRoot, ServerError> {
         self.runtime.set_worktree_root(root).await
     }
 
@@ -279,7 +267,7 @@ impl ScopedCode {
     // Workspaces.
     // ------------------------------------------------------------------
 
-    pub(crate) async fn create_workspace(
+    pub async fn create_workspace(
         &self,
         repo_id: RepoId,
         title: Option<String>,
@@ -291,7 +279,7 @@ impl ScopedCode {
             .await
     }
 
-    pub(crate) async fn create_remote_workspace(
+    pub async fn create_remote_workspace(
         &self,
         repo_id: RepoId,
         title: Option<String>,
@@ -301,28 +289,22 @@ impl ScopedCode {
             .await
     }
 
-    pub(crate) async fn list_workspaces(
+    pub async fn list_workspaces(
         &self,
         repo_id: Option<RepoId>,
     ) -> Result<Vec<CodeWorkspace>, ServerError> {
         self.runtime.list_workspaces(&self.owner, repo_id).await
     }
 
-    pub(crate) async fn get_workspace(
-        &self,
-        id: WorkspaceId,
-    ) -> Result<CodeWorkspace, ServerError> {
+    pub async fn get_workspace(&self, id: WorkspaceId) -> Result<CodeWorkspace, ServerError> {
         self.runtime.get_workspace(&self.owner, id).await
     }
 
-    pub(crate) async fn save_workspace(
-        &self,
-        workspace: &CodeWorkspace,
-    ) -> Result<(), ServerError> {
+    pub async fn save_workspace(&self, workspace: &CodeWorkspace) -> Result<(), ServerError> {
         self.runtime.save_workspace(workspace).await
     }
 
-    pub(crate) async fn archive_workspace(
+    pub async fn archive_workspace(
         &self,
         id: WorkspaceId,
         force: bool,
@@ -333,28 +315,22 @@ impl ScopedCode {
             .await
     }
 
-    pub(crate) fn workspace_write_lock(
-        &self,
-        id: WorkspaceId,
-    ) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    pub fn workspace_write_lock(&self, id: WorkspaceId) -> std::sync::Arc<tokio::sync::Mutex<()>> {
         self.runtime.workspace_write_lock(id)
     }
 
-    pub(crate) async fn restore_workspace(
-        &self,
-        id: WorkspaceId,
-    ) -> Result<CodeWorkspace, ServerError> {
+    pub async fn restore_workspace(&self, id: WorkspaceId) -> Result<CodeWorkspace, ServerError> {
         self.runtime.restore_workspace(&self.owner, id).await
     }
 
-    pub(crate) async fn retry_workspace_setup(
+    pub async fn retry_workspace_setup(
         &self,
         id: WorkspaceId,
     ) -> Result<CodeWorkspace, ServerError> {
         self.runtime.retry_workspace_setup(&self.owner, id).await
     }
 
-    pub(crate) async fn workspace_tree(
+    pub async fn workspace_tree(
         &self,
         id: WorkspaceId,
         query: &str,
@@ -365,7 +341,7 @@ impl ScopedCode {
             .await
     }
 
-    pub(crate) async fn workspace_search(
+    pub async fn workspace_search(
         &self,
         id: WorkspaceId,
         query: &str,
@@ -378,7 +354,7 @@ impl ScopedCode {
             .await
     }
 
-    pub(crate) async fn workspace_transcript_search(
+    pub async fn workspace_transcript_search(
         &self,
         id: WorkspaceId,
         query: &str,
@@ -401,7 +377,7 @@ impl ScopedCode {
         .await?)
     }
 
-    pub(crate) async fn workspace_blob(
+    pub async fn workspace_blob(
         &self,
         id: WorkspaceId,
         path: &str,
@@ -409,7 +385,7 @@ impl ScopedCode {
         self.runtime.workspace_blob(&self.owner, id, path).await
     }
 
-    pub(crate) async fn workspace_files(
+    pub async fn workspace_files(
         &self,
         id: WorkspaceId,
         turn_id: Option<TurnId>,
@@ -417,7 +393,7 @@ impl ScopedCode {
         self.runtime.workspace_files(&self.owner, id, turn_id).await
     }
 
-    pub(crate) async fn workspace_diff(
+    pub async fn workspace_diff(
         &self,
         id: WorkspaceId,
         turn_id: Option<TurnId>,
@@ -432,7 +408,7 @@ impl ScopedCode {
     // Git surfaces on a workspace.
     // ------------------------------------------------------------------
 
-    pub(crate) async fn commit_workspace(
+    pub async fn commit_workspace(
         &self,
         id: WorkspaceId,
         message: Option<String>,
@@ -442,18 +418,15 @@ impl ScopedCode {
             .await
     }
 
-    pub(crate) async fn push_workspace(&self, id: WorkspaceId) -> Result<PushOutcome, ServerError> {
+    pub async fn push_workspace(&self, id: WorkspaceId) -> Result<PushOutcome, ServerError> {
         self.runtime.push_workspace(&self.owner, id).await
     }
 
-    pub(crate) async fn list_triggers(
-        &self,
-        repo_id: RepoId,
-    ) -> Result<Vec<CodeTrigger>, ServerError> {
+    pub async fn list_triggers(&self, repo_id: RepoId) -> Result<Vec<CodeTrigger>, ServerError> {
         self.runtime.list_triggers(&self.owner, repo_id).await
     }
 
-    pub(crate) async fn create_trigger(
+    pub async fn create_trigger(
         &self,
         repo_id: RepoId,
         condition: CodeTriggerCondition,
@@ -464,7 +437,7 @@ impl ScopedCode {
             .await
     }
 
-    pub(crate) async fn set_trigger_enabled(
+    pub async fn set_trigger_enabled(
         &self,
         repo_id: RepoId,
         id: CodeTriggerId,
@@ -475,7 +448,7 @@ impl ScopedCode {
             .await
     }
 
-    pub(crate) async fn delete_trigger(
+    pub async fn delete_trigger(
         &self,
         repo_id: RepoId,
         id: CodeTriggerId,
@@ -483,14 +456,11 @@ impl ScopedCode {
         self.runtime.delete_trigger(&self.owner, repo_id, id).await
     }
 
-    pub(crate) async fn workspace_pr(
-        &self,
-        id: WorkspaceId,
-    ) -> Result<WorkspaceGitStatus, ServerError> {
+    pub async fn workspace_pr(&self, id: WorkspaceId) -> Result<WorkspaceGitStatus, ServerError> {
         self.runtime.workspace_pr(&self.owner, id).await
     }
 
-    pub(crate) async fn workspace_pull_requests(
+    pub async fn workspace_pull_requests(
         &self,
         id: WorkspaceId,
     ) -> Result<
@@ -503,14 +473,14 @@ impl ScopedCode {
         self.runtime.workspace_pull_requests(&self.owner, id).await
     }
 
-    pub(crate) async fn refresh_workspace_pr(
+    pub async fn refresh_workspace_pr(
         &self,
         id: WorkspaceId,
     ) -> Result<WorkspaceGitStatus, ServerError> {
         self.runtime.refresh_workspace_pr(&self.owner, id).await
     }
 
-    pub(crate) async fn start_watch(
+    pub async fn start_watch(
         &self,
         id: WorkspaceId,
         permission_mode_ceiling: Option<tidebreak_core::PermissionMode>,
@@ -520,35 +490,35 @@ impl ScopedCode {
             .await
     }
 
-    pub(crate) async fn stop_watch(
+    pub async fn stop_watch(
         &self,
         id: WorkspaceId,
     ) -> Result<tidebreak_core::CodeWatch, ServerError> {
         self.runtime.stop_watch(&self.owner, id).await
     }
 
-    pub(crate) async fn latest_watch(
+    pub async fn latest_watch(
         &self,
         id: WorkspaceId,
     ) -> Result<Option<tidebreak_core::CodeWatch>, ServerError> {
         self.runtime.latest_watch(&self.owner, id).await
     }
 
-    pub(crate) async fn workspace_pr_comments(
+    pub async fn workspace_pr_comments(
         &self,
         id: WorkspaceId,
     ) -> Result<gh::PrComments, ServerError> {
         self.runtime.workspace_pr_comments(&self.owner, id).await
     }
 
-    pub(crate) async fn workspace_check_logs(
+    pub async fn workspace_check_logs(
         &self,
         id: WorkspaceId,
     ) -> Result<(Option<String>, super::ci_logs::WrittenCheckLogs), ServerError> {
         self.runtime.workspace_check_logs(&self.owner, id).await
     }
 
-    pub(crate) async fn merge_workspace_pr(
+    pub async fn merge_workspace_pr(
         &self,
         id: WorkspaceId,
         target: CodeDeliveryPullRequestTarget,
@@ -561,14 +531,14 @@ impl ScopedCode {
             .await
     }
 
-    pub(crate) async fn mark_workspace_pr_ready(
+    pub async fn mark_workspace_pr_ready(
         &self,
         id: WorkspaceId,
     ) -> Result<WorkspaceGitStatus, ServerError> {
         self.runtime.mark_workspace_pr_ready(&self.owner, id).await
     }
 
-    pub(crate) async fn create_workspace_pr(
+    pub async fn create_workspace_pr(
         &self,
         id: WorkspaceId,
         title: Option<String>,
@@ -579,7 +549,7 @@ impl ScopedCode {
             .await
     }
 
-    pub(crate) async fn run_workspace_action(
+    pub async fn run_workspace_action(
         &self,
         id: WorkspaceId,
         name: &str,
@@ -593,7 +563,7 @@ impl ScopedCode {
     // Sessions, turns, and the journal.
     // ------------------------------------------------------------------
 
-    pub(crate) async fn create_session(
+    pub async fn create_session(
         &self,
         workspace_id: WorkspaceId,
         harness: HarnessKind,
@@ -604,7 +574,7 @@ impl ScopedCode {
             .await
     }
 
-    pub(crate) async fn create_internal_session(
+    pub async fn create_internal_session(
         &self,
         settings: NewSessionSettings,
     ) -> Result<Session, ServerError> {
@@ -613,7 +583,7 @@ impl ScopedCode {
             .await
     }
 
-    pub(crate) async fn create_remote_session(
+    pub async fn create_remote_session(
         &self,
         workspace_id: WorkspaceId,
         harness: HarnessKind,
@@ -624,15 +594,15 @@ impl ScopedCode {
             .await
     }
 
-    pub(crate) async fn get_session(&self, id: SessionId) -> Result<Session, ServerError> {
+    pub async fn get_session(&self, id: SessionId) -> Result<Session, ServerError> {
         self.runtime.get_session(&self.owner, id).await
     }
 
-    pub(crate) async fn list_internal_sessions(&self) -> Result<Vec<Session>, ServerError> {
+    pub async fn list_internal_sessions(&self) -> Result<Vec<Session>, ServerError> {
         self.runtime.list_internal_sessions(&self.owner).await
     }
 
-    pub(crate) async fn list_workspace_sessions(
+    pub async fn list_workspace_sessions(
         &self,
         workspace_id: WorkspaceId,
     ) -> Result<Vec<Session>, ServerError> {
@@ -641,7 +611,7 @@ impl ScopedCode {
             .await
     }
 
-    pub(crate) async fn external_bindings_for_sessions(
+    pub async fn external_bindings_for_sessions(
         &self,
         session_ids: &[SessionId],
     ) -> Result<Vec<tidebreak_core::CodeExternalBinding>, ServerError> {
@@ -650,23 +620,23 @@ impl ScopedCode {
             .await
     }
 
-    pub(crate) async fn list_session_turns(&self, id: SessionId) -> Result<Vec<Turn>, ServerError> {
+    pub async fn list_session_turns(&self, id: SessionId) -> Result<Vec<Turn>, ServerError> {
         self.runtime.list_session_turns(&self.owner, id).await
     }
 
-    pub(crate) async fn list_turn_metrics(
+    pub async fn list_turn_metrics(
         &self,
     ) -> Result<Vec<tidebreak_core::db::code::TurnMetric>, ServerError> {
         self.runtime.list_turn_metrics(&self.owner).await
     }
 
-    pub(crate) async fn list_pull_request_facts(
+    pub async fn list_pull_request_facts(
         &self,
     ) -> Result<Vec<tidebreak_core::CodePullRequestFact>, ServerError> {
         self.runtime.list_pull_request_facts(&self.owner).await
     }
 
-    pub(crate) async fn list_pull_request_attributions(
+    pub async fn list_pull_request_attributions(
         &self,
     ) -> Result<Vec<tidebreak_core::CodePullRequestAttribution>, ServerError> {
         self.runtime
@@ -674,7 +644,7 @@ impl ScopedCode {
             .await
     }
 
-    pub(crate) async fn fork_transcript(
+    pub async fn fork_transcript(
         &self,
         id: SessionId,
         at_turn: Option<tidebreak_core::TurnId>,
@@ -682,14 +652,14 @@ impl ScopedCode {
         self.runtime.fork_transcript(&self.owner, id, at_turn).await
     }
 
-    pub(crate) async fn session_debug(
+    pub async fn session_debug(
         &self,
         id: SessionId,
     ) -> Result<(Session, Vec<Turn>, Vec<SequencedEvent>), ServerError> {
         self.runtime.session_debug(&self.owner, id).await
     }
 
-    pub(crate) async fn resolve_turn_attachments(
+    pub async fn resolve_turn_attachments(
         &self,
         session_id: SessionId,
         requested: &[(uuid::Uuid, String)],
@@ -699,7 +669,7 @@ impl ScopedCode {
             .await
     }
 
-    pub(crate) async fn submit_turn(
+    pub async fn submit_turn(
         &self,
         id: SessionId,
         message: String,
@@ -719,14 +689,14 @@ impl ScopedCode {
             .await
     }
 
-    pub(crate) async fn list_queued_turns(
+    pub async fn list_queued_turns(
         &self,
         id: SessionId,
     ) -> Result<(Vec<QueuedTurn>, bool), ServerError> {
         self.runtime.list_queued_turns(&self.owner, id).await
     }
 
-    pub(crate) async fn update_queued_turn(
+    pub async fn update_queued_turn(
         &self,
         id: SessionId,
         queued_id: TurnId,
@@ -738,7 +708,7 @@ impl ScopedCode {
             .await
     }
 
-    pub(crate) async fn delete_queued_turn(
+    pub async fn delete_queued_turn(
         &self,
         id: SessionId,
         queued_id: TurnId,
@@ -748,19 +718,15 @@ impl ScopedCode {
             .await
     }
 
-    pub(crate) async fn set_queue_paused(
-        &self,
-        id: SessionId,
-        paused: bool,
-    ) -> Result<(), ServerError> {
+    pub async fn set_queue_paused(&self, id: SessionId, paused: bool) -> Result<(), ServerError> {
         self.runtime.set_queue_paused(&self.owner, id, paused).await
     }
 
-    pub(crate) async fn send_queued_now(&self, id: SessionId) -> Result<(), ServerError> {
+    pub async fn send_queued_now(&self, id: SessionId) -> Result<(), ServerError> {
         self.runtime.send_queued_now(&self.owner, id).await
     }
 
-    pub(crate) async fn set_reasoning_effort(
+    pub async fn set_reasoning_effort(
         &self,
         id: SessionId,
         effort: Option<ReasoningEffort>,
@@ -770,7 +736,7 @@ impl ScopedCode {
             .await
     }
 
-    pub(crate) async fn set_fast_mode(
+    pub async fn set_fast_mode(
         &self,
         id: SessionId,
         fast_mode: bool,
@@ -778,14 +744,14 @@ impl ScopedCode {
         self.runtime.set_fast_mode(&self.owner, id, fast_mode).await
     }
 
-    pub(crate) async fn interrupt(&self, id: SessionId) -> Result<(), ServerError> {
+    pub async fn interrupt(&self, id: SessionId) -> Result<(), ServerError> {
         // Authorize the session first: without this the worker registry would
         // answer for a session id whatever owner holds it.
         let _ = self.get_session(id).await?;
         self.runtime.interrupt(id).await
     }
 
-    pub(crate) async fn steer(
+    pub async fn steer(
         &self,
         id: SessionId,
         expected_turn_id: TurnId,
@@ -796,7 +762,7 @@ impl ScopedCode {
             .await
     }
 
-    pub(crate) async fn reap(&self, id: SessionId) -> Result<Session, ServerError> {
+    pub async fn reap(&self, id: SessionId) -> Result<Session, ServerError> {
         self.runtime.reap(&self.owner, id).await
     }
 
@@ -804,19 +770,19 @@ impl ScopedCode {
     // Adapter grants and the connect handshake (docs/slack-sessions.md).
     // ------------------------------------------------------------------
 
-    pub(crate) async fn list_adapter_grants(
+    pub async fn list_adapter_grants(
         &self,
     ) -> Result<Vec<tidebreak_core::CodeExternalGrant>, ServerError> {
         self.runtime.list_adapter_grants(&self.owner).await
     }
 
-    pub(crate) async fn list_adapter_grant_profiles(
+    pub async fn list_adapter_grant_profiles(
         &self,
     ) -> Result<Vec<tidebreak_core::CodeGrantProfile>, ServerError> {
         self.runtime.list_adapter_grant_profiles(&self.owner).await
     }
 
-    pub(crate) async fn revoke_adapter_grant(
+    pub async fn revoke_adapter_grant(
         &self,
         id: tidebreak_core::CodeGrantId,
         reason: &str,
@@ -826,7 +792,7 @@ impl ScopedCode {
             .await
     }
 
-    pub(crate) async fn revoke_workspace_grants(
+    pub async fn revoke_workspace_grants(
         &self,
         channel_kind: &str,
         workspace_identity: &str,
@@ -837,7 +803,7 @@ impl ScopedCode {
             .await
     }
 
-    pub(crate) async fn view_connect_handshake(
+    pub async fn view_connect_handshake(
         &self,
         nonce: &str,
     ) -> Result<Option<(tidebreak_core::CodeConnectHandshake, String)>, ServerError> {
@@ -846,7 +812,7 @@ impl ScopedCode {
             .await
     }
 
-    pub(crate) async fn approve_connect_handshake(
+    pub async fn approve_connect_handshake(
         &self,
         nonce: &str,
         csrf: &str,
@@ -856,7 +822,7 @@ impl ScopedCode {
             .await
     }
 
-    pub(crate) async fn set_permission_mode(
+    pub async fn set_permission_mode(
         &self,
         id: SessionId,
         mode: PermissionMode,
@@ -866,7 +832,7 @@ impl ScopedCode {
             .await
     }
 
-    pub(crate) async fn set_attention(
+    pub async fn set_attention(
         &self,
         id: SessionId,
         clear: bool,
@@ -881,7 +847,7 @@ impl ScopedCode {
     // Approvals.
     // ------------------------------------------------------------------
 
-    pub(crate) async fn list_approvals(
+    pub async fn list_approvals(
         &self,
         state: Option<ApprovalState>,
         session_id: Option<SessionId>,
@@ -891,7 +857,7 @@ impl ScopedCode {
             .await
     }
 
-    pub(crate) async fn decide_approval(
+    pub async fn decide_approval(
         &self,
         id: ApprovalId,
         decision: super::runtime::ApprovalDecisionRequest,
@@ -909,7 +875,7 @@ impl ScopedCode {
     // ------------------------------------------------------------------
 
     /// Reserve a validated image for one of the principal's sessions.
-    pub(crate) async fn publish_session_image(
+    pub async fn publish_session_image(
         &self,
         session_id: SessionId,
         image: &tidebreak_core::ImageRef,
@@ -924,33 +890,33 @@ impl ScopedCode {
         .await?)
     }
 
-    pub(crate) async fn list_sessions(&self) -> Result<Vec<Session>, ServerError> {
+    pub async fn list_sessions(&self) -> Result<Vec<Session>, ServerError> {
         self.runtime.list_sessions(&self.owner).await
     }
 
-    pub(crate) fn adapters(&self) -> &tidebreak_harness::AdapterRegistry {
+    pub fn adapters(&self) -> &tidebreak_harness::AdapterRegistry {
         &self.runtime.adapters
     }
 
-    pub(crate) fn adapter(
+    pub fn adapter(
         &self,
         kind: HarnessKind,
     ) -> Result<Arc<dyn tidebreak_harness::HarnessAdapter>, ServerError> {
         self.runtime.adapter(kind)
     }
 
-    pub(crate) async fn probe(
+    pub async fn probe(
         &self,
         adapter: &dyn tidebreak_harness::HarnessAdapter,
     ) -> tidebreak_harness::HarnessProbe {
         self.runtime.probe(adapter).await
     }
 
-    pub(crate) fn pin_install_error(&self, kind: HarnessKind) -> Option<String> {
+    pub fn pin_install_error(&self, kind: HarnessKind) -> Option<String> {
         self.runtime.pin_install_error(kind)
     }
 
-    pub(crate) fn invalidate_probes(&self) {
+    pub fn invalidate_probes(&self) {
         self.runtime.invalidate_probes();
     }
 
@@ -958,19 +924,17 @@ impl ScopedCode {
     /// true only on a gateway-authenticated hosted machine, whose engines
     /// carry no provider credentials of their own. The doctor reads this to
     /// decide whether the local sign-in probe answers the right question.
-    pub(crate) fn harness_llm_relay_active(&self) -> bool {
+    pub fn harness_llm_relay_active(&self) -> bool {
         self.runtime.harness_llm().is_some()
     }
 
     /// The engine inference relay, on a machine that has one. The hosted
     /// model listing reads the caller's gateway catalog through it.
-    pub(crate) fn harness_llm(&self) -> Option<Arc<super::harness_llm::HarnessLlmRelay>> {
+    pub fn harness_llm(&self) -> Option<Arc<super::harness_llm::HarnessLlmRelay>> {
         self.runtime.harness_llm()
     }
 
-    pub(crate) async fn gateway_model_snapshot(
-        &self,
-    ) -> Option<crate::providers::GatewayModelSnapshot> {
+    pub async fn gateway_model_snapshot(&self) -> Option<crate::providers::GatewayModelSnapshot> {
         self.runtime.gateway_model_snapshot(&self.owner).await
     }
 
@@ -980,7 +944,7 @@ impl ScopedCode {
     /// Progress reaches this principal's `/updates` socket; the binary it
     /// writes belongs to the machine, which is why the route sits on the
     /// deployment plane beside the doctor's refresh.
-    pub(crate) async fn start_harness_install(
+    pub async fn start_harness_install(
         &self,
         kind: HarnessKind,
         deliberate: bool,
@@ -992,17 +956,17 @@ impl ScopedCode {
 
     /// Ask the registry for every engine's newest release. See
     /// [`CodeRuntime::check_harness_updates`].
-    pub(crate) async fn check_harness_updates(&self) -> Result<(), String> {
+    pub async fn check_harness_updates(&self) -> Result<(), String> {
         self.runtime.check_harness_updates().await
     }
 
     /// The update channel this machine is on.
-    pub(crate) async fn harness_update_channel(&self) -> tidebreak_core::HarnessUpdateChannel {
+    pub async fn harness_update_channel(&self) -> tidebreak_core::HarnessUpdateChannel {
         self.runtime.harness_update_channel().await
     }
 
     /// Where one engine stands against its pin and the registry.
-    pub(crate) async fn harness_release_status(
+    pub async fn harness_release_status(
         &self,
         kind: HarnessKind,
     ) -> super::harness_release::HarnessReleaseStatus {

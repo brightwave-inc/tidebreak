@@ -38,7 +38,7 @@ use crate::state::AppState;
 /// honored.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RestApiDefinition {
+pub struct RestApiDefinition {
     /// Base URL the operation path templates append to.
     pub base_url: String,
     /// The bounded operation catalog ingested from the app's OpenAPI
@@ -55,7 +55,7 @@ pub(crate) struct RestApiDefinition {
 
 impl RestApiDefinition {
     /// The executor target this definition describes.
-    pub(crate) fn target(&self) -> RestApiTarget {
+    pub fn target(&self) -> RestApiTarget {
         RestApiTarget {
             base_url: self.base_url.clone(),
             credential: self.credential.clone(),
@@ -72,12 +72,12 @@ impl RestApiDefinition {
 /// point its credential at an arbitrary store key and have the CRUD routes
 /// act on it. [`crate::secret_rehome`] enumerates these keys from the stored
 /// records so re-homed profiles keep their REST credentials.
-pub(crate) fn rest_credential_secret_key(id: ConnectedAppId) -> String {
+pub fn rest_credential_secret_key(id: ConnectedAppId) -> String {
     format!("connected_app.{id}.credential")
 }
 
 /// Parse a `rest_api` record's definition JSON, failing closed per record.
-pub(crate) fn parse_rest_api_definition(
+pub fn parse_rest_api_definition(
     definition: &serde_json::Value,
 ) -> Result<RestApiDefinition, String> {
     serde_json::from_value(definition.clone())
@@ -115,7 +115,7 @@ pub(crate) fn parse_rest_api_definition(
 /// **This canonical form is a compatibility surface.** Persisted grants store
 /// the digest; changing the form (or the meaning of any field in it)
 /// invalidates every existing grant and must bump `v`.
-pub(crate) fn rest_api_fingerprint(definition: &RestApiDefinition) -> [u8; 32] {
+pub fn rest_api_fingerprint(definition: &RestApiDefinition) -> [u8; 32] {
     use sha2::Digest as _;
 
     #[derive(Serialize)]
@@ -152,10 +152,10 @@ pub(crate) fn rest_api_fingerprint(definition: &RestApiDefinition) -> [u8; 32] {
 /// One configured connected app's display name, kind, and current definition
 /// fingerprint — the tuple grant enforcement compares per record id. For an
 /// `mcp_server` app the name is also the namespace its tools mount under.
-pub(crate) struct AppFingerprint {
-    pub(crate) name: String,
-    pub(crate) kind: ConnectedAppKind,
-    pub(crate) fingerprint: [u8; 32],
+pub struct AppFingerprint {
+    pub name: String,
+    pub kind: ConnectedAppKind,
+    pub fingerprint: [u8; 32],
 }
 
 /// SHA-256 fingerprint of one gateway connected app as the gateway currently
@@ -188,7 +188,7 @@ pub(crate) struct AppFingerprint {
 /// **This canonical form is a compatibility surface.** Persisted grants store
 /// the digest; changing the form (or the meaning of any field in it)
 /// invalidates every existing grant and must bump `v`.
-pub(crate) fn gateway_app_fingerprint(
+pub fn gateway_app_fingerprint(
     gateway_base_url: &str,
     gateway_app_id: &str,
     catalog_sha256: &str,
@@ -226,7 +226,7 @@ pub(crate) fn gateway_app_fingerprint(
 /// gateway serves a catalog-document hash, this derivation is replaced by it
 /// — which moves every gateway fingerprint, so that change must bump the
 /// canonical form's `v`.
-pub(crate) fn catalog_sha256_from_operation_ids(operation_ids: &[String]) -> String {
+pub fn catalog_sha256_from_operation_ids(operation_ids: &[String]) -> String {
     use sha2::Digest as _;
     use std::fmt::Write as _;
 
@@ -249,10 +249,10 @@ pub(crate) fn catalog_sha256_from_operation_ids(operation_ids: &[String]) -> Str
 /// it so consent can check a manifest's pins against what the gateway
 /// currently declares — the gateway-side twin of the `rest_api` catalog
 /// lookup, without a second live read.
-pub(crate) struct GatewayAppFingerprint {
-    pub(crate) name: String,
-    pub(crate) operation_ids: Vec<String>,
-    pub(crate) fingerprint: [u8; 32],
+pub struct GatewayAppFingerprint {
+    pub name: String,
+    pub operation_ids: Vec<String>,
+    pub fingerprint: [u8; 32],
 }
 
 /// The current fingerprint of every configured connected app, across kinds.
@@ -261,7 +261,7 @@ pub(crate) struct GatewayAppFingerprint {
 /// are computed from the stored records. A `rest_api` record whose definition
 /// does not parse is skipped — it reads as not-configured, so every grant
 /// naming it fails closed to re-consent rather than matching anything.
-pub(crate) async fn current_app_fingerprints(
+pub async fn current_app_fingerprints(
     state: &AppState,
 ) -> tidebreak_core::Result<BTreeMap<ConnectedAppId, AppFingerprint>> {
     let mut current: BTreeMap<ConnectedAppId, AppFingerprint> = state
@@ -296,32 +296,32 @@ pub(crate) async fn current_app_fingerprints(
 /// The live surface grant enforcement compares pinned fingerprints against,
 /// across connected apps and connected folders — the one lookup the grant,
 /// invoke, and library surfaces share.
-pub(crate) struct CurrentFingerprints {
+pub struct CurrentFingerprints {
     /// Configured connected apps by record id.
-    pub(crate) apps: BTreeMap<ConnectedAppId, AppFingerprint>,
+    pub apps: BTreeMap<ConnectedAppId, AppFingerprint>,
     /// Host-approved connected folders, root id → display name. Empty when
     /// this embedding has no host-folder seam, so every folder binding fails
     /// closed to "not connected".
-    pub(crate) folders: BTreeMap<HostRootId, String>,
+    pub folders: BTreeMap<HostRootId, String>,
     /// Gateway connected apps this profile can currently read, by the
     /// gateway's app id. Empty when nothing readable answers — no gateway, no
     /// session, or no catalog — so every gateway binding fails closed to
     /// re-consent rather than matching a fingerprint over a catalog nobody
     /// read.
-    pub(crate) gateway_apps: BTreeMap<String, GatewayAppFingerprint>,
+    pub gateway_apps: BTreeMap<String, GatewayAppFingerprint>,
     /// Whether a gateway session answered the catalog read at all. False
     /// means the profile has no session to ask — unmanaged, signed out, or a
     /// gateway too old to serve catalogs — which consent reports differently
     /// from a session that answered and did not name the app. Vacuously true
     /// when no gateway app was needed, since nothing was read.
-    pub(crate) gateway_session: bool,
+    pub gateway_session: bool,
 }
 
 impl CurrentFingerprints {
     /// Whether one granted binding still pins what its target carries right
     /// now. A missing record, a disconnected folder, or a gateway app that
     /// does not currently read back is a mismatch, never a match.
-    pub(crate) fn grant_binding_current(&self, binding: &AppGrantBinding) -> bool {
+    pub fn grant_binding_current(&self, binding: &AppGrantBinding) -> bool {
         match binding {
             AppGrantBinding::Operations(binding) => self
                 .apps
@@ -345,7 +345,7 @@ impl CurrentFingerprints {
 /// is a separate live read, so callers name exactly the ids the bindings they
 /// are about to judge mention. An id nothing readable answers to is simply
 /// absent from the result, which reads as stale.
-pub(crate) async fn current_fingerprints(
+pub async fn current_fingerprints(
     state: &AppState,
     needed_gateway_apps: &BTreeSet<String>,
 ) -> tidebreak_core::Result<CurrentFingerprints> {
@@ -367,7 +367,7 @@ pub(crate) async fn current_fingerprints(
 }
 
 /// The gateway app ids a set of manifest bindings names.
-pub(crate) fn gateway_apps_bound_by<'a>(
+pub fn gateway_apps_bound_by<'a>(
     bindings: impl IntoIterator<Item = &'a tidebreak_core::local_app::AppBinding>,
 ) -> BTreeSet<String> {
     bindings
@@ -377,7 +377,7 @@ pub(crate) fn gateway_apps_bound_by<'a>(
 }
 
 /// The gateway app ids a set of grant bindings names.
-pub(crate) fn gateway_apps_granted_by<'a>(
+pub fn gateway_apps_granted_by<'a>(
     bindings: impl IntoIterator<Item = &'a AppGrantBinding>,
 ) -> BTreeSet<String> {
     bindings
@@ -387,7 +387,7 @@ pub(crate) fn gateway_apps_granted_by<'a>(
 }
 
 #[allow(unused_imports)]
-pub(crate) use tidebreak_gateway_runtime::{GatewayAppCatalog, GatewayCatalogSource};
+pub use tidebreak_gateway_runtime::{GatewayAppCatalog, GatewayCatalogSource};
 
 /// The current fingerprint of every readable gateway connected app among
 /// `needed`, by the gateway's app id.
@@ -427,7 +427,7 @@ async fn current_gateway_app_fingerprints(
 /// check pinned operation ids) and invoke dispatch needs the whole
 /// definition; both read through here so "configured" always means "parses
 /// closed".
-pub(crate) async fn current_rest_definitions(
+pub async fn current_rest_definitions(
     state: &AppState,
 ) -> tidebreak_core::Result<Vec<(ConnectedAppId, String, RestApiDefinition)>> {
     Ok(state
@@ -448,7 +448,7 @@ pub(crate) async fn current_rest_definitions(
 /// driven against a fake transport in tests while production always executes
 /// through the real [`RestExecutor`] stack.
 #[async_trait]
-pub(crate) trait RestOperationDispatcher: Send + Sync {
+pub trait RestOperationDispatcher: Send + Sync {
     async fn dispatch(
         &self,
         target: &RestApiTarget,
@@ -471,7 +471,7 @@ impl<T: RestTransport, R: RestHostResolver> RestOperationDispatcher for RestExec
 
 /// The production dispatcher: the governed executor over the real transport
 /// and resolver, resolving credentials from the given secret store.
-pub(crate) fn governed_rest_dispatcher(
+pub fn governed_rest_dispatcher(
     secrets: Arc<dyn SecretProvider>,
 ) -> Arc<dyn RestOperationDispatcher> {
     Arc::new(RestExecutor::new(
@@ -481,7 +481,7 @@ pub(crate) fn governed_rest_dispatcher(
     ))
 }
 
-pub(crate) use tidebreak_gateway_runtime::{
+pub use tidebreak_gateway_runtime::{
     GatewayConsentRelay, GatewayDispatchError, GatewayDraftSource, GatewayInvokeDispatcher,
     GatewayOperationRequest, GatewayRegistration,
 };

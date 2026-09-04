@@ -14,7 +14,7 @@ use crate::bus::EventBus;
 use crate::code_execution::ConfiguredExecProvider;
 use crate::resolver::ProviderResolver;
 
-pub(crate) struct ServerSandboxHost {
+pub struct ServerSandboxHost {
     store: Arc<dyn Store>,
     secrets: Arc<dyn SecretProvider>,
     resolver: Arc<dyn ProviderResolver>,
@@ -23,7 +23,7 @@ pub(crate) struct ServerSandboxHost {
 }
 
 impl ServerSandboxHost {
-    pub(crate) fn new(
+    pub fn new(
         store: Arc<dyn Store>,
         secrets: Arc<dyn SecretProvider>,
         resolver: Arc<dyn ProviderResolver>,
@@ -90,15 +90,15 @@ impl SandboxHost for ServerSandboxHost {
     }
 
     async fn resolve_chat_model(&self, chat: &Chat, boot_default: &str) -> Result<String> {
-        crate::routes::resolve_chat_model(&*self.store, chat, boot_default).await
+        crate::runtime_settings::resolve_chat_model(&*self.store, chat, boot_default).await
     }
 
     async fn checkin_steps_override(&self) -> Result<Option<u32>> {
-        crate::routes::read_sandbox_agent_checkin_steps_override(&*self.store).await
+        crate::runtime_settings::read_sandbox_agent_checkin_steps_override(&*self.store).await
     }
 
     async fn error_checkin_threshold(&self) -> Result<u32> {
-        crate::routes::read_sandbox_agent_error_checkin(&*self.store).await
+        crate::runtime_settings::read_sandbox_agent_error_checkin(&*self.store).await
     }
 
     async fn resolve_web_search(

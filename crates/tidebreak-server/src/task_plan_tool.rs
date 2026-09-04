@@ -16,12 +16,12 @@ use tidebreak_core::{
 };
 
 /// Replace the conversation's task plan.
-pub(crate) struct UpdateTaskPlanTool {
+pub struct UpdateTaskPlanTool {
     store: Arc<dyn Store>,
 }
 
 impl UpdateTaskPlanTool {
-    pub(crate) fn new(store: Arc<dyn Store>) -> Self {
+    pub fn new(store: Arc<dyn Store>) -> Self {
         Self { store }
     }
 }

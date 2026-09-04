@@ -38,7 +38,7 @@ fn call_id_of(approval: &Approval) -> Option<&str> {
 }
 
 /// Abandon the pending approval parked on `call_id`, if there is one.
-pub(crate) async fn abandon_for_call(
+pub async fn abandon_for_call(
     db: &DbStore,
     bus: &CodeEventBus,
     owner: &OwnerId,

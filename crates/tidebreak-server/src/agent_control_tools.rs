@@ -27,9 +27,9 @@ use uuid::Uuid;
 use crate::state::{SandboxAttemptGuard, SandboxSteerGuard};
 
 /// Stable name for the foreground child-resume tool.
-pub(crate) const RESUME_AGENT_TOOL: &str = "resume_agent";
+pub const RESUME_AGENT_TOOL: &str = "resume_agent";
 /// Stable name for the foreground child-cancel tool.
-pub(crate) const CANCEL_AGENT_TOOL: &str = "cancel_agent";
+pub const CANCEL_AGENT_TOOL: &str = "cancel_agent";
 
 /// Process-local acceleration after a durable sandbox cancellation commits.
 ///
@@ -39,7 +39,7 @@ pub(crate) const CANCEL_AGENT_TOOL: &str = "cancel_agent";
 /// container drive. Every signal is only a latency hint: durable cancellation
 /// and terminal-write fencing remain authoritative.
 #[derive(Clone)]
-pub(crate) struct SandboxCancellationAcceleration {
+pub struct SandboxCancellationAcceleration {
     store: Arc<dyn Store>,
     attempts: Arc<SandboxAttemptGuard>,
     steering: Arc<SandboxSteerGuard>,
@@ -47,7 +47,7 @@ pub(crate) struct SandboxCancellationAcceleration {
 }
 
 impl SandboxCancellationAcceleration {
-    pub(crate) fn new(
+    pub fn new(
         store: Arc<dyn Store>,
         attempts: Arc<SandboxAttemptGuard>,
         steering: Arc<SandboxSteerGuard>,
@@ -71,7 +71,7 @@ impl SandboxCancellationAcceleration {
     }
 
     /// Signal the exact local owners named by a committed cancellation.
-    pub(crate) async fn signal_after_commit(
+    pub async fn signal_after_commit(
         &self,
         run_id: AgentRunId,
         committed_lease_token: Option<Uuid>,
@@ -160,12 +160,12 @@ async fn own_background_child(
 }
 
 /// Resume a background child paused at a check-in, optionally with guidance.
-pub(crate) struct ResumeAgentTool {
+pub struct ResumeAgentTool {
     store: Arc<dyn Store>,
 }
 
 impl ResumeAgentTool {
-    pub(crate) fn new(store: Arc<dyn Store>) -> Self {
+    pub fn new(store: Arc<dyn Store>) -> Self {
         Self { store }
     }
 }
@@ -260,20 +260,20 @@ impl Tool for ResumeAgentTool {
 }
 
 /// Cancel one of the conversation's background children.
-pub(crate) struct CancelAgentTool {
+pub struct CancelAgentTool {
     store: Arc<dyn Store>,
     cancellation_acceleration: SandboxCancellationAcceleration,
 }
 
 impl CancelAgentTool {
-    pub(crate) fn new(store: Arc<dyn Store>) -> Self {
+    pub fn new(store: Arc<dyn Store>) -> Self {
         Self {
             cancellation_acceleration: SandboxCancellationAcceleration::detached(store.clone()),
             store,
         }
     }
 
-    pub(crate) fn with_cancellation_acceleration(
+    pub fn with_cancellation_acceleration(
         mut self,
         cancellation_acceleration: SandboxCancellationAcceleration,
     ) -> Self {

@@ -22,8 +22,8 @@ use tidebreak_core::{HarnessKind, HarnessUpdateChannel, OwnerId};
 
 use super::bus::{CodeLiveUpdate, HarnessInstallProgress};
 use super::runtime::CodeRuntime;
+use crate::code::types::CodeHarnessInstallSnapshot;
 use crate::error::ServerError;
-use crate::routes::code::CodeHarnessInstallSnapshot;
 
 /// The pin is on disk and its probe is warm.
 const PHASE_READY: &str = "ready";

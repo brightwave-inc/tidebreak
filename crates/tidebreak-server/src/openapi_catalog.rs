@@ -684,7 +684,7 @@ fn truncate_to_display_prefix(text: &str) -> String {
 }
 
 /// Lowercase-hex SHA-256 of the raw document bytes.
-pub(crate) fn sha256_hex(document: &[u8]) -> String {
+pub fn sha256_hex(document: &[u8]) -> String {
     tidebreak_core::sha256_hex(document)
 }
 

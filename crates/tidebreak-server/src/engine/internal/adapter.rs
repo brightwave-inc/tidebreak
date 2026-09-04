@@ -25,7 +25,7 @@ use crate::state::AppState;
 /// into the runtime that owns it. What it does keep from the runtime is the
 /// journal store and the session bus, because the lane journals straight
 /// into the session's code journal and the engine follows it there.
-pub(crate) struct InternalAdapter {
+pub struct InternalAdapter {
     state: AppState,
     db: Arc<DbStore>,
     bus: Arc<CodeEventBus>,
@@ -36,7 +36,7 @@ pub(crate) struct InternalAdapter {
 }
 
 impl InternalAdapter {
-    pub(crate) fn new(state: AppState, db: Arc<DbStore>, bus: Arc<CodeEventBus>) -> Self {
+    pub fn new(state: AppState, db: Arc<DbStore>, bus: Arc<CodeEventBus>) -> Self {
         let driver = LegDriver::new(
             state.store.clone(),
             state.resolver.clone(),

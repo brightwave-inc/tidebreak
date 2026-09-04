@@ -56,15 +56,14 @@
 //! clients cannot disagree about how long an id, a timestamp, or a cursor may
 //! be.
 
+pub use crate::approvals::ApprovalGrantRung;
 pub use crate::event_projection::{
     RendererAgentEvent, RendererChatFrame, RendererChatMetadata, RendererModelIdentity,
     RendererRefusal, RendererSequencedEvent, RendererToolFailure, RendererToolFailureCode,
     RendererToolFailureReason, RendererToolStatus, RendererTurnUsage, TurnFailureCategory,
 };
 pub use crate::providers::ProviderKind;
-pub use crate::routes::{
-    AgentActivityHistoryItem, AgentActivityKind, AgentActivityOutcome, ApprovalGrantRung,
-};
+pub use crate::routes::{AgentActivityHistoryItem, AgentActivityKind, AgentActivityOutcome};
 
 // REST records (brightwave-inc/tidebreak#3005). One block per route family.
 pub use crate::mcp_config::{McpHealth, McpServerDefinition, McpServerInfo, McpServersInfo};
@@ -85,7 +84,7 @@ pub use crate::routes::{
 // socket above: closed vocabularies, unknown keys rejected, an unknown notice
 // or event type failing its frame. The fixtures in `fixtures/code-frames.json`
 // are serialized from these types (see `wire_code_fixtures`).
-pub use crate::routes::code::types::{
+pub use crate::code::types::{
     ApprovalSnapshot, CodeActionSnapshot, CodeCommitSnapshot, CodeFileChange, CodePushSnapshot,
     CodeRepoSnapshot, CodeWatchSnapshot, CodeWorkspaceDiff, CodeWorkspaceFiles,
     CodeWorkspacePrSnapshot, CodeWorkspaceSnapshot, HarnessAuthMode, HarnessDoctorEntry,

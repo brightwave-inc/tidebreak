@@ -26,13 +26,13 @@ use super::bus::{CodeEventBus, CodeLiveUpdate, TurnRewriteNotice, TurnRewriteSta
 
 /// Store key. Default off: a completed turn is not rewritten until the reader
 /// turns this on.
-pub(crate) const REWRITE_CLOSING_SETTING: &str = "code.rewrite_closing";
+pub const REWRITE_CLOSING_SETTING: &str = "code.rewrite_closing";
 
 /// Longest rewrite stored, and the bound the schema states.
 ///
 /// Enforced by rejection rather than truncation, so a model that ignores it
 /// loses the answer instead of having it cut mid-word.
-pub(crate) const MAX_REWRITE_CHARS: usize = 4_000;
+pub const MAX_REWRITE_CHARS: usize = 4_000;
 
 /// Most of the closing message a rewrite call reads.
 const MAX_REWRITE_SOURCE_BYTES: usize = 8 * 1024;
@@ -49,7 +49,7 @@ const REWRITE_SCHEMA_NAME: &str = "turn_rewrite";
 /// The model's answer to one rewrite call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RewriteProposal {
+pub struct RewriteProposal {
     /// Lucid rewrite of the closing message, or `null` when the original
     /// should stand.
     #[schemars(length(max = MAX_REWRITE_CHARS))]
@@ -78,7 +78,7 @@ At most {MAX_REWRITE_CHARS} characters. Answer {{"rewrite":null}} when the origi
 
 /// What one background rewrite run concluded.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Outcome {
+pub enum Outcome {
     /// A rewrite was stored on the turn.
     Rewritten(String),
     /// The model declined: the original stands.
@@ -95,7 +95,7 @@ pub(crate) enum Outcome {
 /// [`crate::state::AppState`], which would close a reference cycle through
 /// [`super::runtime::CodeRuntime`]. Absent in headless deployments and tests
 /// that register none, exactly like the recap hook.
-pub(crate) trait TurnRewrite: Send + Sync {
+pub trait TurnRewrite: Send + Sync {
     /// Derive and store the rewrite for `turn_id`. Returns immediately; nothing
     /// waits on the result and a lost rewrite costs nothing.
     fn spawn(&self, owner: OwnerId, session_id: SessionId, turn_id: TurnId);
@@ -103,7 +103,7 @@ pub(crate) trait TurnRewrite: Send + Sync {
 
 /// Derives rewrites on the utility role, one at a time per session.
 #[derive(Clone)]
-pub(crate) struct TurnRewriter {
+pub struct TurnRewriter {
     /// Per-caller gateway capabilities on a hosted machine (decisions 51 and
     /// 62): a rewrite runs as the owner of the session it describes.
     on_behalf_of: Option<Arc<crate::obo_gateway::OboGateway>>,
@@ -120,7 +120,7 @@ pub(crate) struct TurnRewriter {
 }
 
 impl TurnRewriter {
-    pub(crate) fn new(
+    pub fn new(
         db: Arc<DbStore>,
         bus: Arc<CodeEventBus>,
         store: Arc<dyn tidebreak_core::Store>,
@@ -142,7 +142,7 @@ impl TurnRewriter {
         }
     }
 
-    pub(crate) fn with_on_behalf_of_gateway(
+    pub fn with_on_behalf_of_gateway(
         mut self,
         gateway: Option<Arc<crate::obo_gateway::OboGateway>>,
     ) -> Self {
@@ -154,7 +154,7 @@ impl TurnRewriter {
     ///
     /// The awaitable form of [`TurnRewrite::spawn`], which is what a test
     /// asserts on.
-    pub(crate) async fn derive(
+    pub async fn derive(
         &self,
         owner: &OwnerId,
         session_id: SessionId,
@@ -329,7 +329,7 @@ impl TurnRewrite for TurnRewriter {
 }
 
 /// Whether closing-message rewrite is on. Default off.
-pub(crate) async fn rewrite_closing_enabled(
+pub async fn rewrite_closing_enabled(
     store: &dyn tidebreak_core::Store,
 ) -> tidebreak_core::Result<bool> {
     Ok(store

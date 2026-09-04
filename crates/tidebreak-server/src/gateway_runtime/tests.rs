@@ -3,11 +3,13 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use super::relay::shared_app_invoke_body;
+use super::*;
 use axum::extract::{Form, State};
-use axum::http::{HeaderMap, Request};
+use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
-use axum::{Extension, Router as AxumRouter};
+use axum::Router as AxumRouter;
 use futures::StreamExt;
 use serde_json::{json, Value};
 use tidebreak_core::id::{AppId, AppRevisionId};
@@ -15,14 +17,7 @@ use tidebreak_core::local_app::{
     AppGatewayOperationsGrantBinding, AppGrant, AppGrantBinding, AppManifest, CreateApp,
     NewAppRevision,
 };
-use tidebreak_core::{
-    AgentConfig, ChatMessage, ChatRequest, Config, DbStore, ModelProvider, OwnerId, ProviderId,
-    Role, ToolRegistry,
-};
-use tower::ServiceExt;
-
-use super::relay::shared_app_invoke_body;
-use super::*;
+use tidebreak_core::{ChatMessage, ChatRequest, DbStore, ModelProvider, OwnerId, ProviderId, Role};
 
 /// The relay body is the gateway's `proxy_api` vocabulary: absent halves
 /// must be absent keys, never null — the gateway's `serde(default)`
@@ -1249,7 +1244,7 @@ async fn apps_carry_readiness_from_the_member_catalog() {
 }
 
 #[tokio::test]
-async fn gateway_apps_route_scopes_used_by_count_to_the_authenticated_principal() {
+async fn gateway_apps_scope_used_by_count_to_the_owner() {
     let gateway = Arc::new(FakeGateway::default());
     *gateway.catalog.lock().unwrap() = Some(sample_catalog());
     let address = serve(gateway).await;
@@ -1297,81 +1292,17 @@ async fn gateway_apps_route_scopes_used_by_count_to_the_authenticated_principal(
         .await
         .unwrap();
 
-    struct RouteTestResolver;
-
-    #[async_trait]
-    impl crate::resolver::ProviderResolver for RouteTestResolver {
-        async fn resolve(&self) -> Arc<dyn ModelProvider> {
-            Arc::new(crate::provider::UnconfiguredProvider)
-        }
-    }
-
-    let secrets: Arc<dyn SecretProvider> = Arc::new(MockSecrets::default());
-    let chatgpt = Arc::new(
-        crate::chatgpt_runtime::ChatGptRuntime::new(store.clone(), secrets.clone()).unwrap(),
-    );
-    let state = crate::state::AppState::with_gateway_runtime(
-        Config::desktop(directory.path()),
-        store,
-        Arc::new(RouteTestResolver),
-        secrets,
-        Arc::new(ToolRegistry::new()),
-        AgentConfig::default(),
-        uuid::Uuid::new_v4(),
-        runtime,
-        chatgpt,
-        crate::managed_policy::MemoryProvisionedPolicy::new(),
-        Arc::new(crate::managed_policy::NoOsPolicy),
-    )
-    .unwrap();
-
-    async fn count_for(
-        state: crate::state::AppState,
-        principal: crate::principal::Principal,
-    ) -> usize {
-        let response = AxumRouter::new()
-            .route("/gateway/apps", get(crate::routes::get_gateway_apps))
-            .with_state(state)
-            .layer(Extension(crate::principal::AuthContext {
-                principal,
-                client_executor: false,
-            }))
-            .oneshot(
-                Request::builder()
-                    .uri("/gateway/apps")
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), axum::http::StatusCode::OK);
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        serde_json::from_slice::<Value>(&body).unwrap()["apps"][0]["used_by_app_count"]
-            .as_u64()
-            .unwrap() as usize
-    }
-
-    let alice_count = count_for(
-        state.clone(),
-        crate::principal::Principal::User {
-            id: crate::principal::UserId::new("alice").unwrap(),
-            role: crate::principal::Role::Member,
-        },
-    )
-    .await;
-    let bob_count = count_for(
-        state,
-        crate::principal::Principal::User {
-            id: crate::principal::UserId::new("bob").unwrap(),
-            role: crate::principal::Role::Member,
-        },
-    )
-    .await;
+    let alice_count = runtime.apps(&alice).await.unwrap().apps[0].used_by_app_count;
+    let bob_count = runtime
+        .apps(&OwnerId::new("user:bob").unwrap())
+        .await
+        .unwrap()
+        .apps[0]
+        .used_by_app_count;
 
     assert_eq!(alice_count, 1);
     assert_eq!(bob_count, 0);
+    drop(directory);
 }
 
 #[tokio::test]

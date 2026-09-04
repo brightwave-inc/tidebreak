@@ -2,10 +2,10 @@
 
 #[cfg(test)]
 pub(crate) mod fixtures;
-pub(crate) mod service;
+pub mod service;
 
-pub(crate) use tidebreak_code_remote::{driver, gateway, wire};
-pub(crate) use tidebreak_code_remote::{
+pub use tidebreak_code_remote::{driver, gateway, wire};
+pub use tidebreak_code_remote::{
     RemoteReapError, RemoteSandboxError, RuntimeToken, RuntimeTokenSource, SandboxProvisioner,
 };
 

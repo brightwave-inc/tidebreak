@@ -143,7 +143,7 @@ pub trait HostFolders: Send + Sync {
 /// **This canonical form is a compatibility surface.** Persisted grants
 /// store the digest; changing the form (or the meaning of any field in it)
 /// invalidates every folder grant and must bump `v`.
-pub(crate) fn folder_fingerprint(folder: HostRootId, access: FolderAccess) -> [u8; 32] {
+pub fn folder_fingerprint(folder: HostRootId, access: FolderAccess) -> [u8; 32] {
     use serde::Serialize;
     use sha2::Digest as _;
 

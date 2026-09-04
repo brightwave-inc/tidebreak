@@ -22,7 +22,7 @@ use tidebreak_egress::{
 
 use crate::error::ServerError;
 
-pub(crate) const CODE_EXECUTION_SETTING: &str = "code_execution";
+pub const CODE_EXECUTION_SETTING: &str = "code_execution";
 /// Generous enough for a cold `pip install` that pulls compiled wheels
 /// (lxml, Pillow); 20s proved too tight and cut installs off mid-retry with
 /// empty stderr. Still host-owned: the model cannot request a longer limit.
@@ -48,7 +48,7 @@ pub(super) fn permits_package_installs(policy: &NetworkPolicy) -> bool {
 /// Custom entries are exact DNS hosts. Wildcards, address literals, and
 /// duplicate spellings are refused or collapsed before persistence so every
 /// renderer and provider compiles the same authority.
-pub(crate) fn normalize_network_policy(
+pub fn normalize_network_policy(
     policy: &mut NetworkPolicy,
 ) -> std::result::Result<(), ServerError> {
     let NetworkPolicy::AllowedHosts { allowed_hosts, .. } = policy else {

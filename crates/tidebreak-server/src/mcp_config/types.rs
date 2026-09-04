@@ -19,14 +19,14 @@ use super::validation::validate_servers;
 
 pub(super) const CONFIG_ENV: &str = "TIDEBREAK_MCP_CONFIG";
 pub(super) const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
-pub(crate) const MAX_CONFIG_BODY_BYTES: usize = 1024 * 1024;
+pub const MAX_CONFIG_BODY_BYTES: usize = 1024 * 1024;
 pub(super) const MAX_SERVERS: usize = 32;
 pub(super) const MAX_ARGS: usize = 128;
 pub(super) const MAX_ENVIRONMENT_VARIABLES: usize = 128;
 pub(super) const MAX_PROCESS_STRING_BYTES: usize = 32 * 1024;
 pub(super) const MAX_ENVIRONMENT_NAME_BYTES: usize = 256;
 pub(super) const MAX_REQUEST_TIMEOUT_MS: u64 = 60 * 60 * 1000;
-pub(crate) const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 60 * 1000;
+pub const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 60 * 1000;
 pub(super) const HEALTH_INTERVAL: Duration = Duration::from_secs(15);
 pub(super) const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 pub(super) const INITIALIZATION_TIMEOUT: Duration = Duration::from_secs(10);
@@ -37,7 +37,7 @@ pub(super) const MAX_RECONNECT_BACKOFF: Duration = Duration::from_secs(30);
 /// policy holds. The definitions stay persisted — inert, not deleted — so an
 /// unprovisioned profile is byte-for-byte unaffected and the list stays
 /// legible instead of servers silently vanishing.
-pub(crate) const MANAGED_DISABLED_DIAGNOSTIC: &str =
+pub const MANAGED_DISABLED_DIAGNOSTIC: &str =
     "Disabled by managed policy. Gateway-managed MCP endpoints remain available.";
 
 /// Persisted memory of the gateway endpoints the user explicitly unmounted:
@@ -46,7 +46,7 @@ pub(crate) const MANAGED_DISABLED_DIAGNOSTIC: &str =
 /// committed settings replacement removes its mount, cleared when one
 /// configures it again, and never touched by auto-mount, so "the user turned
 /// this off" survives restarts without a second copy of the configuration.
-pub(crate) const GATEWAY_ENDPOINT_UNMOUNTS_KEY: &str = "gateway.endpoint_unmounts_v1";
+pub const GATEWAY_ENDPOINT_UNMOUNTS_KEY: &str = "gateway.endpoint_unmounts_v1";
 
 /// Upper bound on remembered unmounts. Entitled slugs are already bounded by
 /// the gateway and configured mounts by [`MAX_SERVERS`]; this only caps what
@@ -56,7 +56,7 @@ pub(super) const MAX_REMEMBERED_UNMOUNTS: usize = 256;
 
 /// How far managed policy locks the manual transports right now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ManualLockdown {
+pub enum ManualLockdown {
     /// Unmanaged: nothing is locked.
     Open,
     /// Managed with `AllowLocalMcpServers`: local stdio servers are the
@@ -70,7 +70,7 @@ pub(crate) enum ManualLockdown {
 
 impl ManualLockdown {
     /// The lockdown a resolved policy asserts.
-    pub(crate) fn for_policy(policy: &crate::managed_policy::ManagedPolicy) -> Self {
+    pub fn for_policy(policy: &crate::managed_policy::ManagedPolicy) -> Self {
         if !policy.managed {
             Self::Open
         } else if policy.allow_local_mcp_servers {
@@ -83,14 +83,14 @@ impl ManualLockdown {
 
 /// Validated external servers selected by the legacy boot file.
 #[derive(Default)]
-pub(crate) struct ConfiguredMcpServers(pub(super) Vec<McpServerDefinition>);
+pub struct ConfiguredMcpServers(pub(super) Vec<McpServerDefinition>);
 
 impl ConfiguredMcpServers {
-    pub(crate) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
-    pub(crate) fn from_env() -> Result<Self> {
+    pub fn from_env() -> Result<Self> {
         let Some(path) = std::env::var_os(CONFIG_ENV).filter(|path| !path.is_empty()) else {
             return Ok(Self::default());
         };
@@ -130,8 +130,8 @@ impl ConfiguredMcpServers {
 /// Complete persisted MCP configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct McpServersConfig {
-    pub(crate) servers: Vec<McpServerDefinition>,
+pub struct McpServersConfig {
+    pub servers: Vec<McpServerDefinition>,
 }
 
 /// One external MCP server definition: a local stdio process (`command`), a
@@ -199,27 +199,27 @@ pub struct McpServerDefinition {
     /// API responses, or logs.
     #[serde(skip)]
     #[ts(skip)]
-    pub(crate) launch: Option<Box<PluginLaunch>>,
+    pub launch: Option<Box<PluginLaunch>>,
 }
 
 /// Connect-time material a plugin-sourced server carries.
 #[derive(Clone, PartialEq, Eq)]
-pub(crate) struct PluginLaunch {
+pub struct PluginLaunch {
     /// Absolute, resolved package root: `PLUGIN_ROOT`, and the directory a
     /// `./`-relative command is resolved against.
-    pub(crate) root: PathBuf,
+    pub root: PathBuf,
     /// Client-managed writable directory: `PLUGIN_DATA`.
-    pub(crate) data: PathBuf,
+    pub data: PathBuf,
     /// Literal environment for a stdio server, already expanded.
-    pub(crate) env: BTreeMap<String, String>,
+    pub env: BTreeMap<String, String>,
     /// Static headers for a streamable-http server.
-    pub(crate) headers: BTreeMap<String, String>,
+    pub headers: BTreeMap<String, String>,
     /// Which root the working directory is anchored to, and so which one it
     /// has to stay inside.
-    pub(crate) cwd_anchor: CwdAnchor,
+    pub cwd_anchor: CwdAnchor,
     /// Why this entry is present but inert, for the transports this client
     /// does not implement.
-    pub(crate) disabled_reason: Option<String>,
+    pub disabled_reason: Option<String>,
 }
 
 /// The root a plugin server's working directory is anchored to.
@@ -229,7 +229,7 @@ pub(crate) struct PluginLaunch {
 /// while the data tree is client-managed and starts empty. Which one was named
 /// is therefore carried rather than inferred from the resolved path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CwdAnchor {
+pub enum CwdAnchor {
     Root,
     Data,
 }
@@ -269,8 +269,8 @@ impl std::fmt::Debug for McpServerDefinition {
 }
 
 #[cfg(test)]
-pub(crate) use tidebreak_gateway_runtime::GatewayEndpointAccess;
-pub(crate) use tidebreak_gateway_runtime::{GatewayEndpoints, GatewayRosterApp};
+pub use tidebreak_gateway_runtime::GatewayEndpointAccess;
+pub use tidebreak_gateway_runtime::{GatewayEndpoints, GatewayRosterApp};
 
 /// [`tidebreak_mcp::CallBearerSource`] over the gateway resolver for one
 /// mounted endpoint: each `tools/call` presents the calling chat's token.
@@ -289,9 +289,9 @@ impl tidebreak_mcp::CallBearerSource for GatewayCallBearer {
 /// One prefetched MCP Apps view document, served to the renderer only through
 /// the dedicated view route and rendered only inside its sandboxed frame.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct UiViewDocument {
-    pub(crate) mime_type: Option<String>,
-    pub(crate) html: String,
+pub struct UiViewDocument {
+    pub mime_type: Option<String>,
+    pub html: String,
 }
 
 impl McpServerDefinition {
@@ -572,7 +572,7 @@ async fn admit_plugin_endpoint(url: &str) -> Result<()> {
 /// **This canonical form is a compatibility surface.** Persisted grants store
 /// the digest; changing the form (or the meaning of any field in it)
 /// invalidates every existing grant and must bump `v`.
-pub(crate) fn definition_fingerprint(definition: &McpServerDefinition) -> [u8; 32] {
+pub fn definition_fingerprint(definition: &McpServerDefinition) -> [u8; 32] {
     use sha2::Digest as _;
 
     #[derive(Serialize)]
@@ -633,7 +633,7 @@ pub(super) const fn default_request_timeout_ms() -> u64 {
 /// Derived from the connected-app record id, never from anything in a
 /// request, so this surface can only ever read and write its own secrets.
 /// Mirrors `rest_credential_secret_key` for the REST connected-app kind.
-pub(crate) fn env_secret_key(id: ConnectedAppId) -> String {
+pub fn env_secret_key(id: ConnectedAppId) -> String {
     format!("mcp.{id}.env_v1")
 }
 
@@ -677,7 +677,7 @@ pub(super) const fn enabled_by_default() -> bool {
 }
 
 /// What a policy-aware replacement did.
-pub(crate) enum McpReplaceOutcome {
+pub enum McpReplaceOutcome {
     Replaced(McpServersInfo),
     /// Managed policy refused these manual servers. Nothing changed.
     RefusedManual(Vec<String>),
@@ -745,11 +745,11 @@ pub struct McpServersInfo {
 
 /// One configured connected app's current namespace and definition
 /// fingerprint, the pair grant enforcement compares per record id.
-pub(crate) struct McpAppFingerprint {
+pub struct McpAppFingerprint {
     /// The configured server name — the namespace its tools mount under.
-    pub(crate) name: String,
+    pub name: String,
     /// [`definition_fingerprint`] of the current definition.
-    pub(crate) fingerprint: [u8; 32],
+    pub fingerprint: [u8; 32],
 }
 
 /// `create_app` re-registered with the live connected-app roster appended to
@@ -789,10 +789,10 @@ pub(super) const ROSTER_OPERATION_IDS: usize = 20;
 
 /// One configured `rest_api` connected app's roster inputs: the record id a
 /// binding names and the operation ids its catalog declares.
-pub(crate) struct RestRosterApp {
-    pub(crate) id: ConnectedAppId,
-    pub(crate) name: String,
-    pub(crate) operation_ids: Vec<String>,
+pub struct RestRosterApp {
+    pub id: ConnectedAppId,
+    pub name: String,
+    pub operation_ids: Vec<String>,
 }
 
 /// The roster text appended to `create_app`'s description: every configured

@@ -53,18 +53,18 @@ const MAX_CAPTURE_CHARS: usize = 4 * 1024;
 /// One captured memory candidate, or a hypothesis observation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct MemoryCandidate {
+pub struct MemoryCandidate {
     /// The knowledge category.
-    pub(crate) kind: MemoryKind,
+    pub kind: MemoryKind,
     /// One plain line stating when this memory matters.
     #[schemars(length(min = 1, max = MAX_MEMORY_TITLE_CHARS))]
-    pub(crate) title: String,
+    pub title: String,
     /// The memory itself, as short markdown.
     #[schemars(length(min = 1, max = MAX_MEMORY_BODY_BYTES))]
-    pub(crate) body: String,
+    pub body: String,
     /// True for a weak, first-observation pattern that should be tracked
     /// rather than proposed for review.
-    pub(crate) hypothesis: bool,
+    pub hypothesis: bool,
 }
 
 /// The model's answer to one capture call.
@@ -114,7 +114,7 @@ Answer {{"memory":null}} for most turns — a memory persists across every later
 
 /// What one background capture run concluded.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Outcome {
+pub enum Outcome {
     /// A new proposal was stored for review.
     Proposed(MemoryRecordId),
     /// A new hypothesis was stored, or an existing one observed again.
@@ -134,7 +134,7 @@ pub(crate) enum Outcome {
 /// Holds handles rather than an `AppState`, like the titler and the code
 /// recapper, so the worker that owns it is not also owned by it.
 #[derive(Clone)]
-pub(crate) struct MemoryCapture {
+pub struct MemoryCapture {
     /// Per-caller gateway capabilities on a hosted machine (decisions 51 and
     /// 62): capture runs as the owner of the chat it reads.
     on_behalf_of: Option<Arc<crate::obo_gateway::OboGateway>>,
@@ -154,7 +154,7 @@ pub(crate) struct MemoryCapture {
 
 impl MemoryCapture {
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
+    pub fn new(
         store: Arc<dyn Store>,
         memory: Arc<dyn MemoryBackend>,
         resolver: Arc<dyn ProviderResolver>,
@@ -176,7 +176,7 @@ impl MemoryCapture {
         }
     }
 
-    pub(crate) fn with_on_behalf_of_gateway(
+    pub fn with_on_behalf_of_gateway(
         mut self,
         gateway: Option<Arc<crate::obo_gateway::OboGateway>>,
     ) -> Self {
@@ -189,7 +189,7 @@ impl MemoryCapture {
     /// Returns immediately. Nothing waits on the result and nothing fails
     /// when it does not arrive, which is what lets the turn worker call this
     /// from its one completion seam without touching the turn's outcome.
-    pub(crate) fn spawn(&self, chat_id: SessionId, turn_id: TurnId) {
+    pub fn spawn(&self, chat_id: SessionId, turn_id: TurnId) {
         let Some((mut claim, mut turn_id)) =
             CaptureClaim::acquire(&self.in_flight, chat_id, turn_id)
         else {
@@ -241,7 +241,7 @@ impl MemoryCapture {
     ///
     /// The awaitable form of [`MemoryCapture::spawn`], which is what a test
     /// asserts on.
-    pub(crate) async fn derive(&self, chat_id: SessionId, turn_id: TurnId) -> Result<Outcome> {
+    pub async fn derive(&self, chat_id: SessionId, turn_id: TurnId) -> Result<Outcome> {
         if !capture_enabled(&*self.store).await? {
             return Ok(Outcome::NotApplicable);
         }
@@ -307,7 +307,7 @@ impl MemoryCapture {
     ///
     /// Crate-visible so the storage tier is testable without a live utility
     /// model; production reaches it only through [`MemoryCapture::derive`].
-    pub(crate) async fn store_candidate(
+    pub async fn store_candidate(
         &self,
         owner: &OwnerId,
         chat_id: SessionId,
@@ -576,12 +576,12 @@ fn capture_store_error(error: tidebreak_core::MemoryError) -> tidebreak_core::Ag
 /// capture switch, both stored settings. Both switches default off.
 pub(crate) async fn capture_enabled(store: &dyn Store) -> Result<bool> {
     let enabled = store
-        .get_setting(crate::routes::MEMORY_ENABLED_SETTING)
+        .get_setting(crate::runtime_settings::MEMORY_ENABLED_SETTING)
         .await?
         .and_then(|value| value.as_bool())
         .unwrap_or(false);
     let capture = store
-        .get_setting(crate::routes::MEMORY_CAPTURE_ENABLED_SETTING)
+        .get_setting(crate::runtime_settings::MEMORY_CAPTURE_ENABLED_SETTING)
         .await?
         .and_then(|value| value.as_bool())
         .unwrap_or(false);

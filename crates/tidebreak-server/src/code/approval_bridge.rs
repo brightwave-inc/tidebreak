@@ -68,24 +68,19 @@ struct ApprovalParks {
 
 /// In-process park for session-scoped permission-prompt MCP calls.
 #[derive(Default)]
-pub(crate) struct ApprovalBridge {
+pub struct ApprovalBridge {
     tokens: Mutex<HashMap<String, ApprovalTokenSubject>>,
     by_session: Mutex<HashMap<SessionId, String>>,
     parked: Mutex<ApprovalParks>,
 }
 
 impl ApprovalBridge {
-    pub(crate) fn new() -> Arc<Self> {
+    pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
     }
 
     /// Mint a worker-scoped token. Every older token and parked call dies.
-    pub(crate) fn issue_token(
-        &self,
-        owner: &OwnerId,
-        session_id: SessionId,
-        spawn_epoch: i64,
-    ) -> String {
+    pub fn issue_token(&self, owner: &OwnerId, session_id: SessionId, spawn_epoch: i64) -> String {
         let token = format!("cma_{}", Uuid::new_v4());
         let mut by_session = self.by_session.lock().expect("approval tokens");
         let mut tokens = self.tokens.lock().expect("approval tokens");
@@ -112,7 +107,7 @@ impl ApprovalBridge {
     }
 
     /// Revoke one worker's bearer and close every native call it parked.
-    pub(crate) fn revoke_session(&self, session_id: SessionId) {
+    pub fn revoke_session(&self, session_id: SessionId) {
         let mut by_session = self.by_session.lock().expect("approval tokens");
         let mut tokens = self.tokens.lock().expect("approval tokens");
         let mut parked = self.parked.lock().expect("approval park");

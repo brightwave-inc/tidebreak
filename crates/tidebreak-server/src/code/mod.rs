@@ -4,55 +4,56 @@
 //! in `tidebreak-harness`. This module owns git worktrees, the per-session
 //! worker, crash recovery, and the live event bus.
 
-pub(crate) mod approval_bridge;
-pub(crate) mod approval_sweep;
-pub(crate) mod attention;
-pub(crate) mod browser_channel;
-pub(crate) mod browser_runtime;
-pub(crate) mod bus;
-pub(crate) mod checkpoint;
-pub(crate) mod ci_logs;
-pub(crate) mod clone;
-pub(crate) mod delivery;
-pub(crate) mod forge_rest;
-pub(crate) mod fork;
-pub(crate) mod gh;
-pub(crate) mod grants;
-pub(crate) mod harness_install;
-pub(crate) mod harness_llm;
-pub(crate) mod harness_release;
-pub(crate) mod memory;
-pub(crate) mod memory_capture;
-pub(crate) mod naming_settings;
-pub(crate) mod pr_facts;
-pub(crate) mod pr_fetch;
-pub(crate) mod pr_refresh;
-pub(crate) mod recap;
-pub(crate) mod reconcile;
-pub(crate) mod recovery;
-pub(crate) mod remote;
-pub(crate) mod rewrite;
-pub(crate) mod runtime;
-pub(crate) mod scoped;
-pub(crate) mod scratch;
-pub(crate) mod session_worker;
-pub(crate) mod setup_script;
-pub(crate) mod terminal;
-pub(crate) mod titling;
-pub(crate) mod trigger;
-pub(crate) mod watch;
-pub(crate) mod worktree;
-pub(crate) mod worktree_orphans;
-pub(crate) mod worktree_root;
+pub mod approval_bridge;
+pub mod approval_sweep;
+pub mod attention;
+pub mod browser_channel;
+pub mod browser_runtime;
+pub mod bus;
+pub mod checkpoint;
+pub mod ci_logs;
+pub mod clone;
+pub mod delivery;
+pub mod forge_rest;
+pub mod fork;
+pub mod gh;
+pub mod grants;
+pub mod harness_install;
+pub mod harness_llm;
+pub mod harness_release;
+pub mod memory;
+pub mod memory_capture;
+pub mod naming_settings;
+pub mod pr_facts;
+pub mod pr_fetch;
+pub mod pr_refresh;
+pub mod recap;
+pub mod reconcile;
+pub mod recovery;
+pub mod remote;
+pub mod rewrite;
+pub mod runtime;
+pub mod scoped;
+pub mod scratch;
+pub mod session_worker;
+pub mod setup_script;
+pub mod terminal;
+pub mod titling;
+pub mod trigger;
+pub mod types;
+pub mod watch;
+pub mod worktree;
+pub mod worktree_orphans;
+pub mod worktree_root;
 
-pub(crate) use runtime::CodeRuntime;
-pub(crate) use scoped::ScopedCode;
+pub use runtime::CodeRuntime;
+pub use scoped::ScopedCode;
 
 /// Timestamp used to rank sessions for trigger delivery and its UI preview.
 ///
 /// A session with turns ranks by its newest turn start. A session with no
 /// turns ranks by creation time.
-pub(crate) fn trigger_target_at(
+pub fn trigger_target_at(
     session_created_at: chrono::DateTime<chrono::Utc>,
     latest_turn_started_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> chrono::DateTime<chrono::Utc> {
@@ -64,7 +65,7 @@ pub(crate) fn trigger_target_at(
 /// A session with no workspace (the in-process engine's) answers `None`
 /// rather than a missing-row error, so callers that need a checkout can
 /// skip the work instead of failing the session.
-pub(crate) async fn session_workspace(
+pub async fn session_workspace(
     db: &tidebreak_core::db::DbStore,
     session: &tidebreak_core::Session,
 ) -> Result<Option<tidebreak_core::CodeWorkspace>, tidebreak_core::AgentError> {
@@ -77,7 +78,7 @@ pub(crate) async fn session_workspace(
 }
 
 /// The display name the product uses for an engine, wherever copy names one.
-pub(crate) fn harness_label(kind: tidebreak_core::HarnessKind) -> &'static str {
+pub fn harness_label(kind: tidebreak_core::HarnessKind) -> &'static str {
     match kind {
         tidebreak_core::HarnessKind::ClaudeCode => "Claude Code",
         tidebreak_core::HarnessKind::Codex => "Codex CLI",

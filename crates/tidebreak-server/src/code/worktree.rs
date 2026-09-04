@@ -19,13 +19,13 @@ const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 const GIT_WORKTREE_TIMEOUT: Duration = Duration::from_secs(120);
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(15);
 /// Default number of paths the tree route returns.
-pub(crate) const DEFAULT_TREE_LIMIT: u32 = 50;
+pub const DEFAULT_TREE_LIMIT: u32 = 50;
 /// Hard cap on the tree route. The explorer may request this many paths.
-pub(crate) const MAX_TREE_LIMIT: u32 = 5_000;
+pub const MAX_TREE_LIMIT: u32 = 5_000;
 /// Default number of matching lines returned by content search.
-pub(crate) const DEFAULT_SEARCH_LIMIT: u32 = 200;
+pub const DEFAULT_SEARCH_LIMIT: u32 = 200;
 /// Hard cap for one content-search response.
-pub(crate) const MAX_SEARCH_LIMIT: u32 = 500;
+pub const MAX_SEARCH_LIMIT: u32 = 500;
 const MAX_SEARCH_QUERY_CHARS: usize = 500;
 const MAX_SEARCH_PREVIEW_CHARS: usize = 500;
 const ARCHIVE_SCAN_MAX_PATH_BYTES: usize = 1024 * 1024;
@@ -44,7 +44,7 @@ const NOUNS: &[&str] = &[
 
 /// A validated, canonical local git repository.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ValidatedRepo {
+pub struct ValidatedRepo {
     pub toplevel: PathBuf,
 }
 
@@ -54,7 +54,7 @@ pub(crate) struct ValidatedRepo {
 /// form returned by `canonicalize`. Repository identity is also
 /// case-insensitive there.
 #[cfg(windows)]
-pub(crate) fn repo_paths_equivalent(left: &Path, right: &Path) -> bool {
+pub fn repo_paths_equivalent(left: &Path, right: &Path) -> bool {
     use windows_sys::Win32::Globalization::{CompareStringOrdinal, CSTR_EQUAL};
 
     let left = windows_repo_path_identity(left);
@@ -72,7 +72,7 @@ pub(crate) fn repo_paths_equivalent(left: &Path, right: &Path) -> bool {
 }
 
 #[cfg(not(windows))]
-pub(crate) fn repo_paths_equivalent(left: &Path, right: &Path) -> bool {
+pub fn repo_paths_equivalent(left: &Path, right: &Path) -> bool {
     left == right
 }
 
@@ -134,7 +134,7 @@ fn wide_ascii_upper(unit: u16) -> u16 {
 
 /// Why a workspace archive needs an explicit `force`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ArchiveBlock {
+pub enum ArchiveBlock {
     Uncommitted,
     Unpushed,
     UncommittedAndUnpushed,
@@ -142,7 +142,7 @@ pub(crate) enum ArchiveBlock {
 }
 
 impl ArchiveBlock {
-    pub(crate) fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             Self::Uncommitted => "uncommitted",
             Self::Unpushed => "unpushed",
@@ -154,7 +154,7 @@ impl ArchiveBlock {
 
 /// Failure from a git or worktree operation.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum WorktreeError {
+pub enum WorktreeError {
     #[error("{0}")]
     User(String),
     #[error("You cannot start from `{looked_for}`. None of these resolve: {tried}. Choose a reachable base ref and try again.")]
@@ -168,7 +168,7 @@ pub(crate) enum WorktreeError {
 }
 
 impl WorktreeError {
-    pub(crate) fn user(message: impl Into<String>) -> Self {
+    pub fn user(message: impl Into<String>) -> Self {
         Self::User(message.into())
     }
 
@@ -213,7 +213,7 @@ struct WorktreeOperationMarker {
 /// durable. A failed durable write can then remove only the checkout and ref
 /// that still match this operation.
 #[derive(Debug)]
-pub(crate) struct WorktreeOperation {
+pub struct WorktreeOperation {
     repo_root: PathBuf,
     marker_path: PathBuf,
     marker: WorktreeOperationMarker,
@@ -221,13 +221,13 @@ pub(crate) struct WorktreeOperation {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RestoredBranch {
+pub enum RestoredBranch {
     Created,
     Existing,
 }
 
 /// Name-matched git-tracked and untracked-unignored paths. Never file contents.
-pub(crate) async fn list_tree_paths(
+pub async fn list_tree_paths(
     worktree_path: &Path,
     query: &str,
     limit: u32,
@@ -260,17 +260,17 @@ pub(crate) async fn list_tree_paths(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct WorktreeSearchMatch {
-    pub(crate) path: String,
-    pub(crate) line_number: u32,
-    pub(crate) line: String,
+pub struct WorktreeSearchMatch {
+    pub path: String,
+    pub line_number: u32,
+    pub line: String,
 }
 
 /// Literal, case-insensitive content search across tracked and untracked files
 /// that are not ignored by Git. Git's own grep engine keeps the hot path fast;
 /// results are streamed and the process is stopped after one row beyond the
 /// requested bound, so a one-character query cannot flood server memory.
-pub(crate) async fn search_worktree_contents(
+pub async fn search_worktree_contents(
     worktree_path: &Path,
     query: &str,
     include: &str,
@@ -489,7 +489,7 @@ fn path_name_matches(path: &str, needle: &str) -> bool {
 }
 
 /// Validate a path as a non-bare git repository and return its canonical toplevel.
-pub(crate) async fn validate_repo_path(path: &Path) -> Result<ValidatedRepo, WorktreeError> {
+pub async fn validate_repo_path(path: &Path) -> Result<ValidatedRepo, WorktreeError> {
     let requested = path.to_path_buf();
     if let Ok(bare) = git_stdout(
         Some(&requested),
@@ -526,7 +526,7 @@ pub(crate) async fn validate_repo_path(path: &Path) -> Result<ValidatedRepo, Wor
 /// Tries the configured ref, then the target of `refs/remotes/origin/HEAD`,
 /// then `main`, then `master`, then the current branch. A remote-only
 /// `origin/<name>` is accepted when the local branch does not exist.
-pub(crate) async fn resolve_default_base_ref(
+pub async fn resolve_default_base_ref(
     repo_root: &Path,
     configured: Option<&str>,
 ) -> Result<String, WorktreeError> {
@@ -568,7 +568,7 @@ pub(crate) async fn resolve_default_base_ref(
 
 /// Resolve one requested ref, including `origin/<name>` when the local branch
 /// is missing. Does not walk sibling default names.
-pub(crate) async fn resolve_named_base_ref(
+pub async fn resolve_named_base_ref(
     repo_root: &Path,
     reference: &str,
 ) -> Result<String, WorktreeError> {
@@ -592,7 +592,7 @@ pub(crate) async fn resolve_named_base_ref(
 }
 
 /// Create a worktree and branch under the Tidebreak data directory.
-pub(crate) async fn create_worktree(
+pub async fn create_worktree(
     repo_root: &Path,
     worktree_path: &Path,
     branch: &str,
@@ -610,7 +610,7 @@ pub(crate) async fn create_worktree(
 }
 
 /// True when `refs/heads/<branch>` exists in the repository.
-pub(crate) async fn branch_exists(repo_root: &Path, branch: &str) -> Result<bool, WorktreeError> {
+pub async fn branch_exists(repo_root: &Path, branch: &str) -> Result<bool, WorktreeError> {
     match git(
         Some(repo_root),
         &[
@@ -639,7 +639,7 @@ pub(crate) async fn branch_exists(repo_root: &Path, branch: &str) -> Result<bool
 /// not a flag on it: create atomically mints a branch, while restore must never
 /// mint one. The branch surviving archive is what makes the workspace worth
 /// restoring.
-pub(crate) async fn restore_worktree(
+pub async fn restore_worktree(
     repo_root: &Path,
     worktree_path: &Path,
     branch: &str,
@@ -655,7 +655,7 @@ pub(crate) async fn restore_worktree(
 }
 
 /// Re-create a released branch from its bundle and check out its exact tip.
-pub(crate) async fn restore_released_worktree(
+pub async fn restore_released_worktree(
     repo_root: &Path,
     worktree_path: &Path,
     branch: &str,
@@ -676,7 +676,7 @@ pub(crate) async fn restore_released_worktree(
 }
 
 /// Re-create a released branch directly from a commit the repository retains.
-pub(crate) async fn restore_released_tip_worktree(
+pub async fn restore_released_tip_worktree(
     repo_root: &Path,
     worktree_path: &Path,
     branch: &str,
@@ -723,7 +723,7 @@ impl WorktreeOperation {
     }
 
     /// Release the reservation after the final workspace row is durable.
-    pub(crate) async fn complete(self) {
+    pub async fn complete(self) {
         if let Err(error) = self.remove_registration_marker().await {
             tracing::warn!(
                 path = %self.marker.worktree_path,
@@ -742,7 +742,7 @@ impl WorktreeOperation {
     }
 
     /// Remove only the unchanged checkout and branch created by this attempt.
-    pub(crate) async fn rollback(&self) {
+    pub async fn rollback(&self) {
         let owns_marker = match self.owns_marker().await {
             Ok(owns_marker) => owns_marker,
             Err(error) => {
@@ -1354,7 +1354,7 @@ async fn branch_is_registered(repo_root: &Path, branch: &str) -> Result<bool, Wo
 }
 
 /// Run the setup script, if any. Failure preserves the checkout.
-pub(crate) async fn run_setup_script(
+pub async fn run_setup_script(
     worktree_path: &Path,
     repo_root: &Path,
     workspace_name: &str,
@@ -1365,7 +1365,7 @@ pub(crate) async fn run_setup_script(
 
 /// Run the archive script, if any. Failure preserves the checkout, so the
 /// caller must not remove the worktree when this returns an error.
-pub(crate) async fn run_archive_script(
+pub async fn run_archive_script(
     worktree_path: &Path,
     repo_root: &Path,
     workspace_name: &str,
@@ -1414,7 +1414,7 @@ async fn run_hook_script(
 }
 
 /// Whether the worktree has uncommitted or unpushed work that archive must not discard.
-pub(crate) async fn archive_blockers(
+pub async fn archive_blockers(
     worktree_path: &Path,
     base_ref: &str,
 ) -> Result<Option<ArchiveBlock>, WorktreeError> {
@@ -1438,10 +1438,7 @@ pub(crate) async fn archive_blockers(
 /// The branch is kept. `force` is required by the caller when the checkout
 /// has uncommitted or unpushed work; this function uses `git worktree remove
 /// --force` so a dirty tree does not block the removal itself.
-pub(crate) async fn remove_worktree(
-    repo_root: &Path,
-    worktree_path: &Path,
-) -> Result<(), WorktreeError> {
+pub async fn remove_worktree(repo_root: &Path, worktree_path: &Path) -> Result<(), WorktreeError> {
     let path = worktree_path.to_string_lossy();
     match git(
         Some(repo_root),
@@ -1469,7 +1466,7 @@ pub(crate) async fn remove_worktree(
 /// Bundles are derived data, not user work: unlike a worktree (decision 53)
 /// they belong in the disposable app-data directory, beside the database that
 /// records them.
-pub(crate) fn bundle_path(data_dir: &Path, workspace: &uuid::Uuid) -> PathBuf {
+pub fn bundle_path(data_dir: &Path, workspace: &uuid::Uuid) -> PathBuf {
     data_dir
         .join("code")
         .join("bundles")
@@ -1477,7 +1474,7 @@ pub(crate) fn bundle_path(data_dir: &Path, workspace: &uuid::Uuid) -> PathBuf {
 }
 
 /// The commit a branch points at.
-pub(crate) async fn branch_tip(repo_root: &Path, branch: &str) -> Result<String, WorktreeError> {
+pub async fn branch_tip(repo_root: &Path, branch: &str) -> Result<String, WorktreeError> {
     let sha = git_stdout(
         Some(repo_root),
         &["rev-parse", &format!("refs/heads/{branch}")],
@@ -1494,7 +1491,7 @@ pub(crate) async fn branch_tip(repo_root: &Path, branch: &str) -> Result<String,
 /// the repository, so carrying it would multiply the bundle by the size of the
 /// project for nothing. What is left is the work this workspace did, which is
 /// what a restore needs to put the branch back.
-pub(crate) async fn create_bundle(
+pub async fn create_bundle(
     repo_root: &Path,
     base_ref: &str,
     branch: &str,
@@ -1654,7 +1651,7 @@ async fn restore_released_tip(
 /// Release has already recorded the exact tip and bundled any branch-only
 /// commits, so `-D` is the honest flag: `-d` would refuse exactly the unmerged
 /// branches release exists to reclaim.
-pub(crate) async fn delete_branch(repo_root: &Path, branch: &str) -> Result<(), WorktreeError> {
+pub async fn delete_branch(repo_root: &Path, branch: &str) -> Result<(), WorktreeError> {
     git(Some(repo_root), &["branch", "-D", branch], GIT_TIMEOUT)
         .await
         .map(|_| ())
@@ -1662,7 +1659,7 @@ pub(crate) async fn delete_branch(repo_root: &Path, branch: &str) -> Result<(), 
 }
 
 /// Drop stale worktree registrations from the repo.
-pub(crate) async fn prune_worktrees(repo_root: &Path) -> Result<(), WorktreeError> {
+pub async fn prune_worktrees(repo_root: &Path) -> Result<(), WorktreeError> {
     git(Some(repo_root), &["worktree", "prune"], GIT_TIMEOUT)
         .await
         .map(|_| ())
@@ -1670,7 +1667,7 @@ pub(crate) async fn prune_worktrees(repo_root: &Path) -> Result<(), WorktreeErro
 }
 
 /// Slug used in data-dir paths and, with the repo prefix, in branch names.
-pub(crate) fn slugify(value: &str) -> String {
+pub fn slugify(value: &str) -> String {
     let mut slug = String::new();
     let mut last_dash = false;
     for ch in value.chars() {
@@ -1694,7 +1691,7 @@ pub(crate) fn slugify(value: &str) -> String {
 /// Branch name: repo prefix plus a title slug, or a generated name that also
 /// carries the workspace id. The id keeps the 400 readable word pairs from
 /// colliding with an older workspace or a concurrent create.
-pub(crate) fn branch_name(prefix: &str, title: &str, id: &uuid::Uuid) -> String {
+pub fn branch_name(prefix: &str, title: &str, id: &uuid::Uuid) -> String {
     let slug = slugify(title);
     let slug = if slug.is_empty() {
         format!("{}-{}", two_word_name(id.as_u128()), short_id(id))
@@ -1705,7 +1702,7 @@ pub(crate) fn branch_name(prefix: &str, title: &str, id: &uuid::Uuid) -> String 
 }
 
 /// Branch name from a slug that the workspace allocator already resolved.
-pub(crate) fn branch_name_from_slug(prefix: &str, slug: &str) -> String {
+pub fn branch_name_from_slug(prefix: &str, slug: &str) -> String {
     let prefix = if prefix.is_empty() {
         String::new()
     } else if prefix.ends_with('/') {
@@ -1727,7 +1724,7 @@ pub(crate) fn branch_name_from_slug(prefix: &str, slug: &str) -> String {
 /// The repo segment is the slug alone. Workspace ids are unique across every
 /// repo, so two repos that share a name share a folder without ever sharing a
 /// worktree.
-pub(crate) fn worktree_dir(
+pub fn worktree_dir(
     root: &Path,
     workspace_id: tidebreak_core::WorkspaceId,
     repo_slug: &str,
@@ -1743,13 +1740,13 @@ pub(crate) fn worktree_dir(
 /// The default worktree root for an embedding that names no visible one:
 /// `<data_dir>/code/worktrees`, where every worktree lived before the root
 /// became configurable.
-pub(crate) fn data_dir_worktree_root(data_dir: &Path) -> PathBuf {
+pub fn data_dir_worktree_root(data_dir: &Path) -> PathBuf {
     data_dir.join("code").join("worktrees")
 }
 
 /// First eight hex digits of a UUID — enough to separate the workspaces one
 /// person runs, short enough to keep the path readable.
-pub(crate) fn short_id(id: &uuid::Uuid) -> String {
+pub fn short_id(id: &uuid::Uuid) -> String {
     id.simple().to_string()[..8].to_owned()
 }
 
@@ -1761,7 +1758,7 @@ fn dir_segment<'a>(slug: &'a str, fallback: &'a str) -> &'a str {
     }
 }
 
-pub(crate) fn two_word_name(seed: u128) -> String {
+pub fn two_word_name(seed: u128) -> String {
     let adjective = ADJECTIVES[(seed % ADJECTIVES.len() as u128) as usize];
     let noun = NOUNS[((seed / ADJECTIVES.len() as u128) % NOUNS.len() as u128) as usize];
     format!("{adjective}-{noun}")
@@ -1771,7 +1768,7 @@ const MAX_BLOB_BYTES: usize = 512 * 1_024;
 
 /// One worktree file's text, bounded so a huge blob cannot fill the viewer.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct WorktreeBlob {
+pub struct WorktreeBlob {
     pub path: String,
     pub content: String,
     pub truncated: bool,
@@ -1779,7 +1776,7 @@ pub(crate) struct WorktreeBlob {
 }
 
 /// Read one relative worktree file as UTF-8 text.
-pub(crate) async fn read_worktree_file(
+pub async fn read_worktree_file(
     worktree_path: &Path,
     relative: &str,
 ) -> Result<WorktreeBlob, WorktreeError> {

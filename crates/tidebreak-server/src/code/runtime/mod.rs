@@ -82,9 +82,9 @@ use super::worktree::{
     remove_worktree, run_archive_script, run_setup_script, slugify, validate_repo_path,
     worktree_dir, WorktreeError,
 };
+use crate::code::types::{CodeDeliveryPullRequestTarget, CodeGitHubRepositoryTarget};
 use crate::error::ServerError;
 use crate::managed_policy::ManagedPolicy;
-use crate::routes::code::types::{CodeDeliveryPullRequestTarget, CodeGitHubRepositoryTarget};
 
 mod adapters;
 mod approvals;
@@ -104,7 +104,7 @@ use settings::{normalize_model, refuse_ceiling_with_no_offered_mode, refuse_unho
 /// Optional metadata on `POST /code/repos`. Every field left `None` takes
 /// the value [`CodeRuntime::register_repo`] derives from the checkout.
 #[derive(Debug, Default)]
-pub(crate) struct RepoRegistration {
+pub struct RepoRegistration {
     /// Set only by the clone path: the remote the checkout came from, which
     /// is what makes the directory Tidebreak's to reclaim later.
     pub cloned_from: Option<String>,
@@ -118,7 +118,7 @@ pub(crate) struct RepoRegistration {
 }
 
 /// Result of `POST /sessions/{id}/turns`.
-pub(crate) enum SubmitTurnOutcome {
+pub enum SubmitTurnOutcome {
     /// The session was idle; the turn ran to a terminal event.
     Ran(Box<Turn>),
     /// The session or its workspace was busy; the message parked as a
@@ -133,7 +133,7 @@ pub(crate) enum SubmitTurnOutcome {
 /// stage 2). A replayed delivery answers with the same shape the first one
 /// earned, derived from the row's current state.
 #[derive(Debug)]
-pub(crate) enum ExternalMessageOutcome {
+pub enum ExternalMessageOutcome {
     /// The message became a running turn.
     NewTurn(Box<Turn>),
     /// The session was busy; the message sits as a durable queue row.
@@ -144,22 +144,22 @@ pub(crate) enum ExternalMessageOutcome {
 }
 
 /// Shared code-mode services for the process.
-pub(crate) struct CodeRuntime {
+pub struct CodeRuntime {
     pub db: Arc<DbStore>,
     pub bus: Arc<CodeEventBus>,
     pub adapters: AdapterRegistry,
     pub data_dir: PathBuf,
     /// Visible worktree root this embedding names, if any. The stored
     /// `code_worktree_root` setting overrides it; see [`super::worktree_root`].
-    pub(crate) worktree_root_default: Option<PathBuf>,
+    pub worktree_root_default: Option<PathBuf>,
     /// Where this embedding places clones when no `code_clone_parent_dir`
     /// is stored. The self-host profile sets `{data_dir}/code/src` so a
     /// hosted machine never asks a caller to name a path they cannot see
     /// (decision 70).
-    pub(crate) clone_parent_default: Option<PathBuf>,
+    pub clone_parent_default: Option<PathBuf>,
     pub blobs: Arc<dyn tidebreak_core::BlobStore>,
     pub approvals: Arc<ApprovalBridge>,
-    pub(crate) browser_tokens: BrowserTokenRegistry,
+    pub browser_tokens: BrowserTokenRegistry,
     /// The desktop browser adapter, installed before recovery starts. Absent
     /// in headless deployments and tests that do not register one.
     browser_runtime: Option<Arc<dyn crate::code::browser_runtime::BrowserRuntime>>,
@@ -189,7 +189,7 @@ pub(crate) struct CodeRuntime {
     remote: Option<Arc<super::remote::service::RemoteSessions>>,
     /// Live fan-out for adapter-grant revocations, so an event stream
     /// holding a revoked grant drops immediately (docs/slack-sessions.md).
-    pub(crate) grant_revocations: Arc<super::grants::GrantRevocations>,
+    pub grant_revocations: Arc<super::grants::GrantRevocations>,
     loopback_base: Mutex<Option<String>>,
     /// Memoized harness probes, one per kind. See [`CodeRuntime::probe`].
     probes: Mutex<HashMap<HarnessKind, HarnessProbe>>,
@@ -228,17 +228,17 @@ pub(crate) struct CodeRuntime {
     /// decides if the timeline read is worth paying, and the required
     /// approval count anchors the review-decision word (decision 66).
     branch_rules: Mutex<HashMap<String, CachedBranchRules>>,
-    pub(crate) delivery_cache: DeliveryCache,
-    pub(crate) clone_jobs: CloneJobs,
+    pub delivery_cache: DeliveryCache,
+    pub clone_jobs: CloneJobs,
     /// Warm harness installs started ahead of a session create.
     pub(super) harness_installs: HarnessInstallJobs,
     /// The registry's last answer per engine, for the doctor's update rows.
     pub(super) harness_releases: super::harness_release::KnownReleases,
-    #[cfg(test)]
-    pub(crate) gh_search_path: Mutex<Option<String>>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub gh_search_path: Mutex<Option<String>>,
     /// Forge REST base override, so tests point decision 65's reads at a
     /// loopback fake while the lending gate still names github.com.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     forge_api_base: Mutex<Option<String>>,
     stall_sweep: Mutex<Option<super::attention::StallSweepGuard>>,
     stall_started: AtomicBool,
@@ -268,9 +268,9 @@ pub(crate) struct CodeRuntime {
     /// (`super::rewrite`). Installed the same way as recap.
     rewrite: Mutex<Option<Arc<dyn super::rewrite::TurnRewrite>>>,
     memory_capture: Mutex<Option<Arc<dyn super::memory_capture::TurnMemoryCapture>>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     archive_shutdown_timeout: AtomicBool,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fail_next_workspace_release_metadata: AtomicBool,
 }
 
@@ -289,7 +289,7 @@ struct DeliveryNudgeDebounce {
 
 /// The exact merge target the runtime accepted plus the refreshed workspace
 /// status after the host action.
-pub(crate) struct WorkspaceMergeOutcome {
+pub struct WorkspaceMergeOutcome {
     pub target: CodeDeliveryPullRequestTarget,
     pub accepted_head_sha: String,
     pub status: WorkspaceGitStatus,
@@ -377,7 +377,7 @@ struct CachedBranchRules {
 /// and the routes that move them mid-conversation move them one at a time
 /// against the same session row.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct NewSessionSettings {
+pub struct NewSessionSettings {
     pub permission_mode: PermissionMode,
     pub model: Option<String>,
     /// `None` leaves the engine's own default in force.
@@ -393,7 +393,7 @@ pub(crate) struct NewSessionSettings {
 
 impl CodeRuntime {
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(
+    pub fn new(
         db: Arc<DbStore>,
         data_dir: PathBuf,
         worktree_root_default: Option<PathBuf>,
@@ -450,9 +450,9 @@ impl CodeRuntime {
             clone_jobs: CloneJobs::default(),
             harness_installs: HarnessInstallJobs::default(),
             harness_releases: super::harness_release::KnownReleases::default(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             gh_search_path: Mutex::new(None),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             forge_api_base: Mutex::new(None),
             stall_sweep: Mutex::new(None),
             stall_started: AtomicBool::new(false),
@@ -470,9 +470,9 @@ impl CodeRuntime {
             recap: Mutex::new(None),
             rewrite: Mutex::new(None),
             memory_capture: Mutex::new(None),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             archive_shutdown_timeout: AtomicBool::new(false),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             fail_next_workspace_release_metadata: AtomicBool::new(false),
         }
     }
@@ -485,21 +485,19 @@ impl CodeRuntime {
     }
 
     /// The per-caller git-forge lender, on a machine that has one.
-    pub(crate) fn git_credentials(
-        &self,
-    ) -> Option<&Arc<dyn crate::obo_gateway::GitCredentialLender>> {
+    pub fn git_credentials(&self) -> Option<&Arc<dyn crate::obo_gateway::GitCredentialLender>> {
         self.git_credentials.as_ref()
     }
 
     /// The engine inference relay, on a machine that has one.
-    pub(crate) fn harness_llm(&self) -> Option<Arc<super::harness_llm::HarnessLlmRelay>> {
+    pub fn harness_llm(&self) -> Option<Arc<super::harness_llm::HarnessLlmRelay>> {
         self.harness_llm.clone()
     }
 
     /// The gateway model snapshot that applies to this caller. Hosted
     /// machines read the caller's catalog; local machines use the synced
     /// deployment snapshot.
-    pub(crate) async fn gateway_model_snapshot(
+    pub async fn gateway_model_snapshot(
         &self,
         owner: &OwnerId,
     ) -> Option<crate::providers::GatewayModelSnapshot> {
@@ -522,7 +520,7 @@ impl CodeRuntime {
     /// keep it off the bind critical path; the base is published before that
     /// future exists, so a session created while recovery is still in flight
     /// is wired exactly like a recovered one.
-    pub(crate) fn start(
+    pub fn start(
         self: &Arc<Self>,
         loopback_base: String,
     ) -> std::pin::Pin<
@@ -548,17 +546,13 @@ impl CodeRuntime {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_registry(
-        db: Arc<DbStore>,
-        data_dir: PathBuf,
-        adapters: AdapterRegistry,
-    ) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_registry(db: Arc<DbStore>, data_dir: PathBuf, adapters: AdapterRegistry) -> Self {
         Self::with_registry_and_browser_runtime(db, data_dir, adapters, None, None)
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_registry_and_browser_runtime(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_registry_and_browser_runtime(
         db: Arc<DbStore>,
         data_dir: PathBuf,
         adapters: AdapterRegistry,
@@ -571,7 +565,7 @@ impl CodeRuntime {
             // only failure is an OS-level path resolution error such as a
             // dangling CWD, which is a startup bug, not a runtime condition.
             .expect("browser capfile directory must be resolvable to an absolute path");
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         browser_tokens.set_loopback_base("http://127.0.0.1:0");
         Self {
             db,
@@ -609,9 +603,9 @@ impl CodeRuntime {
             clone_jobs: CloneJobs::default(),
             harness_installs: HarnessInstallJobs::default(),
             harness_releases: super::harness_release::KnownReleases::default(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             gh_search_path: Mutex::new(None),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             forge_api_base: Mutex::new(None),
             stall_sweep: Mutex::new(None),
             stall_started: AtomicBool::new(false),
@@ -629,17 +623,17 @@ impl CodeRuntime {
             recap: Mutex::new(None),
             rewrite: Mutex::new(None),
             memory_capture: Mutex::new(None),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             archive_shutdown_timeout: AtomicBool::new(false),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             fail_next_workspace_release_metadata: AtomicBool::new(false),
         }
     }
 
     /// Lend gateway git credentials from tests, in place of the on-behalf-of
     /// handle a hosted deployment wires in.
-    #[cfg(test)]
-    pub(crate) fn with_git_credentials(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_git_credentials(
         mut self,
         lender: Arc<dyn crate::obo_gateway::GitCredentialLender>,
     ) -> Self {
@@ -649,17 +643,14 @@ impl CodeRuntime {
 
     /// Wire the engine inference relay from tests, standing in for the
     /// on-behalf-of handle a hosted deployment constructs.
-    #[cfg(test)]
-    pub(crate) fn with_harness_llm(
-        mut self,
-        relay: Arc<super::harness_llm::HarnessLlmRelay>,
-    ) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_harness_llm(mut self, relay: Arc<super::harness_llm::HarnessLlmRelay>) -> Self {
         self.harness_llm = Some(relay);
         self
     }
 
     /// Wire the managed-policy-aware gateway catalog used by local engines.
-    pub(crate) fn with_gateway_runtime(
+    pub fn with_gateway_runtime(
         mut self,
         gateway: Arc<crate::gateway_runtime::GatewayRuntime>,
     ) -> Self {
@@ -667,13 +658,13 @@ impl CodeRuntime {
         self
     }
 
-    pub(crate) fn with_clone_parent_default(mut self, parent: PathBuf) -> Self {
+    pub fn with_clone_parent_default(mut self, parent: PathBuf) -> Self {
         self.clone_parent_default = Some(parent);
         self
     }
 
     /// Enable remote sessions with a configured transport and settings.
-    pub(crate) fn with_remote_sessions(
+    pub fn with_remote_sessions(
         mut self,
         remote: Arc<super::remote::service::RemoteSessions>,
     ) -> Self {
@@ -682,36 +673,36 @@ impl CodeRuntime {
     }
 
     /// The remote-session context, when this deployment configured one.
-    pub(crate) fn remote_sessions(&self) -> Option<Arc<super::remote::service::RemoteSessions>> {
+    pub fn remote_sessions(&self) -> Option<Arc<super::remote::service::RemoteSessions>> {
         self.remote.clone()
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_gh_search_path(&self, path: Option<String>) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_gh_search_path(&self, path: Option<String>) {
         *self.gh_search_path.lock().expect("gh search path") = path;
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_forge_api_base(&self, base: Option<String>) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_forge_api_base(&self, base: Option<String>) {
         *self.forge_api_base.lock().expect("forge api base") = base;
     }
 
-    #[cfg(test)]
-    pub(crate) fn set_archive_shutdown_timeout(&self, enabled: bool) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_archive_shutdown_timeout(&self, enabled: bool) {
         self.archive_shutdown_timeout
             .store(enabled, Ordering::SeqCst);
     }
 
-    #[cfg(test)]
-    pub(crate) fn fail_next_workspace_release_metadata(&self) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fail_next_workspace_release_metadata(&self) {
         self.fail_next_workspace_release_metadata
             .store(true, Ordering::SeqCst);
     }
 
     /// The REST base decision 65's pull-request operations drive: the
     /// forge's own, or a test override.
-    pub(crate) fn forge_api_base_for(&self, host: &str) -> String {
-        #[cfg(test)]
+    pub fn forge_api_base_for(&self, host: &str) -> String {
+        #[cfg(any(test, feature = "test-support"))]
         {
             if let Some(base) = self.forge_api_base.lock().expect("forge api base").clone() {
                 return base;
@@ -721,14 +712,12 @@ impl CodeRuntime {
     }
 
     /// Return the installed browser adapter, if any.
-    pub(crate) fn browser_runtime(
-        &self,
-    ) -> Option<Arc<dyn crate::code::browser_runtime::BrowserRuntime>> {
+    pub fn browser_runtime(&self) -> Option<Arc<dyn crate::code::browser_runtime::BrowserRuntime>> {
         self.browser_runtime.clone()
     }
 
     /// Install the hook that recaps each completed turn (`super::recap`).
-    pub(crate) fn install_recap(&self, recap: Arc<dyn super::recap::TurnRecap>) {
+    pub fn install_recap(&self, recap: Arc<dyn super::recap::TurnRecap>) {
         *self.recap.lock().expect("code recap hook") = Some(recap);
     }
 
@@ -739,7 +728,7 @@ impl CodeRuntime {
     }
 
     /// Install the hook that rewrites each completed turn (`super::rewrite`).
-    pub(crate) fn install_rewrite(&self, rewrite: Arc<dyn super::rewrite::TurnRewrite>) {
+    pub fn install_rewrite(&self, rewrite: Arc<dyn super::rewrite::TurnRewrite>) {
         *self.rewrite.lock().expect("code rewrite hook") = Some(rewrite);
     }
 
@@ -975,7 +964,7 @@ mod delivery_nudge_tests {
 /// a client can only pick a scope the card showed (the same rule chat's
 /// grant rungs follow); the server resolves the concrete scope here.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum ApprovalDecisionRequest {
+pub enum ApprovalDecisionRequest {
     Approve,
     Deny {
         feedback: Option<String>,

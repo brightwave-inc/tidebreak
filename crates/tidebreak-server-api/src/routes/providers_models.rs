@@ -12,42 +12,12 @@ use crate::error::ServerError;
 use crate::extract::{Json, Path};
 use crate::model_roles::{self, ModelRole};
 use crate::providers::{self, ProviderCredential, ProviderInfo, ProviderKind, ProviderUpdate};
+use crate::runtime_settings::chat_role_model;
 use crate::state::AppState;
 use crate::voice_transcription::{self, VoiceTranscriptionInfo, VoiceTranscriptionUpdate};
 
 pub(super) async fn read_model(store: &dyn Store) -> tidebreak_core::Result<Option<String>> {
     model_roles::read_selection(store, ModelRole::Chat).await
-}
-
-/// The `chat` role's model with no conversation in hand: the global selection,
-/// else the model this process launched with.
-///
-/// The boot default is process state, which is why the chat role has no
-/// registry-backed default list of its own the way `utility` does.
-pub(super) async fn chat_role_model(
-    store: &dyn Store,
-    boot_default: &str,
-) -> tidebreak_core::Result<String> {
-    Ok(read_model(store)
-        .await?
-        .unwrap_or_else(|| boot_default.to_owned()))
-}
-
-/// Resolve which model a new execution in `chat` should use.
-///
-/// The order is the chat's override, then the global `model` setting, then the
-/// boot default. A foreground turn freezes the result when its message is
-/// accepted; a sandbox child inherits its origin turn's frozen selection and
-/// only falls back here when it was admitted before that was recorded.
-pub(crate) async fn resolve_chat_model(
-    store: &dyn Store,
-    chat: &tidebreak_core::Chat,
-    boot_default: &str,
-) -> tidebreak_core::Result<String> {
-    match chat.model.clone() {
-        Some(model) => Ok(model),
-        None => chat_role_model(store, boot_default).await,
-    }
 }
 
 /// Resolve one chat's durable selection into the immutable selector a new

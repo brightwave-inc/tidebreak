@@ -35,7 +35,7 @@ use ts_rs::TS;
 use crate::state::BlobWriteGuard;
 
 /// Accumulates one turn's file changes while the overlay is applied.
-pub(crate) struct TurnSnapshotSink {
+pub struct TurnSnapshotSink {
     store: Arc<dyn Store>,
     blobs: Arc<dyn BlobStore>,
     blob_writes: Arc<BlobWriteGuard>,
@@ -43,7 +43,7 @@ pub(crate) struct TurnSnapshotSink {
 }
 
 impl TurnSnapshotSink {
-    pub(crate) fn new(
+    pub fn new(
         store: Arc<dyn Store>,
         blobs: Arc<dyn BlobStore>,
         blob_writes: Arc<BlobWriteGuard>,
@@ -57,11 +57,7 @@ impl TurnSnapshotSink {
     }
 
     /// Commit the journal for `turn_id`, making its retained bytes live.
-    pub(crate) async fn commit(
-        &self,
-        chat_id: SessionId,
-        turn_id: TurnId,
-    ) -> tidebreak_core::Result<()> {
+    pub async fn commit(&self, chat_id: SessionId, turn_id: TurnId) -> tidebreak_core::Result<()> {
         let files = std::mem::take(
             &mut *self
                 .files
@@ -83,7 +79,7 @@ impl TurnSnapshotSink {
 /// restores it exactly as it does a granted folder's file. Each overwrite
 /// commits on its own, the way a connected-app publication does, because a
 /// structured write has no later write-back step to batch behind.
-pub(crate) struct TurnScratchJournal {
+pub struct TurnScratchJournal {
     sink: TurnSnapshotSink,
     folder: std::path::PathBuf,
     chat_id: SessionId,
@@ -91,7 +87,7 @@ pub(crate) struct TurnScratchJournal {
 }
 
 impl TurnScratchJournal {
-    pub(crate) fn new(
+    pub fn new(
         store: Arc<dyn Store>,
         blobs: Arc<dyn BlobStore>,
         blob_writes: Arc<BlobWriteGuard>,
@@ -222,7 +218,7 @@ impl WriteSnapshotSink for TurnSnapshotSink {
 
 /// Result of replaying one turn's durable file-change journal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ExecTurnUndoOutcome {
+pub struct ExecTurnUndoOutcome {
     pub chat_id: SessionId,
     pub turn_id: TurnId,
     pub files: Vec<ExecFileUndoOutcome>,
@@ -230,7 +226,7 @@ pub(crate) struct ExecTurnUndoOutcome {
 
 /// Result of undoing one journaled file change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ExecFileUndoOutcome {
+pub struct ExecFileUndoOutcome {
     pub snapshot_id: String,
     pub folder_name: String,
     pub relative_path: String,
@@ -240,7 +236,7 @@ pub(crate) struct ExecFileUndoOutcome {
 /// Stable per-file outcome for an undo request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum ExecFileUndoStatus {
+pub enum ExecFileUndoStatus {
     /// Prior bytes replaced the turn's output, including a file the turn deleted.
     Restored,
     /// A file the turn created was removed.
@@ -265,7 +261,7 @@ pub(crate) enum ExecFileUndoStatus {
 /// machine: a retry recognizes the prior digest (or absence for a created
 /// file) as already undone, so a crash between files can resume from the same
 /// durable journal rows.
-pub(crate) async fn undo_turn_file_changes(
+pub async fn undo_turn_file_changes(
     store: &dyn Store,
     blobs: &dyn BlobStore,
     chat_id: SessionId,
@@ -293,7 +289,7 @@ pub(crate) async fn undo_turn_file_changes(
 }
 
 /// Undo one journaled file without touching its siblings.
-pub(crate) async fn undo_one_file_change(
+pub async fn undo_one_file_change(
     store: &dyn Store,
     blobs: &dyn BlobStore,
     chat_id: SessionId,
@@ -320,7 +316,7 @@ pub(crate) async fn undo_one_file_change(
 /// Renderer-owned classification of one journal row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum ExecFileChangeClassification {
+pub enum ExecFileChangeClassification {
     Applied,
     Rejected,
 }
@@ -328,7 +324,7 @@ pub(crate) enum ExecFileChangeClassification {
 /// The successful filesystem effect, absent for a rejected write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum ExecFileChangeKind {
+pub enum ExecFileChangeKind {
     Created,
     Overwritten,
     Deleted,
@@ -337,7 +333,7 @@ pub(crate) enum ExecFileChangeKind {
 /// Whether an applied file can still be safely reverted now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum ExecFileUndoAvailability {
+pub enum ExecFileUndoAvailability {
     Available,
     AlreadyUndone,
     Stale,
@@ -347,7 +343,7 @@ pub(crate) enum ExecFileUndoAvailability {
 /// A binary format handled by the bundled #1056 document renderer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum ExecFilePreviewFormat {
+pub enum ExecFilePreviewFormat {
     Pdf,
     Docx,
     Xlsx,
@@ -388,7 +384,7 @@ impl ExecFilePreviewFormat {
 /// Whether one side of a binary before/after comparison can be requested.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum ExecFilePreviewAvailability {
+pub enum ExecFilePreviewAvailability {
     Available,
     Empty,
     Stale,
@@ -398,7 +394,7 @@ pub(crate) enum ExecFilePreviewAvailability {
 
 /// Renderer-safe selection metadata; bytes remain behind the scoped endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
-pub(crate) struct ExecFileBinaryPreview {
+pub struct ExecFileBinaryPreview {
     pub format: ExecFilePreviewFormat,
     pub before: ExecFilePreviewAvailability,
     pub after: ExecFilePreviewAvailability,
@@ -408,7 +404,7 @@ pub(crate) struct ExecFileBinaryPreview {
 /// bounded unified diff when both revisions are text or a binary preview
 /// selector whose bytes remain behind the scoped preview endpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
-pub(crate) struct ExecFileChangeSummary {
+pub struct ExecFileChangeSummary {
     pub snapshot_id: String,
     pub folder_name: String,
     pub relative_path: String,
@@ -425,7 +421,7 @@ const MAX_FILE_PREVIEW_INPUT_BYTES: u64 = MAX_EXEC_WORKSPACE_FILE_BYTES as u64;
 const FILE_PREVIEW_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Build durable change summaries grouped by turn without exposing host paths.
-pub(crate) async fn list_file_change_summaries(
+pub async fn list_file_change_summaries(
     store: &dyn Store,
     blobs: &dyn BlobStore,
     chat_id: SessionId,
@@ -642,13 +638,13 @@ async fn text_diff(
 /// Which immutable side of a journaled change the renderer requested.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum ExecFilePreviewRevision {
+pub enum ExecFilePreviewRevision {
     Before,
     After,
 }
 
 /// One ephemeral, already-bounded raster result from the bundled renderer.
-pub(crate) struct RenderedExecFilePreview {
+pub struct RenderedExecFilePreview {
     pub media_type: ImageMediaType,
     pub width: u32,
     pub height: u32,
@@ -657,7 +653,7 @@ pub(crate) struct RenderedExecFilePreview {
 
 /// Safe failure vocabulary for the renderer-facing preview endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ExecFilePreviewError {
+pub enum ExecFilePreviewError {
     NotFound,
     Unsupported,
     Empty,
@@ -667,7 +663,7 @@ pub(crate) enum ExecFilePreviewError {
     RenderFailed,
 }
 
-pub(crate) struct ExecFilePreviewRequest<'a> {
+pub struct ExecFilePreviewRequest<'a> {
     pub chat_id: SessionId,
     pub turn_id: TurnId,
     pub snapshot_id: uuid::Uuid,
@@ -678,7 +674,7 @@ pub(crate) struct ExecFilePreviewRequest<'a> {
 
 /// Authorize, select, and render one revision without publishing a reusable
 /// file or image identity. All filesystem paths remain server-side.
-pub(crate) async fn render_file_change_preview(
+pub async fn render_file_change_preview(
     store: &dyn Store,
     blobs: &dyn BlobStore,
     request: ExecFilePreviewRequest<'_>,

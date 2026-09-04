@@ -8,10 +8,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use tidebreak_core::{
-    AgentRun, CompactionPolicy, OwnerId, PermissionMode, PromptCacheRetention, ReasoningEffort,
-    SessionId, Store, TurnId, DEFAULT_COMPACTION_MIN_THRESHOLD_TOKENS,
-    DEFAULT_COMPACTION_PROTECT_RECENT_MESSAGES, DEFAULT_COMPACTION_TARGET_FRACTION,
-    DEFAULT_COMPACTION_THRESHOLD_FRACTION,
+    AgentRun, OwnerId, PermissionMode, PromptCacheRetention, ReasoningEffort, SessionId, Store,
+    TurnId,
 };
 
 use crate::code::naming_settings::{self, BranchPrefixMode, GitSourceControlSettings};
@@ -23,9 +21,16 @@ use crate::exec_write_snapshot::{
     render_file_change_preview, undo_one_file_change, undo_turn_file_changes, ExecFilePreviewError,
     ExecFilePreviewRequest, ExecFilePreviewRevision, ExecFileUndoOutcome, ExecTurnUndoOutcome,
 };
-use crate::extract::{Json, Path};
+use crate::extract::{double_option, Json, Path};
 use crate::model_roles::{self, ModelRole};
 use crate::principal::AuthContext;
+pub(crate) use crate::runtime_settings::read_compaction_policy;
+pub use crate::runtime_settings::CompactionSettings;
+use crate::runtime_settings::{
+    read_compaction_settings, read_max_active_background_agents, read_prompt_cache_retention,
+    read_sandbox_agent_checkin_steps, read_sandbox_agent_error_checkin,
+    MAX_SANDBOX_AGENT_CHECKIN_STEPS, MAX_SANDBOX_AGENT_ERROR_CHECKIN,
+};
 use crate::scoped_store::ScopedStore;
 use crate::state::AppState;
 use crate::web_search::{
@@ -41,48 +46,6 @@ use super::{
     SANDBOX_AGENT_CHECKIN_STEPS_SETTING, SANDBOX_AGENT_ERROR_CHECKIN_SETTING,
     SERVED_BYTES_CONTENT_POLICY,
 };
-
-/// Largest accepted check-in cadence. Steps are the expensive unit — each is a
-/// model completion over the whole replayed chain — so this is "absurd but
-/// finite", not a number anyone should reach.
-const MAX_SANDBOX_AGENT_CHECKIN_STEPS: u32 = 1_000;
-/// Largest accepted consecutive-error threshold before a run checks in.
-const MAX_SANDBOX_AGENT_ERROR_CHECKIN: u32 = 100;
-
-/// Host-tunable chat compaction cadence and retention.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ts_rs::TS)]
-pub struct CompactionSettings {
-    /// Compact when unabridged tokens exceed this fraction of the context window.
-    pub threshold_fraction: f64,
-    /// After compaction, keep about this fraction of the window as raw recent history.
-    pub target_fraction: f64,
-    /// Absolute floor applied before scaling by context window.
-    pub min_threshold_tokens: u32,
-    /// Newest durable messages that must never enter the compacted prefix.
-    pub protect_recent_messages: u32,
-}
-
-impl Default for CompactionSettings {
-    fn default() -> Self {
-        Self {
-            threshold_fraction: DEFAULT_COMPACTION_THRESHOLD_FRACTION,
-            target_fraction: DEFAULT_COMPACTION_TARGET_FRACTION,
-            min_threshold_tokens: DEFAULT_COMPACTION_MIN_THRESHOLD_TOKENS as u32,
-            protect_recent_messages: DEFAULT_COMPACTION_PROTECT_RECENT_MESSAGES as u32,
-        }
-    }
-}
-
-impl From<&CompactionSettings> for CompactionPolicy {
-    fn from(settings: &CompactionSettings) -> Self {
-        Self {
-            threshold_fraction: settings.threshold_fraction,
-            target_fraction: settings.target_fraction,
-            min_threshold_tokens: settings.min_threshold_tokens as usize,
-            protect_recent_messages: settings.protect_recent_messages as usize,
-        }
-    }
-}
 
 /// A reader's explicit deviation from a model's curated `recommended` flag.
 ///
@@ -284,18 +247,6 @@ pub struct MemorySettingsUpdate {
     pub enabled: Option<bool>,
     #[serde(default)]
     pub capture_enabled: Option<bool>,
-}
-
-/// Deserialize a present field (including JSON `null`) as `Some(..)`; `#[serde(default)]`
-/// supplies `None` when the field is absent.
-pub(crate) fn double_option<'de, D, T>(
-    deserializer: D,
-) -> std::result::Result<Option<Option<T>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: serde::Deserialize<'de>,
-{
-    serde::Deserialize::deserialize(deserializer).map(Some)
 }
 
 /// `GET /settings` — the current runtime settings.
@@ -633,67 +584,6 @@ pub(crate) async fn read_model_visibility_overrides(
         .unwrap_or_default())
 }
 
-/// The stored prompt-cache retention, or the default (`five_minutes`) when
-/// unset or unreadable.
-pub(crate) async fn read_prompt_cache_retention(
-    store: &dyn Store,
-) -> tidebreak_core::Result<PromptCacheRetention> {
-    Ok(store
-        .get_setting(crate::routes::PROMPT_CACHE_RETENTION_SETTING)
-        .await?
-        .and_then(|value| serde_json::from_value(value).ok())
-        .unwrap_or_default())
-}
-
-pub(crate) async fn read_max_active_background_agents(
-    store: &dyn Store,
-) -> tidebreak_core::Result<u32> {
-    Ok(store
-        .get_setting(MAX_ACTIVE_BACKGROUND_AGENTS_SETTING)
-        .await?
-        .and_then(|value| serde_json::from_value::<u32>(value).ok())
-        .filter(|limit| *limit > 0 && *limit <= AgentRun::MAX_CONCURRENCY_LIMIT)
-        .unwrap_or(AgentRun::DEFAULT_MAX_ACTIVE_BACKGROUND_AGENTS))
-}
-
-/// The stored check-in cadence, as the number of model steps one background
-/// run may take before it must wrap up and report back.
-pub(crate) async fn read_sandbox_agent_checkin_steps(
-    store: &dyn Store,
-) -> tidebreak_core::Result<u32> {
-    Ok(read_sandbox_agent_checkin_steps_override(store)
-        .await?
-        .unwrap_or(tidebreak_core::DEFAULT_SANDBOX_AGENT_CHECKIN_STEPS as u32))
-}
-
-/// The stored cadence only if one was explicitly set.
-///
-/// The sandbox worker distinguishes "no choice recorded" (keep the boot
-/// configuration's step budget) from "the user chose a cadence" (override it),
-/// so the two cannot fight over runs when no setting exists.
-pub(crate) async fn read_sandbox_agent_checkin_steps_override(
-    store: &dyn Store,
-) -> tidebreak_core::Result<Option<u32>> {
-    Ok(store
-        .get_setting(SANDBOX_AGENT_CHECKIN_STEPS_SETTING)
-        .await?
-        .and_then(|value| serde_json::from_value::<u32>(value).ok())
-        .filter(|steps| *steps > 0 && *steps <= MAX_SANDBOX_AGENT_CHECKIN_STEPS))
-}
-
-/// The stored consecutive tool-error threshold after which a background run
-/// checks in rather than continuing to thrash.
-pub(crate) async fn read_sandbox_agent_error_checkin(
-    store: &dyn Store,
-) -> tidebreak_core::Result<u32> {
-    Ok(store
-        .get_setting(SANDBOX_AGENT_ERROR_CHECKIN_SETTING)
-        .await?
-        .and_then(|value| serde_json::from_value::<u32>(value).ok())
-        .filter(|errors| *errors > 0 && *errors <= MAX_SANDBOX_AGENT_ERROR_CHECKIN)
-        .unwrap_or(tidebreak_core::DEFAULT_SANDBOX_AGENT_ERROR_CHECKIN as u32))
-}
-
 /// Absolute floor / ceiling for `min_threshold_tokens`.
 const MIN_COMPACTION_MIN_THRESHOLD_TOKENS: u32 = 1_000;
 const MAX_COMPACTION_MIN_THRESHOLD_TOKENS: u32 = 2_000_000;
@@ -732,47 +622,6 @@ fn validate_compaction_settings(settings: &CompactionSettings) -> Result<(), Ser
     Ok(())
 }
 
-pub(crate) async fn read_compaction_settings(
-    store: &dyn Store,
-) -> tidebreak_core::Result<CompactionSettings> {
-    let defaults = CompactionSettings::default();
-    let settings = CompactionSettings {
-        threshold_fraction: store
-            .get_setting(COMPACTION_THRESHOLD_FRACTION_SETTING)
-            .await?
-            .and_then(|value| serde_json::from_value::<f64>(value).ok())
-            .filter(|value| *value > 0.0 && *value <= 1.0)
-            .unwrap_or(defaults.threshold_fraction),
-        target_fraction: store
-            .get_setting(COMPACTION_TARGET_FRACTION_SETTING)
-            .await?
-            .and_then(|value| serde_json::from_value::<f64>(value).ok())
-            .filter(|value| *value > 0.0 && *value <= 1.0)
-            .unwrap_or(defaults.target_fraction),
-        min_threshold_tokens: store
-            .get_setting(COMPACTION_MIN_THRESHOLD_TOKENS_SETTING)
-            .await?
-            .and_then(|value| serde_json::from_value::<u32>(value).ok())
-            .filter(|value| {
-                (MIN_COMPACTION_MIN_THRESHOLD_TOKENS..=MAX_COMPACTION_MIN_THRESHOLD_TOKENS)
-                    .contains(value)
-            })
-            .unwrap_or(defaults.min_threshold_tokens),
-        protect_recent_messages: store
-            .get_setting(COMPACTION_PROTECT_RECENT_MESSAGES_SETTING)
-            .await?
-            .and_then(|value| serde_json::from_value::<u32>(value).ok())
-            .filter(|value| *value >= 1)
-            .unwrap_or(defaults.protect_recent_messages),
-    };
-    // Independently-stored keys can drift into an impossible pair; fall closed
-    // to defaults rather than hand the agent a policy that cannot resolve.
-    if settings.threshold_fraction <= settings.target_fraction {
-        return Ok(defaults);
-    }
-    Ok(settings)
-}
-
 async fn write_compaction_settings(
     store: &dyn Store,
     settings: &CompactionSettings,
@@ -802,15 +651,6 @@ async fn write_compaction_settings(
         )
         .await?;
     Ok(())
-}
-
-/// Resolve the host compaction policy for the next turn.
-pub(crate) async fn read_compaction_policy(
-    store: &dyn Store,
-) -> tidebreak_core::Result<CompactionPolicy> {
-    Ok(CompactionPolicy::from(
-        &read_compaction_settings(store).await?,
-    ))
 }
 
 /// `GET /web-search` — read host-owned web-search selection and readiness.

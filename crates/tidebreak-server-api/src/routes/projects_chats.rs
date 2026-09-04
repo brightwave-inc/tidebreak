@@ -18,23 +18,22 @@ use tidebreak_core::{
 
 use crate::error::ServerError;
 use crate::exec_write_snapshot::{list_file_change_summaries, ExecFileChangeSummary};
-use crate::extract::{Json, Path};
+use crate::extract::{double_option, Json, Path};
 use crate::principal::AuthContext;
 use crate::scoped_store::ScopedStore;
 use crate::state::AppState;
 
+pub use crate::chat_titling::MAX_CHAT_TITLE_CHARS;
+
 use super::providers_models::{refuse_permission_mode_over_ceiling, validate_model_selection};
 use super::settings::{
-    double_option, read_sticky_default, sticky_default_key, sticky_default_value,
-    write_sticky_default, STICKY_MODEL_KEY, STICKY_NETWORK_POLICY_KEY, STICKY_PERMISSION_MODE_KEY,
+    read_sticky_default, sticky_default_key, sticky_default_value, write_sticky_default,
+    STICKY_MODEL_KEY, STICKY_NETWORK_POLICY_KEY, STICKY_PERMISSION_MODE_KEY,
     STICKY_REASONING_EFFORT_KEY,
 };
 
 /// Product-facing project names stay compact across desktop and API clients.
 pub const MAX_PROJECT_TITLE_CHARS: usize = 120;
-/// The same bound for conversation names, whether a user typed one or the
-/// product derived one. A sidebar row is a sidebar row either way.
-pub const MAX_CHAT_TITLE_CHARS: usize = MAX_PROJECT_TITLE_CHARS;
 /// Project metadata requests need only a compact JSON object.
 pub const MAX_PROJECT_METADATA_BODY_BYTES: usize = 1_024;
 

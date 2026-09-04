@@ -31,18 +31,18 @@ const HOT_WINDOW: Duration = Duration::from_secs(120);
 /// one that knows the agent just pushed, and a row nobody marks stays on
 /// its pre-push head until a route mutation or the reconcile sweep moves it.
 #[derive(Clone, Default)]
-pub(crate) struct HotPullRequests(Arc<Mutex<HashMap<WorkspaceId, (OwnerId, Instant)>>>);
+pub struct HotPullRequests(Arc<Mutex<HashMap<WorkspaceId, (OwnerId, Instant)>>>);
 
 impl HotPullRequests {
     /// Keep this workspace on the hot tier for [`HOT_WINDOW`].
-    pub(crate) fn mark(&self, owner: &OwnerId, id: WorkspaceId) {
+    pub fn mark(&self, owner: &OwnerId, id: WorkspaceId) {
         let mut hot = self.0.lock().expect("hot prs");
         hot.retain(|_, (_, marked)| marked.elapsed() <= HOT_WINDOW);
         hot.insert(id, (owner.clone(), Instant::now()));
     }
 
     /// The workspaces still inside their window.
-    pub(crate) fn live(&self) -> Vec<(OwnerId, WorkspaceId)> {
+    pub fn live(&self) -> Vec<(OwnerId, WorkspaceId)> {
         let mut hot = self.0.lock().expect("hot prs");
         hot.retain(|_, (_, marked)| marked.elapsed() <= HOT_WINDOW);
         hot.iter()

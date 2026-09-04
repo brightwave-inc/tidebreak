@@ -42,14 +42,14 @@ use crate::obo_gateway::{GatewayCompatModel, OboGateway};
 
 /// Whose inference a relay key spends.
 #[derive(Clone)]
-pub(crate) struct HarnessLlmSubject {
-    pub(crate) owner: OwnerId,
-    pub(crate) session: SessionId,
+pub struct HarnessLlmSubject {
+    pub owner: OwnerId,
+    pub session: SessionId,
 }
 
 /// The gateway compat endpoint one relay route forwards to.
 #[derive(Clone, Copy)]
-pub(crate) enum RelayEndpoint {
+pub enum RelayEndpoint {
     /// Anthropic Messages, spoken by Claude Code.
     AnthropicMessages,
     /// OpenAI Responses, spoken by Codex.
@@ -70,7 +70,7 @@ impl RelayEndpoint {
 
     /// A vendor-shaped error the engine's own client reports legibly,
     /// instead of a server shape it would print as opaque JSON.
-    pub(crate) fn error_response(self, status: StatusCode, kind: &str, message: &str) -> Response {
+    pub fn error_response(self, status: StatusCode, kind: &str, message: &str) -> Response {
         let body = match self {
             Self::AnthropicMessages => serde_json::json!({
                 "type": "error",
@@ -89,7 +89,7 @@ impl RelayEndpoint {
 }
 
 /// In-memory key registry plus the forwarding client.
-pub(crate) struct HarnessLlmRelay {
+pub struct HarnessLlmRelay {
     obo: Arc<OboGateway>,
     client: reqwest::Client,
     state: Mutex<RelayState>,
@@ -102,7 +102,7 @@ struct RelayState {
 }
 
 impl HarnessLlmRelay {
-    pub(crate) fn new(obo: Arc<OboGateway>) -> Self {
+    pub fn new(obo: Arc<OboGateway>) -> Self {
         let client = reqwest::Client::builder()
             // Only the dial is bounded. An inference stream legitimately
             // runs for minutes, so a total request timeout would kill long
@@ -121,7 +121,7 @@ impl HarnessLlmRelay {
     /// Both of the caller's compat listings. Keeping the read behind the
     /// relay means hosted pickers and the turns they start always answer to
     /// the same gateway deployment.
-    pub(crate) async fn listings(
+    pub async fn listings(
         &self,
         owner: &OwnerId,
     ) -> tidebreak_core::Result<(
@@ -133,7 +133,7 @@ impl HarnessLlmRelay {
 
     /// The caller's model catalog, including per-model reasoning ladders when
     /// the gateway states them.
-    pub(crate) async fn catalog(
+    pub async fn catalog(
         &self,
         owner: &OwnerId,
     ) -> tidebreak_core::Result<Option<crate::providers::GatewayModelSnapshot>> {
@@ -143,7 +143,7 @@ impl HarnessLlmRelay {
     /// Mint the relay key for `subject`, replacing any prior key the same
     /// session held. Reissue-on-attach is what keeps a reaped or relaunched
     /// worker from extending the life of a key an old child still knows.
-    pub(crate) fn issue(&self, subject: HarnessLlmSubject) -> String {
+    pub fn issue(&self, subject: HarnessLlmSubject) -> String {
         let key = generate_key();
         let mut state = self.state.lock().expect("harness llm registry");
         if let Some(old) = state.by_session.insert(subject.session, key.clone()) {
@@ -154,7 +154,7 @@ impl HarnessLlmRelay {
     }
 
     /// Revoke the key for `session_id`. Idempotent.
-    pub(crate) fn revoke(&self, session_id: SessionId) {
+    pub fn revoke(&self, session_id: SessionId) {
         let mut state = self.state.lock().expect("harness llm registry");
         if let Some(key) = state.by_session.remove(&session_id) {
             state.keys.remove(&key);
@@ -215,7 +215,7 @@ impl HarnessLlmRelay {
 
     /// Stream one relayed inference request through to the gateway's compat
     /// endpoint with a fresh on-behalf-of token.
-    pub(crate) async fn forward(
+    pub async fn forward(
         &self,
         endpoint: RelayEndpoint,
         headers: &HeaderMap,
@@ -286,11 +286,7 @@ impl HarnessLlmRelay {
     /// ignores unknown members — the gateway's own listing already carries
     /// additive fields for the same reason. The listing is a bounded JSON
     /// document, so this buffers rather than streams.
-    pub(crate) async fn forward_models(
-        &self,
-        endpoint: RelayEndpoint,
-        headers: &HeaderMap,
-    ) -> Response {
+    pub async fn forward_models(&self, endpoint: RelayEndpoint, headers: &HeaderMap) -> Response {
         let token = match self.exchange(endpoint, headers).await {
             Ok(token) => token,
             Err(response) => return response,
@@ -381,7 +377,7 @@ impl HarnessLlmRelay {
 /// Callers put the same name in `SessionSpec::relay_key_env` so the harness
 /// adapters' reserved-namespace handling lets exactly this one variable
 /// through.
-pub(crate) const RELAY_KEY_ENV: &str = "TIDEBREAK_LLM_KEY";
+pub const RELAY_KEY_ENV: &str = "TIDEBREAK_LLM_KEY";
 
 /// The argv and environment that point one engine child at the relay.
 ///
@@ -389,7 +385,7 @@ pub(crate) const RELAY_KEY_ENV: &str = "TIDEBREAK_LLM_KEY";
 /// owns the engine knowledge; this side owns the host knowledge — the
 /// relay's endpoint paths under the loopback base and the key variable
 /// name.
-pub(crate) fn spawn_wiring(
+pub fn spawn_wiring(
     kind: HarnessKind,
     loopback_base: &str,
     key: &str,
@@ -412,7 +408,7 @@ pub(crate) fn spawn_wiring(
 /// this on a gateway-hosted machine, where a covered engine needs no local
 /// sign-in and an uncovered one cannot run at all; everywhere else the local
 /// probe decides, and this answer does not matter.
-pub(crate) fn relay_covered(kind: HarnessKind) -> bool {
+pub fn relay_covered(kind: HarnessKind) -> bool {
     match kind {
         HarnessKind::ClaudeCode
         | HarnessKind::Codex

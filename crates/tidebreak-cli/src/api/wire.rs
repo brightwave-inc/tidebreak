@@ -33,7 +33,7 @@ mod tests {
     use super::*;
 
     /// Path of the server's chat-frame fixtures, relative to this crate.
-    const CHAT_FRAMES: &str = "../tidebreak-server/fixtures/chat-frames.json";
+    const CHAT_FRAMES: &str = "../tidebreak-server-api/fixtures/chat-frames.json";
 
     fn chat_frame_fixtures() -> Vec<(String, serde_json::Value)> {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(CHAT_FRAMES);
@@ -88,7 +88,7 @@ mod tests {
     }
 
     /// Path of the server's REST record fixtures, relative to this crate.
-    const REST_RECORDS: &str = "../tidebreak-server/fixtures/rest-records.json";
+    const REST_RECORDS: &str = "../tidebreak-server-api/fixtures/rest-records.json";
 
     fn rest_record_fixtures() -> Vec<(String, String, serde_json::Value)> {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(REST_RECORDS);

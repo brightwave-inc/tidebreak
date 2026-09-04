@@ -60,14 +60,14 @@ const _: () = assert!(MAX_APP_NAME_CHARS <= MAX_GATEWAY_TITLE_CHARS);
 /// One local revision, projected into what a shared-app create or revision
 /// append carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SharedAppProjection {
+pub struct SharedAppProjection {
     /// Display name — the gateway manifest's `title` and the create body's
     /// `name`.
-    pub(crate) name: String,
+    pub name: String,
     /// The gateway's manifest vocabulary: `{title, bindings, parameters}`.
-    pub(crate) manifest: serde_json::Value,
+    pub manifest: serde_json::Value,
     /// The revision's bundle bytes, base64 as the gateway takes them.
-    pub(crate) bundle_base64: String,
+    pub bundle_base64: String,
 }
 
 /// The network half of registration, so the whole ladder is drivable against
@@ -79,7 +79,7 @@ pub(crate) struct SharedAppProjection {
 /// with. That is the same `Ok(None)`-on-404 reading the rest of the gateway
 /// client uses, and it is a degradation rather than a fault.
 #[async_trait]
-pub(crate) trait GatewayDraftClient: Send + Sync {
+pub trait GatewayDraftClient: Send + Sync {
     /// Register a new shared app. `slug` is only sent when the caller is
     /// asking for a specific one; otherwise the gateway derives it.
     async fn create(
@@ -108,12 +108,12 @@ pub(crate) trait GatewayDraftClient: Send + Sync {
 
 /// The production client: the three registration calls over the one gateway
 /// runtime's connection.
-pub(crate) struct GatewayConnectorDraftClient {
+pub struct GatewayConnectorDraftClient {
     runtime: Arc<GatewayRuntime>,
 }
 
 impl GatewayConnectorDraftClient {
-    pub(crate) fn new(runtime: Arc<GatewayRuntime>) -> Self {
+    pub fn new(runtime: Arc<GatewayRuntime>) -> Self {
         Self { runtime }
     }
 
@@ -213,7 +213,7 @@ impl GatewayDraftClient for GatewayConnectorDraftClient {
 
 /// The store-backed registration lifecycle: the durable `(app, deployment) →
 /// shared app` mapping plus the calls that establish and advance it.
-pub(crate) struct GatewayDraftRegistry {
+pub struct GatewayDraftRegistry {
     store: Arc<dyn Store>,
     /// Profile data directory the write-once bundle bytes live under.
     data_dir: PathBuf,
@@ -231,7 +231,7 @@ pub(crate) struct GatewayDraftRegistry {
 }
 
 impl GatewayDraftRegistry {
-    pub(crate) fn new(
+    pub fn new(
         store: Arc<dyn Store>,
         data_dir: PathBuf,
         client: Arc<dyn GatewayDraftClient>,
@@ -538,7 +538,7 @@ impl GatewayDraftSource for GatewayDraftRegistry {
 /// The deployment a registration belongs to, when this profile is managed
 /// with a gateway URL — read exactly as the invoke dispatcher reads it, so
 /// the grant and invoke paths can never key a mapping differently.
-pub(crate) async fn registration_base_url(runtime: &GatewayRuntime) -> Option<String> {
+pub async fn registration_base_url(runtime: &GatewayRuntime) -> Option<String> {
     let policy = runtime.policy().ok()?;
     policy.gateway_url.filter(|_| policy.managed)
 }
@@ -550,7 +550,7 @@ pub(crate) async fn registration_base_url(runtime: &GatewayRuntime) -> Option<St
 /// one key rather than two registrations. A URL that does not parse is used
 /// as given: it will not match a session either, and inventing a key for it
 /// would be worse than keying it verbatim.
-pub(crate) fn normalized_gateway_base_url(base_url: &str) -> String {
+pub fn normalized_gateway_base_url(base_url: &str) -> String {
     match reqwest::Url::parse(base_url) {
         Ok(url) => {
             let mut normalized = url.to_string();

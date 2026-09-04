@@ -12,6 +12,9 @@ use crate::extract::{Json, Path, Query};
 use crate::scoped_store::ScopedStore;
 use crate::state::AppState;
 
+use crate::approvals::grant_rungs_from_scopes;
+pub use crate::approvals::ApprovalGrantRung;
+
 /// Body of `POST /chats/{id}/approvals/{call_id}`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -25,34 +28,6 @@ pub struct ApprovalBody {
     /// call only.
     #[serde(default)]
     pub grant: Option<ApprovalGrantRung>,
-}
-
-/// How wide a standing grant the human chose, narrowest first.
-///
-/// The renderer names a rung; the server builds the concrete grant from the
-/// arguments the call is parked on. A grant can therefore only ever describe
-/// the action that was actually under review.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ts_rs::TS)]
-#[serde(rename_all = "snake_case")]
-pub enum ApprovalGrantRung {
-    /// Exactly the action the card showed.
-    ExactAction,
-    /// A leading run of the command's argv tokens, with any arguments after
-    /// it — "any `cargo test`", not just "any `cargo`".
-    ///
-    /// The renderer names how many tokens it was offered rather than the
-    /// tokens themselves. The server derives the ladder from the parked
-    /// call's own arguments and honors the length only if it appears there,
-    /// so a client cannot invent a prefix the card never showed.
-    CommandPrefix { tokens: usize },
-    /// A leading run of a workspace write's path segments — the file itself,
-    /// or the directory that holds it.
-    ///
-    /// Named by segment count on the same terms as [`Self::CommandPrefix`]:
-    /// the concrete place comes from the parked call, never from the client.
-    PathPrefix { segments: usize },
-    /// Every call to this tool.
-    WholeTool,
 }
 
 /// Wire form of an approval decision.
@@ -141,37 +116,6 @@ pub(crate) fn approval_grant_rungs(
     // place rungs and an ungrantable kind offers nothing.
     scopes.retain(|scope| kind.grantable_at(scope));
     grant_rungs_from_scopes(&scopes, action_is_exact)
-}
-
-pub(crate) fn grant_rungs_from_scopes(
-    scopes: &[tidebreak_core::GrantScope],
-    action_is_exact: bool,
-) -> Vec<ApprovalGrantRung> {
-    scopes
-        .iter()
-        .filter_map(|scope| match scope {
-            tidebreak_core::GrantScope::ExactAction(_) if action_is_exact => {
-                Some(ApprovalGrantRung::ExactAction)
-            }
-            tidebreak_core::GrantScope::ExactAction(_) => None,
-            tidebreak_core::GrantScope::CommandPrefix { tokens } => {
-                Some(ApprovalGrantRung::CommandPrefix {
-                    tokens: tokens.len(),
-                })
-            }
-            tidebreak_core::GrantScope::PathSubtree { prefix } => {
-                Some(ApprovalGrantRung::PathPrefix {
-                    segments: prefix.split('/').count(),
-                })
-            }
-            tidebreak_core::GrantScope::WholeTool => Some(ApprovalGrantRung::WholeTool),
-            // Retained for old durable grants; the current ladder names the
-            // same authority as a one-token command prefix.
-            tidebreak_core::GrantScope::AnyArgsFor { .. } => {
-                Some(ApprovalGrantRung::CommandPrefix { tokens: 1 })
-            }
-        })
-        .collect()
 }
 
 /// `GET /chats/{id}/approvals` — recover a bounded page of pending cards.

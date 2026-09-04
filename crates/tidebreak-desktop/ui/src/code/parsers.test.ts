@@ -1939,7 +1939,7 @@ const CODE_FRAMES: { name: string; kind: string; value: unknown }[] =
     readFileSync(
       fileURLToPath(
         new URL(
-          "../../../../tidebreak-server/fixtures/code-frames.json",
+          "../../../../tidebreak-server-api/fixtures/code-frames.json",
           import.meta.url,
         ),
       ),

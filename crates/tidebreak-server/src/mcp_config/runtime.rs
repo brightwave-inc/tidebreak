@@ -45,7 +45,7 @@ pub(super) struct RuntimeState {
 /// A turn asks for one [`snapshot`](Self::snapshot) and keeps that `Arc` for its
 /// entire live execution. Reconfiguration therefore affects only later turns;
 /// old sessions remain alive until their last turn snapshot is dropped.
-pub(crate) struct McpRuntime {
+pub struct McpRuntime {
     base_tools: ToolRegistry,
     tools: RwLock<Arc<ToolRegistry>>,
     pub(super) state: Mutex<RuntimeState>,
@@ -76,7 +76,7 @@ pub(crate) struct McpRuntime {
 }
 
 impl McpRuntime {
-    pub(crate) fn new(
+    pub fn new(
         base_tools: Arc<ToolRegistry>,
         store: Arc<dyn Store>,
         secrets: Arc<dyn SecretProvider>,
@@ -106,13 +106,13 @@ impl McpRuntime {
 
     /// Install the host-folder seam so the `create_app` roster can list
     /// approved folders. At most once, at assembly.
-    pub(crate) fn set_host_folders(&self, host: Arc<dyn crate::host_folders::HostFolders>) {
+    pub fn set_host_folders(&self, host: Arc<dyn crate::host_folders::HostFolders>) {
         let _ = self.host_folders.set(host);
     }
 
     /// Install the installed-plugin seam. At most once, at assembly; the
     /// startup reconcile that first connects bundled servers runs after it.
-    pub(crate) fn set_plugin_catalog(&self, catalog: Arc<dyn crate::plugin_mcp::PluginMcpCatalog>) {
+    pub fn set_plugin_catalog(&self, catalog: Arc<dyn crate::plugin_mcp::PluginMcpCatalog>) {
         let _ = self.plugin_catalog.set(catalog);
     }
 
@@ -240,14 +240,14 @@ impl McpRuntime {
     /// runtime splits attestation contexts and every attested `tools/call`
     /// is refused).
     #[cfg(test)]
-    pub(crate) fn gateway_endpoints(&self) -> Arc<dyn GatewayEndpoints> {
+    pub fn gateway_endpoints(&self) -> Arc<dyn GatewayEndpoints> {
         self.gateway.clone()
     }
 
     /// The secret store this runtime writes environment values to — so a test
     /// can read back exactly what landed there.
     #[cfg(test)]
-    pub(crate) fn secrets(&self) -> Arc<dyn SecretProvider> {
+    pub fn secrets(&self) -> Arc<dyn SecretProvider> {
         self.secrets.clone()
     }
 
@@ -306,7 +306,7 @@ impl McpRuntime {
     /// restarted. Idempotent, and a no-op on an unmanaged profile.
     ///
     /// Returns whether anything was taken down.
-    pub(crate) async fn enforce_manual_lockdown(&self) -> bool {
+    pub async fn enforce_manual_lockdown(&self) -> bool {
         match self.manual_lockdown().await {
             ManualLockdown::Open => false,
             lockdown => self.take_down_locked_manual_servers(lockdown).await,
@@ -358,7 +358,7 @@ impl McpRuntime {
     /// A boot file remains fail-closed. Persisted definitions degrade in place
     /// so the Settings UI remains available to repair a missing executable or
     /// selected environment variable.
-    pub(crate) async fn initialize(&self, boot: ConfiguredMcpServers) -> Result<()> {
+    pub async fn initialize(&self, boot: ConfiguredMcpServers) -> Result<()> {
         let records: Vec<ConnectedApp> = self
             .store
             .list_connected_apps()
@@ -429,7 +429,7 @@ impl McpRuntime {
 
     /// One prefetched MCP Apps view document, when the named server is
     /// connected and declared it.
-    pub(crate) async fn ui_view_document(&self, server: &str, uri: &str) -> Option<UiViewDocument> {
+    pub async fn ui_view_document(&self, server: &str, uri: &str) -> Option<UiViewDocument> {
         let state = self.state.lock().await;
         state.servers.get(server)?.ui_views.get(uri).cloned()
     }
@@ -440,7 +440,7 @@ impl McpRuntime {
     /// Read live per call — never cached across a request — so grant
     /// enforcement always compares against the definition an id resolves to
     /// *now*, including a definition swapped in while the app stayed open.
-    pub(crate) async fn app_fingerprints(&self) -> BTreeMap<ConnectedAppId, McpAppFingerprint> {
+    pub async fn app_fingerprints(&self) -> BTreeMap<ConnectedAppId, McpAppFingerprint> {
         let state = self.state.lock().await;
         state
             .definitions
@@ -459,18 +459,18 @@ impl McpRuntime {
     }
 
     /// One immutable tool surface for a live turn.
-    pub(crate) fn snapshot(&self) -> Arc<ToolRegistry> {
+    pub fn snapshot(&self) -> Arc<ToolRegistry> {
         self.tools
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
 
-    pub(crate) async fn definitions(&self) -> Vec<McpServerDefinition> {
+    pub async fn definitions(&self) -> Vec<McpServerDefinition> {
         self.state.lock().await.definitions.clone()
     }
 
-    pub(crate) async fn info(&self) -> McpServersInfo {
+    pub async fn info(&self) -> McpServersInfo {
         let state = self.state.lock().await;
         McpServersInfo {
             servers: state
@@ -507,7 +507,7 @@ impl McpRuntime {
     /// Names only, never remote-authored descriptions or schemas: the same
     /// renderer-safety posture as the consent sheet. Bounded by the
     /// per-server discovery cap the client enforces at connect time.
-    pub(crate) async fn tool_names(&self) -> BTreeMap<String, Vec<String>> {
+    pub async fn tool_names(&self) -> BTreeMap<String, Vec<String>> {
         let state = self.state.lock().await;
         state
             .servers
@@ -534,7 +534,7 @@ impl McpRuntime {
     /// whose refusal arm is unreachable. Production has one entry point; this
     /// keeps the tests that predate the policy check reading as they did.
     #[cfg(test)]
-    pub(crate) async fn replace(&self, config: McpServersConfig) -> Result<McpServersInfo> {
+    pub async fn replace(&self, config: McpServersConfig) -> Result<McpServersInfo> {
         match self
             .replace_under_policy(config, ManualLockdown::Open)
             .await?
@@ -561,7 +561,7 @@ impl McpRuntime {
     /// between the verdict and the commit — admitting a manual definition the
     /// policy refuses. Refusing changes nothing at all: it happens before
     /// validation and before any child is started.
-    pub(crate) async fn replace_under_policy(
+    pub async fn replace_under_policy(
         &self,
         config: McpServersConfig,
         lockdown: ManualLockdown,
@@ -594,7 +594,7 @@ impl McpRuntime {
     /// admission check refuses only manual additions), so no lockdown branch
     /// is needed here. An unreadable unmount memory fails closed — no
     /// mounting — rather than resurrecting an endpoint the user turned off.
-    pub(crate) async fn auto_mount_gateway_endpoints(&self, entitled: &[String]) -> Result<bool> {
+    pub async fn auto_mount_gateway_endpoints(&self, entitled: &[String]) -> Result<bool> {
         let _mutation = self.mutation.lock().await;
         let mut servers = self.state.lock().await.definitions.clone();
         let unmounts = read_endpoint_unmounts(&*self.store).await?;
@@ -996,7 +996,7 @@ impl McpRuntime {
     /// plugin does not churn somebody's stdio child.
     ///
     /// Returns whether the published set changed.
-    pub(crate) async fn reconcile_plugin_servers(&self) -> bool {
+    pub async fn reconcile_plugin_servers(&self) -> bool {
         if self.plugin_catalog.get().is_none() {
             return false;
         }
@@ -1124,7 +1124,7 @@ impl McpRuntime {
     /// connected apps exist — until something unrelated republishes. The
     /// connected-apps CRUD surface calls this after every store write; MCP
     /// connections are untouched.
-    pub(crate) async fn refresh_connected_app_roster(&self) {
+    pub async fn refresh_connected_app_roster(&self) {
         let state = self.state.lock().await;
         let registry = self.registry_for(&state).await;
         *self
@@ -1224,7 +1224,7 @@ impl McpRuntime {
     }
 
     /// Force a fresh connection and tool discovery for one configured server.
-    pub(crate) async fn reconnect(&self, name: &str) -> Result<McpServersInfo> {
+    pub async fn reconnect(&self, name: &str) -> Result<McpServersInfo> {
         self.reconnect_if_epoch(name, None).await
     }
 
@@ -1379,7 +1379,7 @@ impl McpRuntime {
 
     /// Monitor healthy sessions and reconnect degraded or tool-changed servers
     /// with capped exponential backoff.
-    pub(crate) async fn supervise(self: Arc<Self>) {
+    pub async fn supervise(self: Arc<Self>) {
         loop {
             tokio::time::sleep(HEALTH_INTERVAL).await;
             let lockdown = self.manual_lockdown().await;

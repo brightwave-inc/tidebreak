@@ -137,7 +137,7 @@ Four more things are shared through it:
   and cursor ceilings. They are generated into `wire.ts` as constants, and
   `lib/wireDecode.ts` re-exports them, so the renderer and the CLI cannot apply
   different numbers.
-- **Chat-frame fixtures.** `crates/tidebreak-server/fixtures/chat-frames.json`
+- **Chat-frame fixtures.** `crates/tidebreak-server-api/fixtures/chat-frames.json`
   is one real frame of every kind the socket carries, serialized from the
   server's own types by the same generator test (a variant without a fixture
   fails `the_chat_frame_fixtures_cover_every_event`). The server round-trips
@@ -152,7 +152,7 @@ Four more things are shared through it:
   flattens its definition, and serde cannot guard across a flatten, so its
   envelope `McpServersInfo` is the guarded shape. The output records carry
   typed timestamps and a `producedBy` enum rather than preformatted strings.
-  `crates/tidebreak-server/fixtures/rest-records.json` holds one real value
+  `crates/tidebreak-server-api/fixtures/rest-records.json` holds one real value
   per record (`{ name, type, value }`, the type naming the wire type it
   decodes through), serialized by the same generator test; the server
   round-trips every entry and the CLI decodes every entry. The renderer does
@@ -161,7 +161,7 @@ Four more things are shared through it:
 - **Code-mode fixtures.** The repo, workspace, session, turn, approval, and
   delivery snapshots, the sequenced event frame, and the `/code/updates`
   notices are re-exported from `tidebreak_server::wire` too, reject unknown
-  keys, and are written to `crates/tidebreak-server/fixtures/code-frames.json`
+  keys, and are written to `crates/tidebreak-server-api/fixtures/code-frames.json`
   by `wire_code_fixtures` (a `CodeEvent` or `CodeUpdateNotice` variant without
   a fixture fails `the_code_frame_fixtures_cover_every_event`). The server
   round-trips every entry, the CLI's `api::code` tests decode every entry, and

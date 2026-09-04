@@ -51,13 +51,13 @@ pub(crate) const SSE_UNSUPPORTED_DIAGNOSTIC: &str =
 
 /// One installed, enabled plugin's bundled MCP configuration, with the two
 /// directories its servers are launched against.
-pub(crate) struct PluginMcpSource {
-    pub(crate) plugin: String,
+pub struct PluginMcpSource {
+    pub plugin: String,
     /// Absolute, resolved package root — the value of `PLUGIN_ROOT`.
-    pub(crate) root: PathBuf,
+    pub root: PathBuf,
     /// Client-managed writable directory — the value of `PLUGIN_DATA`.
-    pub(crate) data: PathBuf,
-    pub(crate) config: tidebreak_code_execution::PluginMcpConfig,
+    pub data: PathBuf,
+    pub config: tidebreak_code_execution::PluginMcpConfig,
 }
 
 /// One bundled server that did not make it into the runtime set.
@@ -75,21 +75,21 @@ pub(crate) struct SkippedPluginServer {
 /// one (tests, headless servers with no plugin tree) should contribute no
 /// plugin servers rather than fail.
 #[async_trait::async_trait]
-pub(crate) trait PluginMcpCatalog: Send + Sync {
+pub trait PluginMcpCatalog: Send + Sync {
     /// Every installed, enabled plugin's bundled configuration, read live.
     async fn sources(&self) -> Vec<PluginMcpSource>;
 }
 
 /// The production catalog: the installed plugin tree, the stored enable flags,
 /// and the app data directory the `PLUGIN_DATA` directories live under.
-pub(crate) struct InstalledPluginMcpCatalog {
+pub struct InstalledPluginMcpCatalog {
     exec: Arc<crate::code_execution::ConfiguredExecProvider>,
     store: Arc<dyn Store>,
     data_root: PathBuf,
 }
 
 impl InstalledPluginMcpCatalog {
-    pub(crate) fn new(
+    pub fn new(
         exec: Arc<crate::code_execution::ConfiguredExecProvider>,
         store: Arc<dyn Store>,
         data_root: PathBuf,

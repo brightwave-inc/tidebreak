@@ -175,7 +175,7 @@ struct ExchangeResponse {
 /// gateway, as the caller (decision 65) — this is what the UI names the
 /// acting identity with.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct GitForgeIdentity {
+pub struct GitForgeIdentity {
     /// The gateway's display name for the forge app.
     pub app_name: String,
     /// Whose account work lands as.
@@ -184,7 +184,7 @@ pub(crate) struct GitForgeIdentity {
 
 /// Whose account work done with a borrowed forge credential lands as.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum GitForgeAttribution {
+pub enum GitForgeAttribution {
     /// The App's bot account (decision 63): `<slug>[bot]` when the gateway
     /// has recorded the App slug.
     Bot {
@@ -205,7 +205,7 @@ pub(crate) enum GitForgeAttribution {
 
 /// One repository the gateway list offers (decision 70).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct GitHubRepository {
+pub struct GitHubRepository {
     pub full_name: String,
     pub private: bool,
     pub description: Option<String>,
@@ -216,7 +216,7 @@ pub(crate) struct GitHubRepository {
 /// Held for the length of a single git operation and dropped. Deliberately
 /// no `Clone`, and `Debug` redacts the secret: the secret is the whole
 /// value, and the fewer copies and formatters that can touch it, the better.
-pub(crate) struct GitCredential {
+pub struct GitCredential {
     /// Login half of the HTTP basic pair — `x-access-token` for GitHub Apps.
     pub username: String,
     /// The repository-scoped installation token, dead within about an hour.
@@ -241,7 +241,7 @@ impl std::fmt::Debug for GitCredential {
 /// by its consumer — the repo-source probe words them as availability, a
 /// clone or push words them as the operation's failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum GitForgeError {
+pub enum GitForgeError {
     /// The caller's machine-bound session is gone; they sign in again.
     SignInRequired(String),
     /// No forge with a mintable App identity is available to this caller.
@@ -267,10 +267,10 @@ pub(crate) enum GitForgeError {
 /// picker needs: the id a turn presents, the display name when the listing
 /// carries one, and the family default the Anthropic surface annotates.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct GatewayCompatModel {
-    pub(crate) id: String,
-    pub(crate) display_name: Option<String>,
-    pub(crate) family_default: bool,
+pub struct GatewayCompatModel {
+    pub id: String,
+    pub display_name: Option<String>,
+    pub family_default: bool,
 }
 
 /// Per-caller inference credentials for a gateway-authenticated deployment.
@@ -279,7 +279,7 @@ pub(crate) struct GatewayCompatModel {
 /// authenticated caller's bearer with [`OboGateway::record_caller`], and ask
 /// for a caller's credential supplier with
 /// [`OboGateway::token_source_for`].
-pub(crate) struct OboGateway {
+pub struct OboGateway {
     /// Where the exchange is POSTed. Honors the verifier override, because
     /// this is a server-to-server call like principal validation.
     token_url: reqwest::Url,
@@ -321,7 +321,7 @@ impl OboGateway {
     /// Fails when the configured gateway URL cannot carry a server-to-server
     /// call, so a misconfigured deployment refuses to assemble rather than
     /// failing every turn at run time.
-    pub(crate) fn from_config(config: &tidebreak_core::Config) -> Result<Option<Arc<Self>>> {
+    pub fn from_config(config: &tidebreak_core::Config) -> Result<Option<Arc<Self>>> {
         if config.profile != Profile::SelfHost {
             return Ok(None);
         }
@@ -353,7 +353,7 @@ impl OboGateway {
     /// # Errors
     /// Fails when `base_url` is unparseable, carries credentials, a query, or
     /// a fragment, or is cleartext outside loopback development.
-    pub(crate) fn new(base_url: &str, resource: String) -> Result<Self> {
+    pub fn new(base_url: &str, resource: String) -> Result<Self> {
         let base = normalized_gateway_base(base_url)?;
         let token_url = join_below(&base, "oauth/token")?;
         let catalog_url = join_below(&base, "api/v1/me/catalog")?;
@@ -386,7 +386,7 @@ impl OboGateway {
     }
 
     /// The normalized gateway base URL, as stamped onto per-caller snapshots.
-    pub(crate) fn gateway_base_url(&self) -> &str {
+    pub fn gateway_base_url(&self) -> &str {
         &self.gateway_base_url
     }
 
@@ -396,7 +396,7 @@ impl OboGateway {
     /// request, so the newest live token is the one a later turn exchanges. A
     /// replacement subject does not invalidate the cached inference token:
     /// both name the same user, and the cached one is still that user's.
-    pub(crate) fn record_caller(&self, owner: &OwnerId, bearer: Arc<str>) {
+    pub fn record_caller(&self, owner: &OwnerId, bearer: Arc<str>) {
         let Ok(mut users) = self.users.lock() else {
             return;
         };
@@ -426,7 +426,7 @@ impl OboGateway {
     /// `None` is a fail-closed answer, not a fallback: the router is offered
     /// no route, and the turn fails with the missing-credential shape rather
     /// than running on somebody else's authority.
-    pub(crate) fn token_source_for(
+    pub fn token_source_for(
         self: &Arc<Self>,
         owner: &OwnerId,
     ) -> Option<Arc<dyn BearerTokenSource>> {
@@ -452,7 +452,7 @@ impl OboGateway {
     /// Each token is exchanged for the `runtime:{endpoint_slug}` audience so
     /// a sandbox is provisioned as its owner, never as a shared machine
     /// identity (`docs/slack-sessions.md`).
-    pub(crate) fn runtime_tokens(self: &Arc<Self>, endpoint_slug: &str) -> Arc<RuntimeTokens> {
+    pub fn runtime_tokens(self: &Arc<Self>, endpoint_slug: &str) -> Arc<RuntimeTokens> {
         Arc::new(RuntimeTokens {
             gateway: self.clone(),
             audience: format!("runtime:{endpoint_slug}"),
@@ -466,7 +466,7 @@ impl OboGateway {
     /// # Errors
     /// Fails when this process holds no subject token for `owner`, or when
     /// the gateway refuses the exchange.
-    pub(crate) async fn bearer_for(&self, owner: &OwnerId) -> Result<String> {
+    pub async fn bearer_for(&self, owner: &OwnerId) -> Result<String> {
         let slot = {
             let users = self.users.lock().map_err(|_| {
                 AgentError::msg("on-behalf-of inference state is unavailable in this process")
@@ -560,7 +560,7 @@ impl OboGateway {
     /// # Errors
     /// Fails when the gateway refuses the exchange or the read, and on
     /// transport failure with nothing inside the stale grace to serve.
-    pub(crate) async fn snapshot_for(
+    pub async fn snapshot_for(
         &self,
         owner: &OwnerId,
     ) -> Result<Option<crate::providers::GatewayModelSnapshot>> {
@@ -718,7 +718,7 @@ impl OboGateway {
     /// Each side fails on its own when this process holds no live subject
     /// for `owner`, when the exchange or that read is refused, on transport
     /// failure, and when that body is not a listing shape.
-    pub(crate) async fn compat_listings(
+    pub async fn compat_listings(
         &self,
         owner: &OwnerId,
     ) -> Result<(
@@ -773,7 +773,7 @@ impl OboGateway {
     /// # Errors
     /// Fails when this process holds no live token for `owner`, when the
     /// gateway names a refusal, and on transport failure.
-    pub(crate) async fn git_forge_identity(
+    pub async fn git_forge_identity(
         &self,
         owner: &OwnerId,
     ) -> Result<GitForgeIdentity, GitForgeError> {
@@ -825,7 +825,7 @@ impl OboGateway {
     /// # Errors
     /// Fails when this process holds no live token for `owner`, when the
     /// gateway names a refusal, and on transport failure.
-    pub(crate) async fn git_credential(
+    pub async fn git_credential(
         &self,
         owner: &OwnerId,
         repository: &str,
@@ -886,7 +886,7 @@ impl OboGateway {
 
     /// Repositories this caller can clone, listed by the gateway so this
     /// machine never holds a token for the read (decision 70).
-    pub(crate) async fn list_repositories(
+    pub async fn list_repositories(
         &self,
         owner: &OwnerId,
     ) -> Result<Vec<GitHubRepository>, GitForgeError> {
@@ -1057,8 +1057,8 @@ impl OboGateway {
 
     /// Seed a caller's snapshot directly, for tests that need routes without
     /// a live fake gateway behind them.
-    #[cfg(test)]
-    pub(crate) async fn seed_snapshot_for_test(
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn seed_snapshot_for_test(
         &self,
         owner: &OwnerId,
         snapshot: crate::providers::GatewayModelSnapshot,
@@ -1200,7 +1200,7 @@ fn git_refusal(status: reqwest::StatusCode, body: &[u8]) -> GitForgeError {
 /// Tokens are cached per owner and re-exchanged near expiry. Each owner
 /// has their own mutex, so one hung mint does not block another owner's
 /// spawn or pump.
-pub(crate) struct RuntimeTokens {
+pub struct RuntimeTokens {
     gateway: Arc<OboGateway>,
     audience: String,
     slots: std::sync::Mutex<HashMap<OwnerId, Arc<tokio::sync::Mutex<Option<CachedToken>>>>>,
@@ -1267,7 +1267,7 @@ impl crate::code::remote::RuntimeTokenSource for RuntimeTokens {
 /// A seam rather than a concrete handle so code-mode tests fake the
 /// gateway's answers without a live server behind them.
 #[async_trait]
-pub(crate) trait GitCredentialLender: Send + Sync {
+pub trait GitCredentialLender: Send + Sync {
     /// The identity work would land as, or the named reason none is offered.
     async fn git_forge_identity(&self, owner: &OwnerId) -> Result<GitForgeIdentity, GitForgeError>;
 
@@ -1309,23 +1309,23 @@ impl GitCredentialLender for OboGateway {
 }
 
 /// Scripted git-forge lending for code-mode tests.
-#[cfg(test)]
-pub(crate) mod test_support {
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
     use super::*;
 
     /// A lender whose answers are set by the test: an identity (or refusal)
     /// for the probe, an optional refusal for mints, and a record of every
     /// repository a mint was asked for.
-    pub(crate) struct FakeLender {
-        pub(crate) identity: std::sync::Mutex<Result<GitForgeIdentity, GitForgeError>>,
-        pub(crate) mint_refusal: std::sync::Mutex<Option<GitForgeError>>,
-        pub(crate) minted: std::sync::Mutex<Vec<String>>,
-        pub(crate) listed: std::sync::Mutex<Result<Vec<GitHubRepository>, GitForgeError>>,
+    pub struct FakeLender {
+        pub identity: std::sync::Mutex<Result<GitForgeIdentity, GitForgeError>>,
+        pub mint_refusal: std::sync::Mutex<Option<GitForgeError>>,
+        pub minted: std::sync::Mutex<Vec<String>>,
+        pub listed: std::sync::Mutex<Result<Vec<GitHubRepository>, GitForgeError>>,
     }
 
     impl FakeLender {
         /// A deployment whose forge serves this caller as `bot_login`.
-        pub(crate) fn offering(bot_login: &str) -> Self {
+        pub fn offering(bot_login: &str) -> Self {
             Self {
                 identity: std::sync::Mutex::new(Ok(GitForgeIdentity {
                     app_name: "Acme Forge".to_owned(),
@@ -1341,7 +1341,7 @@ pub(crate) mod test_support {
 
         /// A deployment whose forge acts as this caller's own account
         /// (decision 65).
-        pub(crate) fn offering_person(login: &str) -> Self {
+        pub fn offering_person(login: &str) -> Self {
             Self {
                 identity: std::sync::Mutex::new(Ok(GitForgeIdentity {
                     app_name: "Acme Forge".to_owned(),
@@ -1362,7 +1362,7 @@ pub(crate) mod test_support {
         }
 
         /// A deployment whose gateway refuses both surfaces with `error`.
-        pub(crate) fn refusing(error: GitForgeError) -> Self {
+        pub fn refusing(error: GitForgeError) -> Self {
             Self {
                 identity: std::sync::Mutex::new(Err(error.clone())),
                 mint_refusal: std::sync::Mutex::new(Some(error.clone())),
@@ -1372,7 +1372,7 @@ pub(crate) mod test_support {
         }
 
         /// Every repository a mint was asked for, in order.
-        pub(crate) fn minted(&self) -> Vec<String> {
+        pub fn minted(&self) -> Vec<String> {
             self.minted.lock().expect("minted").clone()
         }
     }

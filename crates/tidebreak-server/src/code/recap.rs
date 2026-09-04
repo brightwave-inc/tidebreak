@@ -57,14 +57,14 @@ use super::bus::CodeEventBus;
 
 /// Store key. Default on: completed turns that need a fallback receive a
 /// one-line recap unless the reader turns the feature off in agent settings.
-pub(crate) const TURN_RECAPS_SETTING: &str = "code.turn_recaps";
+pub const TURN_RECAPS_SETTING: &str = "code.turn_recaps";
 
 /// Longest recap stored, and the bound the schema states.
 ///
 /// Two plain sentences fit comfortably; a third does not. The bound is enforced
 /// by rejection rather than truncation, so a model that ignores it loses the
 /// answer instead of having it cut mid-word.
-pub(crate) const MAX_RECAP_CHARS: usize = 280;
+pub const MAX_RECAP_CHARS: usize = 280;
 
 /// Recap length asked for in prose, well under the bound the schema enforces.
 const RECAP_TARGET_WORDS: usize = 40;
@@ -93,7 +93,7 @@ const RECAP_SCHEMA_NAME: &str = "session_recap";
 /// The model's answer to one recap call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RecapProposal {
+pub struct RecapProposal {
     /// Where the session stands, or `null` when the turn is not worth a line.
     #[schemars(length(max = MAX_RECAP_CHARS))]
     recap: Option<String>,
@@ -123,7 +123,7 @@ Answer {{"recap":null}} when there is nothing worth saying — a turn that only 
 
 /// What one background recap run concluded.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Outcome {
+pub enum Outcome {
     /// A recap was stored on the turn.
     Recapped(String),
     /// The model declined: the turn is not worth a line.
@@ -140,7 +140,7 @@ pub(crate) enum Outcome {
 /// [`crate::state::AppState`], which would close a reference cycle through
 /// [`super::runtime::CodeRuntime`]. Absent in headless deployments and tests
 /// that register none, exactly like the browser runtime the runtime carries.
-pub(crate) trait TurnRecap: Send + Sync {
+pub trait TurnRecap: Send + Sync {
     /// Derive and store the recap for `turn_id`. Returns immediately; nothing
     /// waits on the result and a lost recap costs nothing.
     fn spawn(&self, owner: OwnerId, session_id: SessionId, turn_id: TurnId);
@@ -153,17 +153,17 @@ pub(crate) trait TurnRecap: Send + Sync {
 /// owns it is not also owned by it. Every field is a handle, so cloning one to
 /// hand to a spawned task is cheap.
 #[derive(Clone)]
-pub(crate) struct TurnRecapper {
+pub struct TurnRecapper {
     /// Per-caller gateway capabilities on a hosted machine (decisions 51 and
     /// 62): a recap runs as the owner of the session it describes.
-    pub(crate) on_behalf_of: Option<Arc<crate::obo_gateway::OboGateway>>,
-    pub(crate) db: Arc<DbStore>,
-    pub(crate) bus: Arc<CodeEventBus>,
-    pub(crate) store: Arc<dyn tidebreak_core::Store>,
-    pub(crate) resolver: Arc<dyn ProviderResolver>,
-    pub(crate) secrets: Arc<dyn tidebreak_core::SecretProvider>,
-    pub(crate) provisioned_policy: Arc<dyn crate::managed_policy::ProvisionedPolicySource>,
-    pub(crate) os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
+    pub on_behalf_of: Option<Arc<crate::obo_gateway::OboGateway>>,
+    pub db: Arc<DbStore>,
+    pub bus: Arc<CodeEventBus>,
+    pub store: Arc<dyn tidebreak_core::Store>,
+    pub resolver: Arc<dyn ProviderResolver>,
+    pub secrets: Arc<dyn tidebreak_core::SecretProvider>,
+    pub provisioned_policy: Arc<dyn crate::managed_policy::ProvisionedPolicySource>,
+    pub os_policy: Arc<dyn crate::managed_policy::OsPolicySource>,
     /// Sessions with a recap call in flight, and at most one turn queued by a
     /// completion that landed while that call was running.
     ///
@@ -182,7 +182,7 @@ pub(crate) struct TurnRecapper {
 }
 
 impl TurnRecapper {
-    pub(crate) fn new(
+    pub fn new(
         db: Arc<DbStore>,
         bus: Arc<CodeEventBus>,
         store: Arc<dyn tidebreak_core::Store>,
@@ -204,7 +204,7 @@ impl TurnRecapper {
         }
     }
 
-    pub(crate) fn with_on_behalf_of_gateway(
+    pub fn with_on_behalf_of_gateway(
         mut self,
         gateway: Option<Arc<crate::obo_gateway::OboGateway>>,
     ) -> Self {
@@ -216,7 +216,7 @@ impl TurnRecapper {
     ///
     /// The awaitable form of [`TurnRecap::spawn`], which is what a test asserts
     /// on.
-    pub(crate) async fn derive(
+    pub async fn derive(
         &self,
         owner: &OwnerId,
         session_id: SessionId,
@@ -303,7 +303,7 @@ impl TurnRecapper {
     /// what this turn was asked for, and what the turn actually did. The goal
     /// is what keeps a recap of the fifth turn from reading as though the work
     /// began there.
-    pub(crate) async fn turn_material(
+    pub async fn turn_material(
         &self,
         owner: &OwnerId,
         session_id: SessionId,
@@ -448,7 +448,7 @@ impl TurnRecap for TurnRecapper {
 }
 
 /// Whether completed code turns receive one-line recaps. Default on.
-pub(crate) async fn turn_recaps_enabled(
+pub async fn turn_recaps_enabled(
     store: &dyn tidebreak_core::Store,
 ) -> tidebreak_core::Result<bool> {
     Ok(store
