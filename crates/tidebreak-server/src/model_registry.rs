@@ -441,6 +441,23 @@ const MODEL_REGISTRY: &[ModelSpec] = &[
         // `max_completion_tokens`. Only the 5.6 generation added `max`.
         reasoning_efforts: EFFORT_NONE_TO_MAX,
     },
+    // Astra is the current flagship, but OpenAI is still rolling access out
+    // and provider discovery does not expose it on the installation used for
+    // verification. Keep it selectable without making an unavailable row the
+    // default-visible recommendation; revisit after rollout and a live turn.
+    ModelSpec {
+        id: "gpt-6-astra",
+        display_name: "GPT-6 Astra",
+        provider: ProviderKind::Openai,
+        verification: VerificationTier::Unverified,
+        recommended: false,
+        context_window: 1_050_000,
+        max_output_tokens: 128_000,
+        input_modalities: TEXT_AND_IMAGE,
+        supports_reasoning: true,
+        supports_vendor_web_search: false,
+        reasoning_efforts: EFFORT_LOW_TO_MAX,
+    },
     ModelSpec {
         id: "gpt-5.6-terra",
         display_name: "GPT-5.6 Terra",
@@ -1282,10 +1299,12 @@ mod tests {
     }
 
     #[test]
-    fn every_openai_entry_reasons_on_a_caller_selected_effort() {
-        let openai: Vec<_> = models_for(ProviderKind::Openai).collect();
-        assert!(!openai.is_empty());
-        for spec in openai {
+    fn every_gpt_5_entry_reasons_on_a_caller_selected_effort() {
+        let gpt_5: Vec<_> = models_for(ProviderKind::Openai)
+            .filter(|spec| spec.id.starts_with("gpt-5"))
+            .collect();
+        assert!(!gpt_5.is_empty());
+        for spec in gpt_5 {
             assert!(
                 spec.supports_reasoning && spec.supports_reasoning_effort(),
                 "{} is curated on the OpenAI route without the reasoning shape that route sends",
@@ -1320,6 +1339,22 @@ mod tests {
             find("gpt-5.4-nano").unwrap().reasoning_efforts,
             EFFORT_NONE_TO_XHIGH
         );
+    }
+
+    #[test]
+    fn gpt_6_astra_rejects_none_and_exposes_its_documented_contract() {
+        let astra = find_for(ProviderKind::Openai, "gpt-6-astra").unwrap();
+
+        assert_eq!(astra.verification, VerificationTier::Unverified);
+        assert!(!astra.recommended);
+        assert_eq!(astra.context_window, 1_050_000);
+        assert_eq!(astra.max_output_tokens, 128_000);
+        assert!(astra.accepts(InputModality::Text));
+        assert!(astra.accepts(InputModality::Image));
+        assert!(astra.supports_reasoning);
+        assert!(astra.supports_tools());
+        assert_eq!(astra.reasoning_efforts, EFFORT_LOW_TO_MAX);
+        assert!(!astra.reasoning_efforts.contains(&ReasoningEffort::None));
     }
 
     #[test]

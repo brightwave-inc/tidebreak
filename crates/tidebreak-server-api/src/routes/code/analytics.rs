@@ -21,7 +21,7 @@ use super::types::{
     CodeAnalyticsRange, CodeAnalyticsRepository, CodeAnalyticsSnapshot, CodeAnalyticsTotals,
 };
 
-const PRICES_AS_OF: &str = "2026-08-21";
+const PRICES_AS_OF: &str = "2026-09-03";
 
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct CodeAnalyticsQuery {
@@ -465,6 +465,7 @@ fn canonical_model_id(model: &str) -> Option<&'static str> {
     // Longer ids first: a bare `claude-fable-5` must not claim the 5.1 row,
     // and Flash-Lite must not read as Flash.
     [
+        "gpt-6-astra",
         "gpt-5.6-terra",
         "gpt-5.6-luna",
         "gpt-5.5",
@@ -512,9 +513,16 @@ fn model_has_dated_suffix(value: &str, id: &str) -> bool {
 
 fn price_for_canonical(model: &str) -> Option<PriceRate> {
     match model {
-        // OpenAI short-context (under 272K) rates. The GPT-5.6 rows are the
-        // only OpenAI models that bill cache writes. Sol's rate is promotional,
-        // published as holding at least through 2026-11-21.
+        // OpenAI short-context (up to 272K) rates. Longer Astra prompts use
+        // multipliers that this canonical table does not model. The GPT-5.6
+        // rows also bill cache writes; Sol's rate is promotional, published as
+        // holding at least through 2026-11-21.
+        "gpt-6-astra" => Some(PriceRate {
+            input: 10_000,
+            output: 50_000,
+            cache_read: 1_000,
+            cache_write: 12_500,
+        }),
         "gpt-5.6-sol" => Some(PriceRate {
             input: 4_000,
             output: 20_000,
@@ -718,6 +726,14 @@ mod tests {
     #[test]
     fn canonical_prices_cover_curated_gateway_ids() {
         assert_eq!(
+            canonical_model_id("model_gateway::gpt-6-astra"),
+            Some("gpt-6-astra")
+        );
+        assert_eq!(
+            canonical_model_id("openai/gpt-6-astra"),
+            Some("gpt-6-astra")
+        );
+        assert_eq!(
             canonical_model_id("model_gateway::gpt-5.6"),
             Some("gpt-5.6-sol")
         );
@@ -801,5 +817,28 @@ mod tests {
             total: 1_610_000,
         });
         assert_eq!(microusd(cost), 3_125_000);
+    }
+
+    #[test]
+    fn gpt_6_astra_uses_the_published_short_context_rates() {
+        let rate = price_for_canonical("gpt-6-astra").unwrap();
+        assert_eq!(
+            rate,
+            PriceRate {
+                input: 10_000,
+                output: 50_000,
+                cache_read: 1_000,
+                cache_write: 12_500,
+            }
+        );
+
+        let cost = rate.cost_millimicrousd(UsageTotals {
+            input: 1_000_000,
+            output: 1_000_000,
+            cache_read: 1_000_000,
+            cache_write: 1_000_000,
+            total: 4_000_000,
+        });
+        assert_eq!(microusd(cost), 73_500_000);
     }
 }
