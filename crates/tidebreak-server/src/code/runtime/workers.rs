@@ -188,8 +188,15 @@ impl CodeRuntime {
                     owner: session.owner.clone(),
                     session: session.id,
                 });
-                let (argv, env) =
+                let (argv, mut env) =
                     crate::code::harness_llm::spawn_wiring(session.harness_kind, &base, &key);
+                // A repository session's own git borrows the person's forge
+                // credential through the loopback route under the same key,
+                // so the harness's shell can push what it made. A machine
+                // that lends none leaves git as it found it.
+                if workspace.is_some() && self.git_credentials.is_some() {
+                    env.extend(crate::code::harness_llm::git_credential_wiring(&base));
+                }
                 (
                     argv,
                     env,
