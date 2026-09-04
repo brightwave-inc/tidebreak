@@ -499,7 +499,10 @@ pub async fn publish_session_image(
     headers: HeaderMap,
     RawBytes(bytes): RawBytes,
 ) -> Result<impl IntoResponse, ServerError> {
-    let _session = code.get_session(id).await?;
+    // A write, so `contribute` or ownership, settled before the bytes are
+    // stored: a viewer may read the session but not attach to it (decision
+    // 0086).
+    code.ensure_session_contributor(id).await?;
     let bytes = bytes.to_vec();
     let image = inspect_image_bytes(&bytes)?;
     require_declared_type_matches(&headers, image.media_type)?;

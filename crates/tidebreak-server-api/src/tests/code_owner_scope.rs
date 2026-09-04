@@ -456,6 +456,25 @@ async fn get_status(
         .status()
 }
 
+/// Publish the one-pixel fixture image to a session as the named principal.
+async fn publish_png(
+    client: &reqwest::Client,
+    addr: std::net::SocketAddr,
+    token: &str,
+    session: &str,
+) -> reqwest::Response {
+    client
+        .post(format!(
+            "http://{addr}/sessions/{session}/attachments/images"
+        ))
+        .bearer_auth(token)
+        .header(reqwest::header::CONTENT_TYPE, "image/png")
+        .body(super::code_attachments::one_pixel_png())
+        .send()
+        .await
+        .unwrap()
+}
+
 async fn post_status(
     client: &reqwest::Client,
     addr: std::net::SocketAddr,
@@ -589,6 +608,16 @@ async fn a_viewer_reads_a_contributor_writes_and_neither_owns() {
         reqwest::StatusCode::NOT_FOUND,
         "a viewer must not pause the queue"
     );
+    // Publishing an image is a write too: it is the authority a later turn
+    // attachment is checked against, so a viewer is refused before any
+    // bytes are stored.
+    assert_eq!(
+        publish_png(&client, addr, BOB_TOKEN, &session)
+            .await
+            .status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "a viewer must not publish an image"
+    );
 
     grant_access(
         &client,
@@ -619,6 +648,38 @@ async fn a_viewer_reads_a_contributor_writes_and_neither_owns() {
         turn["actor"]["principal"].as_str(),
         Some("user:bob"),
         "the submitted turn names its actor"
+    );
+
+    // A contributor publishes an image and attaches it. The publication row
+    // is written under the session's owner, which is the scope the turn's
+    // attachment check reads it back through; written under the caller it
+    // would be refused here, and the attachment would never resolve.
+    let published = publish_png(&client, addr, BOB_TOKEN, &session).await;
+    assert_eq!(
+        published.status(),
+        reqwest::StatusCode::CREATED,
+        "a contributor publishes an image"
+    );
+    let published: serde_json::Value = published.json().await.unwrap();
+    let blob_id = published["attachment_id"]
+        .as_str()
+        .or_else(|| published["blob_id"].as_str())
+        .expect("the publication names its blob")
+        .to_owned();
+    assert_eq!(
+        post_status(
+            &client,
+            addr,
+            BOB_TOKEN,
+            &format!("/sessions/{session}/turns"),
+            serde_json::json!({
+                "message": "and look at this",
+                "attachments": [{ "blob_id": blob_id, "media_type": "image/png" }],
+            }),
+        )
+        .await,
+        reqwest::StatusCode::ACCEPTED,
+        "a contributor attaches the image they published"
     );
 
     // Lifecycle and settings stay with the owner, and so does the access

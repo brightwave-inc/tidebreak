@@ -1734,6 +1734,7 @@ mod tests {
             checkpoint_ref: None,
             diffstat: None,
             usage: None,
+            actor: None,
             narrative: None,
             rewrite: None,
             started_at: chrono::Utc::now(),

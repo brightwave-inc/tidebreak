@@ -1314,6 +1314,7 @@ fn render_event(
         Event::ApprovalResolved {
             approval_id,
             decision: ApprovalDecisionKind::Abandoned,
+            ..
         } => {
             finish_line(dangling);
             eprintln!(

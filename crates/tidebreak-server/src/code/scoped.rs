@@ -1060,20 +1060,40 @@ impl ScopedCode {
     // principal's own sessions.
     // ------------------------------------------------------------------
 
-    /// Reserve a validated image for one of the principal's sessions.
+    /// Reserve a validated image for a session the principal may drive.
+    ///
+    /// Publication is a write: it is what a later turn attachment is checked
+    /// against, so it takes `contribute` like the turn that will carry the
+    /// image, and the row is written under the session's owner, whose
+    /// session it is (decision 0086). A viewer is refused as not found, the
+    /// way every other write answers them.
     pub async fn publish_session_image(
         &self,
         session_id: SessionId,
         image: &tidebreak_core::ImageRef,
     ) -> Result<bool, ServerError> {
+        let owner = self.session_owner_for_contribute(session_id).await?;
         Ok(tidebreak_core::db::code::publish_session_image(
             &self.runtime.db,
-            &self.owner,
+            &owner,
             session_id,
             image,
             chrono::Utc::now(),
         )
         .await?)
+    }
+
+    /// Refuse a principal who may not drive this session, before a route
+    /// does work on their behalf. The same answer as
+    /// [`Self::publish_session_image`] gives, settled before the bytes are
+    /// stored rather than after.
+    pub async fn ensure_session_contributor(
+        &self,
+        session_id: SessionId,
+    ) -> Result<(), ServerError> {
+        self.session_owner_for_contribute(session_id)
+            .await
+            .map(|_| ())
     }
 
     pub async fn list_sessions(&self) -> Result<Vec<Session>, ServerError> {
