@@ -107,6 +107,9 @@ impl TurnMemoryCapturer {
         session_id: SessionId,
         turn_id: TurnId,
     ) -> Result<()> {
+        if !crate::memory_capture::capture_enabled(&*self.store).await? {
+            return Ok(());
+        }
         let Some(turn) = get_turn(&self.db, owner, turn_id).await? else {
             return Ok(());
         };
@@ -393,14 +396,18 @@ mod tests {
     use std::process::Command as StdCommand;
 
     use super::*;
+    use async_trait::async_trait;
     use tidebreak_core::db::code::{
         append_event, insert_repo, insert_session, insert_turn, insert_workspace, save_turn,
     };
     use tidebreak_core::{
         Attention, AttentionSource, AttentionState, CodeRepo, CodeWorkspace, CodeWorkspaceStatus,
-        Diffstat, Event, FileChangeKind, HarnessKind, PermissionMode, RepoId, Session, SessionId,
-        SessionKind, SessionLifecycle, Turn, TurnId, TurnStatus, WorkspaceId,
+        Diffstat, Event, FileChangeKind, HarnessKind, MemoryListFilter, ModelProvider,
+        PermissionMode, RepoId, SecretProvider, Session, SessionId, SessionKind, SessionLifecycle,
+        Turn, TurnId, TurnStatus, WorkspaceId,
     };
+
+    use crate::resolver::ProviderResolver;
 
     fn git(repo: &Path, args: &[&str]) {
         let output = StdCommand::new("git")
@@ -423,6 +430,142 @@ mod tests {
         assert!(is_agent_context_file(".cursor/rules/rust.md"));
         assert!(is_agent_context_file(".github/copilot-instructions.md"));
         assert!(!is_agent_context_file("src/main.rs"));
+    }
+
+    struct ProbeProvisionedPolicy;
+
+    impl crate::managed_policy::ProvisionedPolicySource for ProbeProvisionedPolicy {
+        fn read(&self) -> Result<Option<String>> {
+            panic!("utility-model derivation must not run when memory capture is disabled");
+        }
+
+        fn write(&self, _gateway_url: &str) -> Result<()> {
+            panic!("utility-model derivation must not run when memory capture is disabled");
+        }
+
+        fn clear(&self) -> Result<()> {
+            panic!("utility-model derivation must not run when memory capture is disabled");
+        }
+    }
+
+    struct PanicResolver;
+
+    #[async_trait]
+    impl ProviderResolver for PanicResolver {
+        async fn resolve(&self) -> std::sync::Arc<dyn ModelProvider> {
+            panic!("provider resolution must not run when memory capture is disabled");
+        }
+    }
+
+    struct NoSecrets;
+
+    #[async_trait]
+    impl SecretProvider for NoSecrets {
+        async fn get_secret(&self, _key: &str) -> Result<Option<String>> {
+            Ok(None)
+        }
+
+        async fn set_secret(&self, _key: &str, _value: &str) -> Result<()> {
+            Err(AgentError::Secret("read-only test secrets".into()))
+        }
+
+        async fn delete_secret(&self, _key: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn derive_is_a_noop_when_memory_capture_is_disabled() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = std::sync::Arc::new(
+            DbStore::connect(&format!(
+                "sqlite://{}?mode=rwc",
+                directory.path().join("code.db").display()
+            ))
+            .await
+            .unwrap(),
+        );
+        let owner = OwnerId::local();
+        let session_id = SessionId::new();
+        insert_session(
+            &db,
+            &Session {
+                id: session_id,
+                owner: owner.clone(),
+                workspace_id: None,
+                kind: SessionKind::Interactive,
+                harness_kind: HarnessKind::ClaudeCode,
+                harness_version: None,
+                harness_resume_ref: None,
+                permission_mode: PermissionMode::Plan,
+                model: None,
+                reasoning_effort: None,
+                fast_mode: false,
+                lifecycle: SessionLifecycle::Idle,
+                fence_reason: None,
+                child_pid: None,
+                child_process_identity: None,
+                spawn_epoch: 1,
+                attention: Attention::new(AttentionState::Idle, AttentionSource::Lifecycle),
+                unrecognized_event_count: 0,
+                subagents: Vec::new(),
+                created_at: chrono::Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+        let turn_id = TurnId::new();
+        insert_turn(
+            &db,
+            &owner,
+            &Turn {
+                id: turn_id,
+                session_id,
+                ordinal: 1,
+                status: TurnStatus::Completed,
+                model: None,
+                fast_mode: false,
+                user_input: "Remember that we ship on Fridays.".into(),
+                user_input_blob_id: None,
+                attachments: Vec::new(),
+                checkpoint_ref: None,
+                diffstat: None,
+                usage: None,
+                narrative: None,
+                rewrite: None,
+                started_at: chrono::Utc::now(),
+                ended_at: Some(chrono::Utc::now()),
+                park_ref: None,
+                park_wait: None,
+            },
+        )
+        .await
+        .unwrap();
+        append_event(&db, &owner, session_id, 1, &Event::TurnStarted { turn_id })
+            .await
+            .unwrap();
+
+        let store: std::sync::Arc<dyn tidebreak_core::Store> = db.clone();
+        let recap = TurnRecapper::new(
+            db.clone(),
+            std::sync::Arc::new(super::super::bus::CodeEventBus::default()),
+            store,
+            std::sync::Arc::new(PanicResolver),
+            std::sync::Arc::new(NoSecrets),
+            std::sync::Arc::new(ProbeProvisionedPolicy),
+            std::sync::Arc::new(crate::managed_policy::NoOsPolicy),
+        );
+        let capturer = TurnMemoryCapturer::from_recap(recap);
+
+        capturer.derive(&owner, session_id, turn_id).await.unwrap();
+
+        let records = MemoryBackend::list(&*db, &owner, MemoryListFilter::default())
+            .await
+            .unwrap();
+        assert!(
+            records.is_empty(),
+            "disabled capture must not store a proposal"
+        );
     }
 
     #[tokio::test]
