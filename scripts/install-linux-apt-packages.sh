@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
-# Install Linux CI/release packages without stalling on a dead Azure mirror.
+# Use HTTPS Ubuntu archives for Linux CI and release dependencies.
 #
-# Hosted ubuntu-22.04 runners pin apt to azure.archive.ubuntu.com. That mirror
-# regularly returns Ign: for InRelease and package payloads and can hang far
-# longer than a healthy archive.ubuntu.com fetch. Point apt at the public
-# Ubuntu archive first, then install with short timeouts and a few retries.
+# Hosted runner mirrors can stall on HTTP requests. Normalize Ubuntu sources
+# to official HTTPS endpoints, then install with short timeouts and retries.
 set -euo pipefail
 
 if (($# == 0)); then
@@ -62,11 +60,11 @@ fi
 
 case "$arch" in
 amd64)
-  archive_url="${TIDEBREAK_APT_ARCHIVE_URL:-http://archive.ubuntu.com/ubuntu}"
-  security_url="${TIDEBREAK_APT_SECURITY_URL:-http://security.ubuntu.com/ubuntu}"
+  archive_url="${TIDEBREAK_APT_ARCHIVE_URL:-https://archive.ubuntu.com/ubuntu}"
+  security_url="${TIDEBREAK_APT_SECURITY_URL:-https://security.ubuntu.com/ubuntu}"
   ;;
 arm64)
-  archive_url="${TIDEBREAK_APT_ARCHIVE_URL:-http://ports.ubuntu.com/ubuntu-ports}"
+  archive_url="${TIDEBREAK_APT_ARCHIVE_URL:-https://ports.ubuntu.com/ubuntu-ports}"
   security_url="${TIDEBREAK_APT_SECURITY_URL:-$archive_url}"
   ;;
 *)
@@ -87,13 +85,16 @@ path = Path(sys.argv[1])
 archive_url = sys.argv[2]
 security_url = sys.argv[3]
 text = path.read_text()
-replacements = (
-    (r"https?://azure\.archive\.ubuntu\.com/ubuntu-ports", archive_url),
-    (r"https?://azure\.archive\.ubuntu\.com/ubuntu", archive_url),
-    (r"https?://security\.ubuntu\.com/ubuntu", security_url),
+ubuntu_source = re.compile(
+    r"https?://(?:(?P<security>security\.ubuntu\.com/ubuntu)"
+    r"|(?:azure\.)?archive\.ubuntu\.com/ubuntu(?:-ports)?"
+    r"|ports\.ubuntu\.com/ubuntu-ports)(?=/|\s|$)"
 )
-for pattern, replacement in replacements:
-    text = re.sub(pattern, replacement, text)
+# One pass preserves explicit overrides that name another Ubuntu endpoint.
+text = ubuntu_source.sub(
+    lambda match: security_url if match.group("security") else archive_url,
+    text,
+)
 path.write_text(text)
 ' "$file" "$archive_url" "$security_url"
 }

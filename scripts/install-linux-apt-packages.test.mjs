@@ -94,15 +94,15 @@ test("rewrites the Azure Ubuntu mirror to archive.ubuntu.com on amd64", () => {
     mirrors: "http://azure.archive.ubuntu.com/ubuntu\tpriority:1\n",
   });
 
-  assert.match(result.sources, /deb http:\/\/archive\.ubuntu\.com\/ubuntu jammy main/);
+  assert.match(result.sources, /deb https:\/\/archive\.ubuntu\.com\/ubuntu jammy main/);
   assert.doesNotMatch(result.sources, /azure\.archive\.ubuntu\.com/);
   assert.match(
     result.extraLists["ubuntu.sources"],
-    /URIs: http:\/\/archive\.ubuntu\.com\/ubuntu/,
+    /URIs: https:\/\/archive\.ubuntu\.com\/ubuntu/,
   );
   assert.equal(
     result.mirrors,
-    "http://archive.ubuntu.com/ubuntu\tpriority:1\n",
+    "https://archive.ubuntu.com/ubuntu\tpriority:1\n",
   );
   assert.match(result.conf, /Acquire::Retries "3";/);
   assert.match(result.conf, /Acquire::http::Timeout "20";/);
@@ -125,14 +125,14 @@ test("rewrites ARM runners to ports.ubuntu.com", () => {
     },
   });
 
-  assert.match(result.sources, /deb http:\/\/ports\.ubuntu\.com\/ubuntu-ports jammy main/);
+  assert.match(result.sources, /deb https:\/\/ports\.ubuntu\.com\/ubuntu-ports jammy main/);
   assert.match(
     result.extraLists["ubuntu.list"],
-    /deb http:\/\/ports\.ubuntu\.com\/ubuntu-ports jammy main/,
+    /deb https:\/\/ports\.ubuntu\.com\/ubuntu-ports jammy main/,
   );
   assert.equal(
     result.mirrors,
-    "http://ports.ubuntu.com/ubuntu-ports\tpriority:1\n",
+    "https://ports.ubuntu.com/ubuntu-ports\tpriority:1\n",
   );
 });
 
@@ -145,10 +145,10 @@ test("writes a public archive sources.list when none exists", () => {
   assert.equal(
     result.sources,
     [
-      "deb http://archive.ubuntu.com/ubuntu jammy main restricted universe multiverse",
-      "deb http://archive.ubuntu.com/ubuntu jammy-updates main restricted universe multiverse",
-      "deb http://archive.ubuntu.com/ubuntu jammy-backports main restricted universe multiverse",
-      "deb http://security.ubuntu.com/ubuntu jammy-security main restricted universe multiverse",
+      "deb https://archive.ubuntu.com/ubuntu jammy main restricted universe multiverse",
+      "deb https://archive.ubuntu.com/ubuntu jammy-updates main restricted universe multiverse",
+      "deb https://archive.ubuntu.com/ubuntu jammy-backports main restricted universe multiverse",
+      "deb https://security.ubuntu.com/ubuntu jammy-security main restricted universe multiverse",
       "",
     ].join("\n"),
   );
@@ -164,4 +164,94 @@ test("the helper is executable", () => {
   chmodSync(script, 0o755);
   const result = spawnSync("test", ["-x", script]);
   assert.equal(result.status, 0);
+});
+
+test("normalizes existing official Ubuntu HTTP sources to HTTPS", () => {
+  const result = runFixture({
+    arch: "amd64",
+    sources: [
+      "deb http://archive.ubuntu.com/ubuntu jammy main",
+      "deb http://security.ubuntu.com/ubuntu jammy-security main",
+      "deb http://custom.example/ubuntu jammy main",
+      "",
+    ].join("\n"),
+    extraLists: {
+      "ubuntu.sources":
+        "URIs: http://archive.ubuntu.com/ubuntu\nSuites: jammy jammy-updates\n",
+      "security.list":
+        "deb http://security.ubuntu.com/ubuntu jammy-security main\n",
+    },
+    mirrors: "http://archive.ubuntu.com/ubuntu\tpriority:1\n",
+  });
+
+  assert.equal(
+    result.sources,
+    [
+      "deb https://archive.ubuntu.com/ubuntu jammy main",
+      "deb https://security.ubuntu.com/ubuntu jammy-security main",
+      "deb http://custom.example/ubuntu jammy main",
+      "",
+    ].join("\n"),
+  );
+  assert.equal(
+    result.extraLists["ubuntu.sources"],
+    "URIs: https://archive.ubuntu.com/ubuntu\nSuites: jammy jammy-updates\n",
+  );
+  assert.equal(
+    result.extraLists["security.list"],
+    "deb https://security.ubuntu.com/ubuntu jammy-security main\n",
+  );
+  assert.equal(result.mirrors, "https://archive.ubuntu.com/ubuntu\tpriority:1\n");
+});
+
+test("normalizes existing Ubuntu ports HTTP sources to HTTPS", () => {
+  const result = runFixture({
+    arch: "arm64",
+    sources: "deb http://ports.ubuntu.com/ubuntu-ports jammy main\n",
+    extraLists: {
+      "ubuntu.sources":
+        "URIs: http://ports.ubuntu.com/ubuntu-ports\nSuites: jammy\n",
+    },
+  });
+
+  assert.equal(
+    result.sources,
+    "deb https://ports.ubuntu.com/ubuntu-ports jammy main\n",
+  );
+  assert.equal(
+    result.extraLists["ubuntu.sources"],
+    "URIs: https://ports.ubuntu.com/ubuntu-ports\nSuites: jammy\n",
+  );
+  assert.equal(
+    result.mirrors,
+    "https://ports.ubuntu.com/ubuntu-ports\tpriority:1\n",
+  );
+});
+
+test("preserves explicit endpoint overrides without rewriting their output", () => {
+  const result = runFixture({
+    arch: "amd64",
+    sources: [
+      "deb http://archive.ubuntu.com/ubuntu jammy main",
+      "deb https://security.ubuntu.com/ubuntu jammy-security main",
+      "",
+    ].join("\n"),
+    extraEnv: {
+      TIDEBREAK_APT_ARCHIVE_URL: "http://security.ubuntu.com/ubuntu",
+      TIDEBREAK_APT_SECURITY_URL: "http://archive.ubuntu.com/ubuntu",
+    },
+  });
+
+  assert.equal(
+    result.sources,
+    [
+      "deb http://security.ubuntu.com/ubuntu jammy main",
+      "deb http://archive.ubuntu.com/ubuntu jammy-security main",
+      "",
+    ].join("\n"),
+  );
+  assert.equal(
+    result.mirrors,
+    "http://security.ubuntu.com/ubuntu\tpriority:1\n",
+  );
 });
