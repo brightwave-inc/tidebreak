@@ -551,6 +551,13 @@ impl CodeRuntime {
         let runtime = self.clone();
         Box::pin(async move {
             cleanup.map_err(ServerError::internal)?;
+            if let Some(external) = runtime
+                .harness_llm
+                .as_ref()
+                .and_then(|relay| relay.external_delegations())
+            {
+                external.start_revocation_sweep();
+            }
             let actions = runtime.recover().await;
             // After recovery so resumed watch sessions have workers to drive;
             // the sweep reads its work list from the `code_watch` table, so

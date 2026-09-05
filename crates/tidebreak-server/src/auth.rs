@@ -380,7 +380,13 @@ pub async fn require_token(
 ) -> Response {
     let presented = extract_token(request.headers()).map(str::to_owned);
     let resolved = match presented.as_deref() {
-        Some(presented) => resolve_principal(&state, presented).await,
+        Some(presented) => match resolve_principal(&state, presented).await {
+            Ok(principal) => principal,
+            Err(error) => {
+                tracing::warn!(%error, "model-gateway could not validate Tidebreak caller");
+                return StatusCode::SERVICE_UNAVAILABLE.into_response();
+            }
+        },
         None => None,
     };
 
@@ -415,11 +421,12 @@ pub async fn require_token(
     }
 }
 
-/// Process-memory lease retained by Gateway-authenticated WebSocket tasks.
+/// Process-memory lease retained by gateway-authenticated request tasks.
 ///
 /// The bearer is intentionally private and this type deliberately implements
-/// neither `Debug` nor serialization. Socket loops use it only to re-check the
-/// live Gateway principal; static-token and local sockets receive no lease.
+/// neither `Debug` nor serialization. Socket loops re-check its principal;
+/// external consent uses its exact credential. Static-token and local
+/// requests receive no lease.
 #[derive(Clone)]
 pub struct GatewayAuthLease {
     bearer: std::sync::Arc<str>,
@@ -427,6 +434,26 @@ pub struct GatewayAuthLease {
 }
 
 impl GatewayAuthLease {
+    /// Bind consent to the exact request credential that approved it.
+    pub(crate) async fn enroll_external_delegation(
+        &self,
+        external: &crate::obo_gateway::external::ExternalDelegations,
+        owner: &tidebreak_core::OwnerId,
+        handshake: tidebreak_core::CodeHandshakeId,
+    ) -> Result<()> {
+        if &self.principal.owner_id() != owner {
+            return Err(AgentError::SignInRequired(
+                "the approval credential belongs to another account".into(),
+            ));
+        }
+        external.enroll(owner, handshake, &self.bearer).await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(principal: Principal, bearer: std::sync::Arc<str>) -> Self {
+        Self { principal, bearer }
+    }
+
     /// Revalidate the original credential and require identity and role to be
     /// unchanged. Refusal, expiry, deactivation, demotion/promotion, and
     /// verifier outages all fail closed.
@@ -444,17 +471,19 @@ impl GatewayAuthLease {
 /// `None` is a 401: a token that names no one admits no one. Unknown future
 /// profiles resolve nobody until they choose an authenticator — fail closed,
 /// never defaulted to the local owner.
-async fn resolve_principal(state: &AppState, presented: &str) -> Option<Principal> {
+async fn resolve_principal(state: &AppState, presented: &str) -> Result<Option<Principal>> {
     match state.config.profile {
         // The per-launch bearer is loopback-only and handed to one client, so
         // the verified caller *is* the local owner.
-        Profile::Desktop => constant_time_eq(presented.as_bytes(), state.token.as_bytes())
-            .then_some(Principal::LocalOwner),
+        Profile::Desktop => Ok(
+            constant_time_eq(presented.as_bytes(), state.token.as_bytes())
+                .then_some(Principal::LocalOwner),
+        ),
         // Every self-host credential names a configured user. The per-launch
         // bearer is deliberately not consulted: on a shared deployment it
         // names nobody, so it authenticates nobody.
-        Profile::SelfHost => state.principal_authenticator.resolve(presented).await,
-        _ => None,
+        Profile::SelfHost => state.principal_authenticator.try_resolve(presented).await,
+        _ => Ok(None),
     }
 }
 
@@ -553,19 +582,25 @@ impl PrincipalAuthenticator {
     }
 
     async fn resolve(&self, presented: &str) -> Option<Principal> {
+        match self.try_resolve(presented).await {
+            Ok(principal) => principal,
+            Err(error) => {
+                tracing::warn!(%error, "model-gateway could not validate Tidebreak caller");
+                None
+            }
+        }
+    }
+
+    /// Preserve verifier failures so HTTP requests can retry without treating
+    /// an unavailable identity service as an expired or revoked credential.
+    async fn try_resolve(&self, presented: &str) -> Result<Option<Principal>> {
         match self {
-            Self::None => None,
-            Self::Static(tokens) => tokens
+            Self::None => Ok(None),
+            Self::Static(tokens) => Ok(tokens
                 .resolve(presented)
-                .map(|(id, role)| Principal::User { id, role }),
-            Self::Oidc(oidc) => oidc.resolve(presented),
-            Self::Gateway(gateway) => match gateway.resolve(presented).await {
-                Ok(principal) => principal,
-                Err(error) => {
-                    tracing::warn!(%error, "model-gateway could not validate Tidebreak caller");
-                    None
-                }
-            },
+                .map(|(id, role)| Principal::User { id, role })),
+            Self::Oidc(oidc) => Ok(oidc.resolve(presented)),
+            Self::Gateway(gateway) => gateway.resolve(presented).await,
         }
     }
 }

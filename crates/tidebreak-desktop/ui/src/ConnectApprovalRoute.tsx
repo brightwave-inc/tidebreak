@@ -155,10 +155,10 @@ export function ConnectApprovalView({
             </div>
             {phase === "approved" ? (
               <p className="text-sm leading-relaxed">
-                Approved. To finish connecting, return to{" "}
-                {channelLabel(page.channel_kind)} and confirm there — the direct
-                message proves the account is yours, and nothing is linked until
-                it lands.
+                Approved. To finish connecting, return to the{" "}
+                {channelLabel(page.channel_kind)} conversation where you started
+                and select Confirm connection. This confirms that you control
+                the account.
               </p>
             ) : (
               <>

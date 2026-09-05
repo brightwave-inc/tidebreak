@@ -986,9 +986,10 @@ impl ScopedCode {
         &self,
         nonce: &str,
         csrf: &str,
+        lease: Option<&crate::auth::GatewayAuthLease>,
     ) -> Result<Option<tidebreak_core::CodeConnectHandshake>, ServerError> {
         self.runtime
-            .approve_connect_handshake(&self.owner, nonce, csrf)
+            .approve_connect_handshake(&self.owner, nonce, csrf, lease)
             .await
     }
 

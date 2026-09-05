@@ -2875,6 +2875,83 @@ async fn handoff_app(gateway_url: &str) -> (Router, tempfile::TempDir) {
     (app(state), dir)
 }
 
+/// A verifier outage admits nobody but preserves the caller's session. Once
+/// the gateway returns, the same bearer works without another sign-in.
+#[tokio::test]
+async fn gateway_verifier_outage_is_retryable_without_ending_the_session() {
+    use axum::response::IntoResponse as _;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let seen = attempts.clone();
+    let gateway = Router::new().route(
+        "/api/v1/tidebreak/principal",
+        axum::routing::get(move |headers: axum::http::HeaderMap| {
+            let seen = seen.clone();
+            async move {
+                match headers
+                    .get(header::AUTHORIZATION)
+                    .and_then(|value| value.to_str().ok())
+                {
+                    Some("Bearer mg_at_retry") => {
+                        let attempt = seen.fetch_add(1, Ordering::SeqCst);
+                        match attempt {
+                            0 => StatusCode::BAD_GATEWAY.into_response(),
+                            1 => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+                            2 => StatusCode::GATEWAY_TIMEOUT.into_response(),
+                            _ => axum::Json(serde_json::json!({
+                                "user_id": "73eaa9e8-f60a-4f84-96cf-6a9d2bbd6d55",
+                                "is_admin": true,
+                            }))
+                            .into_response(),
+                        }
+                    }
+                    _ => StatusCode::UNAUTHORIZED.into_response(),
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, gateway).await.unwrap() });
+    let (machine, _directory) = handoff_app(&format!("http://{address}")).await;
+    let request = |token: &str| {
+        Request::builder()
+            .uri("/policy")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    for _ in 0..3 {
+        let response = machine
+            .clone()
+            .oneshot(request("mg_at_retry"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+    assert_eq!(
+        machine
+            .clone()
+            .oneshot(request("mg_at_retry"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK,
+    );
+    assert_eq!(
+        machine
+            .oneshot(request("mg_at_revoked"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED,
+    );
+    assert_eq!(attempts.load(Ordering::SeqCst), 4);
+    server.abort();
+}
+
 fn handoff_request(query: &str) -> Request<Body> {
     Request::builder()
         .uri(format!("/auth/handoff{query}"))

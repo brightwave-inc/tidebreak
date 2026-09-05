@@ -224,8 +224,9 @@ impl CodeRuntime {
             let adapter = self.adapter(session.harness_kind)?;
             let probe = self.probe(adapter.as_ref()).await;
             let selected = self
-                .selected_model_capabilities_for_owner(
+                .selected_model_capabilities_for_scope(
                     owner,
+                    Some(super::settings::ModelCredentialScope::Session(session.id)),
                     adapter.as_ref(),
                     &probe,
                     next.model.as_deref(),

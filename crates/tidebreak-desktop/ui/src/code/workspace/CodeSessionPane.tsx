@@ -545,7 +545,10 @@ export function CodeSessionPane({
         />
       )}
       {!subagentCallId && session.external_origin && (
-        <SessionOriginBanner origin={session.external_origin} />
+        <SessionOriginBanner
+          origin={session.external_origin}
+          executionLocation={session.execution_location}
+        />
       )}
       <div className={cn("message-view", follow.fadeClass)}>
         {connectionState === "reconnecting" && (

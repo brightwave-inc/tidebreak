@@ -221,6 +221,7 @@ impl super::runtime::CodeRuntime {
                     "a rotated refresh token was replayed; the grant is revoked"
                 );
                 self.grant_revocations().publish(grant.id);
+                self.revoke_gateway_delegation(&grant.owner, grant.id).await;
                 Ok((outcome, None))
             }
             GrantRotation::Unknown => Ok((outcome, None)),
@@ -240,7 +241,19 @@ impl super::runtime::CodeRuntime {
         if revoked.is_some() {
             self.grant_revocations().publish(grant_id);
         }
+        self.revoke_gateway_delegation(owner, grant_id).await;
         Ok(revoked)
+    }
+
+    async fn revoke_gateway_delegation(&self, owner: &OwnerId, grant: CodeGrantId) {
+        if let Some(external) = self
+            .harness_llm()
+            .and_then(|relay| relay.external_delegations().cloned())
+        {
+            if let Err(error) = external.revoke(owner, grant).await {
+                tracing::warn!(%grant, %error, "external access is revoked locally; gateway revocation will retry");
+            }
+        }
     }
 
     pub fn grant_revocations(&self) -> Arc<GrantRevocations> {
@@ -342,7 +355,28 @@ impl super::runtime::CodeRuntime {
         owner: &OwnerId,
         nonce: &str,
         csrf: &str,
+        lease: Option<&crate::auth::GatewayAuthLease>,
     ) -> Result<Option<tidebreak_core::CodeConnectHandshake>, ServerError> {
+        if let Some(external) = self
+            .harness_llm()
+            .and_then(|relay| relay.external_delegations().cloned())
+        {
+            let Some((handshake, expected_csrf)) =
+                self.view_connect_handshake(owner, nonce).await?
+            else {
+                return Ok(None);
+            };
+            if handshake.state != tidebreak_core::CodeConnectState::Pending || expected_csrf != csrf
+            {
+                return Ok(None);
+            }
+            let lease = lease.ok_or_else(|| {
+                ServerError::unauthorized("sign in again to approve this external connection")
+            })?;
+            lease
+                .enroll_external_delegation(&external, owner, handshake.id)
+                .await?;
+        }
         Ok(
             tidebreak_core::db::code::approve_connect_handshake_all_owners(
                 &self.db,
@@ -379,6 +413,7 @@ impl super::runtime::CodeRuntime {
         };
         for grant_id in replaced {
             self.grant_revocations().publish(grant_id);
+            self.revoke_gateway_delegation(&grant.owner, grant_id).await;
         }
         Ok(Some((grant, pair)))
     }
@@ -419,6 +454,7 @@ impl super::runtime::CodeRuntime {
         .await?;
         for grant in &revoked {
             self.grant_revocations().publish(grant.id);
+            self.revoke_gateway_delegation(owner, grant.id).await;
         }
         Ok(revoked)
     }

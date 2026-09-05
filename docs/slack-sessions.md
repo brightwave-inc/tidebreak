@@ -68,6 +68,24 @@ criteria" and "Stage: scratch workspaces").
   requests ceilings at spawn; it does not own enforcement of them. Naming
   and versioning that contract is a dependency of stage 1, not a detail.
 
+## Hosted machine connections
+
+On a gateway-managed machine, a confirmed Slack connection retains a gateway
+delegation. The gateway stores the consent. Tidebreak stores the connection
+identifier and uses the machine's existing gateway identity to request
+short-lived tokens. Browser closure, browser token expiry, and a machine
+restart do not require another sign-in for the connection's machine sessions.
+Tidebreak checks the live local grant before each delegated inference, catalog,
+and Git credential request. Revoking or replacing the connection denies local
+access immediately. A retry sweep completes gateway revocation after an outage
+or restart. Revoking the source gateway sign-in also ends its delegation.
+
+Connections approved before gateway delegation support need approval again.
+A live browser sign-in cannot supply credentials for those old connections.
+When Slack reports that approval is required, send "reconnect" to Tidebreak and
+approve the connection. This replaces the old grant; existing sessions keep
+their original grant and do not acquire the replacement's authority.
+
 ## Bets and exit criteria
 
 Slack as a channel is a product conviction, not a bet under test: people

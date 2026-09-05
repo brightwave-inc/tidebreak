@@ -8,6 +8,16 @@ use tidebreak_core::ExecutionLocation;
 const MACHINE_PROMOTION_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 const MACHINE_PROMOTION_POLLS: usize = 40;
 
+fn external_delegation_error(error: tidebreak_core::AgentError) -> ServerError {
+    match error {
+        tidebreak_core::AgentError::SignInRequired(_) | tidebreak_core::AgentError::InvalidTarget(_) => ServerError::conflict_kind(
+            "external_reconnect_required",
+            "Your Slack connection needs approval again. Send `reconnect` to Tidebreak, then approve the connection.",
+        ),
+        error => ServerError::from(error),
+    }
+}
+
 impl CodeRuntime {
     /// Create a workspace whose checkout lives in a sandbox, not on this
     /// machine. A per-workspace `remote:<id>` worktree marker records that
@@ -143,6 +153,23 @@ impl CodeRuntime {
                 "a binding needs a channel kind and a conversation key",
             ));
         }
+        let delegated = if self.external_execution_location() == ExecutionLocation::Machine {
+            match self
+                .harness_llm
+                .as_ref()
+                .and_then(|relay| relay.external_delegations())
+            {
+                Some(external) => Some(
+                    external
+                        .for_grant(owner, grant_id)
+                        .await
+                        .map_err(external_delegation_error)?,
+                ),
+                None => None,
+            }
+        } else {
+            None
+        };
         // The fast path costs one read and builds nothing.
         if let Some(binding) = tidebreak_core::db::code::get_external_binding(
             &self.db,
@@ -203,20 +230,46 @@ impl CodeRuntime {
                     ..settings
                 };
                 let workspace = self
-                    .create_workspace(owner, repo_id, title, None, None)
+                    .create_workspace_with_git_credentials(
+                        owner,
+                        repo_id,
+                        title,
+                        None,
+                        None,
+                        delegated
+                            .as_ref()
+                            .map(|gateway| {
+                                gateway.as_ref() as &dyn crate::obo_gateway::GitCredentialLender
+                            })
+                            .or_else(|| self.git_credentials().map(|lender| lender.as_ref())),
+                    )
                     .await?;
                 let session = self
-                    .create_session(owner, workspace.id, harness, settings)
+                    .create_session_of_kind_unattached(
+                        owner,
+                        workspace.id,
+                        SessionKind::Interactive,
+                        harness,
+                        settings,
+                        Some(grant_id),
+                    )
                     .await?;
-                Ok(tidebreak_core::db::code::bind_external_session(
+                let resolution = tidebreak_core::db::code::resolve_external_machine_session(
                     &self.db,
                     owner,
                     grant_id,
                     channel_kind,
                     external_key,
-                    session.id,
+                    &session,
                 )
-                .await?)
+                .await?;
+                if matches!(
+                    resolution,
+                    tidebreak_core::ExternalSessionResolution::Created(_)
+                ) {
+                    self.attach_and_spawn_worker(session).await?;
+                }
+                Ok(resolution)
             }
         }
     }
@@ -617,6 +670,18 @@ impl CodeRuntime {
             ));
         }
         let session = self.get_session(owner, session_id).await?;
+        if session.execution_location == ExecutionLocation::Machine {
+            if let Some(external) = self
+                .harness_llm
+                .as_ref()
+                .and_then(|relay| relay.external_delegations())
+            {
+                external
+                    .for_grant(owner, grant_id)
+                    .await
+                    .map_err(external_delegation_error)?;
+            }
+        }
         match session.lifecycle {
             SessionLifecycle::Ended => {
                 return Err(ServerError::conflict_kind(

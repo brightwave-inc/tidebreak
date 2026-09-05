@@ -136,6 +136,12 @@ pub(super) fn permission_mode_fence_reason(intent: &PermissionModeChangeIntent) 
     }
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum ModelCredentialScope {
+    Session(SessionId),
+    Grant(tidebreak_core::CodeGrantId),
+}
+
 impl CodeRuntime {
     /// Change a session's permission mode through one durable intent.
     ///
@@ -597,8 +603,9 @@ impl CodeRuntime {
         let adapter = self.adapter(session.harness_kind)?;
         let probe = self.probe(adapter.as_ref()).await;
         let selected = self
-            .selected_model_capabilities_for_owner(
+            .selected_model_capabilities_for_scope(
                 owner,
+                Some(ModelCredentialScope::Session(session.id)),
                 adapter.as_ref(),
                 &probe,
                 session.model.as_deref(),
@@ -652,8 +659,9 @@ impl CodeRuntime {
         let adapter = self.adapter(session.harness_kind)?;
         let probe = self.probe(adapter.as_ref()).await;
         let selected = self
-            .selected_model_capabilities_for_owner(
+            .selected_model_capabilities_for_scope(
                 owner,
+                Some(ModelCredentialScope::Session(session.id)),
                 adapter.as_ref(),
                 &probe,
                 session.model.as_deref(),
@@ -714,9 +722,10 @@ impl CodeRuntime {
         }
     }
 
-    pub(super) async fn selected_model_capabilities_for_owner(
+    pub(super) async fn selected_model_capabilities_for_scope(
         &self,
         owner: &OwnerId,
+        scope: Option<ModelCredentialScope>,
         adapter: &dyn HarnessAdapter,
         probe: &HarnessProbe,
         selected: Option<&str>,
@@ -728,7 +737,16 @@ impl CodeRuntime {
         if adapter.capabilities(probe).reasoning_levels != CapLevel::Supported {
             return capabilities;
         }
-        let Some(snapshot) = self.gateway_model_snapshot(owner).await else {
+        let snapshot = match (self.harness_llm.as_ref(), scope) {
+            (Some(relay), Some(ModelCredentialScope::Session(id))) => {
+                relay.catalog_for_session(owner, id).await.ok().flatten()
+            }
+            (Some(relay), Some(ModelCredentialScope::Grant(id))) => {
+                relay.catalog_for_grant(owner, id).await.ok().flatten()
+            }
+            _ => self.gateway_model_snapshot(owner).await,
+        };
+        let Some(snapshot) = snapshot else {
             return capabilities;
         };
         let Some(model_efforts) =
@@ -942,8 +960,9 @@ mod selected_model_capabilities_tests {
             ScriptedAdapter::new(plain_text_script()).with_reasoning_levels(CapLevel::Supported);
 
         let capabilities = runtime
-            .selected_model_capabilities_for_owner(
+            .selected_model_capabilities_for_scope(
                 &OwnerId::new("alice").unwrap(),
+                None,
                 &adapter,
                 &scripted_probe(),
                 Some("model-gateway-model-gateway/glm-5.3"),
@@ -982,8 +1001,9 @@ mod selected_model_capabilities_tests {
             }]);
 
         let capabilities = runtime
-            .selected_model_capabilities_for_owner(
+            .selected_model_capabilities_for_scope(
                 &OwnerId::new("alice").unwrap(),
+                None,
                 &adapter,
                 &scripted_probe(),
                 Some("model-gateway-model-gateway/glm-5.3"),
@@ -1007,8 +1027,9 @@ mod selected_model_capabilities_tests {
             ScriptedAdapter::new(plain_text_script()).with_reasoning_levels(CapLevel::Supported);
 
         let capabilities = runtime
-            .selected_model_capabilities_for_owner(
+            .selected_model_capabilities_for_scope(
                 &OwnerId::new("alice").unwrap(),
+                None,
                 &adapter,
                 &scripted_probe(),
                 Some("model-gateway-model-gateway/glm-5.3"),

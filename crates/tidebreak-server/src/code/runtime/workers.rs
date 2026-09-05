@@ -113,8 +113,9 @@ impl CodeRuntime {
         }
         if session.reasoning_effort.is_some() || session.fast_mode {
             let selected = self
-                .selected_model_capabilities_for_owner(
+                .selected_model_capabilities_for_scope(
                     &session.owner,
+                    Some(super::settings::ModelCredentialScope::Session(session.id)),
                     adapter.as_ref(),
                     &probe,
                     session.model.as_deref(),

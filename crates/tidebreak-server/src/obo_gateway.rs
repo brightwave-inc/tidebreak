@@ -33,6 +33,8 @@
 //!   router only where the deployment states no other inference path; see
 //!   [`crate::providers::collect_routes`].
 
+pub mod external;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -305,6 +307,7 @@ pub struct OboGateway {
     gateway_base_url: String,
     client: reqwest::Client,
     users: std::sync::Mutex<HashMap<OwnerId, Arc<UserSlot>>>,
+    machine_credentials: Option<(String, String)>,
 }
 
 impl OboGateway {
@@ -344,7 +347,12 @@ impl OboGateway {
             .auth_gateway_verifier_url
             .as_deref()
             .unwrap_or(gateway_url);
-        Ok(Some(Arc::new(Self::new(base, resource)?)))
+        let mut gateway = Self::new(base, resource)?;
+        gateway.machine_credentials = std::env::var("GATEWAY_CLIENT_ID")
+            .ok()
+            .zip(std::env::var("GATEWAY_CLIENT_SECRET").ok())
+            .filter(|(id, secret)| !id.is_empty() && !secret.is_empty());
+        Ok(Some(Arc::new(gateway)))
     }
 
     /// Build an exchange client against `base_url`, acting as the machine
@@ -382,6 +390,7 @@ impl OboGateway {
             gateway_base_url,
             client,
             users: std::sync::Mutex::new(HashMap::new()),
+            machine_credentials: None,
         })
     }
 

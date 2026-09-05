@@ -469,6 +469,97 @@ describe("ManagedGate", () => {
     expect(screen.queryByText("the open product")).not.toBeInTheDocument();
   });
 
+  it.each([502, 503, 504])(
+    "a %s policy response holds boot closed and retries until the machine returns",
+    async (status) => {
+      const getPolicy = vi
+        .fn()
+        .mockRejectedValueOnce(new Error(`${status}: machine restarting`))
+        .mockRejectedValueOnce(new Error(`${status}: machine restarting`))
+        .mockResolvedValue(managed);
+      vi.useFakeTimers();
+      mount(api({ getPolicy }));
+      await act(async () => {});
+      expect(screen.getByText("starting…")).toBeInTheDocument();
+      expect(screen.queryByText("the open product")).not.toBeInTheDocument();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_100);
+      });
+      expect(getPolicy).toHaveBeenCalledTimes(2);
+      expect(screen.getByText("starting…")).toBeInTheDocument();
+      expect(screen.queryByText("the open product")).not.toBeInTheDocument();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_100);
+      });
+      expect(getPolicy).toHaveBeenCalledTimes(3);
+      expect(screen.getByText("Sign in to continue")).toBeInTheDocument();
+      expect(screen.queryByText("the open product")).not.toBeInTheDocument();
+    },
+  );
+
+  it.each([502, 503, 504])(
+    "a %s policy watch response preserves the last policy and keeps watching",
+    async (status) => {
+      const getPolicy = vi
+        .fn()
+        .mockResolvedValueOnce(managed)
+        .mockRejectedValueOnce(new Error(`${status}: machine restarting`))
+        .mockResolvedValue({
+          ...managed,
+          gateway_url: "https://next-gateway.example/",
+        });
+      vi.useFakeTimers();
+      mount(
+        api({
+          getPolicy,
+          getGatewayStatus: vi.fn().mockResolvedValue(signedIn),
+        }),
+      );
+      await act(async () => {});
+      await act(async () => {});
+      expect(screen.getByText("the open product")).toBeInTheDocument();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_100);
+      });
+      expect(getPolicy).toHaveBeenCalledTimes(2);
+      expect(screen.getByText("the open product")).toBeInTheDocument();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_100);
+      });
+      expect(getPolicy).toHaveBeenCalledTimes(3);
+      expect(screen.getByText("Sign in to continue")).toBeInTheDocument();
+      expect(
+        screen.getByText("https://next-gateway.example/"),
+      ).toBeInTheDocument();
+      expect(screen.queryByText("the open product")).not.toBeInTheDocument();
+    },
+  );
+
+  it.each([401, 403, 500])(
+    "a %s policy refusal does not retry or open the app",
+    async (status) => {
+      const getPolicy = vi
+        .fn()
+        .mockRejectedValue(new Error(`${status}: refused`));
+      vi.useFakeTimers();
+      mount(api({ getPolicy }));
+      await act(async () => {});
+      expect(
+        screen.getByText(/Contact your administrator/),
+      ).toBeInTheDocument();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_100);
+      });
+      expect(getPolicy).toHaveBeenCalledTimes(1);
+      expect(screen.queryByText("the open product")).not.toBeInTheDocument();
+    },
+  );
+
   it("a managed policy without a gateway URL blocks instead of lifting on any session", async () => {
     const client = api({
       getPolicy: vi.fn().mockResolvedValue({ managed: true, source: "os" }),
