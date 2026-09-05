@@ -1002,6 +1002,9 @@ pub struct CodePushSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(deny_unknown_fields)]
 pub struct CodeWorkspacePrSnapshot {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub git: Option<CodeWorkspaceGitState>,
     pub dirty: bool,
     pub unpushed: bool,
     pub ahead: u64,
@@ -1029,6 +1032,28 @@ pub struct CodeWorkspacePrSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub watch: Option<CodeWatchSnapshot>,
+}
+
+/// Local Git facts, separate from the hosted pull request lifecycle.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(deny_unknown_fields)]
+pub struct CodeWorkspaceGitState {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub branch: Option<String>,
+    pub head_sha: String,
+    pub base_ref: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub upstream: Option<String>,
+    pub ahead_of_upstream: u64,
+    pub behind_upstream: u64,
+    pub changed_files: u32,
+    pub staged_files: u32,
+    pub unstaged_files: u32,
+    pub untracked_files: u32,
+    pub conflicted_files: u32,
+    pub branch_has_changes: bool,
 }
 
 /// One pull request attributed to a workspace, from the durable fact store

@@ -1590,6 +1590,11 @@ export type CodeWorkspaceDiff = { diff: string, truncated: boolean, stat: Diffst
 export type CodeWorkspaceFiles = { files: Array<CodeFileChange>, truncated: boolean, stat: Diffstat, turn_id?: TurnId, };
 
 /**
+ * Local Git facts, separate from the hosted pull request lifecycle.
+ */
+export type CodeWorkspaceGitState = { branch?: string, head_sha: string, base_ref: string, upstream?: string, ahead_of_upstream: number, behind_upstream: number, changed_files: number, staged_files: number, unstaged_files: number, untracked_files: number, conflicted_files: number, branch_has_changes: boolean, };
+
+/**
  * One repository-wide conversation-history match.
  */
 export type CodeWorkspaceHistorySearchMatch = { workspace_id: WorkspaceId, workspace_title: string, session_id: SessionId, turn_id?: TurnId, source: CodeWorkspaceHistorySearchSource, preview: string, created_at: string, };
@@ -1602,7 +1607,7 @@ export type CodeWorkspaceHistorySearchSource = "turn_user_input" | "turn_narrati
 /**
  * PR + checks digest plus the local git facts the PR card needs.
  */
-export type CodeWorkspacePrSnapshot = { dirty: boolean, unpushed: boolean, ahead: number, has_upstream: boolean, suggested_commit_message: string, pr?: PullRequestDigest, gh_found: boolean, gh_authenticated?: boolean, remediation: string,
+export type CodeWorkspacePrSnapshot = { git?: CodeWorkspaceGitState, dirty: boolean, unpushed: boolean, ahead: number, has_upstream: boolean, suggested_commit_message: string, pr?: PullRequestDigest, gh_found: boolean, gh_authenticated?: boolean, remediation: string,
 /**
  * The identity a push from this machine acts as: the deployment's
  * GitHub App bot account (decision 63) or the caller's own login

@@ -9,13 +9,18 @@ import type {
 } from "@/code/useCodeWorkspacePr";
 import {
   blockedWatchPrGit,
+  conflictedPrGit,
+  dirtyFailingChecksPrGit,
   dirtyGit,
+  divergedPrGit,
   failingChecksPrGit,
   fixingPrGit,
+  mergedFollowUpPrGit,
   needsApprovalPrGit,
   openPrGit,
   queuedPrGit,
   readyForPrGit,
+  syncNeededPrGit,
   watchingPrGit,
 } from "./fixtures";
 
@@ -24,10 +29,11 @@ function resourceFor(
   busy: CodeWorkspacePrMutation | null = null,
   mutationError: string | null = null,
   setMutationError: (error: string | null) => void = () => {},
+  error: string | null = null,
 ): CodeWorkspacePrResource {
   return {
     data: snapshot,
-    error: null,
+    error,
     refreshing: false,
     refresh: async () => {},
     adopt: () => {},
@@ -45,6 +51,7 @@ function WorkflowState({
   watchTaskLink = false,
   checkLogsHang = false,
   mergeConflict = false,
+  error = null,
 }: {
   snapshot: CodeWorkspacePrSnapshot | null;
   busy?: CodeWorkspacePrMutation | null;
@@ -54,6 +61,8 @@ function WorkflowState({
   checkLogsHang?: boolean;
   /** Reject merge after confirmation because the pull request head moved. */
   mergeConflict?: boolean;
+  /** Keep the last confirmed snapshot while an explicit refresh error remains visible. */
+  error?: string | null;
 }) {
   const [mutationError, setMutationError] = useState<string | null>(null);
   return (
@@ -80,7 +89,13 @@ function WorkflowState({
       workspaceId="ws-1"
       branchName="tidebreak/scoped-ui-workshop"
       baseRef="main"
-      resource={resourceFor(snapshot, busy, mutationError, setMutationError)}
+      resource={resourceFor(
+        snapshot,
+        busy,
+        mutationError,
+        setMutationError,
+        error,
+      )}
       onOpenSourceControl={fn()}
       onOpenPr={fn()}
       onOpenWatchTask={watchTaskLink ? fn() : undefined}
@@ -171,6 +186,33 @@ export const StoppingWatch: Story = {
 /** Failing checks with nobody watching: the button offers Fix errors. */
 export const FailingChecks: Story = {
   args: { snapshot: failingChecksPrGit },
+};
+
+export const LocalChangesAndFailingChecks: Story = {
+  args: { snapshot: dirtyFailingChecksPrGit },
+};
+
+export const BranchNeedsSync: Story = {
+  args: { snapshot: syncNeededPrGit },
+};
+
+export const BranchesDiverged: Story = {
+  args: { snapshot: divergedPrGit },
+};
+
+export const LocalConflicts: Story = {
+  args: { snapshot: conflictedPrGit },
+};
+
+export const MergedWithFollowUpChanges: Story = {
+  args: { snapshot: mergedFollowUpPrGit },
+};
+
+export const PersistentRefreshError: Story = {
+  args: {
+    snapshot: dirtyFailingChecksPrGit,
+    error: "Could not read checks for the current head.",
+  },
 };
 
 /**

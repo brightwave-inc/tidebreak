@@ -11,7 +11,6 @@ import { toast } from "sonner";
 import { HttpError, type ApiClient } from "../api/client";
 import type {
   CodePrMergeMethod,
-  CodeWatchSnapshot,
   CodeWatchState,
   PullRequestDigest,
 } from "../api/types";
@@ -40,12 +39,8 @@ import {
 import { useCodeUiStore } from "./CodeUiStore";
 import type { CodeWorkspacePrResource } from "./useCodeWorkspacePr";
 import {
-  checkSummaryText,
-  prCompactStatusLabel,
-  prCompactStatusTone,
-} from "./prState";
-import {
   composePrPrompt,
+  workspaceActionPrompt,
   resolveWorkflowShortcut,
   workspaceMergeConflictMessage,
   workspaceMergeIdentity,
@@ -54,6 +49,10 @@ import {
   type WorkspaceWorkflowAction,
 } from "./workspaceWorkflow";
 import { STATUS_MARK, STATUS_TEXT } from "./statusTone";
+import {
+  WorkspaceStatusDetails,
+  workspaceStatusLabel,
+} from "./WorkspaceStatusDetails";
 
 /**
  * Compact workspace workflow control for the top chrome.
@@ -70,6 +69,7 @@ export function WorkspaceWorkflowControl({
   fallbackPr,
   resource,
   onOpenSourceControl,
+  onArchive,
   onOpenPr,
   onOpenWatchTask,
 }: {
@@ -89,6 +89,7 @@ export function WorkspaceWorkflowControl({
   fallbackPr?: PullRequestDigest;
   resource: CodeWorkspacePrResource;
   onOpenSourceControl: () => void;
+  onArchive?: () => void;
   /** Open the pull request as a workspace center tab. */
   onOpenPr?: () => void;
   /** Open the watch task's transcript; the segment is a link to the fork. */
@@ -117,7 +118,10 @@ export function WorkspaceWorkflowControl({
     (watch.state === "watching" ||
       watch.state === "fixing" ||
       watch.state === "blocked");
-  const primary = watchActive ? undefined : model.primary;
+  const primary =
+    watchActive || resource.error || (model.primary === "archive" && !onArchive)
+      ? undefined
+      : model.primary;
   const busy = resource.busy;
   const primaryLabel = primary
     ? workspaceWorkflowActionLabel(primary, model.stage)
@@ -129,10 +133,6 @@ export function WorkspaceWorkflowControl({
     model.pr && resource.mutationError?.includes("Refresh workspace status")
       ? `Pull request #${model.pr.number} changed`
       : model.title;
-  const activeChecks =
-    model.pr?.checks?.filter(
-      (check) => check.bucket === "fail" || check.bucket === "pending",
-    ) ?? [];
 
   // Republish the primary action for the command palette, which leads with it.
   // Cleared on unmount so the palette never offers a step for a workspace the
@@ -185,6 +185,10 @@ export function WorkspaceWorkflowControl({
       .getState()
       .takeWorkflowShortcut(workspaceId);
     if (shortcut === null) return;
+    if (resource.error && !["view_pr", "source_control"].includes(shortcut)) {
+      toast.error("Refresh workspace status before acting on it");
+      return;
+    }
     const resolution = resolveWorkflowShortcut(shortcut, model, watchActive);
     if ("blocked" in resolution) {
       toast.message(resolution.blocked);
@@ -236,21 +240,6 @@ export function WorkspaceWorkflowControl({
       runComposerPrompt(workspaceId, prWorkflowPrompt(action, pr, logs));
     } finally {
       setAttachingLogs(false);
-    }
-  }
-
-  async function startWatch() {
-    setDetailsOpen(false);
-    try {
-      await resource.runMutation("watch", async () => {
-        await client.startCodeWatch(workspaceId);
-        await resource.refresh();
-      });
-      toast.success("Watching the pull request");
-    } catch (err) {
-      const message = friendlyErrorMessage(err, "Could not start the watch");
-      resource.setMutationError(message);
-      toast.error(message);
     }
   }
 
@@ -387,6 +376,20 @@ export function WorkspaceWorkflowControl({
 
   async function run(action: WorkspaceWorkflowAction) {
     switch (action) {
+      case "archive":
+        onArchive?.();
+        return;
+      case "update_pr":
+      case "follow_up_pr":
+      case "sync_branch":
+      case "resolve_divergence":
+      case "resolve_local_conflicts": {
+        setDetailsOpen(false);
+        const prompt = workspaceActionPrompt(action, model.pr, baseRef);
+        if (prompt && !runComposerPrompt(workspaceId, prompt))
+          toast.error("Another agent action is already running");
+        return;
+      }
       case "open_source":
         setDetailsOpen(false);
         onOpenSourceControl();
@@ -448,7 +451,7 @@ export function WorkspaceWorkflowControl({
         }
         return;
       case "watch_and_fix":
-        await startWatch();
+        await runAgentAction("watch_and_fix");
         return;
       case "merge":
         await mergePr();
@@ -461,338 +464,199 @@ export function WorkspaceWorkflowControl({
     }
   }
 
+  const disabled =
+    busy !== null ||
+    agentActionRunning ||
+    attachingLogs ||
+    resource.error !== null;
+  async function refreshStatus() {
+    try {
+      await resource.refreshFromHost();
+    } catch (error) {
+      toast.error(
+        friendlyErrorMessage(error, "Could not refresh workspace status"),
+      );
+    }
+  }
   return (
     <>
       {confirmDialog}
       <div
-        className="border-border-subtle bg-page-background/70 flex min-w-0 max-w-[min(40vw,26rem)] shrink items-center overflow-hidden rounded-lg border shadow-[0_1px_2px_color-mix(in_oklch,var(--foreground)_6%,transparent)] max-[1099px]:max-w-none max-[1099px]:flex-1"
+        className="flex min-w-0 max-w-[min(48vw,32rem)] items-center overflow-hidden rounded-lg border border-border-subtle bg-page-background max-[1099px]:max-w-none max-[1099px]:flex-1"
         data-testid="workspace-workflow-control"
         data-stage={model.stage}
         data-tone={model.tone}
       >
-        {model.pr ? (
-          <PullRequestChip
-            number={model.pr.number}
-            label={prCompactStatusLabel(model.pr)}
-            tone={prCompactStatusTone(model.pr)}
-            url={model.pr.url}
-            mutationError={resource.mutationError}
-            showRefresh={Boolean(resource.mutationError) || detailsOpen}
-            refreshing={resource.refreshing}
-            onOpen={onOpenPr ?? (() => void run("open_pr"))}
-            onOpenExternal={() => {
-              const url = model.pr?.url;
-              if (url) void openExternal(url).catch(() => undefined);
-            }}
-            onRefresh={() => void resource.refresh()}
-          />
-        ) : (
-          <Popover open={detailsOpen} onOpenChange={setDetailsOpen}>
-            <PopoverTrigger asChild>
-              <button
-                type="button"
-                className={cn(
-                  "hover:bg-background focus-visible:ring-ring/25 flex h-8 min-w-0 flex-1 cursor-pointer items-center gap-1.5 bg-transparent px-2.5 text-xs font-medium transition-colors outline-none focus-visible:ring-3",
-                )}
-                aria-label={`Workspace status: ${model.summary}`}
-              >
+        {model.pr && (
+          <button
+            type="button"
+            className="h-control shrink-0 border-r border-border-subtle px-2 text-xs font-medium tabular-nums hover:bg-muted"
+            data-testid="workspace-pr-chip"
+            aria-label={`Open pull request #${model.pr.number}`}
+            onClick={() => void run("open_pr")}
+          >
+            #{model.pr.number}
+          </button>
+        )}
+        <Popover open={detailsOpen} onOpenChange={setDetailsOpen}>
+          <PopoverTrigger asChild>
+            <button
+              type="button"
+              className="flex h-control min-w-0 flex-1 items-center gap-1.5 px-2.5 text-xs hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring"
+              aria-label={`Workspace status: ${workspaceStatusLabel(model)}`}
+            >
+              {resource.refreshing || busy === "refresh" ? (
+                <Spinner className="size-3.5 shrink-0" />
+              ) : (
                 <GitBranch
-                  className={cn("size-3.5 shrink-0", STATUS_MARK[model.tone])}
+                  className={cn(
+                    "size-3.5 shrink-0",
+                    STATUS_MARK[resource.error ? "warning" : model.tone],
+                  )}
                   aria-hidden
                 />
-                <span
-                  className="text-foreground-subtle min-w-0 truncate tabular-nums max-[640px]:hidden"
-                  aria-live="polite"
+              )}
+              <span
+                className={cn(
+                  "min-w-0 truncate",
+                  STATUS_TEXT[resource.error ? "warning" : model.tone],
+                )}
+                aria-live="polite"
+              >
+                {resource.error
+                  ? "Status unavailable"
+                  : workspaceStatusLabel(model).replace(/^#\d+\s*·\s*/, "")}
+              </span>
+            </button>
+          </PopoverTrigger>
+          <PopoverContent
+            align="end"
+            sideOffset={7}
+            className="w-[min(25rem,calc(100vw-24px))] p-0"
+            data-testid="workspace-workflow-popover"
+            role="dialog"
+            aria-labelledby={popoverTitleId}
+          >
+            <div className="flex items-start gap-2 border-b border-border-subtle p-3">
+              <div className="min-w-0 flex-1">
+                <h2 id={popoverTitleId} className="text-md font-medium">
+                  {detailsTitle}
+                </h2>
+                <p
+                  className="mt-1 truncate font-mono text-xs text-muted-foreground"
+                  title={branchName}
                 >
-                  {statusLabel}
-                </span>
-              </button>
-            </PopoverTrigger>
-            <PopoverContent
-              align="end"
-              sideOffset={7}
-              className="w-[min(21rem,calc(100vw-24px))] overflow-hidden p-0"
-              data-testid="workspace-workflow-popover"
-              role="dialog"
-              aria-labelledby={popoverTitleId}
-            >
-              <div className="flex items-start gap-2.5 border-b border-border-subtle px-3 py-3">
-                <span
-                  className={cn(
-                    "mt-0.5 grid size-6 shrink-0 place-items-center",
-                    STATUS_MARK[model.tone],
-                  )}
-                >
-                  <GitBranch className="size-3.5" aria-hidden />
-                </span>
-                <div className="min-w-0 flex-1">
-                  <h2
-                    id={popoverTitleId}
-                    className="text-md font-semibold leading-5"
-                  >
-                    {detailsTitle}
-                  </h2>
-                  <p className="text-foreground-subtle mt-0.5 text-xs leading-4">
-                    {resource.mutationError ?? resource.error ?? model.detail}
-                  </p>
-                </div>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-xs"
-                  aria-label="Refresh workspace status"
-                  disabled={resource.refreshing || busy !== null}
-                  onClick={() => void resource.refresh()}
-                >
-                  {resource.refreshing ? (
-                    <Spinner aria-hidden />
-                  ) : (
-                    <RefreshCw aria-hidden />
-                  )}
-                </Button>
+                  {resource.data?.git?.branch ?? branchName}
+                </p>
               </div>
-
-              <dl className="divide-y divide-border-subtle px-3 text-xs">
-                <div className="flex items-center gap-3 py-2.5">
-                  <dt className="text-foreground-subtle shrink-0">Branch</dt>
-                  <dd
-                    className="min-w-0 flex-1 truncate text-right font-mono text-xs"
-                    title={branchName}
-                  >
-                    {branchName}
-                  </dd>
-                </div>
-                {baseRef ? (
-                  <div className="flex items-center gap-3 py-2.5">
-                    <dt className="text-foreground-subtle shrink-0">Base</dt>
-                    <dd className="min-w-0 flex-1 truncate text-right font-mono text-xs">
-                      {baseRef}
-                    </dd>
-                  </div>
-                ) : null}
-                {model.checks && model.checks.total > 0 ? (
-                  <div className="flex items-center gap-3 py-2.5">
-                    <dt className="text-foreground-subtle shrink-0">Checks</dt>
-                    <dd className="min-w-0 flex-1 truncate text-right tabular-nums">
-                      {checkSummaryText(model.checks)}
-                    </dd>
-                  </div>
-                ) : null}
-                {watch ? (
-                  <div className="flex items-center gap-3 py-2.5">
-                    <dt className="text-foreground-subtle shrink-0">Watch</dt>
-                    <dd
-                      className="min-w-0 flex-1 truncate text-right"
-                      title={watch.detail}
-                    >
-                      {watchStatusLabel(watch)}
-                    </dd>
-                  </div>
-                ) : null}
-              </dl>
-
-              {activeChecks.length > 0 ? (
-                <div className="border-t border-border-subtle px-3 py-2.5">
-                  <p className="text-foreground-subtle mb-1.5 text-xs font-medium">
-                    Active checks
-                  </p>
-                  <ul className="flex flex-col gap-1.5">
-                    {activeChecks.slice(0, 4).map((check, index) => (
-                      <li
-                        key={`${check.name}-${index}`}
-                        className="flex min-w-0 items-center gap-2 text-xs"
-                        title={check.detail}
-                      >
-                        <span
-                          className={cn(
-                            "size-1.5 shrink-0 rounded-full",
-                            check.bucket === "fail"
-                              ? "bg-critical"
-                              : "bg-info-foreground",
-                          )}
-                          aria-hidden
-                        />
-                        <span className="min-w-0 flex-1 truncate">
-                          {check.name}
-                        </span>
-                        <span
-                          className={cn(
-                            "shrink-0 text-xs font-medium",
-                            check.bucket === "fail"
-                              ? STATUS_TEXT.critical
-                              : STATUS_TEXT.pending,
-                          )}
-                        >
-                          {check.bucket === "fail" ? "Failed" : "Pending"}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                  {activeChecks.length > 4 ? (
-                    <p className="text-foreground-subtle mt-1.5 text-xs">
-                      +{activeChecks.length - 4} more
-                    </p>
-                  ) : null}
-                </div>
-              ) : null}
-
-              <div className="flex items-center gap-1 border-t border-border-subtle p-1.5">
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                aria-label="Refresh workspace status"
+                disabled={resource.refreshing || busy !== null}
+                onClick={() => void refreshStatus()}
+              >
+                {resource.refreshing || busy === "refresh" ? (
+                  <Spinner aria-hidden />
+                ) : (
+                  <RefreshCw aria-hidden />
+                )}
+              </Button>
+            </div>
+            <div className="p-3">
+              <WorkspaceStatusDetails
+                model={model}
+                snapshot={resource.data}
+                error={resource.mutationError ?? resource.error}
+              />
+            </div>
+            <div className="flex flex-wrap gap-1 border-t border-border-subtle p-1.5">
+              <Button variant="ghost" size="sm" onClick={onOpenSourceControl}>
+                Source control
+              </Button>
+              {model.pr?.url && (
                 <Button
-                  type="button"
                   variant="ghost"
                   size="sm"
-                  className="justify-start"
-                  onClick={() => void run("open_source")}
+                  onClick={() =>
+                    void openExternal(model.pr!.url!).catch(() => false)
+                  }
                 >
-                  <GitBranch aria-hidden />
-                  Source control
+                  <ArrowUpRight aria-hidden />
+                  Open on GitHub
                 </Button>
-                {watchActive && (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    disabled={busy !== null}
-                    onClick={() => void stopWatch()}
-                  >
-                    {busy === "stop_watch" ? "Stopping…" : "Stop watching"}
-                  </Button>
-                )}
-              </div>
-            </PopoverContent>
-          </Popover>
-        )}
-
+              )}
+              {watchActive && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={busy !== null}
+                  onClick={() => void stopWatch()}
+                >
+                  Stop background watch
+                </Button>
+              )}
+            </div>
+          </PopoverContent>
+        </Popover>
         {watchActive && watch ? (
           <Button
-            type="button"
             variant="ghost"
             size="sm"
-            className="border-border-subtle min-w-0 rounded-none border-0 border-l bg-background px-2.5 hover:bg-muted/70"
-            title={
-              watch.detail
-                ? `${watchStateLabel(watch.state)}: ${watch.detail}. Click to open the watch task.`
-                : "A watch task is keeping this pull request moving. Click to open it."
+            className="shrink-0 rounded-none border-l border-border-subtle"
+            onClick={() =>
+              onOpenWatchTask ? onOpenWatchTask() : void stopWatch()
             }
             disabled={busy !== null}
-            aria-busy={busy === "stop_watch"}
             data-testid="workspace-watch-control"
-            onClick={() => {
-              if (onOpenWatchTask) {
-                setDetailsOpen(false);
-                onOpenWatchTask();
-              } else {
-                void stopWatch();
-              }
-            }}
           >
-            {busy === "stop_watch" ? (
-              <Spinner aria-hidden />
-            ) : (
-              <CircleDotDashed
-                className={cn(
-                  watch.state === "blocked"
-                    ? STATUS_MARK.warning
-                    : STATUS_MARK.pending,
-                )}
-                aria-hidden
-              />
-            )}
-            <span className="truncate max-[760px]:sr-only">
-              {busy === "stop_watch"
-                ? "Stopping…"
-                : onOpenWatchTask
-                  ? `Watching in "Fix PR #${watch.pr_number}"`
-                  : watchStateLabel(watch.state)}
-            </span>
-          </Button>
-        ) : primary === "open_pr" && primaryLabel && model.pr?.url ? (
-          <Button
-            asChild
-            variant="ghost"
-            size="sm"
-            className="border-border-subtle min-w-0 rounded-none border-0 border-l bg-foreground px-2.5 text-background hover:bg-foreground/88 hover:text-background"
-          >
-            <a
-              href={model.pr.url}
-              aria-label={primaryLabel}
-              onClick={(event) => {
-                event.preventDefault();
-                void run("open_pr");
-              }}
-            >
-              <span className="truncate">{primaryLabel}</span>
-            </a>
+            <CircleDotDashed aria-hidden />
+            {watchStateLabel(watch.state)}
           </Button>
         ) : primary && primaryLabel ? (
           <Button
             type="button"
             variant="ghost"
             size="sm"
-            className="border-border-subtle min-w-0 rounded-none border-0 border-l bg-foreground px-2.5 text-background hover:bg-foreground/88 hover:text-background disabled:bg-muted disabled:text-muted-foreground"
-            title={
-              primary === "watch_and_fix"
-                ? "Start an agent task that watches this pull request and fixes actionable failures."
-                : primary === "compose_pr"
-                  ? "Send a request to commit, push, and open a pull request."
-                  : primary === "mark_ready" ||
-                      primary === "merge" ||
-                      primary === "fix_errors" ||
-                      primary === "address_feedback" ||
-                      primary === "update_branch" ||
-                      primary === "resolve_conflicts"
-                    ? `Start an agent task to ${primaryLabel.toLowerCase()}.`
-                    : undefined
-            }
-            disabled={
-              busy !== null ||
-              agentActionRunning ||
-              attachingLogs ||
-              model.stage === "loading"
-            }
-            aria-busy={busy === primary || agentActionRunning || attachingLogs}
+            className="h-control shrink-0 rounded-none border-l border-border-subtle bg-foreground px-2.5 text-background hover:bg-foreground/90 hover:text-background"
+            disabled={disabled || model.stage === "loading"}
+            aria-busy={busy !== null || agentActionRunning || attachingLogs}
             onClick={() => void run(primary)}
+            title={
+              primary === "update_pr"
+                ? "Commit and push your changes to this pull request."
+                : primary === "watch_and_fix"
+                  ? "Ask the agent in this conversation to monitor the PR and fix actionable failures."
+                  : undefined
+            }
           >
-            {busy === primary || agentActionRunning || attachingLogs ? (
+            {busy !== null || agentActionRunning || attachingLogs ? (
               <Spinner aria-hidden />
-            ) : primary === "watch_and_fix" ? (
-              <CircleDotDashed aria-hidden />
             ) : null}
-            <span
-              className={cn(
-                "truncate",
-                primary === "watch_and_fix" && "max-[760px]:sr-only",
-              )}
-            >
-              {busy === "push" && primary === "push"
-                ? "Pushing…"
-                : busy === "create_pr" && primary === "create_pr"
-                  ? "Creating…"
-                  : attachingLogs
-                    ? "Reading logs…"
-                    : primaryLabel}
-            </span>
+            {attachingLogs ? "Reading logs…" : primaryLabel}
           </Button>
         ) : null}
-
-        {secondaryActions.length > 0 ? (
+        {secondaryActions.length > 0 && (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button
-                type="button"
                 variant="ghost"
                 size="sm"
-                className="border-border-subtle rounded-none border-0 border-l bg-transparent px-1.5 hover:bg-background"
+                className="h-control rounded-none border-l border-border-subtle px-1.5"
                 aria-label="More workspace actions"
-                disabled={busy !== null || agentActionRunning || attachingLogs}
+                disabled={busy !== null}
               >
                 <ChevronDown aria-hidden />
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-44">
+            <DropdownMenuContent align="end">
               {secondaryActions.map((action) => (
                 <DropdownMenuItem
                   key={action}
+                  disabled={
+                    disabled && action !== "open_pr" && action !== "open_source"
+                  }
                   onSelect={() => void run(action)}
                 >
                   {workspaceWorkflowActionLabel(action, model.stage)}
@@ -800,83 +664,9 @@ export function WorkspaceWorkflowControl({
               ))}
             </DropdownMenuContent>
           </DropdownMenu>
-        ) : null}
+        )}
       </div>
     </>
-  );
-}
-
-function PullRequestChip({
-  number,
-  label,
-  tone,
-  url,
-  mutationError,
-  showRefresh,
-  refreshing,
-  onOpen,
-  onOpenExternal,
-  onRefresh,
-}: {
-  number: number;
-  label: string;
-  tone: ReturnType<typeof prCompactStatusTone>;
-  url?: string | null;
-  mutationError: string | null;
-  showRefresh: boolean;
-  refreshing: boolean;
-  onOpen: () => void;
-  onOpenExternal: () => void;
-  onRefresh: () => void;
-}) {
-  return (
-    <div className="flex min-w-0 flex-1 items-center gap-1.5 px-1.5">
-      <div
-        className="flex h-7 overflow-hidden rounded-md border border-border-subtle"
-        data-testid="workspace-pr-chip"
-      >
-        <button
-          type="button"
-          className="hover:bg-background focus-visible:ring-ring/25 cursor-pointer px-2 text-xs font-semibold tabular-nums outline-none focus-visible:ring-3"
-          aria-label={`Open pull request #${number}`}
-          onClick={onOpen}
-        >
-          #{number}
-        </button>
-        {url ? (
-          <button
-            type="button"
-            className="hover:bg-background focus-visible:ring-ring/25 cursor-pointer border-l border-border-subtle px-1.5 outline-none focus-visible:ring-3"
-            aria-label={`Open pull request #${number} on GitHub`}
-            onClick={onOpenExternal}
-          >
-            <ArrowUpRight className="size-3.5" aria-hidden />
-          </button>
-        ) : null}
-      </div>
-      <span
-        className={cn(
-          "min-w-0 truncate text-xs font-medium",
-          STATUS_TEXT[tone],
-        )}
-        title={mutationError ?? undefined}
-        aria-live="polite"
-      >
-        {label}
-      </span>
-      {showRefresh ? (
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-xs"
-          aria-label="Refresh workspace status"
-          disabled={refreshing}
-          onClick={onRefresh}
-        >
-          {refreshing ? <Spinner aria-hidden /> : <RefreshCw aria-hidden />}
-        </Button>
-      ) : null}
-    </div>
   );
 }
 
@@ -895,11 +685,4 @@ function watchStateLabel(state: CodeWatchState): string {
     case "failed":
       return "Watch failed";
   }
-}
-
-function watchStatusLabel(watch: CodeWatchSnapshot): string {
-  const base = watch.detail ?? watchStateLabel(watch.state);
-  return watch.cycles > 0
-    ? `${base} · ${watch.cycles} fix ${watch.cycles === 1 ? "turn" : "turns"}`
-    : base;
 }

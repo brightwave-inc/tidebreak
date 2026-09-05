@@ -690,9 +690,11 @@ it("keys the attributed set on full identity, not the number", async () => {
     return buttons;
   });
 
-  // The live number matches both repositories, so no row may claim to be
-  // current: treating either as the primary would collapse two identities.
-  expect(list.querySelectorAll("[aria-current='true']")).toHaveLength(0);
+  // The live URL identifies the matching repository even when another
+  // repository uses the same pull request number.
+  const initialCurrent = list.querySelectorAll("[aria-current='true']");
+  expect(initialCurrent).toHaveLength(1);
+  expect(initialCurrent[0].textContent).toContain("app");
 
   // Selecting the cross-repo row shows that row's stored snapshot — never
   // the live resource its number collides with.

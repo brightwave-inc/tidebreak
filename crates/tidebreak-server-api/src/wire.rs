@@ -87,9 +87,10 @@ pub use crate::routes::{
 pub use crate::code::types::{
     ApprovalSnapshot, CodeActionSnapshot, CodeCommitSnapshot, CodeFileChange, CodePushSnapshot,
     CodeRepoSnapshot, CodeWatchSnapshot, CodeWorkspaceDiff, CodeWorkspaceFiles,
-    CodeWorkspacePrSnapshot, CodeWorkspaceSnapshot, HarnessAuthMode, HarnessDoctorEntry,
-    HarnessDoctorReport, QueuedTurn, QueuedTurnsSnapshot, SequencedEventFrame, SessionDigest,
-    SessionExternalOrigin, SessionSnapshot, TurnRewriteState, TurnSnapshot, UpdateNotice,
+    CodeWorkspaceGitState, CodeWorkspacePrSnapshot, CodeWorkspaceSnapshot, HarnessAuthMode,
+    HarnessDoctorEntry, HarnessDoctorReport, QueuedTurn, QueuedTurnsSnapshot, SequencedEventFrame,
+    SessionDigest, SessionExternalOrigin, SessionSnapshot, TurnRewriteState, TurnSnapshot,
+    UpdateNotice,
 };
 
 /// Guard sizes for the opaque strings a client draws from this surface.

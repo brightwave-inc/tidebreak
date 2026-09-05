@@ -353,7 +353,9 @@ impl CodeRuntime {
         owner: &OwnerId,
         id: WorkspaceId,
     ) -> Result<WorkspaceGitStatus, ServerError> {
-        self.refresh_workspace_pr_row(owner, id).await;
+        self.try_refresh_workspace_pr_row(owner, id)
+            .await
+            .map_err(|message| ServerError::unprocessable_kind("pr_refresh_failed", message))?;
         self.workspace_pr(owner, id).await
     }
 
@@ -368,11 +370,22 @@ impl CodeRuntime {
     /// refresh drives the forge REST API with a borrowed credential —
     /// same gate, same stored ETags, same 304-shaped traffic.
     pub async fn refresh_workspace_pr_row(&self, owner: &OwnerId, id: WorkspaceId) {
-        let Ok(workspace) = self.get_workspace(owner, id).await else {
-            return;
-        };
+        if let Err(error) = self.try_refresh_workspace_pr_row(owner, id).await {
+            tracing::debug!(%error, "workspace pull request refresh failed");
+        }
+    }
+
+    async fn try_refresh_workspace_pr_row(
+        &self,
+        owner: &OwnerId,
+        id: WorkspaceId,
+    ) -> Result<(), String> {
+        let workspace = self
+            .get_workspace(owner, id)
+            .await
+            .map_err(|error| error.message().to_owned())?;
         if workspace.status != CodeWorkspaceStatus::Active {
-            return;
+            return Ok(());
         }
         let gh_path = self.gh_search_path_owned();
         let worktree = std::path::PathBuf::from(&workspace.worktree_path);
@@ -386,11 +399,13 @@ impl CodeRuntime {
                     .await
             }
             None => {
-                let Ok(Some((target, credential))) =
-                    self.forge_rest_context(owner, &worktree).await
-                else {
-                    return;
-                };
+                let (target, credential) = self
+                    .forge_rest_context(owner, &worktree)
+                    .await
+                    .map_err(|error| error.message().to_owned())?
+                    .ok_or_else(|| {
+                        "Connect GitHub before refreshing pull request status.".to_owned()
+                    })?;
                 let api_base = self.forge_api_base_for(&target.host);
                 let transport = crate::code::pr_fetch::FetchTransport::Rest {
                     api_base: &api_base,
@@ -400,8 +415,8 @@ impl CodeRuntime {
                     .await
             }
         };
-        let Some(digest) = digest else {
-            return;
+        let Some(digest) = digest? else {
+            return Ok(());
         };
         if workspace.pr.as_ref() != Some(&digest) {
             match set_active_workspace_pull_request(&self.db, owner, workspace.id, &digest).await {
@@ -420,6 +435,7 @@ impl CodeRuntime {
                 }
             }
         }
+        Ok(())
     }
 
     /// Keep this workspace on the hot refresh tier.
@@ -496,19 +512,44 @@ impl CodeRuntime {
         owner: &OwnerId,
         workspace: &CodeWorkspace,
         transport: crate::code::pr_fetch::FetchTransport<'_>,
-    ) -> Option<PullRequestDigest> {
+    ) -> Result<Option<PullRequestDigest>, String> {
         use crate::code::pr_fetch::{self, EndpointRead};
 
         let gate = &self.host_gate;
-        let stored_identity = workspace
+        let mut stored_identity = workspace
             .pr
             .as_ref()
             .and_then(|pr| pr.url.as_deref())
             .and_then(crate::code::pr_facts::pull_request_identity_from_url);
+        if workspace.pr.as_ref().is_some_and(|pr| {
+            pr.state == "merged" || pr.state == "closed" || pr.merged == Some(true)
+        }) {
+            if let Some(target) = self.workspace_repository_target(owner, workspace).await {
+                if let Some(found) = pr_fetch::read_pull_request_for_head(
+                    gate,
+                    transport,
+                    &target.host,
+                    &target.owner,
+                    &target.name,
+                    &workspace.branch_name,
+                )
+                .await
+                .map_err(|error| error.to_string())?
+                {
+                    if found.state == "open" {
+                        stored_identity =
+                            Some((target.host, target.owner, target.name, found.number));
+                    }
+                }
+            }
+        }
         let (host, repo_owner, repo_name, number) = match stored_identity {
             Some(identity) => identity,
             None => {
-                let target = self.workspace_repository_target(owner, workspace).await?;
+                let target = self
+                    .workspace_repository_target(owner, workspace)
+                    .await
+                    .ok_or_else(|| "Could not identify the workspace repository.".to_owned())?;
                 let found = match pr_fetch::read_pull_request_for_head(
                     gate,
                     transport,
@@ -519,10 +560,14 @@ impl CodeRuntime {
                 )
                 .await
                 {
-                    Ok(found) => found?,
+                    Ok(Some(found)) => found,
+                    Ok(None) => return Ok(None),
                     Err(failure) => {
                         tracing::debug!(error = %failure, "code-mode: pull-request lookup skipped");
-                        return None;
+                        return Err(
+                            "Pull request status could not be confirmed. Retry the refresh."
+                                .to_owned(),
+                        );
                     }
                 };
                 (target.host, target.owner, target.name, found.number)
@@ -564,13 +609,20 @@ impl CodeRuntime {
                 pull_etag = etag;
                 (value, true)
             }
-            Ok(EndpointRead::NotModified) => {
-                (pr_fetch::rest_pull_from_fact(stored_fact.as_ref()?), false)
+            Ok(EndpointRead::NotModified) => (
+                pr_fetch::rest_pull_from_fact(
+                    stored_fact
+                        .as_ref()
+                        .ok_or_else(|| "The cached pull request is unavailable.".to_owned())?,
+                ),
+                false,
+            ),
+            Ok(EndpointRead::Missing) => {
+                return Err("The pull request is unavailable on GitHub.".to_owned())
             }
-            Ok(EndpointRead::Missing) => return None,
             Err(failure) => {
                 tracing::debug!(error = %failure, "code-mode: pull-request read skipped");
-                return None;
+                return Err(failure.to_string());
             }
         };
         let stored_live = stored_fact.as_ref().and_then(|fact| fact.live.as_ref());
@@ -608,10 +660,9 @@ impl CodeRuntime {
                     Ok(EndpointRead::Missing) => Vec::new(),
                     Err(failure) => {
                         tracing::debug!(error = %failure, "code-mode: check-runs read skipped");
-                        checks_etag = None;
-                        stored_live
-                            .and_then(|live| live.checks.clone())
-                            .unwrap_or_default()
+                        return Err(format!(
+                            "Could not read checks for the current head: {failure}"
+                        ));
                     }
                 }
             }
@@ -652,8 +703,7 @@ impl CodeRuntime {
                 Ok(EndpointRead::Missing) => None,
                 Err(failure) => {
                     tracing::debug!(error = %failure, "code-mode: reviews read skipped");
-                    reviews_etag = None;
-                    stored_live.and_then(|live| live.review_decision.clone())
+                    return Err(format!("Could not read review status: {failure}"));
                 }
             }
         } else {
@@ -729,11 +779,13 @@ impl CodeRuntime {
                 number = number,
                 "code-mode: a conditional pull-request read lost its validator; dropping it"
             );
-            return None;
+            return Err(
+                "Pull request status changed during refresh. Retry the refresh.".to_owned(),
+            );
         }
         self.record_pull_request_live_state(owner, Some(workspace.id), &digest)
             .await;
-        Some(digest)
+        Ok(Some(digest))
     }
 
     /// The base branch's rules, cached per branch for [`BRANCH_RULES_TTL`].

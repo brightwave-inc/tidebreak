@@ -105,7 +105,23 @@ export const userQuestions: PendingUserQuestions = {
   ],
 };
 
+export const workspaceGit: NonNullable<CodeWorkspacePrSnapshot["git"]> = {
+  branch: "tidebreak/scoped-ui-workshop",
+  head_sha: "8a1f2240e66d32a8",
+  base_ref: "main",
+  upstream: "origin/tidebreak/scoped-ui-workshop",
+  ahead_of_upstream: 0,
+  behind_upstream: 0,
+  changed_files: 0,
+  staged_files: 0,
+  unstaged_files: 0,
+  untracked_files: 0,
+  conflicted_files: 0,
+  branch_has_changes: false,
+};
+
 export const cleanGit: CodeWorkspacePrSnapshot = {
+  git: workspaceGit,
   dirty: false,
   unpushed: false,
   ahead: 0,
@@ -119,12 +135,24 @@ export const cleanGit: CodeWorkspacePrSnapshot = {
 export const dirtyGit: CodeWorkspacePrSnapshot = {
   ...cleanGit,
   dirty: true,
+  git: {
+    ...workspaceGit,
+    changed_files: 2,
+    staged_files: 1,
+    unstaged_files: 1,
+    branch_has_changes: true,
+  },
 };
 
 export const unpushedGit: CodeWorkspacePrSnapshot = {
   ...cleanGit,
   unpushed: true,
   ahead: 1,
+  git: {
+    ...workspaceGit,
+    ahead_of_upstream: 1,
+    branch_has_changes: true,
+  },
 };
 
 /** A hosted machine whose pushes land as the deployment's GitHub App. */
@@ -148,6 +176,10 @@ export const readyForPrGit: CodeWorkspacePrSnapshot = {
   ...cleanGit,
   ahead: 1,
   has_upstream: true,
+  git: {
+    ...workspaceGit,
+    branch_has_changes: true,
+  },
 };
 
 export const openPrGit: CodeWorkspacePrSnapshot = {
@@ -262,6 +294,60 @@ export const needsApprovalPrGit: CodeWorkspacePrSnapshot = {
     review_decision: "review_required",
     mergeable: "mergeable",
     merge_state_status: "blocked",
+  },
+};
+
+/** Local work and hosted failures stay visible at the same time. */
+export const dirtyFailingChecksPrGit: CodeWorkspacePrSnapshot = {
+  ...failingChecksPrGit,
+  dirty: true,
+  git: {
+    ...workspaceGit,
+    changed_files: 3,
+    staged_files: 1,
+    unstaged_files: 1,
+    untracked_files: 1,
+    branch_has_changes: true,
+  },
+};
+
+/** The remote branch advanced without local commits. */
+export const syncNeededPrGit: CodeWorkspacePrSnapshot = {
+  ...openPrGit,
+  git: { ...workspaceGit, behind_upstream: 2, branch_has_changes: true },
+};
+
+/** Local and remote commits require an explicit reconciliation. */
+export const divergedPrGit: CodeWorkspacePrSnapshot = {
+  ...openPrGit,
+  git: {
+    ...workspaceGit,
+    ahead_of_upstream: 1,
+    behind_upstream: 2,
+    branch_has_changes: true,
+  },
+};
+
+/** An unfinished Git operation blocks pull request actions. */
+export const conflictedPrGit: CodeWorkspacePrSnapshot = {
+  ...openPrGit,
+  dirty: true,
+  git: {
+    ...workspaceGit,
+    changed_files: 2,
+    conflicted_files: 2,
+    branch_has_changes: true,
+  },
+};
+
+/** Later local work keeps the merged outcome and starts a follow-up path. */
+export const mergedFollowUpPrGit: CodeWorkspacePrSnapshot = {
+  ...dirtyGit,
+  pr: {
+    ...openPrGit.pr!,
+    state: "merged",
+    merged: true,
+    head_sha: workspaceGit.head_sha,
   },
 };
 
