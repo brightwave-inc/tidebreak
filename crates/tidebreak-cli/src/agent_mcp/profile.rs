@@ -368,7 +368,7 @@ fn web_search_select_spec() -> ToolSpec {
             json!({
                 "provider": {
                     "type": ["string", "null"],
-                    "description": "Web-search provider (exa, tavily, brave, searxng), or off/null to disable.",
+                    "description": "Web-search provider (exa, tavily, brave, firecrawl, searxng), or off/null to disable.",
                 },
             }),
             &["provider"],

@@ -21,6 +21,7 @@ function clientFor(
   credentials: WebSearchCredentialReadiness[] = [
     { provider: "exa", has_credential: false },
     { provider: "tavily", has_credential: false },
+    { provider: "firecrawl", has_credential: false },
   ],
 ) {
   const putWebSearchConfig = vi.fn().mockResolvedValue(config);
@@ -68,6 +69,9 @@ describe("WebSearchPanel", () => {
     fireEvent.change(screen.getByLabelText(/Tavily API key/), {
       target: { value: "tavily-secret" },
     });
+    fireEvent.change(screen.getByLabelText(/Firecrawl API key/), {
+      target: { value: "firecrawl-secret" },
+    });
     fireEvent.change(screen.getByLabelText(/Request timeout/), {
       target: { value: "30" },
     });
@@ -79,6 +83,10 @@ describe("WebSearchPanel", () => {
     expect(putWebSearchCredential).toHaveBeenCalledWith(
       "tavily",
       "tavily-secret",
+    );
+    expect(putWebSearchCredential).toHaveBeenCalledWith(
+      "firecrawl",
+      "firecrawl-secret",
     );
     expect(putWebSearchConfig).toHaveBeenCalledWith({
       mode: "automatic",

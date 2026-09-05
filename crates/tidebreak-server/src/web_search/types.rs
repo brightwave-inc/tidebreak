@@ -57,6 +57,7 @@ pub enum WebSearchProviderKind {
     Exa,
     Tavily,
     Brave,
+    Firecrawl,
     Searxng,
     /// The chat's own model provider, searched through one dedicated
     /// sub-request rather than a third-party engine.
@@ -75,10 +76,11 @@ impl WebSearchProviderKind {
     ///
     /// Anything that has to enumerate providers reads this rather than
     /// spelling out a list that a new variant would silently fall out of.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Exa,
         Self::Tavily,
         Self::Brave,
+        Self::Firecrawl,
         Self::Searxng,
         Self::ModelProvider,
     ];
@@ -89,6 +91,7 @@ impl WebSearchProviderKind {
             Self::Exa => "exa",
             Self::Tavily => "tavily",
             Self::Brave => "brave",
+            Self::Firecrawl => "firecrawl",
             Self::Searxng => "searxng",
             Self::ModelProvider => "model_provider",
         }
@@ -107,6 +110,7 @@ impl WebSearchProviderKind {
             Self::Exa => Some("web_search.exa.api_key"),
             Self::Tavily => Some("web_search.tavily.api_key"),
             Self::Brave => Some("web_search.brave.api_key"),
+            Self::Firecrawl => Some("web_search.firecrawl.api_key"),
             // A self-hosted instance the operator runs. There is no vendor
             // account behind it and so no key.
             Self::Searxng => None,
@@ -124,6 +128,7 @@ impl WebSearchProviderKind {
             Self::Exa => Some("https://api.exa.ai/search"),
             Self::Tavily => Some("https://api.tavily.com/search"),
             Self::Brave => Some("https://api.search.brave.com/res/v1/web/search"),
+            Self::Firecrawl => Some("https://api.firecrawl.dev/v2/search"),
             // Self-hosted: the operator supplies the address.
             Self::Searxng => None,
             // Not an endpoint this module dials at all. The request goes out
@@ -143,7 +148,7 @@ impl WebSearchProviderKind {
         match self {
             Self::Exa => Some("https://api.exa.ai/contents"),
             Self::Tavily => Some("https://api.tavily.com/extract"),
-            Self::Brave | Self::Searxng | Self::ModelProvider => None,
+            Self::Brave | Self::Firecrawl | Self::Searxng | Self::ModelProvider => None,
         }
     }
 
@@ -168,6 +173,7 @@ impl WebSearchProviderKind {
             Self::Exa => Some("api.exa.ai"),
             Self::Tavily => Some("api.tavily.com"),
             Self::Brave => Some("api.search.brave.com"),
+            Self::Firecrawl => Some("api.firecrawl.dev"),
             Self::Searxng | Self::ModelProvider => None,
         }
     }

@@ -5731,7 +5731,7 @@ export type WebSearchMode = "automatic" | "vendor" | "host" | "off";
  * A configured web-search backend. The stable string also selects its secret
  * reference; it is intentionally not a model-controlled argument.
  */
-export type WebSearchProviderKind = "exa" | "tavily" | "brave" | "searxng" | "model_provider";
+export type WebSearchProviderKind = "exa" | "tavily" | "brave" | "firecrawl" | "searxng" | "model_provider";
 
 export type WorkspaceConfigAction = "skip" | "add" | "replace";
 

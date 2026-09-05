@@ -2120,6 +2120,11 @@ export const webSearchReady: WebSearchConfigInfo = {
   available: true,
 };
 
+export const webSearchFirecrawlReady: WebSearchConfigInfo = {
+  ...webSearchReady,
+  provider: "firecrawl",
+};
+
 export const webSearchVendorOnly: WebSearchConfigInfo = {
   ...webSearchNoProvider,
   mode: "vendor",
@@ -2140,7 +2145,14 @@ export const webSearchCredentials: WebSearchCredentialReadiness[] = [
   { provider: "exa", has_credential: false },
   { provider: "tavily", has_credential: false },
   { provider: "brave", has_credential: true },
+  { provider: "firecrawl", has_credential: false },
 ];
+
+export const webSearchFirecrawlCredentials: WebSearchCredentialReadiness[] =
+  webSearchCredentials.map((credential) => ({
+    ...credential,
+    has_credential: credential.provider === "firecrawl",
+  }));
 
 /**
  * A finished six-call code turn, as the composer's ring receives it.

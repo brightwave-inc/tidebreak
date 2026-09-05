@@ -893,8 +893,8 @@ impl std::fmt::Debug for WebSearchCredentialUpdate {
     }
 }
 
-/// `GET /web-search/credentials` — readiness for the fixed Exa and Tavily
-/// credential slots. This route never returns the stored keys.
+/// `GET /web-search/credentials` — readiness for every fixed hosted-provider
+/// credential slot. This route never returns the stored keys.
 pub async fn get_web_search_credentials(
     State(state): State<AppState>,
 ) -> Result<Json<WebSearchCredentialsInfo>, ServerError> {
