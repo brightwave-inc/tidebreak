@@ -15,7 +15,6 @@ import {
   ExternalLink,
   Eye,
   FolderOpen,
-  GitBranch,
   GitPullRequest,
   Pin,
   Radar,
@@ -67,7 +66,11 @@ import {
   workspaceWorkflowModel,
   type WorkspaceWorkflowAction,
 } from "./workspaceWorkflow";
-import { checkSummaryText, pullRequestReviewSummary } from "./prState";
+import type { CodeWorkspacePrResource } from "./useCodeWorkspacePr";
+import {
+  WorkspaceStatusDetails,
+  workspaceStatusLabel,
+} from "./WorkspaceStatusDetails";
 import {
   attentionMarkForDigest,
   digestStatusTone,
@@ -89,7 +92,6 @@ import {
   watchRowLabel,
   workspaceCardLabel,
   workspaceCardStatus,
-  workspacePrChipSummary,
   WORKSPACE_STATUS_RANK_LABELS,
   WORKSPACE_STATUS_RANK_TONES,
   type CardDensity,
@@ -171,6 +173,8 @@ export function WorkspaceCard({
   childSessions = [],
   stackParent,
   detailDefaultOpen = false,
+  prResource,
+  onDetailOpenChange,
   contextMenuLabel,
   onOpen,
   onSelectPointer,
@@ -196,6 +200,8 @@ export function WorkspaceCard({
   stackParent?: { id: string; title: string } | null;
   /** Open the hover detail at mount time. Stories use this for visual review. */
   detailDefaultOpen?: boolean;
+  prResource?: CodeWorkspacePrResource;
+  onDetailOpenChange?: (open: boolean) => void;
   /** Section label for a bulk context menu. */
   contextMenuLabel?: string;
   onOpen: () => void;
@@ -209,10 +215,15 @@ export function WorkspaceCard({
   onOpenChildSession?: (sessionId: string) => void;
   onOpenSubagent?: (callId: string) => void;
   onOpenStackParent?: (workspaceId: string) => void;
-  onWorkflowAction?: (action: WorkspaceWorkflowAction) => void;
+  onWorkflowAction?: (
+    action: WorkspaceWorkflowAction,
+    pr?: PullRequestDigest,
+  ) => void;
 }) {
   const title = digest?.title ?? workspace.title;
-  const pr = digest?.pr_state ?? workspace.pr;
+  const pr = prResource?.data
+    ? prResource.data.pr
+    : (digest?.pr_state ?? workspace.pr);
   const archived = isPutAway(workspace);
   const creating = workspace.status === "creating";
   const creationPhase = workspaceCreationPhase(workspace);
@@ -221,6 +232,9 @@ export function WorkspaceCard({
   const attentionMark = attentionMarkForDigest(digest);
   const [detailOpen, setDetailOpen] = useState(detailDefaultOpen);
   const compactDetail = useCompactWorkspaceDetail();
+  useEffect(() => {
+    onDetailOpenChange?.(detailOpen);
+  }, [detailOpen, onDetailOpenChange]);
   const watchActive = childSessions.some(
     (child) =>
       child.watch_state === "watching" ||
@@ -346,7 +360,7 @@ export function WorkspaceCard({
             side={compactDetail ? "bottom" : "right"}
             align="start"
             sideOffset={10}
-            className="w-[22rem] overflow-hidden rounded-xl border-border bg-popover p-0"
+            className="w-[min(26rem,calc(100vw-24px))] overflow-hidden rounded-xl border-border bg-popover p-0"
           >
             <WorkspaceDetailPanel
               workspace={workspace}
@@ -361,6 +375,7 @@ export function WorkspaceCard({
               commands={commands}
               onCommand={onCommand}
               onWorkflowAction={onWorkflowAction}
+              prResource={prResource}
             />
           </HoverCardContent>
         </HoverCard>
@@ -553,8 +568,10 @@ function WorkspaceDetailPanel({
   commands,
   onCommand,
   onWorkflowAction,
+  prResource,
 }: {
   workspace: CodeWorkspaceSnapshot;
+  prResource?: CodeWorkspacePrResource;
   digest: CodeSessionDigest | undefined;
   session: CodeSessionSnapshot | undefined;
   repoName: string;
@@ -565,7 +582,10 @@ function WorkspaceDetailPanel({
   terminalOpen: boolean;
   commands: readonly WorkspaceCommand[];
   onCommand: (command: WorkspaceCommand["id"]) => void;
-  onWorkflowAction?: (action: WorkspaceWorkflowAction) => void;
+  onWorkflowAction?: (
+    action: WorkspaceWorkflowAction,
+    pr?: PullRequestDigest,
+  ) => void;
 }) {
   const activity = workspaceActivitySummary(digest, session, terminalOpen, pr);
   const matchingSession =
@@ -574,37 +594,25 @@ function WorkspaceDetailPanel({
     ? (workspace.archived_at ?? workspace.created_at)
     : (matchingSession?.created_at ?? workspace.created_at);
   const age = formatCompactAge(stamp);
-  const model = pr ? workspaceWorkflowModel(null, pr) : null;
+  const model = workspaceWorkflowModel(prResource?.data ?? null, pr);
   const primary =
-    model?.primary && !(watchActive && model.primary !== "open_pr")
+    model?.primary &&
+    !prResource?.error &&
+    !(watchActive && model.primary !== "open_pr")
       ? model.primary
       : undefined;
   const primaryLabel =
     primary && model
-      ? workspaceWorkflowActionLabel(primary, model.stage)
+      ? primary === "merge"
+        ? "Review merge"
+        : primary === "mark_ready"
+          ? "Review draft"
+          : workspaceWorkflowActionLabel(primary, model.stage)
       : null;
   const prTitle = pr?.title?.trim();
   const showPrTitle = prTitle && prTitle !== title.trim();
-  const checkLabel = model?.checks?.total
-    ? checkSummaryText(model.checks)
-    : pr?.checks_summary?.trim() || null;
-  const checkTone: StatusTone = model?.checks?.failing
-    ? "critical"
-    : model?.checks?.pending
-      ? "pending"
-      : model?.checks?.passing
-        ? "ready"
-        : "neutral";
-  const review = pr
-    ? pullRequestReviewSummary({
-        state: pr.state,
-        draft: pr.draft ?? false,
-        review_decision: pr.review_decision,
-      })
-    : null;
   const putAwayLabel =
     workspace.status === "released" ? "Released" : "Archived";
-  const prCountLabel = workspacePrChipSummary(digest?.pr_count);
   const worktreeCommand = commands.find(
     (command) =>
       command.id === "open-worktree" || command.id === "copy-worktree",
@@ -680,65 +688,36 @@ function WorkspaceDetailPanel({
           </div>
         )}
 
-        {pr && model && (
+        {!archived && (
           <div className="mt-3 border-t border-border-subtle pt-3">
-            <div className="flex items-start gap-2">
-              <GitPullRequest
-                className={cn(
-                  "mt-0.5 size-3.5 shrink-0",
-                  STATUS_MARK[prCompactStatusTone(pr)],
-                )}
-                aria-hidden
-              />
-              <div className="min-w-0 flex-1">
-                <div className="flex min-w-0 items-center gap-2">
-                  <span className="shrink-0 text-xs font-medium tabular-nums">
-                    Pull request #{pr.number}
-                  </span>
-                  {prCountLabel && (
-                    <span className="rounded-md bg-muted px-1.5 py-0.5 text-2xs font-medium text-muted-foreground tabular-nums">
-                      {prCountLabel}
-                    </span>
-                  )}
-                  <span
-                    className={cn(
-                      "ml-auto shrink-0 text-xs font-medium",
-                      STATUS_TEXT[model.tone],
-                    )}
-                  >
-                    {model.summary.replace(/^#\d+\s*·\s*/, "")}
-                  </span>
-                </div>
-                <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                  {model.detail}
-                </p>
-              </div>
-            </div>
-
-            <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-muted-foreground">
-              {checkLabel && (
-                <WorkspaceStatusFact
-                  icon={<CheckCircle2 />}
-                  label={checkLabel}
-                  tone={checkTone}
-                />
+            <p
+              className={cn(
+                "mb-2 text-xs font-medium",
+                STATUS_TEXT[prResource?.error ? "warning" : model.tone],
               )}
-              {review && (
-                <WorkspaceStatusFact
-                  icon={<Eye />}
-                  label={review.label}
-                  tone={review.tone}
-                />
-              )}
-              {pr.base_branch && (
-                <WorkspaceStatusFact
-                  icon={<GitBranch />}
-                  label={`into ${pr.base_branch}`}
-                  tone="neutral"
-                />
-              )}
-            </div>
-
+            >
+              {prResource?.error
+                ? "Status unavailable"
+                : workspaceStatusLabel(model)}
+            </p>
+            <WorkspaceStatusDetails
+              model={model}
+              snapshot={prResource?.data ?? null}
+              error={prResource?.mutationError ?? prResource?.error}
+            />
+            {prResource && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="mt-2"
+                disabled={prResource.refreshing || prResource.busy !== null}
+                onClick={() =>
+                  void prResource.refreshFromHost().catch(() => undefined)
+                }
+              >
+                Refresh status
+              </Button>
+            )}
             {primary &&
               primary !== "open_pr" &&
               primaryLabel &&
@@ -748,8 +727,8 @@ function WorkspaceDetailPanel({
                   variant="ghost"
                   size="sm"
                   className="mt-3 h-7 bg-foreground px-2.5 text-xs text-background hover:bg-foreground/88 hover:text-background"
-                  title={model.detail}
-                  onClick={() => onWorkflowAction(primary)}
+                  disabled={prResource?.busy != null}
+                  onClick={() => onWorkflowAction(primary, pr)}
                 >
                   {primaryLabel}
                 </Button>
@@ -758,13 +737,13 @@ function WorkspaceDetailPanel({
         )}
       </div>
 
-      <div className="flex items-center gap-2 border-t border-border-subtle bg-muted/25 px-3 py-2">
+      <div className="flex items-center gap-1 border-t border-border-subtle bg-muted/25 px-2 py-2">
         {worktreeCommand && (
           <Button
             type="button"
             variant="ghost"
             size="sm"
-            className="h-7 gap-1.5 px-2 text-xs"
+            className="h-7 gap-1.5 px-1.5 text-xs"
             onClick={() => onCommand(worktreeCommand.id)}
           >
             {worktreeCommand.id === "open-worktree" ? (
@@ -781,7 +760,7 @@ function WorkspaceDetailPanel({
           type="button"
           variant="ghost"
           size="sm"
-          className="h-7 gap-1.5 px-2 text-xs"
+          className="h-7 gap-1.5 px-1.5 text-xs"
           onClick={() => onCommand(archived ? "restore" : "archive")}
         >
           {archived ? (
@@ -797,7 +776,7 @@ function WorkspaceDetailPanel({
             variant="ghost"
             size="sm"
             className={cn(
-              "h-7 gap-1.5 px-2 text-xs",
+              "h-7 gap-1.5 px-1.5 text-xs",
               STATUS_TEXT[prCompactStatusTone(pr)],
             )}
             aria-label={`Open pull request #${pr.number}`}
@@ -818,25 +797,6 @@ function WorkspaceDetailPanel({
         )}
       </div>
     </div>
-  );
-}
-
-function WorkspaceStatusFact({
-  icon,
-  label,
-  tone,
-}: {
-  icon: ReactNode;
-  label: string;
-  tone: StatusTone;
-}) {
-  return (
-    <span className={cn("inline-flex items-center gap-1", STATUS_TEXT[tone])}>
-      <span className="[&_svg]:size-3 [&_svg]:shrink-0" aria-hidden>
-        {icon}
-      </span>
-      <span>{label}</span>
-    </span>
   );
 }
 

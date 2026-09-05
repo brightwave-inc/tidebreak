@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useRef } from "react";
 
 import type { ApiClient } from "../api/client";
-import type { CodeWorkspacePullRequests } from "../api/types";
+import type {
+  CodeWorkspacePullRequests,
+  PullRequestDigest,
+} from "../api/types";
 import { useLiveResource, type LiveResource } from "./useLiveContent";
 
 /**
@@ -13,6 +16,7 @@ export function useWorkspacePullRequests(
   client: Pick<ApiClient, "getCodeWorkspacePullRequests">,
   workspaceId: string,
   prCount: number | undefined,
+  pr?: PullRequestDigest,
 ): LiveResource<CodeWorkspacePullRequests> {
   const load = useCallback(
     () => client.getCodeWorkspacePullRequests(workspaceId),
@@ -24,7 +28,7 @@ export function useWorkspacePullRequests(
     load,
     errorMessage: "Could not load the workspace's pull requests",
   });
-  const signature = prCount === undefined ? "" : String(prCount);
+  const signature = JSON.stringify([prCount, pr]);
   const seenRef = useRef({ workspaceId, signature });
 
   useEffect(() => {

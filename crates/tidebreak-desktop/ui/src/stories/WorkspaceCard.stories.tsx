@@ -10,6 +10,7 @@ import {
   worktreeOpenFailureNotice,
 } from "@/code/workspaceActions";
 import { WorkspaceCard, WorkspaceStatusMark } from "@/code/WorkspaceCard";
+import type { CodeWorkspacePrResource } from "@/code/useCodeWorkspacePr";
 import type { WorkspaceStatusRank } from "@/code/workspaceCards";
 import { WORKSPACE_STATUS_RANK_LABELS } from "@/code/workspaceCards";
 import { Toaster } from "@/components/ui/sonner";
@@ -19,6 +20,7 @@ import {
   closedPrDigest,
   codeSession,
   codeWorkspace,
+  dirtyFailingChecksPrGit,
   doneDigest,
   draftPrDigest,
   grokIdleSession,
@@ -72,6 +74,19 @@ const meta = {
 
 export default meta;
 type Story = StoryObj<typeof meta>;
+
+const sharedStatusResource: CodeWorkspacePrResource = {
+  data: dirtyFailingChecksPrGit,
+  error: null,
+  refreshing: false,
+  refresh: fn(async () => {}),
+  adopt: fn(),
+  busy: null,
+  mutationError: null,
+  setMutationError: fn(),
+  refreshFromHost: fn(async () => undefined),
+  runMutation: async (_mutation, operation) => operation(),
+};
 
 export const Idle: Story = {};
 
@@ -675,6 +690,17 @@ export const PullRequestOpen: Story = {
   args: {
     workspace: { ...codeWorkspace, pr: openPrDigest },
     commands: workspaceCommands({ hasPr: true, archived: false }),
+  },
+};
+
+/** The hovercard uses the same local and hosted snapshot as the header. */
+export const SharedLocalAndPullRequestStatus: Story = {
+  args: {
+    workspace: { ...codeWorkspace, pr: dirtyFailingChecksPrGit.pr },
+    commands: workspaceCommands({ hasPr: true, archived: false }),
+    detailDefaultOpen: true,
+    prResource: sharedStatusResource,
+    onWorkflowAction: fn(),
   },
 };
 

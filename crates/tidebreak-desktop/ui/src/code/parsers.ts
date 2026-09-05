@@ -2324,6 +2324,7 @@ export function parseCodeWorkspacePr(
       "ahead",
       "has_upstream",
       "suggested_commit_message",
+      "git",
       "pr",
       "gh_found",
       "gh_authenticated",
@@ -2368,12 +2369,52 @@ export function parseCodeWorkspacePr(
     if (!pr) return null;
     parsed.pr = pr;
   }
+  if (value.git !== undefined) {
+    const git = parseWorkspaceGitState(value.git);
+    if (!git) return null;
+    parsed.git = git;
+  }
   if (value.watch !== undefined) {
     const watch = parseCodeWatch(value.watch);
     if (!watch) return null;
     parsed.watch = watch;
   }
   return parsed;
+}
+
+function parseWorkspaceGitState(
+  value: unknown,
+): NonNullable<CodeWorkspacePrSnapshot["git"]> | null {
+  if (!isRecord(value)) return null;
+  const counts = [
+    "ahead_of_upstream",
+    "behind_upstream",
+    "changed_files",
+    "staged_files",
+    "unstaged_files",
+    "untracked_files",
+    "conflicted_files",
+  ] as const;
+  if (
+    !onlyKeys<NonNullable<CodeWorkspacePrSnapshot["git"]>>(value, [
+      "branch",
+      "head_sha",
+      "base_ref",
+      "upstream",
+      "branch_has_changes",
+      ...counts,
+    ]) ||
+    !optionalLine(value.branch) ||
+    !optionalLine(value.upstream) ||
+    !lineText(value.head_sha) ||
+    !lineText(value.base_ref) ||
+    typeof value.branch_has_changes !== "boolean" ||
+    counts.some(
+      (key) => !Number.isSafeInteger(value[key]) || (value[key] as number) < 0,
+    )
+  )
+    return null;
+  return value as NonNullable<CodeWorkspacePrSnapshot["git"]>;
 }
 
 export function parseCodeWatch(value: unknown): CodeWatchSnapshot | null {

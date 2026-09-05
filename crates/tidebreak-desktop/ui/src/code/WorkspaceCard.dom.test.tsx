@@ -11,6 +11,7 @@ import type {
   CodeWorkspaceSnapshot,
   PullRequestDigest,
 } from "../api/types";
+import type { CodeWorkspacePrResource } from "./useCodeWorkspacePr";
 import type { OptimisticCodeWorkspaceSnapshot } from "./CodeCatalogStore";
 
 const workspace: CodeWorkspaceSnapshot = {
@@ -32,6 +33,30 @@ const pr: PullRequestDigest = {
 };
 
 afterEach(cleanup);
+
+function cardResource(pr?: PullRequestDigest): CodeWorkspacePrResource {
+  return {
+    data: {
+      dirty: false,
+      unpushed: false,
+      ahead: 0,
+      has_upstream: true,
+      suggested_commit_message: "",
+      gh_found: true,
+      remediation: "",
+      pr,
+    },
+    error: null,
+    refreshing: false,
+    busy: null,
+    mutationError: null,
+    refresh: vi.fn(),
+    refreshFromHost: vi.fn(),
+    adopt: vi.fn(),
+    setMutationError: vi.fn(),
+    runMutation: vi.fn(),
+  };
+}
 
 function renderCard(overrides?: {
   workspace?: Partial<OptimisticCodeWorkspaceSnapshot>;
@@ -58,6 +83,7 @@ function renderCard(overrides?: {
   render(
     <WorkspaceCard
       workspace={merged}
+      prResource={cardResource(overrides?.pr)}
       digest={overrides?.digest}
       session={overrides?.session}
       repoName="app"
@@ -246,7 +272,7 @@ describe("WorkspaceCard", () => {
     expect(detail).toHaveTextContent("tidebreak/fix-login");
     expect(detail).toHaveTextContent("8 passing · 1 pending");
     expect(detail).toHaveTextContent("Review required");
-    expect(detail).toHaveTextContent("into main");
+    expect(detail).toHaveTextContent("Base: main");
 
     await user.click(screen.getByRole("button", { name: "Archive" }));
     expect(onCommand).toHaveBeenCalledWith("archive");
@@ -273,13 +299,21 @@ describe("WorkspaceCard", () => {
         onOpen={vi.fn()}
         onCommand={vi.fn()}
         onWorkflowAction={onWorkflowAction}
+        prResource={cardResource({
+          ...pr,
+          mergeable: "conflicting",
+          checks_summary: undefined,
+        })}
       />,
     );
 
     // Same model, same label table as WorkspaceWorkflowControl: a
     // conflicting PR's one obvious action is resolving the conflicts.
     await user.click(screen.getByRole("button", { name: "Resolve conflicts" }));
-    expect(onWorkflowAction).toHaveBeenCalledWith("resolve_conflicts");
+    expect(onWorkflowAction).toHaveBeenCalledWith(
+      "resolve_conflicts",
+      expect.objectContaining({ number: 184 }),
+    );
   });
 
   it("leads an archived workspace's panel with Restore", async () => {

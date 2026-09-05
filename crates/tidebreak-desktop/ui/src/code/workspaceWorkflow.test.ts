@@ -50,7 +50,7 @@ describe("workspaceWorkflowModel", () => {
     // into the menu.
     expect(dirty.secondary).toEqual(["open_source"]);
     expect(workspaceWorkflowActionLabel("open_source", dirty.stage)).toBe(
-      "Review & commit",
+      "Source control",
     );
 
     const unpushed = workspaceWorkflowModel({
@@ -58,22 +58,22 @@ describe("workspaceWorkflowModel", () => {
       unpushed: true,
       ahead: 2,
     });
-    expect(unpushed.summary).toBe("Unpushed changes");
-    expect(unpushed.primary).toBe("push");
+    expect(unpushed.summary).toBe("Unpushed commits");
+    expect(unpushed.primary).toBe("compose_pr");
 
     const ready = workspaceWorkflowModel({ ...CLEAN, ahead: 2 });
     expect(ready.summary).toBe("Ready for PR");
-    expect(ready.primary).toBe("create_pr");
+    expect(ready.primary).toBe("compose_pr");
 
     const setup = workspaceWorkflowModel({
       ...CLEAN,
       ahead: 2,
       gh_found: false,
     });
-    expect(setup.summary).toBe("GitHub setup");
-    expect(setup.primary).toBe("open_source");
+    expect(setup.summary).toBe("Ready for PR");
+    expect(setup.primary).toBe("compose_pr");
     expect(workspaceWorkflowActionLabel(setup.primary!, setup.stage)).toBe(
-      "Set up GitHub",
+      "Create PR",
     );
   });
 
@@ -95,7 +95,7 @@ describe("workspaceWorkflowModel", () => {
     expect(failing.summary).toBe("#41 · 1 failing");
     expect(failing.primary).toBe("fix_errors");
     expect(workspaceWorkflowActionLabel(failing.primary!, failing.stage)).toBe(
-      "Fix CI",
+      "Fix checks",
     );
 
     const queued = workspaceWorkflowModel({
@@ -119,7 +119,8 @@ describe("workspaceWorkflowModel", () => {
     });
     expect(merged.summary).toBe("#41 · Merged");
     expect(merged.tone).toBe("merged");
-    expect(merged.secondary).toEqual([]);
+    expect(merged.primary).toBe("archive");
+    expect(merged.secondary).toEqual(["open_pr", "open_source"]);
   });
 
   it("puts the concrete repair or merge action in the primary slot", () => {
@@ -158,10 +159,10 @@ describe("workspaceWorkflowModel", () => {
       dirty: true,
       pr: existing,
     });
-    expect(dirty.summary).toBe("#41 · Changes");
+    expect(dirty.summary).toBe("#41 · Uncommitted changes");
     // With a pull request open there is nothing to create: new local changes
     // go through the commit box to update it.
-    expect(dirty.primary).toBe("open_source");
+    expect(dirty.primary).toBe("update_pr");
 
     const unpushed = workspaceWorkflowModel({
       ...CLEAN,
@@ -169,7 +170,7 @@ describe("workspaceWorkflowModel", () => {
       ahead: 7,
       pr: existing,
     });
-    expect(unpushed.summary).toBe("#41 · Unpushed");
+    expect(unpushed.summary).toBe("#41 · Unpushed commits");
     expect(unpushed.detail).not.toContain("7");
   });
 
@@ -276,12 +277,12 @@ describe("resolveWorkflowShortcut", () => {
     // commit-and-open request; with one open, it goes to the commit box.
     expect(chord("pull_request", { ...CLEAN, dirty: true })).toBe("compose_pr");
     expect(chord("pull_request", { ...CLEAN, dirty: true, pr: pr({}) })).toBe(
-      "open_source",
+      "update_pr",
     );
     expect(chord("pull_request", { ...CLEAN, unpushed: true, ahead: 1 })).toBe(
-      "push",
+      "compose_pr",
     );
-    expect(chord("pull_request", { ...CLEAN, ahead: 2 })).toBe("create_pr");
+    expect(chord("pull_request", { ...CLEAN, ahead: 2 })).toBe("compose_pr");
     expect(
       chord("pull_request", { ...CLEAN, pr: pr({ url: "https://x/41" }) }),
     ).toBe("open_pr");
@@ -293,7 +294,9 @@ describe("resolveWorkflowShortcut", () => {
   it("runs whatever the header's primary control says next", () => {
     // The point of Cmd+Shift+Enter: one chord the reader can hold down the
     // whole workflow, wired to the same decision the button draws.
-    expect(chord("next", { ...CLEAN, unpushed: true, ahead: 1 })).toBe("push");
+    expect(chord("next", { ...CLEAN, unpushed: true, ahead: 1 })).toBe(
+      "compose_pr",
+    );
     expect(chord("next", { ...CLEAN, pr: pr({ draft: true }) })).toBe(
       "mark_ready",
     );
@@ -472,5 +475,108 @@ describe("workspace merge identity", () => {
         new HttpError(409, "409: branch protection", "pr_not_mergeable"),
       ),
     ).toBeNull();
+  });
+});
+
+const GIT = {
+  branch: "topic",
+  head_sha: "abc123456789",
+  base_ref: "main",
+  upstream: "origin/topic",
+  ahead_of_upstream: 0,
+  behind_upstream: 0,
+  changed_files: 0,
+  staged_files: 0,
+  unstaged_files: 0,
+  untracked_files: 0,
+  conflicted_files: 0,
+  branch_has_changes: true,
+};
+
+describe("combined local and PR states", () => {
+  it.each([
+    ["unstaged", { changed_files: 1, unstaged_files: 1 }],
+    ["staged", { changed_files: 1, staged_files: 1 }],
+    ["untracked", { changed_files: 1, untracked_files: 1 }],
+  ])("publishes %s work and preserves the hosted failure", (_name, counts) => {
+    const snapshot = { ...CLEAN, dirty: true, git: { ...GIT, ...counts } };
+    expect(workspaceWorkflowModel(snapshot).primary).toBe("compose_pr");
+    const model = workspaceWorkflowModel({
+      ...snapshot,
+      pr: pr({ checks: [{ name: "ci", bucket: "fail" }] }),
+    });
+    expect(model.primary).toBe("update_pr");
+    expect(model.tone).toBe("critical");
+    expect(model.localSummary).toBe("1 changed file");
+    expect(model.prSummary).toBe("Checks failed");
+    expect(model.checks?.failing).toBe(1);
+  });
+  it.each([
+    ["sync_needed", "sync_branch", { behind_upstream: 2 }],
+    [
+      "diverged",
+      "resolve_divergence",
+      { behind_upstream: 2, ahead_of_upstream: 1 },
+    ],
+    ["local_conflicts", "resolve_local_conflicts", { conflicted_files: 1 }],
+    ["detached", "open_source", { branch: undefined }],
+  ] as const)("blocks merge and watch in %s", (stage, action, git) => {
+    const model = workspaceWorkflowModel({
+      ...CLEAN,
+      git: { ...GIT, ...git },
+      pr: pr({ merge_state_status: "clean", mergeable: "mergeable" }),
+    });
+    expect(model.stage).toBe(stage);
+    expect(model.primary).toBe(action);
+    expect(resolveWorkflowShortcut("merge", model, false)).toHaveProperty(
+      "blocked",
+    );
+    expect(resolveWorkflowShortcut("watch", model, false)).toHaveProperty(
+      "blocked",
+    );
+    expect(model.secondary).not.toContain("watch_and_fix");
+  });
+  it("does not infer branch changes from commits that leave no diff", () => {
+    expect(
+      workspaceWorkflowModel({
+        ...CLEAN,
+        ahead: 5,
+        unpushed: true,
+        git: { ...GIT, branch_has_changes: false, upstream: undefined },
+      }).stage,
+    ).toBe("clean");
+  });
+  it.each(["merged", "closed"])(
+    "keeps the %s outcome while offering a follow-up",
+    (state) => {
+      const ended = pr({ state });
+      const model = workspaceWorkflowModel({
+        ...CLEAN,
+        dirty: true,
+        git: { ...GIT, changed_files: 1 },
+        pr: ended,
+      });
+      expect(model.primary).toBe("follow_up_pr");
+      expect(model.pr?.state).toBe(state);
+      expect(model.prSummary).toBe(state === "merged" ? "Merged" : "Closed");
+      expect(resolveWorkflowShortcut("watch", model, false)).toHaveProperty(
+        "blocked",
+      );
+      const later = workspaceWorkflowModel({
+        ...CLEAN,
+        git: { ...GIT, head_sha: "later" },
+        pr: ended,
+      });
+      expect(later.primary).toBe("follow_up_pr");
+    },
+  );
+  it("does not offer a merge before local status loads", () => {
+    const model = workspaceWorkflowModel(
+      null,
+      pr({ merge_state_status: "clean", mergeable: "mergeable" }),
+    );
+    expect(model.stage).toBe("loading");
+    expect(model.primary).toBeUndefined();
+    expect(model.pr?.number).toBe(41);
   });
 });

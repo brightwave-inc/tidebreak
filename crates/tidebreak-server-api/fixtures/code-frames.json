@@ -412,6 +412,20 @@
       "dirty": false,
       "gh_authenticated": true,
       "gh_found": true,
+      "git": {
+        "ahead_of_upstream": 2,
+        "base_ref": "main",
+        "behind_upstream": 0,
+        "branch": "mara/code-parsers-bounded",
+        "branch_has_changes": true,
+        "changed_files": 1,
+        "conflicted_files": 0,
+        "head_sha": "cec166ffc1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6",
+        "staged_files": 0,
+        "unstaged_files": 1,
+        "untracked_files": 0,
+        "upstream": "origin/mara/code-parsers-bounded"
+      },
       "has_upstream": true,
       "pr": {
         "auto_merge_enabled": true,

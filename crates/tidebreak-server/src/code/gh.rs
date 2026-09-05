@@ -189,6 +189,7 @@ pub async fn configure_workspace_identity(
 /// Live git + `gh` observation for the workspace PR card.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceGitStatus {
+    pub git: super::types::CodeWorkspaceGitState,
     pub dirty: bool,
     pub unpushed: bool,
     pub ahead: u64,
@@ -360,6 +361,7 @@ pub async fn workspace_git_status(
     // which the runtime drives with the fact row's ETags; this observation
     // only carries the persisted copy and the local git state.
     Ok(WorkspaceGitStatus {
+        git: inspect.git,
         dirty: inspect.dirty,
         unpushed: inspect.unpushed,
         ahead: inspect.ahead,
@@ -924,6 +926,7 @@ pub fn format_shortstat(stat: &Diffstat) -> String {
 }
 
 struct GitInspect {
+    git: super::types::CodeWorkspaceGitState,
     dirty: bool,
     unpushed: bool,
     ahead: u64,
@@ -1022,7 +1025,52 @@ async fn inspect_git(worktree: &Path, base_ref: &str, title: &str) -> Result<Git
             .unwrap_or_default(),
     );
     let commits = commit_subjects(worktree, &range).await?;
+    let mut details = parse_workspace_file_status(
+        &git(
+            worktree,
+            &["status", "--porcelain=v2", "-z", "--untracked-files=all"],
+            GIT_TIMEOUT,
+        )
+        .await?,
+    );
+    details.branch = git(
+        worktree,
+        &["symbolic-ref", "--quiet", "--short", "HEAD"],
+        GIT_TIMEOUT,
+    )
+    .await
+    .ok();
+    details.head_sha = git(worktree, &["rev-parse", "HEAD"], GIT_TIMEOUT).await?;
+    details.base_ref = base_ref.to_owned();
+    details.upstream = git(
+        worktree,
+        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+        GIT_TIMEOUT,
+    )
+    .await
+    .ok();
+    details.ahead_of_upstream = ahead_of_upstream;
+    details.behind_upstream = if has_upstream {
+        parse_count(
+            &git(
+                worktree,
+                &["rev-list", "--count", "HEAD..@{u}"],
+                GIT_TIMEOUT,
+            )
+            .await?,
+        )
+    } else {
+        0
+    };
+    details.branch_has_changes = !git(
+        worktree,
+        &["diff", "--name-only", &format!("{base_ref}...HEAD")],
+        GIT_TIMEOUT,
+    )
+    .await?
+    .is_empty();
     Ok(GitInspect {
+        git: details,
         dirty,
         unpushed,
         ahead,
@@ -1031,6 +1079,38 @@ async fn inspect_git(worktree: &Path, base_ref: &str, title: &str) -> Result<Git
         suggested_pr_body: generate_pr_body(&commits, &branch_stat),
         diffstat: branch_stat,
     })
+}
+
+fn parse_workspace_file_status(status: &str) -> super::types::CodeWorkspaceGitState {
+    let mut result = super::types::CodeWorkspaceGitState::default();
+    let mut records = status.split('\0').filter(|record| !record.is_empty());
+    while let Some(record) = records.next() {
+        match record.as_bytes().first() {
+            Some(b'?') => {
+                result.changed_files += 1;
+                result.untracked_files += 1;
+            }
+            Some(b'u') => {
+                result.changed_files += 1;
+                result.conflicted_files += 1;
+            }
+            Some(b'1' | b'2') => {
+                result.changed_files += 1;
+                let xy = record.split_whitespace().nth(1).unwrap_or("..").as_bytes();
+                if xy.first().is_some_and(|value| *value != b'.') {
+                    result.staged_files += 1;
+                }
+                if xy.get(1).is_some_and(|value| *value != b'.') {
+                    result.unstaged_files += 1;
+                }
+                if record.starts_with('2') {
+                    records.next();
+                }
+            }
+            _ => {}
+        }
+    }
+    result
 }
 
 async fn has_uncommitted_work(worktree: &Path) -> Result<bool, GhError> {
@@ -2351,6 +2431,60 @@ mod tests {
         assert!(!answered.contains("ghs_dying_token"), "{answered}");
     }
 
+    #[test]
+    fn workspace_status_counts_mixed_changes_and_skips_rename_source_paths() {
+        let status = "1 .M N... tracked\0".to_owned()
+            + "1 MM N... staged-and-unstaged\0"
+            + "2 R. N... renamed\0? old name\0"
+            + "? untracked with spaces\0"
+            + "u UU N... conflict\0";
+        let parsed = parse_workspace_file_status(&status);
+        assert_eq!(parsed.changed_files, 5);
+        assert_eq!(parsed.staged_files, 2);
+        assert_eq!(parsed.unstaged_files, 2);
+        assert_eq!(parsed.untracked_files, 1);
+        assert_eq!(parsed.conflicted_files, 1);
+    }
+
+    #[tokio::test]
+    async fn workspace_status_distinguishes_branch_diff_from_upstream_divergence() {
+        let (_dir, work, bare) = init_paired_repos();
+        run(&work, &["git", "checkout", "-b", "topic"]);
+        run(&work, &["git", "push", "-u", "origin", "topic"]);
+        std::fs::write(work.join("local.txt"), "local\n").unwrap();
+        run(&work, &["git", "add", "."]);
+        run(&work, &["git", "commit", "-m", "local"]);
+        let remote = work.parent().unwrap().join("other");
+        run(
+            work.parent().unwrap(),
+            &[
+                "git",
+                "clone",
+                bare.to_str().unwrap(),
+                remote.to_str().unwrap(),
+            ],
+        );
+        run(&remote, &["git", "checkout", "topic"]);
+        run(&remote, &["git", "config", "user.email", "dev@example.com"]);
+        run(&remote, &["git", "config", "user.name", "Dev"]);
+        std::fs::write(remote.join("remote.txt"), "remote\n").unwrap();
+        run(&remote, &["git", "add", "."]);
+        run(&remote, &["git", "commit", "-m", "remote"]);
+        run(&remote, &["git", "push"]);
+        run(&work, &["git", "fetch", "origin"]);
+        std::fs::write(work.join("README.md"), "changed\n").unwrap();
+        std::fs::write(work.join("untracked.txt"), "new\n").unwrap();
+        let result = inspect_git(&work, "main", "Test").await.unwrap();
+        assert!(result.dirty && result.unpushed && result.git.branch_has_changes);
+        assert_eq!(result.git.branch.as_deref(), Some("topic"));
+        assert_eq!(result.git.upstream.as_deref(), Some("origin/topic"));
+        assert_eq!(result.git.ahead_of_upstream, 1);
+        assert_eq!(result.git.behind_upstream, 1);
+        assert_eq!(result.git.changed_files, 2);
+        assert_eq!(result.git.unstaged_files, 1);
+        assert_eq!(result.git.untracked_files, 1);
+    }
+
     fn init_paired_repos() -> (TempDir, PathBuf, PathBuf) {
         let dir = TempDir::new().unwrap();
         let bare = dir.path().join("origin.git");
@@ -2378,6 +2512,11 @@ mod tests {
         let status = StdCommand::new(args[0])
             .args(&args[1..])
             .current_dir(cwd)
+            // Keep workstation signing and hook settings out of this fixture.
+            // A global commit.gpgSign setting otherwise waits for an external
+            // signer while the test is creating its temporary repositories.
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_TERMINAL_PROMPT", "0")
             .status()
             .unwrap();
