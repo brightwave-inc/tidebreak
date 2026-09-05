@@ -64,27 +64,19 @@ grants must stay constrained to a tool's canonical destination. Arbitrary cron,
 cloud execution while the user's machine is unavailable, and a separate agent
 runtime are outside that first step.
 
-## A browser without ambient computer control
+## Browser work beyond the macOS release
 
-Browser automation is a major missing capability, but it must not become a way
-to take over the user's everyday browser or desktop. The future browser surface
-needs its own Tidebreak-managed profile, clear cookie and login lifetime rules,
-visible foreground control, durable history, cancellation, and a reset path.
+The visible Tidebreak-managed browser is active implementation work under
+#2335. Foreground chat and local code harnesses share the native control
+boundary. Release acceptance remains in #2345; see
+[code-mode browser integration](code-browser-integration.md) for the working
+contract and validation steps.
 
-The initial contract must distinguish navigation from entering sensitive text,
-uploading files, downloading files, and submitting an external action. It must
-also keep page-authored content separate from model instructions and from host
-credentials and capabilities. Personal-profile access by default, CAPTCHA
-evasion, and password-manager integration are not in this plan.
-
-Desktop computer use — screen capture and consent-gated control of native
-apps — is no longer parked; it is specified by
-[decision record 13](decisions/0013-computer-use-screen-capture-and-app-control.md)
-as its own capability with per-app grants. That record deliberately keeps the
-everyday browser out of its starter scope: operating the user's browser
-through the accessibility channel is not a substitute for the managed browser
-surface described here, which stays deferred until its contract above is
-real.
+Windows and Linux agent control, background browser agents, arbitrary signed-in
+services, personal-profile access, CAPTCHA handling, and password-manager
+integration remain deferred. Desktop computer use stays a separate capability
+with per-app grants under
+[decision record 13](decisions/0013-computer-use-screen-capture-and-app-control.md).
 
 ## More ways to organize and shape work
 

@@ -328,7 +328,7 @@ async fn native_binary_choice(
             allow_label.to_owned(),
             "Cancel".to_owned(),
         ));
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_window("main") {
         dialog = dialog.parent(&window);
     }
     dialog.show(move |approved| {
@@ -358,7 +358,7 @@ async fn native_three_way_choice(
             second.to_owned(),
             cancel.to_owned(),
         ));
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_window("main") {
         dialog = dialog.parent(&window);
     }
     dialog.show_with_result(move |answer| {

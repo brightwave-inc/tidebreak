@@ -27,7 +27,7 @@ use objc2_foundation::{
 use objc2_web_kit::WKWebView;
 use tauri::Webview;
 
-use crate::code_browser::BrowserUrlChange;
+use crate::{browser_native_webview::with_browser_webview, code_browser::BrowserUrlChange};
 
 /// Runs on the main thread each time the observed view's URL changes.
 pub(crate) type BrowserUrlChangeHandler = Box<dyn Fn(BrowserUrlChange) + Send + 'static>;
@@ -131,38 +131,31 @@ pub(crate) fn observe_browser_url(
     handler: BrowserUrlChangeHandler,
 ) -> Result<(), String> {
     let label = webview.label().to_owned();
-    webview
-        .with_webview(move |platform| {
-            let Some(mtm) = MainThreadMarker::new() else {
-                return;
-            };
-            // SAFETY: tauri hands the native `WKWebView` pointer to this
-            // closure on the main thread.
-            let view: &WKWebView = unsafe { &*platform.inner().cast() };
-            let observer = BrowserUrlObserver::new(mtm, view.retain(), handler);
-            observer.attach();
-            let previous =
-                URL_OBSERVERS.with(|observers| observers.borrow_mut().insert(label, observer));
-            if let Some(previous) = previous {
-                previous.detach();
-            }
-        })
-        .map_err(|error| format!("browser host: {error}"))
+    with_browser_webview(webview, move |view| {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let observer = BrowserUrlObserver::new(mtm, view.retain(), handler);
+        observer.attach();
+        let previous =
+            URL_OBSERVERS.with(|observers| observers.borrow_mut().insert(label, observer));
+        if let Some(previous) = previous {
+            previous.detach();
+        }
+    })
 }
 
 /// Remove the URL observer registered for this webview, if any. Call before
 /// closing the view so the observer releases it.
 pub(crate) fn stop_observing_browser_url(webview: &Webview) -> Result<(), String> {
     let label = webview.label().to_owned();
-    webview
-        .with_webview(move |_platform| {
-            if let Some(observer) =
-                URL_OBSERVERS.with(|observers| observers.borrow_mut().remove(&label))
-            {
-                observer.detach();
-            }
-        })
-        .map_err(|error| format!("browser host: {error}"))
+    with_browser_webview(webview, move |_view| {
+        if let Some(observer) =
+            URL_OBSERVERS.with(|observers| observers.borrow_mut().remove(&label))
+        {
+            observer.detach();
+        }
+    })
 }
 
 /// Detach every registered observer and release the views they held. Runs on

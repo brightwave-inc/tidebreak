@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Browser recovery fixture</title>
+    <style>
+      body { margin: 40px auto; padding: 0 24px; max-width: 720px; font: 16px/1.5 system-ui, sans-serif; color: #18212f; background: #f5f5f2; }
+      h1 { font-size: 28px; }
+      section { margin: 32px 0; }
+      label { display: block; }
+      input { display: block; box-sizing: border-box; width: 100%; margin: 8px 0 16px; padding: 10px; font: inherit; }
+      button { margin: 0 8px 8px 0; padding: 8px 12px; font: inherit; }
+      a { color: #124ea3; }
+      a[aria-disabled="true"] { color: #666; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Browser recovery fixture</h1>
+      <p>This page reads its non-authentication storage markers on load. To create markers, enter a unique run ID and choose Save recovery marker.</p>
+      <section aria-labelledby="storage-heading">
+        <h2 id="storage-heading">Persistent storage</h2>
+        <label for="fixture-marker">Fixture marker</label>
+        <input id="fixture-marker" autocomplete="off" spellcheck="false" maxlength="64" />
+        <button id="save-recovery-marker" type="button">Save recovery marker</button>
+        <button id="read-recovery-markers" type="button">Read recovery markers</button>
+        <p id="local-storage-marker">Local storage marker: Checking</p>
+        <p id="cookie-marker">Cookie marker: Checking</p>
+        <p id="recovery-status" role="status">Reading recovery markers.</p>
+      </section>
+      <section aria-labelledby="download-heading">
+        <h2 id="download-heading">Interrupted download</h2>
+        <p>The download sends a fixed prefix, then waits up to two minutes for release. Each run ID accepts one download request. Use a new marker for another run.</p>
+        <a id="slow-download" aria-disabled="true" download>Download held fixture file</a>
+      </section>
+      <a href="/">Return to the main fixture</a>
+    </main>
+    <script type="module" src="/recovery.mjs"></script>
+  </body>
+</html>

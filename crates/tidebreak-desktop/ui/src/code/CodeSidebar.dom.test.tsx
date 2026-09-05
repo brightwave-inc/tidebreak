@@ -15,6 +15,7 @@ import { useCodeDeliveryStore } from "./CodeDeliveryStore";
 import { DEFAULT_RAIL_PREFS, useCodeUiStore } from "./CodeUiStore";
 import { disconnectCodeUpdates, useCodeUpdatesStore } from "./CodeUpdatesStore";
 import { CodeSidebar } from "./CodeSidebar";
+import { writeBrowserTabLayout } from "./workspace/browserTabLayout";
 
 vi.mock("sonner", () => ({
   toast: { success: vi.fn(), error: vi.fn(), message: vi.fn() },
@@ -328,7 +329,7 @@ describe("CodeSidebar", () => {
     expect(screen.getByText("Agent working")).toBeInTheDocument();
   });
 
-  it("opens a harness subagent through the filtered workspace address", async () => {
+  it("opens a harness subagent without dropping the workspace panels", async () => {
     client.openCodeUpdates.mockImplementationOnce((onNotice) => {
       queueMicrotask(() =>
         onNotice({
@@ -367,7 +368,10 @@ describe("CodeSidebar", () => {
       <AppContextProvider value={app}>
         <CodeSidebar />
       </AppContextProvider>,
-      { initialUrl: "/code" },
+      {
+        initialUrl:
+          "/code/w/ws-1?tabs=file.README.md,browser.open&active=browser.open",
+      },
     );
 
     fireEvent.click(
@@ -380,6 +384,8 @@ describe("CodeSidebar", () => {
       expect(router.state.location.pathname).toBe("/code/w/ws-1");
       expect(router.state.location.search).toMatchObject({
         subagent: "toolu-task-1",
+        tabs: "file.README.md,browser.open",
+        active: "browser.open",
       });
       expect(router.state.location.search).not.toHaveProperty("task");
     });
@@ -529,6 +535,45 @@ describe("CodeSidebar", () => {
     expect(card).toHaveAttribute("aria-selected", "true");
     fireEvent.pointerDown(screen.getByRole("button", { name: "Workspaces" }));
     expect(card).not.toHaveAttribute("aria-selected");
+  });
+
+  it("restores saved browser tabs when you enter a workspace from the rail", async () => {
+    writeBrowserTabLayout("ws-1", {
+      tabs: [{ type: "browser", browserId: "saved" }],
+      activeIndex: 0,
+      fullscreen: false,
+    });
+    const { router } = await renderWithRouter(
+      <AppContextProvider value={app}>
+        <CodeSidebar />
+      </AppContextProvider>,
+      { initialUrl: "/code" },
+    );
+    fireEvent.click(await screen.findByRole("button", { name: /^Fix login/ }));
+    await waitFor(() =>
+      expect(router.state.location.search).toMatchObject({
+        tabs: "browser.saved",
+      }),
+    );
+  });
+
+  it("keeps open panels when you select the workspace already on screen", async () => {
+    const { router } = await renderWithRouter(
+      <AppContextProvider value={app}>
+        <CodeSidebar />
+      </AppContextProvider>,
+      {
+        initialUrl:
+          "/code/w/ws-1?tabs=browser.open,file.README.md&active=file.README.md",
+      },
+    );
+    fireEvent.click(await screen.findByRole("button", { name: /^Fix login/ }));
+    await waitFor(() =>
+      expect(router.state.location.search).toMatchObject({
+        tabs: "browser.open,file.README.md",
+        active: "file.README.md",
+      }),
+    );
   });
 
   it("opens and clears selection on an unmodified click", async () => {

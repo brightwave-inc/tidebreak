@@ -64,6 +64,7 @@ import {
 } from "./browserSession";
 
 const SLOW_LOAD_MS = 15_000;
+const NATIVE_REVEAL_FALLBACK_MS = 100;
 let nextProfileResetId = 0;
 
 function createProfileResetId(): number {
@@ -177,7 +178,10 @@ function CodeBrowserTabSession({
   const resizeCreateAttempted = useRef(false);
   const nativeHistoryAvailable = useRef(false);
   const lastNativeBounds = useRef<BrowserBounds | null>(null);
-  const nativeRevealFrame = useRef<number | null>(null);
+  const nativeRevealRequest = useRef<{
+    frame: number | null;
+    timer: number | null;
+  } | null>(null);
   const sessionRef = useRef(session);
   const [viewport, setViewport] = useState(() => restoreOrDefaultViewport());
   const viewportSurfaceRef = useRef<HTMLDivElement | null>(null);
@@ -246,10 +250,11 @@ function CodeBrowserTabSession({
   );
 
   const cancelNativeReveal = useCallback(() => {
-    if (nativeRevealFrame.current === null) return;
-    const frame = nativeRevealFrame.current;
-    nativeRevealFrame.current = null;
-    window.cancelAnimationFrame(frame);
+    const request = nativeRevealRequest.current;
+    nativeRevealRequest.current = null;
+    if (!request) return;
+    if (request.frame !== null) window.cancelAnimationFrame(request.frame);
+    if (request.timer !== null) window.clearTimeout(request.timer);
   }, []);
 
   const markNativeClosedForProfileReset = useCallback(() => {
@@ -343,9 +348,14 @@ function CodeBrowserTabSession({
         return;
       }
 
-      const frame = window.requestAnimationFrame(() => {
-        if (nativeRevealFrame.current !== frame) return;
-        nativeRevealFrame.current = null;
+      const request = {
+        frame: null as number | null,
+        timer: null as number | null,
+      };
+      nativeRevealRequest.current = request;
+      const reveal = () => {
+        if (nativeRevealRequest.current !== request) return;
+        cancelNativeReveal();
         if (
           !mountedRef.current ||
           !nativeReady.current ||
@@ -361,8 +371,11 @@ function CodeBrowserTabSession({
             visible: true,
           })
           .catch(() => undefined);
-      });
-      nativeRevealFrame.current = frame;
+      };
+      // An occluded host webview can pause animation frames. Both callbacks
+      // share one request and recheck visibility before revealing the tab.
+      request.frame = window.requestAnimationFrame(reveal);
+      request.timer = window.setTimeout(reveal, NATIVE_REVEAL_FALLBACK_MS);
     },
     [browserId, cancelNativeReveal, host, workspaceId],
   );

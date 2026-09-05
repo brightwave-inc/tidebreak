@@ -22,12 +22,16 @@ use tidebreak_core::{
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
+#[cfg(target_os = "macos")]
+use crate::browser_native_webview::with_browser_webview;
+
 use crate::{
     browser_control::{
-        BrowserConfirmationBinding, BrowserDispatchEffect, BrowserLoadState, BrowserRegistry,
-        BrowserSnapshot, BrowserTargetError, BrowserTargetFingerprint, BrowserTargetRecord,
+        BrowserConfirmationBinding, BrowserDispatchEffect, BrowserLoadState,
+        BrowserObservationFence, BrowserRegistry, BrowserSnapshot, BrowserTargetError,
+        BrowserTargetFingerprint, BrowserTargetRecord,
     },
-    code_browser::browser_label,
+    code_browser::{begin_agent_browser_control, browser_label},
 };
 
 const MAX_ACTION_VALUE_CHARS: usize = 8_192;
@@ -106,6 +110,7 @@ struct RawSemanticNode {
 enum NativeActionResolutionStatus {
     Ready,
     NoOp,
+    PendingNativeInput,
     StaleTarget,
     HumanTakeoverRequired,
     UnsupportedFrame,
@@ -145,6 +150,10 @@ struct NativeActionResolution {
     scroll_delta_x: Option<f64>,
     #[serde(default)]
     scroll_delta_y: Option<f64>,
+    #[serde(default)]
+    target_focused: bool,
+    #[serde(default)]
+    target_dom_focused: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -189,7 +198,8 @@ pub(crate) async fn browser_semantic_snapshot(
     if !arguments.is_well_formed() {
         return Err("browser snapshot request is not valid".to_owned());
     }
-    let host_snapshot = registry.begin_agent_control(capability_id, &arguments.browser_id)?;
+    let host_snapshot =
+        begin_agent_browser_control(app, registry, capability_id, &arguments.browser_id)?;
     if host_snapshot.load_state != Some(BrowserLoadState::Ready) {
         return Err("browser page is still loading".to_owned());
     }
@@ -361,7 +371,7 @@ async fn native_consequential_action_choice(
             "Allow action".to_owned(),
             "Cancel".to_owned(),
         ));
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_window("main") {
         dialog = dialog.parent(&window);
     }
     dialog.show(move |approved| {
@@ -394,7 +404,7 @@ pub(crate) async fn native_browser_upload_choice(
             "Upload file".to_owned(),
             "Cancel".to_owned(),
         ));
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_window("main") {
         dialog = dialog.parent(&window);
     }
     dialog.show(move |approved| {
@@ -439,13 +449,28 @@ pub(crate) async fn execute_browser_upload(
         ));
     }
 
-    registry.begin_agent_observation(capability_id, &arguments.browser_id)?;
+    let host = registry.begin_agent_observation(capability_id, &arguments.browser_id)?;
+    let origin = host
+        .url
+        .as_deref()
+        .and_then(BrowserOrigin::from_url)
+        .ok_or_else(|| "browser has no authorized HTTP origin".to_owned())?;
+    let fence = registry.observation_fence(capability_id, &arguments.browser_id)?;
     let label = browser_label(&arguments.browser_id)?;
     let webview = app
         .get_webview(&label)
         .ok_or_else(|| "browser session is not open".to_owned())?;
     let script = browser_upload_script(&target, &file)?;
-    let raw: RawBrowserUploadResult = evaluate_json(&webview, &script).await?;
+    let authorization = NativeUploadAuthorization {
+        registry: registry.clone(),
+        capability_id,
+        workspace_id: workspace_id.clone(),
+        origin,
+        fence,
+        arguments: arguments.clone(),
+        target,
+    };
+    let raw = evaluate_browser_upload(&webview, script, authorization).await?;
     if raw.status == tidebreak_core::BrowserUploadStatus::Uploaded {
         registry.invalidate_semantic_snapshot(
             &arguments.browser_id,
@@ -1135,36 +1160,33 @@ async fn capture_browser_image(
     let sender = Arc::new(Mutex::new(Some(sender)));
     let block_sender = Arc::clone(&sender);
 
-    webview
-        .with_webview(move |platform| unsafe {
-            let view: &WKWebView = &*platform.inner().cast();
-            let configuration = match snapshot_configuration(view, max_width, max_height) {
-                Ok(configuration) => configuration,
-                Err(error) => {
-                    if let Some(sender) = sender.lock().ok().and_then(|mut s| s.take()) {
-                        let _ = sender.send(Err(error));
-                    }
-                    return;
+    with_browser_webview(webview, move |view| unsafe {
+        let configuration = match snapshot_configuration(view, max_width, max_height) {
+            Ok(configuration) => configuration,
+            Err(error) => {
+                if let Some(sender) = sender.lock().ok().and_then(|mut s| s.take()) {
+                    let _ = sender.send(Err(error));
                 }
+                return;
+            }
+        };
+        let configuration_ptr: *mut AnyObject = match &configuration {
+            Some(configuration) => Retained::as_ptr(configuration).cast_mut(),
+            None => std::ptr::null_mut(),
+        };
+        let handler = RcBlock::new(move |snapshot: *mut AnyObject, error: *mut NSError| {
+            let Some(sender) = block_sender.lock().ok().and_then(|mut s| s.take()) else {
+                return;
             };
-            let configuration_ptr: *mut AnyObject = match &configuration {
-                Some(configuration) => Retained::as_ptr(configuration).cast_mut(),
-                None => std::ptr::null_mut(),
-            };
-            let handler = RcBlock::new(move |snapshot: *mut AnyObject, error: *mut NSError| {
-                let Some(sender) = block_sender.lock().ok().and_then(|mut s| s.take()) else {
-                    return;
-                };
-                let result = snapshot_to_png_base64(snapshot, error);
-                let _ = sender.send(result);
-            });
-            let _: () = msg_send![
-                view,
-                takeSnapshotWithConfiguration: configuration_ptr,
-                completionHandler: &*handler
-            ];
-        })
-        .map_err(|error| format!("browser host: {error}"))?;
+            let result = snapshot_to_png_base64(snapshot, error);
+            let _ = sender.send(result);
+        });
+        let _: () = msg_send![
+            view,
+            takeSnapshotWithConfiguration: configuration_ptr,
+            completionHandler: &*handler
+        ];
+    })?;
 
     timeout(Duration::from_secs(SCREENSHOT_TIMEOUT_SECONDS), receiver)
         .await
@@ -1213,6 +1235,7 @@ pub(crate) async fn browser_native_act(
         ));
     }
 
+    let fence = registry.observation_fence(capability_id, &arguments.browser_id)?;
     let workspace_id = host_snapshot.workspace_id;
     let origin = host_snapshot
         .url
@@ -1291,6 +1314,7 @@ pub(crate) async fn browser_native_act(
     let app = app.clone();
     let dispatch_registry = registry.clone();
     let browser_id = arguments.browser_id.clone();
+    let dispatch_origin = origin.clone();
     registry
         .dispatch_agent(
             capability_id,
@@ -1307,6 +1331,8 @@ pub(crate) async fn browser_native_act(
                     dispatch_registry,
                     capability_id,
                     workspace_id,
+                    dispatch_origin,
+                    fence,
                     arguments,
                 )
                 .await
@@ -1342,6 +1368,8 @@ async fn execute_native_action(
     registry: BrowserRegistry,
     capability_id: Uuid,
     workspace_id: String,
+    origin: BrowserOrigin,
+    fence: BrowserObservationFence,
     arguments: tidebreak_core::BrowserActArgs,
 ) -> Result<tidebreak_core::BrowserActResult, String> {
     use tidebreak_core::BrowserActStatus;
@@ -1380,9 +1408,12 @@ async fn execute_native_action(
         registry.clone(),
         capability_id,
         workspace_id.clone(),
+        origin.clone(),
+        fence,
         &arguments,
-        resolution_script.clone(),
+        resolution_script,
         NativeActionDispatchPhase::Initial,
+        None,
     )
     .await
     {
@@ -1425,7 +1456,13 @@ async fn execute_native_action(
             &workspace_id,
             &arguments.snapshot_id,
         );
-        if let Err(failure) = wait_for_native_action_processing(&webview, &arguments.action).await {
+        if let Err(failure) = wait_for_native_action_processing(
+            &webview,
+            &arguments.action,
+            NativeActionDispatchPhase::Initial,
+        )
+        .await
+        {
             return Ok(native_failure_result(
                 arguments,
                 failure,
@@ -1438,9 +1475,11 @@ async fn execute_native_action(
             &registry,
             capability_id,
             &workspace_id,
+            &origin,
+            fence,
             &arguments,
             &resolution,
-            &resolution_script,
+            &target,
         )
         .await
         {
@@ -1485,7 +1524,8 @@ fn native_resolution_status(
             BrowserActStatus::HumanTakeoverRequired
         }
         NativeActionResolutionStatus::UnsupportedFrame => BrowserActStatus::UnsupportedFrame,
-        NativeActionResolutionStatus::UnsupportedNative => BrowserActStatus::UnsupportedNative,
+        NativeActionResolutionStatus::UnsupportedNative
+        | NativeActionResolutionStatus::PendingNativeInput => BrowserActStatus::UnsupportedNative,
         NativeActionResolutionStatus::InvalidValue => BrowserActStatus::InvalidValue,
         NativeActionResolutionStatus::TargetObscured => BrowserActStatus::TargetObscured,
     }
@@ -1553,6 +1593,12 @@ enum NativeActionDispatchOutcome {
 #[derive(Clone, Copy)]
 enum NativeActionDispatchPhase {
     Initial,
+    FocusVerify,
+    PressKey,
+    SelectInitialStep,
+    FillSelectAll,
+    FillInsert,
+    FillVerify,
     SelectFollowUp {
         previous_selected_index: i64,
         previous_distance: u64,
@@ -1577,10 +1623,41 @@ fn validate_native_follow_up_progress(
 ) -> Result<(), NativeInputFailure> {
     match phase {
         NativeActionDispatchPhase::Initial => Ok(()),
+        NativeActionDispatchPhase::PressKey | NativeActionDispatchPhase::SelectInitialStep
+            if resolution.target_focused =>
+        {
+            Ok(())
+        }
+        NativeActionDispatchPhase::FocusVerify
+        | NativeActionDispatchPhase::PressKey
+        | NativeActionDispatchPhase::SelectInitialStep => Err(NativeInputFailure::Typed {
+            status: tidebreak_core::BrowserActStatus::UnsupportedNative,
+            message: "The target did not retain native focus. No key was sent.".to_owned(),
+        }),
+        NativeActionDispatchPhase::FillSelectAll | NativeActionDispatchPhase::FillInsert
+            if resolution.target_focused =>
+        {
+            Ok(())
+        }
+        NativeActionDispatchPhase::FillSelectAll | NativeActionDispatchPhase::FillInsert => {
+            Err(NativeInputFailure::Typed {
+                status: tidebreak_core::BrowserActStatus::UnsupportedNative,
+                message: "The target did not retain native focus. No text was inserted.".to_owned(),
+            })
+        }
+        NativeActionDispatchPhase::FillVerify => Err(NativeInputFailure::Engine(
+            "The browser did not retain the requested field value.".to_owned(),
+        )),
         NativeActionDispatchPhase::SelectFollowUp {
             previous_selected_index,
             previous_distance,
         } => {
+            if !resolution.target_focused {
+                return Err(NativeInputFailure::Typed {
+                    status: tidebreak_core::BrowserActStatus::UnsupportedNative,
+                    message: "The select control lost native focus. No key was sent.".to_owned(),
+                });
+            }
             let selected_index = resolution.selected_index.ok_or_else(|| {
                 NativeInputFailure::Engine("browser select has no current option index".to_owned())
             })?;
@@ -1646,136 +1723,175 @@ fn native_failure_result(
 }
 
 #[cfg(target_os = "macos")]
+struct NativeInputCallbackState {
+    sender: Option<oneshot::Sender<Result<NativeActionDispatchOutcome, NativeInputFailure>>>,
+    cancelled: bool,
+}
+
+#[cfg(target_os = "macos")]
+struct NativeInputCancellation(std::sync::Arc<std::sync::Mutex<NativeInputCallbackState>>);
+
+#[cfg(target_os = "macos")]
+impl Drop for NativeInputCancellation {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.0.lock() {
+            state.cancelled = true;
+            state.sender.take();
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
 async fn resolve_and_dispatch_native_action(
     webview: &Webview,
     registry: BrowserRegistry,
     capability_id: Uuid,
     workspace_id: String,
+    origin: BrowserOrigin,
+    fence: BrowserObservationFence,
     arguments: &tidebreak_core::BrowserActArgs,
     script: String,
     phase: NativeActionDispatchPhase,
+    phase_deadline: Option<tokio::time::Instant>,
 ) -> Result<NativeActionDispatchOutcome, NativeInputFailure> {
     use std::sync::{Arc, Mutex};
 
     use block2::RcBlock;
     use objc2::{runtime::AnyObject, Message};
     use objc2_foundation::{NSError, NSString};
-    use objc2_web_kit::WKWebView;
     use tokio::sync::oneshot;
 
-    struct CallbackState {
-        sender: Option<oneshot::Sender<Result<NativeActionDispatchOutcome, NativeInputFailure>>>,
-        cancelled: bool,
-    }
-
+    let deadline = phase_deadline.unwrap_or_else(|| {
+        tokio::time::Instant::now() + std::time::Duration::from_secs(JAVASCRIPT_TIMEOUT_SECONDS)
+    });
     let (sender, mut receiver) = oneshot::channel();
-    let state = Arc::new(Mutex::new(CallbackState {
+    let state = Arc::new(Mutex::new(NativeInputCallbackState {
         sender: Some(sender),
         cancelled: false,
     }));
+    let _cancellation = NativeInputCancellation(Arc::clone(&state));
     let callback_state = Arc::clone(&state);
     let browser_id = arguments.browser_id.clone();
     let snapshot_id = arguments.snapshot_id.clone();
     let document_epoch = arguments.document_epoch;
     let target_ref = arguments.target_ref.clone();
     let action = arguments.action.clone();
-    webview
-        .with_webview(move |platform| unsafe {
-            let view: &WKWebView = &*platform.inner().cast();
-            let retained_view = view.retain();
-            let content_world = match browser_semantics_content_world() {
-                Ok(content_world) => content_world,
-                Err(error) => {
-                    if let Ok(mut state) = callback_state.lock() {
-                        if let Some(sender) = state.sender.take() {
-                            let _ = sender.send(Err(NativeInputFailure::Engine(error)));
-                        }
+    with_browser_webview(webview, move |view| unsafe {
+        let retained_view = view.retain();
+        let content_world = match browser_semantics_content_world() {
+            Ok(content_world) => content_world,
+            Err(error) => {
+                if let Ok(mut state) = callback_state.lock() {
+                    if let Some(sender) = state.sender.take() {
+                        let _ = sender.send(Err(NativeInputFailure::Engine(error)));
                     }
-                    return;
                 }
+                return;
+            }
+        };
+        let handler = RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
+            let Ok(mut state) = callback_state.lock() else {
+                return;
             };
-            let handler = RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
-                let Ok(mut state) = callback_state.lock() else {
-                    return;
-                };
-                if state.cancelled {
-                    return;
+            if state.cancelled {
+                return;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                if let Some(sender) = state.sender.take() {
+                    let _ = sender.send(Err(native_input_deadline_failure(phase, phase_deadline)));
                 }
-                let result = (|| {
-                    if !error.is_null() {
-                        let message = (&*error).localizedDescription().to_string();
-                        return Err(NativeInputFailure::Engine(format!(
-                            "browser JavaScript failed: {message}"
-                        )));
-                    }
-                    if value.is_null() {
-                        return Err(NativeInputFailure::Engine(
-                            "browser JavaScript returned no value".to_owned(),
-                        ));
-                    }
-                    let value: &NSString = &*value.cast();
-                    let mut resolution: NativeActionResolution =
-                        serde_json::from_str(&value.to_string()).map_err(|error| {
-                            NativeInputFailure::Engine(format!("invalid browser response: {error}"))
-                        })?;
-                    if resolution.status != NativeActionResolutionStatus::Ready {
+                return;
+            }
+            let result = (|| {
+                if !error.is_null() {
+                    let message = (&*error).localizedDescription().to_string();
+                    return Err(NativeInputFailure::Engine(format!(
+                        "browser JavaScript failed: {message}"
+                    )));
+                }
+                if value.is_null() {
+                    return Err(NativeInputFailure::Engine(
+                        "browser JavaScript returned no value".to_owned(),
+                    ));
+                }
+                let value: &NSString = &*value.cast();
+                let mut resolution: NativeActionResolution =
+                    serde_json::from_str(&value.to_string()).map_err(|error| {
+                        NativeInputFailure::Engine(format!("invalid browser response: {error}"))
+                    })?;
+                registry
+                    .authorize_native_action_phase(
+                        capability_id,
+                        &browser_id,
+                        &workspace_id,
+                        &origin,
+                        fence,
+                    )
+                    .map_err(NativeInputFailure::Engine)?;
+                if resolution.status == NativeActionResolutionStatus::NoOp
+                    && matches!(action, tidebreak_core::BrowserAction::Focus)
+                {
+                    verify_native_page_focus(&retained_view)?;
+                }
+                if resolution.status != NativeActionResolutionStatus::Ready {
+                    return Ok(NativeActionDispatchOutcome::Resolved {
+                        resolution: Box::new(resolution),
+                        dispatch_error: None,
+                    });
+                }
+                if phase.validates_registered_target() {
+                    let target = match registry.semantic_target(
+                        &browser_id,
+                        &workspace_id,
+                        &snapshot_id,
+                        document_epoch,
+                        &target_ref,
+                    ) {
+                        Ok(target) => target,
+                        Err(error) => {
+                            return Ok(NativeActionDispatchOutcome::TargetRejected(error));
+                        }
+                    };
+                    if target.sensitive {
+                        resolution.status = NativeActionResolutionStatus::HumanTakeoverRequired;
+                        resolution.message =
+                            "Password, file, and verification-code fields require human takeover."
+                                .to_owned();
                         return Ok(NativeActionDispatchOutcome::Resolved {
                             resolution: Box::new(resolution),
                             dispatch_error: None,
                         });
                     }
-                    registry
-                        .begin_agent_observation(capability_id, &browser_id)
-                        .map_err(NativeInputFailure::Engine)?;
-                    if phase.validates_registered_target() {
-                        let target = match registry.semantic_target(
-                            &browser_id,
-                            &workspace_id,
-                            &snapshot_id,
-                            document_epoch,
-                            &target_ref,
-                        ) {
-                            Ok(target) => target,
-                            Err(error) => {
-                                return Ok(NativeActionDispatchOutcome::TargetRejected(error));
-                            }
-                        };
-                        if target.sensitive {
-                            resolution.status =
-                                NativeActionResolutionStatus::HumanTakeoverRequired;
-                            resolution.message = "Password, file, and verification-code fields require human takeover."
-                                .to_owned();
-                            return Ok(NativeActionDispatchOutcome::Resolved {
-                                resolution: Box::new(resolution),
-                                dispatch_error: None,
-                            });
-                        }
-                    }
-                    let dispatch_error = validate_native_follow_up_progress(phase, &resolution)
-                        .and_then(|()| {
-                            dispatch_native_action(&retained_view, &resolution, &action)
-                        })
-                        .err();
-                    Ok(NativeActionDispatchOutcome::Resolved {
-                        resolution: Box::new(resolution),
-                        dispatch_error,
-                    })
-                })();
-                if let Some(sender) = state.sender.take() {
-                    let _ = sender.send(result);
                 }
-            });
-            let script = NSString::from_str(&script);
-            view.evaluateJavaScript_inFrame_inContentWorld_completionHandler(
-                &script,
-                None,
-                &content_world,
-                Some(&handler),
-            );
-        })
-        .map_err(|error| NativeInputFailure::Engine(format!("browser host: {error}")))?;
+                let dispatch_error = validate_native_follow_up_progress(phase, &resolution)
+                    .and_then(|()| {
+                        if tokio::time::Instant::now() >= deadline {
+                            return Err(native_input_deadline_failure(phase, phase_deadline));
+                        }
+                        dispatch_native_action(&retained_view, &resolution, &action, phase)
+                    })
+                    .err();
+                Ok(NativeActionDispatchOutcome::Resolved {
+                    resolution: Box::new(resolution),
+                    dispatch_error,
+                })
+            })();
+            if let Some(sender) = state.sender.take() {
+                let _ = sender.send(result);
+            }
+        });
+        let script = NSString::from_str(&script);
+        view.evaluateJavaScript_inFrame_inContentWorld_completionHandler(
+            &script,
+            None,
+            &content_world,
+            Some(&handler),
+        );
+    })
+    .map_err(NativeInputFailure::Engine)?;
 
-    let timeout = tokio::time::sleep(std::time::Duration::from_secs(JAVASCRIPT_TIMEOUT_SECONDS));
+    let timeout = tokio::time::sleep_until(deadline);
     tokio::pin!(timeout);
     tokio::select! {
         result = &mut receiver => {
@@ -1801,11 +1917,69 @@ async fn resolve_and_dispatch_native_action(
                     "native browser input was interrupted".to_owned(),
                 ))?
             } else {
-                Err(NativeInputFailure::Timeout(
-                    "native browser input timed out".to_owned(),
-                ))
+                Err(native_input_deadline_failure(phase, phase_deadline))
             }
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NativePendingEventKind {
+    Presentation,
+    Mouse,
+    Key,
+    None,
+}
+
+fn native_pending_event_kind(
+    action: &tidebreak_core::BrowserAction,
+    phase: NativeActionDispatchPhase,
+) -> NativePendingEventKind {
+    match action {
+        tidebreak_core::BrowserAction::Fill { .. } => match phase {
+            NativeActionDispatchPhase::Initial
+            | NativeActionDispatchPhase::FillSelectAll
+            | NativeActionDispatchPhase::FillInsert => NativePendingEventKind::Presentation,
+            _ => NativePendingEventKind::None,
+        },
+        tidebreak_core::BrowserAction::Click
+        | tidebreak_core::BrowserAction::Check { .. }
+        | tidebreak_core::BrowserAction::Hover
+        | tidebreak_core::BrowserAction::ScrollIntoView => NativePendingEventKind::Mouse,
+        tidebreak_core::BrowserAction::Press { .. }
+        | tidebreak_core::BrowserAction::Select { .. } => NativePendingEventKind::Presentation,
+        tidebreak_core::BrowserAction::Focus => match phase {
+            NativeActionDispatchPhase::Initial => NativePendingEventKind::Presentation,
+            _ => NativePendingEventKind::None,
+        },
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn ensure_native_event_processing_supported(
+    view: &objc2_web_kit::WKWebView,
+    kind: NativePendingEventKind,
+) -> Result<(), NativeInputFailure> {
+    use objc2::{msg_send, sel};
+    let supported: bool = match kind {
+        NativePendingEventKind::Presentation => {
+            msg_send![view, respondsToSelector: sel!(_doAfterNextPresentationUpdate:)]
+        }
+        NativePendingEventKind::Mouse => {
+            msg_send![view, respondsToSelector: sel!(_doAfterProcessingAllPendingMouseEvents:)]
+        }
+        NativePendingEventKind::Key => {
+            msg_send![view, respondsToSelector: sel!(_doAfterProcessingAllPendingKeyEvents:)]
+        }
+        NativePendingEventKind::None => true,
+    };
+    if supported {
+        Ok(())
+    } else {
+        Err(NativeInputFailure::Typed {
+            status: tidebreak_core::BrowserActStatus::UnsupportedNative,
+            message: "This WebKit version cannot wait for browser presentation.".to_owned(),
+        })
     }
 }
 
@@ -1813,82 +1987,79 @@ async fn resolve_and_dispatch_native_action(
 async fn wait_for_native_action_processing(
     webview: &Webview,
     action: &tidebreak_core::BrowserAction,
+    phase: NativeActionDispatchPhase,
 ) -> Result<(), NativeInputFailure> {
     use std::sync::{Arc, Mutex};
 
     use block2::RcBlock;
     use objc2::{msg_send, sel};
-    use objc2_web_kit::WKWebView;
     use tokio::{sync::oneshot, time::timeout};
 
-    #[derive(Clone, Copy)]
-    enum PendingEventKind {
-        Mouse,
-        Key,
-        None,
-    }
-
-    let kind = match action {
-        tidebreak_core::BrowserAction::Click
-        | tidebreak_core::BrowserAction::Check { .. }
-        | tidebreak_core::BrowserAction::Hover
-        | tidebreak_core::BrowserAction::ScrollIntoView => PendingEventKind::Mouse,
-        tidebreak_core::BrowserAction::Fill { .. }
-        | tidebreak_core::BrowserAction::Press { .. }
-        | tidebreak_core::BrowserAction::Select { .. } => PendingEventKind::Key,
-        tidebreak_core::BrowserAction::Focus => PendingEventKind::None,
-    };
-    if matches!(kind, PendingEventKind::None) {
+    let kind = native_pending_event_kind(action, phase);
+    if matches!(kind, NativePendingEventKind::None) {
         return Ok(());
     }
 
-    let (sender, receiver) = oneshot::channel();
+    let (sender, receiver) = oneshot::channel::<Result<(), NativeInputFailure>>();
     let sender = Arc::new(Mutex::new(Some(sender)));
     let callback_sender = Arc::clone(&sender);
-    webview
-        .with_webview(move |platform| unsafe {
-            let view: &WKWebView = &*platform.inner().cast();
-            let supported = match kind {
-                PendingEventKind::Mouse => {
-                    msg_send![view, respondsToSelector: sel!(_doAfterProcessingAllPendingMouseEvents:)]
-                }
-                PendingEventKind::Key => {
-                    msg_send![view, respondsToSelector: sel!(_doAfterProcessingAllPendingKeyEvents:)]
-                }
-                PendingEventKind::None => true,
-            };
-            if !supported {
-                if let Some(sender) = sender.lock().ok().and_then(|mut sender| sender.take()) {
-                    let _ = sender.send(());
-                }
-                return;
+    with_browser_webview(webview, move |view| unsafe {
+        let supported = match kind {
+            NativePendingEventKind::Presentation => {
+                msg_send![view, respondsToSelector: sel!(_doAfterNextPresentationUpdate:)]
             }
-            let handler = RcBlock::new(move || {
-                if let Some(sender) = callback_sender
-                    .lock()
-                    .ok()
-                    .and_then(|mut sender| sender.take())
-                {
-                    let _ = sender.send(());
-                }
-            });
-            match kind {
-                PendingEventKind::Mouse => {
-                    let _: () = msg_send![
-                        view,
-                        _doAfterProcessingAllPendingMouseEvents: &*handler
-                    ];
-                }
-                PendingEventKind::Key => {
-                    let _: () = msg_send![
-                        view,
-                        _doAfterProcessingAllPendingKeyEvents: &*handler
-                    ];
-                }
-                PendingEventKind::None => {}
+            NativePendingEventKind::Mouse => {
+                msg_send![view, respondsToSelector: sel!(_doAfterProcessingAllPendingMouseEvents:)]
             }
-        })
-        .map_err(|error| NativeInputFailure::Engine(format!("browser host: {error}")))?;
+            NativePendingEventKind::Key => {
+                msg_send![view, respondsToSelector: sel!(_doAfterProcessingAllPendingKeyEvents:)]
+            }
+            NativePendingEventKind::None => true,
+        };
+        if !supported {
+            if let Some(sender) = sender.lock().ok().and_then(|mut sender| sender.take()) {
+                let outcome = if matches!(kind, NativePendingEventKind::Presentation) {
+                    Err(NativeInputFailure::Typed {
+                        status: tidebreak_core::BrowserActStatus::UnsupportedNative,
+                        message: "This WebKit version cannot wait for browser presentation."
+                            .to_owned(),
+                    })
+                } else {
+                    Ok(())
+                };
+                let _ = sender.send(outcome);
+            }
+            return;
+        }
+        let handler = RcBlock::new(move || {
+            if let Some(sender) = callback_sender
+                .lock()
+                .ok()
+                .and_then(|mut sender| sender.take())
+            {
+                let _ = sender.send(Ok(()));
+            }
+        });
+        match kind {
+            NativePendingEventKind::Presentation => {
+                let _: () = msg_send![view, _doAfterNextPresentationUpdate: &*handler];
+            }
+            NativePendingEventKind::Mouse => {
+                let _: () = msg_send![
+                    view,
+                    _doAfterProcessingAllPendingMouseEvents: &*handler
+                ];
+            }
+            NativePendingEventKind::Key => {
+                let _: () = msg_send![
+                    view,
+                    _doAfterProcessingAllPendingKeyEvents: &*handler
+                ];
+            }
+            NativePendingEventKind::None => {}
+        }
+    })
+    .map_err(NativeInputFailure::Engine)?;
 
     timeout(
         std::time::Duration::from_secs(NATIVE_EVENT_PROCESSING_TIMEOUT_SECONDS),
@@ -1898,7 +2069,7 @@ async fn wait_for_native_action_processing(
     .map_err(|_| {
         NativeInputFailure::Timeout("native browser input did not finish processing".to_owned())
     })?
-    .map_err(|_| NativeInputFailure::Engine("native browser input was interrupted".to_owned()))?;
+    .map_err(|_| NativeInputFailure::Engine("native browser input was interrupted".to_owned()))??;
     Ok(())
 }
 
@@ -1906,22 +2077,213 @@ async fn wait_for_native_action_processing(
 async fn wait_for_native_action_processing(
     _webview: &Webview,
     _action: &tidebreak_core::BrowserAction,
+    _phase: NativeActionDispatchPhase,
 ) -> Result<(), NativeInputFailure> {
     Ok(())
 }
 
+fn native_input_deadline_failure(
+    phase: NativeActionDispatchPhase,
+    phase_deadline: Option<tokio::time::Instant>,
+) -> NativeInputFailure {
+    if phase_deadline.is_some() {
+        native_action_postcondition_timeout(phase)
+    } else {
+        NativeInputFailure::Timeout("native browser input timed out".to_owned())
+    }
+}
+
+fn native_action_postcondition_timeout(phase: NativeActionDispatchPhase) -> NativeInputFailure {
+    match phase {
+        NativeActionDispatchPhase::SelectFollowUp { .. } => NativeInputFailure::Engine(
+            "The browser did not move the select control toward the requested option.".to_owned(),
+        ),
+
+        NativeActionDispatchPhase::FocusVerify
+        | NativeActionDispatchPhase::PressKey
+        | NativeActionDispatchPhase::SelectInitialStep => NativeInputFailure::Typed {
+            status: tidebreak_core::BrowserActStatus::UnsupportedNative,
+            message: "The target did not retain native focus. No key was sent.".to_owned(),
+        },
+        NativeActionDispatchPhase::FillVerify => NativeInputFailure::Engine(
+            "The browser did not retain the requested field value.".to_owned(),
+        ),
+        _ => NativeInputFailure::Typed {
+            status: tidebreak_core::BrowserActStatus::UnsupportedNative,
+            message:
+                "The target did not retain native focus or text selection. No text was inserted."
+                    .to_owned(),
+        },
+    }
+}
+
+async fn wait_for_native_action_phase<F, Fut>(
+    phase: NativeActionDispatchPhase,
+    timeout: std::time::Duration,
+    mut resolve: F,
+) -> Result<NativeActionResolution, NativeInputFailure>
+where
+    F: FnMut(tokio::time::Instant) -> Fut,
+    Fut: std::future::Future<Output = Result<NativeActionResolution, NativeInputFailure>>,
+{
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(native_action_postcondition_timeout(phase));
+        }
+        // The native resolver owns this deadline. Its callback mutex preserves
+        // the result when input has already dispatched before timeout fires.
+        let resolution = resolve(deadline).await?;
+        if resolution.status != NativeActionResolutionStatus::PendingNativeInput {
+            return Ok(resolution);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(native_action_postcondition_timeout(phase));
+        }
+        // Pending resolution does not dispatch input. Resolve the same private
+        // target again, including its live authority, before the next phase.
+        tokio::time::sleep_until(std::cmp::min(
+            deadline,
+            tokio::time::Instant::now()
+                + std::time::Duration::from_millis(NATIVE_ACTION_VERIFY_DELAY_MILLIS),
+        ))
+        .await;
+    }
+}
+
 #[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
 async fn finish_native_action(
     webview: &Webview,
     registry: &BrowserRegistry,
     capability_id: Uuid,
     workspace_id: &str,
+    origin: &BrowserOrigin,
+    fence: BrowserObservationFence,
     arguments: &tidebreak_core::BrowserActArgs,
     initial_resolution: &NativeActionResolution,
-    resolution_script: &str,
+    target: &BrowserTargetRecord,
 ) -> Result<(), NativeInputFailure> {
+    let resolution_script = native_action_resolution_script(target, &arguments.action)
+        .map_err(NativeInputFailure::Engine)?;
     match &arguments.action {
+        tidebreak_core::BrowserAction::Focus | tidebreak_core::BrowserAction::Press { .. } => {
+            let phase = if matches!(arguments.action, tidebreak_core::BrowserAction::Focus) {
+                NativeActionDispatchPhase::FocusVerify
+            } else {
+                NativeActionDispatchPhase::PressKey
+            };
+            let script =
+                native_action_resolution_script_for_phase(target, &arguments.action, phase)
+                    .map_err(NativeInputFailure::Engine)?;
+            let resolution = wait_for_native_action_phase(
+                phase,
+                std::time::Duration::from_secs(NATIVE_EVENT_PROCESSING_TIMEOUT_SECONDS),
+                |deadline| {
+                    continue_native_action(
+                        webview,
+                        registry,
+                        capability_id,
+                        workspace_id,
+                        origin,
+                        fence,
+                        arguments,
+                        &script,
+                        phase,
+                        Some(deadline),
+                    )
+                },
+            )
+            .await?;
+            match resolution.status {
+                NativeActionResolutionStatus::NoOp => Ok(()),
+                NativeActionResolutionStatus::Ready => {
+                    wait_for_native_action_processing(webview, &arguments.action, phase).await
+                }
+                _ => Err(native_resolution_failure(resolution)),
+            }
+        }
+
+        tidebreak_core::BrowserAction::Fill { .. } => {
+            for phase in [
+                NativeActionDispatchPhase::FillSelectAll,
+                NativeActionDispatchPhase::FillInsert,
+                NativeActionDispatchPhase::FillVerify,
+            ] {
+                let script =
+                    native_action_resolution_script_for_phase(target, &arguments.action, phase)
+                        .map_err(NativeInputFailure::Engine)?;
+                let resolution = wait_for_native_action_phase(
+                    phase,
+                    std::time::Duration::from_secs(NATIVE_EVENT_PROCESSING_TIMEOUT_SECONDS),
+                    |deadline| {
+                        continue_native_action(
+                            webview,
+                            registry,
+                            capability_id,
+                            workspace_id,
+                            origin,
+                            fence,
+                            arguments,
+                            &script,
+                            phase,
+                            Some(deadline),
+                        )
+                    },
+                )
+                .await?;
+                match resolution.status {
+                    NativeActionResolutionStatus::NoOp => return Ok(()),
+                    NativeActionResolutionStatus::Ready => {
+                        wait_for_native_action_processing(webview, &arguments.action, phase)
+                            .await?;
+                    }
+                    _ => return Err(native_resolution_failure(resolution)),
+                }
+            }
+            Err(NativeInputFailure::Engine(
+                "The browser could not confirm the requested field value.".to_owned(),
+            ))
+        }
         tidebreak_core::BrowserAction::Select { .. } => {
+            let resolution_script = native_action_resolution_script_for_phase(
+                target,
+                &arguments.action,
+                NativeActionDispatchPhase::SelectInitialStep,
+            )
+            .map_err(NativeInputFailure::Engine)?;
+            let initial_resolution = wait_for_native_action_phase(
+                NativeActionDispatchPhase::SelectInitialStep,
+                std::time::Duration::from_secs(NATIVE_EVENT_PROCESSING_TIMEOUT_SECONDS),
+                |deadline| {
+                    continue_native_action(
+                        webview,
+                        registry,
+                        capability_id,
+                        workspace_id,
+                        origin,
+                        fence,
+                        arguments,
+                        &resolution_script,
+                        NativeActionDispatchPhase::SelectInitialStep,
+                        Some(deadline),
+                    )
+                },
+            )
+            .await?;
+            match initial_resolution.status {
+                NativeActionResolutionStatus::NoOp => return Ok(()),
+                NativeActionResolutionStatus::Ready => {
+                    wait_for_native_action_processing(
+                        webview,
+                        &arguments.action,
+                        NativeActionDispatchPhase::SelectInitialStep,
+                    )
+                    .await?
+                }
+                _ => return Err(native_resolution_failure(initial_resolution)),
+            }
+
             let mut selected_index = initial_resolution.selected_index.ok_or_else(|| {
                 NativeInputFailure::Engine("browser select has no current option index".to_owned())
             })?;
@@ -1932,16 +2294,29 @@ async fn finish_native_action(
             })?;
             let mut distance = selected_index.abs_diff(option_index);
             for _ in 0..=MAX_NATIVE_SELECT_STEPS {
-                let resolution = continue_native_action(
-                    webview,
-                    registry,
-                    capability_id,
-                    workspace_id,
-                    arguments,
-                    resolution_script,
-                    NativeActionDispatchPhase::SelectFollowUp {
-                        previous_selected_index: selected_index,
-                        previous_distance: distance,
+                let phase = NativeActionDispatchPhase::SelectFollowUp {
+                    previous_selected_index: selected_index,
+                    previous_distance: distance,
+                };
+                let script =
+                    native_action_resolution_script_for_phase(target, &arguments.action, phase)
+                        .map_err(NativeInputFailure::Engine)?;
+                let resolution = wait_for_native_action_phase(
+                    phase,
+                    std::time::Duration::from_secs(NATIVE_EVENT_PROCESSING_TIMEOUT_SECONDS),
+                    |deadline| {
+                        continue_native_action(
+                            webview,
+                            registry,
+                            capability_id,
+                            workspace_id,
+                            origin,
+                            fence,
+                            arguments,
+                            &script,
+                            phase,
+                            Some(deadline),
+                        )
                     },
                 )
                 .await?;
@@ -1954,7 +2329,12 @@ async fn finish_native_action(
                             )
                         })?;
                         distance = selected_index.abs_diff(option_index);
-                        wait_for_native_action_processing(webview, &arguments.action).await?;
+                        wait_for_native_action_processing(
+                            webview,
+                            &arguments.action,
+                            NativeActionDispatchPhase::Initial,
+                        )
+                        .await?;
                     }
                     _ => return Err(native_resolution_failure(resolution)),
                 }
@@ -1971,21 +2351,29 @@ async fn finish_native_action(
                     registry,
                     capability_id,
                     workspace_id,
+                    origin,
+                    fence,
                     arguments,
-                    resolution_script,
+                    &resolution_script,
                     NativeActionDispatchPhase::ScrollFollowUp {
                         previous_x: previous.x.unwrap_or_default(),
                         previous_y: previous.y.unwrap_or_default(),
                         previous_delta_x: previous.scroll_delta_x.unwrap_or_default(),
                         previous_delta_y: previous.scroll_delta_y.unwrap_or_default(),
                     },
+                    None,
                 )
                 .await?;
                 match resolution.status {
                     NativeActionResolutionStatus::NoOp => return Ok(()),
                     NativeActionResolutionStatus::Ready => {
                         previous = resolution;
-                        wait_for_native_action_processing(webview, &arguments.action).await?;
+                        wait_for_native_action_processing(
+                            webview,
+                            &arguments.action,
+                            NativeActionDispatchPhase::Initial,
+                        )
+                        .await?;
                     }
                     _ => return Err(native_resolution_failure(resolution)),
                 }
@@ -2001,14 +2389,18 @@ async fn finish_native_action(
 }
 
 #[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
 async fn continue_native_action(
     webview: &Webview,
     registry: &BrowserRegistry,
     capability_id: Uuid,
     workspace_id: &str,
+    origin: &BrowserOrigin,
+    fence: BrowserObservationFence,
     arguments: &tidebreak_core::BrowserActArgs,
     resolution_script: &str,
     phase: NativeActionDispatchPhase,
+    phase_deadline: Option<tokio::time::Instant>,
 ) -> Result<NativeActionResolution, NativeInputFailure> {
     tokio::time::sleep(std::time::Duration::from_millis(
         NATIVE_ACTION_VERIFY_DELAY_MILLIS,
@@ -2019,9 +2411,12 @@ async fn continue_native_action(
         registry.clone(),
         capability_id,
         workspace_id.to_owned(),
+        origin.clone(),
+        fence,
         arguments,
         resolution_script.to_owned(),
         phase,
+        phase_deadline,
     )
     .await?
     {
@@ -2042,14 +2437,18 @@ async fn continue_native_action(
 }
 
 #[cfg(not(target_os = "macos"))]
+#[allow(clippy::too_many_arguments)]
 async fn resolve_and_dispatch_native_action(
     _webview: &Webview,
     _registry: BrowserRegistry,
     _capability_id: Uuid,
     _workspace_id: String,
+    _origin: BrowserOrigin,
+    _fence: BrowserObservationFence,
     _arguments: &tidebreak_core::BrowserActArgs,
     _script: String,
     _phase: NativeActionDispatchPhase,
+    _phase_deadline: Option<tokio::time::Instant>,
 ) -> Result<NativeActionDispatchOutcome, NativeInputFailure> {
     Err(NativeInputFailure::Engine(
         "trusted native browser input is not available on this platform".to_owned(),
@@ -2057,14 +2456,17 @@ async fn resolve_and_dispatch_native_action(
 }
 
 #[cfg(not(target_os = "macos"))]
+#[allow(clippy::too_many_arguments)]
 async fn finish_native_action(
     _webview: &Webview,
     _registry: &BrowserRegistry,
     _capability_id: Uuid,
     _workspace_id: &str,
+    _origin: &BrowserOrigin,
+    _fence: BrowserObservationFence,
     _arguments: &tidebreak_core::BrowserActArgs,
     _initial_resolution: &NativeActionResolution,
-    _resolution_script: &str,
+    _target: &BrowserTargetRecord,
 ) -> Result<(), NativeInputFailure> {
     Ok(())
 }
@@ -2074,8 +2476,9 @@ unsafe fn dispatch_native_action(
     view: &objc2_web_kit::WKWebView,
     resolution: &NativeActionResolution,
     action: &tidebreak_core::BrowserAction,
+    phase: NativeActionDispatchPhase,
 ) -> Result<(), NativeInputFailure> {
-    use objc2_app_kit::{NSStandardKeyBindingResponding, NSView};
+    use objc2_app_kit::NSView;
 
     let native_view: &NSView = &*(view as *const _ as *const NSView);
     let window = native_view
@@ -2094,30 +2497,139 @@ unsafe fn dispatch_native_action(
             send_native_hover(view, &window, window_point).map_err(NativeInputFailure::Engine)?;
         }
         tidebreak_core::BrowserAction::Focus => {
-            focus_accessibility_target(view, &window, screen_point)
-                .map_err(NativeInputFailure::Engine)?;
+            acquire_native_target_focus(view, &window, screen_point, resolution)?;
         }
-        tidebreak_core::BrowserAction::Fill { value } => {
-            let target = focus_accessibility_target(view, &window, screen_point)
-                .map_err(NativeInputFailure::Engine)?;
-            let responder = window.firstResponder().ok_or_else(|| {
-                NativeInputFailure::Engine("browser input target did not accept focus".to_owned())
-            })?;
-            ensure_accessibility_target_focused(&target).map_err(NativeInputFailure::Engine)?;
-            responder.selectAll(None);
-            let text = objc2_foundation::NSString::from_str(value);
-            responder.insertText(&text);
-        }
+        tidebreak_core::BrowserAction::Fill { value } => match phase {
+            NativeActionDispatchPhase::Initial => {
+                ensure_native_event_processing_supported(
+                    view,
+                    NativePendingEventKind::Presentation,
+                )?;
+                send_native_click(&window, window_point).map_err(NativeInputFailure::Engine)?;
+            }
+            NativeActionDispatchPhase::FillSelectAll | NativeActionDispatchPhase::FillInsert => {
+                ensure_native_event_processing_supported(
+                    view,
+                    NativePendingEventKind::Presentation,
+                )?;
+                insert_native_text(view, &window, value, phase)?;
+            }
+            _ => {
+                return Err(NativeInputFailure::Engine(
+                    "browser fill reached an invalid native input phase".to_owned(),
+                ));
+            }
+        },
         tidebreak_core::BrowserAction::Press { key } => {
-            focus_accessibility_target(view, &window, screen_point)
-                .map_err(NativeInputFailure::Engine)?;
-            send_native_key(&window, window_point, key).map_err(NativeInputFailure::Engine)?;
+            if matches!(phase, NativeActionDispatchPhase::Initial) {
+                acquire_native_target_focus(view, &window, screen_point, resolution)?;
+            } else {
+                native_browser_responder(view, &window)?;
+                send_native_key(&window, window_point, key).map_err(NativeInputFailure::Engine)?;
+            }
         }
         tidebreak_core::BrowserAction::Select { .. } => {
-            send_native_select_step(view, &window, screen_point, window_point, resolution)?;
+            if matches!(phase, NativeActionDispatchPhase::Initial) {
+                acquire_native_target_focus(view, &window, screen_point, resolution)?;
+            } else {
+                native_browser_responder(view, &window)?;
+                send_native_select_step(&window, window_point, resolution)?;
+            }
         }
         tidebreak_core::BrowserAction::ScrollIntoView => {
             send_native_scroll(view, &window, resolution).map_err(NativeInputFailure::Engine)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn native_browser_responder(
+    view: &objc2_web_kit::WKWebView,
+    window: &objc2_app_kit::NSWindow,
+) -> Result<objc2::rc::Retained<objc2_app_kit::NSResponder>, NativeInputFailure> {
+    use objc2::{msg_send, ClassType};
+    use objc2_app_kit::NSView;
+    let responder = window.firstResponder().ok_or_else(|| {
+        NativeInputFailure::Engine("browser input target did not accept focus".to_owned())
+    })?;
+    let is_view: bool = msg_send![&*responder, isKindOfClass: NSView::class()];
+    if !is_view {
+        return Err(NativeInputFailure::Engine(
+            "browser keyboard focus moved outside the page".to_owned(),
+        ));
+    }
+    let native_view: &NSView = &*(view as *const _ as *const NSView);
+    let responder_view: &NSView = &*(&*responder as *const _ as *const NSView);
+    if !std::ptr::eq(responder_view, native_view) && !responder_view.isDescendantOf(native_view) {
+        return Err(NativeInputFailure::Engine(
+            "browser keyboard focus moved outside the page".to_owned(),
+        ));
+    }
+    Ok(responder)
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn verify_native_page_focus(
+    view: &objc2_web_kit::WKWebView,
+) -> Result<(), NativeInputFailure> {
+    let native_view: &objc2_app_kit::NSView = &*(view as *const _ as *const objc2_app_kit::NSView);
+    let window = native_view
+        .window()
+        .ok_or_else(|| NativeInputFailure::Engine("browser window is not available".to_owned()))?;
+    ensure_active_browser_window(&window)?;
+    native_browser_responder(view, &window)?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn acquire_native_target_focus(
+    view: &objc2_web_kit::WKWebView,
+    window: &objc2_app_kit::NSWindow,
+    screen_point: objc2_foundation::NSPoint,
+    resolution: &NativeActionResolution,
+) -> Result<(), NativeInputFailure> {
+    ensure_native_event_processing_supported(view, NativePendingEventKind::Presentation)?;
+    if resolution.target_dom_focused {
+        if resolution.target_focused && native_browser_responder(view, window).is_ok() {
+            return Ok(());
+        }
+        let responder: &objc2_app_kit::NSResponder =
+            &*(view as *const _ as *const objc2_app_kit::NSResponder);
+        if !window.makeFirstResponder(Some(responder)) {
+            return Err(NativeInputFailure::Typed {
+                status: tidebreak_core::BrowserActStatus::UnsupportedNative,
+                message: "The browser view did not accept native keyboard focus.".to_owned(),
+            });
+        }
+        return Ok(());
+    }
+    focus_accessibility_target(view, window, screen_point).map_err(|_| NativeInputFailure::Typed {
+        status: tidebreak_core::BrowserActStatus::UnsupportedNative,
+        message: "This target cannot receive native accessibility focus. Focus it in the browser, then take a new snapshot.".to_owned(),
+    })?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn insert_native_text(
+    view: &objc2_web_kit::WKWebView,
+    window: &objc2_app_kit::NSWindow,
+    value: &str,
+    phase: NativeActionDispatchPhase,
+) -> Result<(), NativeInputFailure> {
+    use objc2_app_kit::NSStandardKeyBindingResponding;
+    let responder = native_browser_responder(view, window)?;
+    match phase {
+        NativeActionDispatchPhase::FillSelectAll => responder.selectAll(None),
+        NativeActionDispatchPhase::FillInsert => {
+            let text = objc2_foundation::NSString::from_str(value);
+            responder.insertText(&text);
+        }
+        _ => {
+            return Err(NativeInputFailure::Engine(
+                "browser fill reached an invalid text phase".to_owned(),
+            ))
         }
     }
     Ok(())
@@ -2303,10 +2815,6 @@ unsafe fn focus_accessibility_target(
     use objc2::{msg_send, sel};
     use objc2_app_kit::NSResponder;
 
-    let responder: &NSResponder = &*(view as *const _ as *const NSResponder);
-    if !window.makeFirstResponder(Some(responder)) {
-        return Err("browser view did not accept keyboard focus".to_owned());
-    }
     let target: Option<Retained<AnyObject>> = msg_send![view, accessibilityHitTest: screen_point];
     let target =
         target.ok_or_else(|| "browser target is not exposed to native accessibility".to_owned())?;
@@ -2314,6 +2822,10 @@ unsafe fn focus_accessibility_target(
         msg_send![&*target, respondsToSelector: sel!(setAccessibilityFocused:)];
     if !supports_focus {
         return Err("browser target cannot accept native accessibility focus".to_owned());
+    }
+    let responder: &NSResponder = &*(view as *const _ as *const NSResponder);
+    if !window.makeFirstResponder(Some(responder)) {
+        return Err("browser view did not accept keyboard focus".to_owned());
     }
     let _: () = msg_send![&*target, setAccessibilityFocused: true];
     ensure_accessibility_target_focused(&target)?;
@@ -2340,9 +2852,7 @@ unsafe fn ensure_accessibility_target_focused(
 
 #[cfg(target_os = "macos")]
 unsafe fn send_native_select_step(
-    view: &objc2_web_kit::WKWebView,
     window: &objc2_app_kit::NSWindow,
-    screen_point: objc2_foundation::NSPoint,
     window_point: objc2_foundation::NSPoint,
     resolution: &NativeActionResolution,
 ) -> Result<(), NativeInputFailure> {
@@ -2365,7 +2875,6 @@ unsafe fn send_native_select_step(
                 .to_owned(),
         });
     }
-    focus_accessibility_target(view, window, screen_point).map_err(NativeInputFailure::Engine)?;
     let key = if option_index > selected_index {
         "ArrowDown"
     } else {
@@ -2628,7 +3137,30 @@ fn native_action_resolution_script(
     target: &BrowserTargetRecord,
     action: &tidebreak_core::BrowserAction,
 ) -> Result<String, String> {
+    native_action_resolution_script_for_phase(target, action, NativeActionDispatchPhase::Initial)
+}
+
+fn native_action_resolution_script_for_phase(
+    target: &BrowserTargetRecord,
+    action: &tidebreak_core::BrowserAction,
+    phase: NativeActionDispatchPhase,
+) -> Result<String, String> {
     let payload = serde_json::json!({
+        "previousSelectedIndex": match phase {
+            NativeActionDispatchPhase::SelectFollowUp { previous_selected_index, .. } => Some(previous_selected_index),
+            _ => None,
+        },
+        "focusStage": match phase {
+            NativeActionDispatchPhase::FocusVerify => "verify",
+            NativeActionDispatchPhase::PressKey | NativeActionDispatchPhase::SelectInitialStep | NativeActionDispatchPhase::SelectFollowUp { .. } => "required",
+            _ => "acquire",
+        },
+        "fillStage": match phase {
+            NativeActionDispatchPhase::FillSelectAll => "select_all",
+            NativeActionDispatchPhase::FillInsert => "insert",
+            NativeActionDispatchPhase::FillVerify => "verify",
+            _ => "focus",
+        },
         "framePath": target.frame_path,
         "selector": target.selector,
         "marker": target.marker,
@@ -2719,6 +3251,177 @@ fn screenshot_privacy_script(watch_key: &str, finish: bool) -> Result<String, St
         .replace("__SENSITIVE_FIELD_POLICY__", SENSITIVE_FIELD_POLICY))
 }
 
+struct NativeUploadAuthorization {
+    registry: BrowserRegistry,
+    capability_id: Uuid,
+    workspace_id: String,
+    origin: BrowserOrigin,
+    fence: BrowserObservationFence,
+    arguments: tidebreak_core::BrowserUploadArgs,
+    target: BrowserTargetRecord,
+}
+
+impl NativeUploadAuthorization {
+    fn authorize(&self) -> Result<(), String> {
+        self.registry.authorize_native_action_phase(
+            self.capability_id,
+            &self.arguments.browser_id,
+            &self.workspace_id,
+            &self.origin,
+            self.fence,
+        )?;
+        let host = self
+            .registry
+            .begin_agent_observation(self.capability_id, &self.arguments.browser_id)?;
+        if !host
+            .agent_access
+            .as_ref()
+            .is_some_and(|access| access.can_transfer_files)
+        {
+            return Err("browser origin is not shared for this operation".to_owned());
+        }
+        let target = self
+            .registry
+            .semantic_target(
+                &self.arguments.browser_id,
+                &self.workspace_id,
+                &self.arguments.snapshot_id,
+                self.arguments.document_epoch,
+                &self.arguments.target_ref,
+            )
+            .map_err(|error| target_error_message(error).to_owned())?;
+        if target != self.target || !is_file_input(&target) {
+            return Err(target_error_message(BrowserTargetError::StaleTarget).to_owned());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+struct NativeUploadCallbackState {
+    sender: Option<oneshot::Sender<Result<String, String>>>,
+    cancelled: bool,
+    deadline: tokio::time::Instant,
+}
+
+#[cfg(any(target_os = "macos", test))]
+struct NativeUploadCancellation(std::sync::Arc<std::sync::Mutex<NativeUploadCallbackState>>);
+
+#[cfg(any(target_os = "macos", test))]
+impl Drop for NativeUploadCancellation {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.0.lock() {
+            state.cancelled = true;
+            state.sender.take();
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn submit_native_browser_upload(
+    state: &std::sync::Mutex<NativeUploadCallbackState>,
+    authorization: &NativeUploadAuthorization,
+    submit: impl FnOnce(),
+) -> Result<(), String> {
+    let state = state
+        .lock()
+        .map_err(|_| "browser upload callback is unavailable".to_owned())?;
+    if state.cancelled || state.sender.as_ref().is_none_or(oneshot::Sender::is_closed) {
+        return Err("browser upload was cancelled".to_owned());
+    }
+    if tokio::time::Instant::now() >= state.deadline {
+        return Err("browser JavaScript timed out".to_owned());
+    }
+    authorization.authorize()?;
+    // Keep cancellation serialized with the actual queued script submission.
+    submit();
+    drop(state);
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+async fn evaluate_browser_upload(
+    webview: &Webview,
+    script: String,
+    authorization: NativeUploadAuthorization,
+) -> Result<RawBrowserUploadResult, String> {
+    use std::sync::{Arc, Mutex};
+
+    use block2::RcBlock;
+    use objc2::runtime::AnyObject;
+    use objc2_foundation::{NSError, NSString};
+
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_secs(JAVASCRIPT_TIMEOUT_SECONDS);
+    let (sender, receiver) = oneshot::channel();
+    let state = Arc::new(Mutex::new(NativeUploadCallbackState {
+        sender: Some(sender),
+        cancelled: false,
+        deadline,
+    }));
+    let _cancellation = NativeUploadCancellation(Arc::clone(&state));
+    let callback_state = Arc::clone(&state);
+    with_browser_webview(webview, move |view| unsafe {
+        let result_state = Arc::clone(&callback_state);
+        let handler = RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
+            let Some(sender) = result_state
+                .lock()
+                .ok()
+                .and_then(|mut state| state.sender.take())
+            else {
+                return;
+            };
+            if !error.is_null() {
+                let message = (&*error).localizedDescription().to_string();
+                let _ = sender.send(Err(format!("browser JavaScript failed: {message}")));
+                return;
+            }
+            if value.is_null() {
+                let _ = sender.send(Err("browser JavaScript returned no value".to_owned()));
+                return;
+            }
+            let value: &NSString = &*value.cast();
+            let _ = sender.send(Ok(value.to_string()));
+        });
+        let result = browser_semantics_content_world().and_then(|content_world| {
+            let script = NSString::from_str(&script);
+            submit_native_browser_upload(&callback_state, &authorization, || {
+                view.evaluateJavaScript_inFrame_inContentWorld_completionHandler(
+                    &script,
+                    None,
+                    &content_world,
+                    Some(&handler),
+                );
+            })
+        });
+        if let Err(error) = result {
+            if let Some(sender) = callback_state
+                .lock()
+                .ok()
+                .and_then(|mut state| state.sender.take())
+            {
+                let _ = sender.send(Err(error));
+            }
+        }
+    })?;
+
+    let raw = tokio::time::timeout_at(deadline, receiver)
+        .await
+        .map_err(|_| "browser JavaScript timed out".to_owned())?
+        .map_err(|_| "browser JavaScript was interrupted".to_owned())??;
+    serde_json::from_str(&raw).map_err(|error| format!("invalid browser response: {error}"))
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn evaluate_browser_upload(
+    _webview: &Webview,
+    _script: String,
+    authorization: NativeUploadAuthorization,
+) -> Result<RawBrowserUploadResult, String> {
+    authorization.authorize()?;
+    Err("semantic browser control is not available on this platform yet".to_owned())
+}
+
 #[cfg(target_os = "macos")]
 async fn evaluate_json<T: serde::de::DeserializeOwned>(
     webview: &Webview,
@@ -2729,49 +3432,45 @@ async fn evaluate_json<T: serde::de::DeserializeOwned>(
     use block2::RcBlock;
     use objc2::runtime::AnyObject;
     use objc2_foundation::{NSError, NSString};
-    use objc2_web_kit::WKWebView;
     use tokio::{sync::oneshot, time::timeout};
 
     let (sender, receiver) = oneshot::channel();
     let sender = Mutex::new(Some(sender));
     let script = script.to_owned();
-    webview
-        .with_webview(move |platform| unsafe {
-            let view: &WKWebView = &*platform.inner().cast();
-            let content_world = match browser_semantics_content_world() {
-                Ok(content_world) => content_world,
-                Err(error) => {
-                    if let Some(sender) = sender.lock().ok().and_then(|mut sender| sender.take()) {
-                        let _ = sender.send(Err(error));
-                    }
-                    return;
+    with_browser_webview(webview, move |view| unsafe {
+        let content_world = match browser_semantics_content_world() {
+            Ok(content_world) => content_world,
+            Err(error) => {
+                if let Some(sender) = sender.lock().ok().and_then(|mut sender| sender.take()) {
+                    let _ = sender.send(Err(error));
                 }
+                return;
+            }
+        };
+        let handler = RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
+            let Some(sender) = sender.lock().ok().and_then(|mut sender| sender.take()) else {
+                return;
             };
-            let handler = RcBlock::new(move |value: *mut AnyObject, error: *mut NSError| {
-                let Some(sender) = sender.lock().ok().and_then(|mut sender| sender.take()) else {
-                    return;
-                };
-                if !error.is_null() {
-                    let message = (&*error).localizedDescription().to_string();
-                    let _ = sender.send(Err(format!("browser JavaScript failed: {message}")));
-                    return;
-                }
-                if value.is_null() {
-                    let _ = sender.send(Err("browser JavaScript returned no value".to_owned()));
-                    return;
-                }
-                let value: &NSString = &*value.cast();
-                let _ = sender.send(Ok(value.to_string()));
-            });
-            let script = NSString::from_str(&script);
-            view.evaluateJavaScript_inFrame_inContentWorld_completionHandler(
-                &script,
-                None,
-                &content_world,
-                Some(&handler),
-            );
-        })
-        .map_err(|error| format!("browser host: {error}"))?;
+            if !error.is_null() {
+                let message = (&*error).localizedDescription().to_string();
+                let _ = sender.send(Err(format!("browser JavaScript failed: {message}")));
+                return;
+            }
+            if value.is_null() {
+                let _ = sender.send(Err("browser JavaScript returned no value".to_owned()));
+                return;
+            }
+            let value: &NSString = &*value.cast();
+            let _ = sender.send(Ok(value.to_string()));
+        });
+        let script = NSString::from_str(&script);
+        view.evaluateJavaScript_inFrame_inContentWorld_completionHandler(
+            &script,
+            None,
+            &content_world,
+            Some(&handler),
+        );
+    })?;
 
     let raw = timeout(
         std::time::Duration::from_secs(JAVASCRIPT_TIMEOUT_SECONDS),
@@ -3132,7 +3831,8 @@ const SNAPSHOT_SCRIPT: &str = r#"
       && rect.height > 0;
   };
   const actionsFor = (element, role, sensitive) => {
-    if (sensitive) return ["human_takeover"];
+    const nativePopupSelect = element.localName === "select" && !element.multiple && element.size <= 1;
+    if (sensitive || nativePopupSelect) return ["human_takeover"];
     const actions = ["focus", "hover", "scroll_into_view"];
     if (["button", "link", "checkbox", "radio", "tab"].includes(role)) actions.unshift("click");
     if (role === "textbox") actions.unshift("fill");
@@ -3838,15 +4538,36 @@ const NATIVE_ACTION_RESOLUTION_SCRIPT: &str = r#"
   }
 
   const action = payload.action;
+  const targetDomFocused = doc.activeElement === element
+    && frameChain.every((entry) => entry.doc.activeElement === entry.frame);
+  const targetFocused = targetDomFocused && doc.hasFocus()
+    && frameChain.every((entry) => entry.doc.hasFocus());
+  let pendingFillInput = null;
+  if (["verify", "required"].includes(payload.focusStage) && !targetFocused) {
+    pendingFillInput = "Waiting for the target to receive native keyboard focus.";
+  }
   if (action.type === "fill") {
-    const fillable = element instanceof view.HTMLInputElement
-      || element instanceof view.HTMLTextAreaElement
-      || element.isContentEditable;
-    if (!fillable) return result("unsupported_native", "This target cannot be filled.");
+    const textInput = element instanceof view.HTMLInputElement
+      && ["text", "search", "url", "tel"].includes(fresh.inputType);
+    const fillable = textInput || element instanceof view.HTMLTextAreaElement;
+    if (!fillable) {
+      return result("unsupported_native", "Native fill supports ordinary text inputs and textareas.");
+    }
     if (element.readOnly) return result("invalid_value", "The target is read-only.");
-    const current = element.isContentEditable ? element.textContent : element.value;
+    if (["select_all", "insert"].includes(payload.fillStage) && !targetFocused) {
+      pendingFillInput = "Waiting for the target to receive native focus.";
+    }
+    const current = element.value;
+    if (payload.fillStage === "insert" && (
+      element.selectionStart !== 0 || element.selectionEnd !== String(current || "").length
+    )) {
+      pendingFillInput = "Waiting for the target to select its text.";
+    }
     if (String(current || "") === action.value) {
       return result("no_op", "The target already contains the requested value.");
+    }
+    if (payload.fillStage === "verify") {
+      pendingFillInput = "Waiting for the requested field value.";
     }
   } else if (action.type === "select") {
     if (!(element instanceof view.HTMLSelectElement)) {
@@ -3862,8 +4583,19 @@ const NATIVE_ACTION_RESOLUTION_SCRIPT: &str = r#"
     if (element.value === action.value) {
       return result("no_op", "The requested option is already selected.");
     }
+    if (!element.multiple && element.size <= 1) {
+      return result(
+        "unsupported_native",
+        "This select opens a native popup. Take over the browser to choose an option. No input was sent.",
+      );
+    }
     payload.optionIndex = optionIndex;
     payload.selectedIndex = element.selectedIndex;
+    if (payload.previousSelectedIndex !== null
+      && payload.previousSelectedIndex !== undefined
+      && element.selectedIndex === payload.previousSelectedIndex) {
+      pendingFillInput = "Waiting for the select control to process native input.";
+    }
   } else if (action.type === "check") {
     if (
       !(element instanceof view.HTMLInputElement)
@@ -3877,7 +4609,7 @@ const NATIVE_ACTION_RESOLUTION_SCRIPT: &str = r#"
     if (Boolean(element.checked) === Boolean(action.checked)) {
       return result("no_op", "The target already has the requested checked state.");
     }
-  } else if (action.type === "focus" && doc.activeElement === element) {
+  } else if (action.type === "focus" && targetFocused) {
     return result("no_op", "The target already has focus.");
   }
 
@@ -4048,6 +4780,8 @@ const NATIVE_ACTION_RESOLUTION_SCRIPT: &str = r#"
     return result("no_op", "The target is visible after native scrolling.");
   }
 
+  if (pendingFillInput) return result("pending_native_input", pendingFillInput);
+
   return result("ready", "The target is ready for native input.", {
     x: offsetX + rect.x,
     y: offsetY + rect.y,
@@ -4057,6 +4791,8 @@ const NATIVE_ACTION_RESOLUTION_SCRIPT: &str = r#"
     viewportHeight: window.innerHeight,
     optionIndex: payload.optionIndex ?? null,
     selectedIndex: payload.selectedIndex ?? null,
+    targetFocused,
+    targetDomFocused,
   });
 })()
 "#;
@@ -4258,6 +4994,8 @@ mod tests {
             scroll_y: None,
             scroll_delta_x: None,
             scroll_delta_y: None,
+            target_focused: false,
+            target_dom_focused: false,
         }
     }
 
@@ -4423,6 +5161,583 @@ mod tests {
         assert!(native_action_requires_confirmation(&external, true, &click));
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn dropping_a_native_input_future_disarms_its_queued_callback() {
+        use std::sync::{Arc, Mutex};
+        let (sender, mut receiver) = oneshot::channel();
+        let state = Arc::new(Mutex::new(NativeInputCallbackState {
+            sender: Some(sender),
+            cancelled: false,
+        }));
+        {
+            let _cancellation = NativeInputCancellation(Arc::clone(&state));
+            assert!(!state.lock().unwrap().cancelled);
+        }
+        let callback = state.lock().unwrap();
+        assert!(callback.cancelled);
+        assert!(callback.sender.is_none());
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(oneshot::error::TryRecvError::Closed)
+        ));
+    }
+
+    struct QueuedUploadFixture {
+        authorization: NativeUploadAuthorization,
+        state: std::sync::Arc<std::sync::Mutex<NativeUploadCallbackState>>,
+        receiver: oneshot::Receiver<Result<String, String>>,
+        _private: tempfile::TempDir,
+    }
+
+    fn queued_upload_fixture() -> QueuedUploadFixture {
+        use tidebreak_core::{BrowserOriginScope, BrowserUploadArgs, BrowserUploadResource};
+
+        let registry = BrowserRegistry::default();
+        let private = tempfile::tempdir().unwrap();
+        registry.initialize_private_state(private.path()).unwrap();
+        let origin = BrowserOrigin::from_url("https://example.com/upload").unwrap();
+        let instance = registry
+            .register("browser-1", "workspace-1", origin.as_str().to_owned(), true)
+            .unwrap();
+        registry
+            .page_finished(
+                "browser-1",
+                "workspace-1",
+                instance,
+                origin.as_str().to_owned(),
+            )
+            .unwrap();
+        registry
+            .grant_browser_access(
+                "browser-1",
+                "workspace-1",
+                &origin,
+                BrowserOriginScope::Origin {
+                    origin: origin.clone(),
+                },
+                &[
+                    BrowserGrantCapability::BrowserControlOrigin,
+                    BrowserGrantCapability::BrowserTransferFiles,
+                ],
+            )
+            .unwrap();
+        let capability_id = registry.issue_agent_capability("workspace-1", "Code agent");
+        registry
+            .begin_agent_control(capability_id, "browser-1")
+            .unwrap();
+        let target = BrowserTargetRecord {
+            frame_path: vec![],
+            selector: "input:nth-of-type(1)".to_owned(),
+            marker: "__marker".to_owned(),
+            marker_value: "@e1".to_owned(),
+            fingerprint: BrowserTargetFingerprint {
+                tag: "input".to_owned(),
+                role: "textbox".to_owned(),
+                name: "File input".to_owned(),
+                input_type: Some("file".to_owned()),
+                href: None,
+                sensitive: true,
+            },
+            sensitive: true,
+            consequential: true,
+        };
+        registry
+            .record_semantic_snapshot(
+                "browser-1",
+                "workspace-1",
+                0,
+                "snapshot-1".to_owned(),
+                HashMap::from([("@e1".to_owned(), target.clone())]),
+            )
+            .unwrap();
+        let fence = registry
+            .observation_fence(capability_id, "browser-1")
+            .unwrap();
+        let authorization = NativeUploadAuthorization {
+            registry,
+            capability_id,
+            workspace_id: "workspace-1".to_owned(),
+            origin,
+            fence,
+            arguments: BrowserUploadArgs {
+                browser_id: "browser-1".to_owned(),
+                snapshot_id: "snapshot-1".to_owned(),
+                document_epoch: 0,
+                target_ref: "@e1".to_owned(),
+                resource: BrowserUploadResource::Output {
+                    output_id: Uuid::new_v4(),
+                },
+            },
+            target,
+        };
+        authorization.authorize().unwrap();
+        let (sender, receiver) = oneshot::channel();
+        QueuedUploadFixture {
+            authorization,
+            state: std::sync::Arc::new(std::sync::Mutex::new(NativeUploadCallbackState {
+                sender: Some(sender),
+                cancelled: false,
+                deadline: tokio::time::Instant::now() + std::time::Duration::from_secs(10),
+            })),
+            receiver,
+            _private: private,
+        }
+    }
+
+    #[tokio::test]
+    async fn queued_upload_is_disarmed_when_its_operation_future_is_dropped() {
+        let mut fixture = queued_upload_fixture();
+        let future_state = std::sync::Arc::clone(&fixture.state);
+        let (started, ready) = oneshot::channel();
+        let operation = tokio::spawn(async move {
+            let _cancellation = NativeUploadCancellation(future_state);
+            started.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        ready.await.unwrap();
+        operation.abort();
+        assert!(operation.await.unwrap_err().is_cancelled());
+
+        let mut submissions = 0;
+        let error = submit_native_browser_upload(&fixture.state, &fixture.authorization, || {
+            submissions += 1;
+        })
+        .unwrap_err();
+        assert_eq!(error, "browser upload was cancelled");
+        assert_eq!(submissions, 0);
+        assert!(matches!(
+            fixture.receiver.try_recv(),
+            Err(oneshot::error::TryRecvError::Closed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn queued_upload_rechecks_native_authority_before_submitting() {
+        for changed in [
+            "capability",
+            "expired",
+            "hidden",
+            "stop",
+            "human",
+            "document",
+            "instance",
+            "sharing",
+        ] {
+            let fixture = queued_upload_fixture();
+            let authorization = &fixture.authorization;
+            let registry = &authorization.registry;
+            match changed {
+                "capability" => registry.revoke_agent_capability(authorization.capability_id),
+                "expired" => registry.expire_agent_capability_for_test(authorization.capability_id),
+                "hidden" => {
+                    registry
+                        .set_visible("browser-1", "workspace-1", false)
+                        .unwrap();
+                }
+                "stop" => {
+                    registry
+                        .stop_agent_control("browser-1", "workspace-1")
+                        .await
+                        .unwrap();
+                }
+                "human" => {
+                    registry
+                        .take_human_control("browser-1", "workspace-1")
+                        .await
+                        .unwrap();
+                }
+                "document" => {
+                    registry
+                        .page_started(
+                            "browser-1",
+                            "workspace-1",
+                            authorization.fence.instance_id,
+                            "https://example.com/changed".to_owned(),
+                        )
+                        .unwrap();
+                }
+                "instance" => {
+                    registry.remove("browser-1", "workspace-1").unwrap();
+                    let instance = registry
+                        .register(
+                            "browser-1",
+                            "workspace-1",
+                            authorization.origin.as_str().to_owned(),
+                            true,
+                        )
+                        .unwrap();
+                    registry
+                        .page_finished(
+                            "browser-1",
+                            "workspace-1",
+                            instance,
+                            authorization.origin.as_str().to_owned(),
+                        )
+                        .unwrap();
+                    registry
+                        .begin_agent_control(authorization.capability_id, "browser-1")
+                        .unwrap();
+                }
+                "sharing" => {
+                    registry
+                        .revoke_browser_access("browser-1", "workspace-1")
+                        .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let mut submissions = 0;
+            assert!(
+                submit_native_browser_upload(&fixture.state, authorization, || {
+                    submissions += 1;
+                })
+                .is_err(),
+                "accepted changed {changed}"
+            );
+            assert_eq!(submissions, 0, "submitted after changed {changed}");
+        }
+    }
+
+    #[test]
+    fn queued_upload_requires_transfer_permission_even_when_control_remains_valid() {
+        let fixture = queued_upload_fixture();
+        let authorization = &fixture.authorization;
+        let registry = &authorization.registry;
+        registry
+            .revoke_browser_access("browser-1", "workspace-1")
+            .unwrap();
+        registry
+            .grant_browser_access(
+                "browser-1",
+                "workspace-1",
+                &authorization.origin,
+                tidebreak_core::BrowserOriginScope::Origin {
+                    origin: authorization.origin.clone(),
+                },
+                &[BrowserGrantCapability::BrowserControlOrigin],
+            )
+            .unwrap();
+        registry
+            .begin_agent_control(authorization.capability_id, "browser-1")
+            .unwrap();
+        registry
+            .record_semantic_snapshot(
+                "browser-1",
+                "workspace-1",
+                0,
+                "snapshot-1".to_owned(),
+                HashMap::from([("@e1".to_owned(), authorization.target.clone())]),
+            )
+            .unwrap();
+        registry
+            .authorize_native_action_phase(
+                authorization.capability_id,
+                "browser-1",
+                "workspace-1",
+                &authorization.origin,
+                authorization.fence,
+            )
+            .unwrap();
+
+        let mut submissions = 0;
+        let error = submit_native_browser_upload(&fixture.state, authorization, || {
+            submissions += 1;
+        })
+        .unwrap_err();
+        assert_eq!(error, "browser origin is not shared for this operation");
+        assert_eq!(submissions, 0);
+    }
+
+    #[test]
+    fn queued_upload_rejects_a_replaced_snapshot_or_target() {
+        for changed in ["snapshot", "target"] {
+            let fixture = queued_upload_fixture();
+            let authorization = &fixture.authorization;
+            let mut target = authorization.target.clone();
+            if changed == "target" {
+                target.marker_value = "@replacement".to_owned();
+            }
+            authorization
+                .registry
+                .record_semantic_snapshot(
+                    "browser-1",
+                    "workspace-1",
+                    0,
+                    if changed == "snapshot" {
+                        "snapshot-2"
+                    } else {
+                        "snapshot-1"
+                    }
+                    .to_owned(),
+                    HashMap::from([("@e1".to_owned(), target)]),
+                )
+                .unwrap();
+            let mut submissions = 0;
+            assert!(
+                submit_native_browser_upload(&fixture.state, authorization, || {
+                    submissions += 1;
+                })
+                .is_err(),
+                "accepted changed {changed}"
+            );
+            assert_eq!(submissions, 0);
+        }
+    }
+
+    #[test]
+    fn queued_upload_cannot_submit_after_its_deadline_or_receiver_closes() {
+        for changed in ["deadline", "receiver"] {
+            let fixture = queued_upload_fixture();
+            if changed == "deadline" {
+                fixture.state.lock().unwrap().deadline = tokio::time::Instant::now();
+            } else {
+                drop(fixture.receiver);
+            }
+            let mut submissions = 0;
+            assert!(
+                submit_native_browser_upload(&fixture.state, &fixture.authorization, || {
+                    submissions += 1;
+                })
+                .is_err(),
+                "accepted changed {changed}"
+            );
+            assert_eq!(submissions, 0);
+        }
+    }
+
+    #[test]
+    fn queued_upload_submits_once_with_live_consent_and_the_same_target() {
+        let fixture = queued_upload_fixture();
+        let mut submissions = 0;
+        submit_native_browser_upload(&fixture.state, &fixture.authorization, || {
+            submissions += 1;
+        })
+        .unwrap();
+        assert_eq!(submissions, 1);
+    }
+
+    #[test]
+    fn fill_waits_for_focus_and_selection_before_inserting() {
+        let action = tidebreak_core::BrowserAction::Fill {
+            value: "task".to_owned(),
+        };
+        assert_eq!(
+            native_pending_event_kind(&action, NativeActionDispatchPhase::Initial),
+            NativePendingEventKind::Presentation
+        );
+        assert_eq!(
+            native_pending_event_kind(&action, NativeActionDispatchPhase::FillSelectAll),
+            NativePendingEventKind::Presentation
+        );
+        assert_eq!(
+            native_pending_event_kind(&action, NativeActionDispatchPhase::FillInsert),
+            NativePendingEventKind::Presentation
+        );
+        assert_eq!(
+            native_pending_event_kind(&action, NativeActionDispatchPhase::FillVerify),
+            NativePendingEventKind::None
+        );
+    }
+
+    #[tokio::test]
+    async fn fill_polls_pending_state_and_stops_after_one_ready_result() {
+        let mut calls = 0;
+        let resolution = wait_for_native_action_phase(
+            NativeActionDispatchPhase::FillInsert,
+            std::time::Duration::from_secs(1),
+            |_| {
+                calls += 1;
+                let mut resolution = native_resolution();
+                if calls < 3 {
+                    resolution.status = NativeActionResolutionStatus::PendingNativeInput;
+                }
+                std::future::ready(Ok(resolution))
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolution.status, NativeActionResolutionStatus::Ready);
+        assert_eq!(calls, 3);
+    }
+
+    #[tokio::test]
+    async fn fill_preserves_input_completed_while_the_native_deadline_fires() {
+        let resolution = wait_for_native_action_phase(
+            NativeActionDispatchPhase::FillInsert,
+            std::time::Duration::from_millis(5),
+            |deadline| async move {
+                // A native callback can hold its mutex through the deadline.
+                // The resolver returns that completed result after dispatch.
+                tokio::time::sleep_until(deadline + std::time::Duration::from_millis(5)).await;
+                Ok(native_resolution())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolution.status, NativeActionResolutionStatus::Ready);
+    }
+
+    #[tokio::test]
+    async fn fill_does_not_poll_again_after_a_fresh_target_refusal() {
+        let mut calls = 0;
+        let resolution = wait_for_native_action_phase(
+            NativeActionDispatchPhase::FillInsert,
+            std::time::Duration::from_secs(1),
+            |_| {
+                calls += 1;
+                let mut resolution = native_resolution();
+                resolution.status = NativeActionResolutionStatus::StaleTarget;
+                std::future::ready(Ok(resolution))
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolution.status, NativeActionResolutionStatus::StaleTarget);
+        assert_eq!(calls, 1);
+    }
+
+    #[tokio::test]
+    async fn fill_bounds_pending_and_unresponsive_postconditions() {
+        for phase in [
+            NativeActionDispatchPhase::FillSelectAll,
+            NativeActionDispatchPhase::FillInsert,
+            NativeActionDispatchPhase::FillVerify,
+        ] {
+            let failure = wait_for_native_action_phase(
+                phase,
+                std::time::Duration::from_millis(5),
+                |deadline| async move {
+                    tokio::time::sleep_until(deadline).await;
+                    Err(native_input_deadline_failure(phase, Some(deadline)))
+                },
+            )
+            .await
+            .unwrap_err();
+            let expected = if matches!(phase, NativeActionDispatchPhase::FillVerify) {
+                tidebreak_core::BrowserActStatus::EngineFailure
+            } else {
+                tidebreak_core::BrowserActStatus::UnsupportedNative
+            };
+            assert_eq!(failure.status(), expected);
+        }
+        let mut calls = 0;
+        assert!(wait_for_native_action_phase(
+            NativeActionDispatchPhase::FillInsert,
+            std::time::Duration::from_millis(5),
+            |_| {
+                calls += 1;
+                let mut resolution = native_resolution();
+                resolution.status = NativeActionResolutionStatus::PendingNativeInput;
+                std::future::ready(Ok(resolution))
+            },
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            calls, 1,
+            "an expired phase must not start another resolver callback"
+        );
+    }
+
+    #[test]
+    fn keyboard_dispatch_requires_native_focus_after_acquisition() {
+        for phase in [
+            NativeActionDispatchPhase::PressKey,
+            NativeActionDispatchPhase::SelectInitialStep,
+        ] {
+            let mut resolution = native_resolution();
+            resolution.target_dom_focused = true;
+            assert_eq!(
+                validate_native_follow_up_progress(phase, &resolution)
+                    .unwrap_err()
+                    .status(),
+                tidebreak_core::BrowserActStatus::UnsupportedNative
+            );
+            resolution.target_focused = true;
+            assert!(validate_native_follow_up_progress(phase, &resolution).is_ok());
+        }
+        let mut resolution = native_resolution();
+        resolution.selected_index = Some(2);
+        resolution.option_index = Some(4);
+        let phase = NativeActionDispatchPhase::SelectFollowUp {
+            previous_selected_index: 1,
+            previous_distance: 3,
+        };
+        assert_eq!(
+            validate_native_follow_up_progress(phase, &resolution)
+                .unwrap_err()
+                .status(),
+            tidebreak_core::BrowserActStatus::UnsupportedNative
+        );
+        resolution.target_focused = true;
+        assert!(validate_native_follow_up_progress(phase, &resolution).is_ok());
+    }
+
+    #[test]
+    fn keyboard_actions_wait_after_focus_and_each_dispatched_key() {
+        for action in [
+            tidebreak_core::BrowserAction::Focus,
+            tidebreak_core::BrowserAction::Press {
+                key: "Enter".to_owned(),
+            },
+            tidebreak_core::BrowserAction::Select {
+                value: "two".to_owned(),
+            },
+        ] {
+            assert_eq!(
+                native_pending_event_kind(&action, NativeActionDispatchPhase::Initial),
+                NativePendingEventKind::Presentation
+            );
+        }
+        assert_eq!(
+            native_pending_event_kind(
+                &tidebreak_core::BrowserAction::Focus,
+                NativeActionDispatchPhase::FocusVerify
+            ),
+            NativePendingEventKind::None
+        );
+        assert_eq!(
+            native_pending_event_kind(
+                &tidebreak_core::BrowserAction::Press {
+                    key: "Enter".to_owned()
+                },
+                NativeActionDispatchPhase::PressKey
+            ),
+            NativePendingEventKind::Presentation
+        );
+    }
+
+    #[test]
+    fn fill_requires_fresh_focus_before_selection_and_insertion() {
+        for phase in [
+            NativeActionDispatchPhase::FillSelectAll,
+            NativeActionDispatchPhase::FillInsert,
+        ] {
+            let mut resolution = native_resolution();
+            let failure = validate_native_follow_up_progress(phase, &resolution).unwrap_err();
+            assert_eq!(
+                failure.status(),
+                tidebreak_core::BrowserActStatus::UnsupportedNative
+            );
+            resolution.target_focused = true;
+            assert!(validate_native_follow_up_progress(phase, &resolution).is_ok());
+        }
+    }
+
+    #[test]
+    fn fill_verification_never_repeats_input_when_the_value_did_not_stick() {
+        let mut resolution = native_resolution();
+        resolution.target_focused = true;
+        let failure =
+            validate_native_follow_up_progress(NativeActionDispatchPhase::FillVerify, &resolution)
+                .unwrap_err();
+        assert_eq!(
+            failure.status(),
+            tidebreak_core::BrowserActStatus::EngineFailure
+        );
+        assert!(failure.message().contains("requested field value"));
+    }
+
     #[test]
     fn select_follow_up_requires_progress_toward_the_requested_option() {
         let phase = NativeActionDispatchPhase::SelectFollowUp {
@@ -4430,11 +5745,13 @@ mod tests {
             previous_distance: 3,
         };
         let mut moving = native_resolution();
+        moving.target_focused = true;
         moving.selected_index = Some(2);
         moving.option_index = Some(4);
         assert!(validate_native_follow_up_progress(phase, &moving).is_ok());
 
         let mut stalled = native_resolution();
+        stalled.target_focused = true;
         stalled.selected_index = Some(1);
         stalled.option_index = Some(4);
         let failure = validate_native_follow_up_progress(phase, &stalled).unwrap_err();
@@ -4445,6 +5762,7 @@ mod tests {
         assert!(failure.message().contains("did not move"));
 
         let mut moving_away = native_resolution();
+        moving_away.target_focused = true;
         moving_away.selected_index = Some(0);
         moving_away.option_index = Some(4);
         assert!(validate_native_follow_up_progress(phase, &moving_away).is_err());
@@ -4510,7 +5828,7 @@ mod tests {
             .expect("continue helper");
         let finish = &source[finish_start..finish_end];
 
-        assert!(select.contains("focus_accessibility_target"));
+        assert!(!select.contains("focus_accessibility_target"));
         assert!(select.contains("ArrowDown"));
         assert!(select.contains("ArrowUp"));
         assert!(!select.contains("send_native_click"));
@@ -4652,7 +5970,7 @@ mod tests {
         assert!(script.contains("const value = !interactive || sensitive"));
         assert!(script.contains("text: sensitive ? null : (text || null)"));
         assert!(script.contains("interactive && !sensitive && element.href"));
-        assert!(script.contains("if (sensitive) return [\"human_takeover\"]"));
+        assert!(script.contains("if (sensitive || nativePopupSelect) return [\"human_takeover\"]"));
     }
 
     #[test]

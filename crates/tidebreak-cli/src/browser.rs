@@ -1,15 +1,15 @@
 //! Tidebreak browser CLI commands and the `browser-mcp` stdio server.
 //!
-//! `tidebreak browser list|navigate|snapshot|wait|screenshot --json` drive a
+//! `tidebreak browser list|navigate|snapshot|wait|screenshot|act --json` drive a
 //! running Tidebreak browser server through the session-private capability
 //! file named by `TIDEBREAK_BROWSER_CAPFILE`. Every operation runs through a
 //! single [`BrowserClient`] that is shared between the direct CLI and the MCP
 //! tool implementations.
 //!
-//! `tidebreak browser-mcp` serves exactly five tools — browser_list,
-//! browser_navigate, browser_snapshot, browser_wait, and browser_screenshot —
-//! over MCP stdio, using the canonical core tool specs and validating typed
-//! arguments before sending them to the browser server.
+//! `tidebreak browser-mcp` serves list, navigate, snapshot, wait, and screenshot
+//! tools over MCP stdio. It also serves `browser_act` when the native runtime
+//! supports semantic actions. All tools use the canonical core tool specs and
+//! validate typed arguments before sending them to the browser server.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -1360,7 +1360,7 @@ impl Tool for BrowserListTool {
             Ok(result) => {
                 let data = serde_json::to_value(&result).ok();
                 let text = format_browser_list_summary(&result);
-                Ok(ToolOutput::text(text).with_data(data.unwrap_or(Value::Null)))
+                Ok(browser_result_output(text, data.unwrap_or(Value::Null)))
             }
             Err(failure) => Ok(mcp_failure(failure)),
         }
@@ -1403,7 +1403,7 @@ impl Tool for BrowserNavigateTool {
                     "Navigated browser {} to {}. Load state: {:?}, epoch: {}.",
                     result.browser_id, result.url, result.load_state, result.document_epoch
                 );
-                Ok(ToolOutput::text(text).with_data(data.unwrap_or(Value::Null)))
+                Ok(browser_result_output(text, data.unwrap_or(Value::Null)))
             }
             Err(failure) => Ok(mcp_failure(failure)),
         }
@@ -1443,7 +1443,7 @@ impl Tool for BrowserSnapshotTool {
             Ok(snapshot) => {
                 let data = serde_json::to_value(&snapshot).ok();
                 let text = format_browser_snapshot_summary(&snapshot);
-                Ok(ToolOutput::text(text).with_data(data.unwrap_or(Value::Null)))
+                Ok(browser_result_output(text, data.unwrap_or(Value::Null)))
             }
             Err(failure) => Ok(mcp_failure(failure)),
         }
@@ -1483,7 +1483,7 @@ impl Tool for BrowserWaitTool {
             Ok(result) => {
                 let data = serde_json::to_value(&result).ok();
                 let text = format_browser_wait_summary(&result);
-                Ok(ToolOutput::text(text).with_data(data.unwrap_or(Value::Null)))
+                Ok(browser_result_output(text, data.unwrap_or(Value::Null)))
             }
             Err(failure) => Ok(mcp_failure(failure)),
         }
@@ -1566,7 +1566,7 @@ impl Tool for BrowserActTool {
                     "Browser action {} returned {:?}. {}",
                     result.action, result.status, result.message
                 );
-                Ok(ToolOutput::text(text).with_data(data))
+                Ok(browser_result_output(text, data))
             }
             Err(failure) => Ok(mcp_failure(failure)),
         }
@@ -1574,6 +1574,14 @@ impl Tool for BrowserActTool {
 }
 
 // -- helper functions --
+
+/// Keep the complete, bounded result available to MCP hosts that forward only
+/// text content to their model. Snapshot identities and refs must reach the
+/// model even when the host does not consume `structuredContent`. Screenshots
+/// use a separate path so their base-64 pixels never enter text.
+fn browser_result_output(summary: String, data: Value) -> ToolOutput {
+    ToolOutput::text(format!("{summary}\n\n{data}")).with_data(data)
+}
 
 /// Build a concise model-readable summary of a page snapshot.
 fn format_browser_snapshot_summary(snapshot: &BrowserPageSnapshot) -> String {

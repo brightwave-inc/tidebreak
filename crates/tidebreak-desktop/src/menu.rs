@@ -163,14 +163,14 @@ pub(crate) fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) 
             }
         }
         MENU_CLOSE_WINDOW_ID => {
-            if let Some(window) = app.get_webview_window("main") {
+            if let Some(window) = app.get_window("main") {
                 if let Err(error) = window.close() {
                     eprintln!("tidebreak-desktop: could not close the window: {error}");
                 }
             }
         }
         MENU_RELOAD_ID => {
-            if let Some(window) = app.get_webview_window("main") {
+            if let Some(window) = app.get_webview("main") {
                 if let Err(error) = window.reload() {
                     eprintln!("tidebreak-desktop: could not reload the app: {error}");
                 }

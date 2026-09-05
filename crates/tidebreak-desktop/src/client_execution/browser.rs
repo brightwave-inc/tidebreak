@@ -7,6 +7,7 @@
 //! capability, workspace supplied by a model, or screenshot pixels.
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::sync::{Mutex as StdMutex, MutexGuard as StdMutexGuard};
 
 use base64::Engine as _;
@@ -42,6 +43,8 @@ use super::{
 };
 
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+// The server grants a 60-second lease. Renew while native consent is pending.
+const LEASE_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
 /// Keep the serialized result under the durable client-resolution ceiling.
 const MAX_RESULT_CONTENT_BYTES: usize = 56 * 1024;
 
@@ -294,26 +297,64 @@ async fn execute_receipt(
         );
     }
 
-    client
-        .heartbeat(receipt.chat_id, receipt.call_id, receipt.lease_token)
-        .await
-        .map_err(control_plane_error)?;
+    let lease = BrowserExecutionLease {
+        client,
+        chat_id: receipt.chat_id,
+        call_id: receipt.call_id,
+        lease_token: receipt.lease_token,
+    };
+    lease.heartbeat().await?;
     receipt.phase = FolderOperationPhase::DispatchStarted;
     state
         .receipts
         .save_foreground_browser(&receipt)
         .map_err(private_receipt_error)?;
 
-    let resolution =
-        match state
-            .foreground_browser
-            .capability_for(registry, context.chat_id, &workspace_id)
-        {
-            Ok(capability_id) => {
-                execute_operation(app, state, registry, context, capability_id, &claim.call).await
+    let resolution = match state.foreground_browser.capability_for(
+        registry,
+        context.chat_id,
+        &workspace_id,
+    ) {
+        Ok(capability_id) => {
+            match execute_while_lease_live(
+                execute_operation(
+                    app,
+                    state,
+                    registry,
+                    context,
+                    capability_id,
+                    &claim.call,
+                    &lease,
+                ),
+                || async {
+                    lease.heartbeat().await?;
+                    registry.heartbeat_agent_capability(capability_id, &workspace_id)
+                },
+            )
+            .await
+            {
+                Ok(resolution) => resolution,
+                Err(_) => {
+                    registry.revoke_agent_capability(capability_id);
+                    if let Some(browser_id) = claim
+                        .call
+                        .arguments
+                        .get("browser_id")
+                        .and_then(|id| id.as_str())
+                    {
+                        if let Ok(snapshot) = registry.snapshot(browser_id, &workspace_id) {
+                            crate::code_browser::emit_controller_event(app, &snapshot);
+                        }
+                    }
+                    unavailable(
+                            "browser_execution_unavailable",
+                            "The browser operation stopped because its execution authorization is no longer available. Do not retry without direction.",
+                        )
+                }
             }
-            Err(error) => map_native_error(None, error),
-        };
+        }
+        Err(error) => map_native_error(None, error),
+    };
     receipt.resolution = Some(resolution);
     state
         .receipts
@@ -325,6 +366,48 @@ async fn execute_receipt(
         receipt.resolution.as_ref().expect("stored above"),
     )
     .await
+}
+
+#[derive(Clone, Copy)]
+struct BrowserExecutionLease<'a> {
+    client: &'a super::control_plane::ControlPlaneClient,
+    chat_id: SessionId,
+    call_id: CallId,
+    lease_token: Uuid,
+}
+
+impl BrowserExecutionLease<'_> {
+    async fn heartbeat(&self) -> Result<(), String> {
+        self.client
+            .heartbeat(self.chat_id, self.call_id, self.lease_token)
+            .await
+            .map_err(control_plane_error)
+    }
+}
+
+/// Drop pending native work when the canonical call loses its lease.
+async fn execute_while_lease_live<T, Operation, Heartbeat, Renewal>(
+    operation: Operation,
+    mut heartbeat: Heartbeat,
+) -> Result<T, String>
+where
+    Operation: Future<Output = T>,
+    Heartbeat: FnMut() -> Renewal,
+    Renewal: Future<Output = Result<(), String>>,
+{
+    let keepalive = async {
+        loop {
+            tokio::time::sleep(LEASE_HEARTBEAT_INTERVAL).await;
+            if let Err(error) = heartbeat().await {
+                break error;
+            }
+        }
+    };
+    tokio::select! {
+        biased;
+        error = keepalive => Err(error),
+        result = operation => Ok(result),
+    }
 }
 
 /// A claim conflict may belong to another executor. Never dispatch after one.
@@ -447,6 +530,7 @@ async fn execute_operation(
     context: AuthoritativeContext,
     capability_id: Uuid,
     call: &ToolCallRecord,
+    lease: &BrowserExecutionLease<'_>,
 ) -> StoredResolution {
     match call.name.as_str() {
         BROWSER_LIST_TOOL => {
@@ -558,6 +642,7 @@ async fn execute_operation(
                 context,
                 capability_id,
                 arguments.clone(),
+                lease,
             )
             .await
             {
@@ -589,6 +674,17 @@ struct ResolvedBrowserUploadSource {
     file: BrowserUploadFile,
 }
 
+/// Clear the browser's action label on every return and cancelled future.
+struct BrowserActionCleanup<Cleanup: FnOnce()>(Option<Cleanup>);
+
+impl<Cleanup: FnOnce()> Drop for BrowserActionCleanup<Cleanup> {
+    fn drop(&mut self) {
+        if let Some(cleanup) = self.0.take() {
+            cleanup();
+        }
+    }
+}
+
 async fn execute_browser_upload_operation(
     app: &AppHandle,
     state: &HostAccess,
@@ -596,11 +692,19 @@ async fn execute_browser_upload_operation(
     context: AuthoritativeContext,
     capability_id: Uuid,
     arguments: BrowserUploadArgs,
+    lease: &BrowserExecutionLease<'_>,
 ) -> Result<tidebreak_core::BrowserUploadResult, String> {
     if !arguments.is_well_formed() {
         return Err("browser upload request is not valid".to_owned());
     }
     let host_snapshot = registry.begin_agent_observation(capability_id, &arguments.browser_id)?;
+    let _action_cleanup = BrowserActionCleanup(Some(|| {
+        if let Ok(snapshot) =
+            registry.set_agent_action(capability_id, &host_snapshot.browser_id, None, false)
+        {
+            crate::code_browser::emit_controller_event(app, &snapshot);
+        }
+    }));
     if !host_snapshot
         .engine
         .as_ref()
@@ -662,12 +766,15 @@ async fn execute_browser_upload_operation(
 
     let initial = resolve_browser_upload_source(app, state, context, &arguments.resource).await?;
     let target_label = "File input".to_owned();
-    let _ = registry.set_agent_action(
+    lease.heartbeat().await?;
+    if let Ok(snapshot) = registry.set_agent_action(
         capability_id,
         &arguments.browser_id,
         Some("Waiting for upload confirmation"),
         false,
-    );
+    ) {
+        crate::code_browser::emit_controller_event(app, &snapshot);
+    }
     let approved = crate::browser_semantics::native_browser_upload_choice(
         app,
         &origin,
@@ -676,7 +783,6 @@ async fn execute_browser_upload_operation(
     )
     .await?;
     if !approved {
-        let _ = registry.set_agent_action(capability_id, &arguments.browser_id, None, false);
         return Ok(crate::browser_semantics::browser_upload_result(
             &arguments,
             BrowserUploadStatus::Declined,
@@ -685,6 +791,8 @@ async fn execute_browser_upload_operation(
         ));
     }
 
+    // A late dialog answer cannot authorize work after the tool was cancelled.
+    lease.heartbeat().await?;
     let confirmation_binding = initial.file.binding.clone();
     let confirmation_id = registry.record_native_confirmation(
         capability_id,
@@ -721,6 +829,7 @@ async fn execute_browser_upload_operation(
                 if confirmed.binding != confirmation_binding {
                     return Err("browser upload resource changed before attachment".to_owned());
                 }
+                lease.heartbeat().await?;
                 crate::browser_semantics::execute_browser_upload(
                     dispatch_app,
                     dispatch_registry,
@@ -733,9 +842,6 @@ async fn execute_browser_upload_operation(
             },
         )
         .await;
-    if result.is_err() {
-        let _ = registry.set_agent_action(capability_id, &host_snapshot.browser_id, None, false);
-    }
     result.map_err(|error| {
         if error == "browser confirmation does not match this action" {
             "browser upload resource changed before attachment".to_owned()
@@ -1059,7 +1165,8 @@ fn map_native_error(browser_id: Option<&str>, error: String) -> StoredResolution
     }
     if matches!(
         inner,
-        "browser origin is not shared with this agent"
+        "browser destination is not shared for navigation"
+            | "browser origin is not shared with this agent"
             | "browser origin is not shared for this operation"
             | "browser origin is not shared for control"
             | "browser has no authorized HTTP origin"
@@ -1191,6 +1298,256 @@ mod tests {
             created_at: chrono::Utc::now(),
             resolved_at: None,
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn browser_lease_renews_during_confirmation_beyond_server_expiry() {
+        let renewals = std::sync::atomic::AtomicUsize::new(0);
+        let result = execute_while_lease_live(
+            async {
+                tokio::time::sleep(std::time::Duration::from_secs(75)).await;
+                "confirmed"
+            },
+            || async {
+                renewals.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await;
+
+        assert_eq!(result.as_deref(), Ok("confirmed"));
+        assert!(renewals.load(std::sync::atomic::Ordering::SeqCst) >= 4);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn browser_lease_loss_drops_confirmation_before_a_late_answer() {
+        let (confirmation, answer) = tokio::sync::oneshot::channel::<bool>();
+        let attached = std::sync::atomic::AtomicBool::new(false);
+        let result = execute_while_lease_live(
+            async {
+                if answer.await.unwrap_or(false) {
+                    attached.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            },
+            || async { Err("call cancelled or lease no longer owned".to_owned()) },
+        )
+        .await;
+
+        assert_eq!(
+            result.unwrap_err(),
+            "call cancelled or lease no longer owned"
+        );
+        assert!(confirmation.send(true).is_err());
+        assert!(!attached.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn durable_turn_cancellation_drops_upload_confirmation_before_late_approval() {
+        use tidebreak_core::{
+            Chat, ClaimClientToolCallOutcome, ClientToolCallRequest, DbStore,
+            HeartbeatClientToolCallOutcome, ParkTurnForClientCallOutcome,
+            RequestTurnCancellationOutcome, Store, TurnCheckpointProgress, TurnId, TurnRunStatus,
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let store = DbStore::connect(&format!(
+            "sqlite://{}?mode=rwc",
+            directory.path().join("cancel-upload.db").display()
+        ))
+        .await
+        .unwrap();
+        let chat = Chat {
+            id: SessionId::new(),
+            project_id: None,
+            title: None,
+            model: None,
+            reasoning_effort: None,
+            permission_mode: None,
+            network_policy: Default::default(),
+            attachment_revision: 0,
+            root_attachments: Vec::new(),
+            memory_incognito: false,
+            created_at: chrono::Utc::now(),
+        };
+        store.create_chat(&chat).await.unwrap();
+        let turn_id = TurnId::new();
+        store
+            .accept_turn(turn_id, chat.id, "test-model", "upload a file")
+            .await
+            .unwrap();
+        let turn_lease = Uuid::new_v4();
+        let claimed_at = chrono::Utc::now();
+        assert_eq!(
+            store
+                .claim_turn(
+                    turn_lease,
+                    claimed_at,
+                    claimed_at + chrono::Duration::minutes(1),
+                )
+                .await
+                .unwrap()
+                .turn
+                .unwrap()
+                .id,
+            turn_id
+        );
+        let request = ClientToolCallRequest {
+            id: CallId::new(),
+            chat_id: chat.id,
+            turn_id,
+            provider_id: "native-upload".into(),
+            name: BROWSER_UPLOAD_TOOL.into(),
+            arguments: serde_json::json!({
+                "browser_id": "browser-1",
+                "snapshot_id": "snapshot-1",
+                "document_epoch": 0,
+                "ref": "@e1",
+                "resource": {"kind": "output", "output_id": Uuid::new_v4()},
+            }),
+        };
+        assert!(validate_browser_upload_arguments(&request.arguments));
+        assert!(matches!(
+            store
+                .park_turn_for_client_tool_call(
+                    turn_id,
+                    turn_lease,
+                    0,
+                    TurnCheckpointProgress {
+                        model_steps: 1,
+                        usage: Default::default(),
+                    },
+                    chrono::Utc::now(),
+                    &request,
+                )
+                .await
+                .unwrap(),
+            Some(ParkTurnForClientCallOutcome::Parked { .. })
+        ));
+        let client_lease = Uuid::new_v4();
+        let now = chrono::Utc::now();
+        assert!(matches!(
+            store
+                .claim_client_tool_call(
+                    request.id,
+                    chat.id,
+                    Uuid::new_v4(),
+                    client_lease,
+                    now,
+                    now + chrono::Duration::minutes(1),
+                )
+                .await
+                .unwrap(),
+            ClaimClientToolCallOutcome::Claimed(_)
+        ));
+
+        let (confirmation, answer) = tokio::sync::oneshot::channel::<bool>();
+        let (show_sheet, sheet_shown) = tokio::sync::oneshot::channel::<()>();
+        let attached = std::sync::atomic::AtomicBool::new(false);
+        let mut execution = Box::pin(execute_while_lease_live(
+            async {
+                show_sheet.send(()).unwrap();
+                if answer.await.unwrap_or(false) {
+                    attached.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            },
+            || async {
+                let now = chrono::Utc::now();
+                match store
+                    .heartbeat_client_tool_call(
+                        request.id,
+                        chat.id,
+                        client_lease,
+                        now,
+                        now + chrono::Duration::minutes(1),
+                    )
+                    .await
+                    .unwrap()
+                {
+                    HeartbeatClientToolCallOutcome::Extended
+                    | HeartbeatClientToolCallOutcome::Existing => Ok(()),
+                    HeartbeatClientToolCallOutcome::LeaseLost => Err("lease lost".to_owned()),
+                }
+            },
+        ));
+        tokio::select! {
+            shown = sheet_shown => shown.unwrap(),
+            result = &mut execution => panic!("upload ended before confirmation: {result:?}"),
+        }
+        let cancellation = store
+            .request_turn_cancellation_and_append_event(turn_id, chrono::Utc::now())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            cancellation.outcome,
+            RequestTurnCancellationOutcome::Requested(ref turn)
+                if turn.status == TurnRunStatus::CancellingClient
+        ));
+        assert_eq!(
+            store.list_tool_calls(chat.id).await.unwrap()[0].status,
+            ToolCallStatus::Pending
+        );
+        tokio::time::pause();
+        tokio::time::advance(LEASE_HEARTBEAT_INTERVAL).await;
+        // Resume before polling SQLite so virtual time cannot outrun its worker.
+        tokio::time::resume();
+        let stopped = tokio::time::timeout(std::time::Duration::from_secs(5), &mut execution)
+            .await
+            .expect("accepted cancellation must stop the pending upload");
+        assert_eq!(stopped.unwrap_err(), "lease lost");
+        assert!(confirmation.send(true).is_err());
+        assert!(!attached.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn browser_action_clears_when_confirmation_is_cancelled() {
+        let cleared = std::sync::atomic::AtomicUsize::new(0);
+        let result = execute_while_lease_live(
+            async {
+                let _cleanup = BrowserActionCleanup(Some(|| {
+                    cleared.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }));
+                std::future::pending::<()>().await;
+            },
+            || async { Err("lease lost".to_owned()) },
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(cleared.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn browser_action_clears_after_post_confirmation_error() {
+        let cleared = std::sync::atomic::AtomicUsize::new(0);
+        let result = async {
+            let _cleanup = BrowserActionCleanup(Some(|| {
+                cleared.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }));
+            Err::<(), _>("lease lost")?;
+            Ok::<(), &str>(())
+        }
+        .await;
+        assert_eq!(result, Err("lease lost"));
+        assert_eq!(cleared.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn browser_completion_stops_lease_renewal() {
+        let renewals = std::sync::atomic::AtomicUsize::new(0);
+        let result = execute_while_lease_live(
+            async {
+                tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+            },
+            || async {
+                renewals.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(renewals.load(std::sync::atomic::Ordering::SeqCst), 1);
+        tokio::time::advance(std::time::Duration::from_secs(60)).await;
+        assert_eq!(renewals.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -1430,6 +1787,24 @@ mod tests {
         assert!(!result.contains("cGl4ZWxz"));
         assert!(!result.contains("imageBase64"));
         assert_eq!(images, Some(vec![image]));
+    }
+
+    #[test]
+    fn native_navigation_denial_is_not_reported_as_a_user_stop() {
+        for (message, expected_code) in [
+            (
+                "browser destination is not shared for navigation",
+                "browser_not_authorized",
+            ),
+            ("browser control was stopped by the user", "stopped_by_user"),
+        ] {
+            let StoredResolution::Failed { error_code, .. } =
+                map_native_error(Some("browser-1"), message.to_owned())
+            else {
+                panic!("navigation refusal must fail");
+            };
+            assert_eq!(error_code, expected_code);
+        }
     }
 
     #[test]

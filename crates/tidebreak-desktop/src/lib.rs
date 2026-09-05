@@ -25,6 +25,9 @@ mod broker;
 )]
 mod browser_control;
 mod browser_downloads;
+mod browser_grants;
+#[cfg(target_os = "macos")]
+mod browser_native_webview;
 mod browser_profile;
 mod browser_recovery;
 mod browser_runtime_adapter;
@@ -245,7 +248,7 @@ async fn put_native_mcp_servers(
                 "Allow and save".to_owned(),
                 "Cancel".to_owned(),
             ));
-        if let Some(window) = app.get_webview_window("main") {
+        if let Some(window) = app.get_window("main") {
             dialog = dialog.parent(&window);
         }
         dialog.show(move |approved| {

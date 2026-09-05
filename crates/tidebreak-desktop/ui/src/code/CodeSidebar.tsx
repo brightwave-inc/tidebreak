@@ -10,8 +10,10 @@ import {
 import { toast } from "sonner";
 
 import { useApp } from "@/AppContext";
+import { attachedRemotely } from "@/host";
 import { cn, friendlyErrorMessage } from "@/lib/utils";
 import { useLayoutState } from "@/panel/usePanelNav";
+import { searchFromLayout } from "@/panel/panelUrl";
 import { SidebarFrame } from "@/sidebar/SidebarFrame";
 import { NotificationBellButton } from "@/NotificationBellButton";
 import { SidebarButton } from "@/sidebar/primitives";
@@ -51,6 +53,7 @@ import {
 import { fetchFixErrorsLogs } from "./checkLogs";
 import { prWorkflowPrompt } from "./prActions";
 import type { WorkspaceWorkflowAction } from "./workspaceWorkflow";
+import { readBrowserTabLayout } from "./workspace/browserTabLayout";
 
 /**
  * The code-mode rail: one toolbar, then workspace cards.
@@ -105,6 +108,15 @@ export function CodeSidebar() {
   const viewedWorkspaceId = pathname.startsWith("/code/w/")
     ? pathname.slice("/code/w/".length).split("/")[0]
     : undefined;
+
+  function workspacePanelSearch(workspaceId: string) {
+    if (workspaceId !== viewedWorkspaceId && attachedRemotely()) return {};
+    return searchFromLayout(
+      workspaceId === viewedWorkspaceId
+        ? layout
+        : readBrowserTabLayout(workspaceId),
+    );
+  }
 
   useEffect(() => {
     void refresh(client);
@@ -325,6 +337,7 @@ export function CodeSidebar() {
                     void navigate({
                       to: "/code/w/$workspaceId",
                       params: { workspaceId },
+                      search: workspacePanelSearch(workspaceId),
                     })
                   }
                   onOpen={() => {
@@ -333,6 +346,7 @@ export function CodeSidebar() {
                     void navigate({
                       to: "/code/w/$workspaceId",
                       params: { workspaceId: workspace.id },
+                      search: workspacePanelSearch(workspace.id),
                     });
                   }}
                   onSelectPointer={(event) =>
@@ -346,14 +360,20 @@ export function CodeSidebar() {
                     void navigate({
                       to: "/code/w/$workspaceId",
                       params: { workspaceId: workspace.id },
-                      search: { task: sessionId },
+                      search: {
+                        ...workspacePanelSearch(workspace.id),
+                        task: sessionId,
+                      },
                     })
                   }
                   onOpenSubagent={(callId) =>
                     void navigate({
                       to: "/code/w/$workspaceId",
                       params: { workspaceId: workspace.id },
-                      search: { subagent: callId },
+                      search: {
+                        ...workspacePanelSearch(workspace.id),
+                        subagent: callId,
+                      },
                     })
                   }
                   onWorkflowAction={(action: WorkspaceWorkflowAction) => {

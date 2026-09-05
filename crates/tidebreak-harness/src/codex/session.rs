@@ -27,9 +27,9 @@ use tidebreak_core::{PermissionMode, ReasoningEffort, MAX_NOTICE_CHARS};
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 const THREAD_LOAD_TIMEOUT: Duration = Duration::from_secs(120);
 const THREAD_LOAD_ABSOLUTE_CEILING: Duration = Duration::from_secs(30 * 60);
-/// `thread/resume` returns the full persisted thread in one JSON-RPC line.
-/// Keep normal turn events on the shared 256 KiB limit, but admit a bounded
-/// response large enough for established Codex threads during startup.
+/// Codex returns persisted threads and complete MCP results in one JSON-RPC
+/// line. Browser snapshots can exceed the shared 256 KiB limit when the result
+/// includes both text and structured content. Keep both reads bounded at 16 MiB.
 const RPC_MAX_PARTIAL_LINE: usize = 16 * 1_024 * 1_024;
 #[cfg(not(test))]
 const PROCESS_INTERRUPT_GRACE: Duration = Duration::from_secs(2);
@@ -1124,8 +1124,14 @@ impl CodexSession {
     }
 
     async fn read_lines(&self) -> Result<Vec<String>, HarnessError> {
-        self.read_lines_with_budget(StreamBudget::default(), false)
-            .await
+        self.read_lines_with_budget(
+            StreamBudget {
+                max_partial_line: RPC_MAX_PARTIAL_LINE,
+                ..StreamBudget::default()
+            },
+            false,
+        )
+        .await
     }
 
     async fn read_lines_with_budget(

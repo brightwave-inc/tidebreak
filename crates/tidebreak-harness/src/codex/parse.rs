@@ -28,6 +28,7 @@ pub struct CodexStreamParser {
     resume_ref: Option<String>,
     version: Option<String>,
     started_tools: HashSet<String>,
+    completed_mcp_tools: HashSet<String>,
     /// Codex child thread ids whose synthetic `Task` span has started.
     started_subagents: HashSet<String>,
     /// Child thread ids whose synthetic `Task` span has settled.
@@ -349,6 +350,7 @@ impl CodexStreamParser {
         }
         match item.get("type").and_then(Value::as_str) {
             Some("commandExecution") => self.emit_tool_started(&item, parent_call_id),
+            Some("mcpToolCall") => self.emit_mcp_tool_started(&item, parent_call_id),
             Some("fileChange") => self.emit_file_change_started(&item, parent_call_id),
             Some("collabAgentToolCall") => self.emit_collab_started(&item, parent_call_id),
             Some("subAgentActivity" | "userMessage" | "agentMessage" | "reasoning") => Vec::new(),
@@ -371,6 +373,7 @@ impl CodexStreamParser {
         }
         match item.get("type").and_then(Value::as_str) {
             Some("commandExecution") => self.emit_tool_completed(&item, parent_call_id),
+            Some("mcpToolCall") => self.emit_mcp_tool_completed(&item, parent_call_id),
             Some("fileChange") => self.emit_file_change_completed(&item, parent_call_id),
             Some("collabAgentToolCall") => self.emit_collab_completed(&item, parent_call_id),
             Some("agentMessage") => {
@@ -901,6 +904,86 @@ impl CodexStreamParser {
         }]
     }
 
+    fn emit_mcp_tool_started(
+        &mut self,
+        item: &Value,
+        parent_call_id: Option<String>,
+    ) -> Vec<HarnessEvent> {
+        let Some(call_id) = item
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        else {
+            self.count_unrecognized("mcpToolCall/missing-id", "missing MCP call id");
+            return Vec::new();
+        };
+        if !self.started_tools.insert(call_id.to_owned()) {
+            return Vec::new();
+        }
+        let name = mcp_tool_name(item);
+        vec![HarnessEvent::ToolStarted {
+            call_id: call_id.to_owned(),
+            detail: ToolDetail::Other {
+                summary: name.clone(),
+            },
+            name,
+            parent_call_id,
+        }]
+    }
+
+    fn emit_mcp_tool_completed(
+        &mut self,
+        item: &Value,
+        parent_call_id: Option<String>,
+    ) -> Vec<HarnessEvent> {
+        let Some(call_id) = item
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+        else {
+            self.count_unrecognized("mcpToolCall/missing-id", "missing MCP call id");
+            return Vec::new();
+        };
+        if !self.completed_mcp_tools.insert(call_id.to_owned()) {
+            return Vec::new();
+        }
+        let mut events = self.emit_mcp_tool_started(item, parent_call_id.clone());
+        let outcome = match item.get("status").and_then(Value::as_str) {
+            Some("completed")
+                if item.get("error").is_none_or(Value::is_null)
+                    && item.pointer("/result/isError").and_then(Value::as_bool) != Some(true) =>
+            {
+                ToolOutcome::Succeeded
+            }
+            Some("completed" | "failed") => ToolOutcome::Failed,
+            _ => {
+                // Do not log a raw MCP item: arguments and result metadata can
+                // contain credentials, resource bodies, or image pixels.
+                self.count_unrecognized(
+                    "mcpToolCall/completed/unknown-status",
+                    "unknown MCP status",
+                );
+                ToolOutcome::Failed
+            }
+        };
+        let preview = if outcome == ToolOutcome::Succeeded {
+            mcp_tool_preview(item)
+        } else {
+            // Transport errors may include credentials or private resource URLs.
+            "MCP tool failed.".to_owned()
+        };
+        events.push(HarnessEvent::ToolCompleted {
+            call_id: call_id.to_owned(),
+            outcome,
+            preview,
+            detail: Some(ToolDetail::Other {
+                summary: mcp_tool_name(item),
+            }),
+            parent_call_id,
+        });
+        events
+    }
+
     fn emit_file_change_started(
         &mut self,
         item: &Value,
@@ -1002,6 +1085,45 @@ impl CodexStreamParser {
             "unrecognized engine event payload"
         );
     }
+}
+
+fn mcp_tool_name(item: &Value) -> String {
+    let server = item
+        .get("server")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let tool = item
+        .get("tool")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    bound(&format!("mcp__{server}__{tool}"), MAX_TOOL_SUMMARY_CHARS)
+}
+
+/// Match the other adapters' bounded text preview. Binary blocks, resources,
+/// structured results, arguments, and metadata never enter the transcript.
+fn mcp_tool_preview(item: &Value) -> String {
+    let content = item.pointer("/result/content").and_then(Value::as_array);
+    let mut preview = String::new();
+    let mut remaining = MAX_PREVIEW_CHARS;
+    for block in content.into_iter().flatten() {
+        if block.get("type").and_then(Value::as_str) != Some("text") {
+            continue;
+        }
+        let Some(text) = block.get("text").and_then(Value::as_str) else {
+            continue;
+        };
+        if text.is_empty() || remaining == 0 {
+            continue;
+        }
+        if !preview.is_empty() {
+            preview.push('\n');
+            remaining -= 1;
+        }
+        let text = bound(text, remaining);
+        remaining -= text.chars().count();
+        preview.push_str(&text);
+    }
+    preview
 }
 
 fn thread_id(params: &Value) -> Option<&str> {
@@ -1402,6 +1524,131 @@ mod tests {
     }
 
     use super::*;
+
+    fn mcp_frame(method: &str, item: Value) -> String {
+        serde_json::json!({"method": method, "params": {"item": item}}).to_string()
+    }
+
+    fn mcp_item(status: &str) -> Value {
+        serde_json::json!({
+            "type": "mcpToolCall", "id": "browser-call", "server": "tb-browser",
+            "tool": "browser_snapshot", "status": status,
+            "arguments": {"browser_id": "browser-1", "private": "argument-secret"}
+        })
+    }
+
+    #[test]
+    fn mcp_calls_emit_one_started_and_completed_span_without_private_payloads() {
+        let mut parser = CodexStreamParser::new();
+        let started = mcp_frame("item/started", mcp_item("inProgress"));
+        let events = parser.push_line(&started);
+        assert_eq!(
+            events,
+            vec![HarnessEvent::ToolStarted {
+                call_id: "browser-call".into(),
+                name: "mcp__tb-browser__browser_snapshot".into(),
+                detail: ToolDetail::Other {
+                    summary: "mcp__tb-browser__browser_snapshot".into()
+                },
+                parent_call_id: None,
+            }]
+        );
+        assert!(parser.push_line(&started).is_empty());
+        let mut item = mcp_item("completed");
+        item["result"] = serde_json::json!({
+            "content": [
+                {"type": "text", "text": "Snapshot contains one button."},
+                {"type": "image", "data": "pixel-secret", "text": "image-secret"},
+                {"type": "resource", "resource": {"text": "resource-secret"}},
+                {"type": "text", "text": "Take a fresh snapshot after acting."}
+            ],
+            "structuredContent": {"private": "structured-secret"},
+            "_meta": {"private": "metadata-secret"}
+        });
+        let completed = mcp_frame("item/completed", item);
+        let events = parser.push_line(&completed);
+        assert_eq!(
+            events,
+            vec![HarnessEvent::ToolCompleted {
+                call_id: "browser-call".into(),
+                outcome: ToolOutcome::Succeeded,
+                preview: "Snapshot contains one button.\nTake a fresh snapshot after acting."
+                    .into(),
+                detail: Some(ToolDetail::Other {
+                    summary: "mcp__tb-browser__browser_snapshot".into()
+                }),
+                parent_call_id: None,
+            }]
+        );
+        assert!(parser.push_line(&completed).is_empty());
+        assert_eq!(parser.unrecognized(), 0);
+        assert!(!serde_json::to_string(&events).unwrap().contains("secret"));
+    }
+
+    #[test]
+    fn failed_mcp_call_starts_a_missing_span_without_echoing_transport_errors() {
+        let mut item = mcp_item("failed");
+        item["error"] =
+            serde_json::json!({"message": "Bearer transport-secret at /private/capfile"});
+        let out = CodexStreamParser::parse_ndjson(&mcp_frame("item/completed", item));
+        assert_eq!(out.unrecognized, 0);
+        assert_eq!(out.events.len(), 2);
+        assert!(
+            matches!(&out.events[0], HarnessEvent::ToolStarted { name, .. }
+            if name == "mcp__tb-browser__browser_snapshot")
+        );
+        assert!(
+            matches!(&out.events[1], HarnessEvent::ToolCompleted { outcome: ToolOutcome::Failed, preview, .. }
+            if preview == "MCP tool failed.")
+        );
+        assert!(!serde_json::to_string(&out.events)
+            .unwrap()
+            .contains("secret"));
+    }
+
+    #[test]
+    fn mcp_completed_error_and_unknown_status_never_report_success() {
+        for (status, error, result, unrecognized) in [
+            (
+                "completed",
+                serde_json::json!({"message": "private failure"}),
+                Value::Null,
+                0,
+            ),
+            (
+                "completed",
+                Value::Null,
+                serde_json::json!({"isError": true}),
+                0,
+            ),
+            ("inProgress", Value::Null, Value::Null, 1),
+        ] {
+            let mut item = mcp_item(status);
+            item["error"] = error;
+            item["result"] = result;
+            let out = CodexStreamParser::parse_ndjson(&mcp_frame("item/completed", item));
+            assert_eq!(out.unrecognized, unrecognized);
+            assert!(matches!(
+                out.events.last(),
+                Some(HarnessEvent::ToolCompleted {
+                    outcome: ToolOutcome::Failed,
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn mcp_text_preview_is_bounded_without_surfacing_binary_blocks() {
+        let mut item = mcp_item("completed");
+        item["result"] = serde_json::json!({"content": [
+            {"type": "image", "text": "not-a-text-block", "data": "pixel-secret"},
+            {"type": "text", "text": "é".repeat(MAX_PREVIEW_CHARS + 1)},
+            {"type": "text", "text": "past-the-limit"}
+        ]});
+        let preview = mcp_tool_preview(&item);
+        assert_eq!(preview, "é".repeat(MAX_PREVIEW_CHARS));
+    }
 
     #[test]
     fn unknown_event_types_are_counted_and_do_not_drop_known_events() {

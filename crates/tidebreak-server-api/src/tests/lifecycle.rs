@@ -2976,6 +2976,112 @@ async fn client_execution_poll_terminalizes_an_expired_lease_and_resumes_the_tur
 }
 
 #[tokio::test]
+async fn cancelling_browser_upload_rejects_lease_renewal_and_recovery_but_allows_resolution() {
+    let (router, token, store, _dir) = test_app_without_turn_worker().await;
+    let bearer = format!("Bearer {token}");
+    let chat = make_chat(&router, &bearer).await;
+    let turn_id = TurnId::new();
+    let (turn_token, claimed_at) =
+        accept_and_claim_turn_for_route_test(&*store, turn_id, chat.id, "upload a file").await;
+    let call = ClientToolCallRequest {
+        id: CallId::new(),
+        chat_id: chat.id,
+        turn_id,
+        provider_id: "native-upload".into(),
+        name: tidebreak_core::BROWSER_UPLOAD_TOOL.into(),
+        arguments: serde_json::json!({
+            "browser_id": "browser-1",
+            "snapshot_id": "snapshot-1",
+            "document_epoch": 0,
+            "ref": "@e1",
+            "resource": {"kind": "output", "output_id": uuid::Uuid::new_v4()},
+        }),
+    };
+    assert!(tidebreak_core::validate_browser_upload_arguments(
+        &call.arguments
+    ));
+    assert!(matches!(
+        store
+            .park_turn_for_client_tool_call(
+                turn_id,
+                turn_token,
+                0,
+                test_client_checkpoint_progress(1),
+                claimed_at,
+                &call,
+            )
+            .await
+            .unwrap()
+            .unwrap(),
+        ParkTurnForClientCallOutcome::Parked { .. }
+    ));
+
+    let lease_token = uuid::Uuid::new_v4();
+    let claim_uri = format!("/chats/{}/client-executions/{}/claim", chat.id, call.id);
+    let claim_body = serde_json::json!({
+        "executor_id": uuid::Uuid::new_v4(),
+        "lease_token": lease_token,
+    });
+    let claim = post_executor_json(&router, &claim_uri, claim_body.clone()).await;
+    assert_eq!(claim.status(), StatusCode::OK);
+    let claim: serde_json::Value = json_body(claim).await;
+    assert_eq!(claim["disposition"], "claimed");
+    assert_eq!(claim["call"]["name"], tidebreak_core::BROWSER_UPLOAD_TOOL);
+    let heartbeat_uri = format!("/chats/{}/client-executions/{}/heartbeat", chat.id, call.id);
+    let heartbeat_body = serde_json::json!({"lease_token": lease_token});
+    assert_eq!(
+        post_executor_json(&router, &heartbeat_uri, heartbeat_body.clone())
+            .await
+            .status(),
+        StatusCode::OK
+    );
+
+    assert_eq!(
+        cancel_turn(&router, &bearer, chat.id, turn_id).await,
+        StatusCode::ACCEPTED
+    );
+    assert_eq!(
+        store.get_turn(turn_id).await.unwrap().unwrap().status,
+        TurnRunStatus::CancellingClient
+    );
+    assert_eq!(
+        store.list_tool_calls(chat.id).await.unwrap()[0].status,
+        ToolCallStatus::Pending,
+        "the claimed call must remain reconcilable while its operation stops"
+    );
+
+    let heartbeat = post_executor_json(&router, &heartbeat_uri, heartbeat_body).await;
+    let recovery = post_executor_json(&router, &claim_uri, claim_body).await;
+    assert_eq!(
+        (heartbeat.status(), recovery.status()),
+        (StatusCode::CONFLICT, StatusCode::CONFLICT),
+        "accepted cancellation must fence both lease renewal and exact-claim recovery"
+    );
+
+    let resolve_uri = format!("/chats/{}/client-executions/{}/resolve", chat.id, call.id);
+    let resolution_body = serde_json::json!({
+        "lease_token": lease_token,
+        "resolution": {"status": "cancelled", "result": "cancelled before attachment"},
+    });
+    let resolved = post_executor_json(&router, &resolve_uri, resolution_body.clone()).await;
+    assert_eq!(resolved.status(), StatusCode::OK);
+    let resolved: serde_json::Value = json_body(resolved).await;
+    assert_eq!(resolved["disposition"], "resolved");
+    assert_eq!(
+        store.get_turn(turn_id).await.unwrap().unwrap().status,
+        TurnRunStatus::Cancelled
+    );
+    assert_eq!(
+        store.list_tool_calls(chat.id).await.unwrap()[0].status,
+        ToolCallStatus::Cancelled
+    );
+    let repeated = post_executor_json(&router, &resolve_uri, resolution_body).await;
+    assert_eq!(repeated.status(), StatusCode::OK);
+    let repeated: serde_json::Value = json_body(repeated).await;
+    assert_eq!(repeated["disposition"], "existing");
+}
+
+#[tokio::test]
 async fn cancellation_closes_an_expired_claimed_client_wait_without_executor_ack() {
     let (router, token, store, _dir) = test_app_without_turn_worker().await;
     let bearer = format!("Bearer {token}");

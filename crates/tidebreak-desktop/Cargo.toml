@@ -73,11 +73,13 @@ tauri-plugin-single-instance = { version = "=2.4.3", features = ["deep-link"] }
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_SystemServices"] }
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "=0.6.2"
-libc.workspace = true
 objc2 = "=0.6.4"
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["NSAccessibility", "NSAccessibilityProtocols", "NSApplication", "NSEvent", "NSGraphicsContext", "NSResponder", "NSText", "NSView", "NSWindow", "objc2-core-graphics"] }
 objc2-core-graphics = { version = "=0.3.2", default-features = false, features = ["CGEvent", "CGEventSource", "CGEventTypes", "CGGeometry"] }
-objc2-foundation = { version = "=0.3.2", default-features = false, features = ["NSArray", "NSError", "NSGeometry", "NSKeyValueObserving", "NSString", "NSURL"] }
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["NSArray", "NSError", "NSGeometry", "NSKeyValueObserving", "NSString", "NSURL", "NSUUID"] }
 objc2-web-kit = { version = "=0.3.2", default-features = false, features = ["WKContentWorld", "WKFrameInfo", "WKWebView", "block2"] }
