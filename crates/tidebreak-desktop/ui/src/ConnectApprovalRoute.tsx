@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams } from "@tanstack/react-router";
 
 import { useApp } from "./AppContext";
@@ -32,6 +32,7 @@ export function ConnectApprovalRoute() {
   const [phase, setPhase] = useState<ConnectApprovalPhase>("loading");
   const [error, setError] = useState<string | null>(null);
   const [loadAttempt, setLoadAttempt] = useState(0);
+  const approvalVersion = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -50,17 +51,21 @@ export function ConnectApprovalRoute() {
     })();
     return () => {
       cancelled = true;
+      approvalVersion.current += 1;
     };
   }, [client, loadAttempt, nonce]);
 
   async function approve() {
     if (!page) return;
+    const version = approvalVersion.current;
     setPhase("approving");
     setError(null);
     try {
       await client.approveCodeConnect(nonce, page.csrf);
+      if (approvalVersion.current !== version) return;
       setPhase("approved");
     } catch {
+      if (approvalVersion.current !== version) return;
       setError("The connect request could not be approved. Try again.");
       setPhase("ready");
     }

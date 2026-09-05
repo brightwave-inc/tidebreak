@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
-# Install Linux CI/release packages without stalling on a dead Azure mirror.
+# Use HTTPS Ubuntu archives for Linux CI and release dependencies.
 #
-# Hosted ubuntu-22.04 runners pin apt to azure.archive.ubuntu.com. That mirror
-# regularly returns Ign: for InRelease and package payloads and can hang far
-# longer than a healthy archive.ubuntu.com fetch. Point apt at the public
-# Ubuntu archive first, then install with short timeouts and a few retries.
+# Hosted runner mirrors can stall on HTTP requests. Normalize Ubuntu sources
+# to HTTPS endpoints and use a second mirror when downloads stall.
 set -euo pipefail
 
 if (($# == 0)); then
@@ -62,11 +60,11 @@ fi
 
 case "$arch" in
 amd64)
-  archive_url="${TIDEBREAK_APT_ARCHIVE_URL:-http://archive.ubuntu.com/ubuntu}"
-  security_url="${TIDEBREAK_APT_SECURITY_URL:-http://security.ubuntu.com/ubuntu}"
+  archive_url="${TIDEBREAK_APT_ARCHIVE_URL:-https://archive.ubuntu.com/ubuntu}"
+  security_url="${TIDEBREAK_APT_SECURITY_URL:-https://security.ubuntu.com/ubuntu}"
   ;;
 arm64)
-  archive_url="${TIDEBREAK_APT_ARCHIVE_URL:-http://ports.ubuntu.com/ubuntu-ports}"
+  archive_url="${TIDEBREAK_APT_ARCHIVE_URL:-https://ports.ubuntu.com/ubuntu-ports}"
   security_url="${TIDEBREAK_APT_SECURITY_URL:-$archive_url}"
   ;;
 *)
@@ -87,22 +85,45 @@ path = Path(sys.argv[1])
 archive_url = sys.argv[2]
 security_url = sys.argv[3]
 text = path.read_text()
-replacements = (
-    (r"https?://azure\.archive\.ubuntu\.com/ubuntu-ports", archive_url),
-    (r"https?://azure\.archive\.ubuntu\.com/ubuntu", archive_url),
-    (r"https?://security\.ubuntu\.com/ubuntu", security_url),
+ubuntu_source = re.compile(
+    r"https?://(?:(?P<security>security\.ubuntu\.com/ubuntu)"
+    r"|(?:azure\.)?archive\.ubuntu\.com/ubuntu(?:-ports)?"
+    r"|ports\.ubuntu\.com/ubuntu-ports)(?=/|\s|$)"
 )
-for pattern, replacement in replacements:
-    text = re.sub(pattern, replacement, text)
+# One pass preserves explicit overrides that name another Ubuntu endpoint.
+text = ubuntu_source.sub(
+    lambda match: security_url if match.group("security") else archive_url,
+    text,
+)
 path.write_text(text)
 ' "$file" "$archive_url" "$security_url"
 }
 
 run mkdir -p "$(dirname "$sources_list")" "$sources_dir" "$apt_conf_dir"
 
-if [[ -f "$sources_list" ]]; then
-  rewrite_ubuntu_sources "$sources_list"
-else
+shopt -s nullglob
+extra_sources=("$sources_dir"/*.list "$sources_dir"/*.sources)
+shopt -u nullglob
+
+has_ubuntu_source() {
+  python3 -c '
+from pathlib import Path
+import re
+import sys
+
+for name in sys.argv[3:]:
+    if not name:
+        continue
+    text = "\n".join(line for line in Path(name).read_text().splitlines()
+                     if not line.lstrip().startswith("#"))
+    if (re.search(r"https?://(?:[\w.-]+\.)?ubuntu\.com/ubuntu(?:-ports)?|mirror\+file:\S*/apt-mirrors\.txt", text)
+            or any(url in text for url in sys.argv[1:3])):
+        sys.exit(0)
+sys.exit(1)
+' "$archive_url" "$security_url" "${extra_sources[@]:-}"
+}
+
+if [[ ! -f "$sources_list" ]] && ! has_ubuntu_source; then
   cat <<SOURCES | run tee "$sources_list" >/dev/null
 deb $archive_url $codename main restricted universe multiverse
 deb $archive_url $codename-updates main restricted universe multiverse
@@ -111,15 +132,17 @@ deb $security_url $codename-security main restricted universe multiverse
 SOURCES
 fi
 
-shopt -s nullglob
-for file in "$sources_dir"/*.list "$sources_dir"/*.sources; do
-  rewrite_ubuntu_sources "$file"
-done
-shopt -u nullglob
+configure_sources() {
+  rewrite_ubuntu_sources "$sources_list"
+  for file in "${extra_sources[@]:-}"; do
+    rewrite_ubuntu_sources "$file"
+  done
+  if [[ -e "$mirrors_file" || -n "$root" ]]; then
+    printf '%s\tpriority:1\n' "$archive_url" | run tee "$mirrors_file" >/dev/null
+  fi
+}
 
-if [[ -e "$mirrors_file" || -n "$root" ]]; then
-  printf '%s\tpriority:1\n' "$archive_url" | run tee "$mirrors_file" >/dev/null
-fi
+configure_sources
 
 cat <<CONF | run tee "$apt_conf_dir/99tidebreak-ci" >/dev/null
 Acquire::Retries "3";
@@ -143,5 +166,30 @@ if [[ -n "${TIDEBREAK_APT_DRY_RUN:-}" ]]; then
   exit 0
 fi
 
-run apt-get "${apt_opts[@]}" update
-run apt-get "${apt_opts[@]}" install -y --no-install-recommends "$@"
+if [[ "$arch" != amd64 || -n "${TIDEBREAK_APT_ARCHIVE_URL+x}" || -n "${TIDEBREAK_APT_SECURITY_URL+x}" ]]; then
+  run apt-get "${apt_opts[@]}" update
+  run apt-get "${apt_opts[@]}" install -y --no-install-recommends "$@"
+  exit 0
+fi
+
+# Bound network work separately so a timeout never interrupts dpkg.
+# Both mirrors together use at most 340 seconds, leaving time to install.
+download_packages() {
+  run timeout --kill-after=5s 60s apt-get "${apt_opts[@]}" \
+    -o APT::Update::Error-Mode=any update &&
+    run timeout --kill-after=5s 100s apt-get "${apt_opts[@]}" \
+      install --download-only -y --no-install-recommends "$@"
+}
+
+if ! download_packages "$@"; then
+  echo "Ubuntu downloads did not finish; trying the HTTPS kernel.org mirror." >&2
+  archive_url=https://mirrors.edge.kernel.org/ubuntu
+  security_url="$archive_url"
+  configure_sources
+  if ! download_packages "$@"; then
+    echo "Ubuntu dependency downloads failed on both HTTPS mirrors." >&2
+    exit 1
+  fi
+fi
+
+run apt-get "${apt_opts[@]}" install --no-download -y --no-install-recommends "$@"

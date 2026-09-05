@@ -1927,8 +1927,19 @@ jobs:
 
       - name: Install Linux packaging dependencies
         timeout-minutes: 8
+        env:
+          RELEASE_SHA: ${{ needs.validate.outputs.sha }}
+          RELEASE_WORKFLOW_SHA: ${{ github.sha }}
         run: |
-          scripts/install-linux-apt-packages.sh \
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$RELEASE_SHA" ]] || {
+            echo "Release checkout does not match the validated commit." >&2
+            exit 1
+          }
+          git fetch --no-tags --depth=1 origin "$RELEASE_WORKFLOW_SHA"
+          installer="$RUNNER_TEMP/tidebreak-install-linux-apt-packages.sh"
+          git show "$RELEASE_WORKFLOW_SHA:scripts/install-linux-apt-packages.sh" > "$installer"
+          bash "$installer" \
             build-essential \
             cmake \
             file \
@@ -1939,6 +1950,10 @@ jobs:
             libxdo-dev \
             patchelf \
             xdg-utils
+          [[ "$(git rev-parse HEAD)" == "$RELEASE_SHA" ]] || {
+            echo "Dependency installation changed the release checkout." >&2
+            exit 1
+          }
 
       - name: Set up compiler cache
         uses: ./.github/actions/setup-sccache-s3

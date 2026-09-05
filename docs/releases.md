@@ -305,11 +305,14 @@ validated release tag before the updater private key enters the step
 environment, then signs and collects only the completed package bytes. The
 compile step can write S3 cache entries without receiving the updater key.
 
-Hosted `ubuntu-22.04` runners pin apt at `azure.archive.ubuntu.com`, which can
-stall on `apt-get update` for most of the 90-minute job. The packaging step
-rewrites that mirror to `archive.ubuntu.com` (or `ports.ubuntu.com` on ARM),
-sets short apt timeouts, and fails the step in eight minutes if the public
-archive is also unreachable.
+The Linux packaging step extracts its dependency installer from the dispatching
+workflow SHA while keeping application HEAD at the validated release SHA. Default
+amd64 downloads use HTTPS Ubuntu endpoints, then kernel.org if needed. Each
+mirror gets 60 seconds for indexes and 100 seconds for downloads, with a
+five-second termination grace per phase. The 340-second download bound leaves
+time for the final `--no-download` install within the eight-minute step. ARM and
+explicit endpoint overrides keep their existing installation path. APT signature
+checks stay enabled.
 
 The public download contract is rooted at:
 

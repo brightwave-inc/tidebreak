@@ -14,7 +14,7 @@ runs:
   using: composite
   steps:
     - name: Configure compiler cache environment
-      if: ${{ inputs.remote-cache-enabled == 'true' }}
+      if: ${{ inputs.remote-cache-enabled == 'true' && (github.event_name != 'workflow_dispatch' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
       shell: bash
       env:
         CACHE_ACCESS: ${{ inputs.access }}
@@ -36,7 +36,7 @@ runs:
         } >> "$GITHUB_ENV"
 
     - name: Authenticate to the compiler cache
-      if: ${{ inputs.remote-cache-enabled == 'true' }}
+      if: ${{ inputs.remote-cache-enabled == 'true' && (github.event_name != 'workflow_dispatch' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}
       uses: aws-actions/configure-aws-credentials@e6de054238d6b7531b4efff3b6587d9aade6a06c # v6
       with:
         role-to-assume: ${{ inputs.access == 'write' && 'arn:aws:iam::767397701846:role/bw-github-ci-sccache-write-role' || 'arn:aws:iam::767397701846:role/bw-github-ci-sccache-read-role' }}
