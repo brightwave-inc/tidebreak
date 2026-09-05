@@ -298,7 +298,7 @@ async fn execute_receipt(
     }
 
     let lease = BrowserExecutionLease {
-        client: &client,
+        client,
         chat_id: receipt.chat_id,
         call_id: receipt.call_id,
         lease_token: receipt.lease_token,

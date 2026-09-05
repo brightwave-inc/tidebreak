@@ -1742,6 +1742,7 @@ impl Drop for NativeInputCancellation {
 }
 
 #[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
 async fn resolve_and_dispatch_native_action(
     webview: &Webview,
     registry: BrowserRegistry,
@@ -2151,6 +2152,7 @@ where
 }
 
 #[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
 async fn finish_native_action(
     webview: &Webview,
     registry: &BrowserRegistry,
@@ -2387,6 +2389,7 @@ async fn finish_native_action(
 }
 
 #[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
 async fn continue_native_action(
     webview: &Webview,
     registry: &BrowserRegistry,
@@ -2434,6 +2437,7 @@ async fn continue_native_action(
 }
 
 #[cfg(not(target_os = "macos"))]
+#[allow(clippy::too_many_arguments)]
 async fn resolve_and_dispatch_native_action(
     _webview: &Webview,
     _registry: BrowserRegistry,
@@ -2452,6 +2456,7 @@ async fn resolve_and_dispatch_native_action(
 }
 
 #[cfg(not(target_os = "macos"))]
+#[allow(clippy::too_many_arguments)]
 async fn finish_native_action(
     _webview: &Webview,
     _registry: &BrowserRegistry,
@@ -5965,7 +5970,7 @@ mod tests {
         assert!(script.contains("const value = !interactive || sensitive"));
         assert!(script.contains("text: sensitive ? null : (text || null)"));
         assert!(script.contains("interactive && !sensitive && element.href"));
-        assert!(script.contains("if (sensitive) return [\"human_takeover\"]"));
+        assert!(script.contains("if (sensitive || nativePopupSelect) return [\"human_takeover\"]"));
     }
 
     #[test]
