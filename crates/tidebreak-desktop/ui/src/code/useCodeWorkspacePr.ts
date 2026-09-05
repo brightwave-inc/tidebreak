@@ -105,8 +105,10 @@ class WorkspacePrResource {
       .then(() => this.client.getCodeWorkspacePr(this.id))
       .then(
         (data) => {
-          if (generation === this.generation)
-            this.update({ data, error: this.hostError });
+          if (generation === this.generation) {
+            this.hostError = null;
+            this.update({ data, error: null });
+          }
         },
         (error) => {
           if (generation === this.generation)

@@ -247,7 +247,7 @@ describe("shared workspace views", () => {
       await pending;
     });
   });
-  it("keeps host-refresh failures visible across successful local polls", async () => {
+  it("clears a host-refresh failure after a successful local poll", async () => {
     const client = {
       getCodeWorkspacePr: vi.fn(async () => CLEAN),
       refreshCodeWorkspacePr: vi
@@ -265,10 +265,6 @@ describe("shared workspace views", () => {
     expect(result.current.error).toContain("GitHub unavailable");
     await act(async () => {
       await result.current.refresh();
-    });
-    expect(result.current.error).toContain("GitHub unavailable");
-    await act(async () => {
-      await result.current.refreshFromHost();
     });
     expect(result.current.error).toBeNull();
   });
