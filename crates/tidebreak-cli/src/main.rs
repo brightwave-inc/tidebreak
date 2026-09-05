@@ -61,14 +61,15 @@
 //! process owns that broker state — `serve`, or the engine `-p` embeds. See
 //! [`folder_executor`].
 //!
-//! `tidebreak browser list|navigate|snapshot|wait|screenshot --json` drive a
+//! `tidebreak browser list|navigate|snapshot|wait|screenshot|act --json` drive a
 //! running Tidebreak browser server through the session-private capability
 //! file named by `TIDEBREAK_BROWSER_CAPFILE`. These commands write JSON to
 //! stdout and errors to stderr, and they refuse `--server`/`--attach` since the
 //! browser server is reached exclusively through the capfile.
 //!
-//! `tidebreak browser-mcp` serves the same five browser operations over MCP
-//! stdio so any MCP-speaking host can observe and navigate browser sessions.
+//! `tidebreak browser-mcp` serves the same browser operations over MCP stdio.
+//! MCP includes act only when the native engine supports trusted input.
+//! The native runtime authorizes every browser action.
 //! See [`browser`].
 //!
 //! `tidebreak agent-mcp` serves chat-mode tools over MCP stdio so an external

@@ -1,8 +1,9 @@
 //! Durable, native-owned browser restart metadata.
 //!
 //! The store records only completed navigation state. Live engine handles,
-//! document epochs, controller capabilities, grants, and in-flight work stay
-//! in memory so a restart cannot replay authority or an unfinished action.
+//! document epochs, controller capabilities, and in-flight work stay in memory
+//! so a restart cannot replay an unfinished action. Explicit sharing consent
+//! lives separately in the native browser grant store.
 
 use std::{
     collections::{HashMap, HashSet},

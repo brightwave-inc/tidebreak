@@ -72,7 +72,7 @@ async fn pick_open_path(app: &AppHandle) -> Result<Option<PathBuf>, String> {
         .file()
         .set_title("Import workspace configuration")
         .add_filter("Tidebreak configuration", &["json"]);
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_window("main") {
         picker = picker.set_parent(&window);
     }
     picker.pick_file(move |path| {

@@ -2795,6 +2795,7 @@ pub trait Store: Send + Sync {
     /// Claim the first lease with a caller-generated secret fencing token.
     /// A retry with the same executor and token recovers the original live
     /// claim even when the caller proposes a newly calculated expiry.
+    /// Cancelling or terminal durable turns cannot grant or recover execution.
     async fn claim_client_tool_call(
         &self,
         id: CallId,
@@ -2806,6 +2807,7 @@ pub trait Store: Send + Sync {
     ) -> Result<ClaimClientToolCallOutcome>;
 
     /// Monotonically extend an exact live client-execution lease.
+    /// Refuse renewal after the durable turn enters cancellation or a terminal state.
     async fn heartbeat_client_tool_call(
         &self,
         id: CallId,

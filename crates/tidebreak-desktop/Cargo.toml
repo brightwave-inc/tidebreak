@@ -79,5 +79,5 @@ libc.workspace = true
 objc2 = "=0.6.4"
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["NSAccessibility", "NSAccessibilityProtocols", "NSApplication", "NSEvent", "NSGraphicsContext", "NSResponder", "NSText", "NSView", "NSWindow", "objc2-core-graphics"] }
 objc2-core-graphics = { version = "=0.3.2", default-features = false, features = ["CGEvent", "CGEventSource", "CGEventTypes", "CGGeometry"] }
-objc2-foundation = { version = "=0.3.2", default-features = false, features = ["NSArray", "NSError", "NSGeometry", "NSKeyValueObserving", "NSString", "NSURL"] }
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["NSArray", "NSError", "NSGeometry", "NSKeyValueObserving", "NSString", "NSURL", "NSUUID"] }
 objc2-web-kit = { version = "=0.3.2", default-features = false, features = ["WKContentWorld", "WKFrameInfo", "WKWebView", "block2"] }

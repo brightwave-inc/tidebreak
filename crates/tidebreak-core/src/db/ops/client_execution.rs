@@ -1,11 +1,14 @@
 use chrono::{DateTime, Utc};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, DatabaseTransaction, EntityTrait, QueryFilter, QueryOrder, Set,
+    TransactionTrait,
 };
 
 use crate::error::{AgentError, Result};
 use crate::id::{CallId, SessionId};
-use crate::model::{ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus};
+use crate::model::{
+    ToolCallExecution, ToolCallRecord, ToolCallResolution, ToolCallStatus, TurnRunStatus,
+};
 use crate::storage::{
     AcceptClaimedToolCallOutcome, AcceptToolCallOutcome, ClaimClientToolCallOutcome,
     ClientToolCallClaim, HeartbeatClientToolCallOutcome, JournaledClientToolCallOutcome,
@@ -160,6 +163,33 @@ pub(in crate::db) async fn accept_claimed_tool_call(
     Ok(AcceptClaimedToolCallOutcome::Accepted(inserted))
 }
 
+// The caller holds the chat write lock shared by cancellation. Check the
+// parent before granting execution; a pending call remains reconcilable while
+// its cancelling turn waits for the native operation to stop.
+async fn client_turn_allows_execution_on(
+    transaction: &DatabaseTransaction,
+    call: &entities::tool_call::Model,
+) -> Result<bool> {
+    let Some(turn) = entities::turn::Entity::find_by_id(call.turn_id)
+        .one(transaction)
+        .await
+        .map_err(store_err)?
+    else {
+        // Legacy client calls can predate durable turns. Browser tools always
+        // require the authoritative turn that accepted their native work.
+        return Ok(!crate::is_browser_tool(&call.name));
+    };
+    if turn.session_id != call.chat_id {
+        return Ok(false);
+    }
+    let status = super::turn::turn_run_from_model(turn)?.status;
+    Ok(!status.is_terminal()
+        && !matches!(
+            status,
+            TurnRunStatus::Cancelling | TurnRunStatus::CancellingClient
+        ))
+}
+
 pub(in crate::db) async fn claim_client_tool_call(
     store: &DbStore,
     id: CallId,
@@ -198,6 +228,7 @@ pub(in crate::db) async fn claim_client_tool_call(
         || existing.name == crate::ASK_USER_QUESTIONS_TOOL
         || existing.name == crate::EXIT_PLAN_MODE_TOOL
         || existing.status != ToolCallStatus::Pending.as_str()
+        || !client_turn_allows_execution_on(&transaction, &existing).await?
     {
         transaction.commit().await.map_err(store_err)?;
         return Ok(ClaimClientToolCallOutcome::Unavailable);
@@ -258,6 +289,7 @@ pub(in crate::db) async fn heartbeat_client_tool_call(
         || existing.status != ToolCallStatus::Pending.as_str()
         || existing.client_lease_token != Some(lease_token)
         || current_expiry.is_none_or(|expiry| expiry <= now || lease_expires_at < expiry)
+        || !client_turn_allows_execution_on(&transaction, &existing).await?
     {
         transaction.commit().await.map_err(store_err)?;
         return Ok(HeartbeatClientToolCallOutcome::LeaseLost);

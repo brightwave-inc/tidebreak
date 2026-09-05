@@ -5,7 +5,7 @@
 //! workspaces, or advance its document epoch.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     io::Write,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard, OnceLock},
@@ -25,6 +25,7 @@ use tokio::sync::OwnedMutexGuard;
 use tokio::sync::{watch, Mutex as AsyncMutex};
 use uuid::Uuid;
 
+use crate::browser_grants::{BrowserGrant, BrowserGrantStore};
 use crate::browser_recovery::{
     BrowserSessionStore, LegacyBrowserImportResult, LegacyBrowserSession, RecoveredBrowserSession,
 };
@@ -151,6 +152,53 @@ impl BrowserDispatchEffect {
             Self::Observe | Self::Mutate => BrowserAuditConfirmation::NotRequired,
             Self::Consequential => BrowserAuditConfirmation::Approved,
         }
+    }
+}
+
+/// Whether an engine result reports a completed operation rather than a typed refusal.
+pub(crate) trait BrowserDispatchResult {
+    fn audit_succeeded(&self) -> bool;
+}
+
+impl BrowserDispatchResult for () {
+    fn audit_succeeded(&self) -> bool {
+        true
+    }
+}
+
+impl BrowserDispatchResult for tidebreak_core::BrowserNavigateResult {
+    fn audit_succeeded(&self) -> bool {
+        true
+    }
+}
+
+impl BrowserDispatchResult for tidebreak_core::BrowserPageSnapshot {
+    fn audit_succeeded(&self) -> bool {
+        true
+    }
+}
+
+impl BrowserDispatchResult for tidebreak_core::BrowserScreenshotResult {
+    fn audit_succeeded(&self) -> bool {
+        true
+    }
+}
+
+impl BrowserDispatchResult for tidebreak_core::BrowserActResult {
+    fn audit_succeeded(&self) -> bool {
+        self.status == tidebreak_core::BrowserActStatus::Ok
+    }
+}
+
+impl BrowserDispatchResult for tidebreak_core::BrowserWaitResult {
+    fn audit_succeeded(&self) -> bool {
+        self.status == tidebreak_core::BrowserWaitStatus::Resolved
+    }
+}
+
+impl BrowserDispatchResult for tidebreak_core::BrowserUploadResult {
+    fn audit_succeeded(&self) -> bool {
+        self.status == tidebreak_core::BrowserUploadStatus::Uploaded
     }
 }
 
@@ -289,13 +337,6 @@ struct BrowserAgentCapability {
 }
 
 #[derive(Clone)]
-struct BrowserGrant {
-    workspace_id: String,
-    scope: BrowserOriginScope,
-    capabilities: HashSet<BrowserGrantCapability>,
-}
-
-#[derive(Clone)]
 struct BrowserConfirmationRecord {
     capability_id: Uuid,
     browser_id: String,
@@ -376,7 +417,6 @@ pub(crate) enum BrowserNavigationDecision {
         origin: String,
         snapshot: BrowserSnapshot,
     },
-    Deny,
 }
 
 impl BrowserRecord {
@@ -417,6 +457,8 @@ struct BrowserRegistryState {
     next_instance_id: u64,
     capabilities: HashMap<Uuid, BrowserAgentCapability>,
     grants: Vec<BrowserGrant>,
+    grant_store: Option<BrowserGrantStore>,
+    grant_storage_required: bool,
     confirmations: HashMap<Uuid, BrowserConfirmationRecord>,
 }
 
@@ -491,8 +533,26 @@ impl Default for BrowserRegistry {
 
 impl BrowserRegistry {
     pub(crate) fn initialize_private_state(&self, data_dir: &Path) -> Result<(), String> {
+        let mut state = self.lock();
+        state.grant_storage_required = true;
         self.audit.initialize(data_dir)?;
-        self.sessions.initialize(data_dir)
+        self.sessions.initialize(data_dir)?;
+        if let Some(store) = &state.grant_store {
+            return if store.belongs_to(data_dir) {
+                Ok(())
+            } else {
+                Err("Browser sharing storage was initialized more than once".to_owned())
+            };
+        }
+        if !state.grants.is_empty() {
+            return Err(
+                "Browser sharing storage must be initialized before granting access".to_owned(),
+            );
+        }
+        let (store, grants) = BrowserGrantStore::open(data_dir)?;
+        state.grants = grants;
+        state.grant_store = Some(store);
+        Ok(())
     }
 
     pub(crate) fn recover_session(
@@ -953,19 +1013,22 @@ impl BrowserRegistry {
             return Err("browser origin changed while permission was being requested".to_owned());
         }
 
-        if let Some(grant) = state
-            .grants
-            .iter_mut()
-            .find(|grant| grant.workspace_id == workspace_id && grant.scope == scope)
-        {
+        let owner_id = record.owner_id.clone();
+        let mut next = state.grants.clone();
+        if let Some(grant) = next.iter_mut().find(|grant| {
+            grant.owner_id == owner_id && grant.workspace_id == workspace_id && grant.scope == scope
+        }) {
             grant.capabilities.extend(capabilities.iter().copied());
         } else {
-            state.grants.push(BrowserGrant {
+            next.push(BrowserGrant {
+                owner_id,
                 workspace_id: workspace_id.to_owned(),
                 scope: scope.clone(),
                 capabilities: capabilities.iter().copied().collect(),
             });
         }
+        persist_browser_grants(&state, &next)?;
+        state.grants = next;
 
         {
             let record = state
@@ -1007,14 +1070,41 @@ impl BrowserRegistry {
         ensure_workspace(browser_id, workspace_id, record)?;
         let target = share_target_for_record(record)
             .ok_or_else(|| "browser has no shareable HTTP origin".to_owned())?;
-        state
+        let owner_id = record.owner_id.clone();
+        let revoked = state
             .grants
-            .retain(|grant| grant.workspace_id != workspace_id || !grant.scope.covers(&target));
-        {
-            let record = state
-                .records
-                .get_mut(browser_id)
-                .expect("browser was checked above");
+            .iter()
+            .filter(|grant| {
+                grant.owner_id == owner_id
+                    && grant.workspace_id == workspace_id
+                    && grant.scope.covers(&target)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let next = state
+            .grants
+            .iter()
+            .filter(|grant| {
+                grant.owner_id != owner_id
+                    || grant.workspace_id != workspace_id
+                    || !grant.scope.covers(&target)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let persisted = persist_browser_grants(&state, &next);
+        // Stop live access even when the disk rejects the durable revoke. The
+        // caller receives that error and can retry before restarting the app.
+        state.grants = next;
+        for (id, record) in &mut state.records {
+            if record.owner_id != owner_id || record.workspace_id != workspace_id {
+                continue;
+            }
+            let affected = id == browser_id
+                || share_target_for_record(record)
+                    .is_some_and(|origin| revoked.iter().any(|grant| grant.scope.covers(&origin)));
+            if !affected {
+                continue;
+            }
             record.dispatch.halt.send_replace(true);
             record.paused_origin = None;
             record.pending_navigation_url = None;
@@ -1025,11 +1115,63 @@ impl BrowserRegistry {
             record.semantic_snapshot = None;
             record.screenshot_epoch = None;
         }
+        if let Err(error) = persisted {
+            return Err(format!("{error} Agent access is stopped for this run. Retry Stop sharing before restarting Tidebreak."));
+        }
         let record = state
             .records
             .get(browser_id)
             .expect("browser was checked above");
         Ok(record.snapshot(browser_id, agent_access_for_record(&state, record)))
+    }
+
+    /// Resume only consent that native code already holds for this exact owner,
+    /// workspace, and target. An uncovered origin still needs the sharing dialog.
+    pub(crate) fn resume_shared_browser(
+        &self,
+        browser_id: &str,
+        workspace_id: &str,
+    ) -> Result<Option<(BrowserSnapshot, Option<String>)>, String> {
+        let mut state = self.lock();
+        let record = state
+            .records
+            .get(browser_id)
+            .ok_or_else(|| "browser session is not registered".to_owned())?;
+        ensure_workspace(browser_id, workspace_id, record)?;
+        if record.resetting {
+            return Err("browser profile is resetting".to_owned());
+        }
+        let origin = share_target_for_record(record)
+            .ok_or_else(|| "browser has no shareable HTTP origin".to_owned())?;
+        let required = if record.pending_navigation_url.is_some() {
+            BrowserGrantCapability::BrowserControlOrigin
+        } else {
+            BrowserGrantCapability::BrowserObserveOrigin
+        };
+        if !grants_cover(&state, &record.owner_id, workspace_id, &origin, required) {
+            return Ok(None);
+        }
+        let record = state
+            .records
+            .get_mut(browser_id)
+            .expect("browser was checked above");
+        record.paused_origin = None;
+        record.dispatch.halt.send_replace(false);
+        if record.controller.halted {
+            record.controller = BrowserController::default();
+            record.controller_capability_id = None;
+        }
+        record.semantic_snapshot = None;
+        record.screenshot_epoch = None;
+        let pending_navigation = record.pending_navigation_url.take();
+        let record = state
+            .records
+            .get(browser_id)
+            .expect("browser was checked above");
+        Ok(Some((
+            record.snapshot(browser_id, agent_access_for_record(&state, record)),
+            pending_navigation,
+        )))
     }
 
     pub(crate) fn share_target_origin(
@@ -1085,6 +1227,7 @@ impl BrowserRegistry {
                 current_origin(record).is_some_and(|origin| {
                     grants_cover(
                         &state,
+                        &record.owner_id,
                         &record.workspace_id,
                         &origin,
                         BrowserGrantCapability::BrowserObserveOrigin,
@@ -1119,6 +1262,7 @@ impl BrowserRegistry {
         }
         if !grants_cover(
             &state,
+            &record.owner_id,
             &capability.workspace_id,
             &origin,
             BrowserGrantCapability::BrowserObserveOrigin,
@@ -1192,6 +1336,7 @@ impl BrowserRegistry {
         }
         if !grants_cover(
             &state,
+            &record.owner_id,
             &capability.workspace_id,
             &origin,
             BrowserGrantCapability::BrowserObserveOrigin,
@@ -1209,6 +1354,26 @@ impl BrowserRegistry {
             return Err("browser is not controlled by this agent".to_owned());
         }
         Ok(record.snapshot(browser_id, agent_access_for_record(&state, record)))
+    }
+
+    /// Recheck an in-flight native action without reacquiring its dispatch gate.
+    /// The outer dispatch consumes confirmation and records the action once.
+    pub(crate) fn authorize_native_action_phase(
+        &self,
+        capability_id: Uuid,
+        browser_id: &str,
+        workspace_id: &str,
+        origin: &BrowserOrigin,
+        fence: BrowserObservationFence,
+    ) -> Result<(), String> {
+        authorize_native_action_phase_locked(
+            &self.lock(),
+            capability_id,
+            browser_id,
+            workspace_id,
+            origin,
+            fence,
+        )
     }
 
     pub(crate) fn set_agent_action(
@@ -1377,6 +1542,7 @@ impl BrowserRegistry {
         }
         if !grants_cover(
             &state,
+            &record.owner_id,
             &capability.workspace_id,
             origin,
             required_capability,
@@ -1426,6 +1592,7 @@ impl BrowserRegistry {
         dispatch: F,
     ) -> Result<T, String>
     where
+        T: BrowserDispatchResult,
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<T, String>>,
     {
@@ -1464,6 +1631,7 @@ impl BrowserRegistry {
         dispatch: F,
     ) -> Result<T, String>
     where
+        T: BrowserDispatchResult,
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Result<T, String>>,
     {
@@ -1568,7 +1736,10 @@ impl BrowserRegistry {
             event_id,
             timestamp: chrono::Utc::now(),
             phase: BrowserAuditPhase::Outcome,
-            outcome: if result.is_ok() {
+            outcome: if result
+                .as_ref()
+                .is_ok_and(BrowserDispatchResult::audit_succeeded)
+            {
                 BrowserAuditOutcome::Succeeded
             } else {
                 BrowserAuditOutcome::Failed
@@ -1587,32 +1758,29 @@ impl BrowserRegistry {
         result
     }
 
-    /// Gate both agent-initiated navigation and page redirects before the new
-    /// document is exposed. Human navigation remains subject only to the URL
-    /// safety checks in the child-webview host.
-    pub(crate) fn authorize_navigation(
+    /// Reject an unshared native URL without assuming which frame requested it.
+    /// Tauri's callback includes iframe requests but exposes no frame identity.
+    pub(crate) fn allow_navigation(
         &self,
         browser_id: &str,
         workspace_id: &str,
         instance_id: u64,
-        destination_url: &str,
         destination: &BrowserOrigin,
-    ) -> BrowserNavigationDecision {
-        let mut state = self.lock();
+    ) -> bool {
+        let state = self.lock();
         let Some(record) = state.records.get(browser_id) else {
-            return BrowserNavigationDecision::Deny;
+            return false;
         };
-        if record.workspace_id != workspace_id || record.instance_id != instance_id {
-            return BrowserNavigationDecision::Deny;
-        }
-        if record.resetting {
-            return BrowserNavigationDecision::Deny;
+        if record.workspace_id != workspace_id
+            || record.instance_id != instance_id
+            || record.resetting
+        {
+            return false;
         }
         if record.controller.kind != BrowserControllerKind::Agent {
-            return BrowserNavigationDecision::Allow;
+            return true;
         }
-
-        let authorized = record
+        record
             .controller_capability_id
             .and_then(|capability_id| state.capabilities.get(&capability_id))
             .is_some_and(|capability| {
@@ -1621,13 +1789,50 @@ impl BrowserRegistry {
                     && !*record.dispatch.halt.borrow()
                     && grants_cover(
                         &state,
+                        &record.owner_id,
                         workspace_id,
                         destination,
                         BrowserGrantCapability::BrowserControlOrigin,
                     )
-            });
-        if authorized {
-            return BrowserNavigationDecision::Allow;
+            })
+    }
+
+    /// Pause a known top-level agent destination before scheduling navigation.
+    /// The URL-only native callback only rejects requests; it cannot safely
+    /// store an iframe destination for top-level replay.
+    pub(crate) fn authorize_agent_navigation(
+        &self,
+        capability_id: Uuid,
+        browser_id: &str,
+        origin: &BrowserOrigin,
+        fence: BrowserObservationFence,
+        destination_url: &str,
+        destination: &BrowserOrigin,
+    ) -> Result<BrowserNavigationDecision, String> {
+        let mut state = self.lock();
+        let workspace_id = active_capability(&state, capability_id)?
+            .workspace_id
+            .clone();
+        authorize_native_action_phase_locked(
+            &state,
+            capability_id,
+            browser_id,
+            &workspace_id,
+            origin,
+            fence,
+        )?;
+        let record = state
+            .records
+            .get(browser_id)
+            .expect("browser was checked above");
+        if grants_cover(
+            &state,
+            &record.owner_id,
+            &workspace_id,
+            destination,
+            BrowserGrantCapability::BrowserControlOrigin,
+        ) {
+            return Ok(BrowserNavigationDecision::Allow);
         }
 
         {
@@ -1652,10 +1857,10 @@ impl BrowserRegistry {
             .get(browser_id)
             .expect("browser was checked above");
         let snapshot = record.snapshot(browser_id, agent_access_for_record(&state, record));
-        BrowserNavigationDecision::Pause {
+        Ok(BrowserNavigationDecision::Pause {
             origin: destination.as_str().to_owned(),
             snapshot,
-        }
+        })
     }
 
     pub(crate) fn page_started(
@@ -1907,6 +2112,7 @@ impl BrowserRegistry {
                 .ok_or_else(|| "browser has no authorized HTTP origin".to_owned())?;
             if !grants_cover(
                 &state,
+                &record.owner_id,
                 &workspace_id,
                 &origin,
                 BrowserGrantCapability::BrowserObserveOrigin,
@@ -1995,6 +2201,7 @@ impl BrowserRegistry {
                 .ok_or_else(|| "browser has no authorized HTTP origin".to_owned())?;
             if !grants_cover(
                 &state,
+                &record.owner_id,
                 &workspace_id,
                 &origin,
                 BrowserGrantCapability::BrowserObserveOrigin,
@@ -2050,6 +2257,7 @@ impl BrowserRegistry {
             .ok_or_else(|| "browser has no authorized HTTP origin".to_owned())?;
         if !grants_cover(
             &state,
+            &record.owner_id,
             &capability.workspace_id,
             &origin,
             BrowserGrantCapability::BrowserObserveOrigin,
@@ -2192,6 +2400,54 @@ impl BrowserRegistry {
     }
 }
 
+fn authorize_native_action_phase_locked(
+    state: &BrowserRegistryState,
+    capability_id: Uuid,
+    browser_id: &str,
+    workspace_id: &str,
+    origin: &BrowserOrigin,
+    fence: BrowserObservationFence,
+) -> Result<(), String> {
+    let capability = active_capability(state, capability_id)?;
+    if capability.workspace_id != workspace_id {
+        return Err("browser capability belongs to another workspace".to_owned());
+    }
+    let record = state
+        .records
+        .get(browser_id)
+        .ok_or_else(|| "browser session is not registered".to_owned())?;
+    ensure_workspace(browser_id, workspace_id, record)?;
+    if record.instance_id != fence.instance_id
+        || record.document_epoch != fence.document_epoch
+        || record.resetting
+        || record.load_state != BrowserLoadState::Ready
+        || current_origin(record).as_ref() != Some(origin)
+    {
+        return Err("browser document changed during native input".to_owned());
+    }
+    if !record.visible {
+        return Err("browser is hidden".to_owned());
+    }
+    if *record.dispatch.halt.borrow() {
+        return Err("browser control was stopped by the user".to_owned());
+    }
+    if record.controller.kind != BrowserControllerKind::Agent
+        || record.controller_capability_id != Some(capability_id)
+    {
+        return Err("browser is not controlled by this agent".to_owned());
+    }
+    if !grants_cover(
+        state,
+        &record.owner_id,
+        workspace_id,
+        origin,
+        BrowserGrantCapability::BrowserControlOrigin,
+    ) {
+        return Err("browser origin is not shared for this operation".to_owned());
+    }
+    Ok(())
+}
+
 fn active_capability(
     state: &BrowserRegistryState,
     capability_id: Uuid,
@@ -2214,14 +2470,34 @@ fn share_target_for_record(record: &BrowserRecord) -> Option<BrowserOrigin> {
         .or_else(|| current_origin(record))
 }
 
+fn persist_browser_grants(
+    state: &BrowserRegistryState,
+    grants: &[BrowserGrant],
+) -> Result<(), String> {
+    if let Some(store) = &state.grant_store {
+        return store.persist(grants);
+    }
+    if state.grant_storage_required {
+        return Err("Browser sharing storage is unavailable".to_owned());
+    }
+    // Unit fixtures have no app data directory. Production initializes native
+    // storage before exposing any browser command.
+    #[cfg(test)]
+    return Ok(());
+    #[cfg(not(test))]
+    Err("Browser sharing storage is unavailable".to_owned())
+}
+
 fn grants_cover(
     state: &BrowserRegistryState,
+    owner_id: &OwnerId,
     workspace_id: &str,
     origin: &BrowserOrigin,
     requested: BrowserGrantCapability,
 ) -> bool {
     state.grants.iter().any(|grant| {
-        grant.workspace_id == workspace_id
+        grant.owner_id == *owner_id
+            && grant.workspace_id == workspace_id
             && grant.scope.covers(origin)
             && grant
                 .capabilities
@@ -2254,7 +2530,11 @@ fn agent_access_for_record(
     let matching: Vec<_> = state
         .grants
         .iter()
-        .filter(|grant| grant.workspace_id == record.workspace_id && grant.scope.covers(&origin))
+        .filter(|grant| {
+            grant.owner_id == record.owner_id
+                && grant.workspace_id == record.workspace_id
+                && grant.scope.covers(&origin)
+        })
         .collect();
     let covers = |requested| {
         matching.iter().any(|grant| {
@@ -2322,7 +2602,13 @@ fn authorize_agent_dispatch(
     {
         return Err("browser is not controlled by this agent".to_owned());
     }
-    if !grants_cover(state, &capability.workspace_id, origin, required_capability) {
+    if !grants_cover(
+        state,
+        &record.owner_id,
+        &capability.workspace_id,
+        origin,
+        required_capability,
+    ) {
         return Err("browser origin is not shared for this operation".to_owned());
     }
 

@@ -401,7 +401,10 @@
           body: new FormData(event.currentTarget),
         });
         const payload = await response.json();
-        status.textContent = `Upload ${payload.status}: ${payload.bytes} bytes`;
+        status.textContent = `Upload ${payload.status}: ${payload.bytes} bytes`
+          + (payload.files ?? []).map((file) =>
+            ` | ${file.name}: ${file.bytes} bytes, SHA-256 ${file.sha256}`
+          ).join("");
       });
 
       document.querySelector("#open-popup").addEventListener("click", () => {
@@ -412,6 +415,42 @@
         console.error("Agent browser fixture console error");
         status.textContent = "Console error emitted";
       });
+
+      // Opt-in native input races. The default Todo fixture has no handlers here.
+      const nativeFillCase = new URL(location.href).searchParams.get("nativeFillCase");
+      if (["replace_on_focus", "steal_focus", "replace_on_select", "steal_focus_on_select"].includes(nativeFillCase)) {
+        const input = document.querySelector("#item-label");
+        const decoy = document.querySelector('[name="displayName"]');
+        input.value = "Original fixture text";
+        const verify = document.createElement("button");
+        verify.type = "button";
+        verify.textContent = "Verify native fill values";
+        verify.style.cssText = "position:fixed;top:8px;right:8px;z-index:1";
+        verify.addEventListener("click", () => {
+          status.textContent = "Native fill values: " + JSON.stringify({
+            original: input.value,
+            current: document.querySelector("#item-label").value,
+            decoy: decoy.value,
+          });
+        });
+        document.body.append(verify);
+        let triggered = false;
+        const onSelect = nativeFillCase.endsWith("_select");
+        input.addEventListener(onSelect ? "select" : "focus", () => {
+          if (triggered) return;
+          if (onSelect && (input.selectionStart !== 0 || input.selectionEnd !== input.value.length)) return;
+          triggered = true;
+          if (nativeFillCase.startsWith("replace_")) {
+            const replacement = input.cloneNode(true);
+            replacement.value = "Original fixture text";
+            input.replaceWith(replacement);
+            replacement.focus();
+          } else {
+            decoy.focus();
+          }
+          status.textContent = "Native fill case triggered: " + nativeFillCase;
+        });
+      }
 
       renderRoute();
       renderItems();

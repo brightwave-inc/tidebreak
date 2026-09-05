@@ -283,9 +283,14 @@ fn unit_session(sink: Arc<dyn crate::HarnessEventSink>) -> CodexSession {
 
 #[cfg(unix)]
 async fn session_reading_script(script: &str) -> (CodexSession, tokio::process::Child) {
-    let mut child = Command::new("sh")
-        .arg("-c")
-        .arg(script)
+    let mut command = Command::new("sh");
+    command.arg("-c").arg(script);
+    session_reading_command(command).await
+}
+
+#[cfg(unix)]
+async fn session_reading_command(mut command: Command) -> (CodexSession, tokio::process::Child) {
+    let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -328,7 +333,7 @@ sleep 2
 }
 
 /// `thread/resume` returns the entire persisted thread in one response. A
-/// healthy response larger than the normal turn-event limit must still reach
+/// healthy response larger than the shared default line limit must still reach
 /// the matching RPC waiter.
 #[cfg(unix)]
 #[tokio::test]
@@ -345,8 +350,102 @@ sleep 2
     session
         .read_until_rpc(7, Duration::from_secs(2), THREAD_LOAD_ABSOLUTE_CEILING)
         .await
-        .expect("a valid response above the normal line limit should be read");
+        .expect("a valid response above the shared default line limit should be read");
     let _ = child.kill().await;
+}
+
+/// Text-compatible MCP results carry a second serialized copy of the snapshot.
+/// A 500-button snapshot with 100-character names produces a frame over 300 KiB.
+#[cfg(unix)]
+#[tokio::test]
+async fn read_lines_preserves_large_browser_mcp_results() {
+    let nodes: Vec<_> = (1..=500)
+        .map(|index| {
+            json!({
+                "kind": "interactive", "ref": format!("@e{index}"), "tag": "button",
+                "role": "button", "name": "a".repeat(100), "frame": "main",
+                "disabled": false, "sensitive": false, "actions": ["click"],
+                "bounds": {"x": 0, "y": index, "width": 100, "height": 20}
+            })
+        })
+        .collect();
+    let snapshot = json!({
+        "browserId": "browser-1", "snapshotId": "snapshot-1", "documentEpoch": 1,
+        "contentTrust": "untrusted_page", "url": "https://example.com", "title": "Buttons",
+        "viewport": {"width": 1024, "height": 768, "scrollX": 0, "scrollY": 0},
+        "nodes": nodes, "frames": [], "truncated": false
+    });
+    serde_json::from_value::<tidebreak_core::BrowserPageSnapshot>(snapshot.clone())
+        .expect("the generated snapshot must satisfy the browser contract");
+    let frame = json!({
+        "method": "item/completed",
+        "params": {"item": {
+            "type": "mcpToolCall", "id": "browser-call", "server": "tb-browser",
+            "tool": "browser_snapshot", "status": "completed", "arguments": {},
+            "result": {
+                "content": [{"type": "text", "text": format!("Snapshot contains 500 buttons.\n{snapshot}")}],
+                "structuredContent": snapshot
+            }
+        }}
+    }).to_string();
+    assert!(frame.len() > StreamBudget::default().max_partial_line);
+    assert!(frame.len() < RPC_MAX_PARTIAL_LINE);
+    let dir = tempfile::tempdir().unwrap();
+    let input_path = dir.path().join("codex-stream.jsonl");
+    std::fs::write(&input_path, format!("{frame}\n")).unwrap();
+    let mut command = Command::new("cat");
+    command.arg(input_path);
+    let (session, mut child) = session_reading_command(command).await;
+    let lines = timeout(Duration::from_secs(2), session.read_lines())
+        .await
+        .expect("the browser result should arrive before the deadline")
+        .unwrap();
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0].len(), frame.len());
+    assert!(
+        lines[0] == frame,
+        "the reader must preserve the full JSON frame"
+    );
+    let events = session.emit_parsed(&lines[0]).await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        HarnessEvent::ToolCompleted {
+            call_id,
+            outcome: tidebreak_core::ToolOutcome::Succeeded,
+            preview,
+            ..
+        } if call_id == "browser-call" && preview.starts_with("Snapshot contains 500 buttons.")
+    )));
+    assert!(child.wait().await.unwrap().success());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn read_lines_truncates_oversized_events_and_preserves_following_lines() {
+    let payload_bytes = RPC_MAX_PARTIAL_LINE + 1;
+    let script = format!(
+        r#"
+printf '%*s' {payload_bytes} '' | tr ' ' a
+printf '\nfollowing event\n'
+"#
+    );
+    let (session, mut child) = session_reading_script(&script).await;
+    let lines = timeout(Duration::from_secs(5), async {
+        let mut lines = Vec::new();
+        while lines.len() < 2 {
+            let batch = session.read_lines().await.unwrap();
+            assert!(!batch.is_empty(), "stdout closed before the following line");
+            lines.extend(batch);
+        }
+        lines
+    })
+    .await
+    .expect("an oversized event must not block later lines");
+    assert_eq!(lines[0].len(), RPC_MAX_PARTIAL_LINE);
+    assert_eq!(lines[1], "following event");
+    let stdout = session.stdout.lock().unwrap().clone().unwrap();
+    assert!(stdout.lock().await.lines.overflow_chunks > 0);
+    assert!(child.wait().await.unwrap().success());
 }
 
 /// Even startup responses stay bounded. If Codex exceeds its larger RPC

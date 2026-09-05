@@ -117,7 +117,7 @@ async fn pick_skill_folder(app: &AppHandle) -> Result<Option<PathBuf>, String> {
         .dialog()
         .file()
         .set_title("Choose a skill folder or a folder of skills");
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_window("main") {
         picker = picker.set_parent(&window);
     }
     picker.pick_folder(move |path| {

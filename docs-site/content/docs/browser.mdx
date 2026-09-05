@@ -1,0 +1,97 @@
+---
+title: In-app browser
+description: Share a visible macOS browser tab with a foreground chat or a coding agent.
+---
+
+On macOS, Tidebreak agents can inspect and control a visible browser tab that
+you share. Use it for local development servers, previews, public documentation,
+and ordinary forms. Tidebreak keeps a separate browser profile and does not
+import your personal browser's cookies or logins.
+
+## Share a tab
+
+To let an agent use a page:
+
+1. Open **Browser** from the chat's status menu, or open a browser tab in the
+   code workspace.
+2. Navigate to the page you want the agent to use.
+3. Select **Share with agent** and review the origin in the native confirmation.
+4. Keep the tab visible and ask the agent to inspect or use the page.
+
+For example: “Use the shared browser to add a Todo item, then read the page to
+confirm that it appears.”
+
+Tidebreak remembers your sharing choice for this conversation or workspace,
+including after an app restart. For local previews, choose **Only this origin**
+or **All local sites** to include changing loopback ports. **Stop sharing**
+removes the saved choice.
+
+If the agent sees no tabs, check that you opened and shared the tab in the same
+conversation or code workspace. A browser ID alone gives an agent no access.
+When the agent uses its navigation tool to request an unshared origin, Tidebreak
+pauses before opening it. Select **Review & resume** to review that destination.
+Page links, redirects, and iframe loads do not queue a destination for this
+control. The native URL callback rejects an unshared request without pausing the
+whole tab. To request a blocked destination deliberately, ask the agent to
+navigate directly to its address.
+
+## Coding agents
+
+Tidebreak configures the browser connection when it launches a local coding
+session. Claude Code, Codex CLI, and OpenCode receive the browser through MCP.
+Grok CLI receives instructions for the bundled browser command. You do not need
+to install a second browser server or copy credentials into the conversation.
+
+The agent lists shared tabs, reads a semantic snapshot, and uses the snapshot's
+element references to click, fill, select, or scroll. After an action, the agent
+reads a fresh snapshot. Old references fail when the page or control state
+changes. Focus and keyboard actions require a target whose native focus can be
+verified. If the engine returns `unsupported_native`, use a supported action
+or take over the tab.
+
+On macOS, changing a collapsed select that opens a native popup returns
+`unsupported_native` before any input. Choose **Take over** and select the
+option yourself. If the requested value is already selected, the action
+completes without input. Selection in inline listboxes is not yet verified.
+
+A terminal or agent launched outside Tidebreak does not inherit this connection.
+A remote server without the desktop browser runtime cannot control a local tab.
+
+## Stop or take over
+
+Use **Stop** to cancel agent control, **Take over** to return control to yourself,
+or **Stop sharing** to revoke the grant. Hiding a tab prevents the agent from
+acting on it. An agent cannot resume a stopped tab by retrying its tool call. To continue,
+select **Review & resume**. An already approved site resumes without another
+sharing prompt.
+
+Tidebreak treats page text as untrusted content. A page cannot grant access to
+another origin, a host file, or another conversation. Password and verification-code
+fields require you to take over. Outside localhost, Tidebreak asks for native
+confirmation before consequential actions and selection changes.
+
+## Files, screenshots, and reset
+
+Foreground chat can attach an exact conversation output or a file from an
+approved connected folder. Each upload requires confirmation. The code-harness
+browser bridge does not expose an upload tool. To download a file, take over a
+visible foreground conversation browser. Tidebreak saves completed downloads to
+that conversation's Outputs. Code-workspace browsers cannot save downloads.
+
+The screenshot operation returns an unsupported result while WKWebView cannot
+prove that closed shadow roots conceal no sensitive content. Agents can use
+semantic snapshots; they should not retry a screenshot that the engine refuses.
+
+To clear the managed browser profile, use **Reset development profile** in the
+browser options. Reset ends agent control and invalidates old element references.
+It preserves your origin sharing choices. To revoke those choices, use
+**Stop sharing**.
+
+## Release scope
+
+The macOS implementation is undergoing the release acceptance work tracked in
+issue #2345. Native agent workflows and packaging need separate verification;
+unit tests and the simulated bridge fixture do not establish those results.
+Windows and Linux agent control, background browser agents, arbitrary signed-in
+services, personal profiles, CAPTCHA handling, and password-manager integration
+remain outside this release.

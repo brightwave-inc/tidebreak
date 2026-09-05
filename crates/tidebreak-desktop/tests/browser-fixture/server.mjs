@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -92,6 +93,49 @@ function fixtureDelay(url) {
   }
 }
 
+const maxSlowDownloads = 64;
+const maxActiveSlowDownloads = 4;
+const maxSlowDownloadWaitMs = 120_000;
+const slowDownloadPrefix = Buffer.from("browser fixture recovery download\n");
+const slowDownloadBody = Buffer.concat([
+  slowDownloadPrefix,
+  Buffer.alloc(64 * 1024 - slowDownloadPrefix.length, "r"),
+]);
+
+function recoveryToken(url) {
+  const token = url.searchParams.get("token") ?? "";
+  return /^[A-Za-z0-9_-]{1,64}$/.test(token) ? token : null;
+}
+
+function slowDownloadWait(url) {
+  const value = url.searchParams.get("timeout_ms");
+  if (value === null) return maxSlowDownloadWaitMs;
+  if (!/^[0-9]{1,6}$/.test(value)) return null;
+  const milliseconds = Number(value);
+  return milliseconds >= 25 && milliseconds <= maxSlowDownloadWaitMs
+    ? milliseconds
+    : null;
+}
+
+function slowDownloadSnapshot(entry) {
+  return {
+    token: entry.token,
+    status: entry.status,
+    requests: entry.requests,
+    totalBytes: slowDownloadBody.length,
+    prefixBytes: slowDownloadPrefix.length,
+    timeoutMs: entry.timeoutMs,
+  };
+}
+
+function finishSlowDownload(entry, status) {
+  if (!["waiting", "releasing"].includes(entry.status)) return;
+  entry.status = status;
+  clearTimeout(entry.timer);
+  entry.timer = null;
+  entry.response = null;
+}
+
 function parseJsonBody(body) {
   try {
     return JSON.parse(body.toString("utf8"));
@@ -107,6 +151,8 @@ export async function startBrowserFixture({
 } = {}) {
   let items = [{ id: 1, label: "Inspect the preview" }];
   let nextItemId = 2;
+  const slowDownloads = new Map();
+  let closing = false;
 
   const crossOriginServer = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", "http://fixture.invalid");
@@ -133,6 +179,111 @@ export async function startBrowserFixture({
         html(response, source.replaceAll("__CROSS_ORIGIN__", crossOrigin));
         return;
       }
+      if (request.method === "GET" && url.pathname === "/recovery") {
+        html(response, await fixtureFile("recovery.html"));
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/recovery.mjs") {
+        text(response, await fixtureFile("recovery.mjs"), 200, {
+          "content-type": "text/javascript; charset=utf-8",
+        });
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/slow-download") {
+        const token = recoveryToken(url);
+        const timeoutMs = slowDownloadWait(url);
+        if (!token || timeoutMs === null) {
+          json(response, { error: "invalid_download_request" }, 400);
+          return;
+        }
+        const previous = slowDownloads.get(token);
+        if (previous) {
+          previous.requests += 1;
+          json(
+            response,
+            {
+              error: "download_token_reused",
+              ...slowDownloadSnapshot(previous),
+            },
+            409,
+          );
+          return;
+        }
+        const active = Array.from(slowDownloads.values()).filter(
+          (entry) => entry.response,
+        ).length;
+        if (
+          closing ||
+          slowDownloads.size >= maxSlowDownloads ||
+          active >= maxActiveSlowDownloads
+        ) {
+          json(response, { error: "download_limit_reached" }, 503);
+          return;
+        }
+        const entry = {
+          token,
+          status: "waiting",
+          requests: 1,
+          timeoutMs,
+          response,
+          timer: null,
+        };
+        slowDownloads.set(token, entry);
+        response.once("finish", () => finishSlowDownload(entry, "completed"));
+        response.once("close", () => finishSlowDownload(entry, "aborted"));
+        response.once("error", () => finishSlowDownload(entry, "aborted"));
+        entry.timer = setTimeout(() => {
+          finishSlowDownload(entry, "timed_out");
+          response.destroy();
+        }, timeoutMs);
+        entry.timer.unref();
+        response.writeHead(200, {
+          "cache-control": "no-store",
+          "content-type": "application/octet-stream",
+          "content-length": String(slowDownloadBody.length),
+          "content-disposition":
+            'attachment; filename="fixture-recovery-' + token + '.txt"',
+          "x-content-type-options": "nosniff",
+        });
+        response.flushHeaders();
+        response.write(slowDownloadPrefix);
+        return;
+      }
+      if (
+        ["GET", "POST"].includes(request.method) &&
+        url.pathname === "/api/slow-download"
+      ) {
+        const token = recoveryToken(url);
+        if (!token) {
+          json(response, { error: "invalid_download_token" }, 400);
+          return;
+        }
+        const entry = slowDownloads.get(token);
+        if (!entry) {
+          json(response, { error: "download_not_found" }, 404);
+          return;
+        }
+        if (request.method === "POST") {
+          if ((await requestBody(request)).length !== 0) {
+            json(response, { error: "download_release_body_not_empty" }, 400);
+            return;
+          }
+          if (entry.status !== "waiting" || !entry.response) {
+            json(
+              response,
+              { error: "download_not_waiting", ...slowDownloadSnapshot(entry) },
+              409,
+            );
+            return;
+          }
+          entry.status = "releasing";
+          entry.response.end(
+            slowDownloadBody.subarray(slowDownloadPrefix.length),
+          );
+        }
+        json(response, slowDownloadSnapshot(entry));
+        return;
+      }
       if (request.method === "GET" && url.pathname === "/same-frame") {
         html(response, await fixtureFile("same-frame.html"));
         return;
@@ -148,6 +299,17 @@ export async function startBrowserFixture({
         response.writeHead(302, {
           "cache-control": "no-store",
           location: "/redirected?from=redirect",
+        });
+        response.end();
+        return;
+      }
+      if (
+        request.method === "GET" &&
+        url.pathname === "/redirect-cross-origin"
+      ) {
+        response.writeHead(302, {
+          "cache-control": "no-store",
+          location: `${crossOrigin}/cross-frame`,
         });
         response.end();
         return;
@@ -191,10 +353,29 @@ export async function startBrowserFixture({
       }
       if (request.method === "POST" && url.pathname === "/upload") {
         const body = await requestBody(request);
+        const contentType = request.headers["content-type"] ?? null;
+        const files = [];
+        if (contentType?.startsWith("multipart/form-data")) {
+          const form = await new Request("http://fixture.invalid/upload", {
+            method: "POST",
+            headers: { "content-type": contentType },
+            body,
+          }).formData();
+          for (const value of form.values()) {
+            if (typeof value === "string") continue;
+            const bytes = Buffer.from(await value.arrayBuffer());
+            files.push({
+              name: value.name,
+              bytes: bytes.length,
+              sha256: createHash("sha256").update(bytes).digest("hex"),
+            });
+          }
+        }
         json(response, {
           status: "uploaded",
           bytes: body.length,
-          contentType: request.headers["content-type"] ?? null,
+          contentType,
+          files,
         });
         return;
       }
@@ -213,8 +394,14 @@ export async function startBrowserFixture({
 
       json(response, { error: "not_found" }, 404);
     } catch (error) {
-      const status = Number.isInteger(error?.statusCode) ? error.statusCode : 500;
-      json(response, { error: status === 413 ? "body_too_large" : "fixture_error" }, status);
+      const status = Number.isInteger(error?.statusCode)
+        ? error.statusCode
+        : 500;
+      json(
+        response,
+        { error: status === 413 ? "body_too_large" : "fixture_error" },
+        status,
+      );
     }
   });
 
@@ -228,6 +415,12 @@ export async function startBrowserFixture({
       origin,
       crossOrigin,
       async close() {
+        closing = true;
+        for (const entry of slowDownloads.values()) {
+          const heldResponse = entry.response;
+          finishSlowDownload(entry, "aborted");
+          heldResponse?.destroy();
+        }
         await Promise.all([close(primaryServer), close(crossOriginServer)]);
       },
     };
@@ -261,7 +454,9 @@ const invokedPath = process.argv[1]
   : null;
 
 if (invokedPath === import.meta.url) {
-  const fixture = await startBrowserFixture(fixtureOptions(process.argv.slice(2)));
+  const fixture = await startBrowserFixture(
+    fixtureOptions(process.argv.slice(2)),
+  );
   process.stdout.write(
     `${JSON.stringify({ origin: fixture.origin, crossOrigin: fixture.crossOrigin })}\n`,
   );

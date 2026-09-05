@@ -1885,6 +1885,165 @@ async fn concurrent_client_resolution_and_cancellation_do_not_invert_locks() {
 }
 
 #[tokio::test]
+async fn client_cancellation_fences_live_heartbeat_and_existing_claim() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let (turn_id, call, parked_at) = park_test_client_wait(&store, chat.id).await;
+    let executor_id = uuid::Uuid::new_v4();
+    let lease_token = uuid::Uuid::new_v4();
+    let claimed_at = parked_at + chrono::Duration::seconds(1);
+    let expires_at = claimed_at + chrono::Duration::minutes(1);
+    assert!(matches!(
+        store
+            .claim_client_tool_call(
+                call.id,
+                chat.id,
+                executor_id,
+                lease_token,
+                claimed_at,
+                expires_at,
+            )
+            .await
+            .unwrap(),
+        ClaimClientToolCallOutcome::Claimed(_)
+    ));
+    let cancelled_at = claimed_at + chrono::Duration::seconds(1);
+    let cancellation = store
+        .request_turn_cancellation_and_append_event(turn_id, cancelled_at)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        cancellation.outcome,
+        RequestTurnCancellationOutcome::Requested(ref turn)
+            if turn.status == TurnRunStatus::CancellingClient
+    ));
+    let after_cancel = cancelled_at + chrono::Duration::seconds(1);
+    assert_eq!(
+        store
+            .heartbeat_client_tool_call(
+                call.id,
+                chat.id,
+                lease_token,
+                after_cancel,
+                expires_at + chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap(),
+        HeartbeatClientToolCallOutcome::LeaseLost
+    );
+    assert_eq!(
+        store
+            .claim_client_tool_call(
+                call.id,
+                chat.id,
+                executor_id,
+                lease_token,
+                after_cancel,
+                expires_at + chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap(),
+        ClaimClientToolCallOutcome::Unavailable
+    );
+    let pending = store.list_tool_calls(chat.id).await.unwrap();
+    assert_eq!(pending[0].status, ToolCallStatus::Pending);
+    assert_eq!(pending[0].client_lease_expires_at, Some(expires_at));
+
+    let reconciled = store
+        .resolve_client_tool_call_and_append_event(
+            call.id,
+            chat.id,
+            lease_token,
+            after_cancel,
+            &ToolCallResolution::Cancelled {
+                result: "cancelled before native attachment".into(),
+            },
+            after_cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(reconciled.outcome, ResolveToolCallOutcome::Resolved);
+    assert_eq!(reconciled.turn.unwrap().status, TurnRunStatus::Cancelled);
+}
+
+#[tokio::test]
+async fn browser_client_claim_requires_its_own_durable_parent_turn() {
+    let (_dir, store) = temp_store().await;
+    let chat = sample_chat();
+    store.create_chat(&chat).await.unwrap();
+    let now = Utc::now();
+    let call = ToolCallRecord {
+        id: CallId::new(),
+        chat_id: chat.id,
+        turn_id: TurnId::new(),
+        provider_id: "native-browser".into(),
+        name: crate::BROWSER_LIST_TOOL.into(),
+        arguments: serde_json::json!({}),
+        raw_arguments: None,
+        execution: ToolCallExecution::Client,
+        status: ToolCallStatus::Pending,
+        result: None,
+        result_preview: None,
+        provider_replay: None,
+        error_code: None,
+        error_detail: None,
+        client_executor_id: None,
+        client_lease_expires_at: None,
+        created_at: now,
+        resolved_at: None,
+    };
+    store.accept_tool_call(&call).await.unwrap();
+    assert_eq!(
+        store
+            .claim_client_tool_call(
+                call.id,
+                chat.id,
+                uuid::Uuid::new_v4(),
+                uuid::Uuid::new_v4(),
+                now,
+                now + chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap(),
+        ClaimClientToolCallOutcome::Unavailable
+    );
+
+    let other_chat = Chat {
+        id: SessionId::new(),
+        ..sample_chat()
+    };
+    store.create_chat(&other_chat).await.unwrap();
+    assert!(matches!(
+        store
+            .accept_turn(
+                call.turn_id,
+                other_chat.id,
+                "test-model",
+                "another conversation"
+            )
+            .await
+            .unwrap(),
+        AcceptTurnOutcome::Accepted(_)
+    ));
+    assert_eq!(
+        store
+            .claim_client_tool_call(
+                call.id,
+                chat.id,
+                uuid::Uuid::new_v4(),
+                uuid::Uuid::new_v4(),
+                now,
+                now + chrono::Duration::minutes(1),
+            )
+            .await
+            .unwrap(),
+        ClaimClientToolCallOutcome::Unavailable
+    );
+}
+
+#[tokio::test]
 async fn client_tool_call_is_fenced_by_its_exact_lease() {
     let (_dir, store) = temp_store().await;
     let chat = sample_chat();

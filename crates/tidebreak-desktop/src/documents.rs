@@ -439,7 +439,7 @@ pub(crate) fn handle_window_drag_drop(app: &AppHandle, window_label: &str, event
         DragDropEvent::Over { .. } => return,
         _ => return,
     };
-    if let Some(window) = app.get_webview_window(window_label) {
+    if let Some(window) = app.get_window(window_label) {
         if let Err(error) = window.emit(IMPORT_DROP_EVENT, state) {
             eprintln!("tidebreak-desktop: could not emit import drop state: {error}");
         }
@@ -678,7 +678,7 @@ fn streaming_local_client() -> reqwest::Client {
 pub(crate) async fn pick_documents(app: &AppHandle) -> Result<Option<Vec<PathBuf>>, String> {
     let (tx, rx) = oneshot::channel();
     let mut picker = app.dialog().file().set_title("Attach files");
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_window("main") {
         picker = picker.set_parent(&window);
     }
     picker.pick_files(move |paths| {
@@ -711,7 +711,7 @@ pub(crate) async fn pick_export_path(
         .file()
         .set_title(dialog_title)
         .set_file_name(filename);
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_window("main") {
         picker = picker.set_parent(&window);
     }
     picker.save_file(move |path| {

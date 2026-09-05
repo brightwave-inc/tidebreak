@@ -1348,7 +1348,7 @@ async fn confirm_folder_widening(
             "Allow".to_owned(),
             "Cancel".to_owned(),
         ));
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_window("main") {
         dialog = dialog.parent(&window);
     }
     dialog.show(move |approved| {
@@ -1404,7 +1404,7 @@ async fn pick_folder_titled(
     if let Some(starting_directory) = starting_directory {
         picker = picker.set_directory(starting_directory);
     }
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_window("main") {
         picker = picker.set_parent(&window);
     }
     picker.pick_folder(move |path| {

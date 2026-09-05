@@ -1637,87 +1637,180 @@ async fn browser_navigate_decodes_response() {
 }
 
 #[tokio::test]
-async fn browser_snapshot_decodes_response() {
+async fn browser_mcp_text_can_drive_a_snapshot_action_sequence() {
+    use serde_json::json;
+    use tidebreak_mcp::protocol::Request;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let endpoint = format!("http://127.0.0.1:{}", addr.port());
-
+    let snapshot = json!({
+        "browserId": "browser-1",
+        "snapshotId": "snap-1",
+        "documentEpoch": 3,
+        "contentTrust": "untrusted_page",
+        "url": "https://example.com/",
+        "title": "Test Page",
+        "viewport": {"width": 1024.0, "height": 768.0, "scrollX": 0.0, "scrollY": 0.0},
+        "nodes": [{
+            "kind": "interactive", "ref": "element-1", "tag": "button",
+            "role": "button", "name": "Continue", "frame": "main",
+            "disabled": false, "sensitive": false, "actions": ["click"],
+            "bounds": {"x": 0.0, "y": 0.0, "width": 80.0, "height": 30.0}
+        }],
+        "frames": [],
+        "truncated": false
+    });
+    let action = json!({
+        "browserId": "browser-1", "snapshotId": "snap-1", "documentEpoch": 3,
+        "ref": "element-1", "action": "click", "status": "ok",
+        "message": "Action completed", "requiresResnapshot": true
+    });
+    let responses = [snapshot.clone(), action.clone()];
     let handle = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let (reader, writer) = stream.into_split();
-        let mut buf_reader = tokio::io::BufReader::new(reader);
-        let mut content_length: usize = 0;
-        loop {
-            let mut line = String::new();
-            if tokio::io::AsyncBufReadExt::read_line(&mut buf_reader, &mut line)
-                .await
-                .unwrap()
-                == 0
-            {
-                break;
+        for (index, result) in responses.into_iter().enumerate() {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (reader, mut writer) = stream.into_split();
+            let mut reader = tokio::io::BufReader::new(reader);
+            let mut request_line = String::new();
+            reader.read_line(&mut request_line).await.unwrap();
+            let operation = if index == 0 { "snapshot" } else { "act" };
+            assert_eq!(
+                request_line,
+                format!("POST /code/browser/{operation} HTTP/1.1\r\n")
+            );
+            let mut content_length = 0;
+            let mut authorized = false;
+            loop {
+                let mut line = String::new();
+                assert_ne!(reader.read_line(&mut line).await.unwrap(), 0);
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    content_length = value.trim().parse().unwrap();
+                }
+                authorized |= line
+                    .trim()
+                    .eq_ignore_ascii_case(&format!("authorization: Bearer {VALID_TOKEN}"));
             }
-            if line == "\r\n" {
-                break;
+            assert!(authorized);
+            let mut body = vec![0; content_length];
+            reader.read_exact(&mut body).await.unwrap();
+            let body: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["browser_id"], "browser-1");
+            if index == 0 {
+                assert_eq!(body["max_nodes"], 250);
+            } else {
+                assert_eq!(body["snapshot_id"], "snap-1");
+                assert_eq!(body["document_epoch"], 3);
+                assert_eq!(body["ref"], "element-1");
+                assert_eq!(body["action"], json!({"type": "click"}));
             }
-            if line.to_lowercase().starts_with("content-length:") {
-                content_length = line.split(':').nth(1).unwrap().trim().parse().unwrap_or(0);
-            }
-        }
-        let mut body_bytes = vec![0u8; content_length];
-        if content_length > 0 {
-            tokio::io::AsyncReadExt::read_exact(&mut buf_reader, &mut body_bytes)
+            let bytes = serde_json::to_vec(&result).unwrap();
+            writer
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n",
+                        bytes.len()
+                    )
+                    .as_bytes(),
+                )
                 .await
                 .unwrap();
+            writer.write_all(&bytes).await.unwrap();
         }
-        let result = serde_json::json!({
-            "browserId": "browser-1",
-            "snapshotId": "snap-1",
-            "documentEpoch": 3,
-            "contentTrust": "untrusted_page",
-            "url": "https://example.com/",
-            "title": "Test Page",
-            "viewport": {
-                "width": 1024.0, "height": 768.0,
-                "scrollX": 0.0, "scrollY": 0.0
-            },
-            "nodes": [],
-            "frames": [],
-            "truncated": false
-        });
-        let result_bytes = serde_json::to_vec(&result).unwrap();
-        let response = format!(
-            "HTTP/1.1 200 OK\r\n\
-             Content-Type: application/json\r\n\
-             Content-Length: {}\r\n\
-             Connection: close\r\n\r\n",
-            result_bytes.len()
-        );
-        let mut writer = writer;
-        tokio::io::AsyncWriteExt::write_all(&mut writer, response.as_bytes())
-            .await
-            .unwrap();
-        tokio::io::AsyncWriteExt::write_all(&mut writer, &result_bytes)
-            .await
-            .unwrap();
     });
 
     let cap = BrowserCapfile {
         endpoint: format!("http://127.0.0.1:{}/code/browser", addr.port()),
         token: VALID_TOKEN.to_string(),
-        semantic_actions: false,
+        semantic_actions: true,
     };
     let client = BrowserClient::new(&cap).unwrap();
-    let mut test_client = client.clone();
-    test_client.endpoint = endpoint;
-
-    let args = BrowserSnapshotArgs {
-        browser_id: "browser-1".to_string(),
-        max_nodes: Some(250),
+    let ctx = ToolCtx::without_private_scratch(tidebreak_core::SessionId::new(), None);
+    let server = tidebreak_mcp::McpServer::new(
+        Arc::new(browser_tool_registry(&client, cap.semantic_actions)),
+        ctx,
+    )
+    .with_approval_gate(Arc::new(AutoApproveGate));
+    let request = |id, method: &str, params| -> Request {
+        serde_json::from_value(json!({
+            "jsonrpc": "2.0", "id": id, "method": method, "params": params
+        }))
+        .unwrap()
     };
-    let result = browser_snapshot(&test_client, &args).await.unwrap();
-    assert_eq!(result.title, "Test Page");
-    assert_eq!(result.document_epoch, 3);
-    handle.abort();
+    let initialized = server
+        .handle(request(
+            1,
+            "initialize",
+            json!({
+                "protocolVersion": tidebreak_mcp::PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "text-only-harness", "version": "1.0.0"}
+            }),
+        ))
+        .await
+        .unwrap();
+    assert!(initialized.error.is_none());
+    assert!(server
+        .handle(
+            serde_json::from_value(json!({
+                "jsonrpc": "2.0", "method": "notifications/initialized"
+            }))
+            .unwrap(),
+        )
+        .await
+        .is_none());
+
+    let response = server
+        .handle(request(
+            2,
+            "tools/call",
+            json!({
+                "name": "browser_snapshot",
+                "arguments": {"browser_id": "browser-1", "max_nodes": 250}
+            }),
+        ))
+        .await
+        .unwrap()
+        .result
+        .unwrap();
+    assert_eq!(response["isError"], false);
+    assert_eq!(response["structuredContent"], snapshot);
+    // Simulate a harness that presents only MCP text content to its model.
+    let text = response["content"][0]["text"].as_str().unwrap();
+    let (_, json_text) = text
+        .split_once("\n\n")
+        .expect("complete JSON text fallback");
+    let observed: Value = serde_json::from_str(json_text).unwrap();
+    assert_eq!(observed, snapshot);
+    let response = server
+        .handle(request(
+            3,
+            "tools/call",
+            json!({
+                "name": "browser_act",
+                "arguments": {
+                    "browser_id": observed["browserId"],
+                    "snapshot_id": observed["snapshotId"],
+                    "document_epoch": observed["documentEpoch"],
+                    "ref": observed["nodes"][0]["ref"],
+                    "action": {"type": observed["nodes"][0]["actions"][0]}
+                }
+            }),
+        ))
+        .await
+        .unwrap()
+        .result
+        .unwrap();
+    assert_eq!(response["isError"], false);
+    assert_eq!(response["structuredContent"], action);
+    let text = response["content"][0]["text"].as_str().unwrap();
+    let (_, json_text) = text.split_once("\n\n").unwrap();
+    assert_eq!(serde_json::from_str::<Value>(json_text).unwrap(), action);
+    handle.await.unwrap();
 }
 
 // -- MCP failure mapping ----------------------------------------------

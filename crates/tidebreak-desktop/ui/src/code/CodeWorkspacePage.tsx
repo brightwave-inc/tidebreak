@@ -259,8 +259,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
     };
   }, [workspaceId]);
 
-  // Browsers close before shells: a native webview is worth nothing off
-  // screen, while a shell outlives the tab that opened it.
+  // Browser tabs survive leaving the workspace; their native views hide.
   const {
     browserTitles,
     browserInitialUrls,

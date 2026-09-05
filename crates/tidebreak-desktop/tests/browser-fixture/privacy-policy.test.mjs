@@ -312,3 +312,17 @@ test("sensitive textarea and contenteditable values never reach snapshot fields"
     assert.equal(result.nodes[0].href, null);
   }
 });
+
+
+test("the non-auth fixture marker remains writable under the native privacy policy", async () => {
+  const source = await readFile(resolve(fixtureRoot, "recovery.html"), "utf8");
+  const input = source.match(/<input\b([^>]+)>/);
+  const label = source.match(/<label for="([^"]+)">([^<]+)<\/label>/);
+  assert.ok(input);
+  assert.ok(label);
+  const attrs = Object.fromEntries(
+    Array.from(input[1].matchAll(/([a-z-]+)="([^"]*)"/g), (match) => [match[1], match[2]]),
+  );
+  assert.equal(attrs.id, label[1]);
+  assert.equal(classify(field({ id: attrs.id, label: label[2], attrs }), documentStub), false);
+});

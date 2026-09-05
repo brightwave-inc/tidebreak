@@ -7,6 +7,10 @@ import {
 } from "../codeChrome";
 import { attachedRemotely } from "@/host";
 import { browserTitlesForLayout } from "./layout";
+import {
+  readBrowserTabLayout,
+  writeBrowserTabLayout,
+} from "./browserTabLayout";
 import { closeCodeBrowser } from "../browser/browserHost";
 import { seedBrowserSession } from "../browser/browserPersistence";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -15,10 +19,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
  * The browser tabs one workspace has open: their titles, the address each
  * started on, and the native webview behind each.
  *
- * A browser is a child webview the page mints an id for, so the tab exists
- * before the view does. The view is worth nothing once it is off screen, so
- * a browser closes when its tab goes and when the page unmounts — unlike a
- * shell, which survives the reader looking elsewhere.
+ * Tab membership survives workspace navigation and restart. Each panel hides
+ * its native view on unmount; only removing its tab closes the native session.
  */
 export function useBrowserTabs({
   workspaceId,
@@ -29,11 +31,10 @@ export function useBrowserTabs({
   layout: LayoutState;
   setLayout: (next: LayoutState) => void;
 }) {
-  const layoutRef = useRef(layout);
-  layoutRef.current = layout;
   const previousLayoutRef = useRef(layout);
   const closedBrowserIdsRef = useRef(new Set<string>());
-  const workspaceBrowserIdsRef = useRef(new Set<string>());
+  const restorationCheckedRef = useRef(false);
+  const restoringRef = useRef(false);
   const [browserTitles, setBrowserTitles] = useState<Record<string, string>>(
     () => browserTitlesForLayout(layout),
   );
@@ -53,15 +54,31 @@ export function useBrowserTabs({
   );
 
   useEffect(() => {
+    const empty = layout.tabs.length === 0 && !layout.editorSplit?.tabs.length;
+    if (!restorationCheckedRef.current) {
+      restorationCheckedRef.current = true;
+      if (empty && !attachedRemotely()) {
+        const saved = readBrowserTabLayout(workspaceId);
+        if (codeBrowserIds(saved).length > 0) {
+          restoringRef.current = true;
+          setLayout(saved);
+          return;
+        }
+      }
+    }
+    // Router navigation is asynchronous, including Strict Mode effect replay.
+    // Keep the saved tabs until the restored URL reaches this hook.
+    if (restoringRef.current && empty) return;
+    restoringRef.current = false;
     const ids = codeBrowserIds(layout);
     for (const browserId of ids) {
       closedBrowserIdsRef.current.delete(browserId);
-      workspaceBrowserIdsRef.current.add(browserId);
     }
     closeBrowserPanels(
       removedCodeBrowserIds(previousLayoutRef.current, layout),
     );
     previousLayoutRef.current = layout;
+    if (!attachedRemotely()) writeBrowserTabLayout(workspaceId, layout);
     setBrowserTitles((current) => {
       let changed = false;
       const next: Record<string, string> = {};
@@ -73,12 +90,7 @@ export function useBrowserTabs({
       if (Object.keys(current).length !== ids.length) changed = true;
       return changed ? next : current;
     });
-  }, [closeBrowserPanels, layout]);
-
-  useEffect(() => {
-    workspaceBrowserIdsRef.current = new Set(codeBrowserIds(layoutRef.current));
-    return () => closeBrowserPanels([...workspaceBrowserIdsRef.current]);
-  }, [closeBrowserPanels, workspaceId]);
+  }, [closeBrowserPanels, layout, setLayout, workspaceId]);
 
   function openBrowser(url?: string, preferredRegion?: CodeEditorRegion) {
     const browserId = crypto.randomUUID();

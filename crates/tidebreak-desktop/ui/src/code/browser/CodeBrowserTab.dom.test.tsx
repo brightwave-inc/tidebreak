@@ -26,6 +26,7 @@ import {
   type LegacyBrowserState,
 } from "./browserPersistence";
 import { useRefreshSignals } from "@/RefreshSignals";
+import { usePortalOverlayOpen } from "@/lib/usePortalOverlayOpen";
 import { CodeBrowserTab } from "./CodeBrowserTab";
 
 type CommandCall = {
@@ -249,6 +250,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -317,6 +319,155 @@ describe("CodeBrowserTab", () => {
       false,
     );
   });
+
+  it.each([
+    { label: "newly created", existing: false },
+    { label: "restored", existing: true },
+  ])(
+    "reveals a $label native view when animation frames never arrive",
+    async ({ existing }) => {
+      vi.useFakeTimers();
+      const frames: FrameRequestCallback[] = [];
+      vi.spyOn(window, "requestAnimationFrame").mockImplementation(
+        (callback) => {
+          frames.push(callback);
+          return frames.length;
+        },
+      );
+      const runtime = browserHost({ existing });
+      await act(async () => {
+        render(
+          <CodeBrowserTab
+            workspaceId="workspace-1"
+            browserId="browser-1"
+            initialUrl="https://example.com"
+            host={runtime.host}
+          />,
+        );
+      });
+      expect(
+        runtime.calls.some(
+          ({ action }) => action.type === (existing ? "snapshot" : "create"),
+        ),
+      ).toBe(true);
+      await act(async () => vi.advanceTimersByTimeAsync(100));
+      const reveals = () =>
+        runtime.calls.filter(
+          ({ action }) => action.type === "set_visible" && action.visible,
+        );
+      expect(reveals()).toHaveLength(1);
+      await act(async () => {
+        for (const callback of [...frames]) callback(100);
+        await vi.advanceTimersByTimeAsync(100);
+      });
+      expect(reveals()).toHaveLength(1);
+    },
+  );
+
+  it.each(["hide", "unmount"] as const)(
+    "cancels the native reveal fallback after %s",
+    async (cancel) => {
+      vi.useFakeTimers();
+      const frames: FrameRequestCallback[] = [];
+      vi.spyOn(window, "requestAnimationFrame").mockImplementation(
+        (callback) => {
+          frames.push(callback);
+          return frames.length;
+        },
+      );
+      const runtime = browserHost({ existing: true });
+      let view!: ReturnType<typeof render>;
+      await act(async () => {
+        view = render(
+          <CodeBrowserTab
+            workspaceId="workspace-1"
+            browserId="browser-1"
+            initialUrl="https://example.com"
+            host={runtime.host}
+          />,
+        );
+      });
+      expect(frames.length).toBeGreaterThan(0);
+      await act(async () => {
+        if (cancel === "unmount") view.unmount();
+        else
+          view.rerender(
+            <CodeBrowserTab
+              workspaceId="workspace-1"
+              browserId="browser-1"
+              initialUrl="https://example.com"
+              host={runtime.host}
+              obscured
+            />,
+          );
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(100);
+        for (const callback of [...frames]) callback(100);
+      });
+      expect(runtime.calls).toContainEqual({
+        workspaceId: "workspace-1",
+        browserId: "browser-1",
+        action: { type: "set_visible", visible: false },
+      });
+      expect(
+        runtime.calls.filter(
+          ({ action }) => action.type === "set_visible" && action.visible,
+        ),
+      ).toHaveLength(0);
+    },
+  );
+
+  it.each(["dialog", "alertdialog", "menu", "listbox"])(
+    "hides the native reveal fallback behind a global %s when frames never arrive",
+    async (role) => {
+      vi.useFakeTimers();
+      vi.spyOn(window, "requestAnimationFrame").mockReturnValue(1);
+      const runtime = browserHost({ existing: true });
+      function BrowserWithGlobalOverlays() {
+        const obscured = usePortalOverlayOpen();
+        return (
+          <CodeBrowserTab
+            workspaceId="workspace-1"
+            browserId="browser-1"
+            initialUrl="https://example.com"
+            host={runtime.host}
+            obscured={obscured}
+          />
+        );
+      }
+      const overlay = document.createElement("div");
+      overlay.setAttribute("role", role);
+      overlay.setAttribute("data-state", "open");
+      try {
+        await act(async () => {
+          render(<BrowserWithGlobalOverlays />);
+        });
+        await act(async () => {
+          document.body.append(overlay);
+        });
+        await act(async () => vi.advanceTimersByTimeAsync(100));
+        const reveals = () =>
+          runtime.calls.filter(
+            ({ action }) => action.type === "set_visible" && action.visible,
+          );
+        expect(reveals()).toHaveLength(0);
+        expect(runtime.calls).toContainEqual({
+          workspaceId: "workspace-1",
+          browserId: "browser-1",
+          action: { type: "set_visible", visible: false },
+        });
+
+        await act(async () => {
+          overlay.setAttribute("data-state", "closed");
+        });
+        await act(async () => vi.advanceTimersByTimeAsync(100));
+        expect(reveals()).toHaveLength(1);
+      } finally {
+        overlay.remove();
+      }
+    },
+  );
 
   it("hides the native surface for app overlays and restores it afterwards", async () => {
     const runtime = browserHost();

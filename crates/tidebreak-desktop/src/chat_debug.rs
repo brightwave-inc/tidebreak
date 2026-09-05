@@ -1039,7 +1039,7 @@ async fn pick_bundle_path(app: &AppHandle, filename: &str) -> Result<Option<Path
         .set_title("Save debug bundle")
         .set_file_name(filename)
         .add_filter("Markdown", &["md"]);
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_window("main") {
         picker = picker.set_parent(&window);
     }
     picker.save_file(move |path| {

@@ -21,14 +21,9 @@ export function usePortalOverlayOpen(): boolean {
       '[role="menu"][data-state="open"]',
       '[role="listbox"][data-state="open"]',
     ].join(",");
-    let frame: number | null = null;
-    const update = () => {
-      if (frame !== null) return;
-      frame = window.requestAnimationFrame(() => {
-        frame = null;
-        setOpen(document.querySelector(selector) !== null);
-      });
-    };
+    // MutationObserver batches changes without waiting for animation frames,
+    // which an occluded host webview can suspend while native reveal continues.
+    const update = () => setOpen(document.querySelector(selector) !== null);
     const stateObserver = new MutationObserver(update);
     stateObserver.observe(document.body, {
       attributes: true,
@@ -44,7 +39,6 @@ export function usePortalOverlayOpen(): boolean {
     return () => {
       stateObserver.disconnect();
       portalObserver.disconnect();
-      if (frame !== null) window.cancelAnimationFrame(frame);
     };
   }, []);
 

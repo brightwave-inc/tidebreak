@@ -45,7 +45,7 @@ import { hasLocalHostAuthority, hasNativeHost } from "./host";
 import { Skeleton } from "@/components/ui/skeleton";
 import { usePortalOverlayOpen } from "@/lib/usePortalOverlayOpen";
 import { foregroundBrowserScope } from "./code/browser/foregroundBrowserScope";
-import { seedBrowserSession } from "./code/browser/browserPersistence";
+import { useForegroundBrowserTabs } from "./code/browser/useForegroundBrowserTabs";
 import { MarkdownLinkProvider } from "./MessageMarkdown";
 
 import { friendlyErrorMessage } from "./lib/utils";
@@ -133,7 +133,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   const navigate = useNavigate();
   const { client, models, defaultModelKey, providers, setStatus } = useApp();
   const modelSettingsNav = useModelSettingsNav();
-  const { layout, openPanel } = usePanelNav();
+  const { layout, openPanel, setLayout } = usePanelNav();
   const sourceNav = useStableSourceNav(openPanel);
   const chats = useChatListStore((state) => state.chats);
   const chatsLoaded = useChatListStore((state) => state.chatsLoaded);
@@ -185,12 +185,8 @@ export function ChatRoute({ chatId }: { chatId: string }) {
   );
   const deliverables = useDeliverableCatalog(chatId);
   const overlayOpen = usePortalOverlayOpen();
-  const [browserTitles, setBrowserTitles] = useState<Record<string, string>>(
-    {},
-  );
-  const [browserInitialUrls, setBrowserInitialUrls] = useState<
-    Record<string, string>
-  >({});
+  const { browserTitles, browserInitialUrls, openBrowser, setBrowserTitle } =
+    useForegroundBrowserTabs({ chatId, layout, setLayout, openPanel });
 
   // A chat id that is not in the list — deleted in another window, or a stale
   // deep link — should land somewhere real rather than on an empty frame. The
@@ -689,41 +685,6 @@ export function ChatRoute({ chatId }: { chatId: string }) {
    * message only has to name it again. That is why no size comes with it — the
    * transcript records what a document is, not how many bytes it was.
    */
-  /**
-   * Open a chat-scoped browser tab.  If one is already in the strip,
-   * focus it rather than opening a duplicate.  One default browser tab
-   * per chat, seeded with a fresh browser id and a foreground workspace
-   * scope the native executor derives identically from the chat id.
-   */
-  function openBrowser(url?: string) {
-    if (!url) {
-      const existingIndex = layout.tabs.findIndex(
-        (tab) => tab.type === "browser",
-      );
-      if (existingIndex !== -1) {
-        openPanel(layout.tabs[existingIndex]);
-        return;
-      }
-    }
-    const browserId = crypto.randomUUID();
-    seedBrowserSession({
-      browserId,
-      workspaceId: foregroundBrowserScope(chatId),
-      initialUrl: url,
-    });
-    if (url) {
-      setBrowserInitialUrls((current) => ({
-        ...current,
-        [browserId]: url,
-      }));
-    }
-    setBrowserTitles((current) => ({
-      ...current,
-      [browserId]: "Browser",
-    }));
-    openPanel({ type: "browser", browserId });
-  }
-
   function onReattachFile(file: TranscriptFileAttachment) {
     if (files.some((current) => current.documentId === file.documentId)) return;
     if (images.attachments.length + files.length >= MAX_IMAGE_ATTACHMENTS) {
@@ -1054,13 +1015,7 @@ export function ChatRoute({ chatId }: { chatId: string }) {
               browserId={panel.browserId}
               initialUrl={browserInitialUrls[panel.browserId]}
               obscured={overlayOpen}
-              onTitleChange={(title) =>
-                setBrowserTitles((current) =>
-                  current[panel.browserId] === title
-                    ? current
-                    : { ...current, [panel.browserId]: title },
-                )
-              }
+              onTitleChange={(title) => setBrowserTitle(panel.browserId, title)}
             />
           </Suspense>
         );

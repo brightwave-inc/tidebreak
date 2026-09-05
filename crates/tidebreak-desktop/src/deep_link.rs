@@ -140,7 +140,7 @@ fn handle_deep_link_urls(app: &tauri::AppHandle, urls: &[tauri::Url]) {
 /// Bring the main window to the user: pairing was asked for from outside the
 /// app (a browser or terminal), and its outcome shows in the app.
 pub(crate) fn focus_main_window(app: &tauri::AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_window("main") {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
@@ -465,7 +465,7 @@ async fn ask_confirmation(
             confirm_label.to_owned(),
             "Cancel".to_owned(),
         ));
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_window("main") {
         dialog = dialog.parent(&window);
     }
     dialog.show(move |approved| {

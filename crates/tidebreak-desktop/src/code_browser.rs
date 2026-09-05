@@ -58,9 +58,9 @@ const SAME_DOCUMENT_NAVIGATION_POLL_INTERVAL: std::time::Duration =
 #[cfg(not(target_os = "macos"))]
 const SAME_DOCUMENT_NAVIGATION_HIDDEN_POLL_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(2);
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 const PROFILE_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 const PROFILE_CLOSE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
 
 /// One URL change reported by the native view. `loading` is true while a
@@ -441,11 +441,35 @@ pub(crate) async fn code_browser_command(
     }
 }
 
+/// Publish acquired control before observation or navigation can start.
+/// Restored tabs have no page event that would otherwise reveal the controller.
+pub(crate) fn begin_agent_browser_control(
+    app: &AppHandle,
+    registry: &BrowserRegistry,
+    capability_id: Uuid,
+    browser_id: &str,
+) -> Result<BrowserSnapshot, String> {
+    begin_agent_browser_control_with(registry, capability_id, browser_id, |snapshot| {
+        emit_controller_event(app, snapshot);
+    })
+}
+
+fn begin_agent_browser_control_with(
+    registry: &BrowserRegistry,
+    capability_id: Uuid,
+    browser_id: &str,
+    publish: impl FnOnce(&BrowserSnapshot),
+) -> Result<BrowserSnapshot, String> {
+    let snapshot = registry.begin_agent_control(capability_id, browser_id)?;
+    publish(&snapshot);
+    Ok(snapshot)
+}
+
 /// Navigate one shared visible browser through the native agent-control gate.
 ///
-/// The dispatch is authorized against the current origin. The child-webview's
-/// `on_navigation` hook independently authorizes the destination origin and
-/// pauses the navigation when the user's live grant does not cover it.
+/// The dispatch checks the current origin and the requested top-level destination.
+/// The native URL callback also rejects unshared requests without treating
+/// iframe URLs as top-level destinations.
 pub(crate) async fn navigate_browser_for_agent(
     app: &AppHandle,
     registry: &BrowserRegistry,
@@ -456,7 +480,9 @@ pub(crate) async fn navigate_browser_for_agent(
         return Err("browser navigation request is not valid".to_owned());
     }
 
-    let host_snapshot = registry.begin_agent_control(capability_id, &arguments.browser_id)?;
+    let host_snapshot =
+        begin_agent_browser_control(app, registry, capability_id, &arguments.browser_id)?;
+    let fence = registry.observation_fence(capability_id, &arguments.browser_id)?;
     let workspace_id = host_snapshot.workspace_id;
     let current_origin = host_snapshot
         .url
@@ -478,6 +504,9 @@ pub(crate) async fn navigate_browser_for_agent(
     let dispatch_browser_id = browser_id.clone();
     let fallback_url = destination.to_string();
     let dispatch_registry = registry.clone();
+    let dispatch_app = app.clone();
+    let dispatch_current_origin = current_origin.clone();
+    let dispatch_destination_origin = destination_origin.clone();
 
     registry
         .dispatch_agent(
@@ -490,6 +519,20 @@ pub(crate) async fn navigate_browser_for_agent(
             BrowserDispatchEffect::Mutate,
             None,
             move || async move {
+                match dispatch_registry.authorize_agent_navigation(
+                    capability_id,
+                    &dispatch_browser_id,
+                    &dispatch_current_origin,
+                    fence,
+                    destination.as_str(),
+                    &dispatch_destination_origin,
+                )? {
+                    BrowserNavigationDecision::Allow => {}
+                    BrowserNavigationDecision::Pause { origin, snapshot } => {
+                        emit_navigation_paused_event(&dispatch_app, snapshot, origin);
+                        return Err("browser destination is not shared for navigation".to_owned());
+                    }
+                }
                 webview.navigate(destination).map_err(browser_error)?;
                 let deadline = tokio::time::Instant::now() + AGENT_NAVIGATION_START_TIMEOUT;
                 loop {
@@ -637,64 +680,40 @@ fn create_browser(
             let Some(origin) = BrowserOrigin::from_url(safe_url.as_str()) else {
                 return false;
             };
-            match navigation_registry.authorize_navigation(
+            if !navigation_registry.allow_navigation(
                 &navigation_browser,
                 &navigation_workspace,
                 instance_id,
-                safe_url.as_str(),
                 &origin,
             ) {
-                BrowserNavigationDecision::Allow => {
-                    if navigation_profiles
-                        .record_url(&navigation_owner, &navigation_profile, &safe_url)
-                        .is_err()
-                    {
-                        emit_event(
-                            &navigation_main,
-                            CodeBrowserEvent {
-                                workspace_id: navigation_workspace.clone(),
-                                browser_id: navigation_browser.clone(),
-                                kind: "navigation_blocked",
-                                url: Some(url.to_string()),
-                                title: None,
-                                message: Some(
-                                    "This site could not be added to the managed browser profile"
-                                        .to_owned(),
-                                ),
-                                load_state: None,
-                                document_epoch: None,
-                                controller: None,
-                                agent_access: None,
-                                origin: None,
-                            },
-                        );
-                        false
-                    } else {
-                        true
-                    }
-                }
-                BrowserNavigationDecision::Pause { origin, snapshot } => {
-                    emit_event(
-                        &navigation_main,
-                        CodeBrowserEvent {
-                            workspace_id: navigation_workspace.clone(),
-                            browser_id: navigation_browser.clone(),
-                            kind: "agent_navigation_paused",
-                            url: None,
-                            title: snapshot.title,
-                            message: Some(format!(
-                                "Agent navigation paused before opening {origin}"
-                            )),
-                            load_state: snapshot.load_state,
-                            document_epoch: snapshot.document_epoch,
-                            controller: snapshot.controller,
-                            agent_access: snapshot.agent_access,
-                            origin: Some(origin),
-                        },
-                    );
-                    false
-                }
-                BrowserNavigationDecision::Deny => false,
+                return false;
+            }
+            if navigation_profiles
+                .record_url(&navigation_owner, &navigation_profile, &safe_url)
+                .is_err()
+            {
+                emit_event(
+                    &navigation_main,
+                    CodeBrowserEvent {
+                        workspace_id: navigation_workspace.clone(),
+                        browser_id: navigation_browser.clone(),
+                        kind: "navigation_blocked",
+                        url: Some(url.to_string()),
+                        title: None,
+                        message: Some(
+                            "This site could not be added to the managed browser profile"
+                                .to_owned(),
+                        ),
+                        load_state: None,
+                        document_epoch: None,
+                        controller: None,
+                        agent_access: None,
+                        origin: None,
+                    },
+                );
+                false
+            } else {
+                true
             }
         })
         .on_new_window(move |url, _features| {
@@ -1064,6 +1083,9 @@ async fn share_browser_with_agent(
     browser_id: &str,
     workspace_id: &str,
 ) -> Result<(BrowserSnapshot, Option<String>), String> {
+    if let Some(resumed) = registry.resume_shared_browser(browser_id, workspace_id)? {
+        return Ok(resumed);
+    }
     let origin = registry.share_target_origin(browser_id, workspace_id)?;
     let scope = if origin.is_loopback() {
         native_loopback_share_choice(app, &origin).await?
@@ -1100,7 +1122,7 @@ async fn native_public_share_choice(
     let mut dialog = app
         .dialog()
         .message(format!(
-            "Allow agents in this workspace to inspect and navigate {origin}?\n\nPage content is untrusted. Password and verification-code fields stay private and require human takeover. Every file upload requires another confirmation. Screenshots pause when the host cannot prove that visible fields are safe."
+            "Allow agents in this workspace to inspect and navigate {origin}?\n\nTidebreak remembers this choice for this workspace until you choose Stop sharing, including after app restarts. Page content is untrusted. Password and verification-code fields stay private and require human takeover. Every file upload requires another confirmation. Screenshots pause when the host cannot prove that visible fields are safe."
         ))
         .title("Share this site with agents?")
         .kind(MessageDialogKind::Warning)
@@ -1108,7 +1130,7 @@ async fn native_public_share_choice(
             "Share this site".to_owned(),
             "Cancel".to_owned(),
         ));
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_window("main") {
         dialog = dialog.parent(&window);
     }
     dialog.show(move |approved| {
@@ -1128,7 +1150,7 @@ async fn native_loopback_share_choice(
     let mut dialog = app
         .dialog()
         .message(format!(
-            "Allow agents in this workspace to inspect and navigate {origin_label}?\n\nPassword and verification-code fields stay private and require human takeover. Every file upload requires another confirmation. Screenshots pause when the host cannot prove that visible fields are safe. Choose only this origin, or all loopback sites in this workspace so development ports can change without another share prompt."
+            "Allow agents in this workspace to inspect and navigate {origin_label}?\n\nTidebreak remembers your selected scope for this workspace until you choose Stop sharing, including after app restarts. Password and verification-code fields stay private and require human takeover. Every file upload requires another confirmation. Screenshots pause when the host cannot prove that visible fields are safe. Choose only this origin, or all loopback sites in this workspace so development ports can change without another share prompt."
         ))
         .title("Share a local site with agents?")
         .kind(MessageDialogKind::Warning)
@@ -1137,7 +1159,7 @@ async fn native_loopback_share_choice(
             "All local sites".to_owned(),
             "Cancel".to_owned(),
         ));
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_window("main") {
         dialog = dialog.parent(&window);
     }
     dialog.show_with_result(move |answer| {
@@ -1319,14 +1341,119 @@ async fn delete_managed_profile(
             .await
             .map_err(browser_error)?;
         if identifiers.contains(&identifier) {
-            app.remove_data_store(identifier)
-                .await
-                .map_err(browser_error)?;
+            remove_profile_data_when_released(|| remove_named_browser_profile(app, identifier))
+                .await?;
         }
         Ok(())
     } else {
         remove_legacy_website_data(app, profile.website_hosts()).await
     }
+}
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Eq, PartialEq)]
+enum BrowserProfileRemovalError {
+    InUse,
+    Failed(String),
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl BrowserProfileRemovalError {
+    fn from_native(domain: &str, code: isize, description: &str) -> Self {
+        if domain == "WKWebSiteDataStore"
+            && matches!(
+                description,
+                "Data store is in use" | "Data store is in use (by network process)"
+            )
+        {
+            Self::InUse
+        } else {
+            Self::Failed(format!(
+                "browser host: could not remove website data: {domain} ({code}): {description}"
+            ))
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+async fn remove_profile_data_when_released<D, DeleteFuture>(mut delete: D) -> Result<(), String>
+where
+    D: FnMut() -> DeleteFuture,
+    DeleteFuture: std::future::Future<Output = Result<(), BrowserProfileRemovalError>>,
+{
+    let deadline = tokio::time::Instant::now() + PROFILE_CLOSE_TIMEOUT;
+    loop {
+        // A submitted removal cannot be canceled. Await its callback before
+        // reconstructing a profile that the native engine may still delete.
+        match delete().await {
+            Ok(()) => return Ok(()),
+            Err(BrowserProfileRemovalError::Failed(message)) => return Err(message),
+            Err(BrowserProfileRemovalError::InUse) => {
+                let now = tokio::time::Instant::now();
+                if now < deadline {
+                    tokio::time::sleep_until((now + PROFILE_CLOSE_POLL_INTERVAL).min(deadline))
+                        .await;
+                    if tokio::time::Instant::now() < deadline {
+                        continue;
+                    }
+                }
+                return Err(
+                    "browser profile reset timed out waiting for WebKit to release its data store"
+                        .to_owned(),
+                );
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn remove_named_browser_profile(
+    app: &AppHandle,
+    identifier: [u8; 16],
+) -> Result<(), BrowserProfileRemovalError> {
+    use std::cell::RefCell;
+
+    use block2::RcBlock;
+    use objc2::MainThreadMarker;
+    use objc2_foundation::{NSError, NSUUID};
+    use objc2_web_kit::WKWebsiteDataStore;
+
+    let (sender, receiver) = oneshot::channel();
+    app.run_on_main_thread(move || {
+        let Some(mtm) = MainThreadMarker::new() else {
+            let _ = sender.send(Err(BrowserProfileRemovalError::Failed(
+                "browser profile reset requires the main thread".to_owned(),
+            )));
+            return;
+        };
+        let identifier = NSUUID::from_bytes(identifier);
+        let sender = RefCell::new(Some(sender));
+        let removed = RcBlock::new(move |error: *mut NSError| {
+            // WebKit owns the optional error for the duration of this callback.
+            let result = unsafe { error.as_ref() }.map_or(Ok(()), |error| {
+                Err(BrowserProfileRemovalError::from_native(
+                    &error.domain().to_string(),
+                    error.code(),
+                    &error.localizedDescription().to_string(),
+                ))
+            });
+            if let Some(sender) = sender.take() {
+                let _ = sender.send(result);
+            }
+        });
+        // Only the identifier resolved from the native owner/profile pair is used.
+        unsafe {
+            WKWebsiteDataStore::removeDataStoreForIdentifier_completionHandler(
+                &identifier,
+                &removed,
+                mtm,
+            );
+        }
+    })
+    .map_err(|error| BrowserProfileRemovalError::Failed(browser_error(error)))?;
+    receiver.await.map_err(|_| {
+        BrowserProfileRemovalError::Failed("browser profile removal closed unexpectedly".to_owned())
+    })?
 }
 
 #[cfg(target_os = "macos")]
@@ -1634,7 +1761,29 @@ pub(crate) fn emit_download_event(
     );
 }
 
-fn emit_controller_event(app: &AppHandle, snapshot: &BrowserSnapshot) {
+fn emit_navigation_paused_event(app: &AppHandle, snapshot: BrowserSnapshot, origin: String) {
+    let Some(main) = app.get_webview("main") else {
+        return;
+    };
+    emit_event(
+        &main,
+        CodeBrowserEvent {
+            workspace_id: snapshot.workspace_id,
+            browser_id: snapshot.browser_id,
+            kind: "agent_navigation_paused",
+            url: None,
+            title: snapshot.title,
+            message: Some(format!("Agent navigation paused before opening {origin}")),
+            load_state: snapshot.load_state,
+            document_epoch: snapshot.document_epoch,
+            controller: snapshot.controller,
+            agent_access: snapshot.agent_access,
+            origin: Some(origin),
+        },
+    );
+}
+
+pub(crate) fn emit_controller_event(app: &AppHandle, snapshot: &BrowserSnapshot) {
     let Some(main) = app.get_webview("main") else {
         return;
     };
@@ -1696,6 +1845,85 @@ fn browser_error(error: impl std::fmt::Display) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovered_browser_publishes_agent_control_before_observation() {
+        let private = tempfile::tempdir().unwrap();
+        let origin = BrowserOrigin::from_url("https://example.com/fixture").unwrap();
+        let registry = BrowserRegistry::default();
+        registry.initialize_private_state(private.path()).unwrap();
+        let instance = registry
+            .register(
+                "browser-1",
+                "workspace-1",
+                "https://example.com/fixture".to_owned(),
+                true,
+            )
+            .unwrap();
+        registry
+            .page_finished(
+                "browser-1",
+                "workspace-1",
+                instance,
+                "https://example.com/fixture".to_owned(),
+            )
+            .unwrap();
+        registry
+            .grant_browser_access(
+                "browser-1",
+                "workspace-1",
+                &origin,
+                BrowserOriginScope::Origin {
+                    origin: origin.clone(),
+                },
+                &[BrowserGrantCapability::BrowserControlOrigin],
+            )
+            .unwrap();
+        drop(registry);
+
+        let reopened = BrowserRegistry::default();
+        reopened.initialize_private_state(private.path()).unwrap();
+        let recovered = reopened
+            .recover_session(&OwnerId::local(), "browser-1", "workspace-1")
+            .unwrap()
+            .unwrap();
+        reopened
+            .register("browser-1", "workspace-1", recovered.url, true)
+            .unwrap();
+        let before = reopened.snapshot("browser-1", "workspace-1").unwrap();
+        assert_eq!(
+            before.controller.unwrap().kind,
+            tidebreak_core::BrowserControllerKind::Human
+        );
+        assert!(before.agent_access.unwrap().shared);
+        let capability = reopened.issue_agent_capability("workspace-1", "Code agent");
+        let mut published = None;
+        let acquired =
+            begin_agent_browser_control_with(&reopened, capability, "browser-1", |snapshot| {
+                published = Some(snapshot.clone())
+            })
+            .unwrap();
+        let published = published.expect("controller state must publish before observation starts");
+        assert_eq!(published.browser_id, "browser-1");
+        assert_eq!(published.workspace_id, "workspace-1");
+        assert_eq!(published.document_epoch, acquired.document_epoch);
+        let controller = published.controller.unwrap();
+        assert_eq!(
+            controller.kind,
+            tidebreak_core::BrowserControllerKind::Agent
+        );
+        assert_eq!(controller.label.as_deref(), Some("Code agent"));
+        assert!(!controller.halted);
+        assert!(published.agent_access.unwrap().shared);
+
+        let other = reopened.issue_agent_capability("other-workspace", "Other agent");
+        assert!(
+            begin_agent_browser_control_with(&reopened, other, "browser-1", |_| {
+                panic!("denied acquisition must not publish agent control");
+            })
+            .is_err()
+        );
+    }
 
     #[test]
     fn browser_ids_are_bounded_and_safe_for_tauri_labels() {
@@ -1909,6 +2137,86 @@ mod tests {
         })
         .is_err());
     }
+    #[tokio::test(start_paused = true)]
+    async fn profile_reset_waits_for_native_views_to_release_the_store() {
+        let mut attempts = 0;
+        remove_profile_data_when_released(|| {
+            attempts += 1;
+            std::future::ready(if attempts < 3 {
+                Err(BrowserProfileRemovalError::InUse)
+            } else {
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(attempts, 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn profile_reset_preserves_permanent_native_removal_errors() {
+        let mut attempts = 0;
+        let failure = "browser host: native disk deletion failed";
+        let error = remove_profile_data_when_released(|| {
+            attempts += 1;
+            std::future::ready(Err(BrowserProfileRemovalError::Failed(failure.to_owned())))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(attempts, 1);
+        assert_eq!(error, failure);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn profile_reset_bounds_native_store_release_retries() {
+        let started = tokio::time::Instant::now();
+        let mut attempts = 0;
+        let error = remove_profile_data_when_released(|| {
+            attempts += 1;
+            std::future::ready(Err(BrowserProfileRemovalError::InUse))
+        })
+        .await
+        .unwrap_err();
+        assert!(attempts > 1);
+        assert_eq!(started.elapsed(), PROFILE_CLOSE_TIMEOUT);
+        assert!(error.contains("timed out waiting for WebKit"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn profile_reset_awaits_submitted_deletion_before_reconstructing() {
+        let started = tokio::time::Instant::now();
+        let result = remove_profile_data_when_released(|| async {
+            tokio::time::sleep(PROFILE_CLOSE_TIMEOUT + PROFILE_CLOSE_POLL_INTERVAL).await;
+            Ok(())
+        })
+        .await;
+        assert!(result.is_ok());
+        assert!(started.elapsed() > PROFILE_CLOSE_TIMEOUT);
+    }
+
+    #[test]
+    fn profile_reset_retries_only_webkit_store_in_use_errors() {
+        for description in [
+            "Data store is in use",
+            "Data store is in use (by network process)",
+        ] {
+            assert_eq!(
+                BrowserProfileRemovalError::from_native("WKWebSiteDataStore", 1, description),
+                BrowserProfileRemovalError::InUse,
+            );
+        }
+        for (domain, description) in [
+            ("WKWebSiteDataStore", "Failed to delete files on disk"),
+            ("OtherDomain", "Data store is in use"),
+            ("WKWebSiteDataStore", "Identifier is invalid"),
+        ] {
+            let error = BrowserProfileRemovalError::from_native(domain, 1, description);
+            assert!(
+                matches!(error, BrowserProfileRemovalError::Failed(message) if message.contains(description))
+            );
+        }
+    }
+
     #[tokio::test]
     async fn profile_reset_closes_sessions_before_deleting_profile_data() {
         let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));

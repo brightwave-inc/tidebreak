@@ -129,7 +129,7 @@ fn browser_identity_cannot_be_rebound_to_another_workspace() {
 }
 
 #[test]
-fn restart_recovers_only_the_last_completed_navigation_without_authority() {
+fn restart_restores_explicit_consent_and_completed_navigation_without_live_authority() {
     let private = tempfile::tempdir().unwrap();
     let owner = OwnerId::local();
     let registry = BrowserRegistry::default();
@@ -241,15 +241,16 @@ fn restart_recovers_only_the_last_completed_navigation_without_authority() {
         BrowserControllerKind::Human
     );
     let access = snapshot.agent_access.unwrap();
-    assert!(!access.shared);
-    assert!(!access.can_observe);
-    assert!(!access.can_control);
+    assert!(access.shared);
+    assert!(access.can_observe);
+    assert!(access.can_control);
+    assert!(!access.can_transfer_files);
     let state = reopened.lock();
     let record = state.records.get("browser-1").unwrap();
     assert!(record.controller_capability_id.is_none());
     assert!(record.semantic_snapshot.is_none());
     assert!(state.capabilities.is_empty());
-    assert!(state.grants.is_empty());
+    assert_eq!(state.grants.len(), 1);
 }
 
 #[test]
@@ -354,7 +355,9 @@ fn explicit_close_forgets_only_the_exact_recovery_binding() {
 
 #[tokio::test]
 async fn profile_reset_drains_and_removes_only_matching_native_sessions() {
+    let private = tempfile::tempdir().unwrap();
     let registry = BrowserRegistry::default();
+    registry.initialize_private_state(private.path()).unwrap();
     let owner = OwnerId::local();
     let other_owner = OwnerId::new("other-owner").unwrap();
     let profile_id = Uuid::new_v4().to_string();
@@ -454,6 +457,25 @@ async fn profile_reset_drains_and_removes_only_matching_native_sessions() {
             .agent_access
             .unwrap()
             .can_observe
+    );
+    drop(registry);
+    let reopened = BrowserRegistry::default();
+    reopened.initialize_private_state(private.path()).unwrap();
+    reopened
+        .register(
+            "after-reset-restart",
+            "workspace-1",
+            "https://example.com/".to_owned(),
+            true,
+        )
+        .unwrap();
+    assert!(
+        reopened
+            .snapshot("after-reset-restart", "workspace-1")
+            .unwrap()
+            .agent_access
+            .unwrap()
+            .shared
     );
 }
 
@@ -1488,6 +1510,131 @@ async fn audit_intent_is_durable_before_dispatch_and_excludes_sensitive_data() {
     assert!(!audit.contains(PAGE_CONTENT));
 }
 
+async fn typed_dispatch_audit<T: BrowserDispatchResult>(result: T) -> (T, String) {
+    let (registry, _, origin, capability, private) = controlled_registry();
+    let result = registry
+        .dispatch_agent(
+            capability,
+            "browser-1",
+            &origin,
+            BrowserGrantCapability::BrowserControlOrigin,
+            "native_operation",
+            None,
+            BrowserDispatchEffect::Mutate,
+            None,
+            || async move { Ok(result) },
+        )
+        .await
+        .unwrap();
+    let audit = std::fs::read_to_string(private.path().join(BROWSER_AUDIT_FILE)).unwrap();
+    let event: serde_json::Value = serde_json::from_str(audit.lines().last().unwrap()).unwrap();
+    assert_eq!(event["phase"], "outcome");
+    (result, event["outcome"].as_str().unwrap().to_owned())
+}
+
+#[tokio::test]
+async fn typed_action_refusals_are_failed_audit_outcomes() {
+    use tidebreak_core::{BrowserActResult, BrowserActStatus};
+
+    for status in [
+        BrowserActStatus::Ok,
+        BrowserActStatus::StaleTarget,
+        BrowserActStatus::HumanTakeoverRequired,
+        BrowserActStatus::HiddenTab,
+        BrowserActStatus::UnsupportedFrame,
+        BrowserActStatus::UnsupportedNative,
+        BrowserActStatus::InvalidValue,
+        BrowserActStatus::TargetObscured,
+        BrowserActStatus::EngineFailure,
+        BrowserActStatus::Timeout,
+    ] {
+        let (result, outcome) = typed_dispatch_audit(BrowserActResult {
+            browser_id: "browser-1".to_owned(),
+            snapshot_id: "snapshot-1".to_owned(),
+            document_epoch: 1,
+            target_ref: "@e1".to_owned(),
+            action: "fill".to_owned(),
+            status,
+            message: "typed engine outcome".to_owned(),
+            requires_resnapshot: true,
+            url: None,
+            title: None,
+        })
+        .await;
+        assert_eq!(result.status, status);
+        assert_eq!(
+            outcome,
+            if status == BrowserActStatus::Ok {
+                "succeeded"
+            } else {
+                "failed"
+            }
+        );
+    }
+}
+
+#[tokio::test]
+async fn typed_wait_and_upload_failures_are_failed_audit_outcomes() {
+    use tidebreak_core::{
+        BrowserUploadResult, BrowserUploadStatus, BrowserWaitResult, BrowserWaitStatus,
+    };
+
+    for status in [
+        BrowserWaitStatus::Resolved,
+        BrowserWaitStatus::TimedOut,
+        BrowserWaitStatus::Stopped,
+    ] {
+        let (result, outcome) = typed_dispatch_audit(BrowserWaitResult {
+            browser_id: "browser-1".to_owned(),
+            status,
+            message: "typed wait outcome".to_owned(),
+            document_epoch: 1,
+            url: None,
+            title: None,
+        })
+        .await;
+        assert_eq!(result.status, status);
+        assert_eq!(
+            outcome,
+            if status == BrowserWaitStatus::Resolved {
+                "succeeded"
+            } else {
+                "failed"
+            }
+        );
+    }
+    for status in [
+        BrowserUploadStatus::Uploaded,
+        BrowserUploadStatus::StaleTarget,
+        BrowserUploadStatus::HiddenTab,
+        BrowserUploadStatus::InvalidTarget,
+        BrowserUploadStatus::Declined,
+        BrowserUploadStatus::EngineFailure,
+    ] {
+        let (result, outcome) = typed_dispatch_audit(BrowserUploadResult {
+            browser_id: "browser-1".to_owned(),
+            snapshot_id: "snapshot-1".to_owned(),
+            document_epoch: 1,
+            target_ref: "@e1".to_owned(),
+            status,
+            message: "typed upload outcome".to_owned(),
+            requires_resnapshot: true,
+            filename: None,
+            bytes: None,
+        })
+        .await;
+        assert_eq!(result.status, status);
+        assert_eq!(
+            outcome,
+            if status == BrowserUploadStatus::Uploaded {
+                "succeeded"
+            } else {
+                "failed"
+            }
+        );
+    }
+}
+
 #[tokio::test]
 async fn stop_and_takeover_survive_broken_audit_storage() {
     let (registry, _, origin, capability, private) = controlled_registry();
@@ -1512,25 +1659,157 @@ async fn stop_and_takeover_survive_broken_audit_storage() {
     assert_eq!(human.controller.unwrap().kind, BrowserControllerKind::Human);
 }
 
+#[tokio::test]
+async fn denied_frame_navigation_preserves_top_level_control_and_snapshot() {
+    let (registry, instance, origin, capability, _private) = controlled_registry();
+    registry
+        .record_semantic_snapshot(
+            "browser-1",
+            "workspace-1",
+            0,
+            "snapshot-1".to_owned(),
+            HashMap::from([("@e1".to_owned(), target("Continue"))]),
+        )
+        .unwrap();
+    let grants_before = registry.lock().grants.clone();
+    let destination = BrowserOrigin::parse("https://frame.example.org").unwrap();
+    assert!(!registry.allow_navigation("browser-1", "workspace-1", instance, &destination));
+    let snapshot = registry.snapshot("browser-1", "workspace-1").unwrap();
+    let access = snapshot.agent_access.unwrap();
+    assert!(
+        !access.halted,
+        "a denied iframe must not halt the allowed top-level page"
+    );
+    assert!(!access.paused);
+    assert!(access.shared);
+    assert_eq!(snapshot.url.as_deref(), Some("https://example.com"));
+    assert_eq!(snapshot.document_epoch, Some(0));
+    assert_eq!(
+        snapshot.controller.unwrap().kind,
+        BrowserControllerKind::Agent
+    );
+    assert_eq!(registry.lock().grants, grants_before);
+    assert!(registry
+        .take_pending_navigation("browser-1", "workspace-1")
+        .unwrap()
+        .is_none());
+    registry
+        .begin_agent_observation(capability, "browser-1")
+        .unwrap();
+    assert!(registry
+        .semantic_target("browser-1", "workspace-1", "snapshot-1", 0, "@e1")
+        .is_ok());
+    let ran = Arc::new(AtomicBool::new(false));
+    dispatch_probe(registry, capability, origin, Arc::clone(&ran))
+        .await
+        .unwrap();
+    assert!(ran.load(Ordering::SeqCst));
+}
+
 #[test]
-fn cross_origin_redirects_pause_before_the_destination_is_exposed() {
-    let (registry, instance, _origin, _capability, _private) = controlled_registry();
+fn agent_navigation_preflight_rejects_a_changed_document_without_pausing() {
+    let (registry, instance, origin, capability, _private) = controlled_registry();
+    let fence = registry.observation_fence(capability, "browser-1").unwrap();
+    registry
+        .page_started(
+            "browser-1",
+            "workspace-1",
+            instance,
+            "https://example.com/next".to_owned(),
+        )
+        .unwrap();
+    registry
+        .page_finished(
+            "browser-1",
+            "workspace-1",
+            instance,
+            "https://example.com/next".to_owned(),
+        )
+        .unwrap();
+    let destination = BrowserOrigin::parse("https://unshared.example").unwrap();
+    assert!(registry
+        .authorize_agent_navigation(
+            capability,
+            "browser-1",
+            &origin,
+            fence,
+            destination.as_str(),
+            &destination,
+        )
+        .is_err());
+    let access = registry
+        .snapshot("browser-1", "workspace-1")
+        .unwrap()
+        .agent_access
+        .unwrap();
+    assert!(!access.paused);
+    assert!(!access.halted);
+    assert!(registry
+        .take_pending_navigation("browser-1", "workspace-1")
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn agent_navigation_preflight_preserves_explicit_stop() {
+    let (registry, instance, origin, capability, _private) = controlled_registry();
+    let fence = registry.observation_fence(capability, "browser-1").unwrap();
+    registry
+        .stop_agent_control("browser-1", "workspace-1")
+        .await
+        .unwrap();
+    assert!(!registry.allow_navigation("browser-1", "workspace-1", instance, &origin));
+    let destination = BrowserOrigin::parse("https://unshared.example").unwrap();
+    assert_eq!(
+        registry
+            .authorize_agent_navigation(
+                capability,
+                "browser-1",
+                &origin,
+                fence,
+                destination.as_str(),
+                &destination,
+            )
+            .err()
+            .as_deref(),
+        Some("browser control was stopped by the user")
+    );
+    let access = registry
+        .snapshot("browser-1", "workspace-1")
+        .unwrap()
+        .agent_access
+        .unwrap();
+    assert!(access.halted);
+    assert_eq!(access.origin.as_deref(), Some(origin.as_str()));
+    assert!(registry
+        .take_pending_navigation("browser-1", "workspace-1")
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn explicit_top_level_navigation_pauses_before_the_destination_is_exposed() {
+    let (registry, _instance, origin, capability, _private) = controlled_registry();
+    let fence = registry.observation_fence(capability, "browser-1").unwrap();
     let destination_url = "https://accounts.example.org/login?continue=%2Fsettings";
     let destination = BrowserOrigin::from_url("https://accounts.example.org/login").unwrap();
 
-    let decision = registry.authorize_navigation(
-        "browser-1",
-        "workspace-1",
-        instance,
-        destination_url,
-        &destination,
-    );
+    let decision = registry
+        .authorize_agent_navigation(
+            capability,
+            "browser-1",
+            &origin,
+            fence,
+            destination_url,
+            &destination,
+        )
+        .unwrap();
     let BrowserNavigationDecision::Pause {
         origin: paused_origin,
         snapshot,
     } = decision
     else {
-        panic!("ungranted redirect should pause");
+        panic!("unshared top-level destination should pause");
     };
     assert_eq!(paused_origin, "https://accounts.example.org");
     assert_eq!(snapshot.url.as_deref(), Some("https://example.com"));
@@ -2023,4 +2302,546 @@ fn complete_screenshot_recording_rejects_missing_snapshot() {
         error.contains("snapshot is stale"),
         "expected missing stored snapshot to reject, got: {error}"
     );
+}
+
+#[test]
+fn native_action_phases_recheck_the_full_control_scope() {
+    for changed in [
+        "capability",
+        "workspace",
+        "owner",
+        "hidden",
+        "stop",
+        "grant",
+        "origin",
+        "epoch",
+        "instance",
+        "reset",
+        "loading",
+    ] {
+        let (registry, _, origin, capability, _private) = controlled_registry();
+        let fence = registry.observation_fence(capability, "browser-1").unwrap();
+        assert!(registry
+            .authorize_native_action_phase(capability, "browser-1", "workspace-1", &origin, fence)
+            .is_ok());
+        {
+            let mut state = registry.lock();
+            match changed {
+                "capability" => {
+                    state.capabilities.remove(&capability);
+                }
+                "workspace" => {
+                    state
+                        .capabilities
+                        .get_mut(&capability)
+                        .unwrap()
+                        .workspace_id = "other-workspace".to_owned();
+                }
+                "grant" => {
+                    for grant in &mut state.grants {
+                        grant
+                            .capabilities
+                            .remove(&BrowserGrantCapability::BrowserControlOrigin);
+                        grant
+                            .capabilities
+                            .insert(BrowserGrantCapability::BrowserObserveOrigin);
+                    }
+                }
+                _ => {
+                    let record = state.records.get_mut("browser-1").unwrap();
+                    match changed {
+                        "owner" => record.controller_capability_id = Some(Uuid::new_v4()),
+                        "hidden" => record.visible = false,
+                        "stop" => {
+                            record.dispatch.halt.send_replace(true);
+                        }
+                        "origin" => record.url = Some("https://other.example/".to_owned()),
+                        "epoch" => record.document_epoch += 1,
+                        "instance" => record.instance_id += 1,
+                        "reset" => record.resetting = true,
+                        "loading" => record.load_state = BrowserLoadState::Loading,
+                        _ => unreachable!(),
+                    }
+                }
+            }
+        }
+        assert!(
+            registry
+                .authorize_native_action_phase(
+                    capability,
+                    "browser-1",
+                    "workspace-1",
+                    &origin,
+                    fence
+                )
+                .is_err(),
+            "accepted changed {changed}"
+        );
+        if changed == "grant" {
+            assert!(
+                registry
+                    .begin_agent_observation(capability, "browser-1")
+                    .is_ok(),
+                "observe-only authority must not permit native input"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn native_action_phase_rechecks_stop_before_the_outer_dispatch_drains() {
+    let (registry, _, origin, capability, _private) = controlled_registry();
+    let fence = registry.observation_fence(capability, "browser-1").unwrap();
+    let (started_tx, started_rx) = oneshot::channel();
+    let (continue_tx, continue_rx) = oneshot::channel();
+    let dispatch_registry = registry.clone();
+    let phase_registry = registry.clone();
+    let phase_origin = origin.clone();
+    let dispatch = tokio::spawn(async move {
+        dispatch_registry
+            .dispatch_agent(
+                capability,
+                "browser-1",
+                &origin,
+                BrowserGrantCapability::BrowserControlOrigin,
+                "fill",
+                Some("Title"),
+                BrowserDispatchEffect::Mutate,
+                None,
+                move || async move {
+                    started_tx.send(()).unwrap();
+                    continue_rx.await.unwrap();
+                    phase_registry.authorize_native_action_phase(
+                        capability,
+                        "browser-1",
+                        "workspace-1",
+                        &phase_origin,
+                        fence,
+                    )
+                },
+            )
+            .await
+    });
+    started_rx.await.unwrap();
+    let mut halt = registry.subscribe_halt("browser-1", "workspace-1").unwrap();
+    let stop_registry = registry.clone();
+    let stop = tokio::spawn(async move {
+        stop_registry
+            .stop_agent_control("browser-1", "workspace-1")
+            .await
+    });
+    halt.changed().await.unwrap();
+    assert!(!stop.is_finished());
+    continue_tx.send(()).unwrap();
+    assert!(dispatch
+        .await
+        .unwrap()
+        .unwrap_err()
+        .contains("stopped by the user"));
+    stop.await.unwrap().unwrap();
+}
+
+#[test]
+fn remembered_consent_is_bound_to_owner_workspace_origin_and_capabilities() {
+    let private = tempfile::tempdir().unwrap();
+    let registry = BrowserRegistry::default();
+    registry.initialize_private_state(private.path()).unwrap();
+    let origin = BrowserOrigin::parse("https://example.com").unwrap();
+    registry
+        .register("original", "workspace-1", origin.as_str().to_owned(), true)
+        .unwrap();
+    registry
+        .grant_browser_access(
+            "original",
+            "workspace-1",
+            &origin,
+            BrowserOriginScope::Origin {
+                origin: origin.clone(),
+            },
+            &[BrowserGrantCapability::BrowserObserveOrigin],
+        )
+        .unwrap();
+    registry.remove("original", "workspace-1").unwrap();
+    registry
+        .register(
+            "replacement",
+            "workspace-1",
+            "https://example.com/next".to_owned(),
+            true,
+        )
+        .unwrap();
+    assert!(
+        registry
+            .snapshot("replacement", "workspace-1")
+            .unwrap()
+            .agent_access
+            .unwrap()
+            .shared
+    );
+    drop(registry);
+
+    let reopened = BrowserRegistry::default();
+    reopened.initialize_private_state(private.path()).unwrap();
+    for (id, owner, workspace, url, shared) in [
+        (
+            "same",
+            OwnerId::local(),
+            "workspace-1",
+            "https://example.com/path",
+            true,
+        ),
+        (
+            "owner",
+            OwnerId::new("other").unwrap(),
+            "workspace-1",
+            "https://example.com",
+            false,
+        ),
+        (
+            "workspace",
+            OwnerId::local(),
+            "workspace-2",
+            "https://example.com",
+            false,
+        ),
+        (
+            "conversation",
+            OwnerId::local(),
+            "foreground-chat:workspace-1",
+            "https://example.com",
+            false,
+        ),
+        (
+            "port",
+            OwnerId::local(),
+            "workspace-1",
+            "https://example.com:444",
+            false,
+        ),
+        (
+            "scheme",
+            OwnerId::local(),
+            "workspace-1",
+            "http://example.com",
+            false,
+        ),
+    ] {
+        reopened
+            .register_managed(
+                id,
+                workspace,
+                owner,
+                Uuid::new_v4().to_string(),
+                url.to_owned(),
+                true,
+            )
+            .unwrap();
+        let snapshot = reopened.snapshot(id, workspace).unwrap();
+        let access = snapshot.agent_access.unwrap();
+        assert_eq!(access.shared, shared, "{id}");
+        assert!(!access.can_control);
+        assert!(!access.can_transfer_files);
+        assert_eq!(
+            snapshot.controller.unwrap().kind,
+            BrowserControllerKind::Human
+        );
+    }
+    let capability = reopened.issue_agent_capability("workspace-1", "Code agent");
+    assert!(reopened.begin_agent_control(capability, "owner").is_err());
+    assert!(reopened.begin_agent_control(capability, "same").is_ok());
+}
+
+#[test]
+fn remembered_loopback_consent_stays_in_its_conversation_and_revokes_across_restart() {
+    let private = tempfile::tempdir().unwrap();
+    let registry = BrowserRegistry::default();
+    registry.initialize_private_state(private.path()).unwrap();
+    let workspace = "foreground-chat:first";
+    let origin = BrowserOrigin::parse("http://localhost:3000").unwrap();
+    registry
+        .register("first", workspace, origin.as_str().to_owned(), true)
+        .unwrap();
+    registry
+        .grant_browser_access(
+            "first",
+            workspace,
+            &origin,
+            BrowserOriginScope::LoopbackWorkspace,
+            &[BrowserGrantCapability::BrowserControlOrigin],
+        )
+        .unwrap();
+    drop(registry);
+    let reopened = BrowserRegistry::default();
+    reopened.initialize_private_state(private.path()).unwrap();
+    for (id, scope, url, shared) in [
+        ("next-port", workspace, "http://127.0.0.1:4317", true),
+        ("next-host", workspace, "http://dev.localhost:5173", true),
+        (
+            "other-chat",
+            "foreground-chat:second",
+            "http://127.0.0.1:4317",
+            false,
+        ),
+        ("code", "workspace-1", "http://127.0.0.1:4317", false),
+        ("public", workspace, "https://example.com", false),
+    ] {
+        reopened.register(id, scope, url.to_owned(), true).unwrap();
+        assert_eq!(
+            reopened
+                .snapshot(id, scope)
+                .unwrap()
+                .agent_access
+                .unwrap()
+                .shared,
+            shared,
+            "{id}"
+        );
+    }
+    reopened
+        .revoke_browser_access("next-port", workspace)
+        .unwrap();
+    assert!(
+        !reopened
+            .snapshot("next-host", workspace)
+            .unwrap()
+            .agent_access
+            .unwrap()
+            .shared
+    );
+    drop(reopened);
+    let revoked = BrowserRegistry::default();
+    revoked.initialize_private_state(private.path()).unwrap();
+    revoked
+        .register(
+            "after-restart",
+            workspace,
+            "http://localhost:9000".to_owned(),
+            true,
+        )
+        .unwrap();
+    assert!(
+        !revoked
+            .snapshot("after-restart", workspace)
+            .unwrap()
+            .agent_access
+            .unwrap()
+            .shared
+    );
+}
+
+#[tokio::test]
+async fn resume_reuses_consent_after_stop_without_adding_capabilities() {
+    let (registry, _instance, _origin, capability, _private) = controlled_registry();
+    let before = registry.lock().grants.clone();
+    registry
+        .stop_agent_control("browser-1", "workspace-1")
+        .await
+        .unwrap();
+    assert!(registry
+        .begin_agent_control(capability, "browser-1")
+        .is_err());
+    let (resumed, pending) = registry
+        .resume_shared_browser("browser-1", "workspace-1")
+        .unwrap()
+        .unwrap();
+    assert!(pending.is_none());
+    assert!(!resumed.agent_access.as_ref().unwrap().halted);
+    assert!(!resumed.agent_access.unwrap().can_transfer_files);
+    assert_eq!(
+        resumed.controller.unwrap().kind,
+        BrowserControllerKind::Human
+    );
+    assert_eq!(registry.lock().grants, before);
+    assert!(registry
+        .begin_agent_control(capability, "browser-1")
+        .is_ok());
+}
+
+#[test]
+fn resume_never_approves_an_uncovered_paused_origin() {
+    let (registry, _instance, origin, capability, _private) = controlled_registry();
+    let fence = registry.observation_fence(capability, "browser-1").unwrap();
+    let destination = BrowserOrigin::parse("https://accounts.example.org").unwrap();
+    assert!(matches!(
+        registry
+            .authorize_agent_navigation(
+                capability,
+                "browser-1",
+                &origin,
+                fence,
+                "https://accounts.example.org/login",
+                &destination,
+            )
+            .unwrap(),
+        BrowserNavigationDecision::Pause { .. }
+    ));
+    let before = registry.lock().grants.clone();
+    assert!(registry
+        .resume_shared_browser("browser-1", "workspace-1")
+        .unwrap()
+        .is_none());
+    let snapshot = registry.snapshot("browser-1", "workspace-1").unwrap();
+    assert!(snapshot.agent_access.unwrap().paused);
+    assert_eq!(registry.lock().grants, before);
+    assert!(registry
+        .take_pending_navigation("browser-1", "workspace-1")
+        .is_err());
+}
+
+#[test]
+fn corrupt_consent_fails_closed_without_importing_renderer_recovery() {
+    let private = tempfile::tempdir().unwrap();
+    let registry = BrowserRegistry::default();
+    registry.initialize_private_state(private.path()).unwrap();
+    let path = private.path().join("browser/agent-origin-grants.json");
+    std::fs::write(&path, b"{truncated").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let reopened = BrowserRegistry::default();
+    assert!(reopened.initialize_private_state(private.path()).is_err());
+    assert!(reopened.lock().grants.is_empty());
+    let origin = BrowserOrigin::parse("https://example.com").unwrap();
+    reopened
+        .register("browser", "workspace-1", origin.as_str().to_owned(), true)
+        .unwrap();
+    assert!(reopened
+        .grant_browser_access(
+            "browser",
+            "workspace-1",
+            &origin,
+            BrowserOriginScope::Origin {
+                origin: origin.clone()
+            },
+            &[BrowserGrantCapability::BrowserControlOrigin]
+        )
+        .is_err());
+}
+
+#[test]
+fn failed_consent_writes_do_not_enable_access_or_claim_durable_revoke() {
+    let private = tempfile::tempdir().unwrap();
+    let registry = BrowserRegistry::default();
+    registry.initialize_private_state(private.path()).unwrap();
+    let origin = BrowserOrigin::parse("https://example.com").unwrap();
+    registry
+        .register("browser", "workspace-1", origin.as_str().to_owned(), true)
+        .unwrap();
+    let path = private.path().join("browser/agent-origin-grants.json");
+    std::fs::create_dir(&path).unwrap();
+    assert!(registry
+        .grant_browser_access(
+            "browser",
+            "workspace-1",
+            &origin,
+            BrowserOriginScope::Origin {
+                origin: origin.clone()
+            },
+            &[BrowserGrantCapability::BrowserControlOrigin]
+        )
+        .is_err());
+    assert!(
+        !registry
+            .snapshot("browser", "workspace-1")
+            .unwrap()
+            .agent_access
+            .unwrap()
+            .shared
+    );
+    std::fs::remove_dir(&path).unwrap();
+    registry
+        .grant_browser_access(
+            "browser",
+            "workspace-1",
+            &origin,
+            BrowserOriginScope::Origin {
+                origin: origin.clone(),
+            },
+            &[BrowserGrantCapability::BrowserControlOrigin],
+        )
+        .unwrap();
+    let saved = std::fs::read(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    let error = registry
+        .revoke_browser_access("browser", "workspace-1")
+        .unwrap_err();
+    assert!(error.contains("Retry Stop sharing before restarting"));
+    let access = registry
+        .snapshot("browser", "workspace-1")
+        .unwrap()
+        .agent_access
+        .unwrap();
+    assert!(!access.shared);
+    assert!(access.halted);
+    std::fs::remove_dir(&path).unwrap();
+    std::fs::write(&path, saved).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    registry
+        .revoke_browser_access("browser", "workspace-1")
+        .unwrap();
+    drop(registry);
+    let reopened = BrowserRegistry::default();
+    reopened.initialize_private_state(private.path()).unwrap();
+    assert!(reopened.lock().grants.is_empty());
+}
+
+#[test]
+fn observation_only_consent_cannot_navigate_or_queue_replay() {
+    let (registry, instance) = ready_registry(true);
+    let origin = BrowserOrigin::parse("https://example.com").unwrap();
+    registry
+        .grant_browser_access(
+            "browser-1",
+            "workspace-1",
+            &origin,
+            BrowserOriginScope::Origin {
+                origin: origin.clone(),
+            },
+            &[BrowserGrantCapability::BrowserObserveOrigin],
+        )
+        .unwrap();
+    let capability = registry.issue_agent_capability("workspace-1", "Code agent");
+    registry
+        .begin_agent_control(capability, "browser-1")
+        .unwrap();
+    assert!(!registry.allow_navigation("browser-1", "workspace-1", instance, &origin));
+    let fence = registry.observation_fence(capability, "browser-1").unwrap();
+    assert_eq!(
+        registry
+            .authorize_agent_navigation(
+                capability,
+                "browser-1",
+                &origin,
+                fence,
+                "https://example.com/next",
+                &origin,
+            )
+            .err()
+            .as_deref(),
+        Some("browser origin is not shared for this operation")
+    );
+    let (_, pending) = registry
+        .resume_shared_browser("browser-1", "workspace-1")
+        .unwrap()
+        .unwrap();
+    assert!(pending.is_none());
+    let access = registry
+        .snapshot("browser-1", "workspace-1")
+        .unwrap()
+        .agent_access
+        .unwrap();
+    assert!(!access.paused);
+    assert!(access.can_observe);
+    assert!(!access.can_control);
+    assert!(registry
+        .take_pending_navigation("browser-1", "workspace-1")
+        .unwrap()
+        .is_none());
 }
