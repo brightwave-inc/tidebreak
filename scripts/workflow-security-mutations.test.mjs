@@ -166,6 +166,16 @@ const mutations = [
       ),
   },
   {
+    name: "compiler cache feature-branch dispatch OIDC access",
+    file: ".github/actions/setup-sccache-s3/action.yml",
+    expected: "manual feature-branch validation keeps compiler cache local",
+    mutate: (source) =>
+      source.replaceAll(
+        " && (github.event_name != 'workflow_dispatch' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch))",
+        "",
+      ),
+  },
+  {
     name: "self-host mutable runtime packages",
     file: "deploy/self-host/Dockerfile",
     expected: "self-host runtime installs packages from an immutable Debian snapshot",

@@ -846,6 +846,29 @@ test("compiler caches use OIDC-scoped S3 access", () => {
   }
 });
 
+test("manual feature-branch validation keeps compiler cache local", () => {
+  const remoteGuard =
+    "if: ${{ inputs.remote-cache-enabled == 'true' && (github.event_name != 'workflow_dispatch' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) }}";
+  const steps = compilerCacheAction.split(/^    - name: /m).slice(1);
+  for (const name of [
+    "Configure compiler cache environment",
+    "Authenticate to the compiler cache",
+  ]) {
+    const step = steps.find((entry) => entry.startsWith(name + "\n"));
+    assert.ok(
+      step?.includes(remoteGuard),
+      name + " must exclude off-default manual runs",
+    );
+  }
+  const install = steps.find((entry) => entry.startsWith("Install sccache\n"));
+  assert.ok(install, "every run must install the local compiler cache");
+  assert.doesNotMatch(install, /^      if:/m);
+  assert.doesNotMatch(
+    install,
+    /SCCACHE_BUCKET|configure-aws-credentials|role-to-assume/,
+  );
+});
+
 test("production secrets remain isolated to the release workflow", () => {
   const secretConsumers = Object.entries(workflows)
     .filter(([, source]) => source.includes("secrets."))
