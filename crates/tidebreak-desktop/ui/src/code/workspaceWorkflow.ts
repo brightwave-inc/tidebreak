@@ -12,7 +12,12 @@ import {
   prWorkflowStatus,
   type PrWorkflowAction,
 } from "./prActions";
-import { checkSummaryText, type CheckCounts } from "./prState";
+import {
+  checkSummaryText,
+  pullRequestLifecycle,
+  PR_GATE_LABEL,
+  type CheckCounts,
+} from "./prState";
 import { renderWorkflowPrompt } from "./workflowPrompts";
 
 export type WorkspaceWorkflowAction =
@@ -21,7 +26,13 @@ export type WorkspaceWorkflowAction =
   | "push"
   | "create_pr"
   | "compose_pr"
-  | "open_pr";
+  | "open_pr"
+  | "update_pr"
+  | "follow_up_pr"
+  | "sync_branch"
+  | "resolve_divergence"
+  | "resolve_local_conflicts"
+  | "archive";
 
 export type WorkspaceWorkflowTone =
   | "neutral"
@@ -33,6 +44,11 @@ export type WorkspaceWorkflowTone =
 
 export type WorkspaceWorkflowModel = {
   stage:
+    | "detached"
+    | "sync_needed"
+    | "diverged"
+    | "local_conflicts"
+    | "follow_up"
     | "loading"
     | "checking"
     | "clean"
@@ -55,6 +71,8 @@ export type WorkspaceWorkflowModel = {
     | "closed";
   tone: WorkspaceWorkflowTone;
   summary: string;
+  localSummary?: string;
+  prSummary?: string;
   title: string;
   detail: string;
   primary?: WorkspaceWorkflowAction;
@@ -186,89 +204,142 @@ export function workspaceWorkflowModel(
   fallbackPr?: PullRequestDigest,
 ): WorkspaceWorkflowModel {
   const pr = snapshot === null ? fallbackPr : snapshot.pr;
-  if (!snapshot) {
-    if (pr) return pullRequestWorkflow(pr);
+  const hosted = pr ? pullRequestWorkflow(pr) : undefined;
+  const prSummary = pr
+    ? [
+        PR_GATE_LABEL[prWorkflowStatus(pr).state],
+        pr.auto_merge_enabled &&
+        prWorkflowStatus(pr).state !== "auto_merge" &&
+        prWorkflowStatus(pr).state !== "queued" &&
+        pullRequestLifecycle(pr) === "open"
+          ? "Auto-merge on"
+          : null,
+      ]
+        .filter(Boolean)
+        .join(" · ")
+    : undefined;
+  const common = { pr, prSummary, checks: hosted?.checks };
+  if (!snapshot)
     return {
+      ...common,
       stage: "loading",
       tone: "neutral",
-      summary: "Checking…",
+      summary: "Checking workspace…",
       title: "Checking workspace status",
-      detail: "Reading the branch and pull-request state.",
-      secondary: [],
+      detail: "Reading local changes and pull request status.",
+      secondary: pr?.url ? ["open_pr", "open_source"] : ["open_source"],
     };
-  }
-  if (snapshot.dirty) {
-    if (pr) {
-      return {
-        stage: "dirty",
-        tone: "warning",
-        summary: `#${pr.number} · Changes`,
-        title: `Pull request #${pr.number} has local changes`,
-        detail: "Review the worktree and choose a commit message.",
-        primary: "open_source",
-        secondary: pr.url ? ["open_pr"] : [],
-        pr,
-      };
-    }
-    // No pull request yet, so the useful next step is the whole trip: Create
-    // PR sends the commit-push-open request into the workspace chat. Hand
-    // review stays one step away in the menu.
+  const git = snapshot.git;
+  const localSummary = git?.changed_files
+    ? `${git.changed_files} changed ${git.changed_files === 1 ? "file" : "files"}`
+    : snapshot.dirty
+      ? "Uncommitted changes"
+      : undefined;
+  const local = (
+    stage: WorkspaceWorkflowModel["stage"],
+    summary: string,
+    detail: string,
+    primary: WorkspaceWorkflowAction,
+  ): WorkspaceWorkflowModel => ({
+    ...common,
+    stage,
+    tone: hosted?.tone === "critical" ? "critical" : "warning",
+    summary: pr ? `#${pr.number} · ${summary}` : summary,
+    localSummary: summary,
+    title: summary,
+    detail,
+    primary,
+    secondary: ["open_source", ...(pr?.url ? ["open_pr" as const] : [])],
+  });
+  if (git && !git.branch)
+    return local(
+      "detached",
+      "Detached HEAD",
+      "Restore the workspace branch before publishing or merging changes.",
+      "open_source",
+    );
+  if (git?.conflicted_files)
+    return local(
+      "local_conflicts",
+      "Local conflicts",
+      "Resolve the unfinished Git operation before publishing changes.",
+      "resolve_local_conflicts",
+    );
+  if (git && git.behind_upstream > 0)
+    return local(
+      git.ahead_of_upstream > 0 ? "diverged" : "sync_needed",
+      git.ahead_of_upstream > 0
+        ? "Branches have diverged"
+        : "Branch needs syncing",
+      `${git.behind_upstream} upstream ${git.behind_upstream === 1 ? "commit is" : "commits are"} missing locally. Preserve local work before syncing.`,
+      git.ahead_of_upstream > 0 ? "resolve_divergence" : "sync_branch",
+    );
+  const settled = pr && ["merged", "closed"].includes(pullRequestLifecycle(pr));
+  const laterCommits =
+    settled &&
+    git &&
+    pr.head_sha &&
+    git.head_sha !== pr.head_sha &&
+    git.branch_has_changes;
+  if (settled) {
+    if (
+      snapshot.dirty ||
+      laterCommits ||
+      (snapshot.unpushed && (!git || git.head_sha !== pr.head_sha))
+    )
+      return local(
+        "follow_up",
+        localSummary ?? "Follow-up changes",
+        "Keep the previous PR outcome and publish the remaining work in a follow-up PR.",
+        "follow_up_pr",
+      );
     return {
-      stage: "dirty",
-      tone: "warning",
-      summary: "Uncommitted changes",
-      title: "Changes need a pull request",
-      detail:
-        "Create PR sends a request to commit, push, and open a pull request.",
-      primary: "compose_pr",
-      secondary: ["open_source"],
+      ...hosted!,
+      ...common,
+      primary: pullRequestLifecycle(pr) === "merged" ? "archive" : "open_pr",
+      secondary:
+        pullRequestLifecycle(pr) === "merged"
+          ? ["open_pr", "open_source"]
+          : ["follow_up_pr", "open_source"],
     };
   }
-  if (snapshot.unpushed) {
-    return {
-      stage: "unpushed",
-      tone: "warning",
-      summary: pr ? `#${pr.number} · Unpushed` : "Unpushed changes",
-      title: "Local commits are ready",
-      detail: pr
-        ? `Push the latest commits to update pull request #${pr.number}.`
-        : "Push the latest local commits to origin.",
-      primary: "push",
-      secondary: pr?.url ? ["open_source", "open_pr"] : ["open_source"],
-      pr,
-    };
-  }
-  if (pr) return pullRequestWorkflow(pr);
-  if (snapshot.ahead > 0) {
-    if (!snapshot.gh_found || snapshot.gh_authenticated === false) {
-      return {
-        stage: "github_setup",
-        tone: "warning",
-        summary: "GitHub setup",
-        title: "GitHub is not ready",
-        detail: snapshot.gh_found
-          ? "Sign in to GitHub CLI before creating a pull request."
-          : "Install GitHub CLI before creating a pull request.",
-        primary: "open_source",
-        secondary: [],
-      };
-    }
+  if (snapshot.dirty)
+    return local(
+      "dirty",
+      localSummary ?? "Uncommitted changes",
+      pr
+        ? "Review, commit, and push the local changes to this pull request."
+        : "Review, commit, and push the changes, then create a pull request.",
+      pr ? "update_pr" : "compose_pr",
+    );
+  if (snapshot.unpushed && (pr || git?.branch_has_changes !== false))
+    return local(
+      "unpushed",
+      git?.ahead_of_upstream
+        ? `${git.ahead_of_upstream} ${git.ahead_of_upstream === 1 ? "commit" : "commits"} to push`
+        : "Unpushed commits",
+      pr
+        ? "Push the local commits to this pull request."
+        : "Publish the branch and create a pull request.",
+      pr ? "update_pr" : "compose_pr",
+    );
+  if (hosted) return { ...hosted, ...common };
+  if (git?.branch_has_changes ?? snapshot.ahead > 0)
     return {
       stage: "ready_for_pr",
       tone: "ready",
       summary: "Ready for PR",
-      title: "The branch is ready",
-      detail: "The latest commits are pushed and ready for a pull request.",
-      primary: "create_pr",
+      title: "Changes are ready for a pull request",
+      detail: "Create a pull request from the published branch.",
+      primary: "compose_pr",
       secondary: ["open_source"],
     };
-  }
   return {
     stage: "clean",
     tone: "neutral",
     summary: "No changes",
     title: "Workspace is clean",
-    detail: "Changes and pull-request actions will appear here.",
+    detail: "No local or branch changes to publish.",
     secondary: ["open_source"],
   };
 }
@@ -500,6 +571,12 @@ export function resolveWorkflowShortcut(
   }
   if (shortcut === "watch") {
     if (watching) return { stopWatch: true };
+    if (
+      ["detached", "sync_needed", "diverged", "local_conflicts"].includes(
+        model.stage,
+      )
+    )
+      return { blocked: model.title };
     return prBlocker(model) ?? { run: "watch_and_fix" };
   }
   if (watching) {
@@ -512,16 +589,24 @@ export function resolveWorkflowShortcut(
       // nothing happen".
       return model.primary ? { run: model.primary } : { blocked: model.title };
     case "pull_request":
+      if (
+        ["detached", "sync_needed", "diverged", "local_conflicts"].includes(
+          model.stage,
+        )
+      )
+        return { run: model.primary! };
       // Commit and push come first whether or not a pull request exists, so
       // these stages lead. With no pull request yet, uncommitted work gets the
       // sent request that carries it all the way; with one open, new local
       // changes go through the commit box to update it.
       if (model.stage === "dirty") {
-        return { run: model.pr ? "open_source" : "compose_pr" };
+        return { run: model.pr ? "update_pr" : "compose_pr" };
       }
       if (model.stage === "github_setup") return { run: "open_source" };
-      if (model.stage === "unpushed") return { run: "push" };
-      if (model.stage === "ready_for_pr") return { run: "create_pr" };
+      if (model.stage === "unpushed")
+        return { run: model.pr ? "update_pr" : "compose_pr" };
+      if (model.stage === "ready_for_pr") return { run: "compose_pr" };
+      if (model.stage === "follow_up") return { run: "follow_up_pr" };
       if (model.pr) {
         return model.pr.url
           ? { run: "open_pr" }
@@ -529,6 +614,12 @@ export function resolveWorkflowShortcut(
       }
       return { blocked: "No commits to open a pull request for" };
     case "update_branch":
+      if (
+        ["detached", "sync_needed", "diverged", "local_conflicts"].includes(
+          model.stage,
+        )
+      )
+        return { run: model.primary! };
       // A rebase over uncommitted work is the classic way to lose it, and the
       // snapshot already knows. Send the reader to the commit box instead.
       if (model.stage === "dirty") {
@@ -573,6 +664,16 @@ function mergeIfGreen(
   if (model.stage === "unpushed") {
     return { blocked: "Push your local commits before merging" };
   }
+  if (
+    [
+      "detached",
+      "sync_needed",
+      "diverged",
+      "local_conflicts",
+      "follow_up",
+    ].includes(model.stage)
+  )
+    return { blocked: model.title };
   const pr = model.pr;
   if (!pr) return { blocked: "No pull request yet" };
   if (!workspaceMergeIdentity(pr)) {
@@ -594,10 +695,10 @@ function mergeIfGreen(
 /** Why a pull request cannot be acted on, or `null` when it can. */
 function prBlocker(model: WorkspaceWorkflowModel): { blocked: string } | null {
   if (!model.pr) return { blocked: "No pull request yet" };
-  if (model.stage === "merged") {
+  if (model.pr && pullRequestLifecycle(model.pr) === "merged") {
     return { blocked: `Pull request #${model.pr.number} is already merged` };
   }
-  if (model.stage === "closed") {
+  if (model.pr && pullRequestLifecycle(model.pr) === "closed") {
     return { blocked: `Pull request #${model.pr.number} is closed` };
   }
   return null;
@@ -615,13 +716,24 @@ export function workspaceWorkflowActionLabel(
   stage: WorkspaceWorkflowModel["stage"],
 ): string {
   switch (action) {
+    case "update_pr":
+      return "Update PR";
+    case "follow_up_pr":
+      return "Create follow-up PR";
+    case "sync_branch":
+      return "Sync branch";
+    case "resolve_divergence":
+      return "Resolve divergence";
+    case "resolve_local_conflicts":
+      return "Resolve conflicts";
+    case "archive":
+      return "Archive workspace";
     case "open_source":
-      if (stage === "github_setup") return "Set up GitHub";
-      return stage === "dirty" ? "Review & commit" : "Source control";
+      return "Source control";
     case "push":
       return "Push";
     case "create_pr":
-      return "Open PR";
+      return "Create PR";
     case "compose_pr":
       return "Create PR";
     case "open_pr":
@@ -635,7 +747,7 @@ export function workspaceWorkflowActionLabel(
     case "merge":
       return "Merge";
     case "fix_errors":
-      return "Fix CI";
+      return "Fix checks";
     case "address_feedback":
       return "Address feedback";
     case "update_branch":
@@ -656,4 +768,37 @@ export function workspaceWorkflowActionLabel(
 export function composePrPrompt(base?: string): string {
   const target = base?.trim() ? `\`${base.trim()}\`` : "the default branch";
   return renderWorkflowPrompt("compose_pr", { base: target });
+}
+
+/** Local publishing actions use the same conversation as PR repairs. */
+export function workspaceActionPrompt(
+  action: WorkspaceWorkflowAction,
+  pr?: PullRequestDigest,
+  base?: string,
+): string | null {
+  if (action === "compose_pr" || action === "create_pr")
+    return composePrPrompt(base);
+  if (
+    [
+      "update_pr",
+      "follow_up_pr",
+      "sync_branch",
+      "resolve_divergence",
+      "resolve_local_conflicts",
+    ].includes(action)
+  ) {
+    return renderWorkflowPrompt(
+      action as
+        | "update_pr"
+        | "follow_up_pr"
+        | "sync_branch"
+        | "resolve_divergence"
+        | "resolve_local_conflicts",
+      {
+        pr: pr?.url ?? (pr ? `#${pr.number}` : "the previous pull request"),
+        base: pr?.base_branch ?? base ?? "the default branch",
+      },
+    );
+  }
+  return null;
 }

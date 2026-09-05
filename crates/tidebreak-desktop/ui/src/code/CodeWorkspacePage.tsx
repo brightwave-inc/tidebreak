@@ -448,7 +448,7 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
             <WorkspaceDeliveryPrTab
               client={client}
               workspaceId={workspaceId}
-              pr={prResource.data?.pr ?? workspace?.pr}
+              pr={prResource.data === null ? pr : prResource.data.pr}
               branch={workspace?.branch_name}
               prResource={prResource}
             />
@@ -832,6 +832,14 @@ function CodeWorkspaceBody({ workspaceId }: { workspaceId: string }) {
               baseRef={workspace.base_ref}
               fallbackPr={pr}
               resource={prResource}
+              onArchive={() =>
+                run("archive", {
+                  workspace,
+                  title: title ?? workspace.title,
+                  pr,
+                  session: session ?? undefined,
+                })
+              }
               onOpenSourceControl={() =>
                 setWorkspaceLayout(
                   openCodeEditor(

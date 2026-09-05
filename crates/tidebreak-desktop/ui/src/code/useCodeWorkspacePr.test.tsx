@@ -215,3 +215,69 @@ describe("useCodeWorkspacePr", () => {
     expect(result.current.mutationError).toBeNull();
   });
 });
+
+describe("shared workspace views", () => {
+  it("shares reads, adopted results, and mutation locks between independent consumers", async () => {
+    const client = { getCodeWorkspacePr: vi.fn(async () => CLEAN) };
+    const { result } = renderHook(() => ({
+      header: useCodeWorkspacePr(client, "shared", 0),
+      hover: useCodeWorkspacePr(client, "shared", 0, undefined, false),
+    }));
+    await waitFor(() => expect(result.current.header.data).toEqual(CLEAN));
+    expect(client.getCodeWorkspacePr).toHaveBeenCalledOnce();
+    act(() => result.current.header.adopt({ ...CLEAN, dirty: true }));
+    expect(result.current.hover.data?.dirty).toBe(true);
+    let release!: () => void;
+    let pending!: Promise<unknown>;
+    act(() => {
+      pending = result.current.hover.runMutation(
+        "push",
+        () =>
+          new Promise<void>((resolve) => {
+            release = resolve;
+          }),
+      );
+    });
+    expect(result.current.header.busy).toBe("push");
+    const duplicate = vi.fn();
+    await result.current.header.runMutation("merge", duplicate);
+    expect(duplicate).not.toHaveBeenCalled();
+    await act(async () => {
+      release();
+      await pending;
+    });
+  });
+  it("clears a host-refresh failure after a successful local poll", async () => {
+    const client = {
+      getCodeWorkspacePr: vi.fn(async () => CLEAN),
+      refreshCodeWorkspacePr: vi
+        .fn()
+        .mockRejectedValueOnce(new Error("GitHub unavailable"))
+        .mockResolvedValue(CLEAN),
+    };
+    const { result } = renderHook(() =>
+      useCodeWorkspacePr(client, "errors", 0),
+    );
+    await waitFor(() => expect(result.current.data).toEqual(CLEAN));
+    await act(async () => {
+      await result.current.refreshFromHost().catch(() => undefined);
+    });
+    expect(result.current.error).toContain("GitHub unavailable");
+    await act(async () => {
+      await result.current.refresh();
+    });
+    expect(result.current.error).toBeNull();
+  });
+  it("keeps action errors until acknowledged or replaced by an authoritative mutation", async () => {
+    const client = { getCodeWorkspacePr: vi.fn(async () => CLEAN) };
+    const { result } = renderHook(() =>
+      useCodeWorkspacePr(client, "mutation-errors", 0),
+    );
+    await waitFor(() => expect(result.current.data).toEqual(CLEAN));
+    act(() => result.current.setMutationError("Push rejected"));
+    await act(async () => {
+      await result.current.refresh();
+    });
+    expect(result.current.mutationError).toBe("Push rejected");
+  });
+});

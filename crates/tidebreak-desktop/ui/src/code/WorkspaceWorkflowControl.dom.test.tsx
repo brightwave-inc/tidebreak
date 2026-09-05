@@ -173,7 +173,7 @@ describe("Create PR", () => {
   });
 });
 
-describe("Fix CI", () => {
+describe("Fix checks", () => {
   it("downloads the failing job logs and names them in the prompt", async () => {
     const write = vi.fn(async () =>
       snapshot([
@@ -188,7 +188,7 @@ describe("Fix CI", () => {
     );
     renderControl(write);
 
-    await userEvent.click(screen.getByRole("button", { name: /fix ci/i }));
+    await userEvent.click(screen.getByRole("button", { name: /fix checks/i }));
 
     await waitFor(() =>
       expect(useCodeUiStore.getState().pendingComposerPrompt).not.toBeNull(),
@@ -214,7 +214,7 @@ describe("Fix CI", () => {
     );
     renderControl(write);
 
-    const button = screen.getByRole("button", { name: /fix ci/i });
+    const button = screen.getByRole("button", { name: /fix checks/i });
     await userEvent.click(button);
     const reading = await screen.findByText("Reading logs…");
     expect(reading).toBeTruthy();
@@ -235,7 +235,7 @@ describe("Fix CI", () => {
       }),
     );
 
-    await userEvent.click(screen.getByRole("button", { name: /fix ci/i }));
+    await userEvent.click(screen.getByRole("button", { name: /fix checks/i }));
 
     await waitFor(() =>
       expect(useCodeUiStore.getState().pendingComposerPrompt).not.toBeNull(),
@@ -270,7 +270,7 @@ function renderMergeControl(error?: HttpError) {
       pr: { ...readyPr.pr!, state: "merged", merged: true },
     };
   });
-  const refresh = vi.fn(async () => {});
+  const refresh = vi.fn(async () => undefined);
   const adopt = vi.fn();
   const setMutationError = vi.fn();
   const mergeResource: CodeWorkspacePrResource = {
@@ -282,7 +282,7 @@ function renderMergeControl(error?: HttpError) {
     busy: null,
     mutationError: null,
     setMutationError,
-    refreshFromHost: async () => undefined,
+    refreshFromHost: refresh,
     runMutation: async (_mutation, operation) => operation(),
   };
   render(
@@ -358,5 +358,76 @@ describe("Merge", () => {
     );
     await userEvent.click(refreshButton);
     expect(refresh).toHaveBeenCalledOnce();
+  });
+});
+
+describe("conversation workflow", () => {
+  it("sends Watch and fix to the existing conversation without starting a background watch", async () => {
+    const startCodeWatch = vi.fn();
+    render(
+      <WorkspaceWorkflowControl
+        client={{
+          startCodeWatch,
+          stopCodeWatch: vi.fn(),
+          writeCodeCheckLogs: vi.fn(),
+          mergeCodePr: vi.fn(),
+          markCodePrReady: vi.fn(),
+          pushCodeWorkspace: vi.fn(),
+          createCodePullRequest: vi.fn(),
+        }}
+        workspaceId="ws-1"
+        branchName="topic"
+        resource={{
+          ...resource(),
+          data: {
+            ...failingPr,
+            pr: {
+              ...failingPr.pr!,
+              checks: [{ name: "ci", bucket: "pending" }],
+            },
+          },
+        }}
+        onOpenSourceControl={vi.fn()}
+      />,
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Watch and fix" }),
+    );
+    const prompt = useCodeUiStore.getState().pendingComposerPrompt;
+    expect(prompt?.text).toContain("in this conversation");
+    expect(prompt?.text).toContain("inline review comments");
+    expect(prompt?.text).toContain("Do not merge");
+    expect(startCodeWatch).not.toHaveBeenCalled();
+  });
+  it("shows local changes beside the hosted failure and submits Update PR", async () => {
+    render(
+      <WorkspaceWorkflowControl
+        client={{
+          startCodeWatch: vi.fn(),
+          stopCodeWatch: vi.fn(),
+          writeCodeCheckLogs: vi.fn(),
+          mergeCodePr: vi.fn(),
+          markCodePrReady: vi.fn(),
+          pushCodeWorkspace: vi.fn(),
+          createCodePullRequest: vi.fn(),
+        }}
+        workspaceId="ws-1"
+        branchName="topic"
+        resource={{ ...resource(), data: { ...failingPr, dirty: true } }}
+        onOpenSourceControl={vi.fn()}
+      />,
+    );
+    expect(
+      screen.getByRole("button", {
+        name: /Workspace status:.*Uncommitted changes.*Checks failed/,
+      }),
+    ).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Update PR" }));
+    expect(useCodeUiStore.getState().pendingComposerPrompt?.text).toContain(
+      "https://github.com/example/app/pull/184",
+    );
+    expect(useCodeUiStore.getState().pendingComposerPrompt?.text).toContain(
+      "push all unpushed commits",
+    );
   });
 });
