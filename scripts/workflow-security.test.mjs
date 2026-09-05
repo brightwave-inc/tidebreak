@@ -2809,3 +2809,69 @@ test("the packaged desktop activates the signed updater feed", () => {
     /const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs\(5 \* 60\)/,
   );
 });
+
+test("Linux release dependencies use the workflow helper without moving application HEAD", () => {
+  const buildJob = workflowJob(workflows["release.yml"], "build_linux");
+  assert.match(
+    buildJob,
+    /uses: actions\/checkout@[^\n]+\n\s+with:\n\s+ref: \$\{\{ needs\.validate\.outputs\.sha \}\}/,
+  );
+  const step = buildJob.match(
+    /- name: Install Linux packaging dependencies\n[\s\S]*?(?=\n      - (?:name:|uses:))/,
+  )?.[0];
+  assert.ok(step, "Linux dependency installation step must exist");
+  assert.match(step, /timeout-minutes: 8/);
+  assert.match(step, /RELEASE_SHA: \$\{\{ needs\.validate\.outputs\.sha \}\}/);
+  assert.match(step, /RELEASE_WORKFLOW_SHA: \$\{\{ github\.sha \}\}/);
+  assert.match(
+    step,
+    /git fetch --no-tags --depth=1 origin "\$RELEASE_WORKFLOW_SHA"/,
+  );
+  assert.match(
+    step,
+    /installer="\$RUNNER_TEMP\/tidebreak-install-linux-apt-packages\.sh"/,
+  );
+  assert.match(
+    step,
+    /git show "\$RELEASE_WORKFLOW_SHA:scripts\/install-linux-apt-packages\.sh" > "\$installer"/,
+  );
+  assert.doesNotMatch(
+    step,
+    /\bgit\s+(?:checkout|switch|reset|restore|read-tree)\b/,
+  );
+  const install = step.indexOf('bash "$installer"');
+  assert.ok(
+    install > step.indexOf('git show "$RELEASE_WORKFLOW_SHA:'),
+    "Extract the helper before running it",
+  );
+  const guards = [
+    ...step.matchAll(
+      /\[\[ "\$\(git rev-parse HEAD\)" == "\$RELEASE_SHA" \]\] \|\| \{\n\s+echo [^\n]+\n\s+exit 1\n\s+\}/g,
+    ),
+  ];
+  assert.equal(
+    guards.length,
+    2,
+    "Guard application HEAD before and after dependency installation",
+  );
+  assert.ok(guards[0].index < step.indexOf("git fetch"));
+  assert.ok(guards[1].index > install);
+  const packages = step
+    .slice(install, guards[1].index)
+    .split("\n")
+    .slice(1)
+    .map((line) => line.trim().replace(/\s*\\$/, ""))
+    .filter(Boolean);
+  assert.deepEqual(packages, [
+    "build-essential",
+    "cmake",
+    "file",
+    "libayatana-appindicator3-dev",
+    "librsvg2-dev",
+    "libssl-dev",
+    "libwebkit2gtk-4.1-dev",
+    "libxdo-dev",
+    "patchelf",
+    "xdg-utils",
+  ]);
+});
