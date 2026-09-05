@@ -27,6 +27,27 @@ impl CodeRuntime {
         suggested_title: Option<String>,
         base_ref: Option<String>,
     ) -> Result<CodeWorkspace, ServerError> {
+        self.create_workspace_with_git_credentials(
+            owner,
+            repo_id,
+            title,
+            suggested_title,
+            base_ref,
+            self.git_credentials().map(|lender| lender.as_ref()),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn create_workspace_with_git_credentials(
+        &self,
+        owner: &OwnerId,
+        repo_id: RepoId,
+        title: Option<String>,
+        suggested_title: Option<String>,
+        base_ref: Option<String>,
+        lender: Option<&dyn crate::obo_gateway::GitCredentialLender>,
+    ) -> Result<CodeWorkspace, ServerError> {
         let repo = self.get_repo(owner, repo_id).await?;
         Self::refuse_removed_repo(&repo)?;
         let explicit_title = title
@@ -154,7 +175,8 @@ impl CodeRuntime {
         // Before the setup script, which may itself commit: from here on,
         // anything this workspace commits should already carry the right
         // name.
-        self.name_workspace_author(owner, &path).await;
+        self.name_workspace_author_with_lender(owner, &path, lender)
+            .await;
         match run_setup_script(
             &path,
             std::path::Path::new(&repo.root_path),

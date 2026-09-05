@@ -32,6 +32,21 @@ impl CodeRuntime {
         workspace_id: WorkspaceId,
         kind: SessionKind,
         harness: HarnessKind,
+        settings: NewSessionSettings,
+    ) -> Result<Session, ServerError> {
+        let session = self
+            .create_session_of_kind_unattached(owner, workspace_id, kind, harness, settings, None)
+            .await?;
+        self.attach_and_spawn_worker(session).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn create_session_of_kind_unattached(
+        &self,
+        owner: &OwnerId,
+        workspace_id: WorkspaceId,
+        kind: SessionKind,
+        harness: HarnessKind,
         NewSessionSettings {
             permission_mode,
             model,
@@ -39,6 +54,7 @@ impl CodeRuntime {
             fast_mode,
             permission_mode_ceiling,
         }: NewSessionSettings,
+        external_grant: Option<tidebreak_core::CodeGrantId>,
     ) -> Result<Session, ServerError> {
         if harness.is_in_process() {
             return Err(ServerError::conflict_kind(
@@ -150,8 +166,9 @@ impl CodeRuntime {
         };
         if execution_settings.reasoning_effort.is_some() || execution_settings.fast_mode {
             let selected = self
-                .selected_model_capabilities_for_owner(
+                .selected_model_capabilities_for_scope(
                     owner,
+                    external_grant.map(super::settings::ModelCredentialScope::Grant),
                     adapter.as_ref(),
                     &probe,
                     execution_settings.model.as_deref(),
@@ -183,7 +200,9 @@ impl CodeRuntime {
             created_at: Utc::now(),
             execution_location: tidebreak_core::ExecutionLocation::Machine,
         };
-        insert_session(&self.db, &session).await?;
+        if external_grant.is_none() {
+            insert_session(&self.db, &session).await?;
+        }
         // Pin where this session starts, before it can take a turn. Sessions
         // share the worktree (record 55), so without a baseline the first
         // turn's diff is the whole worktree against the base branch — a
@@ -202,7 +221,7 @@ impl CodeRuntime {
                 "could not record the session baseline; its first turn diffs against the base ref"
             );
         }
-        self.attach_and_spawn_worker(session).await
+        Ok(session)
     }
 
     /// Create a conversation with no workspace, hosted by the in-process

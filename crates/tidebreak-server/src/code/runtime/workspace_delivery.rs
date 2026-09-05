@@ -169,8 +169,13 @@ impl CodeRuntime {
     /// failures. An identity the gateway states without a commit email is
     /// incomplete and configures nothing — half an identity would be worse
     /// than the checkout's own.
-    pub(super) async fn name_workspace_author(&self, owner: &OwnerId, worktree: &std::path::Path) {
-        let Some(lender) = self.git_credentials() else {
+    pub(super) async fn name_workspace_author_with_lender(
+        &self,
+        owner: &OwnerId,
+        worktree: &std::path::Path,
+        lender: Option<&dyn crate::obo_gateway::GitCredentialLender>,
+    ) {
+        let Some(lender) = lender else {
             return;
         };
         let Ok(identity) = lender.git_forge_identity(owner).await else {

@@ -51,6 +51,11 @@ function httpStatusOf(err: unknown): number | null {
   return match ? Number(match[1]) : null;
 }
 
+/** A proxy or restarting machine has not answered the policy question yet. */
+function isTransientPolicyStatus(status: number): boolean {
+  return status === 502 || status === 503 || status === 504;
+}
+
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = window.setTimeout(
@@ -115,8 +120,9 @@ function samePolicy(a: ManagedPolicy, b: ManagedPolicy): boolean {
  *
  * The policy read fails closed. A transport failure (server not up yet,
  * request timed out) retries silently behind the boot screen — an
- * unreachable server is not an unmanaged profile. An error response blocks
- * the app outright: the server actively said the policy is unreadable.
+ * unreachable server is not an unmanaged profile. Temporary proxy failures
+ * retry the same way. Other error responses block the app because the server
+ * actively said the policy is unreadable.
  */
 export function ManagedGate({
   client,
@@ -207,7 +213,7 @@ export function ManagedGate({
           });
           return;
         }
-        if (httpStatus !== null) {
+        if (httpStatus !== null && !isTransientPolicyStatus(httpStatus)) {
           setPolicyState({ kind: "blocked", status: httpStatus });
           return;
         }
@@ -242,11 +248,15 @@ export function ManagedGate({
         );
       })
       .catch((err) => {
-        // An error *response* means the server says the policy is
-        // unreadable, which fails closed exactly as it does on first read.
-        // A transport failure says nothing, so the last answer stands.
+        // Transport and temporary proxy failures leave the last policy in
+        // force while the watch keeps running. Other HTTP errors fail closed
+        // exactly as they do on the first read.
         const httpStatus = httpStatusOf(err);
-        if (httpStatus !== null && httpStatus !== 404) {
+        if (
+          httpStatus !== null &&
+          httpStatus !== 404 &&
+          !isTransientPolicyStatus(httpStatus)
+        ) {
           setPolicyState({ kind: "blocked", status: httpStatus });
         }
       });

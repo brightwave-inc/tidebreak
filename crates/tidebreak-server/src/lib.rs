@@ -1290,10 +1290,12 @@ async fn bind_inner(
         // And engine inference rides the caller's gateway grant through the
         // relay, since the hosted image has no provider credentials of its
         // own (decision 71).
-        state
-            .on_behalf_of_gateway
-            .clone()
-            .map(|gateway| Arc::new(code::harness_llm::HarnessLlmRelay::new(gateway))),
+        state.on_behalf_of_gateway.clone().map(|gateway| {
+            Arc::new(
+                code::harness_llm::HarnessLlmRelay::new(gateway)
+                    .with_external_delegations(db.clone()),
+            )
+        }),
     )
     .with_gateway_runtime(state.gateway.clone());
     // A self-host machine owns its filesystem. Clones land under the data

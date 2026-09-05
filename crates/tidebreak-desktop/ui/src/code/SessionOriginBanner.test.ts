@@ -7,7 +7,7 @@ describe("externalThreadUrl", () => {
     expect(
       externalThreadUrl({
         channel_kind: "slack",
-        external_key: "T0400000/C0812345/1724900000.123456",
+        external_key: "T0400000:C0812345:1724900000.123456",
       }),
     ).toBe("https://slack.com/archives/C0812345/p1724900000123456");
     expect(
@@ -24,8 +24,19 @@ describe("externalThreadUrl", () => {
     expect(
       externalThreadUrl({
         channel_kind: "slack",
-        external_key: "T0400000/D0898765/dm/2",
+        external_key: "T0400000:D0898765:dm2",
       }),
+    ).toBeNull();
+  });
+
+  it.each([
+    "T1:C1:not-a-timestamp",
+    "T1:C1:171.5:extra",
+    "T1:C1/redirect:171.5",
+    "T1:C1:171.5?redirect=elsewhere",
+  ])("rejects malformed thread key %s", (external_key) => {
+    expect(
+      externalThreadUrl({ channel_kind: "slack", external_key }),
     ).toBeNull();
   });
 

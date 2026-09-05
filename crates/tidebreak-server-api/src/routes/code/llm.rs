@@ -153,6 +153,21 @@ pub async fn harness_git_credential(
     {
         return plain(StatusCode::OK, "");
     }
+    let delegated = match relay
+        .external_gateway_for_session(&subject.owner, subject.session)
+        .await
+    {
+        Ok(gateway) => gateway,
+        Err(
+            error @ (tidebreak_core::AgentError::SignInRequired(_)
+            | tidebreak_core::AgentError::InvalidTarget(_)),
+        ) => return plain(StatusCode::UNAUTHORIZED, &error.to_string()),
+        Err(error) => return plain(StatusCode::BAD_GATEWAY, &error.to_string()),
+    };
+    let lender: &dyn crate::obo_gateway::GitCredentialLender = match delegated.as_ref() {
+        Some(gateway) => gateway.as_ref(),
+        None => lender.as_ref(),
+    };
     match lender
         .git_credential(&subject.owner, &format!("{origin_owner}/{origin_name}"))
         .await

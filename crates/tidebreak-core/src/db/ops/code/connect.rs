@@ -9,7 +9,8 @@
 //! transaction that consumes the handshake.
 
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, QueryTrait,
+    Set, TransactionTrait,
 };
 
 use crate::code::{
@@ -441,4 +442,47 @@ pub async fn list_connect_grant_profiles(
             })
         })
         .collect())
+}
+
+/// The completed consent that owns one grant's gateway delegation.
+pub async fn completed_connect_handshake_for_grant(
+    store: &DbStore,
+    owner: &OwnerId,
+    grant_id: CodeGrantId,
+) -> Result<Option<CodeConnectHandshake>> {
+    entities::code_connect_handshake::Entity::find()
+        .filter(entities::code_connect_handshake::Column::ApprovalOwner.eq(owner.as_str()))
+        .filter(entities::code_connect_handshake::Column::GrantId.eq(grant_id.0))
+        .filter(
+            entities::code_connect_handshake::Column::State
+                .eq(CodeConnectState::Completed.as_str()),
+        )
+        .one(&store.conn)
+        .await
+        .map_err(store_err)?
+        .map(handshake_from_model)
+        .transpose()
+}
+
+/// Revoked external consent retained for retrying gateway revocation after a restart.
+pub async fn revoked_connect_handshakes_all_owners(
+    store: &DbStore,
+) -> Result<Vec<CodeConnectHandshake>> {
+    let revoked = entities::code_external_grant::Entity::find()
+        .select_only()
+        .column(entities::code_external_grant::Column::Id)
+        .filter(entities::code_external_grant::Column::RevokedAt.is_not_null())
+        .into_query();
+    entities::code_connect_handshake::Entity::find()
+        .filter(entities::code_connect_handshake::Column::GrantId.in_subquery(revoked))
+        .filter(
+            entities::code_connect_handshake::Column::State
+                .eq(CodeConnectState::Completed.as_str()),
+        )
+        .all(&store.conn)
+        .await
+        .map_err(store_err)?
+        .into_iter()
+        .map(handshake_from_model)
+        .collect()
 }

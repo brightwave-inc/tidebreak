@@ -72,7 +72,9 @@ describe("ConnectApprovalView", () => {
         onRetry={() => {}}
       />,
     );
-    expect(screen.getByText(/return to Slack and confirm there/)).toBeTruthy();
+    expect(
+      screen.getByText(/return to the Slack conversation where you started/),
+    ).toBeTruthy();
     expect(
       screen.queryByRole("button", { name: "Yes, this is me" }),
     ).toBeNull();

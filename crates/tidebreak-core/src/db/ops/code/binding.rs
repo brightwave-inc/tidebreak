@@ -138,6 +138,49 @@ pub async fn resolve_external_session(
     workspace: &CodeWorkspace,
     session: &Session,
 ) -> Result<ExternalSessionResolution> {
+    resolve_external_session_inner(
+        store,
+        owner,
+        grant_id,
+        channel_kind,
+        external_key,
+        Some(workspace),
+        session,
+    )
+    .await
+}
+
+/// Insert a machine session and its external binding atomically. Recovery
+/// cannot observe the session before its grant is known.
+pub async fn resolve_external_machine_session(
+    store: &DbStore,
+    owner: &OwnerId,
+    grant_id: CodeGrantId,
+    channel_kind: &str,
+    external_key: &str,
+    session: &Session,
+) -> Result<ExternalSessionResolution> {
+    resolve_external_session_inner(
+        store,
+        owner,
+        grant_id,
+        channel_kind,
+        external_key,
+        None,
+        session,
+    )
+    .await
+}
+
+async fn resolve_external_session_inner(
+    store: &DbStore,
+    owner: &OwnerId,
+    grant_id: CodeGrantId,
+    channel_kind: &str,
+    external_key: &str,
+    workspace: Option<&CodeWorkspace>,
+    session: &Session,
+) -> Result<ExternalSessionResolution> {
     let transaction = store.conn.begin().await.map_err(store_err)?;
     if let Some(hit) = entities::code_external_binding::Entity::find()
         .filter(entities::code_external_binding::Column::Owner.eq(owner.as_str()))
@@ -151,7 +194,9 @@ pub async fn resolve_external_session(
         transaction.commit().await.map_err(store_err)?;
         return Ok(resolution);
     }
-    super::workspace::insert_workspace_on(&transaction, workspace).await?;
+    if let Some(workspace) = workspace {
+        super::workspace::insert_workspace_on(&transaction, workspace).await?;
+    }
     super::session::insert_session_on(&transaction, session).await?;
     let now = database_now(&transaction).await?;
     let binding = CodeExternalBinding {

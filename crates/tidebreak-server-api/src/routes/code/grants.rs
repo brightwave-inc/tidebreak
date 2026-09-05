@@ -204,9 +204,10 @@ pub struct ConnectApproveBody {
 pub async fn connect_approve(
     code: ScopedCode,
     Path(nonce): Path<String>,
+    lease: Option<axum::Extension<crate::auth::GatewayAuthLease>>,
     Json(body): Json<ConnectApproveBody>,
 ) -> Result<StatusCode, ServerError> {
-    code.approve_connect_handshake(&nonce, &body.csrf)
+    code.approve_connect_handshake(&nonce, &body.csrf, lease.as_ref().map(|lease| &lease.0))
         .await?
         .ok_or_else(|| ServerError::not_found("this connect link is no longer valid"))?;
     Ok(StatusCode::NO_CONTENT)

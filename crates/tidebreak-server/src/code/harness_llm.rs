@@ -95,6 +95,7 @@ pub struct HarnessLlmRelay {
     obo: Arc<OboGateway>,
     client: reqwest::Client,
     state: Mutex<RelayState>,
+    external: Option<Arc<crate::obo_gateway::external::ExternalDelegations>>,
 }
 
 #[derive(Default)]
@@ -117,7 +118,72 @@ impl HarnessLlmRelay {
             obo,
             client,
             state: Mutex::new(RelayState::default()),
+            external: None,
         }
+    }
+
+    /// Attach durable external consent before any worker can use this relay.
+    pub fn with_external_delegations(mut self, db: Arc<tidebreak_core::db::DbStore>) -> Self {
+        self.external = Some(Arc::new(
+            crate::obo_gateway::external::ExternalDelegations::new(self.obo.clone(), db),
+        ));
+        self
+    }
+
+    pub fn external_delegations(
+        &self,
+    ) -> Option<&Arc<crate::obo_gateway::external::ExternalDelegations>> {
+        self.external.as_ref()
+    }
+
+    pub async fn gateway_for_session(
+        &self,
+        owner: &OwnerId,
+        session: SessionId,
+    ) -> tidebreak_core::Result<Arc<OboGateway>> {
+        match self.external.as_ref() {
+            Some(external) => Ok(external
+                .for_session(owner, session)
+                .await?
+                .unwrap_or_else(|| self.obo.clone())),
+            None => Ok(self.obo.clone()),
+        }
+    }
+
+    pub async fn external_gateway_for_session(
+        &self,
+        owner: &OwnerId,
+        session: SessionId,
+    ) -> tidebreak_core::Result<Option<Arc<OboGateway>>> {
+        match self.external.as_ref() {
+            Some(external) => external.for_session(owner, session).await,
+            None => Ok(None),
+        }
+    }
+
+    pub async fn catalog_for_session(
+        &self,
+        owner: &OwnerId,
+        session: SessionId,
+    ) -> tidebreak_core::Result<Option<crate::providers::GatewayModelSnapshot>> {
+        self.gateway_for_session(owner, session)
+            .await?
+            .snapshot_for(owner)
+            .await
+    }
+
+    pub async fn catalog_for_grant(
+        &self,
+        owner: &OwnerId,
+        grant: tidebreak_core::CodeGrantId,
+    ) -> tidebreak_core::Result<Option<crate::providers::GatewayModelSnapshot>> {
+        self.external
+            .as_ref()
+            .ok_or_else(|| AgentError::SignInRequired("reconnect this external connection".into()))?
+            .for_grant(owner, grant)
+            .await?
+            .snapshot_for(owner)
+            .await
     }
 
     /// Both of the caller's compat listings. Keeping the read behind the
@@ -205,7 +271,14 @@ impl HarnessLlmRelay {
                 "unknown or revoked harness relay key",
             ));
         };
-        match self.obo.bearer_for(&subject.owner).await {
+        let bearer = async {
+            self.gateway_for_session(&subject.owner, subject.session)
+                .await?
+                .bearer_for(&subject.owner)
+                .await
+        }
+        .await;
+        match bearer {
             Ok(token) => Ok(token),
             Err(error @ (AgentError::SignInRequired(_) | AgentError::InvalidTarget(_))) => {
                 Err(endpoint.error_response(
