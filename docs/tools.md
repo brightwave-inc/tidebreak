@@ -18,7 +18,7 @@ The current foreground agent surface contains these tools:
 | `list_documents` | List bounded metadata for this conversation's documents and its project's files | Server, read-only |
 | `read_document` | Read a bounded canonical-text range from one source | Server, read-only |
 | `read_tool_result` | Read past the point a large tool result was cut short for the turn | Server, read-only |
-| `web_search` | Search the public web through the configured provider (Exa, Tavily, Brave, or a self-hosted SearXNG) | Server, sensitive approval |
+| `web_search` | Search the public web through the configured provider (Exa, Tavily, Brave, Firecrawl, or a self-hosted SearXNG) | Server, sensitive approval |
 | `web_extract` | Fetch one exact public page URL, return its readable content through the configured provider or the built-in engine, and keep it as a source of the conversation | Server, sensitive approval |
 | `request_folder_access` | Ask the trusted desktop host to connect another folder | Client continuation |
 | `list_connected_folders` | List roots already attached to this chat | Native client continuation |

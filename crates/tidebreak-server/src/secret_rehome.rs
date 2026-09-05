@@ -49,6 +49,7 @@ const WEB_SEARCH_CREDENTIAL_KEYS: &[&str] = &[
     web_search_credential_key(WebSearchProviderKind::Exa),
     web_search_credential_key(WebSearchProviderKind::Tavily),
     web_search_credential_key(WebSearchProviderKind::Brave),
+    web_search_credential_key(WebSearchProviderKind::Firecrawl),
 ];
 
 /// One provider's fixed credential key, in const context.

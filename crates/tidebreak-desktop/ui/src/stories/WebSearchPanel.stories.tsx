@@ -4,6 +4,8 @@ import type { ApiClient, WebSearchConfigInfo } from "@/api";
 import { WebSearchPanel } from "@/settings/WebSearchPanel";
 import {
   webSearchCredentials,
+  webSearchFirecrawlCredentials,
+  webSearchFirecrawlReady,
   webSearchHostOnlyUnconfigured,
   webSearchKeyMissing,
   webSearchNoProvider,
@@ -20,12 +22,13 @@ import {
  * that could mutate settings would be a story that behaves differently the
  * second time it is opened.
  */
-function stubClient(config: WebSearchConfigInfo): ApiClient {
+function stubClient(
+  config: WebSearchConfigInfo,
+  credentials = webSearchCredentials,
+): ApiClient {
   return {
     getWebSearchConfig: async () => config,
-    listWebSearchCredentials: async () => ({
-      credentials: webSearchCredentials,
-    }),
+    listWebSearchCredentials: async () => ({ credentials }),
   } as unknown as ApiClient;
 }
 
@@ -52,6 +55,13 @@ type Story = StoryObj<typeof meta>;
 
 /** The operator's own engine, keyed and preferred over any built-in search. */
 export const ConfiguredEngine: Story = {};
+
+/** Firecrawl selected with its write-only key stored in the system keychain. */
+export const FirecrawlConfigured: Story = {
+  args: {
+    client: stubClient(webSearchFirecrawlReady, webSearchFirecrawlCredentials),
+  },
+};
 
 /**
  * Nothing configured, automatic mode — the common install.
