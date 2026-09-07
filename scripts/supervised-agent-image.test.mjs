@@ -95,6 +95,14 @@ test("the built workload starts as UID 65532 with pinned tools and no server", {
   ], { encoding: "utf8", timeout: 60000 });
   assert.equal(inspect.status, 0, inspect.stderr);
   assert.match(inspect.stdout, new RegExp(claudeVersion.replaceAll(".", "\\.") + " "));
+  const committed = spawnSync("docker", ["run", "--rm", "--network=none", "--entrypoint", "/bin/sh",
+    "--env", "GIT_AUTHOR_NAME=fixture[bot]", "--env", "GIT_COMMITTER_NAME=fixture[bot]",
+    "--env", "GIT_AUTHOR_EMAIL=8675309+fixture[bot]@users.noreply.github.com",
+    "--env", "GIT_COMMITTER_EMAIL=8675309+fixture[bot]@users.noreply.github.com",
+    image, "-ec", 'directory=$(mktemp -d); cd "$directory"; git init -q; touch change; git add change; git commit -qm "Verify sandbox authorship"; git show -s --format="%an <%ae> | %cn <%ce>"',
+  ], { encoding: "utf8", timeout: 60000 });
+  assert.equal(committed.status, 0, committed.stderr);
+  assert.equal(committed.stdout.trim(), "fixture[bot] <8675309+fixture[bot]@users.noreply.github.com> | fixture[bot] <8675309+fixture[bot]@users.noreply.github.com>");
   const missingContract = spawnSync("docker", ["run", "--rm", "--network=none", image], { encoding: "utf8", timeout: 60000 });
   assert.notEqual(missingContract.status, 0);
   assert.match(missingContract.stderr, /Gateway must provide a sandbox identity/);
