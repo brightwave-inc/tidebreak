@@ -1297,7 +1297,14 @@ async fn bind_inner(
             )
         }),
     )
-    .with_gateway_runtime(state.gateway.clone());
+    .with_gateway_runtime(state.gateway.clone())
+    // A channel-bound session on this machine's engine starts in the
+    // operator's default mode and may ask up to the operator's ceiling
+    // (decision 88); both are `ask` unless the deployment says otherwise.
+    .with_external_permission_policy(
+        state.config.external_permission_mode,
+        state.config.external_permission_ceiling,
+    );
     // A self-host machine owns its filesystem. Clones land under the data
     // directory unless an operator set a destination (decision 70).
     let mut runtime = if state.config.profile == Profile::SelfHost {

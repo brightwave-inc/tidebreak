@@ -1904,6 +1904,13 @@ export type CreateMemoryRecordBody = { id: MemoryRecordId, kind: MemoryKind, sta
 export type CredentialPlacement = "bearer" | { "header": string };
 
 /**
+ * Why a machine session's own git or `gh` was refused a forge credential
+ * at the loopback route (decision 63's seam), so the surfaces can name
+ * the remedy rather than show the bare status git prints.
+ */
+export type CredentialRefusalReason = "connection_ended" | "not_connected" | "forge_refused";
+
+/**
  * User-inspectable routing limits and capabilities for one configured model.
  *
  * OpenAI-compatible rows are validated to the conservative text-only shape.
@@ -2238,7 +2245,19 @@ level: HarnessNoticeLevel,
 /**
  * Bounded message.
  */
-message: string, } | { "type": "attention_changed",
+message: string, } | { "type": "credential_refused",
+/**
+ * Which class of refusal, so a renderer can pick the remedy.
+ */
+reason: CredentialRefusalReason,
+/**
+ * Bounded message, as the machine answered the helper.
+ */
+message: string,
+/**
+ * Bounded remedy sentence for the person.
+ */
+remediation: string, } | { "type": "attention_changed",
 /**
  * New state.
  */

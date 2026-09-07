@@ -298,7 +298,8 @@ pub fn chat_event(event: Event) -> Result<Option<AgentEvent>> {
         }
         | Event::CheckpointRecorded { .. }
         | Event::HarnessNotice { .. }
-        | Event::AttentionChanged { .. } => return Ok(None),
+        | Event::AttentionChanged { .. }
+        | Event::CredentialRefused { .. } => return Ok(None),
     }))
 }
 

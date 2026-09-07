@@ -116,6 +116,12 @@
     "message": "unrecognized event type counted"
   },
   {
+    "type": "credential_refused",
+    "reason": "connection_ended",
+    "message": "this external connection has no live gateway delegation",
+    "remediation": "Reconnect this session from Slack."
+  },
+  {
     "type": "attention_changed",
     "state": {
       "type": "fenced",

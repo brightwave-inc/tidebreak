@@ -60,6 +60,7 @@ import type {
   HarnessDoctorEntry,
   HarnessDoctorReport,
   HarnessKind,
+  CredentialRefusalReason,
   HarnessNoticeLevel,
   HarnessTier,
   ReasoningEffort,
@@ -412,6 +413,11 @@ const TURN_REWRITE_STATES = new Set<CodeTurnRewriteState>([
   "failed",
 ]);
 const NOTICE_LEVELS = new Set<HarnessNoticeLevel>(["info", "warning", "error"]);
+const CREDENTIAL_REFUSAL_REASONS = new Set<CredentialRefusalReason>([
+  "connection_ended",
+  "not_connected",
+  "forge_refused",
+]);
 const FILE_CHANGE_KINDS = new Set<FileChangeKind>([
   "added",
   "modified",
@@ -3939,6 +3945,26 @@ export function parseCodeEvent(value: unknown): CodeEvent | null {
         type: "harness_notice",
         level: value.level,
         message: value.message,
+      };
+    case "credential_refused":
+      // The machine refused the session's own git a forge credential; the
+      // reason class picks the remedy, the message is what the helper saw.
+      if (
+        !onlyKeys<Extract<WireCodeEvent, { type: "credential_refused" }>>(
+          value,
+          ["type", "reason", "message", "remediation"],
+        ) ||
+        !isMember(value.reason, CREDENTIAL_REFUSAL_REASONS) ||
+        !blockText(value.message) ||
+        !blockText(value.remediation)
+      ) {
+        return null;
+      }
+      return {
+        type: "credential_refused",
+        reason: value.reason,
+        message: value.message,
+        remediation: value.remediation,
       };
     case "approval_requested":
       // The internal engine journals the card's request beside the id so

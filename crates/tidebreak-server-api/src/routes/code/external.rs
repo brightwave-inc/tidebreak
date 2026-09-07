@@ -103,6 +103,12 @@ pub struct ExternalSessionBody {
     pub title: Option<String>,
     #[serde(default)]
     pub harness: Option<HarnessKind>,
+    /// The permission mode the channel asks for. On the machine's engine it
+    /// is honored up to the operator's ceiling and refused by name above it;
+    /// absent, the session takes the operator's default (decision 88). A
+    /// sandbox session is always `allow`, so any other value is refused.
+    #[serde(default)]
+    pub permission_mode: Option<PermissionMode>,
 }
 
 #[derive(serde::Serialize)]
@@ -151,6 +157,7 @@ pub async fn external_get_or_create(
                 fast_mode: false,
                 permission_mode_ceiling: None,
             },
+            body.permission_mode,
         )
         .await?;
     let (status, response) = match resolution {

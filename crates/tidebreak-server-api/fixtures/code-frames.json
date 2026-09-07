@@ -1026,6 +1026,19 @@
   },
   {
     "kind": "event_frame",
+    "name": "event: credential_refused",
+    "value": {
+      "event": {
+        "message": "this external connection has no live gateway delegation; reconnect it from Slack",
+        "reason": "connection_ended",
+        "remediation": "Reconnect this session from Slack; a newer connect or a revoke ended the one it used.",
+        "type": "credential_refused"
+      },
+      "seq": 66
+    }
+  },
+  {
+    "kind": "event_frame",
     "name": "event: checkpoint_recorded",
     "value": {
       "event": {

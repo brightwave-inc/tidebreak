@@ -1372,23 +1372,36 @@ async fn an_external_message_carries_the_senders_channel_identity() {
 /// Claude Code, plus one local git repository: the machine the adapter's
 /// end-to-end lane drives.
 async fn machine_app() -> (Router, Arc<CodeRuntime>, RepoId, tempfile::TempDir) {
+    machine_app_built(|runtime| runtime).await
+}
+
+/// [`machine_app`] with the runtime shaped by the caller before the app is
+/// built: the operator's permission policy, say.
+async fn machine_app_built(
+    customize: impl FnOnce(CodeRuntime) -> CodeRuntime,
+) -> (Router, Arc<CodeRuntime>, RepoId, tempfile::TempDir) {
     let (dir, store) = temp_db_store("code.db").await;
     let db = Arc::new(store);
     let store_trait: Arc<dyn Store> = db.clone();
     let mut registry = tidebreak_harness::AdapterRegistry::new();
     // The machine location takes the deployment's default mode, `ask`, so
-    // the engine must offer structured approvals the way Claude Code does.
+    // the engine must offer structured approvals the way Claude Code does;
+    // the operator's policy tests name the other modes, so the engine
+    // offers those too.
     registry.register(Arc::new(
         crate::scripted_harness::ScriptedAdapter::new(crate::scripted_harness::plain_text_script())
-            .with_approvals(tidebreak_core::CapLevel::Supported),
+            .with_approvals(tidebreak_core::CapLevel::Supported)
+            .with_plan_mode(tidebreak_core::CapLevel::Supported)
+            .with_auto_mode(tidebreak_core::CapLevel::Supported)
+            .with_allow_mode(tidebreak_core::CapLevel::Supported),
     ));
-    let runtime = Arc::new(CodeRuntime::with_registry_and_browser_runtime(
+    let runtime = Arc::new(customize(CodeRuntime::with_registry_and_browser_runtime(
         db,
         dir.path().to_path_buf(),
         registry,
         None,
         None,
-    ));
+    )));
     let owner = OwnerId::local();
     let root = super::code::init_git_repo(dir.path());
     let repo = CodeRepo {
@@ -1558,4 +1571,317 @@ async fn a_machine_without_a_runtime_runs_an_external_session_on_its_own_engine(
         replay["turn_id"], turn_id,
         "a replayed delivery answers from the first row"
     );
+}
+
+/// Decision 88's amendment: on the machine's engine a channel session takes
+/// the operator's default mode when it names none, the mode it names up to
+/// the operator's ceiling, and a refusal by name above it. The refusal is a
+/// conflict the adapter can show, not a silently clamped session.
+#[tokio::test]
+async fn a_machine_session_takes_the_operators_mode_and_refuses_above_the_ceiling() {
+    let (router, runtime, repo_id, _dir) = machine_app_built(|runtime| {
+        runtime.with_external_permission_policy(
+            tidebreak_core::PermissionMode::Auto,
+            tidebreak_core::PermissionMode::Allow,
+        )
+    })
+    .await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let owner = OwnerId::local();
+    let (_grant, pair) = runtime
+        .mint_adapter_grant(&owner, "slack", "U1", "T1")
+        .await
+        .unwrap();
+    let start = |key: &'static str, mode: Option<&'static str>| {
+        let mut body = serde_json::json!({ "external_key": key, "repo_id": repo_id });
+        if let Some(mode) = mode {
+            body["permission_mode"] = serde_json::Value::String(mode.to_owned());
+        }
+        client
+            .post(format!("http://{addr}/external/code/sessions"))
+            .bearer_auth(&pair.token)
+            .json(&body)
+            .send()
+    };
+
+    let defaulted = start("T1/C1/1.1", None).await.unwrap();
+    assert_eq!(defaulted.status(), reqwest::StatusCode::CREATED);
+    let session_id = bound_session_id(&runtime, &owner, "T1/C1/1.1").await;
+    let session = runtime.get_session(&owner, session_id).await.unwrap();
+    assert_eq!(
+        session.permission_mode,
+        tidebreak_core::PermissionMode::Auto,
+        "the channel named no mode, so the operator's default applies"
+    );
+
+    let named = start("T1/C1/2.2", Some("allow")).await.unwrap();
+    assert_eq!(named.status(), reqwest::StatusCode::CREATED);
+    let session_id = bound_session_id(&runtime, &owner, "T1/C1/2.2").await;
+    let session = runtime.get_session(&owner, session_id).await.unwrap();
+    assert_eq!(
+        session.permission_mode,
+        tidebreak_core::PermissionMode::Allow,
+        "a mode at the ceiling is honored"
+    );
+
+    let lower = start("T1/C1/3.3", Some("plan")).await.unwrap();
+    assert_eq!(lower.status(), reqwest::StatusCode::CREATED);
+    let session_id = bound_session_id(&runtime, &owner, "T1/C1/3.3").await;
+    let session = runtime.get_session(&owner, session_id).await.unwrap();
+    assert_eq!(
+        session.permission_mode,
+        tidebreak_core::PermissionMode::Plan
+    );
+
+    let unknown = start("T1/C1/4.4", Some("bypass")).await.unwrap();
+    assert_eq!(
+        unknown.status(),
+        reqwest::StatusCode::BAD_REQUEST,
+        "a mode this machine does not know is a malformed request"
+    );
+}
+
+/// The ceiling is the operator's line: a channel that names a mode above
+/// it is refused by name, with the ceiling and the setting to raise it in
+/// the message, and no session or workspace is created.
+#[tokio::test]
+async fn a_machine_session_above_the_ceiling_is_refused_by_name() {
+    let (router, runtime, repo_id, _dir) = machine_app().await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let owner = OwnerId::local();
+    let (_grant, pair) = runtime
+        .mint_adapter_grant(&owner, "slack", "U1", "T1")
+        .await
+        .unwrap();
+    let refused = client
+        .post(format!("http://{addr}/external/code/sessions"))
+        .bearer_auth(&pair.token)
+        .json(&serde_json::json!({
+            "external_key": "T1/C1/9.9",
+            "repo_id": repo_id,
+            "permission_mode": "allow",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(body["kind"], "permission_mode_above_ceiling", "{body}");
+    let message = body["message"].as_str().unwrap_or_default();
+    assert!(message.contains("up to ask"), "{message}");
+    assert!(
+        message.contains("TIDEBREAK_EXTERNAL_PERMISSION_CEILING"),
+        "{message}"
+    );
+    assert!(
+        tidebreak_core::db::code::get_external_binding(&runtime.db, &owner, "slack", "T1/C1/9.9")
+            .await
+            .unwrap()
+            .is_none(),
+        "a refused start binds nothing"
+    );
+}
+
+/// A sandbox deployment runs channel sessions in `allow` because confinement
+/// is that placement's boundary; a request for any other mode is refused
+/// rather than approximated, and `allow` itself passes through.
+#[tokio::test]
+async fn a_sandbox_deployment_refuses_any_mode_but_allow() {
+    let (router, _fake, runtime, repo_id, _dir) = external_app().await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let owner = OwnerId::local();
+    let (_grant, pair) = runtime
+        .mint_adapter_grant(&owner, "slack", "U1", "T1")
+        .await
+        .unwrap();
+    let refused = client
+        .post(format!("http://{addr}/external/code/sessions"))
+        .bearer_auth(&pair.token)
+        .json(&serde_json::json!({
+            "external_key": "T1/C1/1.1",
+            "repo_id": repo_id,
+            "permission_mode": "ask",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = refused.json().await.unwrap();
+    assert_eq!(body["kind"], "permission_mode_unsupported", "{body}");
+
+    let allowed = client
+        .post(format!("http://{addr}/external/code/sessions"))
+        .bearer_auth(&pair.token)
+        .json(&serde_json::json!({
+            "external_key": "T1/C1/1.1",
+            "repo_id": repo_id,
+            "permission_mode": "allow",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(allowed.status(), reqwest::StatusCode::CREATED);
+    let session_id = bound_session_id(&runtime, &owner, "T1/C1/1.1").await;
+    let session = runtime.get_session(&owner, session_id).await.unwrap();
+    assert_eq!(
+        session.permission_mode,
+        tidebreak_core::PermissionMode::Allow
+    );
+}
+
+/// A forge that refuses every borrow with a reason, so the loopback route's
+/// answer and its journal row can be pinned.
+struct RefusingFake(crate::obo_gateway::GitForgeError);
+
+#[async_trait::async_trait]
+impl crate::obo_gateway::GitCredentialLender for RefusingFake {
+    async fn git_forge_identity(
+        &self,
+        _owner: &OwnerId,
+    ) -> Result<crate::obo_gateway::GitForgeIdentity, crate::obo_gateway::GitForgeError> {
+        Err(crate::obo_gateway::GitForgeError::NoGitForge)
+    }
+
+    async fn git_credential(
+        &self,
+        _owner: &OwnerId,
+        _repository: &str,
+    ) -> Result<crate::obo_gateway::GitCredential, crate::obo_gateway::GitForgeError> {
+        Err(match &self.0 {
+            crate::obo_gateway::GitForgeError::SignInRequired(message) => {
+                crate::obo_gateway::GitForgeError::SignInRequired(message.clone())
+            }
+            crate::obo_gateway::GitForgeError::NotConnected { connect_url } => {
+                crate::obo_gateway::GitForgeError::NotConnected {
+                    connect_url: connect_url.clone(),
+                }
+            }
+            _ => crate::obo_gateway::GitForgeError::NoGitForge,
+        })
+    }
+
+    async fn list_repositories(
+        &self,
+        _owner: &OwnerId,
+    ) -> Result<Vec<crate::obo_gateway::GitHubRepository>, crate::obo_gateway::GitForgeError> {
+        Ok(Vec::new())
+    }
+}
+
+/// A refused borrow is said twice: the route answers the helper a status
+/// and the reason, and the session's journal takes a `credential_refused`
+/// row with the reason class and the remedy, so the desktop and the channel
+/// can show why a push stopped. A dead sign-in reads as the connection
+/// having ended; a forge with no identity for the person reads as not
+/// connected; anything else reads as the forge refusing.
+#[tokio::test]
+async fn a_refused_borrow_answers_the_helper_and_journals_the_reason() {
+    for (refusal, status, reason) in [
+        (
+            crate::obo_gateway::GitForgeError::SignInRequired("sign in again".to_owned()),
+            reqwest::StatusCode::UNAUTHORIZED,
+            "connection_ended",
+        ),
+        (
+            crate::obo_gateway::GitForgeError::NotConnected {
+                connect_url: Some("https://gateway.example/account/apps".to_owned()),
+            },
+            reqwest::StatusCode::FORBIDDEN,
+            "not_connected",
+        ),
+        (
+            crate::obo_gateway::GitForgeError::NoGitForge,
+            reqwest::StatusCode::BAD_GATEWAY,
+            "forge_refused",
+        ),
+    ] {
+        let lender = Arc::new(RefusingFake(refusal));
+        let gateway = Arc::new(
+            crate::obo_gateway::OboGateway::new(
+                "https://gateway.example",
+                "tidebreak:feedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeedfeed"
+                    .to_owned(),
+            )
+            .unwrap(),
+        );
+        let relay = Arc::new(crate::code::harness_llm::HarnessLlmRelay::new(gateway));
+        let (router, _fake, runtime, repo_id, _token, _dir) = external_app_built({
+            let lender = lender.clone();
+            let relay = relay.clone();
+            move |runtime| runtime.with_git_credentials(lender).with_harness_llm(relay)
+        })
+        .await;
+        let addr = serve(router).await;
+        let client = reqwest::Client::new();
+        let owner = OwnerId::local();
+        let (_grant, pair) = runtime
+            .mint_adapter_grant(&owner, "slack", "U1", "T1")
+            .await
+            .unwrap();
+        let created = client
+            .post(format!("http://{addr}/external/code/sessions"))
+            .bearer_auth(&pair.token)
+            .json(&serde_json::json!({ "external_key": "T1/C7/1.1", "repo_id": repo_id }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+        let session_id = bound_session_id(&runtime, &owner, "T1/C7/1.1").await;
+        let key = relay.issue(crate::code::harness_llm::HarnessLlmSubject {
+            owner: owner.clone(),
+            session: session_id,
+        });
+        let refused = client
+            .post(format!(
+                "http://{addr}{}",
+                crate::code::harness_llm::GIT_CREDENTIAL_PATH
+            ))
+            .bearer_auth(&key)
+            .body("protocol=https\nhost=github.com\npath=acme/tools.git\n")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), status, "{reason}");
+        let answer = refused.text().await.unwrap();
+        assert!(
+            !answer.is_empty(),
+            "the helper gets the reason for {reason}"
+        );
+        assert!(
+            !answer.contains("username="),
+            "a refusal lends nothing: {answer}"
+        );
+
+        let page = tidebreak_core::db::code::list_events(
+            &runtime.db,
+            &owner,
+            session_id,
+            0,
+            tidebreak_core::db::code::MAX_REPLAY_EVENTS,
+        )
+        .await
+        .unwrap();
+        let row = page
+            .events
+            .iter()
+            .find_map(|sequenced| match &sequenced.event {
+                tidebreak_core::Event::CredentialRefused {
+                    reason,
+                    message,
+                    remediation,
+                } => Some((*reason, message.clone(), remediation.clone())),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("a credential_refused row for {reason}"));
+        assert_eq!(serde_json::to_value(row.0).unwrap(), reason);
+        assert_eq!(
+            row.1,
+            answer.trim_end(),
+            "the row carries the helper's reason"
+        );
+        assert!(!row.2.is_empty(), "the row names a remedy");
+    }
 }

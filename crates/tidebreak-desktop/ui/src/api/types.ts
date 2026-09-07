@@ -21,6 +21,7 @@ import {
   type AgentRunTaskPlan as WireAgentRunTaskPlan,
   type Chat as WireChat,
   type ChatTranscript as WireChatTranscript,
+  type CredentialRefusalReason as WireCredentialRefusalReason,
   type ExecConfigInfo as WireExecConfigInfo,
   type ConnectedAppInfo as WireConnectedAppInfo,
   type ConnectedAppsInfo as WireConnectedAppsInfo,
@@ -1386,6 +1387,7 @@ export type SequencedCodeEventFrame = WireSequencedCodeEventFrame;
 export type ToolDetail = WireToolDetail;
 export type ToolOutcome = WireToolOutcome;
 export type HarnessNoticeLevel = WireHarnessNoticeLevel;
+export type CredentialRefusalReason = WireCredentialRefusalReason;
 
 /** Doctor report for every registered engine. */
 /**

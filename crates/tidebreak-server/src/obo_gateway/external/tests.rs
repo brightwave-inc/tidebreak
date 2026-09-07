@@ -240,6 +240,7 @@ async fn browser_credentials_cannot_mask_missing_or_unconfirmed_delegation() {
             None,
             tidebreak_core::HarnessKind::ClaudeCode,
             crate::code::runtime::NewSessionSettings::default(),
+            None,
         )
         .await
         .unwrap_err();
@@ -498,6 +499,7 @@ async fn first_external_worker_after_restart_names_the_owner_before_workspace_se
             Some("From Slack".into()),
             HarnessKind::ClaudeCode,
             crate::code::runtime::NewSessionSettings::default(),
+            None,
         )
         .await
         .unwrap();

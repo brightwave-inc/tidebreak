@@ -389,6 +389,13 @@ export const Notices: Story = {
       },
       {
         kind: "notice",
+        id: "notice-credential-refused",
+        level: "warning",
+        message:
+          "Push refused: this external connection has no live gateway delegation; reconnect it from Slack. Reconnect this session from Slack; a newer connect or a revoke ended the one it used.",
+      },
+      {
+        kind: "notice",
         id: "notice-path",
         level: "error",
         message:

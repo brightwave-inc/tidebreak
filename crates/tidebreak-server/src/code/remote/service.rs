@@ -1465,6 +1465,7 @@ mod tests {
                 Some("fix the flake".into()),
                 HarnessKind::ClaudeCode,
                 session_settings(),
+                None,
             )
             .await
             .unwrap();
@@ -1493,6 +1494,7 @@ mod tests {
                 None,
                 HarnessKind::ClaudeCode,
                 session_settings(),
+                None,
             )
             .await
             .unwrap();
@@ -1512,6 +1514,7 @@ mod tests {
                 None,
                 HarnessKind::ClaudeCode,
                 session_settings(),
+                None,
             )
             .await
             .unwrap();
@@ -1539,6 +1542,7 @@ mod tests {
                 None,
                 HarnessKind::ClaudeCode,
                 session_settings(),
+                None,
             )
             .await
             .unwrap();
@@ -1568,6 +1572,7 @@ mod tests {
                 None,
                 HarnessKind::ClaudeCode,
                 session_settings(),
+                None,
             )
             .await
             .unwrap();
@@ -1715,6 +1720,7 @@ mod tests {
                 None,
                 HarnessKind::ClaudeCode,
                 session_settings(),
+                None,
             )
             .await
             .unwrap();
