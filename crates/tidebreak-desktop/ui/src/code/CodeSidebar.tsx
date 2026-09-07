@@ -11,7 +11,7 @@ import { toast } from "sonner";
 
 import { useApp } from "@/AppContext";
 import { attachedRemotely } from "@/host";
-import { cn, friendlyErrorMessage } from "@/lib/utils";
+import { cn } from "@/lib/utils";
 import type { ApiClient } from "../api/client";
 import { useLayoutState } from "@/panel/usePanelNav";
 import { searchFromLayout } from "@/panel/panelUrl";
