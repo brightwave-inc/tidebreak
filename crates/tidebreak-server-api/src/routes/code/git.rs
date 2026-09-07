@@ -223,7 +223,8 @@ fn pr_snapshot(
     watch: Option<tidebreak_core::CodeWatch>,
 ) -> CodeWorkspacePrSnapshot {
     CodeWorkspacePrSnapshot {
-        git: Some(status.git),
+        git: status.git,
+        remote: status.remote.then_some(true),
         dirty: status.dirty,
         unpushed: status.unpushed,
         ahead: status.ahead,

@@ -362,6 +362,14 @@ impl ScopedCode {
         self.runtime.get_workspace(&self.owner, id).await
     }
 
+    /// Require a writable workspace whose commands may run on this machine.
+    pub async fn require_live_workspace(
+        &self,
+        id: WorkspaceId,
+    ) -> Result<CodeWorkspace, ServerError> {
+        self.runtime.require_live_workspace(&self.owner, id).await
+    }
+
     pub async fn save_workspace(&self, workspace: &CodeWorkspace) -> Result<(), ServerError> {
         self.runtime.save_workspace(workspace).await
     }

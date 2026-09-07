@@ -56,6 +56,9 @@
 !deploy/
 !deploy/self-host/
 !deploy/self-host/entrypoint.sh
+!deploy/supervised-agent/
+!deploy/supervised-agent/entrypoint.sh
+!deploy/supervised-agent/install-harness.mjs
 
 # Never admit hidden files or common credential files, even below an allowed
 # source directory. Keep these after the allow rules so they win. The explicit

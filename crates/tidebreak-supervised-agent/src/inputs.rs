@@ -87,6 +87,8 @@ pub struct Repository {
 pub struct Inputs {
     /// Task text for the first turn.
     pub task: String,
+    /// Branch assigned by Tidebreak for the primary repository.
+    pub workspace_branch: Option<String>,
     /// Absolute URL of the control endpoint's poll route base.
     pub control_url: String,
     /// Directory the engine runs in.
@@ -193,7 +195,13 @@ fn optional(value: Option<String>) -> Option<String> {
 
 /// Resolves every input, naming the first one that is absent or unusable.
 pub fn resolve(raw: RawInputs) -> Result<Inputs, InputError> {
-    let task = optional(raw.task).ok_or_else(|| InputError::missing(TASK_VARIABLE))?;
+    let raw_task = optional(raw.task).ok_or_else(|| InputError::missing(TASK_VARIABLE))?;
+    let envelope = tidebreak_core::code::RemoteWorkspaceTask::parse(&raw_task)
+        .map_err(|message| InputError::unusable(TASK_VARIABLE, &message))?;
+    let (task, workspace_branch) = match envelope {
+        Some(envelope) => (envelope.task, Some(envelope.branch)),
+        None => (raw_task, None),
+    };
 
     let endpoint =
         optional(raw.supervisor_endpoint).unwrap_or_else(|| DEFAULT_SUPERVISOR_ENDPOINT.to_owned());
@@ -262,6 +270,13 @@ pub fn resolve(raw: RawInputs) -> Result<Inputs, InputError> {
             }
         });
 
+    if workspace_branch.is_some() && repositories.is_empty() {
+        return Err(InputError::unusable(
+            TASK_VARIABLE,
+            "a workspace task requires a repository",
+        ));
+    }
+
     let forge_push_denied = optional(raw.forge_push).as_deref() == Some("denied");
 
     let incarnation = optional(raw.incarnation)
@@ -285,6 +300,7 @@ pub fn resolve(raw: RawInputs) -> Result<Inputs, InputError> {
 
     Ok(Inputs {
         task,
+        workspace_branch,
         control_url,
         workspace,
         mode,
@@ -348,6 +364,7 @@ mod tests {
     fn defaults_cover_every_optional_variable() {
         let inputs = resolve(minimal()).unwrap();
         assert_eq!(inputs.control_url, "http://127.0.0.1:15003");
+        assert_eq!(inputs.workspace_branch, None);
         assert_eq!(inputs.mode, RunMode::Goal);
         assert_eq!(inputs.max_turns, None);
         assert_eq!(inputs.starting_turn, 1);
@@ -358,8 +375,32 @@ mod tests {
         assert_eq!(inputs.incarnation, 1);
     }
 
-    /// The environment writes empty strings for undeclared fields; they must
-    /// read the same as absent ones.
+    #[test]
+    fn a_workspace_envelope_hands_only_the_original_task_to_the_engine() {
+        let task = "Do this.\nKeep the exact text.\n";
+        let mut raw = minimal();
+        raw.task = Some(
+            tidebreak_core::code::RemoteWorkspaceTask::encode(task, "thet/remote-work").unwrap(),
+        );
+        raw.repository_url = Some("https://github.com/acme/tools".into());
+        let inputs = resolve(raw).unwrap();
+        assert_eq!(inputs.task, task);
+        assert_eq!(inputs.workspace_branch.as_deref(), Some("thet/remote-work"));
+    }
+
+    #[test]
+    fn a_workspace_envelope_requires_a_repository() {
+        let mut raw = minimal();
+        raw.task = Some(
+            tidebreak_core::code::RemoteWorkspaceTask::encode("work", "thet/remote-work").unwrap(),
+        );
+        assert!(resolve(raw)
+            .unwrap_err()
+            .message
+            .contains("requires a repository"));
+    }
+
+    /// Empty environment values must read the same as absent ones.
     #[test]
     fn empty_values_read_as_absent() {
         let raw = RawInputs {

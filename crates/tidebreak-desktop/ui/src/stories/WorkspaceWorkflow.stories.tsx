@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { fn } from "storybook/test";
+import { expect, fn, userEvent, within } from "storybook/test";
 import { HttpError, type CodeWorkspacePrSnapshot } from "@/api";
 import { WorkspaceWorkflowControl } from "@/code/WorkspaceWorkflowControl";
 import type {
@@ -223,4 +223,61 @@ export const PersistentRefreshError: Story = {
  */
 export const ReadingCheckLogs: Story = {
   args: { snapshot: failingChecksPrGit, checkLogsHang: true },
+};
+
+export const SandboxWithoutPullRequest: Story = {
+  args: {
+    snapshot: { ...readyForPrGit, remote: true, git: undefined, pr: undefined },
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await userEvent.click(
+      canvas.getByRole("button", {
+        name: "Workspace status: Sandbox workspace",
+      }),
+    );
+    await expect(
+      within(document.body).getByText("Checkout runs in a sandbox"),
+    ).toBeVisible();
+    await expect(
+      within(document.body).queryByRole("button", {
+        name: /^Source control$/,
+      }),
+    ).not.toBeInTheDocument();
+  },
+};
+
+export const SandboxPullRequest: Story = {
+  args: { snapshot: { ...openPrGit, remote: true, git: undefined } },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      canvas.getByRole("button", { name: /^View PR$/ }),
+    ).toBeVisible();
+    await userEvent.click(
+      canvas.getByRole("button", { name: /Workspace status:/ }),
+    );
+    await expect(
+      within(document.body).getByRole("button", { name: "Open on GitHub" }),
+    ).toBeVisible();
+    await expect(
+      within(document.body).queryByRole("button", {
+        name: /^Source control$/,
+      }),
+    ).not.toBeInTheDocument();
+  },
+};
+
+export const SandboxRefreshFailed: Story = {
+  args: {
+    snapshot: { ...failingChecksPrGit, remote: true, git: undefined },
+    error:
+      "Your GitHub connection is unavailable. Reconnect it to refresh this pull request.",
+  },
+  play: async ({ canvasElement }) => {
+    await userEvent.click(
+      within(canvasElement).getByRole("button", { name: /Workspace status:/ }),
+    );
+    await expect(within(document.body).getByRole("alert")).toBeVisible();
+  },
 };

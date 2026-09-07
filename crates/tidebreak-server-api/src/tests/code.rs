@@ -117,6 +117,7 @@ impl SandboxProvisioner for UnusedRemoteProvisioner {
     async fn spawn(
         &self,
         _owner: &tidebreak_core::OwnerId,
+        _session: tidebreak_core::SessionId,
         _arguments: &SpawnArguments,
     ) -> Result<SandboxLease, RemoteSandboxError> {
         panic!("remote create-route tests must not provision a sandbox")
@@ -125,6 +126,7 @@ impl SandboxProvisioner for UnusedRemoteProvisioner {
     async fn status(
         &self,
         _owner: &tidebreak_core::OwnerId,
+        _session: tidebreak_core::SessionId,
         _sandbox_id: &str,
     ) -> Result<SandboxStatus, RemoteSandboxError> {
         panic!("remote create-route tests must not read sandbox status")
@@ -133,6 +135,7 @@ impl SandboxProvisioner for UnusedRemoteProvisioner {
     async fn events(
         &self,
         _owner: &tidebreak_core::OwnerId,
+        _session: tidebreak_core::SessionId,
         _sandbox_id: &str,
         _cursor: EventCursor,
     ) -> Result<SandboxEvents, RemoteSandboxError> {
@@ -142,6 +145,7 @@ impl SandboxProvisioner for UnusedRemoteProvisioner {
     async fn send(
         &self,
         _owner: &tidebreak_core::OwnerId,
+        _session: tidebreak_core::SessionId,
         _sandbox_id: &str,
         _message: &SandboxMessage,
     ) -> Result<MessageReceipt, RemoteSandboxError> {
@@ -151,6 +155,7 @@ impl SandboxProvisioner for UnusedRemoteProvisioner {
     async fn cancel(
         &self,
         _owner: &tidebreak_core::OwnerId,
+        _session: tidebreak_core::SessionId,
         _sandbox_id: &str,
     ) -> Result<(), RemoteSandboxError> {
         panic!("remote create-route tests must not cancel a sandbox")
@@ -225,6 +230,7 @@ pub(super) async fn code_app_with_options(
             Arc::new(UnusedRemoteProvisioner),
             RemoteSpawnSettings {
                 profile: "test-remote".to_owned(),
+                engine: None,
                 incarnation_cap: 2,
                 spend_ceiling_microusd: None,
                 session_spend_ceiling_microusd: None,

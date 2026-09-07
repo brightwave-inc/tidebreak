@@ -93,6 +93,36 @@ impl CodeRuntime {
         })
     }
 
+    pub(super) fn validate_remote_execution(&self, session: &Session) -> Result<(), ServerError> {
+        if let Some(remote) = self.remote_sessions() {
+            remote
+                .settings
+                .validate_execution(session)
+                .map_err(|message| {
+                    ServerError::unprocessable_kind("sandbox_settings_unavailable", message)
+                })?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn validate_remote_settings_change(
+        &self,
+        session: &Session,
+        next: &SessionExecutionSettings,
+    ) -> Result<(), ServerError> {
+        if self
+            .remote_sessions()
+            .is_some_and(|remote| remote.settings.engine.is_some())
+            && *next != SessionExecutionSettings::from(session)
+        {
+            return Err(ServerError::conflict_kind(
+                "sandbox_settings_fixed",
+                "choose the model and reasoning effort when starting a new sandbox session; this profile cannot change them during a session",
+            ));
+        }
+        Ok(())
+    }
+
     /// Shape a remote session value bound to `workspace`, uninserted.
     pub(super) fn remote_session_value(
         owner: &OwnerId,
@@ -112,7 +142,7 @@ impl CodeRuntime {
             permission_mode: settings.permission_mode,
             model: normalize_model(settings.model),
             reasoning_effort: settings.reasoning_effort,
-            fast_mode: false,
+            fast_mode: settings.fast_mode,
             lifecycle: SessionLifecycle::Idle,
             fence_reason: None,
             child_pid: None,
@@ -207,6 +237,7 @@ impl CodeRuntime {
                 }
                 let workspace = self.build_remote_workspace(owner, &repo, title).await?;
                 let session = Self::remote_session_value(owner, workspace.id, harness, settings);
+                self.validate_remote_execution(&session)?;
                 Ok(tidebreak_core::db::code::resolve_external_session(
                     &self.db,
                     owner,
@@ -321,6 +352,7 @@ impl CodeRuntime {
             ));
         }
         let session = Self::remote_session_value(owner, workspace_id, harness, settings);
+        self.validate_remote_execution(&session)?;
         insert_session(&self.db, &session).await?;
         Ok(session)
     }
@@ -364,9 +396,9 @@ impl CodeRuntime {
                 "remote sessions cannot stage attachment bytes because the sandbox message contract carries text only; send the turn without attachments",
             ));
         }
-        // Settings stick without local capability validation: the sandbox
-        // engine reads them off the spawn, and no local harness answers for
-        // a remote one.
+        self.validate_remote_execution(&session)?;
+        // The declared supervised image reads settings only at spawn. Inbox
+        // messages cannot change them, so preserve the session contract.
         let mut next = SessionExecutionSettings::from(&session);
         if let Some(model) = normalize_model(model) {
             next.model = Some(model);
@@ -374,6 +406,7 @@ impl CodeRuntime {
         if let Some(effort) = reasoning_effort {
             next.reasoning_effort = effort;
         }
+        self.validate_remote_settings_change(&session, &next)?;
         if next != SessionExecutionSettings::from(&session) {
             session = replace_session_execution_settings(&self.db, owner, &session, &next)
                 .await?
@@ -472,6 +505,7 @@ impl CodeRuntime {
         message: String,
         actor: Option<tidebreak_core::TurnActor>,
     ) -> Result<SubmitTurnOutcome, ServerError> {
+        self.validate_remote_execution(session)?;
         let queued = tidebreak_core::db::code::list_queued_turns(&self.db, owner, session.id)
             .await
             .map_err(ServerError::from)?;
@@ -571,15 +605,14 @@ impl CodeRuntime {
         let Some(remote) = self.remote_sessions() else {
             return Ok(());
         };
-        if session.lifecycle != SessionLifecycle::Idle {
+        if session.execution_location != ExecutionLocation::Sandbox
+            || session.lifecycle != SessionLifecycle::Idle
+        {
             return Ok(());
         }
         let Ok(Some(workspace)) = self.session_workspace(&session).await else {
             return Ok(());
         };
-        if !workspace.is_remote() {
-            return Ok(());
-        }
         if tidebreak_core::db::code::queue_paused(&self.db, &session.owner, session.id).await? {
             return Ok(());
         }
@@ -671,6 +704,7 @@ impl CodeRuntime {
         }
         let session = self.get_session(owner, session_id).await?;
         if session.execution_location == ExecutionLocation::Machine {
+            self.require_machine_execution()?;
             if let Some(external) = self
                 .harness_llm
                 .as_ref()
@@ -770,7 +804,7 @@ impl CodeRuntime {
         };
         match remote
             .provisioner
-            .send(&session.owner, sandbox_id, &message)
+            .send(&session.owner, session.id, sandbox_id, &message)
             .await
         {
             Ok(_) => Ok(()),
@@ -797,7 +831,11 @@ impl CodeRuntime {
             return;
         };
         if let Some(sandbox_id) = row.sandbox_id.as_deref() {
-            if let Err(error) = remote.provisioner.cancel(&session.owner, sandbox_id).await {
+            if let Err(error) = remote
+                .provisioner
+                .cancel(&session.owner, session.id, sandbox_id)
+                .await
+            {
                 tracing::warn!(
                     session = %session.id,
                     %error,

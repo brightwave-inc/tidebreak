@@ -8,7 +8,7 @@ use crate::code::ScopedCode;
 use crate::error::ServerError;
 use crate::extract::{Json, Path, Query};
 use crate::state::AppState;
-use tidebreak_core::{CodeWorkspaceStatus, WorkspaceId};
+use tidebreak_core::WorkspaceId;
 
 use super::types::{
     CodeTerminalRead, CodeTerminalSnapshot, CreateTerminalBody, TerminalReadQuery,
@@ -21,12 +21,10 @@ pub async fn create_terminal(
     Path(id): Path<WorkspaceId>,
     Json(body): Json<CreateTerminalBody>,
 ) -> Result<impl IntoResponse, ServerError> {
-    let workspace = code.get_workspace(id).await?;
-    require_active(&workspace.status)?;
+    code.require_live_workspace(id).await?;
     let write = code.workspace_write_lock(id);
     let _write_guard = write.lock().await;
-    let workspace = code.get_workspace(id).await?;
-    require_active(&workspace.status)?;
+    let workspace = code.require_live_workspace(id).await?;
     let snap = state
         .terminals
         .open(
@@ -99,12 +97,10 @@ pub async fn write_terminal(
     Path(path): Path<WorkspaceTerminalPath>,
     Json(body): Json<TerminalWriteBody>,
 ) -> Result<StatusCode, ServerError> {
-    let workspace = code.get_workspace(path.id).await?;
-    require_active(&workspace.status)?;
+    code.require_live_workspace(path.id).await?;
     let write = code.workspace_write_lock(path.id);
     let _write_guard = write.lock().await;
-    let workspace = code.get_workspace(path.id).await?;
-    require_active(&workspace.status)?;
+    code.require_live_workspace(path.id).await?;
     let bytes = decode_write(&body.bytes)?;
     state
         .terminals
@@ -119,27 +115,15 @@ pub async fn resize_terminal(
     Path(path): Path<WorkspaceTerminalPath>,
     Json(body): Json<TerminalResizeBody>,
 ) -> Result<Json<CodeTerminalSnapshot>, ServerError> {
-    let workspace = code.get_workspace(path.id).await?;
-    require_active(&workspace.status)?;
+    code.require_live_workspace(path.id).await?;
     let write = code.workspace_write_lock(path.id);
     let _write_guard = write.lock().await;
-    let workspace = code.get_workspace(path.id).await?;
-    require_active(&workspace.status)?;
+    code.require_live_workspace(path.id).await?;
     let snap = state
         .terminals
         .resize(path.id, path.tid, body.cols, body.rows)
         .map_err(map_terminal)?;
     Ok(Json(snapshot_wire(snap)))
-}
-
-fn require_active(status: &CodeWorkspaceStatus) -> Result<(), ServerError> {
-    if *status != CodeWorkspaceStatus::Active {
-        return Err(ServerError::conflict_kind(
-            "workspace_not_ready",
-            format!("workspace is {}", status.as_str()),
-        ));
-    }
-    Ok(())
 }
 
 fn decode_write(encoded: &str) -> Result<Vec<u8>, ServerError> {

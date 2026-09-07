@@ -2319,6 +2319,7 @@ export function parseCodeWorkspacePr(
   if (
     !isRecord(value) ||
     !onlyKeys<WireCodeWorkspacePrSnapshot>(value, [
+      "remote",
       "dirty",
       "unpushed",
       "ahead",
@@ -2333,6 +2334,7 @@ export function parseCodeWorkspacePr(
       "pushes_as_self",
       "watch",
     ]) ||
+    (value.remote !== undefined && typeof value.remote !== "boolean") ||
     typeof value.dirty !== "boolean" ||
     typeof value.unpushed !== "boolean" ||
     !isFiniteNumber(value.ahead) ||
@@ -2349,6 +2351,7 @@ export function parseCodeWorkspacePr(
     return null;
   }
   const parsed: CodeWorkspacePrSnapshot = {
+    ...(value.remote !== undefined ? { remote: value.remote } : {}),
     dirty: value.dirty,
     unpushed: value.unpushed,
     ahead: value.ahead,

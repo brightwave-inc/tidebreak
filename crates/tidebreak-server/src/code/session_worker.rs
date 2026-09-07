@@ -2540,6 +2540,17 @@ async fn drive_turn_inner(
 ) -> Result<Turn, WorkerError> {
     let db = &sink.db;
     let bus = &sink.bus;
+    let current = get_session(db, &session.owner, session.id)
+        .await
+        .map_err(|error| WorkerError::Failed(error.to_string()))?
+        .ok_or_else(|| WorkerError::Conflict("session no longer exists".into()))?;
+    if session.execution_location != tidebreak_core::ExecutionLocation::Machine
+        || current.execution_location != tidebreak_core::ExecutionLocation::Machine
+    {
+        return Err(WorkerError::Conflict(
+            "this session runs in a sandbox; its queued messages stay with the sandbox".into(),
+        ));
+    }
     if session.lifecycle == SessionLifecycle::Running {
         return Err(WorkerError::Conflict(
             "a turn is already running on this session".into(),
@@ -2562,10 +2573,6 @@ async fn drive_turn_inner(
     // that wait then update this same session copy, so the turn sees the last
     // committed settings when the lock becomes available.
     if matches!(worktree.wait, TurnWait::Queued) {
-        let current = get_session(db, &session.owner, session.id)
-            .await
-            .map_err(|err| WorkerError::Failed(err.to_string()))?
-            .ok_or_else(|| WorkerError::Failed(format!("session {} not found", session.id)))?;
         if current.spawn_epoch != session.spawn_epoch {
             return Err(WorkerError::Conflict(
                 "the session worker was superseded before the turn started".into(),
@@ -2619,6 +2626,11 @@ async fn drive_turn_inner(
             .await
             .map_err(|error| WorkerError::Failed(error.to_string()))?
             .ok_or_else(|| WorkerError::Conflict("workspace no longer exists".into()))?;
+        if workspace.is_remote() {
+            return Err(WorkerError::Conflict(
+                "a local worker cannot run in a sandbox workspace".into(),
+            ));
+        }
         if workspace.status != CodeWorkspaceStatus::Active {
             return Err(WorkerError::Conflict(format!(
                 "workspace is {}",

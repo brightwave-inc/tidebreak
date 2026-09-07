@@ -52,6 +52,7 @@ mod code_doctor;
 mod code_external;
 #[cfg(unix)]
 mod code_git;
+mod code_hosted_execution;
 mod code_internal;
 mod code_owner_scope;
 mod code_policy;

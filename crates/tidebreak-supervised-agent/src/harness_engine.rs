@@ -54,6 +54,8 @@ use crate::engine::{
 /// such an environment and no wiring is applied.
 pub const PLACEHOLDER_TOKEN_VARIABLE: &str = "MODEL_GATEWAY_SANDBOX_PLACEHOLDER_TOKEN";
 
+const SANDBOX_PLACEHOLDER_TOKEN: &str = "mg-sandbox-placeholder";
+
 /// The gateway base URL the environment writes on every sandboxed pod.
 ///
 /// The confinement boundary recognizes gateway traffic by authority:
@@ -94,6 +96,11 @@ fn resolve_gateway_inference(
     let Some(placeholder_credential) = placeholder else {
         return Ok(None);
     };
+    if placeholder_credential != SANDBOX_PLACEHOLDER_TOKEN {
+        return Err(format!(
+            "{PLACEHOLDER_TOKEN_VARIABLE} must contain the public sandbox placeholder"
+        ));
+    }
     let Some(gateway_url) = gateway_url else {
         return Err(format!(
             "{PLACEHOLDER_TOKEN_VARIABLE} is set but {GATEWAY_URL_VARIABLE} is missing or empty; \
@@ -185,7 +192,7 @@ impl HarnessEngine {
                 let root = inference.gateway_url.trim_end_matches('/');
                 let anthropic_base = format!("{root}/compat/anthropic");
                 let openai_base = format!("{root}/compat/openai");
-                let (argv, env) = spawn_wiring(
+                let (argv, mut env) = spawn_wiring(
                     self.kind,
                     &InferenceWiring {
                         anthropic_base: &anthropic_base,
@@ -194,6 +201,24 @@ impl HarnessEngine {
                         key: &inference.placeholder_credential,
                     },
                 );
+                // gh requires a token to issue requests. Only the public dummy
+                // enters the engine; Gateway injects the connected app credential.
+                env.push(("GH_TOKEN".to_owned(), SANDBOX_PLACEHOLDER_TOKEN.to_owned()));
+                // Gateway resolves this public author metadata from the connected
+                // GitHub identity. Keep it across the harness environment filter.
+                for (name, value) in &probe.env {
+                    if let (Some(name), Some(value)) = (name.to_str(), value.to_str()) {
+                        if matches!(
+                            name,
+                            "GIT_AUTHOR_NAME"
+                                | "GIT_AUTHOR_EMAIL"
+                                | "GIT_COMMITTER_NAME"
+                                | "GIT_COMMITTER_EMAIL"
+                        ) {
+                            env.push((name.to_owned(), value.to_owned()));
+                        }
+                    }
+                }
                 (argv, env, Some(RELAY_KEY_ENV.to_owned()))
             }
             None => (Vec::new(), Vec::new(), None),
@@ -908,8 +933,22 @@ mod tests {
         let captured = adapter.captured.clone();
         let mut engine = engine_over(adapter, probe(true));
         // The trailing slash must not double up in the derived roots.
+        engine.spec.probe.env.extend([
+            ("GIT_AUTHOR_NAME".into(), "fixture-app[bot]".into()),
+            (
+                "GIT_AUTHOR_EMAIL".into(),
+                "fixture-app[bot]@users.noreply.github.com".into(),
+            ),
+            ("GIT_COMMITTER_NAME".into(), "fixture-app[bot]".into()),
+            (
+                "GIT_COMMITTER_EMAIL".into(),
+                "fixture-app[bot]@users.noreply.github.com".into(),
+            ),
+            ("GH_TOKEN".into(), "fixture-secret-must-not-pass".into()),
+            ("GITHUB_TOKEN".into(), "another-fixture-secret".into()),
+        ]);
         engine.spec.gateway_inference = Some(GatewayInference {
-            placeholder_credential: "placeholder".to_owned(),
+            placeholder_credential: SANDBOX_PLACEHOLDER_TOKEN.to_owned(),
             gateway_url: "https://gateway.internal:8443/".to_owned(),
         });
         engine.start_turn(request("go")).await.unwrap();
@@ -923,7 +962,49 @@ mod tests {
         assert!(captured
             .extra_env
             .iter()
-            .any(|(name, value)| name == "ANTHROPIC_AUTH_TOKEN" && value == "placeholder"));
+            .any(|(name, value)| name == "ANTHROPIC_AUTH_TOKEN"
+                && value == SANDBOX_PLACEHOLDER_TOKEN));
+        let mut effective: std::collections::HashMap<OsString, OsString> =
+            tidebreak_harness::filter_child_env(captured.env.clone())
+                .into_iter()
+                .collect();
+        effective.extend(
+            captured
+                .extra_env
+                .iter()
+                .map(|(name, value)| (name.into(), value.into())),
+        );
+        assert_eq!(
+            effective.get(std::ffi::OsStr::new("GH_TOKEN")).unwrap(),
+            SANDBOX_PLACEHOLDER_TOKEN
+        );
+        assert_eq!(
+            effective
+                .get(std::ffi::OsStr::new("GIT_AUTHOR_NAME"))
+                .unwrap(),
+            "fixture-app[bot]"
+        );
+        assert_eq!(
+            effective
+                .get(std::ffi::OsStr::new("GIT_COMMITTER_EMAIL"))
+                .unwrap(),
+            "fixture-app[bot]@users.noreply.github.com"
+        );
+        assert!(!effective.contains_key(std::ffi::OsStr::new("GITHUB_TOKEN")));
+        assert!(effective
+            .values()
+            .all(|value| !value.to_string_lossy().contains("fixture-secret")));
+    }
+
+    #[test]
+    fn real_credentials_cannot_replace_the_public_placeholder() {
+        let error = resolve_gateway_inference(
+            Some("fixture-real-secret".into()),
+            Some("https://gateway.invalid".into()),
+        )
+        .unwrap_err();
+        assert!(error.contains("public sandbox placeholder"));
+        assert!(!error.contains("fixture-real-secret"));
     }
 
     /// The placeholder never stands alone: without a gateway URL the pod
@@ -931,10 +1012,11 @@ mod tests {
     /// at a destination the confinement boundary refuses.
     #[test]
     fn a_placeholder_without_a_gateway_url_is_refused() {
-        let error = resolve_gateway_inference(Some("placeholder".to_owned()), None).unwrap_err();
+        let error = resolve_gateway_inference(Some(SANDBOX_PLACEHOLDER_TOKEN.to_owned()), None)
+            .unwrap_err();
         assert!(error.contains(GATEWAY_URL_VARIABLE));
         let error = resolve_gateway_inference(
-            Some("placeholder".to_owned()),
+            Some(SANDBOX_PLACEHOLDER_TOKEN.to_owned()),
             Some("gateway.internal:8443".to_owned()),
         )
         .unwrap_err();

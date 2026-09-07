@@ -46,6 +46,8 @@ const STALE_INTENT_AGE: chrono::Duration = chrono::Duration::minutes(10);
 pub struct RemoteSpawnSettings {
     /// Administrator-defined profile on the runtime endpoint.
     pub profile: String,
+    /// Engine and Allow mode supplied by the declared supervised image.
+    pub engine: Option<tidebreak_core::HarnessKind>,
     /// Concurrent live incarnations one owner may hold.
     pub incarnation_cap: usize,
     /// Per-spawn spend ceiling in micro-USD, when one is set.
@@ -53,6 +55,27 @@ pub struct RemoteSpawnSettings {
     /// Cumulative per-session spend ceiling in micro-USD, when one is set.
     /// Per-spawn ceilings multiply by reincarnation; this one does not.
     pub session_spend_ceiling_microusd: Option<i64>,
+}
+
+impl RemoteSpawnSettings {
+    /// Reject settings the declared supervised image cannot apply.
+    pub fn validate_execution(&self, session: &Session) -> Result<(), String> {
+        let Some(engine) = self.engine else {
+            return Ok(());
+        };
+        if session.harness_kind != engine {
+            return Err(format!(
+                "this sandbox profile runs {engine}; select that engine to start the session"
+            ));
+        }
+        if session.permission_mode != tidebreak_core::PermissionMode::Allow {
+            return Err("this sandbox profile supports Allow mode; Gateway still enforces repository and app access".into());
+        }
+        if session.fast_mode {
+            return Err("this sandbox profile does not support fast mode".into());
+        }
+        Ok(())
+    }
 }
 
 /// What one submitted turn became.
@@ -324,6 +347,9 @@ impl RemoteDriver<'_> {
         promoted: Option<&tidebreak_core::code::QueuedTurn>,
     ) -> Result<RemoteTurnOutcome, tidebreak_core::AgentError> {
         let (db, bus, provisioner, settings) = (self.db, self.bus, self.provisioner, self.settings);
+        settings
+            .validate_execution(session)
+            .map_err(tidebreak_core::AgentError::config)?;
         let owner = session.owner.clone();
         let last = latest_turn(db, &owner, session.id).await?;
         if last
@@ -348,7 +374,9 @@ impl RemoteDriver<'_> {
                     if row.state == IncarnationState::Active {
                         if let Some(sandbox_id) = row.sandbox_id.as_deref() {
                             releasing = true;
-                            if let Err(error) = provisioner.cancel(&owner, sandbox_id).await {
+                            if let Err(error) =
+                                provisioner.cancel(&owner, session.id, sandbox_id).await
+                            {
                                 warn!(
                                     session = %session.id,
                                     %error,
@@ -400,7 +428,10 @@ impl RemoteDriver<'_> {
                 message
                     .validate()
                     .map_err(tidebreak_core::AgentError::Store)?;
-                match provisioner.send(&owner, sandbox_id, &message).await {
+                match provisioner
+                    .send(&owner, session.id, sandbox_id, &message)
+                    .await
+                {
                     Ok(_) => {
                         let turn =
                             start_turn_row(db, bus, session, ordinal, text, promoted).await?;
@@ -492,7 +523,16 @@ impl RemoteDriver<'_> {
             profile: settings.profile.clone(),
             harness: "custom".to_owned(),
             mode: Some("turn".to_owned()),
-            task: text.to_owned(),
+            task: if settings.engine.is_some() {
+                tidebreak_core::code::RemoteWorkspaceTask::encode(text, &workspace.branch_name)
+                    .map_err(|error| {
+                        tidebreak_core::AgentError::config(format!(
+                            "the workspace task could not be encoded: {error}"
+                        ))
+                    })?
+            } else {
+                text.to_owned()
+            },
             repository: Some(repository_url(repo)?),
             repository_ref: Some(resume_ref.clone()),
             repositories: Vec::new(),
@@ -507,7 +547,7 @@ impl RemoteDriver<'_> {
             spend_ceiling_microusd: settings.spend_ceiling_microusd,
             max_turns: None,
         };
-        match provisioner.spawn(&owner, &arguments).await {
+        match provisioner.spawn(&owner, session.id, &arguments).await {
             Ok(lease) => {
                 if let Err(error) =
                     activate_incarnation(db, &owner, intent.id, &lease.sandbox_id).await
@@ -515,7 +555,10 @@ impl RemoteDriver<'_> {
                     // The protocol closed the row under us (the sweep, say).
                     // The sandbox this call holds is orphaned: cancel it, or
                     // a later turn provisions a second one for this session.
-                    if let Err(cancel_error) = provisioner.cancel(&owner, &lease.sandbox_id).await {
+                    if let Err(cancel_error) = provisioner
+                        .cancel(&owner, session.id, &lease.sandbox_id)
+                        .await
+                    {
                         warn!(
                             session = %session.id,
                             sandbox = %lease.sandbox_id,
@@ -607,6 +650,7 @@ impl RemoteDriver<'_> {
         let read = match provisioner
             .events(
                 &owner,
+                session.id,
                 &sandbox_id,
                 EventCursor {
                     after_seq: Some(row.events_cursor),
@@ -640,7 +684,8 @@ impl RemoteDriver<'_> {
                 // a refusal does not prove the workload is gone — then close
                 // the row and fence; reap waives the gate and the next turn
                 // reincarnates.
-                if let Err(cancel_error) = provisioner.cancel(&owner, &sandbox_id).await {
+                if let Err(cancel_error) = provisioner.cancel(&owner, session.id, &sandbox_id).await
+                {
                     warn!(
                         session = %session.id,
                         %cancel_error,
@@ -663,7 +708,7 @@ impl RemoteDriver<'_> {
         // Feed the spend ledger from the environment's own meter. Best
         // effort: a status fault costs one reading, and the terminal pump
         // records the final figure.
-        if let Ok(status) = provisioner.status(&owner, &sandbox_id).await {
+        if let Ok(status) = provisioner.status(&owner, session.id, &sandbox_id).await {
             if let Some(spend) = status.spend_microusd {
                 record_incarnation_spend(db, &owner, row.id, spend).await?;
             }
@@ -753,7 +798,7 @@ impl RemoteDriver<'_> {
                 if let Some(sandbox_id) = row.sandbox_id.as_deref() {
                     // Best effort: the reap must not hang on an environment
                     // that is already gone.
-                    if let Err(error) = provisioner.cancel(&owner, sandbox_id).await {
+                    if let Err(error) = provisioner.cancel(&owner, session.id, sandbox_id).await {
                         warn!(
                             session = %session.id,
                             %error,
@@ -972,6 +1017,7 @@ mod tests {
         async fn spawn(
             &self,
             _owner: &OwnerId,
+            _session: SessionId,
             arguments: &SpawnArguments,
         ) -> Result<SandboxLease, RemoteSandboxError> {
             let hook = self.on_spawn.lock().unwrap().take();
@@ -989,6 +1035,7 @@ mod tests {
         async fn status(
             &self,
             _owner: &OwnerId,
+            _session: SessionId,
             sandbox_id: &str,
         ) -> Result<SandboxStatus, RemoteSandboxError> {
             Ok(SandboxStatus {
@@ -1009,6 +1056,7 @@ mod tests {
         async fn events(
             &self,
             _owner: &OwnerId,
+            _session: SessionId,
             _sandbox_id: &str,
             _cursor: EventCursor,
         ) -> Result<SandboxEvents, RemoteSandboxError> {
@@ -1025,6 +1073,7 @@ mod tests {
         async fn send(
             &self,
             _owner: &OwnerId,
+            _session: SessionId,
             sandbox_id: &str,
             message: &SandboxMessage,
         ) -> Result<MessageReceipt, RemoteSandboxError> {
@@ -1042,6 +1091,7 @@ mod tests {
         async fn cancel(
             &self,
             _owner: &OwnerId,
+            _session: SessionId,
             sandbox_id: &str,
         ) -> Result<(), RemoteSandboxError> {
             self.cancels.lock().unwrap().push(sandbox_id.to_owned());
@@ -1052,6 +1102,7 @@ mod tests {
     fn settings() -> RemoteSpawnSettings {
         RemoteSpawnSettings {
             profile: "tidebreak-remote".to_owned(),
+            engine: None,
             incarnation_cap: 2,
             spend_ceiling_microusd: Some(5_000_000),
             session_spend_ceiling_microusd: None,
@@ -1067,6 +1118,52 @@ mod tests {
                 settings: $settings,
             }
         };
+    }
+
+    #[tokio::test]
+    async fn a_declared_engine_rejects_unsupported_settings_before_provisioning() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, bus, session, workspace, repo) = seed(dir.path()).await;
+        let fake = FakeProvisioner::default();
+        let mut settings = settings();
+        settings.engine = Some(tidebreak_core::HarnessKind::ClaudeCode);
+        let driver = driver!(&db, &bus, &fake, &settings);
+        for (harness, mode, fast) in [
+            (
+                tidebreak_core::HarnessKind::Codex,
+                tidebreak_core::PermissionMode::Allow,
+                false,
+            ),
+            (
+                tidebreak_core::HarnessKind::ClaudeCode,
+                tidebreak_core::PermissionMode::Ask,
+                false,
+            ),
+            (
+                tidebreak_core::HarnessKind::ClaudeCode,
+                tidebreak_core::PermissionMode::Allow,
+                true,
+            ),
+        ] {
+            let mut rejected = session.clone();
+            rejected.harness_kind = harness;
+            rejected.permission_mode = mode;
+            rejected.fast_mode = fast;
+            assert!(driver
+                .submit_turn(&mut rejected, &workspace, &repo, "start")
+                .await
+                .is_err());
+        }
+        assert!(fake.spawns.lock().unwrap().is_empty());
+        assert!(fake.sends.lock().unwrap().is_empty());
+        assert!(latest_incarnation(&db, &session.owner, session.id)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(latest_turn(&db, &session.owner, session.id)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     /// A first turn on a fresh remote session reserves, spawns from the
@@ -1103,6 +1200,26 @@ mod tests {
         assert_eq!(spawns[0].mode.as_deref(), Some("turn"));
         assert_eq!(spawns[0].spend_ceiling_microusd, Some(5_000_000));
         assert_eq!(session.lifecycle, SessionLifecycle::Running);
+    }
+
+    #[tokio::test]
+    async fn a_declared_supervisor_receives_the_workspace_branch_in_its_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, bus, mut session, workspace, repo) = seed(dir.path()).await;
+        let fake = FakeProvisioner::default();
+        let mut settings = settings();
+        settings.engine = Some(session.harness_kind);
+        let driver = driver!(&db, &bus, &fake, &settings);
+        driver
+            .submit_turn(&mut session, &workspace, &repo, "build it")
+            .await
+            .unwrap();
+        let spawns = fake.spawns.lock().unwrap();
+        let task = tidebreak_core::code::RemoteWorkspaceTask::parse(&spawns[0].task)
+            .unwrap()
+            .unwrap();
+        assert_eq!(task.task, "build it");
+        assert_eq!(task.branch, workspace.branch_name);
     }
 
     /// A turn while the sandbox lives is an inbox message, not a spawn.
@@ -1888,20 +2005,23 @@ mod tests {
             async fn spawn(
                 &self,
                 owner: &OwnerId,
+                session: SessionId,
                 arguments: &SpawnArguments,
             ) -> Result<SandboxLease, RemoteSandboxError> {
-                self.0.spawn(owner, arguments).await
+                self.0.spawn(owner, session, arguments).await
             }
             async fn status(
                 &self,
                 owner: &OwnerId,
+                session: SessionId,
                 sandbox_id: &str,
             ) -> Result<SandboxStatus, RemoteSandboxError> {
-                self.0.status(owner, sandbox_id).await
+                self.0.status(owner, session, sandbox_id).await
             }
             async fn events(
                 &self,
                 _owner: &OwnerId,
+                _session: SessionId,
                 _sandbox_id: &str,
                 _cursor: EventCursor,
             ) -> Result<SandboxEvents, RemoteSandboxError> {
@@ -1914,17 +2034,19 @@ mod tests {
             async fn send(
                 &self,
                 owner: &OwnerId,
+                session: SessionId,
                 sandbox_id: &str,
                 message: &SandboxMessage,
             ) -> Result<MessageReceipt, RemoteSandboxError> {
-                self.0.send(owner, sandbox_id, message).await
+                self.0.send(owner, session, sandbox_id, message).await
             }
             async fn cancel(
                 &self,
                 owner: &OwnerId,
+                session: SessionId,
                 sandbox_id: &str,
             ) -> Result<(), RemoteSandboxError> {
-                self.0.cancel(owner, sandbox_id).await
+                self.0.cancel(owner, session, sandbox_id).await
             }
         }
         let refusing = RefusingReads(&fake);
@@ -1977,20 +2099,23 @@ mod tests {
             async fn spawn(
                 &self,
                 owner: &OwnerId,
+                session: SessionId,
                 arguments: &SpawnArguments,
             ) -> Result<SandboxLease, RemoteSandboxError> {
-                self.0.spawn(owner, arguments).await
+                self.0.spawn(owner, session, arguments).await
             }
             async fn status(
                 &self,
                 owner: &OwnerId,
+                session: SessionId,
                 sandbox_id: &str,
             ) -> Result<SandboxStatus, RemoteSandboxError> {
-                self.0.status(owner, sandbox_id).await
+                self.0.status(owner, session, sandbox_id).await
             }
             async fn events(
                 &self,
                 _owner: &OwnerId,
+                _session: SessionId,
                 _sandbox_id: &str,
                 _cursor: EventCursor,
             ) -> Result<SandboxEvents, RemoteSandboxError> {
@@ -2001,17 +2126,19 @@ mod tests {
             async fn send(
                 &self,
                 owner: &OwnerId,
+                session: SessionId,
                 sandbox_id: &str,
                 message: &SandboxMessage,
             ) -> Result<MessageReceipt, RemoteSandboxError> {
-                self.0.send(owner, sandbox_id, message).await
+                self.0.send(owner, session, sandbox_id, message).await
             }
             async fn cancel(
                 &self,
                 owner: &OwnerId,
+                session: SessionId,
                 sandbox_id: &str,
             ) -> Result<(), RemoteSandboxError> {
-                self.0.cancel(owner, sandbox_id).await
+                self.0.cancel(owner, session, sandbox_id).await
             }
         }
         let expired = ExpiredToken(&fake);

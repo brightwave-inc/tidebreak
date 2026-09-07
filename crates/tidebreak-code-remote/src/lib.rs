@@ -111,13 +111,17 @@ impl std::fmt::Debug for RuntimeToken {
 /// provisioned as its owner, never as a shared machine identity.
 #[async_trait]
 pub trait RuntimeTokenSource: Send + Sync {
-    /// A live token for `owner`, minted or refreshed as needed.
+    /// A live token for this session, using its original external grant when bound.
     ///
     /// # Errors
     ///
     /// [`RemoteSandboxError::SignInRequired`] when no credential for this
     /// owner can mint one.
-    async fn runtime_token(&self, owner: &OwnerId) -> Result<RuntimeToken, RemoteSandboxError>;
+    async fn runtime_token(
+        &self,
+        owner: &OwnerId,
+        session: SessionId,
+    ) -> Result<RuntimeToken, RemoteSandboxError>;
 }
 
 /// The provisioning client a remote session drives its sandbox through.
@@ -134,6 +138,7 @@ pub trait SandboxProvisioner: Send + Sync {
     async fn spawn(
         &self,
         owner: &OwnerId,
+        session: SessionId,
         arguments: &SpawnArguments,
     ) -> Result<SandboxLease, RemoteSandboxError>;
 
@@ -141,6 +146,7 @@ pub trait SandboxProvisioner: Send + Sync {
     async fn status(
         &self,
         owner: &OwnerId,
+        session: SessionId,
         sandbox_id: &str,
     ) -> Result<SandboxStatus, RemoteSandboxError>;
 
@@ -151,6 +157,7 @@ pub trait SandboxProvisioner: Send + Sync {
     async fn events(
         &self,
         owner: &OwnerId,
+        session: SessionId,
         sandbox_id: &str,
         cursor: EventCursor,
     ) -> Result<SandboxEvents, RemoteSandboxError>;
@@ -159,13 +166,19 @@ pub trait SandboxProvisioner: Send + Sync {
     async fn send(
         &self,
         owner: &OwnerId,
+        session: SessionId,
         sandbox_id: &str,
         message: &SandboxMessage,
     ) -> Result<MessageReceipt, RemoteSandboxError>;
 
     /// Asks the environment to stop the sandbox. Idempotent server-side; a
     /// running sandbox keeps a short grace so its terminal checkpoint lands.
-    async fn cancel(&self, owner: &OwnerId, sandbox_id: &str) -> Result<(), RemoteSandboxError>;
+    async fn cancel(
+        &self,
+        owner: &OwnerId,
+        session: SessionId,
+        sandbox_id: &str,
+    ) -> Result<(), RemoteSandboxError>;
 }
 
 /// Supplies the session operations that stay owned by the embedding server.

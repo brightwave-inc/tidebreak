@@ -580,3 +580,50 @@ describe("combined local and PR states", () => {
     expect(model.pr?.number).toBe(41);
   });
 });
+
+describe("remote workspace workflow", () => {
+  const remote: CodeWorkspacePrSnapshot = { ...CLEAN, remote: true };
+
+  it("does not report a remote checkout as clean or offer local changes", () => {
+    const model = workspaceWorkflowModel(remote);
+    expect(model.stage).toBe("remote");
+    expect(model.summary).toBe("Sandbox workspace");
+    expect(model.primary).toBeUndefined();
+    expect(model.secondary).toEqual([]);
+  });
+
+  it.each<Partial<PullRequestDigest>>([
+    { state: "open", draft: true },
+    { state: "open", mergeable: "mergeable", merge_state_status: "clean" },
+    { state: "open", checks: [{ name: "CI", bucket: "fail" }] },
+    { state: "merged", merged: true },
+  ])("keeps PR facts and navigation for %j", (facts) => {
+    const digest = pr(facts);
+    const model = workspaceWorkflowModel({ ...remote, pr: digest });
+    expect(model.pr).toEqual(digest);
+    expect(model.primary).toBe("open_pr");
+    expect(model.secondary).toEqual([]);
+    for (const shortcut of [
+      "merge",
+      "watch",
+      "update_branch",
+      "source_control",
+    ] as const) {
+      expect(resolveWorkflowShortcut(shortcut, model, false)).toHaveProperty(
+        "blocked",
+      );
+    }
+    expect(resolveWorkflowShortcut("view_pr", model, false)).toEqual({
+      run: "open_pr",
+    });
+    expect(resolveWorkflowShortcut("pull_request", model, false)).toEqual({
+      run: "open_pr",
+    });
+  });
+
+  it("preserves local behavior for older responses without a Git snapshot", () => {
+    expect(workspaceWorkflowModel({ ...CLEAN, dirty: true }).primary).toBe(
+      "compose_pr",
+    );
+  });
+});

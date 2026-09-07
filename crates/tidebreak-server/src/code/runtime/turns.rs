@@ -177,10 +177,15 @@ impl CodeRuntime {
                 "session has ended",
             ));
         }
-        if let Some(workspace) = workspace.as_ref().filter(|workspace| workspace.is_remote()) {
-            // The sandbox path: no local worker, no worktree lock, no
-            // harness probe. Everything below this branch assumes a checkout
-            // on this machine.
+        if session.execution_location == tidebreak_core::ExecutionLocation::Sandbox {
+            let workspace = workspace.as_ref().ok_or_else(|| {
+                ServerError::conflict_kind(
+                    "remote_workspace_missing",
+                    "this sandbox session has no workspace",
+                )
+            })?;
+            // The stored session location owns dispatch. A workspace marker
+            // must never turn a sandbox session into a local engine.
             return self
                 .submit_remote_turn(
                     owner,
@@ -195,6 +200,16 @@ impl CodeRuntime {
                     queue_if_busy,
                 )
                 .await;
+        }
+        self.require_machine_execution()?;
+        if workspace
+            .as_ref()
+            .is_some_and(|workspace| workspace.is_remote())
+        {
+            return Err(ServerError::conflict_kind(
+                "session_location_mismatch",
+                "the machine session has a sandbox workspace and cannot run locally",
+            ));
         }
         // No capability gate on attachments. An engine that states image input
         // is handed the bytes on its own protocol; every other one is handed a
@@ -449,6 +464,12 @@ impl CodeRuntime {
     }
 
     pub async fn interrupt(&self, id: SessionId) -> Result<(), ServerError> {
+        let session = tidebreak_core::db::code::get_session_all_owners(&self.db, id)
+            .await?
+            .ok_or_else(|| ServerError::not_found("session not found"))?;
+        if session.execution_location == tidebreak_core::ExecutionLocation::Sandbox {
+            return self.interrupt_remote(&session).await;
+        }
         // Interrupt stops only the active turn. The worker and logical code
         // session continue, so its browser capfile and native capability must
         // remain live for later turns.
@@ -465,22 +486,10 @@ impl CodeRuntime {
                 .map_err(|_| ServerError::internal("session worker dropped the interrupt"))?
                 .map_err(map_worker);
         }
-        // No host worker: a remote session's engine lives in a sandbox.
-        let sessions = list_sessions_all_owners(&self.db).await?;
-        let Some(session) = sessions.into_iter().find(|session| session.id == id) else {
-            return Err(ServerError::conflict_kind(
-                "session_worker_missing",
-                "session worker is not running",
-            ));
-        };
-        let workspace = self.session_workspace(&session).await?;
-        if !workspace.is_some_and(|workspace| workspace.is_remote()) {
-            return Err(ServerError::conflict_kind(
-                "session_worker_missing",
-                "session worker is not running",
-            ));
-        }
-        self.interrupt_remote(&session).await
+        Err(ServerError::conflict_kind(
+            "session_worker_missing",
+            "session worker is not running",
+        ))
     }
 
     /// Retract one queued message. `false` when the row is gone.
@@ -502,10 +511,13 @@ impl CodeRuntime {
         id: SessionId,
         paused: bool,
     ) -> Result<(), ServerError> {
-        let _ = self.get_session(owner, id).await?;
+        let session = self.get_session(owner, id).await?;
+        if !paused && session.execution_location == tidebreak_core::ExecutionLocation::Machine {
+            self.require_machine_execution()?;
+        }
         tidebreak_core::db::code::set_queue_paused(&self.db, owner, id, paused).await?;
         if !paused {
-            self.wake_session_queue(id);
+            self.wake_queue_for_location(&session);
         }
         Ok(())
     }
@@ -514,10 +526,24 @@ impl CodeRuntime {
     /// head row. The tray composes send-now client-side exactly as chat does:
     /// pause, move the row first, stop the live turn, then this.
     pub async fn send_queued_now(&self, owner: &OwnerId, id: SessionId) -> Result<(), ServerError> {
-        let _ = self.get_session(owner, id).await?;
+        let session = self.get_session(owner, id).await?;
+        if session.execution_location == tidebreak_core::ExecutionLocation::Machine {
+            self.require_machine_execution()?;
+        }
         tidebreak_core::db::code::set_queue_paused(&self.db, owner, id, false).await?;
-        self.wake_session_queue(id);
+        self.wake_queue_for_location(&session);
         Ok(())
+    }
+
+    fn wake_queue_for_location(&self, session: &Session) {
+        match session.execution_location {
+            tidebreak_core::ExecutionLocation::Sandbox => {
+                if let Some(remote) = self.remote_sessions() {
+                    remote.wake_sweep();
+                }
+            }
+            tidebreak_core::ExecutionLocation::Machine => self.wake_session_queue(session.id),
+        }
     }
 
     /// Nudge a live worker to re-read its queue. A session with no worker has
@@ -717,11 +743,7 @@ impl CodeRuntime {
                 "only a fenced session can be reaped",
             ));
         }
-        let workspace = self.session_workspace(&session).await?;
-        if workspace
-            .as_ref()
-            .is_some_and(|workspace| workspace.is_remote())
-        {
+        if session.execution_location == tidebreak_core::ExecutionLocation::Sandbox {
             // No worker to shut down and nothing to relaunch: the driver
             // cancels whatever the environment still holds, closes the
             // incarnation, and resolves the fence. The next turn

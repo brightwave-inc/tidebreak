@@ -1607,7 +1607,11 @@ export type CodeWorkspaceHistorySearchSource = "turn_user_input" | "turn_narrati
 /**
  * PR + checks digest plus the local git facts the PR card needs.
  */
-export type CodeWorkspacePrSnapshot = { git?: CodeWorkspaceGitState, dirty: boolean, unpushed: boolean, ahead: number, has_upstream: boolean, suggested_commit_message: string, pr?: PullRequestDigest, gh_found: boolean, gh_authenticated?: boolean, remediation: string,
+export type CodeWorkspacePrSnapshot = {
+/**
+ * The checkout lives in a remote runtime; local git mutations are unavailable.
+ */
+remote?: boolean, git?: CodeWorkspaceGitState, dirty: boolean, unpushed: boolean, ahead: number, has_upstream: boolean, suggested_commit_message: string, pr?: PullRequestDigest, gh_found: boolean, gh_authenticated?: boolean, remediation: string,
 /**
  * The identity a push from this machine acts as: the deployment's
  * GitHub App bot account (decision 63) or the caller's own login

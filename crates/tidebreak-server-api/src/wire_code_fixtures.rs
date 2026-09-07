@@ -556,6 +556,7 @@ pub(crate) fn code_frame_fixtures() -> Vec<Fixture> {
             "workspace pr",
             "workspace_pr",
             &CodeWorkspacePrSnapshot {
+                remote: None,
                 git: Some(CodeWorkspaceGitState {
                     branch: Some("mara/code-parsers-bounded".to_owned()),
                     head_sha: "cec166ffc1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6".to_owned(),

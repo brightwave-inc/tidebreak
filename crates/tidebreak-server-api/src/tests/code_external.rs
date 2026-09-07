@@ -39,6 +39,7 @@ impl SandboxProvisioner for FakeProvisioner {
     async fn spawn(
         &self,
         _owner: &OwnerId,
+        _session: tidebreak_core::SessionId,
         arguments: &SpawnArguments,
     ) -> Result<SandboxLease, RemoteSandboxError> {
         self.spawns.lock().unwrap().push(arguments.clone());
@@ -53,6 +54,7 @@ impl SandboxProvisioner for FakeProvisioner {
     async fn status(
         &self,
         _owner: &OwnerId,
+        _session: tidebreak_core::SessionId,
         sandbox_id: &str,
     ) -> Result<SandboxStatus, RemoteSandboxError> {
         Ok(SandboxStatus {
@@ -73,6 +75,7 @@ impl SandboxProvisioner for FakeProvisioner {
     async fn events(
         &self,
         _owner: &OwnerId,
+        _session: tidebreak_core::SessionId,
         _sandbox_id: &str,
         _cursor: EventCursor,
     ) -> Result<SandboxEvents, RemoteSandboxError> {
@@ -89,6 +92,7 @@ impl SandboxProvisioner for FakeProvisioner {
     async fn send(
         &self,
         _owner: &OwnerId,
+        _session: tidebreak_core::SessionId,
         _sandbox_id: &str,
         message: &SandboxMessage,
     ) -> Result<MessageReceipt, RemoteSandboxError> {
@@ -100,7 +104,12 @@ impl SandboxProvisioner for FakeProvisioner {
         })
     }
 
-    async fn cancel(&self, _owner: &OwnerId, _sandbox_id: &str) -> Result<(), RemoteSandboxError> {
+    async fn cancel(
+        &self,
+        _owner: &OwnerId,
+        _session: tidebreak_core::SessionId,
+        _sandbox_id: &str,
+    ) -> Result<(), RemoteSandboxError> {
         Ok(())
     }
 }
@@ -108,6 +117,7 @@ impl SandboxProvisioner for FakeProvisioner {
 fn remote_settings() -> crate::code::remote::driver::RemoteSpawnSettings {
     crate::code::remote::driver::RemoteSpawnSettings {
         profile: "tidebreak-remote".to_owned(),
+        engine: None,
         incarnation_cap: 2,
         spend_ceiling_microusd: None,
         session_spend_ceiling_microusd: None,
@@ -411,6 +421,158 @@ async fn a_sessions_git_borrows_the_persons_credential_from_the_loopback_route()
         .await
         .unwrap();
     assert_eq!(wrong.status(), reqwest::StatusCode::UNAUTHORIZED);
+}
+
+/// A Slack sandbox stays remote when a browser follows the link, queues a
+/// turn, and the hosted process recovers its session rows.
+#[tokio::test]
+async fn web_follow_ups_and_recovery_keep_a_slack_session_in_its_sandbox() {
+    let (router, fake, runtime, repo_id, token, _dir) = external_app_built(|mut runtime| {
+        runtime
+            .adapters
+            .register(Arc::new(crate::scripted_harness::ScriptedAdapter::new(
+                crate::scripted_harness::plain_text_script(),
+            )));
+        runtime.with_sandbox_only_execution()
+    })
+    .await;
+    let addr = serve(router).await;
+    let client = reqwest::Client::new();
+    let owner = OwnerId::local();
+    let (_grant, pair) = runtime
+        .mint_adapter_grant(&owner, "slack", "U1", "T1")
+        .await
+        .unwrap();
+    let created = client
+        .post(format!("http://{addr}/external/code/sessions"))
+        .bearer_auth(&pair.token)
+        .json(&serde_json::json!({ "external_key": "T1/C-web/1.1", "repo_id": repo_id }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::CREATED);
+    let session_id = bound_session_id(&runtime, &owner, "T1/C-web/1.1").await;
+    let session = runtime.get_session(&owner, session_id).await.unwrap();
+    assert_eq!(
+        session.execution_location,
+        tidebreak_core::ExecutionLocation::Sandbox
+    );
+    assert!(!runtime.has_worker(session_id));
+    let error = runtime
+        .attach_and_spawn_worker(session.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), "session_remote");
+
+    // The session location remains authoritative if old workspace metadata
+    // still names a local path after recovery or an upgrade.
+    let mut workspace = runtime
+        .get_workspace(&owner, session.workspace_id.unwrap())
+        .await
+        .unwrap();
+    workspace.worktree_path = _dir
+        .path()
+        .join("obsolete-local-path")
+        .display()
+        .to_string();
+    tidebreak_core::db::code::save_workspace(&runtime.db, &workspace)
+        .await
+        .unwrap();
+
+    let first = client
+        .post(format!(
+            "http://{addr}/external/code/sessions/{session_id}/messages"
+        ))
+        .bearer_auth(&pair.token)
+        .json(&serde_json::json!({
+            "text": "start in Slack", "event_id": "Ev-web", "channel_ts": "1700000001.000100"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), reqwest::StatusCode::OK);
+    assert_eq!(fake.spawns.lock().unwrap().len(), 1);
+
+    let queued = client
+        .post(format!("http://{addr}/code/sessions/{session_id}/turns"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "message": "continue from the browser" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(queued.status(), reqwest::StatusCode::ACCEPTED);
+    let queued: serde_json::Value = queued.json().await.unwrap();
+    assert_eq!(queued["message"], "continue from the browser");
+    runtime.recover().await.unwrap();
+    assert!(!runtime.has_worker(session_id));
+    assert_eq!(
+        runtime
+            .get_session(&owner, session_id)
+            .await
+            .unwrap()
+            .lifecycle,
+        tidebreak_core::SessionLifecycle::Running
+    );
+
+    fake.event_reads.lock().unwrap().push_back(SandboxEvents {
+        sandbox_id: "sb-ext".into(),
+        state: SandboxState::Running,
+        latest_event_seq: 2,
+        events: vec![
+            SandboxEvent {
+                seq: 1,
+                kind: "turn_started".into(),
+                payload: serde_json::json!({ "turn": 1 }),
+                created_at: String::new(),
+            },
+            SandboxEvent {
+                seq: 2,
+                kind: "turn_completed".into(),
+                payload: serde_json::json!({ "turn": 1, "exit_code": 0 }),
+                created_at: String::new(),
+            },
+        ],
+    });
+    let mut live = runtime.get_session(&owner, session_id).await.unwrap();
+    runtime
+        .remote_sessions()
+        .unwrap()
+        .driver(&runtime.db, runtime.bus.as_ref())
+        .pump(&mut live, 0)
+        .await
+        .unwrap();
+    runtime.start(format!("http://{addr}")).await.unwrap();
+    super::code::wait_until(|| {
+        fake.sends
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|message| message.body == "continue from the browser")
+    })
+    .await;
+    assert_eq!(fake.spawns.lock().unwrap().len(), 1);
+    assert!(!runtime.has_worker(session_id));
+    assert!(
+        tidebreak_core::db::code::list_queued_turns(&runtime.db, &owner, session_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let interrupted = client
+        .post(format!(
+            "http://{addr}/code/sessions/{session_id}/interrupt"
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(interrupted.status(), reqwest::StatusCode::ACCEPTED);
+    assert!(fake
+        .sends
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|message| message.interrupt));
 }
 
 /// The whole adapter surface over HTTP: bad tokens refuse, get-or-create

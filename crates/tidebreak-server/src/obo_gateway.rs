@@ -42,7 +42,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::StreamExt as _;
 
-use tidebreak_core::{AgentError, OwnerId, Profile, Result};
+use tidebreak_core::{AgentError, OwnerId, Profile, Result, SessionId};
 use tidebreak_router::BearerTokenSource;
 
 /// Mint a replacement this close to expiry instead of using the cached token.
@@ -465,6 +465,7 @@ impl OboGateway {
         Arc::new(RuntimeTokens {
             gateway: self.clone(),
             audience: format!("runtime:{endpoint_slug}"),
+            external: None,
             slots: std::sync::Mutex::new(HashMap::new()),
         })
     }
@@ -1206,13 +1207,54 @@ fn git_refusal(status: reqwest::StatusCode, body: &[u8]) -> GitForgeError {
 
 /// [`OboGateway`]-backed source of runtime bearers for one endpoint.
 ///
-/// Tokens are cached per owner and re-exchanged near expiry. Each owner
-/// has their own mutex, so one hung mint does not block another owner's
-/// spawn or pump.
+/// Tokens are cached per session and re-exchanged near expiry. External
+/// sessions validate their original grant before every operation.
+type RuntimeTokenSlot = Arc<tokio::sync::Mutex<Option<SessionRuntimeToken>>>;
+
+struct SessionRuntimeToken {
+    gateway: Arc<OboGateway>,
+    token: CachedToken,
+}
+
 pub struct RuntimeTokens {
     gateway: Arc<OboGateway>,
     audience: String,
-    slots: std::sync::Mutex<HashMap<OwnerId, Arc<tokio::sync::Mutex<Option<CachedToken>>>>>,
+    external: Option<Arc<external::ExternalDelegations>>,
+    slots: std::sync::Mutex<HashMap<(OwnerId, SessionId), RuntimeTokenSlot>>,
+}
+
+impl RuntimeTokens {
+    /// Resolve external sessions through their durable consent on every call.
+    pub fn with_external_delegations(
+        self: Arc<Self>,
+        db: Arc<tidebreak_core::DbStore>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            gateway: self.gateway.clone(),
+            audience: self.audience.clone(),
+            external: Some(Arc::new(external::ExternalDelegations::new(
+                self.gateway.clone(),
+                db,
+            ))),
+            slots: std::sync::Mutex::new(HashMap::new()),
+        })
+    }
+}
+
+fn runtime_token_error(error: AgentError) -> crate::code::remote::RemoteSandboxError {
+    use crate::code::remote::RemoteSandboxError;
+    match error {
+        AgentError::SignInRequired(detail) => RemoteSandboxError::SignInRequired(detail),
+        AgentError::InvalidTarget(detail) => RemoteSandboxError::Refused {
+            operation: "token",
+            code: "external_connection_conflict".into(),
+            message: detail,
+        },
+        other => RemoteSandboxError::Unavailable {
+            operation: "token",
+            detail: other.to_string(),
+        },
+    }
 }
 
 #[async_trait]
@@ -1220,6 +1262,7 @@ impl crate::code::remote::RuntimeTokenSource for RuntimeTokens {
     async fn runtime_token(
         &self,
         owner: &OwnerId,
+        session: SessionId,
     ) -> std::result::Result<
         crate::code::remote::RuntimeToken,
         crate::code::remote::RemoteSandboxError,
@@ -1234,39 +1277,56 @@ impl crate::code::remote::RuntimeTokenSource for RuntimeTokens {
                     detail: "runtime token state is unavailable in this process".into(),
                 })?;
             slots
-                .entry(owner.clone())
+                .entry((owner.clone(), session))
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(None)))
                 .clone()
         };
-        // Holding this owner's slot across the exchange is the single-flight
-        // gate: a second call for the same owner waits and then finds a fresh
-        // token. Other owners are not blocked.
         let mut cached = slot.lock().await;
+        // Recheck the grant before reading a cached runtime token. A browser
+        // sign-in must never replace a revoked Slack connection's authority.
+        let gateway = match &self.external {
+            Some(external) => external
+                .for_session(owner, session)
+                .await
+                .map_err(runtime_token_error)?
+                .unwrap_or_else(|| self.gateway.clone()),
+            None => self.gateway.clone(),
+        };
         if let Some(current) = cached.as_ref() {
-            if current.is_fresh() {
+            if Arc::ptr_eq(&current.gateway, &gateway) && current.token.is_fresh() {
                 return Ok(RuntimeToken {
-                    secret: current.token.to_string(),
+                    secret: current.token.token.to_string(),
                 });
             }
         }
-        let Some(subject) = self.gateway.subject_for(owner) else {
+        let Some(subject) = gateway.subject_for(owner) else {
             return Err(RemoteSandboxError::SignInRequired(
                 "this machine holds no live Model Gateway session for you; sign in again".into(),
             ));
         };
-        let minted = self
-            .gateway
+        let minted = gateway
             .exchange(&subject, &self.audience)
             .await
-            .map_err(|error| match error {
-                AgentError::SignInRequired(detail) => RemoteSandboxError::SignInRequired(detail),
-                other => RemoteSandboxError::Unavailable {
-                    operation: "token",
-                    detail: other.to_string(),
-                },
-            })?;
+            .map_err(runtime_token_error)?;
+        // Revocation may commit while the exchange is in flight.
+        if let Some(external) = &self.external {
+            let confirmed = external
+                .for_session(owner, session)
+                .await
+                .map_err(runtime_token_error)?;
+            let confirmed = confirmed.unwrap_or_else(|| self.gateway.clone());
+            if !Arc::ptr_eq(&confirmed, &gateway) {
+                return Err(RemoteSandboxError::SignInRequired(
+                    "your external connection changed during the runtime request; retry the turn"
+                        .into(),
+                ));
+            }
+        }
         let secret = minted.token.to_string();
-        *cached = Some(minted);
+        *cached = Some(SessionRuntimeToken {
+            gateway,
+            token: minted,
+        });
         Ok(RuntimeToken { secret })
     }
 }
@@ -1979,12 +2039,13 @@ mod tests {
         inference.record_caller(&alice, "mg_at_alice".into());
 
         let tokens = inference.runtime_tokens("primary");
-        let token = tokens.runtime_token(&alice).await.unwrap();
+        let session = SessionId::new();
+        let token = tokens.runtime_token(&alice, session).await.unwrap();
         assert!(token.secret.starts_with("mg_at_runtime_"));
         assert!(token.secret.ends_with("mg_at_alice"));
         assert_eq!(gateway.served(), 1);
         // A second call inside the lifetime reuses the cached token.
-        let again = tokens.runtime_token(&alice).await.unwrap();
+        let again = tokens.runtime_token(&alice, session).await.unwrap();
         assert_eq!(again.secret, token.secret);
         assert_eq!(gateway.served(), 1);
         server.abort();

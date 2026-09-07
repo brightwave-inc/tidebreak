@@ -1337,9 +1337,16 @@ async fn bind_inner(
             let provisioner = code::remote::gateway::GatewayProvisioner::new(
                 gateway.gateway_base_url(),
                 &endpoint,
-                gateway.runtime_tokens(&endpoint),
+                gateway
+                    .runtime_tokens(&endpoint)
+                    .with_external_delegations(db.clone()),
             )
             .map_err(|error| AgentError::config(format!("sandbox runtime client: {error}")))?;
+            let runtime = if state.config.profile == Profile::SelfHost {
+                runtime.with_sandbox_only_execution()
+            } else {
+                runtime
+            };
             runtime.with_remote_sessions(code::remote::service::RemoteSessions::new(
                 Arc::new(provisioner),
                 code::remote::service::configured_settings(profile, &state.config),

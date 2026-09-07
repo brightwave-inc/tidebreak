@@ -86,6 +86,24 @@ async fn seeded_session(
     Arc<CodeEventBus>,
     SessionId,
 ) {
+    seeded_session_at(
+        harness_kind,
+        harness_version,
+        tidebreak_core::ExecutionLocation::Machine,
+    )
+    .await
+}
+
+async fn seeded_session_at(
+    harness_kind: HarnessKind,
+    harness_version: Option<&str>,
+    location: tidebreak_core::ExecutionLocation,
+) -> (
+    tempfile::TempDir,
+    Arc<DbStore>,
+    Arc<CodeEventBus>,
+    SessionId,
+) {
     let directory = tempfile::tempdir().unwrap();
     let store = Arc::new(
         DbStore::connect(&format!(
@@ -166,7 +184,7 @@ async fn seeded_session(
             unrecognized_event_count: 0,
             subagents: Vec::new(),
             created_at: Utc::now(),
-            execution_location: tidebreak_core::ExecutionLocation::Machine,
+            execution_location: location,
         },
     )
     .await
@@ -180,8 +198,14 @@ async fn seeded_session(
 }
 
 async fn seeded_sink() -> (tempfile::TempDir, Arc<DbStore>, Arc<LiveSink>, SessionId) {
+    seeded_sink_at(tidebreak_core::ExecutionLocation::Machine).await
+}
+
+async fn seeded_sink_at(
+    location: tidebreak_core::ExecutionLocation,
+) -> (tempfile::TempDir, Arc<DbStore>, Arc<LiveSink>, SessionId) {
     let (directory, store, bus, session_id) =
-        seeded_session(HarnessKind::ClaudeCode, Some("2.1.237")).await;
+        seeded_session_at(HarnessKind::ClaudeCode, Some("2.1.237"), location).await;
     let sink = sink_for(
         store.clone(),
         bus,
@@ -199,6 +223,94 @@ async fn seeded_sink() -> (tempfile::TempDir, Arc<DbStore>, Arc<LiveSink>, Sessi
         crate::code::pr_refresh::HotPullRequests::default(),
     );
     (directory, store, sink, session_id)
+}
+
+#[tokio::test]
+async fn a_stale_local_worker_leaves_sandbox_queue_rows_for_the_remote_driver() {
+    let (directory, db, sink, session_id) =
+        seeded_sink_at(tidebreak_core::ExecutionLocation::Sandbox).await;
+    let owner = OwnerId::local();
+    let mut session = get_session(&db, &owner, session_id).await.unwrap().unwrap();
+    session.lifecycle = SessionLifecycle::Idle;
+    assert!(save_session(&db, &session).await.unwrap());
+    // A stale worker copy says Machine while the durable session says Sandbox.
+    session.execution_location = tidebreak_core::ExecutionLocation::Machine;
+    let worktree = directory.path().join("wt");
+    std::fs::create_dir_all(&worktree).unwrap();
+    let private = directory.path().join("private");
+    std::fs::create_dir(&private).unwrap();
+    let adapter = ScriptedAdapter::new(plain_text_script());
+    let engine = adapter
+        .launch(SessionSpec {
+            owner: owner.clone(),
+            session_id,
+            worktree,
+            allowed_read_roots: Vec::new(),
+            permission_mode: session.permission_mode,
+            model: None,
+            reasoning_effort: None,
+            fast_mode: false,
+            resume_ref: None,
+            extra_argv: Vec::new(),
+            extra_env: Vec::new(),
+            relay_key_env: None,
+            env: Vec::new(),
+            approval: None,
+            binary: Some(std::path::PathBuf::from("/scripted/engine")),
+            sink: sink.clone() as Arc<dyn tidebreak_harness::HarnessEventSink>,
+            browser: None,
+        })
+        .await
+        .unwrap();
+    let now = Utc::now();
+    let queued = enqueue_queued_turn(
+        &db,
+        &owner,
+        &QueuedTurn {
+            actor: None,
+            id: TurnId::new(),
+            session_id,
+            message: "stay in the sandbox".into(),
+            attachments: Vec::new(),
+            position: 0,
+            created_at: now,
+            updated_at: now,
+        },
+    )
+    .await
+    .unwrap();
+    let store = AttachmentStore {
+        blobs: None,
+        private_root: super::super::scratch::ScratchRoot::open_for_test(&private).unwrap(),
+        engine_reads_images: false,
+    };
+    let queue = TurnQueue {
+        worktree: Arc::new(tokio::sync::Mutex::new(())),
+        wake: Arc::new(tokio::sync::Notify::new()),
+        quiesce: tokio::sync::watch::channel(false).1,
+    };
+    let (_sender, mut commands) = mpsc::channel(1);
+    drain_queued(
+        &mut session,
+        engine.as_ref(),
+        &sink,
+        &queue,
+        &store,
+        &mut commands,
+    )
+    .await;
+    assert_eq!(
+        queued_turn_head(&db, &owner, session_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        queued.id
+    );
+    assert!(list_turns(&db, &owner, session_id)
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 /// An engine that answers its own approval — a standing grant, an

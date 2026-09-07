@@ -11,6 +11,10 @@ run-name: >-
 # to GHCR:
 #
 #   ghcr.io/brightwave-inc/tidebreak-server
+#   ghcr.io/brightwave-inc/tidebreak-supervised-agent
+#
+# Both images share verified tools and source. The supervised agent uses
+# Gateway's BYO startup contract and contains no server or renderer.
 #
 # The image is the same artifact deploy/self-host/docker-compose.yml builds
 # locally as `tidebreak-self-host:local`: the `tidebreak` binary with
@@ -95,9 +99,6 @@ concurrency:
   group: tidebreak-server-image-${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag || 'latest-release' }}
   cancel-in-progress: false
 
-env:
-  SERVER_REPOSITORY: ghcr.io/${{ github.repository_owner }}/tidebreak-server
-
 jobs:
   resolve:
     name: resolve the release tag
@@ -110,6 +111,7 @@ jobs:
       build_sha: ${{ steps.decide.outputs.build_sha }}
       publish_latest: ${{ steps.decide.outputs.publish_latest }}
       immutable: ${{ steps.decide.outputs.immutable }}
+      images: ${{ steps.decide.outputs.images }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -211,6 +213,14 @@ jobs:
             exit 1
           }
 
+          # Older release tags predate the supervised target. Keep backfills
+          # on their original default server target.
+          git show "$build_sha:deploy/self-host/Dockerfile" > "$RUNNER_TEMP/tidebreak-release-Dockerfile"
+          images='[{"name":"server","target":""}]'
+          if grep -Eq '^FROM runtime-base AS supervised-agent$' "$RUNNER_TEMP/tidebreak-release-Dockerfile"; then
+            images='[{"name":"server","target":"server"},{"name":"supervised-agent","target":"supervised-agent"}]'
+          fi
+
           publish_latest=false
           if [[ "$tag" == "$latest_tag" ]]; then
             publish_latest=true
@@ -221,11 +231,12 @@ jobs:
             echo "build_sha=$build_sha"
             echo "publish_latest=$publish_latest"
             echo "immutable=$immutable"
+            echo "images=$images"
           } >> "$GITHUB_OUTPUT"
           echo "version=${tag#v} build_sha=$build_sha publish_latest=$publish_latest immutable=$immutable"
 
   build:
-    name: build and push · ${{ matrix.arch }}
+    name: build and push · ${{ matrix.artifact.name }} · ${{ matrix.arch }}
     needs: resolve
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
@@ -237,12 +248,16 @@ jobs:
       id-token: write
       attestations: write
     env:
+      SERVER_REPOSITORY: ghcr.io/${{ github.repository_owner }}/tidebreak-${{ matrix.artifact.name }}
+      IMAGE_TARGET: ${{ matrix.artifact.target }}
       BUILD_SHA: ${{ needs.resolve.outputs.build_sha }}
       IMMUTABLE: ${{ needs.resolve.outputs.immutable }}
       VERSION: ${{ needs.resolve.outputs.version }}
     strategy:
       fail-fast: true
       matrix:
+        artifact: ${{ fromJSON(needs.resolve.outputs.images) }}
+        arch: [amd64, arm64]
         include:
           - arch: amd64
             runner: ubuntu-latest
@@ -276,15 +291,23 @@ jobs:
       # --locked` has to see the whole workspace and the committed Cargo.lock.
       # BuildKit reads the sidecar deploy/self-host/Dockerfile.dockerignore,
       # which denies by default and admits only source paths.
-      - name: Build the server container
+      - name: Build the container
         run: |
-          docker build \
+          target=()
+          if [[ -n "$IMAGE_TARGET" ]]; then
+            target=(--target "$IMAGE_TARGET")
+          fi
+          if [[ "$IMAGE_TARGET" == "supervised-agent" ]]; then
+            target+=(--build-arg "TOOLCHAINS=rust,python")
+          fi
+          docker build "${target[@]}" \
             --file deploy/self-host/Dockerfile \
             --build-arg "TIDEBREAK_VERSION=$VERSION" \
             --tag "$SERVER_REPOSITORY:$VERSION-${{ matrix.arch }}" \
             .
 
       - name: Smoke test the built binary
+        if: matrix.artifact.name == 'server'
         run: |
           # Proves the binary executes on this architecture, and that it
           # carries the release it claims to. A published image whose version
@@ -296,6 +319,12 @@ jobs:
             echo "Expected 'tidebreak $VERSION'." >&2
             exit 1
           }
+
+      - name: Smoke test the supervised workload
+        if: matrix.artifact.name == 'supervised-agent'
+        env:
+          TIDEBREAK_SUPERVISED_AGENT_IMAGE: ${{ env.SERVER_REPOSITORY }}:${{ env.VERSION }}-${{ matrix.arch }}
+        run: node --test scripts/supervised-agent-image.test.mjs
 
       - name: Push the per-architecture tag
         run: docker push "$SERVER_REPOSITORY:$VERSION-${{ matrix.arch }}"
@@ -324,8 +353,11 @@ jobs:
   manifest:
     # Assembles the user-facing tags only after every architecture has built
     # and pushed.
-    name: assemble the multi-arch manifest
+    name: assemble the multi-arch manifest · ${{ matrix.artifact.name }}
     needs: [resolve, build]
+    strategy:
+      matrix:
+        artifact: ${{ fromJSON(needs.resolve.outputs.images) }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -334,6 +366,7 @@ jobs:
       id-token: write
       attestations: write
     env:
+      SERVER_REPOSITORY: ghcr.io/${{ github.repository_owner }}/tidebreak-${{ matrix.artifact.name }}
       VERSION: ${{ needs.resolve.outputs.version }}
     steps:
       - name: Log in to GHCR
@@ -375,7 +408,7 @@ jobs:
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
           echo "Published $SERVER_REPOSITORY:$VERSION at $digest"
           {
-            echo "## Published server image"
+            echo "## Published $SERVER_REPOSITORY"
             echo
             echo "- \`$SERVER_REPOSITORY:$VERSION\`"
             if [[ "$PUBLISH_LATEST" == "true" ]]; then

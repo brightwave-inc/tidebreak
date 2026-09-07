@@ -794,6 +794,12 @@ describe("parseCodeWorkspacePr", () => {
     },
   };
 
+  it("preserves the remote flag without accepting a non-boolean flag", () => {
+    const remote = { ...pr, remote: true };
+    expect(parseCodeWorkspacePr(remote)).toEqual(remote);
+    expect(parseCodeWorkspacePr({ ...pr, remote: "true" })).toBeNull();
+  });
+
   it("accepts GET /code/workspaces/{id}/pr", () => {
     expect(parseCodeWorkspacePr(pr)).toEqual(pr);
   });

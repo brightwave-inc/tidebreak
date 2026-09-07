@@ -63,6 +63,7 @@ pub(crate) fn configured_settings(
 ) -> RemoteSpawnSettings {
     RemoteSpawnSettings {
         profile,
+        engine: config.runtime_engine,
         incarnation_cap: config.runtime_concurrency_cap,
         spend_ceiling_microusd: config.runtime_spawn_spend_ceiling_microusd,
         session_spend_ceiling_microusd: config.runtime_session_spend_ceiling_microusd,
@@ -389,6 +390,7 @@ mod tests {
         async fn spawn(
             &self,
             _owner: &OwnerId,
+            _session: tidebreak_core::SessionId,
             arguments: &SpawnArguments,
         ) -> Result<SandboxLease, RemoteSandboxError> {
             self.spawns.lock().unwrap().push(arguments.clone());
@@ -403,6 +405,7 @@ mod tests {
         async fn status(
             &self,
             _owner: &OwnerId,
+            _session: tidebreak_core::SessionId,
             sandbox_id: &str,
         ) -> Result<SandboxStatus, RemoteSandboxError> {
             Ok(SandboxStatus {
@@ -423,6 +426,7 @@ mod tests {
         async fn events(
             &self,
             _owner: &OwnerId,
+            _session: tidebreak_core::SessionId,
             _sandbox_id: &str,
             _cursor: EventCursor,
         ) -> Result<SandboxEvents, RemoteSandboxError> {
@@ -440,6 +444,7 @@ mod tests {
         async fn send(
             &self,
             _owner: &OwnerId,
+            _session: tidebreak_core::SessionId,
             _sandbox_id: &str,
             message: &SandboxMessage,
         ) -> Result<MessageReceipt, RemoteSandboxError> {
@@ -454,6 +459,7 @@ mod tests {
         async fn cancel(
             &self,
             _owner: &OwnerId,
+            _session: tidebreak_core::SessionId,
             sandbox_id: &str,
         ) -> Result<(), RemoteSandboxError> {
             self.cancels.lock().unwrap().push(sandbox_id.to_owned());
@@ -464,6 +470,7 @@ mod tests {
     fn settings() -> RemoteSpawnSettings {
         RemoteSpawnSettings {
             profile: "tidebreak-remote".to_owned(),
+            engine: None,
             incarnation_cap: 2,
             spend_ceiling_microusd: None,
             session_spend_ceiling_microusd: None,
@@ -474,11 +481,13 @@ mod tests {
     fn configured_settings_use_operator_limits() {
         let mut config = tidebreak_core::Config::desktop("/data");
         config.runtime_concurrency_cap = 7;
+        config.runtime_engine = Some(HarnessKind::ClaudeCode);
         config.runtime_spawn_spend_ceiling_microusd = Some(9_000_000);
         config.runtime_session_spend_ceiling_microusd = None;
 
         let settings = configured_settings("remote-large".to_owned(), &config);
         assert_eq!(settings.profile, "remote-large");
+        assert_eq!(settings.engine, Some(HarnessKind::ClaudeCode));
         assert_eq!(settings.incarnation_cap, 7);
         assert_eq!(settings.spend_ceiling_microusd, Some(9_000_000));
         assert_eq!(settings.session_spend_ceiling_microusd, None);
@@ -486,6 +495,13 @@ mod tests {
 
     async fn runtime_with_remote(
         root: &std::path::Path,
+    ) -> (Arc<CodeRuntime>, Arc<FakeProvisioner>, OwnerId, CodeRepo) {
+        runtime_with_remote_settings(root, settings()).await
+    }
+
+    async fn runtime_with_remote_settings(
+        root: &std::path::Path,
+        spawn_settings: RemoteSpawnSettings,
     ) -> (Arc<CodeRuntime>, Arc<FakeProvisioner>, OwnerId, CodeRepo) {
         let db = tidebreak_core::DbStore::connect(&format!(
             "sqlite://{}?mode=rwc",
@@ -504,7 +520,7 @@ mod tests {
             None,
             None,
         )
-        .with_remote_sessions(RemoteSessions::new(fake.clone(), settings()));
+        .with_remote_sessions(RemoteSessions::new(fake.clone(), spawn_settings));
         let runtime = Arc::new(runtime);
         let owner = OwnerId::local();
         let repo = CodeRepo {
@@ -545,6 +561,106 @@ mod tests {
             payload,
             created_at: String::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn a_declared_profile_rejects_settings_before_saving_or_queueing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut spawn_settings = settings();
+        spawn_settings.engine = Some(HarnessKind::ClaudeCode);
+        let (runtime, fake, owner, repo) =
+            runtime_with_remote_settings(dir.path(), spawn_settings).await;
+        let workspace = runtime
+            .create_remote_workspace(&owner, repo.id, Some("declared".into()))
+            .await
+            .unwrap();
+        let mut unsupported = session_settings();
+        unsupported.permission_mode = PermissionMode::Ask;
+        assert!(runtime
+            .create_remote_session(&owner, workspace.id, HarnessKind::ClaudeCode, unsupported)
+            .await
+            .is_err());
+        let mut fast = session_settings();
+        fast.fast_mode = true;
+        assert!(runtime
+            .create_remote_session(&owner, workspace.id, HarnessKind::ClaudeCode, fast)
+            .await
+            .is_err());
+        let session = runtime
+            .create_remote_session(
+                &owner,
+                workspace.id,
+                HarnessKind::ClaudeCode,
+                session_settings(),
+            )
+            .await
+            .unwrap();
+        assert!(runtime
+            .set_permission_mode(&owner, session.id, PermissionMode::Ask)
+            .await
+            .is_err());
+        assert!(runtime
+            .set_fast_mode(&owner, session.id, true)
+            .await
+            .is_err());
+        assert!(runtime
+            .set_reasoning_effort(
+                &owner,
+                session.id,
+                Some(tidebreak_core::ReasoningEffort::High)
+            )
+            .await
+            .is_err());
+        runtime
+            .submit_turn(
+                &owner,
+                session.id,
+                "start".into(),
+                None,
+                None,
+                Vec::new(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(runtime
+            .submit_turn(
+                &owner,
+                session.id,
+                "changed model".into(),
+                Some("another-model".into()),
+                None,
+                Vec::new(),
+                None
+            )
+            .await
+            .is_err());
+        let stored = runtime.get_session(&owner, session.id).await.unwrap();
+        assert_eq!(stored.permission_mode, PermissionMode::Allow);
+        assert!(!stored.fast_mode);
+        assert_eq!(stored.model, None);
+        assert_eq!(stored.reasoning_effort, None);
+        let mut incompatible = stored;
+        incompatible.harness_kind = HarnessKind::Codex;
+        tidebreak_core::db::code::save_session(&runtime.db, &incompatible)
+            .await
+            .unwrap();
+        assert!(runtime
+            .submit_turn(
+                &owner,
+                session.id,
+                "unsupported queued engine".into(),
+                None,
+                None,
+                Vec::new(),
+                None
+            )
+            .await
+            .is_err());
+        let (queue, _) = runtime.list_queued_turns(&owner, session.id).await.unwrap();
+        assert!(queue.is_empty());
+        assert_eq!(fake.spawns.lock().unwrap().len(), 1);
+        assert!(fake.sends.lock().unwrap().is_empty());
     }
 
     /// The runtime carries a turn to a sandbox with no local harness: create
